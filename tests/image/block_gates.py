@@ -36,28 +36,36 @@ in fp32 on that input, with exact float32 products on the dequantized
 weight, so no softmax carries an earlier rounding into the reading. The
 gate is a relative L2 of 2 n u over all rows, the image rows and the
 caption rows, where u is the largest relative error of one rounding to
-the activation dtype (2^-8 for bfloat16) and n counts the outputs the
-stock path of the op writes in that dtype. Each such output is within u
-of its exact value and the errors add to first order, so n u bounds a
-stock op on a well-conditioned input and the factor 2 covers the
-conditioning. n is a property of the op, not of the route: a kernel that
-replaces a stock op is read at the same site against the same gate. The
+the activation dtype (2^-8 for bfloat16) and n counts the roundings to
+that dtype on the path the site ran. On the stock ops n is the count of
+outputs the ops write in that dtype. Each such output is within u of its
+exact value and the errors add to first order, so n u bounds the op on a
+well-conditioned input and the factor 2 covers the conditioning. The
 exact side takes the constants of the right model, its weights, norm
-weights of q and k, and RoPE tables, so a production op that is handed
-another constant fails at its site.
+weights of q and k, norm eps and RoPE tables, so a production op that is
+handed another constant fails at its site.
 
 The kernel routes of ``gmlx.image.ops.kq_routes`` round at other points
 than the oracle's bf16 run, so the product gate reads the block rows and
 the free-running blocks on the stock ops, in ``stock_ops_only``, and the
 velocity on the path a request takes. The site gate holds each routed
-kernel, and names the sites that ran on one in ``Sites.routed``.
+kernel, and names the sites that ran on one in ``Sites.routed``. A site
+that ran on a kernel is held to the kernel's own count, KERNEL_ROUNDINGS,
+and not to the count of the stock ops it replaces: a kernel that rounds
+once has a third of the room of a stock path that rounds three times.
 
 A relative L2 over all rows does not see a fault in one row of a few
 thousand, and a kernel can go wrong in one row. So a site on a kernel is
 also held row by row: the site's gate on every row of its output, one
-token over its heads and channels. The derivation of the gate is per
-element, so it holds for one row as for all of them, and the worst row of
-the stock ops at the same sites reads a third of it at most.
+token over its heads and channels. One head is a small part of a token
+row of q and k, a sixtieth at 30 heads, so the q and k site is held head
+by head as well: its gate on every head row, one head of one token of q
+or of k. The gate is an L2 bound over the elements of a row and not a
+bound on each element, so it holds for a row of any length: a head row,
+a token row, or all rows. One rounding to nearest leaves every element
+within u of its value, so a row of the q and k kernel reads half its gate
+at most. On check 3's fixtures its worst head row reads 0.49 of the gate
+and its worst token row 0.34, and the worst row of the glu kernel 0.26.
 """
 from __future__ import annotations
 
@@ -490,10 +498,8 @@ _GLU = (("w1", 0, "feed_forward", 0), ("w3", 0, "feed_forward", 0),
         ("swiglu", 0, "w1", -1), ("swiglu", 1, "w3", -1),
         ("w2", 0, "swiglu", -1))
 
-# n of the site gate: the outputs the stock path of an op writes in the
-# activation dtype. n is a property of the op, not of the route, so a
-# kernel that writes one output where the stock op writes three is held
-# to the gate of three.
+# n of the site gate on the stock ops: the outputs the stock path of an op
+# writes in the activation dtype.
 ROUNDINGS = {
     "sdpa": 1,            # one op
     "tanh": 1,
@@ -504,6 +510,13 @@ ROUNDINGS = {
     "lora.down": 1,       # x @ A^T
     "lora.add": 1,        # one addmm of the base product and z @ B^T
 }
+# n of a site that ran on a kernel route: the kernel's own roundings to
+# the activation dtype. The qk kernel norms and rotates in fp32 and rounds
+# at the write. The glu kernel stores the activation of the gate product
+# and then its product with the up product, and decodes each of the two
+# weight tiles into the activation dtype. On random inputs the qk kernel
+# reads 0.43 u, one rounding to nearest, and the glu kernel 0.85 u, four.
+KERNEL_ROUNDINGS = {"qk": 1, "glu": 4}
 
 
 SITE_RULE = (
@@ -511,17 +524,19 @@ SITE_RULE = (
     "production input against the stock op in fp32, with exact float32 "
     "products on the dequantized weight, over all rows, the image rows and "
     "the caption rows. u = 2^-8 is one rounding to bfloat16, and n counts "
-    "the outputs the stock path of the op writes in the activation dtype, "
-    "whatever kernel runs. A wrong adapter table is visible only where the "
-    "part of a leaf's delta it changes exceeds the gate of a site that "
-    "reads it: a tenth of the largest leaf delta for a strength a tenth "
-    "off, and all of it for a group left out")
+    "the roundings to the activation dtype on the path the site ran: the "
+    "outputs the stock ops write, or the kernel's own, 1 for qk and 4 for "
+    "glu. A wrong adapter table is visible only where the part of a leaf's "
+    "delta it changes exceeds the gate of a site that reads it: a tenth of "
+    "the largest leaf delta for a strength a tenth off, and all of it for "
+    "a group left out")
 
 
 ROW_RULE = (
     "row rule of a site on a kernel: relative L2 <= 2 n u on every row of "
-    "the site's output, one token over its heads and channels, with the n "
-    "and u of the site gate")
+    "the site's output, one token over its heads and channels, and on "
+    "every head row of a qk site, one head of one token of q or of k, with "
+    "the n and u of the site gate")
 
 
 def unit(dtype) -> float:
@@ -548,13 +563,14 @@ def site_process() -> bool:
     return not tf32()
 
 
-def rerun_sites(request, tag: str, velocity: str | None = None) -> None:
+def rerun_sites(request, tag: str, *velocity: str) -> None:
     """Rerun this test in a child process with TF32 off and the kernel
-    routes as this process has them. ``velocity`` is the digest of this
-    process's velocity, which the child's production step must equal bit
-    for bit."""
+    routes as this process has them. ``velocity`` holds the digest of
+    this process's velocity for each step the child reads, and each
+    production step of the child must equal one of them bit for bit."""
     _rerun(request, tag, {"MLX_ENABLE_TF32": "0",
-                          **({SITE_VELOCITY: velocity} if velocity else {})})
+                          **({SITE_VELOCITY: ",".join(velocity)}
+                             if velocity else {})})
 
 
 def resolve(root, path: str):
@@ -579,9 +595,29 @@ def _row_sums(got, want, rows: int = 1) -> tuple:
             mx.sum(mx.square(want), axis=axes))
 
 
+def _head_sums(got: tuple, want: tuple) -> tuple:
+    """Squared error and squared exact norm per head row of a q and k
+    pair, each (B, H, L, D): two arrays of (2, B, H, L), q then k."""
+    f = mx.float32
+    e2 = [mx.sum(mx.square(g.astype(f) - w.astype(f)), axis=-1)
+          for g, w in zip(got, want)]
+    r2 = [mx.sum(mx.square(w.astype(f)), axis=-1) for w in want]
+    return mx.stack(e2), mx.stack(r2)
+
+
 def _rel(e2: float, r2: float) -> float:
     with np.errstate(all="ignore"):
         return 0.0 if e2 == 0 else float(np.sqrt(np.float64(e2) / r2))
+
+
+def _worst(e2: np.ndarray, r2: np.ndarray) -> tuple:
+    """The largest relative L2 of the rows of ``e2`` over ``r2`` and its
+    index. A row that is not finite is the worst row."""
+    with np.errstate(all="ignore"):
+        rel = np.where(e2 == 0, 0.0, np.sqrt(e2 / r2))
+    at = np.unravel_index(
+        int(np.argmax(np.where(np.isfinite(rel), rel, np.inf))), rel.shape)
+    return float(rel[at]), tuple(int(i) for i in at)
 
 
 class _Leaf:
@@ -649,32 +685,37 @@ class _SiteTaps(dict):
 class Sites:
     """The site gate's reader for one free-running production step of
     ``model``. Make it on the right model, before any fault: it keeps the
-    right leaves and codecs, the q and k norm weights and eps of each
-    block, and the model's RoPE tables for the exact side. ``factors``,
-    from ``site_factors``, is the right adapter table.
+    right leaves and codecs, the q and k norm weights of each block, and
+    the model's RoPE tables for the exact side. The eps of the q and k
+    norm is the ``norm_eps`` of the model's config, which no block
+    attribute and no call of the op can change. ``factors``, from
+    ``site_factors``, is the right adapter table.
 
     A site is read at the op's seam, the ``gmlx.image.ops`` function or
     the call of the leaf or norm, so a kernel route is measured at the
-    same site as the stock op it replaces. n is a property of the op, not
-    of the route: it is the count of ``ROUNDINGS``, ``norm_roundings`` and
-    ``_Leaf.roundings`` on the stock path, whatever kernel ran. A product
-    under an adapter delta counts two more than the leaf, the down product
-    and the addmm. q and k norm with RoPE counts the norm and the cast
-    after the fp32 rotation. The glu site, from the feed-forward input to
-    the input of w2, counts its two products and ``swiglu``. Where the
-    stock ops run inside a site they are sites too: w1, w3 and ``swiglu``
-    inside glu, and the base product, the down product and the addmm
-    inside a leaf under an adapter.
+    same site as the stock op it replaces. On the stock path n is the
+    count of ``ROUNDINGS``, ``norm_roundings`` and ``_Leaf.roundings``. A
+    product under an adapter delta counts two more than the leaf, the down
+    product and the addmm. q and k norm with RoPE counts the norm and the
+    cast after the fp32 rotation. The glu site, from the feed-forward
+    input to the input of w2, counts its two products and ``swiglu``. A qk
+    or glu site that a kernel route handed to mlx-kquant counts the
+    kernel's own roundings, ``KERNEL_ROUNDINGS``. Where the stock ops run
+    inside a site they are sites too: w1, w3 and ``swiglu`` inside glu,
+    and the base product, the down product and the addmm inside a leaf
+    under an adapter.
 
     After ``run``: ``readings`` and ``missed`` hold each site to its gate,
     ``routed`` names the qk and glu sites that a kernel route handed to
-    mlx-kquant, ``effect`` is each adapter delta's share of its leaf's
-    output, and ``broken`` lists what the block does that no site reads,
-    which a right model leaves empty."""
+    mlx-kquant, ``worst_rows``, ``worst_heads`` and ``missed_rows`` hold
+    those to the row rule, ``effect`` is each adapter delta's share of its
+    leaf's output, and ``broken`` lists what the block does that no site
+    reads, which a right model leaves empty."""
 
     def __init__(self, model, factors=None):
         self.model, self.act = model, model.act_dtype
         self.u = unit(self.act)
+        self.eps = model.cfg.norm_eps
         self._factors = factors or (lambda path: None)
         self.blocks, self.leaves, self.bases, self.norms = {}, {}, {}, {}
         self.attn, self.ffs, self.right = {}, {}, {}
@@ -683,7 +724,7 @@ class Sites:
                 name = f"{group}.{i}"
                 att = blk.attention
                 rec = {"modulated": "adaLN_modulation" in blk, "leaves": {},
-                       "qk": (att.q_norm.weight, att.k_norm.weight, att.eps)}
+                       "qk": (att.q_norm.weight, att.k_norm.weight)}
                 for leaf, path in LEAVES.items():
                     if leaf == "adaLN_modulation" and not rec["modulated"]:
                         continue
@@ -703,10 +744,12 @@ class Sites:
         self.routed: dict = {}  # name -> the mlx-kquant op that ran the site
         self.chunked: set = set()  # sites that write a modulation
         self.sums: dict = {}    # name -> (error, exact norm), squared per row
+        self.heads: dict = {}   # qk site -> the same per head row
         self.deltas: dict = {}  # adapter leaf -> squared delta per row
         self.broken: list = []
         self.n_img = 0
         self._pending, self._dpending, self._links = {}, {}, []
+        self._hpending: dict = {}
         self._state: dict = {}
         self._cur = self._leaf = None
 
@@ -716,7 +759,8 @@ class Sites:
         return self._state.setdefault(block, {"io": {}})
 
     def _site(self, block: str, site: str, family: str, n: int, got, want,
-              ins=None, inner: bool = False, chunks: bool = False) -> None:
+              ins=None, inner: bool = False, chunks: bool = False,
+              heads: bool = False) -> None:
         name = f"{block}.{site}"
         outs = got if isinstance(got, tuple) else (got,)
         if any(o.dtype != self.act for o in outs):
@@ -726,6 +770,8 @@ class Sites:
             self.chunked.add(name)
         self._pending[name] = _row_sums(got, want,
                                         len(CHUNKS) if chunks else 1)
+        if heads:
+            self._hpending[name] = _head_sums(got, want)
         if ins is not None:
             self._st(block)["io"][site] = (*ins, *outs)
 
@@ -739,11 +785,14 @@ class Sites:
 
     def flush(self, *arrays) -> None:
         pend, deltas, links = self._pending, self._dpending, self._links
+        heads, self._hpending = self._hpending, {}
         self._pending, self._dpending, self._links = {}, {}, []
         mx.eval(*arrays, *(a for pair in pend.values() for a in pair),
+                *(a for pair in heads.values() for a in pair),
                 *deltas.values(), *(eq for _, eq in links))
-        for name, pair in pend.items():
-            self.sums[name] = tuple(np.array(a).astype(np.float64)
+        for store, got in ((self.sums, pend), (self.heads, heads)):
+            for name, pair in got.items():
+                store[name] = tuple(np.array(a).astype(np.float64)
                                     for a in pair)
         for name, d2 in deltas.items():
             self.deltas[name] = np.array(d2).astype(np.float64)
@@ -778,19 +827,30 @@ class Sites:
         and one chunk of a modulation."""
         out = {}
         for name in self.sites:
-            e2, r2 = self.sums[name]
-            with np.errstate(all="ignore"):
-                rel = np.where(e2 == 0, 0.0, np.sqrt(e2 / r2))
-            row = int(np.argmax(np.where(np.isfinite(rel), rel, np.inf)))
-            out[name] = (float(rel[row]) / self.gate(name), row)
+            v, at = _worst(*self.sums[name])
+            out[name] = (v / self.gate(name), at[0])
+        return out
+
+    def worst_heads(self) -> dict:
+        """qk site to (the largest relative L2 of one head row over the
+        site's gate, that row as (q or k, head, token)). A head row is one
+        head of one token of q or of k."""
+        out = {}
+        for name, sums in self.heads.items():
+            v, (part, _, head, token) = _worst(*sums)
+            out[name] = (v / self.gate(name), ("qk"[part], head, token))
         return out
 
     def missed_rows(self) -> dict:
-        """Site on a kernel to its worst row over its gate, for each such
-        site that has a row over the gate or not finite."""
-        return {name: v if np.isfinite(v) else np.inf
-                for name, (v, _) in self.worst_rows().items()
-                if name in self.routed and not v <= 1}
+        """Site on a kernel to its worst row or head row over its gate,
+        for each such site that has one over the gate or not finite."""
+        out: dict = {}
+        for rows in (self.worst_rows(), self.worst_heads()):
+            for name, (v, _) in rows.items():
+                if name in self.routed and not v <= 1:
+                    out[name] = max(out.get(name, 0.0),
+                                    v if np.isfinite(v) else np.inf)
+        return out
 
     def missed(self) -> dict:
         """Site to its largest reading over its gate, for each site that
@@ -939,7 +999,7 @@ class Sites:
         def call(q, k, q_w, k_w, cos, sin, eps):
             out = orig(q, k, q_w, k_w, cos, sin, eps)
             if s._cur is not None:
-                qw, kw, right_eps = s.right[s._cur]["qk"]
+                qw, kw = s.right[s._cur]["qk"]
                 rc, rs = s._tables[s._cur.split(".")[0]]
                 if rc.shape != cos.shape:
                     s.broken.append(f"{s._cur}.qk takes the rope tables of "
@@ -947,10 +1007,13 @@ class Sites:
                     rc, rs = cos, sin
                 want = attention.qk_norm_rope(
                     q.astype(f), k.astype(f), qw.astype(f), kw.astype(f),
-                    rc, rs, right_eps)
+                    rc, rs, s.eps)
                 n = 1 + max(norm_roundings(qw, q.dtype),
                             norm_roundings(kw, k.dtype))
-                s._site(s._cur, "qk", "qk", n, tuple(out), want, (q, k))
+                if f"{s._cur}.qk" in s.routed:
+                    n = KERNEL_ROUNDINGS["qk"]
+                s._site(s._cur, "qk", "qk", n, tuple(out), want, (q, k),
+                        heads=True)
             return out
         return call
 
@@ -1040,6 +1103,8 @@ class Sites:
             parts.append(hit[1] if hit is not None and hit[0] is x0 else
                          right.exact(x0.astype(f),
                                      self._factors(right.path))[0])
+        if f"{lf.block}.glu" in self.routed:
+            n = KERNEL_ROUNDINGS["glu"]
         self._site(lf.block, "glu", "glu", n, x, epilogues.swiglu(*parts))
 
     def _leave(self, name: str, x0: mx.array, out: mx.array) -> None:
@@ -1189,11 +1254,12 @@ def right_sites(sites: Sites, velocity: str, label: str) -> None:
     """The site gate of a right model. Every op between a block's input
     and its output is a site, the step read is bit for bit the one the
     parent process ran without hooks, every site is within its gate, and
-    every row of a site on a kernel is. Prints the largest reading of
-    each family as a share of its gate, and the sites on a kernel."""
+    every row and head row of a site on a kernel is. Prints the largest
+    reading of each family as a share of its gate, and the sites on a
+    kernel with their worst rows."""
     want = os.environ.get(SITE_VELOCITY)
-    assert want in (None, velocity), (
-        f"{label}: the step the sites were read on is not the step of the "
+    assert want is None or velocity in want.split(","), (
+        f"{label}: the step the sites were read on is not a step of the "
         f"parent process")
     assert not sites.broken, sites.broken[:6]
     seams = sum(not inner for _, _, inner in sites.sites.values())
@@ -1205,14 +1271,19 @@ def right_sites(sites: Sites, velocity: str, label: str) -> None:
     print(f"{label}: {len(sites.sites)} sites, the largest reading over its "
           f"gate by family: "
           + ", ".join(f"{k} {v:.2f}" for k, v in sorted(top.items())))
-    assert sites.routed.keys() <= sites.sites.keys()
-    rows = sites.worst_rows()
+    assert sites.routed.keys() <= sites.sites.keys(), (
+        "kernel calls at no site",
+        sorted(sites.routed.keys() - sites.sites.keys()))
+    rows, heads = sites.worst_rows(), sites.worst_heads()
     for route in KERNEL_OPS:
         every = [n for n in sites.sites if n.endswith("." + route)]
-        on = [rows[n][0] for n in every if n in sites.routed]
+        on = [n for n in every if n in sites.routed]
+        worst = [f", worst {what} {max(got[n][0] for n in on):.2f} of its "
+                 f"gate" for what, got in (("row", rows), ("head row", heads))
+                 if any(n in got for n in on)]
         print(f"{label}: {len(on)} of {len(every)} {route} sites on an "
-              f"mlx-kquant kernel"
-              + (f", worst row {max(on):.2f} of its gate" if on else ""))
+              f"mlx-kquant kernel, n {KERNEL_ROUNDINGS[route]}"
+              + "".join(worst))
     assert not sites.missed(), (label, SITE_RULE, sites.missed())
     assert not sites.missed_rows(), (label, ROW_RULE, sites.missed_rows())
 

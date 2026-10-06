@@ -269,11 +269,13 @@ def velocity_sign(mp, model, arrays):
 
 
 def glu_kernel_left_on(mp, model, block: str):
-    """The gate and up pair of ``block`` handed to the mlx-kquant kernel,
-    as a route left in force in the exact process would."""
+    """The gate and up pair of ``block`` handed to the mlx-kquant kernel
+    in bfloat16, as a route left in force would take it from a model in
+    its activation dtype."""
     from gmlx.image import ops
 
     ff, real = resolve(model, block).feed_forward, ops.glu_pair
+    fused, half = ops.swiglu_fused, model.act_dtype
 
     def pair(gate, up, x):
         if gate is not ff.w1:
@@ -283,6 +285,27 @@ def glu_kernel_left_on(mp, model, block: str):
         return g["weight"], u["weight"], g.kquant_type
 
     mp.setattr(ops, "glu_pair", pair)
+    mp.setattr(ops, "swiglu_fused", lambda x, *rest: fused(
+        x.astype(half), *rest).astype(x.dtype))
+
+
+def qk_kernel_left_on(mp, model, block: str):
+    """The q and k of ``block`` handed to the qk route in bfloat16, which
+    takes them as it would from a model in its activation dtype."""
+    from gmlx.image import ops
+    from gmlx.image.ops import kq_routes
+
+    real, half = ops.qk_norm_rope, model.act_dtype
+    target = resolve(model, block).attention.q_norm.weight
+
+    def seam(q, k, q_w, *rest):
+        if q_w is not target:
+            return real(q, k, q_w, *rest)
+        out = kq_routes.qk_norm_rope(q.astype(half), k.astype(half), q_w,
+                                     *rest)
+        return tuple(o.astype(q.dtype) for o in out)
+
+    mp.setattr(ops, "qk_norm_rope", seam)
 
 
 # A wrong model is seen when it moves a measure this many times the gate.
@@ -363,31 +386,37 @@ def test_check3_exact_gate_at_512(turbo, request, monkeypatch):
 
 def kernel_left_on_fails_the_exact_gate(monkeypatch, model, arrays) -> None:
     """A kernel route left in force in the exact process fails the exact
-    gate twice over: the record of products on a kernel refuses it, and
-    the kernel's rounding puts the feed-forward row of its block out. On
-    a build without the kernel there is no route to leave on."""
+    gate twice over: the record of products on a kernel refuses it by the
+    name of its op, and the kernel's rounding puts the branch row of its
+    block out. On a build without the kernel there is no route to leave
+    on."""
     from gmlx.image.ops import kq_routes
 
-    if kq_routes._kq_op("quantized_matmul_glu") is None:
-        print("check3 exact 512: this mlx-kquant has no glu kernel to "
-              "leave on")
-        return
     block = f"layers.{len(model.layers) // 2}"
-    with monkeypatch.context() as mp:
-        glu_kernel_left_on(mp, model, block)
-        with exact_products(model) as used:
-            branches: dict = {}
-            got = dict(check3_rows(model, arrays, [block], branches))
-    assert used.kernel == [("quantized_matmul_glu", "kernel route")]
-    with pytest.raises(AssertionError, match="1 K-quant products ran on a "
-                                             "kernel in the exact process"):
-        assert_all_dense(model, used)
-    missed = exact_missed({**got, **branches})
-    assert f"{block}.feed_forward" in missed, (missed, branches)
-    assert all(r.startswith(block) for r in missed), sorted(missed)
-    print(f"check3 exact 512, a glu kernel left on in {block}: the record "
-          f"refuses it, and {len(missed)} measures miss, most "
-          f"{max(missed, key=missed.get)} at {max(missed.values()):.2e}")
+    for op, branch, left_on in (
+            ("quantized_matmul_glu", "feed_forward", glu_kernel_left_on),
+            ("qk_norm_rope", "attention", qk_kernel_left_on)):
+        if kq_routes._kq_op(op) is None:
+            print(f"check3 exact 512: this mlx-kquant has no {op} to leave "
+                  f"on")
+            continue
+        with monkeypatch.context() as mp:
+            left_on(mp, model, block)
+            with exact_products(model) as used:
+                branches: dict = {}
+                got = dict(check3_rows(model, arrays, [block], branches))
+        assert used.kernel == [(op, "kernel route")], used.kernel
+        with pytest.raises(AssertionError, match="1 K-quant products ran "
+                                                 "on a kernel in the exact "
+                                                 "process"):
+            assert_all_dense(model, used)
+        missed = exact_missed({**got, **branches})
+        assert f"{block}.{branch}" in missed, (missed, branches)
+        assert all(r.startswith(block) for r in missed), sorted(missed)
+        print(f"check3 exact 512, {op} left on in {block}: the record "
+              f"refuses it, and {len(missed)} measures miss, most "
+              f"{max(missed, key=missed.get)} at "
+              f"{max(missed.values()):.2e}")
 
 
 @pytest.mark.integration
@@ -512,6 +541,51 @@ def qk_head_row_from_another(block: str, head: int, row: int, src: int):
     return apply
 
 
+def kernel_head_scaled(head: int, scale: float):
+    """Head ``head`` of the q output of the qk kernel times ``scale``, at
+    every call of the kernel."""
+    def apply(mp, model):
+        from gmlx.image.ops import kq_routes
+
+        real = kq_routes._kq_op("qk_norm_rope")
+
+        def op(q, k, q_w, k_w, cos, sin, eps):
+            qo, ko = real(q, k, q_w, k_w, cos, sin, eps)
+            by = mx.where(mx.arange(qo.shape[1]) == head, scale, 1.0)
+            wide = qo.astype(mx.float32) * by[:, None, None]
+            return wide.astype(qo.dtype), ko
+
+        mp.setitem(kq_routes._OPS, "qk_norm_rope", op)
+    return apply
+
+
+def kernel_last_row_tile_scaled(scale: float):
+    """Every column of the last partial row tile of the glu kernel's
+    output times ``scale``: the rows after the last multiple of 128."""
+    def apply(mp, model):
+        from gmlx.image import ops
+
+        real = ops.swiglu_fused
+
+        def fused(x, w_gate, w_up, codec):
+            out = real(x, w_gate, w_up, codec)
+            rows = out.shape[-2]
+            by = mx.where(mx.arange(rows) >= rows // 128 * 128, scale, 1.0)
+            return (out.astype(mx.float32) * by[:, None]).astype(out.dtype)
+
+        mp.setattr(ops, "swiglu_fused", fused)
+    return apply
+
+
+def other_caption(arrays: dict, tokens: int) -> dict:
+    """The fixture step with a caption of ``tokens`` tokens, the fixture's
+    caption rows repeated: another count of rows in every block the
+    caption reaches, and another last row tile of the glu kernel."""
+    cap = np.asarray(arrays["cap_feats"])
+    return dict(arrays, cap_feats=np.concatenate(
+        [cap] * -(-tokens // cap.shape[0]))[:tokens])
+
+
 def codec_leaves(model) -> dict:
     """K-quant codec to (block, leaf) of one main layer leaf in it, the
     middle one of the leaf name that has the most."""
@@ -555,6 +629,29 @@ def kernel_census(model, sites: Sites) -> None:
     assert sites.routed.keys() == want, sorted(sites.routed.keys() ^ want)
 
 
+# Caption tokens of the second site read at each size. The fixture's 36
+# tokens pad to 64 caption rows, so the last row tile of the glu kernel in a
+# main layer holds 64 rows of 128. 100 tokens pad to 128 rows and leave no
+# partial tile, and 20 pad to 32 rows.
+SECOND_CAPTION = {512: 100, 1024: 20}
+
+
+def second_caption_sites(model, arrays: dict, first: Sites, tag: str) -> None:
+    """The site gate of the right model on a second caption length: the
+    same sites on the same paths as the fixture's, and another count of
+    rows in the main layers."""
+    tokens = arrays["cap_feats"].shape[0]
+    sites = Sites(model)
+    right_sites(sites, sites.run(arrays), f"{tag}, {tokens} caption tokens")
+    kernel_census(model, sites)
+    assert sites.sites.keys() == first.sites.keys()
+    assert sites.n_img == first.n_img
+    rows = {name: len(sites.sums[name][0]) for name in sites.sites
+            if name.startswith("layers.") and name.endswith(".glu")}
+    was = {name: len(first.sums[name][0]) for name in rows}
+    assert set(rows.values()) != set(was.values()), (rows, was)
+
+
 def _span(missed: dict) -> str:
     fin = [v for v in missed.values() if np.isfinite(v)]
     return (f"{len(missed)} sites miss, {len(missed) - len(fin)} not finite"
@@ -566,13 +663,16 @@ def test_check3_site_gate_at_512(turbo, request, monkeypatch):
     """Every op of every block is within its gate of the exact op on its
     own input, and each wrong production model fails at its fault."""
     arrays, _ = fixture("check3_z_image_turbo_512")
+    second = other_caption(arrays, SECOND_CAPTION[512])
     if not site_process():
         return rerun_sites(request, "check3 sites",
-                           plain_velocity(turbo, arrays))
+                           plain_velocity(turbo, arrays),
+                           plain_velocity(turbo, second))
     sites = Sites(turbo)
     v = sites.run(arrays)
     right_sites(sites, v, "check3 sites 512")
     kernel_census(turbo, sites)
+    second_caption_sites(turbo, second, sites, "check3 sites 512")
     glu = {n for n in sites.sites if n.endswith(".glu")}
     assert len(glu) == len(_blocks(turbo))
 
@@ -627,6 +727,7 @@ def test_check3_site_gate_at_512(turbo, request, monkeypatch):
           f"{len(others)} codecs: the product refuses the row")
 
     kernel_site_faults(monkeypatch, turbo, arrays, sites)
+    kernel_gate_faults(monkeypatch, turbo, arrays, sites, "check3 sites 512")
     # The model is the right one again.
     assert Sites(turbo).run(arrays) == v
 
@@ -723,12 +824,76 @@ def kernel_site_faults(monkeypatch, model, arrays: dict, right: Sites
             assert rows.keys() == {name}, sorted(rows)
 
 
+# The scale of the last partial row tile of the glu kernel that the row
+# rule fails at every site at both sizes: 4 percent is 10.2 u against the
+# 8 u of the kernel's gate, and reads 1.57 gates on the worst row. A scale
+# under the gate fails only by the rounding of the row it lands on:
+# 2 percent, 5.1 u, reads 0.92 gates at 512 and 1.00 at 1024, and
+# 3 percent, 7.7 u, fails at 28 and 29 of the 30 sites.
+TILE_SCALE = 1.04
+
+
+def kernel_gate_faults(monkeypatch, model, arrays: dict, right: Sites,
+                       tag: str) -> None:
+    """Faults in the output of a kernel that the gates at the counts of
+    the stock ops pass, and the row rule at the kernel's own count
+    fails. They wrap the kernel, so a build without it has none. The eps
+    handed to the qk kernel is not among them: the mean square of q and k
+    is far above it here, twice the eps moves no row, and the kernel's
+    test against the float64 reference holds it on inputs near eps."""
+    on = {r: {n for n in right.routed if n.endswith("." + r)}
+          for r in ("qk", "glu")}
+
+    def over_all(got: Sites, names: set) -> float:
+        return max(max(r.values()) for n, r in got.readings().items()
+                   if n in names)
+
+    # One head of 30 of q is a sixtieth of a token row of q and k. Five
+    # percent of it is 0.65 percent of that row, where one rounding's gate
+    # is 0.78 percent, so the token rows read 0.92 gates over all rows and
+    # 1.02 to 1.05 on the worst. On its own head rows it is 6.4 gates, and
+    # 6.8 with their rounding.
+    if on["qk"]:
+        got = faulted_sites(monkeypatch, model, arrays,
+                            kernel_head_scaled(3, 1.05))
+        rows, heads = got.missed_rows(), got.worst_heads()
+        print(f"{tag}, head 3 of q of the qk kernel times 1.05: "
+              f"{_span(rows)} on a head row, "
+              f"{over_all(got, on['qk']):.2f} gates over all rows, "
+              f"{max(got.worst_rows()[n][0] for n in on['qk']):.2f} on the "
+              f"worst token row")
+        assert rows.keys() == on["qk"], sorted(rows.keys() ^ on["qk"])
+        for name in on["qk"]:
+            v, (part, head, _) = heads[name]
+            assert (part, head) == ("q", 3) and 5.5 < v < 7.5, (name, v)
+
+    # Every column of the rows after the last full tile of 128 rows.
+    if on["glu"]:
+        got = faulted_sites(monkeypatch, model, arrays,
+                            kernel_last_row_tile_scaled(TILE_SCALE))
+        rows, worst = got.missed_rows(), got.worst_rows()
+        print(f"{tag}, the last partial row tile of the glu kernel times "
+              f"{TILE_SCALE}: {_span(rows)} on a row, "
+              f"{over_all(got, on['glu']):.2f} gates over all rows")
+        assert rows.keys() == on["glu"], sorted(rows.keys() ^ on["glu"])
+        for name in on["glu"]:
+            count = len(got.sums[name][0])
+            assert count % 128 and worst[name][1] >= count // 128 * 128, (
+                name, count, worst[name])
+
+
 @pytest.mark.integration
-def test_check3_site_gate_at_1024(turbo, request):
+def test_check3_site_gate_at_1024(turbo, request, monkeypatch):
     arrays, _ = fixture("check3_z_image_turbo_1024")
+    second = other_caption(arrays, SECOND_CAPTION[1024])
     if not site_process():
         return rerun_sites(request, "check3 sites",
-                           plain_velocity(turbo, arrays))
+                           plain_velocity(turbo, arrays),
+                           plain_velocity(turbo, second))
     sites = Sites(turbo)
-    right_sites(sites, sites.run(arrays), "check3 sites 1024")
+    v = sites.run(arrays)
+    right_sites(sites, v, "check3 sites 1024")
     kernel_census(turbo, sites)
+    second_caption_sites(turbo, second, sites, "check3 sites 1024")
+    kernel_gate_faults(monkeypatch, turbo, arrays, sites, "check3 sites 1024")
+    assert Sites(turbo).run(arrays) == v

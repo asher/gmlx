@@ -320,8 +320,11 @@ def site_gate(pipe, name: str, entries, label: str) -> None:
     ``site_reach`` takes from the deltas measured here: all of the delta
     for a group left out and a tenth of it for a strength a tenth off.
     Over the gate the table must fail, at the sites of its changed leaves
-    alone. Under it the table must pass, so a change of a gate or of a
-    delta in either direction fails this test."""
+    alone, and under it the table must pass. The reach and the misses are
+    both read over the gates of the run, so this holds the reader to the
+    deltas it measured and not a gate to its size. A leaf gate that is too
+    wide fails here only where it hides every group left out, and one
+    that is too narrow where the right table misses it."""
     arrays, _ = blocks_fixture(name)
     sites, v = table_sites(pipe, arrays, entries)
     right_sites(sites, v, f"check7 sites {label}")
