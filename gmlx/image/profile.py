@@ -8,7 +8,8 @@ lazy work queued since the previous op. It then runs, evaluates its output
 and books its own time. Calls nested inside a timed op run untimed, so no
 time is booked twice, and the records of one step add up to its wall time.
 A feed-forward pair on the fused kernel books one ``swiglu_fused`` record
-in place of its two leaf calls and their ``swiglu``.
+in place of its two leaf calls and their ``swiglu``, under the path that
+``swiglu`` record takes.
 
 The glue records close every gap, so the records always add up to the
 instrumented step's own wall time. Each timed op also pays one eval round
@@ -30,6 +31,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from . import ops
+from .ops import kq_routes
 
 _TIMED: dict[type, type] = {}
 
@@ -143,6 +145,8 @@ class StepProfiler:
             fn = getattr(ops, name)
             self._saved[name] = fn
             setattr(ops, name, self._timed_seam(name, fn))
+        self._saved["glu_pair"] = ops.glu_pair
+        ops.glu_pair = self._placed_pair(ops.glu_pair)
 
     def remove(self) -> None:
         for m, cls in self._swapped:
@@ -153,6 +157,22 @@ class StepProfiler:
         for name, fn in self._saved.items():
             setattr(ops, name, fn)
         self._saved.clear()
+
+    def _placed_pair(self, fn):
+        """``glu_pair`` that also names the caller of a fused pair. No leaf
+        runs before the pair's seam record, so the record takes the path
+        of the up leaf's parent, as the ``swiglu`` record of the composed
+        pair does."""
+        @functools.wraps(fn)
+        def wrapper(gate, up, x):
+            pair = fn(gate, up, x)
+            if pair is not None:
+                leaf = kq_routes.kquant_leaf(up, x.dtype)
+                path = getattr(leaf, "_prof_path", None)
+                if path is not None:
+                    self._caller = _parent(path)
+            return pair
+        return wrapper
 
     def _timed_seam(self, name: str, fn):
         @functools.wraps(fn)
