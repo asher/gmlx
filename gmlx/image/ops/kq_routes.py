@@ -12,12 +12,15 @@ The kernels have no gradient, so ``mx.grad`` through a routed call raises.
 The image pipeline is inference only.
 
 GMLX_IMAGE_KQ_ROUTES=0 keeps both routes on stock ops, and ``qk`` or
-``glu`` keeps that route alone. It is read once, at import.
+``glu`` keeps that route alone. It is read once, at import. ``only`` puts
+a set of routes in force for a block, for a check that reads the stock
+ops and the kernels in one process.
 """
 
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 
 import mlx.core as mx
 
@@ -96,6 +99,20 @@ def install(routes=None) -> frozenset:
     ns.qk_norm_rope = qk_norm_rope if "qk" in on else attention.qk_norm_rope
     _active = frozenset(on)
     return _active
+
+
+@contextmanager
+def only(routes):
+    """Put ``routes`` in force for the block, and after it the routes that
+    were in force before. Yields the names in force inside the block. The
+    switch is not read again. A graph built in the block keeps the ops it
+    was built with."""
+    before = _active
+    on = install(routes)
+    try:
+        yield on
+    finally:
+        install(before)
 
 
 def qk_norm_rope(q: mx.array, k: mx.array, q_w: mx.array, k_w: mx.array,

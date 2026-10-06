@@ -183,6 +183,23 @@ def test_the_seams_are_five_plain_functions_and_install_assigns(routes):
     assert ops.SEAMS == SEAMS and fake.calls == 0
 
 
+def test_only_puts_routes_in_force_for_a_block(spies):
+    assert kq_routes.active() == {"qk", "glu"}
+    with kq_routes.only(()) as on:
+        assert on == frozenset() == kq_routes.active()
+        assert ops.qk_norm_rope is attention.qk_norm_rope
+        with kq_routes.only(("glu",)) as inner:
+            assert inner == {"glu"} == kq_routes.active()
+        assert kq_routes.active() == frozenset()
+    assert kq_routes.active() == {"qk", "glu"}
+    assert ops.qk_norm_rope is kq_routes.qk_norm_rope
+    with pytest.raises(KeyError), kq_routes.only(("qk",)):
+        assert kq_routes.active() == {"qk"}
+        raise KeyError("in the block")
+    assert kq_routes.active() == {"qk", "glu"}
+    assert ops.qk_norm_rope is kq_routes.qk_norm_rope
+
+
 def test_install_refuses_a_replaced_seam(spies, monkeypatch):
     def other(*args):
         return attention.qk_norm_rope(*args)
