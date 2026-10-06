@@ -1,6 +1,7 @@
 """The Z-Image text encoder on real weights: a Qwen3-4B GGUF passes the
-header and identity checks, the tap after the last layer equals the stock
-forward before its final norm, and release drops the model.
+header and identity checks, the tap after the last layer equals the
+forward of the copied mlx-lm Qwen3 class before its final norm, and release
+drops the model.
 Skipped unless KQUANT_TEST_GGUF_DIR holds a GGUF that passes the Z-Image
 encoder checks."""
 from __future__ import annotations

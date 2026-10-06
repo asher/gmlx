@@ -1,6 +1,7 @@
 """The text encoder tap: the Z-Image template against the official chat
-template, the token cap, the tap walk against the stock forward, the
-encoder identity checks and release. CPU tier, on a tiny random Qwen3."""
+template, the token cap, the tap walk against the forward of the copied
+mlx-lm Qwen3 class, the encoder identity checks and release. CPU tier, on
+a tiny random Qwen3."""
 from __future__ import annotations
 
 import dataclasses

@@ -1,9 +1,10 @@
 """Text encoder tap for image conditioning.
 
-An image family conditions its DiT on the hidden states of a stock chat
-model, read after a fixed layer and before the final norm. ``tap`` walks
-the loaded model's own layer list and stops there. It changes and
-subclasses no stock class.
+An image family conditions its DiT on the hidden states of a chat model
+as the text loader builds it, which for Qwen3 is the copied mlx-lm class.
+The states are read after a fixed layer and before the final norm. ``tap``
+walks the loaded model's own layer list and stops there. It changes and
+subclasses no class of the model.
 
 Each prompt is rendered into the family's fixed template, which the family
 owns and never reads from the GGUF chat template, and truncated to the
