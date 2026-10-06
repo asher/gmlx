@@ -217,6 +217,59 @@ def test_text_halves_need_an_encoder_and_a_fit(tmp_path):
         lora.apply_text_adapters(pipe, [(good, 1.0)])
 
 
+@pytest.mark.parametrize("off", ["empty list", "strength 0"])
+def test_a_removal_clears_the_text_state_of_a_released_encoder(tmp_path,
+                                                                off):
+    """A released encoder has no layers to unwrap. An empty list, and a
+    list at strength 0, still clear its adapter state, so the cache gives
+    the bare conditioning and not the adapted one."""
+    pipe = _pipe()
+    enc = pipe.encoder
+    ad = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors",
+                                        _text_pairs(1, 6.0)))
+    bare = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, [(ad, 0.8)]) == 1
+    adapted = api.encode_text(pipe, "ab")
+    assert adapted.key != bare.key and adapted is not bare
+    assert enc.release() and enc.released
+    assert api.encode_text(pipe, "ab") is adapted
+    rows = [] if off == "empty list" else [(ad, 0.0)]
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert enc.adapters == ""
+    assert api.encode_text(pipe, "ab") is bare
+    # A second removal has nothing to do.
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert api.encode_text(pipe, "ab") is bare
+
+
+def test_the_rows_in_place_are_a_no_op_on_a_released_encoder(tmp_path):
+    """The state is compared before the released check: the rows in place
+    return 0 and their cached conditioning is read. Any other rows need
+    the layers and are refused, and the state stays."""
+    pipe = _pipe()
+    enc = pipe.encoder
+    one = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors",
+                                         _text_pairs(1, 6.0)))
+    two = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors",
+                                         _text_pairs(2)))
+    rows = [(one, 0.8), (two, -0.5)]
+    assert lora.apply_text_adapters(pipe, rows) == 2
+    state = enc.adapters
+    adapted = api.encode_text(pipe, "ab")
+    assert enc.release() and enc.released
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert lora.apply_text_adapters(pipe, rows + [(one, 0.0)]) == 0
+    assert enc.adapters == state == lora.text_state(rows)
+    assert api.encode_text(pipe, "ab") is adapted
+    for other in ([(one, 0.8)], [(one, 0.5), (two, -0.5)],
+                  [(two, -0.5), (one, 0.8)]):
+        with pytest.raises(lora.AdapterError,
+                           match="need a loaded text encoder"):
+            lora.apply_text_adapters(pipe, other)
+        assert enc.adapters == state
+    assert api.encode_text(pipe, "ab") is adapted
+
+
 def test_a_failed_text_install_leaves_the_encoder_bare(tmp_path,
                                                        monkeypatch):
     """A row that does not fit, or an install that fails part way, leaves

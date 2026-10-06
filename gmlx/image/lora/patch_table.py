@@ -296,19 +296,28 @@ def apply_text_adapters(pipe, adapters) -> int:
     Every row is checked before the encoder changes, and a failure while
     installing takes the installed ones off again, so the encoder carries
     all of the rows or none. The encoder's adapter state enters the
-    conditioning key, and it is empty again after a removal. The wraps
+    conditioning key, and it is empty again after a removal. A released
+    encoder keeps the state it had: the rows in place stay a no-op and a
+    removal clears it, and any other rows are refused. The wraps
     read nothing from ``gmlx.lora_rows``, so text rows served in the same
     process cannot scale, switch off or refuse an image prompt's halves."""
     rows = [(ad, float(s)) for ad, s in adapters if ad.text and s != 0.0]
     enc = pipe.encoder
     if not rows:
         # An encoder that never took a text half has nothing to take off.
-        if enc is not None and getattr(enc, "adapters", "") \
-                and enc.owned and not enc.released:
-            _unwrap_text(enc)
+        # A released one has no layers left to unwrap, and its state
+        # clears all the same, since the conditioning cache is keyed on it.
+        if enc is not None and getattr(enc, "adapters", "") and enc.owned:
+            if not enc.released:
+                _unwrap_text(enc)
             enc.adapters = ""
         return 0
     names = ", ".join(ad.name for ad, _ in rows)
+    state = text_state(rows)
+    # The rows in place ask nothing of the encoder, so a released one
+    # takes them too: their conditioning is read from the cache.
+    if getattr(enc, "adapters", "") == state:
+        return 0
     if enc is None or enc.released:
         raise AdapterError(f"{names}: the text encoder halves need a loaded "
                            "text encoder, and this pipeline has none")
@@ -318,9 +327,6 @@ def apply_text_adapters(pipe, adapters) -> int:
             "pairs are refused, because the text encoder is a resident "
             "chat model that an image adapter must not change. Pass a text "
             "strength of 0 to apply the image half alone")
-    state = text_state(rows)
-    if enc.adapters == state:
-        return 0
     from .install import _set
 
     wraps = _text_wraps(pipe, enc, rows)
