@@ -120,9 +120,12 @@ def identify_dit(path: str, *, family: str | None = None,
 
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
+             identified: Identified | None = None,
              log=print) -> tuple[nn.Module, DitInfo]:
     """Load a DiT GGUF. Raises ``ImageModelError`` for a file gmlx image
-    refuses and ``UnsupportedCodecError`` for a codec it cannot run."""
+    refuses and ``UnsupportedCodecError`` for a codec it cannot run.
+    ``identified`` is what ``identify_dit`` gave for this file, which then
+    is not identified again."""
     from mlx_kquant.nn import KQuantLinear
 
     from gmlx.load.loader import (
@@ -159,7 +162,9 @@ def load_dit(path: str, *, family: str | None = None,
             f"({reshaped[0][len(_ORIG_SHAPE_KEY):]} first). gmlx image "
             "loads DiT files whose tensors keep their original shapes")
 
-    ident = identify(view, family=family, variant=variant)
+    ident = identified
+    if ident is None:
+        ident = identify(view, family=family, variant=variant)
     fam = ident.family
     if fam.build is None:
         raise ImageModelError(

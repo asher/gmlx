@@ -210,14 +210,15 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
                               "the parts one by one")
     seconds = {}
     t0 = time.perf_counter()
-    found = identify_dit(str(dit), variant=variant).family
+    ident = identify_dit(str(dit), variant=variant)
+    found = ident.family
     act = image_activation(found.name)
     # A pipeline without an encoder needs no encoder spec of its family.
     spec = None
     if text_encoder is not None or encoder_model is not None:
         spec = encoder_spec(found)
     model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
-                           log=log)
+                           identified=ident, log=log)
     fam = info.identified.family
     seconds["dit"] = time.perf_counter() - t0
     handle = None

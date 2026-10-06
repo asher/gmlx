@@ -302,6 +302,22 @@ def test_a_pipeline_refuses_one_key_over_two_prefix_layouts(pipe):
         api.denoise_step(pipe, lat, SIGMA, qt.conditioning("text", key="k"))
 
 
+def test_load_identifies_the_dit_once(tmp_path, monkeypatch):
+    from gmlx.image import loader
+
+    fam = qt.tiny_family()
+    monkeypatch.setattr(registry, "families", lambda: (fam,))
+    calls, real = [], loader.identify
+    monkeypatch.setattr(loader, "identify",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    path = qt.write(tmp_path / "tiny.gguf", qt.weights(0))
+    pipe = api.load(path, log=lambda *_: None)
+    assert len(calls) == 1 and pipe.family.name == "qwen_image21"
+    # A DiT loaded on its own identifies its file.
+    _, info = loader.load_dit(path, log=lambda *_: None)
+    assert len(calls) == 2 and info.identified.family.name == "qwen_image21"
+
+
 def test_a_pipeline_loads_without_an_encoder_or_a_vae(pipe):
     assert pipe.family.name == "qwen_image21" and pipe.variant == "default"
     assert pipe.encoder is None and pipe.vae is None
