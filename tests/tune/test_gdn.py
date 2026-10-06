@@ -347,6 +347,91 @@ def test_text_only_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatc
     assert calls == [1, 1]
 
 
+def _layout_model(hk, source=None, rows=None):
+    """A toy Qwen3.5 text model of the copied mlx-lm classes in the tiled
+    order, with 2 K heads and 6 V heads by default. With ``source``, that
+    model's weights with one K head per V head, paired in the order
+    ``rows``."""
+    from mlx.utils import tree_flatten
+
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+
+    HK, HV, DK, DV = 2, 6, 32, 32
+    text = dict(
+        model_type="qwen3_5_text", hidden_size=64, intermediate_size=128,
+        linear_num_value_heads=HV, linear_num_key_heads=hk,
+        linear_key_head_dim=DK, linear_value_head_dim=DV,
+        linear_conv_kernel_dim=4, num_hidden_layers=4, num_attention_heads=4,
+        rms_norm_eps=1e-6, vocab_size=96, num_key_value_heads=2,
+        max_position_embeddings=1024, tie_word_embeddings=False, head_dim=32,
+        rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
+                         "rope_theta": 10000000.0,
+                         "partial_rotary_factor": 0.25},
+        full_attention_interval=4, kv_head_layout="tiled")
+    mx.random.seed(11)
+    model = qwen3_5.Model(qwen3_5.ModelArgs.from_dict(
+        {"model_type": "qwen3_5", "text_config": text}))
+    if source is not None:
+        heads = [h % HK if rows == "tiled" else h // (HV // HK)
+                 for h in range(HV)]
+        kd = HK * DK
+        qk = np.concatenate([np.arange(h * DK, (h + 1) * DK) for h in heads])
+        idx = mx.array(np.concatenate([qk, kd + qk,
+                                       2 * kd + np.arange(HV * DV)]))
+        weights = []
+        for name, value in tree_flatten(source.parameters()):
+            if name.endswith(("linear_attn.in_proj_qkv.weight",
+                              "linear_attn.conv1d.weight")):
+                value = value[idx]
+            weights.append((name, value))
+        model.load_weights(weights, strict=True)
+    mx.eval(model.parameters())
+    return model
+
+
+@pytest.mark.parametrize("chunked", (True, False), ids=("chunked", "loop"))
+def test_training_forward_pairs_heads_in_the_order_of_its_model(
+        chunked, monkeypatch):
+    """A training forward of a tiled model with fewer K heads than V heads
+    gives the logits of the same weights with one K head per V head paired
+    tiled, and not of the grouped pairing: on the chunked rule and on the
+    per-token loop."""
+    if not chunked:
+        monkeypatch.setenv("GMLX_TRAIN_GDN_CHUNK", "0")
+    seen = {"chunked": 0, "scan": 0}
+    real_chunked = tg.gated_delta_update_chunked
+    real_scan = tg.training_gated_delta_update
+
+    def chunked_spy(*a, **kw):
+        seen["chunked"] += 1
+        return real_chunked(*a, **kw)
+
+    def scan_spy(*a, **kw):
+        seen["scan"] += 1
+        return real_scan(*a, **kw)
+
+    monkeypatch.setattr(tg, "gated_delta_update_chunked", chunked_spy)
+    monkeypatch.setattr(tg, "training_gated_delta_update", scan_spy)
+
+    narrow = _layout_model(2)
+    models = (narrow, _layout_model(6, narrow, "tiled"),
+              _layout_model(6, narrow, "grouped"))
+    ids = mx.array(np.random.default_rng(4).integers(0, 96, size=(2, 70)))
+    out = []
+    for model in models:
+        assert tg.install_training_gdn(model).count == 3
+        model.train()
+        y = model(ids).astype(mx.float32)
+        mx.eval(y)
+        out.append(np.array(y))
+        model.eval()
+    # Three gated delta layers a model, each through the training scan.
+    assert seen["scan"] == 9
+    assert seen["chunked"] == (9 if chunked else 0)
+    assert np.abs(out[0] - out[1]).max() < 1e-4
+    assert np.abs(out[0] - out[2]).max() > 0.05
+
+
 def _qwen3next_args():
     from gmlx._vendor.mlx_lm.models.qwen3_next import ModelArgs
     return ModelArgs(
