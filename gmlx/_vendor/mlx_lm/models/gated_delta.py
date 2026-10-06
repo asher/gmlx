@@ -15,6 +15,7 @@ def compute_g(A_log, a, dt_bias):
     return mx.exp(-mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias))
 
 
+# gmlx: ``tiled`` builds the kernel for the tiled head order.
 def _make_gated_delta_kernel(has_mask=False, vectorized=False, tiled=False):
     if not mx.metal.is_available():
         return None
@@ -34,6 +35,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False, tiled=False):
         g_access = "g_[hv_idx]"
         g_advance = "g_ += Hv;"
 
+    # gmlx: hk_idx in the source is hk_source.
     source = f"""
         auto n = thread_position_in_grid.z;
         auto b_idx = n / Hv;
@@ -108,7 +110,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False, tiled=False):
     if has_mask:
         inputs.append("mask")
 
-    suffix = "_tiled" if tiled else ""
+    suffix = "_tiled" if tiled else ""  # gmlx: a kernel name per head order
     if vectorized:
         suffix += "_vec"
     if has_mask:
@@ -191,12 +193,13 @@ def gated_delta_kernel(
     beta: mx.array,
     state: mx.array,
     mask: Optional[mx.array] = None,
-    tiled: bool = False,
+    tiled: bool = False,  # gmlx: the head order of the caller's model
 ) -> Tuple[mx.array, mx.array]:
     B, T, Hk, Dk = k.shape
     Hv, Dv = v.shape[2:]
     input_type = q.dtype
     state_type = state.dtype
+    # gmlx: the tiled kernels, when the head counts differ.
     if tiled and Hv != Hk:
         kernel = _gated_delta_kernels_tiled[g.ndim == 4, mask is not None]
         inputs = [q, k, v, g, beta, state, T]
@@ -240,7 +243,7 @@ def gated_delta_ops(
     beta: mx.array,
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
-    tiled: bool = False,
+    tiled: bool = False,  # gmlx: the head order of the caller's model
 ) -> Tuple[mx.array, mx.array]:
     """
     Ops-based reference implementation for prompt prefill (sequential loop).
@@ -262,6 +265,7 @@ def gated_delta_ops(
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
     if (repeat_factor := Hv // Hk) > 1:
+        # gmlx: tile for the tiled order, repeat for the grouped order.
         if tiled:
             q = mx.tile(q, [1, 1, repeat_factor, 1])
             k = mx.tile(k, [1, 1, repeat_factor, 1])
@@ -296,7 +300,7 @@ def gated_delta_update(
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
     use_kernel: bool = True,
-    tiled: bool = False,
+    tiled: bool = False,  # gmlx: the head order of the caller's model
 ) -> Tuple[mx.array, mx.array]:
     beta = mx.sigmoid(b)
     g = compute_g(A_log, a, dt_bias)
@@ -305,6 +309,7 @@ def gated_delta_update(
         Hv, Dv = v.shape[-2:]
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
+    # gmlx: both scans take the head order.
     if not use_kernel or mx.default_device() != mx.gpu or not mx.metal.is_available():
         return gated_delta_ops(q, k, v, g, beta, state, mask, tiled=tiled)
     return gated_delta_kernel(q, k, v, g, beta, state, mask, tiled=tiled)

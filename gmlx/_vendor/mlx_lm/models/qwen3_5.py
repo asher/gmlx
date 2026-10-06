@@ -196,7 +196,7 @@ class GatedDeltaNet(nn.Module):
             state,
             mask,
             use_kernel=not self.training,
-            tiled=self.gdn_kv_tiled,
+            tiled=self.gdn_kv_tiled,  # gmlx: this model's head order
         )
 
         if cache is not None:
