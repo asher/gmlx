@@ -3,12 +3,14 @@ synthesis against the official configs, and the variant identity hash.
 CPU-only. Header fixtures hold names, shapes and codecs, no weights."""
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pytest
 
 from image_fixtures import (
-    Q_HEADER, Z_HEADER, bf16_bits, fixture_view, load_json, official_config,
-    write_gguf)
+    FIXTURES, Q_HEADER, Z_HEADER, bf16_bits, fixture_view, load_json,
+    official_config, write_gguf)
 
 from gmlx.image import fingerprint as fp
 from gmlx.image.registry import VariantRow, families, get_family, is_image_arch
@@ -76,6 +78,16 @@ def test_the_constants_rows_name_the_fixture_revisions():
         row = get_family(fam).constants
         assert (row.repo, row.revision) == (
             manifest[cfg]["repo"], manifest[cfg]["revision"])
+
+
+# transformer/config.json of Qwen/Qwen-Image-2.1 at the manifest's revision.
+QWEN_CONFIG_SHA256 = (
+    "56ae3281c4e6c2d1aa3658252d187488071815fd79bef15808bb0205fc1a2241")
+
+
+def test_the_qwen_config_fixture_is_the_official_file_in_bytes():
+    data = (FIXTURES / "qwen_image21_transformer_config.json").read_bytes()
+    assert hashlib.sha256(data).hexdigest() == QWEN_CONFIG_SHA256
 
 
 def test_header_fixtures_are_small_and_pinned():
