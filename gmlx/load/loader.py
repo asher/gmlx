@@ -904,6 +904,32 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 
+# Params cast to float32 at load, whatever float dtype the file stores them
+# in. The rows above act on F32 and F16 tensors only; this one also takes
+# BF16 tensors, which the activation cast never visits.
+_FP32_CAST_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    # qwen3_vl: the tower's residual stream reaches the thousands in its last
+    # blocks, and a 16-bit float drops the small values beside them. Against
+    # llama.cpp the main image features of a bfloat16 tower are 9 to 15
+    # percent off in relative L2 (worst image token cosine 0.69), and those
+    # of a float32 tower 0.3 to 3.7 percent. Float32 activations over the
+    # stored 16-bit weights give the same bits, but each matmul then pays a
+    # promotion (14 percent of the tower's time at 256 image tokens), so the
+    # weights are cast once here. A BF16 mmproj's tower is 1.06 GiB mapped
+    # from the file as stored and 2.13 GiB owned after this cast.
+    "qwen3_vl": ("vision_tower.",),
+}
+
+
+def float_dtype_rules(model_type: str) -> dict[str, tuple[str, ...]]:
+    """The float dtype rows of ``model_type`` as ``_install_and_load``
+    keywords."""
+    return {
+        "fp32_keep": _FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        "f16_keep": _F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        "fp32_cast": _FP32_CAST_BY_MODEL_TYPE.get(model_type, ()),
+    }
+
 
 def preset_native_fp_wire_env(args) -> None:
     """Pre-set wire mode when a streaming placement is coming.
@@ -1101,6 +1127,7 @@ def _install_and_load(
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
     f16_keep: tuple[str, ...] = (),
+    fp32_cast: tuple[str, ...] = (),
     source_key: tuple | None = None,
     active_before: float | None = None,
     deferred_tables: dict | None = None,
@@ -1127,6 +1154,8 @@ def _install_and_load(
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
     cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
     their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
+    ``fp32_cast``: substrings cast to float32 from F16, BF16 or F32 (see
+    ``_FP32_CAST_BY_MODEL_TYPE``).
 
     ``deferred_tables``: wire name -> file source for tables the wire load
     skipped (past the device buffer ceiling); attached after the kquant swap.
@@ -1225,9 +1254,17 @@ def _install_and_load(
     if act_dtype is None:
         act_dtype = activation_dtype()
     act_name = dtype_name(act_dtype)
-    n_cast = 0
+    n_cast = n_fp32 = 0
     for k in list(loadable):
         v = loadable[k]
+        if (fp32_cast and k not in hf_kquant_meta
+                and v.dtype in (mx.float32, mx.float16, mx.bfloat16)
+                and any(s in k for s in fp32_cast)):
+            if v.dtype != mx.float32:
+                # 2 bytes to 4: the result owns its buffer.
+                loadable[k] = v.astype(mx.float32)
+                n_fp32 += 1
+            continue
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
             if fp32_keep and any(s in k for s in fp32_keep):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
@@ -1247,6 +1284,8 @@ def _install_and_load(
             n_cast += 1
     if n_cast:
         log(f"[dtype] cast {n_cast} float params (norms etc.) to {act_name}")
+    if n_fp32:
+        log(f"[dtype] cast {n_fp32} 16-bit float params to float32")
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")

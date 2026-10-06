@@ -32,11 +32,10 @@ from .config_synth import synthesize_config
 from gmlx.upstream.gdn_patches import require_tiled_gdn
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
-    _F16_KEEP_BY_MODEL_TYPE,
-    _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
     collect_after_load,
+    float_dtype_rules,
     materialize_module_arrays,
     weights_source_key,
 )
@@ -3614,8 +3613,7 @@ def load_vlm_model(
                       sanitize=(model_type in ("deepseek_v4_vl",
                                                  "deepseek_v41_vl")),
                       no_alias=owned_names,
-                      fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
-                      f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+                      **float_dtype_rules(model_type),
                       source_key=weights_source_key(*pf.shards, mmproj_path),
                       active_before=active_before,
                       deferred_tables=oversize_tables(pf.shards, llm_arch),

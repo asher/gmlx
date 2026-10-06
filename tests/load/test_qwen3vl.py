@@ -837,3 +837,213 @@ def test_a_vision_cache_is_filled_once_and_read_by_key():
     vlm.get_input_embeddings(
         ids, pixels, image_grid_thw=grid, vision_cache=cache, _image_key="b")
     assert counted.calls == 2 and len(cache) == 2
+
+
+# The float dtypes of a loaded pair, read from two files.
+
+_FILE_LAYOUTS = ["bf16", "f16", "all_bf16", "all_f16"]
+
+
+def _mint_tiny_qwen3vl_pair(text_path, mmproj_path, layout):
+    """A loadable Qwen3-VL pair. The text file is float32. ``layout`` is how
+    the mmproj stores its floats: ``bf16`` and ``f16`` as llama.cpp writes
+    those files (the matrices of the blocks and the mergers in the 16-bit
+    type, with the patch slices too in F16; the position table and every
+    1-D tensor float32), ``all_bf16`` and ``all_f16`` with every tensor in
+    the 16-bit type. Returns the mmproj tensors as the float32 values the
+    file holds."""
+    from gguf import GGUFWriter
+    from gguf.constants import GGMLQuantizationType
+    from tokenizers import pre_tokenizers
+
+    tokens = _MARKERS + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He"]
+    hid, layers, heads, kv, ffn, hd = 64, 2, 4, 2, 128, 16
+    rng = np.random.default_rng(5)
+
+    def values(name, shape):
+        if name.endswith(".bias"):
+            a = 0.1 * rng.standard_normal(shape)
+        elif len(shape) == 1:
+            a = 1.0 + 0.1 * rng.standard_normal(shape)
+        else:
+            a = rng.standard_normal(shape) / np.sqrt(np.prod(shape[1:]))
+        return np.ascontiguousarray(a, dtype=np.float32)
+
+    w = GGUFWriter(text_path, "qwen3vl")
+    w.add_uint32("qwen3vl.embedding_length", hid)
+    w.add_uint32("qwen3vl.block_count", layers)
+    w.add_uint32("qwen3vl.attention.head_count", heads)
+    w.add_uint32("qwen3vl.attention.head_count_kv", kv)
+    w.add_uint32("qwen3vl.feed_forward_length", ffn)
+    w.add_uint32("qwen3vl.context_length", 1024)
+    w.add_float32("qwen3vl.attention.layer_norm_rms_epsilon", 1e-6)
+    w.add_uint32("qwen3vl.attention.key_length", hd)
+    w.add_float32("qwen3vl.rope.freq_base", 5000000.0)
+    w.add_array("qwen3vl.rope.dimension_sections", [4, 2, 2, 0])
+    w.add_uint32("qwen3vl.n_deepstack_layers", 2)
+    w.add_string("tokenizer.ggml.model", "gpt2")
+    w.add_string("tokenizer.ggml.pre", "qwen2")
+    w.add_array("tokenizer.ggml.tokens", tokens)
+    w.add_array("tokenizer.ggml.merges", ["H e"])
+    w.add_array("tokenizer.ggml.token_type",
+                [3] * len(_MARKERS) + [1] * (len(tokens) - len(_MARKERS)))
+    w.add_uint32("tokenizer.ggml.eos_token_id", 2)
+    w.add_uint32("tokenizer.ggml.padding_token_id", 0)
+    text = {"token_embd.weight": (len(tokens), hid),
+            "output_norm.weight": (hid,),
+            "output.weight": (len(tokens), hid)}
+    for i in range(layers):
+        text.update({
+            f"blk.{i}.attn_norm.weight": (hid,),
+            f"blk.{i}.ffn_norm.weight": (hid,),
+            f"blk.{i}.attn_q.weight": (heads * hd, hid),
+            f"blk.{i}.attn_k.weight": (kv * hd, hid),
+            f"blk.{i}.attn_v.weight": (kv * hd, hid),
+            f"blk.{i}.attn_output.weight": (hid, heads * hd),
+            f"blk.{i}.attn_q_norm.weight": (hd,),
+            f"blk.{i}.attn_k_norm.weight": (hd,),
+            f"blk.{i}.ffn_gate.weight": (ffn, hid),
+            f"blk.{i}.ffn_up.weight": (ffn, hid),
+            f"blk.{i}.ffn_down.weight": (hid, ffn),
+        })
+    for name, shape in text.items():
+        w.add_tensor(name, values(name, shape))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+    w = GGUFWriter(mmproj_path, "clip")
+    w.add_bool("clip.has_vision_encoder", True)
+    w.add_string("clip.projector_type", "qwen3vl_merger")
+    for key in ("patch_size", "image_size", "block_count", "embedding_length",
+                "feed_forward_length", "projection_dim",
+                "attention.head_count", "spatial_merge_size"):
+        w.add_uint32(f"clip.vision.{key}", _MM_META[f"clip.vision.{key}"])
+    w.add_float32("clip.vision.attention.layer_norm_epsilon", 1e-6)
+    w.add_array("clip.vision.is_deepstack_layers",
+                _MM_META["clip.vision.is_deepstack_layers"])
+    w.add_array("clip.vision.image_mean", [0.5, 0.5, 0.5])
+    w.add_array("clip.vision.image_std", [0.5, 0.5, 0.5])
+    stored = {}
+    for name, shape in ((k, tuple(v.shape)) for k, v in _mm_arrays().items()):
+        a = values(name, shape)
+        matrix = len(shape) == 2 and "position_embd" not in name
+        patch = "patch_embd.weight" in name
+        codec = {"bf16": "BF16" if matrix else "F32",
+                 "f16": "F16" if matrix or patch else "F32",
+                 "all_bf16": "BF16", "all_f16": "F16"}[layout]
+        if codec == "BF16":
+            bits = (a.view(np.uint32) >> 16).astype(np.uint16)
+            w.add_tensor(name, bits, raw_shape=a.shape,
+                         raw_dtype=GGMLQuantizationType.BF16)
+            a = (bits.astype(np.uint32) << 16).view(np.float32)
+        elif codec == "F16":
+            half = a.astype(np.float16)
+            w.add_tensor(name, half)
+            a = half.astype(np.float32)
+        else:
+            w.add_tensor(name, a)
+        stored[name] = a
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return stored
+
+
+def _load_tiny_pair(tmp_path, monkeypatch, layout):
+    from test_loader_api import _keep_vlm_render_bindings
+
+    _keep_vlm_render_bindings(monkeypatch)
+    text, mmproj = (str(tmp_path / n) for n in ("t.gguf", "mmproj.gguf"))
+    stored = _mint_tiny_qwen3vl_pair(text, mmproj, layout)
+    model, _, _ = gvlm.load_vlm_model(text, mmproj)
+    return model, stored
+
+
+def _float32_tower(model, stored):
+    """A second tower that holds the file's values as float32 arrays."""
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.vision import VisionModel
+
+    vision, skipped, _ = gvlm.remap_vision_arrays(
+        {k: mx.array(v) for k, v in stored.items()}, "qwen3_vl",
+        mm_meta=_MM_META)
+    assert skipped == []
+    tower = VisionModel(model.config.vision_config)
+    tower.load_weights([(k.removeprefix("vision_tower."), v)
+                        for k, v in vision.items()], strict=True)
+    tower.eval()
+    mx.eval(tower.parameters())
+    return tower
+
+
+def _tower_inputs():
+    # 4 x 6 patches: a grid that is not the position table's own 4 x 4, so
+    # the table is interpolated.
+    mx.random.seed(3)
+    return mx.random.normal((24, 3 * 2 * 16 * 16)), mx.array([[1, 4, 6]])
+
+
+def _rel_l2(got, want):
+    got, want = got.astype(mx.float32), want.astype(mx.float32)
+    return float(mx.linalg.norm(got - want) / mx.linalg.norm(want))
+
+
+@pytest.mark.parametrize("layout", _FILE_LAYOUTS)
+def test_the_tower_of_a_16_bit_mmproj_computes_in_float32(
+        tmp_path, monkeypatch, layout):
+    # The tower's residual stream needs float32. A file that stores the
+    # tower in a 16-bit float loads it as float32 arrays with the file's
+    # values, and its features are those of a float32 tower.
+    model, stored = _load_tiny_pair(tmp_path, monkeypatch, layout)
+    tower = model.vision_tower
+    params = dict(tree_flatten(tower.parameters()))
+    assert {str(v.dtype) for v in params.values()} == {"mlx.core.float32"}
+    ref = _float32_tower(model, stored)
+    for name, want in tree_flatten(ref.parameters()):
+        assert mx.array_equal(params[name], want), name
+
+    pixels, grid = _tower_inputs()
+    main, deep = tower(pixels, grid)
+    want, want_deep = ref(pixels, grid)
+    assert main.dtype == mx.float32
+    assert [d.dtype for d in deep] == [mx.float32, mx.float32]
+    assert _rel_l2(main, want) < 1e-6
+    for got, r in zip(deep, want_deep):
+        assert _rel_l2(got, r) < 1e-6
+
+
+def test_image_features_join_in_the_language_model_dtype(
+        tmp_path, monkeypatch):
+    # The float32 features are cast where they join the token embeddings,
+    # so the decoder stays in its own dtype. Float32 deepstack features
+    # would promote every layer after the first to float32.
+    from gmlx.load.dtypes import activation_dtype
+
+    model, _ = _load_tiny_pair(tmp_path, monkeypatch, "bf16")
+    lm_dtype = model.language_model.model.embed_tokens.weight.dtype
+    assert lm_dtype == activation_dtype()
+    if lm_dtype == mx.float32:
+        pytest.skip("the activation dtype is float32: nothing to tell apart")
+    pixels, grid = _tower_inputs()
+    image_pad, n_soft = _MARKERS.index("<|image_pad|>"), 6
+    ids = mx.array([[1, _MARKERS.index("<|vision_start|>")]
+                    + [image_pad] * n_soft
+                    + [_MARKERS.index("<|vision_end|>"), 10, 11]])
+    assert model.config.image_token_index == image_pad
+
+    main, deep = model.vision_tower(pixels, grid)
+    assert main.dtype == mx.float32
+    feats = model.get_input_embeddings(ids, pixels, image_grid_thw=grid)
+    assert feats.inputs_embeds.dtype == lm_dtype
+    assert mx.array_equal(feats.inputs_embeds[0, 2:2 + n_soft],
+                          main.astype(lm_dtype))
+    assert len(feats.deepstack_visual_embeds) == 2
+    for got, d in zip(feats.deepstack_visual_embeds, deep):
+        assert got.dtype == lm_dtype
+        assert mx.array_equal(got, d.astype(lm_dtype))
+    assert model.encode_images(pixels, image_grid_thw=grid).dtype == lm_dtype
+    logits = model(ids, pixels, image_grid_thw=grid).logits
+    assert logits.dtype == lm_dtype
+    assert logits.shape == (1, ids.shape[1], 264)
