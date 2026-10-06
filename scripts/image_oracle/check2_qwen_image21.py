@@ -22,10 +22,14 @@ needs torchvision, which the oracle environment lacks.
 For each prompt the fixture holds the token ids of the whole templated
 prompt and the fp32 and bf16 taps of the rows that the pipeline keeps.
 The manifest records the bf16 against fp32 gap of each prompt and the
-tolerances: relative L2 at twice that gap, per-token cosine at its
-starting value, 0.999. The bf16 model is the float32 one rounded in
-place, and it runs after every float32 prompt, so one copy of the weights
-is held at a time.
+tolerances: relative L2 at twice that gap, and a per-token cosine floor
+of 1 - 4 (1 - c), where c is the oracle's own smallest per-token cosine
+of that prompt, which bounds the angle at twice the oracle's own. The
+starting value of 0.999 does not hold for this encoder: the row of each
+<|im_start|> token differs by a fifth of its norm between the two runs.
+The manifest names the row of each prompt's smallest cosine. The bf16
+model is the float32 one rounded in place, and it runs after every
+float32 prompt, so one copy of the weights is held at a time.
 
 The bf16 run computes each linear product as a float32 GEMM over the
 bfloat16 operands, rounded once to bfloat16, since torch's CPU bfloat16
@@ -52,7 +56,9 @@ from check2_z_image import PROMPTS, token_cosine
 NAME = "check2_qwen_image21"
 STARTING = {"rel_l2": 2e-2, "token_cosine_min": 0.999}
 RULE = ("relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 "
-        "of the same prompt; per-token cosine at the starting value")
+        "of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the "
+        "oracle's own smallest per-token cosine of the same prompt, and at "
+        "most the starting value")
 ROWS = 16384            # rows of a large tensor dequantized at a time
 SANITY = "The capital of France is"
 
@@ -311,6 +317,7 @@ def main(argv=None) -> int:
 
     gaps, checks, rendered, lengths, kept, secs, tol_rel = ({}, {}, {}, {},
                                                             {}, {}, {})
+    tol_cos = {}
     for key in prompts:
         r32, r16 = runs["fp32"][key], runs["bf16"][key]
         if not np.array_equal(r16["ids"], r32["ids"]):
@@ -319,8 +326,25 @@ def main(argv=None) -> int:
         fx.add(f"tap_{key}", r32["tap"])
         fx.add(f"tap_bf16_{key}", r16["tap"])
         gap = fixtures.compare(r16["tap"], r32["tap"])
-        gap["token_cosine_min"] = float(token_cosine(r16["tap"],
-                                                     r32["tap"]).min())
+        cos = token_cosine(r16["tap"], r32["tap"])
+        norms = np.linalg.norm(r32["tap"].astype(np.float64), axis=-1)
+        rel = np.linalg.norm(r16["tap"].astype(np.float64)
+                             - r32["tap"], axis=-1) / norms
+        row = int(cos.argmin())
+        gap["token_cosine_min"] = float(cos.min())
+        # The row of the smallest cosine, by its place in the tap and by
+        # the token it belongs to, and the spread of the row errors.
+        gap["token_cosine_min_row"] = row
+        gap["token_cosine_min_token_id"] = int(
+            r32["ids"][int(pipe._drop_idx) + row])
+        gap["row_rel_l2"] = {"min": float(rel.min()),
+                             "median": float(np.median(rel)),
+                             "max": float(rel.max())}
+        gap["row_norm"] = {"min": float(norms.min()),
+                           "median": float(np.median(norms)),
+                           "max": float(norms.max())}
+        tol_cos[key] = min(STARTING["token_cosine_min"],
+                           1.0 - 4.0 * (1.0 - gap["token_cosine_min"]))
         gaps[key] = gap
         checks[key] = {m: r["hook_equals_features"]
                        for m, r in (("fp32", r32), ("bf16", r16))}
@@ -361,7 +385,7 @@ def main(argv=None) -> int:
         seconds={"load_s": round(load_s, 1), "cast_s": round(cast_s, 1),
                  **secs})
     fx.tolerances.update(rule=RULE, starting=STARTING, rel_l2=tol_rel,
-                         token_cosine_min=STARTING["token_cosine_min"])
+                         token_cosine_min=tol_cos)
     fx.note("The pipeline encodes one prompt at batch 1 with no padding and "
             "no mask, as gmlx encodes a prompt.")
     path = fx.write(a.out)

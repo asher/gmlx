@@ -212,6 +212,11 @@ def main(argv=None) -> int:
                              f"pipeline in fp32: {same}")
         fx.add(f"noise_{size}", noise)
         fx.add(f"latents_{size}", final)
+        # The schedule of the pipeline's own call at this token count.
+        fx.add(f"sigmas_{size}", oracle.to_numpy(
+            pipe.scheduler.sigmas).astype(np.float32))
+        fx.add(f"timesteps_{size}", oracle.to_numpy(
+            pipe.scheduler.timesteps).astype(np.float32))
         for k in a.keep:
             if k < steps:
                 fx.add(f"latents_{size}_step{k}", after[k - 1])
