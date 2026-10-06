@@ -19,8 +19,11 @@ A request runs a negative row whenever its guidance is not 1.0, as
 
 Levers apply in order until the plan fits: sequential rows in place of a
 batch, release of an owned encoder after encoding, and tiled VAE decode.
-A plan that still does not fit raises ``ImageMemoryError`` with each term
-in GiB and the largest term named, unless GMLX_OVERCOMMIT=1.
+A family whose VAE row is unmeasured decodes an image larger than one tile
+in tiles from the start, as ``vae_tiling`` chooses for it, so tiling is no
+lever of its plan. A plan that still does not fit raises
+``ImageMemoryError`` with each term in GiB and the largest term named,
+unless GMLX_OVERCOMMIT=1.
 
 The MLX buffer cache keeps freed buffers for reuse up to its limit, which
 defaults to 95 percent of memory. One VAE decode frees and allocates
@@ -28,8 +31,15 @@ buffers of many sizes inside one evaluation, so under the default limit
 its footprint reaches two to three times its live peak. Image work runs
 inside ``bounded_cache``, which lowers the limit to ``CACHE_BOUND`` for
 the block, and the step and VAE peaks below are footprints measured that
-way. ``vae_tiling`` decides between a whole and a tiled VAE pass from
-those peaks and the free working set, and refuses one that does not fit.
+way.
+
+A VAE pass is priced by the row of its family in ``VAE_ROWS``, for the
+plan and for ``vae.tiling`` alike. A measured row holds footprints fitted
+on that VAE. An unmeasured row holds only what arithmetic gives, and
+``unmeasured_bytes`` prices its passes by one rule. ``vae_tiling`` decides
+between a whole and a tiled pass and refuses one that does not fit. On an
+unmeasured row it never picks a whole pass by itself for an image larger
+than one tile.
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ import math
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Callable
 
 GiB = 1 << 30
 
@@ -91,9 +102,7 @@ class VaeFit:
 # fit a line in pixels. The slope is raised 10 percent and the base
 # covers every whole pass plus 0.25 GiB. At 1024 the bf16 decode measured
 # 4.45 GiB exact and 6.64 GiB on Winograd, against 5.61 and 7.48 here,
-# and the fp32 decode 7.01 and 10.42 GiB, against 8.44 and 11.55. The
-# Qwen-Image 2.1 VAE uses these rows by its channel count until it is
-# measured.
+# and the fp32 decode 7.01 and 10.42 GiB, against 8.44 and 11.55.
 VAE_DECODE = {"exact": {2: VaeFit(base=1.59 * GiB, k=16.1),
                         4: VaeFit(base=2.55 * GiB, k=11.8)},
               "winograd": {2: VaeFit(base=2.35 * GiB, k=20.5),
@@ -102,7 +111,6 @@ VAE_ENCODE = {"exact": {2: VaeFit(base=1.53 * GiB, k=10.7),
                         4: VaeFit(base=2.78 * GiB, k=7.3)},
               "winograd": {2: VaeFit(base=2.35 * GiB, k=15.2),
                            4: VaeFit(base=2.50 * GiB, k=12.6)}}
-
 
 
 @dataclass(frozen=True)
@@ -138,6 +146,59 @@ VAE_TILED = {"decode": {2: TiledFit(base=1.96 * GiB, k_tiles=4.70,
                         4: TiledFit(base=1.69 * GiB, k_tiles=1.29,
                                     k_image=2.91)}}
 
+# Footprint over op-order floor of a pass on an unmeasured row, by conv
+# path. Both numbers are borrowed from another model, the FLUX.1
+# autoencoder, because it is the one VAE measured here and a floor alone
+# is no footprint. Its whole bf16 decode at 1024 pixels measured 4.45 GiB
+# on the exact path and 6.64 GiB on Winograd, against a floor of 1.25 GiB,
+# five of its 128 channel activations at full resolution. That is 3.56
+# and 5.31 times the floor, rounded up here. Its fp32 decode gave 2.80
+# and 4.17 times.
+UNMEASURED_RATIO = {"exact": 3.6, "winograd": 5.4}
+
+
+@dataclass(frozen=True)
+class VaeMemoryRow:
+    """How the VAE of a family is priced.
+
+    ``measured`` says whether the row holds footprints fitted on this VAE.
+    A measured row has ``whole`` and ``tiled``, in bytes per pixel, base
+    channel and activation byte. An unmeasured row has ``floor`` alone,
+    the bytes a pass holds by arithmetic, and ``unmeasured_bytes`` prices
+    the pass from them. The pass that measures a VAE sets its fits and
+    ``measured`` together."""
+    measured: bool
+    channels: dict                  # op -> base channels at full resolution
+    whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
+    tiled: dict | None = None       # op -> itemsize -> TiledFit
+    floor: Callable | None = None   # see ``_qwen_image21_vae_floor``
+
+
+def _qwen_image21_vae_floor(op: str, height: int, width: int, *,
+                            config=None, **kw):
+    """The steps of a Qwen-Image 2.1 VAE pass, each (name, device bytes,
+    softmax bytes, host bytes), and the weight count, for the VAE of
+    ``config`` or the official file's when None. A tiled pass holds one
+    tile at a time, in tiles of whole latent pixels."""
+    from .vae import qwen_image21_memory as m
+
+    cfg = m.OFFICIAL if config is None else config
+    return (m.memory_terms(cfg, op, height, width, **kw),
+            m.weight_count(cfg))
+
+
+VAE_ROWS = {
+    # The FLUX.1 autoencoder.
+    "z_image": VaeMemoryRow(
+        measured=True, channels={"decode": 128, "encode": 128},
+        whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED),
+    # The Qwen-Image 2.1 autoencoder. No file of it has run here. The
+    # ladder on the official file sets the fits and ``measured``.
+    "qwen_image21": VaeMemoryRow(
+        measured=False, channels={"decode": 144, "encode": 96},
+        floor=_qwen_image21_vae_floor),
+}
+
 
 @dataclass(frozen=True)
 class PrefixRow:
@@ -171,7 +232,6 @@ class PeakRow:
     caption_rows: int               # caption rows at most, joined to the image
     width: int                      # widest outputs per row, in elements
     step: StepFit                   # step footprint from the formula
-    vae_channels: int               # VAE channels at full resolution
     prefix: PrefixRow | None = None
     encode_row_bytes: int = 0       # encoder activation bytes per token,
                                     # times ENCODE_LIVE
@@ -181,7 +241,7 @@ class PeakRow:
 PEAKS = {
     "z_image": PeakRow(token_px=16, row_multiple=32, caption_rows=512,
                        width=11520 + 2 * 10240, step=Z_IMAGE_STEP,
-                       vae_channels=128, encode_row_bytes=3 * 9728 * 2),
+                       encode_row_bytes=3 * 9728 * 2),
     # A step runs the target rows alone: the fused MLP product and its
     # gated half are the widest outputs. The sizes are those the
     # fingerprint holds the file to: 32 blocks, 4096 wide, a 12288 MLP.
@@ -194,7 +254,6 @@ PEAKS = {
     # 16.5 GiB at 2048x2048 and 10.1 GiB with nine 1024 pixel references.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
                             width=24576 + 12288, step=Z_IMAGE_STEP,
-                            vae_channels=96,
                             prefix=PrefixRow(blocks=32, dim=4096,
                                              token_px=16),
                             encode_row_bytes=3 * 12288 * 2),
@@ -340,7 +399,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 text_tokens: int | None = None, refs: int = 0,
                 ref_px: int = 0, prefix_rows=None, prefix_other: int = 0,
                 prefix_bound: int = 0, cache_bytes: int = 0,
-                tile: int = 512, budget: float | None = None,
+                tile: int = TILE_PX, budget: float | None = None,
                 overcommit: bool | None = None) -> MemoryPlan:
     """The memory plan for one image request.
 
@@ -399,10 +458,13 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
     terms["prefix_cache"] = own + min(int(prefix_other),
                                       max(0, int(prefix_bound) - own))
-    full_decode = vae_peak("decode", height, width, itemsize=vsize,
-                           channels=row.vae_channels)
-    tiled_decode = vae_peak("decode", height, width, itemsize=vsize,
-                            channels=row.vae_channels, tiled=True, tile=tile)
+    full_decode = vae_peak("decode", height, width, family=family,
+                           itemsize=vsize, tile=tile)
+    tiled_decode = vae_peak("decode", height, width, family=family,
+                            itemsize=vsize, tiled=True, tile=tile)
+    # The choice ``vae_tiling`` makes by itself on an unmeasured row.
+    auto_tiled = (not vae_row(family).measured
+                  and (height > tile or width > tile))
     caption = row.text_rows if caption_tokens is None else caption_tokens
     encode_peak = caption * row.encode_row_bytes * ENCODE_LIVE
 
@@ -425,14 +487,15 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                           levers=levers, fits=fits)
 
     b = 2 if guided and batch_rows else 1
-    plan = build(b, False, False, ())
+    plan = build(b, False, auto_tiled, ())
     steps = []
     if b == 2:
         steps.append(("sequential rows", dict(b=1)))
     if encoder_owned and terms["encoder"]:
         steps.append(("release the encoder", dict(release=True)))
-    steps.append(("tiled decode", dict(tiled=True)))
-    state = dict(b=b, release=False, tiled=False)
+    if not auto_tiled:
+        steps.append(("tiled decode", dict(tiled=True)))
+    state = dict(b=b, release=False, tiled=auto_tiled)
     applied: tuple = ()
     for name, change in steps:
         if plan.fits:
@@ -475,37 +538,97 @@ def _ref_hint(row: PeakRow, plan: MemoryPlan, image: int, text: int,
             f"{side} px")
 
 
-def tile_layout(size: int, tile: int = TILE_PX,
-                overlap: int = OVERLAP_PX) -> tuple[int, int]:
+def vae_row(family: str) -> VaeMemoryRow:
+    try:
+        return VAE_ROWS[family]
+    except KeyError:
+        known = ", ".join(sorted(VAE_ROWS))
+        raise ValueError(f"no VAE memory row for image family {family!r}; "
+                         f"known: {known}") from None
+
+
+def vae_scale(family: str) -> int:
+    """Image pixels per latent pixel of ``family``'s VAE, from the
+    family's constants row."""
+    from .registry import get_family
+
+    return int(get_family(family).constants.values["vae_scale_factor"])
+
+
+def tile_layout(size: int, tile: int = TILE_PX, overlap: int = OVERLAP_PX,
+                scale: int = 8) -> tuple[int, int]:
     """Tiles along one axis of ``size`` pixels and their length, as
-    ``tiling.tile_length`` and ``tiling.tile_starts`` lay them out at 8
-    pixels per latent pixel."""
+    ``tiling.tile_length`` and ``tiling.tile_starts`` lay them out at
+    ``scale`` pixels per latent pixel."""
     if size <= tile:
         return 1, size
     if overlap >= tile:
         raise ValueError(f"overlap {overlap} must be below the tile {tile}")
     n = math.ceil((size - overlap) / (tile - overlap))
-    length = -(-(size + (n - 1) * overlap) // (8 * n)) * 8
+    length = -(-(size + (n - 1) * overlap) // (scale * n)) * scale
     return n, min(tile, length)
 
 
-def vae_peak(op: str, height: int, width: int, *, itemsize: int,
-             channels: int = 128, batch: int = 1, tiled: bool = False,
-             tile: int = TILE_PX, overlap: int = OVERLAP_PX,
-             conv: str | None = None) -> int:
-    """Footprint of one VAE ``op``, "decode" or "encode", of a ``batch``
-    of ``height`` x ``width`` images on the ``conv`` path (the default
-    path when None), under bounded_cache. A tiled pass follows
-    ``VAE_TILED``."""
+def unmeasured_bytes(steps, weights: int, conv: str = "exact") -> int:
+    """The price of a VAE pass on an unmeasured row. This is the one rule
+    for such a row, whole or in tiles.
+
+    ``steps`` are the steps of the pass, each (name, device bytes, softmax
+    bytes, host bytes) by arithmetic, and ``weights`` the weight bytes at
+    the pass dtype. The op-order floor of a step is its device bytes, the
+    softmax of an attention chunk included. The price is the largest over
+    the steps of the floor times ``UNMEASURED_RATIO`` plus the host bytes
+    of that step, plus the weights, plus ``CACHE_BOUND``. The weights and
+    the cache bound stand where a measured fit has its base. The steps of
+    a tiled pass that holds one tile at a time are those of one tile
+    beside what stays held, so such a pass is priced on one tile, and its
+    host bytes are the blend buffers.
+
+    The ratio is borrowed from the FLUX.1 autoencoder, as its comment
+    says, and it is used because no footprint of the row's own VAE exists
+    and a floor is not one: lazy evaluation holds tensors past the op
+    order, and the buffer cache holds freed ones. A VAE with other blocks
+    can hold more than this ratio of its floor, so ``vae_tiling`` never
+    picks a whole pass on an unmeasured row for an image larger than one
+    tile."""
+    ratio = UNMEASURED_RATIO[conv]
+    return int(max(ratio * (device + softmax) + host
+                   for _, device, softmax, host in steps)
+               + weights + CACHE_BOUND)
+
+
+def vae_peak(op: str, height: int, width: int, *, family: str,
+             itemsize: int, channels: int | None = None, config=None,
+             batch: int = 1, tiled: bool = False, tile: int = TILE_PX,
+             overlap: int = OVERLAP_PX, conv: str | None = None) -> int:
+    """The price of one VAE ``op``, "decode" or "encode", of a ``batch``
+    of ``height`` x ``width`` images by the VAE row of ``family``, on the
+    ``conv`` path (the default path when None).
+
+    A measured row gives the footprint under bounded_cache from its fits,
+    at ``channels`` base channels, and a tiled pass follows its tiled
+    fit. An unmeasured row gives ``unmeasured_bytes`` of the steps of a
+    VAE with ``config``. The plan has no VAE at hand and passes neither,
+    which prices the official file: the row's own channels and config.
+    An image no larger than a tile is priced whole."""
+    row = vae_row(family)
     if conv is None:
         from gmlx.image.vae.conv import CONV as conv
-    fits = {"decode": VAE_DECODE, "encode": VAE_ENCODE}[op]
+    if not row.measured:
+        steps, count = row.floor(op, height, width, config=config,
+                                 itemsize=itemsize, batch=batch, tiled=tiled,
+                                 tile=tile, overlap=overlap)
+        return unmeasured_bytes(steps, count * itemsize, conv)
+    if channels is None:
+        channels = row.channels[op]
+    fits = row.whole[op]
     fit = fits[conv][itemsize]
     if not tiled or (height <= tile and width <= tile):
         return fit.bytes(batch * height * width, channels, itemsize)
-    ny, th = tile_layout(height, tile, overlap)
-    nx, tw = tile_layout(width, tile, overlap)
-    tiled_fit = VAE_TILED[op][itemsize]
+    scale = vae_scale(family)
+    ny, th = tile_layout(height, tile, overlap, scale)
+    nx, tw = tile_layout(width, tile, overlap, scale)
+    tiled_fit = row.tiled[op][itemsize]
     out = tiled_fit.bytes(batch * ny * nx * th * tw, batch * height * width,
                           channels, itemsize)
     if conv != "exact":
@@ -530,31 +653,43 @@ def free_bytes() -> float | None:
     return head
 
 
-def vae_tiling(op: str, height: int, width: int, *, itemsize: int,
-               channels: int = 128, batch: int = 1,
-               tiled: bool | None = None, tile: int = TILE_PX,
-               overlap: int = OVERLAP_PX, conv: str | None = None,
-               free: float | None = None,
+def vae_tiling(op: str, height: int, width: int, *, family: str,
+               itemsize: int, channels: int | None = None, config=None,
+               batch: int = 1, tiled: bool | None = None,
+               tile: int = TILE_PX, overlap: int = OVERLAP_PX,
+               conv: str | None = None, free: float | None = None,
                overcommit: bool | None = None) -> bool:
-    """Whether a VAE ``op`` runs in tiles. ``tiled=None`` picks a whole
-    pass when it fits the free working set and tiles otherwise. A pass
-    that does not fit as chosen raises ImageMemoryError, unless
-    GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``; when the
-    device reports none, nothing is refused and None picks a whole pass.
-    An image no larger than a tile always runs whole."""
-    kw = dict(itemsize=itemsize, channels=channels, batch=batch, tile=tile,
-              overlap=overlap, conv=conv)
+    """Whether a VAE ``op`` runs in tiles, by the VAE row of ``family``.
+    An image no larger than a tile always runs whole.
+
+    ``tiled=None`` is the automatic choice. On a measured row it is a
+    whole pass when that fits the free working set and tiles otherwise.
+    On an unmeasured row it is tiles for every image larger than one
+    tile, on every machine and whatever is free. ``tiled=False`` forces a
+    whole pass at the row's price.
+
+    A pass that does not fit as chosen raises ImageMemoryError, unless
+    GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``. When the
+    device reports none, nothing is refused and the automatic choice on a
+    measured row is a whole pass."""
+    row = vae_row(family)
+    kw = dict(family=family, itemsize=itemsize, channels=channels,
+              config=config, batch=batch, tile=tile, overlap=overlap,
+              conv=conv)
     whole = vae_peak(op, height, width, **kw)
     can_tile = height > tile or width > tile
-    in_tiles = vae_peak(op, height, width, tiled=True, **kw)
+    in_tiles = (vae_peak(op, height, width, tiled=True, **kw) if can_tile
+                else whole)
     if free is None:
         free = free_bytes()
-    if free is None:
-        return bool(tiled) and can_tile
-    if tiled is None:
-        choice = can_tile and whole > free
-    else:
+    if tiled is not None:
         choice = bool(tiled) and can_tile
+    elif not row.measured:
+        choice = can_tile
+    else:
+        choice = can_tile and free is not None and whole > free
+    if free is None:
+        return choice
     need = in_tiles if choice else whole
     if need <= free:
         return choice
@@ -569,10 +704,17 @@ def vae_tiling(op: str, height: int, width: int, *, itemsize: int,
         hint = f"a tiled pass needs {in_tiles / GiB:.2f} GiB"
     else:
         hint = "try a smaller image"
+    rule = ""
+    if not row.measured:
+        from .vae.reader import vae_row as file_row
+
+        title = file_row(family).title
+        rule = (f" {title[0].upper()}{title[1:]} is not measured, and this "
+                "is the price of the rule for an unmeasured VAE.")
     raise ImageMemoryError(
         f"VAE {op} of {batch} x {height}x{width} {how} needs "
         f"{need / GiB:.2f} GiB, and {free / GiB:.2f} GiB is free; {hint}. "
-        "GMLX_OVERCOMMIT=1 overrides.")
+        f"GMLX_OVERCOMMIT=1 overrides.{rule}")
 
 
 _cache_lock = threading.Lock()

@@ -39,7 +39,16 @@ while the sum is divided by the weights.
 from __future__ import annotations
 
 from .flux1_ae import ATTN_SCORE_BYTES
-from .qwen_image21_vae import QwenImage21VAEConfig
+from .qwen_image21_vae import (CONSTANTS, IMAGE_CHANNELS, LATENT_CHANNELS,
+                               QwenImage21VAEConfig)
+
+# The config of the official file, which the memory plan prices before a
+# file is read. The widths are those of its header.
+OFFICIAL = QwenImage21VAEConfig(
+    in_channels=IMAGE_CHANNELS, out_channels=IMAGE_CHANNELS,
+    latent_channels=LATENT_CHANNELS, base_dim=96, decoder_base_dim=144,
+    dim_mult=(1, 2, 4, 8, 8), num_res_blocks=2,
+    temporal=CONSTANTS["temperal_downsample"])
 
 
 class _Live:
@@ -276,9 +285,11 @@ def memory_terms(cfg: QwenImage21VAEConfig, op: str, height: int,
 
     s = _check(cfg, op, height, width)
     h, w = height // s, width // s
-    th = tile_length(h, tile // s, overlap // s)
-    tw = tile_length(w, tile // s, overlap // s)
-    if not tiled or (th == h and tw == w):
+    th, tw = h, w
+    if tiled:
+        th = tile_length(h, tile // s, overlap // s)
+        tw = tile_length(w, tile // s, overlap // s)
+    if th == h and tw == w:
         tp = _walk(cfg, op, height, width, itemsize, batch)
         return [(k, v, tp.softmax.get(k, 0), 0) for k, v in tp.terms]
     tp, one = _Live(itemsize, batch), _Live(itemsize, batch)

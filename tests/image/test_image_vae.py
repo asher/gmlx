@@ -4,6 +4,7 @@ the original-layout name map, strict loading, refusals, the lossless packer
 round trip and tiled decode and encode. CPU."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import struct
@@ -617,12 +618,11 @@ def _unit_fits(monkeypatch):
 
     unit = {2: memfit.VaeFit(0.0, 1.0), 4: memfit.VaeFit(0.0, 1.0)}
     rows = {"exact": unit, "winograd": unit}
-    monkeypatch.setattr(memfit, "VAE_DECODE", rows)
-    monkeypatch.setattr(memfit, "VAE_ENCODE", rows)
     tiled = {2: memfit.TiledFit(0.0, 0.25, 0.0),
              4: memfit.TiledFit(0.0, 0.25, 0.0)}
-    monkeypatch.setattr(memfit, "VAE_TILED",
-                        {"decode": tiled, "encode": tiled})
+    monkeypatch.setitem(memfit.VAE_ROWS, "z_image", dataclasses.replace(
+        memfit.VAE_ROWS["z_image"], whole={"decode": rows, "encode": rows},
+        tiled={"decode": tiled, "encode": tiled}))
 
 
 # With k = 1 the tiny VAE (32 base channels, fp32) at 24x20 needs 61440

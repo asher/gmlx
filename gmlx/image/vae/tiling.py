@@ -36,9 +36,11 @@ decode is clamped after the blend.
 
 ``decode`` and ``encode`` evaluate their result inside
 ``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
-pass. With ``tiled=None`` they run whole when the pass fits the free
-working set and in tiles otherwise, and ``memfit.vae_tiling`` refuses a
-pass that does not fit as chosen. Every VAE pass goes through them, a
+pass. ``memfit.vae_tiling`` prices the pass by the VAE row of the family
+and refuses one that does not fit as chosen. With ``tiled=None`` a VAE
+whose row is measured runs whole when the pass fits the free working set
+and in tiles otherwise. A VAE whose row is unmeasured runs every image
+larger than one tile in tiles. Every VAE pass goes through them, a
 warm-up at a new size included. The module's own ``decode`` and
 ``encode`` build a graph that evaluates under whatever limit is set when
 it runs.
@@ -191,13 +193,34 @@ def run_lockstep(steps, x: mx.array, *, in_scale: int, out_scale: int,
                      out_scale=out_scale, tile=tile, overlap=overlap)
 
 
+def row_family(vae) -> str:
+    """The family whose VAE row in ``memfit`` prices ``vae``: the one it
+    was loaded for, else the first family that decodes with its class."""
+    family = getattr(vae, "family", None)
+    if family is None:
+        from .reader import VAES
+
+        family = next((name for name, row in VAES.items()
+                       if isinstance(vae, row.build)), None)
+    if family is None:
+        raise ValueError(f"no image family decodes with "
+                         f"{type(vae).__name__}")
+    return family
+
+
+def price_args(vae, op: str, batch: int) -> dict:
+    """What ``memfit.vae_peak`` and ``memfit.vae_tiling`` take from
+    ``vae`` for ``op``."""
+    return dict(family=row_family(vae), itemsize=vae.dtype.size,
+                channels=vae.channels(op), config=vae.config, batch=batch,
+                conv=getattr(vae, "conv", None))
+
+
 def _plan(vae, op: str, b: int, height: int, width: int, tiled,
           tile: int, overlap: int, free) -> bool:
-    return memfit.vae_tiling(
-        op, height, width, itemsize=vae.dtype.size,
-        channels=vae.channels(op), batch=b, tiled=tiled,
-        tile=tile, overlap=overlap, conv=getattr(vae, "conv", None),
-        free=free)
+    return memfit.vae_tiling(op, height, width, tiled=tiled, tile=tile,
+                             overlap=overlap, free=free,
+                             **price_args(vae, op, b))
 
 
 def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
@@ -207,9 +230,9 @@ def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
     on the [-1, 1] scale, evaluated. The FLUX.1 autoencoder returns it
     unclamped, and the Qwen-Image 2.1 one clamped to [-1, 1]. ``alpha``
     keeps the fourth channel of a VAE that decodes RGBA. ``tile`` and
-    ``overlap`` are in output pixels. ``tiled=None`` tiles only when a
-    whole decode does not fit ``free`` bytes, which default to the free
-    working set."""
+    ``overlap`` are in output pixels. ``tiled=None`` is the automatic
+    choice of ``memfit.vae_tiling`` against ``free`` bytes, which default
+    to the free working set."""
     rgba = vae.config.out_channels == 4
     if alpha and not rgba:
         raise ValueError("this VAE decodes no alpha channel")

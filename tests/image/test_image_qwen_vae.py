@@ -1279,19 +1279,84 @@ def test_the_pipeline_entry_points_serve_this_vae(vae, monkeypatch):
     assert mx.array_equal(api.vae_encode(pipe, opaque), back).item()
 
 
-def test_the_plan_reads_the_channels_of_the_op(vae, monkeypatch):
+def test_a_pass_is_priced_by_the_family_row_and_the_config_of_the_vae(
+        vae, st_file, monkeypatch):
     from gmlx.image import memfit
+    from gmlx.image.vae import flux1_ae
 
     seen = []
 
     def spy(op, height, width, **kw):
-        seen.append((op, height, width, kw["channels"], kw["itemsize"]))
+        seen.append((op, height, width, kw["family"], kw["config"],
+                     kw["channels"], kw["itemsize"], kw["conv"]))
         return False
 
     monkeypatch.setattr(memfit, "vae_tiling", spy)
     tiling.decode(vae, np.zeros((1, 64, 2, 3), np.float32))
     tiling.encode(vae, np.zeros((1, 32, 48, 3), np.float32))
-    assert seen == [("decode", 32, 48, 6, 4), ("encode", 32, 48, 4, 4)]
+    assert seen == [("decode", 32, 48, FAMILY, vae.config, 6, 4, "exact"),
+                    ("encode", 32, 48, FAMILY, vae.config, 4, 4, "exact")]
+    other = reader.load_vae(st_file, family=FAMILY, dtype="bf16",
+                            conv="winograd")
+    tiling.decode(other, np.zeros((1, 64, 2, 3), np.float32))
+    assert seen[-1][-2:] == (2, "winograd")
+    # A VAE built from a config was loaded for no family, and takes the
+    # row of the family that decodes with its class.
+    assert tiling.row_family(build(tiny_config())) == FAMILY
+    assert tiling.row_family(flux1_ae.Flux1AE(FLUX_TINY)) == "z_image"
+    with pytest.raises(ValueError, match="no image family decodes with"):
+        tiling.row_family(object())
+
+
+def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
+        vae, monkeypatch):
+    """The row of this VAE is unmeasured. A whole pass above one tile runs
+    only when it is forced, at the price of the rule, and is refused one
+    byte under it."""
+    from gmlx.image import memfit
+    from gmlx.image.memfit import GiB, ImageMemoryError
+
+    assert memfit.VAE_ROWS[FAMILY].measured is False
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    rng = np.random.default_rng(31)
+    lat = rng.standard_normal((1, 64, 4, 3)).astype(np.float32)
+    img = rng.uniform(-1, 1, (1, 64, 48, 3)).astype(np.float32)
+    cut = dict(tile=32, overlap=16)
+    for run, x, op in ((tiling.decode, lat, "decode"),
+                       (tiling.encode, img, "encode")):
+        whole = run(vae, x, tiled=False, free=1e12, **cut)
+        tiles = run(vae, x, tiled=True, free=1e12, **cut)
+        assert not mx.array_equal(whole, tiles).item()
+        kw = dict(tiling.price_args(vae, op, 1), **cut)
+        need_whole = memfit.vae_peak(op, 64, 48, **kw)
+        need_tiles = memfit.vae_peak(op, 64, 48, tiled=True, **kw)
+        # Room for either pass, room for the tiles alone, and no figure.
+        for free in (1e12, need_tiles):
+            assert mx.array_equal(run(vae, x, free=free, **cut), tiles).item()
+        with monkeypatch.context() as mp:
+            mp.setattr(memfit, "free_bytes", lambda: None)
+            assert mx.array_equal(run(vae, x, **cut), tiles).item()
+            assert mx.array_equal(run(vae, x, tiled=False, **cut),
+                                  whole).item()
+        # An image no larger than one tile runs whole.
+        assert mx.array_equal(run(vae, x, free=1e12), whole).item()
+        assert mx.array_equal(run(vae, x, tiled=False, free=need_whole,
+                                  **cut), whole).item()
+        with pytest.raises(ImageMemoryError) as e:
+            run(vae, x, tiled=False, free=need_whole - 1, **cut)
+        msg = str(e.value)
+        assert (f"VAE {op} of 1 x 64x48 whole needs "
+                f"{need_whole / GiB:.2f} GiB") in msg
+        assert msg.endswith(
+            "GMLX_OVERCOMMIT=1 overrides. The Qwen-Image 2.1 autoencoder is "
+            "not measured, and this is the price of the rule for an "
+            "unmeasured VAE.")
+        with pytest.raises(ImageMemoryError, match="in tiles needs"):
+            run(vae, x, free=need_tiles - 1, **cut)
+        with monkeypatch.context() as mp:
+            mp.setenv("GMLX_OVERCOMMIT", "1")
+            assert mx.array_equal(run(vae, x, tiled=False, free=0, **cut),
+                                  whole).item()
 
 
 def test_the_pipeline_decode_keeps_the_alpha_when_asked(vae, monkeypatch):

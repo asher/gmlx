@@ -78,7 +78,8 @@ def test_a_512_decode_stays_under_the_fitted_footprint():
         (1, 16, 64, 64)).astype(np.float32))
     mx.eval(vae.parameters(), lat)
     tiling.decode(vae, lat, tiled=False, free=1e12)     # compile kernels
-    bound = memfit.vae_peak("decode", 512, 512, itemsize=2)
+    bound = memfit.vae_peak("decode", 512, 512, family="z_image",
+                            itemsize=2)
     sampler = _Sampler()
     try:
         mx.synchronize()
