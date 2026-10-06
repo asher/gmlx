@@ -253,12 +253,12 @@ def _rerun(request, tag: str, env: dict) -> None:
     assert " passed" in r.stdout, r.stdout[-2000:]
 
 
-def rerun_exact(request, tag: str) -> None:
+def rerun_exact(request, tag: str, **env) -> None:
     """Rerun this test in a child process with TF32 off and the image ops
-    on the stock path, where it gates. The child's lines that carry
-    ``tag`` are printed."""
+    on the stock path, where it gates, and with ``env`` set. The child's
+    lines that carry ``tag`` are printed."""
     _rerun(request, tag, {"MLX_ENABLE_TF32": "0",
-                          "GMLX_IMAGE_KQ_ROUTES": "0"})
+                          "GMLX_IMAGE_KQ_ROUTES": "0", **env})
 
 
 def kquant_leaves(dit) -> dict:

@@ -260,11 +260,17 @@ def mutation_misses(pipe, name: str, entries, label: str) -> dict:
 
 def exact_rows(pipe, arrays: dict, m: dict, entries) -> dict:
     """Every teacher-forced row and branch row under the table of
-    ``entries`` in the oracle's arithmetic."""
+    ``entries`` in the oracle's arithmetic. Under the split placement a
+    module with output bands runs one product per band past its own
+    call, and under any other placement no product does."""
+    from gmlx.image.lora import install
+
     with exact_products(pipe.dit) as used:
         rows, branches, _ = block_rows(pipe, arrays, m, entries, free=False,
                                        branches=True)
     assert_all_dense(pipe.dit, used)
+    assert (used.direct > 0) == (install.placement() == "split"), (
+        install.placement(), used.direct)
     return {**rows, **branches}
 
 
@@ -423,6 +429,30 @@ def test_check7_exact_block_gate_at_512(pipe, tmp_path, request, variant):
     entries = _variant_entries(pipe, tmp_path, variant)
     assert len(mutations(pipe, entries)) == 8
     exact_gate(pipe, name, entries, variant)
+
+
+PLACEMENT = "GMLX_IMAGE_LORA_PLACEMENT"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_check7_exact_block_gate_under_split_at_512(pipe, tmp_path, request,
+                                                    variant):
+    """GMLX_IMAGE_LORA_PLACEMENT=split, which a CLI or API process reads
+    from its environment, runs the base of a module with output bands as
+    one K-quant product per band past the module's call. The exact gate
+    holds that path as it holds the default placement: the right table
+    matches the merged oracle model and all eight wrong tables fail."""
+    name = f"{NAME}_{variant}_blocks"
+    need_blocks(name)
+    if not exact_process() or os.environ.get(PLACEMENT) != "split":
+        return rerun_exact(request, "check7 exact", **{PLACEMENT: "split"})
+    from gmlx.image.lora import install
+
+    assert install.placement() == "split"
+    entries = _variant_entries(pipe, tmp_path, variant)
+    assert len(mutations(pipe, entries)) == 8
+    exact_gate(pipe, name, entries, f"{variant} under split")
 
 
 @pytest.mark.integration
