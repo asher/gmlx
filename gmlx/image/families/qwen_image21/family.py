@@ -122,7 +122,8 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
 
 def synth_config(view: HeaderView) -> dict:
     """The official transformer config keys, from shapes and constants, plus
-    the derived widths the module tree needs."""
+    the derived widths and the scheduler's training timesteps, which the
+    module tree needs."""
     c = CONSTANTS.values
     s = view.dims
     in_ch, inner = s("img_in.weight")
@@ -148,6 +149,7 @@ def synth_config(view: HeaderView) -> dict:
         "ffn_dim": ffn,
         "modulation_dim": s("modulation.1.weight")[1],
         "rope_theta": c["rope_theta"],
+        "num_train_timesteps": c["num_train_timesteps"],
         "mlp_layout": layout,
         "timestep_dim": s(
             "time_text_embed.timestep_embedder.linear_1.weight")[0],

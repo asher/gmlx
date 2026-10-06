@@ -59,6 +59,7 @@ class QwenImage21Config:
     axes_dims: tuple
     rope_theta: float
     fused_mlp: bool
+    train_timesteps: int
 
     @classmethod
     def from_dict(cls, c: dict) -> "QwenImage21Config":
@@ -85,7 +86,8 @@ class QwenImage21Config:
             context_dim=c["context_in_dim"], ffn_dim=c["ffn_dim"],
             t_freq_dim=c["timestep_dim"], eps=c["eps"], axes_dims=axes,
             rope_theta=float(c["rope_theta"]),
-            fused_mlp=c["mlp_layout"] == "fused")
+            fused_mlp=c["mlp_layout"] == "fused",
+            train_timesteps=int(c["num_train_timesteps"]))
 
 
 def squash(gate: mx.array) -> mx.array:
@@ -351,10 +353,12 @@ class QwenImage21DiT(nn.Module):
 
     def timesteps(self, sigma, batch: int) -> np.ndarray:
         """The values the timestep embedding takes for sigmas, in fp32 as
-        the reference forms them: the scheduler's 1000 sigma, the
-        pipeline's division by 1000, and the embedder's factor of 1000."""
+        the reference forms them: the scheduler's sigma times its
+        training timesteps, the pipeline's division by 1000, and the
+        embedder's factor of 1000."""
         s = np.broadcast_to(np.asarray(sigma, np.float32), (batch,))
-        passed = (s * np.float32(1000)) / np.float32(1000)
+        passed = ((s * np.float32(self.cfg.train_timesteps))
+                  / np.float32(1000))
         return np.float32(1000) * passed
 
     def temb(self, t) -> mx.array:

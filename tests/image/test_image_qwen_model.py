@@ -201,6 +201,20 @@ def test_the_timestep_chain_equals_the_reference_bit_for_bit(tiny):
     assert np.array_equal(one, arrays["t_embedded"][3:4])
 
 
+def test_the_timestep_chain_reads_the_training_timesteps_of_the_row():
+    from gmlx.image.registry import get_family
+
+    cfg = qt.config_of(qt.weights(0))
+    row = get_family("qwen_image21").constants.values
+    assert cfg["num_train_timesteps"] == row["num_train_timesteps"] == 1000
+    half = qm.QwenImage21DiT({**cfg, "num_train_timesteps": 500})
+    s = np.array([0.3, 0.7001], np.float32)
+    want = np.float32(1000) * ((s * np.float32(500)) / np.float32(1000))
+    assert np.array_equal(half.timesteps(s, 2), want)
+    assert not np.array_equal(
+        qm.QwenImage21DiT(cfg).timesteps(s, 2), want)
+
+
 def test_the_prefix_reads_t_zero_and_the_target_its_sigma(tiny):
     with mx.stream(mx.cpu):
         zero = qm.prefix_modulation(tiny)
