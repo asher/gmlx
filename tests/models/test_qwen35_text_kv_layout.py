@@ -198,10 +198,34 @@ def mint_mlx(path, wide=None):
                    "text_config": text_raw(HV if wide else HK)}, f)
 
 
+def mint_mmproj(path):
+    # A clip GGUF with the projector type of a Qwen3.5 pair and the
+    # metadata of a one-block tower. It holds one tensor: a load that is
+    # refused before the weights install reads no more.
+    w = GGUFWriter(path, "clip")
+    w.add_bool("clip.has_vision_encoder", True)
+    w.add_string("clip.projector_type", "qwen3vl_merger")
+    w.add_uint32("clip.vision.embedding_length", 32)
+    w.add_uint32("clip.vision.block_count", 1)
+    w.add_uint32("clip.vision.attention.head_count", 2)
+    w.add_uint32("clip.vision.feed_forward_length", 64)
+    w.add_uint32("clip.vision.image_size", 56)
+    w.add_uint32("clip.vision.patch_size", 14)
+    w.add_uint32("clip.vision.projection_dim", H)
+    w.add_uint32("clip.vision.spatial_merge_size", 2)
+    w.add_float32("clip.vision.attention.layer_norm_epsilon", 1e-6)
+    w.add_tensor("v.post_ln.weight", np.ones(32, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
 for name, wide in (("narrow", None), ("wide-tiled", "tiled"),
                    ("wide-grouped", "grouped")):
     mint_gguf(os.path.join(out, f"{name}.gguf"), wide)
     mint_mlx(os.path.join(out, f"mlx-{name}"), wide)
+mint_mmproj(os.path.join(out, "mmproj.gguf"))
 """
 
 _CHILD = _COMMON + r"""
@@ -316,6 +340,85 @@ if references:
 print(json.dumps(out))
 """
 
+_LOADER_CHILD = _COMMON + r"""
+from pathlib import Path
+
+root, loader = Path(sys.argv[1]), sys.argv[2]
+
+import gmlx
+import gmlx.load.config_synth as config_synth
+import gmlx.load.loader as text_loader
+import gmlx.load.vlm as vlm_loader
+import gmlx.spec.mtp_load as mtp_loader
+
+module = {"text": text_loader, "vlm": vlm_loader, "mtp": mtp_loader}[loader]
+check = module.require_tiled_gdn
+synthesize = config_synth.synthesize_config
+
+
+def load(lost):
+    # ``lost``: kv_head_layout leaves the config between its synthesis and
+    # the model classes.
+    if loader == "mtp":
+        # Both MTP loaders arm the tree they built through this function.
+        config = text_raw(HK, model_type="qwen3_5", kv_head_layout="tiled")
+        if lost:
+            del config["kv_head_layout"]
+        model, config = text_loader.build_model(config, mtp=True)
+        mtp_loader._arm_spec_target(model, config, log=lambda *a, **k: None)
+        return
+
+    def synthesized(*args, **kw):
+        config = synthesize(*args, **kw)
+        if lost:
+            del config["kv_head_layout"]
+        return config
+
+    config_synth.synthesize_config = synthesized
+    vlm_loader.synthesize_config = synthesized
+    if loader == "text":
+        gmlx.load_model(str(root / "narrow.gguf"), verbose=False)
+    else:
+        vlm_loader.load_vlm_model(str(root / "narrow.gguf"),
+                                  str(root / "mmproj.gguf"))
+
+
+class Reached(Exception):
+    pass
+
+
+seen = []
+
+
+def stop_at_the_check(model, config):
+    # The check as the loader calls it, on the tree the loader built. The
+    # load ends here: the toy pair has no vision weights to install.
+    seen.append({
+        "layout": config.get("kv_head_layout"),
+        "tiled": sorted({bool(getattr(m, "gdn_kv_tiled", False))
+                         for m in model.modules()
+                         if hasattr(m, "num_k_heads")})})
+    check(model, config)
+    raise Reached()
+
+
+out = {}
+module.require_tiled_gdn = stop_at_the_check
+try:
+    load(lost=False)
+    out["intact"] = "loaded"
+except Reached:
+    out["intact"] = "reached the check"
+module.require_tiled_gdn = check
+try:
+    load(lost=True)
+    out["lost"] = "loaded"
+except Exception as e:
+    out["lost"] = f"{type(e).__name__}: {e}"
+out["seen"] = seen
+print(json.dumps(out))
+"""
+
 _results: dict = {}
 
 
@@ -388,7 +491,9 @@ def _toy_config(**over):
 def test_a_gguf_tree_that_would_pair_heads_grouped_is_refused(mtp):
     """A GGUF config that reaches the model classes without its
     ``kv_head_layout`` builds layers in the grouped order, which gives
-    wrong text and no error. The loaders refuse the tree."""
+    wrong text and no error. ``require_tiled_gdn`` refuses the tree, and
+    ``test_each_gguf_loader_checks_the_tree_it_built`` holds each loader to
+    the call."""
     from gmlx.load.loader import build_model
     from gmlx.upstream.gdn_patches import require_tiled_gdn
 
@@ -400,6 +505,23 @@ def test_a_gguf_tree_that_would_pair_heads_grouped_is_refused(mtp):
     model, config = build_model(lost, mtp=mtp)
     with pytest.raises(RuntimeError, match="grouped order"):
         require_tiled_gdn(model, config)
+
+
+@pytest.mark.parametrize("loader", ("text", "vlm", "mtp"))
+def test_each_gguf_loader_checks_the_tree_it_built(toy, loader):
+    """The text loader, the VLM loader and the arming of an MTP target each
+    run the check on the tree they built. With the config intact the tree
+    is tiled and passes, and with ``kv_head_layout`` lost on the way to the
+    model classes the load is refused."""
+    r = subprocess.run(
+        [sys.executable, "-c", _LOADER_CHILD, str(toy), loader],
+        capture_output=True, text=True, timeout=900, env=dict(os.environ))
+    assert r.returncode == 0, r.stderr[-4000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["intact"] == "reached the check", out
+    assert out["seen"] == [{"layout": "tiled", "tiled": [True]}], out
+    assert out["lost"].startswith("RuntimeError: "), out
+    assert "grouped order" in out["lost"], out
 
 
 def test_a_grouped_or_symmetric_gguf_tree_passes_the_check():
