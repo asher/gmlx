@@ -30,8 +30,8 @@ from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
                          exact_products, rerun_exact)
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 
+from gmlx.image import api, ops, registry
 from gmlx.image import loader as image_loader
-from gmlx.image import ops, registry
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
 
@@ -145,6 +145,59 @@ def test_tiny_velocities_match_the_diffusers_oracle(tiny, case):
         gap = fx.rel_l2(arrays[f"velocity_{tag}_bf16"],
                         arrays[f"velocity_{tag}"])
         assert gap > 100 * TOL
+
+
+@pytest.fixture(scope="module")
+def tiny_bf16(tmp_path_factory):
+    """The tiny model as ``api.load`` gives it: bf16 activations."""
+    path = qt.write(tmp_path_factory.mktemp("qwen16") / "tiny.gguf",
+                    qt.weights())
+    fam = qt.tiny_family()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(registry, "families", lambda: (fam,))
+        return api.load(path, log=lambda *_: None)
+
+
+@pytest.mark.parametrize("case", list(TINY))
+def test_the_tiny_model_in_bf16_is_inside_the_bf16_tolerances(tiny_bf16,
+                                                              case):
+    """The product dtype on the tiny model: every state and tap of the
+    prefill and of a target step is bf16, the velocity is fp32, and it
+    sits inside twice the oracle's own bf16 against fp32 gap."""
+    arrays, m = committed_fixture(TINY[case])
+    tol = m["tolerances"]
+    model = tiny_bf16.dit
+    assert model.act_dtype == mx.bfloat16
+    cond = qg.conditioning(arrays, key="")
+    seen = []
+    with mx.stream(mx.cpu):
+        for tag in "ab":
+            lat = mx.array(arrays[f"latents_{tag}"])
+            sigma = float(arrays[f"sigma_{tag}"])
+            ptaps, ttaps = {}, {}
+            prefix = qm.prefill_prefix(model, cond, ptaps)
+            v = qm.forward_target(model, lat, sigma, cond, prefix, ttaps)
+            states = {**ptaps, **{f"target.{k}": a for k, a in ttaps.items()}}
+            for i, a in enumerate(prefix.arrays()):
+                states[f"prefix.{i}"] = a
+            for i, a in enumerate(qm.modulation(model, sigma).arrays()):
+                states[f"modulation.{i}"] = a
+            off = {k: str(a.dtype) for k, a in states.items()
+                   if a.dtype != mx.bfloat16}
+            assert not off, off
+            assert v.dtype == mx.float32
+            got, want = np.array(v), arrays[f"velocity_{tag}"]
+            assert np.array_equal(got, np.array(api.denoise_step(
+                tiny_bf16, lat, sigma, cond)))
+            rel, cos = fx.rel_l2(got, want), fx.cosine(got, want)
+            seen.append(f"{rel:.2e} of {tol[f'velocity_{tag}_rel_l2']:.2e}")
+            assert rel <= tol[f"velocity_{tag}_rel_l2"], (tag, rel)
+            assert cos >= tol[f"velocity_{tag}_cosine_min"], (tag, cos)
+            # Not the fp32 run under another name.
+            assert rel > 100 * TOL
+    print(f"qwen check3 tiny {case} in bf16: velocities at "
+          + " and ".join(seen) + f" of the oracle's fp32, {len(states)} "
+          "states and taps bf16")
 
 
 # Wrong models.
