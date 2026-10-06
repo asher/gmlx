@@ -16,7 +16,7 @@ import os
 import mlx.core as mx
 import pytest
 
-from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_float, env_int, env_switch
 
 
 def test_env_int_unset_uses_default(monkeypatch):
@@ -42,6 +42,26 @@ def test_env_float_parses_and_tolerates_garbage(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # env_bool
+
+
+def test_env_switch_takes_the_boolean_words_and_its_choices(monkeypatch):
+    monkeypatch.delenv("GMLX_TEST_FLAG", raising=False)
+    assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == "1"
+    assert env_switch("GMLX_TEST_FLAG", ("a", "b"), "0") == "0"
+    for raw, want in (("1", "1"), ("on", "1"), ("TRUE", "1"), ("0", "0"),
+                      (" off ", "0"), ("no", "0"), ("False", "0"), ("", "0"),
+                      ("a", "a"), (" B ", "b")):
+        monkeypatch.setenv("GMLX_TEST_FLAG", raw)
+        assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == want, raw
+
+
+def test_env_switch_warns_on_an_unknown_value_and_keeps_the_default(
+        monkeypatch):
+    monkeypatch.setenv("GMLX_TEST_FLAG", "sometimes")
+    with pytest.warns(UserWarning, match="GMLX_TEST_FLAG='sometimes'"):
+        assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == "1"
+    with pytest.warns(UserWarning, match="using 0"):
+        assert env_switch("GMLX_TEST_FLAG", ("a", "b"), "0") == "0"
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "True", "YES", "on", " on "])
