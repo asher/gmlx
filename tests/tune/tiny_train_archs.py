@@ -5,7 +5,6 @@ them: GGUF base tensor names, eval-mode logits and a record/replay of the
 selections a forward makes."""
 from __future__ import annotations
 
-import contextlib
 import re
 import re._parser as sre
 from dataclasses import dataclass
@@ -160,23 +159,6 @@ CASES = {
     "qwen3_5_moe": Case("qwen35moe", _GDN_BA),
     "qwen3_5_hadamard": Case("qwen35", hadamard=True),
 }
-
-
-@contextlib.contextmanager
-def process_patches():
-    """Undo on exit the module-global patches a load applies: the tiled-V
-    gated-delta rewrite would otherwise reach every later load."""
-    from gmlx._vendor.mlx_lm.models import gated_delta as gd
-
-    saved = dict(vars(gd))
-    try:
-        yield
-    finally:
-        for k in [k for k in vars(gd) if k not in saved]:
-            delattr(gd, k)
-        for k, v in saved.items():
-            if vars(gd).get(k) is not v:
-                setattr(gd, k, v)
 
 
 def _randomize_zero_params(model, seed=0, std=0.05):
@@ -335,8 +317,7 @@ def _post_load_installs(model, config):
 
 
 def build(name):
-    """(model, config, case) for one architecture, as the loader leaves it.
-    Run inside ``process_patches``."""
+    """(model, config, case) for one architecture, as the loader leaves it."""
     from gmlx.load.loader import build_model
     from gmlx.upstream.gdn_patches import (
         _patch_qwen3next_split_gdn,

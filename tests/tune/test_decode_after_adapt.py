@@ -9,7 +9,7 @@ import os
 import mlx.core as mx
 import pytest
 
-from .tiny_train_archs import build, eval_logits, process_patches, rel
+from .tiny_train_archs import build, eval_logits, rel
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("KQUANT_FORCE_CPU") == "1" or not mx.metal.is_available()
@@ -66,18 +66,17 @@ def test_occupancy_wires_built_before_the_adapter_serve_it(monkeypatch):
     from gmlx.tune.lora import LORA_KEYS, prepare_lora_student
 
     monkeypatch.setenv("GMLX_OCCUPANCY_FUSE", "1")
-    with process_patches():
-        model, _, _ = build("qwen3_5")
-        tokens = mx.random.randint(1, 512, (2, 12), key=mx.random.key(7))
-        base_full, _ = eval_logits(model, tokens)   # a batched decode builds the wires
-        wires = [m for m in model.modules()
-                 if getattr(m, "_kq_wqkv", None) is not None
-                 or getattr(m, "_kq_wgu", None) is not None]
-        assert wires
-        prepare_lora_student(model, rank=4, scale=20.0, num_layers=None, keys=LORA_KEYS)
-        assert _randomize_lora_b(model, 0.02) > 0
-        full, dec = eval_logits(model, tokens)
-        monkeypatch.setenv("GMLX_OCCUPANCY_FUSE", "0")
-        _, stock = eval_logits(model, tokens)
+    model, _, _ = build("qwen3_5")
+    tokens = mx.random.randint(1, 512, (2, 12), key=mx.random.key(7))
+    base_full, _ = eval_logits(model, tokens)   # a batched decode builds the wires
+    wires = [m for m in model.modules()
+             if getattr(m, "_kq_wqkv", None) is not None
+             or getattr(m, "_kq_wgu", None) is not None]
+    assert wires
+    prepare_lora_student(model, rank=4, scale=20.0, num_layers=None, keys=LORA_KEYS)
+    assert _randomize_lora_b(model, 0.02) > 0
+    full, dec = eval_logits(model, tokens)
+    monkeypatch.setenv("GMLX_OCCUPANCY_FUSE", "0")
+    _, stock = eval_logits(model, tokens)
     assert rel(full, base_full) > 0.1
     assert rel(stock, dec) < 1e-3

@@ -10,8 +10,6 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-# the module attributes, not import-time bindings: gmlx rebinds them to the
-# tiled K->V head mapping once a qwen35-family GGUF has loaded in the process
 from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
 import gmlx.tune.gdn as tg

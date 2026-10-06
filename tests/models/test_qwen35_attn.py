@@ -64,8 +64,7 @@ def _cfg():
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
-        # The base-built arm reads its head order here; the owned arm
-        # scans through the patched mlx-lm module.
+        # Every gated delta layer of both arms reads its head order here.
         kv_head_layout="tiled",
     )
 
