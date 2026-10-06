@@ -85,6 +85,32 @@ def write_keys(path, keys: dict, metadata: dict | None = None) -> str:
     return str(path)
 
 
+def write_ordered(path, keys: dict) -> str:
+    """A float32 safetensors file whose header lists ``keys`` in the order
+    given. ``write_keys`` goes through a writer that sorts the names, and
+    a file from another writer may list them in any order."""
+    import json
+    import struct
+
+    header: dict = {"__metadata__": {"format": "pt"}}
+    blobs, pos = [], 0
+    for name, value in keys.items():
+        arr = np.ascontiguousarray(np.asarray(value, np.float32))
+        raw = arr.tobytes()
+        header[name] = {"dtype": "F32", "shape": list(arr.shape),
+                        "data_offsets": [pos, pos + len(raw)]}
+        blobs.append(raw)
+        pos += len(raw)
+    head = json.dumps(header, separators=(",", ":")).encode()
+    head += b" " * (-len(head) % 8)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(head)))
+        f.write(head)
+        for raw in blobs:
+            f.write(raw)
+    return str(path)
+
+
 def write_adapter(path, dialect: str, adapter: dict) -> str:
     return write_keys(path, dialect_keys(dialect, adapter))
 

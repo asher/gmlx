@@ -10,7 +10,8 @@ from gmlx.image.lora import reader
 from gmlx.image.lora.reader import (AdapterError, AdapterFamilyError,
                                     LoraKeyMap, UnmatchedKeysError,
                                     UnsupportedAdapterError)
-from lora_fixtures import DIALECTS, dialect_keys, make_pair, write_keys
+from lora_fixtures import (DIALECTS, dialect_keys, make_pair, write_keys,
+                           write_ordered)
 
 KEYMAP = LoraKeyMap(
     family="toy", title="Toy",
@@ -432,3 +433,36 @@ def test_the_header_vet_refuses_two_stems_on_one_module(tmp_path, stems,
         apart.update(_good(stem))
     path = write_keys(tmp_path / "apart.safetensors", apart)
     assert reader.vet_header(path, keymap=KEYMAP) == 3
+
+
+def test_the_header_vet_walks_the_stems_in_file_order(tmp_path):
+    """A writer may list the names in any order. The vet walks the stems
+    in the header's order, as the read does, so both name the same stems
+    in the same places."""
+    under = "lora_unet_layers_0_feed_forward_w1"
+    stems = [W1, under]
+    assert stems != sorted(stems)
+    keys = {}
+    for stem in stems:
+        keys.update(_good(stem))
+    path = write_ordered(tmp_path / "twice.safetensors", keys)
+    assert list(reader.read_lora(path).pairs) == stems
+    with pytest.raises(AdapterError) as want:
+        reader.resolve(reader.read_lora(path), KEYMAP)
+    assert f"{under} and {W1} both target" in str(want.value)
+    with pytest.raises(AdapterError) as got:
+        reader.vet_header(path, keymap=KEYMAP)
+    assert str(got.value) == str(want.value)
+    # The stems that name no module are listed in that order too.
+    odd = ["transformer.layers.0.feed_forward.w9",
+           "lora_unet_layers_0_feed_forward_w8"]
+    keys = {}
+    for stem in odd + [W1]:
+        keys.update(_good(stem))
+    path = write_ordered(tmp_path / "odd.safetensors", keys)
+    with pytest.raises(UnmatchedKeysError) as want:
+        reader.resolve(reader.read_lora(path), KEYMAP)
+    with pytest.raises(UnmatchedKeysError) as got:
+        reader.vet_header(path, keymap=KEYMAP)
+    assert got.value.keys == want.value.keys == tuple(odd)
+    assert str(got.value) == str(want.value)
