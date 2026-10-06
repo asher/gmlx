@@ -315,6 +315,10 @@ def run_case(torch, a, models: dict, cond: dict, sigmas, timesteps,
         "dequant": oracle.dequant_mode(), "matmul": {},
         "bf16_timestep": a.bf16_timestep,
         "encoder_hidden_states_mask": None}
+    decoded = list(getattr(models["fp32"], "plain_decoded", ()))
+    if decoded:
+        # See load_model.
+        fx.results["oracle"]["plain_decoded"] = decoded
     fx.add("features", cond["features"])
     fx.add("img_mask", cond["img_mask"])
     for i, z in enumerate(cond["ref_latents"]):
@@ -521,6 +525,42 @@ def write_gguf(path: Path, tensors: dict) -> None:
     w.close()
 
 
+def load_model(torch, gguf, config, mode: str, dequant: str = "exact"):
+    """The reference DiT of ``mode`` from a GGUF through from_single_file.
+
+    The single-file loader keeps a BF16 tensor in its GGUF bytes, and only
+    a GGUF linear layer decodes them, in its call. The reference class
+    reads every other parameter as a plain tensor, and on the bytes of
+    the text norm's BF16 weight that is a tensor of twice the length, so
+    the forward of the real file stops there. Each such parameter is
+    therefore decoded here once, to the values the file holds, in the
+    mode's dtype. ``model.plain_decoded`` lists them, and a codec other
+    than BF16 on such a parameter is refused."""
+    from diffusers.quantizers.gguf.utils import (
+        GGUFLinear, GGUFParameter, dequantize_gguf_tensor)
+
+    model = oracle.load_dit(gguf, config, mode, cls_name=CLS,
+                            dequant=dequant)
+    dt = oracle.torch_dtype(mode)
+    done = []
+    for path, mod in model.named_modules():
+        if isinstance(mod, GGUFLinear):
+            continue
+        for key, p in list(mod._parameters.items()):
+            if not isinstance(p, GGUFParameter):
+                continue
+            name = f"{path}.{key}" if path else key
+            if p.quant_type.name != "BF16":
+                raise SystemExit(f"error: {name} is {p.quant_type.name} "
+                                 "outside a linear layer")
+            value = dequantize_gguf_tensor(p).as_subclass(torch.Tensor)
+            mod._parameters[key] = torch.nn.Parameter(
+                value.to(dt), requires_grad=False)
+            done.append(name)
+    model.plain_decoded = done
+    return model
+
+
 def tiny_models(torch, root: Path) -> tuple[dict, dict]:
     """The tiny model in fp32 and bf16, loaded from a GGUF in GGUF tensor
     names through the single-file path, and its weights by name."""
@@ -535,7 +575,7 @@ def tiny_models(torch, root: Path) -> tuple[dict, dict]:
               "_diffusers_version": diffusers.__version__, **tiny.TINY}
     (work / "transformer" / "config.json").write_text(
         json.dumps(config, indent=1) + "\n")
-    models = {m: oracle.load_dit(work / "tiny.gguf", work, m, cls_name=CLS)
+    models = {m: load_model(torch, work / "tiny.gguf", work, m)
               for m in oracle.MODES}
     # The loaded model equals the rule's weights under the reference's own
     # names, with each fused gate_up split gate rows first.
@@ -670,8 +710,8 @@ def main(argv=None) -> int:
                  "required")
     if any(s % 32 for s in a.sizes):
         ap.error("sizes must be multiples of 32")
-    models = {m: oracle.load_dit(a.dit, a.config, m, cls_name=CLS,
-                                 dequant=a.dequant) for m in oracle.MODES}
+    models = {m: load_model(torch, a.dit, a.config, m, a.dequant)
+              for m in oracle.MODES}
     for m, model in models.items():
         where = {str(p.device) for p in model.parameters()}
         if where != {"cpu"}:

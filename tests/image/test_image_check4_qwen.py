@@ -2,7 +2,9 @@
 schedule equals diffusers' bit for bit at five sizes and eight step
 counts, and its constants are the official scheduler config's. The arrays
 are small and committed, so this runs on the CPU tier.
-scripts/image_oracle/check4_qwen_image21.py writes them."""
+scripts/image_oracle/check4_qwen_image21.py writes them. The sigmas of
+the oracle's calls on the real file are held to the schedule too, from
+the manifests of check 3."""
 from __future__ import annotations
 
 import hashlib
@@ -62,6 +64,29 @@ def test_mu_follows_the_token_count(check4):
     assert schedule.calculate_shift(256) == pytest.approx(0.5, abs=1e-15)
     assert schedule.calculate_shift(8192) == pytest.approx(0.9, abs=1e-15)
     assert schedule.calculate_shift(16384) > 0.9
+
+
+@pytest.mark.parametrize("name", ["check3_qwen_image21_512",
+                                  "check3_qwen_image21_1024"])
+def test_the_sigmas_of_a_run_on_the_real_file_are_the_schedule(name):
+    """The schedule the oracle set for its calls on the real DiT, at the
+    token count of each size, from the committed manifest alone."""
+    from oracle_fixture import ORACLE, committed
+
+    if not (ORACLE / f"{name}.manifest.json").is_file():
+        pytest.skip(f"{name}.manifest.json is not committed")
+    ins = committed(name)["inputs"]
+    h, w = ins["target_tokens"]
+    assert h * w == _tokens(16 * w, 16 * h)
+    want = np.asarray(ins["sigmas"], np.float64)
+    assert np.array_equal(want, want.astype(np.float32)), "not float32"
+    got = schedule.qwen21_sigmas(ins["steps"], h * w)
+    assert _bits(got) == _bits(want), name
+    for tag in "ab":
+        assert got[ins[f"step_{tag}"]] == np.float32(ins[f"sigma_{tag}"])
+    # The two sizes differ in every sigma but the ends.
+    other = schedule.qwen21_sigmas(ins["steps"], 4 * h * w)
+    assert np.all(other[1:-2] != got[1:-2])
 
 
 def test_the_defaults_are_the_official_scheduler_config(check4):

@@ -409,8 +409,8 @@ def self_test(torch, a) -> int:
                                    pairs, fields)
             rows = [(pairs, {t: a for t, (_, a) in header["scales"].items()},
                      strength)]
-        models = {m: merge(torch, oracle.load_dit(
-            work / "tiny.gguf", work, m, cls_name=c3.CLS), rows, m)
+        models = {m: merge(torch, c3.load_model(
+            torch, work / "tiny.gguf", work, m), rows, m)
             for m in oracle.MODES}
         note = {"config": tiny.TINY, "weights": "qwen_image21_tiny.weights()",
                 "weights_sha256": tiny.sha256(weights),
@@ -495,8 +495,7 @@ def main(argv=None) -> int:
     same_steps(a, src, sigmas, a.source)
 
     def load(mode):
-        return oracle.load_dit(a.dit, a.config, mode, cls_name=c3.CLS,
-                               dequant=a.dequant)
+        return c3.load_model(torch, a.dit, a.config, mode, a.dequant)
 
     t0 = time.perf_counter()
     model = load("fp32")

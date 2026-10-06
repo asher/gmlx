@@ -176,8 +176,7 @@ def main(argv=None) -> int:
                          "from its manifest")
     cond = {"features": feats, "img_mask": np.zeros(len(feats), bool),
             "ref_shapes": [], "ref_latents": []}
-    models = {m: oracle.load_dit(a.dit, a.config, m, cls_name=c3.CLS,
-                                 dequant=a.dequant)
+    models = {m: c3.load_model(torch, a.dit, a.config, m, a.dequant)
               for m in (("fp32", "bf16") if a.bf16 else ("fp32",))}
     c_in = models["fp32"].config.in_channels
     sched, _ = scheduler(torch, a, 1024)
@@ -266,7 +265,8 @@ def main(argv=None) -> int:
         oracle={"device": "cpu", "threads": torch.get_num_threads(),
                 "dequant": oracle.dequant_mode(),
                 "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 "
-                "rounding", "bf16_timestep": a.bf16_timestep},
+                "rounding", "bf16_timestep": a.bf16_timestep,
+                "plain_decoded": list(models["fp32"].plain_decoded)},
         sizes=results)
     fx.tolerances.update(rule=RULE, starting=STARTING, sizes=tol)
     path = fx.write(a.out)

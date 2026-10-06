@@ -73,7 +73,7 @@ exercise a path.
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
-| `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, as a joint forward and as a cached decode. |
+| `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, and each op of a block its stock op. |
 | `tests/image/test_image_qwen_real.py` | None | A Qwen-Image 2.1 DiT GGUF loads with fp32 norm leaves, and a small prefill and cached step stays finite with and without a reference. |
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
 | `tests/image/test_image_text_encoder_real.py` | None | A Qwen3-4B GGUF passes the Z-Image encoder checks, its last-layer tap equals the copied mlx-lm forward before the final norm, and release drops the model. |
@@ -86,7 +86,8 @@ exercise a path.
 | `tests/image/test_image_check6.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` | A whole Z-Image-Turbo run from the oracle's noise stays within the PSNR gate of the oracle's fp32 image. |
 | `tests/image/test_image_check7.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step at 512x512 under a live LoRA matches the oracle on merged weights block by block and in velocity. The base and each wrong table fail. |
 | `tests/image/test_image_check7_community.py` | `GMLX_TEST_LORA_DIR` and `GMLX_IMAGE_FIXTURES` | Public Z-Image-Turbo LoRA files load with every key matched, give the float64 delta, and pass the step against the merged oracle block by block. |
-| `tests/image/test_image_check7_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step at 512x512 under a live LoRA matches the oracle on merged weights, and each linear leaf its exact product. Wrong tables fail. |
+| `tests/image/test_image_check6_qwen.py` | `GMLX_IMAGE_FIXTURES` | A whole Qwen-Image 2.1 run from the oracle's conditioning and noise ends within the gate of the oracle's fp32 latents, on its schedule. |
+| `tests/image/test_image_check7_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step at 512x512 under one live LoRA or two matches the oracle on merged weights, and each leaf its exact product. Wrong tables fail. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL pair loads with every tensor used, the text model and the pair agree before the final norm, and prompt layout and image features match llama.cpp. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
@@ -246,7 +247,16 @@ fused gate and projection weight and on one that holds the pair apart.
 Every row is held to the bounds of check 3, and each wrong table of its
 list must miss a bound by twice. Its rows that read the real file skip
 until the manifests that `check7_qwen_image21_lora.py` writes from it
-are committed.
+are committed. On the real file the script seeds the pairs itself, at a
+norm of 0.15 times each weight, and writes an adapter with an alpha, one
+without, and a stack of two on different layers and blocks.
+
+`check2_qwen_image21.py` loads Qwen3-VL-8B from its text GGUF into the
+transformers class by tensor name and runs the pipeline's own prompt
+encoding. `check6_qwen_image21.py` takes one of its taps as the
+conditioning and runs the pipeline's own call on injected noise, with
+the bf16 run as a loop of the same calls. Both manifests are committed,
+and `tests/image/test_image_check6_qwen.py` reads the second.
 
 ## Server end-to-end harnesses
 
