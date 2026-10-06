@@ -19,7 +19,9 @@ D = 64
 @pytest.fixture
 def routed(monkeypatch):
     """Set the mode and the NAX flag, then report whether a call of the
-    given rows and rank handed its tables to the base."""
+    given rows and rank handed its tables to the base. ``rows`` is a row
+    count for a flat (rows, D) call, or the leading dimensions of the
+    call."""
     from mlx_kquant.nn import KQuantLinear
 
     calls = []
@@ -31,13 +33,14 @@ def routed(monkeypatch):
     monkeypatch.setattr(KQuantLinear, "__call__", fake_call)
     monkeypatch.setattr(modules, "_KQ_LORA_EPILOGUE", True)
 
-    def route(mode: str, nax: bool, rows: int, rank: int) -> bool:
+    def route(mode: str, nax: bool, rows, rank: int) -> bool:
+        lead = rows if isinstance(rows, tuple) else (rows,)
         monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", mode)
         monkeypatch.setattr(modules, "_NAX", nax)
         wrap = modules.LoRAKQuantLinear(
             KQuantLinear(D, D, False, "q8_0"), mx.ones((rank, D)),
             mx.ones((D, rank)), scale=1.0)
-        wrap(mx.zeros((rows, D), mx.bfloat16))
+        wrap(mx.zeros(lead + (D,), mx.bfloat16))
         return calls.pop()
 
     return route
@@ -57,6 +60,29 @@ def test_auto_on_nax_follows_the_sweep_table(routed):
     # The rows are every leading dimension of the call.
     wins = modules.lora_epilogue_wins
     assert wins(4 * 4, 16) is True and wins(4 * 5, 16) is False
+
+
+def test_auto_counts_the_rows_of_a_batched_call(routed):
+    """The gate reads every leading dimension of the call the wrap gets:
+    a (B, L, D) input is B * L rows, not B."""
+    assert routed("auto", True, (4, 4), 16) is True
+    assert routed("auto", True, (4, 5), 16) is False
+    assert routed("auto", True, (1, 32), 8) is True
+    assert routed("auto", True, (2, 20), 8) is False
+    assert routed("auto", True, (2, 2, 2), 32) is True
+    assert routed("auto", True, (3, 3, 1), 32) is False
+
+
+@pytest.mark.parametrize("rank, max_rows", [
+    (1, 32), (5, 32), (8, 32), (9, 16), (12, 16), (16, 16), (17, 8),
+    (24, 8), (32, 8)])
+def test_a_rank_between_two_swept_ranks_takes_the_next_one_s_rows(
+        routed, rank, max_rows):
+    """The sweep has ranks 4, 8, 16, 32, 64 and 128. A rank between two
+    of them has the row bound of the next one up, which is the safe side:
+    the epilogue loses to the stock ops as the rank grows."""
+    assert routed("auto", True, max_rows, rank) is True
+    assert routed("auto", True, max_rows + 1, rank) is False
 
 
 # Swept cells the NAX rule sends to the slower path by more than the A
