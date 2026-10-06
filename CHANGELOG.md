@@ -12,6 +12,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the tool-call parser, gmlx's own parsers included.
 - `server.embeddings` loads Qwen3-Embedding safetensors checkpoints, such as
   `mlx-community/Qwen3-Embedding-0.6B-8bit`.
+- `gmlx image generate` makes images from a Z-Image-Turbo GGUF, its Qwen3-4B
+  text encoder GGUF and its VAE. `bench` times them and `pack-vae` packs a VAE.
+- `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA
+  safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
 
 ### Changed
 
@@ -46,6 +50,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs in bfloat16, or in float32 on an M1 or M2 or with `--dtype float16`.
 - `server.embeddings` refuses a chat model GGUF or an encoder GGUF it cannot
   run, and a Gemma 3 or Qwen3 chat checkpoint of an embedder's model type.
+- On GPUs with NAX (M5), a LoRA adapter layer on a K-quant model picks its path
+  by rank and row count. `GMLX_LORA_EPILOGUE=always` keeps the earlier path.
+- With such an adapter, time to first token drops, most at rank 32 and above,
+  and greedy output can differ from earlier releases where the path changes.
 
 ### Removed
 
