@@ -155,6 +155,11 @@ fusions.
 | `GMLX_IMAGE_LORA_PLACEMENT` | How image LoRA pairs for q, k or v run on a fused `qkv` weight: `block` (default) as one block-diagonal pair, `slice` per band, `split` with a split base. |
 | `GMLX_IMAGE_KQ_ROUTES=0` | Run the image q and k norm with RoPE and the feed-forward gate product on stock ops, not mlx-kquant kernels. `qk` or `glu` keeps one route. Rounding differs. |
 
+The image routes are on when the installed mlx-kquant has the kernels, and
+`GMLX_IMAGE_KQ_ROUTES` is read once, when the image pipeline is imported.
+An image at a fixed seed differs between the kernels and the stock ops.
+The difference is rounding, not an error.
+
 ## Streaming
 
 | Variable | Meaning |
