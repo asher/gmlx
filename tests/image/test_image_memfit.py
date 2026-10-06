@@ -554,5 +554,26 @@ def test_vae_tiling_without_a_free_measure_never_refuses(monkeypatch):
     _unit_fits(monkeypatch)
     monkeypatch.setattr(memfit, "free_bytes", lambda: None)
     kw = dict(family="z_image", itemsize=2)
-    assert memfit.vae_tiling("decode", 4096, 4096, **kw) is False
+    assert memfit.vae_tiling("decode", 4096, 4096, **kw) is True
+    assert memfit.vae_tiling("decode", 4096, 4096, tiled=False,
+                             **kw) is False
     assert memfit.vae_tiling("decode", 4096, 4096, tiled=True, **kw) is True
+
+
+@pytest.mark.parametrize("family", ["z_image", "qwen_image21"])
+def test_without_a_free_measure_the_automatic_choice_is_tiles(family,
+                                                              monkeypatch):
+    """Nothing is refused, and no VAE runs an image larger than one tile
+    whole unless the caller forces it."""
+    monkeypatch.setattr(memfit, "free_bytes", lambda: None)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    for op in ("decode", "encode"):
+        for item in (2, 4):
+            kw = dict(family=family, itemsize=item)
+            assert memfit.vae_tiling(op, 4096, 4096, **kw) is True
+            assert memfit.vae_tiling(op, 528, 512, **kw) is True
+            assert memfit.vae_tiling(op, 512, 512, **kw) is False
+            assert memfit.vae_tiling(op, 4096, 4096, tiled=True, **kw) is True
+            assert memfit.vae_tiling(op, 4096, 4096, tiled=False,
+                                     **kw) is False
+            assert memfit.vae_tiling(op, 512, 512, tiled=True, **kw) is False

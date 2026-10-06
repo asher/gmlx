@@ -653,6 +653,24 @@ def test_decode_and_encode_tile_only_when_a_whole_pass_does_not_fit(
                                         free=TILES), b).item()
 
 
+def test_without_a_free_figure_an_image_above_one_tile_runs_in_tiles(
+        tiny_vae, monkeypatch):
+    from gmlx.image import memfit
+
+    monkeypatch.setattr(memfit, "free_bytes", lambda: None)
+    rng = np.random.default_rng(13)
+    lat = rng.standard_normal((1, 16, 12, 10)).astype(np.float32)
+    img = rng.uniform(-1, 1, (1, 24, 20, 3)).astype(np.float32)
+    cut = dict(tile=16, overlap=4)
+    for run, x in ((tiling.decode, lat), (tiling.encode, img)):
+        whole = run(tiny_vae, x, tiled=False, **cut)
+        tiles = run(tiny_vae, x, tiled=True, **cut)
+        assert not mx.array_equal(whole, tiles).item()
+        assert mx.array_equal(run(tiny_vae, x, **cut), tiles).item()
+        # An image no larger than one tile runs whole.
+        assert mx.array_equal(run(tiny_vae, x), whole).item()
+
+
 def test_a_pass_that_does_not_fit_is_refused_before_it_runs(
         tiny_vae, monkeypatch):
     from gmlx.image.memfit import ImageMemoryError

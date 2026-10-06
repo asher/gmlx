@@ -38,8 +38,9 @@ plan and for ``vae.tiling`` alike. A measured row holds footprints fitted
 on that VAE. An unmeasured row holds only what arithmetic gives, and
 ``unmeasured_bytes`` prices its passes by one rule. ``vae_tiling`` decides
 between a whole and a tiled pass and refuses one that does not fit. On an
-unmeasured row it never picks a whole pass by itself for an image larger
-than one tile.
+unmeasured row, and on any row when the device reports no free working
+set, it never picks a whole pass by itself for an image larger than one
+tile.
 """
 
 from __future__ import annotations
@@ -665,13 +666,13 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
     ``tiled=None`` is the automatic choice. On a measured row it is a
     whole pass when that fits the free working set and tiles otherwise.
     On an unmeasured row it is tiles for every image larger than one
-    tile, on every machine and whatever is free. ``tiled=False`` forces a
-    whole pass at the row's price.
+    tile, on every machine, and so it is on any row when the device
+    reports no free working set. ``tiled=False`` forces a whole pass at
+    the row's price.
 
     A pass that does not fit as chosen raises ImageMemoryError, unless
-    GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``. When the
-    device reports none, nothing is refused and the automatic choice on a
-    measured row is a whole pass."""
+    GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``, and nothing
+    is refused when the device reports none."""
     row = vae_row(family)
     kw = dict(family=family, itemsize=itemsize, channels=channels,
               config=config, batch=batch, tile=tile, overlap=overlap,
@@ -684,10 +685,10 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
         free = free_bytes()
     if tiled is not None:
         choice = bool(tiled) and can_tile
-    elif not row.measured:
+    elif free is None or not row.measured:
         choice = can_tile
     else:
-        choice = can_tile and free is not None and whole > free
+        choice = can_tile and whole > free
     if free is None:
         return choice
     need = in_tiles if choice else whole
