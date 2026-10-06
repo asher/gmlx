@@ -1473,8 +1473,8 @@ def test_qwen3next_recurrent_layers_array_mismatch_rejected():
 
 
 def test_qwen3next_v_heads_are_not_tiled():
-    # qwen3next has asymmetric linear K/V heads (the tiled-V predicate's
-    # trigger) but its wire V order is HF-grouped - the qwen3.5 tiled order
+    # qwen3next has asymmetric linear K/V heads, which the tiled-V predicate
+    # looks for, but its wire V order is grouped. The qwen3.5 tiled order
     # must not apply to it.
     from gmlx.upstream.gdn_patches import gguf_v_heads_tiled
     c = synthesize_config(_qwen3next_meta(), tensor_shapes={})
