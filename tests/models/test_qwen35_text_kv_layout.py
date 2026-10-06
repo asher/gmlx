@@ -524,6 +524,30 @@ def test_each_gguf_loader_checks_the_tree_it_built(toy, loader):
     assert "grouped order" in out["lost"], out
 
 
+def _config_classes():
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import TextModelArgs
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
+    from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import (
+        TextConfig as MoeTextConfig)
+
+    return {"lm_qwen3_5": TextModelArgs, "vlm_qwen3_5": TextConfig,
+            "vlm_qwen3_5_moe": MoeTextConfig}
+
+
+@pytest.mark.parametrize(
+    "name", ("lm_qwen3_5", "vlm_qwen3_5", "vlm_qwen3_5_moe"))
+def test_a_config_that_names_no_head_order_is_grouped(name):
+    """The config of an MLX checkpoint names no head order, and each copied
+    text config then says grouped. A config that says tiled keeps it."""
+    raw = _toy_config(num_experts=4, num_experts_per_tok=2,
+                      shared_expert_intermediate_size=64,
+                      moe_intermediate_size=64)
+    cls = _config_classes()[name]
+    assert cls.from_dict(raw).kv_head_layout == "tiled"
+    del raw["kv_head_layout"]
+    assert cls.from_dict(raw).kv_head_layout == "grouped"
+
+
 def test_a_grouped_or_symmetric_gguf_tree_passes_the_check():
     from gmlx.load.loader import build_model
     from gmlx.upstream.gdn_patches import require_tiled_gdn

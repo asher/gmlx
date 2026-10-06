@@ -401,6 +401,68 @@ def test_prefill_kernel_with_a_gate_per_key_dim_pairs_heads(tiled, masked):
     assert not _close(got, other, atol=1e-2)
 
 
+def _moe_language_model(**layout):
+    """The owned language model as the copied qwen3_5_moe container builds
+    it, from a text config with ``layout`` added."""
+    from gmlx._vendor.mlx_vlm.models.qwen3_5_moe import qwen3_5_moe as container
+    from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import (
+        ModelConfig, TextConfig, VisionConfig)
+
+    text = TextConfig.from_dict(dict(
+        model_type="qwen3_5_moe", hidden_size=64, num_hidden_layers=4,
+        num_attention_heads=4, linear_num_value_heads=HV,
+        linear_num_key_heads=HK, linear_key_head_dim=DK,
+        linear_value_head_dim=DV, linear_conv_kernel_dim=4, num_experts=4,
+        num_experts_per_tok=2, shared_expert_intermediate_size=64,
+        moe_intermediate_size=64, rms_norm_eps=1e-6, vocab_size=128,
+        num_key_value_heads=2, max_position_embeddings=2048,
+        tie_word_embeddings=True, head_dim=32,
+        rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
+                         "rope_theta": 100000, "partial_rotary_factor": 0.25},
+        full_attention_interval=4, **layout))
+    cfg = ModelConfig(
+        text_config=text,
+        vision_config=VisionConfig(
+            depth=1, hidden_size=32, intermediate_size=64, out_hidden_size=64,
+            num_heads=2, patch_size=14, num_position_embeddings=16,
+            deepstack_visual_indexes=[]),
+        model_type="qwen3_5_moe", vocab_size=128, image_token_id=124,
+        video_token_id=125, vision_start_token_id=126, vision_end_token_id=127)
+    mx.random.seed(0)
+    lm = container.LanguageModel(text, cfg)
+    lm.eval()
+    mx.eval(lm.parameters())
+    return lm
+
+
+def test_qwen3_5_moe_config_that_names_no_head_order_is_grouped(on_device):
+    """The config of an MLX checkpoint names no head order. The copied
+    qwen3_5_moe text config then says grouped and the model pairs its heads
+    grouped, and a config that says tiled keeps the field and pairs them
+    tiled."""
+    ids = mx.array(np.random.default_rng(0).integers(1, 120, size=(1, 6)))
+
+    def run(**layout):
+        lm = _moe_language_model(**layout)
+        flags = {m.gdn_kv_tiled for m in lm.modules()
+                 if hasattr(m, "num_k_heads")}
+        cache = lm.make_cache()
+        out = []
+        for chunk in (ids[:, :5], ids[:, 5:6]):
+            y = lm(chunk, cache=cache).logits.astype(mx.float32)
+            mx.eval(y)
+            out.append(np.array(y))
+        return lm.args.kv_head_layout, flags, np.concatenate(out, axis=1)
+
+    layout, flags, unnamed = run()
+    assert (layout, flags) == ("grouped", {False})
+    _, _, grouped = run(kv_head_layout="grouped")
+    layout, flags, tiled = run(kv_head_layout="tiled")
+    assert (layout, flags) == ("tiled", {True})
+    assert np.array_equal(unnamed, grouped)
+    assert np.abs(unnamed - tiled).max() > ORDERS_DIFFER
+
+
 def test_no_installer_rebinds_the_scan_module():
     """The head order is a call argument. Nothing in gmlx assigns a scan
     of the module, which the copied Qwen3.5 path resolves to and every
