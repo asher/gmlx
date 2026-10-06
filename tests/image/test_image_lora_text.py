@@ -19,6 +19,7 @@ TEXT_TOL = 2e-5
 Q = "model.layers.0.self_attn.q_proj"          # 64 -> 64
 K = "model.layers.2.self_attn.k_proj"          # 64 -> 32
 UP = "model.layers.3.mlp.up_proj"              # 64 -> 96
+O1 = "model.layers.1.self_attn.o_proj"         # 64 -> 64
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +165,77 @@ def test_text_halves_come_off_and_change(tmp_path):
     pipe.encoder = SimpleNamespace(owned=True, released=False)
     assert lora.apply_text_adapters(pipe, []) == 0
     assert lora.apply_text_adapters(pipe, [(a1, 0.0)]) == 0
+
+
+def test_a_list_goes_on_over_one_with_other_layers(tmp_path, monkeypatch):
+    """A new list over the one in place: a layer that only the old list
+    wrapped is bare again. A new install that fails part way leaves the
+    encoder bare with an empty state, not the state of the old list."""
+    from gmlx.image.lora import install
+
+    rng = np.random.default_rng(3)
+    one = _text_pairs(1, 6.0)
+    two = {Q: make_pair(rng, 64, 64, 2), O1: make_pair(rng, 64, 64, 2)}
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    base = np.array(enc.encode("ab").hidden[0])
+    before = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, [(a1, 0.8)]) == 1
+    assert _wrapped(enc.model) == sorted([Q, K, UP])
+    assert lora.apply_text_adapters(pipe, [(a2, 0.6)]) == 1
+    assert _wrapped(enc.model) == sorted([Q, O1])
+    assert enc.adapters == lora.text_state([(a2, 0.6)])
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, _merged_hidden([(two, 0.6)])) <= TEXT_TOL
+    assert rel_l2(got, _merged_hidden([(one, 0.8), (two, 0.6)])) > 1e-3
+    # The first list again, and its install raises at the second layer.
+    real, wraps = install._set, []
+
+    def flaky(root, path, new):
+        if isinstance(new, lora.EncoderLoRALinear):
+            wraps.append(path)
+            if len(wraps) == 2:
+                raise RuntimeError("no room")
+        return real(root, path, new)
+
+    monkeypatch.setattr(install, "_set", flaky)
+    with pytest.raises(RuntimeError, match="no room"):
+        lora.apply_text_adapters(pipe, [(a1, 0.8)])
+    monkeypatch.setattr(install, "_set", real)
+    assert len(wraps) == 2
+    assert _wrapped(enc.model) == [] and enc.adapters == ""
+    assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+    assert api.encode_text(pipe, "ab") is before
+
+
+@pytest.mark.parametrize("change", ["strength", "adapter"])
+def test_a_change_of_strength_or_adapter_alone_changes_the_conditioning(
+        tmp_path, change):
+    """Two lists that differ in one strength alone, or in the adapter
+    alone, are two states. The second one is installed, and its
+    conditioning is not the first one's from the cache."""
+    one, two = _text_pairs(1, 6.0), _text_pairs(2, 6.0)
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    first = [(a1, 0.8)]
+    then, stack = ([(a1, 0.5)], [(one, 0.5)]) if change == "strength" \
+        else ([(a2, 0.8)], [(two, 0.8)])
+    assert lora.text_state(first) != lora.text_state(then)
+    assert lora.apply_text_adapters(pipe, first) == 1
+    old = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, then) == 1
+    assert enc.adapters == lora.text_state(then)
+    new = api.encode_text(pipe, "ab")
+    assert new is not old and new.key != old.key
+    want = _merged_hidden(stack)
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, want) <= TEXT_TOL
+    assert rel_l2(np.array(new.features, np.float64), want[0]) <= TEXT_TOL
+    assert rel_l2(np.array(old.features, np.float64), want[0]) > 1e-3
 
 
 def test_a_borrowed_encoder_refuses_text_halves_by_name(tmp_path):
