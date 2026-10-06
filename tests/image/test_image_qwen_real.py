@@ -2,7 +2,7 @@
 quantized matrix, the fp32 norm leaves, and one small prefill and cached
 step with and without a reference image, whose prefix cache has the bytes
 the memory plan counts. Skipped unless KQUANT_TEST_GGUF_DIR holds a
-Qwen-Image 2.1 DiT GGUF (arch qwen_image).
+Qwen-Image 2.1 DiT GGUF, which the tests find by its tensors.
 
 Check 1 of the acceptance gate on the file the committed header inventory
 was read from: its header is the inventory, the fingerprint names the
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from image_fixtures import Q_HEADER, load_json, official_config
+from image_fixtures import Q_HEADER, image_dits, load_json, official_config
 from oracle_fixture import fx
 
 import mlx.core as mx
@@ -34,32 +34,27 @@ OWN_KEYS = ["ffn_dim", "inner_dim", "mlp_layout", "modulation_dim",
             "num_train_timesteps", "rope_theta", "timestep_dim"]
 
 
-def _qwen_file(gguf_index: dict) -> tuple[str, object]:
+def _qwen_file(gguf_dir) -> tuple[str, object]:
     from gmlx.image import fingerprint as fp
     from gmlx.load.headerscan import scan_gguf
 
-    for p in gguf_index.get("qwen_image", []):
-        try:
-            got = fp.identify(fp.view_from_scans([scan_gguf(p)]))
-        except ValueError:
-            continue
-        if got.family.name == "qwen_image21":
-            return p, got
+    for p in image_dits(gguf_dir, "qwen_image21"):
+        return p, fp.identify(fp.view_from_scans([scan_gguf(p)]))
     pytest.skip("no Qwen-Image 2.1 DiT GGUF under KQUANT_TEST_GGUF_DIR")
 
 
-def _inventory_file(gguf_index: dict) -> tuple[str, dict]:
+def _inventory_file(gguf_dir) -> tuple[str, dict]:
     """The file the committed header inventory was read from."""
     want = load_json("manifest.json")[Q_HEADER]
-    for p in gguf_index.get("qwen_image", []):
+    for p in image_dits(gguf_dir, "qwen_image21"):
         if Path(p).name == want["file"] and os.path.getsize(p) == want["size"]:
             return p, want
     pytest.skip(f"{want['file']} is not under KQUANT_TEST_GGUF_DIR")
 
 
 @pytest.fixture(scope="module")
-def load(gguf_index):
-    path, ident = _qwen_file(gguf_index)
+def load(gguf_dir):
+    path, ident = _qwen_file(gguf_dir)
     from gmlx.image.loader import load_dit
 
     lines: list = []
@@ -73,14 +68,15 @@ def loaded(load):
     return load[:3]
 
 
-def test_check1_the_real_header_is_the_committed_inventory(gguf_index):
+def test_check1_the_real_header_is_the_committed_inventory(gguf_dir):
     from gmlx.image import fingerprint as fp
     from gmlx.load.headerscan import scan_gguf
 
-    path, want = _inventory_file(gguf_index)
+    path, want = _inventory_file(gguf_dir)
     assert fx.file_identity(path)["sha256"] == want["sha256"]
     scan = scan_gguf(path)
-    assert not scan.truncated
+    # The file has no KV, so no arch names it: the tensors do.
+    assert not scan.truncated and not scan.kv
     view = fp.view_from_scans([scan])
     inventory = load_json(Q_HEADER)
     assert ({n: (tuple(t.shape), t.codec) for n, t in view.tensors.items()}

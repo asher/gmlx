@@ -13,7 +13,8 @@ import pytest
 from mlx.utils import tree_flatten
 
 import qwen_tiny as qt
-from image_fixtures import Q_HEADER, load_json, official_config
+from image_fixtures import (Q_HEADER, image_dits, load_json, official_config,
+                            write_gguf)
 
 from gmlx.image import fingerprint as fp
 from gmlx.image import loader as image_loader
@@ -32,6 +33,26 @@ def tiny(monkeypatch):
 
 def _load(path, **kw):
     return image_loader.load_dit(str(path), log=lambda *_: None, **kw)
+
+
+def test_the_real_file_tests_find_a_dit_with_no_arch_key(tiny, tmp_path):
+    """The Qwen-Image 2.1 GGUFs of unsloth carry no KV at all. The rows
+    that read a real file find it by its tensors, under any folder of
+    the test directory, and list no other file."""
+    w = qt.weights(0)
+    (tmp_path / "sub").mkdir()
+    bare = qt.write(tmp_path / "sub" / "bare.gguf", w, arch=None)
+    named = qt.write(tmp_path / "named.gguf", w)
+    other = {"w": (np.zeros((4, 4), np.float32), "F32")}
+    write_gguf(tmp_path / "no-arch.gguf", other)
+    write_gguf(tmp_path / "text.gguf", other, arch="llama")
+    # A text arch is not read, whatever its tensors are.
+    qt.write(tmp_path / "under-llama.gguf", w, arch="llama")
+    from gmlx.load.headerscan import scan_gguf
+
+    assert not scan_gguf(bare).kv
+    assert sorted(image_dits(tmp_path, tiny.name)) == sorted([bare, named])
+    assert image_dits(tmp_path, "z_image") == []
 
 
 def _params(model) -> dict:

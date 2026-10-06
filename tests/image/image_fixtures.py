@@ -2,7 +2,9 @@
 and small synthetic GGUFs written with gguf-py."""
 from __future__ import annotations
 
+import functools
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,36 @@ def fixture_view(name: str, *, drop=(), add=None, kv=None, rename=None):
     for n, (shape, codec) in (add or {}).items():
         tensors[n] = Tensor(tuple(shape), codec)
     return HeaderView(kv=dict(d["kv"] if kv is None else kv), tensors=tensors)
+
+
+@functools.lru_cache(maxsize=None)
+def _image_dits(root: str, family: str) -> tuple:
+    from gmlx.image import fingerprint as fp
+    from gmlx.image.registry import is_image_arch
+    from gmlx.load.headerscan import scan_gguf
+
+    found = []
+    for path in sorted(Path(root).rglob("*.gguf")):
+        try:
+            arch = scan_gguf(str(path), include_tensors=False).kv.get(
+                "general.architecture")
+            if arch is not None and not is_image_arch(arch):
+                continue
+            got = fp.identify(fp.view_from_scans([scan_gguf(str(path))]))
+        except Exception:
+            continue
+        if got.family.name == family:
+            found.append(str(path))
+    return tuple(sorted(found, key=lambda p: (os.path.getsize(p), p)))
+
+
+def image_dits(root, family: str) -> list[str]:
+    """The DiT GGUFs of ``family`` under ``root``, smallest first, found
+    by fingerprint as the loader finds them. A DiT file may carry no
+    general.architecture key: the Qwen-Image 2.1 files of
+    unsloth/Qwen-Image-2.1-GGUF have no KV at all, so an index by that
+    key does not list them. A file under a text arch is not read."""
+    return list(_image_dits(str(root), family))
 
 
 def write_gguf(path, tensors: dict, arch: str | None = None) -> str:

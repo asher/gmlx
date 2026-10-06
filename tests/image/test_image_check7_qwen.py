@@ -41,6 +41,7 @@ import qwen_gates as qg
 import qwen_tiny as qt
 from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
                          exact_products, rerun_exact)
+from image_fixtures import image_dits
 from lora_fixtures import (DIALECTS, dialect_keys, header, reference_delta,
                            write_adapter, write_keys)
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
@@ -962,11 +963,11 @@ def test_the_real_manifests_name_the_adapters_the_rows_load():
 
 
 @pytest.fixture(scope="module")
-def real(gguf_index):
+def real(gguf_dir):
     """A pipeline over the DiT GGUF the oracle read, or a skip."""
     m = _real_manifest(REAL)
     want = m["files"]["dit"]
-    for p in gguf_index.get("qwen_image", []):
+    for p in image_dits(gguf_dir, "qwen_image21"):
         if Path(p).name == want["name"] and os.path.getsize(p) == want["size"]:
             break
     else:

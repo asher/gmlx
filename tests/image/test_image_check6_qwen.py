@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
 
 import mlx.core as mx
@@ -41,11 +42,11 @@ def check6():
 
 
 @pytest.fixture(scope="module")
-def pipe(check6, gguf_index):
+def pipe(check6, gguf_dir):
     from gmlx.image import api
 
     want = check6[1]["files"]["dit"]
-    for p in gguf_index.get("qwen_image", []):
+    for p in image_dits(gguf_dir, "qwen_image21"):
         if Path(p).name == want["name"] and os.path.getsize(p) == want["size"]:
             break
     else:

@@ -31,6 +31,7 @@ import qwen_gates as qg
 import qwen_tiny as qt
 from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
                          exact_products, rerun_exact)
+from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 
 from gmlx.image import api, ops, registry
@@ -505,10 +506,10 @@ def _real_manifest(name: str) -> dict:
 
 
 @pytest.fixture(scope="module")
-def real(gguf_index):
+def real(gguf_dir):
     m = _real_manifest(REAL[512])
     want = m["files"]["dit"]
-    for p in gguf_index.get("qwen_image", []):
+    for p in image_dits(gguf_dir, "qwen_image21"):
         if Path(p).name == want["name"] and os.path.getsize(p) == want["size"]:
             break
     else:
