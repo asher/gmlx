@@ -208,7 +208,11 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
 
 
 def _stride(family) -> int:
+    """What a size is a multiple of: the family row's ``size_multiple``,
+    else one DiT patch in pixels."""
     c = family.constants.values
+    if "size_multiple" in c:
+        return int(c["size_multiple"])
     return int(c["vae_scale_factor"]) * int(c["all_patch_size"][0])
 
 

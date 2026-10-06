@@ -271,6 +271,13 @@ def test_a_pipeline_loads_without_an_encoder_or_a_vae(pipe):
         api.vae_decode(pipe, qt.latents())
 
 
+def test_the_command_reads_the_size_multiple_of_the_family_row():
+    from gmlx.commands.image import _stride
+
+    assert _stride(registry.get_family("qwen_image21")) == 32
+    assert _stride(registry.get_family("z_image")) == 16
+
+
 def test_denoise_step_is_pure_in_any_order_with_caches_cleared(pipe):
     conds = [qt.conditioning("ref1", key="pos"),
              qt.conditioning("text", seed=1, key="neg")]
