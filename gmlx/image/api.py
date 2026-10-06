@@ -450,8 +450,9 @@ def _under(pipe: ImagePipeline, table: str, fn):
 def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
                cond: Conditioning, table) -> mx.array:
     """One row through the family's step parts. The conditioning cache
-    holds its bound or two states of the newest size, whichever is larger,
-    so the positive and the negative row of one request both stay."""
+    holds the family's bound, and its two newest states stay whatever their
+    bytes, so the positive and the negative row of one request both stay
+    in either order."""
     dit = pipe.dit
     s = np.float32(sigma)
     dt = str(dit.act_dtype)
@@ -487,9 +488,11 @@ def _memo(cache: ByteLRU, key, make, bound: int | None = None):
         arrays = hit.arrays()
         mx.eval(arrays)
         n = array_bytes(arrays)
-        if bound is not None:
-            cache.max_bytes = max(int(bound), 2 * n)
-        cache.put(key, hit, n)
+        if bound is None:
+            cache.put(key, hit, n)
+        else:
+            cache.max_bytes = int(bound)
+            cache.put(key, hit, n, keep=2)
     return hit
 
 

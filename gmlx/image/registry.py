@@ -44,7 +44,8 @@ class StepParts:
     is the rest of the step for one row, given both, and returns the
     float32 velocity. Each is a pure function of its arguments and the DiT
     weights, and each state gives its arrays as ``arrays()``.
-    ``state_bytes`` bounds the cache of conditioning states.
+    ``state_bytes`` bounds the cache of conditioning states, whose two
+    newest stay past it.
     """
     modulation: Callable
     conditioning: Callable

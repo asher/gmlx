@@ -329,6 +329,17 @@ def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
             (np.float32(s).tobytes(), *key[1:]))) is qm.Modulation
 
 
+def test_the_prefix_cache_bound_holds_the_text_states_of_a_guided_request():
+    """Both text prefixes of a guided request fit the family's bound, so
+    they stay without the rule for the two newest states."""
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family
+
+    row = memfit.PEAKS["qwen_image21"]
+    one = row.prefix.cache_bytes(row.text_rows, 2)
+    assert 2 * one <= get_family("qwen_image21").step.state_bytes
+
+
 def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
     """Five text rows and one 2 x 2 reference, which is 32 pixels square."""
     from gmlx.image import memfit

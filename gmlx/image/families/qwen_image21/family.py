@@ -62,8 +62,9 @@ SAMPLING = {
                            revision="790c92633540aa0cb11d9abf19eb46d861714758"),
 }
 
-# A prefix cache of one megapixel reference is about 2 GiB. The cache of
-# conditioning states keeps this much, or two states when they are larger.
+# The cache of conditioning states holds this much, which is both text
+# states of a guided request twice over. The prefix of one megapixel
+# reference is about 2 GiB, and the two newest states stay past the bound.
 PREFIX_CACHE_BYTES = 1 << 30
 
 

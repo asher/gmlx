@@ -53,7 +53,9 @@ def array_bytes(arrays) -> int:
 
 class ByteLRU:
     """A least recently used map that holds at most ``max_bytes`` of
-    values. An entry larger than the bound is not kept."""
+    values. An entry larger than the bound is not kept. ``put`` with
+    ``keep`` holds that many of the newest entries whatever their bytes,
+    and sheds the older ones down to the bound."""
 
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
@@ -76,16 +78,17 @@ class ByteLRU:
             self._items.move_to_end(key)
             return hit[0]
 
-    def put(self, key, value, nbytes: int) -> None:
+    def put(self, key, value, nbytes: int, keep: int = 0) -> None:
         with self._lock:
             old = self._items.pop(key, None)
             if old is not None:
                 self._bytes -= old[1]
-            if nbytes > self.max_bytes:
+            if nbytes > self.max_bytes and not keep:
                 return
             self._items[key] = (value, int(nbytes))
             self._bytes += int(nbytes)
-            while self._bytes > self.max_bytes:
+            while (self._bytes > self.max_bytes
+                   and len(self._items) > keep):
                 _, (_, n) = self._items.popitem(last=False)
                 self._bytes -= n
 

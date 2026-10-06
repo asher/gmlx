@@ -24,9 +24,10 @@ class _State:
         return self._arrays
 
 
-def _parts_pipe(state_bytes: int = 1 << 20, rows: int = 4):
+def _parts_pipe(state_bytes: int = 1 << 20, rows=4):
     """A pipeline whose family gives step parts, and their call counts.
-    v = latents * 2 sigma + mean of the features."""
+    v = latents * 2 sigma + mean of the features. A state is ``rows``
+    float32 values, one count or a count per conditioning key."""
     calls = {"modulation": 0, "conditioning": 0, "forward": 0}
 
     def modulation(dit, sigma):
@@ -36,7 +37,8 @@ def _parts_pipe(state_bytes: int = 1 << 20, rows: int = 4):
 
     def conditioning(dit, cond):
         calls["conditioning"] += 1
-        return _State(mx.zeros((rows,), mx.float32) + cond.features.mean())
+        n = rows[cond.key] if isinstance(rows, dict) else rows
+        return _State(mx.zeros((n,), mx.float32) + cond.features.mean())
 
     def forward(dit, x, sigma, cond, state, mod):
         calls["forward"] += 1
@@ -90,25 +92,58 @@ def test_step_parts_rows_take_their_own_sigma_and_conditioning():
     assert calls["modulation"] == 2 and calls["conditioning"] == 2
 
 
-def test_the_state_cache_keeps_two_states_of_the_newest_size():
+@pytest.mark.parametrize("pos, neg", [(80, 70), (70, 80), (75, 75)],
+                         ids=["positive_larger", "negative_larger", "equal"])
+def test_the_state_cache_keeps_both_states_of_a_guided_request(pos, neg):
+    # A state is 4 bytes a row and the bound is 300 bytes, so the two
+    # states of the request pass the bound together in every case.
+    rows = {"pos": pos, "neg": neg}
+
+    def run(bound):
+        pipe, calls = _parts_pipe(state_bytes=bound, rows=rows)
+        x = api.sample(pipe, _cond(1.0, "pos"), neg=_cond(0.25, "neg"),
+                       cfg=4.0, height=32, width=32, seed=1, steps=4)
+        return pipe, calls, np.array(x)
+
+    pipe, calls, x = run(300)
+    assert calls == {"modulation": 4, "conditioning": 2, "forward": 8}
+    assert len(pipe.captions) == 2
+    assert pipe.captions.bytes == 4 * (pos + neg)
+    assert pipe.captions.max_bytes == 300
+    assert np.array_equal(x, run(1 << 20)[2])
+
+
+def test_the_state_cache_sheds_to_its_bound_past_the_two_newest_states():
     # A state of 64 rows is 256 bytes, over half the bound of 300.
     pipe, calls = _parts_pipe(state_bytes=300, rows=64)
     x = mx.zeros((1, 4, 2, 4), mx.float32)
-    for _ in range(2):
-        api.denoise_step(pipe, x, 0.5, _cond(1.0, "pos"))
-        api.denoise_step(pipe, x, 0.5, _cond(0.0, "neg"))
-    assert calls["conditioning"] == 2 and pipe.captions.bytes == 512
-    # A third state of that size evicts the least recent one.
-    api.denoise_step(pipe, x, 0.5, _cond(2.0, "other"))
-    assert len(pipe.captions) == 2 and pipe.captions.get(
+    for key in ("pos", "neg", "other"):
+        api.denoise_step(pipe, x, 0.5, _cond(1.0, key))
+    assert len(pipe.captions) == 2 and pipe.captions.bytes == 512
+    assert pipe.captions.get(
         ("pos", pipe.default_table, str(mx.bfloat16))) is None
-    # A small state brings the bound back, and the cache sheds down to it.
-    small, _ = _parts_pipe(state_bytes=300, rows=4)
-    step = small.family.step
-    pipe.family = replace(pipe.family, step=step)
-    api.denoise_step(pipe, x, 0.5, _cond(3.0, "small"))
-    assert pipe.captions.max_bytes == 300
-    assert pipe.captions.bytes <= 300 and len(pipe.captions) == 2
+    # Small states stay up to the bound: 300 bytes hold 18 of 16 bytes.
+    pipe, calls = _parts_pipe(state_bytes=300, rows=4)
+    for i in range(24):
+        api.denoise_step(pipe, x, 0.5, _cond(1.0, f"k{i}"))
+    assert len(pipe.captions) == 18 and pipe.captions.bytes == 288
+    for i in range(6, 24):
+        api.denoise_step(pipe, x, 0.5, _cond(1.0, f"k{i}"))
+    assert calls["conditioning"] == 24
+
+
+def test_a_cache_keeps_its_newest_entries_past_the_bound_when_told():
+    lru = api.ByteLRU(100)
+    lru.put("a", 1, 150)
+    assert len(lru) == 0
+    lru.put("a", 1, 150, keep=2)
+    lru.put("b", 2, 120, keep=2)
+    assert len(lru) == 2 and lru.bytes == 270
+    lru.put("c", 3, 10, keep=2)
+    assert lru.get("a") is None and lru.bytes == 130
+    # A put without keep sheds to the bound.
+    lru.put("d", 4, 10)
+    assert lru.get("b") is None and lru.bytes == 20
 
 
 def test_a_family_schedule_reads_the_token_count_of_the_request():
