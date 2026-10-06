@@ -83,7 +83,7 @@ exercise a path.
 | `tests/image/test_image_check7.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step at 512x512 under a live LoRA matches the oracle on merged weights block by block and in velocity. The base and each wrong table fail. |
 | `tests/image/test_image_check7_community.py` | `GMLX_TEST_LORA_DIR` and `GMLX_IMAGE_FIXTURES` | Public Z-Image-Turbo LoRA files load with every key matched, give the float64 delta, and pass the step against the merged oracle block by block. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
-| `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL text GGUF and its mmproj load with every tensor used, the text model and the pair's language tower give the same hidden state before the final norm, and an image prompt has the token layout llama.cpp builds. |
+| `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL GGUF and its mmproj load with every tensor used, the text model and the pair agree before the final norm, and an image prompt has llama.cpp's layout. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
 
 ```sh
