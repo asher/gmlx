@@ -41,7 +41,23 @@ stock path of the op writes in that dtype. Each such output is within u
 of its exact value and the errors add to first order, so n u bounds a
 stock op on a well-conditioned input and the factor 2 covers the
 conditioning. n is a property of the op, not of the route: a kernel that
-replaces a stock op is read at the same site against the same gate.
+replaces a stock op is read at the same site against the same gate. The
+exact side takes the constants of the right model, its weights, norm
+weights of q and k, and RoPE tables, so a production op that is handed
+another constant fails at its site.
+
+The kernel routes of ``gmlx.image.ops.kq_routes`` round at other points
+than the oracle's bf16 run, so the product gate reads the block rows and
+the free-running blocks on the stock ops, in ``stock_ops_only``, and the
+velocity on the path a request takes. The site gate holds each routed
+kernel, and names the sites that ran on one in ``Sites.routed``.
+
+A relative L2 over all rows does not see a fault in one row of a few
+thousand, and a kernel can go wrong in one row. So a site on a kernel is
+also held row by row: the site's gate on every row of its output, one
+token over its heads and channels. The derivation of the gate is per
+element, so it holds for one row as for all of them, and the worst row of
+the stock ops at the same sites reads a third of it at most.
 """
 from __future__ import annotations
 
@@ -241,6 +257,52 @@ def exact_process() -> bool:
     return not tf32() and stock_ops()
 
 
+KERNEL_OPS = {"qk": "qk_norm_rope", "glu": "quantized_matmul_glu"}
+
+
+@contextmanager
+def kernel_calls(seen):
+    """Call ``seen(route)`` at each call that a kernel route hands to its
+    mlx-kquant op, and yield whether the build has a route."""
+    from gmlx.image import ops
+
+    routes = getattr(ops, "kq_routes", None)
+    saved = {} if routes is None else {
+        name: routes._kq_op(name) for name in KERNEL_OPS.values()}
+
+    def watched(route, op):
+        def call(*args, **kwargs):
+            seen(route)
+            return op(*args, **kwargs)
+        return call
+
+    try:
+        for route, name in KERNEL_OPS.items():
+            if saved.get(name) is not None:
+                routes._OPS[name] = watched(route, saved[name])
+        yield any(op is not None for op in saved.values())
+    finally:
+        for name, op in saved.items():
+            routes._OPS[name] = op
+
+
+@contextmanager
+def stock_ops_only():
+    """Run the block with every kernel route off, and after it the routes
+    that were in force. Fails if a route handed a call to mlx-kquant in the
+    block."""
+    from gmlx.image import ops
+
+    routes = getattr(ops, "kq_routes", None)
+    if routes is None:
+        yield
+        return
+    seen: list = []
+    with routes.only(()), kernel_calls(seen.append):
+        yield
+    assert not seen, f"mlx-kquant kernels ran on the stock path: {seen[:4]}"
+
+
 def _rerun(request, tag: str, env: dict) -> None:
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
@@ -294,7 +356,9 @@ def exact_products(dit):
     placement of an adapter table calls past the module with one band of
     the weight's rows. Every other entry of mlx_kquant is watched, and a
     call that takes the weight of a K-quant linear of ``dit`` is recorded
-    as a product on a kernel. Yields the record, which
+    as a product on a kernel. A kernel route of ``gmlx.image.ops`` keeps
+    its op past the names of mlx_kquant, so each call a route hands to
+    its op is recorded as well. Yields the record, which
     ``assert_all_dense`` reads."""
     import mlx_kquant as kq
     from mlx_kquant.nn import KQuantLinear
@@ -338,29 +402,35 @@ def exact_products(dit):
             return fn(*args, **kwargs)
         return call
 
+    def routed(route):
+        used.kernel.append((KERNEL_OPS[route], "kernel route"))
+
     entries = {n: getattr(kq, n) for n in kq.__all__
                if n not in ("dequantize", "quantized_matmul")
                and callable(getattr(kq, n, None))
                and not isinstance(getattr(kq, n), type)}
     act, call = dit.act_dtype, KQuantLinear.__call__
-    dit.act_dtype, KQuantLinear.__call__ = mx.float32, dense
-    kq.quantized_matmul = direct
-    for n, fn in entries.items():
-        setattr(kq, n, watched(n, fn))
-    try:
-        yield used
-    finally:
-        dit.act_dtype, KQuantLinear.__call__ = act, call
-        kq.quantized_matmul = matmul
+    # The routes look their ops up before the names of mlx_kquant change.
+    with kernel_calls(routed):
+        dit.act_dtype, KQuantLinear.__call__ = mx.float32, dense
+        kq.quantized_matmul = direct
         for n, fn in entries.items():
-            setattr(kq, n, fn)
+            setattr(kq, n, watched(n, fn))
+        try:
+            yield used
+        finally:
+            dit.act_dtype, KQuantLinear.__call__ = act, call
+            kq.quantized_matmul = matmul
+            for n, fn in entries.items():
+                setattr(kq, n, fn)
 
 
 def assert_all_dense(dit, used) -> None:
     """No K-quant product of ``dit`` ran on a kernel in the exact process,
-    and every K-quant linear ran as a dense product. A kernel that reads
-    a weight past its module is recorded when it reaches mlx_kquant, and
-    one that takes the place of a module's call leaves that module out."""
+    no kernel route ran, and every K-quant linear ran as a dense product.
+    A kernel that reads a weight past its module is recorded when it
+    reaches mlx_kquant, and one that takes the place of a module's call
+    leaves that module out."""
     assert not used.kernel, (
         f"{len(used.kernel)} K-quant products ran on a kernel in the exact "
         f"process, such as {used.kernel[:3]}")
@@ -446,6 +516,12 @@ SITE_RULE = (
     "part of a leaf's delta it changes exceeds the gate of a site that "
     "reads it: a tenth of the largest leaf delta for a strength a tenth "
     "off, and all of it for a group left out")
+
+
+ROW_RULE = (
+    "row rule of a site on a kernel: relative L2 <= 2 n u on every row of "
+    "the site's output, one token over its heads and channels, with the n "
+    "and u of the site gate")
 
 
 def unit(dtype) -> float:
@@ -573,7 +649,8 @@ class _SiteTaps(dict):
 class Sites:
     """The site gate's reader for one free-running production step of
     ``model``. Make it on the right model, before any fault: it keeps the
-    right leaves, codecs and norm weights for the exact side. ``factors``,
+    right leaves and codecs, the q and k norm weights and eps of each
+    block, and the model's RoPE tables for the exact side. ``factors``,
     from ``site_factors``, is the right adapter table.
 
     A site is read at the op's seam, the ``gmlx.image.ops`` function or
@@ -590,9 +667,10 @@ class Sites:
     inside a leaf under an adapter.
 
     After ``run``: ``readings`` and ``missed`` hold each site to its gate,
-    ``effect`` is each adapter delta's share of its leaf's output, and
-    ``broken`` lists what the block does that no site reads, which a right
-    model leaves empty."""
+    ``routed`` names the qk and glu sites that a kernel route handed to
+    mlx-kquant, ``effect`` is each adapter delta's share of its leaf's
+    output, and ``broken`` lists what the block does that no site reads,
+    which a right model leaves empty."""
 
     def __init__(self, model, factors=None):
         self.model, self.act = model, model.act_dtype
@@ -603,8 +681,9 @@ class Sites:
         for group in GROUPS:
             for i, blk in enumerate(getattr(model, group)):
                 name = f"{group}.{i}"
-                rec = {"modulated": "adaLN_modulation" in blk,
-                       "attention": blk.attention, "leaves": {}}
+                att = blk.attention
+                rec = {"modulated": "adaLN_modulation" in blk, "leaves": {},
+                       "qk": (att.q_norm.weight, att.k_norm.weight, att.eps)}
                 for leaf, path in LEAVES.items():
                     if leaf == "adaLN_modulation" and not rec["modulated"]:
                         continue
@@ -619,7 +698,9 @@ class Sites:
                 self.ffs[id(blk.feed_forward)] = name
                 self.blocks[id(blk)] = name
                 self.right[name] = rec
+        self._rope, self._tables = model.rope, {}
         self.sites: dict = {}   # name -> (family, n, inside a seam site)
+        self.routed: dict = {}  # name -> the mlx-kquant op that ran the site
         self.chunked: set = set()  # sites that write a modulation
         self.sums: dict = {}    # name -> (error, exact norm), squared per row
         self.deltas: dict = {}  # adapter leaf -> squared delta per row
@@ -690,6 +771,26 @@ class Sites:
             out[name] = {g: _rel(e2[s].sum(), r2[s].sum()) / self.gate(name)
                          for g, s in self._groups(name, len(e2)).items()}
         return out
+
+    def worst_rows(self) -> dict:
+        """Site to (the largest relative L2 of one row over the site's
+        gate, that row). A row is one token over its heads and channels,
+        and one chunk of a modulation."""
+        out = {}
+        for name in self.sites:
+            e2, r2 = self.sums[name]
+            with np.errstate(all="ignore"):
+                rel = np.where(e2 == 0, 0.0, np.sqrt(e2 / r2))
+            row = int(np.argmax(np.where(np.isfinite(rel), rel, np.inf)))
+            out[name] = (float(rel[row]) / self.gate(name), row)
+        return out
+
+    def missed_rows(self) -> dict:
+        """Site on a kernel to its worst row over its gate, for each such
+        site that has a row over the gate or not finite."""
+        return {name: v if np.isfinite(v) else np.inf
+                for name, (v, _) in self.worst_rows().items()
+                if name in self.routed and not v <= 1}
 
     def missed(self) -> dict:
         """Site to its largest reading over its gate, for each site that
@@ -838,11 +939,15 @@ class Sites:
         def call(q, k, q_w, k_w, cos, sin, eps):
             out = orig(q, k, q_w, k_w, cos, sin, eps)
             if s._cur is not None:
-                att = s.right[s._cur]["attention"]
-                qw, kw = att.q_norm.weight, att.k_norm.weight
+                qw, kw, right_eps = s.right[s._cur]["qk"]
+                rc, rs = s._tables[s._cur.split(".")[0]]
+                if rc.shape != cos.shape:
+                    s.broken.append(f"{s._cur}.qk takes the rope tables of "
+                                    f"{cos.shape[0]} rows")
+                    rc, rs = cos, sin
                 want = attention.qk_norm_rope(
                     q.astype(f), k.astype(f), qw.astype(f), kw.astype(f),
-                    cos, sin, att.eps)
+                    rc, rs, right_eps)
                 n = 1 + max(norm_roundings(qw, q.dtype),
                             norm_roundings(kw, k.dtype))
                 s._site(s._cur, "qk", "qk", n, tuple(out), want, (q, k))
@@ -1015,12 +1120,18 @@ class Sites:
                   (ops, "sdpa", self._h_sdpa)]
         if install.placement() == "block":
             hooks.append((install, "_add", self._h_add))
+
+        def routed(route: str) -> None:
+            if self._cur is not None:
+                self.routed[f"{self._cur}.{route}"] = KERNEL_OPS[route]
+
         saved = []
         try:
             for obj, attr, hook in hooks:
                 saved.append((obj, attr, getattr(obj, attr)))
                 setattr(obj, attr, hook(saved[-1][2]))
-            yield
+            with kernel_calls(routed):
+                yield
         finally:
             for obj, attr, orig in reversed(saved):
                 setattr(obj, attr, orig)
@@ -1028,6 +1139,14 @@ class Sites:
     def run(self, arrays: dict) -> str:
         """Read every site of one free-running production step on the
         fixture's inputs. Returns the digest of the velocity."""
+        cfg = self.model.cfg
+        ht, wt = (n // cfg.patch for n in arrays["latents"].shape[2:])
+        n_cap = -(-arrays["cap_feats"].shape[0] // cfg.seq_multiple) \
+            * cfg.seq_multiple
+        img, cap = self._rope(ht, wt, n_cap)
+        self._tables = {"noise_refiner": img, "context_refiner": cap,
+                        "layers": tuple(mx.concatenate([a, b], axis=0)
+                                        for a, b in zip(img, cap))}
         with self._hooked():
             v = self.model(mx.array(arrays["latents"]),
                            float(arrays["sigma"]),
@@ -1069,8 +1188,9 @@ def plain_velocity(model, arrays: dict) -> str:
 def right_sites(sites: Sites, velocity: str, label: str) -> None:
     """The site gate of a right model. Every op between a block's input
     and its output is a site, the step read is bit for bit the one the
-    parent process ran without hooks, and every site is within its gate.
-    Prints the largest reading of each family as a share of its gate."""
+    parent process ran without hooks, every site is within its gate, and
+    every row of a site on a kernel is. Prints the largest reading of
+    each family as a share of its gate, and the sites on a kernel."""
     want = os.environ.get(SITE_VELOCITY)
     assert want in (None, velocity), (
         f"{label}: the step the sites were read on is not the step of the "
@@ -1085,7 +1205,16 @@ def right_sites(sites: Sites, velocity: str, label: str) -> None:
     print(f"{label}: {len(sites.sites)} sites, the largest reading over its "
           f"gate by family: "
           + ", ".join(f"{k} {v:.2f}" for k, v in sorted(top.items())))
+    assert sites.routed.keys() <= sites.sites.keys()
+    rows = sites.worst_rows()
+    for route in KERNEL_OPS:
+        every = [n for n in sites.sites if n.endswith("." + route)]
+        on = [rows[n][0] for n in every if n in sites.routed]
+        print(f"{label}: {len(on)} of {len(every)} {route} sites on an "
+              f"mlx-kquant kernel"
+              + (f", worst row {max(on):.2f} of its gate" if on else ""))
     assert not sites.missed(), (label, SITE_RULE, sites.missed())
+    assert not sites.missed_rows(), (label, ROW_RULE, sites.missed_rows())
 
 
 def site_reach(effect: dict, got: Sites, part: float, where: str = "") -> float:

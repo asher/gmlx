@@ -22,7 +22,9 @@ swapped with k. A left out group moves the rows of that group alone, by
 the adapter's effect as the manifest records it.
 
 The product gate holds every block row, the free-running blocks and the
-velocity to the manifest's tolerances. The velocity sums 34 blocks, and a
+velocity to the manifest's tolerances. The block rows and the free-running
+blocks run on the stock ops, and the velocity on the path a request takes,
+kernel routes included. The velocity sums 34 blocks, and a
 fault in one block or a strength a tenth off moves it less than its
 tolerance. The block rows see a wrong table where the oracle's effect
 puts it two tolerances out, and the mutation rows record which ones that
@@ -54,7 +56,7 @@ from block_gates import (EXACT_TOL, adapter_sites, assert_all_dense,
                          check3_rows, exact_missed, exact_process,
                          exact_products, free_run, gate, rerun_exact,
                          rerun_sites, right_sites, site_process, site_reach,
-                         table_sites, table_velocity, thin)
+                         stock_ops_only, table_sites, table_velocity, thin)
 
 NAME = "check7_z_image_turbo_lora_512"
 
@@ -128,7 +130,8 @@ def block_rows(pipe, arrays: dict, m: dict, entries, free: bool = True,
                branches: bool = False):
     """Every teacher-forced row of the step under the table of
     ``entries``, the branch rows with ``branches`` and the free-running
-    block rows with ``free``, each against the merged oracle model."""
+    block rows with ``free``, each against the merged oracle model, on
+    the stock ops."""
     from gmlx.image import api
     from gmlx.image.lora import install
 
@@ -136,9 +139,10 @@ def block_rows(pipe, arrays: dict, m: dict, entries, free: bool = True,
     prev = install.activate(pipe, tid)
     try:
         seen: dict | None = {} if branches else None
-        rows = check3_rows(pipe.dit, arrays, m["inputs"]["rows"], seen)
-        blocks = free_run(pipe.dit, arrays, m["inputs"]["free_rows"])[0] \
-            if free else None
+        with stock_ops_only():
+            rows = check3_rows(pipe.dit, arrays, m["inputs"]["rows"], seen)
+            blocks = free_run(pipe.dit, arrays,
+                              m["inputs"]["free_rows"])[0] if free else None
     finally:
         install.restore(pipe, prev)
     if seen is not None:
@@ -157,8 +161,9 @@ def block_misses(m: dict, rows: dict) -> dict:
 def block_gate(pipe, name: str, entries, label: str,
                velocity: bool = True) -> None:
     """The product gate of the step under ``entries`` against the block
-    fixture ``name``: teacher-forced rows, free-running blocks and, with
-    ``velocity``, the velocity through ``denoise_step``."""
+    fixture ``name``: teacher-forced rows and free-running blocks on the
+    stock ops and, with ``velocity``, the velocity through
+    ``denoise_step`` on the path a request takes."""
     from gmlx.image import api
 
     arrays, m = blocks_fixture(name)

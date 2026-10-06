@@ -1,6 +1,6 @@
 """The exact context of ``block_gates`` on a tiny K-quant model: which
-products it runs dense, and what ``assert_all_dense`` refuses. CPU, no
-model file."""
+products it runs dense, and what ``assert_all_dense`` refuses, a kernel
+route left in force among them. CPU, no model file."""
 from __future__ import annotations
 
 import mlx.core as mx
@@ -9,12 +9,17 @@ import numpy as np
 import pytest
 
 import block_gates
-from block_gates import assert_all_dense, exact_products
+from block_gates import (assert_all_dense, exact_products, kernel_calls,
+                         stock_ops_only)
+
+from gmlx.image import ops
+from gmlx.image.ops import attention, kq_routes
 
 kq = pytest.importorskip("mlx_kquant")
 
 CODEC = "q4_k"
 WIDTH = 256
+EXACT_PROCESS = block_gates.exact_process
 
 
 def _leaf(rng, out: int):
@@ -163,3 +168,98 @@ def test_the_entries_are_put_back_when_the_run_raises(tiny):
     assert (kq.quantized_matmul, kq.gather_qmm,
             KQuantLinear.__call__) == before
     assert tiny.act_dtype == mx.bfloat16
+
+
+# The kernel routes of gmlx.image.ops.
+
+@pytest.fixture
+def routes(monkeypatch):
+    """Both routes in force on stand-in ops, put back after the test."""
+    calls = []
+
+    def glu(x, w_gate, w_up, codec):
+        calls.append("glu")
+        return x
+
+    def qk(q, k, *rest):
+        calls.append("qk")
+        return q, k
+
+    monkeypatch.setattr(ops, "qk_norm_rope", ops.qk_norm_rope)
+    monkeypatch.setattr(kq_routes, "_active", kq_routes._active)
+    monkeypatch.setattr(kq_routes, "_OPS", dict(
+        kq_routes._OPS, qk_norm_rope=qk, quantized_matmul_glu=glu, nax=True))
+    assert kq_routes.install(kq_routes.ROUTES) == set(kq_routes.ROUTES)
+    return calls
+
+
+def test_a_kernel_route_left_in_force_is_refused(tiny, routes):
+    """The routes keep their ops in a table of their own, past the names
+    of mlx_kquant that the exact context watches. A call a route hands to
+    its op in the exact context is recorded, beside the dense products of
+    every module, and refused."""
+    x = _x()
+    table = dict(kq_routes._OPS)
+    with exact_products(tiny) as used:
+        mx.eval(tiny(x))
+        kq_routes.swiglu_fused(x, tiny.a.weight, tiny.a.weight, CODEC)
+    assert routes == ["glu"]
+    assert used == {id(tiny.a), id(tiny.b)}
+    assert used.kernel == [("quantized_matmul_glu", "kernel route")]
+    with pytest.raises(AssertionError, match="1 K-quant products ran on a "
+                                             "kernel in the exact process"):
+        assert_all_dense(tiny, used)
+    assert kq_routes._OPS == table
+
+
+def test_the_exact_context_refuses_a_process_with_a_route_in_force(
+        tiny, routes, monkeypatch):
+    monkeypatch.setattr(block_gates, "tf32", lambda: False)
+    monkeypatch.setattr(block_gates, "exact_process", EXACT_PROCESS)
+    assert not block_gates.stock_ops()
+    with pytest.raises(AssertionError, match="GMLX_IMAGE_KQ_ROUTES=0"):
+        with exact_products(tiny):
+            pass
+    assert tiny.act_dtype == mx.bfloat16
+    with kq_routes.only(()):
+        assert block_gates.stock_ops()
+        with exact_products(tiny) as used:
+            mx.eval(tiny(_x()))
+        assert_all_dense(tiny, used)
+    assert not block_gates.stock_ops() and routes == []
+
+
+def test_stock_ops_only_puts_the_routes_off_and_back(routes):
+    q = mx.zeros((1, 2, 1, 64), mx.bfloat16)
+    args = (q, q, mx.ones((64,)), mx.ones((64,)), mx.ones((2, 32)),
+            mx.zeros((2, 32)), 1e-5)
+    table = dict(kq_routes._OPS)
+    with stock_ops_only():
+        assert kq_routes.active() == frozenset()
+        assert ops.qk_norm_rope is attention.qk_norm_rope
+        ops.qk_norm_rope(*args)
+    assert routes == []
+    assert kq_routes.active() == set(kq_routes.ROUTES)
+    assert ops.qk_norm_rope is kq_routes.qk_norm_rope
+    assert kq_routes._OPS == table
+    # A call that still reaches a route's op in the block fails it.
+    with pytest.raises(AssertionError, match="ran on the stock path"):
+        with stock_ops_only():
+            kq_routes.swiglu_fused(q, q, q, CODEC)
+    assert routes == ["glu"]
+    assert kq_routes.active() == set(kq_routes.ROUTES)
+    assert kq_routes._OPS == table
+
+
+def test_kernel_calls_names_each_call_a_route_hands_over(routes):
+    seen = []
+    table = dict(kq_routes._OPS)
+    x = mx.zeros((1, 4), mx.bfloat16)
+    with kernel_calls(seen.append) as has:
+        assert has
+        kq_routes.swiglu_fused(x, x, x, CODEC)
+        kq_routes.swiglu_fused(x, x, x, CODEC)
+    assert seen == ["glu", "glu"] == routes
+    assert kq_routes._OPS == table
+    kq_routes.swiglu_fused(x, x, x, CODEC)
+    assert seen == ["glu", "glu"]
