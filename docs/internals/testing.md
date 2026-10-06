@@ -64,7 +64,9 @@ The GGUF-gated tests check numerical correctness against real weights and
 stay skipped until `KQUANT_TEST_GGUF_DIR` points at a folder of GGUFs.
 Each test selects a model by architecture from the GGUF header, and any
 architecture you do not have skips, so one small model is enough to
-exercise a path.
+exercise a path. The Qwen-Image 2.1 rows find their DiT by its tensor
+names instead, as the loader does, because the GGUFs of
+`unsloth/Qwen-Image-2.1-GGUF` carry no metadata keys at all.
 
 | Module | Extra gate | What it checks |
 |--------|------------|----------------|
@@ -74,7 +76,7 @@ exercise a path.
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
 | `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, and each op of a block its stock op. |
-| `tests/image/test_image_qwen_real.py` | None | A Qwen-Image 2.1 DiT GGUF loads with fp32 norm leaves, and a small prefill and cached step stays finite with and without a reference. |
+| `tests/image/test_image_qwen_real.py` | None | A Qwen-Image 2.1 DiT GGUF has the committed header, loads with each tensor as bytes of the file, and a small cached step is finite with and without a reference. |
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
 | `tests/image/test_image_text_encoder_real.py` | None | A Qwen3-4B GGUF passes the Z-Image encoder checks, its last-layer tap equals the copied mlx-lm forward before the final norm, and release drops the model. |
 | `tests/image/test_image_check2.py` | `GMLX_IMAGE_FIXTURES` | The Z-Image encoder tap has the oracle's token ids and stays within its calibrated relative L2 and per-token cosine. |
@@ -221,8 +223,10 @@ reading, and each wrong model of its list must miss a row by twice that.
 `tests/image/test_image_qwen_layout.py` holds the position of every
 token, the expansion of image slots, the modulation row of every token
 and the prefill segments to the layout fixture. The rows of
-`test_image_check3_qwen.py` that read the real file skip until the
-manifests that `check3_qwen_image21.py` writes from it are committed.
+`test_image_check3_qwen.py` that read the real file take the committed
+manifests that `check3_qwen_image21.py` wrote from it. Their exact gate
+also runs the model's own timestep embedding, which is two K-quant
+products in the real file and float32 in the tiny one.
 
 `check5_qwen_image21_vae.py --self-test` builds diffusers'
 `AutoencoderKLQwenImage21` at a tiny config, with the seeded weights of
@@ -245,11 +249,17 @@ diffusers' own Qwen LoRA loader gives the key.
 dialect and runs the step under a patch table, on a model that holds the
 fused gate and projection weight and on one that holds the pair apart.
 Every row is held to the bounds of check 3, and each wrong table of its
-list must miss a bound by twice. Its rows that read the real file skip
-until the manifests that `check7_qwen_image21_lora.py` writes from it
-are committed. On the real file the script seeds the pairs itself, at a
-norm of 0.15 times each weight, and writes an adapter with an alpha, one
-without, and a stack of two on different layers and blocks.
+list must miss a bound by twice. Its rows that read the real file take
+the committed manifests that `check7_qwen_image21_lora.py` wrote from
+it. On the real file the script seeds the pairs itself, at a norm of
+0.15 times each weight, and writes an adapter with an alpha, one
+without, and a stack of two on different layers and blocks. At that
+norm the gates differ in what they show. The block rows of the product
+gate do not see a missing adapter in the first adapted blocks, and up
+to a third of the adapted leaf calls would pass their site gate without
+the adapter. The exact gate is the one that shows the adapter is
+applied: it leaves the adapter out of each block in turn, and each must
+miss.
 
 `check2_qwen_image21.py` loads Qwen3-VL-8B from its text GGUF into the
 transformers class by tensor name and runs the pipeline's own prompt
