@@ -322,3 +322,78 @@ def test_the_header_vet_places_stems_on_the_family_and_the_dit(tmp_path):
                                            "which this DiT does not have"):
         reader.vet_header(good, keymap=KEYMAP,
                           modules=held - {"layers.0.feed_forward.w1"})
+
+
+W1 = "transformer.layers.0.feed_forward.w1"
+TO_Q = "transformer.layers.0.attention.to_q"
+TEXT_Q = "text_encoder.layers.0.self_attn.q_proj"
+
+
+def _good(stem: str) -> dict:
+    down, up, _ = _pair()
+    return {stem + ".lora_down.weight": down, stem + ".lora_up.weight": up}
+
+
+@pytest.mark.parametrize("keys, text", [
+    ({**_good(W1), TO_Q + ".lora_down.weight": _pair()[0]},
+     f"{TO_Q} has no up tensor"),
+    ({**_good(W1), TO_Q + ".lora_up.weight": _pair()[1]},
+     f"{TO_Q} has no down tensor"),
+    ({**_good(W1), TO_Q + ".alpha": np.float32(4.0)},
+     f"{TO_Q} has an alpha and no pair"),
+    ({TO_Q + ".alpha": np.float32(4.0)}, f"{TO_Q} has an alpha and no pair"),
+    ({**_good(W1), W1 + ".lora_A.weight": _pair()[0]},
+     f"{W1} has two down tensors"),
+], ids=["no up", "no down", "alpha beside a pair", "alpha alone",
+        "two down"])
+def test_the_header_vet_refuses_a_broken_pair_as_the_read_does(tmp_path,
+                                                               keys, text):
+    """The names in the header show a stem with half a pair, with an alpha
+    alone or with two tensors of one role. The vet refuses each with the
+    error the read gives, with or without a key map."""
+    path = write_keys(tmp_path / "broken.safetensors", keys)
+    with pytest.raises(AdapterError) as want:
+        reader.read_lora(path)
+    assert text in str(want.value)
+    for kw in ({}, {"allow_unmatched": True}, {"keymap": KEYMAP},
+               {"keymap": KEYMAP, "modules": {"layers.0.feed_forward.w1"}}):
+        with pytest.raises(AdapterError) as got:
+            reader.vet_header(path, **kw)
+        assert type(got.value) is type(want.value)
+        assert str(got.value) == str(want.value)
+
+
+@pytest.mark.parametrize("stems, text", [
+    ((W1, "lora_unet_layers_0_feed_forward_w1"),
+     "both target layers.0.feed_forward.w1"),
+    ((TO_Q, "lora_unet_layers_0_attention_to_q", W1),
+     "both target layers.0.attention.qkv band (0, 0, 8)"),
+    ((W1, TEXT_Q, "lora_te_layers_0_self_attn_q_proj"),
+     "both target model.layers.0.self_attn.q_proj"),
+], ids=["whole weight", "band", "text"])
+def test_the_header_vet_refuses_two_stems_on_one_module(tmp_path, stems,
+                                                        text):
+    """Two stems that resolve to one module and band are refused by the
+    vet with the error ``resolve`` gives, in the stems' file order."""
+    keys = {}
+    for stem in stems:
+        keys.update(_good(stem))
+    path = write_keys(tmp_path / "twice.safetensors", keys)
+    with pytest.raises(AdapterError) as want:
+        reader.resolve(reader.read_lora(path), KEYMAP)
+    assert text in str(want.value)
+    # Without a key map the vet cannot place a stem.
+    assert reader.vet_header(path) == len(stems)
+    for kw in ({}, {"allow_unmatched": True},
+               {"modules": {"layers.0.feed_forward.w1"}}):
+        with pytest.raises(AdapterError) as got:
+            reader.vet_header(path, keymap=KEYMAP, **kw)
+        assert type(got.value) is type(want.value)
+        assert str(got.value) == str(want.value)
+    # The band targets of one module are not one target.
+    apart = {}
+    for stem in (TO_Q, "transformer.layers.0.attention.to_k",
+                 "transformer.layers.0.attention.qkv"):
+        apart.update(_good(stem))
+    path = write_keys(tmp_path / "apart.safetensors", apart)
+    assert reader.vet_header(path, keymap=KEYMAP) == 3

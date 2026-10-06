@@ -613,11 +613,25 @@ def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
         f"{stem}.mystery": d})
     junk = tmp_path / "junk.safetensors"
     junk.write_bytes(b"not a safetensors file at all")
+    half = write_keys(tmp_path / "half.safetensors", {
+        f"{stem}.lora_down.weight": d})
+    alone = write_keys(tmp_path / "alone.safetensors", {
+        f"{stem}.lora_down.weight": d, f"{stem}.lora_up.weight": u,
+        "lora_unet_layers_1_attention_out.alpha": np.float32(4.0)})
+    twice = write_keys(tmp_path / "twice.safetensors", {
+        f"{stem}.lora_down.weight": d, f"{stem}.lora_up.weight": u,
+        "transformer.layers.0.attention.to_out.0.lora_A.weight": d,
+        "transformer.layers.0.attention.to_out.0.lora_B.weight": u})
     # A file that is refused by its key names, or is not safetensors, is
     # refused from its header, before any model loads. So is a file whose
     # keys name no module of this DiT: its GGUF header gives the family
-    # and the modules it holds.
-    for path, text in ((loha, "loha.safetensors is a LoHa adapter"),
+    # and the modules it holds. So is a file with half a pair, an alpha
+    # alone or two stems on one module, which the header's names show.
+    for path, text in ((half, f"half.safetensors: {stem} has no up tensor"),
+                       (alone, "lora_unet_layers_1_attention_out has an "
+                               "alpha and no pair"),
+                       (twice, "both target layers.0.attention.out"),
+                       (loha, "loha.safetensors is a LoHa adapter"),
                        (dora, "dora.safetensors is a DoRA adapter"),
                        (stray, "1 of 3 keys have no known LoRA suffix"),
                        (str(junk), "is not a safetensors file"),

@@ -192,6 +192,30 @@ def _matrix(arr: mx.array, key: str, path: str) -> mx.array:
     return arr
 
 
+def _need_pair(path: str, stem: str, roles) -> None:
+    """Raise ``AdapterError`` for a stem that lacks a half of its pair.
+    ``roles`` holds the roles the stem has tensors for."""
+    if "down" in roles and "up" in roles:
+        return
+    if set(roles) == {"alpha"}:
+        raise AdapterError(f"{path}: {stem} has an alpha and no pair")
+    missing = "down" if "down" not in roles else "up"
+    raise AdapterError(f"{path}: {stem} has no {missing} tensor")
+
+
+def _one_stem_per_target(path: str, rows) -> None:
+    """Raise ``AdapterError`` when two of the (stem, module, band) rows
+    target one module and band."""
+    seen: dict = {}
+    for stem, module, band in rows:
+        key = (module, band)
+        if key in seen:
+            raise AdapterError(
+                f"{path}: {stem} and {seen[key]} both target "
+                f"{module}" + ("" if band is None else f" band {band}"))
+        seen[key] = stem
+
+
 def parse_pairs(arrays: Mapping, path: str = "<arrays>", *,
                 metadata: Mapping | None = None,
                 allow_unmatched: bool = False) -> RawLora:
@@ -223,12 +247,7 @@ def parse_pairs(arrays: Mapping, path: str = "<arrays>", *,
             f"suffix: {_listed(stray)}", tuple(stray))
     pairs = {}
     for stem, slot in parts.items():
-        if "down" not in slot or "up" not in slot:
-            if set(slot) == {"alpha"}:
-                raise AdapterError(f"{path}: {stem} has an alpha and no "
-                                   "pair")
-            missing = "down" if "down" not in slot else "up"
-            raise AdapterError(f"{path}: {stem} has no {missing} tensor")
+        _need_pair(path, stem, slot)
         down = _matrix(slot["down"][1], slot["down"][0], path)
         up = _matrix(slot["up"][1], slot["up"][0], path)
         if up.shape[1] != down.shape[0]:
@@ -276,61 +295,73 @@ def vet_header(path: str, *, allow_unmatched: bool = False,
                keymap: LoraKeyMap | None = None, modules=None) -> int:
     """Check a LoRA safetensors file by its header alone and return the
     number of pair stems it names. Raises as ``read_lora`` does for a file
-    that is not safetensors, for a refused adapter type and for keys with
-    no known suffix. It reads no tensor, so a caller can refuse a file
-    before it loads a model.
+    that is not safetensors, for a refused adapter type, for keys with no
+    known suffix, and for a stem with two tensors of one role or without
+    both halves of its pair. It reads no tensor, so a caller can refuse a
+    file before it loads a model.
 
     With ``keymap``, the stems are placed as ``resolve`` places them, so a
-    file for another family raises ``AdapterFamilyError`` and a stem that
-    names no module raises ``UnmatchedKeysError``. With ``modules``, the
-    module paths that the DiT file holds a weight for, a stem that targets
-    a module outside them raises ``AdapterError``. Whether a pair's shape
-    fits its module is checked at the load."""
+    file for another family raises ``AdapterFamilyError``, a stem that
+    names no module raises ``UnmatchedKeysError`` and two stems on one
+    module raise ``AdapterError``. With ``modules``, the module paths that
+    the DiT file holds a weight for, a stem that targets a module outside
+    them raises ``AdapterError``. Whether a pair's shape fits its module
+    is checked at the load."""
     import os
 
     path = os.path.expanduser(str(path))
     names = _header_names(path)
-    stems, stray = set(), []
+    # Stems in file order, as ``parse_pairs`` holds them.
+    parts: dict[str, set] = {}
+    stray = []
     for key in names:
         hit = _split(key)
         if hit is None:
             stray.append(key)
-        else:
-            stems.add(hit[0])
+            continue
+        stem, role = hit
+        roles = parts.setdefault(stem, set())
+        if role in roles:
+            raise AdapterError(f"{path}: {stem} has two {role} tensors")
+        roles.add(role)
     if stray and not allow_unmatched:
         raise UnmatchedKeysError(
             f"{path}: {len(stray)} of {len(names)} keys have no known LoRA "
             f"suffix: {_listed(stray)}", tuple(stray))
-    if not stems:
+    for stem, roles in parts.items():
+        _need_pair(path, stem, roles)
+    if not parts:
         raise AdapterError(f"{path} holds no LoRA pair")
     if keymap is not None:
-        _vet_targets(path, sorted(stems), keymap, modules, allow_unmatched)
-    return len(stems)
+        _vet_targets(path, list(parts), keymap, modules, allow_unmatched)
+    return len(parts)
 
 
 def _vet_targets(path: str, stems: list, keymap: LoraKeyMap, modules,
                  allow_unmatched: bool) -> None:
     """Raise as ``resolve`` and ``load_adapter`` do for stems that name no
-    module of the family, or a module the DiT file does not hold."""
+    module of the family, two stems on one module, or a module the DiT
+    file does not hold."""
     under = _underscore_index(keymap.targets)
     text_under = _underscore_index(keymap.text_targets)
-    placed, unmatched, absent = 0, [], []
+    dit, text, unmatched, absent = [], [], [], []
     for stem in stems:
         if is_text_stem(stem):
-            if _text_target(stem, keymap, text_under) is None:
+            target = _text_target(stem, keymap, text_under)
+            if target is None:
                 unmatched.append(stem)
             else:
-                placed += 1
+                text.append((stem, target, None))
             continue
         hit = _dit_target(stem, keymap, under)
         if hit is None:
             unmatched.append(stem)
             continue
-        placed += 1
-        module = keymap.targets[hit[0]][0]
+        module, band = keymap.targets[hit[0]]
+        dit.append((stem, module, band))
         if modules is not None and module not in modules:
             absent.append((stem, module))
-    if not placed:
+    if not dit and not text:
         raise AdapterFamilyError(
             f"{path} is not a {keymap.title} adapter: none of its "
             f"{len(stems)} targets names a {keymap.title} module "
@@ -339,6 +370,7 @@ def _vet_targets(path: str, stems: list, keymap: LoraKeyMap, modules,
         raise UnmatchedKeysError(
             f"{path}: {len(unmatched)} of {len(stems)} targets name no "
             f"{keymap.title} module: {_listed(unmatched)}", tuple(unmatched))
+    _one_stem_per_target(path, dit + text)
     if absent:
         stem, module = absent[0]
         raise AdapterError(f"{path}: {stem} targets {module}, which this "
@@ -457,13 +489,7 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             f"{raw.path}: {len(dropped)} underscore keys spell diffusers "
             f"names ({_listed(dropped)}). gmlx applies them and ComfyUI "
             "drops them, so the image differs from ComfyUI's")
-    seen: dict = {}
-    for t in dit + text:
-        key = (t.module, t.band)
-        if key in seen:
-            raise AdapterError(
-                f"{raw.path}: {t.pair.stem} and {seen[key]} both target "
-                f"{t.module}" + ("" if t.band is None else f" band {t.band}"))
-        seen[key] = t.pair.stem
+    _one_stem_per_target(raw.path, [(t.pair.stem, t.module, t.band)
+                                    for t in dit + text])
     return ResolvedLora(path=raw.path, dit=tuple(dit), text=tuple(text),
                         unmatched=tuple(unmatched), warnings=tuple(warnings))
