@@ -1,6 +1,6 @@
 """The hooks a family's registry row gives the shared image code, on toy
-families: the step in parts under the pipeline's two memos, and the
-schedule. CPU."""
+families: the step in parts under the pipeline's two memos, the schedule
+and the size multiple. CPU."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -8,9 +8,10 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from gmlx.image import api
-from gmlx.image.registry import StepParts, get_family
+from gmlx.image.registry import ConstantsRow, StepParts, get_family
 
 
 class _State:
@@ -129,3 +130,16 @@ def test_a_family_schedule_reads_the_token_count_of_the_request():
     api.sample(pipe, _cond(0.25, "a"), height=48, width=64, seed=3,
                sigmas=[1.0, 0.5, 0.0])
     assert len(seen) == n and calls["forward"] == 4
+
+
+def test_the_size_multiple_comes_from_the_family_row_when_it_has_one():
+    pipe, _ = _parts_pipe()
+    assert pipe.size_multiple == 16
+    row = pipe.family.constants
+    pipe.family = replace(pipe.family, constants=ConstantsRow(
+        {**row.values, "size_multiple": 32}, row.repo, row.revision))
+    assert pipe.size_multiple == 32
+    with pytest.raises(ValueError, match="multiples of 32, not 48x64"):
+        api.sample(pipe, _cond(0.25), height=48, width=64, seed=0, steps=1)
+    x = api.sample(pipe, _cond(0.25), height=64, width=32, seed=0, steps=1)
+    assert x.shape == (1, 4, 8, 4)

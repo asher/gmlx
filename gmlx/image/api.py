@@ -124,6 +124,14 @@ class ImagePipeline:
         return int(self.family.constants.values["vae_scale_factor"])
 
     @property
+    def size_multiple(self) -> int:
+        """What an image's height and width are multiples of: the family
+        row's ``size_multiple``, else one DiT patch in pixels."""
+        c = self.family.constants.values
+        return int(c.get("size_multiple",
+                         self.vae_scale * self.dit.cfg.patch))
+
+    @property
     def defaults(self) -> SamplerDefaults:
         row = sampler_defaults(self.family.name, self.variant)
         if row is None:
@@ -540,7 +548,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         cfg = pipe.defaults.cfg
     if cfg != 1.0 and neg is None:
         raise ValueError(f"cfg {cfg} needs a negative conditioning")
-    unit = pipe.vae_scale * pipe.dit.cfg.patch
+    unit = pipe.size_multiple
     if height <= 0 or width <= 0 or height % unit or width % unit:
         raise ValueError(f"height and width must be positive multiples of "
                          f"{unit}, not {height}x{width}")
