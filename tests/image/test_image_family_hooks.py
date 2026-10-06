@@ -1,6 +1,6 @@
 """The hooks a family's registry row gives the shared image code, on toy
-families: the step in parts under the pipeline's two memos, the schedule
-and the size multiple. CPU."""
+families: the step in parts under the pipeline's two memos, the schedule,
+the size multiple, and a load without an encoder. CPU."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -10,7 +10,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from gmlx.image import api
+from gmlx.image import api, memfit
+from gmlx.image.fingerprint import ImageModelError
 from gmlx.image.registry import ConstantsRow, StepParts, get_family
 
 
@@ -143,3 +144,32 @@ def test_the_size_multiple_comes_from_the_family_row_when_it_has_one():
         api.sample(pipe, _cond(0.25), height=48, width=64, seed=0, steps=1)
     x = api.sample(pipe, _cond(0.25), height=64, width=32, seed=0, steps=1)
     assert x.shape == (1, 4, 8, 4)
+
+
+def test_a_family_without_an_encoder_loads_when_none_is_asked(monkeypatch):
+    from gmlx.image import dtypes, loader
+
+    fam = replace(get_family("z_image"), name="toy", title="Toy")
+    ident = SimpleNamespace(family=fam, variant="default")
+    loads = []
+
+    def load_dit(path, **kw):
+        loads.append(path)
+        dit = SimpleNamespace(act_dtype=kw["act_dtype"])
+        return dit, SimpleNamespace(identified=ident)
+
+    monkeypatch.setattr(api, "_header_bytes", lambda p, kind: 0)
+    monkeypatch.setattr(memfit, "gate_load", lambda *a, **k: None)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **kw: ident)
+    monkeypatch.setattr(loader, "load_dit", load_dit)
+    monkeypatch.setattr(
+        dtypes, "image_activation",
+        lambda name, **kw: dtypes.Activation(mx.bfloat16, mx.bfloat16, 16))
+    pipe = api.load("d.gguf")
+    assert pipe.family is fam and pipe.encoder is None and pipe.vae is None
+    with pytest.raises(ValueError, match="no text encoder"):
+        api.encode_text(pipe, "a prompt")
+    # With an encoder asked for, the family is refused before the DiT loads.
+    with pytest.raises(ImageModelError, match="'toy' has no text encoder"):
+        api.load("d.gguf", text_encoder="e.gguf")
+    assert loads == ["d.gguf"]
