@@ -920,6 +920,47 @@ def _real_manifest(name: str) -> dict:
     return committed(name)
 
 
+def test_the_real_manifests_name_the_adapters_the_rows_load():
+    """The committed manifests alone: the dialects of each variant, the
+    two adapters of the stack and where they meet, one pair fixture, one
+    source step and one DiT file for all, and tolerances that follow the
+    rule from the gaps beside them."""
+    top = committed(REAL)
+    ins = top["inputs"]
+    assert {v: tuple(r["dialects"])
+            for v, r in ins["variants"].items()} == REAL_VARIANTS
+    stack = ins["stacked"]["adapters"]
+    assert [(r["prefix"], r["dialect"], r["alpha"]) for r in stack] == [
+        ("", "kohya", 4.0), ("two.", "diffusers", None)]
+    one, two = (set(r["targets"]) for r in stack)
+    assert one == set(ins["targets"]) and two & one and two - one
+
+    def blocks(targets):
+        return {int(t.split(".")[1]) for t in targets}
+
+    # The second adapter shares blocks with the first, has blocks of its
+    # own, and leaves some of the first's alone.
+    assert blocks(two) & blocks(one) and blocks(two) - blocks(one)
+    assert blocks(one) - blocks(two)
+    assert set(top["tensors"]) == {
+        f"{r['prefix']}{half}.{t}" for r in stack for t in r["targets"]
+        for half in ("down", "up")}
+    names = [r["fixture"] for r in ins["variants"].values()]
+    for name in (*names, ins["stacked"]["fixture"]):
+        m = committed(name)
+        assert m["inputs"]["pairs_fixture"] == REAL, name
+        assert m["inputs"]["source"] == ins["source"], name
+        assert m["files"]["dit"] == top["files"]["dit"], name
+        for tag in "ab":
+            gap = m["results"][f"velocity_{tag}_bf16_vs_fp32"]
+            tol = m["tolerances"]
+            assert tol[f"velocity_{tag}_rel_l2"] == 2 * gap["rel_l2"]
+            assert tol[f"velocity_{tag}_cosine_min"] == pytest.approx(
+                1 - 4 * (1 - gap["cosine"]), abs=1e-12)
+    assert [r["prefix"] for r in committed(
+        ins["stacked"]["fixture"])["inputs"]["adapters"]] == ["", "two."]
+
+
 @pytest.fixture(scope="module")
 def real(gguf_index):
     """A pipeline over the DiT GGUF the oracle read, or a skip."""
