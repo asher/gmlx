@@ -151,6 +151,60 @@ def image_mask(case: str) -> np.ndarray:
     return mask
 
 
+# Synthetic LoRA adapters: target, a linear module of the reference
+# transformer, to rank. Between them they name every kind of linear layer,
+# both halves of one image MLP, one half of the other, and some targets
+# twice, so a stack sums on a band, across bands and on a whole weight.
+_B = "transformer_blocks."
+LORA = {
+    "one": {
+        _B + "0.attn.to_q": 2, _B + "0.attn.to_k": 3, _B + "0.attn.to_v": 2,
+        _B + "0.attn.to_out.0": 2, _B + "0.img_mlp.gate_layer": 4,
+        _B + "0.img_mlp.proj": 2, _B + "0.img_mlp.out": 2,
+        _B + "1.attn.to_k": 2, _B + "1.attn.to_v": 2,
+        _B + "1.img_mlp.gate_layer": 2,
+        "img_in": 2, "txt_in.in_layer": 2, "txt_in.out_layer": 2,
+        "time_text_embed.timestep_embedder.linear_1": 2,
+        "time_text_embed.timestep_embedder.linear_2": 2,
+        "modulation.1": 2, "norm_out.linear": 2, "proj_out": 2,
+    },
+    "two": {
+        _B + "0.attn.to_v": 2, _B + "0.img_mlp.gate_layer": 3,
+        _B + "1.attn.to_q": 2, _B + "1.img_mlp.proj": 2,
+        "txt_in.out_layer": 2, "modulation.1": 1, "proj_out": 1,
+    },
+}
+# Variant to the case it runs on and its rows of (adapter, alpha,
+# strength). The rows of a variant are merged into one model.
+LORA_VARIANTS = {
+    "alpha": ("ref2", (("one", 3.0, 0.8),)),
+    "plain": ("ref1", (("one", None, 0.5),)),
+    "stacked": ("text", (("one", 3.0, 0.75), ("two", None, -0.4))),
+}
+
+
+def lora_pairs(name: str, cfg: dict = TINY) -> dict:
+    """Target to (down (rank, in), up (out, rank)) of adapter ``name``,
+    float32 in [-0.25, 0.25) and exact in bfloat16."""
+    dims = shapes(cfg, fused=False)
+    out = {}
+    for target, rank in LORA[name].items():
+        rows, cols = dims[target + ".weight"]
+        out[target] = (
+            uniform(f"lora {name} {target} down", (rank, cols))
+            * np.float32(0.5),
+            uniform(f"lora {name} {target} up", (rows, rank))
+            * np.float32(0.5))
+    return out
+
+
+def lora_sha256(name: str, cfg: dict = TINY) -> dict:
+    """The sha256 of every factor of adapter ``name``."""
+    return sha256({f"{part}.{target}": a
+                   for target, pair in lora_pairs(name, cfg).items()
+                   for part, a in zip(("down", "up"), pair)})
+
+
 def sha256(arrays: dict) -> dict:
     """Name to sha256 of each array's little-endian bytes."""
     return {k: hashlib.sha256(np.ascontiguousarray(

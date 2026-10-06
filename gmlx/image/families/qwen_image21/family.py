@@ -181,6 +181,12 @@ def _forward(dit, latents, sigma, cond, prefix, mod):
     return forward_target(dit, latents, sigma, cond, prefix, mod=mod)
 
 
+def lora_map(config: dict):
+    from .lora_map import lora_map as build_map
+
+    return build_map(config)
+
+
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
     """Sigmas of ``steps`` for an image of ``tokens`` latent tokens."""
     from gmlx.image.schedule import qwen21_sigmas
@@ -210,4 +216,5 @@ FAMILY = Family(
     sampling=SAMPLING,
     step=StepParts(_modulation, _prefix, _forward, PREFIX_CACHE_BYTES),
     schedule=schedule,
+    lora_map=lora_map,
 )
