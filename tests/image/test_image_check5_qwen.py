@@ -27,6 +27,13 @@ MLX_ENABLE_TF32=0 in a child process, as in the Z-Image check. They are
 skipped until the oracle has run on the official VAE and its manifest is
 committed, and unless GMLX_TEST_IMAGE_DIR holds the VAE and
 GMLX_IMAGE_FIXTURES the fixture.
+
+Every pass of an official test goes through ``tiling.decode`` or
+``tiling.encode``, which price it by the VAE row of the memory plan and
+refuse one that does not fit. That row is unmeasured, so a pass above one
+tile runs whole only when the test forces it. A test that does states the
+price of its largest pass, and none runs a whole pass above 1024 pixels,
+where a bf16 decode is priced at 8.69 GiB against 26.92 GiB at 2048.
 scripts/image_oracle/check5_qwen_image21_vae.py writes the fixtures."""
 from __future__ import annotations
 
@@ -51,6 +58,8 @@ TINY_FP32_MAX_ABS = 5e-5
 OFFICIAL_FLAGS = [False, True, True, True]
 TILED_ENCODE_REL_L2 = 0.05
 TILED_ROUND_TRIP_DB = 50.0
+# The largest side that an official test runs whole.
+WHOLE_MAX = 1024
 
 
 def to_unit(img: np.ndarray) -> np.ndarray:
@@ -82,6 +91,24 @@ def _encode_latents(vae, image, **kw) -> np.ndarray:
     from gmlx.image.vae import tiling
 
     return np.array(tiling.encode(vae, image.transpose(0, 2, 3, 1), **kw))
+
+
+def _guarded_mean(vae, image, m, **kw) -> np.ndarray:
+    """The encoder mean through the guarded encode. That gives model-space
+    latents, and the oracle's statistics put them back on the VAE's
+    scale."""
+    shape = (1, -1, 1, 1)
+    lat = _encode_latents(vae, image, **kw).astype(np.float64)
+    return (lat * np.array(m["inputs"]["latents_std"]).reshape(shape)
+            + np.array(m["inputs"]["latents_mean"]).reshape(shape))
+
+
+def _whole_tags(m) -> list:
+    """The manifest's sizes for a test that runs each whole."""
+    big = [s for s in m["inputs"]["sizes"] if max(s) > WHOLE_MAX]
+    assert not big, (f"no official test runs a whole pass above {WHOLE_MAX} "
+                     f"pixels, and the oracle's sizes hold {big}")
+    return _tags(m)
 
 
 def readings(vae, arrays, s: str) -> dict:
@@ -179,6 +206,23 @@ def test_the_latent_statistics_are_the_oracle_ones(selftest, files):
     cfg = _load(files["safetensors"], "fp32").config
     assert list(cfg.latents_mean) == m["inputs"]["latents_mean"]
     assert list(cfg.latents_std) == m["inputs"]["latents_std"]
+
+
+def test_the_guarded_encode_gives_the_encoder_mean(selftest, files):
+    """The official tests read the encoder mean from the guarded encode."""
+    arrays, m = selftest
+    with mx.stream(mx.cpu):
+        vae = _load(files["safetensors"], "fp32")
+        for s in _tags(m):
+            image = arrays[f"image_{s}"]
+            got = _guarded_mean(vae, image, m, tiled=False, free=1e12)
+            tol = m["tolerances"]["sizes"][s]["encode_fp32_max_abs"]
+            assert fx.max_abs(got, _encode_mean(vae, image)) < 2e-6
+            assert fx.max_abs(got, arrays[f"encode_mean_{s}"]) <= tol
+        assert _whole_tags(m) == _tags(m)
+        big = {"inputs": {"sizes": [[512, 512], [1024, 1040]]}}
+        with pytest.raises(AssertionError, match="above 1024 pixels"):
+            _whole_tags(big)
 
 
 @pytest.mark.parametrize("fmt", ["safetensors", "gguf"])
@@ -446,14 +490,16 @@ def test_latent_statistics_are_the_oracle_ones(check5, vaes):
 
 @official
 def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
+    """Whole fp32 decodes, forced. At 1024 pixels the largest is priced at
+    15.38 GiB on the exact conv path and 21.46 GiB on Winograd."""
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
     bad = []
     for conv in CONV_PATHS:
         vae = vaes("fp32", conv)
-        for s in _tags(m):
-            got = _decode(vae, arrays[f"latents_{s}"])
+        for s in _whole_tags(m):
+            got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
             ref = arrays[f"decoded_{s}"]
             err = fx.max_abs(got, ref)
             tol = m["tolerances"]["sizes"][s]["decode_fp32_max_abs"]
@@ -470,14 +516,16 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
 
 @official
 def test_bf16_decode_psnr(check5, vaes):
+    """Whole bf16 decodes, forced. At 1024 pixels the largest is priced at
+    8.69 GiB on the exact conv path and 11.73 GiB on Winograd."""
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
     bad = []
     for conv in CONV_PATHS:
         vae = vaes("bf16", conv)
-        for s in _tags(m):
-            got = _decode(vae, arrays[f"latents_{s}"])
+        for s in _whole_tags(m):
+            got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
             ref = arrays[f"decoded_{s}"]
             db = fx.psnr(to_unit(got), to_unit(ref), 1.0)
             tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
@@ -490,15 +538,17 @@ def test_bf16_decode_psnr(check5, vaes):
 
 @official
 def test_fp32_encoder_mean(check5, vaes, request):
+    """Whole fp32 encodes, forced, through the guarded encode. At 1024
+    pixels the largest is priced at 8.63 GiB."""
     arrays, m = check5
     bad = []
-    for s in _tags(m):
+    for s in _whole_tags(m):
         image = arrays[f"image_{s}"]
         rgba = np.concatenate([image, arrays[f"alpha_{s}"]], axis=1)
         tol = m["tolerances"]["sizes"][s]["encode_fp32_max_abs"]
         for what, x, key in (("opaque", image, f"encode_mean_{s}"),
                              ("alpha", rgba, f"encode_mean_rgba_{s}")):
-            got = _encode_mean(vaes("fp32"), x)
+            got = _guarded_mean(vaes("fp32"), x, m, tiled=False)
             err = fx.max_abs(got, arrays[key])
             print(f"[check5] {s} fp32 encode mean, {what}, {_numerics()}, "
                   f"max abs {err:.3e}, rel L2 "
@@ -513,9 +563,12 @@ def test_fp32_encoder_mean(check5, vaes, request):
 
 @official
 def test_bf16_encoder_mean(check5, vaes):
+    """Whole bf16 encodes, forced, through the guarded encode. At 1024
+    pixels the largest is priced at 5.32 GiB."""
     arrays, m = check5
-    for s in _tags(m):
-        got = _encode_mean(vaes("bf16"), arrays[f"image_{s}"])
+    for s in _whole_tags(m):
+        got = _guarded_mean(vaes("bf16"), arrays[f"image_{s}"], m,
+                            tiled=False)
         ref = arrays[f"encode_mean_{s}"]
         tol = m["tolerances"]["sizes"][s]["encode_bf16_rel_l2"]
         rel = fx.rel_l2(got, ref)
@@ -527,25 +580,38 @@ def test_bf16_encoder_mean(check5, vaes):
 
 @official
 def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
+    """The tiled bf16 decode, which is the automatic choice above one
+    tile, beside one whole decode, forced. At 1024 pixels the tiled pass
+    is priced at 3.52 GiB and the whole one at 8.69 GiB."""
+    from gmlx.image import memfit
+    from gmlx.image.vae import tiling
+
     arrays, m = check5
-    s = _tags(m)[-1]
+    s = _whole_tags(m)[-1]
     lat = arrays[f"latents_{s}"]
     vae = vaes("bf16")
     tiled = _decode(vae, lat, tiled=True)
     ref = arrays[f"decoded_{s}"]
     db = fx.psnr(to_unit(tiled), to_unit(ref), 1.0)
-    whole = fx.psnr(to_unit(_decode(vae, lat)), to_unit(ref), 1.0)
+    whole = fx.psnr(to_unit(_decode(vae, lat, tiled=False)), to_unit(ref),
+                    1.0)
     tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
     print(f"[check5] {s} bf16 tiled decode PSNR {db:.2f} dB against "
           f"{whole:.2f} dB whole, tolerance {tol:.2f} dB")
-    assert m["inputs"]["sizes"][-1][0] > 512
+    h, w = m["inputs"]["sizes"][-1]
+    assert h > 512
+    assert memfit.vae_tiling("decode", h, w,
+                             **tiling.price_args(vae, "decode", 1)) is True
     assert db >= tol
 
 
 @official
 def test_tiled_bf16_encode_at_the_largest_size(check5, vaes):
+    """A tiled bf16 encode beside a whole one, forced, and two whole
+    decodes, forced. At 1024 pixels the whole encode is priced at 5.32 GiB
+    and each whole decode at 8.69 GiB."""
     arrays, m = check5
-    s = _tags(m)[-1]
+    s = _whole_tags(m)[-1]
     vae = vaes("bf16")
     image = arrays[f"image_{s}"]
     whole = _encode_latents(vae, image, tiled=False)
