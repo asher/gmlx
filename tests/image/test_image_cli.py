@@ -648,6 +648,34 @@ def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
     assert not list(tmp_path.glob("gmlx-*.png"))
 
 
+def test_an_adapter_for_a_module_the_dit_file_lacks_is_refused_unloaded(
+        tiny, monkeypatch, capsys):
+    """The vet gets the module paths the DiT file holds a weight for. A
+    file that targets a module of the family which this DiT file lacks is
+    refused before any model loads, by generate and by bench."""
+    ident = image_preflight.identify_dit(tiny.files["dit.gguf"])
+    gone = "layers.0.feed_forward.w1"
+    held = {k: v for k, v in ident.view.tensors.items()
+            if k != f"{gone}.weight"}
+    assert len(held) == len(ident.view.tensors) - 1
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p: SimpleNamespace(
+                            family=ident.family, variant=ident.variant,
+                            config=ident.config,
+                            view=SimpleNamespace(tensors=held)))
+    for action in (tiny.base + ["--prompt", "p", "--size", "32x32",
+                                "--seed", "1"],
+                   ["image", "bench", tiny.files["dit.gguf"], "--encoder",
+                    tiny.files["enc.gguf"], "--vae", tiny.files["vae.gguf"],
+                    "--sizes", "32x32", "--steps", "1", "--runs", "1"]):
+        assert umbrella_main(action + ["--adapter", tiny.b,
+                                       "--adapter", tiny.a]) == 1
+        err = capsys.readouterr().err
+        assert f"targets {gone}, which this DiT does not have" in err
+        assert "b.safetensors" in err
+        assert tiny.pipes == []
+
+
 def test_bench_runs_under_the_adapters_and_records_them(tiny, capsys,
                                                         monkeypatch):
     tables = []
