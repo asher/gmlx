@@ -136,7 +136,7 @@
   }
  },
  "tolerances": {
-  "rule": "fp32 decode max abs at the plan's starting value; fp32 encode max abs at twice the oracle's own fp32 against float64 max abs; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice the oracle's own",
+  "rule": "fp32 decode max abs at its starting value, 1e-3; fp32 encode max abs at twice the oracle's own fp32 against float64 max abs; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice the oracle's own",
   "starting": {
    "decode_fp32_max_abs": 0.001,
    "decode_bf16_psnr_db": 45.0,

@@ -11,11 +11,11 @@ grouping and border errors.
 
 The fixture holds, per size, the image, the encoder mean, the model space
 latents, the raw fp32 decode and the raw bf16 decode. The manifest records
-the bf16 against fp32 gap and the tolerances: fp32 decode max abs at the
-plan's 1e-3, and bf16 PSNR on the [0, 1] image at twice the oracle's own
-error, which is 6.02 dB below its PSNR. The fp32 encode is held to twice
-the oracle's own fp32 error, its max abs against a float64 encode, since
-the encoder's large activations put that error above 1e-3.
+the bf16 against fp32 gap and the tolerances: fp32 decode max abs at its
+starting value, 1e-3, and bf16 PSNR on the [0, 1] image at twice the
+oracle's own error, which is 6.02 dB below its PSNR. The fp32 encode is
+held to twice the oracle's own fp32 error, its max abs against a float64
+encode, since the encoder's large activations put that error above 1e-3.
 
 The bf16 run computes each convolution and linear product in float32 over
 the bfloat16 operands, rounded once to bfloat16, as a bfloat16 GEMM with
@@ -45,7 +45,7 @@ SIZES = (512, 1024)
 SEED = 5
 STARTING = {"decode_fp32_max_abs": 1e-3, "decode_bf16_psnr_db": 45.0,
             "encode_fp32_max_abs": 1e-3}
-RULE = ("fp32 decode max abs at the plan's starting value; fp32 encode max "
+RULE = ("fp32 decode max abs at its starting value, 1e-3; fp32 encode max "
         "abs at twice the oracle's own fp32 against float64 max abs; bf16 "
         "PSNR at twice the oracle's own bf16 against fp32 RMS error, which "
         "is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice "

@@ -12,8 +12,8 @@ is the final norm of the last layer's output.
 For each prompt the fixture holds the token ids and the fp32 and bf16 taps
 of the real rows. The manifest records the bf16 against fp32 gap of each
 prompt, the gap between the padded batch and an unpadded batch 1 run, and
-the tolerances: relative L2 at twice the bf16 gap, per-token cosine at the
-plan's starting value.
+the tolerances: relative L2 at twice the bf16 gap, per-token cosine at its
+starting value, 0.999.
 
 The bf16 run computes each linear product as a float32 GEMM over the
 bfloat16 operands, rounded once to bfloat16, since torch's CPU bfloat16

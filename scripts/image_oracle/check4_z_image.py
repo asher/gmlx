@@ -169,7 +169,7 @@ def main(argv=None) -> int:
     fx.tolerances.update(sigmas="bitwise", linspace_probe="bitwise",
                          trajectory_max_abs=1e-6, exact_max_abs=1e-6,
                          unipc_sigmas="bitwise", unipc_max_abs=1e-6,
-                         rule="plan starting values; the schedule is exact")
+                         rule="starting values; the schedule is exact")
     fx.note("The trajectory starts at the noise and steps with the "
             "constant velocity noise - x0, so its exact value at sigma s is "
             "noise + (s - 1) * (noise - x0).")
