@@ -313,10 +313,12 @@ class Modulation:
 class PrefixCache:
     """What a step derives from the conditioning: each block's K and V of
     the prefix after RoPE, (1, heads, P, head dim), and the position on
-    the frame axis where the target block starts."""
+    the frame axis where the target block starts. ``built_for`` is the
+    ``prefix_tag`` of that conditioning."""
     k: tuple
     v: tuple
     position: int
+    built_for: tuple
 
     def arrays(self) -> list:
         return [*self.k, *self.v]
@@ -424,6 +426,12 @@ def prefix_key(cond) -> tuple:
             tuple(int(s) for s in cond.image_slots), refs)
 
 
+def prefix_tag(cond) -> tuple:
+    """What names the conditioning of a prefix in a target step: its key
+    and what its prefix layout depends on."""
+    return (cond.key, *prefix_key(cond))
+
+
 def modulation(model: QwenImage21DiT, sigma) -> Modulation:
     """The modulation of target rows at ``sigma``, one value or one per
     row."""
@@ -460,7 +468,8 @@ def prefill_prefix(model: QwenImage21DiT, cond,
         values.append(v)
         if taps is not None:
             taps[f"transformer_blocks.{i}"] = x
-    return PrefixCache(tuple(keys), tuple(values), lay.position)
+    return PrefixCache(tuple(keys), tuple(values), lay.position,
+                       (cond.key, *key))
 
 
 def forward_target(model: QwenImage21DiT, latents: mx.array, sigma, cond,
@@ -468,10 +477,13 @@ def forward_target(model: QwenImage21DiT, latents: mx.array, sigma, cond,
                    mod: Modulation | None = None) -> mx.array:
     """Velocity (B, C, H, W) fp32 for fp32 target latents at ``sigma``
     over the prefix of ``cond``. ``prefix`` holds all of ``cond`` that the
-    target reads. ``mod``, from ``modulation``, stands in for the work it
-    holds. ``taps`` collects the target rows after every block."""
+    target reads, and one built for another conditioning is refused.
+    ``mod``, from ``modulation``, stands in for the work it holds.
+    ``taps`` collects the target rows after every block."""
     cfg = model.cfg
     b, _, h, w = latents.shape
+    if prefix.built_for != prefix_tag(cond):
+        raise ValueError("the prefix was built for another conditioning")
     if len(prefix.k) != cfg.n_layers:
         raise ValueError(f"the prefix holds {len(prefix.k)} blocks, and "
                          f"the model has {cfg.n_layers}")

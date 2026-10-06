@@ -249,7 +249,8 @@ def test_a_prefix_of_another_depth_and_bad_references_are_refused(tiny):
     cond, lat = qt.conditioning("ref1"), qt.latents()
     with mx.stream(mx.cpu):
         prefix = qm.prefill_prefix(tiny, cond)
-        short = qm.PrefixCache(prefix.k[:1], prefix.v[:1], prefix.position)
+        short = qm.PrefixCache(prefix.k[:1], prefix.v[:1], prefix.position,
+                               prefix.built_for)
         with pytest.raises(ValueError, match="holds 1 blocks.*has 2"):
             qm.forward_target(tiny, lat, SIGMA, cond, short)
         flat = api.Conditioning(cond.features, "", ref_latents=(
@@ -270,6 +271,35 @@ def pipe(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "families", lambda: (fam,))
     path = qt.write(tmp_path / "tiny.gguf", qt.weights(0))
     return api.load(path, log=lambda *_: None)
+
+
+def test_a_target_step_refuses_the_prefix_of_another_conditioning(tiny):
+    cond, lat = qt.conditioning("ref1"), qt.latents()
+    refused = "the prefix was built for another conditioning"
+    with mx.stream(mx.cpu):
+        prefix = qm.prefill_prefix(tiny, cond)
+        assert prefix.built_for == qm.prefix_tag(cond)
+        qm.forward_target(tiny, lat, SIGMA, cond, prefix)
+        # Another key over the same rows, and the same key over another
+        # layout.
+        for other in (
+                api.Conditioning(cond.features, "other",
+                                 ref_latents=cond.ref_latents,
+                                 image_slots=cond.image_slots),
+                qt.conditioning("text", key=cond.key),
+                qt.conditioning("ref2", key=cond.key)):
+            with pytest.raises(ValueError, match=refused):
+                qm.forward_target(tiny, lat, SIGMA, other, prefix)
+
+
+def test_a_pipeline_refuses_one_key_over_two_prefix_layouts(pipe):
+    """The memo of prefix states is keyed by the conditioning key, so a
+    second conditioning under that key would read the first one's
+    prefix."""
+    lat = qt.latents()
+    api.denoise_step(pipe, lat, SIGMA, qt.conditioning("ref1", key="k"))
+    with pytest.raises(ValueError, match="built for another conditioning"):
+        api.denoise_step(pipe, lat, SIGMA, qt.conditioning("text", key="k"))
 
 
 def test_a_pipeline_loads_without_an_encoder_or_a_vae(pipe):
