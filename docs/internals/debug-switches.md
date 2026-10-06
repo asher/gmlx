@@ -158,7 +158,10 @@ fusions.
 The image routes are on when the installed mlx-kquant has the kernels, and
 `GMLX_IMAGE_KQ_ROUTES` is read once, when the image pipeline is imported.
 An image at a fixed seed differs between the kernels and the stock ops.
-The difference is rounding, not an error.
+The difference is rounding, not an error. mlx-kquant's own switches
+(`KQ_GLU`, `KQ_GLU_MIN_ROWS`, `KQ_GLU_BK`) act below the route: when one
+makes the op compose its two products, gmlx still hands the pair to the op
+and its records name the kernel.
 
 ## Streaming
 

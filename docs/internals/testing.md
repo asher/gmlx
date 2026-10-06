@@ -186,14 +186,17 @@ routes. The site gate proves the arithmetic of each op on the path a
 request takes: the output of every op between a block's input and its
 output is within a relative L2 of `2 n u` of the stock op in float32 on
 the same input, where `u = 2^-8` is one bfloat16 rounding and `n` counts
-the outputs the stock op writes in bfloat16, so a kernel is held to the
-gate of the op it replaces. A relative L2 over all rows does not see a
-fault in one row of a few thousand, so a site on a kernel is also held
-to the same gate on every row of its output. MLX reads
-`MLX_ENABLE_TF32` once per process, so the exact and the site tests
-rerun themselves in a child process with `MLX_ENABLE_TF32=0`, the exact
-tests with the image ops on the stock path and the site tests on the
-kernel routes the build has.
+the roundings to bfloat16 on the path the site ran. On the stock ops that
+is the outputs the ops write in bfloat16. A site on a kernel is held to
+the kernel's own count, 1 for the q and k norm with RoPE and 4 for the
+feed-forward gate product, and not to the count of the ops it replaces.
+A relative L2 over all rows does not see a fault in one row of a few
+thousand, so a site on a kernel is also held to the same gate on every
+row of its output, and the q and k site on every head of every row. MLX
+reads `MLX_ENABLE_TF32` once per process, so the exact and the site
+tests rerun themselves in a child process with `MLX_ENABLE_TF32=0`, the
+exact tests with the image ops on the stock path and the site tests on
+the kernel routes the build has.
 The oracle dequantizes GGUF blocks in float32
 arithmetic, as ggml does. Stock diffusers keeps the block scales in
 float16, which moves K-quant weights by about 8e-4 in relative L2, and
