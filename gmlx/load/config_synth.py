@@ -68,7 +68,7 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # attention + PLE n-gram embeddings; vendored gmlx.models.qwen4_exp.model.
     "qwen4exp": "qwen4_exp",
     "qwen3": "qwen3",
-    # Qwen3-VL dense text tower (Qwen3-VL-2B/4B/8B/32B). The tensor layout is
+    # Qwen3-VL dense text tower (run on Qwen3-VL-8B). The tensor layout is
     # Qwen3 dense, and the rotary position has three axes. A text-only prompt
     # puts the same position on every axis, which is the one-axis rope of the
     # qwen3 class at the file's base, so it loads as qwen3. The vision tower

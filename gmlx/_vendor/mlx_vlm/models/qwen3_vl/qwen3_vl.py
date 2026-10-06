@@ -32,6 +32,21 @@ def masked_scatter(
     return final_embedding
 
 
+# gmlx: encode_images below gives the cache entry that this class's own
+# get_input_embeddings reads. A subclass that joins the image features its
+# own way (qwen3_5, qwen4_exp) reads another entry, so it does not inherit
+# the method, and the generate path caches nothing for it, as before.
+class _OwnJoinOnly:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def __get__(self, obj, owner=None):
+        owner = type(obj) if owner is None else owner
+        if owner.get_input_embeddings is not Model.get_input_embeddings:
+            raise AttributeError(self.fn.__name__)
+        return self.fn.__get__(obj, owner)
+
+
 class Model(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -52,9 +67,18 @@ class Model(nn.Module):
         mask = kwargs.get("mask", None)
         pixel_values_videos = kwargs.get("pixel_values_videos", None)
 
+        # gmlx: cached image features stand in for the image pixels. A
+        # caller passes the entry itself, or a vision cache and its key.
+        vision_cache = kwargs.get("vision_cache", None)
+        image_key = kwargs.get("_image_key", None)
+        cached = kwargs.get("cached_image_features", None)
+        if cached is None and vision_cache is not None and image_key is not None:
+            cached = vision_cache.get(image_key)
+
         # Video inputs flow in via pixel_values_videos from the generic
         # prepare_inputs path; alias to pixel_values for the unified encoder.
-        if pixel_values is None and pixel_values_videos is None:
+        # gmlx: a call with cached features and no pixels is an image call.
+        if pixel_values is None and pixel_values_videos is None and cached is None:
             position_ids, rope_deltas = self.language_model.get_rope_index(
                 input_ids, attention_mask=mask
             )
@@ -67,52 +91,55 @@ class Model(nn.Module):
         # Get the input embeddings from the language model
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
 
-        cached = kwargs.get("cached_image_features", None)
+        # gmlx: one path joins the features, cached or computed. The cached
+        # branch used to join the main features and drop the deepstack
+        # features, so the decoder ran without them.
+        dtype = inputs_embeds.dtype
+        image_features = image_deepstack = None
+        video_features = video_deepstack = None
         if cached is not None:
-            inputs_embeds, _ = self.merge_input_ids_with_image_features(
-                cached,
-                inputs_embeds,
-                input_ids,
-                self.config.image_token_index,
-                self.config.video_token_index,
+            image_features, image_deepstack = self._split_image_features(
+                cached, dtype
             )
-            deepstack_visual_embeds = None
-        else:
-            if self.vision_tower is None:
+            n_image_tokens = int((input_ids == self.config.image_token_index).sum())
+            if image_features.shape[0] != n_image_tokens:
                 raise ValueError(
-                    "this Qwen3-VL model was loaded without a vision tower"
+                    "cached_image_features hold "
+                    f"{image_features.shape[0]} image tokens and the prompt "
+                    f"has {n_image_tokens}"
                 )
-            dtype = self.vision_tower.patch_embed.proj.weight.dtype
-            image_features = image_deepstack = None
-            video_features = video_deepstack = None
-            if pixel_values is not None:
-                image_features, image_deepstack = self.vision_tower(
-                    pixel_values.astype(dtype), image_grid_thw
-                )
-            if pixel_values_videos is not None:
-                video_features, video_deepstack = self.vision_tower(
-                    pixel_values_videos.astype(dtype), video_grid_thw
-                )
-
-            image_mask = input_ids == self.config.image_token_index
-            video_mask = input_ids == self.config.video_token_index
-            if image_features is not None:
-                inputs_embeds = masked_scatter(
-                    inputs_embeds,
-                    mx.broadcast_to(image_mask[..., None], inputs_embeds.shape),
-                    image_features,
-                )
-            if video_features is not None:
-                inputs_embeds = masked_scatter(
-                    inputs_embeds,
-                    mx.broadcast_to(video_mask[..., None], inputs_embeds.shape),
-                    video_features,
-                )
-            deepstack_visual_embeds = self._merge_deepstack_features(
-                input_ids,
-                image_deepstack,
-                video_deepstack,
+        elif pixel_values is not None:
+            image_features, image_deepstack = self._vision_features(
+                pixel_values, image_grid_thw, dtype
             )
+            if vision_cache is not None and image_key is not None:
+                entry = self._pack_image_features(image_features, image_deepstack)
+                mx.eval(entry)
+                vision_cache.put(image_key, entry)
+        if pixel_values_videos is not None:
+            video_features, video_deepstack = self._vision_features(
+                pixel_values_videos, video_grid_thw, dtype
+            )
+
+        image_mask = input_ids == self.config.image_token_index
+        video_mask = input_ids == self.config.video_token_index
+        if image_features is not None:
+            inputs_embeds = masked_scatter(
+                inputs_embeds,
+                mx.broadcast_to(image_mask[..., None], inputs_embeds.shape),
+                image_features,
+            )
+        if video_features is not None:
+            inputs_embeds = masked_scatter(
+                inputs_embeds,
+                mx.broadcast_to(video_mask[..., None], inputs_embeds.shape),
+                video_features,
+            )
+        deepstack_visual_embeds = self._merge_deepstack_features(
+            input_ids,
+            image_deepstack,
+            video_deepstack,
+        )
 
         visual_pos_masks = (input_ids == self.config.image_token_index) | (
             input_ids == self.config.video_token_index
@@ -131,6 +158,54 @@ class Model(nn.Module):
             position_ids=position_ids,
             rope_deltas=rope_deltas,
         )
+
+    # gmlx: the tower computes in float32 whatever dtype its weights are
+    # stored in. Its residual stream reaches the thousands in the last
+    # blocks, and a 16-bit float drops the small values beside them: in
+    # bfloat16 the main features come out about a tenth off. The features
+    # take the dtype of the token embeddings here, where they join them.
+    def _vision_features(self, pixel_values, grid_thw, dtype):
+        if self.vision_tower is None:
+            raise ValueError("this Qwen3-VL model was loaded without a vision tower")
+        features, deepstack = self.vision_tower(
+            pixel_values.astype(mx.float32), grid_thw
+        )
+        return features.astype(dtype), [d.astype(dtype) for d in deepstack]
+
+    # gmlx: a cache entry for this class is one array, the main features
+    # and then the deepstack features in block order:
+    # [1 + deepstack blocks, image tokens, hidden].
+    @staticmethod
+    def _pack_image_features(features, deepstack):
+        return mx.stack([features] + list(deepstack))
+
+    def _split_image_features(self, cached, dtype):
+        n_deepstack = len(self.config.vision_config.deepstack_visual_indexes)
+        if (
+            not isinstance(cached, mx.array)
+            or cached.ndim != 3
+            or cached.shape[0] != 1 + n_deepstack
+        ):
+            shape = cached.shape if isinstance(cached, mx.array) else type(cached)
+            raise ValueError(
+                "cached_image_features for qwen3_vl carry the main features "
+                f"and the {n_deepstack} deepstack features, stacked as "
+                f"[{1 + n_deepstack}, image tokens, hidden]; got {shape}. "
+                "Main features alone would join without the deepstack features."
+            )
+        cached = cached.astype(dtype)
+        return cached[0], [cached[i] for i in range(1, cached.shape[0])]
+
+    # gmlx: the generate path fills its vision cache through this call, and
+    # passes the entry back as cached_image_features.
+    @_OwnJoinOnly
+    def encode_images(self, pixel_values: mx.array, **kwargs) -> mx.array:
+        """The cache entry of the images in ``pixel_values``."""
+        dtype = self.language_model.model.embed_tokens(mx.array([[0]])).dtype
+        features, deepstack = self._vision_features(
+            pixel_values, kwargs.get("image_grid_thw", None), dtype
+        )
+        return self._pack_image_features(features, deepstack)
 
     def _merge_deepstack_features(
         self,

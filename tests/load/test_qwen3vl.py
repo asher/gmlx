@@ -456,3 +456,381 @@ def test_deepstack_features_come_from_the_flagged_vision_blocks():
     assert len(deep) == len(want) == 2
     for got, ref in zip(deep, want):
         assert float(mx.abs(got - ref).max()) < 1e-5
+
+
+# The three-axis rotary position where the axes differ.
+
+def _axis_of_pair():
+    """The axis each frequency pair reads, written out here and not taken
+    from the class: time, then height at pairs 1, 4, 7, ... and width at
+    pairs 2, 5, 8, ..., for as many pairs as each of the two is wide; time
+    keeps the rest, which with [24, 20, 20] is pairs 60 to 63."""
+    axis = np.zeros(HALF, dtype=np.int64)
+    axis[1:3 * SECTIONS[1]:3] = 1
+    axis[2:3 * SECTIONS[2]:3] = 2
+    return axis
+
+
+# One row per axis. No two axes agree at any of the L places, and the
+# values reach what a 4096 token image inside a long prompt can give.
+_POS_3D = np.array([
+    [5, 5, 5, 700, 700, 3000, 1, 0],
+    [0, 17, 300, 2, 1900, 44, 3999, 9],
+    [9, 4000, 60, 1, 250, 3, 11, 2600],
+])
+
+
+def _angles(axis, pos=_POS_3D):
+    freqs = BASE ** (-np.arange(HALF, dtype=np.float64) / HALF)
+    return pos[axis].T.astype(np.float64) * freqs
+
+
+def _rotation(ang):
+    return np.concatenate([np.cos(ang), np.sin(ang)], axis=-1)
+
+
+def _pair_bound(ang):
+    """What fp32 can hold of each angle's cos and sin: the position times
+    the frequency rounds to a few spacings of fp32 at the angle."""
+    one = 8 * np.spacing(np.abs(ang).astype(np.float32)).astype(np.float64)
+    return np.concatenate([one, one], axis=-1) + 1e-6
+
+
+def test_three_axis_rope_at_unequal_positions_is_the_float64_rotation():
+    assert np.bincount(_axis_of_pair()).tolist() == SECTIONS
+    assert (_POS_3D[0] != _POS_3D[1]).all()
+    assert (_POS_3D[0] != _POS_3D[2]).all()
+    assert (_POS_3D[1] != _POS_3D[2]).all()
+    ang = _angles(_axis_of_pair())
+    ref, bound = _rotation(ang), _pair_bound(ang)
+    x, rot = _unit(), _vlm_rope()
+    pos = mx.array(_POS_3D).reshape(3, 1, L)
+    cos, sin = rot(x, pos)
+    got = {"tables": apply_multimodal_rotary_pos_emb(x, x, cos, sin)[0]}
+    if rot.fused_apply:
+        got["fused"] = rot.apply_rotary(x, x, pos, unsqueeze_dim=1)[0]
+    for name, out in got.items():
+        gap = np.abs(np.array(out)[0, 0].astype(np.float64) - ref)
+        assert (gap <= bound).all(), (name, float((gap / bound).max()))
+
+
+def _chunked_axis():
+    return np.repeat(np.arange(3), SECTIONS)
+
+
+def _interleaved_axis(sections):
+    axis = np.zeros(HALF, dtype=np.int64)
+    axis[1:3 * sections[1]:3] = 1
+    axis[2:3 * sections[2]:3] = 2
+    return axis
+
+
+@pytest.mark.parametrize("name", [
+    "chunked", "height_width_swapped", "time_height_swapped",
+    "sections_20_24_20", "sections_20_20_24"])
+def test_another_axis_layout_does_not_pass_the_unequal_position_check(name):
+    # The same bound refuses each layout a wrong table or a wrong section
+    # list would give, by a wide margin, so the check above can tell them.
+    right = _axis_of_pair()
+    wrong = {
+        "chunked": _chunked_axis(),
+        "height_width_swapped": np.array([0, 2, 1])[right],
+        "time_height_swapped": np.array([1, 0, 2])[right],
+        "sections_20_24_20": _interleaved_axis([20, 24, 20]),
+        "sections_20_20_24": _interleaved_axis([20, 20, 24]),
+    }[name]
+    ang = _angles(right)
+    gap = np.abs(_rotation(_angles(wrong)) - _rotation(ang))
+    assert float((gap / _pair_bound(ang)).max()) > 100
+
+
+# The processor the two headers give.
+
+_BYTE_TOKENS = [chr(i) for i in range(33, 127)]
+_PROCESSOR_TOKENS = (["<|endoftext|>", "<|im_start|>", "<|im_end|>",
+                      "<|vision_start|>", "<|vision_end|>", "<|image_pad|>",
+                      "<|video_pad|>"] + _BYTE_TOKENS)
+
+
+def _flat_image(width, height, value=0):
+    from PIL import Image
+
+    return Image.fromarray(np.full((height, width, 3), value, dtype=np.uint8))
+
+
+def _processor(model_type):
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+
+    tokenizer = load_tokenizer_from_gguf({
+        "general.architecture": "qwen3vl",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.tokens": list(_PROCESSOR_TOKENS),
+        "tokenizer.ggml.merges": [],
+        "tokenizer.ggml.token_type": [3] * 7 + [1] * len(_BYTE_TOKENS),
+        "tokenizer.ggml.eos_token_id": 2,
+        "tokenizer.ggml.padding_token_id": 0,
+    }, "qwen3vl")
+    # The values the Qwen3-VL-8B mmproj header carries.
+    mm_meta = dict(_MM_META)
+    mm_meta["clip.vision.image_mean"] = [0.5, 0.5, 0.5]
+    mm_meta["clip.vision.image_std"] = [0.5, 0.5, 0.5]
+    return gvlm._synthesize_vlm_processor(model_type, tokenizer, mm_meta)
+
+
+def test_processor_constants_are_the_official_ones():
+    # Qwen3-VL's preprocessor_config.json: patch 16, merge 2, temporal patch
+    # 2, rescale 1 / 255, mean and std 0.5 on every channel.
+    ip = _processor("qwen3_vl").image_processor
+    assert (ip.patch_size, ip.merge_size, ip.temporal_patch_size) == (16, 2, 2)
+    assert ip.do_rescale and ip.do_normalize
+    assert ip.rescale_factor == pytest.approx(0.00392156862745098, rel=1e-12)
+    assert list(ip.image_mean) == [0.5, 0.5, 0.5]
+    assert list(ip.image_std) == [0.5, 0.5, 0.5]
+
+
+def test_processor_maps_a_byte_to_twice_its_fraction_minus_one():
+    # The arithmetic those constants give, on pixels: 0 goes to -1, 255 to
+    # 1, and v to 2 * v / 255 - 1. A doubled rescale or the CLIP mean and
+    # std both miss it.
+    ip = _processor("qwen3_vl").image_processor
+    for value in (0, 51, 128, 255):
+        out = ip([_flat_image(256, 256, value)])
+        assert out["image_grid_thw"].tolist() == [[1, 16, 16]]
+        want = 2.0 * value / 255.0 - 1.0
+        assert np.abs(out["pixel_values"] - want).max() < 1e-6, value
+
+
+@pytest.mark.parametrize("width,height,tokens", [
+    (64, 64, 64), (128, 128, 64), (160, 120, 70), (224, 224, 64),
+    (256, 256, 64), (2560, 1920, 4015)])
+def test_qwen3vl_image_token_counts(width, height, tokens):
+    # The official counts at the low end, where the lower bound resizes up,
+    # and the upper bound's count for an image past it.
+    ip = _processor("qwen3_vl").image_processor
+    assert ip.num_image_tokens(height, width) == tokens
+    grid = ip([_flat_image(width, height)])["image_grid_thw"]
+    assert int(grid.prod()) // 4 == tokens
+
+
+def test_qwen3vl_pixel_bounds_are_64_and_4096_image_tokens():
+    ip = _processor("qwen3_vl").image_processor
+    assert ip.min_pixels == 64 * 32 * 32 == 65536
+    assert ip.max_pixels == 4096 * 32 * 32 == 4194304
+    # the largest image the bound lets through whole.
+    assert ip.num_image_tokens(2048, 2048) == 4096
+
+
+def test_qwen36_keeps_its_pixel_bounds():
+    for model_type in ("qwen3_5", "qwen3_5_moe"):
+        ip = _processor(model_type).image_processor
+        assert ip.min_pixels == 8 * 32 * 32
+        assert ip.max_pixels == 4096 * 32 * 32
+        assert ip.num_image_tokens(64, 64) == 9
+
+
+# The merger and the refusals from their other side.
+
+def test_merger_activation_is_the_exact_gelu():
+    import math
+
+    tower = _tiny_vlm().vision_tower
+    grid = np.linspace(-6.0, 6.0, 241)
+    exact = np.array([0.5 * v * (1.0 + math.erf(v / math.sqrt(2.0)))
+                      for v in grid])
+    tanh = np.array([0.5 * v * (1.0 + math.tanh(
+        math.sqrt(2.0 / math.pi) * (v + 0.044715 * v ** 3))) for v in grid])
+    # the two forms are apart by more than a hundred times the bound.
+    assert np.abs(tanh - exact).max() > 1e-4
+    mergers = [tower.merger] + list(tower.deepstack_merger_list)
+    assert len(mergers) == 3
+    for merger in mergers:
+        got = np.array(merger.act_fn(mx.array(grid.astype(np.float32))))
+        assert np.abs(got - exact).max() < 1e-6
+
+
+def test_vlm_config_refuses_axis_widths_under_the_head_width():
+    meta = _llm_meta()
+    widths = list(meta["qwen3vl.rope.dimension_sections"])
+    widths[0] -= 1
+    meta["qwen3vl.rope.dimension_sections"] = widths
+    with pytest.raises(ValueError, match="half the head width"):
+        gvlm.synthesize_vlm_config(
+            "qwen3_vl", meta, _QWEN3VL_SHAPES, _MM_META)
+
+
+def test_vlm_config_refuses_a_text_file_with_fewer_deepstack_layers():
+    meta = _llm_meta()
+    meta["qwen3vl.n_deepstack_layers"] = 1
+    with pytest.raises(gvlm.UnsupportedVLMError, match="not a pair"):
+        gvlm.synthesize_vlm_config(
+            "qwen3_vl", meta, _QWEN3VL_SHAPES, _MM_META)
+
+
+def test_vlm_config_refuses_a_pair_that_names_no_deepstack_blocks():
+    # Neither header has a deepstack key: the load would build no merger
+    # and drop the features without a word.
+    meta = _llm_meta()
+    del meta["qwen3vl.n_deepstack_layers"]
+    mm_meta = dict(_MM_META)
+    del mm_meta["clip.vision.is_deepstack_layers"]
+    with pytest.raises(gvlm.UnsupportedVLMError,
+                       match="names no deepstack blocks"):
+        gvlm.synthesize_vlm_config(
+            "qwen3_vl", meta, _QWEN3VL_SHAPES, mm_meta)
+    # One key is enough: the mmproj's flags alone give the blocks.
+    cfg = gvlm.synthesize_vlm_config(
+        "qwen3_vl", meta, _QWEN3VL_SHAPES, _MM_META)
+    assert cfg["vision_config"]["deepstack_visual_indexes"] == [1, 2]
+
+
+# Cached image features.
+
+def _cache_entry(vlm, pixels, grid):
+    """The entry format, built here by hand: the main features, then the
+    deepstack features in block order, one array."""
+    main, deep = vlm.vision_tower(pixels.astype(mx.float32), grid)
+    entry = mx.stack([main] + list(deep))
+    mx.eval(entry)
+    return entry
+
+
+def test_encode_images_gives_the_cache_entry():
+    vlm = _tiny_vlm()
+    _, pixels, grid, n_soft = _image_turn()
+    entry = vlm.encode_images(pixels, image_grid_thw=grid)
+    # the generate path evaluates an entry this way before it stores it.
+    mx.eval(*entry)
+    assert entry.shape == (3, n_soft, 64)
+    assert float(mx.abs(entry - _cache_entry(vlm, pixels, grid)).max()) < 1e-6
+
+
+def test_classes_with_their_own_join_do_not_inherit_encode_images():
+    # The generate path caches through encode_images where a class has it.
+    # The Qwen3.6 and qwen4_exp containers subclass this one and join the
+    # main features alone, so the entry of this class is not theirs.
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.qwen3_5 import Model as Qwen35
+    from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.qwen3_5_moe import (
+        Model as Qwen35Moe,
+    )
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VL
+    from gmlx.models.qwen4_exp.vlm_model import Model as Qwen4Exp
+
+    assert hasattr(Qwen3VL, "encode_images")
+    assert hasattr(_tiny_vlm(), "encode_images")
+    for cls in (Qwen35, Qwen35Moe, Qwen4Exp):
+        assert issubclass(cls, Qwen3VL)
+        assert not hasattr(cls, "encode_images"), cls
+        assert not hasattr(cls, "encode_image"), cls
+
+
+def test_cached_image_features_keep_the_deepstack_features():
+    vlm = _tiny_vlm()
+    ids, pixels, grid, _ = _image_turn()
+    want = vlm.get_input_embeddings(ids, pixels, image_grid_thw=grid)
+    got = vlm.get_input_embeddings(
+        ids, pixels, image_grid_thw=grid,
+        cached_image_features=_cache_entry(vlm, pixels, grid))
+    # the main features land where the tower's would.
+    assert float(mx.abs(got.inputs_embeds - want.inputs_embeds).max()) < 1e-6
+    assert want.deepstack_visual_embeds is not None
+    assert got.deepstack_visual_embeds is not None
+    assert float(mx.abs(mx.array(got.deepstack_visual_embeds)
+                        - mx.array(want.deepstack_visual_embeds)).max()) < 1e-6
+
+
+def test_cached_image_features_give_the_same_hidden_state():
+    vlm = _tiny_vlm()
+    ids, pixels, grid, _ = _image_turn()
+    n_layers = len(vlm.language_model.model.layers)
+    want = vlm.hidden_state_at_layer(
+        ids, n_layers, pixel_values=pixels, image_grid_thw=grid)
+    got = vlm.hidden_state_at_layer(
+        ids, n_layers, pixel_values=pixels, image_grid_thw=grid,
+        cached_image_features=_cache_entry(vlm, pixels, grid))
+    assert float(mx.abs(got - want).max()) < 1e-5
+
+
+def test_cached_image_features_give_the_same_logits():
+    vlm = _tiny_vlm()
+    ids, pixels, grid, _ = _image_turn()
+    want = vlm(ids, pixel_values=pixels, image_grid_thw=grid).logits
+    got = vlm(ids, pixel_values=pixels, image_grid_thw=grid,
+              cached_image_features=_cache_entry(vlm, pixels, grid)).logits
+    assert float(mx.abs(got - want).max()) < 1e-5
+
+
+def test_cached_image_features_without_pixels_are_not_ignored():
+    # A caller that kept the features and dropped the pixels gets the image
+    # embeddings and the image positions, not the text-only ones.
+    vlm = _tiny_vlm()
+    ids, pixels, grid, _ = _image_turn()
+    want = vlm.get_input_embeddings(ids, pixels, image_grid_thw=grid)
+    got = vlm.get_input_embeddings(
+        ids, None, image_grid_thw=grid,
+        cached_image_features=_cache_entry(vlm, pixels, grid))
+    assert float(mx.abs(got.inputs_embeds - want.inputs_embeds).max()) < 1e-6
+    assert got.position_ids.tolist() == want.position_ids.tolist()
+    assert float(mx.abs(mx.array(got.deepstack_visual_embeds)
+                        - mx.array(want.deepstack_visual_embeds)).max()) < 1e-6
+
+
+def test_main_features_alone_are_refused_as_a_cache_entry():
+    vlm = _tiny_vlm()
+    ids, pixels, grid, _ = _image_turn()
+    main, _ = vlm.vision_tower(pixels.astype(mx.float32), grid)
+    for features in (main, main[None], [main]):
+        with pytest.raises(ValueError, match="deepstack features"):
+            vlm.get_input_embeddings(
+                ids, pixels, image_grid_thw=grid,
+                cached_image_features=features)
+
+
+def test_a_cache_entry_of_another_image_is_refused():
+    vlm = _tiny_vlm()
+    ids, _, grid, n_soft = _image_turn()
+    _, pixels, other_grid, other_soft = _image_turn(grid_h=4, grid_w=6)
+    assert other_soft != n_soft
+    with pytest.raises(ValueError, match="image tokens"):
+        vlm.get_input_embeddings(
+            ids, None, image_grid_thw=grid,
+            cached_image_features=_cache_entry(vlm, pixels, other_grid))
+
+
+class _CountedTower:
+    """The tower behind a call counter."""
+
+    def __init__(self, tower):
+        self.tower = tower
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self.tower(*args, **kwargs)
+
+
+def test_a_vision_cache_is_filled_once_and_read_by_key():
+    # The serve path passes its cache and a key, and the class fills it.
+    from gmlx._vendor.mlx_vlm.vision_cache import VisionFeatureCache
+
+    vlm = _tiny_vlm()
+    ids, pixels, grid, n_soft = _image_turn()
+    want = vlm.get_input_embeddings(ids, pixels, image_grid_thw=grid)
+    counted = _CountedTower(vlm.vision_tower)
+    vlm.vision_tower = counted
+    cache = VisionFeatureCache()
+    first = vlm.get_input_embeddings(
+        ids, pixels, image_grid_thw=grid, vision_cache=cache, _image_key="a")
+    assert counted.calls == 1 and len(cache) == 1
+    assert cache.get("a").shape == (3, n_soft, 64)
+    again = vlm.get_input_embeddings(
+        ids, pixels, image_grid_thw=grid, vision_cache=cache, _image_key="a")
+    assert counted.calls == 1
+    for got in (first, again):
+        assert float(mx.abs(got.inputs_embeds - want.inputs_embeds).max()) < 1e-6
+        assert float(mx.abs(mx.array(got.deepstack_visual_embeds)
+                            - mx.array(want.deepstack_visual_embeds)).max()) < 1e-6
+    # another key is another image.
+    vlm.get_input_embeddings(
+        ids, pixels, image_grid_thw=grid, vision_cache=cache, _image_key="b")
+    assert counted.calls == 2 and len(cache) == 2

@@ -1276,7 +1276,7 @@
   "mlx_vlm/models/qwen3_vl/config.py": {"status": "verbatim", "upstream": "8b529cfbd568c7d202140b4d5212be7fe740310c1a80374fa7dd4e59b9763017"},
   "mlx_vlm/models/qwen3_vl/language.py": {"status": "verbatim", "upstream": "2ebeacac837db9417e683780b94d24cdee563fa340a9638b0965a6c0bfcde056"},
   "mlx_vlm/models/qwen3_vl/processing_qwen3_vl.py": {"status": "verbatim", "upstream": "8f8acffe91739016a8829217e8745d66141a37b73a2fd646c3989cef05db855b"},
-  "mlx_vlm/models/qwen3_vl/qwen3_vl.py": {"status": "verbatim", "upstream": "12f0393421918eb1cbaa6daa447d93a405762e997f688676688e5c71d987d3ee"},
+  "mlx_vlm/models/qwen3_vl/qwen3_vl.py": {"sha256": "86ff7ba4ade2c3945ec4d2285159c05f42c291984730df82830b78410a93e7d6", "status": "edited", "upstream": "12f0393421918eb1cbaa6daa447d93a405762e997f688676688e5c71d987d3ee"},
   "mlx_vlm/models/qwen3_vl/vision.py": {"status": "verbatim", "upstream": "0c51d19e208e5d8fa7a6751aee0a9360a5bd8783dcfcf532286d14a0f1fbc7f9"},
   "mlx_vlm/models/qwen3_vl_embedding/__init__.py": {"status": "verbatim", "upstream": "3ce3afd9589961badddeb5472a6cb4fe24b84eb4a126d00b8945ee869a362c76"},
   "mlx_vlm/models/qwen3_vl_embedding/config.py": {"status": "verbatim", "upstream": "ee9fbdc563df33214eb6c9aa522bf0ca7ce22ac2460aa62c81dde75ef9d4873e"},

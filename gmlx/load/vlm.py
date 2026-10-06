@@ -143,7 +143,7 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # and wrapper classes are vendored (gmlx.models.qwen4_exp.vlm_model).
         if llm_arch == "qwen4exp":
             return "qwen4_exp"
-        # Qwen3-VL (llama.cpp arch tag qwen3vl) - the Qwen3 dense text tower
+        # Qwen3-VL (llama.cpp arch tag qwen3vl): the Qwen3 dense text tower
         # with the Qwen3-VL vision tower and its deepstack mergers, whose
         # features join the first decoder layers.
         if llm_arch == "qwen3vl":
@@ -1337,6 +1337,12 @@ def _synthesize_qwen3vl_vlm_config(
 
     vision_config = _synthesize_qwen35_vision_config(mm_meta, "qwen3_vl")
     n_text = llm_meta.get("qwen3vl.n_deepstack_layers")
+    if n_text is None and mm_meta.get("clip.vision.is_deepstack_layers") is None:
+        raise UnsupportedVLMError(
+            "Qwen3-VL pair names no deepstack blocks: the text GGUF has no "
+            "'qwen3vl.n_deepstack_layers' and the mmproj has no "
+            "'clip.vision.is_deepstack_layers', so the load would drop the "
+            "deepstack features the model was trained with")
     n_vision = len(vision_config["deepstack_visual_indexes"])
     if n_text is not None and int(n_text) != n_vision:
         raise UnsupportedVLMError(
@@ -2096,8 +2102,11 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type == "gemma4_unified":
         return _attach_streaming_helpers(
             _synthesize_gemma4_unified_processor(tokenizer, mm_meta), tokenizer)
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_vl"):
+    if model_type in ("qwen3_5", "qwen3_5_moe"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
+    if model_type == "qwen3_vl":
+        return _synthesize_qwen35_processor(
+            tokenizer, mm_meta, min_image_tokens=_QWEN3VL_MIN_IMAGE_TOKENS)
     if model_type == "qwen4_exp":
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen3_omni_moe":
@@ -2258,7 +2267,13 @@ def _synthesize_gemma4_unified_processor(tokenizer, mm_meta: dict):
     )
 
 
-def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
+# The smallest image Qwen3-VL's own preprocessor_config.json allows, in image
+# tokens: shortest_edge 65536 pixels at 1024 pixels per token.
+_QWEN3VL_MIN_IMAGE_TOKENS = 64
+
+
+def _synthesize_qwen35_processor(tokenizer, mm_meta: dict, *,
+                                 min_image_tokens: int = 8):
     """Build the Qwen3.6 (qwen3_5 / qwen3_5_moe) processor from the GGUFs alone.
 
     Qwen3-VL preprocessing is dynamic-resolution: ``smart_resize`` rescales each
@@ -2274,7 +2289,14 @@ def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
     / 4194304 here. The marker token ids (``<|image_pad|>``/``<|vision_start|>``/
     ``<|vision_end|>``) are resolved by ``Qwen3VLProcessor`` itself via the
     tokenizer's ``convert_tokens_to_ids`` (they live in the GGUF vocab as control
-    tokens), so nothing extra rides on the tokenizer."""
+    tokens), so nothing extra rides on the tokenizer.
+
+    ``min_image_tokens`` is the lower bound. Qwen3-VL passes the 64 tokens of
+    its own preprocessor_config.json, where llama.cpp resizes down to 8, so a
+    small image is resized as the model was trained to see it. That file also
+    allows 16384 tokens. The upper bound stays at 4096 for every model here:
+    the tower attends over four patches per image token, so 16384 tokens is
+    one attention over 65536 patches."""
     from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor, Qwen3VLProcessor,
     )
@@ -2288,7 +2310,7 @@ def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
     # dual-conv stack (constant 2), not GGUF metadata.
     temporal_patch_size = 2
     patch_area = (patch_size * merge_size) ** 2
-    min_pixels = 8 * patch_area
+    min_pixels = min_image_tokens * patch_area
     max_pixels = 4096 * patch_area
 
     image_processor = Qwen3VLImageProcessor(

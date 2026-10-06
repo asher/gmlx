@@ -68,3 +68,13 @@ def test_deepseek4v_on_a_foreign_text_arch_is_refused():
     and routes them with its own bias; only the deepseek4 arch has that."""
     with pytest.raises(UnsupportedVLMError, match="deepseek4v.*deepseek2"):
         resolve_vlm_model_type("deepseek2", {"clip.projector_type": "deepseek4v"})
+
+
+def test_the_qwen3vl_container_takes_only_the_qwen3vl_text_arch():
+    """A plain qwen3 text file beside this projector does not get the
+    container that reads the deepstack features: its header has no rotary
+    axis widths and no deepstack count. It resolves as it did before the
+    qwen3vl row."""
+    mm = {"clip.projector_type": "qwen3vl_merger"}
+    assert resolve_vlm_model_type("qwen3", mm) == "qwen3_5"
+    assert resolve_vlm_model_type("qwen3moe", mm) == "qwen3_5"
