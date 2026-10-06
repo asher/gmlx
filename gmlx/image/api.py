@@ -12,7 +12,9 @@ guidance and keeps no step counter. ``guide`` combines a positive and a
 negative velocity. Rows run as sequential forwards. A DiT that splits its
 step, as Z-Image does, gets the modulation of each sigma from a memo keyed
 on the float32 bits of sigma and the patch table, and the caption state of
-each conditioning from a cache keyed on its key and the patch table.
+each conditioning from a cache keyed on its key and the patch table. A
+family that gives ``step`` parts in its registry row runs through them
+under the same two memos, whose keys then also hold the activation dtype.
 
 ``sample`` runs the whole loop inside ``memfit.bounded_cache``, so the
 buffers one step frees go back to the system instead of the MLX cache,
@@ -429,9 +431,30 @@ def _under(pipe: ImagePipeline, table: str, fn):
         install.restore(pipe, prev)
 
 
+def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
+               cond: Conditioning, table) -> mx.array:
+    """One row through the family's step parts. The conditioning cache
+    holds its bound or two states of the newest size, whichever is larger,
+    so the positive and the negative row of one request both stay."""
+    dit = pipe.dit
+    s = np.float32(sigma)
+    dt = str(dit.act_dtype)
+    mod = _memo(pipe.modulations, (s.tobytes(), table, dt),
+                lambda: _under(pipe, table,
+                               lambda: parts.modulation(dit, s)))
+    make = lambda: _under(  # noqa: E731
+        pipe, table, lambda: parts.conditioning(dit, cond))
+    state = _memo(pipe.captions, (cond.key, table, dt), make,
+                  bound=parts.state_bytes) if cond.key else make()
+    return _under(pipe, table,
+                  lambda: parts.forward(dit, x, s, cond, state, mod))
+
+
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
          cond: Conditioning, table) -> mx.array:
     dit = pipe.dit
+    if pipe.family.step is not None:
+        return _parts_row(pipe, pipe.family.step, x, sigma, cond, table)
     if not (hasattr(dit, "modulation") and hasattr(dit, "caption")):
         return _under(pipe, table, lambda: dit(
             x, np.reshape(sigma, (1,)), cond.features[None]))
@@ -441,13 +464,16 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption))
 
 
-def _memo(cache: ByteLRU, key, make):
+def _memo(cache: ByteLRU, key, make, bound: int | None = None):
     hit = cache.get(key)
     if hit is None:
         hit = make()
         arrays = hit.arrays()
         mx.eval(arrays)
-        cache.put(key, hit, array_bytes(arrays))
+        n = array_bytes(arrays)
+        if bound is not None:
+            cache.max_bytes = max(int(bound), 2 * n)
+        cache.put(key, hit, n)
     return hit
 
 

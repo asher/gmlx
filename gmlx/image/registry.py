@@ -35,6 +35,24 @@ class SamplingRow:
 
 
 @dataclass(frozen=True)
+class StepParts:
+    """A family's denoise step in the parts a pipeline caches.
+
+    ``modulation(dit, sigma)`` is what the step derives from one float32
+    sigma alone and ``conditioning(dit, cond)`` what it derives from the
+    conditioning alone. ``forward(dit, latents, sigma, cond, state, mod)``
+    is the rest of the step for one row, given both, and returns the
+    float32 velocity. Each is a pure function of its arguments and the DiT
+    weights, and each state gives its arrays as ``arrays()``.
+    ``state_bytes`` bounds the cache of conditioning states.
+    """
+    modulation: Callable
+    conditioning: Callable
+    forward: Callable
+    state_bytes: int = 256 << 20
+
+
+@dataclass(frozen=True)
 class Family:
     name: str                        # "z_image"
     title: str                       # "Z-Image"
@@ -50,6 +68,7 @@ class Family:
     variants: dict = field(default_factory=dict)   # hash -> VariantRow
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
+    step: StepParts | None = None      # None runs the DiT's own step
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))
