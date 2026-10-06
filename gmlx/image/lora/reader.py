@@ -272,13 +272,20 @@ def _header_names(path: str) -> list:
     return names
 
 
-def vet_header(path: str, *, allow_unmatched: bool = False) -> int:
+def vet_header(path: str, *, allow_unmatched: bool = False,
+               keymap: LoraKeyMap | None = None, modules=None) -> int:
     """Check a LoRA safetensors file by its header alone and return the
     number of pair stems it names. Raises as ``read_lora`` does for a file
     that is not safetensors, for a refused adapter type and for keys with
     no known suffix. It reads no tensor, so a caller can refuse a file
-    before it loads a model. Whether the stems name modules of a family
-    is checked by ``resolve``, which needs the family's key map."""
+    before it loads a model.
+
+    With ``keymap``, the stems are placed as ``resolve`` places them, so a
+    file for another family raises ``AdapterFamilyError`` and a stem that
+    names no module raises ``UnmatchedKeysError``. With ``modules``, the
+    module paths that the DiT file holds a weight for, a stem that targets
+    a module outside them raises ``AdapterError``. Whether a pair's shape
+    fits its module is checked at the load."""
     import os
 
     path = os.path.expanduser(str(path))
@@ -296,7 +303,46 @@ def vet_header(path: str, *, allow_unmatched: bool = False) -> int:
             f"suffix: {_listed(stray)}", tuple(stray))
     if not stems:
         raise AdapterError(f"{path} holds no LoRA pair")
+    if keymap is not None:
+        _vet_targets(path, sorted(stems), keymap, modules, allow_unmatched)
     return len(stems)
+
+
+def _vet_targets(path: str, stems: list, keymap: LoraKeyMap, modules,
+                 allow_unmatched: bool) -> None:
+    """Raise as ``resolve`` and ``load_adapter`` do for stems that name no
+    module of the family, or a module the DiT file does not hold."""
+    under = _underscore_index(keymap.targets)
+    text_under = _underscore_index(keymap.text_targets)
+    placed, unmatched, absent = 0, [], []
+    for stem in stems:
+        if is_text_stem(stem):
+            if _text_target(stem, keymap, text_under) is None:
+                unmatched.append(stem)
+            else:
+                placed += 1
+            continue
+        hit = _dit_target(stem, keymap, under)
+        if hit is None:
+            unmatched.append(stem)
+            continue
+        placed += 1
+        module = keymap.targets[hit[0]][0]
+        if modules is not None and module not in modules:
+            absent.append((stem, module))
+    if not placed:
+        raise AdapterFamilyError(
+            f"{path} is not a {keymap.title} adapter: none of its "
+            f"{len(stems)} targets names a {keymap.title} module "
+            f"({_listed(unmatched)})")
+    if unmatched and not allow_unmatched:
+        raise UnmatchedKeysError(
+            f"{path}: {len(unmatched)} of {len(stems)} targets name no "
+            f"{keymap.title} module: {_listed(unmatched)}", tuple(unmatched))
+    if absent:
+        stem, module = absent[0]
+        raise AdapterError(f"{path}: {stem} targets {module}, which this "
+                           "DiT does not have")
 
 
 def read_lora(path: str, *, allow_unmatched: bool = False) -> RawLora:

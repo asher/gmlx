@@ -347,15 +347,25 @@ def _check_files(a) -> None:
             raise FileNotFoundError(f"--adapter {path}: no such file")
 
 
-def _vet_adapters(a) -> None:
+def _vet_adapters(a, ident=None) -> None:
     """Refuse an ``--adapter`` file gmlx does not apply from its header,
-    before any model loads."""
+    before any model loads. With the identified DiT, also refuse a file
+    whose keys name no module of its family or a module the DiT file does
+    not hold."""
     if not a.adapter:
         return
     from gmlx.image import lora
 
+    keymap = modules = None
+    if ident is not None:
+        if ident.family.lora_map is None:
+            raise lora.AdapterError(f"{ident.family.title} has no LoRA key "
+                                    "map in gmlx")
+        keymap = ident.family.lora_map(ident.config)
+        modules = {n[:-len(".weight")] for n in ident.view.tensors
+                   if n.endswith(".weight")}
     for path, _ in a.adapter:
-        lora.vet_header(path)
+        lora.vet_header(path, keymap=keymap, modules=modules)
 
 
 def _file_sha256(path: str) -> str:
@@ -447,6 +457,7 @@ def _generate(a) -> int:
     log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
 
     ident = image_preflight.identify_dit(a.model)
+    _vet_adapters(a, ident)
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
     steps, cfg, strength = _settings(a, ident, defaults)
@@ -700,6 +711,7 @@ def _bench(a) -> int:
             raise OSError(f"cannot write {a.json_out}: {err}")
     log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
     ident = image_preflight.identify_dit(a.model)
+    _vet_adapters(a, ident)
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
     a.strength = None

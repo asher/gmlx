@@ -457,6 +457,17 @@ def tiny(env, monkeypatch, tmp_path):
         return env.pipes[-1]
 
     monkeypatch.setattr(api, "load", load)
+    # The header of the tiny DiT's file: its config and its tensor names.
+    from image_fixtures import TINY_Z_CONFIG, tiny_z_model
+    from mlx.utils import tree_flatten
+
+    names = {k: SimpleNamespace(shape=tuple(v.shape), codec="Q4_K")
+             for k, v in tree_flatten(tiny_z_model()[0].parameters())}
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p: SimpleNamespace(
+                            family=get_family("z_image"), variant=env.variant,
+                            config=dict(TINY_Z_CONFIG),
+                            view=SimpleNamespace(tensors=names)))
     env.a = write_adapter(tmp_path / "a.safetensors", "kohya",
                           tiny_z_adapter(1, 4.0, wide=True))
     env.b = write_adapter(tmp_path / "b.safetensors", "diffusers",
@@ -603,11 +614,15 @@ def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
     junk = tmp_path / "junk.safetensors"
     junk.write_bytes(b"not a safetensors file at all")
     # A file that is refused by its key names, or is not safetensors, is
-    # refused from its header, before any model loads.
+    # refused from its header, before any model loads. So is a file whose
+    # keys name no module of this DiT: its GGUF header gives the family
+    # and the modules it holds.
     for path, text in ((loha, "loha.safetensors is a LoHa adapter"),
                        (dora, "dora.safetensors is a DoRA adapter"),
                        (stray, "1 of 3 keys have no known LoRA suffix"),
-                       (str(junk), "is not a safetensors file")):
+                       (str(junk), "is not a safetensors file"),
+                       (flux, "flux.safetensors is not a Z-Image adapter"),
+                       (extra, "1 of 9 targets name no Z-Image module")):
         for action in (tiny.base + run, [
                 "image", "bench", tiny.files["dit.gguf"], "--encoder",
                 tiny.files["enc.gguf"], "--vae", tiny.files["vae.gguf"],
@@ -616,12 +631,6 @@ def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
                                            "--adapter", path]) == 1
             assert text in capsys.readouterr().err
             assert tiny.pipes == []
-    # Whether the keys name modules of this DiT is known once it loads.
-    for path, text in ((flux, "flux.safetensors is not a Z-Image adapter"),
-                       (extra, "1 of 9 targets name no Z-Image module")):
-        assert umbrella_main(tiny.base + run + ["--adapter", path]) == 1
-        assert text in capsys.readouterr().err
-    assert len(tiny.pipes) == 2
     assert not list(tmp_path.glob("gmlx-*.png"))
 
 

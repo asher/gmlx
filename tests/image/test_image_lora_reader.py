@@ -279,3 +279,47 @@ def test_a_file_that_is_not_safetensors_is_refused(tmp_path):
         reader.read_lora(str(p))
     with pytest.raises(AdapterError, match="No such file"):
         reader.read_lora(str(tmp_path / "missing.safetensors"))
+
+
+def test_the_header_vet_places_stems_on_the_family_and_the_dit(tmp_path):
+    """With a key map the vet refuses, from the header alone, what
+    ``resolve`` and the load refuse: a file for another family, a stem
+    that names no module, and a module the DiT file does not hold."""
+    down, up, _ = _pair()
+    held = {"layers.0.attention.qkv", "layers.0.feed_forward.w1",
+            "x_embedder"}
+
+    def write(name, stems):
+        keys = {}
+        for stem in stems:
+            keys[stem + ".lora_A.weight"] = down
+            keys[stem + ".lora_B.weight"] = up
+        return write_keys(tmp_path / name, keys)
+
+    good = write("good.safetensors", [
+        "transformer.layers.0.attention.to_q",
+        "lora_unet_layers_0_feed_forward_w1",
+        "text_encoders.toy_te.transformer.model.layers.0.self_attn.q_proj"])
+    assert reader.vet_header(good) == 3
+    assert reader.vet_header(good, keymap=KEYMAP, modules=held) == 3
+    flux = write("flux.safetensors", [
+        "transformer.transformer_blocks.0.attn.to_q",
+        "lora_unet_double_blocks_0_img_attn_qkv"])
+    assert reader.vet_header(flux) == 2
+    for allow in (False, True):
+        with pytest.raises(AdapterFamilyError, match="not a Toy adapter"):
+            reader.vet_header(flux, keymap=KEYMAP, allow_unmatched=allow)
+    extra = write("extra.safetensors", [
+        "transformer.layers.0.feed_forward.w1",
+        "transformer.layers.0.feed_forward.w9"])
+    with pytest.raises(UnmatchedKeysError) as e:
+        reader.vet_header(extra, keymap=KEYMAP)
+    assert "1 of 2 targets name no Toy module" in str(e.value)
+    assert e.value.keys == ("transformer.layers.0.feed_forward.w9",)
+    assert reader.vet_header(extra, keymap=KEYMAP, allow_unmatched=True) == 2
+    # The map has the target and the DiT file holds no weight for it.
+    with pytest.raises(AdapterError, match="layers.0.feed_forward.w1, "
+                                           "which this DiT does not have"):
+        reader.vet_header(good, keymap=KEYMAP,
+                          modules=held - {"layers.0.feed_forward.w1"})
+
