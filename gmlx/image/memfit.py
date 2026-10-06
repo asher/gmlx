@@ -7,6 +7,11 @@ decode, and each phase adds its own activation peak to what is resident
 then. The plan fits when the largest phase stays within the working budget
 of ``gmlx.serve.capacity``.
 
+A family that caches a prefix per conditioning adds three terms to the
+denoise phase: the cache of every conditioning, the K and V of one block
+joined over the prefix and the image rows in each step, and the prefill
+pass over the prefix rows, which a conditioning runs once.
+
 Levers apply in order until the plan fits: sequential rows in place of a
 batch, release of an owned encoder after encoding, and tiled VAE decode.
 A plan that still does not fit raises ``ImageMemoryError`` with each term
@@ -28,7 +33,6 @@ import math
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable
 
 GiB = 1 << 30
 
@@ -131,6 +135,30 @@ VAE_TILED = {"decode": {2: TiledFit(base=1.96 * GiB, k_tiles=4.70,
 
 
 @dataclass(frozen=True)
+class PrefixRow:
+    """The prefix a family caches per conditioning: the K and V of every
+    block for the text rows and the reference latent tokens. A step holds
+    one block's cached K and V joined with the target's own, and the
+    prefill runs the prefix rows through the blocks once per
+    conditioning."""
+    blocks: int                     # blocks that cache K and V
+    dim: int                        # elements of one K or V row
+    token_px: int                   # pixels per reference token on each axis
+
+    def rows(self, text: int, refs: int, ref_px: int) -> int:
+        """Prefix rows of one conditioning with ``text`` text rows and
+        ``refs`` square references of ``ref_px`` pixels."""
+        return text + refs * (ref_px // self.token_px) ** 2
+
+    def cache_bytes(self, rows: int, itemsize: int) -> int:
+        return 2 * self.blocks * rows * self.dim * itemsize
+
+    def join_bytes(self, rows: int, itemsize: int) -> int:
+        """K and V of one block over ``rows`` joined rows."""
+        return 2 * rows * self.dim * itemsize
+
+
+@dataclass(frozen=True)
 class PeakRow:
     """How a family's activation peak follows from the request."""
     token_px: int                   # pixels per token along each axis
@@ -139,25 +167,25 @@ class PeakRow:
     width: int                      # widest outputs per row, in elements
     step: StepFit                   # step footprint from the formula
     vae_channels: int               # VAE channels at full resolution
-    prefix: Callable | None = None  # (text, refs, ref_px) -> bytes per cond
+    prefix: PrefixRow | None = None
     encode_row_bytes: int = 0       # encoder activation bytes per token,
                                     # times ENCODE_LIVE
     text_rows: int = 512
-
-
-def _qwen_prefix(text: int, refs: int, ref_px: int) -> int:
-    tokens = text + refs * (ref_px // 16) ** 2
-    return 2 * 32 * tokens * 4096 * 2
 
 
 PEAKS = {
     "z_image": PeakRow(token_px=16, row_multiple=32, caption_rows=512,
                        width=11520 + 2 * 10240, step=Z_IMAGE_STEP,
                        vae_channels=128, encode_row_bytes=3 * 9728 * 2),
+    # A step runs the target rows alone: the fused MLP product and its
+    # gated half are the widest outputs. The sizes are those the
+    # fingerprint holds the file to: 32 blocks, 4096 wide, a 12288 MLP.
     # The step row is Z-Image's until a Qwen-Image 2.1 step is measured.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
                             width=24576 + 12288, step=Z_IMAGE_STEP,
-                            vae_channels=96, prefix=_qwen_prefix,
+                            vae_channels=96,
+                            prefix=PrefixRow(blocks=32, dim=4096,
+                                             token_px=16),
                             encode_row_bytes=3 * 12288 * 2),
 }
 
@@ -249,6 +277,20 @@ def image_rows(row: PeakRow, height: int, width: int,
     return -(-tokens // m) * m + (-(-cap // m) * m if row.caption_rows else 0)
 
 
+def prefix_terms(row: PeakRow, image: int, text: int, refs: int,
+                 ref_px: int, itemsize: int) -> tuple[int, int, int]:
+    """Bytes a family's prefix adds to one conditioning of a request with
+    ``image`` image rows: its cache, the step formula of one row with the
+    joined K and V of a block, and the step formula of its prefill."""
+    step = image * row.width * itemsize
+    if row.prefix is None:
+        return 0, step, 0
+    rows = row.prefix.rows(text, refs, ref_px)
+    return (row.prefix.cache_bytes(rows, itemsize),
+            step + row.prefix.join_bytes(rows + image, itemsize),
+            rows * row.width * itemsize)
+
+
 def _dtype_name(dtype) -> str:
     return str(dtype).rsplit(".", 1)[-1]
 
@@ -320,11 +362,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         "caches": int(cache_bytes),
         "prefix_cache": 0,
     }
-    if row.prefix is not None:
-        text = row.text_rows if text_tokens is None else text_tokens
-        terms["prefix_cache"] = conds * row.prefix(text, refs, ref_px)
     rows = image_rows(row, height, width, caption_tokens)
-    step_one = rows * row.width * act
+    text = row.text_rows if text_tokens is None else text_tokens
+    cache_one, step_one, prefill = prefix_terms(row, rows, text, refs,
+                                                ref_px, act)
+    terms["prefix_cache"] = conds * cache_one
     full_decode = vae_peak("decode", height, width, itemsize=vsize,
                            channels=row.vae_channels)
     tiled_decode = vae_peak("decode", height, width, itemsize=vsize,
@@ -334,7 +376,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
         t = dict(terms)
-        t["step_peak"] = row.step.bytes(b * step_one)
+        t["step_peak"] = row.step.bytes(max(b * step_one, prefill))
         t["decode_peak"] = int(tiled_decode if tiled else full_decode)
         t["encode_peak"] = int(encode_peak)
         resident = sum(t[n] for n in ("dit", "encoder", "vae", "mmproj",
@@ -373,27 +415,29 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         hint += ("; a borrowed encoder stays resident, so load the encoder "
                  "on its own")
     if refs:
-        hint += _ref_hint(row, terms, plan, refs, ref_px, conds, text_tokens)
+        hint += _ref_hint(row, plan, rows, text, refs, ref_px, conds, act)
     raise ImageMemoryError(
         f"image request does not fit: {plan.describe()}. {hint}. "
         "GMLX_OVERCOMMIT=1 overrides.", plan)
 
 
-def _ref_hint(row: PeakRow, terms: dict, plan: MemoryPlan, refs: int,
-              ref_px: int, conds: int, text_tokens: int | None) -> str:
+def _ref_hint(row: PeakRow, plan: MemoryPlan, image: int, text: int,
+              refs: int, ref_px: int, conds: int, itemsize: int) -> str:
     """The largest reference count, and the largest reference size at the
     requested count, that fit the denoise phase."""
     if row.prefix is None or plan.budget is None:
         return ""
-    text = row.text_rows if text_tokens is None else text_tokens
     room = (plan.budget - plan.phases["denoise"]
-            + terms["prefix_cache"])
+            + plan.terms["prefix_cache"] + plan.terms["step_peak"])
 
     def fits(n: int, px: int) -> bool:
-        return conds * row.prefix(text, n, px) <= room
+        cache, step, prefill = prefix_terms(row, image, text, n, px,
+                                            itemsize)
+        return (conds * cache
+                + row.step.bytes(max(plan.rows * step, prefill))) <= room
 
     count = max((n for n in range(refs + 1) if fits(n, ref_px)), default=0)
-    side = next((s for s in range(ref_px, 0, -row.token_px)
+    side = next((s for s in range(ref_px, 0, -row.prefix.token_px)
                  if fits(refs, s)), 0)
     return (f"; {count} references of {ref_px} px fit, or {refs} of "
             f"{side} px")

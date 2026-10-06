@@ -57,15 +57,72 @@ def test_z_image_rows_and_step_formula(z_view):
 
 def test_qwen_image_rows_and_prefix_cache(q_view):
     row = memfit.PEAKS["qwen_image21"]
+    pre = row.prefix
     assert memfit.image_rows(row, 1024, 1024, None) == 4096
     assert round(4096 * (24576 + 12288) * 2 / GiB, 2) == 0.28
-    assert row.prefix(200, 0, 0) == 100 * (1 << 20)
-    assert row.prefix(0, 1, 1024) == 2 * GiB
+    # 200 text rows cache 100 MiB, and one 1024 pixel reference 2 GiB.
+    assert pre.rows(200, 0, 0) == 200 and pre.rows(0, 1, 1024) == 4096
+    assert pre.rows(200, 3, 512) == 200 + 3 * 1024
+    assert pre.cache_bytes(200, 2) == 100 * (1 << 20)
+    assert pre.cache_bytes(4096, 2) == 2 * GiB
     p = plan_memory(q_view, 0, 0, family="qwen_image21", height=1024,
                     width=1024, cfg=4.0, text_tokens=200, refs=1,
                     ref_px=1024, budget=BUDGET_128, overcommit=False)
     assert p.terms["prefix_cache"] == 2 * (100 * (1 << 20) + 2 * GiB)
     assert p.rows == 2
+    # The cache follows the activation dtype.
+    p = plan_memory(q_view, 0, 0, family="qwen_image21", height=1024,
+                    width=1024, text_tokens=200, dtype="float32",
+                    budget=BUDGET_128, overcommit=False)
+    assert p.terms["prefix_cache"] == 2 * 100 * (1 << 20)
+
+
+def test_the_qwen_row_holds_the_sizes_of_the_header(q_view):
+    from gmlx.image import fingerprint as fp
+
+    got = fp.identify(q_view)
+    cfg, row = got.config, memfit.PEAKS[got.family.name]
+    assert (row.prefix.blocks, row.prefix.dim) == (
+        cfg["num_layers"], cfg["inner_dim"]) == (32, 4096)
+    # The widest outputs of a row: the fused gate and up product, and the
+    # gated half that the MLP's last product reads.
+    assert row.width == 2 * cfg["ffn_dim"] + cfg["ffn_dim"] == 36864
+    # One token is one latent pixel of the 16x VAE.
+    assert row.token_px == row.prefix.token_px == 16 * cfg["patch_size"]
+    assert row.caption_rows == 0 and row.row_multiple == 1
+
+
+def test_a_qwen_step_holds_the_joined_keys_and_the_prefill(q_view):
+    row = memfit.PEAKS["qwen_image21"]
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              budget=BUDGET_128, overcommit=False)
+    image = 4096 * 36864 * 2
+
+    def join(rows):
+        return 2 * rows * 4096 * 2
+
+    # Text to image: 4096 target rows over the K and V of 512 text rows.
+    p = plan_memory(q_view, 0, 0, **kw)
+    assert p.terms["prefix_cache"] == 2 * 32 * 512 * 4096 * 2 == GiB // 4
+    assert p.terms["step_peak"] == row.step.bytes(image + join(512 + 4096))
+    assert p.phases["denoise"] == (p.terms["dit"] + p.terms["prefix_cache"]
+                                   + p.terms["step_peak"])
+    assert memfit.prefix_terms(row, 4096, 512, 0, 0, 2) == (
+        GiB // 4, image + join(512 + 4096), 512 * 36864 * 2)
+    # Two 1024 pixel references: the prefill of 8704 prefix rows is wider
+    # than one step of 4096 target rows, and narrower than two.
+    prefix = 512 + 2 * 4096
+    step, prefill = image + join(prefix + 4096), prefix * 36864 * 2
+    assert step < prefill < 2 * step
+    p = plan_memory(q_view, 0, 0, refs=2, ref_px=1024, **kw)
+    assert p.rows == 1 and p.terms["step_peak"] == row.step.bytes(prefill)
+    p = plan_memory(q_view, 0, 0, refs=2, ref_px=1024, cfg=4.0, **kw)
+    assert p.rows == 2 and p.terms["step_peak"] == row.step.bytes(2 * step)
+    assert p.terms["prefix_cache"] == 2 * 32 * prefix * 4096 * 2 * 2
+    # A family without a prefix has neither term.
+    z = memfit.PEAKS["z_image"]
+    assert memfit.prefix_terms(z, 4128, 512, 2, 1024, 2) == (
+        0, 4128 * z.width * 2, 0)
 
 
 def test_a_16_gib_machine_releases_the_encoder_and_tiles_at_1024(z_view):
@@ -194,7 +251,18 @@ def test_reference_refusal_names_what_fits(q_view):
                     budget=60 * GiB, overcommit=False)
     msg = str(e.value)
     assert "The largest term is prefix_cache" in msg
-    assert "; 13 references of 1024 px fit, or 16 of 928 px" in msg
+    assert "; 9 references of 1024 px fit, or 16 of 800 px" in msg
+    # What the message names fits, and one step more does not.
+    kw = dict(family="qwen_image21", height=1024, width=1024, cfg=4.0,
+              budget=60 * GiB, overcommit=False)
+    for refs, px, fits in ((9, 1024, True), (10, 1024, False),
+                           (16, 800, True), (16, 816, False)):
+        if fits:
+            assert plan_memory(q_view, ENCODER, 0, refs=refs, ref_px=px,
+                               **kw).fits
+        else:
+            with pytest.raises(ImageMemoryError):
+                plan_memory(q_view, ENCODER, 0, refs=refs, ref_px=px, **kw)
 
 
 def test_fp32_vae_on_fp16_activations(z_view):
