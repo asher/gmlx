@@ -16,11 +16,6 @@ from gmlx.load.vlm import UnsupportedVLMError, resolve_vlm_model_type
     ("qwen35", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_5"),
     ("qwen35moe", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_5_moe"),
     ("qwen3vlmoe", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_omni_moe"),
-    ("qwen3vl", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
-    ("qwen3vl", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
-    ("qwen35", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_5"),
-    ("qwen35moe", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_5_moe"),
-    ("qwen4exp", {"clip.projector_type": "qwen3vl_merger"}, "qwen4_exp"),
     ("gemma4", {"clip.vision.projector_type": "gemma4v"}, "gemma4"),
     ("gemma4", {"clip.vision.projector_type": "gemma4uv"}, "gemma4_unified"),
     ("muse-glimmer", {"clip.projector_type": "muse-glimmer"}, "muse_glimmer"),
@@ -28,6 +23,11 @@ from gmlx.load.vlm import UnsupportedVLMError, resolve_vlm_model_type
      "muse_glimmer"),
     ("deepseek2", {"clip.projector_type": "kimik25"}, "kimi_k25"),
     ("deepseek4", {"clip.projector_type": "deepseek4v"}, "deepseek_v4_vl"),
+    ("qwen3vl", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
+    ("qwen3vl", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
+    ("qwen35", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_5"),
+    ("qwen35moe", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_5_moe"),
+    ("qwen4exp", {"clip.projector_type": "qwen3vl_merger"}, "qwen4_exp"),
 ])
 def test_supported_families_resolve(llm_arch, mm_meta, expected):
     assert resolve_vlm_model_type(llm_arch, mm_meta) == expected
