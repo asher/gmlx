@@ -178,13 +178,16 @@ def top(got: dict, only: str = "") -> tuple[str, float]:
     return k, got[k]
 
 
-def wrong_tables(pipe, tmp, m: dict, rows: list, each: bool = True) -> dict:
+def wrong_tables(pipe, tmp, m: dict, rows: list, each: bool = True,
+                 every_block: bool = False) -> dict:
     """Wrong tables made from the (LoadedAdapter, strength) rows of a
     right one, as name to entries: the gate and the projection of every
-    image MLP swapped, the adapters without their alpha, a group of
-    entries left out, with ``each`` every one entry left out, every
-    strength a tenth off each way, and the table of one adapter of a
-    stack, of an adapter the oracle did not merge, and of none."""
+    image MLP swapped, the adapters without their alpha, the entries of
+    one block left out (the first, the middle and the last block, or
+    with ``every_block`` each block in turn), with ``each`` every one
+    entry left out, every strength a tenth off each way, and the table
+    of one adapter of a stack, of an adapter the oracle did not merge,
+    and of none."""
     cfg = pipe.dit.cfg
     ffn = cfg.ffn_dim
     entries = lora.table_entries(rows)
@@ -205,8 +208,9 @@ def wrong_tables(pipe, tmp, m: dict, rows: list, each: bool = True) -> dict:
             [(ad, s) for (ad, _), (_, s) in zip(bare, rows)])
     blocks = sorted({int(p.split(".")[1]) for p, _, _ in entries
                      if p.startswith(B)})
-    groups = {f"block_{i}": f"{B}{i}." for i in sorted(
-        {blocks[0], blocks[len(blocks) // 2], blocks[-1]})}
+    some = sorted({blocks[0], blocks[len(blocks) // 2], blocks[-1]})
+    groups = {f"block_{i}": f"{B}{i}."
+              for i in (blocks if every_block else some)}
     for name, prefix in groups.items():
         out[f"{name}_left_out"] = [e for e in entries
                                    if not e[0].startswith(prefix)]
@@ -1033,27 +1037,32 @@ def test_check7_product_gate_block_by_block_at_512(real, tmp_path, variant):
     assert not misses, misses
     # A negative control: the base model. Every row of a block is fed the
     # merged oracle's input, so a row can only miss in a block the
-    # adapter is in, and the gate must see the adapter there.
+    # adapter is in. The row does not see the adapter in every block: a
+    # block's output is its input plus two gated branches, and in the
+    # first adapted blocks what the adapter adds to it is under twice the
+    # oracle's own bf16 gap. The exact gate leaves the adapter out of
+    # each block in turn, and the site gate reads every adapted leaf.
     adapted = {int(t.split(".")[1])
                for t in m["inputs"]["adapters"][0]["targets"]}
     with qg.under_table(real, api.EMPTY_TABLE):
         base = qg.check3_rows(real.dit, arrays)
     tol = m["tolerances"]["rows_rel_l2"]
-    over = {r: g["rel_l2"] / tol[r] for r, g in base.items()
-            if r in tol and not g["rel_l2"] <= tol[r]}
-    seen = {}
-    for r, ratio in over.items():
-        if "transformer_blocks." in r or r.startswith("prefill."):
-            seen.setdefault(int(r.rsplit(".", 1)[1]), {})[r] = ratio
-    weakest = min((max(v.values()) for v in seen.values()), default=0.0)
-    print(f"qwen check7 block by block {variant}, base model: "
-          f"{len(over)} rows miss in blocks {sorted(seen)} of the adapted "
-          f"{sorted(adapted)}; the block that misses least is "
-          f"{weakest:.2f} times its gate")
-    assert set(seen) == adapted, (sorted(seen), sorted(adapted))
-    for i in adapted:
-        assert f"joint.transformer_blocks.{i}" in seen[i], seen[i]
-        assert f"cached.transformer_blocks.{i}" in seen[i], seen[i]
+    share = {r: g["rel_l2"] / tol[r] for r, g in base.items() if r in tol}
+    top: dict = {}
+    for r, v in share.items():
+        if "transformer_blocks." in r:
+            i = int(r.rsplit(".", 1)[1])
+            top[i] = max(top.get(i, 0.0), v)
+    seen = {i for i, v in top.items() if v > 1}
+    clean = max(v for i, v in top.items() if i not in adapted)
+    print(f"qwen check7 block by block {variant}, base model: the largest "
+          "row of each adapted block over its gate: "
+          + ", ".join(f"{i} {top[i]:.2f}" for i in sorted(adapted))
+          + f"; a block without the adapter reads at most {clean:.2f}")
+    assert not [r for r, v in share.items()
+                if v > 1 and "transformer_blocks." not in r]
+    assert seen <= adapted, (sorted(seen), sorted(adapted))
+    assert len(seen) >= len(adapted) - 2, sorted(adapted - seen)
 
 
 @pytest.mark.integration
@@ -1124,8 +1133,14 @@ def _exact_gate(pipe, tmp, variant: str, label: str) -> None:
               f"{got[name]['rel_l2']:.2e} of the oracle, at {name}, gate "
               f"{EXACT_TOL:.0e}")
         assert not qg.missed(got, EXACT_TOL), qg.missed(got, EXACT_TOL)
-        wrong = wrong_tables(pipe, tmp, m, rows, each=False)
-        assert sum(k.startswith("block_") for k in wrong) >= 2
+        # The adapter left out of each block in turn: the product gate
+        # on a block's row does not see it in every block.
+        wrong = wrong_tables(pipe, tmp, m, rows, each=False,
+                             every_block=True)
+        blocks = {int(p.split(".")[1]) for p, _, _ in lora.table_entries(
+            rows) if p.startswith(B)}
+        assert {k for k in wrong if k.startswith("block_")} == {
+            f"block_{i}_left_out" for i in blocks}
         for fault, entries in wrong.items():
             with qg.under_table(pipe, api.define_patch_table(pipe, entries)):
                 missed = qg.missed(qg.step(pipe.dit, arrays), EXACT_TOL)
