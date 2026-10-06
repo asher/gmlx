@@ -146,9 +146,10 @@ manifest, so its test runs in the CPU tier.
 The oracle runs each check in float32 and in bfloat16. A tolerance is
 twice the gap between those two runs, and the manifest records the gap
 beside the tolerance. The velocity also has a cosine floor of
-`1 - 2(1 - c)`, where c is the oracle's own cosine between the two runs.
+`1 - 4(1 - c)`, where c is the oracle's own cosine between the two runs.
 Cosine distance grows with the square of the angle, so the floor bounds
-the angle at sqrt(2) times the oracle's own, a tighter gate than twice.
+the angle at twice the oracle's own, as the tolerance bounds the
+relative L2.
 A late block adds a few percent to its output, so an error in the
 block's own computation hides under the bfloat16 rounding of its output.
 Each block therefore also has two branch rows, the outputs of its

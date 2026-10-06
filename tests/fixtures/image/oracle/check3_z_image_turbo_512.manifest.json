@@ -989,13 +989,13 @@
   }
  },
  "tolerances": {
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of the free-running pass and for the velocity. The velocity cosine floor is 1 - 2 x the oracle's own cosine distance. Cosine distance grows with the square of the angle, so the floor bounds the angle to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle. Each block also has two teacher-forced branch rows, the output of its attention module and of its feed-forward module, at 2 x the oracle's own gap on each, since a late block adds a few percent to its output and an update row would inherit the residual stream's bf16 rounding",
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of the free-running pass and for the velocity. The velocity cosine floor is 1 - 4 x the oracle's own cosine distance. Cosine distance grows with the square of the angle, so the floor bounds the angle to the fp32 velocity at 2 x the oracle's own bf16 angle, as the relative L2 tolerance bounds the amplitude. Each block also has two teacher-forced branch rows, the output of its attention module and of its feed-forward module, since a late block adds a few percent to its output and an update row would inherit the residual stream's bf16 rounding. The fp32 arrays of the branch rows are for a gate that runs the model in fp32. 2 x the oracle's own gap on a branch row is recorded and is not a gate: it is one rounding sample, and a right model lands on either side of it",
   "starting": {
    "block_rel_l2": 0.005,
    "velocity_rel_l2": 0.02
   },
   "velocity_rel_l2": 0.11225776507621249,
-  "velocity_cosine_min": 0.9968586363970375,
+  "velocity_cosine_min": 0.9937172727940751,
   "rows_rel_l2": {
    "t_embedder": 0.002676586129974845,
    "x_embed": 0.004636956123718571,

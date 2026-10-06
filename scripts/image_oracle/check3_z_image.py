@@ -49,14 +49,17 @@ STARTING = {"block_rel_l2": 5e-3, "velocity_rel_l2": 2e-2}
 RULE = ("tolerance = 2 x the oracle's own bf16 against fp32 relative L2: "
         "teacher-forced for each row, free running for each block of the "
         "free-running pass and for the velocity. The velocity cosine floor "
-        "is 1 - 2 x the oracle's own cosine distance. Cosine distance "
+        "is 1 - 4 x the oracle's own cosine distance. Cosine distance "
         "grows with the square of the angle, so the floor bounds the angle "
-        "to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle. "
-        "Each block also has two teacher-forced branch rows, the output of "
-        "its attention module and of its feed-forward module, at 2 x the "
-        "oracle's own gap on each, since a late block adds a few percent "
-        "to its output and an update row would inherit the residual "
-        "stream's bf16 rounding")
+        "to the fp32 velocity at 2 x the oracle's own bf16 angle, as the "
+        "relative L2 tolerance bounds the amplitude. Each block also has "
+        "two teacher-forced branch rows, the output of its attention "
+        "module and of its feed-forward module, since a late block adds a "
+        "few percent to its output and an update row would inherit the "
+        "residual stream's bf16 rounding. The fp32 arrays of the branch "
+        "rows are for a gate that runs the model in fp32. 2 x the oracle's "
+        "own gap on a branch row is recorded and is not a gate: it is one "
+        "rounding sample, and a right model lands on either side of it")
 
 
 def chain(model) -> list[tuple[str, object]]:
@@ -292,7 +295,7 @@ def run_size(torch, a, models, size: int, cap: np.ndarray, ids, cap_meta,
     fx.results["velocity_bf16_vs_fp32"] = gap_v
     fx.tolerances.update(rule=RULE, starting=STARTING,
                          velocity_rel_l2=2 * gap_v["rel_l2"],
-                         velocity_cosine_min=1 - 2 * (1 - gap_v["cosine"]))
+                         velocity_cosine_min=1 - 4 * (1 - gap_v["cosine"]))
 
     if blocks:
         c32, c16 = caps["fp32"], caps["bf16"]

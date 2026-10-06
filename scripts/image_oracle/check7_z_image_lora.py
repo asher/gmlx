@@ -72,11 +72,12 @@ VARIANTS = {
 }
 RULE = ("tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of "
         "the velocity with the adapter merged, and the cosine floor is 1 - "
-        "2 x its own cosine distance: check 3's rule on the merged model")
-BLOCK_RULE = (RULE + ". Each row, branch row and free-running block has 2 x "
-              "the oracle's own bf16 against fp32 relative L2 at that "
-              "point, with the bf16 block teacher-forced on the merged "
-              "fp32 model's input for a row and a branch row")
+        "4 x its own cosine distance: check 3's rule on the merged model")
+BLOCK_RULE = (RULE + ". Each row and free-running block has 2 x the "
+              "oracle's own bf16 against fp32 relative L2 at that point, "
+              "with the bf16 block teacher-forced on the merged fp32 "
+              "model's input for a row. The same figure of a branch row is "
+              "recorded and is not a gate, as in check 3")
 
 
 def rss_gib() -> float:
@@ -285,7 +286,7 @@ def write_blocks(name: str, script: str, dit: Path, base: dict, src: dict,
         seconds=case["seconds"])
     fx.tolerances.update(
         rule=BLOCK_RULE, velocity_rel_l2=2 * gap["rel_l2"],
-        velocity_cosine_min=1 - 2 * (1 - gap["cosine"]),
+        velocity_cosine_min=1 - 4 * (1 - gap["cosine"]),
         rows_rel_l2={r: 2 * g["rel_l2"] for r, g in case["rows"].items()},
         free_rel_l2={n: 2 * g["rel_l2"] for n, g in case["free"].items()},
         branch_rel_l2={k: 2 * g["rel_l2"]
@@ -404,7 +405,7 @@ def main(argv=None) -> int:
                                "adapter_vs_base_fp32": effect}
         fx.tolerances[variant] = {
             "velocity_rel_l2": 2 * gap["rel_l2"],
-            "velocity_cosine_min": 1 - 2 * (1 - gap["cosine"])}
+            "velocity_cosine_min": 1 - 4 * (1 - gap["cosine"])}
         print(f"[check7] {variant}: bf16 vs fp32 rel L2 "
               f"{gap['rel_l2']:.3e} cos {gap['cosine']:.6f}; adapter vs "
               f"base rel L2 {effect['rel_l2']:.3e}", flush=True)

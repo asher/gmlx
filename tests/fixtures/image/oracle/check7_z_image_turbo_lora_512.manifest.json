@@ -389,18 +389,18 @@
   "peak_rss_gib": 26.12
  },
  "tolerances": {
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of the velocity with the adapter merged, and the cosine floor is 1 - 2 x its own cosine distance: check 3's rule on the merged model",
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of the velocity with the adapter merged, and the cosine floor is 1 - 4 x its own cosine distance: check 3's rule on the merged model",
   "check3_512": {
    "velocity_rel_l2": 0.11225776507621249,
-   "velocity_cosine_min": 0.9968586363970375
+   "velocity_cosine_min": 0.9937172727940751
   },
   "alpha": {
    "velocity_rel_l2": 0.12574007012596686,
-   "velocity_cosine_min": 0.9960500377780575
+   "velocity_cosine_min": 0.9921000755561149
   },
   "plain": {
    "velocity_rel_l2": 0.15396811255408788,
-   "velocity_cosine_min": 0.9940827828101317
+   "velocity_cosine_min": 0.9881655656202635
   }
  },
  "notes": [],

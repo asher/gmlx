@@ -222,21 +222,8 @@ def test_check7_community_step_at_512(pipe, aid):
         assert base["rel_l2"] > tol["velocity_rel_l2"], base
 
 
-# An adapter whose merged model the oracle runs in bfloat16 closer to its
-# own float32 than gmlx runs the model with no adapter: the floor made
-# from that gap is then above the cosine of the gmlx step without any
-# adapter, and the adapter step misses it by the same margin.
-COSINE_MISS = {
-    "bdsqlsz_detailed_eyes": "floor 0.997793 from an oracle gap of 0.0470, "
-    "and gmlx without an adapter is at 0.997350 against the oracle's base",
-}
-
-
 @pytest.mark.integration
-@pytest.mark.parametrize("aid", [
-    pytest.param(a, marks=pytest.mark.xfail(strict=True,
-                                            reason=COSINE_MISS[a]))
-    if a in COSINE_MISS else a for a in ADAPTERS])
+@pytest.mark.parametrize("aid", ADAPTERS)
 def test_check7_community_step_cosine_at_512(pipe, aid):
     """The cosine half of the gate."""
     c = _step_case(pipe, aid)

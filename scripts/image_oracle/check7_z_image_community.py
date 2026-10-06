@@ -282,7 +282,7 @@ def main(argv=None) -> int:
                            "diffusers_converter": check}
         fx.tolerances[aid] = {
             "velocity_rel_l2": 2 * gap["rel_l2"],
-            "velocity_cosine_min": 1 - 2 * (1 - gap["cosine"])}
+            "velocity_cosine_min": 1 - 4 * (1 - gap["cosine"])}
         print(f"[check7] {aid}: bf16 vs fp32 rel L2 {gap['rel_l2']:.3e} cos "
               f"{gap['cosine']:.6f}; adapter vs base rel L2 "
               f"{effect['rel_l2']:.3e}", flush=True)

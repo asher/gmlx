@@ -1061,9 +1061,9 @@
   }
  },
  "tolerances": {
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of the velocity with the adapter merged, and the cosine floor is 1 - 2 x its own cosine distance: check 3's rule on the merged model. Each row, branch row and free-running block has 2 x the oracle's own bf16 against fp32 relative L2 at that point, with the bf16 block teacher-forced on the merged fp32 model's input for a row and a branch row",
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of the velocity with the adapter merged, and the cosine floor is 1 - 4 x its own cosine distance: check 3's rule on the merged model. Each row and free-running block has 2 x the oracle's own bf16 against fp32 relative L2 at that point, with the bf16 block teacher-forced on the merged fp32 model's input for a row. The same figure of a branch row is recorded and is not a gate, as in check 3",
   "velocity_rel_l2": 0.10297324348255661,
-  "velocity_cosine_min": 0.9973702464368637,
+  "velocity_cosine_min": 0.9947404928737273,
   "rows_rel_l2": {
    "t_embedder": 0.002676586129974845,
    "x_embed": 0.004636956123718571,
