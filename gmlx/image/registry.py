@@ -69,6 +69,8 @@ class Family:
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
     step: StepParts | None = None      # None runs the DiT's own step
+    # (steps, tokens=, variant=) -> float32 sigmas with the final zero
+    schedule: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

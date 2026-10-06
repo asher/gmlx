@@ -132,7 +132,12 @@ class ImagePipeline:
                 f"{self.variant}; pass steps and cfg")
         return row
 
-    def sigmas(self, steps: int) -> np.ndarray:
+    def sigmas(self, steps: int, tokens: int | None = None) -> np.ndarray:
+        """The family's schedule of ``steps``. ``tokens`` is the image
+        token count of the request, which a dynamic shift reads."""
+        if self.family.schedule is not None:
+            return self.family.schedule(steps, tokens=tokens,
+                                        variant=self.variant)
         if self.family.name == "z_image":
             row = self.family.sampling.get(self.variant)
             shift = (self.family.constants.values["scheduler_shift"]
@@ -545,7 +550,9 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         raise ValueError("denoise below 1 and mask need init_latents")
 
     if sigmas is None:
-        s = pipe.sigmas(pipe.defaults.steps if steps is None else steps)
+        token_px = pipe.vae_scale * pipe.dit.cfg.patch
+        s = pipe.sigmas(pipe.defaults.steps if steps is None else steps,
+                        (height // token_px) * (width // token_px))
     else:
         s = check_sigmas(sigmas)
         if steps is not None and steps != len(s) - 1:

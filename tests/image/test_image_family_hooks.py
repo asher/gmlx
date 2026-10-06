@@ -1,5 +1,6 @@
 """The hooks a family's registry row gives the shared image code, on toy
-families: the step in parts under the pipeline's two memos. CPU."""
+families: the step in parts under the pipeline's two memos, and the
+schedule. CPU."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -105,3 +106,26 @@ def test_the_state_cache_keeps_two_states_of_the_newest_size():
     api.denoise_step(pipe, x, 0.5, _cond(3.0, "small"))
     assert pipe.captions.max_bytes == 300
     assert pipe.captions.bytes <= 300 and len(pipe.captions) == 2
+
+
+def test_a_family_schedule_reads_the_token_count_of_the_request():
+    seen = []
+
+    def schedule(steps, *, tokens, variant):
+        seen.append((steps, tokens, variant))
+        return np.linspace(1.0, 0.0, steps + 1, dtype=np.float32)
+
+    pipe, calls = _parts_pipe()
+    pipe.family = replace(pipe.family, schedule=schedule)
+    assert np.array_equal(pipe.sigmas(4, 96), schedule(4, tokens=96,
+                                                       variant="turbo"))
+    # Z-Image tokens are 16 pixels a side: 64x48 is 4 x 3 of them.
+    x = api.sample(pipe, _cond(0.25, "a"), height=48, width=64, seed=3,
+                   steps=2)
+    assert seen[-1] == (2, 12, "turbo") and calls["forward"] == 2
+    assert x.shape == (1, 4, 6, 8)
+    # An outside list still replaces the family's schedule.
+    n = len(seen)
+    api.sample(pipe, _cond(0.25, "a"), height=48, width=64, seed=3,
+               sigmas=[1.0, 0.5, 0.0])
+    assert len(seen) == n and calls["forward"] == 4
