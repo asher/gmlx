@@ -546,10 +546,9 @@ def test_another_axis_layout_does_not_pass_the_unequal_position_check(name):
 
 # The processor the two headers give.
 
-_BYTE_TOKENS = [chr(i) for i in range(33, 127)]
-_PROCESSOR_TOKENS = (["<|endoftext|>", "<|im_start|>", "<|im_end|>",
-                      "<|vision_start|>", "<|vision_end|>", "<|image_pad|>",
-                      "<|video_pad|>"] + _BYTE_TOKENS)
+_MARKERS = ["<|endoftext|>", "<|im_start|>", "<|im_end|>",
+            "<|vision_start|>", "<|vision_end|>", "<|image_pad|>",
+            "<|video_pad|>"]
 
 
 def _flat_image(width, height, value=0):
@@ -559,15 +558,19 @@ def _flat_image(width, height, value=0):
 
 
 def _processor(model_type):
+    from tokenizers import pre_tokenizers
+
     from gmlx.load.tokenizer import load_tokenizer_from_gguf
 
+    tokens = _MARKERS + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He"]
     tokenizer = load_tokenizer_from_gguf({
         "general.architecture": "qwen3vl",
         "tokenizer.ggml.model": "gpt2",
         "tokenizer.ggml.pre": "qwen2",
-        "tokenizer.ggml.tokens": list(_PROCESSOR_TOKENS),
-        "tokenizer.ggml.merges": [],
-        "tokenizer.ggml.token_type": [3] * 7 + [1] * len(_BYTE_TOKENS),
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.merges": ["H e"],
+        "tokenizer.ggml.token_type": (
+            [3] * len(_MARKERS) + [1] * (len(tokens) - len(_MARKERS))),
         "tokenizer.ggml.eos_token_id": 2,
         "tokenizer.ggml.padding_token_id": 0,
     }, "qwen3vl")
