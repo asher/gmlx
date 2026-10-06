@@ -40,10 +40,10 @@ def _qwen_vlm_pair(gguf_dir):
     paired = [m for m in scan_dirs([spec], [str(gguf_dir)]) if m.mmproj]
     for m in paired:
         kv = scan_gguf(m.path, include_tensors=False).kv
-        if str(kv.get("general.architecture", "")).startswith("qwen3"):
+        if str(kv.get("general.architecture", "")).startswith("qwen35"):
             return m
     pytest.skip(
-        "no qwen3.x model with a paired sibling mmproj under "
+        "no qwen3.5 or qwen3.6 model with a paired sibling mmproj under "
         "KQUANT_TEST_GGUF_DIR"
     )
 

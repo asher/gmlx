@@ -16,6 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text encoder GGUF and its VAE. `bench` times them and `pack-vae` packs a VAE.
 - `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA
   safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
+- Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
+  text models, and read images with their mmproj.
 
 ### Changed
 
