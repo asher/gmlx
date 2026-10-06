@@ -8,8 +8,9 @@ run the gate and up products of a feed-forward and their swiglu as one
 kernel over two K-quant weights. A call that a kernel does not take runs
 the stock ops, and so does every call on an mlx-kquant without the op.
 
-The kernels have no gradient, so ``mx.grad`` through a routed call raises.
-The image pipeline is inference only.
+No kernel has a gradient with respect to a weight, and the qk kernel has
+none at all, so ``mx.grad`` through a routed qk call raises. The image
+pipeline is inference only.
 
 GMLX_IMAGE_KQ_ROUTES=0 keeps both routes on stock ops, and ``qk`` or
 ``glu`` keeps that route alone. It is read once, at import. ``only`` puts
@@ -190,5 +191,6 @@ def swiglu_fused(x: mx.array, w_gate: mx.array, w_up: mx.array,
     K-quant weights in one kernel, for a pair that ``glu_pair`` returned.
     The kernel takes both products in fp32, rounds the activation once and
     its product with the up product once. The stock ops also round each
-    matmul product and the sigmoid. No gradient."""
+    matmul product and the sigmoid. No gradient with respect to the
+    weights."""
     return _kq_op("quantized_matmul_glu")(x, w_gate, w_up, codec)

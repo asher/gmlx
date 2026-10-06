@@ -13,7 +13,8 @@ lists. The fused qkv matrix stays one product whose output splits into q, k
 and v. Elementwise and attention steps go through the ``gmlx.image.ops``
 seams. The forward is for inference only: the mlx-kquant kernels that
 ``gmlx.image.ops.kq_routes`` puts under ``qk_norm_rope`` and the
-feed-forward have no gradient.
+feed-forward have no gradient with respect to a weight, and the first has
+none at all.
 
 One step runs patchify, ``x_embedder``, the noise refiner, the caption path
 through the context refiner, the main layers over ``[x, cap]``, the final
@@ -120,7 +121,7 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     """w2(silu(w1(x)) * w3(x)). A w1 and w3 pair that ``ops.glu_pair``
     accepts runs with its swiglu as one mlx-kquant kernel, which has no
-    gradient."""
+    gradient with respect to the weights."""
 
     def __init__(self, cfg: ZImageConfig):
         super().__init__()
