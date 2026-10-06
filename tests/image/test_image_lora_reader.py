@@ -473,8 +473,9 @@ def test_the_header_vet_walks_the_stems_in_file_order(tmp_path):
 # The LoRA config in a file's header, as diffusers' save_lora_weights
 # writes it for a file without alpha tensors.
 
-Q, K, W1 = ("layers.0.attention.to_q", "layers.0.attention.to_k",
-            "layers.0.feed_forward.w1")
+ATT_Q, ATT_K, FF_W1 = (
+    "layers.0.attention.to_q", "layers.0.attention.to_k",
+    "layers.0.feed_forward.w1")
 CONFIG = {
     "r": 2, "lora_alpha": 1.5, "target_modules": ["to_q", "to_k", "w1"],
     "rank_pattern": {}, "alpha_pattern": {}, "exclude_modules": None,
@@ -493,7 +494,7 @@ def _saved(ranks: dict, alphas: dict | None = None,
     save_lora_weights spells them, with an alpha tensor where given."""
     keys = {}
     for i, (target, rank) in enumerate(ranks.items()):
-        out, inp = (8, 6) if target != W1 else (12, 6)
+        out, inp = (8, 6) if target != FF_W1 else (12, 6)
         down, up, _ = _pair(i, out, inp, rank)
         keys[f"{prefix}{target}.lora_A.weight"] = mx.array(down)
         keys[f"{prefix}{target}.lora_B.weight"] = mx.array(up)
@@ -514,17 +515,18 @@ def _alphas(res) -> dict:
 
 
 def test_a_header_config_gives_each_pair_its_alpha():
-    keys = _saved({Q: 2, K: 3, W1: 2})
-    assert _alphas(_resolved(keys, None)) == {Q: None, K: None, W1: None}
+    keys = _saved({ATT_Q: 2, ATT_K: 3, FF_W1: 2})
+    assert _alphas(_resolved(keys, None)) == {
+        ATT_Q: None, ATT_K: None, FF_W1: None}
     assert _resolved(keys, None).warnings == ()
     # The most common rank is r, another rank is in rank_pattern, and
     # alpha_pattern gives a module an alpha of its own. A pattern matches
     # the end of a module name after a dot, and "^" holds it to the whole
     # name.
-    fields = {**CONFIG, "rank_pattern": {"^" + K: 3},
+    fields = {**CONFIG, "rank_pattern": {"^" + ATT_K: 3},
               "alpha_pattern": {"w1": 4.0, "attention.to_k": 6.0}}
     res = _resolved(keys, fields)
-    assert _alphas(res) == {Q: 1.5, K: 6.0, W1: 4.0}
+    assert _alphas(res) == {ATT_Q: 1.5, ATT_K: 6.0, FF_W1: 4.0}
     assert [(t.module, t.band) for t in res.dit] == [
         ("layers.0.attention.qkv", (0, 0, 8)),
         ("layers.0.attention.qkv", (0, 8, 8)),
@@ -536,9 +538,9 @@ def test_a_header_config_gives_each_pair_its_alpha():
     assert "ComfyUI does not read the header" in res.warnings[0]
     # An alpha equal to the rank is the scale 1 that every reader gives.
     plain = _resolved(keys, {**CONFIG, "lora_alpha": 2,
-                             "rank_pattern": {K: 3},
-                             "alpha_pattern": {K: 3}})
-    assert _alphas(plain) == {Q: 2.0, K: 3.0, W1: 2.0}
+                             "rank_pattern": {ATT_K: 3},
+                             "alpha_pattern": {ATT_K: 3}})
+    assert _alphas(plain) == {ATT_Q: 2.0, ATT_K: 3.0, FF_W1: 2.0}
     assert plain.warnings == ()
 
 
@@ -549,7 +551,7 @@ def test_a_header_config_gives_each_pair_its_alpha():
     ({"to_q": 7.0, "zz": 9.0}, 7.0),
     # "^" anchors a key to the start of the name.
     ({"^attention.to_q": 7.0}, 1.5),
-    ({"^" + Q: 7.0}, 7.0),
+    ({"^" + ATT_Q: 7.0}, 7.0),
     # A key matches whole name parts only.
     ({"o_q": 7.0}, 1.5),
     ({"0.attention.to_q": 8.0}, 8.0),
@@ -559,8 +561,8 @@ def test_a_header_config_gives_each_pair_its_alpha():
 ])
 def test_a_header_pattern_matches_a_module_as_peft_matches_it(patterns,
                                                               want):
-    res = _resolved(_saved({Q: 2}), {**CONFIG, "alpha_pattern": patterns})
-    assert _alphas(res) == {Q: want}
+    res = _resolved(_saved({ATT_Q: 2}), {**CONFIG, "alpha_pattern": patterns})
+    assert _alphas(res) == {ATT_Q: want}
 
 
 REFUSED = [
@@ -588,7 +590,7 @@ REFUSED = [
                               enumerate(REFUSED)])
 def test_a_header_field_that_changes_the_delta_is_refused_by_name(
         tmp_path, name, value, kind):
-    keys = _saved({Q: 2})
+    keys = _saved({ATT_Q: 2})
     fields = {**CONFIG, name: value}
     said = f"the adapter header sets transformer.{name}"
     with pytest.raises(UnsupportedAdapterError, match=said) as e:
@@ -607,11 +609,11 @@ def test_a_header_field_that_changes_the_delta_is_refused_by_name(
     # Left off, the field changes nothing.
     for off in (None, False, [], {}, "", 0,
                 *(["none"] if name == "bias" else [])):
-        assert _alphas(_resolved(keys, {**CONFIG, name: off})) == {Q: 1.5}
+        assert _alphas(_resolved(keys, {**CONFIG, name: off})) == {ATT_Q: 1.5}
 
 
 def test_a_header_config_is_read_whole_or_refused():
-    keys = _saved({Q: 2})
+    keys = _saved({ATT_Q: 2})
     assert reader.header_configs(None) == {}
     assert reader.header_configs({"format": "pt"}) == {}
     assert reader.header_configs({reader.HEADER_ENTRY: ""}) == {}
@@ -654,28 +656,29 @@ def test_a_header_config_is_read_whole_or_refused():
 def test_a_pair_that_disagrees_with_the_header_is_refused():
     fields = {**CONFIG, "alpha_pattern": {"to_k": 0.1}}
     # An alpha tensor equal to the header's alpha is the same pair.
-    same = _resolved(_saved({Q: 2, K: 2}, {Q: 1.5, K: 0.1}), fields)
-    assert _alphas(same) == {Q: 1.5, K: float(np.float32(0.1))}
+    same = _resolved(
+        _saved({ATT_Q: 2, ATT_K: 2}, {ATT_Q: 1.5, ATT_K: 0.1}), fields)
+    assert _alphas(same) == {ATT_Q: 1.5, ATT_K: float(np.float32(0.1))}
     assert same.warnings == ()
     # Equal is equal after rounding to the tensor's dtype.
     for dtype in (mx.float16, mx.bfloat16):
-        keys = _saved({K: 2}, {K: mx.array(0.1, dtype)})
+        keys = _saved({ATT_K: 2}, {ATT_K: mx.array(0.1, dtype)})
         alpha, = _alphas(_resolved(keys, fields)).values()
         assert alpha != float(np.float32(0.1)) and abs(alpha - 0.1) < 1e-3
     # Another alpha is refused, and both are named.
     with pytest.raises(AdapterError,
-                       match=f"transformer.{Q} has an alpha tensor of 3, "
-                             f"and the adapter header gives {Q} the alpha "
+                       match=f"transformer.{ATT_Q} has an alpha tensor of 3, "
+                             f"and the adapter header gives {ATT_Q} the alpha "
                              "1.5"):
-        _resolved(_saved({Q: 2}, {Q: 3.0}), fields)
+        _resolved(_saved({ATT_Q: 2}, {ATT_Q: 3.0}), fields)
     # A pair of another rank than the header's does not load in the
     # reference.
     with pytest.raises(AdapterError,
-                       match=f"transformer.{K} has rank 3, and the adapter "
-                             f"header gives {K} the rank 2"):
-        _resolved(_saved({Q: 2, K: 3}), fields)
-    assert _alphas(_resolved(_saved({Q: 2, K: 3}), {
-        **fields, "rank_pattern": {"to_k": 3}})) == {Q: 1.5, K: 0.1}
+                       match=f"transformer.{ATT_K} has rank 3, and the "
+                             f"adapter header gives {ATT_K} the rank 2"):
+        _resolved(_saved({ATT_Q: 2, ATT_K: 3}), fields)
+    assert _alphas(_resolved(_saved({ATT_Q: 2, ATT_K: 3}), {
+        **fields, "rank_pattern": {"to_k": 3}})) == {ATT_Q: 1.5, ATT_K: 0.1}
 
 
 @pytest.mark.parametrize("change", [
@@ -687,8 +690,8 @@ def test_a_pair_that_disagrees_with_the_header_is_refused():
 def test_a_pair_the_header_leaves_out_is_refused(tmp_path, change):
     """The reference loader gives such a module no adapter and drops the
     pair, so a file that has one is refused."""
-    keys = _saved({Q: 2, K: 2, W1: 2})
-    said = (f"transformer.{W1} is a pair on {W1}, which the "
+    keys = _saved({ATT_Q: 2, ATT_K: 2, FF_W1: 2})
+    said = (f"transformer.{FF_W1} is a pair on {FF_W1}, which the "
             "transformer.target_modules and exclude_modules of the adapter "
             "header leave out")
     with pytest.raises(AdapterError, match=said):
@@ -698,10 +701,10 @@ def test_a_pair_the_header_leaves_out_is_refused(tmp_path, change):
     assert reader.vet_header(path) == 3
     with pytest.raises(AdapterError, match=said):
         reader.vet_header(path, keymap=KEYMAP)
-    del keys[f"transformer.{W1}.lora_A.weight"]
-    del keys[f"transformer.{W1}.lora_B.weight"]
-    assert _alphas(_resolved(keys, {**CONFIG, **change})) == {Q: 1.5,
-                                                              K: 1.5}
+    del keys[f"transformer.{FF_W1}.lora_A.weight"]
+    del keys[f"transformer.{FF_W1}.lora_B.weight"]
+    assert _alphas(_resolved(keys, {**CONFIG, **change})) == {ATT_Q: 1.5,
+                                                              ATT_K: 1.5}
 
 
 def test_a_header_config_covers_its_own_component(tmp_path):
@@ -709,7 +712,7 @@ def test_a_header_config_covers_its_own_component(tmp_path):
     down, up, _ = _pair(5, 8, 6, 4)
     text = {te + ".lora_A.weight": mx.array(down),
             te + ".lora_B.weight": mx.array(up)}
-    keys = {**_saved({Q: 2}), **text}
+    keys = {**_saved({ATT_Q: 2}), **text}
     te_config = {"r": 4, "lora_alpha": 2.0, "target_modules": ["q_proj"]}
     both = header(CONFIG)
     both[reader.HEADER_ENTRY] = json.dumps({
@@ -717,14 +720,15 @@ def test_a_header_config_covers_its_own_component(tmp_path):
         **json.loads(header(te_config, "text_encoder")[reader.HEADER_ENTRY])})
     res = reader.resolve(reader.parse_pairs(keys, "f", metadata=both),
                          KEYMAP)
-    assert _alphas(res) == {Q: 1.5}
+    assert _alphas(res) == {ATT_Q: 1.5}
     assert [(t.module, t.pair.alpha) for t in res.text] == [
         ("model.layers.0.self_attn.q_proj", 2.0)]
     # A header with a config for another component alone leaves the
     # reference with nothing to build this one's config from.
     for comp, fields, other, stem in (
             ("transformer", CONFIG, "text_encoder", te),
-            ("text_encoder", te_config, "transformer", "transformer." + Q)):
+            ("text_encoder", te_config, "transformer",
+             "transformer." + ATT_Q)):
         with pytest.raises(AdapterError,
                            match=f"has a LoRA config for {comp} and none "
                                  f"for {other}, which {stem} belongs to"):
@@ -758,8 +762,8 @@ def test_values_that_are_not_finite_are_refused_at_the_read(tmp_path):
     arr = np.array(up)
     arr[0, 0] = np.nan
     path = write_keys(tmp_path / "nan.safetensors", {
-        f"transformer.{Q}.lora_A.weight": down,
-        f"transformer.{Q}.lora_B.weight": arr})
+        f"transformer.{ATT_Q}.lora_A.weight": down,
+        f"transformer.{ATT_Q}.lora_B.weight": arr})
     with pytest.raises(AdapterError, match="holds a value that is not "
                                            "finite"):
         reader.read_lora(path)
