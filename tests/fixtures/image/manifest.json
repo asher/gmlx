@@ -29,7 +29,7 @@
     "file": "vae/diffusion_pytorch_model.safetensors",
     "size": 1350989512,
     "sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
-    "sha256_source": "The oid that the Hub lists for the file at this revision. The file has not been hashed here yet, and test_image_qwen_vae_real.py compares it once the file is on disk."
+    "sha256_source": "The oid that the Hub lists for the file at this revision, and the sha256 of the downloaded file, which test_image_qwen_vae_real.py compares with the file under GMLX_TEST_IMAGE_DIR."
   },
   "qwen_image21_vae_config.json": {
     "repo": "Qwen/Qwen-Image-2.1",

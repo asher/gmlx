@@ -76,9 +76,10 @@ def test_the_header_and_config_fixtures_are_pinned():
         assert len(row["sha256"]) == 64
     assert head["file"] == "vae/diffusion_pytorch_model.safetensors"
     assert cfg["file"] == "vae/config.json"
-    # The safetensors sha256 is the Hub's listing until the gated test
-    # hashes the file, and the manifest says so.
+    # The safetensors sha256 is the Hub's listing and the hash of the
+    # downloaded file, and the manifest says so.
     assert head["sha256_source"].startswith("The oid that the Hub lists")
+    assert "the sha256 of the downloaded file" in head["sha256_source"]
     raw = (FIXTURES / CONFIG).read_bytes()
     assert hashlib.sha256(raw).hexdigest() == cfg["sha256"]
     d = load_json(HEADER)

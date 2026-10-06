@@ -19,9 +19,9 @@ A request runs a negative row whenever its guidance is not 1.0, as
 
 Levers apply in order until the plan fits: sequential rows in place of a
 batch, release of an owned encoder after encoding, and tiled VAE decode.
-A family whose VAE row is unmeasured decodes an image larger than one tile
-in tiles from the start, as ``vae_tiling`` chooses for it, so tiling is no
-lever of its plan. A plan that still does not fit raises
+A family whose VAE row takes tiles first decodes an image larger than one
+tile in tiles from the start, as ``vae_tiling`` chooses for it, so tiling
+is no lever of its plan. A plan that still does not fit raises
 ``ImageMemoryError`` with each term in GiB and the largest term named,
 unless GMLX_OVERCOMMIT=1.
 
@@ -37,10 +37,10 @@ A VAE pass is priced by the row of its family in ``VAE_ROWS``, for the
 plan and for ``vae.tiling`` alike. A measured row holds footprints fitted
 on that VAE. An unmeasured row holds only what arithmetic gives, and
 ``unmeasured_bytes`` prices its passes by one rule. ``vae_tiling`` decides
-between a whole and a tiled pass and refuses one that does not fit. On an
-unmeasured row, and on any row when the device reports no free working
-set, it never picks a whole pass by itself for an image larger than one
-tile.
+between a whole and a tiled pass and refuses one that does not fit. On a
+row that takes tiles first, which every unmeasured row does, and on any
+row when the device reports no free working set, it never picks a whole
+pass by itself for an image larger than one tile.
 """
 
 from __future__ import annotations
@@ -167,12 +167,26 @@ class VaeMemoryRow:
     channel and activation byte. An unmeasured row has ``floor`` alone,
     the bytes a pass holds by arithmetic, and ``unmeasured_bytes`` prices
     the pass from them. The pass that measures a VAE sets its fits and
-    ``measured`` together."""
+    ``measured`` together, and may keep the floor beside them.
+
+    ``one_tile`` says that a tiled pass holds one tile at a time, so the
+    tile term of its fit counts the pixels of one tile and not of all.
+    ``tiles_first`` makes tiles the automatic choice for every image
+    larger than one tile, whatever is free. An unmeasured row always
+    takes tiles first."""
     measured: bool
     channels: dict                  # op -> base channels at full resolution
     whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
     tiled: dict | None = None       # op -> itemsize -> TiledFit
     floor: Callable | None = None   # see ``_qwen_image21_vae_floor``
+    one_tile: bool = False
+    tiles_first: bool = False
+
+    @property
+    def auto_tiles(self) -> bool:
+        """Whether the automatic choice above one tile is tiles on every
+        machine."""
+        return self.tiles_first or not self.measured
 
 
 def _qwen_image21_vae_floor(op: str, height: int, width: int, *,
@@ -463,8 +477,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                            itemsize=vsize, tile=tile)
     tiled_decode = vae_peak("decode", height, width, family=family,
                             itemsize=vsize, tiled=True, tile=tile)
-    # The choice ``vae_tiling`` makes by itself on an unmeasured row.
-    auto_tiled = (not vae_row(family).measured
+    # The choice ``vae_tiling`` makes by itself on a row that takes tiles
+    # first.
+    auto_tiled = (vae_row(family).auto_tiles
                   and (height > tile or width > tile))
     caption = row.text_rows if caption_tokens is None else caption_tokens
     encode_peak = caption * row.encode_row_bytes * ENCODE_LIVE
@@ -630,7 +645,8 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
     ny, th = tile_layout(height, tile, overlap, scale)
     nx, tw = tile_layout(width, tile, overlap, scale)
     tiled_fit = row.tiled[op][itemsize]
-    out = tiled_fit.bytes(batch * ny * nx * th * tw, batch * height * width,
+    tiles = 1 if row.one_tile else ny * nx
+    out = tiled_fit.bytes(batch * tiles * th * tw, batch * height * width,
                           channels, itemsize)
     if conv != "exact":
         one = batch * th * tw
@@ -663,12 +679,12 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
     """Whether a VAE ``op`` runs in tiles, by the VAE row of ``family``.
     An image no larger than a tile always runs whole.
 
-    ``tiled=None`` is the automatic choice. On a measured row it is a
-    whole pass when that fits the free working set and tiles otherwise.
-    On an unmeasured row it is tiles for every image larger than one
-    tile, on every machine, and so it is on any row when the device
-    reports no free working set. ``tiled=False`` forces a whole pass at
-    the row's price.
+    ``tiled=None`` is the automatic choice. It is a whole pass when that
+    fits the free working set and tiles otherwise. On a row that takes
+    tiles first, which every unmeasured row does, it is tiles for every
+    image larger than one tile, on every machine, and so it is on any
+    row when the device reports no free working set. ``tiled=False``
+    forces a whole pass at the row's price.
 
     A pass that does not fit as chosen raises ImageMemoryError, unless
     GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``, and nothing
@@ -685,7 +701,7 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
         free = free_bytes()
     if tiled is not None:
         choice = bool(tiled) and can_tile
-    elif free is None or not row.measured:
+    elif free is None or row.auto_tiles:
         choice = can_tile
     else:
         choice = can_tile and whole > free

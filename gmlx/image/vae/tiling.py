@@ -38,11 +38,11 @@ decode is clamped after the blend.
 ``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
 pass. ``memfit.vae_tiling`` prices the pass by the VAE row of the family
 and refuses one that does not fit as chosen. With ``tiled=None`` a VAE
-whose row is measured runs whole when the pass fits the free working set
-and in tiles otherwise. A VAE whose row is unmeasured runs every image
-larger than one tile in tiles, and so does any VAE when the device
-reports no free working set. Every VAE pass goes through them, a warm-up
-at a new size included. The module's own ``decode`` and
+runs whole when the pass fits the free working set and in tiles
+otherwise. A VAE whose row takes tiles first, as every unmeasured row
+does, runs every image larger than one tile in tiles, and so does any VAE
+when the device reports no free working set. Every VAE pass goes through
+them, a warm-up at a new size included. The module's own ``decode`` and
 ``encode`` build a graph that evaluates under whatever limit is set when
 it runs.
 """
