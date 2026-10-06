@@ -920,14 +920,32 @@ _FP32_CAST_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "qwen3_vl": ("vision_tower.",),
 }
 
+# The same cast behind an environment switch that is off by default: model
+# type -> (variable, substrings).
+_FP32_CAST_BY_SWITCH: dict[str, tuple[str, tuple[str, ...]]] = {
+    # qwen3_5, qwen3_5_moe (Qwen3.5 and Qwen3.6) carry the qwen3_vl tower.
+    # On Qwen3.6-35B-A3B the main image features of the bfloat16 tower are
+    # 5 to 6 percent from the float32 tower's in relative L2, and the worst
+    # image token has cosine 0.86. The float32 tower costs 19 percent of the
+    # tower's time and 12 percent of the time to the first token of a 1200
+    # token image request, so these shipped families keep bfloat16 unless
+    # the switch is set.
+    "qwen3_5": ("GMLX_QWEN35_VISION_FP32", ("vision_tower.",)),
+    "qwen3_5_moe": ("GMLX_QWEN35_VISION_FP32", ("vision_tower.",)),
+}
+
 
 def float_dtype_rules(model_type: str) -> dict[str, tuple[str, ...]]:
     """The float dtype rows of ``model_type`` as ``_install_and_load``
-    keywords."""
+    keywords. Reads the switch of a ``_FP32_CAST_BY_SWITCH`` row."""
+    fp32_cast = _FP32_CAST_BY_MODEL_TYPE.get(model_type, ())
+    switch = _FP32_CAST_BY_SWITCH.get(model_type)
+    if switch is not None and env_bool(switch[0], False):
+        fp32_cast = fp32_cast + switch[1]
     return {
         "fp32_keep": _FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
         "f16_keep": _F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
-        "fp32_cast": _FP32_CAST_BY_MODEL_TYPE.get(model_type, ()),
+        "fp32_cast": fp32_cast,
     }
 
 

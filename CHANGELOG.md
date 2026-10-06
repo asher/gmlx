@@ -18,6 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
   text models, and read images with their mmproj.
+- `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6
+  pair in float32, which makes its image features more exact.
 
 ### Changed
 

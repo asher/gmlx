@@ -1047,3 +1047,97 @@ def test_image_features_join_in_the_language_model_dtype(
     logits = model(ids, pixels, image_grid_thw=grid).logits
     assert logits.dtype == lm_dtype
     assert logits.shape == (1, ids.shape[1], 264)
+
+
+# The same tower in the Qwen3.5 and Qwen3.6 containers.
+
+class _TowerAndHead(nn.Module):
+    """The two parameter groups the float dtype rows tell apart."""
+
+    def __init__(self, tower):
+        super().__init__()
+        self.vision_tower = tower
+        self.language_model = nn.Linear(8, 8)
+
+
+def _install_qwen36_tower(model_type, stored):
+    """A tiny Qwen3.6 tower loaded the way the pair load installs it, from
+    matrices in the 16-bit dtype ``stored``. Returns the container and the
+    arrays it was loaded from."""
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.config import VisionConfig
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.vision import VisionModel
+    from gmlx.load.loader import _install_and_load, float_dtype_rules
+
+    config = gvlm._synthesize_qwen35_vision_config(_MM_META, model_type)
+    model = _TowerAndHead(VisionModel(VisionConfig.from_dict(config)))
+    vision, _, _ = gvlm.remap_vision_arrays(
+        _mm_arrays(), model_type, mm_meta=_MM_META)
+    weights = {k: v.astype(stored) if v.ndim >= 2 else v
+               for k, v in vision.items()}
+    weights["language_model.weight"] = mx.ones((8, 8))
+    weights["language_model.bias"] = mx.zeros((8,))
+    mx.eval(weights)
+    _install_and_load(model, dict(weights), {}, log=lambda *_a, **_k: None,
+                      sanitize=False, text_patches=False,
+                      **float_dtype_rules(model_type))
+    return model, weights
+
+
+_QWEN36_TYPES = ["qwen3_5", "qwen3_5_moe"]
+
+
+@pytest.mark.parametrize("model_type", _QWEN36_TYPES)
+@pytest.mark.parametrize("value", [None, "0"])
+def test_the_qwen36_tower_keeps_its_dtypes_by_default(
+        model_type, value, monkeypatch):
+    # The shipped families load their tower as before unless the switch is
+    # set: a 16-bit matrix as stored, a float32 tensor in the activation
+    # dtype.
+    from gmlx.load.dtypes import activation_dtype
+    from gmlx.load.loader import float_dtype_rules
+
+    if value is None:
+        monkeypatch.delenv("GMLX_QWEN35_VISION_FP32", raising=False)
+    else:
+        monkeypatch.setenv("GMLX_QWEN35_VISION_FP32", value)
+    assert float_dtype_rules(model_type)["fp32_cast"] == ()
+    model, weights = _install_qwen36_tower(model_type, mx.bfloat16)
+    for name, v in tree_flatten(model.vision_tower.parameters()):
+        stored = weights[f"vision_tower.{name}"].dtype
+        want = mx.bfloat16 if stored == mx.bfloat16 else activation_dtype()
+        assert v.dtype == want, name
+
+
+@pytest.mark.parametrize("model_type", _QWEN36_TYPES)
+@pytest.mark.parametrize("stored", [mx.bfloat16, mx.float16],
+                         ids=["bf16", "f16"])
+def test_the_switch_loads_the_qwen36_tower_as_float32(
+        model_type, stored, monkeypatch):
+    # GMLX_QWEN35_VISION_FP32=1: every tower parameter is a float32 array
+    # with the stored value. The container casts the pixels to the dtype
+    # of the patch weight, so the whole tower then computes in float32.
+    from gmlx.load.dtypes import activation_dtype
+
+    monkeypatch.setenv("GMLX_QWEN35_VISION_FP32", "1")
+    model, weights = _install_qwen36_tower(model_type, stored)
+    for name, v in tree_flatten(model.vision_tower.parameters()):
+        assert v.dtype == mx.float32, name
+        want = weights[f"vision_tower.{name}"].astype(mx.float32)
+        assert mx.array_equal(v, want), name
+    assert model.vision_tower.patch_embed.proj.weight.dtype == mx.float32
+    # the switch reaches the tower alone.
+    assert model.language_model.weight.dtype == activation_dtype()
+    pixels, grid = _tower_inputs()
+    main, _ = model.vision_tower(pixels, grid)
+    assert main.dtype == mx.float32
+
+
+@pytest.mark.parametrize("value", [None, "0", "1"])
+def test_the_qwen3vl_tower_is_float32_whatever_the_switch(value, monkeypatch):
+    from gmlx.load.loader import float_dtype_rules
+
+    if value is None:
+        monkeypatch.delenv("GMLX_QWEN35_VISION_FP32", raising=False)
+    else:
+        monkeypatch.setenv("GMLX_QWEN35_VISION_FP32", value)
+    assert float_dtype_rules("qwen3_vl")["fp32_cast"] == ("vision_tower.",)
