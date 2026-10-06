@@ -707,6 +707,27 @@ def test_a_pair_the_header_leaves_out_is_refused(tmp_path, change):
                                                               ATT_K: 1.5}
 
 
+@pytest.mark.parametrize("targets, left_out", [
+    (["layers.0.attention.to_q", "attention.to_k", "w1"], None),
+    (["o_q", "to_k", "w1"], ATT_Q),
+    (r".*\.to_[qk]|.*w1", None),
+    (r"attention\.to_q|.*to_k|.*w1", ATT_Q),
+])
+def test_a_header_target_names_a_module_as_peft_names_it(targets, left_out):
+    """A listed name is the name of the module or its end after a dot, and
+    a regular expression matches the whole name."""
+    keys = _saved({ATT_Q: 2, ATT_K: 2, FF_W1: 2})
+    fields = {**CONFIG, "target_modules": targets}
+    if left_out is None:
+        assert _alphas(_resolved(keys, fields)) == {
+            ATT_Q: 1.5, ATT_K: 1.5, FF_W1: 1.5}
+        return
+    with pytest.raises(AdapterError,
+                       match=f"transformer.{left_out} is a pair on "
+                             f"{left_out}, which the transformer"):
+        _resolved(keys, fields)
+
+
 def test_a_header_config_covers_its_own_component(tmp_path):
     te = "text_encoder.model.layers.0.self_attn.q_proj"
     down, up, _ = _pair(5, 8, 6, 4)
@@ -733,6 +754,20 @@ def test_a_header_config_covers_its_own_component(tmp_path):
                            match=f"has a LoRA config for {comp} and none "
                                  f"for {other}, which {stem} belongs to"):
             _resolved(keys, fields, comp)
+    # A text pair is held to the config of its own component, at the load
+    # and by the header alone.
+    out = {**te_config, "target_modules": ["k_proj"]}
+    said = (f"{te} is a pair on model.layers.0.self_attn.q_proj, which "
+            "the text_encoder.target_modules and exclude_modules")
+    with pytest.raises(AdapterError, match=said):
+        _resolved(text, out, "text_encoder")
+    path = write_keys(tmp_path / "t.safetensors", text,
+                      header(out, "text_encoder"))
+    with pytest.raises(AdapterError, match=said):
+        reader.vet_header(path, keymap=KEYMAP)
+    kept = write_keys(tmp_path / "k.safetensors", text,
+                      header(te_config, "text_encoder"))
+    assert reader.vet_header(kept, keymap=KEYMAP) == 1
 
 
 def test_values_that_are_not_finite_are_refused_at_the_read(tmp_path):
