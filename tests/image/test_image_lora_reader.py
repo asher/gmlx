@@ -334,6 +334,41 @@ def _good(stem: str) -> dict:
     return {stem + ".lora_down.weight": down, stem + ".lora_up.weight": up}
 
 
+def test_the_header_vet_places_text_stems_on_the_family_encoder(tmp_path):
+    """A text stem counts only when it names a layer of this family's
+    text encoder. A text-only file for another encoder is a file for
+    another family, and beside a DiT stem its text stems are unmatched,
+    as ``resolve`` finds after the read."""
+    clip = ["lora_te1_text_model_encoder_layers_0_self_attn_q_proj",
+            "text_encoders.clip_l.transformer.text_model.encoder.layers.0"
+            ".mlp.fc1"]
+    other = write_keys(tmp_path / "clip.safetensors",
+                       {k: v for s in clip for k, v in _good(s).items()})
+    mixed = write_keys(tmp_path / "mixed.safetensors", {
+        **_good(W1), **_good(clip[0])})
+    own = write_keys(tmp_path / "own.safetensors", _good(TEXT_Q))
+    for path, kind, text in (
+            (other, AdapterFamilyError, "clip.safetensors is not a Toy "
+                                        "adapter: none of its 2 targets"),
+            (mixed, UnmatchedKeysError, "1 of 2 targets name no Toy "
+                                        f"module: {clip[0]}")):
+        for allow in (False, True):
+            if allow and kind is UnmatchedKeysError:
+                assert reader.vet_header(path, keymap=KEYMAP,
+                                         allow_unmatched=True) == 2
+                continue
+            with pytest.raises(kind) as want:
+                reader.resolve(reader.read_lora(path), KEYMAP,
+                               allow_unmatched=allow)
+            assert text in str(want.value)
+            with pytest.raises(kind) as got:
+                reader.vet_header(path, keymap=KEYMAP, allow_unmatched=allow)
+            assert type(got.value) is kind
+            assert str(got.value) == str(want.value)
+    assert reader.vet_header(own, keymap=KEYMAP) == 1
+    assert reader.vet_header(own, keymap=KEYMAP, modules=set()) == 1
+
+
 @pytest.mark.parametrize("keys, text", [
     ({**_good(W1), TO_Q + ".lora_down.weight": _pair()[0]},
      f"{TO_Q} has no up tensor"),
