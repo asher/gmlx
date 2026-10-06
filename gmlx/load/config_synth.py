@@ -68,6 +68,12 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # attention + PLE n-gram embeddings; vendored gmlx.models.qwen4_exp.model.
     "qwen4exp": "qwen4_exp",
     "qwen3": "qwen3",
+    # Qwen3-VL dense text tower (Qwen3-VL-2B/4B/8B/32B). The tensor layout is
+    # Qwen3 dense, and the rotary position has three axes. A text-only prompt
+    # puts the same position on every axis, which is the one-axis rope of the
+    # qwen3 class at the file's base, so it loads as qwen3. The vision tower
+    # (a separate mmproj) rides the VLM path as qwen3_vl.
+    "qwen3vl": "qwen3",
     "qwen3moe": "qwen3_moe",
     # Qwen3-VL / Qwen3-Omni text tower. Structurally a Qwen3-MoE (identical
     # tensor layout: qk-norm + stacked routed experts, no shared expert) plus
@@ -747,11 +753,16 @@ def synthesize_gemma4_assistant_config(meta, tensor_shapes=None) -> dict[str, An
 
 # qwen3
 
-def _synth_qwen3(meta, shapes, config: dict) -> None:
+def _synth_qwen3(meta, shapes, config: dict, arch: str = "qwen3") -> None:
     """Synthesize a qwen3 config. Universal fields cover everything; this
     function handles rope_scaling passthrough so mlx_lm's initialize_rope
-    doesn't see unexpected keys."""
-    arch = "qwen3"
+    doesn't see unexpected keys.
+
+    ``arch`` selects the GGUF metadata key prefix: ``qwen3`` for Qwen3 dense,
+    or ``qwen3vl`` for the Qwen3-VL dense text tower. The text config carries
+    no ``rope.dimension_sections``: with one position on all three axes the
+    sections select the same angle for every frequency, so the qwen3 class's
+    one-axis rope is exact. The VLM config synth reads the sections."""
     rope_scaling_type = _read_string(meta, f"{arch}.rope.scaling.type")
     if rope_scaling_type is not None and rope_scaling_type != "none":
         rp: dict[str, Any] = {"type": rope_scaling_type, "rope_type": rope_scaling_type}
@@ -3655,6 +3666,7 @@ def _synth_qwen4exp(meta, shapes, config: dict) -> None:
 _SYNTH = {
     "gemma4": _synth_gemma4,
     "qwen3": _synth_qwen3,
+    "qwen3vl": lambda m, s, c: _synth_qwen3(m, s, c, "qwen3vl"),
     "qwen3moe": lambda m, s, c: _synth_qwen3moe(m, s, c, "qwen3moe"),
     "qwen3vlmoe": lambda m, s, c: _synth_qwen3moe(m, s, c, "qwen3vlmoe"),
     "qwen2": _synth_qwen2,

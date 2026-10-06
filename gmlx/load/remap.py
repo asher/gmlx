@@ -46,6 +46,10 @@ ARCH_ALIAS = {
     "qwen2": "QWEN2",
     "qwen2moe": "QWEN2MOE",
     "qwen3": "QWEN3",
+    # Qwen3-VL dense text tower: the Qwen3 dense tensor layout (qk-norm, no
+    # qk-permute), so it reuses the QWEN3 templates and override. The vision
+    # tower lives in a separate mmproj.
+    "qwen3vl": "QWEN3",
     "qwen3moe": "QWEN3MOE",
     # Qwen3-VL / Qwen3-Omni text tower: identical tensor layout to Qwen3-MoE
     # (qk-norm + stacked routed experts), so it reuses the QWEN3MOE templates +

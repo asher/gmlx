@@ -143,6 +143,11 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # and wrapper classes are vendored (gmlx.models.qwen4_exp.vlm_model).
         if llm_arch == "qwen4exp":
             return "qwen4_exp"
+        # Qwen3-VL (llama.cpp arch tag qwen3vl) - the Qwen3 dense text tower
+        # with the Qwen3-VL vision tower and its deepstack mergers, whose
+        # features join the first decoder layers.
+        if llm_arch == "qwen3vl":
+            return "qwen3_vl"
         return "qwen3_5"
     if llm_arch == "gemma4":
         # gemma-4 ships two omni families: the E-series (E2B/E4B) with CLIP +
@@ -701,6 +706,30 @@ _QWEN35V_TOP_MAP = {
     "mm.2.bias": "vision_tower.merger.linear_fc2.bias",
 }
 
+# Qwen3-VL (qwen3_vl) adds the deepstack mergers to that tower. A merger takes
+# the hidden state after one vision block, moves the 2x2 merge unit onto the
+# feature axis, normalizes it there, and projects it to the text width. The
+# GGUF names each merger by its block (v.deepstack.<block>.*) and flags the
+# blocks in clip.vision.is_deepstack_layers; the tower holds the mergers as a
+# list in block order.
+_QWEN3VL_DEEPSTACK_RE = re.compile(
+    r"^v\.deepstack\.(\d+)\.(norm|fc1|fc2)\.(weight|bias)$")
+_QWEN3VL_DEEPSTACK_SUBMAP = {
+    "norm": "norm",
+    "fc1": "linear_fc1",
+    "fc2": "linear_fc2",
+}
+
+
+def _qwen3vl_deepstack_blocks(mm_meta: dict) -> list[int]:
+    """The vision blocks whose output feeds a deepstack merger, in order."""
+    flags = mm_meta.get("clip.vision.is_deepstack_layers")
+    if flags is None:
+        return []
+    if not isinstance(flags, (list, tuple)):
+        flags = [flags]
+    return [i for i, flag in enumerate(flags) if flag]
+
 
 # GLM-5.3-Flash (glm5next): the GLM-OCR ViT + conv-downsample projector,
 # mapped onto the vendored gmlx.models.glm5_next.vision tower. The patch
@@ -1043,7 +1072,11 @@ def remap_vision_arrays(
             out[f"{base}.{tgt}.{leaf}"] = arr
         return out, skipped, vis_kqmeta
 
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl"):
+        # Only the qwen3_vl container reads the deepstack features, so only
+        # it maps the mergers; the other containers leave them unused.
+        deepstack = (_qwen3vl_deepstack_blocks(mm_meta or {})
+                     if model_type == "qwen3_vl" else [])
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -1056,6 +1089,20 @@ def remap_vision_arrays(
             hit = _QWEN35V_TOP_MAP.get(name)
             if hit is not None:
                 out[hit] = arr
+                continue
+            m = _QWEN3VL_DEEPSTACK_RE.match(name) if deepstack else None
+            if m is not None:
+                block = int(m.group(1))
+                if block not in deepstack:
+                    raise ValueError(
+                        f"mmproj tensor {name!r} is a deepstack merger of "
+                        f"vision block {block}, which "
+                        "clip.vision.is_deepstack_layers does not flag "
+                        f"(flagged: {deepstack})")
+                out["vision_tower.deepstack_merger_list."
+                    f"{deepstack.index(block)}."
+                    f"{_QWEN3VL_DEEPSTACK_SUBMAP[m.group(2)]}."
+                    f"{m.group(3)}"] = arr
                 continue
             m = _VISION_BLK_RE.match(name)
             if m is None:
@@ -1185,10 +1232,14 @@ def _synthesize_qwen35_vision_config(mm_meta: dict, model_type: str) -> dict:
     ``num_position_embeddings`` is the learned position grid (one embedding per
     patch over a square ``image_size/patch_size`` side), and ``out_hidden_size``
     is the merger's projection width = the text hidden size. deepstack is forced
-    empty (qwen3.5 disables it; the GGUF's is_deepstack_layers are all zero)."""
+    empty (qwen3.5 disables it; the GGUF's is_deepstack_layers are all zero),
+    except for ``qwen3_vl``, whose container reads the deepstack features:
+    there the list is the blocks the mmproj flags."""
     patch = _mm_int(mm_meta, "clip.vision.patch_size")
     image_size = _mm_int(mm_meta, "clip.vision.image_size")
     grid = image_size // patch
+    deepstack = (_qwen3vl_deepstack_blocks(mm_meta)
+                 if model_type == "qwen3_vl" else [])
     return {
         "model_type": model_type,
         "depth": _mm_int(mm_meta, "clip.vision.block_count"),
@@ -1202,7 +1253,7 @@ def _synthesize_qwen35_vision_config(mm_meta: dict, model_type: str) -> dict:
         "num_position_embeddings": grid * grid,
         "in_channels": 3,
         "image_size": image_size,
-        "deepstack_visual_indexes": [],
+        "deepstack_visual_indexes": deepstack,
     }
 
 
@@ -1242,6 +1293,62 @@ def _synthesize_qwen35_vlm_config(
         "text_config": text_config,
         "vision_config": _synthesize_qwen35_vision_config(mm_meta, vision_mt),
         "vocab_size": int(text_config.get("vocab_size", 248320)),
+    }
+    for key, tok in (("image_token_id", "<|image_pad|>"),
+                     ("video_token_id", "<|video_pad|>"),
+                     ("vision_start_token_id", "<|vision_start|>"),
+                     ("vision_end_token_id", "<|vision_end|>")):
+        tid = _gguf_token_id(llm_meta, tok)
+        if tid is not None:
+            config[key] = tid
+    return config
+
+
+def _synthesize_qwen3vl_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict
+) -> dict:
+    """Qwen3-VL VLM config: the qwen3 text synth + the Qwen3-VL vision tower
+    with its deepstack mergers.
+
+    The text synth (read as ``qwen3vl`` -> qwen3) emits every field the
+    qwen3_vl ``TextConfig`` requires. The text rotary has three axes; the
+    per-axis widths are the first three entries of the LLM GGUF's
+    ``qwen3vl.rope.dimension_sections`` (``[24, 20, 20, 0]``, the fourth axis
+    unused) and must sum to half the head width. The LLM GGUF also counts the
+    deepstack features its first layers take (``qwen3vl.n_deepstack_layers``);
+    a pair whose mmproj flags another number of blocks is refused here, by
+    name, since the container would add features to the wrong layers. The
+    marker token ids come from the GGUF vocab."""
+    text_config = dict(text_config)
+    text_config["model_type"] = "qwen3_vl"
+
+    sections = llm_meta.get("qwen3vl.rope.dimension_sections")
+    if sections is None or len(sections) < 3:
+        raise ValueError(
+            "Qwen3-VL text GGUF is missing 'qwen3vl.rope.dimension_sections' "
+            "(the three rotary axis widths), which image positions need")
+    mrope = [int(s) for s in list(sections)[:3]]
+    head_dim = text_config.get("head_dim")
+    if head_dim is not None and sum(mrope) != int(head_dim) // 2:
+        raise ValueError(
+            f"Qwen3-VL text GGUF rotary axis widths {mrope} sum to "
+            f"{sum(mrope)}, not half the head width ({int(head_dim) // 2})")
+    text_config["rope_scaling"] = {"type": "default", "mrope_section": mrope}
+
+    vision_config = _synthesize_qwen35_vision_config(mm_meta, "qwen3_vl")
+    n_text = llm_meta.get("qwen3vl.n_deepstack_layers")
+    n_vision = len(vision_config["deepstack_visual_indexes"])
+    if n_text is not None and int(n_text) != n_vision:
+        raise UnsupportedVLMError(
+            f"Qwen3-VL text GGUF takes {int(n_text)} deepstack features, and "
+            f"the mmproj flags {n_vision} vision blocks in "
+            "clip.vision.is_deepstack_layers: the two files are not a pair")
+
+    config = {
+        "model_type": "qwen3_vl",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config.get("vocab_size", 151936)),
     }
     for key, tok in (("image_token_id", "<|image_pad|>"),
                      ("video_token_id", "<|video_pad|>"),
@@ -1715,6 +1822,8 @@ def synthesize_vlm_config(
     if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         return _synthesize_qwen35_vlm_config(
             text_config, mm_meta, model_type, llm_meta)
+    if model_type == "qwen3_vl":
+        return _synthesize_qwen3vl_vlm_config(text_config, mm_meta, llm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_config(text_config, mm_meta, llm_meta)
     if model_type == "pixtral":
@@ -1987,7 +2096,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type == "gemma4_unified":
         return _attach_streaming_helpers(
             _synthesize_gemma4_unified_processor(tokenizer, mm_meta), tokenizer)
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_vl"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen4_exp":
         return _synthesize_qwen35_processor(tokenizer, mm_meta)

@@ -69,8 +69,8 @@ def _meta_for(arch: str) -> dict:
 
 
 # model_type each arch must resolve to, for the instantiation sweep.
-DENSE_ARCHES = ["qwen2", "qwen3", "gemma", "gemma2", "gemma3", "phi3", "glm4",
-                "llama", "seed_oss", "smollm3", "granite"]
+DENSE_ARCHES = ["qwen2", "qwen3", "qwen3vl", "gemma", "gemma2", "gemma3", "phi3",
+                "glm4", "llama", "seed_oss", "smollm3", "granite"]
 
 
 @pytest.mark.parametrize("arch", DENSE_ARCHES)
@@ -2543,6 +2543,77 @@ def test_qwen3_rope_scaling_none_omitted():
     m = _base_meta("qwen3")
     m["qwen3.rope.scaling.type"] = "none"
     c = synthesize_config(m, tensor_shapes={})
+    assert "rope_scaling" not in c
+
+
+def _qwen3vl_meta() -> dict:
+    """A Qwen3-VL text header, shrunk: the qwen3vl key prefix, a rope base
+    that is not the qwen3 one, the four rotary axis widths, the deepstack
+    count, and no rope.dimension_count key."""
+    m = _base_meta("qwen3vl")
+    m["qwen3vl.rope.freq_base"] = 5000000.0
+    m["qwen3vl.rope.dimension_sections"] = [4, 2, 2, 0]
+    m["qwen3vl.n_deepstack_layers"] = 3
+    return m
+
+
+# Untied head and per-head qk-norms, as the Qwen3 dense layout has them.
+_QWEN3VL_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_q_norm.weight": [16],
+    "blk.0.attn_k_norm.weight": [16],
+}
+
+
+def test_qwen3vl_text_synth_reads_its_own_prefix():
+    c = synthesize_config(_qwen3vl_meta(), tensor_shapes=_QWEN3VL_SHAPES)
+    assert c["model_type"] == "qwen3"
+    assert c["hidden_size"] == 64
+    assert c["num_hidden_layers"] == 2
+    assert c["num_attention_heads"] == 4
+    assert c["num_key_value_heads"] == 2
+    assert c["intermediate_size"] == 128
+    assert c["head_dim"] == 16
+    assert c["max_position_embeddings"] == 1024
+    assert c["rms_norm_eps"] == 1e-6
+    assert c["vocab_size"] == VOCAB
+    assert c["tie_word_embeddings"] is False
+    # the base is the file's, not the qwen3 class default.
+    assert c["rope_theta"] == 5000000.0
+    # the text class has one rotary axis: the sections stay out of its
+    # config, and so does the deepstack count.
+    assert "rope_scaling" not in c
+    assert "mrope_section" not in c
+    assert "n_deepstack_layers" not in c
+
+
+def test_qwen3vl_text_synth_builds_the_qwen3_class():
+    from gmlx._vendor.mlx_lm.models import qwen3
+
+    config = synthesize_config(_qwen3vl_meta(), tensor_shapes=_QWEN3VL_SHAPES)
+    Model, ModelArgs = _get_classes(config)
+    assert Model is qwen3.Model
+    model = Model(ModelArgs.from_dict(config))
+    names = {k for k, _ in tree_flatten(model.parameters())}
+    assert "lm_head.weight" in names
+    assert "model.layers.0.self_attn.q_norm.weight" in names
+    out = model(mx.array([[1, 2, 3]]))
+    mx.eval(out)
+    assert out.shape == (1, 3, VOCAB)
+
+
+def test_qwen3vl_text_synth_does_not_read_the_qwen3_prefix():
+    # A header that carries its fields under qwen3.* is not a qwen3vl header.
+    m = {k.replace("qwen3vl.", "qwen3."): v for k, v in _qwen3vl_meta().items()}
+    m["general.architecture"] = "qwen3vl"
+    with pytest.raises(ValueError, match="qwen3vl.embedding_length"):
+        synthesize_config(m, tensor_shapes=_QWEN3VL_SHAPES)
+
+
+def test_qwen3vl_rope_scaling_none_omitted():
+    m = _qwen3vl_meta()
+    m["qwen3vl.rope.scaling.type"] = "none"
+    c = synthesize_config(m, tensor_shapes=_QWEN3VL_SHAPES)
     assert "rope_scaling" not in c
 
 
