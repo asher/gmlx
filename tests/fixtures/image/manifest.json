@@ -23,6 +23,20 @@
     "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
     "file": "transformer/config.json"
   },
+  "qwen_image21_vae.header.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "vae/diffusion_pytorch_model.safetensors",
+    "size": 1350989512,
+    "sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
+    "sha256_source": "The oid that the Hub lists for the file at this revision. The file has not been hashed here yet, and test_image_qwen_vae_real.py compares it once the file is on disk."
+  },
+  "qwen_image21_vae_config.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "vae/config.json",
+    "sha256": "9785d527b278cb8b210e9f48a8028d92a4190968ce7e24c8fc85d9d1b82f6ba2"
+  },
   "z_image_turbo_chat_template.jinja": {
     "repo": "Tongyi-MAI/Z-Image-Turbo",
     "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
