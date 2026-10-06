@@ -29,6 +29,7 @@ The delta half of check 7 runs in test_image_qwen_lora_map.py.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,15 +41,20 @@ import qwen_gates as qg
 import qwen_tiny as qt
 from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
                          exact_products, rerun_exact)
-from lora_fixtures import DIALECTS, reference_delta, write_adapter
+from lora_fixtures import (DIALECTS, dialect_keys, header, reference_delta,
+                           write_adapter, write_keys)
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 
 from gmlx.image import api, lora, registry
 from gmlx.image.families.qwen_image21 import model as qm
-from gmlx.image.lora import install, patch_table, reader
+from gmlx.image.lora import install, patch_table, plan, reader
 
 TINY = {v: f"selftest_qwen_image21_tiny_lora_{v}"
         for v in qt.rule.LORA_VARIANTS}
+# The fixtures of the files that no dialect writer spells: one with its
+# LoRA config in the header, and one with a pair on the fused weight.
+HEADER, SHARED = (f"selftest_qwen_image21_tiny_lora_{v}"
+                  for v in qt.rule.LORA_FILES)
 LAYOUTS = ("fused", "unfused")
 # Variant and the dialect of each of its adapters. A dialect that stores
 # an alpha writes the adapters that have one.
@@ -502,6 +508,292 @@ def test_each_placement_gives_the_tiny_step_of_the_merged_oracle(
             [(0, ffn)] if how == "slice" else [(0, ffn), (ffn, 2 * ffn)])
 
 
+def test_a_gate_up_key_gives_the_tiny_step_of_the_merged_oracle(pipes,
+                                                               tmp_path):
+    """A file from the fused layout names img_mlp.gate_up, one pair over
+    both halves. Block 0's gate_layer and proj pairs of the oracle's
+    adapter are written as that one pair: the downs stacked, the ups on
+    the diagonal with each half's alpha over rank folded in, and no alpha
+    of its own. The step is then the oracle's. A file that holds the pair
+    apart has no such module, and the key is refused with the name of
+    that layout."""
+    arrays, m = committed_fixture(TINY["alpha"])
+    (pairs, alpha, strength), = adapters_of(m)
+    mlp = B + "0.img_mlp."
+    (dg, ug), (dp, up) = pairs[mlp + "gate_layer"], pairs[mlp + "proj"]
+    rg, rp, ffn = dg.shape[0], dp.shape[0], ug.shape[0]
+    down = np.concatenate([dg, dp])
+    both = np.zeros((2 * ffn, rg + rp), np.float32)
+    both[:ffn, :rg] = ug * np.float32(alpha / rg)
+    both[ffn:, rg:] = up * np.float32(alpha / rp)
+    keys = dialect_keys("kohya", {
+        t: (d, u, alpha) for t, (d, u) in pairs.items()
+        if t not in (mlp + "gate_layer", mlp + "proj")})
+    stem = "lora_unet_" + (mlp + "gate_up").replace(".", "_")
+    keys[stem + ".lora_down.weight"] = down
+    keys[stem + ".lora_up.weight"] = both
+    path = write_keys(tmp_path / "gate_up.safetensors", keys)
+
+    pipe = pipes["fused"]
+    ad = lora.load_adapter(pipe, path)
+    assert (mlp + "gate_up", None) in {(p, b) for p, b, _ in ad.dit}
+    assert len(ad.dit) == len(pairs) - 1 and ad.warnings == ()
+    tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
+    got = ratios(pipe, arrays, tid, "gate_up key")
+    name, worst = top(got)
+    print(f"qwen check7 tiny gate_up key: worst {worst:.2f} of its bound "
+          f"at {name}")
+    assert worst <= 1, (name, worst)
+    # Without the pair on the fused weight the step misses the gate.
+    del keys[stem + ".lora_down.weight"], keys[stem + ".lora_up.weight"]
+    less = lora.load_adapter(pipe, write_keys(
+        tmp_path / "no_gate_up.safetensors", keys))
+    got = ratios(pipe, arrays, api.define_patch_table(
+        pipe, lora.table_entries([(less, strength)])), "no gate_up key")
+    assert top(got)[1] >= SEEN and top(got, "step ")[1] >= SEEN
+    with pytest.raises(lora.AdapterError,
+                       match="1 of 17 targets name the fused "
+                             "img_mlp.gate_up weight, and this DiT file "
+                             "stores the gate and the projection apart"):
+        lora.load_adapter(pipes["unfused"], path)
+
+
+def test_a_dense_gate_up_pair_gives_the_tiny_step_of_the_merged_oracle(
+        pipes, tmp_path):
+    """One pair over the whole fused weight with one down: its up is
+    dense, the gate rows over the projection rows. The oracle merged it
+    as two pairs with that down, one on each layer of the reference
+    model. Written as those two pairs it is the same step on both
+    layouts."""
+    arrays, m = committed_fixture(SHARED)
+    (pairs, alpha, strength), = adapters_of(m)
+    assert (m["inputs"]["case"], alpha, strength) == ("text", 2.0, 0.7)
+    dense, swapped = {}, {}
+    for t, (d, u) in pairs.items():
+        if t.endswith("img_mlp.gate_layer"):
+            dp, up = pairs[t[:-len("gate_layer")] + "proj"]
+            assert np.array_equal(d, dp)
+            name = t[:-len("gate_layer")] + "gate_up"
+            dense[name] = (d, np.concatenate([u, up]), alpha)
+            swapped[name] = (d, np.concatenate([up, u]), alpha)
+        elif not t.endswith("img_mlp.proj"):
+            dense[t] = swapped[t] = (d, u, alpha)
+    pipe = pipes["fused"]
+    ad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "dense.safetensors", "kohya", dense))
+    assert sorted((p, b) for p, b, _ in ad.dit) == [
+        (B + "0.img_mlp.gate_up", None), (B + "1.attn.to_q", None),
+        (B + "1.img_mlp.gate_up", None)]
+    tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
+    got = ratios(pipe, arrays, tid, "dense")
+    name, worst = top(got)
+    print(f"qwen check7 tiny dense gate_up pair: worst {worst:.2f} of its "
+          f"bound at {name}")
+    assert worst <= 1, (name, worst)
+    for layout in LAYOUTS:
+        rows = load_rows(pipes[layout], tmp_path, m, ("kohya",))
+        got = ratios(pipes[layout], arrays, api.define_patch_table(
+            pipes[layout], lora.table_entries(rows)), f"apart {layout}")
+        assert top(got)[1] <= 1, (layout, top(got))
+    # The halves of the dense up in the other order miss the gate.
+    bad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "swapped.safetensors", "kohya", swapped))
+    got = ratios(pipe, arrays, api.define_patch_table(
+        pipe, lora.table_entries([(bad, strength)])), "swapped")
+    assert top(got)[1] >= SEEN and top(got, "step ")[1] >= SEEN
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_a_header_config_scales_the_tiny_step_as_the_reference_reads_it(
+        tmp_path, layout):
+    """The header row of check 7: a file as the reference's
+    save_lora_weights writes it, with no alpha tensor and its LoRA config
+    in the safetensors header. The oracle read the file with the
+    reference loader and merged every pair at the alpha over rank of the
+    config that loader hands on."""
+    arrays, m = committed_fixture(HEADER)
+    row, = m["inputs"]["adapters"]
+    assert row["alpha"] is None
+    assert row["header"] == row["loader_config"] == qt.rule.LORA_HEADER
+    (pairs, _, strength), = adapters_of(m)
+    keys = dialect_keys("diffusers",
+                        {t: (d, u, None) for t, (d, u) in pairs.items()})
+    pipe = tiny_pipe(tmp_path, layout)
+
+    def load(name: str, fields: dict | None):
+        return lora.load_adapter(pipe, write_keys(
+            tmp_path / f"{name}.safetensors", keys,
+            None if fields is None else header(fields)))
+
+    ad = load("header", row["header"])
+    targets = patch_table.key_map(pipe).targets
+    held = {(module, band): pipe.adapters.get(key)
+            for module, band, key in ad.dit}
+    assert len(held) == len(row["scales"]) == 18
+    for target, (rank, alpha) in row["scales"].items():
+        pair = held[targets[target]]
+        assert (int(pair.down.shape[0]), pair.alpha) == (rank, alpha)
+    assert len(ad.warnings) == 1
+    assert "ComfyUI does not read the header" in ad.warnings[0]
+    tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
+    got = ratios(pipe, arrays, tid, m["name"])
+    name, worst = top(got)
+    print(f"qwen check7 tiny header {layout}: {len(got)} measures, worst "
+          f"{worst:.2f} of its bound at {name}")
+    assert worst <= 1, (name, worst)
+    # The same keys with no header run at scale 1, and a header with
+    # another alpha or without its patterns at other scales. Each misses.
+    wrong = {"no_header": None,
+             "another_alpha": {**row["header"], "lora_alpha": 2.0},
+             "no_alpha_pattern": {**row["header"], "alpha_pattern": {}}}
+    for label, fields in wrong.items():
+        other = load(label, fields)
+        assert (other.warnings == ()) == (fields is None)
+        got = ratios(pipe, arrays, api.define_patch_table(
+            pipe, lora.table_entries([(other, strength)])), label)
+        whole, step = top(got)[1], top(got, "step ")[1]
+        print(f"qwen check7 tiny header {layout}, {label}: {step:.0f} "
+              f"bounds on a step velocity and {whole:.0f} on its most "
+              "moved measure")
+        assert whole >= SEEN and step >= SEEN, (label, whole, step)
+
+
+def test_an_alpha_scales_a_pair_in_every_spelling_of_its_keys(pipes,
+                                                             tmp_path):
+    """The rule: a pair is scaled by its alpha tensor over its rank in
+    every spelling of its keys, as ComfyUI reads a file. The reference
+    loader differs in one spelling. The oracle ran it on a pair of rank 2
+    with an alpha of 3: it folds 1.5 into a pair spelled lora_down and
+    lora_up, and it drops the alpha of a pair spelled lora_A and lora_B,
+    which it then runs at scale 1. A file with those keys and alpha
+    tensors gives another image in the reference pipeline than in gmlx
+    and in ComfyUI."""
+    arrays, m = committed_fixture(TINY["alpha"])
+    seen = m["inputs"]["lora_keys"]["alpha"]
+    assert (seen["rank"], seen["alpha"]) == (2, 3.0)
+    assert seen["lora_down, lora_up"]["factor"] == 1.5
+    assert seen["lora_A, lora_B"]["factor"] == 1.0
+    assert not seen["lora_down, lora_up"]["alpha_returned"]
+    assert not seen["lora_A, lora_B"]["alpha_returned"]
+    for down_s, up_s in ((".lora_down.weight", ".lora_up.weight"),
+                         (".lora_A.weight", ".lora_B.weight")):
+        pair, = reader.parse_pairs({
+            seen["stem"] + down_s: mx.zeros((2, 3)),
+            seen["stem"] + up_s: mx.zeros((4, 2)),
+            seen["stem"] + ".alpha": mx.array(3.0)}, "f").pairs.values()
+        assert plan.pair_scale(pair.alpha, pair.rank) == 1.5
+    # The adapter of the alpha fixture spelled lora_A and lora_B with its
+    # alpha tensors: the step is the oracle's at alpha over rank. At scale
+    # 1, which is the reference loader's reading of those keys, it misses.
+    (pairs, alpha, strength), = adapters_of(m)
+    keys = {}
+    for t, (d, u) in pairs.items():
+        stem = "diffusion_model." + t
+        keys[stem + ".lora_A.weight"], keys[stem + ".lora_B.weight"] = d, u
+        keys[stem + ".alpha"] = np.asarray(alpha, np.float32)
+    path = write_keys(tmp_path / "ab_alpha.safetensors", keys)
+    bare = write_keys(tmp_path / "ab.safetensors", {
+        k: v for k, v in keys.items() if not k.endswith(".alpha")})
+    for layout in LAYOUTS:
+        pipe = pipes[layout]
+        ad = lora.load_adapter(pipe, path)
+        assert len(ad.dit) == len(pairs) and ad.warnings == ()
+        got = ratios(pipe, arrays, api.define_patch_table(
+            pipe, lora.table_entries([(ad, strength)])), "ab alpha")
+        assert top(got)[1] <= 1, (layout, top(got))
+        got = ratios(pipe, arrays, api.define_patch_table(
+            pipe, lora.table_entries(
+                [(lora.load_adapter(pipe, bare), strength)])), "ab")
+        assert top(got)[1] >= SEEN and top(got, "step ")[1] >= SEEN
+
+
+def test_a_leaf_kept_in_float32_adds_its_delta_in_the_dtype_of_its_product(
+        tmp_path, monkeypatch):
+    """A family may keep the timestep embedder in float32 under bfloat16
+    activations, as Z-Image does. Its first linear then gives a float32
+    product from a bfloat16 input, and the factors of a pair on it are in
+    the input's dtype. The leaf casts the delta to the dtype of the
+    product and adds it there."""
+    emb = "time_text_embed.timestep_embedder."
+    fam = replace(qt.tiny_family(), fp32_keep=("norm", "timestep_embedder."))
+    pairs = {t: p for t, p in qt.rule.lora_pairs("one").items()
+             if t.startswith(emb)}
+    alpha, strength = 3.0, 0.8
+    w = qt.weights()
+    merged = dict(w)
+    for t, (down, up) in pairs.items():
+        merged[t + ".weight"] = (w[t + ".weight"] + reference_delta(
+            [(down, up, alpha, None, strength)],
+            w[t + ".weight"].shape)).astype(np.float32)
+
+    def load(name: str, weights: dict):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(registry, "families", lambda: (fam,))
+            return api.load(qt.write(tmp_path / name, weights),
+                            log=lambda *_: None)
+
+    pipe, want = load("base.gguf", w), load("merged.gguf", merged)
+    for p in (pipe, want):
+        t = p.dit.time_text_embed.timestep_embedder
+        assert p.dit.act_dtype == mx.bfloat16
+        assert t.linear_1.weight.dtype == t.linear_2.weight.dtype \
+            == mx.float32
+        assert p.dit.img_in.weight.dtype == mx.bfloat16
+    ad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "t.safetensors", "kohya",
+        {t: (d, u, alpha) for t, (d, u) in pairs.items()}))
+    tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
+
+    mixed, real = [], install._add
+
+    def spy(y, z, b_t):
+        out = real(y, z, b_t)
+        if y.dtype != b_t.dtype:
+            mixed.append((y.dtype, z.dtype, b_t.dtype, out.dtype))
+        return out
+
+    monkeypatch.setattr(install, "_add", spy)
+    branch = (mx.float32, mx.bfloat16, mx.bfloat16, mx.float32)
+    # The leaf on its own: against the float64 product with the merged
+    # weight. The products with A and with B each round to bfloat16.
+    rng = np.random.default_rng(11)
+    x = mx.array(rng.standard_normal((3, qt.rule.T_FREQ)).astype(
+        np.float32)).astype(mx.bfloat16)
+    with mx.stream(mx.cpu), qg.under_table(pipe, tid):
+        leaf = pipe.dit.time_text_embed.timestep_embedder.linear_1
+        got, base = leaf(x), leaf.base(x)
+        mx.eval(got, base)
+    assert mixed == [branch] and got.dtype == mx.float32
+    ref = np.array(x.astype(mx.float32), np.float64) @ merged[
+        emb + "linear_1.weight"].astype(np.float64).T
+    gate = 2 * 2 * qg.SITE_UNIT
+    err, lost = fx.rel_l2(np.array(got), ref), fx.rel_l2(np.array(base), ref)
+    # The timestep embedding through a step: against the model with the
+    # delta in its float32 weights.
+    arrays, _ = committed_fixture("selftest_qwen_image21_tiny_text")
+    cond = qg.conditioning(arrays, "k")
+    lat, sigma = mx.array(arrays["latents_b"]), float(arrays["sigma_b"])
+    mixed.clear()
+    with mx.stream(mx.cpu):
+        v = api.denoise_step(pipe, lat, sigma, cond, patch_table=tid)
+        mx.eval(v)
+        assert mixed and set(mixed) == {branch}
+        t = pipe.dit.timesteps(sigma, 1)
+        with qg.under_table(pipe, tid):
+            temb = np.array(pipe.dit.temb(t))
+        temb_want = np.array(want.dit.temb(t))
+        temb_base = np.array(pipe.dit.temb(t))
+        v_want = api.denoise_step(want, lat, sigma, cond)
+    t_err, t_lost = fx.rel_l2(temb, temb_want), fx.rel_l2(temb_base,
+                                                          temb_want)
+    v_err = fx.rel_l2(np.array(v), np.array(v_want))
+    print(f"qwen check7 tiny float32 leaf under bf16: leaf {err:.2e} of "
+          f"{gate:.2e} ({lost:.2e} without its delta), timestep embedding "
+          f"{t_err:.2e} ({t_lost:.2e} without), step velocity {v_err:.2e}")
+    assert err <= gate and lost >= 10 * gate
+    assert t_err <= gate and t_lost >= 10 * gate
+
+
 def test_load_adapter_refuses_a_pair_of_another_width(tmp_path, pipes):
     """A name of this family with the shape of a relative, such as the
     older Qwen-Image transformer's blocks, is refused by its shape."""
@@ -552,7 +844,7 @@ def test_the_key_map_resolves_what_the_reference_loader_resolves():
                                            strict=True):
                 assert stem == prefix + (layer.replace(".", "_")
                                          if underscored else layer)
-                hit = reader._dit_target(stem, km, under)
+                hit = reader._dit_target(stem, km.targets, under)
                 assert hit is not None, (label, stem)
                 assert hit[0] == layer and hit[1] == underscored
                 ok += gave == layer

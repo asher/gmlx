@@ -10,11 +10,23 @@ underscore name cannot be split back into a path.
 
 A key or a stem that matches nothing raises by default and lists the first
 few, because a partly applied adapter still produces an image.
+
+A pair is scaled by its alpha over its rank. The alpha is the pair's
+``alpha`` tensor, in every spelling of the pair's keys. A file that
+diffusers' ``save_lora_weights`` wrote has no alpha tensors: its header
+holds the PEFT config of each component under ``lora_adapter_metadata``,
+and ``header_configs`` reads the rank and the alpha of every pair from it.
+A config field that would change the delta in another way is refused by
+name. An alpha that is not finite and a factor with a value that is not
+finite are refused at the read.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import math
+import re
+from dataclasses import dataclass, field, replace
 from typing import Mapping
 
 import mlx.core as mx
@@ -91,15 +103,56 @@ TEXT_UNDERSCORE = ("lora_te1_", "lora_te2_", "lora_te3_", "lora_te_")
 
 _LISTED = 4
 
+# The entry of a safetensors header where diffusers' save_lora_weights
+# keeps the PEFT LoRA config of each component, as JSON of
+# ``<component>.<field>`` to value. The diffusers loader builds the
+# component's config from the entry in place of what the tensors say.
+HEADER_ENTRY = "lora_adapter_metadata"
+DIT_COMPONENT, TEXT_COMPONENT = "transformer", "text_encoder"
+# Config fields that give the rank and the alpha of a pair and the
+# modules that have one.
+_HEADER_READ = frozenset({"r", "lora_alpha", "rank_pattern", "alpha_pattern",
+                          "target_modules", "exclude_modules"})
+# Config fields that leave the delta of a stored pair as it is: settings
+# of training and of initialization, and labels.
+_HEADER_INERT = frozenset({
+    "lora_dropout", "init_lora_weights", "inference_mode", "task_type",
+    "peft_type", "peft_version", "base_model_name_or_path", "revision",
+    "auto_mapping", "megatron_config", "megatron_core", "loftq_config",
+    "eva_config", "corda_config", "runtime_config", "qalora_group_size",
+    "ensure_weight_tying"})
+# Config fields that change the delta when set, to the adapter type that
+# the refusal names.
+_HEADER_REFUSED = {
+    "use_dora": "DoRA",
+    "use_rslora": "rank-stabilized LoRA",
+    "lora_bias": "LoRA with a bias",
+    "bias": "LoRA with trained base biases",
+    "use_qalora": "QALoRA",
+    "alora_invocation_tokens": "activated LoRA",
+    "arrow_config": "Arrow routing",
+    "fan_in_fan_out": "LoRA on a transposed weight",
+    "layer_replication": "LoRA on replicated layers",
+    "layers_to_transform": "LoRA on chosen layers",
+    "layers_pattern": "LoRA on chosen layers",
+    "modules_to_save": "LoRA with replaced modules",
+    "trainable_token_indices": "LoRA with trained token rows",
+    "target_parameters": "LoRA on bare parameters",
+}
+# The value of a refused field that leaves it off, beside an empty one.
+_HEADER_OFF = {"bias": "none"}
+
 
 @dataclass(frozen=True)
 class RawPair:
     """One low-rank pair as the file stores it: ``down`` is (rank, in),
-    ``up`` is (out, rank), and ``alpha`` is None when the file has none."""
+    ``up`` is (out, rank), and ``alpha`` is None when the file has none.
+    ``alpha_dtype`` is the dtype of the file's alpha tensor."""
     stem: str
     down: mx.array
     up: mx.array
     alpha: float | None
+    alpha_dtype: mx.Dtype | None = None
 
     @property
     def rank(self) -> int:
@@ -122,13 +175,17 @@ class LoraKeyMap:
     layout has, which ComfyUI finds under ``lycoris_`` and not under the
     other underscore prefixes.
     ``text_names`` are the names a text encoder key may carry after
-    ``text_encoders.``, and ``text_targets`` the encoder's module paths."""
+    ``text_encoders.``, and ``text_targets`` the encoder's module paths.
+    ``absent`` maps a target name that the family has in another layout
+    of its DiT file, and not in this one, to what the name is and what
+    this file has in its place, which ends the refusal of such a key."""
     family: str
     title: str
     targets: Mapping
     diffusers_only: frozenset = frozenset()
     text_names: tuple = ()
     text_targets: tuple = ()
+    absent: Mapping = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -146,6 +203,217 @@ class ResolvedLora:
     text: tuple               # Target rows on text encoder modules
     unmatched: tuple = ()     # stems that named no target
     warnings: tuple = ()
+
+
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and math.isfinite(value)
+
+
+def _selector(value, what: str):
+    """A ``target_modules`` or ``exclude_modules`` value as a compiled
+    regular expression or a tuple of names, or None when it is empty."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            return re.compile(value)
+        except re.error as e:
+            raise AdapterError(f"{what} is not a regular expression "
+                               f"({e})") from None
+    if isinstance(value, (list, tuple)) and all(isinstance(v, str)
+                                                for v in value):
+        return tuple(value)
+    raise AdapterError(f"{what} is neither a regular expression nor a list "
+                       "of names")
+
+
+def _selects(selector, name: str) -> bool:
+    """Whether a selector names the module ``name``, as PEFT reads it: a
+    regular expression matches the whole name, and a listed name matches
+    the name or its end after a dot."""
+    if isinstance(selector, tuple):
+        return name in selector or any(name.endswith("." + t)
+                                       for t in selector)
+    return selector.fullmatch(name) is not None
+
+
+def _patterns(value, what: str, ok) -> tuple:
+    """A ``rank_pattern`` or ``alpha_pattern`` value as rows of (compiled
+    pattern, value) in header order. PEFT matches a pattern at the end of
+    a module name, after a dot or at its start."""
+    if not value:
+        return ()
+    if not isinstance(value, dict):
+        raise AdapterError(f"{what} is not a mapping")
+    rows = []
+    for key, v in value.items():
+        if not ok(v):
+            raise AdapterError(f"{what} gives {key} the value {v!r}")
+        try:
+            rows.append((re.compile(rf"(.*\.)?({key})$"), v))
+        except re.error as e:
+            raise AdapterError(f"{what} has the key {key!r}, which is not "
+                               f"a regular expression ({e})") from None
+    return tuple(rows)
+
+
+def _first(rows: tuple, name: str, default):
+    for pattern, value in rows:
+        if pattern.match(name):
+            return value
+    return default
+
+
+@dataclass(frozen=True)
+class HeaderConfig:
+    """The LoRA config of one component from a file's header: the rank
+    and the alpha of its pairs, the patterns that give some modules
+    another rank or alpha, and the modules that it names."""
+    rank: int
+    alpha: float
+    rank_pattern: tuple = ()
+    alpha_pattern: tuple = ()
+    targets: object = None
+    excluded: object = None
+
+    def of(self, name: str) -> tuple[int, float]:
+        """(rank, alpha) of the module ``name``: those of the first
+        pattern in header order that matches it, else ``r`` and
+        ``lora_alpha``."""
+        return (_first(self.rank_pattern, name, self.rank),
+                float(_first(self.alpha_pattern, name, self.alpha)))
+
+    def names(self, name: str) -> bool:
+        """Whether the config places a pair on the module ``name``."""
+        return _selects(self.targets, name) and not (
+            self.excluded is not None and _selects(self.excluded, name))
+
+
+def _header_config(path: str, comp: str, fields: dict) -> HeaderConfig:
+    where = f"{path}: the adapter header"
+    for name, value in fields.items():
+        if name in _HEADER_READ or name in _HEADER_INERT or not value \
+                or value == _HEADER_OFF.get(name):
+            continue
+        kind = _HEADER_REFUSED.get(name)
+        if kind is None:
+            raise UnsupportedAdapterError(
+                f"{where} sets {comp}.{name}, a field gmlx image does not "
+                "read. It reads r, lora_alpha, rank_pattern, alpha_pattern, "
+                "target_modules and exclude_modules", "adapter header")
+        raise UnsupportedAdapterError(
+            f"{where} sets {comp}.{name} to {value!r}, which makes this "
+            f"{kind}. gmlx image does not apply it. It applies plain LoRA "
+            "pairs only", kind)
+    rank, alpha = fields.get("r"), fields.get("lora_alpha")
+    positive = lambda v: _number(v) and int(v) == v and v > 0  # noqa: E731
+    if not positive(rank):
+        raise AdapterError(f"{where} gives {comp}.r as {rank!r}, which is "
+                           "not a positive integer")
+    if not _number(alpha):
+        raise AdapterError(f"{where} gives {comp}.lora_alpha as {alpha!r}, "
+                           "which is not a finite number")
+    targets = _selector(fields.get("target_modules"),
+                        f"{where}: {comp}.target_modules")
+    if targets is None:
+        raise AdapterError(f"{where} gives no {comp}.target_modules")
+    return HeaderConfig(
+        rank=int(rank), alpha=float(alpha),
+        rank_pattern=tuple((p, int(v)) for p, v in _patterns(
+            fields.get("rank_pattern"), f"{where}: {comp}.rank_pattern",
+            positive)),
+        alpha_pattern=_patterns(fields.get("alpha_pattern"),
+                                f"{where}: {comp}.alpha_pattern", _number),
+        targets=targets,
+        excluded=_selector(fields.get("exclude_modules"),
+                           f"{where}: {comp}.exclude_modules"))
+
+
+def header_configs(metadata: Mapping | None,
+                   path: str = "<arrays>") -> dict:
+    """Component to ``HeaderConfig`` from the ``lora_adapter_metadata``
+    entry of a safetensors header, as diffusers' ``save_lora_weights``
+    writes it. Empty without the entry.
+
+    The diffusers loader passes the fields of a component to PEFT's
+    ``LoraConfig`` in place of what it reads from the tensors. Of those
+    fields gmlx applies ``r``, ``lora_alpha``, ``rank_pattern`` and
+    ``alpha_pattern``, which scale a pair by its alpha over its rank, and
+    holds every pair to ``target_modules`` and ``exclude_modules``. A
+    field that changes the delta in another way and is set raises
+    ``UnsupportedAdapterError`` by its name: ``use_rslora``,
+    ``use_dora``, ``lora_bias``, ``bias``, ``fan_in_fan_out`` and the
+    others of ``_HEADER_REFUSED``. So does a field gmlx does not know,
+    when it is set. An entry gmlx cannot read raises ``AdapterError``."""
+    raw = (metadata or {}).get(HEADER_ENTRY)
+    if not raw:
+        return {}
+    where = f"{path}: the {HEADER_ENTRY} entry of the header"
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        raise AdapterError(f"{where} is not JSON") from None
+    if not isinstance(doc, dict):
+        raise AdapterError(f"{where} is not a JSON object")
+    parts: dict[str, dict] = {}
+    for key, value in doc.items():
+        comp, dot, name = str(key).partition(".")
+        if not dot or not comp or not name:
+            raise AdapterError(f"{where} has the key {key!r}, which names "
+                               "no component and field")
+        parts.setdefault(comp, {})[name] = value
+    return {comp: _header_config(path, comp, fields)
+            for comp, fields in parts.items()}
+
+
+def _header_covers(path: str, configs: Mapping, comp: str, name: str,
+                   stem: str) -> HeaderConfig | None:
+    """The header config that covers the module ``name`` of component
+    ``comp``, or None for a file without a header config. Raises
+    ``AdapterError`` when the header has configs and none for the
+    component, or when its config does not name the module: the reference
+    loader does not load such a pair."""
+    if not configs:
+        return None
+    cfg = configs.get(comp)
+    if cfg is None:
+        raise AdapterError(
+            f"{path}: the adapter header has a LoRA config for "
+            f"{', '.join(sorted(configs))} and none for {comp}, which "
+            f"{stem} belongs to")
+    if not cfg.names(name):
+        raise AdapterError(
+            f"{path}: {stem} is a pair on {name}, which the "
+            f"{comp}.target_modules and exclude_modules of the adapter "
+            "header leave out")
+    return cfg
+
+
+def _under_header(path: str, configs: Mapping, comp: str, name: str,
+                  pair: RawPair) -> tuple[RawPair, bool]:
+    """``pair`` with the alpha that the header gives the module ``name``
+    of component ``comp``, and whether that alpha is not the pair's rank.
+    A pair without an alpha tensor takes the header's. Raises
+    ``AdapterError`` for a pair whose rank is not the header's, and for
+    an alpha tensor that is not the header's alpha in the tensor's
+    dtype."""
+    cfg = _header_covers(path, configs, comp, name, pair.stem)
+    if cfg is None:
+        return pair, False
+    rank, alpha = cfg.of(name)
+    if rank != pair.rank:
+        raise AdapterError(
+            f"{path}: {pair.stem} has rank {pair.rank}, and the adapter "
+            f"header gives {name} the rank {rank}")
+    if pair.alpha is None:
+        return replace(pair, alpha=alpha), alpha != rank
+    same = mx.array(alpha, pair.alpha_dtype or mx.float32).astype(mx.float32)
+    if float(same.item()) != pair.alpha:
+        raise AdapterError(
+            f"{path}: {pair.stem} has an alpha tensor of {pair.alpha:g}, "
+            f"and the adapter header gives {name} the alpha {alpha:g}")
+    return pair, False
 
 
 # The key part PEFT writes two places before the end, as
@@ -222,7 +490,9 @@ def parse_pairs(arrays: Mapping, path: str = "<arrays>", *,
     """The pairs of a key to array mapping. Raises
     ``UnsupportedAdapterError`` for a refused adapter type,
     ``UnmatchedKeysError`` for keys with no known suffix unless
-    ``allow_unmatched``, and ``AdapterError`` for a broken pair."""
+    ``allow_unmatched``, and ``AdapterError`` for a broken pair, for an
+    alpha that is not finite and for a factor that holds a value that is
+    not finite."""
     for key in arrays:
         kind = _refused_kind(key)
         if kind is not None:
@@ -246,6 +516,7 @@ def parse_pairs(arrays: Mapping, path: str = "<arrays>", *,
             f"{path}: {len(stray)} of {len(arrays)} keys have no known LoRA "
             f"suffix: {_listed(stray)}", tuple(stray))
     pairs = {}
+    factors: list = []
     for stem, slot in parts.items():
         _need_pair(path, stem, slot)
         down = _matrix(slot["down"][1], slot["down"][0], path)
@@ -254,24 +525,35 @@ def parse_pairs(arrays: Mapping, path: str = "<arrays>", *,
             raise AdapterError(
                 f"{path}: {stem} pairs up {tuple(up.shape)} with down "
                 f"{tuple(down.shape)}, whose ranks differ")
-        alpha = None
+        alpha = alpha_dtype = None
         if "alpha" in slot:
             a = slot["alpha"][1]
             if a.size != 1:
                 raise AdapterError(f"{path}: {slot['alpha'][0]} is not a "
                                    "scalar")
             alpha = float(a.astype(mx.float32).reshape(-1)[0].item())
-        pairs[stem] = RawPair(stem, down, up, alpha)
+            alpha_dtype = a.dtype
+            if not math.isfinite(alpha):
+                raise AdapterError(f"{path}: {slot['alpha'][0]} is {alpha}, "
+                                   "which is not finite")
+        pairs[stem] = RawPair(stem, down, up, alpha, alpha_dtype)
+        factors += [(slot["down"][0], down), (slot["up"][0], up)]
     if not pairs:
         raise AdapterError(f"{path} holds no LoRA pair")
+    finite = [mx.all(mx.isfinite(a)) for _, a in factors]
+    mx.eval(finite)
+    for (key, _), ok in zip(factors, finite):
+        if not ok.item():
+            raise AdapterError(f"{path}: {key} holds a value that is not "
+                               "finite")
     return RawLora(path=path, pairs=pairs, metadata=dict(metadata or {}),
                    stray=tuple(stray))
 
 
-def _header_names(path: str) -> list:
-    """The tensor names of a safetensors file, from its header. Raises
-    ``UnsupportedAdapterError`` when a name marks an adapter type gmlx
-    does not apply. No tensor is read."""
+def _header_names(path: str) -> tuple[list, dict]:
+    """The tensor names and the metadata of a safetensors file, from its
+    header. Raises ``UnsupportedAdapterError`` when a name marks an
+    adapter type gmlx does not apply. No tensor is read."""
     from ..vae.reader import VAEError, safetensors_header
 
     try:
@@ -288,7 +570,8 @@ def _header_names(path: str) -> list:
             raise UnsupportedAdapterError(
                 f"{path} is a {kind} adapter (key {key}), which gmlx image "
                 "does not apply. It applies plain LoRA pairs only", kind)
-    return names
+    meta = header.get("__metadata__")
+    return names, meta if isinstance(meta, dict) else {}
 
 
 def vet_header(path: str, *, allow_unmatched: bool = False,
@@ -296,21 +579,25 @@ def vet_header(path: str, *, allow_unmatched: bool = False,
     """Check a LoRA safetensors file by its header alone and return the
     number of pair stems it names. Raises as ``read_lora`` does for a file
     that is not safetensors, for a refused adapter type, for keys with no
-    known suffix, and for a stem with two tensors of one role or without
-    both halves of its pair. It reads no tensor, so a caller can refuse a
-    file before it loads a model.
+    known suffix, for a stem with two tensors of one role or without
+    both halves of its pair, and for a header config that
+    ``header_configs`` refuses. It reads no tensor, so a caller can
+    refuse a file before it loads a model.
 
     With ``keymap``, the stems are placed as ``resolve`` places them, so a
     file for another family raises ``AdapterFamilyError``, a stem that
-    names no module raises ``UnmatchedKeysError`` and two stems on one
-    module raise ``AdapterError``. With ``modules``, the module paths that
-    the DiT file holds a weight for, a stem that targets a module outside
-    them raises ``AdapterError``. Whether a pair's shape fits its module
-    is checked at the load."""
+    names no module raises ``UnmatchedKeysError``, and two stems on one
+    module or a stem that the header config leaves out raise
+    ``AdapterError``. With ``modules``, the module paths that the DiT
+    file holds a weight for, a stem that targets a module outside them
+    raises ``AdapterError``. Whether a pair's shape fits its module, its
+    rank is the header's and its alpha tensor is the header's alpha is
+    checked at the load."""
     import os
 
     path = os.path.expanduser(str(path))
-    names = _header_names(path)
+    names, meta = _header_names(path)
+    configs = header_configs(meta, path)
     # Stems in file order, as ``parse_pairs`` holds them.
     parts: dict[str, set] = {}
     stray = []
@@ -333,48 +620,82 @@ def vet_header(path: str, *, allow_unmatched: bool = False,
     if not parts:
         raise AdapterError(f"{path} holds no LoRA pair")
     if keymap is not None:
-        _vet_targets(path, list(parts), keymap, modules, allow_unmatched)
+        _vet_targets(path, list(parts), keymap, modules, allow_unmatched,
+                     configs)
     return len(parts)
 
 
 def _vet_targets(path: str, stems: list, keymap: LoraKeyMap, modules,
-                 allow_unmatched: bool) -> None:
+                 allow_unmatched: bool, configs: Mapping) -> None:
     """Raise as ``resolve`` and ``load_adapter`` do for stems that name no
-    module of the family, two stems on one module, or a module the DiT
-    file does not hold."""
+    module of the family, two stems on one module, a stem that the header
+    config leaves out, or a module the DiT file does not hold."""
     under = _underscore_index(keymap.targets)
     text_under = _underscore_index(keymap.text_targets)
-    dit, text, unmatched, absent = [], [], [], []
+    dit, text, unmatched, absent, other = [], [], [], [], []
     for stem in stems:
         if is_text_stem(stem):
             target = _text_target(stem, keymap, text_under)
             if target is None:
                 unmatched.append(stem)
             else:
+                _header_covers(path, configs, TEXT_COMPONENT, target, stem)
                 text.append((stem, target, None))
             continue
-        hit = _dit_target(stem, keymap, under)
+        hit = _dit_target(stem, keymap.targets, under)
         if hit is None:
             unmatched.append(stem)
+            if _other_layout(stem, keymap) is not None:
+                other.append(stem)
             continue
+        _header_covers(path, configs, DIT_COMPONENT, hit[0], stem)
         module, band = keymap.targets[hit[0]]
         dit.append((stem, module, band))
         if modules is not None and module not in modules:
             absent.append((stem, module))
-    if not dit and not text:
-        raise AdapterFamilyError(
-            f"{path} is not a {keymap.title} adapter: none of its "
-            f"{len(stems)} targets names a {keymap.title} module "
-            f"({_listed(unmatched)})")
-    if unmatched and not allow_unmatched:
-        raise UnmatchedKeysError(
-            f"{path}: {len(unmatched)} of {len(stems)} targets name no "
-            f"{keymap.title} module: {_listed(unmatched)}", tuple(unmatched))
+    _need_targets(path, keymap, len(stems), bool(dit or text), unmatched,
+                  other, allow_unmatched)
     _one_stem_per_target(path, dit + text)
     if absent:
         stem, module = absent[0]
         raise AdapterError(f"{path}: {stem} targets {module}, which this "
                            "DiT does not have")
+
+
+def _other_layout(stem: str, keymap: LoraKeyMap) -> str | None:
+    """What a DiT stem names when the family has its target in another
+    layout of the DiT file and not in this one, else None."""
+    if not keymap.absent:
+        return None
+    hit = _dit_target(stem, keymap.absent, _underscore_index(keymap.absent))
+    return None if hit is None else keymap.absent[hit[0]]
+
+
+def _need_targets(path: str, keymap: LoraKeyMap, total: int, placed: bool,
+                  unmatched: list, other: list, allow_unmatched: bool) -> str:
+    """Raise for the stems that name no target, and return the warning
+    for them when they are allowed, or an empty string. A stem that names
+    a target of another layout of the DiT file is refused with that
+    layout's name, never as an adapter of another family."""
+    msg = ""
+    if other:
+        msg = (f"{path}: {len(other)} of {total} targets name "
+               f"{_other_layout(other[0], keymap)}: {_listed(other)}")
+        if not placed or not allow_unmatched:
+            raise UnmatchedKeysError(msg, tuple(other))
+    if not placed:
+        raise AdapterFamilyError(
+            f"{path} is not a {keymap.title} adapter: none of its "
+            f"{total} targets names a {keymap.title} module "
+            f"({_listed(unmatched)})")
+    rest = [s for s in unmatched if s not in other]
+    if rest:
+        named = (f"{path}: {len(rest)} of {total} targets name no "
+                 f"{keymap.title} module: {_listed(rest)}")
+        if not allow_unmatched:
+            raise UnmatchedKeysError(named, tuple(rest))
+        msg = f"{msg}. {named}" if msg else named
+    return msg + ". They are skipped" if msg else ""
 
 
 def read_lora(path: str, *, allow_unmatched: bool = False) -> RawLora:
@@ -383,7 +704,7 @@ def read_lora(path: str, *, allow_unmatched: bool = False) -> RawLora:
 
     path = os.path.expanduser(str(path))
     # Refuse by name from the header, before any tensor loads.
-    names = _header_names(path)
+    names, _ = _header_names(path)
     try:
         arrays, meta = mx.load(path, return_metadata=True)
     except (RuntimeError, ValueError) as e:
@@ -400,15 +721,16 @@ def _underscore_index(names) -> dict:
     return out
 
 
-def _dit_target(stem: str, keymap: LoraKeyMap, under: dict):
-    """(target name, underscore form) of a DiT stem, or None."""
+def _dit_target(stem: str, targets: Mapping, under: dict):
+    """(target name, underscore form) of a DiT stem among ``targets``,
+    whose underscore index is ``under``, or None."""
     for p in UNDERSCORE_PREFIXES:
         if stem.startswith(p):
             name = under.get(stem[len(p):])
             return None if name is None else (name, True)
     rest = stem
     for _ in range(4):
-        if rest in keymap.targets:
+        if rest in targets:
             return rest, False
         for p in DOTTED_PREFIXES:
             if p and rest.startswith(p):
@@ -448,42 +770,52 @@ def is_text_stem(stem: str) -> bool:
 def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             allow_unmatched: bool = False) -> ResolvedLora:
     """Place every pair of ``raw`` on a module of the family, or on a
-    module of its text encoder. Raises ``AdapterFamilyError`` when no DiT
-    or text stem names a target, and ``UnmatchedKeysError`` for the stems
-    left over unless ``allow_unmatched``."""
+    module of its text encoder, with the rank and the alpha that the
+    file's header config gives it. Raises ``AdapterFamilyError`` when no
+    DiT or text stem names a target, ``UnmatchedKeysError`` for the stems
+    left over unless ``allow_unmatched``, and as ``header_configs`` and
+    ``_under_header`` do for a header config and a pair that does not
+    agree with it."""
+    configs = header_configs(raw.metadata, raw.path)
     under = _underscore_index(keymap.targets)
     text_under = _underscore_index(keymap.text_targets)
-    dit, text, unmatched, dropped = [], [], [], []
+    dit, text, unmatched, dropped, other, scaled = [], [], [], [], [], []
     for stem, pair in raw.pairs.items():
         if is_text_stem(stem):
             path = _text_target(stem, keymap, text_under)
             if path is None:
                 unmatched.append(stem)
-            else:
-                text.append(Target(path, None, pair))
+                continue
+            pair, moved = _under_header(raw.path, configs, TEXT_COMPONENT,
+                                        path, pair)
+            text.append(Target(path, None, pair))
+            scaled += [stem] * moved
             continue
-        hit = _dit_target(stem, keymap, under)
+        hit = _dit_target(stem, keymap.targets, under)
         if hit is None:
             unmatched.append(stem)
+            if _other_layout(stem, keymap) is not None:
+                other.append(stem)
             continue
         name, underscored = hit
         module, band = keymap.targets[name]
+        pair, moved = _under_header(raw.path, configs, DIT_COMPONENT, name,
+                                    pair)
         dit.append(Target(module, band, pair))
+        scaled += [stem] * moved
         if underscored and name in keymap.diffusers_only \
                 and not stem.startswith(COMFY_DIFFUSERS_UNDERSCORE):
             dropped.append(stem)
-    if not dit and not text:
-        raise AdapterFamilyError(
-            f"{raw.path} is not a {keymap.title} adapter: none of its "
-            f"{len(raw.pairs)} targets names a {keymap.title} module "
-            f"({_listed(unmatched)})")
-    warnings = []
-    if unmatched:
-        msg = (f"{raw.path}: {len(unmatched)} of {len(raw.pairs)} targets "
-               f"name no {keymap.title} module: {_listed(unmatched)}")
-        if not allow_unmatched:
-            raise UnmatchedKeysError(msg, tuple(unmatched))
-        warnings.append(msg + ". They are skipped")
+    skipped = _need_targets(raw.path, keymap, len(raw.pairs),
+                            bool(dit or text), unmatched, other,
+                            allow_unmatched)
+    warnings = [skipped] if skipped else []
+    if scaled:
+        warnings.append(
+            f"{raw.path}: {len(scaled)} pairs take an alpha from the "
+            f"adapter header that is not their rank ({_listed(scaled)}). "
+            "gmlx applies it as the diffusers loader does, and ComfyUI "
+            "does not read the header, so the image differs from ComfyUI's")
     if dropped:
         warnings.append(
             f"{raw.path}: {len(dropped)} underscore keys spell diffusers "

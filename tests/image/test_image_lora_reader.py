@@ -2,6 +2,8 @@
 name, and the keys that match nothing."""
 from __future__ import annotations
 
+import json
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -10,8 +12,8 @@ from gmlx.image.lora import reader
 from gmlx.image.lora.reader import (AdapterError, AdapterFamilyError,
                                     LoraKeyMap, UnmatchedKeysError,
                                     UnsupportedAdapterError)
-from lora_fixtures import (DIALECTS, dialect_keys, make_pair, write_keys,
-                           write_ordered)
+from lora_fixtures import (DIALECTS, dialect_keys, header, make_pair,
+                           write_keys, write_ordered)
 
 KEYMAP = LoraKeyMap(
     family="toy", title="Toy",
@@ -466,3 +468,303 @@ def test_the_header_vet_walks_the_stems_in_file_order(tmp_path):
         reader.vet_header(path, keymap=KEYMAP)
     assert got.value.keys == want.value.keys == tuple(odd)
     assert str(got.value) == str(want.value)
+
+
+# The LoRA config in a file's header, as diffusers' save_lora_weights
+# writes it for a file without alpha tensors.
+
+Q, K, W1 = ("layers.0.attention.to_q", "layers.0.attention.to_k",
+            "layers.0.feed_forward.w1")
+CONFIG = {
+    "r": 2, "lora_alpha": 1.5, "target_modules": ["to_q", "to_k", "w1"],
+    "rank_pattern": {}, "alpha_pattern": {}, "exclude_modules": None,
+    "lora_dropout": 0.1, "bias": "none", "init_lora_weights": "gaussian",
+    "use_dora": False, "use_rslora": False, "lora_bias": False,
+    "fan_in_fan_out": False, "inference_mode": True, "peft_type": "LORA",
+    "megatron_core": "megatron.core", "loftq_config": {},
+    "qalora_group_size": 16, "runtime_config": {"ephemeral": False},
+    "modules_to_save": None, "layers_to_transform": None,
+}
+
+
+def _saved(ranks: dict, alphas: dict | None = None,
+           prefix: str = "transformer.") -> dict:
+    """Keys of one pair per target at the rank given, spelled as
+    save_lora_weights spells them, with an alpha tensor where given."""
+    keys = {}
+    for i, (target, rank) in enumerate(ranks.items()):
+        out, inp = (8, 6) if target != W1 else (12, 6)
+        down, up, _ = _pair(i, out, inp, rank)
+        keys[f"{prefix}{target}.lora_A.weight"] = mx.array(down)
+        keys[f"{prefix}{target}.lora_B.weight"] = mx.array(up)
+    for target, alpha in (alphas or {}).items():
+        keys[f"{prefix}{target}.alpha"] = mx.array(alpha)
+    return keys
+
+
+def _resolved(keys: dict, fields: dict | None, component="transformer"):
+    meta = None if fields is None else header(fields, component)
+    return reader.resolve(reader.parse_pairs(keys, "f", metadata=meta),
+                          KEYMAP)
+
+
+def _alphas(res) -> dict:
+    return {t.pair.stem.removeprefix("transformer."): t.pair.alpha
+            for t in res.dit}
+
+
+def test_a_header_config_gives_each_pair_its_alpha():
+    keys = _saved({Q: 2, K: 3, W1: 2})
+    assert _alphas(_resolved(keys, None)) == {Q: None, K: None, W1: None}
+    assert _resolved(keys, None).warnings == ()
+    # The most common rank is r, another rank is in rank_pattern, and
+    # alpha_pattern gives a module an alpha of its own. A pattern matches
+    # the end of a module name after a dot, and "^" holds it to the whole
+    # name.
+    fields = {**CONFIG, "rank_pattern": {"^" + K: 3},
+              "alpha_pattern": {"w1": 4.0, "attention.to_k": 6.0}}
+    res = _resolved(keys, fields)
+    assert _alphas(res) == {Q: 1.5, K: 6.0, W1: 4.0}
+    assert [(t.module, t.band) for t in res.dit] == [
+        ("layers.0.attention.qkv", (0, 0, 8)),
+        ("layers.0.attention.qkv", (0, 8, 8)),
+        ("layers.0.feed_forward.w1", None)]
+    # ComfyUI reads no header, so the three pairs run at another scale
+    # there, and the warning says so.
+    assert len(res.warnings) == 1
+    assert "3 pairs take an alpha from the adapter header" in res.warnings[0]
+    assert "ComfyUI does not read the header" in res.warnings[0]
+    # An alpha equal to the rank is the scale 1 that every reader gives.
+    plain = _resolved(keys, {**CONFIG, "lora_alpha": 2,
+                             "rank_pattern": {K: 3},
+                             "alpha_pattern": {K: 3}})
+    assert _alphas(plain) == {Q: 2.0, K: 3.0, W1: 2.0}
+    assert plain.warnings == ()
+
+
+@pytest.mark.parametrize("patterns, want", [
+    # The first key in header order that matches counts. The writer sorts
+    # the keys, so that order is the sorted one.
+    ({"to_q": 7.0, "attention.to_q": 9.0}, 9.0),
+    ({"to_q": 7.0, "zz": 9.0}, 7.0),
+    # "^" anchors a key to the start of the name.
+    ({"^attention.to_q": 7.0}, 1.5),
+    ({"^" + Q: 7.0}, 7.0),
+    # A key matches whole name parts only.
+    ({"o_q": 7.0}, 1.5),
+    ({"0.attention.to_q": 8.0}, 8.0),
+    # A key is a regular expression.
+    ({r"layers\.\d+\.attention\.to_(q|k)": 7.0}, 7.0),
+    ({r"to_[kv]": 7.0}, 1.5),
+])
+def test_a_header_pattern_matches_a_module_as_peft_matches_it(patterns,
+                                                              want):
+    res = _resolved(_saved({Q: 2}), {**CONFIG, "alpha_pattern": patterns})
+    assert _alphas(res) == {Q: want}
+
+
+REFUSED = [
+    ("use_dora", True, "DoRA"),
+    ("use_rslora", True, "rank-stabilized LoRA"),
+    ("lora_bias", True, "LoRA with a bias"),
+    ("bias", "all", "LoRA with trained base biases"),
+    ("bias", "lora_only", "LoRA with trained base biases"),
+    ("fan_in_fan_out", True, "LoRA on a transposed weight"),
+    ("use_qalora", True, "QALoRA"),
+    ("alora_invocation_tokens", [5, 6], "activated LoRA"),
+    ("arrow_config", {"top_k": 3}, "Arrow routing"),
+    ("layer_replication", [[0, 2], [1, 3]], "LoRA on replicated layers"),
+    ("layers_to_transform", [0], "LoRA on chosen layers"),
+    ("layers_pattern", "layers", "LoRA on chosen layers"),
+    ("modules_to_save", ["x_embedder"], "LoRA with replaced modules"),
+    ("trainable_token_indices", [3], "LoRA with trained token rows"),
+    ("target_parameters", ["weight"], "LoRA on bare parameters"),
+    ("a_field_of_a_later_writer", True, "adapter header"),
+]
+
+
+@pytest.mark.parametrize("name, value, kind", REFUSED,
+                         ids=[f"{n}-{i}" for i, (n, _, _) in
+                              enumerate(REFUSED)])
+def test_a_header_field_that_changes_the_delta_is_refused_by_name(
+        tmp_path, name, value, kind):
+    keys = _saved({Q: 2})
+    fields = {**CONFIG, name: value}
+    said = f"the adapter header sets transformer.{name}"
+    with pytest.raises(UnsupportedAdapterError, match=said) as e:
+        reader.header_configs(header(fields), "f")
+    assert e.value.kind == kind
+    assert ("a field gmlx image does not read" if kind == "adapter header"
+            else f"which makes this {kind}") in str(e.value)
+    with pytest.raises(UnsupportedAdapterError, match=said):
+        _resolved(keys, fields)
+    # The header alone refuses the file, before a tensor or a model loads.
+    path = write_keys(tmp_path / "f.safetensors", keys, header(fields))
+    with pytest.raises(UnsupportedAdapterError, match=said):
+        reader.vet_header(path)
+    with pytest.raises(UnsupportedAdapterError, match=said):
+        reader.vet_header(path, keymap=KEYMAP)
+    # Left off, the field changes nothing.
+    for off in (None, False, [], {}, "", 0,
+                *(["none"] if name == "bias" else [])):
+        assert _alphas(_resolved(keys, {**CONFIG, name: off})) == {Q: 1.5}
+
+
+def test_a_header_config_is_read_whole_or_refused():
+    keys = _saved({Q: 2})
+    assert reader.header_configs(None) == {}
+    assert reader.header_configs({"format": "pt"}) == {}
+    assert reader.header_configs({reader.HEADER_ENTRY: ""}) == {}
+    cfg, = reader.header_configs(header(CONFIG)).values()
+    assert (cfg.rank, cfg.alpha, cfg.targets, cfg.excluded) == (
+        2, 1.5, ("to_q", "to_k", "w1"), None)
+    for entry, match in (
+            ("{", "is not JSON"),
+            ("[1]", "is not a JSON object"),
+            ('{"r": 2}', "names no component and field"),
+            ('{".r": 2}', "names no component and field")):
+        with pytest.raises(AdapterError, match=match):
+            reader.header_configs({reader.HEADER_ENTRY: entry}, "f")
+    for change, match in (
+            ({"r": None}, "transformer.r as None"),
+            ({"r": 0}, "transformer.r as 0"),
+            ({"r": 2.5}, "transformer.r as 2.5"),
+            ({"r": True}, "transformer.r as True"),
+            ({"lora_alpha": None}, "transformer.lora_alpha as None"),
+            ({"lora_alpha": "8"}, "transformer.lora_alpha as '8'"),
+            ({"lora_alpha": float("nan")}, "not a finite number"),
+            ({"lora_alpha": float("inf")}, "not a finite number"),
+            ({"target_modules": None}, "gives no transformer.target_modules"),
+            ({"target_modules": []}, "gives no transformer.target_modules"),
+            ({"target_modules": 3}, "neither a regular expression nor"),
+            ({"target_modules": "("}, "is not a regular expression"),
+            ({"exclude_modules": ["a", 1]}, "neither a regular expression"),
+            ({"rank_pattern": ["to_q"]}, "rank_pattern is not a mapping"),
+            ({"rank_pattern": {"to_q": 0}}, "gives to_q the value 0"),
+            ({"rank_pattern": {"to_q": 1.5}}, "gives to_q the value 1.5"),
+            ({"alpha_pattern": {"to_q": "x"}}, "gives to_q the value 'x'"),
+            ({"alpha_pattern": {"(": 1.0}}, "not a regular expression")):
+        with pytest.raises(AdapterError, match=match) as e:
+            _resolved(keys, {**CONFIG, **change})
+        assert not isinstance(e.value, UnsupportedAdapterError), change
+    with pytest.raises(AdapterError, match="transformer.r as None"):
+        _resolved(keys, {k: v for k, v in CONFIG.items() if k != "r"})
+
+
+def test_a_pair_that_disagrees_with_the_header_is_refused():
+    fields = {**CONFIG, "alpha_pattern": {"to_k": 0.1}}
+    # An alpha tensor equal to the header's alpha is the same pair.
+    same = _resolved(_saved({Q: 2, K: 2}, {Q: 1.5, K: 0.1}), fields)
+    assert _alphas(same) == {Q: 1.5, K: float(np.float32(0.1))}
+    assert same.warnings == ()
+    # Equal is equal after rounding to the tensor's dtype.
+    for dtype in (mx.float16, mx.bfloat16):
+        keys = _saved({K: 2}, {K: mx.array(0.1, dtype)})
+        alpha, = _alphas(_resolved(keys, fields)).values()
+        assert alpha != float(np.float32(0.1)) and abs(alpha - 0.1) < 1e-3
+    # Another alpha is refused, and both are named.
+    with pytest.raises(AdapterError,
+                       match=f"transformer.{Q} has an alpha tensor of 3, "
+                             f"and the adapter header gives {Q} the alpha "
+                             "1.5"):
+        _resolved(_saved({Q: 2}, {Q: 3.0}), fields)
+    # A pair of another rank than the header's does not load in the
+    # reference.
+    with pytest.raises(AdapterError,
+                       match=f"transformer.{K} has rank 3, and the adapter "
+                             f"header gives {K} the rank 2"):
+        _resolved(_saved({Q: 2, K: 3}), fields)
+    assert _alphas(_resolved(_saved({Q: 2, K: 3}), {
+        **fields, "rank_pattern": {"to_k": 3}})) == {Q: 1.5, K: 0.1}
+
+
+@pytest.mark.parametrize("change", [
+    {"target_modules": ["to_q", "to_k"]},
+    {"target_modules": r".*\.attention\.to_[qk]"},
+    {"exclude_modules": ["w1"]},
+    {"exclude_modules": r".*feed_forward.*"},
+])
+def test_a_pair_the_header_leaves_out_is_refused(tmp_path, change):
+    """The reference loader gives such a module no adapter and drops the
+    pair, so a file that has one is refused."""
+    keys = _saved({Q: 2, K: 2, W1: 2})
+    said = (f"transformer.{W1} is a pair on {W1}, which the "
+            "transformer.target_modules and exclude_modules of the adapter "
+            "header leave out")
+    with pytest.raises(AdapterError, match=said):
+        _resolved(keys, {**CONFIG, **change})
+    path = write_keys(tmp_path / "f.safetensors", keys,
+                      header({**CONFIG, **change}))
+    assert reader.vet_header(path) == 3
+    with pytest.raises(AdapterError, match=said):
+        reader.vet_header(path, keymap=KEYMAP)
+    del keys[f"transformer.{W1}.lora_A.weight"]
+    del keys[f"transformer.{W1}.lora_B.weight"]
+    assert _alphas(_resolved(keys, {**CONFIG, **change})) == {Q: 1.5,
+                                                              K: 1.5}
+
+
+def test_a_header_config_covers_its_own_component(tmp_path):
+    te = "text_encoder.model.layers.0.self_attn.q_proj"
+    down, up, _ = _pair(5, 8, 6, 4)
+    text = {te + ".lora_A.weight": mx.array(down),
+            te + ".lora_B.weight": mx.array(up)}
+    keys = {**_saved({Q: 2}), **text}
+    te_config = {"r": 4, "lora_alpha": 2.0, "target_modules": ["q_proj"]}
+    both = header(CONFIG)
+    both[reader.HEADER_ENTRY] = json.dumps({
+        **json.loads(both[reader.HEADER_ENTRY]),
+        **json.loads(header(te_config, "text_encoder")[reader.HEADER_ENTRY])})
+    res = reader.resolve(reader.parse_pairs(keys, "f", metadata=both),
+                         KEYMAP)
+    assert _alphas(res) == {Q: 1.5}
+    assert [(t.module, t.pair.alpha) for t in res.text] == [
+        ("model.layers.0.self_attn.q_proj", 2.0)]
+    # A header with a config for another component alone leaves the
+    # reference with nothing to build this one's config from.
+    for comp, fields, other, stem in (
+            ("transformer", CONFIG, "text_encoder", te),
+            ("text_encoder", te_config, "transformer", "transformer." + Q)):
+        with pytest.raises(AdapterError,
+                           match=f"has a LoRA config for {comp} and none "
+                                 f"for {other}, which {stem} belongs to"):
+            _resolved(keys, fields, comp)
+
+
+def test_values_that_are_not_finite_are_refused_at_the_read(tmp_path):
+    down, up, _ = _pair()
+    d, u = mx.array(down), mx.array(up)
+    for alpha in (float("inf"), float("-inf"), float("nan")):
+        for dtype in (mx.float32, mx.float16):
+            with pytest.raises(AdapterError,
+                               match="a.alpha is .*, which is not finite"):
+                reader.parse_pairs({"a.lora_A.weight": d,
+                                    "a.lora_B.weight": u,
+                                    "a.alpha": mx.array(alpha, dtype)}, "f")
+    for bad in (float("inf"), float("nan")):
+        for dtype in (mx.float32, mx.float16, mx.bfloat16):
+            for which in ("lora_A", "lora_B"):
+                arr = np.array(down if which == "lora_A" else up)
+                arr[-1, -1] = bad
+                keys = {"a.lora_A.weight": d, "a.lora_B.weight": u,
+                        "b.lora_A.weight": d, "b.lora_B.weight": u,
+                        f"b.{which}.weight": mx.array(arr).astype(dtype)}
+                with pytest.raises(
+                        AdapterError,
+                        match=f"f: b.{which}.weight holds a value that is "
+                              "not finite"):
+                    reader.parse_pairs(keys, "f")
+    # A file is refused the same way, and the largest finite values pass.
+    arr = np.array(up)
+    arr[0, 0] = np.nan
+    path = write_keys(tmp_path / "nan.safetensors", {
+        f"transformer.{Q}.lora_A.weight": down,
+        f"transformer.{Q}.lora_B.weight": arr})
+    with pytest.raises(AdapterError, match="holds a value that is not "
+                                           "finite"):
+        reader.read_lora(path)
+    arr[0, 0] = np.finfo(np.float32).max
+    raw = reader.parse_pairs({"a.lora_A.weight": d,
+                              "a.lora_B.weight": mx.array(arr),
+                              "a.alpha": mx.array(3.0e38)}, "f")
+    assert raw.pairs["a"].alpha == float(np.float32(3.0e38))

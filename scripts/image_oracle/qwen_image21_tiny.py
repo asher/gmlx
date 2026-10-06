@@ -173,7 +173,15 @@ LORA = {
         _B + "1.attn.to_q": 2, _B + "1.img_mlp.proj": 2,
         "txt_in.out_layer": 2, "modulation.1": 1, "proj_out": 1,
     },
+    # Both halves of each image MLP at one rank, sharing one down, which
+    # is one dense pair on the fused weight.
+    "wide": {
+        _B + "0.img_mlp.gate_layer": 3, _B + "0.img_mlp.proj": 3,
+        _B + "1.img_mlp.gate_layer": 2, _B + "1.img_mlp.proj": 2,
+        _B + "1.attn.to_q": 2,
+    },
 }
+SHARED_DOWN = ("wide",)
 # Variant to the case it runs on and its rows of (adapter, alpha,
 # strength). The rows of a variant are merged into one model.
 LORA_VARIANTS = {
@@ -183,9 +191,42 @@ LORA_VARIANTS = {
 }
 
 
+# The LoRA config that diffusers' save_lora_weights keeps in the header of
+# a file of adapter "one", which has no alpha tensor. The most common rank
+# is r and the others are in rank_pattern. Some targets have an alpha of
+# their own, by a suffix, by a whole name and by a regular expression. The
+# other fields are those the writer adds, at values that change no delta.
+LORA_HEADER = {
+    "r": 2, "lora_alpha": 1.5,
+    "rank_pattern": {"^" + _B + "0.attn.to_k": 3,
+                     "^" + _B + "0.img_mlp.gate_layer": 4},
+    "alpha_pattern": {"to_q": 3.0, "^" + _B + "1.img_mlp.gate_layer": 0.5,
+                      "timestep_embedder\\.linear_[12]": 1.0,
+                      "proj_out": 4.0},
+    "target_modules": ["to_q", "to_k", "to_v", "to_out.0", "gate_layer",
+                       "proj", "out", "img_in", "in_layer", "out_layer",
+                       "linear_1", "linear_2", "modulation.1",
+                       "norm_out.linear", "proj_out"],
+    "exclude_modules": None, "lora_dropout": 0.0, "bias": "none",
+    "init_lora_weights": "gaussian", "use_dora": False, "use_rslora": False,
+    "lora_bias": False, "fan_in_fan_out": False, "inference_mode": False,
+    "modules_to_save": None, "layers_to_transform": None,
+    "layers_pattern": None, "peft_type": "LORA", "task_type": None,
+    "megatron_config": None, "megatron_core": "megatron.core",
+    "loftq_config": {}, "base_model_name_or_path": None, "revision": None,
+}
+# Variant to its case, its adapter and strength, and the header config of
+# its file, or None for a file whose pairs each carry the alpha given.
+LORA_FILES = {
+    "header": ("ref1", "one", 0.6, None, LORA_HEADER),
+    "shared": ("text", "wide", 0.7, 2.0, None),
+}
+
+
 def lora_pairs(name: str, cfg: dict = TINY) -> dict:
     """Target to (down (rank, in), up (out, rank)) of adapter ``name``,
-    float32 in [-0.25, 0.25) and exact in bfloat16."""
+    float32 in [-0.25, 0.25) and exact in bfloat16. In an adapter of
+    SHARED_DOWN the projection of an image MLP has the down of its gate."""
     dims = shapes(cfg, fused=False)
     out = {}
     for target, rank in LORA[name].items():
@@ -195,6 +236,11 @@ def lora_pairs(name: str, cfg: dict = TINY) -> dict:
             * np.float32(0.5),
             uniform(f"lora {name} {target} up", (rows, rank))
             * np.float32(0.5))
+    if name in SHARED_DOWN:
+        for target in out:
+            if target.endswith(".img_mlp.proj"):
+                gate = target[:-len("proj")] + "gate_layer"
+                out[target] = (out[gate][0], out[target][1])
     return out
 
 

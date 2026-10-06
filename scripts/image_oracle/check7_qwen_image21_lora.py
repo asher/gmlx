@@ -33,15 +33,28 @@ at once.
 
 --self-test merges the adapters of qwen_image21_tiny.py into the tiny
 model and writes one fixture per variant, small enough to commit. The
-first one also records the linear layers of the reference class and, for
-each key spelling of an adapter file, the layer that diffusers' own Qwen
-LoRA loader gives the key.
+first one also records the linear layers of the reference class, for
+each key spelling of an adapter file the layer that diffusers' own Qwen
+LoRA loader gives the key, and what that loader does with an alpha
+tensor under each spelling of a pair.
+
+The header variant is a file as diffusers' save_lora_weights writes it:
+no alpha tensors, and the LoRA config in the safetensors header. The
+loader's own lora_state_dict reads the file, and the config it hands on,
+with the transformer prefix taken off as loaders/peft.py does, gives each
+target its rank and alpha by the rule PEFT's LoraConfig documents: the
+first key of rank_pattern or alpha_pattern that matches the end of the
+module name after a dot, else r or lora_alpha, and a scale of alpha over
+rank. PEFT is not in the oracle environment, so that last step is this
+script's reading of the rule and the config is the loader's.
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -142,7 +155,7 @@ def make_pairs(torch, model, names: list, rank: int, gain: float,
 def merge(torch, model, rows: list, mode: str):
     """Replace every target of ``rows``, one (pairs, alpha, strength) per
     adapter, with a dense linear layer of the merged weight in the
-    mode's dtype."""
+    mode's dtype. ``alpha`` is one value, None, or target to alpha."""
     dt = oracle.torch_dtype(mode)
     names = list(dict.fromkeys(n for pairs, _, _ in rows for n in pairs))
     for name in names:
@@ -152,6 +165,8 @@ def merge(torch, model, rows: list, mode: str):
             if name not in pairs:
                 continue
             down, up = pairs[name]
+            if isinstance(alpha, dict):
+                alpha = alpha[name]
             f = strength * (1.0 if alpha is None else alpha / down.shape[0])
             w += f * (torch.from_numpy(up) @ torch.from_numpy(down))
         if lin.bias is not None:
@@ -198,6 +213,81 @@ def spellings(torch, names: list) -> dict:
                 ", ".join(gave)
         out[label] = rows
     return out
+
+
+def alpha_readings(torch) -> dict:
+    """What diffusers' Qwen LoRA loader does with an alpha tensor, per
+    spelling of the pair: the factor it puts on up @ down, and whether an
+    alpha is left in what it returns. The pair has rank 2 and alpha 3."""
+    from diffusers.loaders.lora_pipeline import QwenImageLoraLoaderMixin
+
+    stem = "diffusion_model.transformer_blocks.0.attn.to_q"
+    down, up = torch.full((2, 3), 0.5), torch.full((4, 2), 0.25)
+    out = {"rank": 2, "alpha": 3.0, "stem": stem}
+    for label, (down_s, up_s) in {
+            "lora_down, lora_up": (".lora_down.weight", ".lora_up.weight"),
+            "lora_A, lora_B": (".lora_A.weight", ".lora_B.weight")}.items():
+        got = QwenImageLoraLoaderMixin.lora_state_dict(
+            {stem + down_s: down.clone(), stem + up_s: up.clone(),
+             stem + ".alpha": torch.tensor(3.0)})
+        a = [v for k, v in got.items() if k.endswith(".lora_A.weight")]
+        b = [v for k, v in got.items() if k.endswith(".lora_B.weight")]
+        if len(a) != 1 or len(b) != 1:
+            raise SystemExit(f"error: the loader returned {sorted(got)}")
+        factor = (b[0] @ a[0]) / (up @ down)
+        if float(factor.max() - factor.min()) > 1e-6:
+            raise SystemExit("error: the loader did not scale the pair")
+        out[label] = {
+            "factor": round(float(factor.mean()), 6),
+            "alpha_returned": any(k.endswith(".alpha") for k in got),
+            "keys": sorted(got)}
+    return out
+
+
+def header_scales(torch, path: Path, pairs: dict, fields: dict) -> dict:
+    """Write ``pairs`` as diffusers' save_lora_weights writes a
+    transformer adapter with the LoRA config ``fields`` in its header,
+    read the file with the loader, and return the config the loader hands
+    on for the transformer and each target's (rank, alpha) under it."""
+    from diffusers.loaders.lora_pipeline import QwenImageLoraLoaderMixin
+    from safetensors.torch import save_file
+
+    state = {}
+    for name, (down, up) in pairs.items():
+        state[f"transformer.{name}.lora_A.weight"] = torch.from_numpy(down)
+        state[f"transformer.{name}.lora_B.weight"] = torch.from_numpy(up)
+    save_file(state, str(path), metadata={
+        "format": "pt", "lora_adapter_metadata": json.dumps(
+            {f"transformer.{k}": v for k, v in fields.items()}, indent=2,
+            sort_keys=True)})
+    got, meta = QwenImageLoraLoaderMixin.lora_state_dict(
+        str(path), return_lora_metadata=True)
+    if sorted(got) != sorted(state) or any(
+            not torch.equal(got[k], v) for k, v in state.items()):
+        raise SystemExit("error: the loader changed the tensors of a file "
+                         "with a header config")
+    # loaders/peft.py load_lora_adapter: the keys of the model's prefix.
+    config = {k.removeprefix("transformer."): v
+              for k, v in (meta or {}).items()
+              if k.startswith("transformer.")}
+    if not config:
+        raise SystemExit("error: the loader handed on no header config")
+
+    def first(patterns, name, default):
+        for key, value in (patterns or {}).items():
+            if re.match(rf"(.*\.)?({key})$", name):
+                return value
+        return default
+
+    scales = {}
+    for name, (down, _) in pairs.items():
+        rank = first(config.get("rank_pattern"), name, config["r"])
+        alpha = first(config.get("alpha_pattern"), name,
+                      config["lora_alpha"])
+        if rank != down.shape[0]:
+            raise SystemExit(f"error: the header gives {name} rank {rank}")
+        scales[name] = [int(rank), float(alpha)]
+    return {"loader_config": config, "scales": scales}
 
 
 def read_source(root: Path, name: str) -> tuple[dict, dict]:
@@ -253,7 +343,8 @@ def self_test(torch, a) -> int:
     keys = {"linear_modules": names,
             "loader": "QwenImageLoraLoaderMixin.lora_state_dict",
             "spellings": {k: list(v) for k, v in SPELLINGS.items()},
-            "resolved": spellings(torch, names)}
+            "resolved": spellings(torch, names),
+            "alpha": alpha_readings(torch)}
     # The pairs of a real run, on the tiny model: the delta of each has
     # the norm the gain asks for.
     scaled = make_pairs(torch, base["fp32"], block_targets(base["fp32"], 1),
@@ -269,7 +360,11 @@ def self_test(torch, a) -> int:
     sig = torch.linspace(1.0, 1 / a.steps, a.steps)
     committed = Path(__file__).resolve().parents[2] / "tests" / "fixtures" \
         / "image" / "oracle"
-    for variant, (case, stack) in tiny.LORA_VARIANTS.items():
+    variants = {v: (case, stack, None)
+                for v, (case, stack) in tiny.LORA_VARIANTS.items()}
+    for v, (case, name, strength, alpha, fields) in tiny.LORA_FILES.items():
+        variants[v] = (case, ((name, alpha, strength),), fields)
+    for variant, (case, stack, fields) in variants.items():
         target, blocks = c3.SELF_CASES[case]
         cond = c3.tiny_cond(case, target)
         # The base model's fixture of this case holds the same inputs.
@@ -284,6 +379,13 @@ def self_test(torch, a) -> int:
                 raise SystemExit(f"error: {k} of {case} differs from the "
                                  "tiny rule")
         rows = [(tiny.lora_pairs(n), alpha, s) for n, alpha, s in stack]
+        header = None
+        if fields is not None:
+            (pairs, _, strength), = rows
+            header = header_scales(torch, work / f"{variant}.safetensors",
+                                   pairs, fields)
+            rows = [(pairs, {t: a for t, (_, a) in header["scales"].items()},
+                     strength)]
         models = {m: merge(torch, oracle.load_dit(
             work / "tiny.gguf", work, m, cls_name=c3.CLS), rows, m)
             for m in oracle.MODES}
@@ -299,6 +401,15 @@ def self_test(torch, a) -> int:
                               "targets": list(tiny.LORA[n]),
                               "pairs_sha256": tiny.lora_sha256(n)}
                              for n, alpha, s in stack]}
+        if header is not None:
+            note["adapters"][0].update(header=fields, **header)
+            note["header"] = (
+                "the file has no alpha tensor and the config in its "
+                "safetensors header under lora_adapter_metadata, as "
+                "save_lora_weights writes it. loader_config is what "
+                "QwenImageLoraLoaderMixin.lora_state_dict hands on, with "
+                "the transformer prefix taken off. scales gives each "
+                "target its (rank, alpha) under that config")
         if keys is not None:
             note["lora_keys"], keys = keys, None
         path = c3.run_case(torch, a, models, read, sig, sig * 1000, blocks,

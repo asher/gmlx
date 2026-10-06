@@ -389,6 +389,27 @@
      "diffusion_model.norm_out.linear": "norm_out.linear",
      "diffusion_model.proj_out": "proj_out"
     }
+   },
+   "alpha": {
+    "rank": 2,
+    "alpha": 3.0,
+    "stem": "diffusion_model.transformer_blocks.0.attn.to_q",
+    "lora_down, lora_up": {
+     "factor": 1.5,
+     "alpha_returned": false,
+     "keys": [
+      "transformer.transformer_blocks.0.attn.to_q.lora_A.weight",
+      "transformer.transformer_blocks.0.attn.to_q.lora_B.weight"
+     ]
+    },
+    "lora_A, lora_B": {
+     "factor": 1.0,
+     "alpha_returned": false,
+     "keys": [
+      "transformer.transformer_blocks.0.attn.to_q.lora_A.weight",
+      "transformer.transformer_blocks.0.attn.to_q.lora_B.weight"
+     ]
+    }
    }
   },
   "rows": [
@@ -650,7 +671,7 @@
  "notes": [
   "The pipeline passes a prompt mask of ones for one unpadded prompt. These calls pass none, which gives the same values."
  ],
- "created": "2026-10-06T13:04:08Z",
+ "created": "2026-10-06T17:58:31Z",
  "npz": "selftest_qwen_image21_tiny_lora_alpha.npz",
  "tensors": {
   "cache.k.0": {

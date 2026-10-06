@@ -12,8 +12,9 @@ import pytest
 
 import qwen_tiny as qt
 from image_fixtures import Q_HEADER, fixture_view
-from lora_fixtures import (DIALECTS, dialect_keys, make_pair, reference_delta,
-                           rel_l2, tiny_z_adapter, write_adapter, write_keys)
+from lora_fixtures import (DIALECTS, dialect_keys, header, make_pair,
+                           reference_delta, rel_l2, tiny_z_adapter,
+                           write_adapter, write_keys)
 
 from gmlx.image import fingerprint as fp
 from gmlx.image.families.qwen_image21.lora_map import lora_map
@@ -310,13 +311,132 @@ def test_a_key_that_names_no_module_is_refused(tmp_path, dialect):
                              allow_unmatched=True)
         assert len(res.dit) == 18 and len(res.unmatched) == 1
         assert "They are skipped" in res.warnings[0]
-    # The fused name is a module of the fused file alone.
+    # The fused name is a module of the fused file alone. On a file that
+    # stores the pair apart the refusal names that layout.
     fused = {**good, B1 + "img_mlp.gate_up": make_pair(rng, 2 * FFN, DIM, 2,
                                                        alpha)}
     path = write_adapter(tmp_path / "gate_up.safetensors", dialect, fused)
     assert len(reader.resolve(reader.read_lora(path), km).dit) == 19
-    with pytest.raises(reader.UnmatchedKeysError, match="gate_up"):
-        reader.resolve(reader.read_lora(path), lora_map(config("unfused")))
+    apart = lora_map(config("unfused"))
+    said = ("1 of 19 targets name the fused img_mlp.gate_up weight, and "
+            "this DiT file stores the gate and the projection apart, as "
+            "img_mlp.gate_layer and img_mlp.proj: ")
+    for read in (lambda: reader.resolve(reader.read_lora(path), apart),
+                 lambda: reader.vet_header(path, keymap=apart)):
+        with pytest.raises(reader.UnmatchedKeysError, match=said) as e:
+            read()
+        assert len(e.value.keys) == 1 and "gate_up" in e.value.keys[0]
+        assert "name no Qwen-Image 2.1 module" not in str(e.value)
+    # Allowed, the key is skipped and the warning names the layout too.
+    res = reader.resolve(reader.read_lora(path), apart, allow_unmatched=True)
+    assert len(res.dit) == 18 and len(res.unmatched) == 1
+    assert said in res.warnings[0] and "They are skipped" in res.warnings[0]
+    # A stranger beside it is named apart from it.
+    both = {**fused, STRANGERS[0]: make_pair(rng, DIM, DIM, 2, alpha)}
+    path2 = write_adapter(tmp_path / "both.safetensors", dialect, both)
+    with pytest.raises(reader.UnmatchedKeysError, match="1 of 20 targets "
+                       "name the fused img_mlp.gate_up weight"):
+        reader.resolve(reader.read_lora(path2), apart)
+    res = reader.resolve(reader.read_lora(path2), apart,
+                         allow_unmatched=True)
+    assert len(res.unmatched) == 2 and len(res.warnings) == 1
+    assert ("1 of 20 targets name the fused img_mlp.gate_up weight"
+            in res.warnings[0])
+    assert ("1 of 20 targets name no Qwen-Image 2.1 module"
+            in res.warnings[0])
+    # A file of gate_up keys alone is of this family, and is refused by
+    # the layout and never as another family's adapter.
+    alone = {B0 + "img_mlp.gate_up": make_pair(rng, 2 * FFN, DIM, 2, alpha),
+             B1 + "img_mlp.gate_up": make_pair(rng, 2 * FFN, DIM, 2, alpha)}
+    path3 = write_adapter(tmp_path / "alone.safetensors", dialect, alone)
+    assert len(reader.resolve(reader.read_lora(path3), km).dit) == 2
+    for allow in (False, True):
+        with pytest.raises(reader.UnmatchedKeysError,
+                           match="2 of 2 targets name the fused "
+                                 "img_mlp.gate_up weight") as e:
+            reader.resolve(reader.read_lora(path3), apart,
+                           allow_unmatched=allow)
+        assert not isinstance(e.value, reader.AdapterFamilyError)
+        with pytest.raises(reader.UnmatchedKeysError,
+                           match="stores the gate and the projection apart"):
+            reader.vet_header(path3, keymap=apart, allow_unmatched=allow)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_check7_delta_half_of_a_file_with_a_header_config(tmp_path, layout):
+    """The file of the tiny rule's header config: no alpha tensor, and the
+    rank and the alpha of every pair in the safetensors header, as the
+    reference's save_lora_weights writes it. Against float64 at the
+    scales the oracle read from the reference loader's config."""
+    from oracle_fixture import committed
+
+    cfg = config(layout)
+    km, dims = lora_map(cfg), dims_of(cfg)
+    row, = committed("selftest_qwen_image21_tiny_lora_header")[
+        "inputs"]["adapters"]
+    assert row["header"] == row["loader_config"] == qt.rule.LORA_HEADER
+    scales = {t: tuple(v) for t, v in row["scales"].items()}
+    bare = adapter("one")
+    assert set(scales) == set(bare)
+    assert {t: r for t, (r, _) in scales.items()} == qt.rule.LORA["one"]
+    assert len({a / r for r, a in scales.values()}) == 6
+    keys = dialect_keys("diffusers", bare)
+    path = write_keys(tmp_path / "h.safetensors", keys,
+                      header(qt.rule.LORA_HEADER))
+    res = reader.resolve(reader.read_lora(path), km)
+    assert {t.pair.stem.removeprefix("transformer."): (t.pair.rank,
+                                                       t.pair.alpha)
+            for t in res.dit} == scales
+    # No pair has its rank as its alpha, and ComfyUI reads no header.
+    assert len(res.warnings) == 1 and res.warnings[0].startswith(
+        f"{path}: 18 pairs take an alpha from the adapter header")
+    got = _parts(path, 0.6, km)
+    want = _reference({t: (d, u, scales[t][1])
+                       for t, (d, u, _) in bare.items()}, 0.6, km)
+    assert set(got) == set(want)
+    for module, parts in got.items():
+        lm = plan.block_diagonal(module, parts, dims[module])
+        delta = np.array(lm.b, np.float64) @ np.array(lm.a, np.float64)
+        assert rel_l2(delta, reference_delta(want[module],
+                                             dims[module])) <= DELTA_TOL
+    assert reader.vet_header(path, keymap=km) == 18
+    for name, kind in (("use_rslora", "rank-stabilized LoRA"),
+                       ("use_dora", "DoRA"), ("lora_bias", "LoRA with a "
+                                                           "bias")):
+        bad = write_keys(tmp_path / f"{name}.safetensors", keys,
+                         header({**qt.rule.LORA_HEADER, name: True}))
+        with pytest.raises(reader.UnsupportedAdapterError, match=kind):
+            reader.vet_header(bad, keymap=km)
+        with pytest.raises(reader.UnsupportedAdapterError, match=kind):
+            reader.resolve(reader.read_lora(bad), km)
+    # An alpha tensor that is not the header's alpha is refused with both.
+    keys["transformer.proj_out.alpha"] = np.asarray(2.0, np.float32)
+    clash = write_keys(tmp_path / "clash.safetensors", keys,
+                       header(qt.rule.LORA_HEADER))
+    with pytest.raises(reader.AdapterError,
+                       match="transformer.proj_out has an alpha tensor of "
+                             "2, and the adapter header gives proj_out the "
+                             "alpha 4"):
+        reader.resolve(reader.read_lora(clash), km)
+
+
+def test_values_that_are_not_finite_are_refused(tmp_path):
+    km = lora_map(config("fused"))
+    for i, (alpha, bad) in enumerate(((float("inf"), None),
+                                      (float("nan"), None),
+                                      (3.0, float("nan")),
+                                      (3.0, float("inf")))):
+        pairs = adapter("one", alpha)
+        if bad is not None:
+            down, up, _ = pairs[B0 + "img_mlp.proj"]
+            up = up.copy()
+            up[3, 1] = bad
+            pairs[B0 + "img_mlp.proj"] = (down, up, alpha)
+        path = write_adapter(tmp_path / f"{i}.safetensors", "kohya", pairs)
+        with pytest.raises(reader.AdapterError, match="not finite") as e:
+            reader.resolve(reader.read_lora(path), km)
+        assert (".alpha is" if bad is None else
+                "img_mlp_proj.lora_up.weight holds") in str(e.value)
 
 
 def test_a_text_encoder_key_is_refused(tmp_path):

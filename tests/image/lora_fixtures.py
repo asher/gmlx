@@ -85,6 +85,17 @@ def write_keys(path, keys: dict, metadata: dict | None = None) -> str:
     return str(path)
 
 
+def header(fields: dict, component: str = "transformer") -> dict:
+    """The safetensors metadata of a file that diffusers' save_lora_weights
+    wrote: the LoRA config ``fields`` of one component, as JSON under
+    lora_adapter_metadata with the keys sorted."""
+    import json
+
+    return {"format": "pt", "lora_adapter_metadata": json.dumps(
+        {f"{component}.{k}": v for k, v in fields.items()}, indent=2,
+        sort_keys=True)}
+
+
 def write_ordered(path, keys: dict) -> str:
     """A float32 safetensors file whose header lists ``keys`` in the order
     given. ``write_keys`` goes through a writer that sorts the names, and

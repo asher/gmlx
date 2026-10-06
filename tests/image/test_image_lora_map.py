@@ -12,8 +12,9 @@ from gmlx.image.lora import plan, reader
 from gmlx.image.registry import get_family
 from image_fixtures import (TINY_Z_CONFIG, Z_HEADER, fixture_view, load_json,
                             official_config)
-from lora_fixtures import (DIALECTS, make_pair, reference_delta, rel_l2,
-                           tiny_z_adapter, write_adapter)
+from lora_fixtures import (DIALECTS, dialect_keys, header, make_pair,
+                           reference_delta, rel_l2, tiny_z_adapter,
+                           write_adapter, write_keys)
 
 DIM = TINY_Z_CONFIG["dim"]
 QKV = "layers.1.attention.qkv"
@@ -197,6 +198,60 @@ def test_check7_delta_half_per_dialect(tmp_path, dialect):
     lm = plan.block_diagonal(QKV, _parts(p1, 1.0, km)[QKV], dims[QKV])
     assert lm.a.shape == (14, DIM) and lm.b.shape == (3 * DIM, 14)
     print(f"check7 delta {dialect}: worst relative L2 {worst:.3e}")
+
+
+def test_check7_delta_half_of_a_file_with_a_header_config(tmp_path):
+    """A file as diffusers' save_lora_weights writes it has no alpha
+    tensors and its LoRA config in the header. Every pair takes its alpha
+    over its rank from there, against float64."""
+    km = lora_map(TINY_Z_CONFIG)
+    dims = _dims(TINY_Z_CONFIG)
+    bare = tiny_z_adapter(1)
+    fields = {
+        "r": 4, "lora_alpha": 6.0,
+        "rank_pattern": {"^layers.1.attention.to_k": 2,
+                         "^layers.1.attention.to_v": 8,
+                         "noise_refiner.0.attention.to_v": 2, "w3": 2},
+        "alpha_pattern": {"feed_forward.w1": 3.0, "to_q": 8.0},
+        "target_modules": ["to_q", "to_k", "to_v", "to_out.0", "w1", "w2",
+                           "w3"],
+        "lora_dropout": 0.0, "bias": "none", "use_dora": False,
+        "init_lora_weights": True}
+    alphas = {t: 6.0 for t in bare}
+    alphas.update({"layers.1.attention.to_q": 8.0,
+                   "layers.0.feed_forward.w1": 3.0})
+    keys = dialect_keys("diffusers", bare)
+    path = write_keys(tmp_path / "h.safetensors", keys, header(fields))
+    got = _parts(path, 0.5, km)
+    want = _reference({t: (d, u, alphas[t]) for t, (d, u, _) in bare.items()},
+                      0.5, km)
+    scale_1 = _reference(bare, 0.5, km)
+    assert set(got) == set(want) and len(got) == 6
+    for module, parts in got.items():
+        lm = plan.block_diagonal(module, parts, dims[module])
+        delta = np.array(lm.b, np.float64) @ np.array(lm.a, np.float64)
+        assert rel_l2(delta, reference_delta(want[module],
+                                             dims[module])) <= DELTA_TOL
+        # No pair has its rank as its alpha, so no module is at scale 1.
+        assert rel_l2(delta, reference_delta(scale_1[module],
+                                             dims[module])) > 0.2
+    # The same keys with no header run at scale 1.
+    plain = _parts(write_keys(tmp_path / "p.safetensors", keys), 0.5, km)
+    for module, parts in plain.items():
+        lm = plan.block_diagonal(module, parts, dims[module])
+        delta = np.array(lm.b, np.float64) @ np.array(lm.a, np.float64)
+        assert rel_l2(delta, reference_delta(scale_1[module],
+                                             dims[module])) <= DELTA_TOL
+    # A field that would change the delta in another way is refused.
+    for name, kind in (("use_rslora", "rank-stabilized LoRA"),
+                       ("use_dora", "DoRA"), ("lora_bias", "LoRA with a "
+                                                           "bias")):
+        bad = write_keys(tmp_path / f"{name}.safetensors", keys,
+                         header({**fields, name: True}))
+        with pytest.raises(reader.UnsupportedAdapterError, match=kind):
+            reader.vet_header(bad, keymap=km)
+        with pytest.raises(reader.UnsupportedAdapterError, match=kind):
+            _parts(bad, 0.5, km)
 
 
 def test_a_pair_that_spells_another_family_resolves_nowhere(tmp_path):
