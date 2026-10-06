@@ -11,8 +11,9 @@ the dialects that carry it. The tolerance is the manifest's: twice the
 oracle's own bf16 against fp32 gap with the adapter merged, check 3's rule.
 scripts/image_oracle/check7_z_image_lora.py writes the fixtures.
 
-The step is gated block by block, as check 3 gates the base model, with
-the two gates of block_gates.py over the merged oracle model's rows.
+The step is gated as check 3 gates the base model, with the three gates
+of block_gates.py. The exact gate and the product gate read the merged
+oracle model's rows.
 
 The exact gate holds the right table to the oracle on every row and every
 branch row at EXACT_TOL. Each wrong table must fail it: the pairs of a
@@ -26,6 +27,13 @@ fault in one block or a strength a tenth off moves it less than its
 tolerance. The block rows see a wrong table where the oracle's effect
 puts it two tolerances out, and the mutation rows record which ones that
 is.
+
+The site gate holds each op of the step under the table to the exact op
+on its own input, with the table's delta in the leaf's exact product. A
+wrong production table is visible to it only where the part of a leaf's
+delta it changes is over the gate of a site that reads it. The test
+measures that for each wrong table and asserts the table fails or passes
+as the measure says.
 
 The delta half of check 7 runs on the CPU in test_image_lora_map.py. The
 rows here need the GGUF under KQUANT_TEST_GGUF_DIR and the arrays under
@@ -42,9 +50,11 @@ import pytest
 
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import committed, fixture, fx
-from block_gates import (EXACT_TOL, assert_all_dense, check3_rows,
-                         exact_missed, exact_process, exact_products,
-                         free_run, gate, rerun_exact, thin)
+from block_gates import (EXACT_TOL, adapter_sites, assert_all_dense,
+                         check3_rows, exact_missed, exact_process,
+                         exact_products, free_run, gate, rerun_exact,
+                         rerun_sites, right_sites, site_process, site_reach,
+                         table_sites, table_velocity, thin)
 
 NAME = "check7_z_image_turbo_lora_512"
 
@@ -290,6 +300,44 @@ def exact_gate(pipe, name: str, entries, label: str) -> None:
             assert any(r.endswith(".attention") for r in missed), mutation
 
 
+def site_gate(pipe, name: str, entries, label: str) -> None:
+    """The site gate of the step under the table of ``entries`` on the
+    inputs of block fixture ``name``, and each wrong production table of
+    ``mutations`` but the q and k swap against the exact ops under the
+    right table. A wrong table is visible only where the part of a leaf's
+    delta it changes is over the gate of a site that reads it, which
+    ``site_reach`` takes from the deltas measured here: all of the delta
+    for a group left out and a tenth of it for a strength a tenth off.
+    Over the gate the table must fail, at the sites of its changed leaves
+    alone. Under it the table must pass, so a change of a gate or of a
+    delta in either direction fails this test."""
+    arrays, _ = blocks_fixture(name)
+    sites, v = table_sites(pipe, arrays, entries)
+    right_sites(sites, v, f"check7 sites {label}")
+    effect = sites.effect()
+    assert len(effect) == len({e[0] for e in entries})
+    seen = {}
+    for mutation, (table, kind, arg) in mutations(pipe, entries).items():
+        if kind == "swap":
+            continue
+        part, where = (1.0, arg + ".") if kind == "group" else \
+            (abs(1 - arg), "")
+        got, _ = table_sites(pipe, arrays, entries, table)
+        missed, reach = got.missed(), site_reach(effect, got, part, where)
+        print(f"check7 sites {label}, {mutation}: the change is "
+              f"{reach:.2f} gates at the site that reads it; "
+              f"{len(missed)} sites miss"
+              + (f", most {max(missed, key=missed.get)} at "
+                 f"{max(missed.values()):.2f} gates" if missed else ""))
+        stray = sorted(missed.keys() - adapter_sites(effect, where))
+        assert not stray, (label, mutation, stray)
+        assert bool(missed) == (reach > 1), (label, mutation, reach, missed)
+        seen[mutation] = bool(missed)
+    assert {"strength x0.9", "strength x1.1"} <= seen.keys()
+    # A group left out must fail on every fixture, in one group at least.
+    assert any(v for k, v in seen.items() if k.endswith(" left out")), seen
+
+
 def _loaded(pipe, tmp_path, dialect: str):
     """The fixture's pairs written in ``dialect`` and loaded, with the
     variant that carries the dialect's arithmetic."""
@@ -375,6 +423,21 @@ def test_check7_exact_block_gate_at_512(pipe, tmp_path, request, variant):
     entries = _variant_entries(pipe, tmp_path, variant)
     assert len(mutations(pipe, entries)) == 8
     exact_gate(pipe, name, entries, variant)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_check7_site_gate_at_512(pipe, tmp_path, request, variant):
+    """Every op of every block under the table is within its gate of the
+    exact op on its own input, and each wrong table fails or passes as
+    its measured change says."""
+    name = f"{NAME}_{variant}_blocks"
+    arrays, _ = blocks_fixture(name)
+    entries = _variant_entries(pipe, tmp_path, variant)
+    if not site_process():
+        return rerun_sites(request, "check7 sites",
+                           table_velocity(pipe, arrays, entries))
+    site_gate(pipe, name, entries, variant)
 
 
 @pytest.mark.integration

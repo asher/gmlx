@@ -1,14 +1,17 @@
 """Check 3 of the image acceptance gate for Z-Image: one denoise step of the
 gmlx DiT, block by block, against the diffusers oracle.
 
-block_gates.py describes the rows and the two gates that read them. The
-exact gate here runs the base model in the oracle's fp32 arithmetic and
+block_gates.py describes the rows and the three gates. The exact gate
+here runs the base model in the oracle's fp32 arithmetic and
 holds every teacher-forced row, every branch row, every free-running block
 and the velocity to the oracle's fp32 arrays, at 512. At 1024 the fixture
 holds the velocity alone, and the exact gate reads that. Each wrong model
 of FAULTS must fail the exact gate, and only on rows its fault reaches.
 The product gate runs the path a request takes and holds the block rows,
 the free-running blocks and the velocity to the manifest's tolerances.
+The site gate holds each op of that path to the exact op on its own
+input, at 512 and at 1024, and each wrong production model of the site
+faults must fail it at the site of its fault.
 The arrays are read from GMLX_IMAGE_FIXTURES and must match the manifests
 committed under tests/fixtures/image/oracle/.
 scripts/image_oracle/check3_z_image.py writes them.
@@ -28,10 +31,11 @@ import pytest
 import mlx.core as mx
 import mlx.nn as nn
 
-from block_gates import (EXACT_TOL, GROUPS, assert_all_dense, check3_rows,
-                         exact_missed, exact_process, exact_products,
-                         free_run, free_running, gate, rerun_exact, thin,
-                         velocity)
+from block_gates import (EXACT_TOL, GROUPS, LEAVES, Sites, assert_all_dense,
+                         check3_rows, exact_missed, exact_process,
+                         exact_products, free_run, free_running, gate,
+                         plain_velocity, rerun_exact, rerun_sites, resolve,
+                         right_sites, site_process, thin, velocity)
 from oracle_fixture import committed, fixture, fx
 
 
@@ -336,3 +340,142 @@ def test_check3_exact_velocity_at_1024(turbo, request):
     print(f"check3 exact 1024: velocity within {vel['rel_l2']:.2e} of the "
           f"oracle, gate {EXACT_TOL:.0e}")
     assert vel["rel_l2"] <= EXACT_TOL, vel
+
+
+# The site gate.
+
+# A K-quant codec to one that reads its rows as the same number of
+# weights. A q6_k row has no such codec.
+MISREAD = {"q4_k": "q4_0", "q5_k": "q5_0"}
+
+
+def gate_and_up_swapped(mp, model):
+    for blk in _blocks(model):
+        ff = blk.feed_forward
+        w1, w3 = ff.w1, ff.w3
+        mp.setattr(ff, "w1", w3)
+        mp.setattr(ff, "w3", w1)
+
+
+def feed_forward_gelu(mp, model):
+    """gelu for silu in the feed-forward's own call, so the fault is on
+    the production path whatever kernel the right call runs."""
+    mp.setattr(type(model.layers[0].feed_forward), "__call__",
+               lambda self, x: self.w2(nn.gelu(self.w1(x)) * self.w3(x)))
+
+
+def _base(model, path: str):
+    leaf = resolve(model, path)
+    return getattr(leaf, "base", leaf)
+
+
+def codec_leaves(model) -> dict:
+    """K-quant codec to (block, leaf) of one main layer leaf in it, the
+    middle one of the leaf name that has the most."""
+    found: dict = {}
+    for i in range(len(model.layers)):
+        for leaf, path in LEAVES.items():
+            codec = getattr(_base(model, f"layers.{i}.{path}"),
+                            "kquant_type", None)
+            if codec is not None:
+                found.setdefault(codec, {}).setdefault(leaf, []).append(
+                    f"layers.{i}")
+    out = {}
+    for codec, leaves in found.items():
+        leaf = max(leaves, key=lambda k: len(leaves[k]))
+        out[codec] = (leaves[leaf][len(leaves[leaf]) // 2], leaf)
+    return out
+
+
+def faulted_sites(monkeypatch, model, arrays: dict, apply) -> Sites:
+    """The sites of the step with the wrong production model of
+    ``apply``, against the right model's exact ops."""
+    sites = Sites(model)
+    with monkeypatch.context() as mp:
+        apply(mp, model)
+        sites.run(arrays)
+    return sites
+
+
+def _span(missed: dict) -> str:
+    fin = [v for v in missed.values() if np.isfinite(v)]
+    return (f"{len(missed)} sites miss, {len(missed) - len(fin)} not finite"
+            + (f", from {min(fin):.1f} to {max(fin):.1f} gates" if fin else ""))
+
+
+@pytest.mark.integration
+def test_check3_site_gate_at_512(turbo, request, monkeypatch):
+    """Every op of every block is within its gate of the exact op on its
+    own input, and each wrong production model fails at its fault."""
+    arrays, _ = fixture("check3_z_image_turbo_512")
+    if not site_process():
+        return rerun_sites(request, "check3 sites",
+                           plain_velocity(turbo, arrays))
+    sites = Sites(turbo)
+    v = sites.run(arrays)
+    right_sites(sites, v, "check3 sites 512")
+    glu = {n for n in sites.sites if n.endswith(".glu")}
+    assert len(glu) == len(_blocks(turbo))
+
+    # silu lands on the up product, so the glu output of every block is
+    # another function of its input. Each product and swiglu is still
+    # right on its own input, and only the glu site reads the pair.
+    missed = faulted_sites(monkeypatch, turbo, arrays,
+                           gate_and_up_swapped).missed()
+    print(f"check3 sites 512, gate and up swapped: {_span(missed)}")
+    assert glu <= missed.keys(), sorted(glu - missed.keys())
+
+    # gelu and silu differ by a few percent of the gate product where the
+    # gate is near zero, and the glu site reads that against silu.
+    missed = faulted_sites(monkeypatch, turbo, arrays,
+                           feed_forward_gelu).missed()
+    print(f"check3 sites 512, gelu for silu: {_span(missed)}")
+    assert missed and missed.keys() <= glu, sorted(missed.keys() - glu)
+
+    # A codec read as another of the same row size decodes other weights,
+    # so the leaf's product is wrong on its own input. The sites before
+    # the leaf pass, and the ones after it read the wrong activations.
+    codecs = codec_leaves(turbo)
+    assert sorted(codecs) == ["q4_k", "q5_k", "q6_k"], codecs
+    for codec, other in MISREAD.items():
+        block, leaf = codecs[codec]
+        got = faulted_sites(
+            monkeypatch, turbo, arrays, lambda mp, model: mp.setattr(
+                _base(model, f"{block}.{LEAVES[leaf]}"), "kquant_type",
+                other))
+        missed, order = got.missed(), list(got.sites)
+        print(f"check3 sites 512, {block}.{leaf} {codec} read as {other}: "
+              f"{_span(missed)}")
+        at = order.index(f"{block}.{leaf}")
+        assert f"{block}.{leaf}" in missed
+        assert all(order.index(n) >= at for n in missed), min(
+            missed, key=order.index)
+
+    # A q6_k row is 210 bytes for 256 weights and no other codec has that
+    # ratio, so the product refuses the row before any kernel runs.
+    from mlx_kquant.codec_geometry import CODEC_GEOMETRY
+
+    block, leaf = codecs["q6_k"]
+    base = _base(turbo, f"{block}.{LEAVES[leaf]}")
+    x = mx.zeros((1, 2, base.weight.shape[1] // 210 * 256), turbo.act_dtype)
+    others = sorted(set(CODEC_GEOMETRY) - {"q6_k"})
+    for other in others:
+        with monkeypatch.context() as mp:
+            mp.setattr(base, "kquant_type", other)
+            with pytest.raises(ValueError):
+                base(x)
+    print(f"check3 sites 512, {block}.{leaf} q6_k read as any of "
+          f"{len(others)} codecs: the product refuses the row")
+
+    # The model is the right one again.
+    assert Sites(turbo).run(arrays) == v
+
+
+@pytest.mark.integration
+def test_check3_site_gate_at_1024(turbo, request):
+    arrays, _ = fixture("check3_z_image_turbo_1024")
+    if not site_process():
+        return rerun_sites(request, "check3 sites",
+                           plain_velocity(turbo, arrays))
+    sites = Sites(turbo)
+    right_sites(sites, sites.run(arrays), "check3 sites 1024")

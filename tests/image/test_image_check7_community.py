@@ -21,7 +21,10 @@ merged oracle model on every row and fails every wrong table, whatever
 the file's strength. The product gate holds the path a request takes to
 twice the oracle's own bf16 against fp32 gap with the adapter merged. It
 fails the wrong tables that the file moves a block row far enough to
-show, and its rows record which.
+show, and its rows record which. The site gate holds each op of the step
+under the file's table to the exact op on its own input, and fails the
+wrong tables whose change at a leaf is over the gate of a site that reads
+it.
 scripts/image_oracle/check7_z_image_community.py writes the fixtures.
 """
 from __future__ import annotations
@@ -37,9 +40,11 @@ import pytest
 
 from lora_fixtures import reference_delta, rel_l2
 from oracle_fixture import ORACLE, committed, fixture, fx
-from block_gates import exact_process, rerun_exact
-from test_image_check7 import (block_gate, exact_gate, mutation_misses,
-                               need_blocks, step, turbo_pipe)
+from block_gates import (exact_process, rerun_exact, rerun_sites,
+                         site_process, table_velocity)
+from test_image_check7 import (block_gate, blocks_fixture, exact_gate,
+                               mutation_misses, need_blocks, site_gate, step,
+                               turbo_pipe)
 
 NAME = "check7_z_image_turbo_community_512"
 ENV = "GMLX_TEST_LORA_DIR"
@@ -259,6 +264,22 @@ def test_check7_community_exact_block_gate_at_512(pipe, request, aid):
     if not exact_process():
         return rerun_exact(request, "check7 exact")
     exact_gate(pipe, name, _entries(pipe, aid), aid)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("aid", ADAPTERS)
+def test_check7_community_site_gate_at_512(pipe, request, aid):
+    """Every op of every block under the file's table is within its gate
+    of the exact op on its own input, and each wrong table fails or
+    passes as its measured change says."""
+    name = f"{NAME}_{aid}_blocks"
+    arrays, _ = blocks_fixture(name)
+    _file(aid)
+    entries = _entries(pipe, aid)
+    if not site_process():
+        return rerun_sites(request, "check7 sites",
+                           table_velocity(pipe, arrays, entries))
+    site_gate(pipe, name, entries, aid)
 
 
 @pytest.mark.integration
