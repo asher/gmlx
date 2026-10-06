@@ -81,14 +81,32 @@ def active() -> frozenset:
     return _active
 
 
+def _named(routes) -> tuple:
+    """``routes`` as a tuple of names of ROUTES. A str, None and an unknown
+    name raise, each by name."""
+    if routes is None:
+        raise TypeError(f"routes is None: pass a tuple of names of {ROUTES}, "
+                        f"or () for no route")
+    if isinstance(routes, str):
+        raise TypeError(f"routes is the str {routes!r}: pass a tuple of "
+                        f"names of {ROUTES}, such as ({routes!r},)")
+    want = tuple(routes)
+    for name in want:
+        if name not in ROUTES:
+            raise ValueError(f"unknown route {name!r}: the routes are "
+                             f"{ROUTES}")
+    return want
+
+
 def install(routes=None) -> frozenset:
     """Put in force the routes of GMLX_IMAGE_KQ_ROUTES, or of ``routes``,
     that the installed mlx-kquant has an op for, and return their names.
     The ``qk_norm_rope`` seam of ``gmlx.image.ops`` is replaced by
     assignment, or set back to the stock function when its route is not in
     force. Runs at import of ``gmlx.image.ops``. Raises while another
-    function holds the seam, as under an installed ``StepProfiler``, whose
-    removal would put back the function it saved."""
+    function holds the seam, as under an installed ``StepProfiler``, and
+    for a ``routes`` that is a str or holds an unknown name, before any
+    change."""
     global _active
     ns = sys.modules[__package__]
     held = ns.qk_norm_rope
@@ -96,7 +114,7 @@ def install(routes=None) -> frozenset:
         raise RuntimeError(
             "gmlx.image.ops.qk_norm_rope is replaced, as by an installed "
             "StepProfiler: remove the replacement before changing routes")
-    want = _WANTED if routes is None else tuple(routes)
+    want = _WANTED if routes is None else _named(routes)
     on = set()
     if "qk" in want and _kq_op("qk_norm_rope") is not None:
         on.add("qk")
@@ -112,13 +130,37 @@ def only(routes):
     """Put ``routes`` in force for the block, and after it the routes that
     were in force before. Yields the names in force inside the block. The
     switch is not read again. A graph built in the block keeps the ops it
-    was built with."""
+    was built with.
+
+    ``routes`` is a tuple of names of ROUTES, or () for none. A str, None
+    and an unknown name raise before any change. The routes in force are
+    state of the process, not of a thread or a pipeline: a forward on
+    another thread runs on the block's routes while the block is open.
+    The block must not be suspended. A generator that yields inside it
+    leaves its routes in force until the generator is resumed or closed,
+    and its exit then puts back the routes of before the block over any
+    set installed since. The exit puts the earlier routes back first and
+    raises after when a function that replaced the seam inside the block
+    still holds it, as a ``StepProfiler`` installed in the block does.
+    The replacement is dropped."""
+    want = _named(routes)
     before = _active
-    on = install(routes)
+    on = install(want)
     try:
         yield on
     finally:
+        ns = sys.modules[__package__]
+        held = ns.qk_norm_rope
+        replaced = held is not qk_norm_rope \
+            and held is not attention.qk_norm_rope
+        if replaced:
+            ns.qk_norm_rope = attention.qk_norm_rope
         install(before)
+        if replaced:
+            raise RuntimeError(
+                "gmlx.image.ops.qk_norm_rope was replaced inside the block, "
+                "as by a StepProfiler installed in it: the replacement is "
+                "dropped and the routes of before the block are in force")
 
 
 def qk_norm_rope(q: mx.array, k: mx.array, q_w: mx.array, k_w: mx.array,

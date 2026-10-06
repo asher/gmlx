@@ -142,11 +142,12 @@ class StepProfiler:
             m.__class__ = _timed_class(cls)
             self._swapped.append((m, cls))
         for name in self.seams:
-            fn = getattr(ops, name)
-            self._saved[name] = fn
-            setattr(ops, name, self._timed_seam(name, fn))
-        self._saved["glu_pair"] = ops.glu_pair
-        ops.glu_pair = self._placed_pair(ops.glu_pair)
+            self._hold(name, self._timed_seam(name, getattr(ops, name)))
+        self._hold("glu_pair", self._placed_pair(ops.glu_pair))
+
+    def _hold(self, name: str, timed) -> None:
+        self._saved[name] = (getattr(ops, name), timed)
+        setattr(ops, name, timed)
 
     def remove(self) -> None:
         for m, cls in self._swapped:
@@ -154,8 +155,11 @@ class StepProfiler:
             m.__dict__.pop("_prof_path", None)
             m.__dict__.pop("_prof_owner", None)
         self._swapped.clear()
-        for name, fn in self._saved.items():
-            setattr(ops, name, fn)
+        # A seam that another function took since keeps that function: the
+        # exit of ``kq_routes.only`` drops a replacement made in its block.
+        for name, (fn, timed) in self._saved.items():
+            if getattr(ops, name) is timed:
+                setattr(ops, name, fn)
         self._saved.clear()
 
     def _placed_pair(self, fn):

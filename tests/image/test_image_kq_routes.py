@@ -201,6 +201,54 @@ def test_only_puts_routes_in_force_for_a_block(spies):
     assert ops.qk_norm_rope is kq_routes.qk_norm_rope
 
 
+@pytest.mark.parametrize("bad,error,names", [
+    ("qk", TypeError, "the str 'qk'"), ("glu", TypeError, "the str 'glu'"),
+    (None, TypeError, "routes is None"),
+    (("glu", "bogus"), ValueError, "unknown route 'bogus'"),
+    (("q", "k"), ValueError, "unknown route 'q'")],
+    ids=["str_qk", "str_glu", "none", "unknown", "letters"])
+def test_only_refuses_a_str_none_and_an_unknown_name(spies, bad, error,
+                                                     names):
+    """tuple("qk") is two unknown names, which would put no route in
+    force. Each is refused by name before any change."""
+    with kq_routes.only(("glu",)):
+        with pytest.raises(error, match=names):
+            with kq_routes.only(bad):
+                pytest.fail("the block was entered")
+        assert kq_routes.active() == {"glu"}
+        assert ops.qk_norm_rope is attention.qk_norm_rope
+    assert kq_routes.active() == {"qk", "glu"}
+    # install takes None for the set of the switch, and refuses the rest.
+    if bad is not None:
+        with pytest.raises(error, match=names):
+            kq_routes.install(bad)
+        assert kq_routes.active() == {"qk", "glu"}
+        assert ops.qk_norm_rope is kq_routes.qk_norm_rope
+
+
+@pytest.mark.parametrize("raises", [False, True], ids=["clean", "error"])
+def test_only_puts_the_earlier_routes_back_before_it_raises(spies, raises):
+    """A profiler installed inside the block still holds the seam at the
+    block's end. The exit puts the earlier routes back, drops the
+    replacement and then raises, and the profiler's removal leaves the
+    seam alone."""
+    p = prof.StepProfiler(_kq_dit())
+    with pytest.raises(RuntimeError, match="replaced inside the block") as e:
+        with kq_routes.only(()):
+            p.install()
+            assert ops.qk_norm_rope is not attention.qk_norm_rope
+            if raises:
+                raise KeyError("in the block")
+    assert isinstance(e.value.__context__, KeyError) == raises
+    for _ in range(2):
+        assert kq_routes.active() == {"qk", "glu"}
+        assert ops.qk_norm_rope is kq_routes.qk_norm_rope
+        p.remove()
+    assert ops.glu_pair is kq_routes.glu_pair
+    assert ops.swiglu_fused is kq_routes.swiglu_fused
+    assert ops.sdpa is attention.sdpa
+
+
 def test_install_refuses_a_replaced_seam(spies, monkeypatch):
     def other(*args):
         return attention.qk_norm_rope(*args)
