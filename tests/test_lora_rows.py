@@ -102,6 +102,26 @@ def test_rows_mode_row_count_mismatch_raises(published, shape):
         wrap(mx.zeros(shape))
 
 
+def test_flat_inputs_of_two_sizes_share_one_publish():
+    """One publish serves flat (B * tokens, D) inputs of any multiple of
+    its row count: each gets its own factor, one value per input row in
+    (B, tokens) order."""
+    lora_rows.configure("rows", 1)
+    wrap, base, a, b = _wrap()
+    lora_rows.set_rows([2.0, 0.0])
+    for tokens in (2, 3, 1, 2):
+        x = mx.random.normal((2 * tokens, 4))
+        y = wrap(x)
+        assert y.shape == (2 * tokens, 3)
+        on, off = x[:tokens], x[tokens:]
+        ref = base(on) + (0.5 * 2.0) * ((on @ a.T) @ b.T)
+        assert mx.allclose(y[:tokens], ref, rtol=1e-2, atol=1e-2), tokens
+        assert mx.allclose(y[tokens:], base(off), rtol=1e-2,
+                           atol=1e-2), tokens
+        delta = mx.abs((0.5 * 2.0) * ((off @ a.T) @ b.T)).max().item()
+        assert delta > 0.1, "the bare rows would show a delta"
+
+
 def test_published_clears_after_forward_in_rows_mode():
     lora_rows.configure("rows", 1)
     lora_rows.register_uid(7, (1.0,))
