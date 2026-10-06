@@ -15,7 +15,8 @@ pipeline is inference only.
 GMLX_IMAGE_KQ_ROUTES=0 keeps both routes on stock ops, and ``qk`` or
 ``glu`` keeps that route alone. It is read once, at import. ``only`` puts
 a set of routes in force for a block, for a check that reads the stock
-ops and the kernels in one process.
+ops and the kernels in one process. The routes in force are state of the
+process, and the image pipeline keys the results it keeps by them.
 """
 
 from __future__ import annotations

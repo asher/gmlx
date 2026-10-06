@@ -45,6 +45,7 @@ import numpy as np
 
 from . import memfit
 from .conditioning import ByteLRU, Conditioning, array_bytes, conditioning_key
+from .ops import kq_routes
 from .registry import Family
 from .samplers import (img2img_start, inpaint_blend, make_sampler, noised,
                        noise_from_seed)
@@ -577,6 +578,10 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
 
 
 def _memo(cache: ByteLRU, key, make):
+    """``make()`` kept under ``key`` and the kernel routes in force. A
+    kernel rounds at other points than the stock ops, so a result made on
+    one set of routes is not the result of another."""
+    key = (*key, kq_routes.active())
     hit = cache.get(key)
     if hit is None:
         hit = make()

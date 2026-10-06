@@ -28,7 +28,8 @@ from gmlx.image.families.z_image.model import FeedForward
 from gmlx.image.lora import install as lora_install
 from gmlx.image.ops import attention, kq_routes
 from gmlx.image.registry import get_family
-from image_fixtures import kq_leaf, kq_z_model
+from image_fixtures import (glu_rounded_once, kq_leaf, kq_z_model,
+                            qk_rounded_once)
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual")
@@ -625,6 +626,37 @@ def test_a_zero_strength_entry_keeps_the_kernel(spies):
     finally:
         lora_install.restore(pipe, prev)
     assert spies.glu.calls == 1
+
+
+# Kept results.
+
+def test_kept_results_follow_the_routes_in_force(routes, monkeypatch):
+    """The pipeline keeps the caption stream and the modulations of a
+    step. A kernel rounds at other points than the stock ops, so a result
+    kept under one set of routes is not served under another: after a
+    change of routes a step is bit for bit the step of a fresh pipeline."""
+    routes._OPS.update(qk_norm_rope=qk_rounded_once,
+                       quantized_matmul_glu=glu_rounded_once, nax=True)
+    monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
+    assert routes.install(routes.ROUTES) == set(routes.ROUTES)
+    rng = np.random.default_rng(0)
+    lat = rng.standard_normal((1, 4, 64, 64)).astype(np.float32)
+    cond = api.Conditioning(mx.array(
+        rng.standard_normal((5, 16)).astype(np.float32)), key="kept")
+
+    def step(pipe) -> np.ndarray:
+        return np.array(api.denoise_step(pipe, lat, 0.6, cond))
+
+    kept = _pipe()
+    on = step(kept)
+    with kq_routes.only(()):
+        off, fresh_off = step(kept), step(_pipe())
+    again, fresh_on = step(kept), step(_pipe())
+    assert not np.array_equal(on, off)
+    assert np.array_equal(off, fresh_off)
+    assert np.array_equal(again, on) and np.array_equal(on, fresh_on)
+    # Each set of routes keeps its own caption stream and modulation.
+    assert len(kept.captions) == len(kept.modulations) == 2
 
 
 # The profiler.
