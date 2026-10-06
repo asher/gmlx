@@ -205,6 +205,22 @@ def test_rotary_frequencies_equal_the_oracle_within_one_ulp(oracle):
     assert full <= 1.6e-5 and center <= 1.6e-7
 
 
+def test_an_odd_grid_has_its_extra_position_below_zero():
+    """The reference indexes n rows as range(-(n - n // 2), n // 2), so
+    an odd count has one more position below zero than from zero up."""
+    rows, cols = layout.grid(3, 5)
+    assert rows.tolist() == [-2] * 5 + [-1] * 5 + [0] * 5
+    assert cols.tolist() == [-3, -2, -1, 0, 1] * 3
+    pos = layout.target_positions(7, 3, 5)
+    assert pos[0].tolist() == [7, -2, -3] and pos[-1].tolist() == [7, 0, 1]
+    # A reference of 3 x 4 latent tokens in three slots of a prefix.
+    lay = layout.prefix_layout(6, (2, 3, 4), ((3, 4),))
+    block = lay.positions[2:14]
+    assert block[:, 0].tolist() == [2] * 12
+    assert block[:, 1].tolist() == [-2] * 4 + [-1] * 4 + [0] * 4
+    assert block[:, 2].tolist() == [-2, -1, 0, 1] * 3
+
+
 def test_rope_tables_are_the_cos_and_sin_of_one_float32_product():
     pos = np.array([[5, -2, 1], [8191, -1024, 0]])
     cos, sin = layout.rope_tables(pos, REAL_AXES, 10000.0)

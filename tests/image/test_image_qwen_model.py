@@ -446,6 +446,20 @@ def test_sample_runs_the_family_schedule_at_the_request_size(pipe):
         api.sample(pipe, cond, height=64, width=96, seed=1, steps=1)
 
 
+def test_the_schedule_is_refused_without_the_token_count(pipe):
+    with pytest.raises(ValueError, match="shifts by the image token count"):
+        pipe.sigmas(4)
+    with pytest.raises(ValueError, match="shifts by the image token count"):
+        pipe.family.schedule(4, tokens=None)
+    assert np.array_equal(pipe.sigmas(4, 16), qwen21_sigmas(4, 16))
+
+
+def test_a_conditioning_without_tokens_is_refused(tiny):
+    empty = api.Conditioning(mx.zeros((0, tiny.cfg.context_dim)), "")
+    with pytest.raises(ValueError, match="the conditioning has no tokens"):
+        qm.prefill_prefix(tiny, empty)
+
+
 def test_sample_under_guidance_holds_a_prefix_cache_per_conditioning(pipe):
     cond = qt.conditioning("ref1", key="pos")
     neg = qt.conditioning("text", seed=1, key="neg")

@@ -208,6 +208,9 @@ def test_a_family_without_an_encoder_loads_when_none_is_asked(monkeypatch):
     # With an encoder asked for, the family is refused before the DiT loads.
     with pytest.raises(ImageModelError, match="'toy' has no text encoder"):
         api.load("d.gguf", text_encoder="e.gguf")
+    # A borrowed encoder model asks for the family's encoder too.
+    with pytest.raises(ImageModelError, match="'toy' has no text encoder"):
+        api.load("d.gguf", encoder_model=(object(), object()))
     assert loads == ["d.gguf"]
 
 
