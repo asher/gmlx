@@ -117,7 +117,8 @@ def adapters_of(m: dict) -> list:
             assert qt.rule.lora_sha256(row["name"]) == row["pairs_sha256"]
         else:
             arrays, _ = fixture(m["inputs"]["pairs_fixture"])
-            pairs = {t: (arrays[f"down.{t}"], arrays[f"up.{t}"])
+            pre = row.get("prefix", "")
+            pairs = {t: (arrays[f"{pre}down.{t}"], arrays[f"{pre}up.{t}"])
                      for t in row["targets"]}
         assert list(pairs) == row["targets"]
         out.append((pairs, row["alpha"], row["strength"]))
@@ -986,6 +987,76 @@ def test_check7_product_gate_block_by_block_at_512(real, tmp_path, variant):
                 **qg.timestep_rows(real.dit, arrays)}
     misses = qg.product_misses(m, rows, free)
     assert not misses, misses
+    # A negative control: the base model. Every row of a block is fed the
+    # merged oracle's input, so a row can only miss in a block the
+    # adapter is in, and the gate must see the adapter there.
+    adapted = {int(t.split(".")[1])
+               for t in m["inputs"]["adapters"][0]["targets"]}
+    with qg.under_table(real, api.EMPTY_TABLE):
+        base = qg.check3_rows(real.dit, arrays)
+    tol = m["tolerances"]["rows_rel_l2"]
+    over = {r: g["rel_l2"] / tol[r] for r, g in base.items()
+            if r in tol and not g["rel_l2"] <= tol[r]}
+    seen = {}
+    for r, ratio in over.items():
+        if "transformer_blocks." in r or r.startswith("prefill."):
+            seen.setdefault(int(r.rsplit(".", 1)[1]), {})[r] = ratio
+    weakest = min((max(v.values()) for v in seen.values()), default=0.0)
+    print(f"qwen check7 block by block {variant}, base model: "
+          f"{len(over)} rows miss in blocks {sorted(seen)} of the adapted "
+          f"{sorted(adapted)}; the block that misses least is "
+          f"{weakest:.2f} times its gate")
+    assert set(seen) == adapted, (sorted(seen), sorted(adapted))
+    for i in adapted:
+        assert f"joint.transformer_blocks.{i}" in seen[i], seen[i]
+        assert f"cached.transformer_blocks.{i}" in seen[i], seen[i]
+
+
+@pytest.mark.integration
+def test_check7_two_stacked_adapters_at_512(real, tmp_path):
+    """Two adapters in one table, the second on fewer layers and partly
+    in blocks of its own: the product gate on the velocities through
+    ``denoise_step`` and on every row, and the table of either adapter
+    alone fails it."""
+    row = _real_manifest(REAL)["inputs"]["stacked"]
+    arrays, m = fixture(_real_manifest(row["fixture"])["name"])
+    assert m["inputs"]["pairs_fixture"] == REAL
+    assert [r["prefix"] for r in m["inputs"]["adapters"]] == ["", "two."]
+    rows = load_rows(real, tmp_path, m,
+                     [r["dialect"] for r in row["adapters"]])
+    entries = lora.table_entries(rows)
+    # A layer holds both adapters, either one, or neither.
+    held = {}
+    for path, band, patches in entries:
+        held.setdefault(len(patches), set()).add((path, band))
+    assert set(held) == {1, 2}, {k: len(v) for k, v in held.items()}
+    one, two = (set(r["targets"]) for r in m["inputs"]["adapters"])
+    assert two - one and two & one and one - two
+    if real.dit.cfg.fused_mlp:
+        # The gate half of a fused weight holds two adapters where the
+        # projection half holds one.
+        ffn = real.dit.cfg.ffn_dim
+        block = min(int(t.split(".")[1]) for t in two & one)
+        path = f"{B}{block}.img_mlp.gate_up"
+        assert (path, (0, 0, ffn)) in held[2]
+        assert (path, (0, ffn, ffn)) in held[1]
+    tid = api.define_patch_table(real, entries)
+    got = step_velocities(real, arrays, tid, "stacked")
+    print("qwen check7 stacked: "
+          + ", ".join(f"{k} {g['rel_l2']:.4e} of "
+                      f"{m['tolerances'][k + '_rel_l2']:.4e}"
+                      for k, g in got.items()))
+    assert not qg.product_misses(m, {}, got), got
+    with qg.under_table(real, tid):
+        blocks = qg.check3_rows(real.dit, arrays)
+        free = {**qg.free_run(real.dit, arrays, own_temb=True),
+                **qg.timestep_rows(real.dit, arrays)}
+    misses = qg.product_misses(m, blocks, free)
+    assert not misses, misses
+    for i, alone in enumerate(rows):
+        wrong = step_velocities(real, arrays, api.define_patch_table(
+            real, lora.table_entries([alone])), f"alone {i}")
+        assert qg.product_misses(m, {}, wrong), (i, wrong)
 
 
 def _exact_gate(pipe, tmp, variant: str, label: str) -> None:
@@ -1046,9 +1117,21 @@ def test_check7_site_gate_at_512(real, tmp_path, variant):
     exact product on the same input."""
     arrays, m, _, tid = _real_table(real, tmp_path, variant)
     sites: dict = {}
-    with qg.leaf_sites(real, tid, sites):
+    shares: dict = {}
+    with qg.leaf_sites(real, tid, sites, shares):
         vel = step_velocities(real, arrays, tid, f"{variant} sites")
     adapted = {p for p, _, _ in real.patch_tables[tid]["entries"]}
+    # The delta of the adapter at each leaf it is in, as a share of the
+    # leaf's output: what the site would read were the delta dropped.
+    assert {p for p, _ in shares} == adapted
+    gate = 2 * qg.LEAF_ROUNDINGS[True] * qg.SITE_UNIT
+    low, mid, high = (float(np.quantile(list(shares.values()), q))
+                      for q in (0.0, 0.5, 1.0))
+    under = sorted(k for k, v in shares.items() if not v > gate)
+    print(f"qwen check7 sites {variant}: the delta is {low:.2e} to "
+          f"{high:.2e} of a leaf output (median {mid:.2e}) over "
+          f"{len(shares)} calls, against a site gate of {gate:.2e}; "
+          f"{len(under)} calls are not above the gate: {under[:8]}")
     assert {p for p, _ in sites} == set(install.linear_leaves(real.dit))
     assert {p for (p, _), (_, gate) in sites.items()
             if gate == 6 * qg.SITE_UNIT} == adapted

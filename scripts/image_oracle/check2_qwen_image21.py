@@ -150,14 +150,18 @@ def load_encoder(torch, a):
             raise SystemExit(f"error: {t.name} has shape "
                              f"{tuple(value.shape)}, and {name} wants "
                              f"{want.get(name)}")
-        set_module_tensor_to_device(lm, name, "cpu", value=value)
+        # The config names bfloat16 and the empty model takes it, so the
+        # dtype is given with each tensor.
+        set_module_tensor_to_device(lm, name, "cpu", value=value,
+                                    dtype=torch.float32)
         seen.add(name)
         census[t.tensor_type.name] = census.get(t.tensor_type.name, 0) + 1
     if left != [HEAD] or seen != set(want):
         raise SystemExit(f"error: GGUF tensors left over {left}, model "
                          f"parameters not set {sorted(set(want) - seen)}")
     meta = [n for n, p in te.named_parameters() if p.is_meta]
-    kinds = {p.dtype for p in te.parameters()}
+    kinds = {p.dtype for p in te.parameters()} | {
+        b.dtype for b in te.buffers() if b.is_floating_point()}
     if meta or kinds != {torch.float32}:
         raise SystemExit(f"error: parameters on no device {meta[:4]}, "
                          f"dtypes {kinds}")

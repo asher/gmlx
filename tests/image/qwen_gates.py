@@ -341,7 +341,7 @@ LEAF_ROUNDINGS = {False: 1, True: 3}
 
 
 @contextmanager
-def leaf_sites(pipe, table: str, sites: dict):
+def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None):
     """Fill ``sites`` with a reading for every call of a linear leaf of
     the DiT while a step runs under ``table``: (module path, call number)
     to (relative L2, gate). A reading is the leaf's output on the path a
@@ -349,7 +349,10 @@ def leaf_sites(pipe, table: str, sites: dict):
     dequantized weight and the same input, with the table's delta through
     its factors as that path holds them. The float32 side runs on the
     CPU, whose float32 products are exact. The leaves must be wrapped,
-    which the first table with entries does."""
+    which the first table with entries does. ``shares`` takes, for every
+    call of a leaf the table adapts, the norm of the delta over the norm
+    of the leaf's output, both in float32: what a leaf that dropped its
+    delta would read at its site."""
     import mlx_kquant as kq
 
     from gmlx.image.lora import install
@@ -372,13 +375,18 @@ def leaf_sites(pipe, table: str, sites: dict):
                 kq.dequantize(base["weight"], base["scales"], codec,
                               mx.float32)
             want = x32 @ w.T
+            d2 = mx.zeros(())
             if f is not None:
-                want = want + (x32 @ f.a_t.astype(mx.float32)) \
+                delta = (x32 @ f.a_t.astype(mx.float32)) \
                     @ f.b_t.astype(mx.float32)
+                d2 = mx.sum(mx.square(delta))
+                want = want + delta
             e2 = mx.sum(mx.square(y.astype(mx.float32) - want))
             r2 = mx.sum(mx.square(want))
-            mx.eval(e2, r2)
+            mx.eval(e2, r2, d2)
         n = counts[self._path] = counts.get(self._path, 0) + 1
+        if shares is not None and f is not None:
+            shares[(self._path, n)] = float(np.sqrt(d2.item() / r2.item()))
         rel = 0.0 if e2.item() == 0 else float(np.sqrt(e2.item() / r2.item()))
         sites[(self._path, n)] = (
             rel, 2 * LEAF_ROUNDINGS[f is not None] * SITE_UNIT)

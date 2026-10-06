@@ -27,6 +27,13 @@ variant. An adapted block holds 0.81 GiB of dense float32 weights in the
 fp32 model and half of that in the bf16 model, and both models are alive
 at once.
 
+The stacked variant merges two adapters. The second has pairs of its own
+rank on four of the seven layers, in two blocks of the first adapter and
+in two blocks the first leaves alone, so a layer may hold both, either
+or neither, and the gate half of a fused MLP weight holds two adapters
+where the projection half holds one. Its pairs are in the fixture <name>
+under two.down.<target> and two.up.<target>.
+
   python scripts/image_oracle/run.py --python <oracle python> --threads 12 \\
       check7_qwen_image21_lora.py --dit qwen-image-2.1-Q4_K_M.gguf \\
       --config <official repo dir>
@@ -75,6 +82,10 @@ VARIANTS = {
     "alpha": (4.0, 0.8, ("kohya", "onetrainer")),
     "plain": (None, 0.5, ("diffusers", "peft")),
 }
+# The stacked variant: (key prefix of the pairs, alpha, strength, dialect).
+STACKED = "stacked"
+STACK = (("", 4.0, 0.8, "kohya"), ("two.", None, 0.5, "diffusers"))
+TWO_LEAVES = ("attn.to_q", "attn.to_v", "img_mlp.gate_layer", "img_mlp.out")
 MERGE = ("W + the sum over adapters of strength * (alpha / rank) * (up @ "
          "down) in float32, then cast to the mode's dtype; a missing alpha "
          "gives 1.0")
@@ -109,6 +120,18 @@ def block_targets(model, blocks: int | None) -> list[str]:
         idx = np.unique(np.round(np.linspace(0, len(idx) - 1, blocks))
                         .astype(int)).tolist()
     return [f"transformer_blocks.{i}.{leaf}" for i in idx for leaf in LEAVES]
+
+
+def second_targets(names: list) -> list[str]:
+    """The targets of the second adapter of a stack, from those of the
+    first: ``TWO_LEAVES`` in every fourth block of the first from its
+    second, and in the block two after each of those where the first has
+    none."""
+    blocks = sorted({int(n.split(".")[1]) for n in names})
+    shared = blocks[1::4]
+    own = [b + 2 for b in shared if b + 2 not in blocks]
+    return [f"transformer_blocks.{i}.{leaf}" for i in sorted(shared + own)
+            for leaf in TWO_LEAVES]
 
 
 def leaf_at(model, name: str):
@@ -439,8 +462,11 @@ def main(argv=None) -> int:
                     help="adapt this many blocks, spread over the model. "
                          "Each holds 0.81 GiB of dense float32 weights "
                          "and half of that in bf16, both at once")
-    ap.add_argument("--variants", nargs="+", default=list(VARIANTS),
-                    choices=list(VARIANTS))
+    ap.add_argument("--variants", nargs="+",
+                    default=[*VARIANTS, STACKED],
+                    choices=[*VARIANTS, STACKED])
+    ap.add_argument("--rank-two", type=int, default=4,
+                    help="rank of the second adapter of the stack")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--bf16-timestep", choices=("fp32", "stock"),
                     default="fp32")
@@ -476,6 +502,9 @@ def main(argv=None) -> int:
     model = load("fp32")
     names = block_targets(model, a.blocks)
     pairs = make_pairs(torch, model, names, a.rank, a.gain, a.seed)
+    two_names = second_targets(names) if STACKED in a.variants else []
+    two = make_pairs(torch, model, two_names, a.rank_two, a.gain,
+                     a.seed + 1)
     del model
     gc.collect()
     print(f"[check7] {len(pairs)} pairs of rank {a.rank} in "
@@ -483,9 +512,17 @@ def main(argv=None) -> int:
     fx = fixtures.FixtureWriter(a.name, check=7, family="qwen_image21",
                                 script=SCRIPT)
     fx.add_file("dit", a.dit)
-    for name, (down, up) in pairs.items():
-        fx.add(f"down.{name}", down)
-        fx.add(f"up.{name}", up)
+    for pre, group in (("", pairs), (STACK[1][0], two)):
+        for name, (down, up) in group.items():
+            fx.add(f"{pre}down.{name}", down)
+            fx.add(f"{pre}up.{name}", up)
+    stack = [{"prefix": pre, "alpha": alpha, "strength": strength,
+              "dialect": dialect, "targets": targets, "rank": rank}
+             for (pre, alpha, strength, dialect), targets, rank in zip(
+                 STACK, (names, two_names), (a.rank, a.rank_two))]
+    if two:
+        fx.inputs["stacked"] = {"fixture": f"{a.name}_{STACKED}",
+                                "adapters": stack, "pair_seed": a.seed + 1}
     fx.inputs.update(
         source=a.source, targets=names, rank=a.rank, gain=a.gain,
         pair_seed=a.seed, blocks=a.blocks,
@@ -495,20 +532,27 @@ def main(argv=None) -> int:
         merge=MERGE,
         variants={v: {"alpha": VARIANTS[v][0], "strength": VARIANTS[v][1],
                       "dialects": list(VARIANTS[v][2]),
-                      "fixture": f"{a.name}_{v}"} for v in a.variants})
+                      "fixture": f"{a.name}_{v}"}
+                  for v in a.variants if v in VARIANTS})
     fx.results["oracle"] = {"device": "cpu",
                             "threads": torch.get_num_threads(),
                             "dequant": a.dequant}
     print(f"[check7] wrote {fx.write()}", flush=True)
     for variant in a.variants:
-        alpha, strength, dialects = VARIANTS[variant]
-        models = {m: merge(torch, load(m), [(pairs, alpha, strength)], m)
-                  for m in oracle.MODES}
+        if variant == STACKED:
+            rows = [(group, r["alpha"], r["strength"])
+                    for group, r in zip((pairs, two), stack)]
+            adapters = [{"name": a.name, **r} for r in stack]
+            dialects = tuple(r["dialect"] for r in stack)
+        else:
+            alpha, strength, dialects = VARIANTS[variant]
+            rows = [(pairs, alpha, strength)]
+            adapters = [{"name": a.name, "alpha": alpha,
+                         "strength": strength, "targets": names}]
+        models = {m: merge(torch, load(m), rows, m) for m in oracle.MODES}
         note = {"source": a.source, "size": ins.get("size"),
                 "variant": variant, "pairs_fixture": a.name, "merge": MERGE,
-                "adapters": [{"name": a.name, "alpha": alpha,
-                              "strength": strength, "targets": names}],
-                "dialects": list(dialects)}
+                "adapters": adapters, "dialects": list(dialects)}
         path = c3.run_case(torch, a, models, cond, sigmas, timesteps, True,
                            f"{a.name}_{variant}", note, check=7,
                            script=SCRIPT)
