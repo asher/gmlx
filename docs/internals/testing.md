@@ -25,6 +25,10 @@ pytest tests/test_config.py  # one module
 Set `KQUANT_FORCE_CPU=1` on a machine with no usable Metal GPU to keep the
 few tests that use array ops off the GPU path.
 
+To compare CPU logits with GPU or float logits, also set `KQ_CPU_NEON=0`.
+On the CPU, mlx-kquant rounds activations to int8 for a matmul of a few
+rows, which moves decode logits more than the GPU's rounding does.
+
 The docs style and link check, `scripts/check-docs.py`, is not collected
 by pytest. CI runs it as a separate step, so run it yourself after editing
 a doc. It also fails when a page directly under `docs/` is not linked from
