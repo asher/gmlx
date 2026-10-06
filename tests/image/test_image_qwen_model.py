@@ -1,0 +1,388 @@
+"""The Qwen-Image 2.1 DiT on a tiny random model, CPU.
+
+The prefill and the cached target forward together equal one forward of
+the whole joint sequence under an explicit block-causal mask, for a text
+prefix and for prefixes with reference images, and three wrong models
+each break the equality. qwen_joint.py holds that joint forward. A
+denoise step through a loaded pipeline is a pure function: steps in any
+order, with the caches cleared between some of them, give the same
+arrays. The rest covers the two MLP layouts, batches, the timestep chain
+and the refusals of the config and of float16.
+"""
+from __future__ import annotations
+
+import mlx.core as mx
+import numpy as np
+import pytest
+
+import qwen_tiny as qt
+from oracle_fixture import committed_fixture, fx
+from qwen_joint import joint_forward
+
+from gmlx.image import api, registry
+from gmlx.image.dtypes import ImageDtypeError
+from gmlx.image.families.qwen_image21 import layout
+from gmlx.image.families.qwen_image21 import model as qm
+from gmlx.image.schedule import qwen21_sigmas
+
+# The equivalence holds to this relative L2 in fp32, and a wrong model
+# must miss it by FAULT times at least.
+TOL = 1e-5
+FAULT = 20.0
+SIGMA = float(qwen21_sigmas(40, 24)[7])
+
+
+@pytest.fixture(scope="module")
+def tiny():
+    return qt.model_of(qt.weights(0))
+
+
+def _cached(model, cond, lat, sigma, prefix_taps=None, target_taps=None):
+    prefix = qm.prefill_prefix(model, cond, prefix_taps)
+    v = qm.forward_target(model, lat, sigma, cond, prefix, target_taps)
+    mx.eval(v)
+    return v
+
+
+def _rel(got, ref) -> float:
+    return fx.rel_l2(np.array(got), np.array(ref))
+
+
+CASES = ("text", "ref1", "ref2", "adjacent")
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_cached_mode_equals_one_joint_forward_under_the_mask(tiny, case):
+    cond, lat = qt.conditioning(case), qt.latents()
+    with mx.stream(mx.cpu):
+        joint, pre, tgt = {}, {}, {}
+        want = joint_forward(tiny, cond, lat, SIGMA, taps=joint)
+        got = _cached(tiny, cond, lat, SIGMA, pre, tgt)
+        mx.eval(want, *joint.values())
+    p = layout.prefix_layout(*qm.prefix_key(cond)).tokens
+    worst = 0.0
+    for name, x in joint.items():
+        assert x.shape[1] == p + lat.shape[2] * lat.shape[3]
+        worst = max(worst, _rel(pre[name], x[:, :p]), _rel(tgt[name],
+                                                           x[:, p:]))
+    vel = _rel(got, want)
+    print(f"qwen cached against joint, {case}: prefix of {p} tokens, "
+          f"blocks within {worst:.2e}, velocity within {vel:.2e}, gate "
+          f"{TOL:.0e}")
+    assert worst < TOL and vel < TOL
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_the_equivalence_fails_for_each_wrong_model(tiny, case, monkeypatch):
+    cond, lat = qt.conditioning(case), qt.latents()
+    lay = layout.prefix_layout(*qm.prefix_key(cond))
+    p = lay.tokens
+    seen = {}
+    with mx.stream(mx.cpu):
+        got = _cached(tiny, cond, lat, SIGMA)
+        # The last prefix token sees the target tokens.
+        seen["a prefix token sees the target"] = _rel(got, joint_forward(
+            tiny, cond, lat, SIGMA, leak=(p - 1, slice(p, None))))
+        # It sees one of them. This is the weakest wrong model, held to
+        # the gate alone.
+        one = _rel(got, joint_forward(tiny, cond, lat, SIGMA,
+                                      leak=(p - 1, p + 3)))
+        # The first prefix token reads the sampled timestep's modulation.
+        seen["a prefix token at the sampled timestep"] = _rel(
+            got, joint_forward(tiny, cond, lat, SIGMA, sampled_rows=(0,)))
+        want = joint_forward(tiny, cond, lat, SIGMA)
+        with monkeypatch.context() as mp:
+            mp.setattr(qm, "prefix_modulation",
+                       lambda model: qm.modulation(model, SIGMA))
+            seen["the prefill at the sampled timestep"] = _rel(
+                _cached(tiny, cond, lat, SIGMA), want)
+        if cond.ref_latents:
+            def late(axes, theta, n_rows, slots, refs):
+                pos = lay.positions.copy()
+                for start, end, text in lay.segments:
+                    if not text:
+                        pos[start:end, 2] += 1
+                return layout.rope_tables(pos, axes, theta)
+
+            with monkeypatch.context() as mp:
+                mp.setattr(layout, "prefix_tables", late)
+                seen["the reference grid one position off"] = _rel(
+                    _cached(tiny, cond, lat, SIGMA), want)
+        assert _rel(_cached(tiny, cond, lat, SIGMA), want) < TOL
+    print(f"qwen cached against joint, {case}, wrong models: "
+          + ", ".join(f"{k} {v:.2e}" for k, v in seen.items())
+          + f", a prefix token sees one target token {one:.2e}")
+    assert one > 2 * TOL
+    assert len(seen) == (4 if cond.ref_latents else 3)
+    for name, miss in seen.items():
+        assert miss > FAULT * TOL, (name, miss)
+
+
+def test_no_mask_is_built_in_cached_mode(tiny, monkeypatch):
+    from gmlx.image import ops
+
+    cond, lat = qt.conditioning("ref2"), qt.latents()
+    masks = []
+    real = ops.sdpa
+
+    def sdpa(q, k, v, mask=None):
+        masks.append((q.shape[2], k.shape[2], mask is not None))
+        return real(q, k, v, mask)
+
+    with mx.stream(mx.cpu):
+        prefix = qm.prefill_prefix(tiny, cond)
+        monkeypatch.setattr(ops, "sdpa", sdpa)
+        monkeypatch.setattr(qm, "causal_mask", None)
+        mx.eval(qm.forward_target(tiny, lat, SIGMA, cond, prefix))
+    # One call per block: the target rows over the prefix and themselves.
+    t = lat.shape[2] * lat.shape[3]
+    assert masks == [(t, prefix.tokens + t, False)] * tiny.cfg.n_layers
+
+
+def test_the_prefill_runs_one_attention_call_per_segment(tiny, monkeypatch):
+    from gmlx.image import ops
+
+    cond = qt.conditioning("ref2")
+    calls = []
+    real = ops.sdpa
+
+    def sdpa(q, k, v, mask=None):
+        calls.append((q.shape[2], k.shape[2], mask is not None))
+        return real(q, k, v, mask)
+
+    monkeypatch.setattr(ops, "sdpa", sdpa)
+    with mx.stream(mx.cpu):
+        prefix = qm.prefill_prefix(tiny, cond)
+    # Rows 0 and 1 are text, a 2x2 reference, row 3, a 4x2 reference, and
+    # four rows of text: each segment's keys end where it ends, and only
+    # text segments carry a mask.
+    want = [(2, 2, True), (4, 6, False), (1, 7, True), (8, 15, False),
+            (4, 19, True)]
+    assert calls == want * tiny.cfg.n_layers
+    assert prefix.tokens == 19 and prefix.position == 2 + 2 + 1 + 4 + 4
+    assert [k.shape for k in prefix.k] == [(1, 2, 19, 16)] * 2
+    assert [v.shape for v in prefix.v] == [(1, 2, 19, 16)] * 2
+
+
+def test_both_mlp_layouts_give_the_same_velocity():
+    w = qt.weights(1)
+    fused, pair = qt.model_of(w), qt.model_of(qt.unfuse(w))
+    assert fused.cfg.fused_mlp and not pair.cfg.fused_mlp
+    cond, lat = qt.conditioning("ref1"), qt.latents()
+    with mx.stream(mx.cpu):
+        a = _cached(fused, cond, lat, SIGMA)
+        b = _cached(pair, cond, lat, SIGMA)
+    assert _rel(b, a) < 5e-6
+
+
+def test_a_batch_gives_each_row_its_own_sigma(tiny):
+    cond = qt.conditioning("ref1")
+    lat = qt.latents(batch=2)
+    sig = np.asarray([SIGMA, 0.25], np.float32)
+    with mx.stream(mx.cpu):
+        prefix = qm.prefill_prefix(tiny, cond)
+        both = qm.forward_target(tiny, lat, sig, cond, prefix)
+        rows = [qm.forward_target(tiny, lat[i:i + 1], sig[i], cond, prefix)
+                for i in range(2)]
+        mx.eval(both, rows)
+    assert both.shape == (2, 8, *qt.TARGET) and both.dtype == mx.float32
+    for i in range(2):
+        assert _rel(both[i:i + 1], rows[i]) < 5e-6
+    assert _rel(rows[1], rows[0]) > 0.1
+
+
+def test_the_timestep_chain_equals_the_reference_bit_for_bit(tiny):
+    arrays, m = committed_fixture("check4_qwen_image21")
+    n, (w, h) = m["inputs"]["chain"]["steps"], m["inputs"]["chain"]["size"]
+    sigmas = arrays[f"sigmas_{n}_{w}x{h}"][:-1]
+    assert np.array_equal(tiny.timesteps(sigmas, n), arrays["t_embedded"])
+    one = tiny.timesteps(sigmas[3], 1)
+    assert one.dtype == np.float32
+    assert np.array_equal(one, arrays["t_embedded"][3:4])
+
+
+def test_the_prefix_reads_t_zero_and_the_target_its_sigma(tiny):
+    with mx.stream(mx.cpu):
+        zero = qm.prefix_modulation(tiny)
+        same = qm.modulation(tiny, 0.0)
+        other = qm.modulation(tiny, SIGMA)
+        mx.eval(zero.arrays(), same.arrays(), other.arrays())
+    for a, b, c in zip(zero.arrays(), same.arrays(), other.arrays()):
+        assert a.shape == (1, 1, tiny.cfg.dim)
+        assert np.array_equal(np.array(a), np.array(b))
+        assert not np.array_equal(np.array(a), np.array(c))
+    # The gates are squashed once, where the modulation is formed.
+    assert float(mx.abs(other.gate1).max()) <= 1.0
+    assert float(mx.abs(other.gate2).max()) <= 1.0
+
+
+def test_float16_and_wrong_configs_are_refused(tiny):
+    with pytest.raises(ImageDtypeError, match="never runs in float16"):
+        tiny.act_dtype = mx.float16
+    assert tiny.act_dtype == mx.float32
+    cfg = qt.config_of(qt.weights(0))
+    for change, text in (
+            ({"patch_size": 2}, "takes latents unpatched"),
+            ({"causal_condition": False}, "causal condition"),
+            ({"axes_dims_rope": [4, 6, 8]}, "sum to the head dim 16"),
+            ({"axes_dims_rope": [3, 7, 6]}, "three even dims"),
+            ({"modulation_dim": 96}, "widths disagree")):
+        with pytest.raises(ValueError, match=text):
+            qm.QwenImage21Config.from_dict({**cfg, **change})
+
+
+def test_a_prefix_of_another_depth_and_bad_references_are_refused(tiny):
+    cond, lat = qt.conditioning("ref1"), qt.latents()
+    with mx.stream(mx.cpu):
+        prefix = qm.prefill_prefix(tiny, cond)
+        short = qm.PrefixCache(prefix.k[:1], prefix.v[:1], prefix.position)
+        with pytest.raises(ValueError, match="holds 1 blocks.*has 2"):
+            qm.forward_target(tiny, lat, SIGMA, cond, short)
+        flat = api.Conditioning(cond.features, "", ref_latents=(
+            cond.ref_latents[0][:4],), image_slots=cond.image_slots)
+        with pytest.raises(ValueError, match=r"must be \(8, h, w\)"):
+            qm.prefill_prefix(tiny, flat)
+        more = api.Conditioning(cond.features, "", ref_latents=(
+            cond.ref_latents[0],), image_slots=(3, 4, 5))
+        with pytest.raises(ValueError, match="3 image slots hold 12"):
+            qm.prefill_prefix(tiny, more)
+
+
+# A loaded pipeline with no encoder and no VAE.
+
+@pytest.fixture
+def pipe(tmp_path, monkeypatch):
+    fam = qt.tiny_family()
+    monkeypatch.setattr(registry, "families", lambda: (fam,))
+    path = qt.write(tmp_path / "tiny.gguf", qt.weights(0))
+    return api.load(path, log=lambda *_: None)
+
+
+def test_a_pipeline_loads_without_an_encoder_or_a_vae(pipe):
+    assert pipe.family.name == "qwen_image21" and pipe.variant == "default"
+    assert pipe.encoder is None and pipe.vae is None
+    assert type(pipe.dit) is qm.QwenImage21DiT
+    assert pipe.dit.act_dtype == mx.bfloat16
+    assert (pipe.vae_scale, pipe.size_multiple) == (16, 32)
+    assert (pipe.defaults.steps, pipe.defaults.cfg) == (40, 1.0)
+    with pytest.raises(ValueError, match="no text encoder"):
+        api.encode_text(pipe, "a prompt")
+    with pytest.raises(ValueError, match="no VAE"):
+        api.vae_decode(pipe, qt.latents())
+
+
+def test_denoise_step_is_pure_in_any_order_with_caches_cleared(pipe):
+    conds = [qt.conditioning("ref1", key="pos"),
+             qt.conditioning("text", seed=1, key="neg")]
+    sig = qwen21_sigmas(6, 24)[:-1]
+    xs = [qt.latents(seed=i) for i in range(len(sig))]
+    calls = [(i, c) for i in range(len(sig)) for c in conds]
+    base = [np.array(api.denoise_step(pipe, xs[i], sig[i], c))
+            for i, c in calls]
+    assert len(pipe.captions) == 2 and len(pipe.modulations) == len(sig)
+    order = np.random.default_rng(3).permutation(len(calls))
+    assert list(order) != sorted(order)
+    cleared = 0
+    for n, j in enumerate(order):
+        if n % 3 == 1:
+            pipe.captions.clear()
+            cleared += 1
+        if n % 4 == 2:
+            pipe.modulations.clear()
+        if n % 5 == 3:
+            layout.clear_caches()
+        i, c = calls[j]
+        again = np.array(api.denoise_step(pipe, xs[i], sig[i], c))
+        assert np.array_equal(again, base[j]), (n, i, c.key)
+    assert cleared >= 3
+    # A conditioning without a key is never cached and gives the same.
+    i, c = calls[4]
+    bare = api.Conditioning(c.features, "", ref_latents=c.ref_latents,
+                            image_slots=c.image_slots)
+    held = len(pipe.captions)
+    assert np.array_equal(
+        np.array(api.denoise_step(pipe, xs[i], sig[i], bare)), base[4])
+    assert len(pipe.captions) == held
+
+
+def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
+    cond = qt.conditioning("ref1", key="pos")
+    x = qt.latents()
+    api.denoise_step(pipe, x, SIGMA, cond)
+    api.denoise_step(pipe, x, 0.25, cond)
+    key = ("pos", pipe.default_table, str(mx.bfloat16))
+    state = pipe.captions.get(key)
+    assert type(state) is qm.PrefixCache and len(pipe.captions) == 1
+    # 2 blocks of K and V, 15 prefix tokens, 32 wide, 2 bytes each.
+    assert state.tokens == 15
+    assert pipe.captions.bytes == 2 * 2 * 15 * 32 * 2
+    assert len(pipe.modulations) == 2
+    for s in (SIGMA, 0.25):
+        assert type(pipe.modulations.get(
+            (np.float32(s).tobytes(), *key[1:]))) is qm.Modulation
+
+
+def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
+    """Five text rows and one 2 x 2 reference, which is 32 pixels square."""
+    from gmlx.image import memfit
+
+    feats = mx.array(qt.rule.features("wide")[:6])
+    ref = mx.array(qt.rule.ref_latents("adjacent")[0])
+    assert ref.shape == (8, 2, 2)
+    cond = api.Conditioning(feats, "one", ref_latents=(ref,),
+                            image_slots=(2,))
+    api.denoise_step(pipe, qt.latents(), SIGMA, cond)
+    state = pipe.captions.get(("one", pipe.default_table, str(mx.bfloat16)))
+    cfg = pipe.dit.cfg
+    row = memfit.PrefixRow(blocks=cfg.n_layers, dim=cfg.dim, token_px=16)
+    assert state.tokens == row.rows(5, 1, 32) == 9
+    assert pipe.captions.bytes == row.cache_bytes(9, 2) == 2 * 2 * 9 * 32 * 2
+    # A step joins the K and V of one block over the prefix and the
+    # target rows.
+    t = qt.TARGET[0] * qt.TARGET[1]
+    own = mx.zeros((1, cfg.n_heads, t, cfg.head_dim), mx.bfloat16)
+    k, v = qm.join_prefix(state.k[0], state.v[0], own, own)
+    assert k.nbytes + v.nbytes == row.join_bytes(9 + t, 2)
+
+
+def test_rows_of_a_batch_take_their_own_conditioning(pipe):
+    conds = [qt.conditioning("ref1", key="pos"),
+             qt.conditioning("text", seed=1, key="neg")]
+    x = qt.latents(batch=2)
+    sig = [SIGMA, 0.25]
+    both = api.denoise_step(pipe, x, sig, conds)
+    assert both.shape == (2, 8, *qt.TARGET) and both.dtype == mx.float32
+    for i in range(2):
+        one = api.denoise_step(pipe, x[i:i + 1], sig[i], conds[i])
+        assert np.array_equal(np.array(both[i:i + 1]), np.array(one))
+
+
+def test_sample_runs_the_family_schedule_at_the_request_size(pipe):
+    cond = qt.conditioning("ref1", key="pos")
+    x = api.sample(pipe, cond, height=64, width=96, seed=1, steps=6)
+    assert x.shape == (1, 8, 4, 6) and x.dtype == mx.float32
+    assert bool(mx.isfinite(x).all())
+    # 64x96 is 4 x 6 latent tokens, and the schedule shifts by that count.
+    s = pipe.sigmas(6, 24)
+    assert np.array_equal(s, qwen21_sigmas(6, 24))
+    assert not np.array_equal(s, qwen21_sigmas(6, 4096))
+    same = api.sample(pipe, cond, height=64, width=96, seed=1,
+                      sigmas=[float(v) for v in s])
+    assert np.array_equal(np.array(same), np.array(x))
+    assert len(pipe.modulations) == 6 and len(pipe.captions) == 1
+    with pytest.raises(ValueError, match="multiples of 32, not 48x96"):
+        api.sample(pipe, cond, height=48, width=96, seed=1, steps=2)
+    with pytest.raises(ValueError, match="needs at least 2 steps"):
+        api.sample(pipe, cond, height=64, width=96, seed=1, steps=1)
+
+
+def test_sample_under_guidance_holds_a_prefix_cache_per_conditioning(pipe):
+    cond = qt.conditioning("ref1", key="pos")
+    neg = qt.conditioning("text", seed=1, key="neg")
+    seen = []
+    x = api.sample(pipe, cond, neg=neg, cfg=4.0, height=64, width=64,
+                   seed=2, steps=3, on_step=lambda i, x: seen.append(i))
+    assert x.shape == (1, 8, 4, 4) and seen == [0, 1, 2]
+    assert len(pipe.captions) == 2
+    plain = api.sample(pipe, cond, height=64, width=64, seed=2, steps=3)
+    assert not np.array_equal(np.array(plain), np.array(x))

@@ -1,15 +1,22 @@
-"""Qwen-Image 2.1 fingerprint, constants and config synthesis.
+"""Qwen-Image 2.1 fingerprint, constants, config synthesis and the hooks
+of its registry row.
 
 Shapes are GGUF order, input dim first. The MLP is stored either as one
 fused gate_up matrix or as a gate and projection pair, reported as the
-layout. The module tree is not built yet, so a matching file is recognized
-and then refused by the loader.
+layout and built as the file has it.
+
+The denoise step is given in parts. The conditioning part is the prefix
+cache of a conditioning, each block's K and V of the text and reference
+image tokens, and the modulation part is what the target tokens derive
+from one sigma. The schedule shifts by the image token count of the
+request.
 """
 
 from __future__ import annotations
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family
+from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
+                                 StepParts)
 
 _B0 = "transformer_blocks.0."
 
@@ -22,6 +29,10 @@ _REQUIRED = (
 )
 _N_BLOCKS = 32
 
+# transformer/config.json gives the first five values and
+# scheduler/scheduler_config.json the six of the schedule. The VAE factor
+# of 16 and the size multiple of 32, two latent pixels, are the reference
+# pipeline's own.
 CONSTANTS = ConstantsRow(
     values={
         "axes_dims_rope": [16, 56, 56],
@@ -29,10 +40,31 @@ CONSTANTS = ConstantsRow(
         "eps": 1e-06,
         "patch_size": 1,
         "causal_condition": True,
+        "base_image_seq_len": 256,
+        "max_image_seq_len": 8192,
+        "base_shift": 0.5,
+        "max_shift": 0.9,
+        "shift_terminal": 0.02,
+        "num_train_timesteps": 1000,
+        "vae_scale_factor": 16,
+        "size_multiple": 32,
     },
     repo="Qwen/Qwen-Image-2.1",
     revision="790c92633540aa0cb11d9abf19eb46d861714758",
 )
+
+# The steps and the guidance are the reference pipeline's defaults,
+# num_inference_steps=40 and true_cfg_scale=1.0, and the shift is the
+# scheduler config's static shift, which the dynamic shift replaces.
+SAMPLING = {
+    "default": SamplingRow(steps=40, cfg=1.0, shift=1.0,
+                           repo="Qwen/Qwen-Image-2.1",
+                           revision="790c92633540aa0cb11d9abf19eb46d861714758"),
+}
+
+# A prefix cache of one megapixel reference is about 2 GiB. The cache of
+# conditioning states keeps this much, or two states when they are larger.
+PREFIX_CACHE_BYTES = 1 << 30
 
 
 def _relative(name: str) -> Refusal:
@@ -94,7 +126,8 @@ def synth_config(view: HeaderView) -> dict:
     s = view.dims
     in_ch, inner = s("img_in.weight")
     head_dim = s(_B0 + "attn.norm_q.weight")[0]
-    if _layout(view) == "unfused":
+    layout = _layout(view) or "fused"
+    if layout == "unfused":
         ffn = s(_B0 + "img_mlp.gate_layer.weight")[1]
     else:
         ffn = s(_B0 + "img_mlp.gate_up.weight")[1] // 2
@@ -114,7 +147,48 @@ def synth_config(view: HeaderView) -> dict:
         "ffn_dim": ffn,
         "modulation_dim": s("modulation.1.weight")[1],
         "rope_theta": c["rope_theta"],
+        "mlp_layout": layout,
+        "timestep_dim": s(
+            "time_text_embed.timestep_embedder.linear_1.weight")[0],
     }
+
+
+def build(config: dict):
+    from .model import QwenImage21DiT
+
+    return QwenImage21DiT(config)
+
+
+def _modulation(dit, sigma):
+    from .model import modulation
+
+    return modulation(dit, sigma)
+
+
+def _prefix(dit, cond):
+    from .model import prefill_prefix
+
+    return prefill_prefix(dit, cond)
+
+
+def _forward(dit, latents, sigma, cond, prefix, mod):
+    from .model import forward_target
+
+    return forward_target(dit, latents, sigma, cond, prefix, mod=mod)
+
+
+def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
+    """Sigmas of ``steps`` for an image of ``tokens`` latent tokens."""
+    from gmlx.image.schedule import qwen21_sigmas
+
+    if tokens is None:
+        raise ValueError("the Qwen-Image 2.1 schedule shifts by the image "
+                         "token count; pass tokens")
+    c = CONSTANTS.values
+    return qwen21_sigmas(
+        steps, tokens, base_len=c["base_image_seq_len"],
+        max_len=c["max_image_seq_len"], base_shift=c["base_shift"],
+        max_shift=c["max_shift"], terminal=c["shift_terminal"])
 
 
 FAMILY = Family(
@@ -126,5 +200,10 @@ FAMILY = Family(
     fingerprint=fingerprint,
     synth_config=synth_config,
     constants=CONSTANTS,
-    build=None,
+    build=build,
+    # diffusers keeps these modules out of its layerwise casting.
+    fp32_keep=("norm",),
+    sampling=SAMPLING,
+    step=StepParts(_modulation, _prefix, _forward, PREFIX_CACHE_BYTES),
+    schedule=schedule,
 )

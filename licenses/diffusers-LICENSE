@@ -25,6 +25,14 @@ source.
   upsample of src/diffusers/models/upsampling.py and the AttnProcessor2_0
   path of src/diffusers/models/attention_processor.py, in channels-last
   layout with an owned contiguous-group GroupNorm.
+- gmlx/image/families/qwen_image21/model.py: the Qwen-Image 2.1 forward of
+  src/diffusers/models/transformers/transformer_qwenimage21.py (the
+  single-stream block, the shared modulation and its t = 0 rows, the
+  zero-centered text norm, the per-segment prefill and the cached decode),
+  split into a prefill of the prefix and a forward of the target rows.
+- gmlx/image/families/qwen_image21/layout.py: QwenImage21Rope,
+  build_token_metadata and the prefix segments of the same file, as host
+  tables of positions and angles.
 - gmlx/image/schedule.py: calculate_shift of
   src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py, and the
   exponential time shift and stretch_shift_to_terminal of
