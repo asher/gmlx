@@ -292,7 +292,13 @@ def fault_misses(monkeypatch, model, arrays: dict, name: str, tol: float
     return missed
 
 
-@pytest.mark.parametrize("name", list(FAULTS))
+def _fault_id(name: str) -> str:
+    """A wrong model's name as a test id, which holds no space."""
+    return name.replace(" = ", "").replace(" ", "_")
+
+
+@pytest.mark.parametrize("name", list(FAULTS),
+                         ids=[_fault_id(n) for n in FAULTS])
 def test_each_wrong_model_fails_the_tiny_gate(tiny, monkeypatch, name):
     arrays, _ = committed_fixture(BLOCKS)
     with mx.stream(mx.cpu):

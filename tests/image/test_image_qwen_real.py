@@ -54,8 +54,8 @@ def test_quantized_leaf_count_and_fp32_norms(loaded):
 
 
 # name: (text rows, image slots, reference shape in latent tokens)
-STEPS = {"text": (24, (), ()), "one reference": (40, tuple(range(10, 18)),
-                                                 ((4, 8),))}
+STEPS = {"text": (24, (), ()),
+         "ref1": (40, tuple(range(10, 18)), ((4, 8),))}
 
 
 @pytest.mark.parametrize("name", list(STEPS))
