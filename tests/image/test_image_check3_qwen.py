@@ -531,6 +531,7 @@ def test_check3_one_step_block_by_block_at_512(real):
     rows = qg.check3_rows(real, arrays)
     free = {**qg.free_run(real, arrays, own_temb=True),
             **qg.timestep_rows(real, arrays)}
+    print("qwen check3 product 512: " + qg.product_reading(m, rows, free))
     misses = qg.product_misses(m, rows, free)
     assert not misses, misses
 
@@ -553,6 +554,8 @@ def test_check3_site_gate_at_512(real):
     print(f"qwen check3 sites 512: {len(sites)} readings, the largest over "
           "its gate by op: "
           + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items())))
+    print("qwen check3 sites 512, that run: "
+          + qg.product_reading(m, {}, free))
     assert not qg.over_gate(sites), qg.over_gate(sites)
     assert not qg.product_misses(m, {}, free)
 
@@ -560,7 +563,9 @@ def test_check3_site_gate_at_512(real):
 @pytest.mark.integration
 def test_check3_final_velocities_at_1024(real):
     arrays, m = fixture(_real_manifest(REAL[1024])["name"])
-    misses = qg.product_misses(m, {}, qg.free_run(real, arrays, own_temb=True))
+    free = qg.free_run(real, arrays, own_temb=True)
+    print("qwen check3 product 1024: " + qg.product_reading(m, {}, free))
+    misses = qg.product_misses(m, {}, free)
     assert not misses, misses
 
 
@@ -573,12 +578,19 @@ def test_check3_exact_gate_at_512(real, request, monkeypatch):
         return rerun_exact(request, "qwen check3 exact")
     with exact_products(real) as used:
         got = qg.step(real, arrays)
+        # A step takes the oracle's timestep embedding. The embedder of
+        # the real file is two K-quant products, held here from the
+        # model's own sinusoid.
+        own = qg.timestep_rows(real, arrays)
         assert_all_dense(real, used)
         top = max(got, key=lambda r: got[r]["rel_l2"])
+        high = max(own, key=lambda r: own[r]["rel_l2"])
         print(f"qwen check3 exact 512: {len(got)} measures within "
-              f"{got[top]['rel_l2']:.2e} of the oracle, at {top}, gate "
-              f"{EXACT_TOL:.0e}")
+              f"{got[top]['rel_l2']:.2e} of the oracle, at {top}, and the "
+              f"model's own timestep rows within "
+              f"{own[high]['rel_l2']:.2e}, at {high}, gate {EXACT_TOL:.0e}")
         assert not qg.missed(got, EXACT_TOL), qg.missed(got, EXACT_TOL)
+        assert not qg.missed(own, EXACT_TOL), qg.missed(own, EXACT_TOL)
         for name in FAULTS:
             missed = fault_misses(monkeypatch, real, arrays, name, EXACT_TOL)
             high = max(missed, key=missed.get)

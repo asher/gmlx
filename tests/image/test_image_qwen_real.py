@@ -119,15 +119,20 @@ def test_check1_the_strict_load_consumes_every_tensor_as_views(load):
         assert tuple(params[name].shape) == tuple(reversed(t.shape)), name
     assert ({n for n in params if n.rsplit(".", 1)[0] not in leaves}
             == {n for n in plain if n.rsplit(".", 1)[0] not in leaves})
-    # The parameters hold the bytes of the file: no weight is dequantized
-    # at the load. The casts the load owns are the BF16 norm weights, and
-    # each doubles its bytes.
+    # The parameters hold the bytes of the file: a K-quant leaf has the
+    # bytes of its tensor as the file has them, so no weight is
+    # dequantized at the load. The casts the load owns are the BF16 norm
+    # weights, and each doubles its bytes.
+    for path, m in leaves.items():
+        t = quant[f"{path}.weight"]
+        assert int(m["weight"].nbytes) == memfit.tensor_bytes(
+            t.shape, t.codec), path
     cast = [n for n, t in plain.items() if "norm" in n and t.codec != "F32"]
     assert info.n_owned_casts == len(cast)
-    grown = sum(memfit.tensor_bytes(tensors[n].shape, tensors[n].codec)
-                for n in cast)
-    assert sum(int(v.nbytes) for v in params.values()) == (
-        memfit.file_bytes(ident.view) + grown)
+    for name, t in plain.items():
+        assert int(params[name].nbytes) == (
+            memfit.tensor_bytes(t.shape, t.codec)
+            * (2 if name in cast else 1)), name
     # The fused layout: one gate and up product and the out product.
     assert ident.layout == "fused" and model.cfg.fused_mlp
     for blk in model.transformer_blocks:

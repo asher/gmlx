@@ -319,6 +319,29 @@ def product_misses(m: dict, rows: dict, free: dict) -> list[str]:
     return out
 
 
+def product_reading(m: dict, rows: dict, free: dict) -> str:
+    """What ``product_misses`` read, in one line: the largest share of
+    its tolerance among the teacher-forced rows and among the
+    free-running blocks, and each velocity against its own."""
+    tol = m["tolerances"]
+    parts = []
+    for label, got, gates in (
+            ("teacher-forced rows", rows, tol.get("rows_rel_l2", {})),
+            ("free-running measures", free, tol.get("free_rel_l2", {}))):
+        share = {r: g["rel_l2"] / gates[r] for r, g in got.items()
+                 if r in gates}
+        if share:
+            top = max(share, key=share.get)
+            parts.append(f"{len(share)} {label}, the largest "
+                         f"{share[top]:.2f} of its gate at {top}")
+    for r in sorted(r for r in free if r.startswith("velocity_")):
+        parts.append(f"{r} {free[r]['rel_l2']:.4e} of "
+                     f"{tol[f'{r}_rel_l2']:.4e}, cosine "
+                     f"{free[r]['cosine']:.6f} over "
+                     f"{tol[f'{r}_cosine_min']:.6f}")
+    return "; ".join(parts)
+
+
 @contextmanager
 def under_table(pipe, table: str):
     """Run the DiT of ``pipe`` under the patch table ``table``, as a

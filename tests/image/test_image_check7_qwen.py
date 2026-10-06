@@ -1027,6 +1027,8 @@ def test_check7_product_gate_block_by_block_at_512(real, tmp_path, variant):
         rows = qg.check3_rows(real.dit, arrays)
         free = {**qg.free_run(real.dit, arrays, own_temb=True),
                 **qg.timestep_rows(real.dit, arrays)}
+    print(f"qwen check7 block by block {variant}: "
+          + qg.product_reading(m, rows, free))
     misses = qg.product_misses(m, rows, free)
     assert not misses, misses
     # A negative control: the base model. Every row of a block is fed the
@@ -1093,6 +1095,8 @@ def test_check7_two_stacked_adapters_at_512(real, tmp_path):
         blocks = qg.check3_rows(real.dit, arrays)
         free = {**qg.free_run(real.dit, arrays, own_temb=True),
                 **qg.timestep_rows(real.dit, arrays)}
+    print("qwen check7 stacked, block by block: "
+          + qg.product_reading(m, blocks, free))
     misses = qg.product_misses(m, blocks, free)
     assert not misses, misses
     for i, alone in enumerate(rows):
@@ -1108,7 +1112,11 @@ def _exact_gate(pipe, tmp, variant: str, label: str) -> None:
     with exact_products(pipe.dit) as used:
         with qg.under_table(pipe, tid):
             got = qg.step(pipe.dit, arrays)
+            # The embedder's two K-quant products, which a step with the
+            # oracle's timestep embedding does not run.
+            own = qg.timestep_rows(pipe.dit, arrays)
         assert_all_dense(pipe.dit, used)
+        assert not qg.missed(own, EXACT_TOL), qg.missed(own, EXACT_TOL)
         assert (used.direct > 0) == (install.placement() == "split"), (
             install.placement(), used.direct)
         name = max(got, key=lambda r: got[r]["rel_l2"])
