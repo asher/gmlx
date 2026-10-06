@@ -157,20 +157,24 @@ attention and feed-forward modules. An update row, output minus input,
 would inherit the residual stream's bfloat16 rounding and hide the same
 error.
 
-Checks 3 and 7 read one denoise step block by block through two gates,
-which `tests/image/block_gates.py` holds for both. The exact gate checks
-structure. It runs the model in the oracle's float32 arithmetic, with
-float32 activations, exact float32 products, every K-quant product on its
-dequantized weight and the stock ops, and holds every row and branch row
-to the oracle at `5e-5`. A wrong model fails it: check 3 lists structural
-faults such as swapped q and k norm weights, and check 7 lists wrong
-adapter tables. MLX reads `MLX_ENABLE_TF32` once per process, so these
-tests rerun themselves in a child process with `MLX_ENABLE_TF32=0` and
-the image ops on the stock path. The product gate runs the path a
-request takes and holds the block rows, the free-running blocks and the
-velocity to the manifest's tolerances. It does not read the branch rows.
-The oracle's gap on a branch row is one rounding sample, and a right
-model lands on either side of twice that.
+Checks 3 and 7 read one denoise step through three gates, which
+`tests/image/block_gates.py` holds for both. The exact gate proves the
+structure: the model in the oracle's float32 arithmetic, with exact
+float32 products, every K-quant product on its dequantized weight and the
+stock ops, matches the oracle on every row and branch row at `5e-5`, and
+each listed wrong model or wrong adapter table fails it. The product gate
+proves the result of the path a request takes: the block rows, the
+free-running blocks and the velocity are within the manifest's
+tolerances, each twice the oracle's own bfloat16 against float32 gap at
+that point. The site gate proves the arithmetic of each op on that path:
+the output of every op between a block's input and its output is within
+a relative L2 of `2 n u` of the stock op in float32 on the same input,
+where `u = 2^-8` is one bfloat16 rounding and `n` counts the outputs the
+stock op writes in bfloat16, so a kernel is held to the gate of the op it
+replaces. MLX reads `MLX_ENABLE_TF32` once per process, so the exact and
+the site tests rerun themselves in a child process with
+`MLX_ENABLE_TF32=0`, the exact tests with the image ops on the stock path
+and the site tests on the kernel routes the build has.
 The oracle dequantizes GGUF blocks in float32
 arithmetic, as ggml does. Stock diffusers keeps the block scales in
 float16, which moves K-quant weights by about 8e-4 in relative L2, and
