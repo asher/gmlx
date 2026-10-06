@@ -4,14 +4,19 @@
 GGUF (architecture ``qwen3vl``) with a sibling mmproj that discovery pairs
 to it. The text file loads as the qwen3 class and the pair as the qwen3_vl
 container. The tests hold both loads to every parameter and every tensor,
-the two models to the same hidden state on a text-only prompt, and an image
-prompt to the token layout llama.cpp's mtmd builds for the same pair.
+the two models to the same hidden state on a text-only prompt, an image
+prompt to the token layout llama.cpp's mtmd builds for the same pair, and
+the image features of the 8B to the ones llama.cpp computes.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
+from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("gmlx._vendor.mlx_vlm")
@@ -124,8 +129,11 @@ _PROSE = (
 # The two classes share every weight and differ in the rope kernel alone,
 # which seeds a different rounding in the 16-bit kernels of each layer.
 # Measured on Qwen3-VL-8B Q4_K_M in bfloat16: cosine 0.9998 at the worst
-# token and relative L2 0.009 over the prompt. A wrong base, section list
-# or layout puts the cosine far under the floor.
+# token and relative L2 0.009 over the prompt. A wrong rope base puts the
+# cosine far under the floor. A wrong section list or axis layout does not
+# show here: a text-only prompt puts one position on all three axes, so
+# every frequency pair reads the same angle whichever axis it is given.
+# The unequal-position test in tests/load/test_qwen3vl.py holds those.
 _COS_FLOOR = 0.998
 _REL_L2_CEILING = 0.03
 
@@ -205,3 +213,158 @@ def test_image_prompt_has_the_layout_mtmd_builds(vlm_load, size, grid):
         f"<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n",
         add_special_tokens=False)
     assert ids == head + [pad] * (rows * cols) + tail
+
+
+# The image features of the 8B against llama.cpp.
+
+_FIXTURE = (Path(__file__).resolve().parents[1] / "fixtures"
+            / "qwen3vl_8b_main_features_llamacpp.npz")
+
+# The fixture holds every 64th column of the main features llama.cpp's
+# mtmd computes for the synthetic image below (196 image tokens), with the
+# Q4_K_M text file and the BF16 mmproj of Qwen3-VL-8B-Instruct. Relative L2
+# against it over those columns, measured: 0.0155 with the tower in float32
+# (0.0180 with MLX_ENABLE_TF32=0) and 0.147 with the tower in bfloat16. The
+# bound leaves the float32 tower a factor of 2.2 and is a factor of 3.7
+# under the bfloat16 tower.
+_FEATURE_REL_L2 = 0.04
+
+
+def _synthetic_image(side=448):
+    """An image by integer arithmetic, the same bytes on every machine: two
+    ramps, a checker of 32 pixel squares and a fine diagonal texture."""
+    y, x = np.mgrid[0:side, 0:side]
+    r = (x * 255) // (side - 1)
+    g = (y * 255) // (side - 1)
+    b = ((x // 32 + y // 32) % 2) * 160 + (x * 7 + y * 13) % 64
+    return np.stack([r, g, b], axis=-1).astype(np.uint8)
+
+
+def _synthetic_inputs(vlm_load):
+    """The synthetic image through the pair's own processor, with the
+    fixture. Skips for a Qwen3-VL of another size."""
+    import mlx.core as mx
+    from PIL import Image
+
+    model, _, processor = vlm_load
+    tower = model.vision_tower
+    if (len(tower.blocks), model.config.vision_config.out_hidden_size) != (
+            27, 4096):
+        pytest.skip("the feature fixture is of Qwen3-VL-8B")
+    fixture = np.load(_FIXTURE)
+    image = _synthetic_image()
+    assert (hashlib.sha256(image.tobytes()).hexdigest()
+            == str(fixture["image_sha256"]))
+    inputs = processor.image_processor([Image.fromarray(image)])
+    pixels = mx.array(inputs["pixel_values"])
+    grid = mx.array(inputs["image_grid_thw"])
+    assert grid.tolist() == [[1, 28, 28]]
+    return pixels, grid, fixture
+
+
+def _rel_l2(got, want):
+    got, want = got.astype(np.float64), want.astype(np.float64)
+    return float(np.linalg.norm(got - want) / np.linalg.norm(want))
+
+
+@_NEEDS_GPU
+def test_main_image_features_follow_llama_cpp(vlm_load):
+    """The main features the container joins to the token embeddings, for
+    an image through the pair's own processor, are the ones llama.cpp
+    computes for the same bytes. A processor with another rescale, mean or
+    std misses the bound, and so does a tower that computes in 16 bits."""
+    import mlx.core as mx
+
+    pixels, grid, fixture = _synthetic_inputs(vlm_load)
+    model = vlm_load[0]
+    entry = model.encode_images(pixels, image_grid_thw=grid)
+    main = np.array(entry[0].astype(mx.float32))
+    assert main.shape == (196, 4096)
+    rel = _rel_l2(main[:, fixture["columns"]], fixture["main"])
+    assert rel < _FEATURE_REL_L2, rel
+    mx.clear_cache()
+
+
+@_NEEDS_GPU
+def test_a_bfloat16_tower_misses_the_feature_bound(vlm_load):
+    """The same tower with every parameter and the pixels in bfloat16, the
+    form a load without the float32 rule gives, is off by several times
+    the bound. This is why the tower computes in float32."""
+    import mlx.core as mx
+    from mlx.utils import tree_map
+
+    pixels, grid, fixture = _synthetic_inputs(vlm_load)
+    tower = vlm_load[0].vision_tower
+    loaded = tower.parameters()
+    tower.update(tree_map(lambda p: p.astype(mx.bfloat16), loaded))
+    try:
+        main, _ = tower(pixels.astype(mx.bfloat16), grid)
+        main = np.array(main.astype(mx.float32))
+    finally:
+        tower.update(loaded)
+    rel = _rel_l2(main[:, fixture["columns"]], fixture["main"])
+    assert rel > 2 * _FEATURE_REL_L2, rel
+    mx.clear_cache()
+
+
+class _Recorder:
+    """A module behind a record of its last input."""
+
+    def __init__(self, module):
+        self.module = module
+        self.seen = None
+
+    def __call__(self, x):
+        self.seen = x
+        return self.module(x)
+
+
+# The merger with the exact GELU against the one with the tanh form, in
+# float64 on the real input: 1.14e-4 relative L2 apart. The model's merger
+# on the CPU stream is 1.5e-6 from the exact form. The feature bound above
+# is far too wide to tell the two forms apart; this check can.
+_MERGER_REL_L2 = 2e-5
+
+
+@_NEEDS_GPU
+def test_real_merger_is_the_exact_gelu_merger_in_float64(vlm_load):
+    """The main merger on the hidden state the tower hands it, against
+    norm, linear, exact GELU, linear in float64 from the same weights."""
+    import mlx.core as mx
+
+    pixels, grid, _ = _synthetic_inputs(vlm_load)
+    tower = vlm_load[0].vision_tower
+    merger = tower.merger
+    recorder = _Recorder(merger)
+    tower.merger = recorder
+    try:
+        mx.eval(tower(pixels.astype(mx.float32), grid)[0])
+    finally:
+        tower.merger = merger
+    x = recorder.seen
+    # With TF32 on, the GPU's float32 products put the merger 7.9e-4 from
+    # the exact form, more than the two forms differ, so the model side
+    # runs on the CPU.
+    with mx.stream(mx.cpu):
+        got = merger(x.astype(mx.float32))
+        mx.eval(got)
+    got = np.array(got.astype(mx.float32))
+
+    def f64(a):
+        return np.array(a.astype(mx.float32)).astype(np.float64)
+
+    h = f64(x)
+    mean = h.mean(-1, keepdims=True)
+    var = ((h - mean) ** 2).mean(-1, keepdims=True)
+    h = (h - mean) / np.sqrt(var + 1e-6)
+    h = h * f64(merger.norm.weight) + f64(merger.norm.bias)
+    w1 = f64(merger.linear_fc1.weight)
+    h = h.reshape(-1, w1.shape[1]) @ w1.T + f64(merger.linear_fc1.bias)
+    erf = np.vectorize(math.erf)
+    exact = 0.5 * h * (1.0 + erf(h / math.sqrt(2.0)))
+    tanh = 0.5 * h * (1.0 + np.tanh(
+        math.sqrt(2.0 / math.pi) * (h + 0.044715 * h ** 3)))
+    w2, b2 = f64(merger.linear_fc2.weight), f64(merger.linear_fc2.bias)
+    assert _rel_l2(got, exact @ w2.T + b2) < _MERGER_REL_L2
+    assert _rel_l2(tanh @ w2.T + b2, exact @ w2.T + b2) > 3 * _MERGER_REL_L2
+    mx.clear_cache()
