@@ -180,17 +180,29 @@ def test_rotary_frequencies_equal_the_oracle_within_one_ulp(oracle):
     for d in (4, 6, 16):
         assert off[d] == (0, 0)
     assert off[56][0] <= 1
-    # The frame axis, which holds the text positions up to 8191, is exact.
-    assert REAL_AXES[0] == 16
-    # The height and width axes reach 64 tokens from the center at 2048
-    # pixels, where one ulp of a frequency and the rounding of the product
-    # move an angle by 8e-6 at most. The one element that differs moves
-    # it by 1.2e-7.
-    pos = np.arange(-64, 64, dtype=np.float32)[:, None]
-    gap = np.abs(pos * layout.rope_freqs(56, theta)[None]
-                 - pos * arrays["rope_freqs.56"][None]).max()
-    print(f"qwen rotary angle gap at 2048 pixels: {gap:.2e} rad")
-    assert gap < 8e-6
+    assert REAL_AXES == (16, 56, 56)
+    # Text sits on all three axes at one shared position, so the 56-wide
+    # axes hold every position of the tables, as the frame axis does. One
+    # frequency of a 56-wide axis is one ulp off torch's. Over all
+    # positions that moves an entry of the cos and sin tables by 1.53e-5
+    # at most, and by 1.2e-7 within 64 positions of the center, where the
+    # image tokens of 2048 pixels sit. Against torch's own tables, with
+    # its cos and sin, the two were measured at 1.5e-5, at position 7729,
+    # and 1.5e-7.
+    ours, torchs = layout.rope_freqs(56, theta), arrays["rope_freqs.56"]
+
+    def table_gap(lo: int, hi: int) -> tuple[float, int]:
+        pos = np.arange(lo, hi, dtype=np.float32)[:, None]
+        a, b = pos * ours[None], pos * torchs[None]
+        gap = np.maximum(np.abs(np.cos(a) - np.cos(b)),
+                         np.abs(np.sin(a) - np.sin(b))).max(axis=1)
+        return float(gap.max()), lo + int(gap.argmax())
+
+    (full, at), (center, _) = table_gap(-1024, 8192), table_gap(-64, 64)
+    print(f"qwen rotary table gap against torch's frequencies on a "
+          f"56-wide axis: {full:.2e} at position {at} over all positions, "
+          f"{center:.2e} within 64 of the center")
+    assert full <= 1.6e-5 and center <= 1.6e-7
 
 
 def test_rope_tables_are_the_cos_and_sin_of_one_float32_product():
