@@ -34,13 +34,14 @@ it embeds it. --bf16-timestep fp32, the default, gives the sinusoid the
 float32 timestep instead, so that the gap measures arithmetic alone.
 
 The conditioning is --conditioning, an .npz of encoder features, their
-image slot mask and reference latents, or with --caption random, seeded
+image slot mask and reference latents, or with --check2 the features of
+one text prompt of a check 2 fixture, or with --caption random, seeded
 normal features and reference latents, which lack the outliers of real
 ones.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check3_qwen_image21.py --dit qwen-image-2.1-Q4_K_M.gguf \\
-      --config <official repo dir> --conditioning <npz>
+      --config <official repo dir> --check2 check2_qwen_image21
 
 --self-test writes a tiny model in GGUF tensor names, loads it back
 through the same single-file path, and writes its fixtures and the
@@ -479,6 +480,20 @@ def read_conditioning(a, c_in: int, ctx: int) -> tuple[dict, dict]:
                 np.float32) for h, w in refs]},
             {"conditioning": "random", "generator": "numpy default_rng("
              "seed + 1) standard_normal float32", "rows": n_rows})
+    if a.check2:
+        root = fixtures.fixture_root()
+        m2 = fixtures.read_manifest(a.check2, root=root)
+        key = f"tap_{a.prompt_key}"
+        with np.load(root / m2["npz"], allow_pickle=False) as z:
+            feats = z[key].astype(np.float32)
+        if fixtures.array_sha256(feats) != m2["tensors"][key]["sha256"]:
+            raise SystemExit(f"error: {key} of {a.check2} differs from its "
+                             "manifest")
+        return ({"features": feats, "img_mask": np.zeros(len(feats), bool),
+                 "ref_shapes": [], "ref_latents": []},
+                {"conditioning": f"{key} of {a.check2}",
+                 "prompt": m2["inputs"]["prompts"][a.prompt_key],
+                 "rows": int(feats.shape[0])})
     with np.load(a.conditioning, allow_pickle=False) as z:
         refs = [z[k] for k in sorted(
             (k for k in z.files if k.startswith("ref_latents.")),
@@ -617,6 +632,11 @@ def main(argv=None) -> int:
     ap.add_argument("--conditioning", type=Path,
                     help=".npz of features (L, D), img_mask (L,) and "
                          "ref_latents.N (C, h, w)")
+    ap.add_argument("--check2",
+                    help="check 2 fixture to take the features of a text "
+                         "prompt from, in place of --conditioning")
+    ap.add_argument("--prompt-key", default="plain",
+                    help="prompt of the --check2 fixture")
     ap.add_argument("--caption", choices=("file", "random"), default="file")
     ap.add_argument("--random-len", type=int, default=64,
                     help="text rows of a random conditioning")
@@ -644,9 +664,10 @@ def main(argv=None) -> int:
     if a.self_test:
         a.steps, a.step, a.step_b = 8, 3, 5
         return self_test(torch, a)
-    if not (a.dit and a.config and (a.conditioning
+    if not (a.dit and a.config and (a.conditioning or a.check2
                                     or a.caption == "random")):
-        ap.error("--dit, --config and --conditioning are required")
+        ap.error("--dit, --config and --conditioning or --check2 are "
+                 "required")
     if any(s % 32 for s in a.sizes):
         ap.error("sizes must be multiples of 32")
     models = {m: oracle.load_dit(a.dit, a.config, m, cls_name=CLS,

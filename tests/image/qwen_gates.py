@@ -389,3 +389,211 @@ def leaf_sites(pipe, table: str, sites: dict):
         yield sites
     finally:
         install.ImageLoRALinear.__call__ = real
+
+
+# The site gate of a block's own ops: the output of each op on its own
+# production input against the stock op in float32 on that input, at most
+# 2 n u. n counts the outputs the stock path of the op writes in the
+# activation dtype, whatever kernel runs at the seam.
+OP_ROUNDINGS = {
+    "layer_norm": 1,      # one op
+    "modulate": 2,        # 1 + scale, then the product
+    "qk": 2,              # the norm, then the cast after the fp32 rotation
+    "sdpa": 1,            # one op
+    "gated_residual": 2,  # gate * y, then the sum
+    "swiglu": 3,          # sigmoid(a), a times it, then the product with b
+}
+# Calls of each op in one call of a block. A prefill calls sdpa once per
+# segment of the prefix.
+BLOCK_OPS = {"layer_norm": 2, "modulate": 2, "qk": 1, "sdpa": 1,
+             "gated_residual": 2, "swiglu": 1}
+NORM_OUT = "norm_out"
+
+
+def _rel_l2(got, want) -> float:
+    """Relative L2 of ``got`` against ``want``, arrays or tuples of
+    arrays, in float32 on the CPU."""
+    got = got if isinstance(got, tuple) else (got,)
+    want = want if isinstance(want, tuple) else (want,)
+    e2 = sum(mx.sum(mx.square(g.astype(mx.float32) - w))
+             for g, w in zip(got, want))
+    r2 = sum(mx.sum(mx.square(w)) for w in want)
+    mx.eval(e2, r2)
+    return 0.0 if e2.item() == 0 else float(np.sqrt(e2.item() / r2.item()))
+
+
+@contextmanager
+def block_sites(model, sites: dict, leaves: bool = False):
+    """Fill ``sites`` with a reading for every op that a block calls
+    through ``gmlx.image.ops`` while steps run: (block, call, op, number)
+    to (relative L2, gate). ``call`` is prefill or target, and ``number``
+    counts the calls of that op in that block and call since the reader
+    started. The final norm's two ops read as the block ``norm_out``. An
+    op that returns another dtype than its input's gets a gate of zero.
+
+    With ``leaves``, every call of a linear leaf of a model without
+    adapter wrappers is read too, as ``leaf_sites`` reads a wrapped one:
+    (module path, call number) to (relative L2, 2 u), against the float32
+    product on the dequantized weight.
+
+    A reading is taken at the seam, so a kernel that replaces an op in
+    the ``ops`` namespace before the reader starts is read at the same
+    site. The float32 side runs on the CPU, whose products are exact."""
+    import mlx_kquant as kq
+
+    from gmlx.image import ops
+    from gmlx.image.lora import install
+    from gmlx.image.ops import attention, epilogues, norms
+
+    f = mx.float32
+    names = {id(b): f"transformer_blocks.{i}"
+             for i, b in enumerate(model.transformer_blocks)}
+    cur: list = [(NORM_OUT, "target")]
+    counts: dict = {}
+
+    def read(op, got, want, like):
+        key = (*cur[-1], op)
+        n = counts[key] = counts.get(key, 0) + 1
+        outs = got if isinstance(got, tuple) else (got,)
+        same = all(o.dtype == like.dtype for o in outs)
+        with mx.stream(mx.cpu):
+            rel = _rel_l2(got, want())
+        sites[(*key, n)] = (rel, 2 * OP_ROUNDINGS[op] * SITE_UNIT * same)
+
+    def within(call, orig):
+        def run(blk, *a, **k):
+            cur.append((names[id(blk)], call))
+            try:
+                return orig(blk, *a, **k)
+            finally:
+                cur.pop()
+        return run
+
+    def layer_norm(orig):
+        def run(x, eps):
+            y = orig(x, eps)
+            read("layer_norm", y, lambda: norms.layer_norm(x.astype(f), eps),
+                 x)
+            return y
+        return run
+
+    def modulate(orig):
+        def run(x, scale):
+            y = orig(x, scale)
+            read("modulate", y, lambda: epilogues.modulate(
+                x.astype(f), scale.astype(f)), x)
+            return y
+        return run
+
+    def gated_residual(orig):
+        def run(x, gate, y):
+            out = orig(x, gate, y)
+            read("gated_residual", out, lambda: epilogues.gated_residual(
+                x.astype(f), gate.astype(f), y.astype(f)), x)
+            return out
+        return run
+
+    def swiglu(orig):
+        def run(a, b):
+            out = orig(a, b)
+            read("swiglu", out, lambda: epilogues.swiglu(
+                a.astype(f), b.astype(f)), a)
+            return out
+        return run
+
+    def qk(orig):
+        def run(q, k, q_w, k_w, cos, sin, eps):
+            out = orig(q, k, q_w, k_w, cos, sin, eps)
+            read("qk", tuple(out), lambda: attention.qk_norm_rope(
+                q.astype(f), k.astype(f), q_w.astype(f), k_w.astype(f),
+                cos, sin, eps), q)
+            return out
+        return run
+
+    def sdpa(orig):
+        def run(q, k, v, mask=None):
+            out = orig(q, k, v, mask)
+            read("sdpa", out, lambda: attention.sdpa(
+                q.astype(f), k.astype(f), v.astype(f), mask), q)
+            return out
+        return run
+
+    paths = {id(m): p for p, m in install.linear_leaves(model).items()}
+    calls: dict = {}
+
+    def leaf(orig):
+        def run(mod, x, *a, **k):
+            y = orig(mod, x, *a, **k)
+            path = paths.get(id(mod))
+            if path is None:
+                return y
+            codec = getattr(mod, "kquant_type", None)
+            with mx.stream(mx.cpu):
+                w = mod["weight"].astype(f) if codec is None else \
+                    kq.dequantize(mod["weight"], mod["scales"], codec, f)
+                rel = _rel_l2(y, x.astype(f) @ w.T)
+            n = calls[path] = calls.get(path, 0) + 1
+            sites[(path, n)] = (rel, 2 * SITE_UNIT)
+            return y
+        return run
+
+    block = type(model.transformer_blocks[0])
+    hooks = [(block, "prefill", lambda o: within("prefill", o)),
+             (block, "target", lambda o: within("target", o)),
+             (ops, "layer_norm", layer_norm), (ops, "modulate", modulate),
+             (ops, "gated_residual", gated_residual), (ops, "swiglu", swiglu),
+             (ops, "qk_norm_rope", qk), (ops, "sdpa", sdpa)]
+    if leaves:
+        assert not any(isinstance(m, install.ImageLoRALinear)
+                       for m in install.modules(model).values())
+        hooks += [(cls, "__call__", leaf) for cls in
+                  {type(m) for m in install.linear_leaves(model).values()}]
+    saved = []
+    try:
+        for obj, attr, hook in hooks:
+            saved.append((obj, attr, getattr(obj, attr)))
+            setattr(obj, attr, hook(saved[-1][2]))
+        yield sites
+    finally:
+        for obj, attr, orig in reversed(saved):
+            setattr(obj, attr, orig)
+
+
+def op_sites(sites: dict) -> dict:
+    """The readings of ``block_sites`` that are ops of a block."""
+    return {k: v for k, v in sites.items() if len(k) == 4}
+
+
+def missing_ops(model, sites: dict, prefills: int, targets: int,
+                segments: int = 1) -> list:
+    """What a run of ``prefills`` prefills and ``targets`` target steps
+    leaves unread: each block calls every op of ``BLOCK_OPS`` in every
+    call, and the final norm its two ops in every target step."""
+    got: dict = {}
+    for block, call, op, _ in op_sites(sites):
+        got[(block, call, op)] = got.get((block, call, op), 0) + 1
+    want = {}
+    for i in range(len(model.transformer_blocks)):
+        for call, runs in (("prefill", prefills), ("target", targets)):
+            for op, n in BLOCK_OPS.items():
+                per = segments if (op, call) == ("sdpa", "prefill") else 1
+                want[(f"transformer_blocks.{i}", call, op)] = runs * n * per
+    for op in ("layer_norm", "modulate"):
+        want[(NORM_OUT, "target", op)] = targets
+    return sorted(f"{k}: {got.get(k, 0)} of {n}" for k, n in want.items()
+                  if got.get(k, 0) != n) + sorted(
+        f"{k}: not a known op call" for k in got if k not in want)
+
+
+def over_gate(sites: dict) -> dict:
+    return {k: v for k, v in sites.items() if not v[0] <= v[1]}
+
+
+def worst_by_op(sites: dict) -> dict:
+    """Op, or leaf for a linear leaf, to its largest reading over its
+    gate."""
+    out: dict = {}
+    for key, (rel, gate) in sites.items():
+        op = key[2] if len(key) == 4 else "leaf"
+        out[op] = max(out.get(op, 0.0), rel / gate if gate else float("inf"))
+    return out

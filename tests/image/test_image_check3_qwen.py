@@ -8,7 +8,10 @@ scripts/image_oracle/check3_qwen_image21.py --self-test writes with
 diffusers' own class on the tiny model of qwen_image21_tiny.py. gmlx
 loads the same weights from a GGUF in GGUF tensor names and runs in the
 oracle's fp32 arithmetic, so every row is held to one fixed bound, and
-each wrong model of FAULTS must miss it.
+each wrong model of FAULTS must miss it. The site gate reads the model
+in bf16: each op of a block and each linear leaf on its own input against
+the stock op in float32, and each wrong op of SITE_FAULTS must miss it at
+its own sites.
 
 The real rows need the Qwen-Image 2.1 GGUF under KQUANT_TEST_GGUF_DIR
 and the fixtures the same script writes from it. They skip until both
@@ -34,6 +37,8 @@ from gmlx.image import api, ops, registry
 from gmlx.image import loader as image_loader
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
+from gmlx.image.lora import install
+from gmlx.image.ops import attention, norms
 
 BLOCKS = "selftest_qwen_image21_tiny_ref2"
 TINY = {c: f"selftest_qwen_image21_tiny_{c}" for c in ("text", "ref1", "ref2")}
@@ -392,6 +397,100 @@ def test_each_wrong_model_fails_on_the_velocities_alone(tiny, monkeypatch,
         assert miss >= SEEN * TOL, (name, miss)
 
 
+# The site gate on the tiny model in bf16.
+
+def _tiny_sites(pipe, arrays: dict) -> tuple[dict, int]:
+    """The sites of one prefill and two target steps on the path a
+    request takes, and the count of the prefix's segments."""
+    model = pipe.dit
+    cond = qg.conditioning(arrays, key="")
+    sites: dict = {}
+    with mx.stream(mx.cpu), qg.block_sites(model, sites, leaves=True):
+        prefix = qm.prefill_prefix(model, cond)
+        for tag in "ab":
+            mx.eval(qm.forward_target(
+                model, mx.array(arrays[f"latents_{tag}"]),
+                float(arrays[f"sigma_{tag}"]), cond, prefix))
+    return sites, len(layout.prefix_layout(*qm.prefix_key(cond)).segments)
+
+
+@pytest.mark.parametrize("case", list(TINY))
+def test_the_sites_of_a_tiny_step_are_within_their_gates(tiny_bf16, case):
+    """Each op of each block and each linear leaf on the path a request
+    takes in bf16 is within 2 n u of the stock op in float32 on the same
+    input, and every op a block calls is read."""
+    arrays, _ = committed_fixture(TINY[case])
+    model = tiny_bf16.dit
+    sites, segments = _tiny_sites(tiny_bf16, arrays)
+    assert not qg.missing_ops(model, sites, 1, 2, segments)
+    assert {k[0] for k in sites if len(k) == 2} == set(
+        install.linear_leaves(model))
+    worst = qg.worst_by_op(sites)
+    print(f"qwen check3 tiny {case} sites: {len(sites)} readings, the "
+          "largest over its gate by op: "
+          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items())))
+    assert not qg.over_gate(sites), qg.over_gate(sites)
+    # Not float32 under another name: a bf16 op rounds.
+    assert max(worst.values()) > 0.01
+
+
+def _a_leaf_off(mp, model):
+    leaf = model.transformer_blocks[1].attn.to_v
+    real = type(leaf).__call__
+    mp.setattr(type(leaf), "__call__", lambda self, x: (
+        real(self, x) * 1.05 if self is leaf else real(self, x)))
+
+
+# name: (the wrong production op, the op whose sites must miss)
+SITE_FAULTS = {
+    "swiglu without its sigmoid": (
+        lambda mp, _: mp.setattr(ops, "swiglu", lambda a, b: a * b),
+        "swiglu"),
+    "modulate without its one": (
+        lambda mp, _: mp.setattr(ops, "modulate", lambda x, s: x * s),
+        "modulate"),
+    "a residual without its gate": (
+        lambda mp, _: mp.setattr(ops, "gated_residual",
+                                 lambda x, g, y: x + y), "gated_residual"),
+    "sdpa without its mask": (
+        lambda mp, _: mp.setattr(
+            ops, "sdpa", lambda q, k, v, mask=None: attention.sdpa(q, k, v)),
+        "sdpa"),
+    "rope with its tables swapped": (
+        lambda mp, _: mp.setattr(
+            ops, "qk_norm_rope", lambda q, k, qw, kw, cos, sin, eps:
+            attention.qk_norm_rope(q, k, qw, kw, sin, cos, eps)), "qk"),
+    "layer norm at another eps": (
+        lambda mp, _: mp.setattr(
+            ops, "layer_norm", lambda x, eps: norms.layer_norm(x, 0.5)),
+        "layer_norm"),
+    "a leaf a twentieth off": (_a_leaf_off, "leaf"),
+}
+
+
+@pytest.mark.parametrize("name", list(SITE_FAULTS),
+                         ids=[_fault_id(n) for n in SITE_FAULTS])
+def test_each_wrong_op_fails_the_tiny_site_gate_at_its_own_site(
+        tiny_bf16, monkeypatch, name):
+    """A site reads an op on the op's own input, so a wrong op is over
+    the gate at its own sites and at no other."""
+    arrays, _ = committed_fixture(BLOCKS)
+    apply, op = SITE_FAULTS[name]
+    with monkeypatch.context() as mp:
+        apply(mp, tiny_bf16.dit)
+        sites, _ = _tiny_sites(tiny_bf16, arrays)
+    over = qg.over_gate(sites)
+    assert over, name
+    assert {k[2] if len(k) == 4 else "leaf" for k in over} == {op}, over
+    if op == "leaf":
+        assert {k[0] for k in over} == {"transformer_blocks.1.attn.to_v"}
+    if op == "sdpa":
+        # The target rows take no mask.
+        assert {k[1] for k in over} == {"prefill"}
+    sites, _ = _tiny_sites(tiny_bf16, arrays)
+    assert not qg.over_gate(sites)
+
+
 # Qwen-Image 2.1 Q4_K_M, when the file and its fixtures are there.
 
 REAL = {512: "check3_qwen_image21_512", 1024: "check3_qwen_image21_1024"}
@@ -433,6 +532,28 @@ def test_check3_one_step_block_by_block_at_512(real):
             **qg.timestep_rows(real, arrays)}
     misses = qg.product_misses(m, rows, free)
     assert not misses, misses
+
+
+@pytest.mark.integration
+def test_check3_site_gate_at_512(real):
+    """Every op of every block and every linear leaf on the path a
+    request takes is within its site gate of the stock op in float32 on
+    the same input, and that run's velocities pass the product gate."""
+    arrays, m = fixture(_real_manifest(REAL[512])["name"])
+    sites: dict = {}
+    with qg.block_sites(real, sites, leaves=True):
+        free = qg.free_run(real, arrays, own_temb=True)
+    cond = qg.conditioning(arrays)
+    segments = len(layout.prefix_layout(*qm.prefix_key(cond)).segments)
+    assert not qg.missing_ops(real, sites, 1, 2, segments)
+    assert {k[0] for k in sites if len(k) == 2} == set(
+        install.linear_leaves(real))
+    worst = qg.worst_by_op(sites)
+    print(f"qwen check3 sites 512: {len(sites)} readings, the largest over "
+          "its gate by op: "
+          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items())))
+    assert not qg.over_gate(sites), qg.over_gate(sites)
+    assert not qg.product_misses(m, {}, free)
 
 
 @pytest.mark.integration
