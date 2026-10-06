@@ -655,13 +655,15 @@ def _need_vae(pipe: ImagePipeline):
 
 def vae_decode(pipe: ImagePipeline, latents, *, tiled: bool | None = None,
                alpha: bool = False) -> mx.array:
-    """Latents to an image (B, H, W, 3) float32 in [0, 1]."""
+    """Latents to an image float32 in [0, 1]: (B, H, W, 3), or (B, H, W, 4)
+    with ``alpha``, which keeps the fourth channel of a VAE that decodes
+    RGBA."""
     vae = _need_vae(pipe)
-    if alpha:
+    if alpha and vae.config.out_channels != 4:
         raise ValueError(f"the {pipe.family.title} VAE has no alpha channel")
     from .vae import tiling
 
-    img = tiling.decode(vae, latents, tiled=tiled)
+    img = tiling.decode(vae, latents, tiled=tiled, alpha=alpha)
     return mx.clip(img / 2 + 0.5, 0.0, 1.0)
 
 

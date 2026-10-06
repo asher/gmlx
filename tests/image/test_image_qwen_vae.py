@@ -1292,3 +1292,22 @@ def test_the_plan_reads_the_channels_of_the_op(vae, monkeypatch):
     tiling.decode(vae, np.zeros((1, 64, 2, 3), np.float32))
     tiling.encode(vae, np.zeros((1, 32, 48, 3), np.float32))
     assert seen == [("decode", 32, 48, 6, 4), ("encode", 32, 48, 4, 4)]
+
+
+def test_the_pipeline_decode_keeps_the_alpha_when_asked(vae, monkeypatch):
+    from gmlx.image import api, memfit
+    from gmlx.image.vae import flux1_ae
+
+    monkeypatch.setattr(memfit, "free_bytes", lambda: 1e12)
+    pipe = _pipe(vae, "Qwen-Image 2.1")
+    lat = np.random.default_rng(17).standard_normal((1, 64, 2, 3)).astype(
+        np.float32)
+    rgba = api.vae_decode(pipe, lat, alpha=True)
+    assert rgba.shape == (1, 32, 48, 4) and rgba.dtype == mx.float32
+    raw = tiling.decode(vae, lat, alpha=True, free=1e12)
+    assert mx.array_equal(rgba, raw / 2 + 0.5).item()
+    assert mx.array_equal(rgba[..., :3], api.vae_decode(pipe, lat)).item()
+    flux = _pipe(flux1_ae.Flux1AE(FLUX_TINY), "Z-Image")
+    with pytest.raises(ValueError, match="Z-Image VAE has no alpha channel"):
+        api.vae_decode(flux, np.zeros((1, 16, 2, 2), np.float32),
+                       alpha=True)
