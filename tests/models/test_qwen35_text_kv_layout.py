@@ -507,6 +507,22 @@ def test_a_gguf_tree_that_would_pair_heads_grouped_is_refused(mtp):
         require_tiled_gdn(model, config)
 
 
+def test_the_check_reads_head_counts_under_text_config():
+    """A container config holds the head counts under ``text_config``."""
+    from gmlx.load.loader import build_model
+    from gmlx.upstream.gdn_patches import require_tiled_gdn
+
+    model, config = build_model(_toy_config())
+    require_tiled_gdn(model, {"model_type": "qwen3_5", "text_config": config})
+
+    lost = _toy_config()
+    del lost["kv_head_layout"]
+    model, config = build_model(lost)
+    with pytest.raises(RuntimeError, match="grouped order"):
+        require_tiled_gdn(model, {"model_type": "qwen3_5",
+                                  "text_config": config})
+
+
 @pytest.mark.parametrize("loader", ("text", "vlm", "mtp"))
 def test_each_gguf_loader_checks_the_tree_it_built(toy, loader):
     """The text loader, the VLM loader and the arming of an MTP target each

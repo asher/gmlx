@@ -191,7 +191,12 @@ def require_tiled_gdn(model, config: dict) -> None:
     in the grouped order. Such a load gives wrong text with no error: the
     no-cache forward looks fine and decode degrades to repetition. It
     happens when the config lost ``kv_head_layout`` on its way to the model
-    classes, or a layer class does not read it."""
+    classes, or a layer class does not read it. A container config holds
+    the head counts under ``text_config``."""
+    if "linear_num_key_heads" not in config:
+        text = config.get("text_config")
+        if isinstance(text, dict):
+            config = text
     if not gguf_v_heads_tiled(config):
         return
     grouped = sorted({
