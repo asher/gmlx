@@ -80,6 +80,8 @@ exercise a path.
 | `tests/image/test_image_check2.py` | `GMLX_IMAGE_FIXTURES` | The Z-Image encoder tap has the oracle's token ids and stays within its calibrated relative L2 and per-token cosine. |
 | `tests/image/test_image_vae_real.py` | `GMLX_TEST_IMAGE_DIR` in place of `KQUANT_TEST_GGUF_DIR` | The official Z-Image VAE safetensors and a GGUF packed from it load to the same weights bit for bit. |
 | `tests/image/test_image_check5.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | On the default conv path the FLUX.1 VAE stays within the oracle's tolerances, fp32 with TF32 off in a child process, tiled passes included. |
+| `tests/image/test_image_qwen_vae_real.py` | `GMLX_TEST_IMAGE_DIR` in place of `KQUANT_TEST_GGUF_DIR` | The official Qwen-Image 2.1 VAE safetensors has the committed header and sha256, and a GGUF packed from it keeps F32 and loads to the same weights bit for bit. |
+| `tests/image/test_image_check5_qwen.py` | `GMLX_TEST_IMAGE_DIR`, `GMLX_IMAGE_FIXTURES` and a committed `check5_qwen_image21_vae` manifest, in place of `KQUANT_TEST_GGUF_DIR` | The official Qwen-Image 2.1 VAE holds the oracle's tolerances in decode and encode, whole and in tiles. The module's tiny tests run in the CPU tier. |
 | `tests/image/test_image_cli_real.py` | `GMLX_TEST_IMAGE_DIR` | `gmlx image generate` writes the latents that `sample` returns for the noise of the same seed, bit for bit. |
 | `tests/image/test_image_check6.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` | A whole Z-Image-Turbo run from the oracle's noise stays within the PSNR gate of the oracle's fp32 image. |
 | `tests/image/test_image_check7.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step at 512x512 under a live LoRA matches the oracle on merged weights block by block and in velocity. The base and each wrong table fail. |
@@ -143,9 +145,10 @@ array, the oracle's own measurements and the tolerances. `manifest.json`
 in the same directory indexes the fixtures. Fixtures stay outside the
 repository. The repository keeps a copy of each manifest that a test
 reads, under `tests/fixtures/image/oracle/`, and the test refuses a
-fixture whose arrays differ from that copy. A fixture of a few tens of
-KiB, such as the check 4 sigma tables, keeps its `.npz` beside the
-manifest, so its test runs in the CPU tier.
+fixture whose arrays differ from that copy. A fixture of at most a few
+hundred KiB, such as the check 4 sigma tables and the tiny VAEs of check
+5 for Qwen-Image 2.1, keeps its `.npz` beside the manifest, so its test
+runs in the CPU tier.
 
 The oracle runs each check in float32 and in bfloat16. A tolerance is
 twice the gap between those two runs, and the manifest records the gap
@@ -219,6 +222,16 @@ token, the expansion of image slots, the modulation row of every token
 and the prefill segments to the layout fixture. The rows of
 `test_image_check3_qwen.py` that read the real file skip until the
 manifests that `check3_qwen_image21.py` writes from it are committed.
+
+`check5_qwen_image21_vae.py --self-test` builds diffusers'
+`AutoencoderKLQwenImage21` at a tiny config, with the seeded weights of
+`qwen_image21_vae_tiny.py`, and writes a fixture that the repository
+keeps. `tests/image/test_image_check5_qwen.py` writes the same weights as
+a safetensors file, whose sha256 the manifest holds, packs it into a GGUF,
+and checks the gmlx decode and encode from both files against the fixture
+on the CPU. Nine wrong models, each one departure from the reference, must
+fail the float32 gate. Without `--self-test` the script runs on the
+official VAE and writes the fixture of the gated tests.
 
 `check7_qwen_image21_lora.py --self-test` merges the adapters of
 `qwen_image21_tiny.py` into the dense weights of that tiny model and runs
