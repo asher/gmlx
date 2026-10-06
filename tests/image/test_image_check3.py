@@ -1,17 +1,17 @@
 """Check 3 of the image acceptance gate for Z-Image: one denoise step of the
 gmlx DiT, block by block, against the diffusers oracle.
 
-Each teacher-forced row gives a gmlx module the oracle's fp32 input to
-it, cast to the activation dtype, with the oracle's timestep embedding,
-and compares the output with the oracle's fp32 output. A late block adds
-a few percent to its output, so each block also has two branch rows: the
-outputs of its attention and feed-forward modules. An update row, output
-minus input, would inherit the residual stream's bf16 rounding. The
-free-running pass runs the whole step and compares the output of every block and the
-velocity, which covers the plumbing between blocks. Tolerances come from
-the manifests committed under tests/fixtures/image/oracle/, where each is
-twice the oracle's own bf16 against fp32 gap at the same point. The arrays are read from GMLX_IMAGE_FIXTURES and must
-match those manifests. scripts/image_oracle/check3_z_image.py writes them.
+block_gates.py describes the rows and the two gates that read them. The
+exact gate here runs the base model in the oracle's fp32 arithmetic and
+holds every teacher-forced row, every branch row, every free-running block
+and the velocity to the oracle's fp32 arrays, at 512. At 1024 the fixture
+holds the velocity alone, and the exact gate reads that. Each wrong model
+of FAULTS must fail the exact gate, and only on rows its fault reaches.
+The product gate runs the path a request takes and holds the block rows,
+the free-running blocks and the velocity to the manifest's tolerances.
+The arrays are read from GMLX_IMAGE_FIXTURES and must match the manifests
+committed under tests/fixtures/image/oracle/.
+scripts/image_oracle/check3_z_image.py writes them.
 
 The tiny row runs on the CPU and needs only the self-test fixture. It
 checks the gmlx forward's conventions against diffusers' own code in fp32.
@@ -19,177 +19,20 @@ The real rows need the Z-Image-Turbo GGUF under KQUANT_TEST_GGUF_DIR.
 """
 from __future__ import annotations
 
-import importlib.util
-import json
 import os
-from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 import mlx.core as mx
+import mlx.nn as nn
 
-_ROOT = Path(__file__).resolve().parents[2]
-ORACLE = _ROOT / "tests" / "fixtures" / "image" / "oracle"
-
-
-def _fixtures_module():
-    path = _ROOT / "scripts" / "image_oracle" / "fixtures.py"
-    spec = importlib.util.spec_from_file_location("_image_oracle_fixtures",
-                                                  path)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-fx = _fixtures_module()
-
-
-def committed(name: str) -> dict:
-    return json.loads((ORACLE / f"{name}.manifest.json").read_text())
-
-
-def fixture(name: str) -> tuple[dict, dict]:
-    """Arrays of a fixture, checked against its committed manifest."""
-    if not os.environ.get(fx.ENV):
-        pytest.skip(f"set {fx.ENV} to the image oracle fixture directory")
-    m = committed(name)
-    if not (fx.fixture_root() / m["npz"]).is_file():
-        pytest.skip(f"{m['npz']} is not under {fx.ENV}; run "
-                    f"{m['script']} to write it")
-    return fx.load(name, manifest=m)
-
-
-def _np(a: mx.array) -> np.ndarray:
-    return np.array(a.astype(mx.float32))
-
-
-BRANCHES = ("attention", "feed_forward")
-
-
-@contextmanager
-def recorded_branches(model, store: dict):
-    """Record the attention and feed-forward outputs of every block into
-    ``store`` by name, such as ``layers.3.attention``."""
-    names = {}
-    for group in ("noise_refiner", "context_refiner", "layers"):
-        for i, blk in enumerate(getattr(model, group)):
-            for sub in BRANCHES:
-                names[id(getattr(blk, sub))] = f"{group}.{i}.{sub}"
-    saved = {type(getattr(model.layers[0], sub)): None for sub in BRANCHES}
-
-    def wrap(orig):
-        def call(self, *args, **kwargs):
-            out = orig(self, *args, **kwargs)
-            if id(self) in names:
-                store[names[id(self)]] = out
-            return out
-        return call
-
-    try:
-        for cls in saved:
-            saved[cls] = cls.__call__
-            cls.__call__ = wrap(saved[cls])
-        yield store
-    finally:
-        for cls, orig in saved.items():
-            if orig is not None:
-                cls.__call__ = orig
-
-
-def check3_rows(model, arrays: dict, rows, branches: dict | None = None
-                ) -> dict:
-    """Relative L2, cosine and max abs of every row against the oracle.
-    With ``branches``, also fills it with each block's attention and
-    feed-forward outputs against the oracle's."""
-    act = model.act_dtype
-    sigma = float(arrays["sigma"])
-    lat = mx.array(arrays["latents"])
-    cap = mx.array(arrays["cap_feats"])[None]
-    adaln = mx.array(arrays["t_embedder.out"]).astype(act)
-
-    def feed(key):
-        return mx.array(arrays[key]).astype(act)
-
-    ht, wt = lat.shape[2] // model.cfg.patch, lat.shape[3] // model.cfg.patch
-    n_cap = arrays["context_refiner.0.in"].shape[1]
-    (xc, xs), (cc, cs) = model.rope(ht, wt, n_cap)
-    cos = mx.concatenate([xc, cc], axis=0)
-    sin = mx.concatenate([xs, cs], axis=0)
-
-    got = {"t_embedder": model.adaln(sigma, 1),
-           "x_embed": model.embed_image(lat),
-           "cap_embed": model.embed_caption(cap)}
-    ref = {"t_embedder": arrays["t_embedder.out"],
-           "x_embed": arrays["noise_refiner.0.in"],
-           "cap_embed": arrays["context_refiner.0.in"]}
-    seen: dict = {}
-    with recorded_branches(model, seen):
-        for group, (c, s, mod) in {"noise_refiner": (xc, xs, True),
-                                   "context_refiner": (cc, cs, False),
-                                   "layers": (cos, sin, True)}.items():
-            for i, blk in enumerate(getattr(model, group)):
-                src = f"{group}.0.in" if i == 0 else f"{group}.{i - 1}.out"
-                name = f"{group}.{i}"
-                got[name] = blk(feed(src), c, s, adaln if mod else None)
-                ref[name] = arrays[f"{name}.out"]
-    if branches is not None:
-        for k, v in seen.items():
-            mx.eval(v)
-            branches[k] = fx.compare(_np(v), arrays[f"{k}.out"])
-    last = f"layers.{len(model.layers) - 1}.out"
-    got["final_layer"] = model.final_layer(feed(last), adaln)
-    ref["final_layer"] = arrays["final_layer.out"]
-    out = {}
-    for row in rows:
-        mx.eval(got[row])
-        out[row] = fx.compare(_np(got[row]), ref[row])
-    return out
-
-
-def free_run(model, arrays: dict, blocks=()) -> tuple[dict, dict]:
-    """One free-running step. Returns the output of each named block and
-    the velocity, each measured against the oracle's fp32 run. The block
-    rows see the plumbing between blocks, which teacher forcing skips."""
-    taps: dict = {}
-    v = model(mx.array(arrays["latents"]), float(arrays["sigma"]),
-              mx.array(arrays["cap_feats"])[None],
-              taps=taps if blocks else None)
-    mx.eval(v, *(taps[b] for b in blocks))
-    free = {b: fx.compare(_np(taps[b]), arrays[f"{b}.out"]) for b in blocks}
-    return free, fx.compare(np.array(v), arrays["velocity"])
-
-
-def velocity(model, arrays: dict) -> dict:
-    return free_run(model, arrays)[1]
-
-
-def gate(m: dict, rows: dict | None, vel: dict,
-         free: dict | None = None, branches: dict | None = None
-         ) -> list[str]:
-    """Rows, branch rows, free-running blocks and velocity measures that
-    miss the manifest's tolerances."""
-    tol = m["tolerances"]
-    misses = [f"{r} rel L2 {g['rel_l2']:.3e} > {tol['rows_rel_l2'][r]:.3e}"
-              for r, g in (rows or {}).items()
-              if not g["rel_l2"] <= tol["rows_rel_l2"][r]]
-    misses += [f"branch {b} rel L2 {g['rel_l2']:.3e} > "
-               f"{tol['branch_rel_l2'][b]:.3e}"
-               for b, g in (branches or {}).items()
-               if not g["rel_l2"] <= tol["branch_rel_l2"][b]]
-    misses += [f"free {b} rel L2 {g['rel_l2']:.3e} > "
-               f"{tol['free_rel_l2'][b]:.3e}"
-               for b, g in (free or {}).items()
-               if not g["rel_l2"] <= tol["free_rel_l2"][b]]
-    if not vel["rel_l2"] <= tol["velocity_rel_l2"]:
-        misses.append(f"velocity rel L2 {vel['rel_l2']:.3e} > "
-                      f"{tol['velocity_rel_l2']:.3e}")
-    if not vel["cosine"] >= tol["velocity_cosine_min"]:
-        misses.append(f"velocity cosine {vel['cosine']:.6f} < "
-                      f"{tol['velocity_cosine_min']}")
-    return misses
+from block_gates import (EXACT_TOL, GROUPS, assert_all_dense, check3_rows,
+                         exact_missed, exact_process, exact_products,
+                         free_run, free_running, gate, rerun_exact, thin,
+                         velocity)
+from oracle_fixture import committed, fixture, fx
 
 
 # The tiny model, against diffusers' code on the same weights.
@@ -259,19 +102,237 @@ def turbo(gguf_index):
 
 @pytest.mark.integration
 def test_check3_one_step_block_by_block_at_512(turbo):
+    """The product gate."""
     arrays, m = fixture("check3_z_image_turbo_512")
     t = turbo.timesteps(float(arrays["sigma"]), 1)
     assert np.array_equal(t, arrays["t_embedder.in"])
-    branches: dict = {}
-    rows = check3_rows(turbo, arrays, m["inputs"]["rows"], branches)
-    assert sorted(branches) == sorted(m["inputs"]["branches"])
+    rows = check3_rows(turbo, arrays, m["inputs"]["rows"])
     free, vel = free_run(turbo, arrays, m["inputs"]["free_rows"])
-    misses = gate(m, rows, vel, free, branches)
+    print(f"check3 product 512: above 0.8 of its gate: "
+          f"{thin(m, rows, vel, free) or 'none'}")
+    misses = gate(m, rows, vel, free)
     assert not misses, misses
 
 
 @pytest.mark.integration
 def test_check3_final_velocity_at_1024(turbo):
     arrays, m = fixture("check3_z_image_turbo_1024")
-    misses = gate(m, None, velocity(turbo, arrays))
+    vel = velocity(turbo, arrays)
+    print(f"check3 product 1024: above 0.8 of its gate: "
+          f"{thin(m, None, vel) or 'none'}")
+    misses = gate(m, None, vel)
     assert not misses, misses
+
+
+# The exact gate.
+
+EMBEDS = ("t_embedder", "x_embed", "cap_embed")
+
+
+def exact_step(model, arrays: dict, m: dict, rows=None, free: bool = True
+               ) -> dict:
+    """Name to measure of the step in the oracle's arithmetic: each
+    teacher-forced row of ``rows`` with the branch rows of its block and,
+    with ``free``, each free-running block as ``free <name>`` and the
+    velocity. Without ``rows`` it is every row, and every K-quant product
+    must then have run dense."""
+    names = m["inputs"]["rows"] if rows is None else rows
+    with exact_products(model) as used:
+        branches: dict = {}
+        got = dict(check3_rows(model, arrays, names, branches))
+        got.update(branches)
+        if rows is None:
+            assert sorted(branches) == sorted(m["inputs"]["branches"])
+            assert_all_dense(model, used)
+        if free:
+            blocks, vel = free_run(model, arrays, m["inputs"]["free_rows"],
+                                   stepwise=True)
+            got.update({f"free {b}": g for b, g in blocks.items()})
+            got["velocity"] = vel
+    return got
+
+
+def _blocks(model, groups=GROUPS) -> list:
+    return [blk for g in groups for blk in getattr(model, g)]
+
+
+def _modulated(row: str) -> bool:
+    return row.startswith(("noise_refiner.", "layers."))
+
+
+def _in_block(row: str) -> bool:
+    return row.startswith(GROUPS)
+
+
+def norm_eps_tenfold(mp, model, arrays):
+    """Every RMSNorm of every block, and its q and k norm, at ten times
+    the eps."""
+    for blk in _blocks(model):
+        for mod in (blk.attention, blk.attention_norm1, blk.attention_norm2,
+                    blk.ffn_norm1, blk.ffn_norm2):
+            mp.setattr(mod, "eps", mod.eps * 10)
+
+
+def qk_norm_weights_swapped(mp, model, arrays):
+    for blk in _blocks(model):
+        q, k = blk.attention.q_norm, blk.attention.k_norm
+        qw, kw = q.weight, k.weight
+        mp.setattr(q, "weight", kw)
+        mp.setattr(k, "weight", qw)
+
+
+def rope_one_token_late(mp, model, arrays):
+    """The image rows' rotary tables shifted by one token."""
+    real = model.rope
+
+    def rope(ht, wt, n_cap):
+        (xc, xs), cap = real(ht, wt, n_cap)
+        return (mx.roll(xc, 1, axis=0), mx.roll(xs, 1, axis=0)), cap
+
+    mp.setattr(model, "rope", rope)
+
+
+def modulation_scales_dropped(mp, model, arrays):
+    """Every modulated block keeps its gates and loses its two scales."""
+    for blk in _blocks(model, ("noise_refiner", "layers")):
+        def modulation(adaln, real=blk.modulation):
+            s_msa, g_msa, s_mlp, g_mlp = real(adaln)
+            return mx.zeros_like(s_msa), g_msa, mx.zeros_like(s_mlp), g_mlp
+
+        mp.setattr(blk, "modulation", modulation)
+
+
+def gelu_for_silu(mp, model, arrays):
+    from gmlx.image import ops
+
+    mp.setattr(ops, "swiglu", lambda a, b: nn.gelu(a) * b)
+
+
+def patch_axes_transposed(mp, model, arrays):
+    """The two pixel axes of a patch in the other order."""
+    def patchify(latents):
+        b, c, h, w = latents.shape
+        p = model.cfg.patch
+        x = latents.reshape(b, c, h // p, p, w // p, p)
+        return x.transpose(0, 2, 4, 5, 3, 1).reshape(
+            b, (h // p) * (w // p), p * p * c)
+
+    mp.setattr(model, "patchify", patchify)
+
+
+def timestep_not_reversed(mp, model, arrays):
+    """t = sigma, where the model takes 1 - sigma."""
+    def timesteps(sigma, batch):
+        s = np.broadcast_to(np.asarray(sigma, np.float32), (batch,))
+        return s * np.float32(model.cfg.t_scale)
+
+    mp.setattr(model, "timesteps", timesteps)
+
+
+def caption_rows_first(mp, model, arrays):
+    """The main layers take [caption, image] rows under the tables of
+    [image, caption]."""
+    block = type(model.layers[0])
+    real, first = block.__call__, model.layers[0]
+    n_img = arrays["noise_refiner.0.in"].shape[1]
+
+    def call(self, x, *args, **kwargs):
+        if self is first:
+            x = mx.concatenate([x[:, n_img:], x[:, :n_img]], axis=1)
+        return real(self, x, *args, **kwargs)
+
+    mp.setattr(block, "__call__", call)
+
+
+def velocity_sign(mp, model, arrays):
+    real = model.unpatchify
+    mp.setattr(model, "unpatchify", lambda x, ht, wt: -real(x, ht, wt))
+
+
+# A wrong model is seen when it moves a measure this many times the gate.
+# The weakest one, the norm eps, moves its most moved row 53 times it.
+SEEN = 2.0
+
+# name: (the wrong model, the teacher-forced rows to run or None for all,
+# whether the free run is needed to see it, the rows it can reach).
+FAULTS = {
+    "norm eps x10": (norm_eps_tenfold, None, False, _in_block),
+    "q and k norm weights swapped": (
+        qk_norm_weights_swapped, None, False, _in_block),
+    "rope one token late": (rope_one_token_late, None, False, _modulated),
+    "modulation scales dropped": (
+        modulation_scales_dropped, None, False, _modulated),
+    "gelu for silu": (
+        gelu_for_silu, None, False,
+        lambda r: _in_block(r) and not r.endswith(".attention")),
+    "patch axes transposed": (
+        patch_axes_transposed, ["x_embed"], False, lambda r: r == "x_embed"),
+    "timestep not reversed": (
+        timestep_not_reversed, ["t_embedder"], False,
+        lambda r: r == "t_embedder"),
+    "caption rows first": (
+        caption_rows_first, [], True,
+        lambda r: r == "velocity" or r.startswith("free layers.")
+        or r == "free final_layer"),
+    "velocity sign": (velocity_sign, [], True, lambda r: r == "velocity"),
+}
+
+
+def fault_misses(monkeypatch, model, arrays: dict, m: dict, name: str
+                 ) -> dict:
+    """The measures the wrong model ``name`` misses under the exact gate.
+    It must miss one by SEEN times the gate at least, and none outside the
+    rows its fault reaches."""
+    apply, rows, free, reach = FAULTS[name]
+    with monkeypatch.context() as mp:
+        apply(mp, model, arrays)
+        missed = exact_missed(exact_step(model, arrays, m, rows, free))
+    assert missed and max(missed.values()) >= SEEN * EXACT_TOL, (name, missed)
+    stray = sorted(r for r in missed if not reach(r))
+    assert not stray, (name, stray)
+    return missed
+
+
+@pytest.mark.integration
+def test_check3_exact_gate_at_512(turbo, request, monkeypatch):
+    """The base model matches the oracle on every row in the oracle's
+    arithmetic, and each wrong model of FAULTS fails."""
+    arrays, m = fixture("check3_z_image_turbo_512")
+    if not exact_process():
+        return rerun_exact(request, "check3 exact")
+    got = exact_step(turbo, arrays, m)
+    assert len(got) == (len(m["inputs"]["rows"]) + len(m["inputs"]["branches"])
+                        + len(m["inputs"]["free_rows"]) + 1)
+    forced = {r: g["rel_l2"] for r, g in got.items() if not free_running(r)}
+    free = {r: g["rel_l2"] for r, g in got.items() if r not in forced}
+    top, ftop = max(forced, key=forced.get), max(free, key=free.get)
+    print(f"check3 exact 512: within {forced[top]:.2e} of the oracle on "
+          f"{len(forced)} teacher-forced rows, at {top}, and within "
+          f"{free[ftop]:.2e} on {len(free)} free-running measures, at "
+          f"{ftop}, gate {EXACT_TOL:.0e}")
+    assert not exact_missed(got), exact_missed(got)
+    assert len(FAULTS) >= 6
+    for name in FAULTS:
+        missed = fault_misses(monkeypatch, turbo, arrays, m, name)
+        low, high = min(missed, key=missed.get), max(missed, key=missed.get)
+        print(f"check3 exact 512, {name}: {len(missed)} measures miss, "
+              f"from {low} at {missed[low]:.2e} to {high} at "
+              f"{missed[high]:.2e}")
+    # The model is the right one again.
+    again = exact_step(turbo, arrays, m, ["x_embed", "t_embedder",
+                                          "layers.0"], free=False)
+    assert not exact_missed(again), exact_missed(again)
+
+
+@pytest.mark.integration
+def test_check3_exact_velocity_at_1024(turbo, request):
+    """The fixture at 1024 holds no block arrays, so the exact gate there
+    is the free-running velocity."""
+    arrays, m = fixture("check3_z_image_turbo_1024")
+    if not exact_process():
+        return rerun_exact(request, "check3 exact")
+    with exact_products(turbo):
+        vel = free_run(turbo, arrays, stepwise=True)[1]
+    print(f"check3 exact 1024: velocity within {vel['rel_l2']:.2e} of the "
+          f"oracle, gate {EXACT_TOL:.0e}")
+    assert vel["rel_l2"] <= EXACT_TOL, vel

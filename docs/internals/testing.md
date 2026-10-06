@@ -152,9 +152,24 @@ the angle at sqrt(2) times the oracle's own, a tighter gate than twice.
 A late block adds a few percent to its output, so an error in the
 block's own computation hides under the bfloat16 rounding of its output.
 Each block therefore also has two branch rows, the outputs of its
-attention and feed-forward modules, at twice the oracle's own gap on
-each. An update row, output minus input, would inherit the residual
-stream's bfloat16 rounding and hide the same error.
+attention and feed-forward modules. An update row, output minus input,
+would inherit the residual stream's bfloat16 rounding and hide the same
+error.
+
+Checks 3 and 7 read one denoise step block by block through two gates,
+which `tests/image/block_gates.py` holds for both. The exact gate checks
+structure. It runs the model in the oracle's float32 arithmetic, with
+float32 activations, exact float32 products, every K-quant product on its
+dequantized weight and the stock ops, and holds every row and branch row
+to the oracle at `5e-5`. A wrong model fails it: check 3 lists structural
+faults such as swapped q and k norm weights, and check 7 lists wrong
+adapter tables. MLX reads `MLX_ENABLE_TF32` once per process, so these
+tests rerun themselves in a child process with `MLX_ENABLE_TF32=0` and
+the image ops on the stock path. The product gate runs the path a
+request takes and holds the block rows, the free-running blocks and the
+velocity to the manifest's tolerances. It does not read the branch rows.
+The oracle's gap on a branch row is one rounding sample, and a right
+model lands on either side of twice that.
 The oracle dequantizes GGUF blocks in float32
 arithmetic, as ggml does. Stock diffusers keeps the block scales in
 float16, which moves K-quant weights by about 8e-4 in relative L2, and

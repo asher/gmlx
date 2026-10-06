@@ -11,28 +11,21 @@ the dialects that carry it. The tolerance is the manifest's: twice the
 oracle's own bf16 against fp32 gap with the adapter merged, check 3's rule.
 scripts/image_oracle/check7_z_image_lora.py writes the fixtures.
 
-The step is gated block by block, as check 3 gates the base model: each
-block of the DiT is fed the merged oracle model's fp32 input to it and
-compared with that model's output, and so are its attention and
-feed-forward modules. Two gates read those rows.
+The step is gated block by block, as check 3 gates the base model, with
+the two gates of block_gates.py over the merged oracle model's rows.
 
-The exact gate runs fp32 activations with exact float32 products and every
-K-quant product on its dequantized weight, which is the arithmetic the
-oracle's fp32 run does. The right table then matches the oracle on every
-row to a few parts in a million, and the gate is EXACT_TOL. Each wrong
-table must fail it: the pairs of a block group left out, the strength at
-0.9 and 1.1 times its value, and q swapped with k. A left out group moves
-the rows of that group alone, by the adapter's effect as the manifest
-records it. MLX reads MLX_ENABLE_TF32 once per process, so with TF32 on
-the test reruns itself in a child process with it off.
+The exact gate holds the right table to the oracle on every row and every
+branch row at EXACT_TOL. Each wrong table must fail it: the pairs of a
+block group left out, the strength at 0.9 and 1.1 times its value, and q
+swapped with k. A left out group moves the rows of that group alone, by
+the adapter's effect as the manifest records it.
 
-The product gate runs the path a request takes, bf16 activations on the
-K-quant kernels, at the manifest's tolerances: every block row, the free
-running blocks and the velocity at the rule, and the branch rows at
-BRANCH_ALLOWANCE times it. The velocity sums 34 blocks, and a fault in one
-block or a strength a tenth off moves it less than its tolerance. The
-block rows see a wrong table where the oracle's effect puts it two
-tolerances out, and the mutation rows record which ones that is.
+The product gate holds every block row, the free-running blocks and the
+velocity to the manifest's tolerances. The velocity sums 34 blocks, and a
+fault in one block or a strength a tenth off moves it less than its
+tolerance. The block rows see a wrong table where the oracle's effect
+puts it two tolerances out, and the mutation rows record which ones that
+is.
 
 The delta half of check 7 runs on the CPU in test_image_lora_map.py. The
 rows here need the GGUF under KQUANT_TEST_GGUF_DIR and the arrays under
@@ -40,10 +33,7 @@ GMLX_IMAGE_FIXTURES.
 """
 from __future__ import annotations
 
-import contextlib
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import mlx.core as mx
@@ -52,7 +42,9 @@ import pytest
 
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import committed, fixture, fx
-from test_image_check3 import check3_rows, free_run, gate
+from block_gates import (EXACT_TOL, assert_all_dense, check3_rows,
+                         exact_missed, exact_process, exact_products,
+                         free_run, gate, rerun_exact, thin)
 
 NAME = "check7_z_image_turbo_lora_512"
 
@@ -95,15 +87,6 @@ def step(pipe, arrays, table=None) -> np.ndarray:
     return np.array(v)
 
 
-# A branch row of a K-quant layer carries the kernels' own precision, which
-# fp32 activations do not lower: the base model stands at 0.81 of the
-# rule's tolerance on its worst branch row in check 3. The rule's tolerance
-# is one sample of the oracle's bf16 rounding on that row and moves by up
-# to a factor of 2 between fixtures, so a right table reaches 1.31 of it
-# (measured over the five fixtures). The product gate holds the branch
-# rows at this multiple of the rule. The exact gate has no such term.
-BRANCH_ALLOWANCE = 1.5
-
 # The block fixture read last. A fixture is about 1.7 GiB, and the rows of
 # one variant or adapter run next to each other.
 _BLOCKS: dict = {}
@@ -123,76 +106,61 @@ def need_blocks(name: str) -> None:
 
 
 def blocks_fixture(name: str) -> tuple[dict, dict]:
-    """The block fixture ``name`` with the product gate's branch
-    tolerances, or a skip without it."""
+    """The block fixture ``name``, or a skip without it."""
     need_blocks(name)
     if name not in _BLOCKS:
         _BLOCKS.clear()
-        arrays, m = fixture(name)
-        tol = m["tolerances"]
-        tol["branch_rel_l2"] = {b: t * BRANCH_ALLOWANCE
-                                for b, t in tol["branch_rel_l2"].items()}
-        _BLOCKS[name] = arrays, m
+        _BLOCKS[name] = fixture(name)
     return _BLOCKS[name]
 
 
-def block_rows(pipe, arrays: dict, m: dict, entries, free: bool = True):
-    """Every teacher-forced row and branch row of the step under the
-    table of ``entries``, and the free-running block rows, each against
-    the merged oracle model."""
+def block_rows(pipe, arrays: dict, m: dict, entries, free: bool = True,
+               branches: bool = False):
+    """Every teacher-forced row of the step under the table of
+    ``entries``, the branch rows with ``branches`` and the free-running
+    block rows with ``free``, each against the merged oracle model."""
     from gmlx.image import api
     from gmlx.image.lora import install
 
     tid = api.define_patch_table(pipe, entries)
     prev = install.activate(pipe, tid)
     try:
-        branches: dict = {}
-        rows = check3_rows(pipe.dit, arrays, m["inputs"]["rows"], branches)
+        seen: dict | None = {} if branches else None
+        rows = check3_rows(pipe.dit, arrays, m["inputs"]["rows"], seen)
         blocks = free_run(pipe.dit, arrays, m["inputs"]["free_rows"])[0] \
             if free else None
     finally:
         install.restore(pipe, prev)
-    assert sorted(branches) == sorted(m["inputs"]["branches"])
-    return rows, branches, blocks
+    if seen is not None:
+        assert sorted(seen) == sorted(m["inputs"]["branches"])
+    return rows, seen, blocks
 
 
-def block_misses(m: dict, rows: dict, branches: dict) -> dict:
-    """Row or branch row name to (relative L2, tolerance) for each one
-    that misses the manifest's tolerance."""
-    tol = m["tolerances"]
-    out = {r: (g["rel_l2"], tol["rows_rel_l2"][r]) for r, g in rows.items()
-           if not g["rel_l2"] <= tol["rows_rel_l2"][r]}
-    out.update({b: (g["rel_l2"], tol["branch_rel_l2"][b])
-                for b, g in branches.items()
-                if not g["rel_l2"] <= tol["branch_rel_l2"][b]})
-    return out
+def block_misses(m: dict, rows: dict) -> dict:
+    """Row name to (relative L2, tolerance) for each row that misses the
+    manifest's tolerance."""
+    tol = m["tolerances"]["rows_rel_l2"]
+    return {r: (g["rel_l2"], tol[r]) for r, g in rows.items()
+            if not g["rel_l2"] <= tol[r]}
 
 
 def block_gate(pipe, name: str, entries, label: str,
                velocity: bool = True) -> None:
-    """Gate the step under ``entries`` block by block against the block
-    fixture ``name``: teacher-forced rows, branch rows, free-running
-    blocks and, with ``velocity``, the velocity through
-    ``denoise_step``."""
+    """The product gate of the step under ``entries`` against the block
+    fixture ``name``: teacher-forced rows, free-running blocks and, with
+    ``velocity``, the velocity through ``denoise_step``."""
     from gmlx.image import api
 
     arrays, m = blocks_fixture(name)
-    rows, branches, free = block_rows(pipe, arrays, m, entries)
+    rows, _, free = block_rows(pipe, arrays, m, entries)
     vel = fx.compare(step(pipe, arrays, api.define_patch_table(
         pipe, entries)), arrays["velocity"])
     tol = m["tolerances"]
-    worst = {kind: max(((g["rel_l2"] / tol[key][n], n)
-                        for n, g in got.items()))
-             for kind, key, got in (("row", "rows_rel_l2", rows),
-                                    ("branch", "branch_rel_l2", branches),
-                                    ("free block", "free_rel_l2", free))}
-    print(f"check7 blocks {label}: "
-          + "; ".join(f"worst {k} {n} at {r:.2f} of its tolerance"
-                      for k, (r, n) in worst.items())
-          + f"; velocity {vel['rel_l2']:.4e} of "
+    print(f"check7 blocks {label}: velocity {vel['rel_l2']:.4e} of "
           f"{tol['velocity_rel_l2']:.4e}, cosine {vel['cosine']:.6f} of "
-          f"{tol['velocity_cosine_min']:.6f}")
-    misses = [x for x in gate(m, rows, vel, free, branches)
+          f"{tol['velocity_cosine_min']:.6f}; above 0.8 of its gate: "
+          f"{thin(m, rows, vel, free) or 'none'}")
+    misses = [x for x in gate(m, rows, vel, free)
               if velocity or not x.startswith("velocity ")]
     assert not misses, misses
 
@@ -234,37 +202,36 @@ def _in_group(row: str, group: str) -> bool:
 
 
 def visible(m: dict, kind: str, arg) -> float:
-    """How far a mutation moves its most moved row, in tolerances of that
-    row, from the adapter's effect on each block as the oracle measured
-    it. A left out group moves a row of the group by the whole effect, a
-    strength factor f by |1 - f| of it, and swapped q and k move an
-    attention row by about half of it, since two of its four weights
-    take the wrong pairs."""
+    """How far a mutation is sure to move its most moved block row, in
+    tolerances of that row, from the adapter's effect on each block as
+    the oracle measured it. A left out group moves a row of the group by
+    the whole effect and a strength factor f by |1 - f| of it. Swapped q
+    and k move a block row by a part of the effect that the manifest does
+    not record, so the product gate is never sure of that one."""
     effect = m["results"]["adapter_effect_teacher_forced"]
-    tol = {**m["tolerances"]["rows_rel_l2"],
-           **m["tolerances"]["branch_rel_l2"]}
-    over = {r: e / tol[r] for r, e in effect.items()}
+    tol = m["tolerances"]["rows_rel_l2"]
+    over = {r: e / tol[r] for r, e in effect.items() if r in tol}
     if kind == "group":
         return max(v for r, v in over.items() if _in_group(r, arg))
     if kind == "strength":
         return abs(1 - arg) * max(over.values())
-    return 0.5 * max(v for r, v in over.items() if r.endswith(".attention"))
+    return 0.0
 
 
 def mutation_misses(pipe, name: str, entries, label: str) -> dict:
-    """Mutation name to (the rows it misses under the block gate of
+    """Mutation name to (the rows it misses under the product gate of
     fixture ``name``, whether the oracle's effect says the gate must see
     it). The right table misses none. A block fed the oracle's input
     shows a fault in its own pairs only, so the rows a left out group
     misses are rows of that group. A mutation the effect says is visible
     must miss a row."""
     arrays, m = blocks_fixture(name)
-    rows, branches, _ = block_rows(pipe, arrays, m, entries, free=False)
-    assert not block_misses(m, rows, branches)
+    rows, _, _ = block_rows(pipe, arrays, m, entries, free=False)
+    assert not block_misses(m, rows)
     out = {}
     for mutation, (wrong, kind, arg) in mutations(pipe, entries).items():
-        rows, branches, _ = block_rows(pipe, arrays, m, wrong, free=False)
-        missed = block_misses(m, rows, branches)
+        rows, _, _ = block_rows(pipe, arrays, m, wrong, free=False)
+        missed = block_misses(m, rows)
         reach = visible(m, kind, arg)
         if kind == "group":
             assert all(_in_group(r, arg) for r in missed), (mutation,
@@ -281,78 +248,32 @@ def mutation_misses(pipe, name: str, entries, label: str) -> dict:
     return out
 
 
-# The exact gate. The right table measures 6.7e-6 at most over the five
-# fixtures, and the weakest wrong table moves its most moved row by 6.4e-4.
-EXACT_TOL = 5e-5
-
-
-def tf32() -> bool:
-    return os.environ.get("MLX_ENABLE_TF32", "1") != "0"
-
-
-def rerun_without_tf32(request) -> None:
-    """Rerun this test in a child process with TF32 off, where it gates."""
-    env = dict(os.environ, MLX_ENABLE_TF32="0")
-    r = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
-         request.node.nodeid], cwd=request.config.rootpath, env=env,
-        capture_output=True, text=True)
-    for line in r.stdout.splitlines():
-        if "check7 exact" in line:
-            print(line[line.index("check7 exact"):])
-    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert " passed" in r.stdout, r.stdout[-2000:]
-
-
-@contextlib.contextmanager
-def exact_products(dit):
-    """Run ``dit`` in the oracle's fp32 arithmetic: fp32 activations, and
-    every K-quant product as a float32 product on the dequantized weight.
-    The dequantized weight is a node of the lazy graph, so one eval holds
-    the weights of one block. The adapter path is the product path's."""
-    import mlx_kquant as kq
-    from mlx_kquant.nn import KQuantLinear
-
-    def dense(self, x, lora=None):
-        w = kq.dequantize(self["weight"], self["scales"], self.kquant_type,
-                          mx.float32)
-        y = x @ w.T
-        return y + self["bias"] if "bias" in self else y
-
-    act, call = dit.act_dtype, KQuantLinear.__call__
-    dit.act_dtype, KQuantLinear.__call__ = mx.float32, dense
-    try:
-        yield
-    finally:
-        dit.act_dtype, KQuantLinear.__call__ = act, call
-
-
 def exact_rows(pipe, arrays: dict, m: dict, entries) -> dict:
-    """Relative L2 of every teacher-forced row and branch row under the
-    table of ``entries`` in the oracle's arithmetic."""
-    with exact_products(pipe.dit):
-        rows, branches, _ = block_rows(pipe, arrays, m, entries, free=False)
-    return {r: g["rel_l2"] for r, g in {**rows, **branches}.items()}
+    """Every teacher-forced row and branch row under the table of
+    ``entries`` in the oracle's arithmetic."""
+    with exact_products(pipe.dit) as used:
+        rows, branches, _ = block_rows(pipe, arrays, m, entries, free=False,
+                                       branches=True)
+    assert_all_dense(pipe.dit, used)
+    return {**rows, **branches}
 
 
 def exact_gate(pipe, name: str, entries, label: str) -> None:
     """The right table matches the merged oracle model on every row, and
     each wrong table of ``mutations`` fails where its fault is."""
-    assert not tf32(), "the exact gate needs MLX_ENABLE_TF32=0"
     arrays, m = blocks_fixture(name)
     effect = m["results"]["adapter_effect_teacher_forced"]
     right = exact_rows(pipe, arrays, m, entries)
-    top = max(right, key=right.get)
+    top = max(right, key=lambda r: right[r]["rel_l2"])
     print(f"check7 exact {label}: the right table is within "
-          f"{right[top]:.2e} of the oracle on {len(right)} rows, at {top}, "
-          f"gate {EXACT_TOL:.0e}")
-    assert right[top] <= EXACT_TOL, (top, right[top])
+          f"{right[top]['rel_l2']:.2e} of the oracle on {len(right)} rows, "
+          f"at {top}, gate {EXACT_TOL:.0e}")
+    assert not exact_missed(right), exact_missed(right)
     wrong = mutations(pipe, entries)
     assert {"strength x0.9", "strength x1.1", "q and k swapped"} <= set(wrong)
     assert sum(k.endswith(" left out") for k in wrong) >= 3, sorted(wrong)
     for mutation, (table, kind, arg) in wrong.items():
-        got = exact_rows(pipe, arrays, m, table)
-        missed = {r: d for r, d in got.items() if not d <= EXACT_TOL}
+        missed = exact_missed(exact_rows(pipe, arrays, m, table))
         assert missed, (label, mutation)
         top = max(missed, key=missed.get)
         print(f"check7 exact {label}, {mutation}: {len(missed)} rows miss, "
@@ -449,8 +370,8 @@ def test_check7_exact_block_gate_at_512(pipe, tmp_path, request, variant):
     oracle's arithmetic, and all eight wrong tables fail."""
     name = f"{NAME}_{variant}_blocks"
     need_blocks(name)
-    if tf32():
-        return rerun_without_tf32(request)
+    if not exact_process():
+        return rerun_exact(request, "check7 exact")
     entries = _variant_entries(pipe, tmp_path, variant)
     assert len(mutations(pipe, entries)) == 8
     exact_gate(pipe, name, entries, variant)
@@ -461,9 +382,9 @@ def test_check7_exact_block_gate_at_512(pipe, tmp_path, request, variant):
 def test_check7_the_product_gate_fails_the_wrong_tables_it_can_see(
         pipe, tmp_path, variant):
     """Which wrong tables the product gate fails. ``mutation_misses``
-    asserts each one that the oracle's effect puts two tolerances out. The
-    synthetic adapter is on every block, strongly enough that this covers
-    the five left out groups."""
+    asserts each one that the oracle's effect puts two tolerances out on
+    a block row, which for the synthetic adapter is its last main layer
+    left out."""
     missed = mutation_misses(pipe, f"{NAME}_{variant}_blocks",
                              _variant_entries(pipe, tmp_path, variant),
                              variant)
@@ -472,6 +393,6 @@ def test_check7_the_product_gate_fails_the_wrong_tables_it_can_see(
     blind = sorted(k for k, (rows, _) in missed.items() if not rows)
     print(f"check7 product mutations {variant}: the gate fails {seen}; it "
           f"passes {blind}")
-    for mutation, (rows, sure) in missed.items():
-        if mutation.endswith(" left out"):
-            assert sure and rows, mutation
+    last = max((k for k in missed if k.startswith("layers.")),
+               key=lambda k: int(k.split()[0].split(".")[1]))
+    assert missed[last][1] and missed[last][0], last

@@ -15,12 +15,13 @@ pairs.
 The delta half builds its reference from the file's own keys with a
 mapping written here: q, k and v of a block are rows 0, 1 and 2 of the
 fused qkv weight in thirds. The step half is check 3's step at 512 under
-the patch table, gated at twice the oracle's own bf16 against fp32 gap
-with the adapter merged: the velocity, and block by block as in
+the patch table, gated on the velocity and block by block as in
 test_image_check7.py. The exact gate there holds each file's table to the
 merged oracle model on every row and fails every wrong table, whatever
-the file's strength. The product gate fails the wrong tables that the
-file moves a block far enough to show, and its rows record which.
+the file's strength. The product gate holds the path a request takes to
+twice the oracle's own bf16 against fp32 gap with the adapter merged. It
+fails the wrong tables that the file moves a block row far enough to
+show, and its rows record which.
 scripts/image_oracle/check7_z_image_community.py writes the fixtures.
 """
 from __future__ import annotations
@@ -36,9 +37,9 @@ import pytest
 
 from lora_fixtures import reference_delta, rel_l2
 from oracle_fixture import ORACLE, committed, fixture, fx
+from block_gates import exact_process, rerun_exact
 from test_image_check7 import (block_gate, exact_gate, mutation_misses,
-                               need_blocks, rerun_without_tf32, step, tf32,
-                               turbo_pipe)
+                               need_blocks, step, turbo_pipe)
 
 NAME = "check7_z_image_turbo_community_512"
 ENV = "GMLX_TEST_LORA_DIR"
@@ -268,8 +269,8 @@ def test_check7_community_exact_block_gate_at_512(pipe, request, aid):
     name = f"{NAME}_{aid}_blocks"
     need_blocks(name)
     _file(aid)
-    if tf32():
-        return rerun_without_tf32(request)
+    if not exact_process():
+        return rerun_exact(request, "check7 exact")
     exact_gate(pipe, name, _entries(pipe, aid), aid)
 
 
