@@ -1179,7 +1179,13 @@ def test_check7_exact_gate_under_split_at_512(real, tmp_path, request,
 def test_check7_site_gate_at_512(real, tmp_path, variant):
     """Every call of a linear leaf on the path a request takes, the
     leaves under the adapter included, is within its site gate of the
-    exact product on the same input."""
+    exact product on the same input.
+
+    The site gate holds the arithmetic of an adapted leaf, and it is not
+    the gate that shows the adapter is there: at the gain of the fixture
+    the delta of the adapter is under the gate of its leaf at part of
+    the calls, so a site would pass there without the delta. The exact
+    gate leaves the adapter out of each block in turn."""
     arrays, m, _, tid = _real_table(real, tmp_path, variant)
     sites: dict = {}
     shares: dict = {}
@@ -1193,10 +1199,19 @@ def test_check7_site_gate_at_512(real, tmp_path, variant):
     low, mid, high = (float(np.quantile(list(shares.values()), q))
                       for q in (0.0, 0.5, 1.0))
     under = sorted(k for k, v in shares.items() if not v > gate)
+    kinds: dict = {}
+    for (path, _), v in shares.items():
+        kinds.setdefault(path.split(".", 2)[2], []).append(v)
     print(f"qwen check7 sites {variant}: the delta is {low:.2e} to "
           f"{high:.2e} of a leaf output (median {mid:.2e}) over "
           f"{len(shares)} calls, against a site gate of {gate:.2e}; "
-          f"{len(under)} calls are not above the gate: {under[:8]}")
+          f"{len(under)} calls are not above the gate, in blocks "
+          f"{sorted({int(p.split('.')[1]) for p, _ in under})}; by leaf, "
+          "smallest and median: "
+          + ", ".join(f"{k} {min(v):.2e} {float(np.median(v)):.2e}"
+                      for k, v in sorted(kinds.items())))
+    # Most calls, not all, would miss their site without the delta.
+    assert mid > gate and len(under) < len(shares) / 2, (mid, len(under))
     assert {p for p, _ in sites} == set(install.linear_leaves(real.dit))
     assert {p for (p, _), (_, gate) in sites.items()
             if gate == 6 * qg.SITE_UNIT} == adapted
