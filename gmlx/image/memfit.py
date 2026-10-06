@@ -75,6 +75,18 @@ class StepFit:
 # percent and the base covers every cell.
 Z_IMAGE_STEP = StepFit(base=1.0 * GiB, k=5.5)
 
+# One Qwen-Image 2.1 Q4_K_M step through ``api.sample`` under bounded_cache
+# on an M5 Max, in fresh processes, over the settled process and less the
+# prefix state of the conditioning: 0.73, 1.17, 1.94 and 5.63 GiB at 256,
+# 1024, 4096 and 16384 image rows with 512 text rows, and 0.61, 1.18, 1.75
+# and 5.34 GiB with 36. At 16384 rows the active peak is 2.5 GiB above the
+# weights and the state, and the cache holds 2.6 GiB against its bound of
+# 2. A line in the formula bytes through the 4096 and 16384 row cells has
+# a slope of 3.6. The slope is raised 10 percent, to 4.0 rounded up, and
+# the base covers every cell. The prefill of 512 text rows reads 0.18 GiB
+# above its state, under the base.
+QWEN_IMAGE21_STEP = StepFit(base=1.0 * GiB, k=4.0)
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -333,9 +345,16 @@ class PeakRow:
     width: int                      # widest outputs per row, in elements
     step: StepFit                   # step footprint from the formula
     prefix: PrefixRow | None = None
+    prefill: StepFit | None = None  # prefill footprint, the step's if None
     encode_row_bytes: int = 0       # encoder activation bytes per token,
                                     # times ENCODE_LIVE
     text_rows: int = 512
+
+    def step_peak(self, step: int, prefill: int) -> int:
+        """Bytes of the wider of a step and a prefill, from the formula
+        bytes of each."""
+        return max(self.step.bytes(step),
+                   (self.prefill or self.step).bytes(prefill))
 
 
 PEAKS = {
@@ -345,17 +364,20 @@ PEAKS = {
     # A step runs the target rows alone: the fused MLP product and its
     # gated half are the widest outputs. The sizes are those the
     # fingerprint holds the file to: 32 blocks, 4096 wide, a 12288 MLP.
-    # The step row is Z-Image's until a Qwen-Image 2.1 step is measured.
-    # No term counts the attention scores, heads x queries x keys, since
-    # the stock attention op was not seen to hold them: a Z-Image step at
-    # 2048x2048, 16896 rows and 30 heads, peaks at 9.6 GiB where the scores
-    # alone are 16 GiB in bf16. That is one machine and one model. Were
-    # the scores held here, a step would add 1.1 GiB at 1024x1024,
-    # 16.5 GiB at 2048x2048 and 10.1 GiB with nine 1024 pixel references.
+    # A prefix state measures exactly its cache bytes. No term counts the
+    # attention scores, heads x queries x keys, since the stock attention
+    # op does not hold them on the machine measured: alone, at the shape
+    # of a step, it peaks at its output, 0.03 GiB at 1024x1024 and
+    # 0.13 GiB at 2048x2048, where the scores are 1.1 and 16.5 GiB in
+    # bf16. That is one machine, an M5 Max, and no reference image. Were
+    # the scores held, a step would add those figures, and 10.1 GiB with
+    # nine 1024 pixel references. The prefill of a prefix with reference
+    # images is not measured, so a prefill keeps Z-Image's slope.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
-                            width=24576 + 12288, step=Z_IMAGE_STEP,
+                            width=24576 + 12288, step=QWEN_IMAGE21_STEP,
                             prefix=PrefixRow(blocks=32, dim=4096,
                                              token_px=16),
+                            prefill=Z_IMAGE_STEP,
                             encode_row_bytes=3 * 12288 * 2),
 }
 
@@ -571,7 +593,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
         t = dict(terms)
-        t["step_peak"] = row.step.bytes(max(b * step_one, prefill))
+        t["step_peak"] = row.step_peak(b * step_one, prefill)
         t["decode_peak"] = int(tiled_decode if tiled else full_decode)
         t["encode_peak"] = int(encode_peak)
         resident = sum(t[n] for n in ("dit", "encoder", "vae", "mmproj",
@@ -630,7 +652,7 @@ def _ref_hint(row: PeakRow, plan: MemoryPlan, image: int, text: int,
         cache, step, prefill = prefix_terms(row, image, text, n, px,
                                             itemsize)
         return (conds * cache
-                + row.step.bytes(max(plan.rows * step, prefill))) <= room
+                + row.step_peak(plan.rows * step, prefill)) <= room
 
     count = max((n for n in range(refs + 1) if fits(n, ref_px)), default=0)
     side = next((s for s in range(ref_px, 0, -row.prefix.token_px)

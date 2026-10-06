@@ -117,9 +117,11 @@ def test_a_qwen_step_holds_the_joined_keys_and_the_prefill(q_view):
     step, prefill = image + join(prefix + 4096), prefix * 36864 * 2
     assert step < prefill < 2 * step
     p = plan_memory(q_view, 0, 0, refs=2, ref_px=1024, **kw)
-    assert p.rows == 1 and p.terms["step_peak"] == row.step.bytes(prefill)
+    assert p.rows == 1 and p.terms["step_peak"] == row.prefill.bytes(prefill)
+    assert row.prefill.bytes(prefill) > row.step.bytes(step)
     p = plan_memory(q_view, 0, 0, refs=2, ref_px=1024, cfg=4.0, **kw)
     assert p.rows == 2 and p.terms["step_peak"] == row.step.bytes(2 * step)
+    assert row.step.bytes(2 * step) > row.prefill.bytes(prefill)
     assert p.terms["prefix_cache"] == 2 * 32 * prefix * 4096 * 2 * 2
     # A family without a prefix has neither term.
     z = memfit.PEAKS["z_image"]
@@ -160,8 +162,8 @@ def test_prefix_rows_of_the_conditionings_replace_the_counts(q_view,
         g = plan_memory(q_view, 0, 0, cfg=4.0, prefix_rows=rows, **kw)
         assert g.rows == 2
         assert g.terms["prefix_cache"] == pos[0] + neg[0]
-        assert g.terms["step_peak"] == row.step.bytes(max(2 * pos[1],
-                                                          pos[2]))
+        assert g.terms["step_peak"] == max(row.step.bytes(2 * pos[1]),
+                                           row.prefill.bytes(pos[2]))
     # A conditioning the request does not name counts as text rows, and
     # one it does not run is left out.
     h = plan_memory(q_view, 0, 0, cfg=4.0, prefix_rows=[4608], **kw)
@@ -400,6 +402,57 @@ def test_the_step_row_covers_the_measured_footprints():
     row = memfit.PEAKS["z_image"]
     for rows, gib in MEASURED_STEP.items():
         assert row.step.bytes(rows * row.width * 2) >= gib * GiB, rows
+
+
+# Footprints in GiB of one Qwen-Image 2.1 Q4_K_M step through api.sample
+# under bounded_cache on an M5 Max, over the settled process, by (image
+# rows, text rows). Each holds the prefix state of its text rows, so the
+# plan covers it with the state and the step peak.
+MEASURED_QWEN_STEP = {(256, 512): 0.98, (256, 36): 0.63,
+                      (1024, 512): 1.43, (1024, 36): 1.20,
+                      (4096, 512): 2.19, (4096, 36): 1.77,
+                      (16384, 512): 5.88, (16384, 36): 5.37}
+# The prefill of a conditioning alone, over the footprint before it, by
+# text rows. It holds the state.
+MEASURED_QWEN_PREFILL = {512: 0.43, 36: 0.06}
+
+
+def test_the_qwen_step_row_covers_the_measured_footprints():
+    row = memfit.PEAKS["qwen_image21"]
+    assert row.step is memfit.QWEN_IMAGE21_STEP
+    for (image, text), gib in MEASURED_QWEN_STEP.items():
+        state, step, prefill = memfit.prefix_row_terms(row, image, text, 2)
+        assert state == row.prefix.cache_bytes(text, 2)
+        assert state + row.step.bytes(step) >= gib * GiB, (image, text)
+        # The row is a fit, not a ceiling far above the readings.
+        assert state + row.step.bytes(step) <= 2.0 * gib * GiB, (image,
+                                                                 text)
+    for text, gib in MEASURED_QWEN_PREFILL.items():
+        state, _, prefill = memfit.prefix_row_terms(row, 256, text, 2)
+        assert state + row.step_peak(0, prefill) >= gib * GiB, text
+
+
+def test_a_prefill_keeps_its_own_fit(q_view):
+    """No prefill of a prefix with reference images is measured, so the
+    step fit of Qwen-Image 2.1 does not price one."""
+    row = memfit.PEAKS["qwen_image21"]
+    assert row.prefill is memfit.Z_IMAGE_STEP
+    assert row.prefill.k > row.step.k and row.prefill.base >= row.step.base
+    assert row.step_peak(GiB, 0) == row.step.bytes(GiB)
+    assert row.step_peak(0, GiB) == row.prefill.bytes(GiB)
+    assert row.step_peak(GiB, GiB) == row.prefill.bytes(GiB)
+    # Nine 1024 pixel references under guidance: the prefill is the term.
+    kw = dict(family="qwen_image21", height=1024, width=1024, cfg=4.0,
+              budget=BUDGET_128, overcommit=False)
+    p = plan_memory(q_view, 0, 0, refs=9, ref_px=1024, **kw)
+    _, step, prefill = memfit.prefix_terms(row, 4096, 512, 9, 1024, 2)
+    assert p.terms["step_peak"] == row.prefill.bytes(prefill)
+    assert row.prefill.bytes(prefill) > row.step.bytes(2 * step)
+    # A row without a prefill fit prices both by its step fit.
+    z = memfit.PEAKS["z_image"]
+    assert z.prefill is None
+    assert z.step_peak(GiB, 2 * GiB) == z.step.bytes(2 * GiB)
+    assert z.step_peak(GiB, 0) == z.step.bytes(GiB)
 
 
 def test_the_vae_rows_cover_the_measured_footprints():

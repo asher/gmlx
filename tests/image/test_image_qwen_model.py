@@ -439,7 +439,8 @@ def test_the_plan_reads_the_prefix_rows_of_its_conditionings(pipe):
         p = plans[rows] = api.plan_request(pipe, conds=cond, **kw)
         cache, step, prefill = memfit.prefix_row_terms(row, image, rows, 2)
         assert p.terms["prefix_cache"] == cache
-        assert p.terms["step_peak"] == row.step.bytes(max(step, prefill))
+        assert p.terms["step_peak"] == max(row.step.bytes(step),
+                                           row.prefill.bytes(prefill))
     assert (plans[9].terms["prefix_cache"] - plans[6].terms["prefix_cache"]
             == row.prefix.cache_bytes(3, 2) > 0)
     assert plans[9].phases["denoise"] > plans[6].phases["denoise"]
