@@ -2125,6 +2125,9 @@ class Qwen3_5Model(nn.Module):
 
 
 class LanguageModel(nn.Module):
+    # The rollback trims each row of a batch to its own accept count.
+    requires_uniform_batch_acceptance = False
+
     def __init__(self, args: TextConfig, config: ModelConfig = None):
         super().__init__()
         self.args = args

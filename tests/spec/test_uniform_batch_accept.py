@@ -79,6 +79,17 @@ def test_the_owned_gemma4_target_clamps_and_others_do_not():
     assert not _uniform_batch_accept(SimpleNamespace(), SimpleNamespace())
 
 
+def test_the_owned_qwen35_target_keeps_the_accept_count_of_each_row():
+    """The class states the value its rollback needs. The mlx-vlm class it
+    replaces states True for a rollback that cannot trim one row."""
+    from gmlx.models.qwen35.language import LanguageModel
+    from gmlx.models.qwen35.owned import OwnedQwen3_5LanguageModel
+
+    assert vars(LanguageModel)["requires_uniform_batch_acceptance"] is False
+    for cls in (LanguageModel, OwnedQwen3_5LanguageModel):
+        assert not _uniform_batch_accept(SimpleNamespace(), cls.__new__(cls))
+
+
 def test_the_owned_gemma4_target_clamps_through_the_rollback_guard():
     """The load path rebinds the rollback hook on the instance, and the
     class attribute still clamps."""
