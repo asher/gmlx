@@ -1,6 +1,7 @@
 """The hooks a family's registry row gives the shared image code, on toy
 families: the step in parts under the pipeline's two memos, the schedule,
-the size multiple, and a load without an encoder. CPU."""
+the size multiple, a load without an encoder, and a conditioning with
+reference images. CPU."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -173,3 +174,13 @@ def test_a_family_without_an_encoder_loads_when_none_is_asked(monkeypatch):
     with pytest.raises(ImageModelError, match="'toy' has no text encoder"):
         api.load("d.gguf", text_encoder="e.gguf")
     assert loads == ["d.gguf"]
+
+
+def test_a_conditioning_carries_reference_latents_and_image_slots():
+    plain = _cond(0.5, "k")
+    assert plain.ref_latents == () and plain.image_slots == ()
+    ref = mx.zeros((4, 2, 4), mx.float32)
+    edit = api.Conditioning(plain.features, "e", ref_latents=(ref,),
+                            image_slots=(1, 2))
+    assert edit.ref_latents[0] is ref and edit.image_slots == (1, 2)
+    assert edit.features is plain.features and edit.key == "e"

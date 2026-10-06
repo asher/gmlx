@@ -23,9 +23,15 @@ import mlx.core as mx
 @dataclass(frozen=True)
 class Conditioning:
     """One encoded prompt: the encoder tap ``(L, D)`` of its tokens,
-    unpadded, and its cache key. An empty key is never cached."""
+    unpadded, and its cache key. An empty key is never cached. An edit
+    also holds ``ref_latents``, the latents ``(C, h, w)`` of each
+    reference image in model space and in prompt order, and
+    ``image_slots``, the indices of the rows of ``features`` that the
+    encoder gave to image tokens, ascending."""
     features: mx.array
     key: str = ""
+    ref_latents: tuple = ()
+    image_slots: tuple = ()
 
 
 def conditioning_key(*, family: str, encoder: str, adapters: str = "",
