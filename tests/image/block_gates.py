@@ -13,7 +13,8 @@ blocks.
 The exact gate checks structure. It runs the model in the oracle's fp32
 arithmetic: fp32 activations, exact float32 products, every K-quant
 product as a float32 product on the dequantized weight, and the stock
-ops. Every row then matches the oracle to a few parts in a million and
+ops. ``assert_all_dense`` holds that no K-quant product ran on a kernel
+there. Every row then matches the oracle to a few parts in a million and
 the gate is EXACT_TOL, so a wrong model fails it at any size of fault
 that matters. MLX reads MLX_ENABLE_TF32 once per process and the kernel
 routes of ``gmlx.image.ops`` are set at import, so a test that needs the
@@ -268,20 +269,45 @@ def kquant_leaves(dit) -> dict:
             if isinstance(m, KQuantLinear)}
 
 
+class _Used(set):
+    """The ids of the K-quant linears whose product ran dense in the
+    exact process. ``direct`` counts the products that ran dense past
+    their module, and ``kernel`` lists each product that ran on a kernel
+    as (entry of mlx_kquant, module path or codec)."""
+
+    def __init__(self):
+        super().__init__()
+        self.direct = 0
+        self.kernel: list = []
+
+
 @contextmanager
 def exact_products(dit):
     """Run ``dit`` in the oracle's fp32 arithmetic: fp32 activations, and
     every K-quant product as a float32 product on the dequantized weight.
     The dequantized weight is a node of the lazy graph, so one eval holds
     the weights of one block. An adapter stays on the product path's
-    code. Yields the ids of the K-quant linears whose product ran here,
-    which ``assert_all_dense`` reads."""
+    code.
+
+    A product runs dense here by either way a caller reaches it: the call
+    of its K-quant linear, and ``kq.quantized_matmul``, which the split
+    placement of an adapter table calls past the module with one band of
+    the weight's rows. Every other entry of mlx_kquant is watched, and a
+    call that takes the weight of a K-quant linear of ``dit`` is recorded
+    as a product on a kernel. Yields the record, which
+    ``assert_all_dense`` reads."""
     import mlx_kquant as kq
     from mlx_kquant.nn import KQuantLinear
 
     assert exact_process(), ("the exact path needs MLX_ENABLE_TF32=0 and "
                              "GMLX_IMAGE_KQ_ROUTES=0")
-    used: set = set()
+    used = _Used()
+    paths = kquant_leaves(dit)
+    weights, owners = {}, {}
+    for m in dit.modules():
+        if id(m) in paths:
+            weights[id(m["weight"])] = paths[id(m)]
+            owners.setdefault(id(m["scales"]), []).append(id(m))
 
     def dense(self, x, lora=None):
         assert lora is None, "the exact path has no in-op adapter epilogue"
@@ -291,17 +317,53 @@ def exact_products(dit):
         y = x @ w.T
         return y + self["bias"] if "bias" in self else y
 
+    matmul = kq.quantized_matmul
+
+    def direct(x, w, scales, kquant_type, transpose=True, **kwargs):
+        # A band of a module's rows carries the module's scales array.
+        owner = owners.get(id(scales), ())
+        if len(owner) != 1 or not transpose or kwargs:
+            used.kernel.append(("quantized_matmul", kquant_type))
+            return matmul(x, w, scales, kquant_type, transpose=transpose,
+                          **kwargs)
+        used.add(owner[0])
+        used.direct += 1
+        return x @ kq.dequantize(w, scales, kquant_type, mx.float32).T
+
+    def watched(name, fn):
+        def call(*args, **kwargs):
+            for a in (*args, *kwargs.values()):
+                if id(a) in weights:
+                    used.kernel.append((name, weights[id(a)]))
+            return fn(*args, **kwargs)
+        return call
+
+    entries = {n: getattr(kq, n) for n in kq.__all__
+               if n not in ("dequantize", "quantized_matmul")
+               and callable(getattr(kq, n, None))
+               and not isinstance(getattr(kq, n), type)}
     act, call = dit.act_dtype, KQuantLinear.__call__
     dit.act_dtype, KQuantLinear.__call__ = mx.float32, dense
+    kq.quantized_matmul = direct
+    for n, fn in entries.items():
+        setattr(kq, n, watched(n, fn))
     try:
         yield used
     finally:
         dit.act_dtype, KQuantLinear.__call__ = act, call
+        kq.quantized_matmul = matmul
+        for n, fn in entries.items():
+            setattr(kq, n, fn)
 
 
-def assert_all_dense(dit, used: set) -> None:
-    """Every K-quant linear of ``dit`` ran as a dense product. A kernel
-    that reads a weight past its module would leave that one out."""
+def assert_all_dense(dit, used) -> None:
+    """No K-quant product of ``dit`` ran on a kernel in the exact process,
+    and every K-quant linear ran as a dense product. A kernel that reads
+    a weight past its module is recorded when it reaches mlx_kquant, and
+    one that takes the place of a module's call leaves that module out."""
+    assert not used.kernel, (
+        f"{len(used.kernel)} K-quant products ran on a kernel in the exact "
+        f"process, such as {used.kernel[:3]}")
     left = sorted(p for i, p in kquant_leaves(dit).items() if i not in used)
     assert not left, f"{len(left)} K-quant products ran off the exact " \
                      f"path, such as {left[:3]}"

@@ -331,12 +331,13 @@ def test_check3_exact_gate_at_512(turbo, request, monkeypatch):
 @pytest.mark.integration
 def test_check3_exact_velocity_at_1024(turbo, request):
     """The fixture at 1024 holds no block arrays, so the exact gate there
-    is the free-running velocity."""
+    is the free-running velocity, with every K-quant product dense."""
     arrays, m = fixture("check3_z_image_turbo_1024")
     if not exact_process():
         return rerun_exact(request, "check3 exact")
-    with exact_products(turbo):
+    with exact_products(turbo) as used:
         vel = free_run(turbo, arrays, stepwise=True)[1]
+    assert_all_dense(turbo, used)
     print(f"check3 exact 1024: velocity within {vel['rel_l2']:.2e} of the "
           f"oracle, gate {EXACT_TOL:.0e}")
     assert vel["rel_l2"] <= EXACT_TOL, vel
