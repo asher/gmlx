@@ -432,6 +432,14 @@ def prefix_tag(cond) -> tuple:
     return (cond.key, *prefix_key(cond))
 
 
+def prefix_bytes(model: QwenImage21DiT, cond) -> int:
+    """Bytes of the ``PrefixCache`` of ``cond`` in the model's activation
+    dtype, from its layout alone."""
+    cfg = model.cfg
+    tokens = layout.prefix_layout(*prefix_key(cond)).tokens
+    return 2 * cfg.n_layers * tokens * cfg.dim * model.act_dtype.size
+
+
 def modulation(model: QwenImage21DiT, sigma) -> Modulation:
     """The modulation of target rows at ``sigma``, one value or one per
     row."""

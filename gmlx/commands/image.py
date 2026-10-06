@@ -503,7 +503,8 @@ def _generate(a) -> int:
                                                    or "")
     encode_s = time.perf_counter() - t0
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
-                            conds=[cond] if neg is None else [cond, neg])
+                            conds=[cond] if neg is None else [cond, neg],
+                            patch_table=table)
     _check_release(a, plan)
     release = a.encoder_release == "always" or (
         a.encoder_release == "auto" and plan.release_encoder)

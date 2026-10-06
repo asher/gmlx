@@ -44,13 +44,17 @@ class StepParts:
     is the rest of the step for one row, given both, and returns the
     float32 velocity. Each is a pure function of its arguments and the DiT
     weights, and each state gives its arrays as ``arrays()``.
-    ``state_bytes`` bounds the cache of conditioning states, whose two
-    newest stay past it.
+    ``state_bytes`` bounds the conditioning states a pipeline holds for
+    other requests beside those of the request it runs, by the rule of
+    ``gmlx.image.api.state_scope``. ``state_size(dit, cond)`` gives the
+    bytes of a conditioning's state before it is built, so the cache makes
+    room first.
     """
     modulation: Callable
     conditioning: Callable
     forward: Callable
     state_bytes: int = 256 << 20
+    state_size: Callable | None = None
 
 
 @dataclass(frozen=True)

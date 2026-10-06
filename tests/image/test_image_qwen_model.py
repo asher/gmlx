@@ -11,6 +11,8 @@ and the refusals of the config and of float16.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -20,6 +22,7 @@ from oracle_fixture import committed_fixture, fx
 from qwen_joint import joint_forward
 
 from gmlx.image import api, memfit, registry
+from gmlx.image.conditioning import array_bytes
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
@@ -390,13 +393,13 @@ def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
 
 
 def test_the_prefix_cache_bound_holds_the_text_states_of_a_guided_request():
-    """Both text prefixes of a guided request fit the family's bound, so
-    they stay without the rule for the two newest states."""
+    """Both text prefixes of a guided request fit the family's bound
+    twice over, so the text states of the request before stay too."""
     from gmlx.image.registry import get_family
 
     row = memfit.PEAKS["qwen_image21"]
     one = row.prefix.cache_bytes(row.text_rows, 2)
-    assert 2 * one <= get_family("qwen_image21").step.state_bytes
+    assert 4 * one <= get_family("qwen_image21").step.state_bytes
 
 
 def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
@@ -473,6 +476,159 @@ def test_the_plan_counts_a_held_prefix_state_once(pipe):
     row = memfit.PEAKS["qwen_image21"]
     assert bare.terms["prefix_cache"] == (
         row.prefix.cache_bytes(row.text_rows, 2) + pipe.captions.bytes)
+
+
+# The state cache against the plan. A text state of 9 rows is 2304 bytes
+# on the tiny model in bf16 and a state with one 8 x 8 reference 18432.
+# The bound holds two text states and a little more.
+TEXT_STATE, REF_STATE, BOUND = 2304, 18432, 2 * 2304 + 600
+
+
+def _text(key: str, rows: int = 9) -> api.Conditioning:
+    rng = np.random.default_rng(len(key) + rows)
+    return api.Conditioning(mx.array(rng.standard_normal(
+        (rows, qt.TINY["context_in_dim"])).astype(np.float32)), key)
+
+
+def _with_ref(key: str) -> api.Conditioning:
+    rng = np.random.default_rng(len(key))
+    return api.Conditioning(
+        mx.array(rng.standard_normal(
+            (24, qt.TINY["context_in_dim"])).astype(np.float32)), key,
+        ref_latents=(mx.array(rng.standard_normal((8, 8, 8)).astype(
+            np.float32)),), image_slots=tuple(range(2, 18)))
+
+
+def _watched(pipe, monkeypatch) -> dict:
+    """Give the plan's prefix row the tiny model's sizes and the family
+    the bound BOUND, and log the bytes of conditioning states alive at
+    every prefill, the held ones and the new one, and at every forward."""
+    row, cfg = memfit.PEAKS["qwen_image21"], pipe.dit.cfg
+    monkeypatch.setitem(memfit.PEAKS, "qwen_image21", replace(
+        row, prefix=replace(row.prefix, blocks=cfg.n_layers, dim=cfg.dim)))
+    parts = pipe.family.step
+    log = {"prefill": [], "forward": []}
+
+    def conditioning(dit, cond):
+        before = pipe.captions.bytes
+        state = parts.conditioning(dit, cond)
+        mx.eval(state.arrays())
+        assert array_bytes(state.arrays()) == parts.state_size(dit, cond)
+        log["prefill"].append(before + array_bytes(state.arrays()))
+        return state
+
+    def forward(dit, x, s, cond, state, mod):
+        log["forward"].append(pipe.captions.bytes)
+        return parts.forward(dit, x, s, cond, state, mod)
+
+    pipe.family = replace(pipe.family, step=replace(
+        parts, state_bytes=BOUND, conditioning=conditioning,
+        forward=forward))
+    return log
+
+
+def _request(pipe, log: dict, conds: list, cfg: float, table=None) -> tuple:
+    """Plan a request as the image command does, sample it, and hold the
+    states alive at every prefill and forward to the plan's prefix term.
+    Returns the term, the most alive at a prefill and at a forward, and
+    the bytes held after."""
+    log["prefill"].clear()
+    log["forward"].clear()
+    plan = api.plan_request(
+        pipe, height=64, width=64, cfg=cfg, conds=conds, patch_table=table,
+        budget=100e9, overcommit=False).terms["prefix_cache"]
+    api.sample(pipe, conds[0], neg=conds[1] if len(conds) > 1 else None,
+               cfg=cfg, height=64, width=64, steps=3, seed=1,
+               patch_table=table)
+    assert len(log["forward"]) == 3 * len(conds)
+    assert max(log["prefill"] + log["forward"]) <= plan, (plan, log)
+    return (plan, max(log["prefill"], default=0), max(log["forward"]),
+            pipe.captions.bytes)
+
+
+def test_the_state_cache_holds_what_the_plan_counts_after_references(
+        pipe, monkeypatch):
+    log = _watched(pipe, monkeypatch)
+    rp, rn, t1 = _with_ref("rp"), _with_ref("rn"), _text("t1")
+    assert _request(pipe, log, [rp, rn], 4.0) == (
+        2 * REF_STATE, 2 * REF_STATE, 2 * REF_STATE, 2 * REF_STATE)
+    # An unguided text request: both reference states go before its
+    # state is built, since neither fits the room beside it.
+    assert _request(pipe, log, [t1], 1.0) == (
+        BOUND, TEXT_STATE, TEXT_STATE, TEXT_STATE)
+    # The same text again finds its state held.
+    assert _request(pipe, log, [t1], 1.0) == (
+        TEXT_STATE, 0, TEXT_STATE, TEXT_STATE)
+
+
+def test_the_state_cache_holds_what_the_plan_counts_on_a_hit(
+        pipe, monkeypatch):
+    """The positive of a guided request with references alone again: its
+    state is held, and the negative's goes at the first step."""
+    log = _watched(pipe, monkeypatch)
+    rp, rn = _with_ref("rp"), _with_ref("rn")
+    _request(pipe, log, [rp, rn], 4.0)
+    assert _request(pipe, log, [rp], 1.0) == (
+        REF_STATE, 0, REF_STATE, REF_STATE)
+    key = ("rp", pipe.default_table, str(mx.bfloat16))
+    assert pipe.captions.nbytes(key) == REF_STATE
+
+
+def test_the_state_cache_holds_what_the_plan_counts_text_after_text(
+        pipe, monkeypatch):
+    log = _watched(pipe, monkeypatch)
+    assert _request(pipe, log, [_text("p1"), _text("n1")], 4.0) == (
+        2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE)
+    # The room beside two new text states holds neither older one.
+    assert _request(pipe, log, [_text("p2"), _text("n2")], 4.0) == (
+        BOUND, 2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE)
+    # The room beside one holds one older state, the last one used.
+    assert _request(pipe, log, [_text("p3")], 1.0) == (
+        BOUND, 2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE)
+    assert [k[0] for k in pipe.captions._items] == ["n2", "p3"]
+    # A guided text request after a request with references.
+    _request(pipe, log, [_with_ref("rp"), _with_ref("rn")], 4.0)
+    assert _request(pipe, log, [_text("p"), _text("n")], 4.0) == (
+        BOUND, 2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE)
+
+
+def test_the_plan_reads_the_held_states_under_the_table_of_the_request(
+        pipe, monkeypatch):
+    from gmlx.image.lora import install
+
+    log = _watched(pipe, monkeypatch)
+    rng = np.random.default_rng(5)
+    dim = pipe.dit.cfg.dim
+    pair = install.register_pair(
+        pipe, mx.array(rng.standard_normal((2, dim)).astype(np.float32)),
+        mx.array(rng.standard_normal((dim, 2)).astype(np.float32)), None)
+    table = api.define_patch_table(
+        pipe, [("transformer_blocks.0.attn.to_q", None, [(pair, 0.1)])])
+    cond = _text("one")
+    kw = dict(height=64, width=64, cfg=1.0, conds=[cond], budget=100e9,
+              overcommit=False)
+    cold = api.plan_request(pipe, patch_table=table, **kw)
+    assert cold.terms["prefix_cache"] == TEXT_STATE
+    assert _request(pipe, log, [cond], 1.0, table) == (
+        TEXT_STATE, TEXT_STATE, TEXT_STATE, TEXT_STATE)
+    # Held under the request's table, the state counts once.
+    warm = api.plan_request(pipe, patch_table=table, **kw)
+    assert warm.terms["prefix_cache"] == TEXT_STATE
+    # The same conditioning under the default table is another state,
+    # and the held one is another request's.
+    assert api.plan_request(pipe, **kw).terms["prefix_cache"] == (
+        2 * TEXT_STATE)
+    assert _request(pipe, log, [cond], 1.0) == (
+        2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE)
+    assert {k[1] for k in pipe.captions._items} == {table,
+                                                    pipe.default_table}
+    # The scope holds the states of the request's table: one state over
+    # the bound is built once and stays through the request.
+    assert _request(pipe, log, [_with_ref("r")], 1.0, table) == (
+        REF_STATE, REF_STATE, REF_STATE, REF_STATE)
+    assert len(log["prefill"]) == 1
+    with pytest.raises(ValueError, match="unknown patch table"):
+        api.plan_request(pipe, patch_table="none", **kw)
 
 
 def test_rows_of_a_batch_take_their_own_conditioning(pipe):

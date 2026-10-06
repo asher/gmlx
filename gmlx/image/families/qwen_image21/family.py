@@ -63,9 +63,11 @@ SAMPLING = {
                            revision="790c92633540aa0cb11d9abf19eb46d861714758"),
 }
 
-# The cache of conditioning states holds this much, which is both text
-# states of a guided request twice over. The prefix of one megapixel
-# reference is about 2 GiB, and the two newest states stay past the bound.
+# A pipeline holds the conditioning states of the request it runs, and
+# beside them up to this much of other requests' states less the bytes of
+# its own. It is both text states of a guided request twice over. The
+# prefix of one megapixel reference is about 2 GiB, so a request with
+# references holds its own states alone.
 PREFIX_CACHE_BYTES = 1 << 30
 
 
@@ -181,6 +183,14 @@ def _forward(dit, latents, sigma, cond, prefix, mod):
     return forward_target(dit, latents, sigma, cond, prefix, mod=mod)
 
 
+def _prefix_bytes(dit, cond) -> int:
+    """Bytes of the prefix state of ``cond``: K and V of every block over
+    its prefix tokens."""
+    from .model import prefix_bytes
+
+    return prefix_bytes(dit, cond)
+
+
 def lora_map(config: dict):
     from .lora_map import lora_map as build_map
 
@@ -214,7 +224,8 @@ FAMILY = Family(
     # diffusers keeps these modules out of its layerwise casting.
     fp32_keep=("norm",),
     sampling=SAMPLING,
-    step=StepParts(_modulation, _prefix, _forward, PREFIX_CACHE_BYTES),
+    step=StepParts(_modulation, _prefix, _forward, PREFIX_CACHE_BYTES,
+                   _prefix_bytes),
     schedule=schedule,
     lora_map=lora_map,
 )

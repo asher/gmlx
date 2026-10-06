@@ -34,6 +34,7 @@ import math
 import numbers
 import secrets
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Mapping
@@ -114,6 +115,7 @@ class ImagePipeline:
         default_factory=lambda: ByteLRU(TABLE_BYTES))
     adapter_files: dict = field(default_factory=dict)  # file -> adapter
     lora: object | None = None                  # lora.install.PatchState
+    scope: tuple | None = None                  # see state_scope
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
@@ -259,14 +261,15 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
 
 def plan_request(pipe: ImagePipeline, *, height: int, width: int,
                  cfg: float | None = None, caption_tokens: int | None = None,
-                 conds=None, budget: float | None = None,
+                 conds=None, patch_table=None, budget: float | None = None,
                  overcommit: bool | None = None) -> memfit.MemoryPlan:
     """The memory plan of one request on this pipeline: its weights, an
     encoder still resident, the caches it holds, and the phase peaks.
     ``conds`` is the request's conditioning, or the positive and the
     negative one, whose text rows and reference latents size the prefix
-    of a family that caches one. Raises ImageMemoryError when no lever
-    makes it fit."""
+    of a family that caches one, and ``patch_table`` the table the
+    request runs under, which names the states it holds already. Raises
+    ImageMemoryError when no lever makes it fit."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
@@ -281,9 +284,9 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     else:
         # The states of a step in parts are the plan's prefix cache term.
         # Those of this request count there once, held already or not.
-        held = sum(pipe.captions.nbytes((c.key, pipe.default_table,
-                                         str(act)))
-                   for c in states if c.key)
+        table = _table_id(pipe, patch_table)
+        held = sum(pipe.captions.nbytes(key) for key in {
+            (c.key, table, str(act)) for c in states if c.key})
         other, bound = pipe.captions.bytes - held, parts.state_bytes
     return memfit.plan_memory(
         pipe.weights.get("dit", 0),
@@ -441,7 +444,9 @@ def _table_id(pipe: ImagePipeline, patch_table) -> str:
 def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
                  patch_table=None) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
-    one value per row, under ``conds``, one Conditioning or one per row."""
+    one value per row, under ``conds``, one Conditioning or one per row.
+    Outside a ``state_scope`` the conditionings of the call are its
+    scope."""
     table = _table_id(pipe, patch_table)
     x = mx.array(latents).astype(mx.float32)
     if x.ndim != 4:
@@ -454,9 +459,65 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
-    out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table)
-           for i in range(b)]
+    with state_scope(pipe, rows, patch_table=table):
+        out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table)
+               for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
+
+
+@contextmanager
+def state_scope(pipe: ImagePipeline, conds, *, patch_table=None):
+    """Hold the conditioning states of one request while it runs.
+
+    A family whose step runs in parts keeps a state per conditioning, for
+    Qwen-Image 2.1 the K and V of its prefix in every block. The states
+    of the conditionings in scope are never shed. Every other held state
+    is shed, the least recently used first, until the others fit in the
+    family's bound less the bytes of the scope's own states. That runs
+    before a state is built and on every step that finds its state held,
+    so the cache holds the scope's states and at most that room of
+    others at every moment, which is the prefix cache term of
+    ``plan_request``.
+
+    ``sample`` opens the scope of its request: the positive conditioning,
+    and the negative one when guided. A ``denoise_step`` call outside a
+    scope has the conditionings of that call as its scope. So a caller
+    that alternates two conditionings in separate bare calls keeps both
+    states only when both fit the bound together. When they do not, each
+    call sheds the other's state and builds its own again, one prefill a
+    call. Such a caller opens one scope around its calls, or passes both
+    conditionings as the rows of one call. A scope opened inside another
+    changes nothing.
+    """
+    rows = [conds] if isinstance(conds, Conditioning) else list(conds)
+    parts = pipe.family.step
+    if parts is None or pipe.scope is not None:
+        yield
+        return
+    table, dt = _table_id(pipe, patch_table), str(pipe.dit.act_dtype)
+    scope, seen = [], set()
+    for c in rows:
+        key = (c.key, table, dt) if c.key else None
+        if key is None or key not in seen:
+            seen.add(key)
+            scope.append((key, 0 if parts.state_size is None
+                          else int(parts.state_size(pipe.dit, c))))
+    pipe.scope = tuple(scope)
+    try:
+        yield
+    finally:
+        pipe.scope = None
+
+
+def _shed_states(pipe: ImagePipeline, parts) -> None:
+    """Shed held states by the rule of ``state_scope``. A state of the
+    scope counts its held bytes, or the bytes it will have before it is
+    built."""
+    scope = pipe.scope or ()
+    own = sum((pipe.captions.nbytes(key) if key is not None else 0) or n
+              for key, n in scope)
+    pipe.captions.shed_others({key for key, _ in scope},
+                              max(0, int(parts.state_bytes) - own))
 
 
 def _under(pipe: ImagePipeline, table: str, fn):
@@ -476,20 +537,27 @@ def _under(pipe: ImagePipeline, table: str, fn):
 
 def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
                cond: Conditioning, table) -> mx.array:
-    """One row through the family's step parts. The conditioning cache
-    holds the family's bound, and its two newest states stay whatever their
-    bytes, so the positive and the negative row of one request both stay
-    in either order."""
+    """One row through the family's step parts. The cache of conditioning
+    states makes room by the rule of ``state_scope`` before the state of
+    ``cond`` is read or built, so a new state is never live beside one
+    the rule sheds."""
     dit = pipe.dit
     s = np.float32(sigma)
     dt = str(dit.act_dtype)
     mod = _memo(pipe.modulations, (s.tobytes(), table, dt),
                 lambda: _under(pipe, table,
                                lambda: parts.modulation(dit, s)))
-    make = lambda: _under(  # noqa: E731
-        pipe, table, lambda: parts.conditioning(dit, cond))
-    state = _memo(pipe.captions, (cond.key, table, dt), make,
-                  bound=parts.state_bytes) if cond.key else make()
+    key = (cond.key, table, dt) if cond.key else None
+    _shed_states(pipe, parts)
+    state = None if key is None else pipe.captions.get(key)
+    if state is None:
+        state = _under(pipe, table, lambda: parts.conditioning(dit, cond))
+        if key is not None:
+            arrays = state.arrays()
+            mx.eval(arrays)
+            pipe.captions.put(key, state, array_bytes(arrays), shed=False)
+            # A family that gives no size before the build sheds here.
+            _shed_states(pipe, parts)
     return _under(pipe, table,
                   lambda: parts.forward(dit, x, s, cond, state, mod))
 
@@ -508,18 +576,13 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption))
 
 
-def _memo(cache: ByteLRU, key, make, bound: int | None = None):
+def _memo(cache: ByteLRU, key, make):
     hit = cache.get(key)
     if hit is None:
         hit = make()
         arrays = hit.arrays()
         mx.eval(arrays)
-        n = array_bytes(arrays)
-        if bound is None:
-            cache.put(key, hit, n)
-        else:
-            cache.max_bytes = int(bound)
-            cache.put(key, hit, n, keep=2)
+        cache.put(key, hit, array_bytes(arrays))
     return hit
 
 
@@ -630,7 +693,9 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
 
     x = noise if init is None else noised(s[0], noise, init)
     smp = make_sampler(sampler, s)
-    with memfit.bounded_cache():
+    scope = state_scope(pipe, [cond] if cfg == 1.0 else [cond, neg],
+                        patch_table=patch_table)
+    with memfit.bounded_cache(), scope:
         for i in range(smp.steps):
             if should_stop is not None and should_stop():
                 raise SampleStopped(i, x)

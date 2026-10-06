@@ -53,9 +53,9 @@ def array_bytes(arrays) -> int:
 
 class ByteLRU:
     """A least recently used map that holds at most ``max_bytes`` of
-    values. An entry larger than the bound is not kept. ``put`` with
-    ``keep`` holds that many of the newest entries whatever their bytes,
-    and sheds the older ones down to the bound."""
+    values. An entry larger than the bound is not kept. A caller with a
+    rule of its own puts with ``shed`` off, which keeps the entry whatever
+    its bytes and sheds nothing, and sheds through ``shed_others``."""
 
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
@@ -85,18 +85,31 @@ class ByteLRU:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
 
-    def put(self, key, value, nbytes: int, keep: int = 0) -> None:
+    def put(self, key, value, nbytes: int, shed: bool = True) -> None:
         with self._lock:
             old = self._items.pop(key, None)
             if old is not None:
                 self._bytes -= old[1]
-            if nbytes > self.max_bytes and not keep:
+            if shed and nbytes > self.max_bytes:
                 return
             self._items[key] = (value, int(nbytes))
             self._bytes += int(nbytes)
-            while (self._bytes > self.max_bytes
-                   and len(self._items) > keep):
+            while shed and self._bytes > self.max_bytes:
                 _, (_, n) = self._items.popitem(last=False)
+                self._bytes -= n
+
+    def shed_others(self, own, room: int) -> None:
+        """Shed the entries whose key is not in ``own``, the least
+        recently used first, until they hold at most ``room`` bytes. The
+        entries of ``own`` stay whatever their bytes."""
+        with self._lock:
+            others = [k for k in self._items if k not in own]
+            held = sum(self._items[k][1] for k in others)
+            for k in others:
+                if held <= room:
+                    break
+                n = self._items.pop(k)[1]
+                held -= n
                 self._bytes -= n
 
     def clear(self) -> None:
