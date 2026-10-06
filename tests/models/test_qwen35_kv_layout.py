@@ -120,13 +120,64 @@ def logits(lm, ids):
             "decode": np.array(decode.astype(mx.float32)).tolist()}
 
 
+import gmlx.models.qwen35.language as language
+
+# The head order of each call of the scan that recomputes a rolled-back
+# state.
+recomputes = []
+_state_update = language.gated_delta_state_update
+
+
+def _counted_state_update(*args, **kw):
+    recomputes.append(bool(kw.get("tiled")))
+    return _state_update(*args, **kw)
+
+
+language.gated_delta_state_update = _counted_state_update
+
+
+def plain(lm, ids):
+    cache = lm.make_cache()
+    mx.eval(lm(ids[:, :5], cache=cache).logits)
+    for i in (5, 6, 7):
+        y = lm(ids[:, i:i + 1], cache=cache).logits.astype(mx.float32)
+        mx.eval(y)
+    return np.array(y).tolist()
+
+
+def rollback(lm, ids, recompute):
+    # Prefill 5 tokens, verify a block of 4, accept 1, then feed one more.
+    # With ``recompute`` the verify hands the rollback no captured states
+    # (entry 11 of each layer's record), so the rollback recomputes the
+    # state from the verify inputs.
+    cache = lm.make_cache()
+    mx.eval(lm(ids[:, :5], cache=cache).logits)
+    hidden, _kv, gdn = lm.speculative_verify_hidden(ids[:, 5:9], cache)
+    mx.eval(hidden)
+    if recompute:
+        gdn = [tuple(s[:11]) + (None,) + tuple(s[12:]) for s in gdn]
+    before = len(recomputes)
+    lm.rollback_speculative_cache(cache, gdn, 1, 4)
+    y = lm(ids[:, 7:8], cache=cache).logits.astype(mx.float32)
+    mx.eval(y)
+    return np.array(y).tolist(), recomputes[before:]
+
+
 ids = mx.array(np.random.default_rng(0).integers(1, 120, size=(1, 6)))
+ids9 = mx.array(np.random.default_rng(1).integers(1, 120, size=(1, 9)))
 models = {layout: build(layout) for layout in order}
 out = {}
 for layout, lm in models.items():
+    captured, captured_calls = rollback(lm, ids9, False)
+    recomputed, recompute_calls = rollback(lm, ids9, True)
     out[layout] = {"model": logits(lm, ids),
                    "reference": logits(reference(lm, layout), ids),
-                   "class": type(lm).__module__}
+                   "class": type(lm).__module__,
+                   "rollback": {"plain": plain(lm, ids9),
+                                "captured": captured,
+                                "captured_calls": captured_calls,
+                                "recomputed": recomputed,
+                                "recompute_calls": recompute_calls}}
 print(json.dumps(out))
 """
 
@@ -171,6 +222,31 @@ def test_each_model_keeps_its_own_head_order(order, device):
         apart = _gap(both["tiled"]["model"][phase],
                      both["grouped"]["model"][phase])
         assert apart > ORDERS_DIFFER, (phase, apart)
+
+
+# A rollback against the plain decode of the same tokens: the measured
+# gap is under 1e-6 on logits that reach 5.
+ROLLBACK_ATOL = 1e-4
+
+
+@pytest.mark.parametrize("device", _DEVICES)
+@pytest.mark.parametrize("layout", ("tiled", "grouped"))
+def test_rollback_that_recomputes_the_state_keeps_the_head_order(layout, device):
+    """A rollback whose verify captured no states recomputes the recurrent
+    state from the verify inputs, in the head order of its model."""
+    other = "grouped" if layout == "tiled" else "tiled"
+    got = _run((layout,), device)[layout]["rollback"]
+    apart = _run((other,), device)[other]["rollback"]["plain"]
+    # The rollback with captured states never reaches the scan, and the
+    # one without them reaches it once.
+    assert got["captured_calls"] == []
+    assert got["recompute_calls"] == [layout == "tiled"]
+    for path in ("captured", "recomputed"):
+        gap = _gap(got[path], got["plain"])
+        assert gap < ROLLBACK_ATOL, (
+            f"{layout} model on {device}, {path} rollback: {gap} from the "
+            "plain decode")
+        assert _gap(got[path], apart) > ORDERS_DIFFER, (layout, device, path)
 
 
 # The scans, one entry at a time.
