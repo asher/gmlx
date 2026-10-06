@@ -33,13 +33,14 @@ _HALF = (mx.float16, mx.bfloat16)
 # Head dims that have a qk_norm_rope kernel.
 _QK_HEAD_DIMS = (64, 96, 128, 256)
 # K tile of the GLU kernel by codec and x dtype, and its fewest rows. The
-# table follows the dispatch of mlx-kquant's quantized_matmul_glu, which
-# also needs tensor-op hardware. Outside it the op composes with one more
-# output buffer than the stock ops, so such a pair stays on the stock ops.
+# rows follow the dispatch of mlx-kquant's quantized_matmul_glu, which
+# also needs tensor-op hardware. Outside its dispatch the op composes with
+# one more output buffer than the stock ops, so such a pair stays on the
+# stock ops. The q8_0 kernel has no row: a q8_0 pair is no faster on it
+# than on the stock ops.
 _GLU_K_TILE = {("q4_k", mx.float16): 128, ("q4_k", mx.bfloat16): 128,
                ("q5_k", mx.float16): 128, ("q5_k", mx.bfloat16): 128,
-               ("q6_k", mx.float16): 128, ("q6_k", mx.bfloat16): 128,
-               ("q8_0", mx.bfloat16): 64}
+               ("q6_k", mx.float16): 128, ("q6_k", mx.bfloat16): 128}
 _GLU_MIN_ROWS = 1024
 
 _OPS: dict = {}

@@ -49,9 +49,8 @@ needs_qk = pytest.mark.skipif(
 needs_glu = pytest.mark.skipif(
     not HAS_GLU, reason="mlx-kquant has no quantized_matmul_glu")
 
-# The codec and x dtype rows that have a GLU kernel.
+# The codec and x dtype rows that the GLU route takes.
 GLU_ROWS = [(c, d) for c in ("q4_k", "q5_k", "q6_k") for d in DTYPES]
-GLU_ROWS.append(("q8_0", mx.bfloat16))
 
 # Head dim 64 and a 256-wide residual, so both kernels take the main
 # layers at 1024 image rows.
@@ -353,9 +352,12 @@ class _Scaled(KQuantLinear):
 
 
 @pytest.mark.parametrize("codec,dtype", GLU_ROWS + [
-    ("q8_0", mx.float16), ("q4_0", mx.bfloat16), ("q3_k", mx.bfloat16)],
+    ("q8_0", mx.bfloat16), ("q8_0", mx.float16), ("q4_0", mx.bfloat16),
+    ("q3_k", mx.bfloat16)],
     ids=lambda v: v if isinstance(v, str) else str(v).split(".")[-1])
-def test_glu_takes_the_codec_rows_of_the_kernel(spies, codec, dtype):
+def test_glu_takes_the_codec_rows_of_the_table(spies, codec, dtype):
+    """q8_0 takes the composition on either half dtype, on an inner dim
+    that mlx-kquant's own q8_0 kernel takes."""
     taken = (codec, dtype) in GLU_ROWS and _gpu()
     gate, up = _pair(codec)
     x = _x((1, 1024, 256), dtype)
@@ -373,10 +375,12 @@ def test_glu_takes_the_codec_rows_of_the_kernel(spies, codec, dtype):
         assert mx.array_equal(y, want).item()
 
 
-@pytest.mark.parametrize("inp,taken", [(192, True), (160, False)])
-def test_glu_takes_q8_0_on_its_k_tile_of_64(spies, inp, taken):
-    gate, up = _pair("q8_0", inp=inp)
-    pair = ops.glu_pair(gate, up, _x((1, 1024, inp), mx.bfloat16))
+@pytest.mark.parametrize("tile,taken", [(256, True), (512, False)])
+def test_glu_takes_an_inner_dim_on_the_k_tile(spies, monkeypatch, tile,
+                                              taken):
+    monkeypatch.setitem(kq_routes._GLU_K_TILE, ("q4_k", mx.bfloat16), tile)
+    gate, up = _pair()
+    pair = ops.glu_pair(gate, up, _x((1, 1024, 256), mx.bfloat16))
     assert (pair is not None) == (taken and _gpu())
 
 
