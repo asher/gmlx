@@ -282,7 +282,10 @@ def teacher_forced(torch, model16, cap32: Capture, cache32) -> dict:
 
 
 def run_case(torch, a, models: dict, cond: dict, sigmas, timesteps,
-             blocks: bool, name: str, family_note: dict) -> Path:
+             blocks: bool, name: str, family_note: dict, check: int = 3,
+             script: str = SCRIPT) -> Path:
+    """Run the calls on ``models``, fp32 and bf16, and write the fixture.
+    Check 7 passes models with an adapter merged and its own script."""
     h, w = cond["target"]
     c_in = models["fp32"].config.in_channels
     rng = np.random.default_rng(a.seed)
@@ -293,8 +296,8 @@ def run_case(torch, a, models: dict, cond: dict, sigmas, timesteps,
         lat_b = rng.standard_normal((1, c_in, h, w)).astype(np.float32)
     t_a, t_b = timesteps[a.step], timesteps[a.step_b]
 
-    fx = fixtures.FixtureWriter(name, check=3, family="qwen_image21",
-                                script=SCRIPT)
+    fx = fixtures.FixtureWriter(name, check=check, family="qwen_image21",
+                                script=script)
     for role, p in (("dit", a.dit), ("conditioning", a.conditioning)):
         if p is not None:
             fx.add_file(role, p)
@@ -430,7 +433,7 @@ def run_case(torch, a, models: dict, cond: dict, sigmas, timesteps,
     fx.note("The pipeline passes a prompt mask of ones for one unpadded "
             "prompt. These calls pass none, which gives the same values.")
     path = fx.write()
-    print(f"[check3] {name}: velocity bf16 vs fp32 rel L2 "
+    print(f"[check{check}] {name}: velocity bf16 vs fp32 rel L2 "
           f"a {fx.results['velocity_a_bf16_vs_fp32']['rel_l2']:.3e} "
           f"b {fx.results['velocity_b_bf16_vs_fp32']['rel_l2']:.3e}, "
           f"extract against joint max abs "

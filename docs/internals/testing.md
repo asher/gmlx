@@ -84,6 +84,7 @@ exercise a path.
 | `tests/image/test_image_check6.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` | A whole Z-Image-Turbo run from the oracle's noise stays within the PSNR gate of the oracle's fp32 image. |
 | `tests/image/test_image_check7.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step at 512x512 under a live LoRA matches the oracle on merged weights block by block and in velocity. The base and each wrong table fail. |
 | `tests/image/test_image_check7_community.py` | `GMLX_TEST_LORA_DIR` and `GMLX_IMAGE_FIXTURES` | Public Z-Image-Turbo LoRA files load with every key matched, give the float64 delta, and pass the step against the merged oracle block by block. |
+| `tests/image/test_image_check7_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step at 512x512 under a live LoRA matches the oracle on merged weights, and each linear leaf its exact product. Wrong tables fail. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL pair loads with every tensor used, the text model and the pair agree before the final norm, and prompt layout and image features match llama.cpp. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
@@ -218,6 +219,21 @@ token, the expansion of image slots, the modulation row of every token
 and the prefill segments to the layout fixture. The rows of
 `test_image_check3_qwen.py` that read the real file skip until the
 manifests that `check3_qwen_image21.py` writes from it are committed.
+
+`check7_qwen_image21_lora.py --self-test` merges the adapters of
+`qwen_image21_tiny.py` into the dense weights of that tiny model and runs
+the same three calls. It writes one fixture per variant: an adapter with
+an alpha, one without, and a stacked pair with a negative strength. The
+first manifest also records, for every linear layer of the reference
+class and every key spelling of an adapter file, the layer that
+diffusers' own Qwen LoRA loader gives the key.
+`tests/image/test_image_check7_qwen.py` writes the same pairs in each
+dialect and runs the step under a patch table, on a model that holds the
+fused gate and projection weight and on one that holds the pair apart.
+Every row is held to the bounds of check 3, and each wrong table of its
+list must miss a bound by twice. Its rows that read the real file skip
+until the manifests that `check7_qwen_image21_lora.py` writes from it
+are committed.
 
 ## Server end-to-end harnesses
 

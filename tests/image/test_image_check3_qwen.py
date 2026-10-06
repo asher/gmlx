@@ -420,27 +420,6 @@ def real(gguf_index):
     return model
 
 
-def _product_misses(m: dict, rows: dict, free: dict) -> list[str]:
-    """Measures of the product path over the manifest's tolerances, each
-    twice the oracle's own bf16 against fp32 gap at that point."""
-    tol = m["tolerances"]
-    out = [f"{r} rel L2 {g['rel_l2']:.3e} > {tol['rows_rel_l2'][r]:.3e}"
-           for r, g in rows.items() if r in tol.get("rows_rel_l2", {})
-           and not g["rel_l2"] <= tol["rows_rel_l2"][r]]
-    for r, g in free.items():
-        if r.startswith("velocity_"):
-            if not g["rel_l2"] <= tol[f"{r}_rel_l2"]:
-                out.append(f"{r} rel L2 {g['rel_l2']:.3e} > "
-                           f"{tol[f'{r}_rel_l2']:.3e}")
-            if not g["cosine"] >= tol[f"{r}_cosine_min"]:
-                out.append(f"{r} cosine {g['cosine']:.6f} < "
-                           f"{tol[f'{r}_cosine_min']}")
-        elif not g["rel_l2"] <= tol["free_rel_l2"][r]:
-            out.append(f"free {r} rel L2 {g['rel_l2']:.3e} > "
-                       f"{tol['free_rel_l2'][r]:.3e}")
-    return out
-
-
 @pytest.mark.integration
 def test_check3_one_step_block_by_block_at_512(real):
     """The product gate, in both of the oracle's modes."""
@@ -452,14 +431,14 @@ def test_check3_one_step_block_by_block_at_512(real):
     rows = qg.check3_rows(real, arrays)
     free = {**qg.free_run(real, arrays, own_temb=True),
             **qg.timestep_rows(real, arrays)}
-    misses = _product_misses(m, rows, free)
+    misses = qg.product_misses(m, rows, free)
     assert not misses, misses
 
 
 @pytest.mark.integration
 def test_check3_final_velocities_at_1024(real):
     arrays, m = fixture(_real_manifest(REAL[1024])["name"])
-    misses = _product_misses(m, {}, qg.free_run(real, arrays, own_temb=True))
+    misses = qg.product_misses(m, {}, qg.free_run(real, arrays, own_temb=True))
     assert not misses, misses
 
 

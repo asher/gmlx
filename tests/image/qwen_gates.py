@@ -15,6 +15,10 @@ path a request takes: one ``prefill_prefix`` and a ``forward_target`` per
 call. Its rows carry the names the manifest gives the oracle's own
 free-running rows.
 
+Check 7 reads the same rows with a patch table active, against a fixture
+of the oracle's model with the adapter merged into its weights, and adds
+the site gate of every linear leaf.
+
 Every row reads the modulation through ``modulation`` and
 ``prefix_modulation`` of the model module, and ``oracle_temb`` gives
 those the oracle's timestep embedding, so a row measures the model and
@@ -292,3 +296,96 @@ def step(model, arrays: dict) -> dict:
 def missed(got: dict, tol: float) -> dict:
     """Name to relative L2 of each measure of ``got`` over ``tol``."""
     return {r: g["rel_l2"] for r, g in got.items() if not g["rel_l2"] <= tol}
+
+
+def product_misses(m: dict, rows: dict, free: dict) -> list[str]:
+    """Measures of the product path over the manifest's tolerances, each
+    twice the oracle's own bf16 against fp32 gap at that point."""
+    tol = m["tolerances"]
+    out = [f"{r} rel L2 {g['rel_l2']:.3e} > {tol['rows_rel_l2'][r]:.3e}"
+           for r, g in rows.items() if r in tol.get("rows_rel_l2", {})
+           and not g["rel_l2"] <= tol["rows_rel_l2"][r]]
+    for r, g in free.items():
+        if r.startswith("velocity_"):
+            if not g["rel_l2"] <= tol[f"{r}_rel_l2"]:
+                out.append(f"{r} rel L2 {g['rel_l2']:.3e} > "
+                           f"{tol[f'{r}_rel_l2']:.3e}")
+            if not g["cosine"] >= tol[f"{r}_cosine_min"]:
+                out.append(f"{r} cosine {g['cosine']:.6f} < "
+                           f"{tol[f'{r}_cosine_min']}")
+        elif not g["rel_l2"] <= tol["free_rel_l2"][r]:
+            out.append(f"free {r} rel L2 {g['rel_l2']:.3e} > "
+                       f"{tol['free_rel_l2'][r]:.3e}")
+    return out
+
+
+@contextmanager
+def under_table(pipe, table: str):
+    """Run the DiT of ``pipe`` under the patch table ``table``, as a
+    denoise step does, so the rows above read the model with an adapter."""
+    from gmlx.image.lora import install
+
+    prev = install.activate(pipe, table)
+    try:
+        yield
+    finally:
+        install.restore(pipe, prev)
+
+
+# The site gate of a linear leaf: relative L2 at most 2 n u, where u is
+# one rounding to bfloat16 and n counts the outputs the stock path writes
+# in the activation dtype: the product, and under an adapter also the
+# product with A and the sum with the product with B.
+SITE_UNIT = 2.0 ** -8
+LEAF_ROUNDINGS = {False: 1, True: 3}
+
+
+@contextmanager
+def leaf_sites(pipe, table: str, sites: dict):
+    """Fill ``sites`` with a reading for every call of a linear leaf of
+    the DiT while a step runs under ``table``: (module path, call number)
+    to (relative L2, gate). A reading is the leaf's output on the path a
+    request takes against the same product in float32 on the leaf's
+    dequantized weight and the same input, with the table's delta through
+    its factors as that path holds them. The float32 side runs on the
+    CPU, whose float32 products are exact. The leaves must be wrapped,
+    which the first table with entries does."""
+    import mlx_kquant as kq
+
+    from gmlx.image.lora import install
+
+    assert pipe.lora is not None, "no table with entries was defined"
+    built = None
+    if pipe.patch_tables[table]["entries"]:
+        built = install.build_table(pipe, table, pipe.dit.act_dtype, "block")
+    counts: dict = {}
+    real = install.ImageLoRALinear.__call__
+
+    def call(self, x):
+        y = real(self, x)
+        base = self.base
+        codec = getattr(base, "kquant_type", None)
+        f = None if built is None else built.get(self._path)
+        with mx.stream(mx.cpu):
+            x32 = x.astype(mx.float32)
+            w = base["weight"].astype(mx.float32) if codec is None else \
+                kq.dequantize(base["weight"], base["scales"], codec,
+                              mx.float32)
+            want = x32 @ w.T
+            if f is not None:
+                want = want + (x32 @ f.a_t.astype(mx.float32)) \
+                    @ f.b_t.astype(mx.float32)
+            e2 = mx.sum(mx.square(y.astype(mx.float32) - want))
+            r2 = mx.sum(mx.square(want))
+            mx.eval(e2, r2)
+        n = counts[self._path] = counts.get(self._path, 0) + 1
+        rel = 0.0 if e2.item() == 0 else float(np.sqrt(e2.item() / r2.item()))
+        sites[(self._path, n)] = (
+            rel, 2 * LEAF_ROUNDINGS[f is not None] * SITE_UNIT)
+        return y
+
+    install.ImageLoRALinear.__call__ = call
+    try:
+        yield sites
+    finally:
+        install.ImageLoRALinear.__call__ = real
