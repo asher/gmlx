@@ -1903,7 +1903,7 @@ class LoRAKQuantLinear(nn.Module):
             # In-op epilogue: the delta rides the base matmul's primitive
             # (zero extra graph ops); the row factor goes in as f32 rows.
             a_t, b_t = self._tables(x.dtype)
-            rows = lora_rows.dense_rows(self.slot, x.size // x.shape[-1])
+            rows = lora_rows.dense_input_rows(self.slot, x.shape[:-1])
             y = self.base(x, lora=(a_t, b_t, rows))
             return self._add_extra(x, y) if self._kq_extra else y
         y = self.base(x, *args, **kwargs)
@@ -1911,8 +1911,8 @@ class LoRAKQuantLinear(nn.Module):
         z = x @ a_t                                   # (..., r)
         # The published row factor rides the rank-r intermediate, cast to
         # its dtype (an f32 factor would promote the delta to f32); the
-        # cast/reshaped vector is cached per publish. Rows laid out flat
-        # get one value each, as the epilogue's rows do.
+        # cast/reshaped vector is cached per publish. A flat (rows, D)
+        # input gets one value per row, as the epilogue's rows do.
         f = lora_rows.dense_row_factor(self.slot, z.shape[:-1], z.dtype)
         if f is not None:
             z = z * f

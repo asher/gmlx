@@ -149,21 +149,21 @@ def row_factor(slot: int, dtype, shape) -> mx.array | None:
 
 def dense_row_factor(slot: int, lead: tuple, dtype) -> mx.array | None:
     """The factor for a dense target's rank-r intermediate whose leading
-    dimensions are ``lead``, cast to ``dtype``. With the batch as the first
-    dimension it is ``row_factor`` at ``(B, 1, ...)``. Any other layout of
-    the same rows, such as ``(B * tokens,)`` or ``(1, B * tokens)``, gets one
-    value per input row in ``(B, tokens)`` order, as ``dense_rows`` gives the
-    in-op epilogue. ``None`` when nothing is published."""
+    dimensions are ``lead``, cast to ``dtype``. An input with a batch
+    dimension, two or more leading dimensions, carries the batch first: it
+    gets ``row_factor`` at ``(B, 1, ...)``, and a first dimension that is
+    not the published row count raises. A flat ``(B * tokens,)`` layout has
+    no batch dimension and gets one value per input row in ``(B, tokens)``
+    order, as ``dense_rows`` gives the in-op epilogue. ``None`` when
+    nothing is published."""
     rows = row_scales(slot)
     if rows is None:
         return None
     lead = tuple(int(n) for n in lead)
-    if lead and lead[0] == rows.shape[0]:
-        return row_factor(slot, dtype, (lead[0],) + (1,) * len(lead))
-    total = 1
-    for n in lead:
-        total *= n
-    flat = dense_rows(slot, total)
+    first = lead[0] if lead else 1
+    if len(lead) >= 2 or lead == (rows.shape[0],):
+        return row_factor(slot, dtype, (first,) + (1,) * len(lead))
+    flat = dense_rows(slot, first)
     key = ("dense", int(slot), dtype, lead)
     arr = _derived.get(key)
     if arr is None:
@@ -205,6 +205,19 @@ def dense_rows(slot: int, rows: int):
     the in-op LoRA epilogue's ``lora_rows``. ``None`` when nothing is
     published."""
     return _flat_rows(slot, rows, 1, (rows,))
+
+
+def dense_input_rows(slot: int, lead: tuple):
+    """``dense_rows`` for a dense target's input whose leading dimensions
+    are ``lead``, under the layout rule of ``dense_row_factor``: with a
+    batch dimension the first one must be the published row count, and a
+    flat layout must hold a multiple of it."""
+    total = 1
+    for n in lead:
+        total *= int(n)
+    if len(lead) >= 2:
+        check_rows(int(lead[0]))
+    return dense_rows(slot, total)
 
 
 def flat_rows(slot: int, tokens: int, k: int):

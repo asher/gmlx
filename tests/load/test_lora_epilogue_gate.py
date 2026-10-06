@@ -192,9 +192,11 @@ def test_both_paths_give_the_same_delta(monkeypatch):
 
 
 def test_rows_mode_takes_the_same_row_layouts_on_both_paths(monkeypatch):
-    """Rows as (B, L, D), (B * L, D) and (1, B * L, D): the plain path
-    scales each input row by its batch row's factor, and the epilogue
-    path hands the kernel the same factor per row."""
+    """Rows as (B, L, D) and as flat (B * L, D): the plain path scales
+    each input row by its batch row's factor, and the epilogue path hands
+    the kernel the same factor per row. An input with a batch dimension
+    that is not the published row count raises on both paths, whether or
+    not its row total is a multiple of it."""
     from mlx_kquant.nn import KQuantLinear
 
     from gmlx import lora_rows
@@ -221,8 +223,9 @@ def test_rows_mode_takes_the_same_row_layouts_on_both_paths(monkeypatch):
     one = x @ np.array(a).T @ np.array(b).T
     want = (one * 0.5 * scales[:, 0, None, None]
             + one * 0.5 * scales[:, 1, None, None]).reshape(-1, D)
-    layouts = ((batch, tokens, D), (batch * tokens, D),
-               (1, batch * tokens, D))
+    layouts = ((batch, tokens, D), (batch * tokens, D))
+    refused = ((1, batch * tokens, D), (batch * 2, tokens, D),
+               (tokens, batch, D), (batch * tokens + 1, D))
     lora_rows.configure("rows", 2)
     try:
         with mx.stream(mx.cpu):
@@ -244,6 +247,17 @@ def test_rows_mode_takes_the_same_row_layouts_on_both_paths(monkeypatch):
                     wrap(mx.array(x.reshape(shape)).astype(mx.bfloat16))
                     rows = seen[0][2]
                     assert np.array(rows).tolist() == [2.0] * 3 + [0.0] * 3
+                for shape in refused:
+                    lora_rows.set_rows(scales)
+                    seen.clear()
+                    for dtype in (mx.float32, mx.bfloat16):
+                        with pytest.raises(lora_rows.LoraRowsError,
+                                           match="has 2 rows, forward has"):
+                            wrap(mx.zeros(shape, dtype))
+                    # The bfloat16 call is the one the epilogue takes, and
+                    # it raises before the base runs.
+                    assert seen == ([None, None] if mode == "never"
+                                    else [None])
     finally:
         lora_rows.set_rows(None)
         lora_rows.configure("static", 1)

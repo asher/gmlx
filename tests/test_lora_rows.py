@@ -83,12 +83,23 @@ def test_rows_mode_unpublished_raises():
         wrap(mx.zeros((1, 2, 4)))
 
 
-def test_rows_mode_row_count_mismatch_raises():
+@pytest.mark.parametrize("published, shape", [
+    ([1.0, 1.0, 1.0], (2, 1, 4)),
+    # An input with a batch dimension whose row total is a multiple of the
+    # published count is still a mismatch.
+    ([1.0, 0.0, 0.5], (2, 3, 4)),
+    ([1.0, 0.0], (4, 3, 4)),
+    ([1.0, 0.0], (1, 4, 4)),
+    # A flat input must hold a multiple of the published count.
+    ([1.0, 0.0], (3, 4)),
+])
+def test_rows_mode_row_count_mismatch_raises(published, shape):
     lora_rows.configure("rows", 1)
     wrap, _base, _a, _b = _wrap()
-    lora_rows.set_rows([1.0, 1.0, 1.0])
-    with pytest.raises(lora_rows.LoraRowsError):
-        wrap(mx.zeros((2, 1, 4)))
+    lora_rows.set_rows(published)
+    with pytest.raises(lora_rows.LoraRowsError,
+                       match=f"has {len(published)} rows, forward has"):
+        wrap(mx.zeros(shape))
 
 
 def test_published_clears_after_forward_in_rows_mode():
