@@ -392,9 +392,20 @@ def reference(dirs, adapter, tmp_path_factory) -> dict:
     return dict(np.load(out))
 
 
-def _logits(model) -> np.ndarray:
-    with mx.stream(mx.cpu):
+def _logits(model, device=mx.cpu) -> np.ndarray:
+    with mx.stream(device):
         return np.array(model(mx.array([IDS])).astype(mx.float32))
+
+
+# The K-quant side of a float comparison runs on each device. The float
+# side stays on the CPU, where a float32 product is exact float32.
+_KQ_DEVICES = ["cpu", pytest.param("gpu", marks=pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available(),
+    reason="needs the Metal device"))]
+
+
+def _device(name: str):
+    return mx.gpu if name == "gpu" else mx.cpu
 
 
 def _owned_classes(model) -> bool:
@@ -499,9 +510,12 @@ def test_a_kquant_model_file_that_is_no_module_names_the_file(dirs, tmp_path):
 # dequantized weights. The K-quant matmul takes and returns bfloat16 where
 # the float model runs float32, so each leaf is off by a fraction of a
 # percent (the leaf test below) and the layers of a toy model grow that:
-# measured 0.026 for llama_kq, 0.195 for the dense Gemma 4 and 0.418 for
-# the MoE ones, where it can turn a routing choice, on logits that reach
-# 2.0, 3.8 and 4.4. Each tolerance is about twice its measurement.
+# measured on the CPU 0.026 for llama_kq, 0.195 for the dense Gemma 4 and
+# 0.418 for the MoE ones, where it can turn a routing choice, on logits
+# that reach 2.0, 3.8 and 4.4. Each tolerance is about twice its CPU
+# measurement. The GPU measures 0.013, 0.074 and 0.083: mlx-kquant's CPU
+# matmul of a few rows also rounds its activations to int8, and with
+# KQ_CPU_NEON=0 the CPU measures 0.013, 0.057 and 0.079.
 _DEQ_ATOL = {"llama_kq": 0.06, "flat_kq_dense": 0.4, "flat_kq": 0.9,
              "container_kq": 0.9}
 # One q_proj with its rows reversed moves the float logits of the MoE
@@ -509,15 +523,16 @@ _DEQ_ATOL = {"llama_kq": 0.06, "flat_kq_dense": 0.4, "flat_kq": 0.9,
 _DEQ_WRONG = 3.0
 
 
+@pytest.mark.parametrize("device", _KQ_DEVICES)
 @pytest.mark.parametrize("name", _KQ_NAMES)
 def test_a_kquant_checkpoint_gives_the_logits_of_its_dequantized_weights(
-        name, dirs, reference, bf16_activations):
+        name, device, dirs, reference, bf16_activations):
     """The reference never enters gmlx's K-quant route: the weights are
     dequantized in the fixture and mlx-lm's own class runs them."""
     from gmlx.load import mlx_checkpoint
 
     model, _ = mlx_checkpoint.load(str(dirs[name]))
-    got, want = _logits(model), reference[_deq(name)]
+    got, want = _logits(model, _device(device)), reference[_deq(name)]
     assert got.shape == want.shape
     gap = float(np.abs(got - want).max())
     assert gap <= _DEQ_ATOL[name], gap
@@ -532,66 +547,78 @@ def test_the_dequantized_reference_sees_one_wrong_projection(reference):
 
 
 # A K-quant leaf against the float32 product of its dequantized weight, as
-# a fraction of the largest output: measured at most 0.011 on a linear,
-# 0.008 on an expert stack and 0.003 on an embedding lookup, and 1.34 on
-# the projection with reversed rows.
+# a fraction of the largest output: measured on the CPU at most 0.011 on a
+# linear, 0.008 on an expert stack and 0.003 on an embedding lookup, on the
+# GPU at most 0.005 on any leaf, and 1.34 on the projection with reversed
+# rows.
 _LEAF_RTOL = 0.02
 
 
-def _leaf_gaps(model, twin: dict, per_tensor: dict) -> dict:
+def _leaf_gaps(model, twin: dict, per_tensor: dict, device=mx.cpu) -> dict:
     """``{leaf: gap}`` of each K-quant leaf of ``model`` on one random
     input against plain float32 arithmetic on ``twin``, the weights of the
     dequantized checkpoint. An embedding gives its lookup and, under
-    ``.as_linear``, its product."""
+    ``.as_linear``, its product. The leaf runs on ``device`` and the float
+    arithmetic on the CPU."""
     from mlx_kquant.nn import KQuantEmbedding, KQuantLinear, KQuantSwitchLinear
 
     leaves = dict(model.named_modules())
     rng = np.random.default_rng(0)
     pairs = {}
-    with mx.stream(mx.cpu):
-        for path in per_tensor:
-            m, w = leaves[path], twin[f"{path}.weight"]
-            bias = twin.get(f"{path}.bias")
-            x = mx.array(rng.standard_normal((1, 5, w.shape[-1])).astype(np.float32))
-            if isinstance(m, KQuantEmbedding):
-                ids = mx.array([IDS])
-                pairs[path] = m(ids), w[ids]
-                pairs[f"{path}.as_linear"] = m.as_linear(x), x @ w.T
-            elif isinstance(m, KQuantSwitchLinear):
-                x = mx.expand_dims(x, (-3, -2))
-                picks = mx.array(rng.integers(0, w.shape[0], size=(1, 5, 2)))
+    for path in per_tensor:
+        m, w = leaves[path], twin[f"{path}.weight"]
+        bias = twin.get(f"{path}.bias")
+        x = mx.array(rng.standard_normal((1, 5, w.shape[-1])).astype(np.float32))
+        if isinstance(m, KQuantEmbedding):
+            ids = mx.array([IDS])
+            with mx.stream(device):
+                got, linear = m(ids), m.as_linear(x)
+            with mx.stream(mx.cpu):
+                pairs[path] = got, w[ids]
+                pairs[f"{path}.as_linear"] = linear, x @ w.T
+        elif isinstance(m, KQuantSwitchLinear):
+            x = mx.expand_dims(x, (-3, -2))
+            picks = mx.array(rng.integers(0, w.shape[0], size=(1, 5, 2)))
+            with mx.stream(device):
+                got = m(x, picks)
+            with mx.stream(mx.cpu):
                 want = mx.gather_mm(x, w.swapaxes(-1, -2), rhs_indices=picks)
                 if bias is not None:
                     want = want + mx.expand_dims(bias[picks], -2)
-                pairs[path] = m(x, picks), want
-            else:
-                assert isinstance(m, KQuantLinear), (path, type(m))
+            pairs[path] = got, want
+        else:
+            assert isinstance(m, KQuantLinear), (path, type(m))
+            with mx.stream(device):
+                got = m(x)
+            with mx.stream(mx.cpu):
                 want = x @ w.T
-                pairs[path] = m(x), want if bias is None else want + bias
-        out = {}
-        for path, (got, want) in pairs.items():
-            assert got.shape == want.shape, path
-            got, want = (np.array(a.astype(mx.float32)) for a in (got, want))
-            out[path] = float(np.abs(got - want).max() / np.abs(want).max())
+                want = want if bias is None else want + bias
+            pairs[path] = got, want
+    out = {}
+    for path, (got, want) in pairs.items():
+        assert got.shape == want.shape, path
+        got, want = (np.array(a.astype(mx.float32)) for a in (got, want))
+        out[path] = float(np.abs(got - want).max() / np.abs(want).max())
     return out
 
 
-def _kq_leaves(dirs, name: str, twin: str):
+def _kq_leaves(dirs, name: str, twin: str, device=mx.cpu):
     from gmlx.load import mlx_checkpoint
 
     model, _ = mlx_checkpoint.load(str(dirs[name]))
     config = json.loads((dirs[name] / "config.json").read_text())
     per_tensor = config["quantization"]["per_tensor"]
     weights = mx.load(str(dirs[twin] / "model.safetensors"))
-    return per_tensor, weights, _leaf_gaps(model, weights, per_tensor)
+    return per_tensor, weights, _leaf_gaps(model, weights, per_tensor, device)
 
 
+@pytest.mark.parametrize("device", _KQ_DEVICES)
 @pytest.mark.parametrize("name", _KQ_NAMES)
 def test_each_kquant_leaf_gives_the_product_of_its_dequantized_weight(
-        name, dirs, bf16_activations):
+        name, device, dirs, bf16_activations):
     """Every path of the checkpoint's map holds its own wire bytes under
     its own codec in the loaded model, whichever class built it."""
-    per_tensor, _, gaps = _kq_leaves(dirs, name, _deq(name))
+    per_tensor, _, gaps = _kq_leaves(dirs, name, _deq(name), _device(device))
     assert set(per_tensor) <= set(gaps)
     worst = max(gaps, key=gaps.__getitem__)
     assert gaps[worst] <= _LEAF_RTOL, (worst, gaps[worst])
