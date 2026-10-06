@@ -934,6 +934,19 @@ official names, in torch layout and their source dtype, so the file is
 lossless and other GGUF readers can use it. It then reads the GGUF back
 and compares every tensor bit for bit before the file replaces `--out`.
 
+It packs the VAE of each image family: the FLUX.1 autoencoder for
+`z_image`, and the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
+official file is F32 and stays F32. The family follows from the tensor
+names and shapes. A file that fills neither is refused with what it
+holds, for example the other family's VAE under `--family`, or a video
+VAE of the same layout.
+
+A Qwen-Image 2.1 file may leave out its `time_conv` tensors, which one
+image never reads. The places where the video layout halves time come
+from the official config, so a `time_conv` tensor anywhere else is
+refused by name. So is a `--source-config` whose `temperal_downsample`,
+`latents_mean` or `latents_std` differs from the official one.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `SRC`, positional | Required | Pack this safetensors VAE. |

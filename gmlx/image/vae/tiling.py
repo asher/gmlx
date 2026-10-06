@@ -3,13 +3,14 @@
 """VAE decode and encode, whole or in tiles.
 
 Tiles are laid out in latent space. The default tile is at most 512
-pixels, which is 64 latent pixels at 8x, and neighbors overlap by at least
-64 pixels. A side takes the fewest tiles of that size that cover it, and
-the tiles shrink to the shortest equal length that keeps the overlap, so
-a 1024 pixel side takes three 384 pixel tiles. Tiles are spread evenly so
-the last one ends at the edge. Each tile is weighted by a cosine ramp across every overlap
-with a neighbor, and the weighted sum is divided by the summed weights.
-Accumulation is on the host in float32.
+pixels, which is 64 latent pixels at 8x and 32 at 16x, and neighbors
+overlap by at least 64 pixels. A side takes the fewest tiles of that size
+that cover it, and the tiles shrink to the shortest equal length that
+keeps the overlap, so a 1024 pixel side takes three 384 pixel tiles.
+Tiles are spread evenly so the last one ends at the edge. Each tile is
+weighted by a cosine ramp across every overlap with a neighbor, and the
+weighted sum is divided by the summed weights. Accumulation is on the host
+in float32.
 
 GroupNorm normalizes over the whole image, so a tile normalized with its
 own statistics drifts from the whole pass: at 1024 pixels in 512 pixel
@@ -21,6 +22,17 @@ its input, and the statistics of the image are merged from the region of
 each tile that is nearer its own center than any neighbor's. All tiles'
 activations at one GroupNorm are held at once, which is about the size of
 that activation for the whole image times the overlap.
+
+The Qwen-Image 2.1 autoencoder normalizes each pixel over its channels and
+takes no statistic of the whole image. Its part at latent resolution runs
+whole too, so the mid attention sees every latent pixel, and its tiles run
+one at a time, each evaluated and blended before the next. A tile's convs
+pad zeros where the whole pass reads the neighboring tile. A tiled result
+therefore equals the whole one at every pixel farther from each cut tile
+edge than the convs reach, which is 13 latent pixels in a decode and 10 in
+an encode (``qwen_image21_vae.reach``). Nearer a cut edge the two differ,
+and the ramp gives a tile a weight that falls to zero at that edge. The
+decode is clamped after the blend.
 
 ``decode`` and ``encode`` evaluate their result inside
 ``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
@@ -183,17 +195,24 @@ def _plan(vae, op: str, b: int, height: int, width: int, tiled,
           tile: int, overlap: int, free) -> bool:
     return memfit.vae_tiling(
         op, height, width, itemsize=vae.dtype.size,
-        channels=vae.config.block_out_channels[0], batch=b, tiled=tiled,
+        channels=vae.channels(op), batch=b, tiled=tiled,
         tile=tile, overlap=overlap, conv=getattr(vae, "conv", None),
         free=free)
 
 
-def decode(vae, latents, *, tiled: bool | None = None, tile: int = TILE,
-           overlap: int = OVERLAP, free: float | None = None) -> mx.array:
-    """Model-space latents (B, C, h, w) to an image (B, H, W, C) in float32
-    on the [-1, 1] scale, unclamped, evaluated. ``tile`` and ``overlap``
-    are in output pixels. ``tiled=None`` tiles only when a whole decode
-    does not fit ``free`` bytes, which default to the free working set."""
+def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
+           tile: int = TILE, overlap: int = OVERLAP,
+           free: float | None = None) -> mx.array:
+    """Model-space latents (B, C, h, w) to an image (B, H, W, 3) in float32
+    on the [-1, 1] scale, evaluated. The FLUX.1 autoencoder returns it
+    unclamped, and the Qwen-Image 2.1 one clamped to [-1, 1]. ``alpha``
+    keeps the fourth channel of a VAE that decodes RGBA. ``tile`` and
+    ``overlap`` are in output pixels. ``tiled=None`` tiles only when a
+    whole decode does not fit ``free`` bytes, which default to the free
+    working set."""
+    rgba = vae.config.out_channels == 4
+    if alpha and not rgba:
+        raise ValueError("this VAE decodes no alpha channel")
     z = vae.to_vae_space(mx.array(latents))
     s = vae.config.scale
     b, h, w = z.shape[0], z.shape[1] * s, z.shape[2] * s
@@ -201,22 +220,32 @@ def decode(vae, latents, *, tiled: bool | None = None, tile: int = TILE,
     with memfit.bounded_cache():
         if not in_tiles:
             out = vae.decode(z).astype(mx.float32)
-            mx.eval(out)
-            return out
-        head = vae.decoder.head(z.astype(vae.dtype))
-        mx.eval(head)
-        return mx.array(run_lockstep(vae.decoder.tail_steps, head,
-                                     in_scale=1, out_scale=s, tile=tile // s,
-                                     overlap=overlap // s))
+        elif vae.lockstep:
+            head = vae.decoder.head(z.astype(vae.dtype))
+            mx.eval(head)
+            out = mx.array(run_lockstep(
+                vae.decoder.tail_steps, head, in_scale=1, out_scale=s,
+                tile=tile // s, overlap=overlap // s))
+        else:
+            head = vae.decode_head(z.astype(vae.dtype))
+            mx.eval(head)
+            out = vae.finish(mx.array(run_tiled(
+                vae.decode_tail, head, in_scale=1, out_scale=s,
+                tile=tile // s, overlap=overlap // s)))
+        if rgba and not alpha:
+            out = out[..., :3]
+        mx.eval(out)
+        return out
 
 
 def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
            noise=None, tile: int = TILE, overlap: int = OVERLAP,
            free: float | None = None) -> mx.array:
     """An image (B, H, W, C) on the [-1, 1] scale to model-space latents
-    (B, C, h, w) in float32, evaluated. ``mode="mode"`` takes the mean,
-    and ``mode="sample"`` adds ``noise`` (B, C, h, w) scaled by the
-    standard deviation. ``tiled`` and ``free`` work as in ``decode``."""
+    (B, C, h, w) in float32, evaluated. A VAE that encodes RGBA takes an
+    RGB image as opaque. ``mode="mode"`` takes the mean, and
+    ``mode="sample"`` adds ``noise`` (B, C, h, w) scaled by the standard
+    deviation. ``tiled`` and ``free`` work as in ``decode``."""
     if mode not in ("mode", "sample"):
         raise ValueError(f"encode mode must be 'mode' or 'sample', not {mode!r}")
     if mode == "sample" and noise is None:
@@ -232,12 +261,17 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
     with memfit.bounded_cache():
         if not in_tiles:
             mean, logvar = vae.encode(x)
-        else:
+        elif vae.lockstep:
             head = run_lockstep(vae.encoder.head_steps, x.astype(vae.dtype),
                                 in_scale=s, out_scale=1, tile=tile // s,
                                 overlap=overlap // s)
             mean, logvar = vae.split_moments(
                 vae.encoder.tail(mx.array(head).astype(vae.dtype)))
+        else:
+            head = run_tiled(vae.encode_head, x, in_scale=s, out_scale=1,
+                             tile=tile // s, overlap=overlap // s)
+            mean, logvar = vae.split_moments(
+                vae.encode_tail(mx.array(head).astype(vae.dtype)))
         mean, logvar = mean.astype(mx.float32), logvar.astype(mx.float32)
         if mode == "sample":
             eps = mx.array(noise).astype(mx.float32).transpose(0, 2, 3, 1)

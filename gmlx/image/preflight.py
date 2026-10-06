@@ -40,7 +40,7 @@ def _image_dit(view) -> bool:
 
 def _vae(view) -> bool:
     from .vae import flux1_ae
-    from .vae.reader import strip_names
+    from .vae.reader import VAES, strip_names
 
     names = strip_names(view.tensors)
     if flux1_ae.is_original_layout(names):
@@ -49,7 +49,8 @@ def _vae(view) -> bool:
                  for n, f in names.items()}
     shapes = {n: tuple(reversed(view.tensors[f].shape))
               for n, f in names.items()}
-    return flux1_ae.config_from_shapes(shapes) is not None
+    return any(row.config_from_shapes(shapes) is not None
+               for row in VAES.values())
 
 
 def classify_view(view) -> str:

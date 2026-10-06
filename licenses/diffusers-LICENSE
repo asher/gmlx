@@ -25,6 +25,11 @@ source.
   upsample of src/diffusers/models/upsampling.py and the AttnProcessor2_0
   path of src/diffusers/models/attention_processor.py, in channels-last
   layout with an owned contiguous-group GroupNorm.
+- gmlx/image/vae/qwen_image21_vae.py: AutoencoderKLQwenImage21 of
+  src/diffusers/models/autoencoders/autoencoder_kl_qwenimage21.py with
+  its encoder, decoder, residual, attention, resample and RMS norm
+  blocks and the AvgDown3D and DupUp3D shortcuts, for one frame, in
+  channels-last layout.
 - gmlx/image/families/qwen_image21/model.py: the Qwen-Image 2.1 forward of
   src/diffusers/models/transformers/transformer_qwenimage21.py (the
   single-stream block, the shared modulation and its t = 0 rows, the

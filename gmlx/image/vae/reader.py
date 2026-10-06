@@ -5,7 +5,11 @@ The prefixes ``vae.`` and ``first_stage_model.`` are stripped, and the
 FLUX.1 autoencoder is also read in its original layout. The whole header is
 checked before any tensor bytes are read. Loading is strict both ways:
 every module parameter is filled, and every file tensor is consumed or on
-the family's expected-unused list.
+the list of tensors that the family's config leaves unread. A file that
+holds another family's VAE, or a relative of one with other channel counts
+or video kernels, is refused with what it holds. A GGUF that carries the
+VAE's config text is refused when a field gmlx takes from the family's
+constants differs there.
 
 Both formats hold torch layout. Conv kernels (O, I, kH, kW) become
 (O, kH, kW, I), and every weight is cast to the decode dtype as an owned,
@@ -23,12 +27,13 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 from ..fingerprint import ImageModelError
-from . import flux1_ae
+from . import flux1_ae, qwen_image21_vae
 from .conv import conv_path, set_conv_path
 
 STRIP_PREFIXES = ("vae.", "first_stage_model.")
 FLOAT_CODECS = ("F32", "F16", "BF16")
 LAYOUT = "torch-oihw"
+CONFIG_KEY = "gmlx.vae.config_json"
 
 
 class VAEError(ImageModelError):
@@ -43,7 +48,15 @@ class VaeRow:
     build: Callable                 # config -> nn.Module
     latent_channels: int
     latent_space: Callable          # family constants -> config fields
-    expected_unused: tuple = ()     # name prefixes left unread
+    expected_unused: Callable | None = None     # config -> names a file
+                                                # may hold that stay unread
+    image_channels: int | None = None   # in and out, when the family fixes
+                                        # them
+    relative: Callable | None = None    # torch shapes -> what a file with
+                                        # this tree holds instead, or None
+    config_disagreements: Callable | None = None    # vae/config.json dict
+                                        # -> fields that differ from the
+                                        # VAE's constants
 
 
 def _flux1_space(c: dict) -> dict:
@@ -51,9 +64,22 @@ def _flux1_space(c: dict) -> dict:
             "shift_factor": c["vae_shift_factor"]}
 
 
+def _own_space(c: dict) -> dict:
+    return {}
+
+
 VAES = {
     "z_image": VaeRow("the FLUX.1 autoencoder", flux1_ae.config_from_shapes,
                       flux1_ae.Flux1AE, 16, _flux1_space),
+    # The latent mean and deviation come with the VAE's own constants.
+    "qwen_image21": VaeRow(
+        "the Qwen-Image 2.1 autoencoder",
+        qwen_image21_vae.config_from_shapes, qwen_image21_vae.QwenImage21VAE,
+        qwen_image21_vae.LATENT_CHANNELS, _own_space,
+        qwen_image21_vae.expected_unused,
+        image_channels=qwen_image21_vae.IMAGE_CHANNELS,
+        relative=qwen_image21_vae.relative,
+        config_disagreements=qwen_image21_vae.config_disagreements),
 }
 
 
@@ -180,13 +206,19 @@ def identify(header: VaeHeader, family: str):
     row = vae_row(family)
     cfg = row.config_from_shapes(header.shapes)
     if cfg is None:
-        first = ", ".join(list(header.shapes)[:4])
-        raise VAEError(f"{header.path} is not a VAE gmlx image reads: "
-                       f"{len(header.shapes)} tensors, first {first}")
+        raise VAEError(_holds(header, family, row))
     if cfg.latent_channels != row.latent_channels:
         raise VAEError(f"this VAE has {cfg.latent_channels} latent channels, "
                        f"and {family} decodes with {row.title} at "
                        f"{row.latent_channels}")
+    if row.image_channels is not None and (
+            cfg.in_channels, cfg.out_channels) != (row.image_channels,) * 2:
+        raise VAEError(f"this VAE has {cfg.in_channels} image channels in "
+                       f"and {cfg.out_channels} out, and {family} decodes "
+                       f"with {row.title} at {row.image_channels}")
+    text = header.metadata.get(CONFIG_KEY)
+    if header.format == "gguf" and text is not None:
+        check_config(header.path, text, family)
     bad = sorted({d for d in header.dtypes.values()
                   if d not in FLOAT_CODECS})
     if bad:
@@ -198,10 +230,46 @@ def identify(header: VaeHeader, family: str):
     return replace(cfg, **space)
 
 
-def check_names(header: VaeHeader, params: dict, row: VaeRow) -> None:
+def check_config(path: str, text: str, family: str) -> None:
+    """Refuse the vae/config.json text of ``path`` when a field that gmlx
+    takes from the constants of ``family``'s VAE differs in it."""
+    row = vae_row(family)
+    if row.config_disagreements is None:
+        return
+    try:
+        config = json.loads(text)
+    except ValueError:
+        config = None
+    if not isinstance(config, dict):
+        raise VAEError(f"{path}: its VAE config is not a JSON object")
+    bad = row.config_disagreements(config)
+    if bad:
+        raise VAEError(f"{path}: its VAE config differs from {row.title} in "
+                       f"{', '.join(bad)}")
+
+
+def _holds(header: VaeHeader, family: str, row: VaeRow) -> str:
+    """Why ``header`` is not ``family``'s VAE, naming what it holds when
+    that is another family's VAE or a relative of one."""
+    for name, other in VAES.items():
+        if name != family and other.config_from_shapes(
+                header.shapes) is not None:
+            return (f"{header.path} holds {other.title}, the {name} VAE, "
+                    f"and {family} decodes with {row.title}")
+    for other in VAES.values():
+        what = other.relative and other.relative(header.shapes)
+        if what:
+            return (f"{header.path} holds {what}, and {family} decodes "
+                    f"with {row.title}")
+    first = ", ".join(list(header.shapes)[:4])
+    return (f"{header.path} is not a VAE gmlx image reads: "
+            f"{len(header.shapes)} tensors, first {first}")
+
+
+def check_names(header: VaeHeader, params: dict, row: VaeRow, cfg) -> None:
+    unread = row.expected_unused(cfg) if row.expected_unused else ()
     missing = sorted(set(params) - set(header.shapes))
-    extra = sorted(n for n in set(header.shapes) - set(params)
-                   if not any(n.startswith(u) for u in row.expected_unused))
+    extra = sorted(set(header.shapes) - set(params) - set(unread))
     wrong = sorted(n for n in set(params) & set(header.shapes)
                    if _mlx_shape(header.shapes[n]) != params[n].shape)
     parts = []
@@ -264,7 +332,7 @@ def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
     cfg = identify(header, family)
     vae = row.build(cfg)
     params = dict(tree_flatten(vae.parameters()))
-    check_names(header, params, row)
+    check_names(header, params, row, cfg)
 
     arrays = _file_arrays(header)
     weights = []

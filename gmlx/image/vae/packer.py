@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..fingerprint import canonical_bf16
-from .reader import (VAES, VAEError, check_names, identify, read_header,
-                     safetensors_header)
+from .reader import (CONFIG_KEY, VAES, VAEError, check_config, check_names,
+                     identify, read_header, safetensors_header)
 
 PACKER_VERSION = "1"
 
@@ -58,8 +58,9 @@ def _family(header, family: str | None) -> str:
             continue
         row = VAES[name]
         params = dict(_tree_params(row.build(cfg)))
-        check_names(header, params, row)
+        check_names(header, params, row, cfg)
         return name
+    errors = list(dict.fromkeys(errors))
     raise VAEError(errors[0] if len(errors) == 1 else
                    f"{header.path} matches no image family's VAE: "
                    + "; ".join(errors))
@@ -116,6 +117,7 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
 
     vh = read_header(src)
     fam = _family(vh, family)
+    check_config(src, config_json, fam)
     header, data_start = safetensors_header(src)
     header.pop("__metadata__", None)
     order = sorted(header, key=lambda n: header[n]["data_offsets"][0])
@@ -129,7 +131,7 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
         "gmlx.vae.source_file": os.path.basename(src),
         "gmlx.vae.source_sha256": _sha256_file(src),
         "gmlx.vae.layout": "torch-oihw",
-        "gmlx.vae.config_json": config_json,
+        CONFIG_KEY: config_json,
         "gmlx.packer.version": PACKER_VERSION,
     }
     mm = np.memmap(src, dtype=np.uint8, mode="r")

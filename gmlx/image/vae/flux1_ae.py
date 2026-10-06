@@ -346,7 +346,12 @@ class Flux1AE(nn.Module):
     mean and log variance of the latent distribution, the log variance
     clipped to [-30, 20]. Both run in the dtype of the weights. The family's
     scaling and shift relate VAE space to the model space the DiT works
-    in."""
+    in.
+
+    GroupNorm takes its statistics over the whole image, so the tiles of a
+    tiled pass advance together (``lockstep``)."""
+
+    lockstep = True
 
     def __init__(self, cfg: Flux1AEConfig):
         super().__init__()
@@ -357,6 +362,10 @@ class Flux1AE(nn.Module):
     @property
     def dtype(self) -> mx.Dtype:
         return self.decoder.conv_in.weight.dtype
+
+    def channels(self, op: str) -> int:
+        """Channels at full resolution in ``op``, "decode" or "encode"."""
+        return self.config.block_out_channels[0]
 
     def decode(self, z: mx.array) -> mx.array:
         return self.decoder(z.astype(self.dtype))
