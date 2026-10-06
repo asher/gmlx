@@ -162,7 +162,9 @@ Checks 3 and 7 read one denoise step through three gates, which
 structure: the model in the oracle's float32 arithmetic, with exact
 float32 products, every K-quant product on its dequantized weight and the
 stock ops, matches the oracle on every row and branch row at `5e-5`, and
-each listed wrong model or wrong adapter table fails it. The product gate
+each listed wrong model or wrong adapter table fails it. Check 7 also
+runs it with `GMLX_IMAGE_LORA_PLACEMENT=split`, where a K-quant product
+runs once per output band past its module's call. The product gate
 proves the result of the path a request takes: the block rows, the
 free-running blocks and the velocity are within the manifest's
 tolerances, each twice the oracle's own bfloat16 against float32 gap at
