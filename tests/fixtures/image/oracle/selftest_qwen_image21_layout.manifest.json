@@ -1,0 +1,482 @@
+{
+ "schema": 1,
+ "name": "selftest_qwen_image21_layout",
+ "check": 3,
+ "family": "qwen_image21",
+ "script": "scripts/image_oracle/check3_qwen_image21.py",
+ "argv": [
+  "check3_qwen_image21.py",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "cases": {
+   "text": {
+    "rows": 7,
+    "image_slots": [],
+    "ref_shapes": [],
+    "target_tokens": [
+     4,
+     6
+    ]
+   },
+   "ref1": {
+    "rows": 9,
+    "image_slots": [
+     3,
+     4
+    ],
+    "ref_shapes": [
+     [
+      2,
+      4
+     ]
+    ],
+    "target_tokens": [
+     4,
+     6
+    ]
+   },
+   "ref2": {
+    "rows": 10,
+    "image_slots": [
+     2,
+     4,
+     5
+    ],
+    "ref_shapes": [
+     [
+      2,
+      2
+     ],
+     [
+      4,
+      2
+     ]
+    ],
+    "target_tokens": [
+     2,
+     4
+    ]
+   },
+   "adjacent": {
+    "rows": 8,
+    "image_slots": [
+     1,
+     2,
+     3
+    ],
+    "ref_shapes": [
+     [
+      2,
+      2
+     ],
+     [
+      4,
+      2
+     ]
+    ],
+    "target_tokens": [
+     4,
+     6
+    ]
+   },
+   "wide": {
+    "rows": 40,
+    "image_slots": [
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     30,
+     31,
+     32,
+     33,
+     34,
+     35
+    ],
+    "ref_shapes": [
+     [
+      8,
+      8
+     ],
+     [
+      4,
+      6
+     ]
+    ],
+    "target_tokens": [
+     12,
+     20
+    ]
+   }
+  },
+  "theta": 10000,
+  "freq_dims": [
+   4,
+   6,
+   16,
+   56
+  ],
+  "config": {
+   "patch_size": 1,
+   "in_channels": 8,
+   "out_channels": 8,
+   "num_layers": 2,
+   "attention_head_dim": 16,
+   "num_attention_heads": 2,
+   "context_in_dim": 24,
+   "mlp_ratio": 3,
+   "axes_dims_rope": [
+    4,
+    6,
+    6
+   ],
+   "eps": 1e-06,
+   "causal_condition": true
+  }
+ },
+ "results": {},
+ "tolerances": {
+  "layout": "exact",
+  "rope_freqs": "one ulp"
+ },
+ "notes": [
+  "positions come from each token's row of the reference's rotary table, joint_source from each token's row of the first block's input, image_ids and target_token_mask from build_token_metadata, and modulation_row from _select_modulation_rows: 0 reads the sampled timestep's row and 1 the t = 0 row. joint_source indexes the encoder rows followed by the image tokens, references first."
+ ],
+ "created": "2026-10-06T09:46:43Z",
+ "npz": "selftest_qwen_image21_layout.npz",
+ "tensors": {
+  "adjacent.image_ids": {
+   "shape": [
+    41
+   ],
+   "dtype": "int32",
+   "sha256": "a5221724511731f5cfae7870da227cbe1818b3eb9a4130ca6fe5b9d2ab29ce12"
+  },
+  "adjacent.image_pad_mask": {
+   "shape": [
+    41
+   ],
+   "dtype": "bool",
+   "sha256": "45456cbdf9a17122f3b86e5aa3aa8e1a51458bb2f1c80b321a39955279d9826c"
+  },
+  "adjacent.joint_source": {
+   "shape": [
+    41
+   ],
+   "dtype": "int32",
+   "sha256": "3d9d75ef7f5f196375d561197e5f3d858fc7bf9ab785bf8e88ebc590b517e0cb"
+  },
+  "adjacent.modulation_row": {
+   "shape": [
+    41
+   ],
+   "dtype": "int8",
+   "sha256": "1081b719f5bf1890490193402fc697b7d74f0c8e45db14a2db27d1be0d30ce11"
+  },
+  "adjacent.positions": {
+   "shape": [
+    41,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "6da884c9bb6e3715d4091edf0681185cac8d452ae743ebb8e00a01bd3c5158b1"
+  },
+  "adjacent.segments": {
+   "shape": [
+    4,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "4b21368526a31210b1a0789ae959db239d87e44e069b3f30072924d82212820e"
+  },
+  "adjacent.target_token_mask": {
+   "shape": [
+    41
+   ],
+   "dtype": "bool",
+   "sha256": "1cd7a971d3a762c86765a659ad434e47e93c56853cc0fc607e09170e7a94fef0"
+  },
+  "ref1.image_ids": {
+   "shape": [
+    39
+   ],
+   "dtype": "int32",
+   "sha256": "792acb84d771ce5b610ade88940ee527e62bb3124f326254261e30a81bb04104"
+  },
+  "ref1.image_pad_mask": {
+   "shape": [
+    39
+   ],
+   "dtype": "bool",
+   "sha256": "eaf57c6dc52decf43cb259b2d89210aeca90697f8f635c060f9020a5fecf6200"
+  },
+  "ref1.joint_source": {
+   "shape": [
+    39
+   ],
+   "dtype": "int32",
+   "sha256": "168ec544cad5dd8bdac9329dcc9598bfc1e452fbd7b0e3e63bd8902db3d233ca"
+  },
+  "ref1.modulation_row": {
+   "shape": [
+    39
+   ],
+   "dtype": "int8",
+   "sha256": "90ea47d803bcc8ec3efb96e84c5c186a9a4f20d14648dc279345c034e8d0a82f"
+  },
+  "ref1.positions": {
+   "shape": [
+    39,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "d6104d9c9869fa1a9e9cdf3e6eba676fe46c44f03def1ed127ee1e27b7702158"
+  },
+  "ref1.segments": {
+   "shape": [
+    3,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "83b34cbafad0ff57cc270e6e8202a1e3a6a4c286e5f7a741f8c7ccddc984f99f"
+  },
+  "ref1.target_token_mask": {
+   "shape": [
+    39
+   ],
+   "dtype": "bool",
+   "sha256": "1cebfce32dee285f3f85758ed8189109dce9fe3becb9aa0f304e410887820249"
+  },
+  "ref2.image_ids": {
+   "shape": [
+    27
+   ],
+   "dtype": "int32",
+   "sha256": "0df61699097c1c676130f40344fa46dd8ee6f2f885f772dc6f2c3e02f5de768c"
+  },
+  "ref2.image_pad_mask": {
+   "shape": [
+    27
+   ],
+   "dtype": "bool",
+   "sha256": "1710e72649b8facc16296f6040348413c945d512a3244e29ae4e04815d6f1b94"
+  },
+  "ref2.joint_source": {
+   "shape": [
+    27
+   ],
+   "dtype": "int32",
+   "sha256": "45567920e41e4ae5a0c2c248de4896a7d9716583f59948d17f722b807b2f1765"
+  },
+  "ref2.modulation_row": {
+   "shape": [
+    27
+   ],
+   "dtype": "int8",
+   "sha256": "f9afd6245d6533407a0b5d84fbc2e2a6cda36d640534668a460aa2ab441d41a2"
+  },
+  "ref2.positions": {
+   "shape": [
+    27,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "b3bfb5bb0c410c773f3e7488f5dcbe87e7511dd6751b20c416cfaa7f4a2eb604"
+  },
+  "ref2.segments": {
+   "shape": [
+    5,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "31d79bb0e9641dacdd33c925b0c3defd2229d514bd31b234632b1f81f9dd9dc1"
+  },
+  "ref2.target_token_mask": {
+   "shape": [
+    27
+   ],
+   "dtype": "bool",
+   "sha256": "2abe98e75c3961454d5934d1cbdb3bea49ddebc277c12167058bcfb6a89ef47f"
+  },
+  "rope_freqs.16": {
+   "shape": [
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "dc0f132eed2f8955fe1077d0ccde8dd576d43efe05e3e8dbb806db0539a0c3eb"
+  },
+  "rope_freqs.4": {
+   "shape": [
+    2
+   ],
+   "dtype": "float32",
+   "sha256": "9d877756a0997bd64e5c564ef48548b144e1fc500cee3eda442fbe375355f683"
+  },
+  "rope_freqs.56": {
+   "shape": [
+    28
+   ],
+   "dtype": "float32",
+   "sha256": "cdacf8bb15240f4db72f20615c8292668f5c058e5a4685cc7930473b53f64d6f"
+  },
+  "rope_freqs.6": {
+   "shape": [
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "dbf7fa9034ae5b6e12ace33b39f8d3002484fbc7b8c346e13ada1627a7da2c05"
+  },
+  "text.image_ids": {
+   "shape": [
+    31
+   ],
+   "dtype": "int32",
+   "sha256": "1d9cc9584659d121313f454d49dfa6f24cfbc2b88d83bcdf9b7823e511c2a58d"
+  },
+  "text.image_pad_mask": {
+   "shape": [
+    31
+   ],
+   "dtype": "bool",
+   "sha256": "3180160b8afdc49c77d36f282f2528a2cf14cad243dfa99317233c01beafdbcf"
+  },
+  "text.joint_source": {
+   "shape": [
+    31
+   ],
+   "dtype": "int32",
+   "sha256": "1e767793061af18bb39b3d8d931b564ddcdbce13d47c4c542fe8cbbf32df9aff"
+  },
+  "text.modulation_row": {
+   "shape": [
+    31
+   ],
+   "dtype": "int8",
+   "sha256": "7e90ac44b5436506cfe499b96d80422d83b74c3ab7d66864cd90bb7763e0d6e7"
+  },
+  "text.positions": {
+   "shape": [
+    31,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "107d66afd2c0db8b7391bbaae0676df08aad13a92407a63a08b82f58f02bc789"
+  },
+  "text.segments": {
+   "shape": [
+    1,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "1475616a15c646cf5c67d438e0ce5f90e4098965c224dc4f560140f17509da57"
+  },
+  "text.target_token_mask": {
+   "shape": [
+    31
+   ],
+   "dtype": "bool",
+   "sha256": "3180160b8afdc49c77d36f282f2528a2cf14cad243dfa99317233c01beafdbcf"
+  },
+  "wide.image_ids": {
+   "shape": [
+    346
+   ],
+   "dtype": "int32",
+   "sha256": "8f220c19f5a9e2674d8b9923bf8d7e340d212e5dc970817e23063dd711637964"
+  },
+  "wide.image_pad_mask": {
+   "shape": [
+    346
+   ],
+   "dtype": "bool",
+   "sha256": "9ef1b702e3fdb4fa17d3b741fc248dd2ee6d679075734a7c31be24467d373d87"
+  },
+  "wide.joint_source": {
+   "shape": [
+    346
+   ],
+   "dtype": "int32",
+   "sha256": "5f665416136cfdee80a270c5598ead84e4c654f025474e5b9a06545a72c07042"
+  },
+  "wide.modulation_row": {
+   "shape": [
+    346
+   ],
+   "dtype": "int8",
+   "sha256": "340f524cfd712bb5abb93d103885dbda95ba9418b366a2189d697034c1a6b092"
+  },
+  "wide.positions": {
+   "shape": [
+    346,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "537979d5d1c27776e7c0c965f53a2297f0874c4d846f183b8fa860f3e7c5d333"
+  },
+  "wide.segments": {
+   "shape": [
+    5,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "e057d4b0b809621369fb3bd5aecaebeda4677a6413d7b46d661730a092962f20"
+  },
+  "wide.target_token_mask": {
+   "shape": [
+    346
+   ],
+   "dtype": "bool",
+   "sha256": "099897284aa2147718a0e0472e6e5bd39edfb6bc26b3e1c0791229477cc7b722"
+  }
+ }
+}

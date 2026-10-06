@@ -73,6 +73,8 @@ exercise a path.
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
+| `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, as a joint forward and as a cached decode. |
+| `tests/image/test_image_qwen_real.py` | None | A Qwen-Image 2.1 DiT GGUF loads with fp32 norm leaves, and a small prefill and cached step stays finite with and without a reference. |
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
 | `tests/image/test_image_text_encoder_real.py` | None | A Qwen3-4B GGUF passes the Z-Image encoder checks, its last-layer tap equals the copied mlx-lm forward before the final norm, and release drops the model. |
 | `tests/image/test_image_check2.py` | `GMLX_IMAGE_FIXTURES` | The Z-Image encoder tap has the oracle's token ids and stays within its calibrated relative L2 and per-token cosine. |
@@ -193,6 +195,29 @@ run takes the oracle's timestep embedding, because torch's float32 `exp`
 rounds some sinusoid frequencies one ulp away from numpy's, and the random
 tiny blocks amplify that gap to about 1e-5. The `t_embedder` row still
 compares gmlx's own embedding with the oracle's.
+
+`check3_qwen_image21.py --self-test` writes a tiny Qwen-Image 2.1 model
+in GGUF tensor names, loads it back through diffusers' single-file path
+and runs one conditioning through three calls: the joint forward of the
+whole sequence, the extract call that keeps each block's K and V of the
+prefix, and the cached decode of the target rows at another sigma. It
+writes four fixtures small enough to commit beside their manifests: a
+text prefix, one reference image, two reference images with every block
+row, and the token layouts of five conditionings.
+`scripts/image_oracle/qwen_image21_tiny.py` forms the tiny model's
+weights and inputs from integer arithmetic, so the oracle and the gmlx
+tests build the same arrays with no weights file between them, and each
+manifest holds the sha256 of the weights.
+`tests/image/test_image_check3_qwen.py` loads the same weights from a
+GGUF and runs the gmlx prefill and target forward against these fixtures
+on the CPU in float32, with the rows that `tests/image/qwen_gates.py`
+describes. Every row is held to `4e-6`, about seven times the largest
+reading, and each wrong model of its list must miss a row by twice that.
+`tests/image/test_image_qwen_layout.py` holds the position of every
+token, the expansion of image slots, the modulation row of every token
+and the prefill segments to the layout fixture. The rows of
+`test_image_check3_qwen.py` that read the real file skip until the
+manifests that `check3_qwen_image21.py` writes from it are committed.
 
 ## Server end-to-end harnesses
 
