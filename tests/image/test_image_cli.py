@@ -581,6 +581,41 @@ def test_adapters_reach_sample_as_one_patch_table(tiny, tmp_path, capsys,
     assert np.array_equal(np.load(lat)["latents"], base)
 
 
+def test_the_command_plans_the_conditionings_and_the_table_it_samples(
+        tiny, tmp_path, capsys, monkeypatch):
+    """The plan of a request counts the states that its conditionings
+    hold under its patch table, so the command hands the plan what it
+    hands ``sample``: the positive conditioning, the negative one when
+    guided, and the table."""
+    planned, sampled = [], []
+    real = api.sample
+    monkeypatch.setattr(api, "plan_request",
+                        lambda pipe, **kw: planned.append(kw) or tiny.plan)
+    monkeypatch.setattr(api, "sample",
+                        lambda pipe, cond, **kw: sampled.append((cond, kw))
+                        or real(pipe, cond, **kw))
+    args = ["--prompt", "p", "--size", "32x32", "--seed", "5", "--steps",
+            "2", "--output", str(tmp_path / "o.png")]
+    guide = ["--guidance", "3", "--negative-prompt", "blur"]
+    for extra, guided, adapted in (
+            ([], False, False), (guide, True, False),
+            (["--adapter", tiny.a], False, True),
+            ([*guide, "--adapter", f"{tiny.b}:0.5"], True, True)):
+        assert umbrella_main(tiny.base + args + extra) == 0
+        plan, (cond, kw), pipe = planned[-1], sampled[-1], tiny.pipes[-1]
+        assert (kw["neg"] is not None) == guided
+        want = [cond, kw["neg"]] if guided else [cond]
+        assert len(plan["conds"]) == len(want)
+        assert all(a is b for a, b in zip(plan["conds"], want))
+        assert plan["patch_table"] == kw["patch_table"]
+        assert (plan["patch_table"] not in (None, pipe.default_table)) \
+            == adapted
+        assert (plan["height"], plan["width"], plan["cfg"]) == (
+            32, 32, 3.0 if guided else 1.0)
+    assert len(planned) == len(sampled) == 4
+    capsys.readouterr()
+
+
 def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
     from lora_fixtures import make_pair, tiny_z_adapter, write_adapter, \
         write_keys

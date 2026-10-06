@@ -288,6 +288,13 @@ def test_the_table_id_is_in_every_weight_dependent_cache_key(tmp_path):
     assert pipe.tables.bytes > 0
     plan = api.plan_request(pipe, height=64, width=64, budget=float(1 << 40))
     assert plan.terms["adapters"] == pipe.adapters.bytes + pipe.tables.bytes
+    # A family whose step is one forward has no step parts, and the plan
+    # counts the caption states it holds among its caches.
+    assert pipe.family.step is None
+    assert pipe.captions.bytes > 0 and pipe.modulations.bytes > 0
+    assert plan.terms["caches"] == (pipe.conditionings.bytes
+                                    + pipe.modulations.bytes
+                                    + pipe.captions.bytes)
 
 
 def test_built_tables_are_cached_per_table_id_and_dtype(tmp_path,
