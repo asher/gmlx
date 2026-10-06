@@ -502,7 +502,8 @@ def _generate(a) -> int:
     neg = None if cfg == 1.0 else api.encode_text(pipe, a.negative_prompt
                                                    or "")
     encode_s = time.perf_counter() - t0
-    plan = api.plan_request(pipe, height=height, width=width, cfg=cfg)
+    plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
+                            conds=[cond] if neg is None else [cond, neg])
     _check_release(a, plan)
     release = a.encoder_release == "always" or (
         a.encoder_release == "auto" and plan.release_encoder)

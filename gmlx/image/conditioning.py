@@ -78,6 +78,13 @@ class ByteLRU:
             self._items.move_to_end(key)
             return hit[0]
 
+    def nbytes(self, key) -> int:
+        """Bytes of the entry at ``key``, 0 without one. The order of use
+        does not change."""
+        with self._lock:
+            hit = self._items.get(key)
+            return 0 if hit is None else hit[1]
+
     def put(self, key, value, nbytes: int, keep: int = 0) -> None:
         with self._lock:
             old = self._items.pop(key, None)

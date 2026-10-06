@@ -247,19 +247,43 @@ def _flat(params):
     return tree_flatten(params)
 
 
+def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
+    """Rows a conditioning puts before the image rows: its text rows and
+    the tokens of its reference latents."""
+    p = pipe.dit.cfg.patch
+    refs = sum((int(r.shape[-2]) // p) * (int(r.shape[-1]) // p)
+               for r in cond.ref_latents)
+    return int(cond.features.shape[0]) - len(cond.image_slots) + refs
+
+
 def plan_request(pipe: ImagePipeline, *, height: int, width: int,
                  cfg: float | None = None, caption_tokens: int | None = None,
-                 budget: float | None = None,
+                 conds=None, budget: float | None = None,
                  overcommit: bool | None = None) -> memfit.MemoryPlan:
     """The memory plan of one request on this pipeline: its weights, an
     encoder still resident, the caches it holds, and the phase peaks.
-    Raises ImageMemoryError when no lever makes it fit."""
+    ``conds`` is the request's conditioning, or the positive and the
+    negative one, whose text rows and reference latents size the prefix
+    of a family that caches one. Raises ImageMemoryError when no lever
+    makes it fit."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
     vae_dtype = getattr(pipe.vae, "dtype", None)
-    caches = (pipe.conditionings.bytes + pipe.captions.bytes
-              + pipe.modulations.bytes)
+    states = ([] if conds is None else [conds]
+              if isinstance(conds, Conditioning) else list(conds))
+    caches = pipe.conditionings.bytes + pipe.modulations.bytes
+    parts = pipe.family.step
+    other = bound = 0
+    if parts is None:
+        caches += pipe.captions.bytes
+    else:
+        # The states of a step in parts are the plan's prefix cache term.
+        # Those of this request count there once, held already or not.
+        held = sum(pipe.captions.nbytes((c.key, pipe.default_table,
+                                         str(act)))
+                   for c in states if c.key)
+        other, bound = pipe.captions.bytes - held, parts.state_bytes
     return memfit.plan_memory(
         pipe.weights.get("dit", 0),
         pipe.weights.get("encoder", 0) if resident else 0,
@@ -269,7 +293,9 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         height=height, width=width,
         cfg=pipe.defaults.cfg if cfg is None else cfg, dtype=act,
         vae_dtype=vae_dtype, encoder_owned=bool(resident and enc.owned),
-        caption_tokens=caption_tokens, cache_bytes=caches, budget=budget,
+        caption_tokens=caption_tokens, cache_bytes=caches,
+        prefix_rows=[_prefix_rows(pipe, c) for c in states] or None,
+        prefix_other=other, prefix_bound=bound, budget=budget,
         overcommit=overcommit)
 
 

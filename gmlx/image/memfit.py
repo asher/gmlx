@@ -10,7 +10,12 @@ of ``gmlx.serve.capacity``.
 A family that caches a prefix per conditioning adds three terms to the
 denoise phase: the cache of every conditioning, the K and V of one block
 joined over the prefix and the image rows in each step, and the prefill
-pass over the prefix rows, which a conditioning runs once.
+pass over the prefix rows, which a conditioning runs once. The cache term
+also holds the states of other conditionings that stay in the cache
+beside the request's own, up to its bound.
+
+A request runs a negative row whenever its guidance is not 1.0, as
+``api.sample`` does, and the plan counts the second conditioning then.
 
 Levers apply in order until the plan fits: sequential rows in place of a
 batch, release of an owned encoder after encoding, and tiled VAE decode.
@@ -181,6 +186,12 @@ PEAKS = {
     # gated half are the widest outputs. The sizes are those the
     # fingerprint holds the file to: 32 blocks, 4096 wide, a 12288 MLP.
     # The step row is Z-Image's until a Qwen-Image 2.1 step is measured.
+    # No term counts the attention scores, heads x queries x keys, since
+    # the stock attention op was not seen to hold them: a Z-Image step at
+    # 2048x2048, 16896 rows and 30 heads, peaks at 9.6 GiB where the scores
+    # alone are 16 GiB in bf16. That is one machine and one model. Were
+    # the scores held here, a step would add 1.1 GiB at 1024x1024,
+    # 16.5 GiB at 2048x2048 and 10.1 GiB with nine 1024 pixel references.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
                             width=24576 + 12288, step=Z_IMAGE_STEP,
                             vae_channels=96,
@@ -277,18 +288,25 @@ def image_rows(row: PeakRow, height: int, width: int,
     return -(-tokens // m) * m + (-(-cap // m) * m if row.caption_rows else 0)
 
 
-def prefix_terms(row: PeakRow, image: int, text: int, refs: int,
-                 ref_px: int, itemsize: int) -> tuple[int, int, int]:
-    """Bytes a family's prefix adds to one conditioning of a request with
-    ``image`` image rows: its cache, the step formula of one row with the
-    joined K and V of a block, and the step formula of its prefill."""
+def prefix_row_terms(row: PeakRow, image: int, prefix: int,
+                     itemsize: int) -> tuple[int, int, int]:
+    """Bytes a conditioning of ``prefix`` prefix rows adds to a request
+    with ``image`` image rows: its cache, the step formula of one row with
+    the joined K and V of a block, and the step formula of its prefill."""
     step = image * row.width * itemsize
     if row.prefix is None:
         return 0, step, 0
-    rows = row.prefix.rows(text, refs, ref_px)
-    return (row.prefix.cache_bytes(rows, itemsize),
-            step + row.prefix.join_bytes(rows + image, itemsize),
-            rows * row.width * itemsize)
+    return (row.prefix.cache_bytes(prefix, itemsize),
+            step + row.prefix.join_bytes(prefix + image, itemsize),
+            prefix * row.width * itemsize)
+
+
+def prefix_terms(row: PeakRow, image: int, text: int, refs: int,
+                 ref_px: int, itemsize: int) -> tuple[int, int, int]:
+    """``prefix_row_terms`` of a conditioning with ``text`` text rows and
+    ``refs`` square references of ``ref_px`` pixels."""
+    rows = 0 if row.prefix is None else row.prefix.rows(text, refs, ref_px)
+    return prefix_row_terms(row, image, rows, itemsize)
 
 
 def _dtype_name(dtype) -> str:
@@ -320,7 +338,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 dtype="bfloat16", vae_dtype=None, batch_rows: bool = True,
                 encoder_owned: bool = True, caption_tokens: int | None = None,
                 text_tokens: int | None = None, refs: int = 0,
-                ref_px: int = 0, cache_bytes: int = 0,
+                ref_px: int = 0, prefix_rows=None, prefix_other: int = 0,
+                prefix_bound: int = 0, cache_bytes: int = 0,
                 tile: int = 512, budget: float | None = None,
                 overcommit: bool | None = None) -> MemoryPlan:
     """The memory plan for one image request.
@@ -329,6 +348,13 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     counts. ``adapters`` is a byte count or a list of them. ``budget``
     defaults to ``capacity.working_budget_bytes()`` and ``overcommit`` to
     GMLX_OVERCOMMIT.
+
+    The prefix rows of a conditioning come from ``text_tokens``, ``refs``
+    and ``ref_px``. ``prefix_rows`` gives them for the request's own
+    conditionings, the positive first, in place of that count. A cache of
+    prefix states that holds ``prefix_other`` bytes of other conditionings
+    sheds them to ``prefix_bound`` as the request's states come in, and
+    what stays is part of the prefix cache term.
     """
     try:
         row = PEAKS[family]
@@ -350,7 +376,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         vae_dtype = ("bfloat16" if _dtype_name(dtype) in ("bfloat16", "bf16")
                      else "float32")
     vsize = _itemsize(vae_dtype)
-    guided = cfg > 1.0
+    guided = cfg != 1.0
     conds = 2 if guided else 1
     terms = {
         "dit": file_bytes(dit),
@@ -364,9 +390,15 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     }
     rows = image_rows(row, height, width, caption_tokens)
     text = row.text_rows if text_tokens is None else text_tokens
-    cache_one, step_one, prefill = prefix_terms(row, rows, text, refs,
-                                                ref_px, act)
-    terms["prefix_cache"] = conds * cache_one
+    counted = 0 if row.prefix is None else row.prefix.rows(text, refs,
+                                                           ref_px)
+    given = [] if prefix_rows is None else [int(n) for n in prefix_rows]
+    per = [prefix_row_terms(row, rows, n, act)
+           for n in (given + [counted] * conds)[:conds]]
+    own = sum(p[0] for p in per)
+    step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
+    terms["prefix_cache"] = own + min(int(prefix_other),
+                                      max(0, int(prefix_bound) - own))
     full_decode = vae_peak("decode", height, width, itemsize=vsize,
                            channels=row.vae_channels)
     tiled_decode = vae_peak("decode", height, width, itemsize=vsize,

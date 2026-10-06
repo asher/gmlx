@@ -125,6 +125,82 @@ def test_a_qwen_step_holds_the_joined_keys_and_the_prefill(q_view):
         0, 4128 * z.width * 2, 0)
 
 
+def test_the_negative_row_counts_whenever_guidance_is_not_one(q_view, z_view):
+    """The rule of api.sample: a negative row runs unless cfg is 1.0."""
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              budget=BUDGET_128, overcommit=False)
+    one = plan_memory(q_view, 0, 0, cfg=1.0, **kw)
+    assert one.rows == 1
+    for cfg in (0.5, 4.0, 0.0, -1.0):
+        p = plan_memory(q_view, 0, 0, cfg=cfg, **kw)
+        assert p.rows == 2, cfg
+        assert p.terms["prefix_cache"] == 2 * one.terms["prefix_cache"]
+    z = dict(height=1024, width=1024)
+    assert _z(z_view, cfg=1.0, **z).rows == 1
+    assert _z(z_view, cfg=0.5, **z).terms == _z(z_view, cfg=4.0, **z).terms
+    assert _z(z_view, cfg=0.5, **z).rows == 2
+
+
+def test_prefix_rows_of_the_conditionings_replace_the_counts(q_view,
+                                                             z_view):
+    row = memfit.PEAKS["qwen_image21"]
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              budget=BUDGET_128, overcommit=False)
+    by_count = plan_memory(q_view, 0, 0, refs=1, ref_px=1024, **kw)
+    by_rows = plan_memory(q_view, 0, 0, prefix_rows=[512 + 4096], **kw)
+    assert by_rows.terms == by_count.terms
+    # Under guidance each conditioning has its own cache, and the step
+    # and the prefill are those of the longer prefix.
+    pos = memfit.prefix_row_terms(row, 4096, 4608, 2)
+    neg = memfit.prefix_row_terms(row, 4096, 77, 2)
+    assert pos[1] > neg[1] and pos[2] > neg[2]
+    for rows in ([4608, 77], [77, 4608]):
+        g = plan_memory(q_view, 0, 0, cfg=4.0, prefix_rows=rows, **kw)
+        assert g.rows == 2
+        assert g.terms["prefix_cache"] == pos[0] + neg[0]
+        assert g.terms["step_peak"] == row.step.bytes(max(2 * pos[1],
+                                                          pos[2]))
+    # A conditioning the request does not name counts as text rows, and
+    # one it does not run is left out.
+    h = plan_memory(q_view, 0, 0, cfg=4.0, prefix_rows=[4608], **kw)
+    assert h.terms["prefix_cache"] == pos[0] + GiB // 4
+    assert plan_memory(q_view, 0, 0, prefix_rows=[4608, 77],
+                       **kw).terms == by_rows.terms
+    # A family without a prefix has no rows to read.
+    z = dict(height=1024, width=1024)
+    assert _z(z_view, prefix_rows=[4608], **z).terms == _z(z_view, **z).terms
+
+
+def test_other_prefix_states_stay_up_to_the_bound(q_view):
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              budget=BUDGET_128, overcommit=False)
+    own = plan_memory(q_view, 0, 0, **kw).terms["prefix_cache"]
+    assert own == GiB // 4
+
+    def cache(other: int, bound: int) -> int:
+        return plan_memory(q_view, 0, 0, prefix_other=other,
+                           prefix_bound=bound, **kw).terms["prefix_cache"]
+
+    # All of a small state stays, a large one is shed to the bound, and
+    # nothing else stays once the request's own states pass the bound.
+    assert cache(GiB // 8, GiB) == own + GiB // 8
+    assert cache(2 * GiB, GiB) == GiB
+    assert cache(2 * GiB, GiB // 8) == own
+    assert cache(GiB, 0) == own
+
+
+def test_the_reference_hint_counts_every_reference_that_fits(q_view):
+    """A request the encode phase refuses, whose references all fit the
+    denoise phase."""
+    with pytest.raises(ImageMemoryError) as e:
+        plan_memory(q_view, ENCODER, 0, family="qwen_image21", height=1024,
+                    width=1024, refs=2, ref_px=1024, caption_tokens=10 ** 7,
+                    budget=60 * GiB, overcommit=False)
+    assert e.value.plan.phases["denoise"] <= 60 * GiB
+    assert e.value.plan.phases["encode"] > 60 * GiB
+    assert "; 2 references of 1024 px fit, or 2 of 1024 px" in str(e.value)
+
+
 def test_a_16_gib_machine_releases_the_encoder_and_tiles_at_1024(z_view):
     p = _z(z_view, height=1024, width=1024, budget=BUDGET_16)
     assert p.fits and p.levers == ("release the encoder", "tiled decode")

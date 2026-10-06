@@ -19,7 +19,7 @@ import qwen_tiny as qt
 from oracle_fixture import committed_fixture, fx
 from qwen_joint import joint_forward
 
-from gmlx.image import api, registry
+from gmlx.image import api, memfit, registry
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
@@ -332,7 +332,6 @@ def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
 def test_the_prefix_cache_bound_holds_the_text_states_of_a_guided_request():
     """Both text prefixes of a guided request fit the family's bound, so
     they stay without the rule for the two newest states."""
-    from gmlx.image import memfit
     from gmlx.image.registry import get_family
 
     row = memfit.PEAKS["qwen_image21"]
@@ -342,8 +341,6 @@ def test_the_prefix_cache_bound_holds_the_text_states_of_a_guided_request():
 
 def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
     """Five text rows and one 2 x 2 reference, which is 32 pixels square."""
-    from gmlx.image import memfit
-
     feats = mx.array(qt.rule.features("wide")[:6])
     ref = mx.array(qt.rule.ref_latents("adjacent")[0])
     assert ref.shape == (8, 2, 2)
@@ -361,6 +358,61 @@ def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
     own = mx.zeros((1, cfg.n_heads, t, cfg.head_dim), mx.bfloat16)
     k, v = qm.join_prefix(state.k[0], state.v[0], own, own)
     assert k.nbytes + v.nbytes == row.join_bytes(9 + t, 2)
+
+
+def test_the_plan_reads_the_prefix_rows_of_its_conditionings(pipe):
+    """A conditioning with a reference plans more than the same request
+    without it, by the prefix terms of the rows it adds."""
+    row = memfit.PEAKS["qwen_image21"]
+    feats = mx.array(qt.rule.features("wide")[:6])
+    ref = mx.array(qt.rule.ref_latents("adjacent")[0])
+    text = api.Conditioning(feats, "text")
+    one = api.Conditioning(feats, "one", ref_latents=(ref,),
+                           image_slots=(2,))
+    kw = dict(height=64, width=64, budget=100e9, overcommit=False)
+    image = 16
+    plans = {}
+    for cond, rows in ((text, 6), (one, 5 + 4)):
+        p = plans[rows] = api.plan_request(pipe, conds=cond, **kw)
+        cache, step, prefill = memfit.prefix_row_terms(row, image, rows, 2)
+        assert p.terms["prefix_cache"] == cache
+        assert p.terms["step_peak"] == row.step.bytes(max(step, prefill))
+    assert (plans[9].terms["prefix_cache"] - plans[6].terms["prefix_cache"]
+            == row.prefix.cache_bytes(3, 2) > 0)
+    assert plans[9].phases["denoise"] > plans[6].phases["denoise"]
+    # Without a conditioning the plan counts the row's text rows.
+    assert (api.plan_request(pipe, **kw).terms["prefix_cache"]
+            == row.prefix.cache_bytes(row.text_rows, 2))
+    # A guided request counts the positive and the negative state.
+    g = api.plan_request(pipe, conds=[one, text], cfg=4.0, **kw)
+    assert g.terms["prefix_cache"] == (plans[9].terms["prefix_cache"]
+                                       + plans[6].terms["prefix_cache"])
+
+
+def test_the_plan_counts_a_held_prefix_state_once(pipe):
+    cond = qt.conditioning("ref1", key="one")
+    kw = dict(height=64, width=64, budget=100e9, overcommit=False)
+    cold = api.plan_request(pipe, conds=cond, **kw)
+    assert cold.terms["caches"] == 0
+    api.denoise_step(pipe, qt.latents(), SIGMA, cond)
+    key = ("one", pipe.default_table, str(mx.bfloat16))
+    assert pipe.captions.nbytes(key) == pipe.captions.bytes > 0
+    warm = api.plan_request(pipe, conds=cond, **kw)
+    assert warm.terms["prefix_cache"] == cold.terms["prefix_cache"]
+    assert warm.terms["caches"] == pipe.modulations.bytes > 0
+    # The state of another conditioning stays beside the request's own.
+    api.denoise_step(pipe, qt.latents(), SIGMA,
+                     qt.conditioning("text", key="other"))
+    other = pipe.captions.bytes - pipe.captions.nbytes(key)
+    assert other > 0
+    both = api.plan_request(pipe, conds=cond, **kw)
+    assert both.terms["prefix_cache"] == cold.terms["prefix_cache"] + other
+    assert both.terms["caches"] == pipe.modulations.bytes
+    # A plan that names no conditioning counts every held state as other.
+    bare = api.plan_request(pipe, **kw)
+    row = memfit.PEAKS["qwen_image21"]
+    assert bare.terms["prefix_cache"] == (
+        row.prefix.cache_bytes(row.text_rows, 2) + pipe.captions.bytes)
 
 
 def test_rows_of_a_batch_take_their_own_conditioning(pipe):
