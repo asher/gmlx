@@ -14,11 +14,12 @@ The fixture holds, per size, the RGB image, the alpha, the two encoder
 means, the model space latents, the fp32 decode and the bf16 decode, all
 RGBA and clamped to [-1, 1] as the VAE returns them. The manifest records
 the bf16 against fp32 gap, the share of the fp32 decode that the clamp
-holds at -1 or 1, and the tolerances: fp32 decode max abs at 1e-3, a
-starting value that the first reading on the official file resets, fp32
-encode max abs at the same value or at twice the oracle's own fp32 error
-against a float64 encode where that is larger, and bf16 PSNR on the [0, 1]
-image at twice the oracle's own error, which is 6.02 dB below its PSNR.
+holds at -1 or 1, and the tolerances: fp32 decode max abs at 2.5e-4,
+which is 5 times the largest reading of gmlx on the official file, fp32
+encode max abs at its starting value of 1e-3 or at twice the oracle's own
+fp32 error against a float64 encode where that is larger, and bf16 PSNR on
+the [0, 1] image at twice the oracle's own error, which is 6.02 dB below
+its PSNR.
 
 The bf16 run computes each convolution in float32 over the bfloat16
 operands, rounded once to bfloat16, as a bfloat16 conv with float32
@@ -66,14 +67,19 @@ TINY_SIZE = (48, 64)
 SEED = 5
 REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 STARTING = 1e-3
+# The first readings of gmlx on the official file, in float32 with exact
+# float32 products on the default conv path, were 3.04e-5 max abs at 512
+# pixels and 4.89e-5 at 1024. The decode gate is 5 times the larger.
+DECODE_FP32_MAX_ABS = 2.5e-4
 TINY_FP32_MAX_ABS = 5e-5
 BF16_RULE = ("bf16 PSNR at twice the oracle's own bf16 against fp32 RMS "
              "error, which is its PSNR less 20 log10(2) dB; bf16 encode "
              "relative L2 at twice the oracle's own")
-RULE = ("fp32 decode max abs at 1e-3, a starting value that the first "
-        "reading on the official file resets; fp32 encode max abs at the "
-        "same value, or at twice the oracle's own fp32 against float64 max "
-        "abs where that is larger; " + BF16_RULE)
+RULE = ("fp32 decode max abs at 2.5e-4: 5 times the largest reading of a "
+        "right model on the official file, 4.89e-5 at 1024 pixels; fp32 "
+        "encode max abs at its starting value, 1e-3, or at twice the "
+        "oracle's own fp32 against float64 max abs where that is larger; "
+        + BF16_RULE)
 TINY_RULE = ("fp32 max abs at 5e-5 on the CPU: about 7 times the largest "
              "reading of a right model over the self-test configs, 6.9e-6, "
              "where the smallest reading of a wrong model is 0.33")
@@ -167,7 +173,7 @@ def _mean(vae, x):
 
 
 def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
-             fp32_max_abs: float) -> None:
+             fp32_max_abs: float, decode_max_abs: float) -> None:
     cfg = vaes["fp32"].config
     z_dim = cfg.z_dim
     l_mean = torch.tensor(cfg.latents_mean).view(1, z_dim, 1, 1)
@@ -229,7 +235,7 @@ def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
         "latents_std": float(np.std(oracle.to_numpy(latents))),
         "seconds": t}
     tol[s] = {
-        "decode_fp32_max_abs": fp32_max_abs,
+        "decode_fp32_max_abs": decode_max_abs,
         "decode_bf16_psnr_db": gap["psnr_db"] - 20 * math.log10(2),
         "encode_fp32_max_abs": max(fp32_max_abs, 2 * enc64["max_abs"]),
         "encode_bf16_rel_l2": 2 * enc["rel_l2"]}
@@ -252,7 +258,12 @@ def _modes(torch, vae32) -> tuple[dict, object]:
 
 
 def _write(torch, a, name: str, vae32, sizes, files: dict, argv: list,
-           extra: dict, notes: list, fp32_max_abs: float, rule: str) -> int:
+           extra: dict, notes: list, fp32_max_abs: float, rule: str,
+           decode_max_abs: float | None = None) -> int:
+    """``fp32_max_abs`` gates the fp32 encode, and the fp32 decode too
+    unless ``decode_max_abs`` gives the decode a value of its own."""
+    if decode_max_abs is None:
+        decode_max_abs = fp32_max_abs
     vaes, vae64 = _modes(torch, vae32)
     fx = fixtures.FixtureWriter(
         name, check=5, family="qwen_image21",
@@ -261,7 +272,8 @@ def _write(torch, a, name: str, vae32, sizes, files: dict, argv: list,
         fx.add_file(role, path)
     results, tol = {}, {}
     for size in sizes:
-        run_size(torch, vaes, vae64, size, fx, results, tol, fp32_max_abs)
+        run_size(torch, vaes, vae64, size, fx, results, tol, fp32_max_abs,
+                 decode_max_abs)
     cfg = vae32.config
     fx.inputs.update(
         sizes=[list(s) for s in sizes], seed=SEED,
@@ -281,7 +293,8 @@ def _write(torch, a, name: str, vae32, sizes, files: dict, argv: list,
         oracle={"device": "cpu", "threads": torch.get_num_threads(),
                 "bf16_products": "bf16 operands, float32 conv, one bf16 "
                 "rounding"}, sizes=results)
-    fx.tolerances.update(rule=rule, fp32_max_abs=fp32_max_abs, sizes=tol)
+    fx.tolerances.update(rule=rule, fp32_max_abs=fp32_max_abs,
+                         decode_fp32_max_abs=decode_max_abs, sizes=tol)
     for n in notes:
         fx.note(n)
     path = fx.write(a.out)
@@ -424,7 +437,8 @@ def main(argv=None) -> int:
          *map(str, a.sizes)],
         {"config_revision": a.config_revision},
         ["The official weights are float32, and the bf16 VAE is a "
-         "bfloat16 copy of the fp32 one."], STARTING, RULE)
+         "bfloat16 copy of the fp32 one."], STARTING, RULE,
+        DECODE_FP32_MAX_ABS)
 
 
 if __name__ == "__main__":
