@@ -37,6 +37,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from gmlx import mlx_guards
 from gmlx.envflags import env_choice
 
 from . import plan
@@ -173,7 +174,7 @@ def _transposed(lm, dtype) -> tuple[mx.array, mx.array]:
 
 def _add(y: mx.array, z: mx.array, b_t: mx.array) -> mx.array:
     if y.dtype == b_t.dtype:
-        return mx.addmm(y, z, b_t)
+        return mlx_guards.addmm(y, z, b_t)
     return y + (z @ b_t).astype(y.dtype)
 
 

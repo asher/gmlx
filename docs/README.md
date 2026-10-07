@@ -128,6 +128,8 @@ These pages are the starting points:
 - [Internals](internals/README.md): How gmlx works inside.
 - [Adding a GGUF architecture](internals/adding-architectures.md): What
   supporting a new model family involves.
+- [Upstream defects](upstream-defects.md): Defects of stock dependencies that
+  gmlx guards against, each with its repro and its test.
 - [Contributing](../CONTRIBUTING.md): Development setup, tests and commit
   style.
 - [Changelog](../CHANGELOG.md): What changed in each release.

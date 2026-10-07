@@ -146,6 +146,7 @@ nav:
       - internals/adding-architectures.md
       - internals/testing.md
       - internals/upstream-upgrades.md
+      - upstream-defects.md
       - internals/streaming-measurements.md
       - internals/structured-reads.md
       - internals/letter-readout.md

@@ -42,6 +42,7 @@ from mlx_kquant.nn import (
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 import gmlx.lora_rows as lora_rows
+from gmlx import mlx_guards
 from .dtypes import activation_dtype
 from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from .transforms import qk_permute_wire
@@ -1885,7 +1886,7 @@ class LoRAKQuantLinear(nn.Module):
             if f is not None:
                 z = z * f
             if y.dtype == b_t.dtype:
-                y = mx.addmm(y, z, b_t)
+                y = mlx_guards.addmm(y, z, b_t)
             else:
                 y = y + (z @ b_t).astype(y.dtype)
         return y
@@ -1917,7 +1918,7 @@ class LoRAKQuantLinear(nn.Module):
         if f is not None:
             z = z * f
         if y.dtype == b_t.dtype:
-            y = mx.addmm(y, z, b_t)
+            y = mlx_guards.addmm(y, z, b_t)
         else:
             y = y + (z @ b_t).astype(y.dtype)
         return self._add_extra(x, y) if self._kq_extra else y
