@@ -277,7 +277,8 @@ def exact_process() -> bool:
     return not tf32() and stock_ops()
 
 
-KERNEL_OPS = {"qk": "qk_norm_rope", "glu": "quantized_matmul_glu"}
+KERNEL_OPS = {"qk": "qk_norm_rope", "glu": "quantized_matmul_glu",
+              "lora": "quantized_matmul_lora"}
 
 
 @contextmanager
@@ -528,7 +529,12 @@ ROUNDINGS = {
 # and then its product with the up product, and decodes each of the two
 # weight tiles into the activation dtype. On random inputs the qk kernel
 # reads 0.43 u, one rounding to nearest, and the glu kernel 0.85 u, four.
-KERNEL_ROUNDINGS = {"qk": 1, "glu": 4}
+# The lora op writes the down product, its product with the strength and
+# the sum of the base product and the up product: three, the count of the
+# stock ops for a leaf under an adapter, which round the base product and
+# have the strength in B. Where the op composes from its unfused ops it
+# writes the base product too, and is held to the same three.
+KERNEL_ROUNDINGS = {"qk": 1, "glu": 4, "lora": 3}
 
 
 SITE_RULE = (
@@ -537,8 +543,9 @@ SITE_RULE = (
     "products on the dequantized weight, over all rows, the image rows and "
     "the caption rows. u = 2^-8 is one rounding to bfloat16, and n counts "
     "the roundings to the activation dtype on the path the site ran: the "
-    "outputs the stock ops write, or the kernel's own, 1 for qk and 4 for "
-    "glu. A wrong adapter table is visible only where the part of a leaf's "
+    "outputs the stock ops write, or the kernel's own, 1 for qk, 4 for "
+    "glu and 3 for a leaf with its adapter on the lora op. A wrong adapter "
+    "table is visible only where the part of a leaf's "
     "delta it changes exceeds the gate of a site that reads it: a tenth of "
     "the largest leaf delta for a strength a tenth off, and all of it for "
     "a group left out")
@@ -712,14 +719,15 @@ class Sites:
     cast after the fp32 rotation. The glu site, from the feed-forward
     input to the input of w2, counts its two products and ``swiglu``. A qk
     or glu site that a kernel route handed to mlx-kquant counts the
-    kernel's own roundings, ``KERNEL_ROUNDINGS``. Where the stock ops run
-    inside a site they are sites too: w1, w3 and ``swiglu`` inside glu,
-    and the base product, the down product and the addmm inside a leaf
-    under an adapter.
+    kernel's own roundings, ``KERNEL_ROUNDINGS``, and so does a leaf whose
+    product and adapter delta the lora route handed to it. Where the stock
+    ops run inside a site they are sites too: w1, w3 and ``swiglu`` inside
+    glu, and the base product, the down product and the addmm inside a
+    leaf under an adapter.
 
     After ``run``: ``readings`` and ``missed`` hold each site to its gate,
-    ``routed`` names the qk and glu sites that a kernel route handed to
-    mlx-kquant, ``worst_rows``, ``worst_heads`` and ``missed_rows`` hold
+    ``routed`` names the qk and glu sites, and the leaves under an
+    adapter, that a kernel route handed to mlx-kquant, ``worst_rows``, ``worst_heads`` and ``missed_rows`` hold
     those to the row rule, ``effect`` is each adapter delta's share of its
     leaf's output, ``pair_effect`` the share of a pair's two deltas at its
     glu site, and ``broken`` lists what the block does that no site reads,
@@ -1118,7 +1126,9 @@ class Sites:
 
         f, st = mx.float32, self._st(lf.block)
         want, delta = lf.exact(x.astype(f), self._factors(lf.path))
-        self._site(lf.block, lf.leaf, f"leaf.{lf.leaf}", self._leaf_n(lf), y,
+        n = KERNEL_ROUNDINGS["lora"] if lf.name in self.routed else \
+            self._leaf_n(lf)
+        self._site(lf.block, lf.leaf, f"leaf.{lf.leaf}", n, y,
                    want, (x,), inner=lf.leaf in ("w1", "w3"),
                    chunks=lf.chunks)
         st[lf.leaf] = (x, want, delta)
@@ -1229,7 +1239,11 @@ class Sites:
             hooks.append((install, "_add", self._h_add))
 
         def routed(route: str) -> None:
-            if self._cur is not None:
+            if route == "lora":
+                # The op ran the leaf that is being called.
+                if self._leaf is not None:
+                    self.routed[self._leaf[0].name] = KERNEL_OPS[route]
+            elif self._cur is not None:
                 self.routed[f"{self._cur}.{route}"] = KERNEL_OPS[route]
 
         saved = []
@@ -1318,7 +1332,11 @@ def right_sites(sites: Sites, velocity: str, label: str) -> None:
         sorted(sites.routed.keys() - sites.sites.keys()))
     rows, heads = sites.worst_rows(), sites.worst_heads()
     for route in KERNEL_OPS:
-        every = [n for n in sites.sites if n.endswith("." + route)]
+        # A lora site is a leaf under an adapter, by the leaf's name.
+        every = sorted(sites.deltas) if route == "lora" else \
+            [n for n in sites.sites if n.endswith("." + route)]
+        if route == "lora" and not every:
+            continue
         on = [n for n in every if n in sites.routed]
         worst = [f", worst {what} {max(got[n][0] for n in on):.2f} of its "
                  f"gate" for what, got in (("row", rows), ("head row", heads))

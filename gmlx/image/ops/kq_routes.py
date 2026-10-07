@@ -5,18 +5,21 @@
 ``install`` replaces the ``qk_norm_rope`` seam with ``qk_norm_rope`` here
 when the installed mlx-kquant has the op. ``glu_pair`` and ``swiglu_fused``
 run the gate and up products of a feed-forward and their swiglu as one
-kernel over two K-quant weights. A call that a kernel does not take runs
-the stock ops, and so does every call on an mlx-kquant without the op.
+kernel over two K-quant weights. ``lora_leaf`` and ``lora_fused`` run the
+product of a K-quant leaf and the low-rank term of its adapter as one op.
+A call that a kernel does not take runs the stock ops, and so does every
+call on an mlx-kquant without the op.
 
 No kernel has a gradient with respect to a weight, and the qk kernel has
 none at all, so ``mx.grad`` through a routed qk call raises. The image
 pipeline is inference only.
 
-GMLX_IMAGE_KQ_ROUTES=0 keeps both routes on stock ops, and ``qk`` or
-``glu`` keeps that route alone. It is read once, at import. ``only`` puts
-a set of routes in force for a block, for a check that reads the stock
-ops and the kernels in one process. The routes in force are state of the
-process, and the image pipeline keys the results it keeps by them.
+GMLX_IMAGE_KQ_ROUTES=0 keeps every route on stock ops, and ``qk``,
+``glu`` or ``lora`` keeps that route alone. It is read once, at import.
+``only`` puts a set of routes in force for a block, for a check that reads
+the stock ops and the kernels in one process. The routes in force are
+state of the process, and the image pipeline keys the results it keeps by
+them.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from gmlx.envflags import env_switch
 
 from . import attention
 
-ROUTES = ("qk", "glu")
+ROUTES = ("qk", "glu", "lora")
 _CHOICE = env_switch("GMLX_IMAGE_KQ_ROUTES", ROUTES)
 _WANTED = {"1": ROUTES, "0": ()}.get(_CHOICE, (_CHOICE,))
 
@@ -47,6 +50,22 @@ _GLU_K_TILE = {("q4_k", mx.float16): 128, ("q4_k", mx.bfloat16): 128,
                ("q5_k", mx.float16): 128, ("q5_k", mx.bfloat16): 128,
                ("q6_k", mx.float16): 128, ("q6_k", mx.bfloat16): 128}
 _GLU_MIN_ROWS = 1024
+# The calls the lora route hands to mlx-kquant's quantized_matmul_lora. They
+# are inside the op's own kernel dispatch, which also needs tensor-op
+# hardware: outside it the op composes from its unfused ops, a step slower
+# than the stock ops with the strength in B, so such a call stays on the
+# stock ops. The rows are the codecs and x dtype of the measured steps, an
+# inner dim of at most 4096, at least 8192 outputs, where the kernel runs
+# from 1024 rows at every rank it takes, at most 256 ranks on a column and
+# at most 16 bands that start on a multiple of 64 columns and end on a
+# multiple of 32 or at the last.
+_LORA_ROWS = (("q4_k", mx.bfloat16), ("q5_k", mx.bfloat16),
+              ("q6_k", mx.bfloat16))
+_LORA_MAX_K = 4096
+_LORA_MIN_N = 8192
+_LORA_MIN_ROWS = 1024
+_LORA_MAX_RANKS = 256
+_LORA_MAX_BANDS = 16
 
 _OPS: dict = {}
 _active: frozenset = frozenset()
@@ -121,6 +140,8 @@ def install(routes=None) -> frozenset:
         on.add("qk")
     if "glu" in want and _kq_op("quantized_matmul_glu") is not None:
         on.add("glu")
+    if "lora" in want and _kq_op("quantized_matmul_lora") is not None:
+        on.add("lora")
     ns.qk_norm_rope = qk_norm_rope if "qk" in on else attention.qk_norm_rope
     _active = frozenset(on)
     return _active
@@ -242,3 +263,62 @@ def swiglu_fused(x: mx.array, w_gate: mx.array, w_up: mx.array,
     matmul product and the sigmoid. No gradient with respect to the
     weights."""
     return _kq_op("quantized_matmul_glu")(x, w_gate, w_up, codec)
+
+
+def lora_static(base, dtype, ranks: int, bands) -> bool:
+    """Whether ``lora_leaf`` can take a call of ``base`` on an x in
+    ``dtype`` with a low-rank term of ``ranks`` ranks and the band table
+    ``bands``, at some row count: a plain KQuantLinear with no bias whose
+    codec, dims, ranks and bands are on the route's table. A leaf that
+    StepProfiler timed counts as its own class."""
+    from mlx_kquant.codec_geometry import in_features
+    from mlx_kquant.nn import KQuantLinear
+
+    cls = type(base)
+    if getattr(cls, "_prof_base", cls) is not KQuantLinear or "bias" in base:
+        return False
+    codec = base.kquant_type
+    if (codec, dtype) not in _LORA_ROWS:
+        return False
+    n, packed = base["weight"].shape
+    if in_features(codec, int(packed)) > _LORA_MAX_K or n < _LORA_MIN_N:
+        return False
+    most = ranks
+    if bands is not None:
+        if not 0 < len(bands) <= _LORA_MAX_BANDS:
+            return False
+        if any(c0 % 64 or (c1 % 32 and c1 != n) for c0, c1, _, _ in bands):
+            return False
+        most = max(r for _, _, _, r in bands)
+    return 0 < most <= _LORA_MAX_RANKS
+
+
+def lora_leaf(base, x: mx.array):
+    """``base`` when ``lora_fused`` takes its product on ``x`` with a
+    low-rank term, else None, and the caller then runs the base product
+    and adds the term on stock ops. ``base`` is a leaf that
+    ``lora_static`` took with its term. The route takes an x of at least
+    1024 rows over its leading dims, on a GPU with tensor ops."""
+    if "lora" not in _active or x.ndim < 2:
+        return None
+    k = x.shape[-1]
+    if k == 0 or x.size // k < _LORA_MIN_ROWS:
+        return None
+    if not _gpu() or not _nax():
+        return None
+    return base
+
+
+def lora_fused(x: mx.array, base, a_t: mx.array, b_t: mx.array,
+               strength: mx.array, bands) -> mx.array:
+    """``x @ W^T + (strength * (x @ a_t)) @ b_t`` over the wire bytes of
+    the K-quant leaf ``base``, for a leaf that ``lora_leaf`` returned.
+    ``a_t`` is (in, rank) and ``b_t`` (rank, out), ``strength`` holds one
+    factor per rank, and ``bands`` is None or rows of (first column, end
+    column, first rank, ranks): the columns of a band take that block of
+    ranks alone. The kernel adds both products in fp32 and rounds once.
+    The stock ops round the base product before the add. No gradient
+    with respect to the weight."""
+    return _kq_op("quantized_matmul_lora")(
+        x, base["weight"], base.kquant_type, a_t, b_t, strength=strength,
+        bands=bands)

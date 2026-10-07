@@ -29,7 +29,7 @@ from gmlx.image.lora import install as lora_install
 from gmlx.image.ops import attention, kq_routes
 from gmlx.image.registry import get_family
 from image_fixtures import (glu_rounded_once, kq_leaf, kq_z_model,
-                            qk_rounded_once)
+                            lora_rounded_once, qk_rounded_once)
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual")
@@ -46,6 +46,8 @@ STEP_TOL = {mx.bfloat16: 7e-3, mx.float16: 9e-4}
 
 HAS_QK = hasattr(kq, "qk_norm_rope")
 HAS_GLU = hasattr(kq, "quantized_matmul_glu")
+HAS_LORA = hasattr(kq, "quantized_matmul_lora")
+BUILT = (("qk", HAS_QK), ("glu", HAS_GLU), ("lora", HAS_LORA))
 needs_qk = pytest.mark.skipif(
     not HAS_QK, reason="mlx-kquant has no qk_norm_rope")
 needs_glu = pytest.mark.skipif(
@@ -106,17 +108,18 @@ def routes(monkeypatch):
 
 @pytest.fixture
 def spies(routes, monkeypatch):
-    """Both routes in force on recording ops, with tensor ops and a GPU
-    default device reported present, so a decision reads the same on any
-    device. A spy calls the build's op on a GPU, and the stock ops on the
-    CPU or on a build without the op."""
+    """The qk and glu routes in force on recording ops, with tensor ops
+    and a GPU default device reported present, so a decision reads the
+    same on any device. A spy calls the build's op on a GPU, and the stock
+    ops on the CPU or on a build without the op. The lora route has its
+    own tests, in test_image_lora_route.py."""
     gpu = _gpu()
     qk = _Spy(gpu and kq_routes._kq_op("qk_norm_rope")
               or attention.qk_norm_rope)
     glu = _Spy(gpu and kq_routes._kq_op("quantized_matmul_glu") or _composed)
     routes._OPS.update(qk_norm_rope=qk, quantized_matmul_glu=glu, nax=True)
     monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
-    assert routes.install(routes.ROUTES) == frozenset(routes.ROUTES)
+    assert routes.install(("qk", "glu")) == {"qk", "glu"}
     return SimpleNamespace(qk=qk, glu=glu)
 
 
@@ -262,7 +265,7 @@ def test_install_refuses_a_replaced_seam(spies, monkeypatch):
 
 
 def test_the_import_time_install_follows_the_build():
-    want = {r for r, op in (("qk", HAS_QK), ("glu", HAS_GLU)) if op}
+    want = {r for r, op in BUILT if op}
     wanted = set(kq_routes._WANTED)
     assert kq_routes.active() == want & wanted
     routed = "qk" in kq_routes.active()
@@ -271,7 +274,8 @@ def test_the_import_time_install_follows_the_build():
 
 
 def test_an_absent_op_keeps_the_stock_ops(routes):
-    routes._OPS.update(qk_norm_rope=None, quantized_matmul_glu=None, nax=True)
+    routes._OPS.update(qk_norm_rope=None, quantized_matmul_glu=None,
+                       quantized_matmul_lora=None, nax=True)
     assert routes.install(routes.ROUTES) == frozenset()
     assert ops.qk_norm_rope is attention.qk_norm_rope
     gate, up = _leaf("q4_k", 64, 256, 1), _leaf("q4_k", 64, 256, 2)
@@ -291,13 +295,14 @@ def test_the_switch_is_read_once_at_import():
         "from gmlx.image.ops import attention, kq_routes as r\n"
         "print(json.dumps([list(r._WANTED), sorted(r.active()),\n"
         "    ops.qk_norm_rope is attention.qk_norm_rope]))\n")
-    both = ("qk", "glu")
+    every = ("qk", "glu", "lora")
     for value, want, warns in (
-            (None, both, False), ("1", both, False), ("on", both, False),
+            (None, every, False), ("1", every, False), ("on", every, False),
             ("0", (), False), (" 0 ", (), False), ("off", (), False),
             ("False", (), False), ("no", (), False), ("", (), False),
             ("qk", ("qk",), False), ("GLU", ("glu",), False),
-            ("sometimes", both, True), ("2", both, True)):
+            ("lora", ("lora",), False),
+            ("sometimes", every, True), ("2", every, True)):
         env = {k: v for k, v in os.environ.items()
                if k != "GMLX_IMAGE_KQ_ROUTES"}
         if value is not None:
@@ -305,12 +310,11 @@ def test_the_switch_is_read_once_at_import():
         r = subprocess.run([sys.executable, "-c", code], cwd=_ROOT, env=env,
                            capture_output=True, text=True, timeout=300)
         assert r.returncode == 0, r.stderr[-2000:]
-        # An unknown value keeps both routes and says so, once.
+        # An unknown value keeps every route and says so, once.
         assert r.stderr.count("GMLX_IMAGE_KQ_ROUTES=") == warns, r.stderr
         wanted, active, stock = json.loads(r.stdout.splitlines()[-1])
         assert tuple(wanted) == want, value
-        assert set(active) == {n for n, op in (("qk", HAS_QK),
-                                               ("glu", HAS_GLU))
+        assert set(active) == {n for n, op in BUILT
                                if op and n in want}, value
         assert stock == ("qk" not in active), value
 
@@ -636,7 +640,8 @@ def test_kept_results_follow_the_routes_in_force(routes, monkeypatch):
     kept under one set of routes is not served under another: after a
     change of routes a step is bit for bit the step of a fresh pipeline."""
     routes._OPS.update(qk_norm_rope=qk_rounded_once,
-                       quantized_matmul_glu=glu_rounded_once, nax=True)
+                       quantized_matmul_glu=glu_rounded_once,
+                       quantized_matmul_lora=lora_rounded_once, nax=True)
     monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
     assert routes.install(routes.ROUTES) == set(routes.ROUTES)
     rng = np.random.default_rng(0)

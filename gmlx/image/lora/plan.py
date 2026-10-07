@@ -14,11 +14,16 @@ an output slice.
 
 Every factor is float32 with the scale folded into B. ``LoraModule`` from
 ``gmlx.load.adapter`` carries the result with ``scale`` 1.0.
+
+``band_table`` and ``unit_pair`` give the block-diagonal pair in the form
+of an op that takes the strength as an input: the pair with ``alpha /
+rank`` in B and no strength, the strength of each part beside its rank,
+and the table of the output bands when the parts have one.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mlx.core as mx
 
@@ -122,3 +127,38 @@ def banded(path: str, parts, dims: tuple) -> list | None:
                      LoraModule(module_path=path, a=a, b=b,
                                 rank=int(a.shape[0]), scale=1.0)))
     return rows
+
+
+def band_table(parts, dims: tuple) -> tuple[list, list | None]:
+    """The order of the parts by output band, as indexes into ``parts``,
+    and the band table of that order: rows of (first row, end row, first
+    rank, ranks) of the weight's output, in order and disjoint. Parts on
+    one band are adjacent and their ranks join. The table is None when
+    every part covers the whole output, and also when a part bands the
+    input or two bands overlap, where every output row takes every rank
+    of the block-diagonal pair. The order is then the given one."""
+    out, _ = dims
+    spans = []
+    for p in parts:
+        if p.band is not None and p.band[0] != 0:
+            return list(range(len(parts))), None
+        spans.append((0, out) if p.band is None
+                     else (p.band[1], p.band[1] + p.band[2]))
+    uniq = sorted(set(spans))
+    if uniq == [(0, out)] or any(a[1] > b[0] for a, b in zip(uniq, uniq[1:])):
+        return list(range(len(parts))), None
+    order = sorted(range(len(parts)), key=lambda i: spans[i])
+    table, z = [], 0
+    for span in uniq:
+        ranks = sum(int(parts[i].down.shape[0]) for i in order
+                    if spans[i] == span)
+        table.append((span[0], span[1], z, ranks))
+        z += ranks
+    return order, table
+
+
+def unit_pair(path: str, parts, dims: tuple) -> LoraModule:
+    """``block_diagonal`` of the parts at strength 1.0: ``alpha / rank``
+    is in B and the strength is not."""
+    return block_diagonal(path, [replace(p, strength=1.0) for p in parts],
+                          dims)

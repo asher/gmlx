@@ -528,7 +528,7 @@ def test_a_strength_change_is_a_new_table_with_no_reload(tmp_path,
     for p, mod in wrappers.items():
         mod.base = SimpleNamespace(weight=mx.zeros(weights[p].shape))
     t2 = api.define_patch_table(pipe, lora.table_entries([(ad, 0.5)]))
-    built = pipe.lora._table((t2, mx.float32, install.placement()))
+    built = pipe.lora._table((t2, mx.float32, install.form()))
     for module, _, _ in pipe.patch_tables[t2]["entries"]:
         assert built.get(module) is not None
     for p, mod in wrappers.items():
@@ -611,7 +611,7 @@ def test_each_placement_gives_the_tiny_step_of_the_merged_oracle(
     print(f"qwen check7 tiny placement {how}: worst {worst:.2f} of its "
           f"bound at {name}")
     assert worst <= 1, (name, worst)
-    built = pipe.lora._cur[(tid, mx.float32, how)]
+    built = pipe.lora._cur[(tid, mx.float32, install.form())]
     ffn = pipe.dit.cfg.ffn_dim
     # Block 0 has both bands of the fused weight and block 1 its gate
     # band alone. A whole weight is a block under every placement.
@@ -1355,9 +1355,15 @@ def test_check7_site_gate_at_512(real, tmp_path, variant):
     arrays, m, _, tid = _real_table(real, tmp_path, variant)
     sites: dict = {}
     shares: dict = {}
-    with qg.leaf_sites(real, tid, sites, shares):
+    routed: dict = {}
+    with qg.leaf_sites(real, tid, sites, shares, routed):
         vel = step_velocities(real, arrays, tid, f"{variant} sites")
     adapted = {p for p, _, _ in real.patch_tables[tid]["entries"]}
+    assert routed.keys() <= shares.keys()
+    worst = max((sites[k][0] / sites[k][1] for k in routed), default=0.0)
+    print(f"qwen check7 sites {variant}: {len(routed)} of {len(shares)} "
+          f"calls of an adapted leaf on an mlx-kquant op, n "
+          f"{qg.bg.KERNEL_ROUNDINGS['lora']}, worst {worst:.2f} of its gate")
     # The delta of the adapter at each leaf it is in, as a share of the
     # leaf's output: what the site would read were the delta dropped.
     assert {p for p, _ in shares} == adapted

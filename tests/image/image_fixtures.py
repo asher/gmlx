@@ -216,3 +216,28 @@ def glu_rounded_once(x, w_gate, w_up, codec):
     g = xf @ kq.dequantize(w_gate, s, codec, f).T
     u = xf @ kq.dequantize(w_up, s, codec, f).T
     return (nn.silu(g) * u).astype(x.dtype)
+
+
+def lora_rounded_once(x, w, codec, lora_a, lora_b, *, strength=None,
+                      bands=None):
+    """A stand-in for mlx-kquant's ``quantized_matmul_lora``: the base
+    product on the dequantized weight and the low-rank term in fp32,
+    rounded once. ``lora_a`` is (in, rank) and ``lora_b`` (rank, out).
+    With ``bands``, rows of (first column, end column, first rank, ranks),
+    a column of a band reads that block of ranks alone and a column of no
+    band reads none."""
+    import mlx.core as mx
+    import mlx_kquant as kq
+
+    f, s = mx.float32, mx.zeros((1,), mx.uint8)
+    xf = x.astype(f)
+    z = xf @ lora_a.astype(f)
+    if strength is not None:
+        z = z * strength.astype(f)
+    b = lora_b.astype(f)
+    if bands is not None:
+        keep = np.zeros(b.shape, np.float32)
+        for c0, c1, z0, r in bands:
+            keep[z0:z0 + r, c0:c1] = 1.0
+        b = b * mx.array(keep)
+    return (xf @ kq.dequantize(w, s, codec, f).T + z @ b).astype(x.dtype)

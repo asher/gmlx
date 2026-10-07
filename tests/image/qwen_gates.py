@@ -426,13 +426,16 @@ def under_table(pipe, table: str):
 # The site gate of a linear leaf: relative L2 at most 2 n u, where u is
 # one rounding to bfloat16 and n counts the outputs the stock path writes
 # in the activation dtype: the product, and under an adapter also the
-# product with A and the sum with the product with B.
+# product with A and the sum with the product with B. A leaf whose product
+# and delta the lora route handed to mlx-kquant is held to the op's own
+# count, ``bg.KERNEL_ROUNDINGS``, which is the same three.
 SITE_UNIT = 2.0 ** -8
 LEAF_ROUNDINGS = {False: 1, True: 3}
 
 
 @contextmanager
-def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None):
+def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None,
+               routed: dict | None = None):
     """Fill ``sites`` with a reading for every call of a linear leaf of
     the DiT while a step runs under ``table``: (module path, call number)
     to (relative L2, gate). A reading is the leaf's output on the path a
@@ -443,7 +446,8 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None):
     which the first table with entries does. ``shares`` takes, for every
     call of a leaf the table adapts, the norm of the delta over the norm
     of the leaf's output, both in float32: what a leaf that dropped its
-    delta would read at its site."""
+    delta would read at its site. ``routed`` takes the name of the
+    mlx-kquant op for every call that the lora route handed to it."""
     import mlx_kquant as kq
 
     from gmlx.image.lora import install
@@ -453,10 +457,13 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None):
     if pipe.patch_tables[table]["entries"]:
         built = install.build_table(pipe, table, pipe.dit.act_dtype, "block")
     counts: dict = {}
+    ran: list = []
     real = install.ImageLoRALinear.__call__
 
     def call(self, x):
+        before = len(ran)
         y = real(self, x)
+        on_op = "lora" in ran[before:]
         base = self.base
         codec = getattr(base, "kquant_type", None)
         f = None if built is None else built.get(self._path)
@@ -479,13 +486,20 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None):
         if shares is not None and f is not None:
             shares[(self._path, n)] = float(np.sqrt(d2.item() / r2.item()))
         rel = 0.0 if e2.item() == 0 else float(np.sqrt(e2.item() / r2.item()))
-        sites[(self._path, n)] = (
-            rel, 2 * LEAF_ROUNDINGS[f is not None] * SITE_UNIT)
+        rounds = LEAF_ROUNDINGS[f is not None]
+        if on_op:
+            assert f is not None, f"{self._path}: the lora op ran a leaf " \
+                                  f"with no adapter"
+            rounds = bg.KERNEL_ROUNDINGS["lora"]
+            if routed is not None:
+                routed[(self._path, n)] = bg.KERNEL_OPS["lora"]
+        sites[(self._path, n)] = (rel, 2 * rounds * SITE_UNIT)
         return y
 
     install.ImageLoRALinear.__call__ = call
     try:
-        yield sites
+        with bg.kernel_calls(ran.append):
+            yield sites
     finally:
         install.ImageLoRALinear.__call__ = real
 

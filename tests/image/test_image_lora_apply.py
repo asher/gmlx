@@ -241,7 +241,7 @@ def test_a_strength_change_is_a_new_table_with_no_reload(tmp_path,
     for p, m in wrappers.items():
         m.base = SimpleNamespace(weight=mx.zeros(weights[p].shape))
     t2 = _table(pipe, [(ad, 0.5)])
-    built = pipe.lora._table((t2, mx.float32, install.placement()))
+    built = pipe.lora._table((t2, mx.float32, install.form()))
     for module, _, _ in pipe.patch_tables[t2]["entries"]:
         assert built.get(module) is not None
     for p, m in wrappers.items():
@@ -325,7 +325,7 @@ def test_built_tables_are_cached_per_table_id_and_dtype(tmp_path,
     assert np.array_equal(np.array(y.astype(mx.float32)),
                           np.array(y2.astype(mx.float32)))
     assert builds == [(tid, mx.float32), (tid, mx.bfloat16)]
-    f = pipe.lora._cur[(tid, mx.bfloat16, install.placement())].get(QKV)
+    f = pipe.lora._cur[(tid, mx.bfloat16, install.form())].get(QKV)
     assert all(a.dtype == mx.bfloat16 for a in f.arrays())
     # q, k and v at ranks 4, 2 and 8 run as one pair of rank 14.
     assert [a.shape for a in f.arrays()] == [(64, 14), (14, 192)]
@@ -482,7 +482,8 @@ def test_each_placement_gives_the_step_on_merged_weights(tmp_path,
     tid = _table(pipe, [(ad, 0.8)])
     got = _step(pipe, tid)
     assert rel_l2(got, _step(_merged([(adapter, 0.8)]))) <= STEP_TOL
-    built = pipe.lora._cur[(tid, mx.float32, how)]
+    assert install.form() in (how, install.KERNEL)
+    built = pipe.lora._cur[(tid, mx.float32, install.form())]
     # q, k and v bands take the placement, and a whole weight is a block.
     assert type(built.get(QKV)).__name__ == kind
     assert type(built.get("noise_refiner.0.attention.qkv")).__name__ == kind

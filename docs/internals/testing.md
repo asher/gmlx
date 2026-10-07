@@ -188,8 +188,12 @@ output is within a relative L2 of `2 n u` of the stock op in float32 on
 the same input, where `u = 2^-8` is one bfloat16 rounding and `n` counts
 the roundings to bfloat16 on the path the site ran. On the stock ops that
 is the outputs the ops write in bfloat16. A site on a kernel is held to
-the kernel's own count, 1 for the q and k norm with RoPE and 4 for the
-feed-forward gate product, and not to the count of the ops it replaces.
+the kernel's own count, 1 for the q and k norm with RoPE, 4 for the
+feed-forward gate product and 3 for a layer with its LoRA delta on the
+low-rank op, and not to the count of the ops it replaces. The stock ops
+of a layer under a delta are three sites, and the addmm of one rounding
+among them sees a strength a tenth off that the one site of the op does
+not; the exact gate and the route's own tests hold the strength.
 A relative L2 over all rows does not see a fault in one row of a few
 thousand, so a site on a kernel is also held to the same gate on every
 row of its output, and the q and k site on every head of every row. MLX

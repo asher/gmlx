@@ -9,7 +9,9 @@ and books its own time. Calls nested inside a timed op run untimed, so no
 time is booked twice, and the records of one step add up to its wall time.
 A feed-forward pair on the fused kernel books one ``swiglu_fused`` record
 in place of its two leaf calls and their ``swiglu``, under the path that
-``swiglu`` record takes.
+``swiglu`` record takes. A K-quant leaf whose product and adapter delta
+run on the low-rank op books one ``lora_fused`` record in place of its
+leaf call, under the leaf's path.
 
 The glue records close every gap, so the records always add up to the
 instrumented step's own wall time. Each timed op also pays one eval round
@@ -144,6 +146,7 @@ class StepProfiler:
         for name in self.seams:
             self._hold(name, self._timed_seam(name, getattr(ops, name)))
         self._hold("glu_pair", self._placed_pair(ops.glu_pair))
+        self._hold("lora_fused", self._timed_lora(ops.lora_fused))
 
     def _hold(self, name: str, timed) -> None:
         self._saved[name] = (getattr(ops, name), timed)
@@ -176,6 +179,19 @@ class StepProfiler:
                 if path is not None:
                     self._caller = _parent(path)
             return pair
+        return wrapper
+
+    def _timed_lora(self, fn):
+        """``lora_fused`` as one seam record under the path of its leaf,
+        whose own call does not run."""
+        @functools.wraps(fn)
+        def wrapper(x, base, a_t, b_t, strength, bands):
+            path = getattr(base, "_prof_path", self._caller)
+            return self._timed(
+                "seam", "lora_fused", path, "",
+                lambda x, a_t, b_t, strength: fn(x, base, a_t, b_t, strength,
+                                                 bands),
+                (x, a_t, b_t, strength), {})
         return wrapper
 
     def _timed_seam(self, name: str, fn):

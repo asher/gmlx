@@ -23,6 +23,14 @@ GMLX_IMAGE_LORA_PLACEMENT picks how a table with output bands is applied,
 for measurement. ``block`` is the block-diagonal pair over the whole
 weight. ``slice`` adds each band's product into its output slice.
 ``split`` runs the base as one product per band.
+
+With the ``lora`` route of ``gmlx.image.ops.kq_routes`` in force, the
+block placement of a K-quant leaf is built in the form of mlx-kquant's
+low-rank op: the base product and the delta are one call, the output
+bands of the table go in as the op's band table, and the strength of
+each part is an input array beside the pair. A table that differs from
+another in its strengths alone so shares that table's pair. A call the
+route does not take runs the block-diagonal pair on stock ops.
 """
 
 from __future__ import annotations
@@ -39,15 +47,28 @@ import numpy as np
 
 from gmlx import mlx_guards
 from gmlx.envflags import env_choice
+from gmlx.image import ops
+from gmlx.image.ops import kq_routes
 
 from . import plan
 from .reader import AdapterError
 
 PLACEMENTS = ("block", "slice", "split")
 _PLACEMENT = env_choice("GMLX_IMAGE_LORA_PLACEMENT", "block", PLACEMENTS)
+# The form of the block placement while the low-rank route is in force.
+KERNEL = "kernel"
 
 
 def placement() -> str:
+    return _PLACEMENT
+
+
+def form() -> str:
+    """The form a table is built in now: the placement, or ``KERNEL`` for
+    the block placement while the low-rank route is in force. A built
+    table is kept under it."""
+    if _PLACEMENT == "block" and "lora" in kq_routes.active():
+        return KERNEL
     return _PLACEMENT
 
 
@@ -265,7 +286,77 @@ class _Split:
         return parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
 
 
-def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base):
+class _Kernel:
+    """The block placement of a K-quant leaf in the form of mlx-kquant's
+    low-rank op: A^T and B^T with ``alpha / rank`` in B, one strength per
+    rank, and the band table or None. ``pair`` is shared by the tables of
+    the same parts at other strengths. ``plain`` builds the factors of
+    the stock path from the pair's arrays, on the first call the route
+    does not take, such as one of few rows."""
+
+    def __init__(self, pair: tuple, strength: mx.array, plain):
+        self.a_t, self.b_t, self.bands = pair
+        self.strength = strength
+        self._plain, self._stock = plain, None
+
+    def arrays(self) -> list:
+        """The arrays this table alone holds. The pair is counted where
+        it is kept."""
+        stock = [] if self._stock is None else self._stock.arrays()
+        return [self.strength, *(a for a in stock
+                                 if a is not self.a_t and a is not self.b_t)]
+
+    def stock(self):
+        if self._stock is None:
+            self._stock = self._plain(self.a_t, self.b_t)
+            mx.eval(self._stock.arrays())
+        return self._stock
+
+    def __call__(self, base, x: mx.array) -> mx.array:
+        leaf = kq_routes.lora_leaf(base, x)
+        if leaf is None:
+            return self.stock()(base, x)
+        return ops.lora_fused(x, leaf, self.a_t, self.b_t, self.strength,
+                              self.bands)
+
+
+def kernel_pair(path: str, parts: list, dims: tuple, dtype) -> tuple:
+    """A^T, B^T and the band table of the parts for mlx-kquant's low-rank
+    op, in the order ``plan.band_table`` gives, with no strength in
+    them."""
+    order, bands = plan.band_table(parts, dims)
+    lm = plan.unit_pair(path, [parts[i] for i in order], dims)
+    return (*_transposed(lm, dtype), bands)
+
+
+def _strengths(parts: list, dims: tuple) -> mx.array:
+    """One strength per rank of ``kernel_pair``, in float32."""
+    order, _ = plan.band_table(parts, dims)
+    return mx.array(np.concatenate(
+        [np.full(int(parts[i].down.shape[0]), parts[i].strength, np.float32)
+         for i in order]))
+
+
+def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
+             pair=None):
+    if how == KERNEL:
+        how = "block"
+        ranks = sum(int(p.down.shape[0]) for p in parts)
+        order, bands = plan.band_table(parts, dims)
+        if pair is not None and kq_routes.lora_static(base, dtype, ranks,
+                                                      bands):
+            def plain(a_t: mx.array, b_t: mx.array):
+                # The block-diagonal pair of the stock path. With the
+                # parts in the pair's order its A is the pair's, and so is
+                # its B when every strength is 1.0, the factor it then
+                # holds. Any other strength is folded into a B of its own.
+                if order != list(range(len(parts))):
+                    return _factors(path, parts, dims, dtype, how, base)
+                if any(p.strength != 1.0 for p in parts):
+                    b = plan.block_diagonal(path, parts, dims).b
+                    b_t = mx.contiguous(b.T).astype(dtype)
+                return _Block(a_t, b_t)
+            return _Kernel(pair(), _strengths(parts, dims), plain)
     if how != "block":
         bands = plan.banded(path, parts, dims)
         if bands is not None and not (len(bands) == 1 and bands[0][:2]
@@ -315,15 +406,22 @@ class BuiltTable:
     dtype, from the cached pairs alone, so no weight of the model is read
     and a dtype that few leaves run in costs only their factors."""
 
-    def __init__(self, parts: dict, leaves: dict, dtype, how: str):
+    def __init__(self, parts: dict, leaves: dict, dtype, how: str,
+                 pairs=None):
         self._parts = parts            # path -> [Part]
         self._leaves = leaves          # path -> base leaf
         self._dtype, self._how = dtype, how
+        self._pairs = pairs            # (path, parts, dims) -> kernel pair
         self._built: dict = {}
-        self.nbytes = 0
 
     def __contains__(self, path: str) -> bool:
         return path in self._parts
+
+    @property
+    def nbytes(self) -> int:
+        """Bytes of the factors built so far."""
+        return sum(int(a.nbytes) for f in self._built.values()
+                   for a in f.arrays())
 
     def get(self, path: str):
         f = self._built.get(path)
@@ -332,11 +430,12 @@ class BuiltTable:
             if parts is None:
                 return None
             leaf = self._leaves[path]
-            f = _factors(path, parts, linear_dims(leaf), self._dtype,
-                         self._how, leaf)
-            arrays = f.arrays()
-            mx.eval(arrays)
-            self.nbytes += sum(int(a.nbytes) for a in arrays)
+            dims = linear_dims(leaf)
+            pair = None if self._pairs is None else \
+                (lambda: self._pairs(path, parts, dims))
+            f = _factors(path, parts, dims, self._dtype, self._how, leaf,
+                         pair)
+            mx.eval(f.arrays())
             self._built[path] = f
         return f
 
@@ -347,6 +446,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
     table = pipe.patch_tables[tid]
     leaves = linear_leaves(pipe.dit)
     by_module: dict = {}
+    named: dict = {}
     for path, band, patches in table["entries"]:
         for key, strength in patches:
             if strength == 0.0:
@@ -358,14 +458,32 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                     f"longer held. Register the pair again")
             by_module.setdefault(path, []).append(
                 plan.Part(pair.down, pair.up, pair.alpha, band, strength))
+            named.setdefault(path, []).append((key, band))
+    pairs = None
+    if how == KERNEL:
+        owner = weakref.ref(pipe)
+
+        def pairs(path: str, parts: list, dims: tuple) -> tuple:
+            # The pair of a module is named by its parts without their
+            # strengths, so every table of those parts shares it.
+            key = (KERNEL, path, tuple(named[path]), dtype)
+            held = owner()
+            hit = None if held is None else held.tables.get(key)
+            if hit is None:
+                hit = kernel_pair(path, parts, dims, dtype)
+                mx.eval(hit[0], hit[1])
+                if held is not None:
+                    held.tables.put(key, hit, int(hit[0].nbytes)
+                                    + int(hit[1].nbytes))
+            return hit
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
-                      how)
+                      how, pairs)
 
 
 class PatchState:
     """The patch table a DiT forward runs under. ``active`` is a table id
     with entries, or None for the base model. Built tables are cached in
-    the pipeline per table id, dtype and placement, and the ones of the
+    the pipeline per table id, dtype and form, and the ones of the
     active table are also held here. A DiT has one state, which every
     pipeline over it shares: ``activate`` names the pipeline whose table
     runs, and a table id names its content, so pipelines that define
@@ -380,7 +498,7 @@ class PatchState:
         tid = self.active
         if tid is None:
             return None
-        key = (tid, dtype, _PLACEMENT)
+        key = (tid, dtype, form())
         hit = self._cur.get(key)
         if hit is None:
             if any(k[0] != tid for k in self._cur):
