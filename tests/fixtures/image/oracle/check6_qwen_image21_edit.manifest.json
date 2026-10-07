@@ -1,0 +1,664 @@
+{
+ "schema": 1,
+ "name": "check6_qwen_image21_edit",
+ "check": 6,
+ "family": "qwen_image21",
+ "script": "scripts/image_oracle/check6_qwen_image21_edit.py",
+ "argv": [
+  "check6_qwen_image21_edit.py",
+  "--dit",
+  "qwen-image-2.1-Q4_K_M.gguf",
+  "--config",
+  "Qwen__Qwen-Image-2.1",
+  "--cases",
+  "one",
+  "two",
+  "--bf16",
+  "one",
+  "two"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "qwen-image-2.1-Q4_K_M.gguf",
+   "size": 4199565024,
+   "sha256": "631d532e7ca71e8d90a87c71d3699761a812039d22e3370e87498d87754660fe"
+  },
+  "vae": {
+   "name": "diffusion_pytorch_model.safetensors",
+   "size": 1350989512,
+   "sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417"
+  },
+  "vae_config": {
+   "name": "config.json",
+   "size": 2079,
+   "sha256": "9785d527b278cb8b210e9f48a8028d92a4190968ce7e24c8fc85d9d1b82f6ba2"
+  }
+ },
+ "inputs": {
+  "cases": {
+   "one": {
+    "prompt": "Paint the largest rectangle bright red and leave the rest of the picture as it is.",
+    "negative_prompt": "blurry, low quality, distorted, watermark",
+    "images": [
+     "a"
+    ],
+    "features": "tap_one of check2_qwen_image21_edit",
+    "negative_features": "tap_one_neg of check2_qwen_image21_edit",
+    "reference_latents": [
+     [
+      64,
+      32,
+      32
+     ]
+    ]
+   },
+   "two": {
+    "prompt": "Place the shapes of the first picture over the background of the second picture.",
+    "negative_prompt": "blurry, low quality, distorted, watermark",
+    "images": [
+     "b",
+     "c"
+    ],
+    "features": "tap_two of check2_qwen_image21_edit",
+    "negative_features": "tap_two_neg of check2_qwen_image21_edit",
+    "reference_latents": [
+     [
+      64,
+      28,
+      36
+     ],
+     [
+      64,
+      36,
+      28
+     ]
+    ]
+   }
+  },
+  "size": 512,
+  "reference_resolution": 512,
+  "steps": 40,
+  "seed": 6,
+  "guidance": 4.0,
+  "kv_cache": true,
+  "bf16_cases": [
+   "one",
+   "two"
+  ],
+  "kept_steps": [
+   1,
+   2,
+   10,
+   20,
+   30
+  ],
+  "schedule": "the pipeline's default, np.linspace(1, 1 / steps, steps)",
+  "config_revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 64, size / 16, size / 16)",
+  "latents": "(1, 64, size / 16, size / 16) float32 in model space, after the last step",
+  "reference_latents": "(64, h / 16, w / 16) float32 in model space: the mode of the VAE in float32 on the resized RGBA image, less latents_mean over latents_std",
+  "guidance_rule": "negative + guidance x (positive - negative), in float32 on the two velocities of a step",
+  "encode_prompt": "replaced by the features and image rows of check2_qwen_image21_edit, after the resized images the pipeline passes are held to that fixture's in bits"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "dequant": "stock",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding",
+   "bf16_timestep": "fp32",
+   "plain_decoded": [
+    "txt_in.text_norm.weight"
+   ]
+  },
+  "cases": {
+   "one": {
+    "fp32_step_s": [
+     39.2,
+     20.2,
+     20.2,
+     20.2,
+     20.2,
+     20.1,
+     20.2,
+     20.2,
+     20.2,
+     20.5,
+     20.6,
+     20.3,
+     20.2,
+     20.3,
+     20.2,
+     20.2,
+     20.2,
+     20.2,
+     20.2,
+     20.3,
+     21.9,
+     22.8,
+     23.6,
+     23.5,
+     23.7,
+     24.1,
+     23.8,
+     22.4,
+     22.2,
+     24.4,
+     23.0,
+     26.5,
+     22.9,
+     27.5,
+     22.6,
+     23.0,
+     24.4,
+     23.8,
+     26.1,
+     25.2
+    ],
+    "fp32_s": 901.2,
+    "loop_equals_pipeline_steps": 2,
+    "bf16_s": 4283.9,
+    "latents_bf16_vs_fp32": {
+     "rel_l2": 0.006674073825644161,
+     "cosine": 0.999978935873574,
+     "max_abs": 0.08540075272321701
+    },
+    "bf16_vs_fp32_by_step": [
+     0.0013304003252123946,
+     0.0018968516328580647,
+     0.0034359781163663247,
+     0.004293899704097038,
+     0.0041199371270074754,
+     0.004232624115031449,
+     0.004405257170325841,
+     0.004475030750994567,
+     0.004580941745733939,
+     0.004711781905071107,
+     0.004840534971118344,
+     0.004962424969064628,
+     0.005090798858028135,
+     0.005216170153102454,
+     0.005358673234002501,
+     0.00546486282896116,
+     0.005550466438667302,
+     0.005638602339985805,
+     0.0057238864115050836,
+     0.005797730472202824,
+     0.005870915967031948,
+     0.005941362425254736,
+     0.006003528099392631,
+     0.006042313148417838,
+     0.00606046090912327,
+     0.0061062554721595256,
+     0.006134097864668095,
+     0.006122810924351894,
+     0.006126004039013139,
+     0.006068281350043311,
+     0.00604897585780788,
+     0.006032612589856451,
+     0.006106737870682038,
+     0.0061351062479454025,
+     0.006183514006583068,
+     0.006313647859245634,
+     0.006319267135096923,
+     0.00639199260868239,
+     0.007121457284316568,
+     0.006674073825644161
+    ]
+   },
+   "two": {
+    "fp32_step_s": [
+     76.8,
+     31.4,
+     26.3,
+     31.6,
+     31.5,
+     31.7,
+     31.5,
+     31.5,
+     31.6,
+     31.7,
+     28.1,
+     29.6,
+     31.4,
+     31.3,
+     31.5,
+     31.2,
+     31.3,
+     31.4,
+     30.8,
+     29.4,
+     28.4,
+     24.2,
+     21.7,
+     22.0,
+     22.7,
+     21.8,
+     28.6,
+     26.6,
+     23.5,
+     28.3,
+     29.3,
+     29.3,
+     27.7,
+     23.9,
+     24.2,
+     25.3,
+     27.2,
+     22.6,
+     22.0,
+     21.9
+    ],
+    "fp32_s": 1162.6,
+    "loop_equals_pipeline_steps": 2,
+    "bf16_s": 5264.5,
+    "latents_bf16_vs_fp32": {
+     "rel_l2": 0.11916707634805569,
+     "cosine": 0.9928785234469678,
+     "max_abs": 2.59515842795372
+    },
+    "bf16_vs_fp32_by_step": [
+     0.0022661586236381428,
+     0.004800739641988771,
+     0.0075400807620852,
+     0.00890495559320674,
+     0.01038637414928572,
+     0.012373115769468451,
+     0.014592342296529007,
+     0.017246443179654042,
+     0.020853403799629983,
+     0.025269132874500812,
+     0.02810599805464675,
+     0.031001323510825938,
+     0.034411929107490025,
+     0.03829191197980774,
+     0.04201254849963187,
+     0.04606009189303269,
+     0.05063805914561076,
+     0.05506214252081356,
+     0.059591890015812735,
+     0.06425647122917104,
+     0.06887237365327026,
+     0.07353291651591785,
+     0.07811444091130298,
+     0.08272328534888365,
+     0.0869422942606868,
+     0.09090396456613122,
+     0.09465498204175446,
+     0.09810989429226621,
+     0.10126585829728853,
+     0.10414698446454003,
+     0.1067204636501916,
+     0.10904875604393577,
+     0.11112572046939054,
+     0.11297658572368673,
+     0.11456431331539255,
+     0.11595844826177311,
+     0.11717646662334766,
+     0.11818617576847165,
+     0.11900518307896714,
+     0.11916707634805569
+    ]
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "final latents: relative L2 at twice the oracle's own bf16 against fp32 relative L2 of the case; a case without a bf16 run starts from the tolerance of the first case that has one",
+  "starting": {
+   "latents_rel_l2": 0.05
+  },
+  "cases": {
+   "one": {
+    "latents_rel_l2": 0.013348147651288321
+   },
+   "two": {
+    "latents_rel_l2": 0.23833415269611138
+   }
+  }
+ },
+ "notes": [],
+ "created": "2026-10-07T11:29:55Z",
+ "npz": "check6_qwen_image21_edit.npz",
+ "tensors": {
+  "features_one": {
+   "shape": [
+    287,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "36cb9652bb22e364d12c9781cdc020cb72397f75e60b51ad106fab0df19533c3"
+  },
+  "features_one_neg": {
+   "shape": [
+    279,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "d421fce6d132be9b959640639a8c244f7e2f06e80af7f7b8f39a17ab6b080d64"
+  },
+  "features_two": {
+   "shape": [
+    539,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "630a9de5a8a8911d51a07e14821a0d8d92adafbe9e116693fbeb84a781478059"
+  },
+  "features_two_neg": {
+   "shape": [
+    533,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "e180391167bd1d045e0d5b9ff432dbd93742e1729f846c7e20f69bea51324e28"
+  },
+  "latents_one": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "4936976f896b36e3ccb212a4299ac8083e7aac81524fd882cbf8cb498111bbb4"
+  },
+  "latents_one_bf16": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "43ed49fa79f3356203be200d3764993c4293e391546196b8b0d14665bc001656"
+  },
+  "latents_one_step1": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "b18e38d035cdccd0a1ea3f500a1496ce9d01ca7cf4f703b9b91cc8bb8b45cb51"
+  },
+  "latents_one_step10": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "dc8ff5ccda67bbbd7c1c4364164d5264711d2529a9e17bb2f5b7879e523fb056"
+  },
+  "latents_one_step2": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d5336eb344411ad7e166938c6cc833141a7bf6c41d14c7bdfccadc27c08060ab"
+  },
+  "latents_one_step20": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "0dae783b0be2c6958bebc0066aa483f82115c59964d50aadbf570f6e5f0ded74"
+  },
+  "latents_one_step30": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "3662e625670a5556f8f3a683b16979e2be6c00866344cfe310370dce7f24e807"
+  },
+  "latents_two": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "9922f3b0c57df6e72b393ed5a3b75261d27d3806e283c796c3ec032806a24b2a"
+  },
+  "latents_two_bf16": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "73eafa646aac9b657aaac4c915038f59d6b4e2614c26039a940037eb5495bffd"
+  },
+  "latents_two_step1": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "f183d315320bbb84d3f31b748743e00f17c2c5a27cc14027875519552695989c"
+  },
+  "latents_two_step10": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "7ca151e4a9bbeb409d9c641229852f033c6cfadec650fc3742d17284258b90a7"
+  },
+  "latents_two_step2": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d09f59ea6d4699c55b9b2fee99ab4f2c4223802d9b49eb585c886dd25cbf5c4a"
+  },
+  "latents_two_step20": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "b39b62d4920c258cce462b8b4f0286ad0e7a8a2070c12242d0e6c8d56639445d"
+  },
+  "latents_two_step30": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "3796a7bc0fd91881004c171489f4e7577a948c3cf51c260a08bff855ffe76198"
+  },
+  "noise": {
+   "shape": [
+    1,
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "4fc58e1651f37316856ef093e36b0a29f0ad6de41a860cd5b73a56eb7111af38"
+  },
+  "ref_latents_a": {
+   "shape": [
+    64,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "817c4022963784a3f4392c129a9b82f67fdbbe426e0a05e82b537c80128589b0"
+  },
+  "ref_latents_b": {
+   "shape": [
+    64,
+    28,
+    36
+   ],
+   "dtype": "float32",
+   "sha256": "82c596a36bfb88196eb26f4c0050146b4f18c065ec06eff43679ad16f8935da6"
+  },
+  "ref_latents_c": {
+   "shape": [
+    64,
+    36,
+    28
+   ],
+   "dtype": "float32",
+   "sha256": "e8709fa3cc3338ce78423e3417f6d91b229435fe6f39b5827cf0efd527bca951"
+  },
+  "resized_a": {
+   "shape": [
+    512,
+    512,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "403056602449587bb98e25cfe041403bceb6a014a1dbed10ee3219abe55d8534"
+  },
+  "resized_b": {
+   "shape": [
+    448,
+    576,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "2e8bcc3217a5439b1f24af553abb9f8cbca0a5a33cd57b63dadc2561cb5ab32b"
+  },
+  "resized_c": {
+   "shape": [
+    576,
+    448,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "c0d01f183c0b8a5d48da75f25f744c275d8d3676f7e0b820f3f9ad7a0a775316"
+  },
+  "sigmas": {
+   "shape": [
+    41
+   ],
+   "dtype": "float32",
+   "sha256": "e020c7cbbbe0abcd287da296952356028e1e61075b4cbf9c3885c472f78f7aff"
+  },
+  "slots_one": {
+   "shape": [
+    256
+   ],
+   "dtype": "int64",
+   "sha256": "794239664e19bce020aeaf13601bae222e9ed1decbeaaf19a12e924307140681"
+  },
+  "slots_one_neg": {
+   "shape": [
+    256
+   ],
+   "dtype": "int64",
+   "sha256": "794239664e19bce020aeaf13601bae222e9ed1decbeaaf19a12e924307140681"
+  },
+  "slots_two": {
+   "shape": [
+    504
+   ],
+   "dtype": "int64",
+   "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
+  },
+  "slots_two_neg": {
+   "shape": [
+    504
+   ],
+   "dtype": "int64",
+   "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
+  },
+  "source_a": {
+   "shape": [
+    768,
+    768,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "611fb9ec5c97cf0572c262b7bf3ea58acc54984610900763ad8db5431153b18a"
+  },
+  "source_b": {
+   "shape": [
+    480,
+    640,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "c731ea4444a67eac1a6b7acc35d21561587c05b07bdafd3f1da2080d61d12911"
+  },
+  "source_c": {
+   "shape": [
+    640,
+    480,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "6ea9b070bcb6aebf7faf31b97a66e766d49b98b2a644aa796227a3076f4de416"
+  },
+  "timesteps": {
+   "shape": [
+    40
+   ],
+   "dtype": "float32",
+   "sha256": "dceb667e63863b48f34586c17a4b2b554c396e219821f7c9f12eebb1b085550a"
+  }
+ }
+}

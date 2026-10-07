@@ -198,3 +198,38 @@ def test_the_runner_resolves_a_bare_script_name_in_its_directory():
     assert runner.resolve_script("fixtures.py") == _DIR / "fixtures.py"
     with pytest.raises(SystemExit):
         runner.resolve_script("no_such_oracle.py")
+
+
+# The fixtures whose reference script loads the Qwen-Image 2.1 DiT file.
+QWEN_DIT_MANIFESTS = (
+    "check3_qwen_image21_512", "check3_qwen_image21_1024",
+    "check3_qwen_image21_ref_512", "check6_qwen_image21",
+    "check6_qwen_image21_edit", "check7_qwen_image21_lora_512_plain",
+    "check7_qwen_image21_lora_512_alpha",
+    "check7_qwen_image21_lora_512_stacked")
+
+
+def test_the_reference_loader_decoded_the_bf16_vectors_of_the_file():
+    """docs/upstream-defects.md, the diffusers single-file loader: a BF16
+    tensor outside a linear layer stays in its GGUF bytes, and the
+    reference scripts decode each one. The names every manifest lists
+    are the BF16 vectors of the file's header inventory, and each
+    manifest that loads the DiT lists them."""
+    tensors = json.loads((_DIR.parents[1] / "tests" / "fixtures" / "image"
+                          / "qwen_image21_q4_k_m.header.json").read_text())[
+        "tensors"]
+    prefix = "model.diffusion_model."
+    vectors = sorted(n.removeprefix(prefix) for n, shape, codec in tensors
+                     if codec == "BF16" and len(shape) == 1)
+    assert vectors == ["txt_in.text_norm.weight"]
+    oracle_dir = _DIR.parents[1] / "tests" / "fixtures" / "image" / "oracle"
+    for name in QWEN_DIT_MANIFESTS:
+        m = json.loads((oracle_dir / f"{name}.manifest.json").read_text())
+        assert m["family"] == "qwen_image21", name
+        assert sorted(m["results"]["oracle"]["plain_decoded"]) == vectors, \
+            name
+    # No other committed manifest of the family's DiT checks is left out.
+    held = {p.name.removesuffix(".manifest.json")
+            for p in oracle_dir.glob("check[367]_qwen_image21*.json")
+            if "plain_decoded" in p.read_text()}
+    assert held == set(QWEN_DIT_MANIFESTS)
