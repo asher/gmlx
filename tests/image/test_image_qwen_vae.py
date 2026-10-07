@@ -55,6 +55,23 @@ def vae(st_file):
     return reader.load_vae(st_file, family=FAMILY, dtype=mx.float32)
 
 
+# A tiled encode crops its tiles at the reach of a cut, which is 10 latent
+# pixels of 16 pixels in the tiny VAE as in the official one. A tile is
+# therefore longer than 20 latent pixels, and 336 pixels is the shortest.
+# An image of 352x368 pixels is 22x23 latent pixels in 2x3 such tiles.
+ENC_TILES = dict(tiled=True, tile=336, overlap=0)
+ENC_SIDES = (352, 368)
+ENC_LATENT = (22, 23)
+
+# A pass does not round a value the same way at every input shape. On the
+# CPU, where this module runs, a cropped head differs from the whole one by
+# up to 2.9e-6 over the layouts of CROPPED and the tiny VAE at ENC_SIDES,
+# on values of 1.8 rms, and the latents by 3e-7. A pixel kept one latent
+# pixel within what a cut reaches is off by 0.2, and blended tiles by 0.07
+# or more.
+ROUNDING = 1e-4
+
+
 def _header_shapes() -> dict:
     return {n: tuple(s) for n, s, _ in load_json(HEADER)["tensors"]}
 
@@ -488,10 +505,11 @@ def test_the_log_variance_is_clipped_to_minus_30_and_20(vae):
     # A sampled encode scales its noise by exp(log variance / 2), which is
     # exp(10) at the upper bound.
     std = np.array(vae.config.latents_std, np.float32)[:, None, None]
-    for kw in ({}, dict(tiled=True, tile=32, overlap=16)):
-        mode = np.array(tiling.encode(vae, img, free=1e12, **kw))
-        got = np.array(tiling.encode(vae, img, mode="sample", free=1e12,
-                                     noise=np.ones((1, 64, 4, 3), np.float32),
+    big = rng.uniform(-1, 1, (1, *ENC_SIDES, 3)).astype(np.float32)
+    for x, kw in ((img, {}), (big, ENC_TILES)):
+        mode = np.array(tiling.encode(vae, x, free=1e12, **kw))
+        got = np.array(tiling.encode(vae, x, mode="sample", free=1e12,
+                                     noise=np.ones(mode.shape, np.float32),
                                      **kw))
         step = (got - mode) * std
         np.testing.assert_allclose(step[:, :32], math.exp(10), rtol=1e-4)
@@ -1038,7 +1056,7 @@ def _pointwise(vae):
     return vae
 
 
-def test_tiles_of_a_pointwise_vae_equal_the_whole_pass(vae):
+def test_blended_tiles_of_a_pointwise_vae_equal_the_whole_decode(vae):
     vae = _pointwise(vae)
     rng = np.random.default_rng(13)
     lat = rng.standard_normal((1, 64, 4, 3)).astype(np.float32)
@@ -1048,13 +1066,6 @@ def test_tiles_of_a_pointwise_vae_equal_the_whole_pass(vae):
                                    tile=32, overlap=16, free=1e12))
     assert whole.shape == (1, 64, 48, 4)
     np.testing.assert_allclose(tiles, whole, rtol=1e-5, atol=1e-5)
-    img = rng.uniform(-1, 1, (1, 64, 48, 3)).astype(np.float32)
-    a = np.array(tiling.encode(vae, img, tiled=False, free=1e12))
-    b = np.array(tiling.encode(vae, img, tiled=True, tile=32, overlap=16,
-                               free=1e12))
-    # The stride 2 convs still pad a tile's bottom and right edge, which a
-    # center tap never reads.
-    np.testing.assert_allclose(b, a, rtol=1e-5, atol=1e-5)
 
 
 def _two_levels():
@@ -1097,7 +1108,7 @@ def test_tiles_equal_the_whole_pass_beyond_the_reach_of_a_cut_edge():
     assert 1e-3 < err[~px].max() <= 2.0
 
     # The encoder's mid attention mixes every latent pixel, so the part
-    # run in tiles is compared: the output of the down blocks.
+    # run in tiles is compared: the output of the down blocks, blended.
     reach = q.reach(cfg, "encode")
     assert reach == 5
     img = rng.uniform(-1, 1, (1, 8, 64, 3)).astype(np.float32)
@@ -1110,33 +1121,206 @@ def test_tiles_equal_the_whole_pass_beyond_the_reach_of_a_cut_edge():
     print(f"[tiling] encode head: max abs {err[far].max():.3e} beyond the "
           f"reach of a cut edge, {err[~far].max():.3e} within it")
     assert err[far].max() <= 1e-5 and err[~far].max() > 1e-3
+    # An encode keeps of each tile the columns beyond the reach and no
+    # other, so it is the whole encode.
     a = np.array(tiling.encode(vae, img, tiled=False, free=1e12))
     b = np.array(tiling.encode(vae, img, tiled=True, tile=56, overlap=48,
                                free=1e12))
     assert a.shape == b.shape == (1, 64, 4, 32)
-    assert np.isfinite(b).all() and not np.array_equal(a, b)
+    assert np.abs(b - a).max() <= ROUNDING
 
 
-def test_a_tiled_encode_runs_the_head_in_tiles_that_overlap():
+def test_a_tiled_encode_runs_the_head_in_tiles_cropped_at_the_reach():
     vae = _two_levels()
     img = np.random.default_rng(21).uniform(-1, 1, (1, 8, 64, 3)).astype(
         np.float32)
     # 56 pixel tiles with 48 pixels of overlap are 28 latent pixels with
-    # 24, and the rest of the encoder runs whole on the blended head.
-    head = tiling.run_tiled(vae.encode_head, mx.array(img), in_scale=2,
-                            out_scale=1, tile=28, overlap=24)
+    # 24, which is more than twice the reach and stands. The rest of the
+    # encoder runs whole on the cropped head.
+    assert tiling.encode_layout(vae, 56, 48) == (28, 24, 5)
+    tiles = dict(in_scale=2, out_scale=1, tile=28, overlap=24)
+    head = tiling.run_tiled(vae.encode_head, mx.array(img), reach=5, **tiles)
     mean, _ = vae.split_moments(vae.encode_tail(mx.array(head)))
     want = np.array(vae.to_model_space(mean))
     got = np.array(tiling.encode(vae, img, tiled=True, tile=56, overlap=48,
                                  free=1e12))
     np.testing.assert_allclose(got, want, rtol=0, atol=1e-6)
-    # Tiles with no overlap are cut at latent column 16, and the head
-    # differs there.
-    cut = tiling.run_tiled(vae.encode_head, mx.array(img), in_scale=2,
-                           out_scale=1, tile=28, overlap=0)
-    assert np.abs(cut - head).max() > 1e-3
-    mean, _ = vae.split_moments(vae.encode_tail(mx.array(cut)))
+    # The same tiles blended differ from it within the reach of the cut
+    # edges, and so does the encode of that head.
+    blend = tiling.run_tiled(vae.encode_head, mx.array(img), **tiles)
+    assert np.abs(blend - head).max() > 1e-3
+    mean, _ = vae.split_moments(vae.encode_tail(mx.array(blend)))
     assert np.abs(np.array(vae.to_model_space(mean)) - got).max() > 1e-4
+
+
+def _window_sum(reach: int):
+    """A stand-in for the pixel-space part of an encode at 2 pixels a
+    latent pixel, in integer arithmetic that is the same at every input
+    shape and on every device: a latent pixel is the sum of its own 2x2
+    pixels and of the ``reach`` latent pixels around them on every side,
+    with zeros beyond the edge of the input."""
+    def fn(x):
+        a = np.array(x).astype(np.int64)
+        _, h, w, _ = a.shape
+        p = 2 * reach
+        a = np.pad(a, ((0, 0), (p, p), (p, p), (0, 0)))
+        c = np.pad(a.cumsum(1).cumsum(2), ((0, 0), (1, 0), (1, 0), (0, 0)))
+        n = 2 * p + 2           # the side of a window in pixels
+        i, j = np.arange(0, h, 2)[:, None], np.arange(0, w, 2)[None, :]
+        out = (c[:, i + n, j + n] - c[:, i, j + n] - c[:, i + n, j]
+               + c[:, i, j])
+        return mx.array(out.astype(np.float32))
+    return fn
+
+
+# (pixels high, pixels wide, tile in pixels) at 2 pixels a latent pixel and
+# a reach of 5 latent pixels. Every layout has neighbors that overlap by
+# 10 or 11 latent pixels, so a kept pixel is exactly 5 from a cut edge.
+CROPPED = [(64, 96, 32), (32, 200, 32), (72, 40, 32), (64, 96, 44),
+           (26, 130, 24), (64, 96, 48), (64, 64, 36)]
+
+
+def _layout(height: int, width: int, t: int, lap: int) -> tuple:
+    """Tile starts along the rows and the columns of an image at 2 pixels
+    a latent pixel, for tiles of ``t`` latent pixels."""
+    return tuple(tiling.tile_starts(n // 2, tiling.tile_length(n // 2, t, lap),
+                                    lap) for n in (height, width))
+
+
+@pytest.mark.parametrize("height,width,tile", CROPPED)
+def test_cropped_tiles_of_exact_arithmetic_are_the_whole_pass_bit_for_bit(
+        height, width, tile):
+    reach = 5
+    ys, xs = _layout(height, width, tile // 2, 2 * reach)
+    # More than one tile, so there is a cut to be wrong at.
+    assert len(ys) * len(xs) > 1
+    rng = np.random.default_rng(43)
+    x = mx.array(rng.integers(1, 10, (1, height, width, 3)).astype(
+        np.float32))
+    tiles = dict(in_scale=2, out_scale=1, tile=tile // 2, overlap=2 * reach)
+    fn = _window_sum(reach)
+    whole = np.array(fn(x))
+    cut = tiling.run_tiled(fn, x, reach=reach, **tiles)
+    assert cut.dtype == np.float32 and cut.shape == whole.shape
+    assert np.array_equal(cut, whole)
+    # A function that reads one latent pixel farther reads past a cut at
+    # a pixel this crop keeps.
+    wide = _window_sum(reach + 1)
+    assert not np.array_equal(tiling.run_tiled(wide, x, reach=reach, **tiles),
+                              np.array(wide(x)))
+    # The same tiles blended are not the whole pass.
+    assert not np.array_equal(tiling.run_tiled(fn, x, **tiles), whole)
+
+
+@pytest.mark.parametrize("height,width,tile", CROPPED)
+def test_a_tiled_encode_is_the_whole_encode(height, width, tile):
+    """To the rounding of the device. A conv does not round a value the
+    same way at every input shape, so a tile and the whole pass can differ
+    in the last bits where no cut reaches."""
+    vae = _two_levels()
+    assert vae.config.scale == 2 and q.reach(vae.config, "encode") == 5
+    rng = np.random.default_rng(41)
+    img = rng.uniform(-1, 1, (1, height, width, 3)).astype(np.float32)
+    # The caller asks for no overlap, and the encode takes twice the reach.
+    t, lap, r = tiling.encode_layout(vae, tile, 0)
+    assert (t, lap, r) == (tile // 2, 10, 5)
+    ys, xs = _layout(height, width, t, lap)
+    assert len(ys) * len(xs) > 1
+    tiles = dict(in_scale=2, out_scale=1, tile=t, overlap=lap)
+    head = np.array(vae.encode_head(mx.array(img)))
+    cut = tiling.run_tiled(vae.encode_head, mx.array(img), reach=r, **tiles)
+    blend = tiling.run_tiled(vae.encode_head, mx.array(img), **tiles)
+    whole = np.array(tiling.encode(vae, img, tiled=False, free=1e12))
+    got = np.array(tiling.encode(vae, img, tiled=True, tile=tile, overlap=0,
+                                 free=1e12))
+    print(f"[tiling] encode {height}x{width}, tile {tile}: {len(ys)} x "
+          f"{len(xs)} tiles, head max abs {np.abs(cut - head).max():.1e} "
+          f"cropped and {np.abs(blend - head).max():.1e} blended, latents "
+          f"max abs {np.abs(got - whole).max():.1e}")
+    assert np.abs(cut - head).max() <= ROUNDING
+    assert got.shape == whole.shape
+    assert np.abs(got - whole).max() <= ROUNDING
+    # The same tiles blended over the same overlap are not the whole head.
+    assert np.abs(blend - head).max() > 0.05
+
+
+def test_cropped_tiles_keep_twice_the_reach_at_every_size():
+    for tile, reach in ((32, 10), (48, 10), (16, 5), (22, 5), (32, 13)):
+        lap = 2 * reach
+        for size in range(1, 513):
+            t = tiling.tile_length(size, tile, lap)
+            starts = tiling.tile_starts(size, t, lap)
+            assert starts[0] == 0 and starts[-1] + t == size
+            rows = np.zeros(size, int)
+            for i, s0 in enumerate(starts):
+                k = tiling.kept(starts, i, t, size, 1, reach)
+                rows[s0 + k.start:s0 + k.stop] += 1
+                # A kept pixel is at least the reach from a cut edge.
+                assert i == 0 or k.start >= reach
+                assert i + 1 == len(starts) or t - k.stop >= reach
+            # The kept pixels of all tiles are every pixel once.
+            assert (rows == 1).all(), (tile, reach, size)
+    # The layout of the official file: 16, 49 and 81 tiles.
+    for px, n, t in ((1024, 4, 31), (1536, 7, 31), (2048, 9, 32)):
+        length = tiling.tile_length(px // 16, 32, 20)
+        assert (len(tiling.tile_starts(px // 16, length, 20)),
+                length) == (n, t)
+
+
+def test_the_price_of_a_tiled_encode_lays_out_the_tiles_that_run(vae):
+    """The pass takes its tiles from ``encode_layout`` and the price takes
+    its overlap from ``memfit.tile_overlap``. Both give the overlap of the
+    crop, whatever overlap the caller names below it."""
+    from gmlx.image import memfit
+
+    t, lap, r = tiling.encode_layout(vae, memfit.TILE_PX, memfit.OVERLAP_PX)
+    assert (t, lap, r) == (32, 20, 10)
+    assert memfit.tile_overlap(FAMILY, "encode", config=vae.config) == 320
+    for px in range(528, 2049, 16):
+        length = tiling.tile_length(px // 16, t, lap)
+        n = len(tiling.tile_starts(px // 16, length, lap))
+        assert memfit.tile_layout(px, 512, 320, 16) == (n, length * 16), px
+    kw = dict(family=FAMILY, itemsize=2, tiled=True)
+    price = memfit.vae_peak("encode", 1024, 1024, **kw)
+    assert memfit.vae_peak("encode", 1024, 1024, overlap=0, **kw) == price
+    assert memfit.vae_peak("encode", 1024, 1024, overlap=320, **kw) == price
+
+
+def test_a_crop_refuses_what_cannot_be_exact():
+    vae = _two_levels()
+    # An overlap under twice the reach.
+    with pytest.raises(ValueError, match="overlap by 9 latent pixels, and "
+                       "a crop at a reach of 5 needs 10"):
+        tiling.kept([0, 11], 0, 20, 31, 1, 5)
+    # A tile no longer than twice the reach keeps no exact pixel.
+    with pytest.raises(ValueError, match="a tile of 20 pixels is 10 latent "
+                       "pixels, and a tiled encode of this VAE needs more "
+                       "than 10, which is 22 pixels"):
+        tiling.encode_layout(vae, 20, 0)
+    img = np.zeros((1, 64, 96, 3), np.float32)
+    # The price of the pass refuses it first, in the same words.
+    with pytest.raises(ValueError, match="a tiled encode of this VAE needs "
+                       "more than 10, which is 22 pixels"):
+        tiling.encode(vae, img, tiled=True, tile=20, overlap=0, free=1e12)
+    # An image of one tile runs whole, whatever the tile is.
+    small = np.zeros((1, 16, 20, 3), np.float32)
+    assert tiling.encode(vae, small, tiled=True, tile=20, overlap=0,
+                         free=1e12).shape == (1, 64, 8, 10)
+    # A forced whole pass has no tiles, so it takes any tile.
+    assert tiling.encode(vae, img, tiled=False, tile=20, overlap=0,
+                         free=1e12).shape == (1, 64, 32, 48)
+    # A caller's overlap above twice the reach stands.
+    assert tiling.encode_layout(vae, 44, 30) == (22, 15, 5)
+    # The official file: 336 pixels is the shortest tile of an encode, and
+    # a decode, which blends, takes any.
+    from gmlx.image import memfit
+
+    assert memfit.croppable(FAMILY, "encode", 336)
+    assert not memfit.croppable(FAMILY, "encode", 335)
+    assert memfit.croppable(FAMILY, "decode", 16)
+    assert memfit.tile_overlap(FAMILY, "encode") == 320
+    assert memfit.tile_overlap(FAMILY, "decode") == memfit.OVERLAP_PX
+    assert tiling.encode_layout(vae, 44, 4) == (22, 10, 5)
 
 
 def test_tiled_decode_and_encode_run_on_the_tiny_vae(vae, monkeypatch):
@@ -1154,12 +1338,16 @@ def test_tiled_decode_and_encode_run_on_the_tiny_vae(vae, monkeypatch):
     assert float(mx.abs(raw).max()) > 1.0
     assert mx.array_equal(tiles, mx.clip(raw, -1.0, 1.0)).item()
     monkeypatch.undo()
-    img = rng.uniform(-1, 1, (1, 64, 48, 3)).astype(np.float32)
-    a = tiling.encode(vae, img, free=1e12)
-    b = tiling.encode(vae, img, tiled=True, tile=32, overlap=16, free=1e12)
-    assert a.shape == b.shape == (1, 64, 4, 3) and a.dtype == mx.float32
-    noise = rng.standard_normal((1, 64, 4, 3)).astype(np.float32)
-    c = tiling.encode(vae, img, mode="sample", noise=noise, free=1e12)
+    img = rng.uniform(-1, 1, (1, *ENC_SIDES, 3)).astype(np.float32)
+    a = tiling.encode(vae, img, tiled=False, free=1e12)
+    b = tiling.encode(vae, img, free=1e12, **ENC_TILES)
+    assert a.shape == b.shape == (1, 64, *ENC_LATENT)
+    assert a.dtype == b.dtype == mx.float32
+    # The tiles are cropped, so they are the whole encode.
+    assert float(mx.abs(a - b).max()) <= ROUNDING
+    noise = rng.standard_normal(a.shape).astype(np.float32)
+    c = tiling.encode(vae, img, mode="sample", noise=noise, tiled=False,
+                      free=1e12)
     assert not mx.array_equal(a, c).item()
 
 
@@ -1175,10 +1363,10 @@ def test_a_bf16_vae_tiles_in_bf16_and_returns_float32(st_file):
     assert float(mx.abs(got).max()) == 1.0
     err = float(mx.abs(got - want).mean())
     assert 0.0 < err < 0.02
-    img = rng.uniform(-1, 1, (1, 64, 48, 3)).astype(np.float32)
-    a = tiling.encode(vae, img, **kw)
-    b = tiling.encode(ref, img, **kw)
-    assert a.shape == (1, 64, 4, 3) and a.dtype == mx.float32
+    img = rng.uniform(-1, 1, (1, *ENC_SIDES, 3)).astype(np.float32)
+    a = tiling.encode(vae, img, free=1e12, **ENC_TILES)
+    b = tiling.encode(ref, img, free=1e12, **ENC_TILES)
+    assert a.shape == (1, 64, *ENC_LATENT) and a.dtype == mx.float32
     rel = float(mx.sqrt(((a - b) ** 2).sum() / (b ** 2).sum()))
     print(f"[tiling] bf16 against fp32, tiled: decode mean abs {err:.3e}, "
           f"encode rel L2 {rel:.3e}")
@@ -1226,7 +1414,10 @@ def test_every_norm_and_conv_of_a_pass_reads_the_vae_dtype(st_file, dtype,
     rng = np.random.default_rng(22)
     lat = rng.standard_normal((1, 64, 4, 3)).astype(np.float32)
     img = rng.uniform(-1, 1, (1, 64, 48, 3)).astype(np.float32)
+    big = rng.uniform(-1, 1, (1, *ENC_SIDES, 3)).astype(np.float32)
+    noise = np.zeros((1, 64, *ENC_LATENT), np.float32)
     tiles = dict(tiled=True, tile=32, overlap=16, free=1e12)
+    cut = dict(free=1e12, **ENC_TILES)
     # (the pass, its ops when whole, whether the part in tiles runs more
     # than once, the dtype of the result)
     f32 = mx.float32
@@ -1239,8 +1430,8 @@ def test_every_norm_and_conv_of_a_pass_reads_the_vae_dtype(st_file, dtype,
         (lambda: vae.encode(mx.array(img))[0], enc, False, want),
         (lambda: tiling.encode(vae, img, tiled=False, free=1e12), enc, False,
          f32),
-        (lambda: tiling.encode(vae, img, **tiles), enc, True, f32),
-        (lambda: tiling.encode(vae, img, mode="sample", noise=lat, **tiles),
+        (lambda: tiling.encode(vae, big, **cut), enc, True, f32),
+        (lambda: tiling.encode(vae, big, mode="sample", noise=noise, **cut),
          enc, True, f32),
     ]
     for run, ops, in_tiles, result in passes:
@@ -1321,32 +1512,45 @@ def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     rng = np.random.default_rng(31)
     lat = rng.standard_normal((1, 64, 4, 3)).astype(np.float32)
-    img = rng.uniform(-1, 1, (1, 64, 48, 3)).astype(np.float32)
-    cut = dict(tile=32, overlap=16)
-    for run, x, op in ((tiling.decode, lat, "decode"),
-                       (tiling.encode, img, "encode")):
-        whole = run(vae, x, tiled=False, free=1e12, **cut)
-        tiles = run(vae, x, tiled=True, free=1e12, **cut)
-        assert not mx.array_equal(whole, tiles).item()
+    img = rng.uniform(-1, 1, (1, *ENC_SIDES, 3)).astype(np.float32)
+    # A cropped encode is the whole encode, so the arrays do not say which
+    # pass ran. The calls of run_tiled do.
+    calls, real = [], tiling.run_tiled
+    monkeypatch.setattr(tiling, "run_tiled",
+                        lambda *a, **kw: calls.append(1) or real(*a, **kw))
+
+    def ran(run, x, in_tiles: bool, want=None, **kw):
+        calls.clear()
+        out = run(vae, x, **kw)
+        assert bool(calls) is in_tiles
+        assert want is None or mx.array_equal(out, want).item()
+        return out
+
+    for run, x, op, (high, wide), cut in (
+            (tiling.decode, lat, "decode", (64, 48),
+             dict(tile=32, overlap=16)),
+            (tiling.encode, img, "encode", ENC_SIDES,
+             dict(tile=ENC_TILES["tile"], overlap=0))):
+        whole = ran(run, x, False, tiled=False, free=1e12, **cut)
+        tiles = ran(run, x, True, tiled=True, free=1e12, **cut)
+        assert whole.shape == tiles.shape
         kw = dict(tiling.price_args(vae, op, 1), **cut)
-        need_whole = memfit.vae_peak(op, 64, 48, **kw)
-        need_tiles = memfit.vae_peak(op, 64, 48, tiled=True, **kw)
+        need_whole = memfit.vae_peak(op, high, wide, **kw)
+        need_tiles = memfit.vae_peak(op, high, wide, tiled=True, **kw)
         # Room for either pass, room for the tiles alone, and no figure.
         for free in (1e12, need_tiles):
-            assert mx.array_equal(run(vae, x, free=free, **cut), tiles).item()
+            ran(run, x, True, tiles, free=free, **cut)
         with monkeypatch.context() as mp:
             mp.setattr(memfit, "free_bytes", lambda: None)
-            assert mx.array_equal(run(vae, x, **cut), tiles).item()
-            assert mx.array_equal(run(vae, x, tiled=False, **cut),
-                                  whole).item()
+            ran(run, x, True, tiles, **cut)
+            ran(run, x, False, whole, tiled=False, **cut)
         # An image no larger than one tile runs whole.
-        assert mx.array_equal(run(vae, x, free=1e12), whole).item()
-        assert mx.array_equal(run(vae, x, tiled=False, free=need_whole,
-                                  **cut), whole).item()
+        ran(run, x, False, whole, free=1e12)
+        ran(run, x, False, whole, tiled=False, free=need_whole, **cut)
         with pytest.raises(ImageMemoryError) as e:
             run(vae, x, tiled=False, free=need_whole - 1, **cut)
         msg = str(e.value)
-        assert (f"VAE {op} of 1 x 64x48 whole needs "
+        assert (f"VAE {op} of 1 x {high}x{wide} whole needs "
                 f"{need_whole / GiB:.2f} GiB") in msg
         assert msg.endswith(
             "GMLX_OVERCOMMIT=1 overrides. The Qwen-Image 2.1 autoencoder is "
@@ -1356,8 +1560,7 @@ def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
             run(vae, x, free=need_tiles - 1, **cut)
         with monkeypatch.context() as mp:
             mp.setenv("GMLX_OVERCOMMIT", "1")
-            assert mx.array_equal(run(vae, x, tiled=False, free=0, **cut),
-                                  whole).item()
+            ran(run, x, False, whole, tiled=False, free=0, **cut)
 
 
 def test_the_pipeline_decode_keeps_the_alpha_when_asked(vae, monkeypatch):

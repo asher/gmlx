@@ -26,13 +26,22 @@ that activation for the whole image times the overlap.
 The Qwen-Image 2.1 autoencoder normalizes each pixel over its channels and
 takes no statistic of the whole image. Its part at latent resolution runs
 whole too, so the mid attention sees every latent pixel, and its tiles run
-one at a time, each evaluated and blended before the next. A tile's convs
-pad zeros where the whole pass reads the neighboring tile. A tiled result
-therefore equals the whole one at every pixel farther from each cut tile
-edge than the convs reach, which is 13 latent pixels in a decode and 10 in
-an encode (``qwen_image21_vae.reach``). Nearer a cut edge the two differ,
-and the ramp gives a tile a weight that falls to zero at that edge. The
-decode is clamped after the blend.
+one at a time, each evaluated before the next. A tile's convs pad zeros
+where the whole pass reads the neighboring tile. A tile therefore equals
+the whole pass at every pixel farther from each cut tile edge than the
+convs reach, which is 13 latent pixels in a decode and 10 in an encode
+(``qwen_image21_vae.reach``), and differs nearer.
+
+A decode of that autoencoder blends its tiles as above: the ramp gives a
+tile a weight that falls to zero at its cut edge, and the decode is
+clamped after the blend. An encode gives its tiled part to the mid
+attention, which spreads an error at a cut over every latent pixel, so
+its tiles are cropped and not blended. Neighbors overlap by at least twice
+the reach, each tile gives the pixels nearer its center than a
+neighbor's, and no pixel within the reach of a cut is kept. The result is
+the whole encode up to the rounding of the device, which can differ
+between input shapes. A cropped tile is longer than twice the reach, so
+336 pixels or more.
 
 ``decode`` and ``encode`` evaluate their result inside
 ``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
@@ -104,33 +113,69 @@ def axis_weights(starts: list[int], i: int, tile: int,
     return w
 
 
+def kept(starts: list[int], i: int, tile: int, size: int, scale: int,
+         reach: int) -> slice:
+    """Output pixels along one axis that a cropped pass takes from tile
+    ``i``, in the tile's own coordinates: those nearer its center than a
+    neighbor's. Neighbors are cut at the middle of their overlap, which
+    must be at least twice ``reach`` latent pixels, so a kept pixel is at
+    least ``reach`` from each cut edge of its tile."""
+    for k in range(len(starts) - 1):
+        got = starts[k] + tile - starts[k + 1]
+        if got < 2 * reach:
+            raise ValueError(f"tiles overlap by {got} latent pixels, and a "
+                             f"crop at a reach of {reach} needs {2 * reach}")
+    return _owned(starts, i, tile, size, scale)
+
+
 def run_tiled(fn, x: mx.array, *, in_scale: int, out_scale: int,
-              tile: int, overlap: int) -> np.ndarray:
+              tile: int, overlap: int, reach: int = 0) -> np.ndarray:
     """``fn`` over tiles of channels-last ``x``, blended, as float32 numpy.
 
     ``tile`` and ``overlap`` are in latent pixels. A latent pixel is
     ``in_scale`` input pixels and ``out_scale`` output pixels.
+
+    With a ``reach`` the tiles are cropped and not blended: the result
+    copies from each tile the pixels nearer its center than a neighbor's,
+    which lie at least ``reach`` latent pixels from its cut edges. When
+    ``fn`` reads no input farther than that from a result, the result is
+    ``fn`` of the whole input, bit for bit where ``fn`` rounds a value the
+    same way in a tile as in the whole input. MLX does not always: a conv
+    can round differently from one input shape to another, by a last bit
+    of float32 on the CPU and by about 1e-3 of the values on a GPU that
+    multiplies float32 matrices at TF32 precision.
     """
     b, h, w = x.shape[0], x.shape[1] // in_scale, x.shape[2] // in_scale
     th, tw = tile_length(h, tile, overlap), tile_length(w, tile, overlap)
     ys, xs = tile_starts(h, th, overlap), tile_starts(w, tw, overlap)
     out = wsum = None
     for i, y0 in enumerate(ys):
-        wy = axis_weights(ys, i, th, out_scale)
+        wy = None if reach else axis_weights(ys, i, th, out_scale)
         for j, x0 in enumerate(xs):
-            wx = axis_weights(xs, j, tw, out_scale)
             piece = fn(x[:, y0 * in_scale:(y0 + th) * in_scale,
                          x0 * in_scale:(x0 + tw) * in_scale])
             piece = np.array(piece.astype(mx.float32))
             if out is None:
                 out = np.zeros((b, h * out_scale, w * out_scale,
                                 piece.shape[-1]), np.float32)
-                wsum = np.zeros((h * out_scale, w * out_scale), np.float32)
+                if not reach:
+                    wsum = np.zeros((h * out_scale, w * out_scale),
+                                    np.float32)
+            if reach:
+                ky = kept(ys, i, th, h, out_scale, reach)
+                kx = kept(xs, j, tw, w, out_scale, reach)
+                out[:, y0 * out_scale + ky.start:y0 * out_scale + ky.stop,
+                    x0 * out_scale + kx.start:x0 * out_scale + kx.stop] = (
+                        piece[:, ky, kx])
+                continue
+            wx = axis_weights(xs, j, tw, out_scale)
             wt = wy[:, None] * wx[None, :]
             ry = slice(y0 * out_scale, (y0 + th) * out_scale)
             rx = slice(x0 * out_scale, (x0 + tw) * out_scale)
             out[:, ry, rx] += piece * wt[None, :, :, None]
             wsum[ry, rx] += wt
+    if reach:
+        return out
     return out / wsum[None, :, :, None]
 
 
@@ -217,6 +262,19 @@ def price_args(vae, op: str, batch: int) -> dict:
                 conv=getattr(vae, "conv", None))
 
 
+def encode_layout(vae, tile: int, overlap: int) -> tuple[int, int, int]:
+    """The tile, the overlap and the reach of a tiled encode, in latent
+    pixels, for ``tile`` and ``overlap`` in image pixels, as the VAE row
+    of the family gives them. Where the row crops the encode's tiles the
+    reach is that of a cut and the overlap at least twice it. Where it
+    blends them the reach is 0."""
+    s = vae.config.scale
+    family = row_family(vae)
+    lap = memfit.tile_overlap(family, "encode", tile, overlap, vae.config)
+    return (tile // s, lap // s,
+            memfit.crop_reach(family, "encode", vae.config))
+
+
 def _plan(vae, op: str, b: int, height: int, width: int, tiled,
           tile: int, overlap: int, free) -> bool:
     return memfit.vae_tiling(op, height, width, tiled=tiled, tile=tile,
@@ -292,8 +350,9 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
             mean, logvar = vae.split_moments(
                 vae.encoder.tail(mx.array(head).astype(vae.dtype)))
         else:
+            t, lap, r = encode_layout(vae, tile, overlap)
             head = run_tiled(vae.encode_head, x, in_scale=s, out_scale=1,
-                             tile=tile // s, overlap=overlap // s)
+                             tile=t, overlap=lap, reach=r)
             mean, logvar = vae.split_moments(
                 vae.encode_tail(mx.array(head).astype(vae.dtype)))
         mean, logvar = mean.astype(mx.float32), logvar.astype(mx.float32)

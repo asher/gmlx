@@ -170,12 +170,14 @@ def test_the_rule_covers_the_decodes_of_the_vae_it_borrows_from():
 
 
 # The prices of the official file, in GiB: whole at 512, 1024, 1536 and
-# 2048 pixels, and in tiles at the last three.
+# 2048 pixels, and in tiles at the last three. The tiles of an encode are
+# cropped and overlap by 320 pixels, so a side of 1024 takes four tiles of
+# 496 pixels where a decode takes three of 384.
 PRICES = {
     ("decode", 2): ((4.14, 8.69, 16.29, 26.92), (3.52, 3.87, 4.15)),
     ("decode", 4): ((6.27, 15.38, 30.57, 51.83), (5.02, 5.74, 6.30)),
-    ("encode", 2): ((3.29, 5.32, 8.69, 13.42), (3.05, 3.88, 4.15)),
-    ("encode", 4): ((4.58, 8.63, 15.38, 24.83), (4.05, 5.63, 6.09)),
+    ("encode", 2): ((3.29, 5.32, 8.69, 13.42), (3.30, 3.88, 4.15)),
+    ("encode", 4): ((4.58, 8.63, 15.38, 24.83), (4.55, 5.63, 6.09)),
 }
 
 
@@ -200,7 +202,8 @@ def test_the_prices_of_the_official_file(op, item):
         assert _price(op, s, item) == int(3.6 * floor + weights + bound)
         for in_tiles in (False, True):
             steps = mem.memory_terms(mem.OFFICIAL, op, s, s, itemsize=item,
-                                     tiled=in_tiles)
+                                     tiled=in_tiles,
+                                     overlap=memfit.tile_overlap(FAMILY, op))
             assert _price(op, s, item, tiled=in_tiles) == int(max(
                 3.6 * (device + softmax) + host
                 for _, device, softmax, host in steps) + weights + bound)

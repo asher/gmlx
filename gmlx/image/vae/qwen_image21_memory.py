@@ -33,7 +33,9 @@ tile at a time. The device then holds one tile beside what stays held,
 which is the whole part's output in a decode and the image in an encode.
 The host holds the blended result and its weights in float32, two more
 copies of a tile while it is blended, and a second copy of the result
-while the sum is divided by the weights.
+while the sum is divided by the weights. An encode crops its tiles and
+does not blend them, so its host holds the result and one tile, which is
+less than these terms count for it.
 """
 
 from __future__ import annotations

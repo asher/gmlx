@@ -171,6 +171,10 @@ class VaeMemoryRow:
 
     ``one_tile`` says that a tiled pass holds one tile at a time, so the
     tile term of its fit counts the pixels of one tile and not of all.
+    ``crop`` gives, for an op and a config, the latent pixels over which a
+    tile's result reads its input when the tiles of that op are cropped
+    and not blended, and 0 when they are blended. Cropped tiles overlap
+    by at least twice that.
     ``tiles_first`` makes tiles the automatic choice for every image
     larger than one tile, whatever is free. An unmeasured row always
     takes tiles first."""
@@ -181,6 +185,7 @@ class VaeMemoryRow:
     floor: Callable | None = None   # see ``_qwen_image21_vae_floor``
     one_tile: bool = False
     tiles_first: bool = False
+    crop: Callable | None = None    # see ``_qwen_image21_vae_crop``
 
     @property
     def auto_tiles(self) -> bool:
@@ -202,6 +207,17 @@ def _qwen_image21_vae_floor(op: str, height: int, width: int, *,
             m.weight_count(cfg))
 
 
+def _qwen_image21_vae_crop(op: str, config=None) -> int:
+    """The reach of a cut in a tiled pass of the Qwen-Image 2.1 VAE whose
+    tiles are cropped: the encode's. A decode blends its tiles."""
+    from .vae import qwen_image21_memory as m
+    from .vae.qwen_image21_vae import reach
+
+    if op != "encode":
+        return 0
+    return reach(m.OFFICIAL if config is None else config, op)
+
+
 VAE_ROWS = {
     # The FLUX.1 autoencoder.
     "z_image": VaeMemoryRow(
@@ -211,7 +227,7 @@ VAE_ROWS = {
     # ladder on the official file sets the fits and ``measured``.
     "qwen_image21": VaeMemoryRow(
         measured=False, channels={"decode": 144, "encode": 96},
-        floor=_qwen_image21_vae_floor),
+        floor=_qwen_image21_vae_floor, crop=_qwen_image21_vae_crop),
 }
 
 
@@ -585,6 +601,48 @@ def tile_layout(size: int, tile: int = TILE_PX, overlap: int = OVERLAP_PX,
     return n, min(tile, length)
 
 
+def crop_reach(family: str, op: str, config=None) -> int:
+    """Latent pixels a cut reaches in a tiled ``op`` of ``family``'s VAE
+    when its tiles are cropped, for the VAE of ``config`` or the official
+    file's when None, and 0 when the tiles are blended."""
+    crop = vae_row(family).crop
+    return 0 if crop is None else int(crop(op, config))
+
+
+def _latent_px(family: str, config=None) -> int:
+    """Image pixels per latent pixel of the VAE of ``config``, or of the
+    family's when None."""
+    return vae_scale(family) if config is None else int(config.scale)
+
+
+def croppable(family: str, op: str, tile: int = TILE_PX,
+              config=None) -> bool:
+    """Whether a tiled ``op`` can run in tiles of ``tile`` pixels. Blended
+    tiles always can. Cropped tiles must be longer than twice the reach of
+    a cut, since a shorter tile keeps no pixel that a cut does not
+    reach."""
+    reach = crop_reach(family, op, config)
+    return not reach or tile // _latent_px(family, config) > 2 * reach
+
+
+def tile_overlap(family: str, op: str, tile: int = TILE_PX,
+                 overlap: int = OVERLAP_PX, config=None) -> int:
+    """The overlap of neighboring tiles of a tiled ``op``, in pixels:
+    ``overlap``, or twice the reach of a cut where the tiles are cropped
+    and that is more. Raises ValueError for a ``tile`` that is not
+    ``croppable``."""
+    reach = crop_reach(family, op, config)
+    if not reach:
+        return int(overlap)
+    scale = _latent_px(family, config)
+    if not croppable(family, op, tile, config):
+        raise ValueError(
+            f"a tile of {tile} pixels is {tile // scale} latent pixels, "
+            f"and a tiled {op} of this VAE needs more than {2 * reach}, "
+            f"which is {(2 * reach + 1) * scale} pixels")
+    return max(int(overlap), 2 * reach * scale)
+
+
 def unmeasured_bytes(steps, weights: int, conv: str = "exact") -> int:
     """The price of a VAE pass on an unmeasured row. This is the one rule
     for such a row, whole or in tiles.
@@ -630,6 +688,8 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
     row = vae_row(family)
     if conv is None:
         from gmlx.image.vae.conv import CONV as conv
+    if tiled and (height > tile or width > tile):
+        overlap = tile_overlap(family, op, tile, overlap, config)
     if not row.measured:
         steps, count = row.floor(op, height, width, config=config,
                                  itemsize=itemsize, batch=batch, tiled=tiled,
@@ -695,7 +755,10 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
               conv=conv)
     whole = vae_peak(op, height, width, **kw)
     can_tile = height > tile or width > tile
-    in_tiles = (vae_peak(op, height, width, tiled=True, **kw) if can_tile
+    # A forced whole pass has no tiled price where no tiled pass exists.
+    priced = can_tile and (tiled is None or bool(tiled)
+                           or croppable(family, op, tile, config))
+    in_tiles = (vae_peak(op, height, width, tiled=True, **kw) if priced
                 else whole)
     if free is None:
         free = free_bytes()
@@ -717,7 +780,7 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
     if overcommit:
         return choice
     how = "in tiles" if choice else "whole"
-    if not choice and can_tile and in_tiles <= free:
+    if not choice and priced and in_tiles <= free:
         hint = f"a tiled pass needs {in_tiles / GiB:.2f} GiB"
     else:
         hint = "try a smaller image"
