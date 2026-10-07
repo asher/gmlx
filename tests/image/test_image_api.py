@@ -597,6 +597,17 @@ def test_the_vae_passes_run_as_the_plan_says(pipe, monkeypatch):
     api.vae_encode(pipe, img, tiled=False)
     assert [(k["tiled"], k["free"]) for _, k in calls] == [
         (True, whole.vae_pass("decode")[1]), (None, None), (False, None)]
+    # A plan that had no budget decided nothing, so its pass is chosen
+    # against what is free, as for a caller without a plan.
+    from dataclasses import replace
+
+    del calls[:]
+    blind = replace(whole, budget=None)
+    assert blind.vae_pass("decode") == (False, None)
+    api.vae_decode(pipe, lat, plan=blind)
+    api.vae_encode(pipe, img, plan=blind, tiled=True)
+    assert [(k["tiled"], k["free"]) for _, k in calls] == [
+        (None, None), (True, None)]
     # A plan without an init image has no encode to run.
     plain = api.plan_request(pipe, budget=100 * G, **kw)
     with pytest.raises(ValueError, match="this plan has no VAE encode"):

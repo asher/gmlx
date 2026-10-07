@@ -760,11 +760,14 @@ def _need_vae(pipe: ImagePipeline):
 def _vae_pass(plan, op: str, tiled: bool | None) -> tuple:
     """How a VAE ``op`` runs and the bytes it may take. With the ``plan``
     of the request both are the plan's, and ``tiled`` overrides its
-    choice alone. Without one the choice is the automatic one against the
-    free working set."""
+    choice alone. Without one, or with a plan that had no budget to
+    decide by, the choice is the automatic one against the free working
+    set."""
     if plan is None:
         return tiled, None
     chosen, room = plan.vae_pass(op)
+    if room is None:
+        return tiled, None
     return (chosen if tiled is None else tiled), room
 
 
