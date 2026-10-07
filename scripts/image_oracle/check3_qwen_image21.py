@@ -507,6 +507,7 @@ def read_conditioning(a, c_in: int, ctx: int) -> tuple[dict, dict]:
                 "ref_shapes": [tuple(r.shape[-2:]) for r in refs],
                 "ref_latents": [r.astype(np.float32) for r in refs]}
     return cond, {"conditioning": "file",
+                  "conditioning_source": a.conditioning_source,
                   "rows": int(cond["features"].shape[0])}
 
 
@@ -672,6 +673,8 @@ def main(argv=None) -> int:
     ap.add_argument("--conditioning", type=Path,
                     help=".npz of features (L, D), img_mask (L,) and "
                          "ref_latents.N (C, h, w)")
+    ap.add_argument("--conditioning-source", default="",
+                    help="what wrote --conditioning, for the manifest")
     ap.add_argument("--check2",
                     help="check 2 fixture to take the features of a text "
                          "prompt from, in place of --conditioning")
