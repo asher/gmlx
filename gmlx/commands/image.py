@@ -32,6 +32,7 @@ _ACTION_DESC = {
 _FORMATS = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
 _EXT_FORMAT = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg",
                ".webp": "webp"}
+_BACKGROUNDS = ("opaque", "transparent")
 _SAMPLERS = ("euler", "uni_pc_bh2")
 
 
@@ -189,6 +190,10 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--no-metadata", action="store_true",
                    help="Leave out the PNG text chunk that records the "
                         "settings.")
+    p.add_argument("--background", choices=_BACKGROUNDS, default="opaque",
+                   help="transparent writes the alpha channel of a model "
+                        "that decodes one, as a png or webp (default "
+                        "opaque).")
     p.add_argument("--save-latent", default=None, metavar="PATH",
                    help="Also write the final latents and seeds to this "
                         ".npz file.")
@@ -302,8 +307,27 @@ def read_mask(path: str, size: tuple):
     return (m >= 0.5).astype(np.float32)
 
 
+def _check_background(a, family, fmt: str) -> bool:
+    """Whether the request writes an alpha channel. ``--background
+    transparent`` is a usage error on a family whose VAE decodes none and
+    with a format that holds none."""
+    if a.background != "transparent":
+        return False
+    from gmlx.image.vae.reader import VAES
+
+    row = VAES.get(family.name)
+    if row is None or row.image_channels != 4:
+        raise _Usage(f"--background transparent: {family.title} decodes no "
+                     "alpha channel")
+    if fmt == "jpeg":
+        raise _Usage("--background transparent: jpeg holds no alpha "
+                     "channel; write a png or a webp")
+    return True
+
+
 def to_uint8(image):
-    """A decoded (1, H, W, 3) image in [0, 1] as uint8, rounded."""
+    """A decoded (1, H, W, C) image in [0, 1] as uint8, rounded: RGB, or
+    RGBA with straight alpha."""
     import mlx.core as mx
     import numpy as np
 
@@ -315,7 +339,7 @@ def write_image(path: str, pixels, fmt: str, quality: int,
                 metadata: dict | None) -> None:
     from PIL import Image, PngImagePlugin
 
-    im = Image.fromarray(pixels, "RGB")
+    im = Image.fromarray(pixels, "RGBA" if pixels.shape[-1] == 4 else "RGB")
     # Written beside the target and renamed, so an interrupt or a failed
     # write leaves no partial image.
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
@@ -486,6 +510,7 @@ def _generate(a) -> int:
         log(f"[image] seed {seed}")
     seeds = [seed + i for i in range(a.count)]
     fmt = _format(a)
+    alpha = _check_background(a, fam, fmt)
     paths = output_paths(a.output, seeds, fmt, time.strftime("%Y%m%d-%H%M%S"))
     for path in paths + ([a.save_latent] if a.save_latent else []):
         err = probe_writable(path)
@@ -524,6 +549,8 @@ def _generate(a) -> int:
                 "adapters": adapters}
     if cfg != 1.0:
         settings["negative_prompt"] = a.negative_prompt or ""
+    if alpha:
+        settings["background"] = "transparent"
     if init is not None:
         settings.update(init_image=os.path.basename(a.init_image),
                         strength=strength)
@@ -538,7 +565,7 @@ def _generate(a) -> int:
                        denoise=1.0 if strength is None else strength,
                        mask=mask, patch_table=table, plan=plan)
         latents.append(np.array(x))
-        pixels = to_uint8(api.vae_decode(pipe, x, plan=plan))
+        pixels = to_uint8(api.vae_decode(pipe, x, alpha=alpha, plan=plan))
         meta = None
         if fmt == "png" and not a.no_metadata:
             meta = {**settings, "seed": s, "model": files["dit"],

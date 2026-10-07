@@ -37,11 +37,17 @@ class _OwnedEncoder(_Encoder):
         return True
 
 
-def _decode(pipe, x, tiled=None, plan=None):
+def _decode(pipe, x, tiled=None, alpha=False, plan=None):
+    """Gray pixels from the latents, and with ``alpha`` a fourth channel
+    that runs from clear at the left to opaque at the right."""
     pipe.decoded.append((tiled, plan))
     b, _, h, w = x.shape
     v = mx.sigmoid(x.mean(axis=1))[..., None]
     img = mx.broadcast_to(v, (b, h, w, 3))
+    if alpha:
+        ramp = mx.broadcast_to(mx.linspace(0.0, 1.0, w)[None, None, :, None],
+                               (b, h, w, 1))
+        img = mx.concatenate([img, ramp], axis=-1)
     return mx.repeat(mx.repeat(img, 8, axis=1), 8, axis=2)
 
 
@@ -181,6 +187,74 @@ def test_format_follows_the_output_and_the_flag(env, tmp_path):
         assert im.format == "WEBP"
 
 
+@pytest.fixture
+def rgba(env, monkeypatch):
+    """The env with a VAE row that decodes four channels, as the row of
+    Qwen-Image 2.1 does."""
+    import dataclasses
+
+    from gmlx.image.vae import reader
+
+    assert reader.VAES["qwen_image21"].image_channels == 4
+    assert reader.VAES["z_image"].image_channels is None
+    monkeypatch.setitem(reader.VAES, "z_image", dataclasses.replace(
+        reader.VAES["z_image"], image_channels=4))
+    return env
+
+
+@pytest.mark.parametrize("fmt", ["png", "webp"])
+def test_a_transparent_background_writes_the_alpha_channel(rgba, tmp_path,
+                                                           capsys, fmt):
+    from PIL import Image
+
+    out = tmp_path / f"a.{fmt}"
+    args = rgba.base + ["--prompt", "p", "--size", "32x32", "--seed", "3",
+                        "--output", str(out), "--json"]
+    assert umbrella_main(args + ["--background", "transparent"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["settings"]["background"] == "transparent"
+    with Image.open(out) as im:
+        assert im.mode == "RGBA" and im.size == (32, 32)
+        clear = np.asarray(im)
+        if fmt == "png":
+            assert json.loads(im.text["gmlx"])["background"] == "transparent"
+    # The alpha of the decode, clear at the left and opaque at the right,
+    # as straight alpha, exact in a png and in a lossy webp.
+    assert clear[:, :8, 3].max() == 0 and clear[:, -8:, 3].min() == 255
+    assert 0 < clear[0, 8, 3] < clear[0, 16, 3] < 255
+    assert umbrella_main(args) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert "background" not in rec["settings"]
+    with Image.open(out) as im:
+        assert im.mode == "RGB"
+        opaque = np.asarray(im)
+    if fmt == "png":
+        assert np.array_equal(clear[..., :3], opaque)
+    # The decode ran with the alpha kept in the first run alone.
+    assert [p.decoded for p in rgba.pipes] == [[(None, rgba.plan)]] * 2
+
+
+def test_a_transparent_background_is_refused_as_a_jpeg(rgba, tmp_path,
+                                                       capsys):
+    for flags in (["--output", str(tmp_path / "a.jpg")],
+                  ["--format", "jpeg", "--output", str(tmp_path / "a.png")]):
+        assert umbrella_main(rgba.base + [
+            "--prompt", "p", "--size", "32x32", "--background",
+            "transparent"] + flags) == 2
+        assert ("--background transparent: jpeg holds no alpha channel; "
+                "write a png or a webp") in capsys.readouterr().err
+    # Refused before any model loads, and nothing is written.
+    assert rgba.pipes == [] and list(tmp_path.glob("a.*")) == []
+
+
+def test_the_uint8_image_keeps_four_channels():
+    from gmlx.commands.image import to_uint8
+
+    x = mx.array(np.array([[[[0.0, 0.5, 1.0, 0.25]]]], np.float32))
+    assert to_uint8(x).tolist() == [[[0, 128, 255, 64]]]
+    assert to_uint8(x[..., :3]).shape == (1, 1, 3)
+
+
 def test_guidance_encodes_the_negative_prompt(env, tmp_path, capsys):
     assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
                                      "--guidance", "3", "--negative-prompt",
@@ -288,6 +362,9 @@ def test_an_unknown_variant_needs_steps_and_guidance(env, tmp_path, capsys):
     (["--prompt", "p", "--init-image", "missing.png"], 1, "no such file"),
     (["--prompt", "p", "--count", "2", "--output", "a{{b}}.png"], 2,
      "one file for 2 images"),
+    (["--prompt", "p", "--background", "clear"], 2, "invalid choice"),
+    (["--prompt", "p", "--background", "transparent"], 2,
+     "--background transparent: Z-Image decodes no alpha channel"),
 ])
 def test_refusals_and_usage_errors(env, flags, code, text, capsys):
     assert umbrella_main(env.base + flags) == code

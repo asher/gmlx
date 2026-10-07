@@ -909,6 +909,7 @@ gmlx placed and the modules it placed them on.
 | `--format png/jpeg/webp` | From `--output`, else `png` | Encode the images in this format. |
 | `--quality N` | `90` | Set the jpeg and webp quality, from 1 to 100. |
 | `--no-metadata` | Off | Leave out the PNG text chunk. |
+| `--background opaque/transparent` | `opaque` | `transparent` writes the alpha channel that Qwen-Image 2.1 decodes, as a png or a webp. It exits 2 with jpeg, and on a model that decodes no alpha channel. |
 | `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
 | `--adapter PATH[:STRENGTH]` | None | Apply this LoRA safetensors file at this strength, 1 when left out. Repeat the flag to stack adapters. |
 | `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
