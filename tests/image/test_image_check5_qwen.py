@@ -20,28 +20,44 @@ smallest reading of a wrong model is 0.33.
 The official tests need the VAE file. gmlx decodes the oracle's latents
 and encodes its image with the official VAE, read from a GGUF packed from
 the oracle's safetensors when one is found, else from that safetensors
-file, and holds the manifest's tolerances, tiled passes included. The
-fp32 decode gate is 2.5e-4 max abs: 5 times the largest reading of gmlx
-on the official file, which on an M5 Max with TF32 off is 3.0e-5 at 512
-pixels and 4.9e-5 at 1024 on the exact conv path. The fp32 encode gate
-keeps its starting value of 1e-3, or twice the oracle's own float32
-against float64 gap where that is larger, and the encoder mean of an
-image with alpha at 1024 reads up to 9.6e-4 of it. The fp32 items are
-gated with MLX_ENABLE_TF32=0 in a child process, as in the Z-Image check.
-Only the
-default conv path gates: the other path is read and printed, and in bf16
-its decode at 1024 pixels reads 48.06 dB against a gate of 49.21. The
-official tests are skipped unless GMLX_TEST_IMAGE_DIR holds the VAE and
-GMLX_IMAGE_FIXTURES the fixture of the committed manifest, which the
-oracle wrote at 512 and 1024 pixels.
+file, and holds the manifest's tolerances. The oracle runs every fp32
+pass again in float64, and each fp32 gate follows from its own fp32
+against float64 gap on that tensor.
+
+The fp32 decode is held to the oracle's fp32 decode at the manifest's max
+abs, twice that gap: 1.2e-4 at 512 pixels and 1.3e-4 at 1024, where gmlx
+on an M5 Max with TF32 off reads 3.0e-5 and 4.9e-5. The latents of the
+image with alpha decode to a real alpha channel, half of it neither
+opaque nor clear, and that decode is held the same way.
+
+The fp32 encoder mean is held to the oracle's float64 mean by relative
+L2, at twice the oracle's own fp32 against float64 relative L2, on the
+GPU and on the MLX CPU stream. Max abs is the wrong measure for this
+tensor. Its largest value is 36 to 66 times its rms, so the largest error
+of a right implementation moves with the one value it falls on: against
+the manifest's max abs gate the GPU reads 0.39 to 0.85 of it and the CPU
+stream 0.46 to 0.94, and against twice the oracle's own max abs gap the
+GPU reads 1.05 at 512 pixels with alpha. By relative L2 the two read 0.46
+to 0.64 of the gate on every image, and the GPU with TF32 on reads 60 to
+85 times it. One value of a mean that is off by the old max abs gate
+still fails the new one. The max abs is printed beside its share of the
+manifest's gate.
+
+The fp32 items are gated with MLX_ENABLE_TF32=0 in a child process, as in
+the Z-Image check. Only the default conv path gates: the other path is
+read and printed, and in bf16 its decode at 1024 pixels reads 48.06 dB
+against a gate of 49.21. The official tests are skipped unless
+GMLX_TEST_IMAGE_DIR holds the VAE and GMLX_IMAGE_FIXTURES the fixture of
+the committed manifest, which the oracle wrote at 512 and 1024 pixels.
 
 Every pass of an official test goes through ``tiling.decode`` or
 ``tiling.encode``, which price it by the VAE row of the memory plan and
-refuse one that does not fit. That row takes tiles first, so a pass above
-one tile runs whole only when the test forces it. A test that does states
-the price of its largest pass over the weights, and none runs a whole pass
-above 1024 pixels, where a bf16 decode is priced at 6.48 GiB against
-22.12 GiB at 2048.
+refuse one that does not fit. Each test forces its passes whole or in
+tiles and states the price of its largest pass over the weights, and
+none runs a whole pass above 1024 pixels, where a bf16 decode is priced
+at 6.80 GiB against 23.03 GiB at 2048. A tiled decode is the whole decode
+and a tiled encode the whole encode, and the last two tests hold that on
+the official file.
 scripts/image_oracle/check5_qwen_image21_vae.py writes the fixtures."""
 from __future__ import annotations
 
@@ -423,7 +439,8 @@ def test_a_file_cannot_give_the_model_other_time_flags(cases, tmp_path):
     assert min(got.values()) > 1000 * tol
 
 
-# The official VAE: waits for the file and for the oracle's manifest.
+# The official VAE: needs the file and the fixture of the committed
+# manifest.
 
 official = pytest.mark.integration
 
@@ -496,13 +513,61 @@ def test_latent_statistics_are_the_oracle_ones(check5, vaes):
     assert list(cfg.latents_std) == m["inputs"]["latents_std"]
 
 
+def _decodes(arrays, m, s: str) -> list:
+    """The decodes the fixture holds at size ``s``, each (name, latents
+    key, decoded key, prefix of its tolerances): the latents of the
+    opaque image, and where the oracle decoded them the latents of the
+    image with alpha, whose alpha channel is a ramp, a clear disk and
+    noise."""
+    rows = [("opaque", f"latents_{s}", f"decoded_{s}", "decode")]
+    if f"latents_rgba_{s}" in arrays:
+        rows.append(("alpha", f"latents_rgba_{s}", f"decoded_rgba_{s}",
+                     "decode_rgba"))
+    return rows
+
+
+@official
+def test_the_fixture_decodes_real_transparency(check5):
+    """The latents of the opaque image decode to an alpha near one, so the
+    fixture also holds the decode of the latents of the image with alpha
+    at the first size."""
+    arrays, m = check5
+    first = _tags(m)[0]
+    assert [name for name, *_ in _decodes(arrays, m, first)] == [
+        "opaque", "alpha"]
+    r = m["results"]["sizes"][first]
+    alpha = to_unit(arrays[f"decoded_rgba_{first}"][:, 3])
+    between = float(np.mean((alpha > 0.01) & (alpha < 0.99)))
+    assert between == pytest.approx(r["decode_rgba_alpha_share_between"])
+    assert between > 0.4 and float(np.mean(alpha <= 0.01)) > 0.05
+    assert (alpha.min(), alpha.max()) == (0.0, 1.0)
+    # Against that, the alpha of the opaque image's latents.
+    opaque = to_unit(arrays[f"decoded_{first}"][:, 3])
+    assert float(np.mean(opaque > 0.99)) > 0.9
+    # Each fp32 gate is twice the oracle's own gap against float64.
+    for s in _tags(m):
+        t, r = m["tolerances"]["sizes"][s], m["results"]["sizes"][s]
+        assert t["decode_fp32_max_abs"] == pytest.approx(
+            2 * r["decode_fp32_vs_fp64"]["max_abs"])
+        assert t["encode_rgba_fp32_max_abs"] == pytest.approx(max(
+            1e-3, 2 * r["encode_rgba_fp32_vs_fp64"]["max_abs"]))
+        assert fx.max_abs(arrays[f"decoded_{s}"],
+                          arrays[f"decoded_f64_{s}"]) == pytest.approx(
+            r["decode_fp32_vs_fp64"]["max_abs"])
+    t, r = m["tolerances"]["sizes"][first], m["results"]["sizes"][first]
+    assert t["decode_rgba_fp32_max_abs"] == pytest.approx(
+        2 * r["decode_rgba_fp32_vs_fp64"]["max_abs"])
+
+
 @official
 def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
     """Whole fp32 decodes, forced. At 1024 pixels the largest is priced at
-    10.18 GiB on the exact conv path and 15.49 GiB on Winograd. The max
-    abs is over the four channels, so the alpha is held to the oracle's
-    fourth channel at the tolerance of the colors, and its own reading is
-    printed."""
+    10.26 GiB on the exact conv path and 15.49 GiB on Winograd. The gate
+    is twice the oracle's own fp32 against float64 gap on that decode.
+    The max abs is over the four channels, so the alpha is held to the
+    oracle's fourth channel at the tolerance of the colors, on the decode
+    whose alpha is near one and on the one whose alpha is a ramp, and its
+    own reading is printed."""
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
@@ -510,17 +575,19 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
     for conv in CONV_PATHS:
         vae = vaes("fp32", conv)
         for s in _whole_tags(m):
-            got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
-            ref = arrays[f"decoded_{s}"]
-            assert got.shape == ref.shape and got.shape[1] == 4
-            err = fx.max_abs(got, ref)
-            alpha = fx.max_abs(got[:, 3:], ref[:, 3:])
-            tol = m["tolerances"]["sizes"][s]["decode_fp32_max_abs"]
-            print(f"[check5] {vae_path.name} {s} fp32 {conv} decode, "
-                  f"{_numerics()}, max abs {err:.3e} (alpha {alpha:.3e}), "
-                  f"rel L2 {fx.rel_l2(got, ref):.3e}, tolerance {tol:.1e}")
-            if conv == CONV and err > tol:
-                bad.append(s)
+            for name, lat, dec, key in _decodes(arrays, m, s):
+                got = _decode(vae, arrays[lat], tiled=False)
+                ref = arrays[dec]
+                assert got.shape == ref.shape and got.shape[1] == 4
+                err = fx.max_abs(got, ref)
+                alpha = fx.max_abs(got[:, 3:], ref[:, 3:])
+                tol = m["tolerances"]["sizes"][s][f"{key}_fp32_max_abs"]
+                print(f"[check5] {vae_path.name} {s} fp32 {conv} decode, "
+                      f"{name}, {_numerics()}, max abs {err:.3e} (alpha "
+                      f"{alpha:.3e}), {err / tol:.2f} of its gate "
+                      f"{tol:.3e}, rel L2 {fx.rel_l2(got, ref):.3e}")
+                if conv == CONV and err > tol:
+                    bad.append((s, name))
     if _tf32():
         _gate_without_tf32(request)
     else:
@@ -530,9 +597,10 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
 @official
 def test_bf16_decode_psnr(check5, vaes):
     """Whole bf16 decodes, forced. At 1024 pixels the largest is priced at
-    6.48 GiB on the exact conv path and 8.91 GiB on Winograd. The alpha
+    6.80 GiB on the exact conv path and 8.91 GiB on Winograd. The alpha
     alone, against the oracle's fourth channel, is held to the gate of the
-    four channels."""
+    four channels where it is near one, and to the oracle's own bf16 gap
+    on the alpha channel where it is a ramp."""
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
@@ -540,49 +608,78 @@ def test_bf16_decode_psnr(check5, vaes):
     for conv in CONV_PATHS:
         vae = vaes("bf16", conv)
         for s in _whole_tags(m):
-            got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
-            ref = arrays[f"decoded_{s}"]
-            assert got.shape == ref.shape and got.shape[1] == 4
-            db = fx.psnr(to_unit(got), to_unit(ref), 1.0)
-            alpha = fx.psnr(to_unit(got[:, 3:]), to_unit(ref[:, 3:]), 1.0)
-            tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
-            print(f"[check5] {s} bf16 {conv} decode PSNR {db:.2f} dB "
-                  f"(alpha {alpha:.2f} dB), max abs "
-                  f"{fx.max_abs(got, ref):.3e}, gate {tol:.2f} dB")
-            if conv == CONV and min(db, alpha) < tol:
-                bad.append(s)
+            for name, lat, dec, key in _decodes(arrays, m, s):
+                got = _decode(vae, arrays[lat], tiled=False)
+                ref = arrays[dec]
+                assert got.shape == ref.shape and got.shape[1] == 4
+                db = fx.psnr(to_unit(got), to_unit(ref), 1.0)
+                alpha = fx.psnr(to_unit(got[:, 3:]), to_unit(ref[:, 3:]),
+                                1.0)
+                t = m["tolerances"]["sizes"][s]
+                tol = t[f"{key}_bf16_psnr_db"]
+                tol_a = t.get(f"{key}_bf16_alpha_psnr_db", tol)
+                print(f"[check5] {s} bf16 {conv} decode, {name}, PSNR "
+                      f"{db:.2f} dB, gate {tol:.2f} dB; alpha {alpha:.2f} "
+                      f"dB, gate {tol_a:.2f} dB; max abs "
+                      f"{fx.max_abs(got, ref):.3e}")
+                if conv == CONV and (db < tol or alpha < tol_a):
+                    bad.append((s, name))
     assert not bad
 
 
-@official
-def test_fp32_encoder_mean(check5, vaes, request):
-    """Whole fp32 encodes, forced, through the guarded encode. At 1024
-    pixels the largest is priced at 5.05 GiB."""
-    arrays, m = check5
+# The encoder means of the fixture: the image, the array of the oracle's
+# mean, its fp32 against float64 gap in the results, and the manifest's
+# max abs tolerance.
+ENCODED = (("opaque", "encode_mean", "encode_fp32_vs_fp64",
+            "encode_fp32_max_abs"),
+           ("alpha", "encode_mean_rgba", "encode_rgba_fp32_vs_fp64",
+            "encode_rgba_fp32_max_abs"))
+
+
+def _encoder_mean_rows(vae, arrays, m, device: str) -> list:
+    """The fp32 encoder means on ``device`` that miss the gate: relative
+    L2 against the oracle's float64 mean, at twice the oracle's own fp32
+    against float64 relative L2."""
     bad = []
     for s in _whole_tags(m):
         image = arrays[f"image_{s}"]
         rgba = np.concatenate([image, arrays[f"alpha_{s}"]], axis=1)
-        tol = m["tolerances"]["sizes"][s]["encode_fp32_max_abs"]
-        for what, x, key in (("opaque", image, f"encode_mean_{s}"),
-                             ("alpha", rgba, f"encode_mean_rgba_{s}")):
-            got = _guarded_mean(vaes("fp32"), x, m, tiled=False)
-            err = fx.max_abs(got, arrays[key])
-            print(f"[check5] {s} fp32 encode mean, {what}, {_numerics()}, "
-                  f"max abs {err:.3e}, rel L2 "
-                  f"{fx.rel_l2(got, arrays[key]):.3e}, tolerance {tol:.3e}")
-            if err > tol:
-                bad.append((s, what))
+        for what, key, gap, max_key in ENCODED:
+            got = _guarded_mean(vae, image if what == "opaque" else rgba, m,
+                                tiled=False)
+            rel = fx.rel_l2(got, arrays[f"{key}_f64_{s}"])
+            gate = 2 * m["results"]["sizes"][s][gap]["rel_l2"]
+            err = fx.max_abs(got, arrays[f"{key}_{s}"])
+            tol = m["tolerances"]["sizes"][s][max_key]
+            print(f"[check5] {s} fp32 encode mean, {what}, {device}, "
+                  f"{_numerics()}, rel L2 against float64 {rel:.3e}, "
+                  f"{rel / gate:.2f} of its gate {gate:.3e}; max abs "
+                  f"against fp32 {err:.3e}, {err / tol:.2f} of the "
+                  f"manifest's {tol:.3e}")
+            if not rel <= gate:
+                bad.append((device, s, what))
+    return bad
+
+
+@official
+def test_fp32_encoder_mean(check5, vaes, request):
+    """Whole fp32 encodes, forced, through the guarded encode, on the GPU
+    with exact float32 products and on the MLX CPU stream. At 1024 pixels
+    the largest is priced at 5.53 GiB."""
+    arrays, m = check5
+    bad = _encoder_mean_rows(vaes("fp32"), arrays, m, "GPU")
     if _tf32():
         _gate_without_tf32(request)
-    else:
-        assert not bad
+        return
+    with mx.stream(mx.cpu):
+        bad += _encoder_mean_rows(vaes("fp32"), arrays, m, "CPU stream")
+    assert not bad
 
 
 @official
 def test_bf16_encoder_mean(check5, vaes):
     """Whole bf16 encodes, forced, through the guarded encode. At 1024
-    pixels the largest is priced at 3.42 GiB."""
+    pixels the largest is priced at 3.69 GiB."""
     arrays, m = check5
     for s in _whole_tags(m):
         got = _guarded_mean(vaes("bf16"), arrays[f"image_{s}"], m,
@@ -597,30 +694,44 @@ def test_bf16_encoder_mean(check5, vaes):
 
 
 @official
-def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
-    """The tiled bf16 decode, which is the automatic choice above one
-    tile, beside one whole decode, forced. At 1024 pixels the tiled pass
-    is priced at 2.24 GiB and the whole one at 6.48 GiB."""
+@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
+def test_a_tiled_decode_is_the_whole_decode_at_the_largest_size(
+        check5, vaes, dtype):
+    """A tiled decode beside a whole one, both forced. The part of the
+    decoder that reads the whole latent runs once, and the tiles of the
+    rest are cropped at the reach of a cut, so the two are one result: in
+    fp32 they are equal in bits, with TF32 on or off, and in bf16 they
+    are held within 2e-3 max abs, the rounding bound of the tiny model,
+    and read 0 on an M5 Max. At 1024 pixels the whole pass is priced at
+    6.80 GiB in bf16 and 10.26 GiB in fp32, and the tiled one at 2.91 and
+    4.65 GiB."""
     from gmlx.image import memfit
     from gmlx.image.vae import tiling
 
     arrays, m = check5
     s = _whole_tags(m)[-1]
-    lat = arrays[f"latents_{s}"]
-    vae = vaes("bf16")
-    tiled = _decode(vae, lat, tiled=True)
-    ref = arrays[f"decoded_{s}"]
-    db = fx.psnr(to_unit(tiled), to_unit(ref), 1.0)
-    whole = fx.psnr(to_unit(_decode(vae, lat, tiled=False)), to_unit(ref),
-                    1.0)
-    tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
-    print(f"[check5] {s} bf16 tiled decode PSNR {db:.2f} dB against "
-          f"{whole:.2f} dB whole, tolerance {tol:.2f} dB")
     h, w = m["inputs"]["sizes"][-1]
     assert h > 512
-    assert memfit.vae_tiling("decode", h, w,
-                             **tiling.price_args(vae, "decode", 1)) is True
-    assert db >= tol
+    vae = vaes(dtype)
+    kw = tiling.price_args(vae, "decode", 1)
+    price = memfit.vae_peak("decode", h, w, **kw)
+    # The automatic choice is whole with room for it and tiles without.
+    assert memfit.vae_tiling("decode", h, w, free=price, **kw) is False
+    assert memfit.vae_tiling("decode", h, w, free=price - 1, **kw) is True
+    lat = arrays[f"latents_{s}"]
+    tiled = _decode(vae, lat, tiled=True)
+    whole = _decode(vae, lat, tiled=False)
+    err = fx.max_abs(tiled, whole)
+    ref = arrays[f"decoded_{s}"]
+    db = fx.psnr(to_unit(tiled), to_unit(ref), 1.0)
+    print(f"[check5] {s} {dtype} tiled decode, {_numerics()}: max abs "
+          f"{err:.3e} against the whole decode, PSNR {db:.2f} dB against "
+          f"the oracle")
+    if dtype == "fp32":
+        assert np.array_equal(tiled, whole)
+    else:
+        assert err <= 2e-3
+        assert db >= m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
 
 
 @official
@@ -628,8 +739,8 @@ def test_tiled_bf16_encode_at_the_largest_size(check5, vaes):
     """A tiled bf16 encode beside a whole one, forced, and two whole
     decodes, forced. The tiles of an encode are cropped at the reach of a
     cut, so it is the whole encode up to the rounding of the device. At
-    1024 pixels the whole encode is priced at 3.42 GiB and each whole
-    decode at 6.48 GiB."""
+    1024 pixels the whole encode is priced at 3.69 GiB and each whole
+    decode at 6.80 GiB."""
     arrays, m = check5
     s = _whole_tags(m)[-1]
     vae = vaes("bf16")

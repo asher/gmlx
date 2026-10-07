@@ -8,18 +8,24 @@ latent distribution, maps the mean to model space as the pipeline does,
 (mean - latents_mean) / latents_std, and decodes those latents back as
 the pipeline does, latents * latents_std + latents_mean. It also encodes
 the image with a seeded alpha channel, so the fourth input channel is
-read as data.
+read as data, and at the first size it decodes the latents of that
+encode, whose alpha channel comes back with a ramp, a transparent disk
+and a band of noise, where the latents of the opaque image decode to an
+alpha near one.
 
 The fixture holds, per size, the RGB image, the alpha, the two encoder
 means, the model space latents, the fp32 decode and the bf16 decode, all
-RGBA and clamped to [-1, 1] as the VAE returns them. The manifest records
-the bf16 against fp32 gap, the share of the fp32 decode that the clamp
-holds at -1 or 1, and the tolerances: fp32 decode max abs at 2.5e-4,
-which is 5 times the largest reading of gmlx on the official file, fp32
-encode max abs at its starting value of 1e-3 or at twice the oracle's own
-fp32 error against a float64 encode where that is larger, and bf16 PSNR on
-the [0, 1] image at twice the oracle's own error, which is 6.02 dB below
-its PSNR.
+RGBA and clamped to [-1, 1] as the VAE returns them. A float64 copy of
+the VAE runs every fp32 pass again on the same input, and the fixture
+holds its results in float64, so a float32 pass can be read against
+either. The manifest records the bf16 against fp32 gap, the fp32 against
+float64 gap of each pass, the share of the fp32 decode that the clamp
+holds at -1 or 1, and the tolerances. Each fp32 tolerance follows from
+the oracle's own fp32 error against float64 on that tensor: the decode
+max abs at twice it, and the encode max abs at twice it or at the
+starting value of 1e-3 where that is larger. The bf16 PSNR on the [0, 1]
+image is at twice the oracle's own error, which is 6.02 dB below its
+PSNR.
 
 The bf16 run computes each convolution in float32 over the bfloat16
 operands, rounded once to bfloat16, as a bfloat16 conv with float32
@@ -67,19 +73,15 @@ TINY_SIZE = (48, 64)
 SEED = 5
 REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 STARTING = 1e-3
-# The first readings of gmlx on the official file, in float32 with exact
-# float32 products on the default conv path, were 3.04e-5 max abs at 512
-# pixels and 4.89e-5 at 1024. The decode gate is 5 times the larger.
-DECODE_FP32_MAX_ABS = 2.5e-4
 TINY_FP32_MAX_ABS = 5e-5
 BF16_RULE = ("bf16 PSNR at twice the oracle's own bf16 against fp32 RMS "
              "error, which is its PSNR less 20 log10(2) dB; bf16 encode "
              "relative L2 at twice the oracle's own")
-RULE = ("fp32 decode max abs at 2.5e-4: 5 times the largest reading of a "
-        "right model on the official file, 4.89e-5 at 1024 pixels; fp32 "
-        "encode max abs at its starting value, 1e-3, or at twice the "
-        "oracle's own fp32 against float64 max abs where that is larger; "
-        + BF16_RULE)
+RULE = ("fp32 decode max abs at twice the oracle's own fp32 against "
+        "float64 max abs on that decode; fp32 encode max abs at its "
+        "starting value, 1e-3, or at twice the oracle's own fp32 against "
+        "float64 max abs on that image where that is larger, for the "
+        "opaque image and for the image with alpha each; " + BF16_RULE)
 TINY_RULE = ("fp32 max abs at 5e-5 on the CPU: about 7 times the largest "
              "reading of a right model over the self-test configs, 6.9e-6, "
              "where the smallest reading of a wrong model is 0.33")
@@ -172,8 +174,27 @@ def _mean(vae, x):
     return vae.encode(x.unsqueeze(2)).latent_dist.mean[:, :, 0]
 
 
+def _decode(vae, z, dt):
+    """The RGBA decode (1, 4, H, W) of VAE space latents ``z`` in ``dt``."""
+    return vae.decode(z.to(dt).unsqueeze(2), return_dict=False)[0][:, :, 0]
+
+
+def _rss_gib() -> float:
+    """The largest resident set of this process so far, in GiB."""
+    import resource
+
+    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                 / 2 ** 30, 2)
+
+
 def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
-             fp32_max_abs: float, decode_max_abs: float) -> None:
+             fp32_max_abs: float, decode_max_abs: float | None,
+             against_float64: bool = False,
+             alpha_decode: bool = False) -> None:
+    """One size. ``decode_max_abs`` None takes the fp32 decode tolerance
+    from the oracle's own fp32 against float64 gap. ``against_float64``
+    adds the float64 results and the gaps of the image with alpha, and
+    ``alpha_decode`` the decode of that image's latents."""
     cfg = vaes["fp32"].config
     z_dim = cfg.z_dim
     l_mean = torch.tensor(cfg.latents_mean).view(1, z_dim, 1, 1)
@@ -193,7 +214,9 @@ def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
         t[f"{mode}_encode_s"] = round(time.perf_counter() - t0, 1)
         out[f"mean_rgba_{mode}"] = oracle.to_numpy(_mean(vae, cut.to(dt)))
     emulate_bf16(torch, False)
+    rss = {"encode": _rss_gib()}
     mean64 = _mean(vae64, opaque.double()).numpy()
+    rss["encode_float64"] = _rss_gib()
     mean32 = torch.from_numpy(out["mean_fp32"])
     latents = (mean32 - l_mean) / l_std
     z = latents * l_std + l_mean
@@ -201,10 +224,19 @@ def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
         emulate_bf16(torch, mode == "bf16")
         dt = oracle.torch_dtype(mode)
         t0 = time.perf_counter()
-        dec = vae.decode(z.to(dt).unsqueeze(2), return_dict=False)[0][:, :, 0]
+        dec = _decode(vae, z, dt)
         t[f"{mode}_decode_s"] = round(time.perf_counter() - t0, 1)
         out[f"decoded_{mode}"] = oracle.to_numpy(dec)
     emulate_bf16(torch, False)
+    rss["decode"] = _rss_gib()
+    dec64 = None
+    if against_float64 or decode_max_abs is None:
+        t0 = time.perf_counter()
+        dec64 = _decode(vae64, z, torch.float64).numpy()
+        t["float64_decode_s"] = round(time.perf_counter() - t0, 1)
+        rss["decode_float64"] = _rss_gib()
+        print(f"[check5] {tag(size)}: largest resident set so far {rss} "
+              "GiB", flush=True)
 
     s = tag(size)
     fx.add(f"image_{s}", image)
@@ -215,6 +247,21 @@ def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
     fx.add(f"latents_{s}", oracle.to_numpy(latents))
     fx.add(f"decoded_{s}", out["decoded_fp32"])
     fx.add(f"decoded_bf16_{s}", out["decoded_bf16"])
+    more, more_tol = {}, {}
+    if against_float64:
+        mean64_rgba = _mean(vae64, cut.double()).numpy()
+        fx.add(f"encode_mean_f64_{s}", mean64)
+        fx.add(f"encode_mean_rgba_f64_{s}", mean64_rgba)
+        fx.add(f"decoded_f64_{s}", dec64)
+        rgba64 = fixtures.compare(out["mean_rgba_fp32"], mean64_rgba)
+        more["encode_rgba_fp32_vs_fp64"] = rgba64
+        more_tol["encode_rgba_fp32_max_abs"] = max(fp32_max_abs,
+                                                   2 * rgba64["max_abs"])
+    if alpha_decode:
+        more_a, tol_a = _alpha_decode(torch, vaes, vae64, out, l_mean, l_std,
+                                      fx, s)
+        more.update(more_a)
+        more_tol.update(tol_a)
 
     d32, d16 = out["decoded_fp32"], out["decoded_bf16"]
     gap = fixtures.compare(d16, d32)
@@ -234,16 +281,62 @@ def run_size(torch, vaes, vae64, size, fx, results: dict, tol: dict,
         "round_trip_fp32_psnr_db": rt,
         "latents_std": float(np.std(oracle.to_numpy(latents))),
         "seconds": t}
+    if dec64 is not None:
+        more["decode_fp32_vs_fp64"] = fixtures.compare(d32, dec64)
+        more["peak_rss_gib"] = rss
+    if decode_max_abs is None:
+        decode_max_abs = 2 * more["decode_fp32_vs_fp64"]["max_abs"]
+    results[s].update(more)
     tol[s] = {
         "decode_fp32_max_abs": decode_max_abs,
         "decode_bf16_psnr_db": gap["psnr_db"] - 20 * math.log10(2),
         "encode_fp32_max_abs": max(fp32_max_abs, 2 * enc64["max_abs"]),
-        "encode_bf16_rel_l2": 2 * enc["rel_l2"]}
+        "encode_bf16_rel_l2": 2 * enc["rel_l2"], **more_tol}
     print(f"[check5] {s}: bf16 decode PSNR {gap['psnr_db']:.2f} dB, max "
           f"abs {gap['max_abs']:.3e}; bf16 encode rel L2 "
           f"{enc['rel_l2']:.3e}; fp32 encode max abs against float64 "
           f"{enc64['max_abs']:.3e}; clamp holds {held:.4f} of the fp32 "
           f"decode; fp32 round trip {rt:.2f} dB; {t}", flush=True)
+    for key, val in more.items():
+        if isinstance(val, dict) and "max_abs" in val:
+            print(f"[check5] {s}: {key} max abs {val['max_abs']:.3e}, rel "
+                  f"L2 {val['rel_l2']:.3e}", flush=True)
+    print(f"[check5] {s}: tolerances {tol[s]}", flush=True)
+
+
+def _alpha_decode(torch, vaes, vae64, out: dict, l_mean, l_std, fx,
+                  s: str) -> tuple[dict, dict]:
+    """The decode of the latents of the image with alpha, in fp32, bf16
+    and float64: the results and tolerances it adds for size ``s``."""
+    latents = (torch.from_numpy(out["mean_rgba_fp32"]) - l_mean) / l_std
+    z = latents * l_std + l_mean
+    dec = {}
+    for mode, vae in vaes.items():
+        emulate_bf16(torch, mode == "bf16")
+        dec[mode] = oracle.to_numpy(_decode(vae, z, oracle.torch_dtype(mode)))
+    emulate_bf16(torch, False)
+    dec64 = _decode(vae64, z, torch.float64).numpy()
+    fx.add(f"latents_rgba_{s}", oracle.to_numpy(latents))
+    fx.add(f"decoded_rgba_{s}", dec["fp32"])
+    fx.add(f"decoded_rgba_bf16_{s}", dec["bf16"])
+    fx.add(f"decoded_rgba_f64_{s}", dec64)
+    gap64 = fixtures.compare(dec["fp32"], dec64)
+    a32, a16 = to_unit(dec["fp32"][:, 3]), to_unit(dec["bf16"][:, 3])
+    psnr = fixtures.psnr(to_unit(dec["bf16"]), to_unit(dec["fp32"]), 1.0)
+    psnr_a = fixtures.psnr(a16, a32, 1.0)
+    results = {
+        "decode_rgba_fp32_vs_fp64": gap64,
+        "decode_rgba_bf16_vs_fp32_psnr_db": psnr,
+        "decode_rgba_bf16_vs_fp32_alpha_psnr_db": psnr_a,
+        # How much of the decoded alpha is neither opaque nor clear.
+        "decode_rgba_alpha_share_between": float(np.mean(
+            (a32 > 0.01) & (a32 < 0.99))),
+        "decode_rgba_alpha_share_clear": float(np.mean(a32 <= 0.01)),
+        "decode_rgba_alpha_range": [float(a32.min()), float(a32.max())]}
+    tol = {"decode_rgba_fp32_max_abs": 2 * gap64["max_abs"],
+           "decode_rgba_bf16_psnr_db": psnr - 20 * math.log10(2),
+           "decode_rgba_bf16_alpha_psnr_db": psnr_a - 20 * math.log10(2)}
+    return results, tol
 
 
 def _modes(torch, vae32) -> tuple[dict, object]:
@@ -259,11 +352,12 @@ def _modes(torch, vae32) -> tuple[dict, object]:
 
 def _write(torch, a, name: str, vae32, sizes, files: dict, argv: list,
            extra: dict, notes: list, fp32_max_abs: float, rule: str,
-           decode_max_abs: float | None = None) -> int:
-    """``fp32_max_abs`` gates the fp32 encode, and the fp32 decode too
-    unless ``decode_max_abs`` gives the decode a value of its own."""
-    if decode_max_abs is None:
-        decode_max_abs = fp32_max_abs
+           against_float64: bool = False) -> int:
+    """``fp32_max_abs`` is the starting value of the fp32 encode gate. It
+    gates the fp32 decode too unless ``against_float64``, which takes the
+    decode gate from the oracle's own fp32 against float64 gap, holds the
+    float64 results, and decodes the image with alpha at the first
+    size."""
     vaes, vae64 = _modes(torch, vae32)
     fx = fixtures.FixtureWriter(
         name, check=5, family="qwen_image21",
@@ -271,9 +365,11 @@ def _write(torch, a, name: str, vae32, sizes, files: dict, argv: list,
     for role, path in files.items():
         fx.add_file(role, path)
     results, tol = {}, {}
-    for size in sizes:
+    for i, size in enumerate(sizes):
         run_size(torch, vaes, vae64, size, fx, results, tol, fp32_max_abs,
-                 decode_max_abs)
+                 None if against_float64 else fp32_max_abs,
+                 against_float64=against_float64,
+                 alpha_decode=against_float64 and i == 0)
     cfg = vae32.config
     fx.inputs.update(
         sizes=[list(s) for s in sizes], seed=SEED,
@@ -293,8 +389,7 @@ def _write(torch, a, name: str, vae32, sizes, files: dict, argv: list,
         oracle={"device": "cpu", "threads": torch.get_num_threads(),
                 "bf16_products": "bf16 operands, float32 conv, one bf16 "
                 "rounding"}, sizes=results)
-    fx.tolerances.update(rule=rule, fp32_max_abs=fp32_max_abs,
-                         decode_fp32_max_abs=decode_max_abs, sizes=tol)
+    fx.tolerances.update(rule=rule, fp32_max_abs=fp32_max_abs, sizes=tol)
     for n in notes:
         fx.note(n)
     path = fx.write(a.out)
@@ -438,7 +533,7 @@ def main(argv=None) -> int:
         {"config_revision": a.config_revision},
         ["The official weights are float32, and the bf16 VAE is a "
          "bfloat16 copy of the fp32 one."], STARTING, RULE,
-        DECODE_FP32_MAX_ABS)
+        against_float64=True)
 
 
 if __name__ == "__main__":
