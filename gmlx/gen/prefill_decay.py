@@ -384,6 +384,11 @@ def set_untracked_weights_owner(owner: object | None) -> None:
     _WEIGHTS_OWNER = owner
 
 
+def untracked_weights_owner() -> object | None:
+    """The owner of the open ownership window, or None when none is open."""
+    return _WEIGHTS_OWNER
+
+
 def note_untracked_weights(nbytes: float, key: object = None) -> None:
     """Loader hook: bytes wired at inference but invisible to
     mx.get_active_memory (zero-copy mmap weights). Same-key registrations

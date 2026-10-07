@@ -323,7 +323,7 @@ def encode_text(pipe: ImagePipeline, prompt: str, *,
     if hit is not None:
         return hit
     tap = enc.encode(prompt)
-    cond = Conditioning(tap.hidden[0][0], key)
+    cond = Conditioning(tap.features, key)
     pipe.conditionings.put(key, cond, array_bytes([cond.features]))
     return cond
 

@@ -11,11 +11,14 @@ owns and never reads from the GGUF chat template, and truncated to the
 family's token cap. It is encoded alone at batch 1 with no padding, so the
 layers take the causal mask and no attention mask is built. With causal
 attention and relative rotary positions, the real tokens of a padded and
-masked reference batch take the same values up to rounding.
+masked reference batch take the same values up to rounding. A family
+whose template opens with a fixed turn drops the rows of that turn from
+the conditioning, after they ran: the rows it keeps attended to them.
 
 An ``EncoderHandle`` owns the encoder it loaded and releases it on request,
-so the DiT and the VAE can use its memory. A borrowed resident chat model
-is never released.
+so the DiT and the VAE can use its memory. An owned encoder holds no
+output matrix, which a tap never reads. A borrowed resident chat model is
+never released and keeps every weight.
 """
 
 from __future__ import annotations
@@ -52,10 +55,20 @@ class EncoderSpec:
     max_tokens: int | None = None
     identity: tuple = ()             # IdentityTensor rows
     identity_source: str = ""        # repository and revision of the hashes
+    drop: int = 0                    # leading rows left out of the features
+    empty: str = ""                  # what an empty prompt is rendered as
+    activation: str | None = None    # dtype the tap's layers run in, the
+                                     # model's own when None
 
     @property
     def template_id(self) -> str:
-        return hashlib.sha256(self.template.encode()).hexdigest()
+        """sha256 of what turns a prompt into the rows of a conditioning
+        beside the token ids: the template, and the count of dropped rows
+        when the spec drops any."""
+        text = self.template
+        if self.drop:
+            text += f"\x00drop={self.drop}"
+        return hashlib.sha256(text.encode()).hexdigest()
 
 
 # Z-Image conditions on Qwen3-4B after layer 35 of 36, which is the
@@ -96,21 +109,34 @@ class EncoderMismatchError(ImageModelError):
 
 
 def encoder_spec(family) -> EncoderSpec:
-    """The encoder spec of a family, given as a name or a ``Family``."""
-    name = family if isinstance(family, str) else family.name
+    """The encoder spec of a family, given as a name or a ``Family``: the
+    one its registry row gives, else the one this module holds for it."""
+    if isinstance(family, str):
+        from .registry import get_family
+
+        try:
+            family = get_family(family)
+        except ValueError:
+            raise ImageModelError(
+                f"image family {family!r} has no text encoder in "
+                "gmlx") from None
+    if family.encoder is not None:
+        return family.encoder()
     try:
-        return ENCODERS[name]
+        return ENCODERS[family.name]
     except KeyError:
         raise ImageModelError(
-            f"image family {name!r} has no text encoder in gmlx") from None
+            f"image family {family.name!r} has no text encoder in "
+            "gmlx") from None
 
 
 def render(spec: EncoderSpec, prompt: str) -> str:
-    """The prompt in the family template."""
+    """The prompt in the family template. An empty prompt is rendered as
+    the spec's ``empty`` text."""
     head, sep, tail = spec.template.partition("{}")
     if not sep:
         raise ValueError(f"template of {spec.name} has no prompt slot")
-    return head + prompt + tail
+    return head + (prompt or spec.empty) + tail
 
 
 def token_ids(spec: EncoderSpec, tokenizer, prompt: str) -> list[int]:
@@ -119,8 +145,10 @@ def token_ids(spec: EncoderSpec, tokenizer, prompt: str) -> list[int]:
     ids = list(tokenizer.encode(render(spec, prompt), add_special_tokens=False))
     if spec.max_tokens is not None:
         ids = ids[: spec.max_tokens]
-    if not ids:
-        raise ValueError("the rendered prompt has no tokens")
+    if len(ids) <= spec.drop:
+        raise ValueError("the rendered prompt has no tokens" if not spec.drop
+                         else f"the rendered prompt has {len(ids)} tokens, "
+                         f"and the first {spec.drop} are dropped")
     return ids
 
 
@@ -136,17 +164,22 @@ def _text_stack(model):
     return embed, layers
 
 
-def tap(model, ids, *, layers: tuple) -> list[mx.array]:
+def tap(model, ids, *, layers: tuple,
+        activation: str | None = None) -> list[mx.array]:
     """Hidden states after running the first ``n`` decoder layers, for each
     ``n`` in ``layers``, with no final norm. ``ids`` is one prompt's token
     ids. Each result is (1, L, hidden) in the model's activation dtype, and
-    layers past the last tap never run."""
+    layers past the last tap never run. With ``activation`` the embeddings
+    are cast to that dtype, and the layers run in it by promotion over the
+    weights as loaded."""
     embed, blocks = _text_stack(model)
     stops = sorted(set(layers))
     if not stops or stops[0] < 1 or stops[-1] > len(blocks):
         raise ValueError(f"tap layers {layers} outside 1..{len(blocks)}")
     x = mx.array(np.asarray(ids, np.int32).reshape(1, -1))
     h = embed(x)
+    if activation is not None:
+        h = h.astype(getattr(mx, activation))
     mask = "causal" if h.shape[1] > 1 else None
     out: dict[int, mx.array] = {}
     for i in range(stops[-1]):
@@ -259,11 +292,17 @@ def check_encoder(model, config: dict, spec: EncoderSpec, *,
 @dataclass(frozen=True)
 class TextTap:
     """One prompt's encoding: its token ids and one hidden state per tap
-    layer, each (1, L, hidden)."""
+    layer, each (1, L, hidden). ``features`` are the rows of the first tap
+    that condition the DiT, (L - drop, hidden)."""
     ids: tuple
     hidden: tuple
     template_id: str
     tap_layers: tuple
+    drop: int = 0
+
+    @property
+    def features(self) -> mx.array:
+        return self.hidden[0][0, self.drop:]
 
 
 def _float_dtype(model) -> str:
@@ -281,13 +320,16 @@ class EncoderHandle:
     released, a borrowed one cannot."""
 
     def __init__(self, model, tokenizer, spec: EncoderSpec, *, owned: bool,
-                 source_key=None):
+                 source_key=None, weights_owner=None):
         self.model = model
         self.tokenizer = tokenizer
         self.spec = spec
         self.owned = owned
         self.source_key = source_key
-        self.dtype_name = _float_dtype(model)
+        # What the free-memory reading holds the mapped weights under,
+        # when this handle's load registered them. See ``load_encoder``.
+        self.weights_owner = weights_owner
+        self.dtype_name = spec.activation or _float_dtype(model)
         self.adapters = ""          # text adapter state, in the cache key
 
     @property
@@ -299,45 +341,107 @@ class EncoderHandle:
             raise RuntimeError(
                 f"the {self.spec.name} text encoder was released")
         ids = token_ids(self.spec, self.tokenizer, prompt)
-        hidden = tap(self.model, ids, layers=self.spec.tap_layers)
+        hidden = tap(self.model, ids, layers=self.spec.tap_layers,
+                     activation=self.spec.activation)
         mx.eval(hidden)
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
                        template_id=self.spec.template_id,
-                       tap_layers=tuple(self.spec.tap_layers))
+                       tap_layers=tuple(self.spec.tap_layers),
+                       drop=self.spec.drop)
 
     def token_ids(self, prompt: str) -> list[int]:
         return token_ids(self.spec, self.tokenizer, prompt)
 
     def release(self) -> bool:
         """Drop an owned encoder and return its memory. The tokenizer stays,
-        so prompts still map to the keys of cached conditionings. Returns
-        False for a borrowed or already released encoder, which stays as
-        it is."""
+        so prompts still map to the keys of cached conditionings. The
+        mapped weights leave the free-memory reading with the model, so a
+        VAE pass after the release sees the room. Returns False for a
+        borrowed or already released encoder, which stays as it is."""
         if not self.owned or self.model is None:
             return False
         self.model = None
+        from gmlx.gen.prefill_decay import forget_untracked_weights
         from gmlx.load.loader import collect_after_load
 
         collect_after_load()
         mx.clear_cache()
+        if self.weights_owner is not None:
+            forget_untracked_weights(self.weights_owner)
+            self.weights_owner = None
         return True
+
+
+def drop_output_head(model) -> int:
+    """Take the output matrix off a text model that has its own, and
+    return the bytes it held, 0 for a model without one. A tap stops
+    before the final norm, so an owned encoder never reads it, and the
+    memory plan counts an encoder without it. A model with tied embeddings
+    has none to drop."""
+    from mlx.utils import tree_flatten
+
+    if "lm_head" not in model:
+        return 0
+    held = sum(int(v.nbytes)
+               for _, v in tree_flatten(model["lm_head"].parameters()))
+    del model["lm_head"]
+    return held
+
+
+def _load_owned(path: str):
+    """The text loader's model, config and tokenizer for ``path``, and
+    the owner its mapped weights are registered under for the free-memory
+    reading. The owner is None when a window of another owner is open,
+    which then forgets the weights when it ends."""
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.load.loader import load_model
+
+    owner = None
+    if pd.untracked_weights_owner() is None:
+        owner = object()
+        pd.set_untracked_weights_owner(owner)
+    try:
+        return (*load_model(path), owner)
+    finally:
+        if owner is not None:
+            pd.set_untracked_weights_owner(None)
+
+
+def _drop_head(model) -> None:
+    """``drop_output_head`` on a loaded encoder, with the mapped bytes of
+    the matrix taken out of the free-memory reading. Bytes the drop
+    returned to MLX were never part of that registration."""
+    from gmlx.gen.prefill_decay import deduct_untracked_weights
+    from gmlx.load.loader import collect_after_load
+
+    before = mx.get_active_memory()
+    held = drop_output_head(model)
+    if not held:
+        return
+    collect_after_load()
+    tracked = max(0, before - mx.get_active_memory())
+    deduct_untracked_weights(max(0, held - tracked),
+                             getattr(model, "_kq_weights_key", None))
 
 
 def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
                  log=print) -> EncoderHandle:
-    """Load an owned text encoder GGUF through the text loader. The header
-    is checked against the spec before any weights load."""
-    from gmlx.load.loader import load_model, weights_source_key
+    """Load an owned text encoder GGUF through the text loader, without
+    its output matrix. The header is checked against the spec before any
+    weights load."""
+    from gmlx.load.loader import weights_source_key
     from gmlx.load.preflight import find_split_shards
 
     check_encoder_file(_header_view(path), spec, override=override)
-    model, config, tokenizer = load_model(path)
+    model, config, tokenizer, owner = _load_owned(path)
     check_encoder(model, config, spec, override=True)
+    _drop_head(model)
     log(f"[image] text encoder {spec.name}, tap after layer "
         f"{', '.join(str(n) for n in spec.tap_layers)} of {spec.layers}")
     return EncoderHandle(model, tokenizer, spec, owned=True,
                          source_key=weights_source_key(
-                             *find_split_shards(path)))
+                             *find_split_shards(path)),
+                         weights_owner=owner)
 
 
 def borrow_encoder(model, tokenizer, config: dict, spec: EncoderSpec, *,

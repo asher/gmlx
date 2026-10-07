@@ -14,6 +14,10 @@ request.
 
 from __future__ import annotations
 
+# The prompt template is the text to image template of diffusers'
+# src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py at e0abab83
+# (Apache-2.0; see licenses/diffusers-LICENSE).
+
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
                                  StepParts)
@@ -53,6 +57,31 @@ CONSTANTS = ConstantsRow(
     revision="790c92633540aa0cb11d9abf19eb46d861714758",
 )
 
+# What the reference pipeline does to a prompt before the text encoder
+# and to the encoder's output after it. The template is its text to image
+# template: a fixed system turn, the prompt as the user turn and the open
+# assistant turn, with no thinking tokens. The pipeline passes it to the
+# tokenizer as it stands and never renders the chat template of the
+# encoder. It drops the rows of the system turn from the hidden states,
+# 14 tokens with the tokenizer of Qwen3-VL-8B, and it encodes an empty
+# prompt as one space, since the tokenizer has no token to open with.
+PROMPT = ConstantsRow(
+    values={
+        "template_t2i": (
+            "<|im_start|>system\n"
+            "Comprehend and analyze the provided prompt.<|im_end|>\n"
+            "<|im_start|>user\n{}<|im_end|>\n"
+            "<|im_start|>assistant\n"),
+        "system_turn": (
+            "<|im_start|>system\n"
+            "Comprehend and analyze the provided prompt.<|im_end|>\n"),
+        "drop_tokens": 14,
+        "empty_prompt": " ",
+    },
+    repo="huggingface/diffusers",
+    revision="e0abab83b5df05de9e7abd788643c1a7c1e42e28",
+)
+
 # The model card at this revision runs each of its three examples with
 # num_inference_steps=40 and names no guidance, so the guidance is the
 # reference pipeline's default, true_cfg_scale=1.0. The shift is the
@@ -62,6 +91,22 @@ SAMPLING = {
                            repo="Qwen/Qwen-Image-2.1",
                            revision="790c92633540aa0cb11d9abf19eb46d861714758"),
 }
+
+# Norm tensors that identify the encoder weights: GGUF name, path in the
+# loaded model and sha256 of the bf16 bits.
+ENCODER_IDENTITY = (
+    ("blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight",
+     "da14da9264fcb45df7b76ff86c2cc6947639c162a96edb0e5459c9d2d87eec19"),
+    ("blk.17.ffn_norm.weight",
+     "model.layers.17.post_attention_layernorm.weight",
+     "76ac781c8aaf8ec914fd9fe65a858acaf999b9bf0e783cbd226b1b5e25a1db23"),
+    ("output_norm.weight", "model.norm.weight",
+     "fe204de7e848b92e8a758ab5e27632e9b698f29571ca56057d13ba73d0b2012a"),
+)
+ENCODER_IDENTITY_SOURCE = (
+    "unsloth/Qwen3-VL-8B-Instruct-GGUF, Qwen3-VL-8B-Instruct-Q4_K_M.gguf "
+    "with sha256 108e7ff92b78eefd3db4741885104acba514255c11b617d3c7b197a5"
+    "f46efe89")
 
 # A pipeline holds the conditioning states of the request it runs, and
 # beside them up to this much of other requests' states less the bytes of
@@ -197,6 +242,40 @@ def lora_map(config: dict):
     return build_map(config)
 
 
+def encoder():
+    """The text encoder of the family: Qwen3-VL-8B read as a text model,
+    after its last layer and before its final norm, on the reference
+    pipeline's template and without the rows of the system turn. The
+    reference sets no token cap.
+
+    The tap runs in float32. The row of each <|im_start|> token amplifies
+    rounding: against the float32 features of the reference, the reference
+    in bfloat16 is 21 percent off in relative L2 on the first kept row and
+    2 percent on the others. On the Q4_K_M file a bfloat16 tap puts that
+    row 16 to 71 percent off, by the prompt length, and the features of a
+    36 row prompt 10 percent off, which moves the final latents of a 512
+    pixel image 6 percent. In float32 over the weights as loaded the row
+    is 4 to 13 percent off and the features 1 to 4 percent."""
+    from gmlx.image.text_encoder import EncoderSpec, IdentityTensor
+
+    p = PROMPT.values
+    return EncoderSpec(
+        name="qwen3-vl-8b",
+        arch="qwen3vl",
+        model_type="qwen3",
+        hidden=4096,
+        layers=36,
+        tap_layers=(36,),
+        template=p["template_t2i"],
+        max_tokens=None,
+        identity=tuple(IdentityTensor(*row) for row in ENCODER_IDENTITY),
+        identity_source=ENCODER_IDENTITY_SOURCE,
+        drop=p["drop_tokens"],
+        empty=p["empty_prompt"],
+        activation="float32",
+    )
+
+
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
     """Sigmas of ``steps`` for an image of ``tokens`` latent tokens."""
     from gmlx.image.schedule import qwen21_sigmas
@@ -228,4 +307,5 @@ FAMILY = Family(
                    _prefix_bytes),
     schedule=schedule,
     lora_map=lora_map,
+    encoder=encoder,
 )

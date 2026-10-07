@@ -5,6 +5,7 @@ a tiny random Qwen3."""
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import weakref
 
 import numpy as np
@@ -14,6 +15,7 @@ import mlx.core as mx
 
 from image_fixtures import FIXTURES, load_json
 
+from gmlx.image import registry
 from gmlx.image import text_encoder as te
 
 _TEMPLATE = "z_image_turbo_chat_template.jinja"
@@ -55,7 +57,46 @@ def test_family_lookup():
     assert te.Z_IMAGE.tap_layers == (35,) and te.Z_IMAGE.layers == 36
     assert te.Z_IMAGE.max_tokens == 512
     with pytest.raises(te.ImageModelError, match="no text encoder"):
-        te.encoder_spec("qwen_image21")
+        te.encoder_spec("no_such_family")
+    fam = registry.get_family("qwen_image21")
+    assert te.encoder_spec("qwen_image21") == te.encoder_spec(fam)
+    assert te.encoder_spec(fam).name == "qwen3-vl-8b"
+    with pytest.raises(te.ImageModelError, match="no text encoder"):
+        te.encoder_spec(dataclasses.replace(fam, name="other", encoder=None))
+
+
+def test_the_qwen_image21_spec_is_the_row_of_the_reference_pipeline():
+    """The template, the dropped rows and the empty prompt against what
+    the oracle recorded of the pipeline's own call on each prompt."""
+    from gmlx.image.families.qwen_image21 import family as qf
+
+    spec = te.encoder_spec("qwen_image21")
+    m = load_json("oracle/check2_qwen_image21.manifest.json")
+    ins = m["inputs"]
+    assert (spec.arch, spec.model_type) == ("qwen3vl", "qwen3")
+    assert (spec.hidden, spec.layers, spec.tap_layers) == (4096, 36, (36,))
+    assert spec.max_tokens is None
+    assert spec.drop == ins["drop_index"] == 14
+    assert "all 36 layers run" in ins["tap"]
+    assert "before the final norm" in ins["tap"]
+    for key, prompt in ins["prompts"].items():
+        assert te.render(spec, prompt) == ins["rendered"][key], key
+        assert ins["lengths"][key] - ins["rows"][key] == spec.drop
+    assert ins["prompts"]["empty"] == "" and spec.empty == " "
+    row = qf.PROMPT
+    assert spec.template == row.values["template_t2i"]
+    assert spec.template.startswith(row.values["system_turn"])
+    assert spec.template.count("{}") == 1 and "think" not in spec.template
+    assert row.revision in m["oracle"]["packages"]["diffusers"]["source"]
+    assert m["files"]["encoder"]["sha256"] in spec.identity_source
+    assert len(spec.identity) == 3
+    # The Z-Image row keeps its key: no dropped rows, an empty prompt as
+    # it stands.
+    z = te.Z_IMAGE
+    assert (z.drop, z.empty) == (0, "")
+    assert z.template_id == hashlib.sha256(z.template.encode()).hexdigest()
+    assert spec.template_id != hashlib.sha256(
+        spec.template.encode()).hexdigest()
 
 
 class _CharTokenizer:
@@ -76,7 +117,7 @@ def test_token_cap_applies_to_the_rendered_text():
                     for c in te.render(te.Z_IMAGE, "x" * 2000)][:512]
 
 
-def _tiny_qwen3(layers: int = 4, seed: int = 0):
+def _tiny_qwen3(layers: int = 4, seed: int = 0, tied: bool = True):
     from mlx.utils import tree_flatten
     from gmlx._vendor.mlx_lm.models import qwen3
 
@@ -84,7 +125,7 @@ def _tiny_qwen3(layers: int = 4, seed: int = 0):
         model_type="qwen3", hidden_size=64, num_hidden_layers=layers,
         intermediate_size=96, num_attention_heads=4, rms_norm_eps=1e-6,
         vocab_size=128, num_key_value_heads=2, max_position_embeddings=512,
-        rope_theta=1e6, head_dim=16, tie_word_embeddings=True)
+        rope_theta=1e6, head_dim=16, tie_word_embeddings=tied)
     mx.random.seed(seed)
     m = qwen3.Model(args)
     rng = np.random.default_rng(seed)
@@ -98,11 +139,11 @@ def _tiny_qwen3(layers: int = 4, seed: int = 0):
     return m, config
 
 
-def _spec(layers=4, tap=(3,), identity=()):
+def _spec(layers=4, tap=(3,), identity=(), **kw):
     return te.EncoderSpec(
         name="tiny", arch="qwen3", model_type="qwen3", hidden=64,
         layers=layers, tap_layers=tap, template="<u>{}</u>", max_tokens=16,
-        identity=identity, identity_source="test")
+        identity=identity, identity_source="test", **kw)
 
 
 def test_tap_at_the_last_layer_is_the_stock_forward_before_its_norm():
@@ -221,3 +262,155 @@ def test_owned_handle_releases_and_a_borrowed_one_does_not():
     borrowed = te.borrow_encoder(m2, _CharTokenizer(), cfg2, spec)
     assert borrowed.release() is False
     assert borrowed.model is m2
+
+
+def test_dropped_rows_run_and_stay_out_of_the_features():
+    """The features are the rows after the dropped ones, of a forward
+    that ran them all: they are not the encoding of the later tokens
+    alone."""
+    m, _ = _tiny_qwen3()
+    tok = _CharTokenizer()
+    plain, spec = _spec(), _spec(drop=3)
+    whole = te.EncoderHandle(m, tok, plain, owned=False).encode("ab")
+    got = te.EncoderHandle(m, tok, spec, owned=False).encode("ab")
+    assert got.ids == whole.ids and got.drop == 3 and whole.drop == 0
+    assert mx.array_equal(got.hidden[0], whole.hidden[0]).item()
+    assert got.features.shape == (len(got.ids) - 3, 64)
+    assert mx.array_equal(got.features, whole.hidden[0][0, 3:]).item()
+    assert mx.array_equal(whole.features, whole.hidden[0][0]).item()
+    (alone,) = te.tap(m, list(got.ids[3:]), layers=spec.tap_layers)
+    assert not mx.allclose(alone[0], got.features, atol=1e-3).item()
+    # The dropped count is part of what a conditioning depends on.
+    assert spec.template_id != plain.template_id
+    assert _spec(drop=4).template_id != spec.template_id
+
+
+def test_a_prompt_must_leave_a_row_after_the_dropped_ones():
+    tok = _CharTokenizer()
+    n = len(te.render(_spec(), ""))
+    assert len(te.token_ids(_spec(drop=n), tok, "a")) == n + 1
+    with pytest.raises(ValueError, match=f"first {n} are dropped"):
+        te.token_ids(_spec(drop=n), tok, "")
+    with pytest.raises(ValueError, match="no tokens"):
+        te.token_ids(dataclasses.replace(_spec(), max_tokens=0), tok, "a")
+
+
+def test_an_empty_prompt_is_rendered_as_the_spec_says():
+    spec = _spec(empty=" ")
+    assert te.render(spec, "") == "<u> </u>"
+    assert te.render(spec, "a") == "<u>a</u>"
+    assert te.render(_spec(), "") == "<u></u>"
+    assert te.render(te.Z_IMAGE, "") == te.Z_IMAGE.template.replace("{}", "")
+
+
+def test_an_owned_encoder_holds_no_output_matrix(monkeypatch):
+    """``load_encoder`` drops the output matrix of a model that has its
+    own, and the tap of the model is what it was. A model with tied
+    embeddings has none, and a borrowed model keeps its own."""
+    from gmlx.load import loader
+
+    m, cfg = _tiny_qwen3(tied=False)
+    ids = [3, 17, 42, 5]
+    assert "lm_head" in m
+    (before,) = te.tap(m, ids, layers=(4,))
+    mx.eval(before)
+    monkeypatch.setattr(te, "_header_view", lambda path: None)
+    monkeypatch.setattr(te, "check_encoder_file", lambda *a, **k: None)
+    monkeypatch.setattr(loader, "load_model",
+                        lambda path: (m, cfg, _CharTokenizer()))
+    h = te.load_encoder("enc.gguf", _spec(), log=lambda *_: None)
+    assert h.owned and h.model is m and "lm_head" not in m
+    assert mx.array_equal(te.tap(m, ids, layers=(4,))[0], before).item()
+    assert te.drop_output_head(m) == 0
+
+    tied, _ = _tiny_qwen3()
+    assert "lm_head" not in tied and te.drop_output_head(tied) == 0
+    assert te.drop_output_head(_tiny_qwen3(tied=False)[0]) == 128 * 64 * 4
+
+    m2, cfg2 = _tiny_qwen3(tied=False)
+    te.borrow_encoder(m2, _CharTokenizer(), cfg2, _spec())
+    assert "lm_head" in m2
+
+
+def test_a_released_encoder_leaves_the_free_memory_reading(monkeypatch):
+    """The mapped weights an owned load registers for the free-memory
+    reading go when the encoder is released, and the output matrix goes
+    when it is dropped. A load inside the window of another owner leaves
+    them to that owner."""
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.load import loader
+
+    key = ("enc.gguf",)
+    head = 128 * 64 * 4
+
+    def load(path):
+        m, cfg = _tiny_qwen3(tied=False)
+        # The tiny model owns its arrays, so the registration stands for
+        # mapped ones of the same size, the output matrix among them.
+        pd.note_untracked_weights(10 * head, key=key)
+        object.__setattr__(m, "_kq_weights_key", key)
+        return m, cfg, _CharTokenizer()
+
+    monkeypatch.setattr(te, "_header_view", lambda path: None)
+    monkeypatch.setattr(te, "check_encoder_file", lambda *a, **k: None)
+    monkeypatch.setattr(loader, "load_model", load)
+    monkeypatch.setattr(te.mx, "get_active_memory", lambda: 0)
+    assert pd.untracked_weight_bytes_for(key) == 0
+
+    h = te.load_encoder("enc.gguf", _spec(), log=lambda *_: None)
+    assert pd.untracked_weights_owner() is None
+    assert h.weights_owner is not None
+    assert pd.untracked_weight_bytes_for(key) == 9 * head
+    assert h.release() is True
+    assert pd.untracked_weight_bytes_for(key) == 0
+    assert h.weights_owner is None and h.release() is False
+
+    # A second load of the file counts again, and so does its release.
+    h = te.load_encoder("enc.gguf", _spec(), log=lambda *_: None)
+    assert pd.untracked_weight_bytes_for(key) == 9 * head
+    h.release()
+    assert pd.untracked_weight_bytes_for(key) == 0
+
+    pool = object()
+    pd.set_untracked_weights_owner(pool)
+    try:
+        h = te.load_encoder("enc.gguf", _spec(), log=lambda *_: None)
+        assert pd.untracked_weights_owner() is pool
+    finally:
+        pd.set_untracked_weights_owner(None)
+    assert h.weights_owner is None
+    h.release()
+    assert pd.untracked_weight_bytes_for(key) == 9 * head
+    pd.forget_untracked_weights(pool)
+    assert pd.untracked_weight_bytes_for(key) == 0
+
+
+def test_a_tap_runs_in_the_dtype_its_spec_names():
+    """The layers of a tap with an activation dtype run in it by promotion
+    over the weights as loaded, and the conditioning key says so."""
+    from mlx.utils import tree_map
+
+    m, cfg = _tiny_qwen3()
+    ids = [3, 17, 42, 5, 9]
+    (want,) = te.tap(m, ids, layers=(4,))
+    assert want.dtype == mx.float32
+    m.update(tree_map(lambda v: v.astype(mx.bfloat16), m.parameters()))
+    (low,) = te.tap(m, ids, layers=(4,))
+    (high,) = te.tap(m, ids, layers=(4,), activation="float32")
+    assert low.dtype == mx.bfloat16 and high.dtype == mx.float32
+
+    def gap(x):
+        return mx.sqrt(((x.astype(mx.float32) - want) ** 2).sum()).item()
+
+    assert gap(high) < gap(low)
+    spec = _spec(layers=4, tap=(4,), activation="float32")
+    h = te.borrow_encoder(m, _CharTokenizer(), cfg, spec)
+    assert h.dtype_name == "float32"
+    got = h.encode("ab")
+    assert got.hidden[0].dtype == mx.float32
+    plain = te.borrow_encoder(m, _CharTokenizer(), cfg,
+                              _spec(layers=4, tap=(4,)))
+    assert plain.dtype_name == "bfloat16"
+    assert plain.encode("ab").hidden[0].dtype == mx.bfloat16
+    assert te.encoder_spec("qwen_image21").activation == "float32"
+    assert te.Z_IMAGE.activation is None

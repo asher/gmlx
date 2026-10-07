@@ -14,6 +14,7 @@ from gmlx.image import api, memfit
 from gmlx.image.registry import get_family
 from gmlx.image.samplers import img2img_start, make_sampler, noise_from_seed
 from gmlx.image.schedule import zimage_sigmas
+from gmlx.image.text_encoder import TextTap
 
 
 class _Dit:
@@ -398,7 +399,8 @@ class _Encoder:
         self.encoded.append(prompt)
         h = mx.array(np.array(self.token_ids(prompt), np.float32)[:, None]
                      * np.ones((1, 4), np.float32))
-        return SimpleNamespace(hidden=(h[None],))
+        return TextTap(ids=tuple(self.token_ids(prompt)),
+                       hidden=(h[None],), template_id="", tap_layers=())
 
 
 def test_encode_text_caches_by_key_and_survives_release(pipe):

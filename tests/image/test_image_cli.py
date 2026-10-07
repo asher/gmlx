@@ -20,6 +20,7 @@ from gmlx.commands.cli import umbrella_main
 from gmlx.image import api
 from gmlx.image.registry import get_family
 from gmlx.image.samplers import noise_from_seed
+from gmlx.image.text_encoder import TextTap
 
 PIL = pytest.importorskip("PIL")
 
@@ -432,7 +433,9 @@ class _TinyEncoder(_OwnedEncoder):
         self.encoded.append(prompt)
         ids = np.array(self.token_ids(prompt), np.float32)[:, None]
         h = (ids % 7 - 3) * np.linspace(0.1, 1.0, 16, dtype=np.float32)
-        return SimpleNamespace(hidden=(mx.array(h)[None],))
+        return TextTap(ids=tuple(self.token_ids(prompt)),
+                       hidden=(mx.array(h)[None],), template_id="",
+                       tap_layers=())
 
 
 def _tiny_pipe(log=print):

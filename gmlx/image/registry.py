@@ -74,6 +74,8 @@ class Family:
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
     step: StepParts | None = None      # None runs the DiT's own step
+    # () -> text_encoder.EncoderSpec; None reads text_encoder.ENCODERS
+    encoder: Callable | None = None
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
 
