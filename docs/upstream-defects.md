@@ -45,3 +45,24 @@ print(mx.addmm(mx.contiguous(c), a, b).reshape(-1))  # GPU: [3, 10, 17]
 - Test: `tests/test_mlx_guards.py`. It holds the guard on each kind of view, a text LoRA layer
   of one output over a column of a wider array and an image LoRA band of one output column
   against a float64 sum, and it holds that a wider c reaches the stock op as the same array.
+
+## The diffusers single-file loader leaves a BF16 tensor outside a linear layer undecoded
+
+- Dependency: diffusers at e0abab83, the revision the image reference scripts under
+  `scripts/image_oracle/` pin. gmlx does not import diffusers: only those scripts do, to write
+  the fixtures the image tests read.
+- Affected: `from_single_file` on a GGUF with a BF16 tensor that is not the weight of a linear
+  layer. In the Qwen-Image 2.1 Q4_K_M file that is `txt_in.text_norm.weight`, the only BF16
+  vector of the file.
+- What goes wrong: the loader keeps the tensor in its GGUF bytes, and only a GGUF linear layer
+  decodes them, in its call. Every other module reads the parameter as a plain tensor. On the
+  bytes of a BF16 vector that is a tensor of twice the length, so the forward of the model stops
+  at the text norm with a shape error.
+- Guard: `load_model` in `scripts/image_oracle/check3_qwen_image21.py` decodes each such
+  parameter once, to the values the file holds, and refuses a codec other than BF16 there. It
+  lists the names it decoded as `results.oracle.plain_decoded` in the manifest of every fixture
+  it loads the DiT for.
+- Test: `test_the_reference_loader_decoded_the_bf16_vectors_of_the_file` in
+  `tests/image/test_image_oracle_harness.py` holds that list, in each committed manifest, to the
+  BF16 vectors of the header inventory of the file. Without the guard no such fixture can be
+  written.

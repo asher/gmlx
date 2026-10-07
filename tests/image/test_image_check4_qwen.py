@@ -2,9 +2,9 @@
 schedule equals diffusers' bit for bit at five sizes and eight step
 counts, and its constants are the official scheduler config's. The arrays
 are small and committed, so this runs on the CPU tier.
-scripts/image_oracle/check4_qwen_image21.py writes them. The sigmas of
-the oracle's calls on the real file are held to the schedule too, from
-the manifests of check 3."""
+scripts/image_oracle/check4_qwen_image21.py writes them. The sigmas the
+oracle recorded for its calls on the real file are held to the schedule
+too, from the manifests of check 3."""
 from __future__ import annotations
 
 import hashlib
@@ -68,9 +68,10 @@ def test_mu_follows_the_token_count(check4):
 
 @pytest.mark.parametrize("name", ["check3_qwen_image21_512",
                                   "check3_qwen_image21_1024"])
-def test_the_sigmas_of_a_run_on_the_real_file_are_the_schedule(name):
+def test_the_sigmas_the_oracle_recorded_are_the_schedule(name):
     """The schedule the oracle set for its calls on the real DiT, at the
-    token count of each size, from the committed manifest alone."""
+    token count of each size. It reads the committed manifest alone and
+    opens no model file."""
     from oracle_fixture import ORACLE, committed
 
     if not (ORACLE / f"{name}.manifest.json").is_file():

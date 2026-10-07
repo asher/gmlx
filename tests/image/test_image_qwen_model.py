@@ -488,6 +488,26 @@ def test_the_prefix_cache_bound_holds_the_text_states_of_a_guided_request():
     assert 4 * one <= get_family("qwen_image21").step.state_bytes
 
 
+def test_the_prefix_cache_bound_keeps_no_reference_state_of_another_request():
+    """The ceiling of the family's bound: it is the four text states and
+    no more, so the state of one 1024 pixel reference, which a request
+    that does not run it would hold for nothing, is over it."""
+    from gmlx.image.registry import get_family
+
+    row = memfit.PEAKS["qwen_image21"]
+    bound = get_family("qwen_image21").step.state_bytes
+    assert bound == 4 * row.prefix.cache_bytes(row.text_rows, 2) == 1 << 30
+    assert bound < row.prefix.cache_bytes(row.prefix.rows(0, 1, 1024), 2)
+    # The plan reads the same number: other states count up to the bound
+    # less the request's own.
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              budget=100e9, overcommit=False, prefix_bound=bound)
+    own = memfit.plan_memory(4 << 30, 0, 0, **kw).terms["prefix_cache"]
+    held = memfit.plan_memory(4 << 30, 0, 0, prefix_other=8 << 30,
+                              **kw).terms["prefix_cache"]
+    assert held == bound and own == bound // 4
+
+
 def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
     """Five text rows and one 2 x 2 reference, which is 32 pixels square."""
     feats = mx.array(qt.rule.features("wide")[:6])
