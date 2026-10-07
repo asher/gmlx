@@ -48,13 +48,17 @@ def _image_dits(root: str, family: str) -> tuple:
 
     found = []
     for path in sorted(Path(root).rglob("*.gguf")):
+        arch = scan_gguf(str(path), include_tensors=False).kv.get(
+            "general.architecture")
+        if arch is not None and not is_image_arch(arch):
+            continue
         try:
-            arch = scan_gguf(str(path), include_tensors=False).kv.get(
-                "general.architecture")
-            if arch is not None and not is_image_arch(arch):
-                continue
             got = fp.identify(fp.view_from_scans([scan_gguf(str(path))]))
-        except Exception:
+        except fp.ImageModelError:
+            # Not an image DiT that gmlx takes. Any other failure of the
+            # scan or of the fingerprint is a fault, and is raised: a
+            # lookup that hid it would turn it into a skip of every row
+            # on the real file.
             continue
         if got.family.name == family:
             found.append(str(path))
@@ -66,7 +70,9 @@ def image_dits(root, family: str) -> list[str]:
     by fingerprint as the loader finds them. A DiT file may carry no
     general.architecture key: the Qwen-Image 2.1 files of
     unsloth/Qwen-Image-2.1-GGUF have no KV at all, so an index by that
-    key does not list them. A file under a text arch is not read."""
+    key does not list them. A file under a text arch is not read, and a
+    file the fingerprint refuses is left out. A file that cannot be
+    scanned, and a fingerprint that fails any other way, raise."""
     return list(_image_dits(str(root), family))
 
 

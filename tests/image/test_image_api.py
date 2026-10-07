@@ -431,6 +431,11 @@ def test_the_conditioning_key_covers_its_inputs():
 
 
 def test_load_gates_the_header_sizes_before_any_load(monkeypatch):
+    # The loader binds memfit.gate_load by name when it is first imported,
+    # so it is imported before the gate is stubbed: a stub bound there
+    # would outlive this test and refuse every later load.
+    from gmlx.image import loader
+
     calls = []
     sizes = {"dit": 5, "encoder": 3, "vae": 1}
     monkeypatch.setattr(api, "_header_bytes",
@@ -441,8 +446,6 @@ def test_load_gates_the_header_sizes_before_any_load(monkeypatch):
         raise memfit.ImageMemoryError("no room")
 
     monkeypatch.setattr(memfit, "gate_load", refuse)
-    from gmlx.image import loader
-
     monkeypatch.setattr(loader, "load_dit", lambda *a, **k: 1 / 0)
     with pytest.raises(memfit.ImageMemoryError):
         api.load("d.gguf", text_encoder="e.gguf", vae="v.gguf")
@@ -451,6 +454,15 @@ def test_load_gates_the_header_sizes_before_any_load(monkeypatch):
         api.load("d.gguf", text_encoder="e", encoder_model=(1, 2))
     with pytest.raises(ValueError, match="memory must be"):
         api.load("d.gguf", memory="maybe")
+
+
+def test_the_load_gate_stub_does_not_outlive_its_test():
+    """After the test above, in a process where it was the first to
+    import the loader: the loader gates with the real gate."""
+    from gmlx.image import loader
+
+    assert loader.gate_load is memfit.gate_load
+    assert memfit.gate_load.__module__ == "gmlx.image.memfit"
 
 
 def test_the_request_plan_releases_an_owned_encoder_and_tiles(pipe):
