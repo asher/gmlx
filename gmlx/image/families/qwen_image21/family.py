@@ -102,7 +102,10 @@ PROMPT = ConstantsRow(
 # each side rounded to a multiple of 32. The encoder sees that image with
 # its alpha composited over white, and the VAE all four channels. The
 # pipeline sets no count, and the model card at the pinned revision gives
-# the count: up to 10 reference images.
+# the count: up to 10 reference images. A reference token holds its cache
+# bytes exactly in every measured request, up to four references of
+# 1024 pixels under guidance, so the count stays the card's and the area
+# the pipeline's, and the memory plan refuses what a machine cannot hold.
 REFERENCES = ConstantsRow(
     values={
         "area": 1024 * 1024,

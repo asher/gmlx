@@ -5,6 +5,11 @@ and a 128 GiB machine. CPU."""
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
+import re
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from image_fixtures import Q_HEADER, Z_HEADER, fixture_view
@@ -121,9 +126,16 @@ def test_a_qwen_step_holds_the_joined_keys_and_the_prefill(q_view):
     assert p.rows == 1 and p.terms["step_peak"] == row.prefill.bytes(prefill)
     assert row.prefill.bytes(prefill) > row.step.bytes(step)
     p = plan_memory(q_view, 0, 0, refs=2, ref_px=1024, cfg=4.0, **kw)
-    assert p.rows == 2 and p.terms["step_peak"] == row.step.bytes(2 * step)
-    assert row.step.bytes(2 * step) > row.prefill.bytes(prefill)
+    assert p.rows == 2
+    assert p.terms["step_peak"] == row.step_peak(2 * step, prefill)
     assert p.terms["prefix_cache"] == 2 * 32 * prefix * 4096 * 2 * 2
+    # One 512 pixel reference under guidance: the two rows of a step are
+    # the term.
+    prefix = 512 + 1024
+    step, prefill = image + join(prefix + 4096), prefix * 36864 * 2
+    p = plan_memory(q_view, 0, 0, refs=1, ref_px=512, cfg=4.0, **kw)
+    assert p.terms["step_peak"] == row.step.bytes(2 * step)
+    assert row.step.bytes(2 * step) > row.prefill.bytes(prefill)
     # A family without a prefix has neither term.
     z = memfit.PEAKS["z_image"]
     assert memfit.prefix_terms(z, 4128, 512, 2, 1024, 2) == (
@@ -153,7 +165,16 @@ def test_prefix_rows_of_the_conditionings_replace_the_counts(q_view,
               budget=BUDGET_128, overcommit=False)
     by_count = plan_memory(q_view, 0, 0, refs=1, ref_px=1024, **kw)
     by_rows = plan_memory(q_view, 0, 0, prefix_rows=[512 + 4096], **kw)
-    assert by_rows.terms == by_count.terms
+
+    def later(terms: dict) -> dict:
+        return {k: v for k, v in terms.items() if k != "encode_peak"}
+
+    assert later(by_rows.terms) == later(by_count.terms)
+    # The count says the request has a reference to encode: its image
+    # rows and the tower. Rows alone are a conditioning made already.
+    assert by_count.terms["encode_peak"] - by_rows.terms["encode_peak"] == \
+        int(1024 * row.encode_row_bytes * memfit.ENCODE_LIVE
+            + row.encode_tower_bytes)
     # Under guidance each conditioning has its own cache, and the step
     # and the prefill are those of the longer prefix.
     pos = memfit.prefix_row_terms(row, 4096, 4608, 2)
@@ -194,16 +215,17 @@ def test_other_prefix_states_stay_up_to_the_bound(q_view):
     assert cache(GiB, 0) == own
 
 
-def test_the_reference_hint_counts_every_reference_that_fits(q_view):
-    """A request the encode phase refuses, whose references all fit the
-    denoise phase."""
+def test_the_reference_hint_counts_every_phase(q_view):
+    """A request whose encode phase does not fit whatever its references
+    are: the hint names no count and no area."""
     with pytest.raises(ImageMemoryError) as e:
         plan_memory(q_view, ENCODER, 0, family="qwen_image21", height=1024,
                     width=1024, refs=2, ref_px=1024, caption_tokens=10 ** 7,
                     budget=60 * GiB, overcommit=False)
     assert e.value.plan.phases["denoise"] <= 60 * GiB
     assert e.value.plan.phases["encode"] > 60 * GiB
-    assert "; 2 references of 1024 px fit, or 2 of 1024 px" in str(e.value)
+    assert ("; the request does not fit without reference images either"
+            in str(e.value))
 
 
 def test_a_16_gib_machine_releases_the_encoder_and_tiles_at_1024(z_view):
@@ -454,18 +476,79 @@ def test_reference_refusal_names_what_fits(q_view):
                     budget=60 * GiB, overcommit=False)
     msg = str(e.value)
     assert "The largest term is prefix_cache" in msg
-    assert "; 9 references of 1024 px fit, or 16 of 800 px" in msg
+    assert ("; the largest that fit are 9 of the 16 reference images at "
+            "this reference area, or all 16 at a reference area of "
+            "768 x 768 px") in msg
     # What the message names fits, and one step more does not.
     kw = dict(family="qwen_image21", height=1024, width=1024, cfg=4.0,
               budget=60 * GiB, overcommit=False)
     for refs, px, fits in ((9, 1024, True), (10, 1024, False),
-                           (16, 800, True), (16, 816, False)):
+                           (16, 768, True), (16, 800, False)):
         if fits:
             assert plan_memory(q_view, ENCODER, 0, refs=refs, ref_px=px,
                                **kw).fits
         else:
             with pytest.raises(ImageMemoryError):
                 plan_memory(q_view, ENCODER, 0, refs=refs, ref_px=px, **kw)
+
+
+def test_reference_refusal_reads_the_sizes_of_the_request(q_view):
+    """The references of a request by their own sizes, both conditionings
+    of a guided one counted, and the VAE encode of each priced."""
+    refs = [(1024, 1024), (768, 1376), (1024, 1024)]
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              overcommit=False)
+    fit = plan_memory(q_view, ENCODER, VAE, ref_sizes=refs,
+                      budget=BUDGET_128, **kw)
+    # Unguided the three fit a budget that the guided request passes.
+    budget = fit.peak + GiB
+    g = dict(kw, cfg=4.0, budget=budget)
+    assert plan_memory(q_view, ENCODER, VAE, ref_sizes=refs, budget=budget,
+                       **kw).fits
+
+    def named(sizes, **over) -> tuple[int, int]:
+        with pytest.raises(ImageMemoryError) as e:
+            plan_memory(q_view, ENCODER, VAE, ref_sizes=sizes,
+                        **{**g, **over})
+        m = re.search(r"; the largest that fit are (\d+) of the 3 reference "
+                      r"images at this reference area, or all 3 at a "
+                      r"reference area of (\d+) x \2 px\. ", str(e.value))
+        assert m, str(e.value)
+        return int(m[1]), int(m[2])
+
+    def at(side: int) -> list:
+        return [(memfit._scaled(h, side / 1024),
+                 memfit._scaled(w, side / 1024)) for h, w in refs]
+
+    count, side = named(refs)
+    assert 0 < count < 3 and 256 <= side < 1024 and side % 32 == 0
+    # What the message names fits, and one step more does not.
+    assert plan_memory(q_view, ENCODER, VAE, ref_sizes=refs[:count],
+                       **g).fits
+    assert plan_memory(q_view, ENCODER, VAE, ref_sizes=at(side), **g).fits
+    for sizes in (refs[:count + 1], at(side + 32)):
+        with pytest.raises(ImageMemoryError):
+            plan_memory(q_view, ENCODER, VAE, ref_sizes=sizes, **g)
+    # Without guidance the same budget holds one conditioning, and all
+    # three fit: the guided refusal counted both.
+    assert at(1024) == refs
+    # A reference area under the family's smallest is never named.
+    # The budget is just over the least the request takes without them.
+    tight = BUDGET_128
+    while True:
+        try:
+            tight = plan_memory(q_view, ENCODER, VAE, cfg=4.0,
+                                budget=tight - 1, **kw).peak
+        except ImageMemoryError:
+            break
+    tight += GiB // 32
+    with pytest.raises(ImageMemoryError) as e:
+        plan_memory(q_view, ENCODER, VAE, ref_sizes=refs,
+                    **{**g, "budget": tight})
+    assert ("the largest that fit are 0 of the 3 reference images at this "
+            "reference area, or all 3 at no smaller reference area"
+            ) in str(e.value)
+    assert memfit.PEAKS["qwen_image21"].prefix.min_ref_px == 256
 
 
 def test_fp32_vae_on_fp16_activations(z_view):
@@ -528,39 +611,118 @@ def test_the_step_row_covers_the_measured_footprints():
         assert row.step.bytes(rows * row.width * 2) >= gib * GiB, rows
 
 
-# Footprints in GiB of one Qwen-Image 2.1 Q4_K_M step through api.sample
-# under bounded_cache on an M5 Max, over the settled process, by (image
-# rows, text rows). Each holds the prefix state of its text rows, so the
-# plan covers it with the state and the step peak.
-MEASURED_QWEN_STEP = {(256, 512): 0.98, (256, 36): 0.63,
-                      (1024, 512): 1.43, (1024, 36): 1.20,
-                      (4096, 512): 2.19, (4096, 36): 1.77,
-                      (16384, 512): 5.88, (16384, 36): 5.37}
-# The prefill of a conditioning alone, over the footprint before it, by
-# text rows. It holds the state.
-MEASURED_QWEN_PREFILL = {512: 0.43, 36: 0.06}
+# The measured cells of one Qwen-Image 2.1 Q4_K_M request through
+# api.sample under bounded_cache on an M5 Max: text requests and requests
+# with reference images, on the stock ops and with the kernel routes in
+# force. See the file's "what".
+QWEN_CELLS = (Path(__file__).resolve().parents[1] / "fixtures" / "image"
+              / "memfit" / "qwen_image21_cells.json")
+# Two cells of 16384 image rows on the stock ops, by text rows: the
+# footprint of a step over the settled process, state included.
+MEASURED_QWEN_STEP_2048 = {512: 5.88, 36: 5.37}
+ROOM = 0.25 * GiB               # what a fit leaves above every cell
 
 
-def test_the_qwen_step_row_covers_the_measured_footprints():
+def _qwen_cells() -> list[dict]:
+    doc = json.loads(QWEN_CELLS.read_text())
+    cells = []
+    for c in doc["cells"]:
+        image = (c["height"] // 16) * (c["width"] // 16)
+        prefix = c["text_rows"] + c["refs"] * (c["ref_px"] // 16) ** 2
+        cells.append(dict(c, image=image, prefix=prefix,
+                          conds=2 if c["guided"] else 1))
+    for text, gib in MEASURED_QWEN_STEP_2048.items():
+        cells.append(dict(image=16384, prefix=text, conds=1, routes=[],
+                          refs=0, ref_px=0, guided=False, steps_gib=[gib],
+                          state_bytes=text * 2 * 32 * 4096 * 2,
+                          prefill_gib=None))
+    return cells
+
+
+def _room(row, cell: dict) -> tuple[float, float]:
+    """Bytes the row's plan leaves above the cell's largest step, and
+    above its prefill alone."""
+    state, step, prefill = memfit.prefix_row_terms(
+        row, cell["image"], cell["prefix"], 2)
+    assert state == cell["state_bytes"]
+    n = cell["conds"]
+    plan = n * state + row.step_peak(n * step, prefill)
+    alone = math.inf
+    if cell["prefill_gib"] is not None:
+        alone = (state + (row.prefill or row.step).bytes(prefill)
+                 - cell["prefill_gib"] * GiB)
+    return plan - max(cell["steps_gib"]) * GiB, alone
+
+
+def test_the_qwen_rows_cover_every_measured_cell():
     row = memfit.PEAKS["qwen_image21"]
     assert row.step is memfit.QWEN_IMAGE21_STEP
-    for (image, text), gib in MEASURED_QWEN_STEP.items():
-        state, step, prefill = memfit.prefix_row_terms(row, image, text, 2)
-        assert state == row.prefix.cache_bytes(text, 2)
-        assert state + row.step.bytes(step) >= gib * GiB, (image, text)
-        # The row is a fit, not a ceiling far above the readings.
-        assert state + row.step.bytes(step) <= 2.0 * gib * GiB, (image,
-                                                                 text)
-    for text, gib in MEASURED_QWEN_PREFILL.items():
-        state, _, prefill = memfit.prefix_row_terms(row, 256, text, 2)
-        assert state + row.step_peak(0, prefill) >= gib * GiB, text
+    assert row.prefill is memfit.QWEN_IMAGE21_PREFILL
+    cells = _qwen_cells()
+    # Both paths, text requests and requests with references, guided and
+    # not, are among the cells.
+    for routes in (True, False):
+        mine = [c for c in cells if bool(c["routes"]) is routes]
+        assert sum(1 for c in mine if not c["refs"]) >= 44
+        assert sum(1 for c in mine if c["refs"] and c["guided"]) == 25
+        assert sum(1 for c in mine if c["refs"] and not c["guided"]) == 25
+        assert {(c["refs"], c["ref_px"]) for c in mine if c["refs"]} == {
+            (n, px) for n in (1, 2) for px in (256, 512, 1024)} | {
+            (4, 1024)}
+    for c in cells:
+        step, alone = _room(row, c)
+        assert step >= ROOM and alone >= ROOM, c
+    # The rows are fits, not ceilings far above the readings: a text
+    # request on the stock ops is priced within 1 GiB of its reading up
+    # to 4096 image rows, and within 1.5 GiB at 16384.
+    text = [c for c in cells if not c["refs"] and not c["routes"]]
+    assert max(_room(row, c)[0] for c in text
+               if c["image"] <= 4096) <= 1.0 * GiB
+    assert max(_room(row, c)[0] for c in text) <= 1.5 * GiB
+    assert min(_room(row, c)[0] for c in cells) <= 0.3 * GiB
+
+
+def test_a_thinner_qwen_row_misses_a_measured_cell():
+    row = memfit.PEAKS["qwen_image21"]
+    cells = _qwen_cells()
+
+    def worst(**change) -> float:
+        thin = dataclasses.replace(row, **change)
+        return min(min(_room(thin, c)) for c in cells)
+
+    assert worst() >= ROOM
+    # The step base the stock ops read over, at 1936 image rows with 512
+    # text rows.
+    for base in (0.9, 1.0):
+        assert worst(step=memfit.StepFit(base * GiB, 4.0)) < 0.05 * GiB
+    assert worst(step=memfit.StepFit(0.9 * GiB, 4.0)) < 0
+    # The prefill fit of another family, and the step's own fit, leave
+    # the first step after the prefill of one 1024 pixel reference no
+    # room.
+    assert worst(prefill=memfit.Z_IMAGE_STEP) < 0.05 * GiB
+    assert worst(prefill=memfit.StepFit(1.25 * GiB, 5.5)) < ROOM
+    assert worst(prefill=None) < 0.05 * GiB
+    # Both under the rows that were in force before these cells.
+    assert worst(step=memfit.StepFit(1.0 * GiB, 4.0),
+                 prefill=memfit.Z_IMAGE_STEP) < -0.1 * GiB
+
+
+def test_a_reference_token_holds_its_cache_bytes():
+    """Every measured state is 2 x 32 x 4096 elements a prefix row in
+    bf16, whatever the references."""
+    row = memfit.PEAKS["qwen_image21"]
+    per_row = 2 * 32 * 4096 * 2
+    assert row.prefix.cache_bytes(1, 2) == per_row == 524288
+    seen = set()
+    for c in _qwen_cells():
+        assert c["state_bytes"] == c["prefix"] * per_row
+        seen.add((c["refs"], c["ref_px"]))
+    assert {(2, 1024), (4, 1024), (0, 0)} <= seen
+    assert row.prefix.rows(512, 2, 1024) == 512 + 2 * 4096
 
 
 def test_a_prefill_keeps_its_own_fit(q_view):
-    """No prefill of a prefix with reference images is measured, so the
-    step fit of Qwen-Image 2.1 does not price one."""
     row = memfit.PEAKS["qwen_image21"]
-    assert row.prefill is memfit.Z_IMAGE_STEP
     assert row.prefill.k > row.step.k and row.prefill.base >= row.step.base
     assert row.step_peak(GiB, 0) == row.step.bytes(GiB)
     assert row.step_peak(0, GiB) == row.prefill.bytes(GiB)
@@ -577,6 +739,101 @@ def test_a_prefill_keeps_its_own_fit(q_view):
     assert z.prefill is None
     assert z.step_peak(GiB, 2 * GiB) == z.step.bytes(2 * GiB)
     assert z.step_peak(GiB, 0) == z.step.bytes(GiB)
+
+
+# MLX peak in GiB of one Qwen3-VL-8B Q4_K_M encode over the encoder with
+# its tower, on an M5 Max in fresh processes, by (references, reference
+# side, feature rows). The tower ran on the GPU with float32 products
+# exact, the arm that reads higher.
+MEASURED_QWEN_ENCODE = {(0, 0, 614): 0.51, (1, 256, 82): 0.48,
+                        (2, 256, 754): 0.67, (1, 512, 274): 1.44,
+                        (2, 512, 1138): 1.46, (1, 1024, 1042): 1.91,
+                        (2, 1024, 2674): 1.98}
+
+
+def test_the_encode_phase_counts_the_image_rows_and_the_tower(q_view):
+    row = memfit.PEAKS["qwen_image21"]
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              budget=BUDGET_128, overcommit=False)
+    for (refs, side, rows), gib in MEASURED_QWEN_ENCODE.items():
+        slots = refs * (side // 32) ** 2
+        p = plan_memory(q_view, ENCODER, 0, caption_tokens=rows - slots,
+                        ref_sizes=[(side, side)] * refs, **kw)
+        assert p.terms["encode_peak"] == int(
+            rows * row.encode_row_bytes * memfit.ENCODE_LIVE
+            + (row.encode_tower_bytes if refs else 0))
+        if refs:
+            assert p.terms["encode_peak"] >= gib * GiB + ROOM, (refs, side)
+        else:
+            assert p.terms["encode_peak"] >= gib * GiB
+    # Without the tower term the encode of one 512 pixel reference is
+    # under its reading.
+    assert 274 * row.encode_row_bytes * memfit.ENCODE_LIVE < 1.44 * GiB
+    # A family without references has no such term.
+    assert memfit.PEAKS["z_image"].encode_tower_bytes == 0
+
+
+def _sized(**tensors):
+    """A header view of tensors with their bytes."""
+    return SimpleNamespace(tensors={
+        name: SimpleNamespace(nbytes=int(n), shape=(), codec="F32")
+        for name, n in tensors.items()})
+
+
+# MLX peak in GiB of each part's load over what stays resident, on the
+# Qwen-Image 2.1 files in fresh processes on an M5 Max.
+MEASURED_LOAD = {"encoder": 0.478, "encoder and mmproj": 1.550,
+                 "vae gguf to bf16": 1.331, "vae gguf to float32": 1.200,
+                 "vae safetensors to bf16": 0.711}
+HEAD_BYTES = 510_504_960        # output.weight of the Qwen3-VL-8B Q4_K_M
+MMPROJ_FILE = 1_162_548_160     # the tensors of its BF16 mmproj
+VAE_ELEMENTS = 337_740_404      # of the Qwen-Image 2.1 VAE
+
+
+def test_the_load_term_covers_the_measured_loads():
+    enc = _sized(**{"output.weight": HEAD_BYTES, "blk.0.w": 4 << 30})
+    mm = _sized(**{"v.w": MMPROJ_FILE})
+    vae = SimpleNamespace(shapes={"w": (VAE_ELEMENTS,)})
+    t, room = memfit.load_transient, memfit.LOAD_ROOM
+    assert t() == 0 and t(5 << 30, 1 << 30, 2 << 30) == 0
+    assert t(enc) == int(room * HEAD_BYTES)
+    assert t(enc) >= MEASURED_LOAD["encoder"] * GiB
+    assert t(enc, None, mm) == int(room * (HEAD_BYTES + MMPROJ_FILE))
+    assert t(enc, None, mm) >= MEASURED_LOAD["encoder and mmproj"] * GiB
+    # An mmproj without its encoder loads nothing.
+    assert t(None, None, mm) == 0
+    assert t(None, vae) == int(room * VAE_ELEMENTS * 4)
+    assert t(None, vae) >= max(v for k, v in MEASURED_LOAD.items()
+                               if k.startswith("vae")) * GiB
+    # The bytes named alone are under two of the readings.
+    assert HEAD_BYTES < MEASURED_LOAD["encoder"] * GiB
+    assert VAE_ELEMENTS * 4 < MEASURED_LOAD["vae gguf to bf16"] * GiB
+    # The parts load one after the other: the larger of the two.
+    assert t(enc, vae, mm) == max(t(enc, None, mm), t(None, vae))
+
+
+def test_a_plan_made_before_the_load_has_a_load_phase(q_view):
+    kw = dict(family="qwen_image21", height=512, width=512,
+              overcommit=False)
+    loaded = plan_memory(q_view, ENCODER, VAE, budget=BUDGET_128, **kw)
+    assert "load" not in loaded.phases and "load_peak" not in loaded.terms
+    peak = int(1.4 * GiB)
+    p = plan_memory(q_view, ENCODER, VAE, load_peak=peak, budget=BUDGET_128,
+                    **kw)
+    assert list(p.phases)[0] == "load"
+    assert p.phases["load"] == p.weight_bytes + peak
+    assert {k: v for k, v in p.phases.items() if k != "load"} == \
+        loaded.phases
+    # The release of the encoder is no lever of the load: a request whose
+    # other phases fit with it is refused when its load does not.
+    released = plan_memory(q_view, ENCODER, VAE,
+                           budget=loaded.weight_bytes + GiB, **kw)
+    assert released.fits and released.release_encoder
+    with pytest.raises(ImageMemoryError) as e:
+        plan_memory(q_view, ENCODER, VAE, load_peak=peak,
+                    budget=loaded.weight_bytes + GiB, **kw)
+    assert "load_peak 1.40 GiB" in str(e.value)
+    assert e.value.plan.peak == e.value.plan.phases["load"]
 
 
 def test_the_vae_rows_cover_the_measured_footprints():

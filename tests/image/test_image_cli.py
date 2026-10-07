@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -509,16 +510,24 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     sizes = {"dit": 5 << 30, "encoder": 2 << 30, "vae": 160 << 20}
     monkeypatch.setattr(api, "_header_bytes",
                         lambda path, kind: 0 if path is None else sizes[kind])
+    seen = []
+    monkeypatch.setattr(pf, "load_transient",
+                        lambda *parts: seen.append(parts) or 300 << 20)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
     plan = pf.check("d", "e", "v", height=1024, width=1024, cfg=None)
     assert plan.fits and plan.terms["dit"] == sizes["dit"]
     assert plan.terms["encoder"] == sizes["encoder"]
-    assert list(plan.phases) == ["encode", "denoise", "decode"]
+    # The load is a phase of the plan the command makes before it loads:
+    # every part resident, and what the load holds beside them.
+    assert list(plan.phases) == ["load", "encode", "denoise", "decode"]
+    assert seen == [("e", "v", None)]
+    assert plan.phases["load"] == sum(sizes.values()) + (300 << 20)
     # An init image adds the phase of its encode.
     init = pf.check("d", "e", "v", height=1024, width=1024, cfg=None,
                     init_image=True)
-    assert list(init.phases) == ["encode", "init", "denoise", "decode"]
+    assert list(init.phases) == ["load", "encode", "init", "denoise",
+                                 "decode"]
     assert init.terms["init_peak"] == memfit.vae_peak(
         "encode", 1024, 1024, family="z_image", itemsize=2)
     # At 12 GiB the request fits with the encoder released. A caller
@@ -1059,11 +1068,15 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
     monkeypatch.setattr(api, "_header_bytes",
                         lambda path, kind: 0 if path is None else sizes[kind])
     monkeypatch.setattr(te, "_header_view", lambda path: 2 << 30)
+    seen = []
+    monkeypatch.setattr(pf, "load_transient",
+                        lambda *parts: seen.append(parts) or 1 << 30)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 200 << 30)
     kw = dict(height=512, width=512, cfg=1.0)
     text = pf.check("d", "e", "v", **kw)
     assert text.terms["mmproj"] == 0 and "init" not in text.phases
+    assert seen == [("e", "v", None)]
     refs = [(1024, 1024), (512, 768)]
     plan = pf.check("d", "e", "v", mmproj="m", refs=refs, **kw)
     assert plan.terms["mmproj"] == 2 << 30
@@ -1073,8 +1086,26 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
         row.prefix.cache_bytes(tokens, 2)
     assert plan.terms["init_peak"] == memfit.vae_peak(
         "encode", 1024, 1024, family="qwen_image21", itemsize=2)
-    assert list(plan.phases) == ["encode", "init", "denoise", "decode"]
+    assert list(plan.phases) == ["load", "encode", "init", "denoise",
+                                 "decode"]
+    assert seen[-1] == ("e", "v", "m")
+    assert plan.phases["load"] == (sum(sizes.values()) + (2 << 30)
+                                   + (1 << 30))
+    # The encode runs the image rows of the references beside the text,
+    # and the tower.
+    assert plan.terms["encode_peak"] - text.terms["encode_peak"] == int(
+        tokens // 4 * row.encode_row_bytes * memfit.ENCODE_LIVE
+        + row.encode_tower_bytes)
     # Guidance holds the references in both conditionings.
     both = pf.check("d", "e", "v", mmproj="m", refs=refs,
                     **{**kw, "cfg": 4.0})
     assert both.terms["prefix_cache"] == 2 * plan.terms["prefix_cache"]
+    # A budget the guided request passes: the refusal names the most of
+    # its references and the largest reference area that fit.
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 22 << 30)
+    assert pf.check("d", "e", "v", mmproj="m", **{**kw, "cfg": 4.0}).fits
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        pf.check("d", "e", "v", mmproj="m", refs=refs, **{**kw, "cfg": 4.0})
+    assert re.search(r"; the largest that fit are \d of the 2 reference "
+                     r"images at this reference area, or all 2 at a "
+                     r"reference area of \d+ x \d+ px\. ", str(e.value))

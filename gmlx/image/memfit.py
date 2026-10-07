@@ -20,6 +20,15 @@ the VAE runs, so the VAE phases count it too.
 A request runs a negative row whenever its guidance is not 1.0, as
 ``api.sample`` does, and the plan counts the second conditioning then.
 
+A request with reference images encodes their image rows beside the text
+and runs the encoder's vision tower, which the encode phase counts, and
+its VAE encodes them one at a time in the phase of the init image. A
+request that does not fit is refused with the largest count of its
+references and the largest reference area that do.
+
+A plan made before the parts load has a load phase too: what stays
+resident and what the load holds beside it, from ``load_transient``.
+
 A VAE pass runs whole when its phase fits the budget and in tiles when
 it does not. Levers apply in order until the plan fits: sequential rows
 in place of a batch, release of an owned encoder after encoding, which
@@ -93,15 +102,29 @@ Z_IMAGE_STEP = StepFit(base=1.0 * GiB, k=5.5)
 
 # One Qwen-Image 2.1 Q4_K_M step through ``api.sample`` under bounded_cache
 # on an M5 Max, in fresh processes, over the settled process and less the
-# prefix state of the conditioning: 0.73, 1.17, 1.94 and 5.63 GiB at 256,
-# 1024, 4096 and 16384 image rows with 512 text rows, and 0.61, 1.18, 1.75
-# and 5.34 GiB with 36. At 16384 rows the active peak is 2.5 GiB above the
-# weights and the state, and the cache holds 2.6 GiB against its bound of
-# 2. A line in the formula bytes through the 4096 and 16384 row cells has
-# a slope of 3.6. The slope is raised 10 percent, to 4.0 rounded up, and
-# the base covers every cell. The prefill of 512 text rows reads 0.18 GiB
-# above its state, under the base.
-QWEN_IMAGE21_STEP = StepFit(base=1.0 * GiB, k=4.0)
+# prefix states of its conditionings. The cells are in
+# tests/fixtures/image/memfit/qwen_image21_cells.json: text requests of
+# 256 to 4096 image rows with 36 to 512 text rows, and requests with one
+# and two reference images of 256, 512 and 1024 pixels and with four of
+# 1024, with and without guidance, each on the stock ops and with the
+# kernel routes in force.
+# Two cells of 16384 image rows read 5.63 and 5.34 GiB. A line in the
+# formula bytes through the 4096 and 16384 row cells has a slope of 3.6,
+# raised 10 percent to 4.0 rounded up. The base is 0.25 GiB above every
+# cell on both paths: the stock ops read highest, at 1764 to 2304 image
+# rows with 512 text rows, where the cache holds 1.4 GiB of freed
+# buffers.
+QWEN_IMAGE21_STEP = StepFit(base=1.25 * GiB, k=4.0)
+
+# The first step of a Qwen-Image 2.1 request comes after the prefill of
+# its conditionings, whose freed buffers the cache still holds. In the
+# same cells a prefill alone reads 2.42 GiB above its state at two
+# 1024 pixel references on the stock ops and 3.80 GiB at four, and the
+# first step after one reads up to 0.3 GiB above a later step. In the formula bytes of the
+# prefix rows the tightest cell, one 1024 pixel reference and 512 text
+# rows at 4096 image rows on the stock ops, needs a slope of 5.9 over the
+# step's base for 0.25 GiB of room. The slope is raised 10 percent.
+QWEN_IMAGE21_PREFILL = StepFit(base=1.25 * GiB, k=6.5)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
@@ -358,6 +381,10 @@ class PrefixRow:
     blocks: int                     # blocks that cache K and V
     dim: int                        # elements of one K or V row
     token_px: int                   # pixels per reference token on each axis
+    slot_tokens: int = 4            # reference tokens per image row of the
+                                    # encoder
+    min_ref_px: int = 0             # the smallest reference size, the side
+                                    # of the square of a reference's area
 
     def rows(self, text: int, refs: int, ref_px: int) -> int:
         """Prefix rows of one conditioning with ``text`` text rows and
@@ -385,6 +412,8 @@ class PeakRow:
     encode_row_bytes: int = 0       # encoder activation bytes per token,
                                     # times ENCODE_LIVE
     text_rows: int = 512
+    encode_tower_bytes: int = 0     # an encode with reference images holds
+                                    # this beside its rows, for the tower
     mmproj_fp32: bool = False       # the encoder's load casts the float
                                     # tensors of its mmproj to float32
 
@@ -407,16 +436,20 @@ PEAKS = {
     # op does not hold them on the machine measured: alone, at the shape
     # of a step, it peaks at its output, 0.03 GiB at 1024x1024 and
     # 0.13 GiB at 2048x2048, where the scores are 1.1 and 16.5 GiB in
-    # bf16. That is one machine, an M5 Max, and no reference image. Were
-    # the scores held, a step would add those figures, and 10.1 GiB with
-    # nine 1024 pixel references. The prefill of a prefix with reference
-    # images is not measured, so a prefill keeps Z-Image's slope.
+    # bf16. That is one machine, an M5 Max. With two 1024 pixel references
+    # under guidance the scores of a step are 6.3 GiB, and the step reads
+    # 3.5 GiB above its states. A reference token holds exactly its cache
+    # bytes, 2 x 32 x 4096 elements, per conditioning. An encode with
+    # reference images reads up to 1.44 GiB above the encoder at one
+    # 512 pixel reference and 1.98 GiB at two of 1024 pixels with 600 text
+    # rows, the vision tower's pass over one image being the peak.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
                             width=24576 + 12288, step=QWEN_IMAGE21_STEP,
                             prefix=PrefixRow(blocks=32, dim=4096,
-                                             token_px=16),
-                            prefill=Z_IMAGE_STEP,
+                                             token_px=16, min_ref_px=256),
+                            prefill=QWEN_IMAGE21_PREFILL,
                             encode_row_bytes=3 * 12288 * 2,
+                            encode_tower_bytes=int(1.5 * GiB),
                             mmproj_fp32=True),
 }
 
@@ -534,6 +567,36 @@ def vae_bytes(src, itemsize: int) -> int:
         * itemsize
 
 
+# What a load holds over what stays resident, read on the Qwen-Image 2.1
+# files on an M5 Max, each part in a fresh process: the encoder's output
+# matrix until it is dropped, 0.48 GiB; with an mmproj whose 16-bit
+# tensors load as float32, the file's 1.08 GiB beside the cast, 1.55 GiB
+# in all; a VAE's file tensors beside their copies in the decode dtype and
+# layout, 1.33 GiB from a float32 GGUF to bf16 and 1.20 to float32, and
+# 0.71 and 0.77 GiB from safetensors. The bytes named are the output
+# matrix, the mmproj file and the VAE's tensors at float32, 0.48, 1.08
+# and 1.26 GiB there, and the term is those times this.
+LOAD_ROOM = 1.1
+
+
+def load_transient(encoder=None, vae=None, mmproj=None) -> int:
+    """Bytes the load of an image pipeline holds at its peak over what
+    stays resident, from the header views of the encoder and its mmproj
+    and the header of the VAE. The parts load one after the other, so
+    the figure is the larger of the encoder's and the VAE's. A part given
+    as a number, or not at all, counts nothing."""
+    head = 0
+    if encoder is not None and not isinstance(encoder, (int, float)):
+        head = file_bytes(encoder) - file_bytes(encoder,
+                                                skip=("output.weight",))
+        if mmproj is not None and not isinstance(mmproj, (int, float)):
+            head += file_bytes(mmproj)
+    copies = 0
+    if vae is not None and not isinstance(vae, (int, float)):
+        copies = vae_bytes(vae, 4)
+    return int(LOAD_ROOM * max(head, copies))
+
+
 def image_rows(row: PeakRow, height: int, width: int,
                caption: int | None) -> int:
     """Rows per item of one step: image tokens padded to the family's
@@ -600,8 +663,10 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 prefix_shared: bool = False, prefix_other: int = 0,
                 prefix_bound: int = 0, cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
-                ref_sizes=(), vae_price=None, budget: float | None = None,
-                overcommit: bool | None = None) -> MemoryPlan:
+                ref_sizes=(), vae_price=None, load_peak: int = 0,
+                budget: float | None = None,
+                overcommit: bool | None = None,
+                _hint: bool = True) -> MemoryPlan:
     """The memory plan for one image request.
 
     ``dit``, ``encoder``, ``mmproj`` and ``vae`` are header views or byte
@@ -631,6 +696,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     ``prefix_other`` bytes of other conditionings sheds them to
     ``prefix_bound`` as the request's states come in, and what stays is
     part of the prefix cache term.
+
+    ``load_peak`` is what the load of the parts holds over what stays
+    resident, as ``load_transient`` gives it from their headers. With it
+    the plan has a load phase, which a plan for parts that are loaded
+    already leaves out.
     """
     try:
         row = PEAKS[family]
@@ -666,7 +736,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     }
     rows = image_rows(row, height, width, caption_tokens)
     text = row.text_rows if text_tokens is None else text_tokens
-    counted = 0
+    counted = slots = 0
     if row.prefix is not None:
         counted = row.prefix.rows(text, refs, ref_px)
         if not refs:
@@ -674,6 +744,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
             counted += sum((int(h) // row.prefix.token_px)
                            * (int(w) // row.prefix.token_px)
                            for h, w in ref_sizes)
+        # The image rows the encoder runs beside the text.
+        slots = (counted - text) // row.prefix.slot_tokens
     given = [] if prefix_rows is None else [int(n) for n in prefix_rows]
     per = [prefix_row_terms(row, rows, n, act)
            for n in (given + [counted] * conds)[:conds]]
@@ -703,7 +775,10 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                         price("encode", False, h, w),
                         price("encode", True, h, w) if tiles else None))
     caption = row.text_rows if caption_tokens is None else caption_tokens
-    encode_peak = caption * row.encode_row_bytes * ENCODE_LIVE
+    # An encode with reference images runs their image rows beside the
+    # text, and the tower.
+    encode_peak = ((caption + slots) * row.encode_row_bytes * ENCODE_LIVE
+                   + (row.encode_tower_bytes if slots else 0))
 
     def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
         t = dict(terms)
@@ -716,7 +791,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         later = resident - (t["encoder"] + t["mmproj"] if release else 0)
         # The prefix states stay in their cache until the request ends.
         held = later + t["prefix_cache"]
-        phases = {"encode": resident + t["encode_peak"]}
+        phases = {}
+        if load_peak:
+            t["load_peak"] = int(load_peak)
+            phases["load"] = resident + t["load_peak"]
+        phases["encode"] = resident + t["encode_peak"]
         tiled_init = False
         if encodes:
             # A tiled encode is the whole one, so it is a choice by what
@@ -761,33 +840,64 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     if not encoder_owned and (terms["encoder"] or terms["mmproj"]):
         hint += ("; the encoder is not released in this request and stays "
                  "resident")
-    if refs:
-        hint += _ref_hint(row, plan, rows, text, refs, ref_px, conds, act)
+    sizes = ([(ref_px, ref_px)] * refs if refs
+             else [(int(h), int(w)) for h, w in ref_sizes])
+    if _hint and sizes and row.prefix is not None and budget is not None:
+        def fits(k: int, scale: float) -> bool:
+            kw = dict(refs=k, ref_px=_scaled(ref_px, scale)) if refs else dict(
+                ref_sizes=[(_scaled(h, scale), _scaled(w, scale))
+                           for h, w in sizes[:k]])
+            return _replan(
+                dit, encoder, vae, mmproj, adapters, family=family,
+                height=height, width=width, cfg=cfg, dtype=dtype,
+                vae_dtype=vae_dtype, batch_rows=batch_rows,
+                encoder_owned=encoder_owned, caption_tokens=caption_tokens,
+                text_tokens=text_tokens, prefix_other=prefix_other,
+                prefix_bound=prefix_bound, cache_bytes=cache_bytes,
+                tile=tile, init_image=init_image, vae_price=vae_price,
+                load_peak=load_peak, budget=budget, **kw)
+
+        hint += _ref_hint(fits, sizes, row.prefix.min_ref_px)
     raise ImageMemoryError(
         f"image request does not fit: {plan.describe()}. {hint}. "
         "GMLX_OVERCOMMIT=1 overrides.", plan)
 
 
-def _ref_hint(row: PeakRow, plan: MemoryPlan, image: int, text: int,
-              refs: int, ref_px: int, conds: int, itemsize: int) -> str:
-    """The largest reference count, and the largest reference size at the
-    requested count, that fit the denoise phase."""
-    if row.prefix is None or plan.budget is None:
-        return ""
-    room = (plan.budget - plan.phases["denoise"]
-            + plan.terms["prefix_cache"] + plan.terms["step_peak"])
+REF_GRID_PX = 32            # reference sides and sizes step by this
 
-    def fits(n: int, px: int) -> bool:
-        cache, step, prefill = prefix_terms(row, image, text, n, px,
-                                            itemsize)
-        return (conds * cache
-                + row.step_peak(plan.rows * step, prefill)) <= room
 
-    count = max((n for n in range(refs + 1) if fits(n, ref_px)), default=0)
-    side = next((s for s in range(ref_px, 0, -row.prefix.token_px)
-                 if fits(refs, s)), 0)
-    return (f"; {count} references of {ref_px} px fit, or {refs} of "
-            f"{side} px")
+def _scaled(px: int, scale: float) -> int:
+    """A reference side at ``scale``, on the grid of reference sides."""
+    return max(REF_GRID_PX, round(px * scale / REF_GRID_PX) * REF_GRID_PX)
+
+
+def _replan(*args, **kw) -> bool:
+    try:
+        return plan_memory(*args, overcommit=False, _hint=False, **kw).fits
+    except ImageMemoryError:
+        return False
+
+
+def _ref_hint(fits, sizes: list, least: int) -> str:
+    """What of a request with reference images fits its budget: the most
+    of its references, first ones first, at their sizes, and the largest
+    reference area at which all of them fit, down to a side of ``least``
+    pixels. The reference area is that of the largest reference, named by
+    the side of its square. ``fits(count, scale)`` plans the request with
+    its first ``count`` references at ``scale`` times their sides, every
+    phase and every conditioning counted."""
+    n = len(sizes)
+    count = next((k for k in range(n - 1, -1, -1) if fits(k, 1.0)), None)
+    if count is None:
+        return "; the request does not fit without reference images either"
+    side0 = math.isqrt(max(h * w for h, w in sizes))
+    top = (side0 - 1) // REF_GRID_PX * REF_GRID_PX
+    side = next((s for s in range(top, max(least, REF_GRID_PX) - 1,
+                                  -REF_GRID_PX) if fits(n, s / side0)), 0)
+    area = (f"all {n} at a reference area of {side} x {side} px" if side
+            else f"all {n} at no smaller reference area")
+    return (f"; the largest that fit are {count} of the {n} reference "
+            f"images at this reference area, or {area}")
 
 
 def vae_row(family: str) -> VaeMemoryRow:

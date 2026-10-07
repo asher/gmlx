@@ -1,7 +1,8 @@
 """Startup fit check for ``gmlx image``.
 
 The memory plan of the request, from the headers of the DiT, the text
-encoder and the VAE, before any weights load. A request that cannot fit
+encoder and the VAE, before any weights load, with what the load holds
+beside them. A request that cannot fit
 with every lever applied is refused with the plan's terms, instead of
 failing after a load of several GB. GMLX_TOOL_PREFLIGHT=0 skips it.
 """
@@ -19,6 +20,20 @@ def identify_dit(path: str):
     from gmlx.image.loader import identify_dit as identify
 
     return identify(path)
+
+
+def load_transient(encoder: str | None, vae: str | None,
+                   mmproj: str | None) -> int:
+    """Bytes the load of the parts holds over what stays resident, from
+    their headers."""
+    from gmlx.image import memfit
+    from gmlx.image.text_encoder import _header_view
+    from gmlx.image.vae import read_header
+
+    return memfit.load_transient(
+        None if encoder is None else _header_view(encoder),
+        None if vae is None else read_header(str(vae)),
+        None if mmproj is None else _header_view(mmproj))
 
 
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
@@ -47,11 +62,12 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
             return None
         cfg = row.cfg
     act = image_activation(fam)
+    tower = None if mmproj is None else _header_view(mmproj)
     return memfit.plan_memory(
         _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
-        _header_bytes(vae, "vae"),
-        None if mmproj is None else _header_view(mmproj),
+        _header_bytes(vae, "vae"), tower,
         adapters=adapters, family=fam, height=height, width=width, cfg=cfg,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
         ref_sizes=[(int(h), int(w)) for h, w in refs],
+        load_peak=load_transient(encoder, vae, mmproj),
         encoder_owned=not keep_encoder)
