@@ -850,6 +850,19 @@ flags leave out, and a DiT of an unknown variant needs `--steps` and
 `--guidance`. The latents equal those of the Python `sample` call with the
 noise of the same seed.
 
+Each family takes the text encoder its DiT was trained with and its own
+VAE. A file of another model in either place is refused by name before
+the weights load.
+
+| Family | `--encoder` | `--vae` | Defaults |
+|--------|-------------|---------|----------|
+| Z-Image | Qwen3-4B | The FLUX.1 autoencoder | The variant's steps and guidance. |
+| Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. |
+
+Qwen-Image 2.1 wraps the prompt in the template of its reference pipeline,
+a fixed system turn before the prompt, and conditions on the rows after
+that turn. An empty prompt is encoded as one space, as the reference does.
+
 A guidance other than 1 runs the DiT twice in each step, on the prompt and on
 the negative prompt. With no `--negative-prompt` it guides against the
 empty prompt, which is encoded like any other prompt.
