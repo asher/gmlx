@@ -37,15 +37,16 @@ class _OwnedEncoder(_Encoder):
         return True
 
 
-def _decode(pipe, x, tiled=None):
-    pipe.decoded.append(tiled)
+def _decode(pipe, x, tiled=None, plan=None):
+    pipe.decoded.append((tiled, plan))
     b, _, h, w = x.shape
     v = mx.sigmoid(x.mean(axis=1))[..., None]
     img = mx.broadcast_to(v, (b, h, w, 3))
     return mx.repeat(mx.repeat(img, 8, axis=1), 8, axis=2)
 
 
-def _encode(pipe, image, tiled=None, mode="mode", noise=None):
+def _encode(pipe, image, tiled=None, mode="mode", noise=None, plan=None):
+    pipe.encoded_images.append((tiled, plan))
     x = mx.array(image).mean(axis=-1)[:, None]
     pooled = x.reshape(x.shape[0], 1, x.shape[2] // 8, 8, x.shape[3] // 8,
                        8).mean(axis=(3, 5))
@@ -60,7 +61,7 @@ def env(tmp_path, monkeypatch):
         p.write_bytes(b"x")
         files[name] = str(p)
     state = SimpleNamespace(pipes=[], plan=SimpleNamespace(
-        release_encoder=False, tiled_decode=False, levers=(),
+        release_encoder=False, tiled_decode=False, levers=(), rows=2,
         describe=lambda: "peak 9.00 GiB against a budget of 8.00 GiB"),
         variant="turbo", checks=[], checked=None)
     fam = get_family("z_image")
@@ -70,14 +71,16 @@ def env(tmp_path, monkeypatch):
                                  variant=state.variant,
                                  encoder=_OwnedEncoder(), vae=object(),
                                  load_seconds={"dit": 0.0}, log=log)
-        pipe.decoded = []
+        pipe.decoded, pipe.encoded_images = [], []
         state.pipes.append(pipe)
         return pipe
 
     monkeypatch.setattr(api, "load", load)
     monkeypatch.setattr(api, "vae_decode", _decode)
     monkeypatch.setattr(api, "vae_encode", _encode)
-    monkeypatch.setattr(api, "plan_request", lambda *a, **k: state.plan)
+    monkeypatch.setattr(api, "plan_request",
+                        lambda *a, **k: state.planned.append(k) or state.plan)
+    state.planned = []
     view = SimpleNamespace(tensors={
         "a": SimpleNamespace(shape=(4, 4), codec="Q4_K"),
         "b": SimpleNamespace(shape=(4, 4), codec="Q4_K"),
@@ -210,6 +213,13 @@ def test_img2img_and_inpainting_reach_sample(env, tmp_path, monkeypatch):
     assert (k["width"], k["height"]) == (64, 32)
     assert k["denoise"] == 0.6 and k["mask"] is None
     assert k["init_latents"].shape == (1, 4, 4, 8)
+    # The plan counts the encode of the init image, before the load and
+    # after it, and the encode and the decode run as that plan says.
+    assert env.checks[-1]["init_image"] is True
+    assert env.planned[-1]["init_image"] is True
+    pipe = env.pipes[-1]
+    assert pipe.encoded_images == [(None, env.plan)]
+    assert pipe.decoded == [(None, env.plan)]
     assert umbrella_main(env.base + ["--prompt", "p", "--init-image",
                                      str(tmp_path / "in.png"), "--mask",
                                      str(tmp_path / "m.png"), "--output",
@@ -229,10 +239,13 @@ def test_encoder_release_follows_the_policy_and_the_plan(env, tmp_path):
 
     assert not run().encoder.released
     assert run("--encoder-release", "always").encoder.released
+    assert env.checks[-1]["init_image"] is False
+    assert env.planned[-1]["init_image"] is False
     env.plan.release_encoder = True
-    env.plan.tiled_decode = True
     pipe = run()
-    assert pipe.encoder.released and pipe.decoded == [True]
+    # The decode is handed the plan, which says how it runs, and no
+    # choice of the command's own.
+    assert pipe.encoder.released and pipe.decoded == [(None, env.plan)]
 
 
 def test_never_releasing_an_encoder_the_plan_must_release_exits_2(
@@ -358,6 +371,15 @@ def test_bench_records_each_size_from_empty_caches(env, tmp_path, capsys):
     assert len(env.pipes) == 1 and pipe.encoder.encoded == ["a red bicycle "
         "leaning on a brick wall, morning light"] * 6
     assert pipe.dit.calls == 18
+    # A bench keeps its encoder, so no plan of it counts a release, and
+    # every decode runs as the plan of its run says.
+    assert env.checks[0]["keep_encoder"] is True
+    assert len(env.planned) == 6
+    assert all(k["keep_encoder"] is True for k in env.planned)
+    assert [(k["width"], k["height"]) for k in env.planned] == [
+        (32, 32)] * 3 + [(48, 32)] * 3
+    assert pipe.decoded == [(None, env.plan)] * 6
+    assert not pipe.encoder.released
     for r in recs:
         assert r["schema"] == "gmlx.image.bench/1" and r["label"] == "toy"
         assert set(r) >= {"gmlx_version", "mlx_version", "machine", "model",
@@ -415,6 +437,21 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     plan = pf.check("d", "e", "v", height=1024, width=1024, cfg=None)
     assert plan.fits and plan.terms["dit"] == sizes["dit"]
     assert plan.terms["encoder"] == sizes["encoder"]
+    assert list(plan.phases) == ["encode", "denoise", "decode"]
+    # An init image adds the phase of its encode.
+    init = pf.check("d", "e", "v", height=1024, width=1024, cfg=None,
+                    init_image=True)
+    assert list(init.phases) == ["encode", "init", "denoise", "decode"]
+    assert init.terms["init_peak"] == memfit.vae_peak(
+        "encode", 1024, 1024, family="z_image", itemsize=2)
+    # At 12 GiB the request fits with the encoder released. A caller
+    # that keeps the encoder has no such lever, and tiles the decode.
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 12 << 30)
+    freed = pf.check("d", "e", "v", height=1024, width=1024, cfg=None)
+    assert freed.levers == ("release the encoder",)
+    kept = pf.check("d", "e", "v", height=1024, width=1024, cfg=None,
+                    keep_encoder=True)
+    assert kept.levers == ("tiled decode",) and not kept.release_encoder
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 6 << 30)
     with pytest.raises(memfit.ImageMemoryError):
         pf.check("d", "e", "v", height=1024, width=1024, cfg=1.0)
@@ -445,7 +482,7 @@ def _tiny_pipe(log=print):
     pipe = api.ImagePipeline(dit=m, family=get_family("z_image"),
                              variant="turbo", encoder=_TinyEncoder(),
                              vae=object(), load_seconds={"dit": 0.0}, log=log)
-    pipe.decoded = []
+    pipe.decoded, pipe.encoded_images = [], []
     return pipe
 
 
@@ -611,6 +648,8 @@ def test_the_command_plans_the_conditionings_and_the_table_it_samples(
         assert len(plan["conds"]) == len(want)
         assert all(a is b for a, b in zip(plan["conds"], want))
         assert plan["patch_table"] == kw["patch_table"]
+        # The run follows the plan it was admitted under.
+        assert kw["plan"] is tiny.plan
         assert (plan["patch_table"] not in (None, pipe.default_table)) \
             == adapted
         assert (plan["height"], plan["width"], plan["cfg"]) == (

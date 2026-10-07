@@ -494,7 +494,7 @@ def _generate(a) -> int:
 
     _check_release(a, image_preflight.check(
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
-        adapters=_adapter_bytes(a)))
+        adapters=_adapter_bytes(a), init_image=init is not None))
     pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
     table, adapters = _load_adapters(a, pipe, log)
     t0 = time.perf_counter()
@@ -504,7 +504,7 @@ def _generate(a) -> int:
     encode_s = time.perf_counter() - t0
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
                             conds=[cond] if neg is None else [cond, neg],
-                            patch_table=table)
+                            patch_table=table, init_image=init is not None)
     _check_release(a, plan)
     release = a.encoder_release == "always" or (
         a.encoder_release == "auto" and plan.release_encoder)
@@ -512,7 +512,7 @@ def _generate(a) -> int:
         pipe.encoder.release()
     init_latents = None
     if init is not None:
-        init_latents = api.vae_encode(pipe, init[None])
+        init_latents = api.vae_encode(pipe, init[None], plan=plan)
 
     files = {"dit": os.path.basename(a.model),
              "encoder": os.path.basename(a.encoder),
@@ -536,10 +536,9 @@ def _generate(a) -> int:
                        width=width, steps=steps, seed=s, sampler=a.sampler,
                        init_latents=init_latents,
                        denoise=1.0 if strength is None else strength,
-                       mask=mask, patch_table=table)
+                       mask=mask, patch_table=table, plan=plan)
         latents.append(np.array(x))
-        pixels = to_uint8(api.vae_decode(
-            pipe, x, tiled=True if plan.tiled_decode else None))
+        pixels = to_uint8(api.vae_decode(pipe, x, plan=plan))
         meta = None
         if fmt == "png" and not a.no_metadata:
             meta = {**settings, "seed": s, "model": files["dit"],
@@ -663,13 +662,17 @@ def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
     neg = None if cfg == 1.0 else api.encode_text(pipe, "")
     mx.eval(cond.features, *(() if neg is None else (neg.features,)))
     t_enc = clock()
+    # A bench keeps the encoder, which every run encodes with.
+    plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
+                            conds=[cond] if neg is None else [cond, neg],
+                            patch_table=patch_table, keep_encoder=True)
     marks = [t_enc]
     x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height, width=width,
                    steps=steps, seed=seed, sampler=sampler,
-                   patch_table=patch_table,
+                   patch_table=patch_table, plan=plan,
                    on_step=lambda i, _x: marks.append(clock()))
     t_dec = clock()
-    img = api.vae_decode(pipe, x)
+    img = api.vae_decode(pipe, x, plan=plan)
     mx.eval(img)
     t_end = clock()
     return {"encode_s": t_enc - t0,
@@ -730,7 +733,8 @@ def _bench(a) -> int:
                          f"multiples of {stride}")
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
-                          width=big[0], cfg=cfg, adapters=_adapter_bytes(a))
+                          width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
+                          keep_encoder=True)
     pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
     table, adapters = _load_adapters(a, pipe, log)
     model = {

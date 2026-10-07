@@ -52,8 +52,11 @@ and refuses one that does not fit as chosen. With ``tiled=None`` a VAE
 runs whole when the pass fits the free working set and in tiles
 otherwise. A VAE whose row takes tiles first, as every unmeasured row
 does, runs every image larger than one tile in tiles, and so does any VAE
-when the device reports no free working set. Every VAE pass goes through
-them, a warm-up at a new size included. The module's own ``decode`` and
+when the device reports no free working set, and a row that bounds its
+whole passes runs a pass of more pixels in tiles. A request with a memory
+plan passes the plan's choice as ``tiled`` and the room the plan leaves
+for the pass as ``free``. Every VAE pass goes through them, a warm-up at
+a new size included. The module's own ``decode`` and
 ``encode`` build a graph that evaluates under whatever limit is set when
 it runs.
 """
@@ -293,7 +296,8 @@ def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
     keeps the fourth channel of a VAE that decodes RGBA. ``tile`` and
     ``overlap`` are in output pixels. ``tiled=None`` is the automatic
     choice of ``memfit.vae_tiling`` against ``free`` bytes, which default
-    to the free working set."""
+    to the free working set. A request with a memory plan passes the two
+    values of ``MemoryPlan.vae_pass``."""
     rgba = vae.config.out_channels == 4
     if alpha and not rgba:
         raise ValueError("this VAE decodes no alpha channel")

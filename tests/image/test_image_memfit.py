@@ -1,6 +1,7 @@
 """The image memory plan: the formulas on the two real header inventories,
-lever order, refusal text, overcommit, and budgets of a 16 GiB and a
-128 GiB machine. CPU."""
+lever order with a budget that forces each lever, the mmproj at the bytes
+it holds once loaded, refusal text, overcommit, and budgets of a 16 GiB
+and a 128 GiB machine. CPU."""
 from __future__ import annotations
 
 import dataclasses
@@ -274,9 +275,132 @@ def test_a_borrowed_encoder_is_never_released(z_view):
            encoder_owned=False)
     assert p.fits and p.levers == ("tiled decode",)
     assert not p.release_encoder
-    with pytest.raises(ImageMemoryError, match="borrowed encoder"):
+    with pytest.raises(ImageMemoryError, match="is not released in this request"):
         _z(z_view, height=1024, width=1024, budget=BUDGET_16,
            encoder_owned=False)
+
+
+def _mmproj_view():
+    """The header of a small mmproj: 16-bit and 32-bit float tensors and a
+    quantized one."""
+    from types import SimpleNamespace as T
+
+    return T(tensors={
+        "v.patch_embd.weight": T(shape=(64, 3, 16, 16), codec="F16",
+                                 nbytes=64 * 3 * 256 * 2),
+        "v.blk.0.attn.q.weight": T(shape=(64, 64), codec="BF16", nbytes=0),
+        "v.blk.0.ln1.bias": T(shape=(64,), codec="F32", nbytes=64 * 4),
+        "mm.0.weight": T(shape=(256, 64), codec="Q8_0", nbytes=0)})
+
+
+def test_an_mmproj_counts_at_the_bytes_it_holds_once_loaded(q_view, z_view):
+    """The load of a Qwen3-VL tower casts its float tensors to float32, so
+    a 16-bit tensor is resident at twice its file bytes."""
+    view = _mmproj_view()
+    floats = 64 * 3 * 256 + 64 * 64 + 64
+    q8 = memfit.tensor_bytes((256, 64), "Q8_0")
+    on_file = (64 * 3 * 256 + 64 * 64) * 2 + 64 * 4 + q8
+    assert memfit.file_bytes(view) == on_file
+    assert memfit.mmproj_bytes(view) == on_file
+    loaded = memfit.mmproj_bytes(view, fp32=True)
+    assert loaded == floats * 4 + q8 > on_file
+    assert memfit.mmproj_bytes(None) == 0 == memfit.mmproj_bytes(None,
+                                                                 fp32=True)
+    # A byte count is what the caller measured, and stands.
+    assert memfit.mmproj_bytes(123, fp32=True) == 123
+    kw = dict(height=1024, width=1024, budget=BUDGET_128, overcommit=False)
+    assert memfit.PEAKS["qwen_image21"].mmproj_fp32 is True
+    assert memfit.PEAKS["z_image"].mmproj_fp32 is False
+    q = plan_memory(q_view, ENCODER, 0, view, family="qwen_image21", **kw)
+    z = plan_memory(z_view, ENCODER, VAE, view, family="z_image", **kw)
+    assert (q.terms["mmproj"], z.terms["mmproj"]) == (loaded, on_file)
+    # It is resident in every phase of a plan that keeps the encoder.
+    bare = plan_memory(q_view, ENCODER, 0, family="qwen_image21", **kw)
+    assert {k: q.phases[k] - bare.phases[k] for k in q.phases} == dict.fromkeys(
+        q.phases, loaded)
+    assert q.weight_bytes == bare.weight_bytes + loaded
+
+
+def test_the_release_of_the_encoder_frees_its_mmproj(q_view):
+    mmproj = GiB // 2
+    kw = dict(family="qwen_image21", height=1024, width=1024,
+              overcommit=False)
+    free = plan_memory(q_view, ENCODER, VAE, mmproj, budget=BUDGET_128, **kw)
+    assert free.levers == () and free.peak == free.phases["decode"]
+    p = plan_memory(q_view, ENCODER, VAE, mmproj, budget=free.peak - 1, **kw)
+    assert p.levers == ("release the encoder",) and p.release_encoder
+    # The encode phase holds both, and the phases after it neither.
+    assert p.phases["encode"] == free.phases["encode"]
+    for phase in ("denoise", "decode"):
+        assert p.phases[phase] == free.phases[phase] - ENCODER - mmproj
+    # An mmproj alone is a reason to release, and none is a lever only
+    # when something is resident to free.
+    alone = plan_memory(q_view, 0, VAE, mmproj, budget=free.peak - ENCODER
+                        - 1, **kw)
+    assert alone.levers == ("release the encoder",)
+    assert alone.phases["decode"] == free.peak - ENCODER - mmproj
+    nothing = plan_memory(q_view, 0, VAE, budget=free.peak - ENCODER - mmproj
+                          - 1, **kw)
+    assert nothing.levers == ("tiled decode",)
+
+
+def test_each_qwen_lever_has_a_budget_that_forces_it(q_view):
+    """The plan's order on Qwen-Image 2.1: sequential rows, release of the
+    encoder, tiled decode, and then the refusal."""
+    rows, release, tiled = memfit.LEVERS
+    mmproj = GiB // 2
+
+    def plan(budget, **kw):
+        kw.setdefault("height", 1024)
+        kw.setdefault("width", 1024)
+        return plan_memory(q_view, ENCODER, VAE, mmproj,
+                           family="qwen_image21", budget=budget,
+                           overcommit=False, **kw)
+
+    # Sequential rows: a guided request above 1024 pixels, where the
+    # decode is in tiles already and two rows of a step are the peak.
+    big = dict(height=1536, width=1536, cfg=4.0)
+    free = plan(BUDGET_128, **big)
+    assert free.levers == () and free.rows == 2 and free.tiled_decode
+    assert free.peak == free.phases["denoise"]
+    p = plan(free.peak - 1, **big)
+    assert p.levers == (rows,) and p.rows == 1 and not p.release_encoder
+    assert p.terms["step_peak"] < free.terms["step_peak"]
+    assert p.terms["prefix_cache"] == free.terms["prefix_cache"]
+    # A request without guidance has one row, and no such lever.
+    assert plan(BUDGET_128, height=1536, width=1536).rows == 1
+    # Release of the encoder: the next lever of that request.
+    q = plan(p.peak - 1, **big)
+    assert q.levers == (rows, release) and q.release_encoder
+    assert q.peak == p.peak - ENCODER - mmproj
+    # Tiled decode: a request at 1024 pixels, where a whole decode is the
+    # peak, with an encoder that is not released.
+    free = plan(BUDGET_128, encoder_owned=False)
+    assert free.levers == () and free.peak == free.phases["decode"]
+    p = plan(free.peak - 1, encoder_owned=False)
+    assert p.levers == (tiled,) and p.tiled_decode
+    assert p.terms["decode_peak"] < free.terms["decode_peak"]
+    # All three in order on a guided request at 1024 pixels, where a lever
+    # is taken although the one before it left the plan over the budget.
+    guided = plan(BUDGET_128, cfg=4.0)
+    assert guided.levers == () and guided.peak == guided.phases["decode"]
+    assert plan(guided.peak - 1, cfg=4.0).levers == (rows, release)
+    after = guided.peak - ENCODER - mmproj
+    last = plan(after - 1, cfg=4.0)
+    assert last.levers == (rows, release, tiled)
+    # The refusal, one byte under the last plan, names every term in GiB.
+    with pytest.raises(ImageMemoryError) as e:
+        plan(last.peak - 1, cfg=4.0)
+    msg, refused = str(e.value), e.value.plan
+    assert refused.levers == (rows, release, tiled) and not refused.fits
+    assert refused.phases == last.phases
+    for name in ("dit", "encoder", "vae", "mmproj", "prefix_cache",
+                 "step_peak", "decode_peak", "encode_peak"):
+        value = refused.terms[name]
+        assert value > 0 and f"{name} {value / GiB:.2f} GiB" in msg, name
+    assert f"against a budget of {(last.peak - 1) / GiB:.2f} GiB" in msg
+    assert "levers sequential rows, release the encoder, tiled decode" in msg
+    assert "GMLX_OVERCOMMIT=1 overrides" in msg
 
 
 def test_overcommit_returns_the_plan(z_view, monkeypatch):

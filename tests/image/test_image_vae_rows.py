@@ -1,8 +1,9 @@
 """The VAE rows of the image memory plan: a row per family, the fits of
 the Qwen-Image 2.1 VAE against every pass measured on its official file,
 the rule that prices a pass on an unmeasured row, held on that VAE's steps
-as it was priced before, the plan's decode term against the choice and
-the price of the guarded decode under either, and the Z-Image values held
+as it was priced before, the plan's choice between a whole and a tiled
+pass on both sides of its boundary against the choice and the price of
+the guarded pass, and the Z-Image values held
 to what the FLUX.1 fits gave before the rows. Arithmetic only: no array at
 an official width is allocated. CPU."""
 from __future__ import annotations
@@ -80,15 +81,21 @@ def test_every_family_has_a_vae_row():
     assert z.channels == {"decode": 128, "encode": 128}
     assert (z.one_tile, z.tiles_first, z.scores, z.crop) == (
         False, False, 0.0, None)
-    assert z.auto_tiles is False
+    assert z.auto_tiles is False and z.whole_px == 0
+    assert z.tiles_at(4096 * 4096) is False
     # The Qwen-Image 2.1 row is measured and keeps its floor beside the
     # fits.
     assert row.measured is True and callable(row.floor)
     assert row.whole == {"decode": memfit.QWEN_VAE_DECODE,
                          "encode": memfit.QWEN_VAE_ENCODE}
     assert row.tiled is memfit.QWEN_VAE_TILED
-    assert (row.one_tile, row.tiles_first, row.scores) == (True, True, 1.5)
-    assert row.auto_tiles is True and callable(row.crop)
+    assert (row.one_tile, row.tiles_first, row.scores) == (True, False, 1.5)
+    assert row.auto_tiles is False and callable(row.crop)
+    # Its whole passes are measured to 1024 x 1024 pixels, and a pass of
+    # more is in tiles by the automatic choice.
+    assert row.whole_px == 1024 * 1024
+    assert row.tiles_at(1024 * 1024) is False
+    assert row.tiles_at(1024 * 1024 + 1) is True
     # No family reads a VAE fit by a channel count of its step row.
     assert not hasattr(memfit.PEAKS[FAMILY], "vae_channels")
     for price in (memfit.vae_peak, memfit.vae_tiling):
@@ -397,39 +404,73 @@ def test_a_vae_of_another_config_is_priced_at_its_own_channels_and_rows():
                         tiled=True, tile=48, overlap=8, **kw)
 
 
-def test_tiles_come_first_whatever_is_free():
-    kw = dict(family=FAMILY, itemsize=2)
-    whole = _fit_price("decode", 1024, 2)
-    tiles = _fit_price("decode", 1024, 2, tiled=True)
+@pytest.mark.parametrize("item", [2, 4])
+@pytest.mark.parametrize("op", ["decode", "encode"])
+def test_a_pass_runs_whole_when_that_fits_and_in_tiles_when_it_does_not(
+        op, item):
+    """Both sides of the boundary at 1024 pixels, the largest whole pass
+    of this row."""
+    kw = dict(family=FAMILY, itemsize=item, overcommit=False)
+    whole = _fit_price(op, 1024, item)
+    tiles = _fit_price(op, 1024, item, tiled=True)
     assert tiles < whole
-    for free in (1e15, whole, tiles):
-        assert memfit.vae_tiling("decode", 1024, 1024, free=free,
-                                 **kw) is True
-    # One tile runs whole, and a larger image whole when that is forced.
-    assert memfit.vae_tiling("decode", 512, 512, free=1e15, **kw) is False
-    assert memfit.vae_tiling("decode", 1024, 1024, free=whole, tiled=False,
-                             **kw) is False
+
+    def choice(free, **more):
+        return memfit.vae_tiling(op, 1024, 1024, free=free, **kw, **more)
+
+    assert choice(1e15) is False and choice(whole) is False
+    assert choice(whole - 1) is True and choice(tiles) is True
+    with pytest.raises(ImageMemoryError, match="in tiles needs"):
+        choice(tiles - 1)
+    # One tile runs whole, and either pass runs when it is forced.
+    assert memfit.vae_tiling(op, 512, 512, free=1e15, **kw) is False
+    assert choice(1e15, tiled=True) is True
+    assert choice(whole, tiled=False) is False
     with pytest.raises(ImageMemoryError) as e:
-        memfit.vae_tiling("decode", 1024, 1024, free=whole - 1, tiled=False,
-                          overcommit=False, **kw)
+        choice(whole - 1, tiled=False)
     # A measured row says nothing of the rule.
     assert str(e.value).endswith(
         f"a tiled pass needs {tiles / GiB:.2f} GiB. GMLX_OVERCOMMIT=1 "
         "overrides.")
-    with pytest.raises(ImageMemoryError, match="in tiles needs"):
-        memfit.vae_tiling("decode", 1024, 1024, free=tiles - 1,
-                          overcommit=False, **kw)
 
 
-def test_a_16_gb_mac_has_the_tiled_decode_and_not_the_whole_one():
-    """Why tiles come first on this row. The working budget of a 16 GB
-    Mac, the Q4_K_M DiT and the bf16 VAE resident and the encoder
-    released: a tiled decode at 2048 pixels fits, and a whole one at 1024
-    does not."""
+@pytest.mark.parametrize("item", [2, 4])
+@pytest.mark.parametrize("op", ["decode", "encode"])
+def test_a_pass_of_more_pixels_than_a_measured_whole_one_is_in_tiles(
+        op, item):
+    """No whole pass has run above 1024 x 1024 pixels, so above that the
+    automatic choice is tiles whatever is free, over a batch too."""
+    kw = dict(family=FAMILY, itemsize=item, free=1e15, overcommit=False)
+    for height, width, batch in ((1536, 1536, 1), (2048, 2048, 1),
+                                 (1024, 1040, 1), (4096, 512, 1),
+                                 (1024, 1024, 2)):
+        assert memfit.vae_tiling(op, height, width, batch=batch,
+                                 **kw) is True, (height, width, batch)
+    assert memfit.vae_tiling(op, 1024, 1024, **kw) is False
+    assert memfit.vae_tiling(op, 2048, 512, **kw) is False
+    # A caller can still force the whole pass, at the fit carried on.
+    assert memfit.vae_tiling(op, 2048, 2048, tiled=False, **kw) is False
+    with pytest.raises(ImageMemoryError, match="whole needs"):
+        memfit.vae_tiling(op, 2048, 2048, tiled=False,
+                          **{**kw, "free": _fit_price(op, 2048, item) - 1})
+
+
+def test_a_16_gb_mac_decodes_1024_pixels_in_tiles_and_a_128_gb_one_whole(
+        q_view):
+    """The working budget of a 16 GB Mac with the Q4_K_M DiT and the bf16
+    VAE resident and the encoder released: a whole decode at 1024 pixels
+    does not fit and a tiled one does. The plan releases the encoder
+    before it takes tiles."""
     budget = 17_179_869_184 - 8e9
     resident = 4199565024 + WEIGHTS * 2
-    assert resident + _fit_price("decode", 2048, 2, tiled=True) < budget
+    assert resident + _fit_price("decode", 1024, 2, tiled=True) < budget
     assert resident + _fit_price("decode", 1024, 2) > budget
+    kw = dict(family=FAMILY, height=1024, width=1024, overcommit=False)
+    plan = plan_memory(q_view, 3 * GiB, WEIGHTS * 2, budget=budget, **kw)
+    assert plan.levers == ("release the encoder", "tiled decode")
+    assert plan.tiled_decode and plan.phases["decode"] <= budget
+    plan = plan_memory(q_view, 3 * GiB, WEIGHTS * 2, budget=100e9, **kw)
+    assert plan.levers == () and not plan.tiled_decode
 
 
 # The rule of an unmeasured row
@@ -599,12 +640,17 @@ def _at_decode(plan, budget: float) -> float:
 
 
 def _decode(plan, size: int, item: int, free: float, tiled="plan") -> bool:
-    """The choice of the guarded decode with ``free`` bytes free, asked as
-    ``gmlx image`` asks for a plan's request."""
+    """The choice of the guarded decode with ``free`` bytes for the pass,
+    asked as ``api.vae_decode`` asks for a plan's request."""
     if tiled == "plan":
-        tiled = True if plan.tiled_decode else None
+        tiled = plan.vae_pass("decode")[0]
     return tiling._plan(_stub(item), "decode", 1, size, size, tiled,
                         tiling.TILE, tiling.OVERLAP, free)
+
+
+def _whole_to(priced_by: str) -> int:
+    """The largest size of SIZES that the automatic choice runs whole."""
+    return 1024 if priced_by == "fits" else 512
 
 
 @pytest.mark.parametrize("item", [2, 4])
@@ -615,16 +661,18 @@ def test_the_plan_and_tiling_agree_on_the_decode(q_view, size, item,
     assert plan.levers == ()
     kw = tiling.price_args(_stub(item), "decode", 1)
     assert kw["family"] == FAMILY and kw["config"] == mem.OFFICIAL
-    # The automatic choice, with room for a whole pass and without.
+    # The automatic choice, with room for a whole pass and with exactly
+    # the room of the plan's pass.
     for free in (1e15, plan.terms["decode_peak"]):
         choice = memfit.vae_tiling("decode", size, size, free=free, **kw)
-        assert choice is plan.tiled_decode is (size > 512)
+        assert choice is plan.tiled_decode is (size > _whole_to(priced_by))
     price = memfit.vae_peak("decode", size, size, tiled=choice, **kw)
     assert price == plan.terms["decode_peak"]
     table = FIT_PRICES if priced_by == "fits" else PRICES
     whole, tiled = table["decode", item]
-    assert round(price / GiB, 2) == (whole[0] if size == 512
-                                     else tiled[SIZES.index(size) - 1])
+    i = SIZES.index(size)
+    assert round(price / GiB, 2) == (tiled[i - 1] if choice else whole[i])
+    assert plan.vae_pass("decode") == (choice, _at_decode(plan, 200 * GiB))
     assert _decode(plan, size, item, price) is plan.tiled_decode
     with pytest.raises(ImageMemoryError,
                        match=f"needs {price / GiB:.2f} GiB"):
@@ -635,7 +683,7 @@ def test_the_plan_and_tiling_agree_on_the_decode(q_view, size, item,
 @pytest.mark.parametrize("size", SIZES)
 def test_a_request_the_plan_admits_is_not_refused_at_decode_time(
         q_view, size, item, priced_by):
-    admitted = []
+    admitted, tiled = [], set()
     for gib in range(4, 42, 2):
         budget = gib * GiB
         try:
@@ -643,14 +691,22 @@ def test_a_request_the_plan_admits_is_not_refused_at_decode_time(
         except ImageMemoryError:
             continue
         admitted.append(gib)
-        assert "tiled decode" not in plan.levers or size == 512
-        free = _at_decode(plan, budget)
+        tiled.add(plan.tiled_decode)
+        # Tiles are a lever only where a whole pass is the first choice.
+        if "tiled decode" in plan.levers:
+            assert (size, priced_by) == (1024, "fits")
+        choice, free = plan.vae_pass("decode")
+        assert free == _at_decode(plan, budget)
         assert free >= plan.terms["decode_peak"]
-        assert _decode(plan, size, item, free) is plan.tiled_decode
+        assert _decode(plan, size, item, free) is choice is plan.tiled_decode
     # A budget one step under the first that admits the request refuses
     # it, so the scan holds the tightest plans.
     assert admitted and admitted[0] > 4
     assert admitted == list(range(admitted[0], 42, 2))
+    # At 1024 pixels the measured row has plans of both kinds.
+    both = (size, priced_by) == (1024, "fits")
+    assert tiled == ({False, True} if both
+                     else {size > _whole_to(priced_by)})
 
 
 @pytest.mark.parametrize("item", [2, 4])
@@ -690,16 +746,23 @@ def test_the_plan_counts_the_vae_weights_once(q_view, item, monkeypatch):
     """A fit is what a pass adds over the loaded weights, and the plan
     holds the weights as a resident term. The rule for an unmeasured row
     counts them in its price, so they stand twice in the decode phase of
-    such a row."""
+    such a row. The decode phase holds the prefix states too, which stay
+    in their cache until the request ends."""
     plan = _plan(q_view, 1024, item, 200 * GiB)
     t = plan.terms
     assert t["vae"] == WEIGHTS * item
-    resident = t["dit"] + t["encoder"] + t["vae"]
-    assert plan.phases["decode"] == resident + t["decode_peak"]
-    # Three tiles a side of 496 pixels, the image term and the scores of
-    # 64 x 64 latent pixels.
-    assert t["decode_peak"] == memfit.QWEN_VAE_TILED["decode"][item].bytes(
-        496 * 496, 1024 * 1024, 144, item) + int(1.5 * 4096 ** 2 * item)
+    held = t["dit"] + t["encoder"] + t["vae"] + t["prefix_cache"]
+    assert t["prefix_cache"] == 2 * 32 * 512 * 4096 * item > 0
+    assert plan.phases["decode"] == held + t["decode_peak"]
+    assert plan.phases["denoise"] == held + t["step_peak"]
+    # A whole pass, and the scores of 64 x 64 latent pixels.
+    scores = int(1.5 * 4096 ** 2 * item)
+    assert t["decode_peak"] == memfit.QWEN_VAE_DECODE["exact"][item].bytes(
+        1024 * 1024, 144, item) + scores
+    # In tiles: three tiles a side of 496 pixels and the image term.
+    assert _fit_price("decode", 1024, item, tiled=True) == (
+        memfit.QWEN_VAE_TILED["decode"][item].bytes(
+            496 * 496, 1024 * 1024, 144, item) + scores)
     _unmeasured(monkeypatch)
     rule = _plan(q_view, 1024, item, 200 * GiB)
     steps = mem.memory_terms(mem.OFFICIAL, "decode", 1024, 1024,
@@ -707,7 +770,143 @@ def test_the_plan_counts_the_vae_weights_once(q_view, item, monkeypatch):
                              overlap=memfit.tile_overlap(FAMILY, "decode"))
     assert rule.terms["decode_peak"] == memfit.unmeasured_bytes(
         steps, WEIGHTS * item)
-    assert rule.phases["decode"] == resident + rule.terms["decode_peak"]
+    assert rule.phases["decode"] == held + rule.terms["decode_peak"]
+
+
+def _request(view, item: int, budget: float, *, size=(1024, 1024), **kw):
+    """A plan with a borrowed encoder, so that tiles are the one lever."""
+    kw.setdefault("encoder_owned", False)
+    return plan_memory(view, ENCODER, WEIGHTS * item, family=FAMILY,
+                       height=size[0], width=size[1], dtype=DTYPES[item],
+                       budget=budget, overcommit=False, **kw)
+
+
+@pytest.mark.parametrize("item", [2, 4])
+def test_the_plan_decodes_whole_at_the_budget_and_in_tiles_under_it(
+        q_view, item):
+    big = _request(q_view, item, 200 * GiB)
+    at = big.phases["decode"]
+    assert at == big.peak and not big.tiled_decode
+    held = at - big.terms["decode_peak"]
+    plan = _request(q_view, item, at)
+    assert plan.levers == () and plan.vae_pass("decode") == (
+        False, big.terms["decode_peak"])
+    plan = _request(q_view, item, at - 1)
+    assert plan.levers == ("tiled decode",)
+    assert plan.terms["decode_peak"] == _fit_price("decode", 1024, item,
+                                                   tiled=True)
+    assert plan.vae_pass("decode") == (True, at - 1 - held)
+    assert _decode(plan, 1024, item, at - 1 - held) is True
+    # An owned encoder goes first, and then the whole decode fits.
+    plan = _request(q_view, item, at - 1, encoder_owned=True)
+    assert plan.levers == ("release the encoder",)
+    assert plan.release_encoder and not plan.tiled_decode
+    # One tile has no tiled pass, so tiles are no lever of its plan.
+    small = _request(q_view, item, 200 * GiB, size=(512, 512))
+    with pytest.raises(ImageMemoryError) as e:
+        _request(q_view, item, small.peak - 1, size=(512, 512))
+    assert e.value.plan.levers == () and not e.value.plan.tiled_decode
+
+
+@pytest.mark.parametrize("item", [2, 4])
+def test_the_plan_encodes_an_init_image_whole_or_in_tiles(q_view, item):
+    """Whole at the budget of the whole encode and in tiles one byte under
+    it."""
+    big = _request(q_view, item, 200 * GiB, init_image=True)
+    assert list(big.phases) == ["encode", "init", "denoise", "decode"]
+    whole = _fit_price("encode", 1024, item)
+    tiles = _fit_price("encode", 1024, item, tiled=True)
+    assert big.terms["init_peak"] == whole and not big.tiled_encode
+    # The init image is encoded with what the decode holds beside it.
+    held = big.phases["init"] - whole
+    assert held == big.phases["decode"] - big.terms["decode_peak"]
+    assert big.vae_pass("encode") == (False, 200 * GiB - held)
+    # The whole encode is smaller than the whole decode, so under the
+    # budget of the first the decode is in tiles by its lever. A tiled
+    # encode is no lever.
+    for budget, tiled, price in ((held + whole, False, whole),
+                                 (held + whole - 1, True, tiles)):
+        plan = _request(q_view, item, budget, init_image=True)
+        assert plan.levers == ("tiled decode",)
+        assert plan.tiled_encode is tiled
+        assert plan.terms["init_peak"] == price
+        assert plan.vae_pass("encode") == (tiled, budget - held)
+        stub = _stub(item)
+        assert tiling._plan(stub, "encode", 1, 1024, 1024, tiled,
+                            tiling.TILE, tiling.OVERLAP,
+                            budget - held) is tiled
+    # Past the measured whole passes both are in tiles whatever is free.
+    plan = _request(q_view, item, 200 * GiB, size=(2048, 2048),
+                    init_image=True)
+    assert plan.levers == () and plan.tiled_encode and plan.tiled_decode
+    assert plan.terms["init_peak"] == _fit_price("encode", 2048, item,
+                                                 tiled=True)
+    # A request without an init image has no such phase or pass.
+    plain = _request(q_view, item, 200 * GiB)
+    assert "init" not in plain.phases and "init_peak" not in plain.terms
+    assert not plain.tiled_encode
+    with pytest.raises(ValueError, match="this plan has no VAE encode"):
+        plain.vae_pass("encode")
+    with pytest.raises(KeyError):
+        plain.vae_pass("other")
+
+
+@pytest.mark.parametrize("size", [(4096, 512), (512, 4096), (1024, 512),
+                                  (512, 1024)],
+                         ids=lambda s: f"{s[0]}x{s[1]}")
+def test_a_request_with_one_side_within_a_tile_can_run_in_tiles(
+        q_view, size, priced_by):
+    """A pass is above one tile when either side is."""
+    height, width = size
+    plan = _request(q_view, 2, 200 * GiB, size=size, init_image=True)
+    auto = priced_by == "rule" or height * width > 1024 * 1024
+    assert plan.levers == ()
+    assert plan.tiled_decode is plan.tiled_encode is auto
+    for op, term in (("decode", "decode_peak"), ("encode", "init_peak")):
+        kw = tiling.price_args(_stub(2), op, 1)
+        whole = memfit.vae_peak(op, height, width, **kw)
+        tiles = memfit.vae_peak(op, height, width, tiled=True, **kw)
+        assert tiles < whole
+        assert plan.terms[term] == (tiles if auto else whole)
+        assert memfit.vae_tiling(op, height, width, free=1e15,
+                                 **kw) is auto
+        assert plan.vae_pass(op)[0] is auto
+    if not auto:
+        # Under the budget of the whole decode, tiles are the lever.
+        under = _request(q_view, 2, plan.phases["decode"] - 1, size=size)
+        assert under.levers == ("tiled decode",) and under.tiled_decode
+        assert under.terms["decode_peak"] < plan.terms["decode_peak"]
+
+
+def test_the_plan_prices_the_passes_of_the_loaded_vae(q_view):
+    """The plan and the guarded pass price one VAE: the conv path it was
+    loaded on, its channels and its config."""
+    plans = {}
+    for conv in ("exact", "winograd"):
+        price = {op: tiling.price_args(_stub(2, conv), op, 1)
+                 for op in ("decode", "encode")}
+        assert price["decode"]["conv"] == conv
+        plan = plans[conv] = _request(q_view, 2, 200 * GiB, init_image=True,
+                                      vae_price=price)
+        for op, term in (("decode", "decode_peak"), ("encode", "init_peak")):
+            assert plan.terms[term] == memfit.vae_peak(
+                op, 1024, 1024, family=FAMILY, itemsize=2, conv=conv)
+            assert tiling._plan(_stub(2, conv), op, 1, 1024, 1024,
+                                plan.vae_pass(op)[0], tiling.TILE,
+                                tiling.OVERLAP, plan.terms[term]) is False
+    for term in ("decode_peak", "init_peak"):
+        assert plans["winograd"].terms[term] > plans["exact"].terms[term]
+    # Without a VAE at hand the plan prices the official file on the
+    # default conv path, which is the exact one.
+    assert _request(q_view, 2, 200 * GiB,
+                    init_image=True).terms == plans["exact"].terms
+    # A VAE of half the decoder channels halves the slope of its decode.
+    half = dict(tiling.price_args(_stub(2), "decode", 1), channels=72)
+    fit = memfit.QWEN_VAE_DECODE["exact"][2]
+    plan = _request(q_view, 2, 200 * GiB, vae_price={"decode": half})
+    assert plans["exact"].terms["decode_peak"] - plan.terms[
+        "decode_peak"] == fit.bytes(1024 * 1024, 144, 2) - fit.bytes(
+            1024 * 1024, 72, 2)
 
 
 def test_a_measured_row_says_nothing_of_the_rule_when_it_refuses():

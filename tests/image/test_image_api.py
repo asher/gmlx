@@ -467,9 +467,158 @@ def test_the_request_plan_releases_an_owned_encoder_and_tiles(pipe):
                          overcommit=False)
     assert p.terms["encoder"] == 0 and not p.release_encoder
     pipe.encoder = SimpleNamespace(released=False, owned=False)
-    with pytest.raises(memfit.ImageMemoryError, match="borrowed encoder"):
+    with pytest.raises(memfit.ImageMemoryError, match="is not released in this request"):
         api.plan_request(pipe, height=1024, width=1024, budget=7 * G,
                          overcommit=False)
+
+
+def _small(pipe):
+    """A small pipeline for the plan: weights in bytes, an owned encoder
+    with an mmproj, and a VAE of the family's row that no pass runs."""
+    G = memfit.GiB
+    pipe.weights = {"dit": G, "encoder": G, "mmproj": G // 2,
+                    "vae": 100 << 20}
+    pipe.encoder = SimpleNamespace(released=False, owned=True)
+    pipe.vae = SimpleNamespace(
+        family="z_image", dtype=mx.bfloat16, conv="exact",
+        config=SimpleNamespace(out_channels=3), channels=lambda op: 128)
+    return dict(height=1024, width=1024, cfg=3.0, overcommit=False)
+
+
+def test_each_lever_has_a_budget_that_forces_it(pipe):
+    """The levers in the plan's order on a small model, and under the
+    last of them the refusal, which names every term in GiB."""
+    kw = _small(pipe)
+    G = memfit.GiB
+    rows, release, tiles = memfit.LEVERS
+    free = api.plan_request(pipe, budget=100 * G, **kw)
+    assert free.levers == () and free.rows == 2
+    assert free.terms["mmproj"] == G // 2 and free.peak == free.phases[
+        "decode"]
+    # One byte under the whole decode: the rows go one at a time, which
+    # frees nothing of the decode, and then the encoder goes with its
+    # mmproj.
+    released = api.plan_request(pipe, budget=free.peak - 1, **kw)
+    assert released.levers == (rows, release) and released.rows == 1
+    assert released.release_encoder and not released.tiled_decode
+    assert released.phases["decode"] == free.peak - G - G // 2
+    assert released.phases["encode"] == free.phases["encode"]
+    # One byte under that: the decode runs in tiles.
+    tiled = api.plan_request(pipe, budget=released.peak - 1, **kw)
+    assert tiled.levers == (rows, release, tiles) and tiled.tiled_decode
+    assert tiled.peak < released.peak
+    # An encoder the caller keeps is no lever, and tiles come in its place.
+    kept = api.plan_request(pipe, budget=free.peak - 1, keep_encoder=True,
+                            **kw)
+    assert kept.levers == (rows, tiles) and not kept.release_encoder
+    # One byte under the last plan nothing is left, and the refusal names
+    # every term in GiB.
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        api.plan_request(pipe, budget=tiled.peak - 1, **kw)
+    msg, plan = str(e.value), e.value.plan
+    assert plan.levers == (rows, release, tiles) and not plan.fits
+    for name, value in plan.terms.items():
+        assert (f"{name} {value / G:.2f} GiB" in msg) == bool(value), name
+    for name in ("dit", "encoder", "mmproj", "vae", "step_peak",
+                 "decode_peak", "encode_peak"):
+        assert plan.terms[name] > 0, name
+    assert f"budget of {(tiled.peak - 1) / G:.2f} GiB" in msg
+    assert "The largest term is decode_peak; try a lower resolution" in msg
+
+
+def test_sample_runs_one_row_at_a_time_where_the_plan_says_so(pipe,
+                                                              monkeypatch):
+    kw = _small(pipe)
+    both = api.plan_request(pipe, budget=100 * memfit.GiB, **kw)
+    one = api.plan_request(pipe, budget=both.peak - 1, **kw)
+    assert (both.rows, one.rows) == (2, 1)
+    real, seen = mx.eval, []
+
+    def spy(*a, **k):
+        seen.append(pipe.dit.calls)
+        return real(*a, **k)
+
+    def run(plan):
+        pipe.dit.calls = 0
+        del seen[:]
+        x = api.sample(pipe, _cond(1.0), neg=_cond(-1.0), cfg=3.0, height=64,
+                       width=64, steps=2, seed=3, plan=plan)
+        return np.array(x), list(seen)
+
+    monkeypatch.setattr(mx, "eval", spy)
+    together, at = run(both)
+    # One evaluation per step, after both forwards.
+    assert at == [2, 4] and run(None)[1] == [2, 4]
+    apart, at = run(one)
+    # The positive velocity is evaluated before the negative forward.
+    assert at == [1, 2, 3, 4]
+    assert np.array_equal(apart, together)
+    # A request without guidance has one row either way.
+    pipe.dit.calls = 0
+    del seen[:]
+    api.sample(pipe, _cond(1.0), cfg=1.0, height=64, width=64, steps=2,
+               seed=3, plan=one)
+    assert seen == [1, 2]
+
+
+def test_the_vae_passes_run_as_the_plan_says(pipe, monkeypatch):
+    from gmlx.image.vae import tiling
+
+    kw = _small(pipe)
+    G = memfit.GiB
+    calls = []
+    monkeypatch.setattr(tiling, "decode", lambda vae, x, **k: calls.append(
+        ("decode", k)) or mx.zeros((1, 8, 8, 3)))
+    monkeypatch.setattr(tiling, "encode", lambda vae, x, **k: calls.append(
+        ("encode", k)) or mx.zeros((1, 4, 1, 1)))
+    lat, img = mx.zeros((1, 4, 1, 1)), np.zeros((1, 8, 8, 3), np.float32)
+    whole = api.plan_request(pipe, budget=100 * G, init_image=True, **kw)
+    assert not whole.tiled_decode and not whole.tiled_encode
+    under = whole.phases["decode"] - G - G // 2
+    tiled = api.plan_request(pipe, budget=under - 1, init_image=True, **kw)
+    assert tiled.tiled_decode and tiled.release_encoder
+    for plan in (whole, tiled):
+        del calls[:]
+        api.vae_decode(pipe, lat, plan=plan)
+        api.vae_encode(pipe, img, plan=plan)
+        held = plan.phases["decode"] - plan.terms["decode_peak"]
+        assert held == plan.phases["init"] - plan.terms["init_peak"]
+        assert [(op, k["tiled"], k["free"]) for op, k in calls] == [
+            ("decode", plan.tiled_decode, plan.budget - held),
+            ("encode", plan.tiled_encode, plan.budget - held)]
+    # The room of the plan is what its pass is priced against, so the
+    # pass the plan admits is the one that runs.
+    assert tiled.budget - held >= tiled.terms["decode_peak"]
+    # A caller can still force a pass, within the room of the plan, and
+    # without a plan the guarded pass chooses against what is free.
+    del calls[:]
+    api.vae_decode(pipe, lat, plan=whole, tiled=True)
+    api.vae_decode(pipe, lat)
+    api.vae_encode(pipe, img, tiled=False)
+    assert [(k["tiled"], k["free"]) for _, k in calls] == [
+        (True, whole.vae_pass("decode")[1]), (None, None), (False, None)]
+    # A plan without an init image has no encode to run.
+    plain = api.plan_request(pipe, budget=100 * G, **kw)
+    with pytest.raises(ValueError, match="this plan has no VAE encode"):
+        api.vae_encode(pipe, img, plan=plain)
+
+
+def test_the_plan_prices_the_vae_the_pipeline_loaded(pipe):
+    kw = _small(pipe)
+    G = memfit.GiB
+    exact = api.plan_request(pipe, budget=100 * G, init_image=True, **kw)
+    pipe.vae.conv = "winograd"
+    wino = api.plan_request(pipe, budget=100 * G, init_image=True, **kw)
+    for op, term in (("decode", "decode_peak"), ("encode", "init_peak")):
+        assert exact.terms[term] == memfit.vae_peak(
+            op, 1024, 1024, family="z_image", itemsize=2, conv="exact")
+        assert wino.terms[term] == memfit.vae_peak(
+            op, 1024, 1024, family="z_image", itemsize=2, conv="winograd")
+        assert wino.terms[term] > exact.terms[term]
+    # A released encoder holds nothing, and neither does its mmproj.
+    pipe.encoder = SimpleNamespace(released=True, owned=True)
+    gone = api.plan_request(pipe, budget=100 * G, **kw)
+    assert gone.terms["encoder"] == gone.terms["mmproj"] == 0
 
 
 def test_the_vae_scale_comes_from_the_family_row(pipe):

@@ -1,29 +1,42 @@
 """The memory plan of an image request, from header sizes and the request.
 
 ``plan_memory`` is a pure function. Resident bytes are the DiT, the text
-encoder, the VAE at its decode dtype, the mmproj for edits, adapter
-factors and caches. A request runs in three phases, encode, denoise and
-decode, and each phase adds its own activation peak to what is resident
-then. The plan fits when the largest phase stays within the working budget
-of ``gmlx.serve.capacity``.
+encoder without its output matrix, the VAE at its decode dtype, the mmproj
+for edits at the bytes its tensors hold once loaded, adapter factors and
+caches. A request runs in three phases, encode, denoise and decode, and
+each phase adds its own activation peak to what is resident then. A
+request with an init image has a fourth, the VAE encode of that image,
+between the encode and the denoise. The plan fits when the largest phase
+stays within the working budget of ``gmlx.serve.capacity``.
 
 A family that caches a prefix per conditioning adds three terms to the
 denoise phase: the cache of every conditioning, the K and V of one block
 joined over the prefix and the image rows in each step, and the prefill
 pass over the prefix rows, which a conditioning runs once. The cache term
 also holds the states of other conditionings that stay in the cache
-beside the request's own, up to its bound.
+beside the request's own, up to its bound. The cache is still held when
+the VAE runs, so the VAE phases count it too.
 
 A request runs a negative row whenever its guidance is not 1.0, as
 ``api.sample`` does, and the plan counts the second conditioning then.
 
-Levers apply in order until the plan fits: sequential rows in place of a
-batch, release of an owned encoder after encoding, and tiled VAE decode.
-A family whose VAE row takes tiles first decodes an image larger than one
-tile in tiles from the start, as ``vae_tiling`` chooses for it, so tiling
-is no lever of its plan. A plan that still does not fit raises
-``ImageMemoryError`` with each term in GiB and the largest term named,
-unless GMLX_OVERCOMMIT=1.
+A VAE pass runs whole when its phase fits the budget and in tiles when
+it does not. Levers apply in order until the plan fits: sequential rows
+in place of a batch, release of an owned encoder after encoding, which
+frees its mmproj with it, and tiled VAE decode. Where the choice of
+``vae_tiling`` is tiles on every machine, the decode is in tiles from the
+start and tiling is no lever of the plan: on a VAE row that takes tiles
+first, and on a measured row past the pixels its whole passes were
+measured to. The encode of an init image is in tiles there too, and
+otherwise whenever its phase does not fit whole, which is no lever
+either, since a tiled encode gives the latents of a whole one. A plan
+that still does not fit raises ``ImageMemoryError`` with each term in GiB
+and the largest term named, unless GMLX_OVERCOMMIT=1.
+
+The plan decides how a request's VAE passes run. ``MemoryPlan.vae_pass``
+gives the choice and the bytes the plan leaves for the pass, and a caller
+hands both to the guarded pass, so a pass the plan admits is not priced
+again against a free figure measured later.
 
 The MLX buffer cache keeps freed buffers for reuse up to its limit, which
 defaults to 95 percent of memory. One VAE decode frees and allocates
@@ -37,10 +50,13 @@ A VAE pass is priced by the row of its family in ``VAE_ROWS``, for the
 plan and for ``vae.tiling`` alike. A measured row holds footprints fitted
 on that VAE. An unmeasured row holds only what arithmetic gives, and
 ``unmeasured_bytes`` prices its passes by one rule. ``vae_tiling`` decides
-between a whole and a tiled pass and refuses one that does not fit. On a
-row that takes tiles first, which every unmeasured row does, and on any
-row when the device reports no free working set, it never picks a whole
-pass by itself for an image larger than one tile.
+between a whole and a tiled pass for a caller without a plan, and
+refuses one that does not fit. On a row that takes tiles first, which
+every unmeasured row does, and on any row when the device reports no free
+working set, it never picks a whole pass by itself for an image larger
+than one tile. A row may also bound its whole passes at the pixels the
+largest measured one had: above that the whole price is the fit carried
+on, and the choice is tiles.
 """
 
 from __future__ import annotations
@@ -258,7 +274,12 @@ class VaeMemoryRow:
     by at least twice that.
     ``tiles_first`` makes tiles the automatic choice for every image
     larger than one tile, whatever is free. An unmeasured row always
-    takes tiles first."""
+    takes tiles first.
+    ``whole_px`` is the pixel count of the largest whole pass the fits
+    were measured on, or 0 for no bound. A pass of more pixels, counted
+    over its batch, is in tiles by the automatic choice whatever is free,
+    since its whole price is the fit carried past what was measured. A
+    caller can still force it whole."""
     measured: bool
     channels: dict                  # op -> base channels at full resolution
     whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
@@ -268,12 +289,19 @@ class VaeMemoryRow:
     tiles_first: bool = False
     crop: Callable | None = None    # see ``_qwen_image21_vae_crop``
     scores: float = 0.0
+    whole_px: int = 0
 
     @property
     def auto_tiles(self) -> bool:
         """Whether the automatic choice above one tile is tiles on every
-        machine."""
+        machine, at every size."""
         return self.tiles_first or not self.measured
+
+    def tiles_at(self, pixels: int) -> bool:
+        """Whether the automatic choice for a pass of ``pixels`` pixels
+        above one tile is tiles on every machine."""
+        return self.auto_tiles or bool(self.whole_px
+                                       and pixels > self.whole_px)
 
 
 def _qwen_image21_vae_floor(op: str, height: int, width: int, *,
@@ -303,16 +331,20 @@ VAE_ROWS = {
     "z_image": VaeMemoryRow(
         measured=True, channels={"decode": 128, "encode": 128},
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED),
-    # The Qwen-Image 2.1 autoencoder, measured on the official file. Tiles
-    # come first: a whole bf16 decode at 1024 pixels is priced at 6.80 GiB,
-    # which a 16 GB Mac does not have beside the weights, and a tiled one
-    # at 2048 pixels at 3.83 GiB, which it has.
+    # The Qwen-Image 2.1 autoencoder, measured on the official file. A
+    # pass runs whole when that fits and in tiles when it does not: a tiled
+    # pass gives the result of the whole one, and at 1024 pixels a tiled
+    # bf16 decode runs 9 tiles of 496 pixels, 2.1 times the pixels. A
+    # whole bf16 decode at 1024 pixels is priced at 6.80 GiB, which a 16
+    # GB Mac does not have beside the weights, and a tiled one at 2048
+    # pixels at 3.83 GiB, which it has. No whole pass has run above 1024
+    # pixels, so above that the automatic choice is tiles.
     "qwen_image21": VaeMemoryRow(
         measured=True, channels={"decode": 144, "encode": 96},
         whole={"decode": QWEN_VAE_DECODE, "encode": QWEN_VAE_ENCODE},
         tiled=QWEN_VAE_TILED, floor=_qwen_image21_vae_floor, one_tile=True,
-        tiles_first=True, crop=_qwen_image21_vae_crop,
-        scores=QWEN_VAE_SCORES),
+        crop=_qwen_image21_vae_crop, scores=QWEN_VAE_SCORES,
+        whole_px=1024 * 1024),
 }
 
 
@@ -353,6 +385,8 @@ class PeakRow:
     encode_row_bytes: int = 0       # encoder activation bytes per token,
                                     # times ENCODE_LIVE
     text_rows: int = 512
+    mmproj_fp32: bool = False       # the encoder's load casts the float
+                                    # tensors of its mmproj to float32
 
     def step_peak(self, step: int, prefill: int) -> int:
         """Bytes of the wider of a step and a prefill, from the formula
@@ -382,7 +416,8 @@ PEAKS = {
                             prefix=PrefixRow(blocks=32, dim=4096,
                                              token_px=16),
                             prefill=Z_IMAGE_STEP,
-                            encode_row_bytes=3 * 12288 * 2),
+                            encode_row_bytes=3 * 12288 * 2,
+                            mmproj_fp32=True),
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode")
@@ -408,6 +443,7 @@ class MemoryPlan:
     levers: tuple                   # applied, in order
     fits: bool
     notes: tuple = field(default=())
+    tiled_encode: bool = False      # the VAE encode of an init image
 
     @property
     def peak(self) -> int:
@@ -417,6 +453,20 @@ class MemoryPlan:
     def weight_bytes(self) -> int:
         return sum(self.terms[k] for k in
                    ("dit", "encoder", "vae", "mmproj", "adapters"))
+
+    def vae_pass(self, op: str) -> tuple[bool, float | None]:
+        """How the plan runs the VAE ``op`` of its request, "decode" or
+        the "encode" of an init image: whether it is in tiles, and the
+        bytes the plan leaves for the pass, which are the budget less
+        what its phase holds beside the pass. None for no budget."""
+        phase, term, tiled = {
+            "decode": ("decode", "decode_peak", self.tiled_decode),
+            "encode": ("init", "init_peak", self.tiled_encode)}[op]
+        if phase not in self.phases:
+            raise ValueError(f"this plan has no VAE {op}")
+        if self.budget is None:
+            return tiled, None
+        return tiled, self.budget - (self.phases[phase] - self.terms[term])
 
     def describe(self) -> str:
         parts = [f"{k} {v / GiB:.2f} GiB" for k, v in self.terms.items() if v]
@@ -447,6 +497,28 @@ def file_bytes(src, *, skip=()) -> int:
         return int(src)
     return sum(t.nbytes or tensor_bytes(t.shape, t.codec)
                for n, t in src.tensors.items() if n not in skip)
+
+
+FLOAT_CODECS = {"F16": 2, "BF16": 2, "F32": 4}
+
+
+def mmproj_bytes(src, *, fp32: bool = False) -> int:
+    """Bytes an mmproj holds once loaded, from a header view, or ``src``
+    itself when it is a number. With ``fp32`` the load casts its float
+    tensors to float32, as the Qwen3-VL vision tower's does, so a 16-bit
+    tensor is resident at twice its file bytes. Other tensors stay as the
+    file stores them."""
+    if src is None:
+        return 0
+    if isinstance(src, (int, float)):
+        return int(src)
+    total = 0
+    for t in src.tensors.values():
+        if fp32 and t.codec in FLOAT_CODECS:
+            total += math.prod(int(d) for d in t.shape) * 4
+        else:
+            total += t.nbytes or tensor_bytes(t.shape, t.codec)
+    return total
 
 
 def vae_bytes(src, itemsize: int) -> int:
@@ -509,6 +581,7 @@ def _largest(terms: dict) -> str:
         "encoder": "a smaller encoder quant",
         "step_peak": "a lower resolution",
         "decode_peak": "a lower resolution",
+        "init_peak": "a smaller init image",
         "prefix_cache": "fewer or smaller references",
         "mmproj": "a smaller mmproj",
         "adapters": "fewer adapters",
@@ -525,14 +598,25 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 text_tokens: int | None = None, refs: int = 0,
                 ref_px: int = 0, prefix_rows=None, prefix_other: int = 0,
                 prefix_bound: int = 0, cache_bytes: int = 0,
-                tile: int = TILE_PX, budget: float | None = None,
+                tile: int = TILE_PX, init_image: bool = False,
+                vae_price=None, budget: float | None = None,
                 overcommit: bool | None = None) -> MemoryPlan:
     """The memory plan for one image request.
 
     ``dit``, ``encoder``, ``mmproj`` and ``vae`` are header views or byte
-    counts. ``adapters`` is a byte count or a list of them. ``budget``
-    defaults to ``capacity.working_budget_bytes()`` and ``overcommit`` to
-    GMLX_OVERCOMMIT.
+    counts. A header view of an mmproj is counted at what it holds once
+    loaded, as ``mmproj_bytes`` gives it for the family, and a byte count
+    as it stands. The mmproj is part of the encoder: an owned encoder
+    that is released frees both. ``adapters`` is a byte count or a list of
+    them. ``budget`` defaults to ``capacity.working_budget_bytes()`` and
+    ``overcommit`` to GMLX_OVERCOMMIT.
+
+    ``init_image`` says the request encodes an init image of its size
+    with the VAE. ``vae_price`` maps "decode" and "encode" to what
+    ``vae_peak`` takes of the loaded VAE beside the family and the
+    itemsize: its channels, config and conv path, as
+    ``tiling.price_args`` gives them. Without it the passes are priced
+    for the family's official file on the default conv path.
 
     The prefix rows of a conditioning come from ``text_tokens``, ``refs``
     and ``ref_px``. ``prefix_rows`` gives them for the request's own
@@ -567,7 +651,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         "dit": file_bytes(dit),
         "encoder": file_bytes(encoder, skip=("output.weight",)),
         "vae": vae_bytes(vae, vsize),
-        "mmproj": file_bytes(mmproj),
+        "mmproj": mmproj_bytes(mmproj, fp32=row.mmproj_fp32),
         "adapters": (int(adapters) if isinstance(adapters, (int, float))
                      else sum(int(a) for a in adapters)),
         "caches": int(cache_bytes),
@@ -584,43 +668,60 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
     terms["prefix_cache"] = own + min(int(prefix_other),
                                       max(0, int(prefix_bound) - own))
-    full_decode = vae_peak("decode", height, width, family=family,
-                           itemsize=vsize, tile=tile)
-    tiled_decode = vae_peak("decode", height, width, family=family,
-                            itemsize=vsize, tiled=True, tile=tile)
-    # The choice ``vae_tiling`` makes by itself on a row that takes tiles
-    # first.
-    auto_tiled = (vae_row(family).auto_tiles
-                  and (height > tile or width > tile))
+    def price(op: str, tiled: bool) -> int:
+        kw = dict(family=family, itemsize=vsize, tile=tile)
+        kw.update({k: v for k, v in ((vae_price or {}).get(op) or {}).items()
+                   if k in ("channels", "config", "conv")})
+        return int(vae_peak(op, height, width, tiled=tiled, **kw))
+
+    # Above one tile a pass can run in tiles. The choice ``vae_tiling``
+    # makes by itself is tiles on a row that takes tiles first, and past
+    # the pixels a row's whole passes were measured to.
+    can_tile = height > tile or width > tile
+    auto_tiled = can_tile and vae_row(family).tiles_at(height * width)
+    decode = {False: price("decode", False), True: price("decode", True)}
+    init = {False: 0, True: 0}
+    if init_image:
+        init = {False: price("encode", False), True: price("encode", True)}
     caption = row.text_rows if caption_tokens is None else caption_tokens
     encode_peak = caption * row.encode_row_bytes * ENCODE_LIVE
 
     def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
         t = dict(terms)
         t["step_peak"] = row.step_peak(b * step_one, prefill)
-        t["decode_peak"] = int(tiled_decode if tiled else full_decode)
+        t["decode_peak"] = decode[tiled]
         t["encode_peak"] = int(encode_peak)
         resident = sum(t[n] for n in ("dit", "encoder", "vae", "mmproj",
                                       "adapters", "caches"))
-        later = resident - (t["encoder"] if release else 0)
-        phases = {
-            "encode": resident + t["encode_peak"],
-            "denoise": later + t["prefix_cache"] + t["step_peak"],
-            "decode": later + t["decode_peak"],
-        }
+        # An owned encoder that is released takes its mmproj with it.
+        later = resident - (t["encoder"] + t["mmproj"] if release else 0)
+        # The prefix states stay in their cache until the request ends.
+        held = later + t["prefix_cache"]
+        phases = {"encode": resident + t["encode_peak"]}
+        tiled_init = False
+        if init_image:
+            # A tiled encode is the whole one, so it is a choice by what
+            # its phase holds and no lever.
+            tiled_init = auto_tiled or (
+                can_tile and budget is not None
+                and held + init[False] > budget)
+            t["init_peak"] = init[tiled_init]
+            phases["init"] = held + t["init_peak"]
+        phases["denoise"] = held + t["step_peak"]
+        phases["decode"] = held + t["decode_peak"]
         fits = budget is None or max(phases.values()) <= budget
         return MemoryPlan(terms=t, phases=phases, budget=budget, rows=b,
                           release_encoder=release, tiled_decode=tiled,
-                          levers=levers, fits=fits)
+                          levers=levers, fits=fits, tiled_encode=tiled_init)
 
     b = 2 if guided and batch_rows else 1
     plan = build(b, False, auto_tiled, ())
     steps = []
     if b == 2:
         steps.append(("sequential rows", dict(b=1)))
-    if encoder_owned and terms["encoder"]:
+    if encoder_owned and (terms["encoder"] or terms["mmproj"]):
         steps.append(("release the encoder", dict(release=True)))
-    if not auto_tiled:
+    if can_tile and not auto_tiled:
         steps.append(("tiled decode", dict(tiled=True)))
     state = dict(b=b, release=False, tiled=auto_tiled)
     applied: tuple = ()
@@ -633,9 +734,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     if plan.fits or overcommit:
         return plan
     hint = _largest(plan.terms)
-    if not encoder_owned and terms["encoder"]:
-        hint += ("; a borrowed encoder stays resident, so load the encoder "
-                 "on its own")
+    if not encoder_owned and (terms["encoder"] or terms["mmproj"]):
+        hint += ("; the encoder is not released in this request and stays "
+                 "resident")
     if refs:
         hint += _ref_hint(row, plan, rows, text, refs, ref_px, conds, act)
     raise ImageMemoryError(
@@ -843,12 +944,15 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
     """Whether a VAE ``op`` runs in tiles, by the VAE row of ``family``.
     An image no larger than a tile always runs whole.
 
-    ``tiled=None`` is the automatic choice. It is a whole pass when that
-    fits the free working set and tiles otherwise. On a row that takes
-    tiles first, which every unmeasured row does, it is tiles for every
-    image larger than one tile, on every machine, and so it is on any
-    row when the device reports no free working set. ``tiled=False``
-    forces a whole pass at the row's price.
+    ``tiled=None`` is the automatic choice, for a caller without a plan.
+    It is a whole pass when that fits the free working set and tiles
+    otherwise. On a row that takes tiles first, which every unmeasured
+    row does, it is tiles for every image larger than one tile, on every
+    machine. So it is on any row when the device reports no free working
+    set, and on a row that bounds its whole passes for a pass of more
+    pixels than the bound. ``tiled=False`` forces a whole pass at the
+    row's price. A request with a plan passes the two values of
+    ``MemoryPlan.vae_pass`` as ``tiled`` and ``free``.
 
     A pass that does not fit as chosen raises ImageMemoryError, unless
     GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``, and nothing
@@ -868,7 +972,7 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
         free = free_bytes()
     if tiled is not None:
         choice = bool(tiled) and can_tile
-    elif free is None or row.auto_tiles:
+    elif free is None or row.tiles_at(batch * height * width):
         choice = can_tile
     else:
         choice = can_tile and whole > free

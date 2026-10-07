@@ -1723,16 +1723,16 @@ def test_a_pass_is_priced_by_the_family_row_and_the_config_of_the_vae(
         tiling.row_family(object())
 
 
-def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
+def test_above_one_tile_the_automatic_choice_is_whole_when_that_fits(
         vae, monkeypatch):
-    """The row of this VAE takes tiles first. A whole pass above one tile
-    runs only when it is forced, at the price of its fit, and is refused
-    one byte under it."""
+    """The row of this VAE is measured and does not take tiles first. A
+    pass above one tile runs whole with room for it and in tiles one byte
+    under that, and a forced whole pass is refused there."""
     from gmlx.image import memfit
     from gmlx.image.memfit import GiB, ImageMemoryError
 
     row = memfit.VAE_ROWS[FAMILY]
-    assert row.measured is True and row.tiles_first is True
+    assert row.measured is True and row.tiles_first is False
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     rng = np.random.default_rng(31)
     lat = rng.standard_normal((1, 64, *DEC_LATENT)).astype(np.float32)
@@ -1761,8 +1761,12 @@ def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
         kw = dict(tiling.price_args(vae, op, 1), **cut)
         need_whole = memfit.vae_peak(op, high, wide, **kw)
         need_tiles = memfit.vae_peak(op, high, wide, tiled=True, **kw)
-        # Room for either pass, room for the tiles alone, and no figure.
-        for free in (1e12, need_tiles):
+        # Room for the whole pass, one byte less, room for the tiles
+        # alone, and no figure.
+        assert need_tiles < need_whole
+        for free in (1e12, need_whole):
+            ran(run, x, False, whole, free=free, **cut)
+        for free in (need_whole - 1, need_tiles):
             ran(run, x, True, tiles, free=free, **cut)
         with monkeypatch.context() as mp:
             mp.setattr(memfit, "free_bytes", lambda: None)

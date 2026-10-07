@@ -23,7 +23,8 @@ after each update and reads ``should_stop()`` before each step; a stop
 raises ``SampleStopped`` with the latents reached.
 
 ``vae_decode`` and ``vae_encode`` map between latents and images in
-``[0, 1]``, whole or in tiles as ``vae.tiling`` decides.
+``[0, 1]``, whole or in tiles as the memory plan of the request says, or
+as ``vae.tiling`` decides for a caller without one.
 """
 
 from __future__ import annotations
@@ -262,15 +263,22 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
 
 def plan_request(pipe: ImagePipeline, *, height: int, width: int,
                  cfg: float | None = None, caption_tokens: int | None = None,
-                 conds=None, patch_table=None, budget: float | None = None,
+                 conds=None, patch_table=None, init_image: bool = False,
+                 keep_encoder: bool = False, budget: float | None = None,
                  overcommit: bool | None = None) -> memfit.MemoryPlan:
     """The memory plan of one request on this pipeline: its weights, an
     encoder still resident, the caches it holds, and the phase peaks.
     ``conds`` is the request's conditioning, or the positive and the
     negative one, whose text rows and reference latents size the prefix
     of a family that caches one, and ``patch_table`` the table the
-    request runs under, which names the states it holds already. Raises
-    ImageMemoryError when no lever makes it fit."""
+    request runs under, which names the states it holds already.
+    ``init_image`` says the request encodes an init image of its size,
+    and ``keep_encoder`` that the caller keeps the encoder through the
+    request, so that its release is no lever.
+    The VAE passes are priced for the VAE this pipeline loaded, on its
+    conv path, and ``vae_decode`` and ``vae_encode`` run them as the plan
+    they are given says. Raises ImageMemoryError when no lever makes it
+    fit."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
@@ -289,19 +297,27 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         held = sum(pipe.captions.nbytes(key) for key in {
             _state_key(pipe, c, table) for c in states if c.key})
         other, bound = pipe.captions.bytes - held, parts.state_bytes
+    price = None
+    if pipe.vae is not None:
+        from .vae import tiling
+
+        price = {op: tiling.price_args(pipe.vae, op, 1)
+                 for op in ("decode", "encode")}
     return memfit.plan_memory(
         pipe.weights.get("dit", 0),
         pipe.weights.get("encoder", 0) if resident else 0,
         pipe.weights.get("vae", 0),
+        pipe.weights.get("mmproj", 0) if resident else 0,
         adapters=pipe.adapters.bytes + pipe.tables.bytes,
         family=pipe.family.name,
         height=height, width=width,
         cfg=pipe.defaults.cfg if cfg is None else cfg, dtype=act,
-        vae_dtype=vae_dtype, encoder_owned=bool(resident and enc.owned),
+        vae_dtype=vae_dtype,
+        encoder_owned=bool(resident and enc.owned and not keep_encoder),
         caption_tokens=caption_tokens, cache_bytes=caches,
         prefix_rows=[_prefix_rows(pipe, c) for c in states] or None,
-        prefix_other=other, prefix_bound=bound, budget=budget,
-        overcommit=overcommit)
+        prefix_other=other, prefix_bound=bound, init_image=init_image,
+        vae_price=price, budget=budget, overcommit=overcommit)
 
 
 def encode_text(pipe: ImagePipeline, prompt: str, *,
@@ -647,14 +663,18 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
            height: int, width: int, steps: int | None = None,
            seed: int | None = None, noise=None, sampler: str = "euler",
            sigmas=None, init_latents=None, denoise: float = 1.0, mask=None,
-           patch_table=None, on_step=None, should_stop=None) -> mx.array:
+           patch_table=None, on_step=None, should_stop=None,
+           plan=None) -> mx.array:
     """Sample latents for ``cond``. With ``init_latents`` the run is
     img2img from strength ``denoise``, and a ``mask`` (1 where the image
     changes) makes it inpainting. ``noise`` is (B, C, H, W) float32, else
     it comes from ``seed``, else from a random seed. The batch is that of
     ``init_latents``, else of ``noise``, else 1. ``sampler`` is
     ``euler`` or ``uni_pc_bh2``, and the model sees the schedule's sigmas
-    either way."""
+    either way. ``plan`` is the memory plan of the request: where it
+    runs one row at a time, a guided step evaluates the positive velocity
+    before it runs the negative row, and the two give the latents of a
+    step that evaluates both together."""
     patch_table = _table_id(pipe, patch_table)
     if cfg is None:
         cfg = pipe.defaults.cfg
@@ -709,6 +729,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
 
     x = noise if init is None else noised(s[0], noise, init)
     smp = make_sampler(sampler, s)
+    one_row = plan is not None and plan.rows == 1
     scope = state_scope(pipe, [cond] if cfg == 1.0 else [cond, neg],
                         patch_table=patch_table)
     with memfit.bounded_cache(), scope:
@@ -717,6 +738,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
                 raise SampleStopped(i, x)
             v = denoise_step(pipe, x, s[i], cond, patch_table=patch_table)
             if cfg != 1.0:
+                if one_row:
+                    mx.eval(v)
                 v = guide(v, denoise_step(pipe, x, s[i], neg,
                                           patch_table=patch_table), cfg)
             x = smp.step(x, v, i)
@@ -734,25 +757,43 @@ def _need_vae(pipe: ImagePipeline):
     return pipe.vae
 
 
+def _vae_pass(plan, op: str, tiled: bool | None) -> tuple:
+    """How a VAE ``op`` runs and the bytes it may take. With the ``plan``
+    of the request both are the plan's, and ``tiled`` overrides its
+    choice alone. Without one the choice is the automatic one against the
+    free working set."""
+    if plan is None:
+        return tiled, None
+    chosen, room = plan.vae_pass(op)
+    return (chosen if tiled is None else tiled), room
+
+
 def vae_decode(pipe: ImagePipeline, latents, *, tiled: bool | None = None,
-               alpha: bool = False) -> mx.array:
+               alpha: bool = False, plan=None) -> mx.array:
     """Latents to an image float32 in [0, 1]: (B, H, W, 3), or (B, H, W, 4)
     with ``alpha``, which keeps the fourth channel of a VAE that decodes
-    RGBA."""
+    RGBA. ``plan`` is the memory plan of the request, from
+    ``plan_request``: the decode runs whole or in tiles as it says, within
+    the bytes it leaves for the pass."""
     vae = _need_vae(pipe)
     if alpha and vae.config.out_channels != 4:
         raise ValueError(f"the {pipe.family.title} VAE has no alpha channel")
     from .vae import tiling
 
-    img = tiling.decode(vae, latents, tiled=tiled, alpha=alpha)
+    tiled, free = _vae_pass(plan, "decode", tiled)
+    img = tiling.decode(vae, latents, tiled=tiled, alpha=alpha, free=free)
     return mx.clip(img / 2 + 0.5, 0.0, 1.0)
 
 
 def vae_encode(pipe: ImagePipeline, image, *, tiled: bool | None = None,
-               mode: str = "mode", noise=None) -> mx.array:
-    """An image (B, H, W, 3) in [0, 1] to latents (B, C, h, w) float32."""
+               mode: str = "mode", noise=None, plan=None) -> mx.array:
+    """An image (B, H, W, 3) in [0, 1] to latents (B, C, h, w) float32.
+    ``plan`` is the memory plan of a request with an init image, and the
+    encode runs as it says."""
     vae = _need_vae(pipe)
     from .vae import tiling
 
+    tiled, free = _vae_pass(plan, "encode", tiled)
     x = mx.array(image).astype(mx.float32) * 2 - 1
-    return tiling.encode(vae, x, tiled=tiled, mode=mode, noise=noise)
+    return tiling.encode(vae, x, tiled=tiled, mode=mode, noise=noise,
+                         free=free)
