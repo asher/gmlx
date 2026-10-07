@@ -93,6 +93,16 @@ NORM_FLOOR = 1e-12
 # on the right.
 DOWN_PAD = ((0, 0), (0, 1), (0, 1), (0, 0))
 
+# Up blocks of the decoder that a tiled decode runs in tiles: all but the
+# first. The convs of the whole up path read 13 latent pixels across a cut,
+# and a 512 pixel tile cropped at 13 would keep a fifth of each side. From
+# the second up block on they read 7, and from the third on 3. The part
+# before the tiles runs on the whole image, and its bytes grow fourfold
+# with each up block it takes: on the official file at 1024 pixels in
+# bfloat16 it measured 0.63 GiB through the first up block and 1.53 GiB
+# through the second.
+TILED_UP_BLOCKS = 4
+
 
 @dataclass(frozen=True)
 class QwenImage21VAEConfig:
@@ -123,17 +133,29 @@ class QwenImage21VAEConfig:
                      for m in (self.dim_mult[-1], *reversed(self.dim_mult)))
 
 
-def expected_unused(cfg: QwenImage21VAEConfig) -> tuple:
+def whole_up_blocks(cfg: QwenImage21VAEConfig) -> int:
+    """Up blocks of the decoder that a tiled decode runs on the whole
+    image, before the ``TILED_UP_BLOCKS`` it runs in tiles."""
+    return max(0, len(cfg.dim_mult) - TILED_UP_BLOCKS)
+
+
+def expected_unused(cfg: QwenImage21VAEConfig) -> dict:
     """The time_conv tensors of the video layout, which a file may hold and
-    one frame never runs: a weight and a bias at each resample where the
-    config halves or doubles time."""
+    one frame never runs, each with its torch shape: a weight and a bias
+    at each resample where the config halves or doubles time. A downsample
+    keeps its channels, and an upsample doubles them for the two frames it
+    makes."""
     n = len(cfg.dim_mult)
     up = cfg.temporal[::-1]
-    at = [f"encoder.down_blocks.{i}.downsampler" for i in range(n - 1)
-          if cfg.temporal[i]]
-    at += [f"decoder.up_blocks.{i}.upsampler" for i in range(n - 1) if up[i]]
-    return tuple(f"{name}.time_conv.{part}" for name in at
-                 for part in ("weight", "bias"))
+    at = [(f"encoder.down_blocks.{i}.downsampler", cfg.encoder_dims[i + 1], 1)
+          for i in range(n - 1) if cfg.temporal[i]]
+    at += [(f"decoder.up_blocks.{i}.upsampler", cfg.decoder_dims[i + 1], 2)
+           for i in range(n - 1) if up[i]]
+    out = {}
+    for name, c, grow in at:
+        out[f"{name}.time_conv.weight"] = (grow * c, c, 1, 1)
+        out[f"{name}.time_conv.bias"] = (grow * c,)
+    return out
 
 
 def config_disagreements(config: dict) -> list:
@@ -441,17 +463,23 @@ class Decoder(nn.Module):
             for i in range(n)]
         self.norm_out = RMSNorm(d[-1], 3)
         self.conv_out = Conv2d(d[-1], cfg.out_channels, 3, padding=1)
+        self.whole = whole_up_blocks(cfg)
 
     def __call__(self, z: mx.array) -> mx.array:
         return self.tail(self.head(z))
 
     def head(self, z: mx.array) -> mx.array:
-        """The latent-space part: conv_in and the mid block."""
-        return self.mid_block(self.conv_in(z))
+        """The part a tiled decode runs on the whole image: conv_in, the
+        mid block and the first up blocks. Its result has ``2 ** whole``
+        pixels per latent pixel."""
+        x = self.mid_block(self.conv_in(z))
+        for blk in self.up_blocks[:self.whole]:
+            x = blk(x)
+        return x
 
     def tail(self, x: mx.array) -> mx.array:
-        """The up blocks and the output conv."""
-        for blk in self.up_blocks:
+        """The last up blocks and the output conv."""
+        for blk in self.up_blocks[self.whole:]:
             x = blk(x)
         return self.conv_out(nn.silu(self.norm_out(x)))
 
@@ -464,9 +492,11 @@ class QwenImage21VAE(nn.Module):
     [-30, 20]. Both run in the dtype of the weights. Model space, which the
     DiT works in, is (z - mean) / std per latent channel.
 
-    No norm takes a statistic of the whole image, so a tiled pass runs the
-    pixel-space part one tile at a time: ``decode_tail`` on tiles of
-    ``decode_head``'s output, and ``encode_head`` on tiles of the image."""
+    No norm takes a statistic of the whole image, so a tiled pass runs
+    the part that holds most of the bytes one tile at a time:
+    ``decode_tail`` on tiles of ``decode_head``'s output, and
+    ``encode_head`` on tiles of the image. A result farther from every cut
+    than ``reach`` is that of the whole pass."""
 
     lockstep = False
 
@@ -498,12 +528,12 @@ class QwenImage21VAE(nn.Module):
             z.astype(self.dtype))))
 
     def decode_head(self, z: mx.array) -> mx.array:
-        """The part at latent resolution: post_quant_conv, conv_in and the
-        mid block."""
+        """The part a tiled decode runs on the whole image:
+        post_quant_conv, conv_in, the mid block and the first up blocks."""
         return self.decoder.head(self.post_quant_conv(z))
 
     def decode_tail(self, x: mx.array) -> mx.array:
-        """The up blocks and the output conv, unclamped."""
+        """The last up blocks and the output conv, unclamped."""
         return self.decoder.tail(x)
 
     def finish(self, x: mx.array) -> mx.array:
@@ -554,14 +584,16 @@ class QwenImage21VAE(nn.Module):
 
 
 def reach(cfg: QwenImage21VAEConfig, op: str) -> int:
-    """Latent pixels over which the pixel-space part of ``op``, "decode" or
+    """Latent pixels over which the tiled part of ``op``, "decode" or
     "encode", reads its input: a result at a latent pixel depends on no
     input farther than this from it. Each 3x3 conv reads one pixel at its
-    own resolution."""
+    own resolution. The tiled part of a decode is ``Decoder.tail``, the
+    up blocks from ``whole_up_blocks`` on, and that of an encode is
+    ``Encoder.head``."""
     n = len(cfg.dim_mult)
     r = 0.0
     if op == "decode":
-        for i in range(n):
+        for i in range(whole_up_blocks(cfg), n):
             r += 2 * (cfg.num_res_blocks + 1) / 2 ** i
             if i < n - 1:
                 r += 1 / 2 ** (i + 1)

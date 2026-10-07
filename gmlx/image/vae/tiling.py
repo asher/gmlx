@@ -24,24 +24,26 @@ activations at one GroupNorm are held at once, which is about the size of
 that activation for the whole image times the overlap.
 
 The Qwen-Image 2.1 autoencoder normalizes each pixel over its channels and
-takes no statistic of the whole image. Its part at latent resolution runs
-whole too, so the mid attention sees every latent pixel, and its tiles run
-one at a time, each evaluated before the next. A tile's convs pad zeros
-where the whole pass reads the neighboring tile. A tile therefore equals
-the whole pass at every pixel farther from each cut tile edge than the
-convs reach, which is 13 latent pixels in a decode and 10 in an encode
-(``qwen_image21_vae.reach``), and differs nearer.
+takes no statistic of the whole image. The part with its mid attention
+runs whole too, so the attention sees every latent pixel, and its tiles
+run one at a time, each evaluated before the next. A tile's convs pad
+zeros where the whole pass reads the neighboring tile. A tile therefore
+equals the whole pass at every pixel farther from each cut tile edge than
+the convs of the tiled part reach (``qwen_image21_vae.reach``), and
+differs nearer.
 
-A decode of that autoencoder blends its tiles as above: the ramp gives a
-tile a weight that falls to zero at its cut edge, and the decode is
-clamped after the blend. An encode gives its tiled part to the mid
-attention, which spreads an error at a cut over every latent pixel, so
-its tiles are cropped and not blended. Neighbors overlap by at least twice
-the reach, each tile gives the pixels nearer its center than a
-neighbor's, and no pixel within the reach of a cut is kept. The result is
-the whole encode up to the rounding of the device, which can differ
-between input shapes. A cropped tile is longer than twice the reach, so
-336 pixels or more.
+Its tiles are cropped and not blended, in a decode and in an encode.
+Neighbors overlap by at least twice the reach, each tile gives the pixels
+nearer its center than a neighbor's, and no pixel within the reach of a
+cut is kept. The result is the whole pass up to the rounding of the
+device, which can differ between input shapes. A blend of the two tiles
+of an overlap does not give that: on texture and on text the tiles of
+the decode disagree by 8 to 15 levels of 255 in the mean before a blend.
+A decode runs conv_in, the mid block and the first up block on the whole
+image, and the other four up blocks in tiles, which read 7 latent pixels
+across a cut. An encode runs conv_in and the down blocks in tiles, which
+read 10. A cropped tile is longer than twice the reach, so a tile is 240
+pixels or more in a decode and 336 or more in an encode.
 
 ``decode`` and ``encode`` evaluate their result inside
 ``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
@@ -262,17 +264,17 @@ def price_args(vae, op: str, batch: int) -> dict:
                 conv=getattr(vae, "conv", None))
 
 
-def encode_layout(vae, tile: int, overlap: int) -> tuple[int, int, int]:
-    """The tile, the overlap and the reach of a tiled encode, in latent
+def crop_layout(vae, op: str, tile: int,
+                overlap: int) -> tuple[int, int, int]:
+    """The tile, the overlap and the reach of a tiled ``op``, in latent
     pixels, for ``tile`` and ``overlap`` in image pixels, as the VAE row
-    of the family gives them. Where the row crops the encode's tiles the
+    of the family gives them. Where the row crops the tiles of the op the
     reach is that of a cut and the overlap at least twice it. Where it
     blends them the reach is 0."""
     s = vae.config.scale
     family = row_family(vae)
-    lap = memfit.tile_overlap(family, "encode", tile, overlap, vae.config)
-    return (tile // s, lap // s,
-            memfit.crop_reach(family, "encode", vae.config))
+    lap = memfit.tile_overlap(family, op, tile, overlap, vae.config)
+    return (tile // s, lap // s, memfit.crop_reach(family, op, vae.config))
 
 
 def _plan(vae, op: str, b: int, height: int, width: int, tiled,
@@ -309,11 +311,12 @@ def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
                 vae.decoder.tail_steps, head, in_scale=1, out_scale=s,
                 tile=tile // s, overlap=overlap // s))
         else:
+            t, lap, r = crop_layout(vae, "decode", tile, overlap)
             head = vae.decode_head(z.astype(vae.dtype))
             mx.eval(head)
             out = vae.finish(mx.array(run_tiled(
-                vae.decode_tail, head, in_scale=1, out_scale=s,
-                tile=tile // s, overlap=overlap // s)))
+                vae.decode_tail, head, in_scale=head.shape[1] // z.shape[1],
+                out_scale=s, tile=t, overlap=lap, reach=r)))
         if rgba and not alpha:
             out = out[..., :3]
         mx.eval(out)
@@ -350,7 +353,7 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
             mean, logvar = vae.split_moments(
                 vae.encoder.tail(mx.array(head).astype(vae.dtype)))
         else:
-            t, lap, r = encode_layout(vae, tile, overlap)
+            t, lap, r = crop_layout(vae, "encode", tile, overlap)
             head = run_tiled(vae.encode_head, x, in_scale=s, out_scale=1,
                              tile=t, overlap=lap, reach=r)
             mean, logvar = vae.split_moments(

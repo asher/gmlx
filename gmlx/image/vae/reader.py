@@ -4,8 +4,9 @@ A VAE is identified by tensor names and shapes, never by an arch string.
 The prefixes ``vae.`` and ``first_stage_model.`` are stripped, and the
 FLUX.1 autoencoder is also read in its original layout. The whole header is
 checked before any tensor bytes are read. Loading is strict both ways:
-every module parameter is filled, and every file tensor is consumed or on
-the list of tensors that the family's config leaves unread. A file that
+every module parameter is filled, and every file tensor is consumed or is
+one that the family's config leaves unread, at the shape the config gives
+it. A file that
 holds another family's VAE, or a relative of one with other channel counts
 or video kernels, is refused with what it holds. A GGUF that carries the
 VAE's config text is refused when a field gmlx takes from the family's
@@ -48,8 +49,9 @@ class VaeRow:
     build: Callable                 # config -> nn.Module
     latent_channels: int
     latent_space: Callable          # family constants -> config fields
-    expected_unused: Callable | None = None     # config -> names a file
-                                                # may hold that stay unread
+    expected_unused: Callable | None = None     # config -> the tensors a
+                                                # file may hold that stay
+                                                # unread, name -> torch shape
     image_channels: int | None = None   # in and out, when the family fixes
                                         # them
     relative: Callable | None = None    # torch shapes -> what a file with
@@ -267,11 +269,15 @@ def _holds(header: VaeHeader, family: str, row: VaeRow) -> str:
 
 
 def check_names(header: VaeHeader, params: dict, row: VaeRow, cfg) -> None:
-    unread = row.expected_unused(cfg) if row.expected_unused else ()
+    unread = row.expected_unused(cfg) if row.expected_unused else {}
     missing = sorted(set(params) - set(header.shapes))
     extra = sorted(set(header.shapes) - set(params) - set(unread))
     wrong = sorted(n for n in set(params) & set(header.shapes)
                    if _mlx_shape(header.shapes[n]) != params[n].shape)
+    # A tensor that stays unread is still held to its shape, so a file of
+    # another model does not pass on the names alone.
+    wrong += sorted(n for n, shape in unread.items() if n in header.shapes
+                    and tuple(header.shapes[n]) != tuple(shape))
     parts = []
     if missing:
         parts.append(f"{len(missing)} missing ({', '.join(missing[:8])})")

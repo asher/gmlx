@@ -103,9 +103,9 @@ def _decode_tile(size: int, t: int, isz: int) -> tuple:
     its peak."""
     px, lat = size * size, (size // 16) ** 2
     return (864 * t * t * isz           # one tile at its peak
-            + 1152 * lat * isz,         # the mid block's output, held
+            + 4 * 1152 * lat * isz,     # the first up block's output, held
             0,
-            4 * px * 4 + 4 * px)        # the blended image and its weights
+            4 * px * 4)                 # the image the tiles are copied to
 
 
 def _encode_tile(size: int, t: int, isz: int) -> tuple:
@@ -132,10 +132,10 @@ IMAGE_2048, HEAD_2048 = 4 * 2048 * 2048 * 3, 4 * 16384 * 768
 
 # (op, pixels a side, itemsize, whole op-order bytes, and for the tiled
 # pass the op-order bytes and the floor's step with its device, softmax
-# and host bytes). The default tile is 384 pixels at 1024 and 464 at 2048.
-# In a tiled pass at 2048 the mid attention, which runs whole, can hold
-# more than a tile: in the encode beside the image and the blended head,
-# and in the fp32 decode once the softmax is counted.
+# and host bytes). At the overlap of 64 pixels that these calls leave to
+# its default, the tile is 384 pixels at 1024 and 464 at 2048. In a tiled
+# encode at 2048 the mid attention, which runs whole, holds more than a
+# tile beside the image and the blended head.
 CELLS = [
     ("decode", 1024, 2, 864 * 1024 * 1024 * 2,
      _decode_tile(1024, 384, 2)[0], f"tile {UP}", _decode_tile(1024, 384, 2)),
@@ -144,7 +144,7 @@ CELLS = [
     ("decode", 2048, 2, 864 * 2048 * 2048 * 2,
      _decode_tile(2048, 464, 2)[0], f"tile {UP}", _decode_tile(2048, 464, 2)),
     ("decode", 2048, 4, 864 * 2048 * 2048 * 4,
-     _decode_tile(2048, 464, 4)[0], f"decoder.{SDPA}", _attention(1152, 4)),
+     _decode_tile(2048, 464, 4)[0], f"tile {UP}", _decode_tile(2048, 464, 4)),
     ("encode", 1024, 2, 384 * 1024 * 1024 * 2,
      _encode_tile(1024, 384, 2)[0], f"tile {DOWN}",
      _encode_tile(1024, 384, 2)),
@@ -196,10 +196,10 @@ def test_the_table_in_gib(cfg):
              for op, size, isz, whole, tiled, _, _ in CELLS}
     # Whole: the op-order peak and the floor. Tiled: the same two.
     assert table == {
-        ("decode", 1024, 2): (1.688, 2.304, 0.246, 0.882),
-        ("decode", 1024, 4): (3.375, 4.608, 0.492, 1.745),
-        ("decode", 2048, 2): (6.750, 7.367, 0.382, 1.076),
-        ("decode", 2048, 4): (13.500, 14.733, 0.763, 2.085),
+        ("decode", 1024, 2): (1.688, 2.304, 0.272, 0.905),
+        ("decode", 1024, 4): (3.375, 4.608, 0.545, 1.794),
+        ("decode", 2048, 2): (6.750, 7.367, 0.487, 1.166),
+        ("decode", 2048, 4): (13.500, 14.733, 0.974, 2.270),
         ("encode", 1024, 2): (0.750, 1.367, 0.117, 0.745),
         ("encode", 1024, 4): (1.500, 2.733, 0.223, 1.467),
         ("encode", 2048, 2): (3.000, 3.617, 0.289, 1.077),
@@ -247,26 +247,32 @@ def test_the_attention_softmax_is_a_second_chunk_of_scores(cfg):
 
 
 def test_the_steps_of_a_tiled_pass_after_its_tiles():
-    # The tiny widths, a 256 pixel image and 32 pixel tiles, so the blend
+    # The tiny widths, a 256 pixel image and 32 pixel tiles, so the image
     # is larger than a tile.
     small = module_config(tiny.TINY)
     for isz in (2, 4):
-        head = 48 * 16 * 16 * isz
+        # The whole part ends on the 48 channels of the first up block at
+        # 2 pixels a latent pixel.
+        head = 48 * 32 * 32 * isz
         image, piece = 4 * 256 * 256 * 4, 4 * 32 * 32 * 4
-        blend = image + 4 * 256 * 256
         kw = dict(itemsize=isz, tiled=True, tile=32, overlap=16)
         steps = mem.memory_terms(small, "decode", 256, 256, **kw)
-        assert steps[-4:] == [
-            ("tile blend", head, 0, blend + 2 * piece),
-            ("blend divide", head, 0, blend + image),
+        # A decode crops its tiles: the host holds the image and one tile.
+        assert steps[-3:] == [
+            ("tile crop", head, 0, image + piece),
             ("image to the device", head + image, 0, image),
             ("clamp", head + 2 * image, 0, 0)]
+        whole = [s[0] for s in steps if not s[0].startswith("tile ")][:-2]
+        assert whole[0] == "post_quant_conv"
+        assert whole[-1] == "decoder.up_blocks.0.add"
+        assert not any(k.startswith("decoder.up_blocks.1") for k in whole)
         tiles = [s for s in steps if s[0].startswith("tile decoder.")]
-        assert tiles and all(s[3] == blend for s in tiles)
+        assert tiles[0][0] == "tile decoder.up_blocks.1.resnets.0.norm1"
+        assert tiles and all(s[3] == image for s in tiles)
         assert max(s[1] for s in tiles) == 36 * 32 * 32 * isz + head
         floor = mem.memory_floor(small, "decode", 256, 256, **kw)
         assert (floor["at"], floor["op_order"], floor["host"]) == (
-            "blend divide", head, blend + image)
+            "image to the device", head + image, image)
         assert mem.activation_peak(small, "decode", 256, 256, **kw) == (
             head + 2 * image, "clamp")
 
@@ -301,16 +307,21 @@ def test_a_tiled_decode_at_2048_by_tile_size(cfg):
                              tiled=True, tile=tile)
         return f["at"], f["total"] - f["weights"]
 
-    # Under 512 pixel tiles the mid attention, which runs whole, is the
-    # peak on the device, and a smaller tile lowers nothing.
+    # Under 512 pixel tiles the part that runs whole holds the most, and
+    # a smaller tile lowers nothing. On the device that is the first up
+    # block: its upsampled branch, the channels its shortcut gathers and
+    # their copy in image order, each 1152 channels at 2 pixels a latent
+    # pixel. With the softmax counted it is the mid attention.
     attn = f"decoder.{SDPA}"
-    assert peak(256) == peak(128) == peak(384) == (322961408, attn)
-    assert _decode_tile(2048, 352, 2)[0] < 322961408
+    first = "decoder.up_blocks.0.shortcut.depth_to_space"
+    assert peak(256) == peak(128) == peak(384) == (
+        3 * 4 * 1152 * 16384 * 2, first)
+    assert _decode_tile(2048, 352, 2)[0] < 452984832 == peak(256)[0]
     assert floor(256) == floor(384) == (attn, 322961408 + 2 * 16384 * 4096)
     # Seven 352 pixel tiles a side at 384, five 464 pixel tiles at 512.
     assert peak(512) == (_decode_tile(2048, 464, 2)[0], f"tile {UP}")
-    assert peak(512)[0] == 409780224
-    assert floor(512) == (f"tile {UP}", 409780224 + 5 * 2048 * 2048 * 4)
+    assert peak(512)[0] == 523026432
+    assert floor(512) == (f"tile {UP}", 523026432 + 4 * 2048 * 2048 * 4)
     # Tiles of at most 768 and of at most 1024 pixels both lay out three
     # 736 pixel tiles a side.
     assert peak(768) == peak(1024)
@@ -335,8 +346,8 @@ def test_peaks_scale_with_the_batch_and_run_whole_inside_one_tile(cfg):
             assert fn(cfg, op, 512, 384, itemsize=2, tiled=True) == fn(
                 cfg, op, 512, 384, itemsize=2)
     wide = mem.memory_floor(cfg, "decode", 512, 1024, itemsize=2, tiled=True)
-    assert wide["op_order"] == 864 * 512 * 384 * 2 + 1152 * 32 * 64 * 2
-    assert wide["host"] == 4 * 512 * 1024 * 5
+    assert wide["op_order"] == 864 * 512 * 384 * 2 + 4608 * 32 * 64 * 2
+    assert wide["host"] == 4 * 512 * 1024 * 4
     for fn in (mem.activation_peak, mem.memory_floor, mem.memory_terms):
         with pytest.raises(ValueError, match="'decode' or 'encode'"):
             fn(cfg, "both", 512, 512, itemsize=2)

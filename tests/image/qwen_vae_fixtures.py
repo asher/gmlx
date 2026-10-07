@@ -55,6 +55,51 @@ def pruned() -> dict:
     }
 
 
+def texture(height: int, width: int, seed: int = 7) -> np.ndarray:
+    """A texture of band-limited noise over a mid gray, (1, H, W, 3) in
+    float32 on the [-1, 1] scale: blocks of 2, 4, 8 and 16 pixels."""
+    rng = np.random.default_rng(seed)
+    out = np.zeros((height, width, 3))
+    for scale, amp in ((2, 0.10), (4, 0.12), (8, 0.12), (16, 0.10)):
+        hh, ww = -(-height // scale), -(-width // scale)
+        n = rng.standard_normal((hh, ww, 3))
+        out += amp * np.repeat(np.repeat(n, scale, 0), scale,
+                               1)[:height, :width]
+    return (np.clip(0.5 + out, 0, 1) * 2 - 1)[None].astype(np.float32)
+
+
+def textlike(height: int, width: int, seed: int = 9) -> np.ndarray:
+    """Dark strokes of one and two pixels and small boxes on a light
+    ground, in rows of 18 pixels as text is laid out, (1, H, W, 3) in
+    float32 on the [-1, 1] scale."""
+    rng = np.random.default_rng(seed)
+    img = np.full((height, width, 3), 0.92)
+    line = 18
+    for top in range(8, height - line, line):
+        col = 8
+        while col < width - 16:
+            w = int(rng.integers(3, 12))
+            kind = int(rng.integers(0, 4))
+            ink = 0.05 + 0.1 * rng.random()
+            if kind == 0:
+                img[top:top + 12, col:col + 2] = ink
+            elif kind == 1:
+                img[top + 5:top + 7, col:col + w] = ink
+            elif kind == 2:
+                img[top:top + 12, col:col + w] = ink
+                img[top + 2:top + 10, col + 2:col + w - 2] = 0.92
+            else:
+                for k in range(0, min(w, 10)):
+                    img[top + k:top + k + 2, col + k:col + k + 1] = ink
+            col += w + int(rng.integers(2, 6))
+    return (img * 2 - 1)[None].astype(np.float32)
+
+
+# Contents that show a seam: a tile and its neighbor disagree most on fine
+# texture and on text.
+CONTENTS = {"texture": texture, "text": textlike}
+
+
 def weights(vae) -> dict:
     import mlx.core as mx
     from mlx.utils import tree_flatten

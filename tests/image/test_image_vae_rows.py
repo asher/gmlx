@@ -1,5 +1,5 @@
 """The VAE rows of the image memory plan: a row per family, the fits of
-the Qwen-Image 2.1 VAE against the passes measured on its official file,
+the Qwen-Image 2.1 VAE against every pass measured on its official file,
 the rule that prices a pass on an unmeasured row, held on that VAE's steps
 as it was priced before, the plan's decode term against the choice and
 the price of the guarded decode under either, and the Z-Image values held
@@ -134,8 +134,8 @@ def test_the_tile_layout_follows_the_scale_of_the_vae():
 
 def test_a_measured_row_lays_its_tiles_out_at_the_scale_of_its_family(
         monkeypatch):
-    """What the row of this family prices once a ladder has set its fits:
-    tiles of whole latent pixels at 16 pixels each."""
+    """What a measured row of this family prices: tiles of whole latent
+    pixels at 16 pixels each."""
     import dataclasses
 
     fit = {2: memfit.VaeFit(0.0, 1.0)}
@@ -143,7 +143,7 @@ def test_a_measured_row_lays_its_tiles_out_at_the_scale_of_its_family(
         memfit.VAE_ROWS[FAMILY], measured=True, floor=None,
         whole={"decode": {"exact": fit}},
         tiled={"decode": {2: memfit.TiledFit(0.0, 0.5, 0.0)}},
-        one_tile=False, tiles_first=False, scores=0.0)
+        one_tile=False, tiles_first=False, scores=0.0, crop=None)
     monkeypatch.setitem(memfit.VAE_ROWS, FAMILY, plain)
     kw = dict(family=FAMILY, itemsize=2)
     assert memfit.vae_peak("decode", 720, 720, **kw) == 720 * 720 * 144 * 2
@@ -182,57 +182,86 @@ def test_a_measured_row_lays_its_tiles_out_at_the_scale_of_its_family(
 
 # The measured row of the Qwen-Image 2.1 VAE
 
-# The ladder on the official file, on an M5 Max under bounded_cache: what
-# a pass added over the settled process with the weights loaded, in GiB,
-# as (growth of the process footprint, MLX peak over the active bytes at
-# the start), each the largest over two fresh processes of a cold and a
-# warm pass. (op, whole or tiled, pixels a side, itemsize, conv path). No
-# pass ran whole above 1024 pixels. The tiled decodes blend 3, 4 and 5
-# tiles a side of 384, 432 and 464 pixels, and the tiled encodes crop 4, 7
-# and 9 tiles a side of 496, 496 and 512 pixels.
+# The passes measured on the official file, on an M5 Max under
+# bounded_cache: what a pass added over the settled process with the
+# weights loaded, in GiB rounded up, as (growth of the process footprint,
+# MLX peak over the active bytes at the start), each the largest over the
+# fresh processes that ran it, a cold and a warm pass in each. (op, whole
+# or tiled, (height, width), itemsize, conv path). No pass ran whole above
+# 1024 pixels. The tiled passes crop their tiles: a decode takes 2, 3, 5
+# and 7 tiles of 496 pixels along a side of 768, 1024, 1536 and 2048, and
+# an encode 3 of 480, 4 of 496, 7 of 496 and 9 of 512.
 CELLS = {
-    ("decode", "whole", 256, 2, "exact"): (1.10, 0.77),
-    ("decode", "whole", 512, 2, "exact"): (2.45, 1.06),
-    ("decode", "whole", 1024, 2, "exact"): (5.50, 3.66),
-    ("decode", "whole", 256, 4, "exact"): (2.19, 1.54),
-    ("decode", "whole", 512, 4, "exact"): (4.31, 2.12),
-    ("decode", "whole", 1024, 4, "exact"): (8.74, 7.32),
-    ("decode", "whole", 256, 2, "winograd"): (1.90, 1.43),
-    ("decode", "whole", 512, 2, "winograd"): (3.53, 2.34),
-    ("decode", "whole", 1024, 2, "winograd"): (7.83, 7.00),
-    ("decode", "whole", 256, 4, "winograd"): (2.77, 2.85),
-    ("decode", "whole", 512, 4, "winograd"): (5.11, 4.67),
-    ("decode", "whole", 1024, 4, "winograd"): (13.58, 14.00),
-    ("encode", "whole", 256, 2, "exact"): (0.37, 0.35),
-    ("encode", "whole", 512, 2, "exact"): (1.04, 0.81),
-    ("encode", "whole", 1024, 2, "exact"): (2.79, 1.56),
-    ("encode", "whole", 256, 4, "exact"): (0.72, 0.70),
-    ("encode", "whole", 512, 4, "exact"): (2.05, 1.65),
-    ("encode", "whole", 1024, 4, "exact"): (3.96, 3.11),
-    ("encode", "whole", 256, 2, "winograd"): (0.48, 0.46),
-    ("encode", "whole", 512, 2, "winograd"): (1.95, 1.25),
-    ("encode", "whole", 1024, 2, "winograd"): (3.28, 2.62),
-    ("encode", "whole", 256, 4, "winograd"): (0.94, 0.92),
-    ("encode", "whole", 512, 4, "winograd"): (2.51, 2.50),
-    ("encode", "whole", 1024, 4, "winograd"): (4.40, 5.22),
-    ("decode", "tiled", 1024, 2, "exact"): (1.79, 0.80),
-    ("decode", "tiled", 1536, 2, "exact"): (2.29, 0.86),
-    ("decode", "tiled", 2048, 2, "exact"): (2.95, 1.18),
-    ("decode", "tiled", 1024, 4, "exact"): (3.46, 1.61),
-    ("decode", "tiled", 1536, 4, "exact"): (3.86, 1.72),
-    ("decode", "tiled", 2048, 4, "exact"): (4.00, 2.08),
-    ("encode", "tiled", 1024, 2, "exact"): (1.18, 0.80),
-    ("encode", "tiled", 1536, 2, "exact"): (1.48, 0.81),
-    ("encode", "tiled", 2048, 2, "exact"): (1.73, 1.01),
-    ("encode", "tiled", 1024, 4, "exact"): (2.07, 1.58),
-    ("encode", "tiled", 1536, 4, "exact"): (2.70, 1.60),
-    ("encode", "tiled", 2048, 4, "exact"): (3.39, 1.77),
+    ("decode", "whole", (256, 256), 2, "exact"): (1.11, 0.77),
+    ("decode", "whole", (512, 512), 2, "exact"): (2.46, 1.07),
+    ("decode", "whole", (576, 576), 2, "exact"): (2.78, 1.35),
+    ("decode", "whole", (512, 768), 2, "exact"): (3.02, 1.43),
+    ("decode", "whole", (640, 640), 2, "exact"): (3.13, 1.49),
+    ("decode", "whole", (704, 704), 2, "exact"): (3.66, 1.80),
+    ("decode", "whole", (512, 1024), 2, "exact"): (3.85, 1.91),
+    ("decode", "whole", (768, 768), 2, "exact"): (4.22, 2.14),
+    ("decode", "whole", (640, 1024), 2, "exact"): (4.57, 2.38),
+    ("decode", "whole", (832, 832), 2, "exact"): (4.70, 2.52),
+    ("decode", "whole", (768, 1024), 2, "exact"): (4.64, 2.75),
+    ("decode", "whole", (896, 896), 2, "exact"): (4.71, 2.81),
+    ("decode", "whole", (1024, 1024), 2, "exact"): (5.51, 3.66),
+    ("decode", "whole", (256, 256), 4, "exact"): (2.19, 1.54),
+    ("decode", "whole", (512, 512), 4, "exact"): (4.31, 2.13),
+    ("decode", "whole", (640, 640), 4, "exact"): (5.21, 2.98),
+    ("decode", "whole", (768, 768), 4, "exact"): (6.59, 4.28),
+    ("decode", "whole", (1024, 1024), 4, "exact"): (8.75, 7.32),
+    ("decode", "whole", (256, 256), 2, "winograd"): (1.90, 1.43),
+    ("decode", "whole", (512, 512), 2, "winograd"): (3.54, 2.34),
+    ("decode", "whole", (1024, 1024), 2, "winograd"): (7.83, 7.01),
+    ("decode", "whole", (256, 256), 4, "winograd"): (2.78, 2.86),
+    ("decode", "whole", (512, 512), 4, "winograd"): (5.11, 4.68),
+    ("decode", "whole", (1024, 1024), 4, "winograd"): (13.59, 14.01),
+    ("encode", "whole", (256, 256), 2, "exact"): (0.38, 0.36),
+    ("encode", "whole", (512, 512), 2, "exact"): (1.05, 0.82),
+    ("encode", "whole", (512, 768), 2, "exact"): (1.50, 0.87),
+    ("encode", "whole", (640, 640), 2, "exact"): (1.56, 0.89),
+    ("encode", "whole", (704, 704), 2, "exact"): (1.85, 0.94),
+    ("encode", "whole", (512, 1024), 2, "exact"): (1.94, 1.00),
+    ("encode", "whole", (768, 768), 2, "exact"): (1.91, 0.88),
+    ("encode", "whole", (640, 1024), 2, "exact"): (2.11, 0.98),
+    ("encode", "whole", (768, 1024), 2, "exact"): (2.50, 1.18),
+    ("encode", "whole", (896, 896), 2, "exact"): (2.55, 1.20),
+    ("encode", "whole", (1024, 1024), 2, "exact"): (2.79, 1.57),
+    ("encode", "whole", (256, 256), 4, "exact"): (0.72, 0.70),
+    ("encode", "whole", (512, 512), 4, "exact"): (2.06, 1.65),
+    ("encode", "whole", (768, 768), 4, "exact"): (3.55, 1.75),
+    ("encode", "whole", (1024, 1024), 4, "exact"): (3.97, 3.11),
+    ("encode", "whole", (256, 256), 2, "winograd"): (0.49, 0.47),
+    ("encode", "whole", (512, 512), 2, "winograd"): (1.96, 1.26),
+    ("encode", "whole", (1024, 1024), 2, "winograd"): (3.28, 2.62),
+    ("encode", "whole", (256, 256), 4, "winograd"): (0.94, 0.92),
+    ("encode", "whole", (512, 512), 4, "winograd"): (2.51, 2.51),
+    ("encode", "whole", (1024, 1024), 4, "winograd"): (4.40, 5.23),
+    ("decode", "tiled", (768, 768), 2, "exact"): (2.41, 1.06),
+    ("decode", "tiled", (512, 1024), 2, "exact"): (2.35, 1.05),
+    ("decode", "tiled", (1024, 1024), 2, "exact"): (2.65, 1.07),
+    ("decode", "tiled", (1536, 1536), 2, "exact"): (2.86, 1.12),
+    ("decode", "tiled", (2048, 2048), 2, "exact"): (3.24, 1.37),
+    ("decode", "tiled", (768, 768), 4, "exact"): (4.11, 2.11),
+    ("decode", "tiled", (512, 1024), 4, "exact"): (4.10, 2.10),
+    ("decode", "tiled", (1024, 1024), 4, "exact"): (4.36, 2.14),
+    ("decode", "tiled", (1536, 1536), 4, "exact"): (4.49, 2.23),
+    ("decode", "tiled", (2048, 2048), 4, "exact"): (4.55, 2.45),
+    ("encode", "tiled", (768, 768), 2, "exact"): (0.93, 0.80),
+    ("encode", "tiled", (512, 1024), 2, "exact"): (1.02, 0.80),
+    ("encode", "tiled", (1024, 1024), 2, "exact"): (1.18, 0.80),
+    ("encode", "tiled", (1536, 1536), 2, "exact"): (1.48, 0.81),
+    ("encode", "tiled", (2048, 2048), 2, "exact"): (1.73, 1.01),
+    ("encode", "tiled", (1024, 1024), 4, "exact"): (2.07, 1.58),
+    ("encode", "tiled", (1536, 1536), 4, "exact"): (2.70, 1.60),
+    ("encode", "tiled", (2048, 2048), 4, "exact"): (3.39, 1.77),
 }
-# How far above its cell a price may stand, in GiB. A whole fit raises its
-# slope 10 percent and its base 0.25 GiB over every cell. A tiled price
-# adds the scores of the mid attention to one tile, which do not peak
-# together, and takes 1.5 times the bytes of the scores where fp32 held
-# 1.18 times.
+# What a fit keeps over every cell it covers, in GiB, and how far above
+# its cell a price may stand. A whole fit raises its slope 10 percent and
+# its base 0.25 GiB over every cell. A tiled price adds the scores of the
+# mid attention to one tile, which do not peak together, and takes 1.5
+# times the bytes of the scores where fp32 held 1.18 times.
+MARGIN = 0.25
 SLACK = {"whole": 1.6, "tiled": 2.0}
 
 
@@ -242,29 +271,42 @@ def _fit_price(op: str, size: int, item: int, **kw) -> int:
 
 
 @pytest.mark.parametrize("cell", list(CELLS), ids=lambda c: "-".join(
-    str(v) for v in c))
+    "x".join(map(str, v)) if isinstance(v, tuple) else str(v) for v in c))
 def test_the_fits_cover_every_measured_pass(cell):
-    op, mode, size, item, conv = cell
+    op, mode, (height, width), item, conv = cell
     added = max(CELLS[cell])
-    price = _fit_price(op, size, item, conv=conv,
-                       tiled=mode == "tiled") / GiB
-    # At or above the pass, and within the slack of it.
-    assert added <= price <= added + SLACK[mode], (cell, price)
+    price = memfit.vae_peak(op, height, width, family=FAMILY, itemsize=item,
+                            conv=conv, tiled=mode == "tiled") / GiB
+    # The margin of the fit rule over the pass as measured, which the
+    # cell rounds up by at most 0.01, and within the slack of it.
+    assert added - 0.01 + MARGIN <= price <= added + SLACK[mode], (
+        cell, price)
+
+
+def test_the_cells_hold_passes_that_are_not_square():
+    """A line through square passes read under a pass between them, so
+    the fits are held on wide and tall passes too, whole and in tiles."""
+    for op in ("decode", "encode"):
+        for mode in ("whole", "tiled"):
+            sides = [hw for o, m, hw, item, conv in CELLS
+                     if (o, m, item, conv) == (op, mode, 2, "exact")]
+            assert any(h != w for h, w in sides), (op, mode)
+            assert any(h == w for h, w in sides), (op, mode)
 
 
 # The prices of the official file by its fits, in GiB over the weights:
 # whole at 512, 1024, 1536 and 2048 pixels, and in tiles at the last three.
 FIT_PRICES = {
-    ("decode", 2): ((2.71, 6.48, 12.90, 22.12), (2.24, 2.67, 3.38)),
-    ("decode", 4): ((4.57, 10.18, 19.77, 33.69), (3.89, 4.59, 5.89)),
-    ("encode", 2): ((1.30, 3.42, 7.08, 12.45), (1.50, 1.74, 2.36)),
-    ("encode", 4): ((2.32, 5.05, 9.84, 17.03), (2.53, 2.96, 4.10)),
+    ("decode", 2): ((2.88, 6.80, 13.46, 23.03), (2.91, 3.19, 3.83)),
+    ("decode", 4): ((4.57, 10.26, 20.00, 34.11), (4.65, 5.16, 6.37)),
+    ("encode", 2): ((1.47, 3.69, 7.52, 13.11), (1.50, 1.74, 2.36)),
+    ("encode", 4): ((2.65, 5.53, 10.55, 18.07), (2.72, 3.15, 4.30)),
 }
 FIT_WINOGRAD = {
-    ("decode", 2): ((3.79, 8.91, 17.58, 29.95), (3.13, 3.62, 4.38)),
-    ("decode", 4): ((5.57, 15.49, 32.25, 56.21), (4.27, 5.19, 6.64)),
-    ("encode", 2): ((2.21, 4.43, 8.26, 13.85), (2.41, 2.65, 3.27)),
-    ("encode", 4): ((2.77, 6.43, 12.76, 22.12), (2.96, 3.39, 4.55)),
+    ("decode", 2): ((3.79, 8.91, 17.58, 29.95), (3.80, 4.08, 4.71)),
+    ("decode", 4): ((5.57, 15.49, 32.25, 56.21), (5.57, 6.08, 7.29)),
+    ("encode", 2): ((2.21, 4.43, 8.26, 13.85), (2.24, 2.48, 3.10)),
+    ("encode", 4): ((2.77, 6.43, 12.76, 22.12), (2.82, 3.25, 4.41)),
 }
 
 
@@ -291,21 +333,31 @@ def test_a_price_is_the_fit_and_the_scores_over_the_weights(item):
     fit = row.whole["decode"]["exact"][item]
     assert _fit_price("decode", 2048, item) == fit.bytes(
         2048 * 2048, 144, item) + held
-    # In tiles: one tile of 464 pixels a side of the 25, the image term,
-    # and the same scores, since the part at latent resolution runs whole.
+    # In tiles, at the overlap of the crop: one tile of 496 pixels a side
+    # of the 49, where a blend would lay out 25 of 464, the image term,
+    # and the same scores, since the part with the attention runs whole.
+    assert memfit.tile_overlap(FAMILY, "decode") == 224
+    assert memfit.tile_layout(2048, 512, 224, 16) == (7, 496)
     assert memfit.tile_layout(2048, scale=16) == (5, 464)
     tiled = row.tiled["decode"][item]
     assert _fit_price("decode", 2048, item, tiled=True) == tiled.bytes(
-        464 * 464, 2048 * 2048, 144, item) + held
-    # The tile term of a decode is the whole fit on the exact path, so a
-    # tile alone costs what a whole pass of its size does.
-    assert (tiled.base, tiled.k_tiles) == (fit.base, fit.k)
-    # A tiled encode is priced at the overlap of its crop: 9 tiles a side
-    # of 512 pixels at 2048, where a blend would lay out 5 of 464.
+        496 * 496, 2048 * 2048, 144, item) + held
+    # A tiled encode overlaps by more: 9 tiles a side of 512 pixels.
     assert memfit.tile_overlap(FAMILY, "encode") == 320
     assert memfit.tile_layout(2048, 512, 320, 16) == (9, 512)
     assert _fit_price("encode", 2048, item, tiled=True) == row.tiled[
         "encode"][item].bytes(512 * 512, 2048 * 2048, 96, item) + held
+    # The tile term is the whole fit on the exact path, so a tile alone
+    # costs what a whole pass of its size does. The image term is what
+    # stays held beside a tile: the float32 result on the host and on the
+    # device and the latents, 36 bytes a pixel, and in a decode the output
+    # of the part run whole, 18 values a pixel.
+    for op in ("decode", "encode"):
+        whole, in_tiles = row.whole[op]["exact"][item], row.tiled[op][item]
+        assert (in_tiles.base, in_tiles.k_tiles) == (whole.base, whole.k)
+        per = 36 + (18 * item if op == "decode" else 0)
+        assert in_tiles.k_image == math.ceil(
+            100 * per / (row.channels[op] * item)) / 100, op
 
 
 def test_a_vae_of_another_config_is_priced_at_its_own_channels_and_rows():
@@ -325,16 +377,24 @@ def test_a_vae_of_another_config_is_priced_at_its_own_channels_and_rows():
     assert memfit.vae_peak("decode", 512, 512, config=mem.OFFICIAL,
                            channels=144, **kw) == memfit.vae_peak(
                                "decode", 512, 512, **kw)
-    # The tiles of a measured row are laid out at the scale of its family:
-    # 100 pixels in tiles of 48 that overlap by 8 are priced as three of
-    # 48, where that VAE cuts three of 40. The scores are those of its own
-    # 25 x 25 latent pixels.
-    assert memfit.tile_layout(100, 48, 8, 4) == (3, 40)
-    assert memfit.tile_layout(100, 48, 8, 16) == (3, 48)
+    # That VAE runs every up block in tiles, which read 8 of its latent
+    # pixels across a cut, so its tiles overlap by 64 pixels. The tiles of
+    # a measured row are laid out at the scale of its family: 100 pixels
+    # in tiles of 80 are priced as three of 80, where that VAE cuts three
+    # of 76. The scores are those of its own 25 x 25 latent pixels.
+    assert q.whole_up_blocks(small) == 0 and q.reach(small, "decode") == 8
+    assert memfit.tile_overlap(FAMILY, "decode", 80, 8, small) == 64
+    assert memfit.tile_layout(100, 80, 64, 4) == (3, 76)
+    assert memfit.tile_layout(100, 80, 64, 16) == (3, 80)
     assert memfit.vae_peak(
-        "decode", 100, 100, config=small, channels=6, tiled=True, tile=48,
+        "decode", 100, 100, config=small, channels=6, tiled=True, tile=80,
         overlap=8, **kw) == memfit.QWEN_VAE_TILED["decode"][4].bytes(
-            48 * 48, 100 * 100, 6, 4) + int(1.5 * (25 * 25) ** 2 * 4)
+            80 * 80, 100 * 100, 6, 4) + int(1.5 * (25 * 25) ** 2 * 4)
+    with pytest.raises(ValueError, match="a tile of 48 pixels is 12 latent "
+                       "pixels, and a tiled decode of this VAE needs more "
+                       "than 16, which is 68 pixels"):
+        memfit.vae_peak("decode", 100, 100, config=small, channels=6,
+                        tiled=True, tile=48, overlap=8, **kw)
 
 
 def test_tiles_come_first_whatever_is_free():
@@ -423,11 +483,12 @@ def test_the_rule_covers_the_decodes_of_the_vae_it_borrows_from():
 
 # The prices of the official file by the rule, in GiB with the weights:
 # whole at 512, 1024, 1536 and 2048 pixels, and in tiles at the last three.
-# The tiles of an encode are cropped and overlap by 320 pixels, so a side
-# of 1024 takes four tiles of 496 pixels where a decode takes three of 384.
+# The tiles are cropped. Those of an encode overlap by 320 pixels, so a
+# side of 1024 takes four tiles of 496 pixels, and those of a decode by
+# 224, so it takes three.
 PRICES = {
-    ("decode", 2): ((4.14, 8.69, 16.29, 26.92), (3.52, 3.87, 4.15)),
-    ("decode", 4): ((6.27, 15.38, 30.57, 51.83), (5.02, 5.74, 6.30)),
+    ("decode", 2): ((4.14, 8.69, 16.29, 26.92), (4.18, 4.36, 4.61)),
+    ("decode", 4): ((6.27, 15.38, 30.57, 51.83), (6.35, 6.69, 7.16)),
     ("encode", 2): ((3.29, 5.32, 8.69, 13.42), (3.30, 3.88, 4.15)),
     ("encode", 4): ((4.58, 8.63, 15.38, 24.83), (4.55, 5.63, 6.09)),
 }
@@ -465,18 +526,20 @@ def test_the_prices_of_the_official_file_by_the_rule(op, item, by_the_rule):
 def test_a_tiled_decode_is_priced_on_one_tile_and_the_host_buffers(
         item, by_the_rule):
     """At 1024 pixels the step that sets the price is in a tile: three
-    tiles of 384 pixels a side, one at a time beside the part run whole,
-    with the blended image and its weights on the host."""
+    tiles of 496 pixels a side, one at a time beside the output of the
+    part run whole, with the image on the host."""
     steps = mem.memory_terms(mem.OFFICIAL, "decode", 1024, 1024,
-                             itemsize=item, tiled=True)
+                             itemsize=item, tiled=True,
+                             overlap=memfit.tile_overlap(FAMILY, "decode"))
     _, name, device, host = max((3.6 * (d + a) + h, k, d, h)
                                 for k, d, a, h in steps)
     assert name.startswith("tile decoder.up_blocks.3.")
-    assert host == 4 * 1024 * 1024 * 4 + 4 * 1024 * 1024
-    head = 1152 * 64 * 64 * item
-    one, _ = mem.activation_peak(mem.OFFICIAL, "decode", 384, 384,
+    assert host == 4 * 1024 * 1024 * 4
+    # The first up block ends at 2 pixels a latent pixel in 1152 channels.
+    head = 1152 * 128 * 128 * item
+    one, _ = mem.activation_peak(mem.OFFICIAL, "decode", 496, 496,
                                  itemsize=item)
-    # The tile's own floor is that of a whole 384 pixel decode, which
+    # The tile's own floor is that of a whole 496 pixel decode, which
     # peaks in the same block.
     assert device == one + head
     assert _price("decode", 1024, item, tiled=True) == int(
@@ -633,14 +696,15 @@ def test_the_plan_counts_the_vae_weights_once(q_view, item, monkeypatch):
     assert t["vae"] == WEIGHTS * item
     resident = t["dit"] + t["encoder"] + t["vae"]
     assert plan.phases["decode"] == resident + t["decode_peak"]
-    # Three tiles a side of 384 pixels, the image term and the scores of
+    # Three tiles a side of 496 pixels, the image term and the scores of
     # 64 x 64 latent pixels.
     assert t["decode_peak"] == memfit.QWEN_VAE_TILED["decode"][item].bytes(
-        384 * 384, 1024 * 1024, 144, item) + int(1.5 * 4096 ** 2 * item)
+        496 * 496, 1024 * 1024, 144, item) + int(1.5 * 4096 ** 2 * item)
     _unmeasured(monkeypatch)
     rule = _plan(q_view, 1024, item, 200 * GiB)
     steps = mem.memory_terms(mem.OFFICIAL, "decode", 1024, 1024,
-                             itemsize=item, tiled=True)
+                             itemsize=item, tiled=True,
+                             overlap=memfit.tile_overlap(FAMILY, "decode"))
     assert rule.terms["decode_peak"] == memfit.unmeasured_bytes(
         steps, WEIGHTS * item)
     assert rule.phases["decode"] == resident + rule.terms["decode_peak"]

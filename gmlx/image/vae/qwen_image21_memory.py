@@ -28,21 +28,21 @@ counts its output at the stream dtype, since the float32 sums stay inside
 the kernel. Attention scores count one chunk of ``flux1_ae.chunked_sdpa``
 at the stream dtype.
 
-A tiled pass runs the part at latent resolution whole and the rest one
-tile at a time. The device then holds one tile beside what stays held,
-which is the whole part's output in a decode and the image in an encode.
-The host holds the blended result and its weights in float32, two more
-copies of a tile while it is blended, and a second copy of the result
-while the sum is divided by the weights. An encode crops its tiles and
-does not blend them, so its host holds the result and one tile, which is
-less than these terms count for it.
+A tiled pass runs one part whole and the rest one tile at a time. The
+whole part is the mid block with what precedes it and, in a decode, the
+up blocks before the tiled ones. The device then holds one tile beside
+what stays held, which is the whole part's output in a decode and the
+image in an encode. The tiles are cropped, so the host holds the result
+in float32 and one tile beside it. The encode's terms still count the
+buffers of a blend, the result twice and a tile twice, which is more than
+its crop holds.
 """
 
 from __future__ import annotations
 
 from .flux1_ae import ATTN_SCORE_BYTES
 from .qwen_image21_vae import (CONSTANTS, IMAGE_CHANNELS, LATENT_CHANNELS,
-                               QwenImage21VAEConfig)
+                               QwenImage21VAEConfig, whole_up_blocks)
 
 # The config of the official file, which the memory plan prices before a
 # file is read. The widths are those of its header.
@@ -128,12 +128,15 @@ def _decode_head(tp: _Live, cfg, h: int, w: int):
     x = tp.new(z, h, w)
     x = tp.op("post_quant_conv", [x], tp.new(z, h, w))
     x = tp.op("decoder.conv_in", [x], tp.new(e[0], h, w))
-    return _mid(tp, "decoder.mid_block", x, e[0], h, w)
+    x = _mid(tp, "decoder.mid_block", x, e[0], h, w)
+    return _up_blocks(tp, cfg, x, h, w, 0, whole_up_blocks(cfg))[0]
 
 
-def _decode_tail(tp: _Live, cfg, x, h: int, w: int):
+def _up_blocks(tp: _Live, cfg, x, h: int, w: int, lo: int, hi: int):
+    """Up blocks ``lo`` to ``hi`` on ``x`` of ``h`` x ``w`` pixels: the
+    result with its height and width."""
     e, n = cfg.decoder_dims, len(cfg.dim_mult)
-    for i in range(n):
+    for i in range(lo, hi):
         blk = f"decoder.up_blocks.{i}"
         up = i < n - 1
         if up:
@@ -157,6 +160,15 @@ def _decode_tail(tp: _Live, cfg, x, h: int, w: int):
             a = tp.op(f"{blk}.add", [a, s], tp.new(c, 2 * h, 2 * w))
             h, w = 2 * h, 2 * w
         x = a
+    return x, h, w
+
+
+def _decode_tail(tp: _Live, cfg, x, h: int, w: int):
+    """The tiled part of a decode on ``x``, the whole part's output over
+    ``h`` x ``w`` latent pixels."""
+    e, n = cfg.decoder_dims, len(cfg.dim_mult)
+    k = whole_up_blocks(cfg)
+    x, h, w = _up_blocks(tp, cfg, x, h << k, w << k, k, n)
     c = e[-1]
     a = tp.op("decoder.norm_out", [x], tp.new(c, h, w))
     a = tp.op("decoder.silu_out", [a], tp.new(c, h, w))
@@ -301,14 +313,16 @@ def memory_terms(cfg: QwenImage21VAEConfig, op: str, height: int,
         c = cfg.out_channels
         image = 4 * batch * height * width * c
         piece = 4 * batch * th * s * tw * s * c
-        # The weighted sum of the tiles and the sum of their weights.
-        blend = image + 4 * height * width
-        _decode_tail(one, cfg, one.new(cfg.decoder_dims[0], th, tw), th, tw)
-        steps += [(f"tile {k}", v + head, 0, blend) for k, v in one.terms]
+        # A tile of the whole part's output: the channels its last up
+        # block ends on, at that block's resolution.
+        whole = whole_up_blocks(cfg)
+        _decode_tail(one, cfg, one.new(cfg.decoder_dims[whole], th << whole,
+                                       tw << whole), th, tw)
+        # The host holds the result, and a tile while its kept part is
+        # copied in.
+        steps += [(f"tile {k}", v + head, 0, image) for k, v in one.terms]
         steps += [
-            # A tile and its weighted copy.
-            ("tile blend", head, 0, blend + 2 * piece),
-            ("blend divide", head, 0, blend + image),
+            ("tile crop", head, 0, image + piece),
             ("image to the device", head + image, 0, image),
             ("clamp", head + 2 * image, 0, 0)]
         return steps

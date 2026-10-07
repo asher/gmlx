@@ -132,7 +132,7 @@ class TiledFit:
     bytes per pixel of all tiles together and ``k_image`` per pixel of the
     image, each per base channel and activation byte. The tile term is the
     activations every tile holds at a GroupNorm, and the image term the
-    part run whole at latent resolution and the blend buffers."""
+    part run whole and the buffers of the result."""
     base: float
     k_tiles: float
     k_image: float
@@ -161,21 +161,25 @@ VAE_TILED = {"decode": {2: TiledFit(base=1.96 * GiB, k_tiles=4.70,
 
 # Qwen-Image 2.1 autoencoder footprints under bounded_cache on the official
 # file, over the loaded weights, by conv path and activation itemsize.
-# Whole passes at 256, 512 and 1024 pixels on an M5 Max, two runs each in
-# fresh processes with a cold and a warm pass, fit a line in pixels. The
-# slope is raised 10 percent and the base covers every whole pass plus
-# 0.25 GiB. A pass is the larger of the growth of the process footprint
-# and of the MLX peak over the active bytes at its start. At 1024 the bf16
-# decode added 5.50 GiB exact and 7.83 GiB on Winograd, against 6.44 and
-# 8.87 here, and the fp32 decode 8.74 and 14.00 GiB, against 10.09 and
-# 15.40. No whole pass above 1024 pixels has run, so a whole price above
-# that is the line carried on.
-QWEN_VAE_DECODE = {"exact": {2: VaeFit(base=1.46 * GiB, k=17.7),
-                             4: VaeFit(base=2.72 * GiB, k=13.1)},
+# Whole passes on an M5 Max, in fresh processes with a cold and a warm
+# pass, fit a line in pixels by least squares. The slope is raised 10
+# percent and the base covers every whole pass plus 0.25 GiB. A pass is
+# the larger of the growth of the process footprint and of the MLX peak
+# over the active bytes at its start. The footprint is concave in pixels,
+# so a line through square passes at 256, 512 and 1024 pixels reads below
+# a pass between them: the exact path is fit over every pass measured from
+# 256 to 1024 pixels, square and not, 13 bf16 decodes, 11 bf16 encodes,
+# and 5 and 4 in fp32. The Winograd path is off by default and has its
+# three square passes. At 1024 the bf16 decode added 5.50 GiB exact and
+# 7.83 GiB on Winograd, against 6.75 and 8.87 here, and the fp32 decode
+# 8.74 and 14.00 GiB, against 10.17 and 15.40. No whole pass above 1024
+# pixels has run, so a whole price above that is the line carried on.
+QWEN_VAE_DECODE = {"exact": {2: VaeFit(base=1.58 * GiB, k=18.4),
+                             4: VaeFit(base=2.69 * GiB, k=13.3)},
                    "winograd": {2: VaeFit(base=2.09 * GiB, k=24.1),
                                 4: VaeFit(base=2.29 * GiB, k=23.3)}}
-QWEN_VAE_ENCODE = {"exact": {2: VaeFit(base=0.60 * GiB, k=14.8),
-                             4: VaeFit(base=1.43 * GiB, k=9.4)},
+QWEN_VAE_ENCODE = {"exact": {2: VaeFit(base=0.74 * GiB, k=15.5),
+                             4: VaeFit(base=1.72 * GiB, k=9.9)},
                    "winograd": {2: VaeFit(base=1.48 * GiB, k=15.5),
                                 4: VaeFit(base=1.57 * GiB, k=12.7)}}
 
@@ -189,27 +193,29 @@ QWEN_VAE_SCORES = 1.5
 
 # Tiled passes of that autoencoder hold one tile at a time beside the part
 # run whole. The tile term is the whole fit on the exact path at one tile,
-# and the image term is by arithmetic: 36 bytes a pixel for the float32
-# result on the host and on the device and the part run whole. With the
-# scores on top, a tiled bf16 decode added 1.79 GiB at 1024 pixels in three
-# 384 pixel tiles a side, 2.29 at 1536 and 2.95 at 2048, against 2.24,
-# 2.67 and 3.38 here, and in fp32 3.46, 3.86 and 4.00 against 3.89, 4.59
-# and 5.89: the scores and a tile do not peak together, and the sum counts
-# both. A tiled encode crops its tiles, four of 496 pixels a side at 1024
-# and nine of 512 at 2048. In bf16 it added 1.18 GiB at 1024 pixels, 1.48
-# at 1536 and 1.73 at 2048, against 1.50, 1.74 and 2.36 here, and in fp32
-# 2.07, 2.70 and 3.39 against 2.53, 2.96 and 4.10. Its base stands over
-# that of the whole fit, by 0.17 GiB in bf16 and 0.14 in fp32, so that the
-# price is 0.25 GiB over the pass at 1536, where the cache holds what the
-# tiles freed while the scores peak. A Winograd pass adds the difference
-# of the whole rows at one tile, and no tiled pass has run on that path.
-QWEN_VAE_TILED = {"decode": {2: TiledFit(base=1.46 * GiB, k_tiles=17.7,
-                                         k_image=0.13),
-                             4: TiledFit(base=2.72 * GiB, k_tiles=13.1,
-                                         k_image=0.07)},
-                  "encode": {2: TiledFit(base=0.77 * GiB, k_tiles=14.8,
+# and the image term is by arithmetic. A decode runs conv_in, the mid block
+# and the first up block whole and holds their output while the tiles run,
+# 18 values a pixel, beside 36 bytes a pixel for the float32 result on the
+# host and on the device: 72 bytes a pixel in bf16 and 108 in fp32. Its
+# tiles are cropped and overlap by 224 pixels, so a side of 1024 pixels
+# takes three tiles of 496, 1536 five and 2048 seven. With the scores on
+# top, a tiled bf16 decode added 2.65 GiB at 1024 pixels, 2.86 at 1536 and
+# 3.24 at 2048, against 2.91, 3.19 and 3.83 here, and in fp32 4.36, 4.49
+# and 4.55 against 4.65, 5.16 and 6.37: the scores and a tile do not peak
+# together, and the sum counts both. An encode holds 36 bytes a pixel, and
+# its tiles overlap by 320 pixels, four of 496 pixels a side at 1024 and
+# nine of 512 at 2048. In bf16 it added 1.18 GiB at 1024 pixels, 1.48 at
+# 1536 and 1.73 at 2048, against 1.50, 1.74 and 2.36 here, and in fp32
+# 2.07, 2.70 and 3.39 against 2.72, 3.15 and 4.30. A Winograd pass adds the
+# difference of the whole rows at one tile, and no tiled pass has run on
+# that path.
+QWEN_VAE_TILED = {"decode": {2: TiledFit(base=1.58 * GiB, k_tiles=18.4,
+                                         k_image=0.25),
+                             4: TiledFit(base=2.69 * GiB, k_tiles=13.3,
+                                         k_image=0.19)},
+                  "encode": {2: TiledFit(base=0.74 * GiB, k_tiles=15.5,
                                          k_image=0.19),
-                             4: TiledFit(base=1.57 * GiB, k_tiles=9.4,
+                             4: TiledFit(base=1.72 * GiB, k_tiles=9.9,
                                          k_image=0.10)}}
 
 # Footprint over op-order floor of a pass on an unmeasured row, by conv
@@ -284,13 +290,11 @@ def _qwen_image21_vae_floor(op: str, height: int, width: int, *,
 
 
 def _qwen_image21_vae_crop(op: str, config=None) -> int:
-    """The reach of a cut in a tiled pass of the Qwen-Image 2.1 VAE whose
-    tiles are cropped: the encode's. A decode blends its tiles."""
+    """The reach of a cut in a tiled pass of the Qwen-Image 2.1 VAE, whose
+    tiles are cropped in a decode and in an encode."""
     from .vae import qwen_image21_memory as m
     from .vae.qwen_image21_vae import reach
 
-    if op != "encode":
-        return 0
     return reach(m.OFFICIAL if config is None else config, op)
 
 
@@ -300,9 +304,9 @@ VAE_ROWS = {
         measured=True, channels={"decode": 128, "encode": 128},
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED),
     # The Qwen-Image 2.1 autoencoder, measured on the official file. Tiles
-    # come first: a whole bf16 decode at 1024 pixels is priced at 6.48 GiB,
+    # come first: a whole bf16 decode at 1024 pixels is priced at 6.80 GiB,
     # which a 16 GB Mac does not have beside the weights, and a tiled one
-    # at 2048 pixels at 3.38 GiB, which it has.
+    # at 2048 pixels at 3.83 GiB, which it has.
     "qwen_image21": VaeMemoryRow(
         measured=True, channels={"decode": 144, "encode": 96},
         whole={"decode": QWEN_VAE_DECODE, "encode": QWEN_VAE_ENCODE},
