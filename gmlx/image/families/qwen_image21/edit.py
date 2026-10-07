@@ -43,11 +43,28 @@ import mlx.core as mx
 import numpy as np
 
 from gmlx.image.conditioning import Reference
-from gmlx.image.dtypes import f32_products_exact
 
 from .family import PROMPT, REFERENCES
 
 MAX_ASPECT = 200            # the image processor refuses a longer image
+
+_F32_EXACT: dict[str, bool] = {}    # by default device
+
+
+def f32_products_exact() -> bool:
+    """Whether the default device multiplies float32 matrices at float32
+    precision. MLX runs float32 matrix products at TF32 precision on
+    M5-class GPUs unless ``MLX_ENABLE_TF32=0`` is set before the first
+    product of the process, and it reads the switch once. Each device is
+    measured once against a product on the CPU."""
+    key = str(mx.default_device())
+    hit = _F32_EXACT.get(key)
+    if hit is None:
+        a = mx.random.normal((64, 64), key=mx.random.key(0))
+        b = mx.random.normal((64, 64), key=mx.random.key(1))
+        gap = mx.abs(mx.matmul(a, b) - mx.matmul(a, b, stream=mx.cpu)).max()
+        hit = _F32_EXACT[key] = float(gap) < 1e-3
+    return hit
 
 
 def dimensions(area: int, ratio: float) -> tuple[int, int]:

@@ -320,12 +320,11 @@ def test_the_tower_runs_where_float32_products_are_exact(handle, refs,
         edit.encode(handle, "x", refs[:1])
         assert seen == [mx.default_stream(
             mx.default_device() if exact else mx.cpu)]
-    from gmlx.image import dtypes
-
+    monkeypatch.undo()
     with mx.stream(mx.cpu):
-        monkeypatch.setattr(dtypes, "_F32_EXACT", {})
-        assert dtypes.f32_products_exact() is True
-        assert dtypes._F32_EXACT == {str(mx.default_device()): True}
+        monkeypatch.setattr(edit, "_F32_EXACT", {})
+        assert edit.f32_products_exact() is True
+        assert edit._F32_EXACT == {str(mx.default_device()): True}
 
 
 def test_an_encoder_without_its_tower_or_with_another_pad_is_refused(refs):
