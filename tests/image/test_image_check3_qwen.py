@@ -30,8 +30,9 @@ import pytest
 import block_gates as bg
 import qwen_gates as qg
 import qwen_tiny as qt
-from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
-                         exact_products, rerun_exact)
+from block_gates import (EXACT_TOL, QWEN_EXACT_FREE_TOL, assert_all_dense,
+                         exact_process, exact_products, free_running,
+                         rerun_exact)
 from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 
@@ -331,12 +332,12 @@ FAULTS = {
 }
 
 
-def fault_misses(monkeypatch, model, arrays: dict, name: str, tol: float
-                 ) -> dict:
+def fault_misses(monkeypatch, model, arrays: dict, name: str, tol) -> dict:
     """The measures the wrong model ``name`` misses. It must miss one by
-    SEEN times the gate at least, and none outside the rows its fault
-    reaches."""
+    SEEN times its gate at least, and none outside the rows its fault
+    reaches. ``tol`` is one gate or a function of a measure's name."""
     apply, reach, clean = FAULTS[name]
+    gate = tol if callable(tol) else (lambda r: tol)
     layout.clear_caches()
     try:
         with monkeypatch.context() as mp:
@@ -344,7 +345,8 @@ def fault_misses(monkeypatch, model, arrays: dict, name: str, tol: float
             missed = qg.missed(qg.step(model, arrays), tol)
     finally:
         layout.clear_caches()
-    assert missed and max(missed.values()) >= SEEN * tol, (name, missed)
+    assert any(v >= SEEN * gate(r) for r, v in missed.items()), (name,
+                                                                 missed)
     stray = sorted(r for r in missed if (
         r.removeprefix("free ") in clean if r.startswith("free ")
         else not reach(r)))
@@ -525,6 +527,12 @@ def test_each_wrong_op_fails_the_tiny_site_gate_at_its_own_site(
 # Qwen-Image 2.1 Q4_K_M, when the file and its fixtures are there.
 
 REAL = {512: "check3_qwen_image21_512", 1024: "check3_qwen_image21_1024"}
+# One step at 512 with one 512 reference in the prefix.
+REF = "check3_qwen_image21_ref_512"
+# The wrong models whose fault a reference in the prefix widens: its rows
+# sit on a frame of their own and read the t = 0 row.
+REF_FAULTS = ("rope axes permuted", "rope frame axis last",
+              "t = 0 row and sampled row swapped")
 
 
 def _real_manifest(name: str) -> dict:
@@ -548,6 +556,56 @@ def real(gguf_dir):
         pytest.fail(f"{p} is not the file the oracle read")
     model, _ = image_loader.load_dit(p, log=lambda *_: None)
     return model
+
+
+def _row_names(blocks: int) -> list[str]:
+    """The names ``check3_rows`` gives its rows for a model of ``blocks``
+    blocks."""
+    names = ["rope_cos", "rope_sin", "txt_in", "img_in", "joint.in",
+             "cached.in", "joint.modulation", "cached.modulation",
+             "joint.proj_out", "cached.proj_out"]
+    for i in range(blocks):
+        names += [f"joint.transformer_blocks.{i}", f"prefill.k.{i}",
+                  f"prefill.v.{i}", f"cached.transformer_blocks.{i}"]
+    return names
+
+
+def test_a_row_with_no_tolerance_is_an_error_of_the_product_gate(tiny):
+    """The product gate reads every teacher-forced row the manifest has
+    a tolerance for, leaves the rows NOT_HELD names to their other gates,
+    and refuses any other row with no tolerance. The names are those
+    ``check3_rows`` gives, and the rows left out of the real manifest are
+    the 72 of NOT_HELD."""
+    arrays, _ = committed_fixture(BLOCKS)
+    with mx.stream(mx.cpu):
+        tiny_rows = qg.check3_rows(tiny, arrays)
+    assert sorted(tiny_rows) == sorted(_row_names(
+        len(tiny.transformer_blocks)))
+    m = committed(REAL[512])
+    gates = m["tolerances"]["rows_rel_l2"]
+    names = _row_names(32)
+    left = [r for r in names if r not in gates]
+    assert len(names) == 138 and len(left) == 72
+    assert all(qg.not_held(r) for r in left)
+    assert not [r for r in gates if qg.not_held(r)]
+    assert set(gates) <= set(names)
+    zero = {"rel_l2": 0.0, "cosine": 1.0}
+    assert qg.product_misses(m, dict.fromkeys(names, zero), {}) == []
+    # A row the manifest lost its tolerance for, and a row of a name the
+    # gate does not know.
+    row = "cached.transformer_blocks.7"
+    thin = {**m, "tolerances": {**m["tolerances"], "rows_rel_l2": {
+        r: g for r, g in gates.items() if r != row}}}
+    with pytest.raises(LookupError, match="1 teacher-forced rows have no"):
+        qg.product_misses(thin, dict.fromkeys(names, zero), {})
+    for name in ("prefill.q.3", "prefill.k.x", "joint.out"):
+        with pytest.raises(LookupError, match="no tolerance"):
+            qg.product_misses(m, {name: zero}, {})
+    with pytest.raises(LookupError, match="free-running measure"):
+        qg.product_misses(m, {}, {"cache.q.3": zero})
+    # A row over its tolerance is a miss, not an error.
+    over = {"rel_l2": 2 * gates[row], "cosine": 1.0}
+    assert len(qg.product_misses(m, {row: over}, {})) == 1
 
 
 @pytest.mark.integration
@@ -655,14 +713,19 @@ def test_check3_exact_gate_at_512(real, request, monkeypatch):
         assert_all_dense(real, used)
         top = max(got, key=lambda r: got[r]["rel_l2"])
         high = max(own, key=lambda r: own[r]["rel_l2"])
+        forced = max((r for r in got if not free_running(r)),
+                     key=lambda r: got[r]["rel_l2"])
         print(f"qwen check3 exact 512: {len(got)} measures within "
-              f"{got[top]['rel_l2']:.2e} of the oracle, at {top}, and the "
-              f"model's own timestep rows within "
-              f"{own[high]['rel_l2']:.2e}, at {high}, gate {EXACT_TOL:.0e}")
-        assert not qg.missed(got, EXACT_TOL), qg.missed(got, EXACT_TOL)
+              f"{got[top]['rel_l2']:.2e} of the oracle, at {top}, the "
+              f"teacher-forced rows within {got[forced]['rel_l2']:.2e}, "
+              f"at {forced}, and the model's own timestep rows within "
+              f"{own[high]['rel_l2']:.2e}, at {high}; gates "
+              f"{EXACT_TOL:.0e} and {QWEN_EXACT_FREE_TOL:.0e} free-running")
+        assert not qg.exact_missed(got), qg.exact_missed(got)
         assert not qg.missed(own, EXACT_TOL), qg.missed(own, EXACT_TOL)
         for name in FAULTS:
-            missed = fault_misses(monkeypatch, real, arrays, name, EXACT_TOL)
+            missed = fault_misses(monkeypatch, real, arrays, name,
+                                  qg.exact_gate)
             high = max(missed, key=missed.get)
             print(f"qwen check3 exact 512, {name}: {len(missed)} measures "
                   f"miss, up to {missed[high]:.2e} at {high}")
@@ -677,5 +740,98 @@ def test_check3_exact_velocities_at_1024(real, request):
         got = qg.free_run(real, arrays)
     print(f"qwen check3 exact 1024: velocities within "
           f"{got['velocity_a']['rel_l2']:.2e} and "
-          f"{got['velocity_b']['rel_l2']:.2e}, gate {EXACT_TOL:.0e}")
-    assert not qg.missed(got, EXACT_TOL), qg.missed(got, EXACT_TOL)
+          f"{got['velocity_b']['rel_l2']:.2e}, gate "
+          f"{QWEN_EXACT_FREE_TOL:.0e}")
+    # Both are free-running measures.
+    assert not qg.missed(got, QWEN_EXACT_FREE_TOL), got
+
+
+def _reference(arrays: dict, m: dict):
+    """The conditioning of the reference fixture: one reference of the
+    target's size, in a prefix longer than the target."""
+    cond = qg.conditioning(arrays)
+    (ref,) = cond.ref_latents
+    assert m["inputs"]["ref_shapes"] == [list(ref.shape[1:])]
+    assert list(ref.shape[1:]) == m["inputs"]["target_tokens"]
+    assert tuple(cond.image_slots) == tuple(m["inputs"]["image_slots"])
+    assert 4 * len(cond.image_slots) == ref.shape[1] * ref.shape[2]
+    return cond
+
+
+def _transposed(arrays: dict) -> dict:
+    """The fixture with its reference read with height and width
+    swapped."""
+    return {**arrays, "ref_latents.0": np.ascontiguousarray(
+        arrays["ref_latents.0"].transpose(0, 2, 1))}
+
+
+@pytest.mark.integration
+def test_check3_one_step_with_a_reference_at_512(real):
+    """The product gate with one 512 reference in the prefix: one prefill
+    and a target step over its K and V, against the oracle's joint
+    forward of the whole sequence on the first latents and against its
+    cached forward on the second, on every block row, every free-running
+    block, the kept K and V and both velocities."""
+    arrays, m = fixture(_real_manifest(REF)["name"])
+    cond = _reference(arrays, m)
+    assert arrays["joint.in"].shape[1] == (
+        arrays["features"].shape[0] - len(cond.image_slots)
+        + 2 * arrays["cached.in"].shape[1])
+    rows = qg.check3_rows(real, arrays)
+    free = {**qg.free_run(real, arrays, own_temb=True),
+            **qg.timestep_rows(real, arrays)}
+    print("qwen check3 product 512 with a reference: "
+          + qg.product_reading(m, rows, free))
+    misses = qg.product_misses(m, rows, free)
+    assert not misses, misses
+    # A control: the reference read with its sides swapped misses both
+    # velocities.
+    wrong = qg.free_run(real, _transposed(arrays))
+    vel = {k: v for k, v in wrong.items() if k.startswith("velocity_")}
+    tol = m["tolerances"]
+    print("qwen check3 product 512 with a reference, the reference "
+          "transposed: " + ", ".join(
+              f"{k} {g['rel_l2'] / tol[k + '_rel_l2']:.1f} of its gate"
+              for k, g in vel.items()))
+    assert all(g["rel_l2"] > tol[f"{k}_rel_l2"] for k, g in vel.items()), vel
+
+
+@pytest.mark.integration
+def test_check3_exact_gate_with_a_reference_at_512(real, request,
+                                                   monkeypatch):
+    """The model with a reference in its prefix matches the oracle on
+    every row in the oracle's arithmetic, and the wrong models of
+    REF_FAULTS and a transposed reference fail."""
+    arrays, m = fixture(_real_manifest(REF)["name"])
+    if not exact_process():
+        return rerun_exact(request, "qwen check3 exact")
+    _reference(arrays, m)
+    with exact_products(real) as used:
+        got = qg.step(real, arrays)
+        own = qg.timestep_rows(real, arrays)
+        assert_all_dense(real, used)
+        top = max(got, key=lambda r: got[r]["rel_l2"])
+        forced = max((r for r in got if not free_running(r)),
+                     key=lambda r: got[r]["rel_l2"])
+        print(f"qwen check3 exact 512 with a reference: {len(got)} "
+              f"measures within {got[top]['rel_l2']:.2e} of the oracle, "
+              f"at {top}, the teacher-forced rows within "
+              f"{got[forced]['rel_l2']:.2e}, at {forced}; gates "
+              f"{EXACT_TOL:.0e} and {QWEN_EXACT_FREE_TOL:.0e} free-running")
+        assert not qg.exact_missed(got), qg.exact_missed(got)
+        assert not qg.missed(own, EXACT_TOL), qg.missed(own, EXACT_TOL)
+        for name in REF_FAULTS:
+            missed = fault_misses(monkeypatch, real, arrays, name,
+                                  qg.exact_gate)
+            high = max(missed, key=missed.get)
+            print(f"qwen check3 exact 512 with a reference, {name}: "
+                  f"{len(missed)} measures miss, up to {missed[high]:.2e} "
+                  f"at {high}")
+        missed = qg.exact_missed(qg.step(real, _transposed(arrays)))
+        assert {"img_in", "joint.in", "free velocity_a",
+                "free velocity_b"} <= set(missed), sorted(missed)[:8]
+        assert "txt_in" not in missed and "cached.in" not in missed
+        print("qwen check3 exact 512 with a reference, the reference "
+              f"transposed: {len(missed)} measures miss, the velocities by "
+              f"{missed['free velocity_a']:.2e} and "
+              f"{missed['free velocity_b']:.2e}")

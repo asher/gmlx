@@ -22,7 +22,13 @@ The real rows need the Qwen-Image 2.1 GGUF under KQUANT_TEST_GGUF_DIR
 and the fixtures the same script writes from it. They skip until both
 are there. They hold the step to the three gates: the exact gate in a
 child process, the product gate on the manifest's tolerances, and the
-site gate of every linear leaf.
+site gate of every linear leaf. The exact gate is the one that holds the
+table: it makes the wrong tables of ``wrong_tables`` and those of
+``structural_tables`` (one half of an image MLP left out or the two
+swapped in the first and the last block, a sign, a block's delta on its
+neighbour) and each must miss, and for the stack each adapter alone. The
+product gates pass a half left out or swapped in the first or the last
+block, and the site gate reads the ops under whatever table it is given.
 
 The delta half of check 7 runs in test_image_qwen_lora_map.py.
 """
@@ -39,8 +45,9 @@ import pytest
 
 import qwen_gates as qg
 import qwen_tiny as qt
-from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
-                         exact_products, rerun_exact)
+from block_gates import (EXACT_TOL, QWEN_EXACT_FREE_TOL, assert_all_dense,
+                         exact_process, exact_products, free_running,
+                         rerun_exact)
 from image_fixtures import image_dits
 from lora_fixtures import (DIALECTS, dialect_keys, header, reference_delta,
                            write_adapter, write_keys)
@@ -238,6 +245,67 @@ def wrong_tables(pipe, tmp, m: dict, rows: list, each: bool = True,
     return out
 
 
+def _block(path: str) -> int | None:
+    return int(path.split(".")[1]) if path.startswith(B) else None
+
+
+def _half(cfg, path: str, band) -> str | None:
+    """``gate`` or ``proj`` for an entry on one half of a block's image
+    MLP input product: a band of the fused weight, or one of the pair of
+    leaves."""
+    leaf = path.rsplit(".", 1)[-1]
+    if not path.startswith(B) or ".img_mlp." not in path:
+        return None
+    if cfg.fused_mlp:
+        if leaf != "gate_up" or band is None:
+            return None
+        return "gate" if band[1] == 0 else "proj"
+    return {"gate_layer": "gate", "proj": "proj"}.get(leaf)
+
+
+def structural_tables(pipe, entries: list) -> dict:
+    """Wrong tables that keep every pair and every strength of the right
+    one and place one of them wrong, as name to entries. In the first
+    and in the last block the adapter is in: one half of the image MLP
+    left out, the two halves swapped, and the sign of the block's
+    strengths. The sign of every strength. The entries of the first, the
+    middle and the last such block moved to the nearest block the
+    adapter is not in, when there is one."""
+    cfg = pipe.dit.cfg
+    blocks = sorted({_block(p) for p, _, _ in entries} - {None})
+    ends = sorted({blocks[0], blocks[-1]})
+    out: dict = {}
+
+    def half(e) -> tuple:
+        return _block(e[0]), _half(cfg, e[0], e[1])
+
+    for i in ends:
+        halves = {half(e)[1]: (e[0], e[1]) for e in entries
+                  if half(e)[0] == i and half(e)[1]}
+        for h in halves:
+            out[f"{h}_half_left_out_in_block_{i}"] = [
+                e for e in entries if half(e) != (i, h)]
+        if len(halves) == 2:
+            other = {"gate": halves["proj"], "proj": halves["gate"]}
+            out[f"halves_swapped_in_block_{i}"] = [
+                (*other[half(e)[1]], e[2]) if half(e)[0] == i and half(e)[1]
+                else e for e in entries]
+        out[f"sign_in_block_{i}"] = [
+            (p, b, [(k, -s if _block(p) == i else s) for k, s in ps])
+            for p, b, ps in entries]
+    out["sign_of_every_strength"] = [(p, b, [(k, -s) for k, s in ps])
+                                     for p, b, ps in entries]
+    free = [i for i in range(len(pipe.dit.transformer_blocks))
+            if i not in blocks]
+    if free:
+        for i in sorted({blocks[0], blocks[len(blocks) // 2], blocks[-1]}):
+            to = min(free, key=lambda j: (abs(j - i), j))
+            out[f"block_{i}_delta_on_block_{to}"] = [
+                (p.replace(f"{B}{i}.", f"{B}{to}.", 1)
+                 if _block(p) == i else p, b, ps) for p, b, ps in entries]
+    return out
+
+
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("variant,dialects", CASES, ids=IDS)
 def test_a_tiny_step_under_a_patch_table_matches_the_merged_oracle(
@@ -312,6 +380,48 @@ def test_each_wrong_table_fails_the_tiny_gate(tmp_path, variant, layout):
                   "on its most moved measure")
     # The right table still passes after all of them ran.
     assert top(ratios(pipe, arrays, right, m["name"]))[1] <= 1
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("variant", list(TINY))
+def test_each_structural_table_fails_the_tiny_gate(tmp_path, variant,
+                                                   layout):
+    """Each table of ``structural_tables`` is another table than the
+    right one and misses a bound by SEEN at least."""
+    arrays, m = committed_fixture(TINY[variant])
+    pipe = tiny_pipe(tmp_path, layout)
+    rows = load_rows(pipe, tmp_path, m, next(d for v, d in CASES
+                                             if v == variant))
+    entries = lora.table_entries(rows)
+    right = api.define_patch_table(pipe, entries)
+    wrong = structural_tables(pipe, entries)
+    blocks = sorted({_block(p) for p, _, _ in entries} - {None})
+    # An end block has a table per half the adapter is in, and the swap
+    # where it is in both.
+    need = {"sign_of_every_strength"}
+    both = 0
+    for i in (blocks[0], blocks[-1]):
+        halves = {_half(pipe.dit.cfg, p, b) for p, b, _ in entries
+                  if _block(p) == i} - {None}
+        need |= {f"{h}_half_left_out_in_block_{i}" for h in halves}
+        need |= {f"sign_in_block_{i}"}
+        if len(halves) == 2:
+            need.add(f"halves_swapped_in_block_{i}")
+            both += 1
+    assert both, "no end block has both halves"
+    moved = {k for k in wrong if "_delta_on_block_" in k}
+    assert need == set(wrong) - moved, sorted(need ^ (set(wrong) - moved))
+    assert bool(moved) == (len(blocks) < len(pipe.dit.transformer_blocks))
+    seen = {}
+    for name, table in wrong.items():
+        tid = api.define_patch_table(pipe, table)
+        assert tid != right, name
+        seen[name] = top(ratios(pipe, arrays, tid, m["name"]))[1]
+        assert seen[name] >= SEEN, (name, seen[name])
+    low = min(seen, key=seen.get)
+    print(f"qwen check7 tiny structural tables {variant} {layout}: "
+          f"{len(seen)} tables, the weakest is {low} at {seen[low]:.0f} "
+          "bounds on its most moved measure")
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
@@ -1041,7 +1151,7 @@ def test_check7_product_gate_block_by_block_at_512(real, tmp_path, variant):
     # block's output is its input plus two gated branches, and in the
     # first adapted blocks what the adapter adds to it is under twice the
     # oracle's own bf16 gap. The exact gate leaves the adapter out of
-    # each block in turn, and the site gate reads every adapted leaf.
+    # each block in turn.
     adapted = {int(t.split(".")[1])
                for t in m["inputs"]["adapters"][0]["targets"]}
     with qg.under_table(real, api.EMPTY_TABLE):
@@ -1061,8 +1171,10 @@ def test_check7_product_gate_block_by_block_at_512(real, tmp_path, variant):
           + f"; a block without the adapter reads at most {clean:.2f}")
     assert not [r for r, v in share.items()
                 if v > 1 and "transformer_blocks." not in r]
-    assert seen <= adapted, (sorted(seen), sorted(adapted))
-    assert len(seen) >= len(adapted) - 2, sorted(adapted - seen)
+    # What the control holds: the base model misses a block row, and
+    # only in a block the adapter is in. It does not hold which of those
+    # blocks miss, which the exact gate does.
+    assert seen and seen <= adapted, (sorted(seen), sorted(adapted))
 
 
 @pytest.mark.integration
@@ -1114,10 +1226,28 @@ def test_check7_two_stacked_adapters_at_512(real, tmp_path):
         assert qg.product_misses(m, {}, wrong), (i, wrong)
 
 
+def _stacked_table(pipe, tmp):
+    """The arrays and manifest of the stack's fixture, the rows of its
+    two adapters and the id of their table."""
+    row = _real_manifest(REAL)["inputs"]["stacked"]
+    arrays, m = fixture(_real_manifest(row["fixture"])["name"])
+    assert m["inputs"]["pairs_fixture"] == REAL
+    rows = load_rows(pipe, tmp, m, [r["dialect"] for r in row["adapters"]])
+    return arrays, m, rows, api.define_patch_table(
+        pipe, lora.table_entries(rows))
+
+
 def _exact_gate(pipe, tmp, variant: str, label: str) -> None:
     """The right table matches the merged oracle model on every measure
-    in the oracle's arithmetic, and each wrong table fails."""
-    arrays, m, rows, tid = _real_table(pipe, tmp, variant)
+    in the oracle's arithmetic, and each wrong table fails: those of
+    ``wrong_tables``, and for one adapter those of ``structural_tables``.
+
+    The wrong tables pin the gates from above. The weakest, one half of
+    the fused weight without its delta in the last block, moves its most
+    moved measure by 2.4e-3, and the product gates pass it."""
+    stacked = variant == "stacked"
+    arrays, m, rows, tid = (_stacked_table(pipe, tmp) if stacked
+                            else _real_table(pipe, tmp, variant))
     with exact_products(pipe.dit) as used:
         with qg.under_table(pipe, tid):
             got = qg.step(pipe.dit, arrays)
@@ -1129,31 +1259,63 @@ def _exact_gate(pipe, tmp, variant: str, label: str) -> None:
         assert (used.direct > 0) == (install.placement() == "split"), (
             install.placement(), used.direct)
         name = max(got, key=lambda r: got[r]["rel_l2"])
+        forced = max((r for r in got if not free_running(r)),
+                     key=lambda r: got[r]["rel_l2"])
         print(f"qwen check7 exact {label}: {len(got)} measures within "
-              f"{got[name]['rel_l2']:.2e} of the oracle, at {name}, gate "
-              f"{EXACT_TOL:.0e}")
-        assert not qg.missed(got, EXACT_TOL), qg.missed(got, EXACT_TOL)
-        # The adapter left out of each block in turn: the product gate
-        # on a block's row does not see it in every block.
-        wrong = wrong_tables(pipe, tmp, m, rows, each=False,
-                             every_block=True)
-        blocks = {int(p.split(".")[1]) for p, _, _ in lora.table_entries(
-            rows) if p.startswith(B)}
-        assert {k for k in wrong if k.startswith("block_")} == {
-            f"block_{i}_left_out" for i in blocks}
-        for fault, entries in wrong.items():
-            with qg.under_table(pipe, api.define_patch_table(pipe, entries)):
-                missed = qg.missed(qg.step(pipe.dit, arrays), EXACT_TOL)
+              f"{got[name]['rel_l2']:.2e} of the oracle, at {name}, the "
+              f"teacher-forced rows within {got[forced]['rel_l2']:.2e}, "
+              f"at {forced}; gates {EXACT_TOL:.0e} and "
+              f"{QWEN_EXACT_FREE_TOL:.0e} free-running")
+        assert not qg.exact_missed(got), qg.exact_missed(got)
+        entries = lora.table_entries(rows)
+        blocks = sorted({_block(p) for p, _, _ in entries} - {None})
+        if stacked:
+            # The first, the middle and the last block left out, and each
+            # adapter of the stack alone.
+            wrong = wrong_tables(pipe, tmp, m, rows, each=False)
+            assert {"table_of_adapter_0_alone",
+                    "table_of_adapter_1_alone"} <= set(wrong)
+        else:
+            # The adapter left out of each block in turn: the product
+            # gate on a block's row does not see it in every block.
+            wrong = wrong_tables(pipe, tmp, m, rows, each=False,
+                                 every_block=True)
+            assert {k for k in wrong if k.startswith("block_")} == {
+                f"block_{i}_left_out" for i in blocks}
+            more = structural_tables(pipe, entries)
+            first, last = blocks[0], blocks[-1]
+            halves = ("gate", "proj")
+            need = {f"{h}_half_left_out_in_block_{i}" for h in halves
+                    for i in (first, last)}
+            need |= {f"halves_swapped_in_block_{last}",
+                     "sign_of_every_strength", f"sign_in_block_{first}",
+                     f"sign_in_block_{last}"}
+            assert need <= set(more), sorted(need - set(more))
+            moved = [k for k in more if "_delta_on_block_" in k]
+            assert {int(k.split("_")[1]) for k in moved} >= {first, last}
+            assert not set(more) & set(wrong)
+            wrong.update(more)
+        weakest = None
+        for fault, table in wrong.items():
+            with qg.under_table(pipe, api.define_patch_table(pipe, table)):
+                missed = qg.exact_missed(qg.step(pipe.dit, arrays))
             assert missed, (label, fault)
             high = max(missed, key=missed.get)
+            over = max(v / qg.exact_gate(r) for r, v in missed.items())
+            if weakest is None or over < weakest[0]:
+                weakest = (over, fault)
             print(f"qwen check7 exact {label}, {fault}: {len(missed)} "
-                  f"measures miss, up to {missed[high]:.2e} at {high}")
+                  f"measures miss, up to {missed[high]:.2e} at {high}, "
+                  f"{over:.0f} of its gate at most")
+        print(f"qwen check7 exact {label}: {len(wrong)} wrong tables, the "
+              f"weakest is {weakest[1]} at {weakest[0]:.0f} of a gate")
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("variant", list(REAL_VARIANTS))
+@pytest.mark.parametrize("variant", [*REAL_VARIANTS, "stacked"])
 def test_check7_exact_gate_at_512(real, tmp_path, request, variant):
-    _variant(variant)
+    if variant != "stacked":
+        _variant(variant)
     if not exact_process():
         return rerun_exact(request, "qwen check7 exact")
     _exact_gate(real, tmp_path, variant, variant)
@@ -1181,11 +1343,15 @@ def test_check7_site_gate_at_512(real, tmp_path, variant):
     leaves under the adapter included, is within its site gate of the
     exact product on the same input.
 
-    The site gate holds the arithmetic of an adapted leaf, and it is not
-    the gate that shows the adapter is there: at the gain of the fixture
-    the delta of the adapter is under the gate of its leaf at part of
-    the calls, so a site would pass there without the delta. The exact
-    gate leaves the adapter out of each block in turn."""
+    The site gate holds the ops under a table, not the table. Its
+    reference is the exact product with the delta of the table under
+    test, so a wrong table reads as a right one: with a band left out,
+    the bands swapped or every sign turned it reads no call over its
+    gate. It holds that a leaf adds the delta the table gives it within
+    the rounding of its ops: a leaf that added none would miss its site
+    at most calls and not at all, since at the gain of the fixture the
+    delta is under the gate of its leaf at part of them. The exact gate
+    holds the table."""
     arrays, m, _, tid = _real_table(real, tmp_path, variant)
     sites: dict = {}
     shares: dict = {}

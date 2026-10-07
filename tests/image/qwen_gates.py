@@ -294,18 +294,77 @@ def step(model, arrays: dict) -> dict:
     return got
 
 
-def missed(got: dict, tol: float) -> dict:
-    """Name to relative L2 of each measure of ``got`` over ``tol``."""
-    return {r: g["rel_l2"] for r, g in got.items() if not g["rel_l2"] <= tol}
+def missed(got: dict, tol) -> dict:
+    """Name to relative L2 of each measure of ``got`` over ``tol``, one
+    gate for all or a function of the measure's name."""
+    gate = tol if callable(tol) else (lambda r: tol)
+    return {r: g["rel_l2"] for r, g in got.items()
+            if not g["rel_l2"] <= gate(r)}
+
+
+def exact_gate(name: str) -> float:
+    """The exact gate of a measure of ``step`` by its name: a
+    free-running measure of this family takes its own gate, which
+    block_gates.py derives, and a teacher-forced row EXACT_TOL."""
+    return bg.QWEN_EXACT_FREE_TOL if bg.free_running(name) else bg.EXACT_TOL
+
+
+def exact_missed(got: dict) -> dict:
+    """Name to relative L2 of each measure of ``step`` over its exact
+    gate."""
+    return missed(got, exact_gate)
+
+
+# The teacher-forced rows the product gate does not hold, by name or by
+# the start of a name, each with the reason. The manifest's rule sets a
+# tolerance from the oracle's own bf16 against fp32 gap at a point, and
+# the oracle records no such gap for these. The exact gate holds every
+# one of them at EXACT_TOL.
+NOT_HELD = {
+    "rope_cos": "a float32 table with no bf16 reading; the exact gate "
+                "and the rope rows of check 3 hold it",
+    "rope_sin": "a float32 table with no bf16 reading; the exact gate "
+                "and the rope rows of check 3 hold it",
+    "joint.in": "the rows of txt_in and img_in in the order of the "
+                "prefix; both products are held, and the free-running "
+                "row of block 0 holds the order",
+    "cached.in": "the img_in product on the second latents; img_in is "
+                 "held",
+    "joint.modulation": "the free-running measure of this name is held",
+    "cached.modulation": "the free-running measure of this name is held",
+    "joint.proj_out": "the free-running measure of this name is held",
+    "cached.proj_out": "the free-running measure of this name is held",
+    "prefill.k.": "the free-running cache.k of the block is held",
+    "prefill.v.": "the free-running cache.v of the block is held",
+}
+
+
+def not_held(row: str) -> str | None:
+    """Why the product gate does not hold a teacher-forced row, or None
+    for a row it must hold."""
+    if row in NOT_HELD:
+        return NOT_HELD[row]
+    return next((why for start, why in NOT_HELD.items()
+                 if start.endswith(".") and row.startswith(start)
+                 and row[len(start):].isdigit()), None)
 
 
 def product_misses(m: dict, rows: dict, free: dict) -> list[str]:
     """Measures of the product path over the manifest's tolerances, each
-    twice the oracle's own bf16 against fp32 gap at that point."""
+    twice the oracle's own bf16 against fp32 gap at that point. A
+    teacher-forced row with no tolerance that NOT_HELD does not name is
+    an error, and so is a free-running measure with none."""
     tol = m["tolerances"]
-    out = [f"{r} rel L2 {g['rel_l2']:.3e} > {tol['rows_rel_l2'][r]:.3e}"
-           for r, g in rows.items() if r in tol.get("rows_rel_l2", {})
-           and not g["rel_l2"] <= tol["rows_rel_l2"][r]]
+    gates = tol.get("rows_rel_l2", {})
+    lost = sorted(r for r in rows if r not in gates and not_held(r) is None)
+    if lost:
+        raise LookupError(
+            f"{len(lost)} teacher-forced rows have no tolerance in the "
+            f"manifest {m.get('name')} and no entry in NOT_HELD, such as "
+            f"{lost[:3]}")
+    out = [f"{r} rel L2 {g['rel_l2']:.3e} > {gates[r]:.3e}"
+           for r, g in rows.items()
+           if r in gates and not g["rel_l2"] <= gates[r]]
     for r, g in free.items():
         if r.startswith("velocity_"):
             if not g["rel_l2"] <= tol[f"{r}_rel_l2"]:
@@ -314,6 +373,10 @@ def product_misses(m: dict, rows: dict, free: dict) -> list[str]:
             if not g["cosine"] >= tol[f"{r}_cosine_min"]:
                 out.append(f"{r} cosine {g['cosine']:.6f} < "
                            f"{tol[f'{r}_cosine_min']}")
+        elif r not in tol.get("free_rel_l2", {}):
+            raise LookupError(
+                f"the free-running measure {r} has no tolerance in the "
+                f"manifest {m.get('name')}")
         elif not g["rel_l2"] <= tol["free_rel_l2"][r]:
             out.append(f"free {r} rel L2 {g['rel_l2']:.3e} > "
                        f"{tol['free_rel_l2'][r]:.3e}")
@@ -335,6 +398,10 @@ def product_reading(m: dict, rows: dict, free: dict) -> str:
             top = max(share, key=share.get)
             parts.append(f"{len(share)} {label}, the largest "
                          f"{share[top]:.2f} of its gate at {top}")
+        left = sum(r not in gates and not r.startswith("velocity_")
+                   for r in got)
+        if left:
+            parts.append(f"{left} {label} left to the gates NOT_HELD names")
     for r in sorted(r for r in free if r.startswith("velocity_")):
         parts.append(f"{r} {free[r]['rel_l2']:.4e} of "
                      f"{tol[f'{r}_rel_l2']:.4e}, cosine "

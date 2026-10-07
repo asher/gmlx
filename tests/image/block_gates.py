@@ -90,6 +90,18 @@ GROUPS = ("noise_refiner", "context_refiner", "layers")
 # table moves its most moved row by 6.4e-4, and the weakest structural
 # fault of check 3, a norm eps ten times too large, by 2.7e-3.
 EXACT_TOL = 5e-5
+# Those readings are Z-Image's. Qwen-Image 2.1 measures 1.55e-5 at most on
+# a teacher-forced row over check 3's fixture and the three of check 7,
+# and its teacher-forced rows keep EXACT_TOL. Its free-running measures
+# carry the fp32 rounding of 32 blocks: the right table of the plain
+# adapter measures 4.41e-5 at the cached row of block 29 (3.4e-5 to
+# 4.3e-5 in blocks 27, 28 and 30), the alpha adapter 1.94e-5, the stack
+# 2.07e-5 and the base model 1.80e-5. The weakest wrong adapter table,
+# one half of the image MLP's fused weight without its delta in the last
+# block, moves its most moved measure by 2.4e-3. The free-running
+# measures of that family take the gate below, 4.5 times the largest
+# right reading and a twelfth of the weakest wrong one.
+QWEN_EXACT_FREE_TOL = 2e-4
 
 
 def _np(a: mx.array) -> np.ndarray:
