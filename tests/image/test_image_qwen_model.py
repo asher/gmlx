@@ -26,6 +26,7 @@ from gmlx.image.conditioning import array_bytes
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
+from gmlx.image.ops import kq_routes
 from gmlx.image.schedule import qwen21_sigmas
 
 # The equivalence holds to this relative L2 in fp32, and a wrong model
@@ -375,12 +376,18 @@ def test_denoise_step_is_pure_in_any_order_with_caches_cleared(pipe):
     assert len(pipe.captions) == held
 
 
+def _state_key(pipe, name: str) -> tuple:
+    """The key the bf16 pipeline keeps the state of a conditioning under,
+    which ends with the kernel routes in force."""
+    return (name, pipe.default_table, str(mx.bfloat16), kq_routes.active())
+
+
 def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
     cond = qt.conditioning("ref1", key="pos")
     x = qt.latents()
     api.denoise_step(pipe, x, SIGMA, cond)
     api.denoise_step(pipe, x, 0.25, cond)
-    key = ("pos", pipe.default_table, str(mx.bfloat16))
+    key = _state_key(pipe, "pos")
     state = pipe.captions.get(key)
     assert type(state) is qm.PrefixCache and len(pipe.captions) == 1
     # 2 blocks of K and V, 15 prefix tokens, 32 wide, 2 bytes each.
@@ -410,7 +417,7 @@ def test_the_memory_plan_counts_the_prefix_cache_a_pipeline_holds(pipe):
     cond = api.Conditioning(feats, "one", ref_latents=(ref,),
                             image_slots=(2,))
     api.denoise_step(pipe, qt.latents(), SIGMA, cond)
-    state = pipe.captions.get(("one", pipe.default_table, str(mx.bfloat16)))
+    state = pipe.captions.get(_state_key(pipe, "one"))
     cfg = pipe.dit.cfg
     row = memfit.PrefixRow(blocks=cfg.n_layers, dim=cfg.dim, token_px=16)
     assert state.tokens == row.rows(5, 1, 32) == 9
@@ -459,7 +466,7 @@ def test_the_plan_counts_a_held_prefix_state_once(pipe):
     cold = api.plan_request(pipe, conds=cond, **kw)
     assert cold.terms["caches"] == 0
     api.denoise_step(pipe, qt.latents(), SIGMA, cond)
-    key = ("one", pipe.default_table, str(mx.bfloat16))
+    key = _state_key(pipe, "one")
     assert pipe.captions.nbytes(key) == pipe.captions.bytes > 0
     warm = api.plan_request(pipe, conds=cond, **kw)
     assert warm.terms["prefix_cache"] == cold.terms["prefix_cache"]
@@ -571,7 +578,7 @@ def test_the_state_cache_holds_what_the_plan_counts_on_a_hit(
     _request(pipe, log, [rp, rn], 4.0)
     assert _request(pipe, log, [rp], 1.0) == (
         REF_STATE, 0, REF_STATE, REF_STATE)
-    key = ("rp", pipe.default_table, str(mx.bfloat16))
+    key = _state_key(pipe, "rp")
     assert pipe.captions.nbytes(key) == REF_STATE
 
 

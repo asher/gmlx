@@ -13,6 +13,7 @@ import pytest
 
 from gmlx.image import api, memfit
 from gmlx.image.fingerprint import ImageModelError
+from gmlx.image.ops import kq_routes
 from gmlx.image.registry import ConstantsRow, StepParts, get_family
 
 
@@ -107,7 +108,7 @@ def test_step_parts_rows_take_their_own_sigma_and_conditioning():
 
 
 def _key(pipe, name: str) -> tuple:
-    return (name, pipe.default_table, str(mx.bfloat16))
+    return (name, pipe.default_table, str(mx.bfloat16), kq_routes.active())
 
 
 @pytest.mark.parametrize("pos, neg", [(80, 70), (70, 80), (75, 75)],
@@ -226,6 +227,27 @@ def test_a_state_is_never_built_beside_a_state_the_rule_sheds():
     for _ in range(2):
         api.denoise_step(pipe, x, 0.5, _cond(1.0, "a"))
     assert calls["conditioning"] == 1 and pipe.captions.bytes == 256
+
+
+def test_a_kept_state_follows_the_kernel_routes_in_force(monkeypatch):
+    """A state is built by the ops of the routes in force. A state and a
+    modulation kept under one set of routes are not served under another,
+    and each set keeps its own."""
+    pipe, calls = _parts_pipe()
+    x = mx.zeros((1, 4, 2, 4), mx.float32)
+    monkeypatch.setattr(kq_routes, "_active", frozenset())
+    api.denoise_step(pipe, x, 0.5, _cond(0.25, "a"))
+    stock = _key(pipe, "a")
+    monkeypatch.setattr(kq_routes, "_active", frozenset({"qk"}))
+    api.denoise_step(pipe, x, 0.5, _cond(0.25, "a"))
+    assert _counts(calls) == {"modulation": 2, "conditioning": 2,
+                              "forward": 2}
+    assert _key(pipe, "a") != stock
+    assert set(pipe.captions._items) == {stock, _key(pipe, "a")}
+    monkeypatch.setattr(kq_routes, "_active", frozenset())
+    api.denoise_step(pipe, x, 0.5, _cond(0.25, "a"))
+    assert _counts(calls) == {"modulation": 2, "conditioning": 2,
+                              "forward": 3}
 
 
 def test_a_cache_sheds_by_its_bound_or_by_the_rule_of_its_caller():

@@ -287,7 +287,7 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         # Those of this request count there once, held already or not.
         table = _table_id(pipe, patch_table)
         held = sum(pipe.captions.nbytes(key) for key in {
-            (c.key, table, str(act)) for c in states if c.key})
+            _state_key(pipe, c, table) for c in states if c.key})
         other, bound = pipe.captions.bytes - held, parts.state_bytes
     return memfit.plan_memory(
         pipe.weights.get("dit", 0),
@@ -495,10 +495,10 @@ def state_scope(pipe: ImagePipeline, conds, *, patch_table=None):
     if parts is None or pipe.scope is not None:
         yield
         return
-    table, dt = _table_id(pipe, patch_table), str(pipe.dit.act_dtype)
+    table = _table_id(pipe, patch_table)
     scope, seen = [], set()
     for c in rows:
-        key = (c.key, table, dt) if c.key else None
+        key = _state_key(pipe, c, table)
         if key is None or key not in seen:
             seen.add(key)
             scope.append((key, 0 if parts.state_size is None
@@ -508,6 +508,17 @@ def state_scope(pipe: ImagePipeline, conds, *, patch_table=None):
         yield
     finally:
         pipe.scope = None
+
+
+def _state_key(pipe: ImagePipeline, cond: Conditioning, table):
+    """The key the state of ``cond`` is kept under: the conditioning, the
+    patch table, the activation dtype and the kernel routes in force. A
+    state is built by the ops of those routes, as the results ``_memo``
+    keeps are. None for a conditioning without a key, whose state is
+    never kept."""
+    if not cond.key:
+        return None
+    return (cond.key, table, str(pipe.dit.act_dtype), kq_routes.active())
 
 
 def _shed_states(pipe: ImagePipeline, parts) -> None:
@@ -548,7 +559,7 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
     mod = _memo(pipe.modulations, (s.tobytes(), table, dt),
                 lambda: _under(pipe, table,
                                lambda: parts.modulation(dit, s)))
-    key = (cond.key, table, dt) if cond.key else None
+    key = _state_key(pipe, cond, table)
     _shed_states(pipe, parts)
     state = None if key is None else pipe.captions.get(key)
     if state is None:
