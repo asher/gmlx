@@ -59,11 +59,29 @@ def key_map(pipe):
     if make is None:
         raise AdapterError(f"{pipe.family.title} has no LoRA key map in "
                            "gmlx")
+    if pipe.dit is None:
+        # A staged load before its DiT: the config of the DiT's header,
+        # and the map is made again from the DiT once that is loaded.
+        return make(dict(pipe.identified.config))
     cfg = pipe.dit.cfg
     cfg = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) \
         and not isinstance(cfg, type) else dict(cfg)
     pipe._lora_key_map = hit = make(cfg)
     return hit
+
+
+def _linear_shapes(pipe) -> dict:
+    """Module path to (out, in) of every linear leaf of the DiT. A staged
+    load reads adapters before its DiT, for the text encoder halves, and
+    the shapes then come from the DiT's header. ``define_patch_table``
+    checks every pair against the loaded leaves again."""
+    if pipe.dit is not None:
+        return {p: linear_dims(m)
+                for p, m in linear_leaves(pipe.dit).items()}
+    tail = ".weight"
+    return {n[:-len(tail)]: (int(t.shape[1]), int(t.shape[0]))
+            for n, t in pipe.identified.view.tensors.items()
+            if n.endswith(tail) and len(t.shape) == 2}
 
 
 def _file_key(path: str) -> tuple:
@@ -92,14 +110,14 @@ def load_adapter(pipe, path: str, *,
             return hit
     raw = read_lora(path, allow_unmatched=allow_unmatched)
     res = resolve(raw, key_map(pipe), allow_unmatched=allow_unmatched)
-    leaves = linear_leaves(pipe.dit)
+    shapes = _linear_shapes(pipe)
     for t in res.dit:
-        leaf = leaves.get(t.module)
-        if leaf is None:
+        dims = shapes.get(t.module)
+        if dims is None:
             raise AdapterError(f"{path}: {t.pair.stem} targets {t.module}, "
                                "which this DiT does not have")
         why = plan.fit(tuple(t.pair.up.shape), tuple(t.pair.down.shape),
-                       t.band, linear_dims(leaf))
+                       t.band, dims)
         if why is not None:
             raise AdapterError(
                 f"{path}: {t.pair.stem} does not fit {t.module} of this "

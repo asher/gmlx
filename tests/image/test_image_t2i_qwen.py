@@ -2,10 +2,11 @@
 
 ``gmlx image generate`` with a DiT path, ``--encoder`` and ``--vae`` writes
 the latents that ``sample`` returns for the noise of the same seed, bit for
-bit. Check 6 from a prompt: the run starts from the prompt text through
-gmlx's own encoder, at the family defaults, and its final latents stay
-within the check 6 tolerance of the oracle's run, which took the oracle's
-own float32 features. The image gmlx decodes from its latents stays at or
+bit. Under the working budget of a 16 GiB Mac the same run loads in stages
+and writes the same latents. Check 6 from a prompt: the run starts from the
+prompt text through gmlx's own encoder, at the family defaults, and its
+final latents stay within the check 6 tolerance of the oracle's run, which
+took the oracle's own float32 features. The image gmlx decodes from its latents stays at or
 above 30 dB of the float32 decode of the oracle's latents. The oracle's
 fixture holds latents and no image, so the reference image is gmlx's own
 float32 VAE on them, a whole pass.
@@ -136,6 +137,64 @@ def test_generate_runs_the_family_defaults(check6, generated):
     assert "negative_prompt" not in s
     assert generated["pixels"].shape == (SIZE, SIZE, 3)
     assert generated["meta"]["prompt"] == ins["prompt"]
+
+
+BUDGET_16 = 17_179_869_184 - 8e9    # the working budget of a 16 GiB Mac
+
+
+def test_a_16_gib_budget_stages_the_load_and_writes_the_same_latents(
+        check6, files, generated, tmp_path, monkeypatch):
+    """The run of ``generated`` again under the working budget of a 16 GiB
+    Mac. The encoder encodes with no DiT and no VAE beside it and is gone
+    when the DiT loads, and the latents are those of the run that loaded
+    every part at once."""
+    from gmlx.commands.cli import umbrella_main
+    from gmlx.device import metal_value
+    from gmlx.image import api, loader
+    from gmlx.image import text_encoder as te
+
+    mem = float(metal_value("memory_size"))
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", repr((mem - BUDGET_16) / 1e9))
+    seen: dict = {"encode": []}
+    load_encoder, encode_text, load_dit = (te.load_encoder, api.encode_text,
+                                           loader.load_dit)
+
+    def encoder(*a, **kw):
+        seen["handle"] = load_encoder(*a, **kw)
+        return seen["handle"]
+
+    def encode(pipe, *a, **kw):
+        seen["encode"].append((pipe.dit, pipe.vae, pipe.encoder.released))
+        return encode_text(pipe, *a, **kw)
+
+    def dit(*a, **kw):
+        seen["dit"] = seen["handle"].released
+        return load_dit(*a, **kw)
+
+    monkeypatch.setattr(te, "load_encoder", encoder)
+    monkeypatch.setattr(api, "encode_text", encode)
+    monkeypatch.setattr(loader, "load_dit", dit)
+    path, enc, vae = files
+    ins = check6[1]["inputs"]
+    lat = tmp_path / "lat.npz"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = umbrella_main([
+            "image", "generate", path, "--encoder", enc, "--vae", vae,
+            "--prompt", ins["prompt"], "--size", f"{SIZE}x{SIZE}",
+            "--seed", str(ins["seed"]), "--output", str(tmp_path / "a.png"),
+            "--save-latent", str(lat), "--json"])
+    assert rc == 0, buf.getvalue()
+    record = json.loads(buf.getvalue().strip().splitlines()[-1])
+    gc.collect()
+    mx.clear_cache()
+    assert record["levers"][-1] == "staged load"
+    assert record["encoder_released"] is True
+    assert seen["encode"] and all(
+        state == (None, None, False) for state in seen["encode"])
+    assert seen["dit"] is True
+    assert generated["record"]["levers"][-1:] != ["staged load"]
+    assert np.array_equal(np.load(lat)["latents"], generated["latents"])
 
 
 def test_generate_latents_equal_sample_with_the_seed_noise(generated,

@@ -17,6 +17,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx image generate` makes images from a Qwen-Image 2.1 GGUF, its
   Qwen3-VL-8B text encoder GGUF and its VAE, and `--ref PATH` edits from up to
   10 reference images with the encoder's mmproj as `--encoder-mmproj`.
+- `gmlx image generate` fits Qwen-Image 2.1 at 1024x1024 in the memory budget
+  of a 16 GB Mac: the text encoder loads, encodes and is released before the
+  DiT loads when the parts do not fit together.
 - `gmlx image generate --background transparent` writes the alpha channel that
   Qwen-Image 2.1 decodes, as a png or a webp.
 - `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA

@@ -28,11 +28,19 @@ references and the largest reference area that do.
 
 A plan made before the parts load has a load phase too: what stays
 resident and what the load holds beside it, from ``load_transient``.
+Such a plan can also load in stages: the encoder loads with its mmproj,
+encodes every conditioning of the request and is released, and the DiT
+and the VAE load after that. The encoder is then never resident beside
+the DiT. The staged order has a phase for the load of the encoder, the
+encode phase with the encoder alone, and a load phase for the DiT and
+the VAE.
 
 A VAE pass runs whole when its phase fits the budget and in tiles when
 it does not. Levers apply in order until the plan fits: sequential rows
 in place of a batch, release of an owned encoder after encoding, which
-frees its mmproj with it, and tiled VAE decode. Where the choice of
+frees its mmproj with it, tiled VAE decode, and last the staged load,
+which a plan takes only when the load of every part at once, or the
+encode beside the DiT, does not fit. Where the choice of
 ``vae_tiling`` is tiles on every machine, the decode is in tiles from the
 start and tiling is no lever of the plan: on a VAE row that takes tiles
 first, and on a measured row past the pixels its whole passes were
@@ -453,7 +461,8 @@ PEAKS = {
                             mmproj_fp32=True),
 }
 
-LEVERS = ("sequential rows", "release the encoder", "tiled decode")
+LEVERS = ("sequential rows", "release the encoder", "tiled decode",
+          "staged load")
 
 
 class ImageMemoryError(RuntimeError):
@@ -477,6 +486,7 @@ class MemoryPlan:
     fits: bool
     notes: tuple = field(default=())
     tiled_encode: bool = False      # the VAE encode of an init image
+    staged_load: bool = False       # the encoder goes before the DiT loads
 
     @property
     def peak(self) -> int:
@@ -577,6 +587,11 @@ def vae_bytes(src, itemsize: int) -> int:
 # matrix, the mmproj file and the VAE's tensors at float32, 0.48, 1.08
 # and 1.26 GiB there, and the term is those times this.
 LOAD_ROOM = 1.1
+# A plan takes the staged order when its budget is nearly full, so each
+# of its two load phases holds this over its load term. The terms alone
+# are 0.04 and 0.06 GiB over the readings of the Qwen-Image 2.1 encoder
+# and VAE, loaded in that order in one process.
+STAGE_ROOM = GiB // 8
 
 
 def load_transient(encoder=None, vae=None, mmproj=None) -> int:
@@ -664,7 +679,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 prefix_bound: int = 0, cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
                 ref_sizes=(), vae_price=None, load_peak: int = 0,
-                budget: float | None = None,
+                load_parts=None, budget: float | None = None,
                 overcommit: bool | None = None,
                 _hint: bool = True) -> MemoryPlan:
     """The memory plan for one image request.
@@ -700,7 +715,12 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     ``load_peak`` is what the load of the parts holds over what stays
     resident, as ``load_transient`` gives it from their headers. With it
     the plan has a load phase, which a plan for parts that are loaded
-    already leaves out.
+    already leaves out. ``load_parts`` is that figure for the encoder
+    with its mmproj and for the VAE, each loaded alone. With it an owned
+    encoder can load, encode and be released before the DiT and the VAE
+    load, which is the last lever of the plan, and each of the two load
+    phases counts STAGE_ROOM over its figure. The adapters load with the
+    encoder then, whose halves of them the encode runs under.
     """
     try:
         row = PEAKS[family]
@@ -780,7 +800,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     encode_peak = ((caption + slots) * row.encode_row_bytes * ENCODE_LIVE
                    + (row.encode_tower_bytes if slots else 0))
 
-    def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
+    def build(b: int, release: bool, tiled: bool, levers: tuple,
+              staged: bool = False) -> MemoryPlan:
         t = dict(terms)
         t["step_peak"] = row.step_peak(b * step_one, prefill)
         t["decode_peak"] = decode[tiled]
@@ -792,10 +813,21 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         # The prefix states stay in their cache until the request ends.
         held = later + t["prefix_cache"]
         phases = {}
-        if load_peak:
-            t["load_peak"] = int(load_peak)
-            phases["load"] = resident + t["load_peak"]
-        phases["encode"] = resident + t["encode_peak"]
+        if staged:
+            # The encoder loads, encodes and goes, and the DiT and the VAE
+            # load after it.
+            first = sum(t[n] for n in ("encoder", "mmproj", "adapters",
+                                       "caches"))
+            t["load_encoder_peak"], t["load_peak"] = (
+                int(v) + STAGE_ROOM for v in load_parts)
+            phases["load_encoder"] = first + t["load_encoder_peak"]
+            phases["encode"] = first + t["encode_peak"]
+            phases["load"] = later + t["load_peak"]
+        else:
+            if load_peak:
+                t["load_peak"] = int(load_peak)
+                phases["load"] = resident + t["load_peak"]
+            phases["encode"] = resident + t["encode_peak"]
         tiled_init = False
         if encodes:
             # A tiled encode is the whole one, so it is a choice by what
@@ -815,7 +847,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         fits = budget is None or max(phases.values()) <= budget
         return MemoryPlan(terms=t, phases=phases, budget=budget, rows=b,
                           release_encoder=release, tiled_decode=tiled,
-                          levers=levers, fits=fits, tiled_encode=tiled_init)
+                          levers=levers, fits=fits, tiled_encode=tiled_init,
+                          staged_load=staged)
 
     b = 2 if guided and batch_rows else 1
     plan = build(b, False, auto_tiled, ())
@@ -826,14 +859,18 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         steps.append(("release the encoder", dict(release=True)))
     if can_tile and not auto_tiled:
         steps.append(("tiled decode", dict(tiled=True)))
-    state = dict(b=b, release=False, tiled=auto_tiled)
+    if load_parts is not None and encoder_owned and (terms["encoder"]
+                                                     or terms["mmproj"]):
+        steps.append(("staged load", dict(staged=True, release=True)))
+    state = dict(b=b, release=False, tiled=auto_tiled, staged=False)
     applied: tuple = ()
     for name, change in steps:
         if plan.fits:
             break
         state.update(change)
         applied += (name,)
-        plan = build(state["b"], state["release"], state["tiled"], applied)
+        plan = build(state["b"], state["release"], state["tiled"], applied,
+                     state["staged"])
     if plan.fits or overcommit:
         return plan
     hint = _largest(plan.terms)
@@ -855,7 +892,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 text_tokens=text_tokens, prefix_other=prefix_other,
                 prefix_bound=prefix_bound, cache_bytes=cache_bytes,
                 tile=tile, init_image=init_image, vae_price=vae_price,
-                load_peak=load_peak, budget=budget, **kw)
+                load_peak=load_peak, load_parts=load_parts, budget=budget,
+                **kw)
 
         hint += _ref_hint(fits, sizes, row.prefix.min_ref_px)
     raise ImageMemoryError(

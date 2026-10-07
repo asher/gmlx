@@ -416,6 +416,90 @@ def test_encode_text_caches_by_key_and_survives_release(pipe):
         api.encode_text(pipe, "ab", images=[np.zeros((8, 8, 3))])
 
 
+class _ReleasedEncoder(_Encoder):
+    owned = True
+
+    @property
+    def released(self):
+        return self.model is None
+
+    def release(self):
+        self.model = None
+        return True
+
+
+def test_a_staged_load_holds_no_dit_beside_the_encoder(pipe, monkeypatch):
+    """``load_staged`` on stub loaders: the encode stage sees the encoder
+    and no DiT or VAE, the encoder is gone when the DiT loads, and the
+    pipeline samples what a pipeline loaded whole samples."""
+    from gmlx.image import loader, text_encoder
+    from gmlx.image import vae as vae_pkg
+
+    fam = get_family("z_image")
+    ident = SimpleNamespace(family=fam, variant="turbo", config={},
+                            view=SimpleNamespace(tensors={}))
+    enc, seen, staged = _ReleasedEncoder(), [], []
+
+    def state():
+        p = staged[0]
+        return (p.dit is not None, p.vae is not None,
+                not p.encoder.released)
+
+    def load_dit(path, **kw):
+        seen.append(("dit", state()))
+        assert kw["identified"] is ident
+        return _Dit(), SimpleNamespace(identified=ident)
+
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, variant=None: ident)
+    monkeypatch.setattr(loader, "load_dit", load_dit)
+    monkeypatch.setattr(
+        text_encoder, "load_encoder",
+        lambda path, spec, log=print, mmproj=None:
+        seen.append(("encoder", path, mmproj)) or enc)
+    monkeypatch.setattr(vae_pkg, "load_vae", lambda path, family, dtype:
+                        seen.append(("vae", state())) or "the vae")
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else 7)
+
+    def encode(p):
+        staged.append(p)
+        seen.append(("encode", state()))
+        assert p.dit is None and p.vae is None and p.identified is ident
+        return api.encode_text(p, "ab")
+
+    got, cond = api.load_staged("d", text_encoder="e", vae="v",
+                                encode=encode)
+    # (the DiT is loaded, the VAE is loaded, the encoder is resident)
+    assert seen == [("encoder", "e", None),
+                    ("encode", (False, False, True)),
+                    ("dit", (False, False, False)),
+                    ("vae", (True, False, False))]
+    assert got is staged[0] and got.encoder.released
+    assert isinstance(got.dit, _Dit) and got.vae == "the vae"
+    assert got.weights == {"dit": 7, "encoder": 7, "vae": 7}
+    assert sorted(got.load_seconds) == ["dit", "encoder", "vae"]
+    # The conditioning of the encode stage serves the loaded pipeline.
+    assert api.encode_text(got, "ab") is cond
+    x = api.sample(got, cond, height=32, width=48, seed=7)
+    pipe.encoder = _Encoder()
+    want = api.sample(pipe, api.encode_text(pipe, "ab"), height=32,
+                      width=48, seed=7)
+    assert np.array_equal(np.array(x), np.array(want))
+    # An mmproj goes to the encoder's load, and the pipeline counts the
+    # tower as loaded.
+    enc2 = _ReleasedEncoder()
+    enc2.vision_bytes = lambda: 11
+    monkeypatch.setattr(
+        text_encoder, "load_encoder",
+        lambda path, spec, log=print, mmproj=None:
+        seen.append(("encoder", path, mmproj)) or enc2)
+    got, _ = api.load_staged("d", text_encoder="e", mmproj="m",
+                             encode=lambda p: None)
+    assert ("encoder", "e", "m") in seen and got.weights["mmproj"] == 11
+    assert got.vae is None and got.encoder.released
+
+
 def test_the_conditioning_key_covers_its_inputs():
     from gmlx.image.conditioning import conditioning_key
 
@@ -502,7 +586,7 @@ def test_each_lever_has_a_budget_that_forces_it(pipe):
     last of them the refusal, which names every term in GiB."""
     kw = _small(pipe)
     G = memfit.GiB
-    rows, release, tiles = memfit.LEVERS
+    rows, release, tiles, _ = memfit.LEVERS
     free = api.plan_request(pipe, budget=100 * G, **kw)
     assert free.levers == () and free.rows == 2
     assert free.terms["mmproj"] == G // 2 and free.peak == free.phases[

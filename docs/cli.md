@@ -846,8 +846,11 @@ once and samples each image in turn, at the seed plus the image's index.
 Before the load it checks from the file headers that the request fits the
 memory budget, and it refuses with the plan's terms when no lever makes it
 fit. The plan takes its levers in one order: the two rows of a guided step
-run one at a time, the text encoder is released after encoding, and the
-VAE decodes in tiles. The run follows the plan it was admitted under. The
+run one at a time, the text encoder is released after encoding, the VAE
+decodes in tiles, and last the load runs in stages. A staged load reads the
+text encoder first, encodes every prompt and reference of the request and
+releases the encoder before the DiT and the VAE load, which gives the same
+latents. The run follows the plan it was admitted under. The
 VAE of Qwen-Image 2.1 runs whole up to 1024x1024 pixels when the plan fits
 that, and in tiles otherwise, and a tiled pass gives the result of the
 whole one. The variant of the DiT sets the steps, guidance and size that the

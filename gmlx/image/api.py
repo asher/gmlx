@@ -2,7 +2,9 @@
 
 ``load`` reads the DiT, the text encoder and the VAE into an
 ``ImagePipeline``, after gating their header sizes against the working
-budget. ``encode_text`` turns a prompt into a ``Conditioning`` through the
+budget. ``load_staged`` reads the text encoder alone, runs the encodes of
+a request, releases the encoder and reads the DiT and the VAE after that,
+for a request whose memory plan takes the staged load. ``encode_text`` turns a prompt into a ``Conditioning`` through the
 family's encoder tap and keeps it in the pipeline's conditioning cache.
 A family that edits from reference images takes them in three steps:
 ``references`` resizes them by the family's rule, ``encode_text`` runs
@@ -44,7 +46,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable, Mapping, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -128,6 +130,7 @@ class ImagePipeline:
     adapter_files: dict = field(default_factory=dict)  # file -> adapter
     lora: object | None = None                  # lora.install.PatchState
     scope: dict | None = None                   # see state_scope
+    identified: object | None = None            # see load_staged
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
@@ -267,6 +270,60 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
                          variant=info.identified.variant, vae=ae,
                          encoder=handle, weights=weights,
                          load_seconds=seconds, log=log)
+
+
+def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
+                mmproj=None, variant=None, log=print) -> tuple:
+    """Load an image pipeline in the staged order, for a request whose
+    memory plan says ``staged_load``, and return it with what ``encode``
+    returned.
+
+    The text encoder loads first, with its vision tower when ``mmproj``
+    is given. ``encode(pipe)`` then runs every encode of the request, and
+    installs the text encoder halves of its adapters before them, on a
+    pipeline that holds the encoder and neither the DiT nor the VAE:
+    ``pipe.dit`` and ``pipe.vae`` are None there, and ``pipe.identified``
+    is the DiT's header. The encoder is released when ``encode`` returns,
+    and the DiT and the VAE load after that, so the encoder is never
+    resident beside them. The conditionings ``encode`` made stay in the
+    pipeline's cache. Reference images get their VAE latents after the
+    load, through ``encode_references``. Each load gates its own weights
+    against the working budget."""
+    from .dtypes import image_activation
+    from .loader import identify_dit, load_dit
+    from .text_encoder import encoder_spec, load_encoder
+    from .vae import load_vae
+
+    weights = {"dit": _header_bytes(dit, "dit"),
+               "encoder": _header_bytes(text_encoder, "encoder"),
+               "vae": _header_bytes(vae, "vae")}
+    ident = identify_dit(str(dit), variant=variant)
+    act = image_activation(ident.family.name)
+    seconds = {}
+    t0 = time.perf_counter()
+    handle = load_encoder(str(text_encoder), encoder_spec(ident.family),
+                          log=log,
+                          mmproj=None if mmproj is None else str(mmproj))
+    if mmproj is not None:
+        weights["mmproj"] = handle.vision_bytes()
+    seconds["encoder"] = time.perf_counter() - t0
+    # The DiT is not loaded yet, and nothing of the encode stage reads it.
+    pipe = ImagePipeline(dit=cast(nn.Module, None), family=ident.family,
+                         variant=ident.variant, encoder=handle,
+                         weights=weights, load_seconds=seconds, log=log,
+                         identified=ident)
+    out = encode(pipe)
+    handle.release()
+    t0 = time.perf_counter()
+    model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
+                           identified=ident, log=log)
+    pipe.dit, pipe.variant = model, info.identified.variant
+    seconds["dit"] = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    if vae is not None:
+        pipe.vae = load_vae(str(vae), family=pipe.family.name, dtype=act.vae)
+    seconds["vae"] = time.perf_counter() - t0
+    return pipe, out
 
 
 def _flat(params):

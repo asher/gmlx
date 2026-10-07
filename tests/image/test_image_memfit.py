@@ -250,7 +250,7 @@ def test_levers_apply_in_order(z_view, monkeypatch):
         return _z(z_view, height=2048, width=2048, cfg=3.0,
                   budget=gib * GiB, **kw).levers
 
-    rows, release, tiled = memfit.LEVERS
+    rows, release, tiled, _ = memfit.LEVERS
     assert levers(20.0) == ()
     assert levers(17.0) == (rows,)
     assert levers(14.0) == (rows, release)
@@ -369,7 +369,7 @@ def test_the_release_of_the_encoder_frees_its_mmproj(q_view):
 def test_each_qwen_lever_has_a_budget_that_forces_it(q_view):
     """The plan's order on Qwen-Image 2.1: sequential rows, release of the
     encoder, tiled decode, and then the refusal."""
-    rows, release, tiled = memfit.LEVERS
+    rows, release, tiled, _ = memfit.LEVERS
     mmproj = GiB // 2
 
     def plan(budget, **kw):
@@ -834,6 +834,186 @@ def test_a_plan_made_before_the_load_has_a_load_phase(q_view):
                     budget=loaded.weight_bytes + GiB, **kw)
     assert "load_peak 1.40 GiB" in str(e.value)
     assert e.value.plan.peak == e.value.plan.phases["load"]
+
+
+def _refused(*args, **kw):
+    """The plan of a request that fits no budget, with every lever on."""
+    with pytest.raises(ImageMemoryError) as e:
+        plan_memory(*args, budget=1, **kw)
+    return e.value.plan
+
+
+def test_the_staged_load_is_the_last_lever_and_prices_each_phase(q_view):
+    """Stub sizes on the Qwen-Image 2.1 header: the staged load is taken
+    only when the plan does not fit without it, each of its phases has its
+    price, and the refusal comes after it."""
+    mm, adapters, caches = GiB // 2, 300 << 20, 100 << 20
+    parts = (int(0.6 * GiB), int(0.3 * GiB))
+    kw = dict(family="qwen_image21", height=512, width=512, cfg=4.0,
+              adapters=adapters, cache_bytes=caches, overcommit=False,
+              load_peak=max(parts))
+    args = (q_view, ENCODER, VAE, mm)
+    dit = memfit.file_bytes(q_view)
+    whole = _refused(*args, **kw)
+    staged = _refused(*args, load_parts=parts, **kw)
+    assert not whole.staged_load and whole.levers == memfit.LEVERS[:2]
+    assert staged.staged_load and staged.levers == (
+        *memfit.LEVERS[:2], "staged load")
+    assert staged.release_encoder and staged.rows == 1
+    assert staged.peak < whole.peak == whole.phases["load"]
+    # A request that fits without the lever has the plan it has without
+    # the parts, at every budget down to the last byte that fits.
+    for budget in (BUDGET_128, 20 * GiB, whole.peak + GiB, whole.peak):
+        p = plan_memory(*args, budget=budget, load_parts=parts, **kw)
+        assert p == plan_memory(*args, budget=budget, **kw)
+        assert p.fits and not p.staged_load and "staged load" not in p.levers
+        assert "load_encoder" not in p.phases
+    # One byte under it the unstaged plan is refused, and the staged one
+    # fits.
+    with pytest.raises(ImageMemoryError):
+        plan_memory(*args, budget=whole.peak - 1, **kw)
+    p = plan_memory(*args, budget=whole.peak - 1, load_parts=parts, **kw)
+    assert p.fits and p.staged_load and p.levers[-1] == "staged load"
+    assert list(p.phases) == ["load_encoder", "encode", "load", "denoise",
+                              "decode"]
+    t = p.terms
+    first = ENCODER + mm + adapters + caches
+    # Each load phase holds the room of a staged load over its part.
+    room = memfit.STAGE_ROOM
+    assert room >= GiB // 10
+    assert t["load_encoder_peak"] == parts[0] + room
+    assert t["load_peak"] == parts[1] + room
+    assert p.phases["load_encoder"] == first + parts[0] + room
+    assert p.phases["encode"] == first + t["encode_peak"]
+    assert p.phases["load"] == (dit + VAE + adapters + caches + parts[1]
+                                + room)
+    # After the release the phases are those of the unstaged plan.
+    assert {k: p.phases[k] for k in ("denoise", "decode")} == {
+        k: whole.phases[k] for k in ("denoise", "decode")}
+    assert p.phases["denoise"] == (dit + VAE + adapters + caches
+                                   + t["prefix_cache"] + t["step_peak"])
+    # The refusal comes after the staged load, and names its phases.
+    with pytest.raises(ImageMemoryError) as e:
+        plan_memory(*args, budget=staged.peak - 1, load_parts=parts, **kw)
+    msg = str(e.value)
+    assert e.value.plan.staged_load and e.value.plan.phases == staged.phases
+    assert "levers sequential rows, release the encoder, staged load" in msg
+    assert f"load_encoder {staged.phases['load_encoder'] / GiB:.2f}" in msg
+    for name in ("load_encoder_peak", "load_peak"):
+        assert f"{name} {staged.terms[name] / GiB:.2f} GiB" in msg
+    # An encoder the request keeps has no such lever.
+    kept = _refused(*args, load_parts=parts, encoder_owned=False, **kw)
+    assert not kept.staged_load and "staged load" not in kept.levers
+    # An init image and a reference keep their phase after the load.
+    edit = _refused(*args, load_parts=parts, ref_sizes=[(256, 256)], **kw)
+    assert list(edit.phases) == ["load_encoder", "encode", "load", "init",
+                                 "denoise", "decode"]
+    assert edit.phases["init"] == (dit + VAE + adapters + caches
+                                   + edit.terms["prefix_cache"]
+                                   + edit.terms["init_peak"])
+
+
+# The Qwen-Image 2.1 files beside the Q4_K_M DiT of the header fixture:
+# the encoder without its output matrix, the mmproj as loaded, the VAE in
+# bf16, and what the load of each part holds over that, in GiB.
+Q_PARTS = dict(encoder=4.20, mmproj=2.15, vae=0.63, load_text=0.52,
+               load_mmproj=1.71, load_vae=1.38)
+
+
+def _q16(q_view, size, cfg, refs=(), budget=BUDGET_16):
+    g = {k: int(v * GiB) for k, v in Q_PARTS.items()}
+    first = g["load_mmproj"] if refs else g["load_text"]
+    return plan_memory(
+        q_view, g["encoder"], g["vae"], g["mmproj"] if refs else 0,
+        family="qwen_image21", height=size, width=size, cfg=cfg,
+        ref_sizes=[(r, r) for r in refs], budget=budget, overcommit=False,
+        load_peak=max(first, g["load_vae"]),
+        load_parts=(first, g["load_vae"]))
+
+
+@pytest.mark.parametrize("size, cfg, refs", [
+    (512, 1.0, ()), (512, 4.0, ()), (1024, 1.0, ()), (1024, 4.0, ()),
+    (512, 1.0, (256,)), (512, 4.0, (256,)), (1024, 4.0, (256,))])
+def test_a_16_gib_machine_runs_qwen_image_staged(q_view, size, cfg, refs):
+    """What a 16 GB Mac runs of Qwen-Image 2.1 at Q4_K_M: no request fits
+    with every part loaded together, and these fit staged."""
+    p = _q16(q_view, size, cfg, refs)
+    assert p.fits and p.staged_load and p.release_encoder
+    assert p.tiled_decode is (size > 512)
+    assert p.rows == 1
+    # On a budget that holds every part the same request loads them
+    # together.
+    free = _q16(q_view, size, cfg, refs, budget=BUDGET_128)
+    assert free.fits and not free.staged_load and not free.levers
+
+
+@pytest.mark.parametrize("size, cfg, refs, phase, peak", [
+    (512, 4.0, (512,), "decode", 8.92), (1024, 4.0, (512,), "decode", 8.95),
+    (512, 1.0, (512,), "encode", 8.69), (1024, 1.0, (1024,), "denoise",
+                                         10.10)])
+def test_a_16_gib_machine_refuses_the_larger_qwen_edits(q_view, size, cfg,
+                                                        refs, phase, peak):
+    with pytest.raises(ImageMemoryError) as e:
+        _q16(q_view, size, cfg, refs)
+    p = e.value.plan
+    assert p.staged_load and p.levers[-1] == "staged load"
+    assert max(p.phases, key=p.phases.get) == phase
+    assert abs(p.peak / GiB - peak) < 0.02
+    assert "against a budget of 8.55 GiB" in str(e.value)
+
+
+# MLX peak in GiB of the load phases of a staged run of those files under
+# the budget of a 16 GiB machine, on an M5 Max: the encoder alone, the
+# encoder with its mmproj, and the DiT with the VAE.
+MEASURED_STAGED = {"load_encoder": 4.681, "load_encoder with mmproj": 7.902,
+                   "load": 5.864}
+
+
+def test_the_staged_load_phases_cover_the_measured_loads(q_view):
+    """A load phase of a staged plan is a tenth of a GiB or more over
+    its reading. The load terms alone leave less."""
+    text, edit = _q16(q_view, 1024, 1.0), _q16(q_view, 512, 4.0, (256,))
+    room = GiB // 10
+    for p, phase, name in ((text, "load_encoder", "load_encoder"),
+                           (edit, "load_encoder", "load_encoder with mmproj"),
+                           (text, "load", "load"), (edit, "load", "load")):
+        read = MEASURED_STAGED[name] * GiB
+        assert p.phases[phase] >= read + room, (name, p.phases[phase] / GiB)
+    bare = text.phases["load_encoder"] - memfit.STAGE_ROOM
+    assert bare < MEASURED_STAGED["load_encoder"] * GiB + room
+
+
+def test_z_image_stages_its_load_only_when_a_budget_needs_it(z_view):
+    """Z-Image at Q4_K_M fits a 16 GiB machine with every part loaded
+    together, as without the lever. With a larger encoder quant the load
+    of all parts is over that budget, and the request runs staged."""
+    parts = (int(0.02 * GiB), int(0.34 * GiB))
+    kw = dict(load_peak=max(parts), load_parts=parts, budget=BUDGET_16)
+    p = _z(z_view, height=1024, width=1024, **kw)
+    assert p.fits and not p.staged_load
+    assert p == _z(z_view, height=1024, width=1024, budget=BUDGET_16,
+                   load_peak=max(parts))
+    assert p.levers == ("release the encoder", "tiled decode")
+    q8 = int(4.3 * GiB)             # Qwen3-4B at Q8_0
+
+    def big(size, **more):
+        return plan_memory(z_view, q8, VAE, family="z_image", height=size,
+                           width=size, overcommit=False, **more)
+
+    for size, levers in ((512, ("release the encoder", "staged load")),
+                         (1024, ("release the encoder", "tiled decode",
+                                 "staged load"))):
+        with pytest.raises(ImageMemoryError) as e:
+            big(size, load_peak=max(parts), budget=BUDGET_16)
+        # The misfit is every part resident together, at the load and
+        # at the encode.
+        whole = e.value.plan.phases
+        assert e.value.plan.peak == max(whole["load"], whole["encode"])
+        staged = big(size, **kw)
+        assert staged.fits and staged.staged_load and staged.levers == levers
+        assert staged.phases["load_encoder"] == (q8 + parts[0]
+                                                 + memfit.STAGE_ROOM)
+        assert staged.peak == staged.phases["decode"]
 
 
 def test_the_vae_rows_cover_the_measured_footprints():

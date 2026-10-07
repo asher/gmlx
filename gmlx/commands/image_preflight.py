@@ -4,7 +4,9 @@ The memory plan of the request, from the headers of the DiT, the text
 encoder and the VAE, before any weights load, with what the load holds
 beside them. A request that cannot fit
 with every lever applied is refused with the plan's terms, instead of
-failing after a load of several GB. GMLX_TOOL_PREFLIGHT=0 skips it.
+failing after a load of several GB. The last lever is the staged load,
+which the command follows when the plan takes it.
+GMLX_TOOL_PREFLIGHT=0 skips the check.
 """
 from __future__ import annotations
 
@@ -70,4 +72,7 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
         ref_sizes=[(int(h), int(w)) for h, w in refs],
         load_peak=load_transient(encoder, vae, mmproj),
+        # Each part alone, for the staged order.
+        load_parts=(load_transient(encoder, None, mmproj),
+                    load_transient(None, vae, None)),
         encoder_owned=not keep_encoder)

@@ -521,7 +521,10 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     # The load is a phase of the plan the command makes before it loads:
     # every part resident, and what the load holds beside them.
     assert list(plan.phases) == ["load", "encode", "denoise", "decode"]
-    assert seen == [("e", "v", None)]
+    # The load of every part together, then of each part alone, which the
+    # staged order reads.
+    assert seen == [("e", "v", None), ("e", None, None), (None, "v", None)]
+    assert not plan.staged_load
     assert plan.phases["load"] == sum(sizes.values()) + (300 << 20)
     # An init image adds the phase of its encode.
     init = pf.check("d", "e", "v", height=1024, width=1024, cfg=None,
@@ -547,6 +550,42 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
         family=fam, variant="unknown"))
     assert pf.check("d", "e", "v", height=1024, width=1024, cfg=None) is None
+
+
+def test_the_preflight_stages_the_load_when_no_other_lever_fits(
+        monkeypatch):
+    from gmlx.image import memfit
+    from gmlx.serve import capacity
+
+    pf = image_preflight
+    fam = get_family("z_image")
+    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+        family=fam, variant="turbo"))
+    sizes = {"dit": 3 << 30, "encoder": 4 << 30, "vae": 160 << 20}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.setattr(pf, "load_transient", lambda e, v, m: (
+        (500 << 20 if e else 0) if v is None else 300 << 20 if e is None
+        else 500 << 20))
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 7 << 30)
+    kw = dict(height=512, width=512, cfg=None)
+    plan = pf.check("d", "e", "v", **kw)
+    assert plan.fits and plan.staged_load and plan.release_encoder
+    assert plan.levers == ("release the encoder", "staged load")
+    room = memfit.STAGE_ROOM
+    assert plan.phases["load_encoder"] == (4 << 30) + (500 << 20) + room
+    assert plan.phases["load"] == ((3 << 30) + (160 << 20) + (300 << 20)
+                                   + room)
+    # A caller that keeps its encoder, as bench does, cannot stage it.
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        pf.check("d", "e", "v", keep_encoder=True, **kw)
+    assert not e.value.plan.staged_load
+    assert "the encoder is not released in this request" in str(e.value)
+    # With every part in the budget the plan is the one without stages.
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 12 << 30)
+    whole = pf.check("d", "e", "v", **kw)
+    assert whole.fits and not whole.staged_load and not whole.levers
 
 
 class _TinyEncoder(_OwnedEncoder):
@@ -599,6 +638,181 @@ def tiny(env, monkeypatch, tmp_path):
     env.b = write_adapter(tmp_path / "b.safetensors", "diffusers",
                           tiny_z_adapter(2))
     return env
+
+
+def _staged_plan(env):
+    """A plan made before the load that takes the staged load."""
+    return SimpleNamespace(
+        release_encoder=True, staged_load=True, tiled_decode=False, rows=1,
+        levers=("release the encoder", "staged load"),
+        describe=lambda: "peak 7.00 GiB against a budget of 8.00 GiB")
+
+
+@pytest.fixture
+def staged(env, monkeypatch):
+    """The env with the real ``api.load_staged`` over stub loaders, and a
+    plan before the load that takes the staged load. ``env.events`` holds
+    each load and encode with (the DiT is loaded, the VAE is loaded, the
+    encoder is resident) as the pipeline had them then."""
+    from gmlx.image import loader, text_encoder
+    from gmlx.image import vae as vae_pkg
+
+    fam = get_family("z_image")
+    ident = SimpleNamespace(family=fam, variant="turbo", config={},
+                            view=SimpleNamespace(tensors={}))
+    env.events, env.make_dit, env.encoder = [], _Dit, _OwnedEncoder
+    env.ident = ident
+
+    def state(pipe):
+        return (pipe.dit is not None, pipe.vae is not None,
+                not pipe.encoder.released)
+
+    def load_encoder(path, spec, log=print, mmproj=None):
+        env.events.append(("load_encoder", mmproj))
+        return env.encoder()
+
+    def load_dit(path, **kw):
+        env.events.append(("load_dit", state(env.pipes[-1])))
+        return env.make_dit(), SimpleNamespace(identified=env.ident)
+
+    def load_vae(path, family, dtype):
+        env.events.append(("load_vae", state(env.pipes[-1])))
+        return object()
+
+    real = api.encode_text
+
+    def encode_text(pipe, prompt, **kw):
+        if not env.pipes or env.pipes[-1] is not pipe:
+            pipe.decoded, pipe.encoded_images = [], []
+            env.pipes.append(pipe)
+        env.events.append(("encode", prompt, state(pipe)))
+        return real(pipe, prompt, **kw)
+
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, variant=None: env.ident)
+    monkeypatch.setattr(loader, "load_dit", load_dit)
+    monkeypatch.setattr(text_encoder, "load_encoder", load_encoder)
+    monkeypatch.setattr(vae_pkg, "load_vae", load_vae)
+    monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 0)
+    monkeypatch.setattr(api, "encode_text", encode_text)
+    env.checked = _staged_plan(env)
+    return env
+
+
+def test_a_staged_plan_loads_the_dit_after_the_encoder_is_gone(
+        staged, tmp_path, capsys):
+    lat = tmp_path / "lat.npz"
+    args = ["--prompt", "a red bicycle", "--negative-prompt", "blur",
+            "--guidance", "3", "--size", "48x32", "--seed", "7",
+            "--save-latent", str(lat), "--output", str(tmp_path / "a.png"),
+            "--json"]
+    assert umbrella_main(staged.base + args) == 0
+    io = capsys.readouterr()
+    rec = json.loads(io.out)
+    # The encoder loads and encodes with no DiT and no VAE beside it, and
+    # is gone when they load.
+    assert staged.events == [
+        ("load_encoder", None),
+        ("encode", "a red bicycle", (False, False, True)),
+        ("encode", "blur", (False, False, True)),
+        ("load_dit", (False, False, False)),
+        ("load_vae", (True, False, False))]
+    pipe = staged.pipes[-1]
+    assert pipe.encoder.released and pipe.dit.calls > 0
+    assert "loading in stages" in io.err
+    # The request plan is made after the release, and the record holds
+    # the levers of the run.
+    assert rec["encoder_released"] is True
+    assert rec["levers"] == ["release the encoder", "staged load"]
+    staged.plan.levers = ("sequential rows", "tiled decode")
+    assert umbrella_main(staged.base + args) == 0
+    assert json.loads(capsys.readouterr().out)["levers"] == [
+        "sequential rows", "release the encoder", "tiled decode",
+        "staged load"]
+    staged_latents = np.load(lat)["latents"]
+    # The latents are those of the same request loaded whole.
+    staged.checked = None
+    monkeypatch_events = len(staged.events)
+    assert umbrella_main(staged.base + args) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["levers"] == ["sequential rows", "tiled decode"]
+    assert rec["encoder_released"] is False
+    # The whole load went through api.load: no stub loader ran.
+    assert [e[0] for e in staged.events[monkeypatch_events:]] == [
+        "encode", "encode"]
+    assert np.array_equal(np.load(lat)["latents"], staged_latents)
+
+
+def test_never_releasing_the_encoder_of_a_staged_plan_exits_2(
+        staged, tmp_path, capsys):
+    args = staged.base + ["--prompt", "p", "--size", "32x32", "--output",
+                          str(tmp_path / "a.png"), "--encoder-release",
+                          "never"]
+    assert umbrella_main(args) == 2
+    err = capsys.readouterr().err
+    assert "--encoder-release never: this request fits only with the text " \
+           "encoder released before the DiT loads; peak 7.00 GiB" in err
+    assert staged.events == [] and staged.pipes == []
+    # always and auto run it staged.
+    for policy in ("always", "auto"):
+        staged.events.clear()
+        assert umbrella_main(args[:-1] + [policy]) == 0
+        assert [e[0] for e in staged.events] == [
+            "load_encoder", "encode", "load_dit", "load_vae"]
+
+
+def test_a_staged_plan_reads_adapters_before_the_encode(staged, tiny,
+                                                        tmp_path, capsys,
+                                                        monkeypatch):
+    """Under the staged order the adapters are read in the encoder stage,
+    where their text encoder halves go on before the encode, from the
+    DiT's header. The patch table is defined after the DiT loads, and the
+    latents are those of the request loaded whole."""
+    from image_fixtures import TINY_Z_CONFIG, tiny_z_model
+    from mlx.utils import tree_flatten
+
+    from gmlx.image import lora
+
+    # The header of the tiny DiT, with shapes in the GGUF's order.
+    names = {k: SimpleNamespace(shape=tuple(reversed(v.shape)), codec="F32")
+             for k, v in tree_flatten(tiny_z_model()[0].parameters())}
+    staged.ident = SimpleNamespace(
+        family=get_family("z_image"), variant="turbo",
+        config=dict(TINY_Z_CONFIG), view=SimpleNamespace(tensors=names))
+    staged.make_dit = lambda: tiny_z_model()[0]
+    staged.encoder = _TinyEncoder
+    real_text, real_table = lora.apply_text_adapters, api.define_patch_table
+
+    def text(pipe, rows):
+        staged.events.append(("text halves", pipe.dit is not None))
+        return real_text(pipe, rows)
+
+    def table(pipe, entries):
+        staged.events.append(("table", pipe.dit is not None,
+                              pipe.encoder.released))
+        return real_table(pipe, entries)
+
+    monkeypatch.setattr(lora, "apply_text_adapters", text)
+    monkeypatch.setattr(api, "define_patch_table", table)
+    lat = tmp_path / "lat.npz"
+    args = ["--prompt", "a red bicycle", "--size", "32x32", "--seed", "5",
+            "--steps", "3", "--output", str(tmp_path / "o.png"),
+            "--save-latent", str(lat), "--json", "--adapter",
+            f"{tiny.a}:0.5", "--adapter", tiny.b]
+    assert umbrella_main(staged.base + args) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert [e[0] for e in staged.events] == [
+        "load_encoder", "text halves", "encode", "load_dit", "load_vae",
+        "table"]
+    assert staged.events[1] == ("text halves", False)
+    assert staged.events[-1] == ("table", True, True)
+    want, tid, shas = _direct_adapters("a red bicycle", 5,
+                                       [(tiny.a, 0.5), (tiny.b, 1.0)],
+                                       steps=3)
+    assert np.array_equal(np.load(lat)["latents"], want)
+    assert tid in staged.pipes[-1].patch_tables
+    assert [r["rows_sha256"] for r in rec["settings"]["adapters"]] == shas
+    assert rec["levers"] == ["release the encoder", "staged load"]
 
 
 def _direct_adapters(prompt, seed, rows, shape=(1, 4, 4, 4), **kw):
@@ -1076,7 +1290,7 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
     kw = dict(height=512, width=512, cfg=1.0)
     text = pf.check("d", "e", "v", **kw)
     assert text.terms["mmproj"] == 0 and "init" not in text.phases
-    assert seen == [("e", "v", None)]
+    assert seen == [("e", "v", None), ("e", None, None), (None, "v", None)]
     refs = [(1024, 1024), (512, 768)]
     plan = pf.check("d", "e", "v", mmproj="m", refs=refs, **kw)
     assert plan.terms["mmproj"] == 2 << 30
@@ -1088,7 +1302,8 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
         "encode", 1024, 1024, family="qwen_image21", itemsize=2)
     assert list(plan.phases) == ["load", "encode", "init", "denoise",
                                  "decode"]
-    assert seen[-1] == ("e", "v", "m")
+    assert seen[-3:] == [("e", "v", "m"), ("e", None, "m"),
+                         (None, "v", None)]
     assert plan.phases["load"] == (sum(sizes.values()) + (2 << 30)
                                    + (1 << 30))
     # The encode runs the image rows of the references beside the text,

@@ -236,8 +236,22 @@ def _check_release(a, plan) -> None:
     encoder released is a usage error."""
     if plan is not None and a.encoder_release == "never" \
             and plan.release_encoder:
+        when = (" before the DiT loads"
+                if getattr(plan, "staged_load", False) else "")
         raise _Usage("--encoder-release never: this request fits only with "
-                     f"the text encoder released; {plan.describe()}")
+                     f"the text encoder released{when}; {plan.describe()}")
+
+
+def _levers(plan, staged: bool) -> list:
+    """The levers a run took, in the plan's order. A staged run plans its
+    request after the encoder is gone, so that plan holds neither the
+    release nor the staged load, which the run took all the same."""
+    if not staged:
+        return list(plan.levers)
+    from gmlx.image.memfit import LEVERS
+
+    took = {*plan.levers, "release the encoder", "staged load"}
+    return [name for name in LEVERS if name in took]
 
 
 def _prompt(a) -> str:
@@ -456,15 +470,12 @@ def _adapter_bytes(a) -> list:
             for p, _ in a.adapter or ()]
 
 
-def _load_adapters(a, pipe, log) -> tuple:
+def _read_adapters(a, pipe, log) -> list:
     """Load the ``--adapter`` files into the pipeline and apply their text
-    encoder halves. Returns the patch table id, or None without adapters,
-    and one record per adapter for the metadata: ``sha256`` is the digest
-    of the file, and ``rows_sha256`` names the pairs gmlx placed and the
-    modules it placed them on."""
+    encoder halves. Returns one (adapter, strength) row per file."""
     if not a.adapter:
-        return None, []
-    from gmlx.image import api, lora
+        return []
+    from gmlx.image import lora
 
     rows = []
     for path, strength in a.adapter:
@@ -473,6 +484,18 @@ def _load_adapters(a, pipe, log) -> tuple:
             log(f"warning: {w}")
         rows.append((ad, strength))
     lora.apply_text_adapters(pipe, rows)
+    return rows
+
+
+def _adapter_table(pipe, rows, log) -> tuple:
+    """The patch table id of the adapter rows, or None without adapters,
+    and one record per adapter for the metadata: ``sha256`` is the digest
+    of the file, and ``rows_sha256`` names the pairs gmlx placed and the
+    modules it placed them on."""
+    if not rows:
+        return None, []
+    from gmlx.image import api, lora
+
     table = api.define_patch_table(pipe, lora.table_entries(rows))
     meta = []
     for ad, strength in rows:
@@ -483,6 +506,11 @@ def _load_adapters(a, pipe, log) -> tuple:
                      "sha256": _file_sha256(ad.path),
                      "rows_sha256": ad.sha256})
     return table, meta
+
+
+def _load_adapters(a, pipe, log) -> tuple:
+    """``_read_adapters`` and ``_adapter_table`` on a loaded pipeline."""
+    return _adapter_table(pipe, _read_adapters(a, pipe, log), log)
 
 
 def _settings(a, ident, defaults):
@@ -572,24 +600,40 @@ def _generate(a) -> int:
         if err is not None:
             raise OSError(f"cannot write {path}: {err}")
 
-    _check_release(a, image_preflight.check(
+    before = image_preflight.check(
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
-        mmproj=mmproj, refs=[(r.height, r.width) for r in refs]))
-    pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
-                    mmproj=mmproj, log=log)
-    table, adapters = _load_adapters(a, pipe, log)
-    t0 = time.perf_counter()
-    # The VAE encodes the references after the encoder's release.
-    cond = api.encode_text(pipe, prompt, images=refs, ref_latents=False)
-    neg = None if cfg == 1.0 else api.encode_text(
-        pipe, a.negative_prompt or "", images=refs, ref_latents=False)
-    encode_s = time.perf_counter() - t0
+        mmproj=mmproj, refs=[(r.height, r.width) for r in refs])
+    _check_release(a, before)
+    staged = bool(getattr(before, "staged_load", False))
+
+    def encode(pipe):
+        # The VAE encodes the references after the encoder's release.
+        t0 = time.perf_counter()
+        cond = api.encode_text(pipe, prompt, images=refs, ref_latents=False)
+        neg = None if cfg == 1.0 else api.encode_text(
+            pipe, a.negative_prompt or "", images=refs, ref_latents=False)
+        return cond, neg, time.perf_counter() - t0
+
+    if staged:
+        # The plan fits only with the encoder gone before the DiT loads.
+        log("[image] loading in stages: the text encoder encodes and is "
+            "released before the DiT loads")
+        pipe, (rows, (cond, neg, encode_s)) = api.load_staged(
+            a.model, text_encoder=a.encoder, vae=a.vae, mmproj=mmproj,
+            log=log,
+            encode=lambda pipe: (_read_adapters(a, pipe, log), encode(pipe)))
+        table, adapters = _adapter_table(pipe, rows, log)
+    else:
+        pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
+                        mmproj=mmproj, log=log)
+        table, adapters = _load_adapters(a, pipe, log)
+        cond, neg, encode_s = encode(pipe)
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
                             conds=[cond] if neg is None else [cond, neg],
                             patch_table=table, init_image=init is not None)
     _check_release(a, plan)
-    release = a.encoder_release == "always" or (
+    release = staged or a.encoder_release == "always" or (
         a.encoder_release == "auto" and plan.release_encoder)
     if release:
         pipe.encoder.release()
@@ -653,7 +697,7 @@ def _generate(a) -> int:
             "model": {"family": fam.name, "variant": pipe.variant, **files},
             "load_s": {k: round(v, 3) for k, v in pipe.load_seconds.items()},
             "encode_s": round(encode_s, 3), "latents": a.save_latent,
-            "encoder_released": release, "levers": list(plan.levers)}))
+            "encoder_released": release, "levers": _levers(plan, staged)}))
     return 0
 
 

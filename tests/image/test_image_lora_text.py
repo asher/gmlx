@@ -3,6 +3,8 @@ image side's own wrap on an owned encoder, refused by name on a borrowed
 one. CPU."""
 from __future__ import annotations
 
+import re
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -114,6 +116,71 @@ def test_text_halves_apply_on_an_owned_encoder(tmp_path):
     # The same state again is a no-op.
     assert lora.apply_text_adapters(pipe, rows) == 0
     assert lora.text_state([(a1, 0.8)]) != lora.text_state(rows)
+
+
+def _unloaded(pipe, change=None) -> api.ImagePipeline:
+    """``pipe`` as a staged load holds it before its DiT loads: no DiT,
+    and the DiT's header, whose shapes are in the GGUF's order."""
+    from types import SimpleNamespace
+
+    from image_fixtures import TINY_Z_CONFIG
+    from mlx.utils import tree_flatten
+
+    names = {k: SimpleNamespace(shape=tuple(reversed(v.shape)), codec="F32")
+             for k, v in tree_flatten(pipe.dit.parameters())}
+    if change is not None:
+        change(names)
+    pipe.dit = None
+    pipe.identified = SimpleNamespace(config=dict(TINY_Z_CONFIG),
+                                      view=SimpleNamespace(tensors=names))
+    return pipe
+
+
+def test_a_staged_pipeline_places_an_adapter_by_the_dit_header(tmp_path):
+    """Before a staged load reads its DiT, an adapter is placed by the
+    DiT's header: the rows and the hash it has on the loaded DiT, with
+    the text halves on for the encode. The table is defined once the DiT
+    is there."""
+    one = _text_pairs(1, 6.0)
+    path = _write(tmp_path / "one.safetensors", one, tiny_z_adapter(1, 4.0))
+    whole = _pipe()
+    want = lora.load_adapter(whole, path)
+    pipe = _pipe()
+    dit = pipe.dit
+    got = lora.load_adapter(_unloaded(pipe), path)
+    assert (got.sha256, got.dit, got.text) == (want.sha256, want.dit,
+                                               want.text)
+    assert len(got.dit) == 8 and len(got.text) == 3
+    assert lora.apply_text_adapters(pipe, [(got, 0.8)]) == 1
+    hidden = np.array(pipe.encoder.encode("ab").hidden[0], np.float64)
+    assert rel_l2(hidden, _merged_hidden([(one, 0.8)])) <= TEXT_TOL
+    assert pipe.encoder.adapters == lora.text_state([(want, 0.8)])
+    pipe.dit = dit
+    tid = api.define_patch_table(pipe, lora.table_entries([(got, 0.8)]))
+    assert tid == api.define_patch_table(
+        whole, lora.table_entries([(want, 0.8)]))
+    # The key map of the loaded DiT is made from the DiT, not kept from
+    # the header.
+    from gmlx.image.lora.patch_table import key_map
+
+    assert key_map(pipe) is key_map(pipe)
+    # A pair that does not fit the header, or names a layer it lacks, is
+    # refused as on a loaded DiT.
+    module = want.dit[0][0]
+
+    def wider(names):
+        t = names[module + ".weight"]
+        t.shape = (t.shape[0] + 1, t.shape[1])
+
+    with pytest.raises(lora.AdapterError,
+                       match=rf"does not fit {re.escape(module)} of this "
+                             "Z-Image DiT"):
+        lora.load_adapter(_unloaded(_pipe(), wider), path)
+    with pytest.raises(lora.AdapterError,
+                       match=rf"targets {re.escape(module)}, which this "
+                             "DiT does not have"):
+        lora.load_adapter(
+            _unloaded(_pipe(), lambda n: n.pop(module + ".weight")), path)
 
 
 def test_text_halves_come_off_and_change(tmp_path):
