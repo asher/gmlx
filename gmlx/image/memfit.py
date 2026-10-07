@@ -596,10 +596,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 dtype="bfloat16", vae_dtype=None, batch_rows: bool = True,
                 encoder_owned: bool = True, caption_tokens: int | None = None,
                 text_tokens: int | None = None, refs: int = 0,
-                ref_px: int = 0, prefix_rows=None, prefix_other: int = 0,
+                ref_px: int = 0, prefix_rows=None,
+                prefix_shared: bool = False, prefix_other: int = 0,
                 prefix_bound: int = 0, cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
-                vae_price=None, budget: float | None = None,
+                ref_sizes=(), vae_price=None, budget: float | None = None,
                 overcommit: bool | None = None) -> MemoryPlan:
     """The memory plan for one image request.
 
@@ -612,7 +613,10 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     ``overcommit`` to GMLX_OVERCOMMIT.
 
     ``init_image`` says the request encodes an init image of its size
-    with the VAE. ``vae_price`` maps "decode" and "encode" to what
+    with the VAE, and ``ref_sizes`` holds the (height, width) in pixels
+    of each reference image it encodes. The encodes run one at a time,
+    after the encoder's release when that lever is taken, and the init
+    phase holds the largest. ``vae_price`` maps "decode" and "encode" to what
     ``vae_peak`` takes of the loaded VAE beside the family and the
     itemsize: its channels, config and conv path, as
     ``tiling.price_args`` gives them. Without it the passes are priced
@@ -620,7 +624,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     The prefix rows of a conditioning come from ``text_tokens``, ``refs``
     and ``ref_px``. ``prefix_rows`` gives them for the request's own
-    conditionings, the positive first, in place of that count. A cache of
+    conditionings, the positive first, in place of that count, and
+    ``prefix_shared`` says the two of a guided request are one, whose
+    state is held once. A cache of
     prefix states that holds ``prefix_other`` bytes of other conditionings
     sheds them to ``prefix_bound`` as the request's states come in, and
     what stays is part of the prefix cache term.
@@ -664,15 +670,15 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     given = [] if prefix_rows is None else [int(n) for n in prefix_rows]
     per = [prefix_row_terms(row, rows, n, act)
            for n in (given + [counted] * conds)[:conds]]
-    own = sum(p[0] for p in per)
+    own = per[0][0] if prefix_shared else sum(p[0] for p in per)
     step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
     terms["prefix_cache"] = own + min(int(prefix_other),
                                       max(0, int(prefix_bound) - own))
-    def price(op: str, tiled: bool) -> int:
+    def price(op: str, tiled: bool, h: int = height, w: int = width) -> int:
         kw = dict(family=family, itemsize=vsize, tile=tile)
         kw.update({k: v for k, v in ((vae_price or {}).get(op) or {}).items()
                    if k in ("channels", "config", "conv")})
-        return int(vae_peak(op, height, width, tiled=tiled, **kw))
+        return int(vae_peak(op, h, w, tiled=tiled, **kw))
 
     # Above one tile a pass can run in tiles. The choice ``vae_tiling``
     # makes by itself is tiles on a row that takes tiles first, and past
@@ -680,9 +686,15 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     can_tile = height > tile or width > tile
     auto_tiled = can_tile and vae_row(family).tiles_at(height * width)
     decode = {False: price("decode", False), True: price("decode", True)}
-    init = {False: 0, True: 0}
-    if init_image:
-        init = {False: price("encode", False), True: price("encode", True)}
+    # The images the VAE encodes: (pixels, tiles of itself, bytes whole,
+    # bytes in tiles or None for an image of one tile).
+    encodes = []
+    for h, w in ([(height, width)] if init_image else []) + [
+            (int(h), int(w)) for h, w in ref_sizes]:
+        tiles = h > tile or w > tile
+        encodes.append((tiles and vae_row(family).tiles_at(h * w),
+                        price("encode", False, h, w),
+                        price("encode", True, h, w) if tiles else None))
     caption = row.text_rows if caption_tokens is None else caption_tokens
     encode_peak = caption * row.encode_row_bytes * ENCODE_LIVE
 
@@ -699,13 +711,18 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         held = later + t["prefix_cache"]
         phases = {"encode": resident + t["encode_peak"]}
         tiled_init = False
-        if init_image:
+        if encodes:
             # A tiled encode is the whole one, so it is a choice by what
-            # its phase holds and no lever.
-            tiled_init = auto_tiled or (
-                can_tile and budget is not None
-                and held + init[False] > budget)
-            t["init_peak"] = init[tiled_init]
+            # its phase holds and no lever. Every image above one tile
+            # runs in tiles when a whole pass of one does not fit.
+            forced = budget is not None and any(
+                held + whole > budget for own, whole, cut in encodes
+                if cut is not None and not own)
+            peaks = [cut if cut is not None and (own or forced) else whole
+                     for own, whole, cut in encodes]
+            tiled_init = any(cut is not None and (own or forced)
+                             for own, _, cut in encodes)
+            t["init_peak"] = max(peaks)
             phases["init"] = held + t["init_peak"]
         phases["denoise"] = held + t["step_peak"]
         phases["decode"] = held + t["decode_peak"]

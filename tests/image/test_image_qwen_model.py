@@ -284,26 +284,98 @@ def test_a_target_step_refuses_the_prefix_of_another_conditioning(tiny):
         prefix = qm.prefill_prefix(tiny, cond)
         assert prefix.built_for == qm.prefix_tag(cond)
         qm.forward_target(tiny, lat, SIGMA, cond, prefix)
-        # Another key over the same rows, and the same key over another
-        # layout.
+        # Another key over the same rows, the same key over another
+        # layout, and the same key and layout over other reference
+        # latents.
         for other in (
                 api.Conditioning(cond.features, "other",
                                  ref_latents=cond.ref_latents,
                                  image_slots=cond.image_slots),
                 qt.conditioning("text", key=cond.key),
-                qt.conditioning("ref2", key=cond.key)):
+                qt.conditioning("ref2", key=cond.key),
+                api.Conditioning(cond.features, cond.key,
+                                 ref_latents=(cond.ref_latents[0] + 1,),
+                                 image_slots=cond.image_slots)):
             with pytest.raises(ValueError, match=refused):
                 qm.forward_target(tiny, lat, SIGMA, other, prefix)
 
 
-def test_a_pipeline_refuses_one_key_over_two_prefix_layouts(pipe):
-    """The memo of prefix states is keyed by the conditioning key, so a
-    second conditioning under that key would read the first one's
-    prefix."""
+def test_a_prefix_state_is_kept_under_the_reference_latents_too(pipe):
+    """The key of a conditioning does not hold its reference latents, so
+    the memo of prefix states is keyed by their hashes and the image
+    slots beside it: one key over other reference latents is another
+    state, and never the first one's prefix."""
     lat = qt.latents()
-    api.denoise_step(pipe, lat, SIGMA, qt.conditioning("ref1", key="k"))
+    ref = qt.conditioning("ref1", key="k")
+    other = api.Conditioning(ref.features, "k",
+                             ref_latents=(ref.ref_latents[0] + 1,),
+                             image_slots=ref.image_slots)
+    plain = qt.conditioning("text", key="k")
+    got = [np.array(api.denoise_step(pipe, lat, SIGMA, c))
+           for c in (ref, other, plain)]
+    assert len(pipe.captions) == 3
+    assert not np.array_equal(got[0], got[1])
+    for c, want in zip((ref, other, plain), got):
+        alone = api.Conditioning(c.features, "", ref_latents=c.ref_latents,
+                                 image_slots=c.image_slots)
+        assert np.array_equal(
+            np.array(api.denoise_step(pipe, lat, SIGMA, alone)), want)
+    assert {k[1] for k in pipe.captions._items} == {
+        ref.ref_hashes, other.ref_hashes, ()}
+    # One key over other text rows has no hash to tell it by, and the
+    # state of the first is refused for the second.
     with pytest.raises(ValueError, match="built for another conditioning"):
-        api.denoise_step(pipe, lat, SIGMA, qt.conditioning("text", key="k"))
+        api.denoise_step(pipe, lat, SIGMA, _text("k", rows=5))
+
+
+def test_a_state_is_kept_under_the_latent_size_of_its_target(pipe):
+    cond = qt.conditioning("ref1", key="k")
+    api.denoise_step(pipe, qt.latents(), SIGMA, cond)
+    api.denoise_step(pipe, qt.latents(size=(4, 4)), SIGMA, cond)
+    assert [k[3] for k in pipe.captions._items] == [tuple(qt.TARGET),
+                                                    (4, 4)]
+    assert _state_key(pipe, "k", (4, 4))[3] == (4, 4)
+    # The plan of a request names the state of its own size: the other
+    # one is another request's, and at a third size both are.
+    kw = dict(conds=cond, budget=100e9, overcommit=False)
+    one = pipe.captions.nbytes(_state_key(pipe, "k", (4, 4)))
+    assert pipe.captions.bytes == 2 * one
+    terms = [api.plan_request(pipe, height=h, width=w, **kw).terms[
+        "prefix_cache"] for h, w in ((64, 64), (64, 96), (96, 96))]
+    assert terms[0] == terms[1] == terms[2] - one
+
+
+@pytest.mark.parametrize("case", ("ref1", "ref2", "adjacent"))
+def test_a_prefix_with_references_is_a_function_of_its_conditioning(pipe,
+                                                                    case):
+    """The state a step keeps for a conditioning with references is equal
+    in bits whatever the target of the step that built it: other latents,
+    another sigma, another latent size."""
+    cond = qt.conditioning(case, key="k")
+    assert cond.ref_latents and cond.image_slots
+    runs = [(qt.latents(), SIGMA),
+            (qt.latents(seed=5), float(qwen21_sigmas(40, 24)[30])),
+            (qt.latents(seed=2, size=(4, 4)), SIGMA)]
+    states = []
+    for lat, sigma in runs:
+        pipe.captions.clear()
+        api.denoise_step(pipe, lat, sigma, cond)
+        ((state, held),) = pipe.captions._items.values()
+        assert held == array_bytes(state.arrays())
+        states.append(state)
+    want = qm.prefill_prefix(pipe.dit, cond)
+    for state in states:
+        assert state.built_for == want.built_for == qm.prefix_tag(cond)
+        assert state.position == want.position
+        for got, ref in zip(state.arrays(), want.arrays()):
+            assert mx.array_equal(got, ref).item()
+    # The rows of the references are in it: the state of the text rows
+    # alone is shorter by their tokens.
+    text = api.Conditioning(cond.features[:cond.image_slots[0]], "t")
+    refs = sum(int(z.shape[-2]) * int(z.shape[-1]) for z in cond.ref_latents)
+    assert want.tokens - qm.prefill_prefix(pipe.dit, text).tokens == (
+        refs + cond.features.shape[0] - len(cond.image_slots)
+        - cond.image_slots[0])
 
 
 def test_load_identifies_the_dit_once(tmp_path, monkeypatch):
@@ -376,10 +448,17 @@ def test_denoise_step_is_pure_in_any_order_with_caches_cleared(pipe):
     assert len(pipe.captions) == held
 
 
-def _state_key(pipe, name: str) -> tuple:
-    """The key the bf16 pipeline keeps the state of a conditioning under,
-    which ends with the kernel routes in force."""
-    return (name, pipe.default_table, str(mx.bfloat16), kq_routes.active())
+def _state_key(pipe, name: str, size=None) -> tuple:
+    """The key the bf16 pipeline keeps the state of a conditioning named
+    ``name`` under, which holds the hashes of its reference latents and
+    its image slots, the target's latent size, and ends with the kernel
+    routes in force. Read from the cache, which must hold one such state
+    at ``size``, by default at any size."""
+    tail = (pipe.default_table, str(mx.bfloat16), kq_routes.active())
+    (key,) = [k for k in pipe.captions._items
+              if k[0] == name and k[4:] == tail
+              and (size is None or k[3] == tuple(size))]
+    return key
 
 
 def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
@@ -396,7 +475,7 @@ def test_the_prefix_cache_is_keyed_by_conditioning_table_and_dtype(pipe):
     assert len(pipe.modulations) == 2
     for s in (SIGMA, 0.25):
         assert type(pipe.modulations.get(
-            (np.float32(s).tobytes(), *key[1:]))) is qm.Modulation
+            (np.float32(s).tobytes(), *key[4:]))) is qm.Modulation
 
 
 def test_the_prefix_cache_bound_holds_the_text_states_of_a_guided_request():
@@ -462,7 +541,9 @@ def test_the_plan_reads_the_prefix_rows_of_its_conditionings(pipe):
 
 def test_the_plan_counts_a_held_prefix_state_once(pipe):
     cond = qt.conditioning("ref1", key="one")
-    kw = dict(height=64, width=64, budget=100e9, overcommit=False)
+    # The latent size of the request is that of the steps below.
+    assert tuple(qt.TARGET) == (4, 6)
+    kw = dict(height=64, width=96, budget=100e9, overcommit=False)
     cold = api.plan_request(pipe, conds=cond, **kw)
     assert cold.terms["caches"] == 0
     api.denoise_step(pipe, qt.latents(), SIGMA, cond)
@@ -628,7 +709,7 @@ def test_the_plan_reads_the_held_states_under_the_table_of_the_request(
         2 * TEXT_STATE)
     assert _request(pipe, log, [cond], 1.0) == (
         2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE, 2 * TEXT_STATE)
-    assert {k[1] for k in pipe.captions._items} == {table,
+    assert {k[4] for k in pipe.captions._items} == {table,
                                                     pipe.default_table}
     # The scope holds the states of the request's table: one state over
     # the bound is built once and stays through the request.
@@ -637,6 +718,121 @@ def test_the_plan_reads_the_held_states_under_the_table_of_the_request(
     assert len(log["prefill"]) == 1
     with pytest.raises(ValueError, match="unknown patch table"):
         api.plan_request(pipe, patch_table="none", **kw)
+
+
+def _steps(pipe, log: dict, cond, plan: int, *, table=None,
+           size=(4, 4)) -> tuple:
+    """Three bare steps of ``cond`` inside the open scope, with the
+    states alive at every prefill and forward held to ``plan``. Returns
+    the prefills and the most alive."""
+    log["prefill"].clear()
+    log["forward"].clear()
+    for s in (0.9, 0.6, 0.3):
+        api.denoise_step(pipe, qt.latents(size=size), s, cond,
+                         patch_table=table)
+    alive = max(log["prefill"] + log["forward"])
+    assert alive <= plan, (plan, log)
+    return len(log["prefill"]), alive
+
+
+def test_a_scope_holds_the_state_of_the_table_its_steps_run_under(
+        pipe, monkeypatch):
+    """A scope opened with the state of the default table held, and
+    steps under another table inside it: the state of the default table
+    goes before the new one is built, and the new one stays, one prefill
+    for three steps. The plan is that of the request under the table."""
+    from gmlx.image.lora import install
+
+    log = _watched(pipe, monkeypatch)
+    rng = np.random.default_rng(5)
+    dim = pipe.dit.cfg.dim
+    pair = install.register_pair(
+        pipe, mx.array(rng.standard_normal((2, dim)).astype(np.float32)),
+        mx.array(rng.standard_normal((dim, 2)).astype(np.float32)), None)
+    table = api.define_patch_table(
+        pipe, [("transformer_blocks.0.attn.to_q", None, [(pair, 0.1)])])
+    r = _with_ref("r")
+    _request(pipe, log, [r], 1.0)
+    plan = api.plan_request(
+        pipe, height=64, width=64, cfg=1.0, conds=[r], patch_table=table,
+        budget=100e9, overcommit=False).terms["prefix_cache"]
+    assert plan == REF_STATE
+    with api.state_scope(pipe, [r]):
+        assert _steps(pipe, log, r, plan, table=table) == (1, REF_STATE)
+        assert [k[4] for k in pipe.captions._items] == [table]
+        # Back under the default table, and at another target size.
+        assert _steps(pipe, log, r, plan) == (1, REF_STATE)
+        assert _steps(pipe, log, r, plan, size=(4, 6)) == (1, REF_STATE)
+        assert [(k[3], k[4]) for k in pipe.captions._items] == [
+            ((4, 6), pipe.default_table)]
+        # Steps that alternate two tables pay a prefill each under a
+        # bound with no room for both, and stay within the plan.
+        log["prefill"].clear()
+        for i in range(4):
+            api.denoise_step(pipe, qt.latents(), 0.5, r,
+                             patch_table=table if i % 2 else None)
+            assert pipe.captions.bytes == REF_STATE
+        assert log["prefill"] == [REF_STATE] * 3
+    assert pipe.scope is None and pipe.captions.bytes == REF_STATE
+
+
+def test_a_scope_holds_the_state_of_the_routes_its_steps_run_under(
+        pipe, monkeypatch):
+    log = _watched(pipe, monkeypatch)
+    r = _with_ref("r")
+    _request(pipe, log, [r], 1.0)
+    held = set(pipe.captions._items)
+    with api.state_scope(pipe, [r]):
+        with kq_routes.only(()):
+            plan = api.plan_request(
+                pipe, height=64, width=64, cfg=1.0, conds=[r],
+                budget=100e9, overcommit=False).terms["prefix_cache"]
+            assert plan == REF_STATE
+            assert _steps(pipe, log, r, plan) == (
+                1 if kq_routes.active() != next(iter(held))[-1] else 0,
+                REF_STATE)
+    assert pipe.captions.bytes == REF_STATE
+
+
+def test_a_scope_inside_a_scope_of_other_conditionings_is_refused(
+        pipe, monkeypatch):
+    """An open scope never sheds its states, so a request with other
+    conditionings inside it would hold them beside its own, over its
+    plan. It is refused by name, with the states built or not, and runs
+    within its plan once the scope is closed."""
+    log = _watched(pipe, monkeypatch)
+    rp, rn, t1 = _with_ref("rp"), _with_ref("rn"), _text("t1")
+    refused = "a state scope is open for other conditionings"
+    with api.state_scope(pipe, [rp, rn]):
+        with pytest.raises(api.StateScopeError, match=refused):
+            api.sample(pipe, t1, height=64, width=64, steps=3, seed=1)
+    assert pipe.scope is None and len(pipe.captions) == 0
+    _request(pipe, log, [rp, rn], 4.0)
+    with api.state_scope(pipe, [rp, rn]):
+        with pytest.raises(api.StateScopeError, match=refused):
+            api.sample(pipe, t1, height=64, width=64, steps=3, seed=1)
+        with pytest.raises(api.StateScopeError, match=refused):
+            api.denoise_step(pipe, qt.latents(), 0.5, t1)
+        # A conditioning of the open scope runs.
+        api.denoise_step(pipe, qt.latents(size=(4, 4)), 0.5, rn)
+        assert pipe.captions.bytes == 2 * REF_STATE
+    assert pipe.scope is None
+    assert _request(pipe, log, [t1], 1.0) == (
+        BOUND, TEXT_STATE, TEXT_STATE, TEXT_STATE)
+
+
+def test_one_conditioning_as_both_rows_of_a_guided_request_is_one_state(
+        pipe, monkeypatch):
+    log = _watched(pipe, monkeypatch)
+    t1 = _text("t1")
+    assert _request(pipe, log, [t1, t1], 4.0) == (
+        TEXT_STATE, TEXT_STATE, TEXT_STATE, TEXT_STATE)
+    assert len(log["prefill"]) == 1
+    # Equal in key, references and slots is one state too, whatever the
+    # objects.
+    again = api.Conditioning(t1.features, "t1")
+    assert _request(pipe, log, [t1, again], 4.0) == (
+        TEXT_STATE, 0, TEXT_STATE, TEXT_STATE)
 
 
 def test_rows_of_a_batch_take_their_own_conditioning(pipe):

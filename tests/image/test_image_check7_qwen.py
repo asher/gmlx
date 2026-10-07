@@ -348,7 +348,7 @@ def test_the_state_of_one_table_is_not_read_under_another(tmp_path, layout):
         assert np.array_equal(seen[(api.EMPTY_TABLE, tag)],
                               velocity(fresh, api.EMPTY_TABLE, tag))
     assert fresh.lora is None and pipe.lora is not None
-    assert {k[1] for k in pipe.captions._items} == {api.EMPTY_TABLE, tid}
+    assert {k[4] for k in pipe.captions._items} == {api.EMPTY_TABLE, tid}
     assert {k[1] for k in pipe.modulations._items} == {api.EMPTY_TABLE, tid}
     assert len(pipe.captions) == 2 and len(pipe.modulations) == 4
 

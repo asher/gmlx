@@ -19,8 +19,8 @@ from __future__ import annotations
 # (Apache-2.0; see licenses/diffusers-LICENSE).
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
-                                 StepParts)
+from gmlx.image.registry import (ConstantsRow, EditParts, Family,
+                                 SamplingRow, StepParts)
 
 _B0 = "transformer_blocks.0."
 
@@ -77,9 +77,44 @@ PROMPT = ConstantsRow(
             "Comprehend and analyze the provided prompt.<|im_end|>\n"),
         "drop_tokens": 14,
         "empty_prompt": " ",
+        # The template of a prompt with reference images: the user turn
+        # opens with one image slot per reference, in order and joined by
+        # one space, and the prompt follows the last slot. {n} is the
+        # reference's number from 1. The processor expands the pad token
+        # of a slot to one token per 32 by 32 pixels of its reference.
+        "template_edit": (
+            "<|im_start|>system\n"
+            "Comprehend and analyze the provided prompt.<|im_end|>\n"
+            "<|im_start|>user\n{slots}{prompt}<|im_end|>\n"
+            "<|im_start|>assistant\n"),
+        "image_slot": "<image{n}><|vision_start|><|image_pad|><|vision_end|>",
+        "image_slot_join": " ",
+        "image_pad": "<|image_pad|>",
     },
     repo="huggingface/diffusers",
     revision="e0abab83b5df05de9e7abd788643c1a7c1e42e28",
+)
+
+# What the reference pipeline does to a reference image, and how many a
+# request takes. The pipeline makes the image RGBA and resizes it with
+# Lanczos to the size of calculate_dimensions: the area of
+# output_resolution squared, 1024 by default, at the image's aspect ratio,
+# each side rounded to a multiple of 32. The encoder sees that image with
+# its alpha composited over white, and the VAE all four channels. The
+# pipeline sets no count, and the model card at the pinned revision gives
+# the count: up to 10 reference images.
+REFERENCES = ConstantsRow(
+    values={
+        "area": 1024 * 1024,
+        "side_multiple": 32,
+        "resample": "lanczos",
+        "encoder_background": [255, 255, 255],
+        "slot_px": 32,
+        "min_area": 256 * 256,
+        "max_refs": 10,
+    },
+    repo="Qwen/Qwen-Image-2.1",
+    revision="790c92633540aa0cb11d9abf19eb46d861714758",
 )
 
 # The model card at this revision runs each of its three examples with
@@ -273,7 +308,32 @@ def encoder():
         drop=p["drop_tokens"],
         empty=p["empty_prompt"],
         activation="float32",
+        vision_type="qwen3_vl",
     )
+
+
+def _prepare(image, area: int):
+    from .edit import prepare
+
+    return prepare(image, area)
+
+
+def _edit_ids(handle, prompt: str, refs):
+    from .edit import token_ids
+
+    return token_ids(handle, prompt, refs)
+
+
+def _edit_encode(handle, prompt: str, refs):
+    from .edit import encode
+
+    return encode(handle, prompt, refs)
+
+
+def _edit_template_id() -> str:
+    from .edit import template_id
+
+    return template_id()
 
 
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
@@ -308,4 +368,9 @@ FAMILY = Family(
     schedule=schedule,
     lora_map=lora_map,
     encoder=encoder,
+    edit=EditParts(max_refs=REFERENCES.values["max_refs"],
+                   area=REFERENCES.values["area"],
+                   min_area=REFERENCES.values["min_area"],
+                   prepare=_prepare, token_ids=_edit_ids,
+                   encode=_edit_encode, template_id=_edit_template_id),
 )

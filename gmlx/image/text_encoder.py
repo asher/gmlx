@@ -15,6 +15,11 @@ masked reference batch take the same values up to rounding. A family
 whose template opens with a fixed turn drops the rows of that turn from
 the conditioning, after they ran: the rows it keeps attended to them.
 
+A family that conditions on reference images loads the encoder with its
+vision tower, from the encoder GGUF and its mmproj, as the multimodal
+class of the model. A text prompt taps that class by the same walk, and
+the family's own code runs a prompt with images.
+
 An ``EncoderHandle`` owns the encoder it loaded and releases it on request,
 so the DiT and the VAE can use its memory. An owned encoder holds no
 output matrix, which a tap never reads. A borrowed resident chat model is
@@ -59,6 +64,8 @@ class EncoderSpec:
     empty: str = ""                  # what an empty prompt is rendered as
     activation: str | None = None    # dtype the tap's layers run in, the
                                      # model's own when None
+    vision_type: str | None = None   # model_type of the encoder loaded with
+                                     # its vision tower, None without one
 
     @property
     def template_id(self) -> str:
@@ -153,8 +160,11 @@ def token_ids(spec: EncoderSpec, tokenizer, prompt: str) -> list[int]:
 
 
 def _text_stack(model):
-    """The embedding and the decoder layer list of a loaded text model."""
+    """The embedding and the decoder layer list of a loaded text model,
+    or of the language model of a multimodal one."""
     inner = getattr(model, "model", None)
+    if inner is None:
+        inner = getattr(getattr(model, "language_model", None), "model", None)
     embed = getattr(inner, "embed_tokens", None)
     layers = getattr(inner, "layers", None)
     if embed is None or layers is None:
@@ -320,9 +330,11 @@ class EncoderHandle:
     released, a borrowed one cannot."""
 
     def __init__(self, model, tokenizer, spec: EncoderSpec, *, owned: bool,
-                 source_key=None, weights_owner=None):
+                 source_key=None, weights_owner=None, processor=None):
         self.model = model
         self.tokenizer = tokenizer
+        # The processor of an encoder loaded with its vision tower.
+        self.processor = processor
         self.spec = spec
         self.owned = owned
         self.source_key = source_key
@@ -335,6 +347,20 @@ class EncoderHandle:
     @property
     def released(self) -> bool:
         return self.model is None
+
+    @property
+    def vision(self) -> bool:
+        """Whether the encoder holds its vision tower."""
+        return getattr(self.model, "vision_tower", None) is not None
+
+    def vision_bytes(self) -> int:
+        """Bytes the vision tower holds as loaded, 0 without one."""
+        from mlx.utils import tree_flatten
+
+        tower = getattr(self.model, "vision_tower", None)
+        if tower is None:
+            return 0
+        return sum(int(v.nbytes) for _, v in tree_flatten(tower.parameters()))
 
     def encode(self, prompt: str) -> TextTap:
         if self.model is None:
@@ -381,30 +407,53 @@ def drop_output_head(model) -> int:
     from mlx.utils import tree_flatten
 
     if "lm_head" not in model:
-        return 0
+        model = getattr(model, "language_model", None)
+        if model is None or "lm_head" not in model:
+            return 0
     held = sum(int(v.nbytes)
                for _, v in tree_flatten(model["lm_head"].parameters()))
     del model["lm_head"]
     return held
 
 
-def _load_owned(path: str):
-    """The text loader's model, config and tokenizer for ``path``, and
-    the owner its mapped weights are registered under for the free-memory
-    reading. The owner is None when a window of another owner is open,
-    which then forgets the weights when it ends."""
+def _load_owned(path: str, mmproj: str | None = None):
+    """The text loader's model, config and tokenizer for ``path``, the
+    processor, and the owner its mapped weights are registered under for
+    the free-memory reading. With ``mmproj`` the model is the multimodal
+    class with its vision tower, and the processor is its own; else the
+    processor is None. The owner is None when a window of another owner
+    is open, which then forgets the weights when it ends."""
     from gmlx.gen import prefill_decay as pd
-    from gmlx.load.loader import load_model
 
     owner = None
     if pd.untracked_weights_owner() is None:
         owner = object()
         pd.set_untracked_weights_owner(owner)
     try:
-        return (*load_model(path), owner)
+        if mmproj is None:
+            from gmlx.load.loader import load_model
+
+            return (*load_model(path), None, owner)
+        from gmlx.load.vlm import load_vlm_model
+
+        model, config, processor, tokenizer = load_vlm_model(
+            path, mmproj, return_tokenizer=True)
+        return model, config, tokenizer, processor, owner
     finally:
         if owner is not None:
             pd.set_untracked_weights_owner(None)
+
+
+def _vision_config(config: dict, spec: EncoderSpec) -> dict:
+    """What ``check_encoder`` reads, from the config of an encoder loaded
+    with its vision tower: the text model's sizes, and the spec's model
+    type when the multimodal type is the one the spec names."""
+    text = config.get("text_config") or {}
+    kind = config.get("model_type")
+    return {"model_type": spec.model_type if kind == spec.vision_type
+            else kind,
+            "hidden_size": text.get("hidden_size"),
+            "num_hidden_layers": text.get("num_hidden_layers")}
 
 
 def _drop_head(model) -> None:
@@ -425,23 +474,32 @@ def _drop_head(model) -> None:
 
 
 def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
-                 log=print) -> EncoderHandle:
+                 mmproj: str | None = None, log=print) -> EncoderHandle:
     """Load an owned text encoder GGUF through the text loader, without
     its output matrix. The header is checked against the spec before any
-    weights load."""
+    weights load. With ``mmproj`` the encoder loads with its vision tower,
+    for a family that conditions on reference images."""
     from gmlx.load.loader import weights_source_key
     from gmlx.load.preflight import find_split_shards
 
+    if mmproj is not None and spec.vision_type is None:
+        raise ImageModelError(
+            f"the {spec.name} text encoder takes no mmproj: its family "
+            "conditions on no reference images")
     check_encoder_file(_header_view(path), spec, override=override)
-    model, config, tokenizer, owner = _load_owned(path)
+    model, config, tokenizer, processor, owner = _load_owned(path, mmproj)
+    if mmproj is not None:
+        config = _vision_config(config, spec)
     check_encoder(model, config, spec, override=True)
     _drop_head(model)
-    log(f"[image] text encoder {spec.name}, tap after layer "
+    tower = " with its vision tower" if mmproj is not None else ""
+    log(f"[image] text encoder {spec.name}{tower}, tap after layer "
         f"{', '.join(str(n) for n in spec.tap_layers)} of {spec.layers}")
-    return EncoderHandle(model, tokenizer, spec, owned=True,
-                         source_key=weights_source_key(
-                             *find_split_shards(path)),
-                         weights_owner=owner)
+    shards = find_split_shards(path)
+    key = (weights_source_key(*shards) if mmproj is None
+           else weights_source_key(*shards, mmproj))
+    return EncoderHandle(model, tokenizer, spec, owned=True, source_key=key,
+                         weights_owner=owner, processor=processor)
 
 
 def borrow_encoder(model, tokenizer, config: dict, spec: EncoderSpec, *,

@@ -4,7 +4,9 @@ pipeline.
 A conditioning is one encoded prompt. Its key is a sha256 over the family,
 the encoder identity, the text adapter state, the template, the token ids,
 the reference images, the tap layers and the dtype, so equal keys mean
-equal features. The pipeline keeps conditionings, the caption state the
+equal features. The latents of the reference images are no part of the
+key: a state the DiT derives from a conditioning is keyed on their hashes
+too. The pipeline keeps conditionings, the caption state the
 DiT derives from them, and the per-sigma modulation in ``ByteLRU`` caches,
 each bounded in bytes.
 """
@@ -18,31 +20,96 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import mlx.core as mx
+import numpy as np
+
+
+@dataclass(frozen=True, eq=False)
+class Reference:
+    """One reference image at the size its family runs it at: ``pixels``
+    is (H, W, 4) uint8 with straight alpha, and ``sha256`` names its
+    bytes and size."""
+    pixels: np.ndarray
+    sha256: str = ""
+
+    def __post_init__(self):
+        px = np.ascontiguousarray(self.pixels)
+        if px.dtype != np.uint8 or px.ndim != 3 or px.shape[2] != 4:
+            raise ValueError("reference pixels must be (H, W, 4) uint8, "
+                             f"not {px.dtype} {px.shape}")
+        px.setflags(write=False)
+        object.__setattr__(self, "pixels", px)
+        if not self.sha256:
+            h = hashlib.sha256(f"{px.shape[0]}x{px.shape[1]}:".encode())
+            h.update(px.tobytes())
+            object.__setattr__(self, "sha256", h.hexdigest())
+
+    @property
+    def height(self) -> int:
+        return int(self.pixels.shape[0])
+
+    @property
+    def width(self) -> int:
+        return int(self.pixels.shape[1])
+
+    @property
+    def identity(self) -> tuple:
+        """What a conditioning key holds of the image."""
+        return (self.sha256, self.height, self.width)
+
+
+def latents_hash(latents: mx.array) -> str:
+    """sha256 of latents (C, h, w): their shape and float32 bits."""
+    a = np.ascontiguousarray(np.array(latents.astype(mx.float32)))
+    h = hashlib.sha256(("x".join(str(d) for d in a.shape) + ":").encode())
+    h.update(a.tobytes())
+    return h.hexdigest()
 
 
 @dataclass(frozen=True)
 class Conditioning:
     """One encoded prompt: the encoder tap ``(L, D)`` of its tokens,
     unpadded, and its cache key. An empty key is never cached. An edit
-    also holds ``ref_latents``, the latents ``(C, h, w)`` of each
-    reference image in model space and in prompt order, and
-    ``image_slots``, the indices of the rows of ``features`` that the
-    encoder gave to image tokens, ascending."""
+    also holds ``image_slots``, the indices of the rows of ``features``
+    that the encoder gave to image tokens, ascending, and ``refs``, the
+    ``Reference`` of each image in prompt order. ``ref_latents`` are the
+    latents ``(C, h, w)`` of each reference in model space, which the VAE
+    adds after the encoder ran, and ``ref_hashes`` name their content:
+    the state a DiT derives from the conditioning depends on them, and
+    the key does not hold them."""
     features: mx.array
     key: str = ""
     ref_latents: tuple = ()
     image_slots: tuple = ()
+    refs: tuple = ()
+    ref_hashes: tuple = ()
+
+    def __post_init__(self):
+        if self.ref_latents and not self.ref_hashes:
+            object.__setattr__(self, "ref_hashes", tuple(
+                latents_hash(z) for z in self.ref_latents))
+        if len(self.ref_hashes) != len(self.ref_latents):
+            raise ValueError(f"{len(self.ref_hashes)} hashes for "
+                             f"{len(self.ref_latents)} reference latents")
+
+    @property
+    def pending(self) -> bool:
+        """Whether the conditioning has image slots and no reference
+        latents yet."""
+        return bool(self.image_slots) and not self.ref_latents
 
 
 def conditioning_key(*, family: str, encoder: str, adapters: str = "",
                      template: str, ids, tap_layers, dtype: str,
                      images=()) -> str:
     """sha256 of the canonical JSON of everything a conditioning depends
-    on. ``images`` holds (sha256, height, width) per reference image."""
+    on. ``images`` holds (sha256, height, width) per reference image, in
+    prompt order."""
     doc = {"family": family, "encoder": encoder, "adapters": adapters,
            "template": template, "ids": [int(i) for i in ids],
-           "tap_layers": [int(n) for n in tap_layers], "dtype": dtype,
-           "images": [list(i) for i in images]}
+           "tap_layers": [int(n) for n in tap_layers], "dtype": dtype}
+    # A text prompt keeps the key it had before reference images.
+    if images:
+        doc["images"] = [list(i) for i in images]
     raw = json.dumps(doc, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -84,6 +151,15 @@ class ByteLRU:
         with self._lock:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
+
+    def newest(self, match):
+        """The most recently used key that ``match`` takes, or None. The
+        order of use does not change."""
+        with self._lock:
+            for key in reversed(self._items):
+                if match(key):
+                    return key
+        return None
 
     def put(self, key, value, nbytes: int, shed: bool = True) -> None:
         with self._lock:

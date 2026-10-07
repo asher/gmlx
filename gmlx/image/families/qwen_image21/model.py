@@ -427,9 +427,10 @@ def prefix_key(cond) -> tuple:
 
 
 def prefix_tag(cond) -> tuple:
-    """What names the conditioning of a prefix in a target step: its key
-    and what its prefix layout depends on."""
-    return (cond.key, *prefix_key(cond))
+    """What names the conditioning of a prefix in a target step: its key,
+    what its prefix layout depends on, and the hashes of its reference
+    latents."""
+    return (cond.key, *prefix_key(cond), tuple(cond.ref_hashes))
 
 
 def prefix_bytes(model: QwenImage21DiT, cond) -> int:
@@ -477,7 +478,7 @@ def prefill_prefix(model: QwenImage21DiT, cond,
         if taps is not None:
             taps[f"transformer_blocks.{i}"] = x
     return PrefixCache(tuple(keys), tuple(values), lay.position,
-                       (cond.key, *key))
+                       prefix_tag(cond))
 
 
 def forward_target(model: QwenImage21DiT, latents: mx.array, sigma, cond,

@@ -58,6 +58,30 @@ class StepParts:
 
 
 @dataclass(frozen=True)
+class EditParts:
+    """How a family conditions on reference images.
+
+    A request takes ``max_refs`` references at most. ``prepare(image,
+    area)`` gives one image as a ``conditioning.Reference``: resized by
+    the family's rule to about ``area`` pixels, which is at least
+    ``min_area``. ``token_ids(handle, prompt, refs)`` are the ids of the
+    prompt in the family's template for references, with the image slots
+    of every reference, and ``encode(handle, prompt, refs)`` runs them
+    with the images through an encoder that has its vision tower and
+    returns the ids, the features ``(L, D)`` and the rows of the features
+    that are image slots. ``template_id()`` names the template in a
+    conditioning key.
+    """
+    max_refs: int
+    area: int
+    min_area: int
+    prepare: Callable
+    token_ids: Callable
+    encode: Callable
+    template_id: Callable
+
+
+@dataclass(frozen=True)
 class Family:
     name: str                        # "z_image"
     title: str                       # "Z-Image"
@@ -78,6 +102,7 @@ class Family:
     encoder: Callable | None = None
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
+    edit: EditParts | None = None      # None takes no reference images
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

@@ -12,17 +12,20 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .api import (SampleStopped, define_patch_table, denoise_step,
-                      encode_text, guide, load, plan_request, sample,
-                      sampler_defaults, vae_decode, vae_encode)
+                      encode_references, encode_text, guide, load,
+                      plan_request, references, sample, sampler_defaults,
+                      vae_decode, vae_encode)
 
 __all__ = [
     "SampleStopped",
     "define_patch_table",
     "denoise_step",
+    "encode_references",
     "encode_text",
     "guide",
     "load",
     "plan_request",
+    "references",
     "sample",
     "sampler_defaults",
     "vae_decode",

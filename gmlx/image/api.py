@@ -4,6 +4,12 @@
 ``ImagePipeline``, after gating their header sizes against the working
 budget. ``encode_text`` turns a prompt into a ``Conditioning`` through the
 family's encoder tap and keeps it in the pipeline's conditioning cache.
+A family that edits from reference images takes them in three steps:
+``references`` resizes them by the family's rule, ``encode_text`` runs
+the prompt with them through an encoder loaded with its vision tower, and
+``encode_references`` adds their VAE latents to the conditioning, which
+``encode_text`` does itself unless told to leave it for after the
+encoder's release.
 
 Latents are ``(B, C, H, W)`` float32 in model space. ``denoise_step``
 evaluates the DiT once per row and returns one float32 velocity per row,
@@ -45,7 +51,8 @@ import mlx.nn as nn
 import numpy as np
 
 from . import memfit
-from .conditioning import ByteLRU, Conditioning, array_bytes, conditioning_key
+from .conditioning import (ByteLRU, Conditioning, Reference, array_bytes,
+                           conditioning_key)
 from .ops import kq_routes
 from .registry import Family
 from .samplers import (img2img_start, inpaint_blend, make_sampler, noised,
@@ -94,6 +101,7 @@ CAPTION_BYTES = 256 << 20
 MODULATION_BYTES = 64 << 20
 ADAPTER_BYTES = 4 << 30
 TABLE_BYTES = 2 << 30
+REFERENCE_BYTES = 64 << 20
 
 
 @dataclass(eq=False)
@@ -115,9 +123,11 @@ class ImagePipeline:
         default_factory=lambda: ByteLRU(ADAPTER_BYTES))
     tables: ByteLRU = field(                    # built patch tables
         default_factory=lambda: ByteLRU(TABLE_BYTES))
+    reference_latents: ByteLRU = field(         # image hash -> VAE latents
+        default_factory=lambda: ByteLRU(REFERENCE_BYTES))
     adapter_files: dict = field(default_factory=dict)  # file -> adapter
     lora: object | None = None                  # lora.install.PatchState
-    scope: tuple | None = None                  # see state_scope
+    scope: dict | None = None                   # see state_scope
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
@@ -180,6 +190,10 @@ def _header_bytes(path, kind: str) -> int:
         return memfit.vae_bytes(read_header(str(path)), vae_dtype().size)
     from .text_encoder import _header_view
 
+    if kind == "mmproj":
+        # Before the family is known: the larger count, every float
+        # tensor at float32.
+        return memfit.mmproj_bytes(_header_view(str(path)), fp32=True)
     skip = ("output.weight",) if kind == "encoder" else ()
     return memfit.file_bytes(_header_view(str(path)), skip=skip)
 
@@ -189,9 +203,12 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
          log=print) -> ImagePipeline:
     """Load an image pipeline from a DiT GGUF, a text encoder GGUF or a
     resident chat model given as ``encoder_model=(model, tokenizer)``, and
-    a VAE. With ``memory="auto"`` the weights of all three are gated on
-    their header sizes before anything loads; ``memory="off"`` skips that
-    gate, and each load still gates its own weights."""
+    a VAE. ``mmproj`` is the mmproj GGUF of the text encoder: with it the
+    encoder loads with its vision tower, which a request with reference
+    images needs and a text request does not. With ``memory="auto"`` the
+    weights of all are gated on their header sizes before anything loads;
+    ``memory="off"`` skips that gate, and each load still gates its own
+    weights."""
     from .dtypes import image_activation
     from .loader import identify_dit, load_dit
     from .text_encoder import encoder_spec, load_encoder
@@ -201,12 +218,14 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
         raise ValueError(f"memory must be 'auto' or 'off', not {memory!r}")
     if text_encoder is not None and encoder_model is not None:
         raise ValueError("pass text_encoder or encoder_model, not both")
-    if mmproj is not None:
-        raise ValueError("an mmproj serves image edits, which this gmlx "
-                         "does not run yet")
+    if mmproj is not None and text_encoder is None:
+        raise ValueError("an mmproj loads with its text encoder GGUF; pass "
+                         "text_encoder")
     weights = {"dit": _header_bytes(dit, "dit"),
                "encoder": _header_bytes(text_encoder, "encoder"),
                "vae": _header_bytes(vae, "vae")}
+    if mmproj is not None:
+        weights["mmproj"] = _header_bytes(mmproj, "mmproj")
     if memory == "auto":
         memfit.gate_load(sum(weights.values()), str(dit),
                          what="image model",
@@ -228,7 +247,11 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     handle = None
     t0 = time.perf_counter()
     if text_encoder is not None:
-        handle = load_encoder(str(text_encoder), spec, log=log)
+        handle = load_encoder(str(text_encoder), spec, log=log,
+                              mmproj=None if mmproj is None else str(mmproj))
+        if mmproj is not None:
+            # What the tower holds as loaded, which the plan counts.
+            weights["mmproj"] = handle.vision_bytes()
     elif encoder_model is not None:
         handle = _borrowed(encoder_model, spec)
     seconds["encoder"] = time.perf_counter() - t0
@@ -256,9 +279,23 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
     """Rows a conditioning puts before the image rows: its text rows and
     the tokens of its reference latents."""
     p = pipe.dit.cfg.patch
-    refs = sum((int(r.shape[-2]) // p) * (int(r.shape[-1]) // p)
-               for r in cond.ref_latents)
+    if cond.pending:
+        px = pipe.vae_scale * p
+        refs = sum((r.height // px) * (r.width // px) for r in cond.refs)
+    else:
+        refs = sum((int(r.shape[-2]) // p) * (int(r.shape[-1]) // p)
+                   for r in cond.ref_latents)
     return int(cond.features.shape[0]) - len(cond.image_slots) + refs
+
+
+def _ref_sizes(states) -> list:
+    """(height, width) in pixels of each distinct reference image of the
+    conditionings, which is one VAE encode each."""
+    seen: dict = {}
+    for c in states:
+        for r in c.refs:
+            seen.setdefault(r.sha256, (r.height, r.width))
+    return list(seen.values())
 
 
 def plan_request(pipe: ImagePipeline, *, height: int, width: int,
@@ -274,7 +311,9 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     request runs under, which names the states it holds already.
     ``init_image`` says the request encodes an init image of its size,
     and ``keep_encoder`` that the caller keeps the encoder through the
-    request, so that its release is no lever.
+    request, so that its release is no lever. The reference images of the
+    conditionings are VAE encodes of their own sizes, priced with the init
+    image's.
     The VAE passes are priced for the VAE this pipeline loaded, on its
     conv path, and ``vae_decode`` and ``vae_encode`` run them as the plan
     they are given says. Raises ImageMemoryError when no lever makes it
@@ -294,8 +333,9 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         # The states of a step in parts are the plan's prefix cache term.
         # Those of this request count there once, held already or not.
         table = _table_id(pipe, patch_table)
+        size = (height // pipe.vae_scale, width // pipe.vae_scale)
         held = sum(pipe.captions.nbytes(key) for key in {
-            _state_key(pipe, c, table) for c in states if c.key})
+            _state_key(pipe, c, table, size) for c in states if c.key})
         other, bound = pipe.captions.bytes - held, parts.state_bytes
     price = None
     if pipe.vae is not None:
@@ -316,17 +356,122 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
         caption_tokens=caption_tokens, cache_bytes=caches,
         prefix_rows=[_prefix_rows(pipe, c) for c in states] or None,
+        prefix_shared=(len(states) == 2
+                       and _ident(states[0]) == _ident(states[1])),
         prefix_other=other, prefix_bound=bound, init_image=init_image,
-        vae_price=price, budget=budget, overcommit=overcommit)
+        ref_sizes=_ref_sizes(states), vae_price=price, budget=budget,
+        overcommit=overcommit)
 
 
-def encode_text(pipe: ImagePipeline, prompt: str, *,
-                images=()) -> Conditioning:
-    """The conditioning of ``prompt``, from the cache when its key is
-    there, else through the encoder tap."""
-    if images:
+def references(pipe: ImagePipeline, images, *,
+               area: int | None = None) -> tuple:
+    """The reference images of a request as the family runs them: each a
+    ``Reference``, resized by the family's rule to ``area`` pixels, by
+    default the family's own. An image is a PIL image or a uint8 array
+    (H, W, 3) or (H, W, 4), and a ``Reference`` passes through. A family
+    without reference images and a count over the family's cap are
+    refused by name."""
+    edit = pipe.family.edit
+    images = list(images)
+    if edit is None:
+        if not images:
+            return ()
         raise ValueError(f"{pipe.family.title} takes no reference images")
+    if len(images) > edit.max_refs:
+        raise ValueError(
+            f"{pipe.family.title} takes at most {edit.max_refs} reference "
+            f"images, and the request has {len(images)}")
+    area = edit.area if area is None else int(area)
+    if not edit.min_area <= area <= edit.area:
+        raise ValueError(
+            f"a reference area of {area} pixels is outside "
+            f"{edit.min_area} to {edit.area}, which {pipe.family.title} "
+            "takes")
+    return tuple(r if isinstance(r, Reference) else edit.prepare(r, area)
+                 for r in images)
+
+
+def _encode_with_images(pipe: ImagePipeline, prompt: str,
+                        refs: tuple) -> Conditioning:
+    edit, enc = pipe.family.edit, pipe.encoder
+    ids = edit.token_ids(enc, prompt, refs)
+    key = conditioning_key(
+        family=pipe.family.name, encoder=str(enc.source_key),
+        adapters=getattr(enc, "adapters", ""), template=edit.template_id(),
+        ids=ids, tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name,
+        images=[r.identity for r in refs])
+    hit = pipe.conditionings.get(key)
+    if hit is None:
+        _, features, slots = edit.encode(enc, prompt, refs)
+        hit = Conditioning(features, key, image_slots=slots, refs=refs)
+        pipe.conditionings.put(key, hit, array_bytes([features]))
+    return hit
+
+
+def encode_references(pipe: ImagePipeline, conds, *, plan=None):
+    """``conds``, one Conditioning or several, with the VAE latents of
+    their reference images. Each image is encoded once, in mode, and its
+    latents stay in the pipeline's cache of reference latents under the
+    image's hash and the VAE's dtype. ``plan`` is the memory plan of the
+    request: an encode runs whole or in tiles as it says. A conditioning
+    without reference images comes back as it is."""
+    import dataclasses
+
+    one = isinstance(conds, Conditioning)
+    out = []
+    for c in [conds] if one else list(conds):
+        if c.refs and not c.ref_latents:
+            lat = tuple(_reference_latents(pipe, r, plan) for r in c.refs)
+            c = dataclasses.replace(c, ref_latents=lat)
+        out.append(c)
+    return out[0] if one else out
+
+
+def _reference_latents(pipe: ImagePipeline, ref: Reference, plan):
+    vae = _need_vae(pipe)
+    key = (ref.sha256, str(getattr(vae, "dtype", "")))
+    hit = pipe.reference_latents.get(key)
+    if hit is not None:
+        return hit
+    from .vae import tiling
+
+    tiled, room = None, None
+    if plan is not None and "init" in plan.phases:
+        tiled, room = plan.vae_pass("encode")
+        if room is None:
+            tiled = None
+        else:
+            # A reference of one tile runs whole, and one past the pixels
+            # a whole pass was measured to runs in tiles.
+            tiled = (max(ref.height, ref.width) > memfit.TILE_PX
+                     and (tiled or memfit.vae_row(pipe.family.name)
+                          .tiles_at(ref.height * ref.width)))
+    x = mx.array(ref.pixels.astype(np.float32) / 255.0)[None] * 2 - 1
+    z = tiling.encode(vae, x, tiled=tiled, mode="mode", free=room)[0]
+    mx.eval(z)
+    pipe.reference_latents.put(key, z, array_bytes([z]))
+    return z
+
+
+def encode_text(pipe: ImagePipeline, prompt: str, *, images=(),
+                ref_latents: bool = True) -> Conditioning:
+    """The conditioning of ``prompt``, from the cache when its key is
+    there, else through the encoder tap. ``images`` are the reference
+    images of an edit, as ``references`` takes them, and the encoder must
+    hold its vision tower. With ``ref_latents`` off the conditioning comes
+    back without the VAE latents of its images, for a caller that
+    releases the encoder first and then calls ``encode_references``."""
     enc = pipe.encoder
+    if images:
+        refs = references(pipe, images)
+        if enc is None:
+            raise ValueError("this pipeline has no text encoder")
+        if not getattr(enc, "vision", False) and not enc.released:
+            raise ValueError(
+                "reference images need the encoder's vision tower: load "
+                "the pipeline with the encoder's mmproj")
+        cond = _encode_with_images(pipe, prompt, refs)
+        return encode_references(pipe, cond) if ref_latents else cond
     if enc is None:
         raise ValueError("this pipeline has no text encoder")
     ids = enc.token_ids(prompt)
@@ -476,25 +621,59 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
-    with state_scope(pipe, rows, patch_table=table):
+    with state_scope(pipe, rows):
         out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table)
                for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
 
+class StateScopeError(RuntimeError):
+    """A state scope asked for inside an open scope of other
+    conditionings."""
+
+
+def _ident(cond: Conditioning) -> tuple:
+    """What names a conditioning in a scope: its key, the hashes of its
+    reference latents and its image slots. A conditioning without a key
+    is named by the object it is."""
+    if not cond.key:
+        return ("", id(cond))
+    return (cond.key, tuple(cond.ref_hashes),
+            tuple(int(s) for s in cond.image_slots))
+
+
+def _need_latents(pipe: ImagePipeline, cond: Conditioning) -> None:
+    if cond.pending:
+        raise ValueError(
+            "the conditioning has reference images and not their latents "
+            "yet: pass it through encode_references first")
+
+
 @contextmanager
-def state_scope(pipe: ImagePipeline, conds, *, patch_table=None):
+def state_scope(pipe: ImagePipeline, conds):
     """Hold the conditioning states of one request while it runs.
 
     A family whose step runs in parts keeps a state per conditioning, for
-    Qwen-Image 2.1 the K and V of its prefix in every block. The states
-    of the conditionings in scope are never shed. Every other held state
-    is shed, the least recently used first, until the others fit in the
-    family's bound less the bytes of the scope's own states. That runs
-    before a state is built and on every step that finds its state held,
-    so the cache holds the scope's states and at most that room of
-    others at every moment, which is the prefix cache term of
-    ``plan_request``.
+    Qwen-Image 2.1 the K and V of its prefix in every block. A state is
+    kept under the conditioning, the target's latent size, the patch
+    table, the activation dtype and the kernel routes of the step that
+    built it. A scope holds one state per conditioning: the one of the
+    step that last ran it, in the scope or before it. Those states are
+    never shed. Every other held
+    state is shed, the least recently used first, until the others fit in
+    the family's bound less the bytes of the scope's own states, and a
+    state that is not built yet counts the bytes it will have. That runs
+    before a state is built and on every step that finds its state held.
+    So the cache holds one state per conditioning in scope and at most
+    that room of others at every moment, which is the prefix cache term
+    of ``plan_request``.
+
+    A step in a scope under another patch table, route set or target
+    size than the step before takes the conditioning's place in the
+    scope: the state of the old step is one of the others from there, and
+    it is shed before the new one is built unless the bound has room for
+    both. Steps that alternate two tables on one conditioning so pay a
+    prefill each when the bound has no such room.
 
     ``sample`` opens the scope of its request: the positive conditioning,
     and the negative one when guided. A ``denoise_step`` call outside a
@@ -503,48 +682,66 @@ def state_scope(pipe: ImagePipeline, conds, *, patch_table=None):
     states only when both fit the bound together. When they do not, each
     call sheds the other's state and builds its own again, one prefill a
     call. Such a caller opens one scope around its calls, or passes both
-    conditionings as the rows of one call. A scope opened inside another
-    changes nothing.
+    conditionings as the rows of one call.
+
+    A scope opened inside another for conditionings of the open one
+    changes nothing. For any other conditioning it raises
+    ``StateScopeError``: the open scope holds its states whatever the
+    inner request plans, so the two would hold more than either plan.
+    The request with the other conditionings runs after the open scope
+    closes.
     """
     rows = [conds] if isinstance(conds, Conditioning) else list(conds)
     parts = pipe.family.step
-    if parts is None or pipe.scope is not None:
+    if parts is None:
         yield
         return
-    table = _table_id(pipe, patch_table)
-    scope, seen = [], set()
+    named: dict = {}
     for c in rows:
-        key = _state_key(pipe, c, table)
-        if key is None or key not in seen:
-            seen.add(key)
-            scope.append((key, 0 if parts.state_size is None
-                          else int(parts.state_size(pipe.dit, c))))
-    pipe.scope = tuple(scope)
+        _need_latents(pipe, c)
+        named.setdefault(_ident(c), c)
+    if pipe.scope is not None:
+        if any(i not in pipe.scope for i in named):
+            raise StateScopeError(
+                "a state scope is open for other conditionings: a request "
+                "with its own conditionings runs after the open scope "
+                "closes")
+        yield
+        return
+    # ident -> [key of the state the scope holds, bytes it has or will].
+    # Until a conditioning steps, its state is the one it used last.
+    pipe.scope = {i: [pipe.captions.newest(lambda k, i=i: k[:3] == i)
+                      if i[0] else None,
+                      0 if parts.state_size is None
+                      else int(parts.state_size(pipe.dit, c))]
+                  for i, c in named.items()}
     try:
         yield
     finally:
         pipe.scope = None
 
 
-def _state_key(pipe: ImagePipeline, cond: Conditioning, table):
-    """The key the state of ``cond`` is kept under: the conditioning, the
-    patch table, the activation dtype and the kernel routes in force. A
-    state is built by the ops of those routes, as the results ``_memo``
-    keeps are. None for a conditioning without a key, whose state is
-    never kept."""
+def _state_key(pipe: ImagePipeline, cond: Conditioning, table, size):
+    """The key the state of ``cond`` is kept under: the conditioning with
+    the hashes of its reference latents and its image slots, the latent
+    size ``(h, w)`` of the target, the patch table, the activation dtype
+    and the kernel routes in force. A state is built by the ops of those
+    routes, as the results ``_memo`` keeps are. None for a conditioning
+    without a key, whose state is never kept."""
     if not cond.key:
         return None
-    return (cond.key, table, str(pipe.dit.act_dtype), kq_routes.active())
+    return (*_ident(cond), (int(size[0]), int(size[1])), table,
+            str(pipe.dit.act_dtype), kq_routes.active())
 
 
 def _shed_states(pipe: ImagePipeline, parts) -> None:
     """Shed held states by the rule of ``state_scope``. A state of the
     scope counts its held bytes, or the bytes it will have before it is
     built."""
-    scope = pipe.scope or ()
+    scope = (pipe.scope or {}).values()
     own = sum((pipe.captions.nbytes(key) if key is not None else 0) or n
               for key, n in scope)
-    pipe.captions.shed_others({key for key, _ in scope},
+    pipe.captions.shed_others({key for key, _ in scope if key is not None},
                               max(0, int(parts.state_bytes) - own))
 
 
@@ -575,7 +772,12 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
     mod = _memo(pipe.modulations, (s.tobytes(), table, dt),
                 lambda: _under(pipe, table,
                                lambda: parts.modulation(dit, s)))
-    key = _state_key(pipe, cond, table)
+    _need_latents(pipe, cond)
+    key = _state_key(pipe, cond, table, x.shape[2:])
+    held = (pipe.scope or {}).get(_ident(cond))
+    if held is not None:
+        # The state of this step is the one the scope holds from here.
+        held[0] = key
     _shed_states(pipe, parts)
     state = None if key is None else pipe.captions.get(key)
     if state is None:
@@ -730,8 +932,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     x = noise if init is None else noised(s[0], noise, init)
     smp = make_sampler(sampler, s)
     one_row = plan is not None and plan.rows == 1
-    scope = state_scope(pipe, [cond] if cfg == 1.0 else [cond, neg],
-                        patch_table=patch_table)
+    scope = state_scope(pipe, [cond] if cfg == 1.0 else [cond, neg])
     with memfit.bounded_cache(), scope:
         for i in range(smp.steps):
             if should_stop is not None and should_stop():

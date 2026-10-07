@@ -127,9 +127,10 @@ def text_processor(config: Path):
         del Qwen3VLProcessor.check_argument_for_proper_class
 
 
-def load_encoder(torch, a):
+def load_encoder(torch, a, vision=None):
     """(model, GGUF reader, codec census). The model holds the language
-    model in float32 on the CPU."""
+    model in float32 on the CPU. ``vision(model)`` sets the vision tower
+    and returns its codec census; without it the model has no tower."""
     import gguf
     from accelerate import init_empty_weights
     from accelerate.utils import set_module_tensor_to_device
@@ -139,7 +140,8 @@ def load_encoder(torch, a):
                                      local_files_only=True)
     with init_empty_weights():
         te = Qwen3VLForConditionalGeneration(cfg)
-    te.model.visual = torch.nn.Module()
+    if vision is None:
+        te.model.visual = torch.nn.Module()
     te.lm_head = torch.nn.Identity()
     lm = te.model.language_model
     want = {n: tuple(p.shape) for n, p in lm.named_parameters()}
@@ -165,6 +167,9 @@ def load_encoder(torch, a):
     if left != [HEAD] or seen != set(want):
         raise SystemExit(f"error: GGUF tensors left over {left}, model "
                          f"parameters not set {sorted(set(want) - seen)}")
+    if vision is not None:
+        for kind, n in vision(te).items():
+            census[f"mmproj {kind}"] = n
     meta = [n for n, p in te.named_parameters() if p.is_meta]
     kinds = {p.dtype for p in te.parameters()} | {
         b.dtype for b in te.buffers() if b.is_floating_point()}

@@ -107,8 +107,9 @@ def test_step_parts_rows_take_their_own_sigma_and_conditioning():
     assert calls["modulation"] == 2 and calls["conditioning"] == 2
 
 
-def _key(pipe, name: str) -> tuple:
-    return (name, pipe.default_table, str(mx.bfloat16), kq_routes.active())
+def _key(pipe, name: str, size=(2, 4)) -> tuple:
+    return (name, (), (), size, pipe.default_table, str(mx.bfloat16),
+            kq_routes.active())
 
 
 @pytest.mark.parametrize("pos, neg", [(80, 70), (70, 80), (75, 75)],
@@ -176,18 +177,37 @@ def test_two_conditionings_in_separate_calls_share_the_bound_or_a_scope():
     assert len(pipe.captions) == 1 and pipe.captions.bytes == 256
     pipe, calls = _parts_pipe(state_bytes=300, rows=64)
     with api.state_scope(pipe, [pos, neg]):
-        assert [n for _, n in pipe.scope] == [256, 256]
+        assert list(pipe.scope.values()) == [[None, 256], [None, 256]]
         for _ in range(3):
             api.denoise_step(pipe, x, 0.5, pos)
             api.denoise_step(pipe, x, 0.5, neg)
     assert calls["conditioning"] == 2 and calls["held"] == [0, 256]
     assert pipe.scope is None and pipe.captions.bytes == 512
-    # A scope inside another changes nothing, and an error closes it.
-    with pytest.raises(RuntimeError), api.state_scope(pipe, pos):
+    # A scope inside another for a conditioning of the open one changes
+    # nothing, and an error closes it.
+    with pytest.raises(RuntimeError, match="boom"), \
+            api.state_scope(pipe, [pos, neg]):
         with api.state_scope(pipe, neg):
-            assert [k[0] for k, _ in pipe.scope] == ["pos"]
+            assert [k[0] for k in pipe.scope] == ["pos", "neg"]
         assert pipe.scope is not None
-        raise RuntimeError
+        raise RuntimeError("boom")
+    assert pipe.scope is None
+    # A scope inside another for a conditioning the open one does not
+    # hold is refused by name, and a bare step for one too.
+    refused = "a state scope is open for other conditionings"
+    with api.state_scope(pipe, pos):
+        with pytest.raises(api.StateScopeError, match=refused):
+            with api.state_scope(pipe, [pos, neg]):
+                pass
+        with pytest.raises(api.StateScopeError, match=refused):
+            api.denoise_step(pipe, x, 0.5, neg)
+        # A conditioning without a key is of a scope as the object it is.
+        with pytest.raises(api.StateScopeError, match=refused):
+            api.denoise_step(pipe, x, 0.5, _cond(1.0))
+        assert pipe.scope is not None
+    bare = _cond(1.0)
+    with api.state_scope(pipe, bare):
+        api.denoise_step(pipe, x, 0.5, bare)
     assert pipe.scope is None
     pipe, calls = _parts_pipe(state_bytes=300, rows=64)
     xx = mx.zeros((2, 4, 2, 4), mx.float32)
