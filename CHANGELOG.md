@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- GGUFs with `Q2_0` tensors load, such as the ISTA-DASLab GSQ-RCO quants of
+  Qwen3.8-Flash-Next. This needs an mlx-kquant build with the `q2_0` codec.
+
 ## [0.4.21] - 2026-10-06
 
 ### Fixed

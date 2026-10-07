@@ -210,7 +210,8 @@ class _FusedMoeCaps:
         kq_has_glu = getattr(kq, "codec_has_moe_glu", None)
         if kq_has_glu is not None:
             codecs += tuple(
-                c for c in ("mxfp4", "nvfp4", "stq1_0") if kq_has_glu(c))
+                c for c in ("mxfp4", "nvfp4", "stq1_0", "q2_0")
+                if kq_has_glu(c))
         self.kq_fused_codecs = codecs
         # Shared-expert codecs allowed to differ from the expert stacks (the
         # only mixed combos with kernels); needs the shexp_kquant_type-aware
