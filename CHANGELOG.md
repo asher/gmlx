@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.21] - 2026-10-06
+
 ### Fixed
 
 - The server with affine `--kv-bits` stores prompt cache blocks, so a later
