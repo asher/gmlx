@@ -249,9 +249,9 @@
     "round_trip_fp32_psnr_db": 25.326100775871335,
     "latents_std": 1.3450528383255005,
     "seconds": {
-     "fp32_encode_s": 1.3,
-     "bf16_encode_s": 1.8,
-     "fp32_decode_s": 3.9,
+     "fp32_encode_s": 1.1,
+     "bf16_encode_s": 1.1,
+     "fp32_decode_s": 4.0,
      "bf16_decode_s": 4.1
     }
    },
@@ -285,26 +285,27 @@
     "round_trip_fp32_psnr_db": 26.809656335893802,
     "latents_std": 1.2878934144973755,
     "seconds": {
-     "fp32_encode_s": 4.0,
+     "fp32_encode_s": 3.9,
      "bf16_encode_s": 4.9,
-     "fp32_decode_s": 17.5,
-     "bf16_decode_s": 18.0
+     "fp32_decode_s": 17.7,
+     "bf16_decode_s": 18.9
     }
    }
   }
  },
  "tolerances": {
-  "rule": "fp32 decode max abs at 1e-3, a starting value that the first reading on the official file resets; fp32 encode max abs at the same value, or at twice the oracle's own fp32 against float64 max abs where that is larger; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice the oracle's own",
+  "rule": "fp32 decode max abs at 2.5e-4: 5 times the largest reading of a right model on the official file, 4.89e-5 at 1024 pixels; fp32 encode max abs at its starting value, 1e-3, or at twice the oracle's own fp32 against float64 max abs where that is larger; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice the oracle's own",
   "fp32_max_abs": 0.001,
+  "decode_fp32_max_abs": 0.00025,
   "sizes": {
    "512x512": {
-    "decode_fp32_max_abs": 0.001,
+    "decode_fp32_max_abs": 0.00025,
     "decode_bf16_psnr_db": 44.59665316979549,
     "encode_fp32_max_abs": 0.0014979130278578445,
     "encode_bf16_rel_l2": 0.03716053905844799
    },
    "1024x1024": {
-    "decode_fp32_max_abs": 0.001,
+    "decode_fp32_max_abs": 0.00025,
     "decode_bf16_psnr_db": 49.2062476775737,
     "encode_fp32_max_abs": 0.001,
     "encode_bf16_rel_l2": 0.04517943168722744
@@ -314,7 +315,7 @@
  "notes": [
   "The official weights are float32, and the bf16 VAE is a bfloat16 copy of the fp32 one."
  ],
- "created": "2026-10-06T19:37:14Z",
+ "created": "2026-10-07T02:58:11Z",
  "npz": "check5_qwen_image21_vae.npz",
  "tensors": {
   "alpha_1024x1024": {

@@ -20,14 +20,15 @@ smallest reading of a wrong model is 0.33.
 The official tests need the VAE file. gmlx decodes the oracle's latents
 and encodes its image with the official VAE, read from a GGUF packed from
 the oracle's safetensors when one is found, else from that safetensors
-file, and holds the manifest's tolerances, tiled passes included. Their
-fp32 max abs is 1e-3, a starting value that the first reading on the
-official file resets. That reading, on an M5 Max with TF32 off, is 3.0e-5
-at 512 pixels and 4.9e-5 at 1024 for the decode on the exact conv path,
-and up to 9.6e-4 for the encoder mean of an image with alpha at 1024,
-which is near its gate of 1e-3. The manifest still holds the starting
-value, since the oracle writes it. The fp32 items are gated with
-MLX_ENABLE_TF32=0 in a child process, as in the Z-Image check. Only the
+file, and holds the manifest's tolerances, tiled passes included. The
+fp32 decode gate is 2.5e-4 max abs: 5 times the largest reading of gmlx
+on the official file, which on an M5 Max with TF32 off is 3.0e-5 at 512
+pixels and 4.9e-5 at 1024 on the exact conv path. The fp32 encode gate
+keeps its starting value of 1e-3, or twice the oracle's own float32
+against float64 gap where that is larger, and the encoder mean of an
+image with alpha at 1024 reads up to 9.6e-4 of it. The fp32 items are
+gated with MLX_ENABLE_TF32=0 in a child process, as in the Z-Image check.
+Only the
 default conv path gates: the other path is read and printed, and in bf16
 its decode at 1024 pixels reads 48.06 dB against a gate of 49.21. The
 official tests are skipped unless GMLX_TEST_IMAGE_DIR holds the VAE and
