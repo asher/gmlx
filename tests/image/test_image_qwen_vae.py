@@ -1502,13 +1502,14 @@ def test_a_pass_is_priced_by_the_family_row_and_the_config_of_the_vae(
 
 def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
         vae, monkeypatch):
-    """The row of this VAE is unmeasured. A whole pass above one tile runs
-    only when it is forced, at the price of the rule, and is refused one
-    byte under it."""
+    """The row of this VAE takes tiles first. A whole pass above one tile
+    runs only when it is forced, at the price of its fit, and is refused
+    one byte under it."""
     from gmlx.image import memfit
     from gmlx.image.memfit import GiB, ImageMemoryError
 
-    assert memfit.VAE_ROWS[FAMILY].measured is False
+    row = memfit.VAE_ROWS[FAMILY]
+    assert row.measured is True and row.tiles_first is True
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     rng = np.random.default_rng(31)
     lat = rng.standard_normal((1, 64, 4, 3)).astype(np.float32)
@@ -1552,10 +1553,7 @@ def test_above_one_tile_the_automatic_choice_is_tiles_whatever_is_free(
         msg = str(e.value)
         assert (f"VAE {op} of 1 x {high}x{wide} whole needs "
                 f"{need_whole / GiB:.2f} GiB") in msg
-        assert msg.endswith(
-            "GMLX_OVERCOMMIT=1 overrides. The Qwen-Image 2.1 autoencoder is "
-            "not measured, and this is the price of the rule for an "
-            "unmeasured VAE.")
+        assert msg.endswith("GMLX_OVERCOMMIT=1 overrides.")
         with pytest.raises(ImageMemoryError, match="in tiles needs"):
             run(vae, x, free=need_tiles - 1, **cut)
         with monkeypatch.context() as mp:

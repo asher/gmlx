@@ -147,14 +147,73 @@ VAE_TILED = {"decode": {2: TiledFit(base=1.96 * GiB, k_tiles=4.70,
                         4: TiledFit(base=1.69 * GiB, k_tiles=1.29,
                                     k_image=2.91)}}
 
+# Qwen-Image 2.1 autoencoder footprints under bounded_cache on the official
+# file, over the loaded weights, by conv path and activation itemsize.
+# Whole passes at 256, 512 and 1024 pixels on an M5 Max, two runs each in
+# fresh processes with a cold and a warm pass, fit a line in pixels. The
+# slope is raised 10 percent and the base covers every whole pass plus
+# 0.25 GiB. A pass is the larger of the growth of the process footprint
+# and of the MLX peak over the active bytes at its start. At 1024 the bf16
+# decode added 5.50 GiB exact and 7.83 GiB on Winograd, against 6.44 and
+# 8.87 here, and the fp32 decode 8.74 and 14.00 GiB, against 10.09 and
+# 15.40. No whole pass above 1024 pixels has run, so a whole price above
+# that is the line carried on.
+QWEN_VAE_DECODE = {"exact": {2: VaeFit(base=1.46 * GiB, k=17.7),
+                             4: VaeFit(base=2.72 * GiB, k=13.1)},
+                   "winograd": {2: VaeFit(base=2.09 * GiB, k=24.1),
+                                4: VaeFit(base=2.29 * GiB, k=23.3)}}
+QWEN_VAE_ENCODE = {"exact": {2: VaeFit(base=0.60 * GiB, k=14.8),
+                             4: VaeFit(base=1.43 * GiB, k=9.4)},
+                   "winograd": {2: VaeFit(base=1.48 * GiB, k=15.5),
+                                4: VaeFit(base=1.57 * GiB, k=12.7)}}
+
+# The mid attention of that autoencoder holds its scores whatever chunk
+# ``chunked_sdpa`` cuts the rows into: at 16384 rows, a 2048 pixel image,
+# the MLX peak on the scores alone is 1.46 times the bytes of every score
+# in bf16 and 1.18 times in fp32, with 4 chunks as with 16. A pass is
+# priced with 1.5 times rows squared times the itemsize on top of its fit.
+# Read at one row count a dtype, and nothing above 2048 pixels has run.
+QWEN_VAE_SCORES = 1.5
+
+# Tiled passes of that autoencoder hold one tile at a time beside the part
+# run whole. The tile term is the whole fit on the exact path at one tile,
+# and the image term is by arithmetic: 36 bytes a pixel for the float32
+# result on the host and on the device and the part run whole. With the
+# scores on top, a tiled bf16 decode added 1.79 GiB at 1024 pixels in three
+# 384 pixel tiles a side, 2.29 at 1536 and 2.95 at 2048, against 2.24,
+# 2.67 and 3.38 here, and in fp32 3.46, 3.86 and 4.00 against 3.89, 4.59
+# and 5.89: the scores and a tile do not peak together, and the sum counts
+# both. A tiled encode crops its tiles, four of 496 pixels a side at 1024
+# and nine of 512 at 2048. In bf16 it added 1.18 GiB at 1024 pixels, 1.48
+# at 1536 and 1.73 at 2048, against 1.50, 1.74 and 2.36 here, and in fp32
+# 2.07, 2.70 and 3.39 against 2.53, 2.96 and 4.10. Its base stands over
+# that of the whole fit, by 0.17 GiB in bf16 and 0.14 in fp32, so that the
+# price is 0.25 GiB over the pass at 1536, where the cache holds what the
+# tiles freed while the scores peak. A Winograd pass adds the difference
+# of the whole rows at one tile, and no tiled pass has run on that path.
+QWEN_VAE_TILED = {"decode": {2: TiledFit(base=1.46 * GiB, k_tiles=17.7,
+                                         k_image=0.13),
+                             4: TiledFit(base=2.72 * GiB, k_tiles=13.1,
+                                         k_image=0.07)},
+                  "encode": {2: TiledFit(base=0.77 * GiB, k_tiles=14.8,
+                                         k_image=0.19),
+                             4: TiledFit(base=1.57 * GiB, k_tiles=9.4,
+                                         k_image=0.10)}}
+
 # Footprint over op-order floor of a pass on an unmeasured row, by conv
 # path. Both numbers are borrowed from another model, the FLUX.1
-# autoencoder, because it is the one VAE measured here and a floor alone
-# is no footprint. Its whole bf16 decode at 1024 pixels measured 4.45 GiB
-# on the exact path and 6.64 GiB on Winograd, against a floor of 1.25 GiB,
-# five of its 128 channel activations at full resolution. That is 3.56
-# and 5.31 times the floor, rounded up here. Its fp32 decode gave 2.80
-# and 4.17 times.
+# autoencoder, because a floor alone is no footprint. Its whole bf16
+# decode at 1024 pixels measured 4.45 GiB on the exact path and 6.64 GiB
+# on Winograd, against a floor of 1.25 GiB, five of its 128 channel
+# activations at full resolution. That is 3.56 and 5.31 times the floor,
+# rounded up here. Its fp32 decode gave 2.80 and 4.17 times.
+#
+# The Qwen-Image 2.1 autoencoder was priced by this rule until its file
+# was measured. Its own ratio, the footprint less the weights and the
+# cache bound over its floor, came to 2.18 in bf16 and 2.05 in fp32 for
+# the whole decode at 1024 pixels on the exact path, and to 3.56 and 3.61
+# on Winograd. Over its whole cells from 256 to 1024 pixels the largest
+# was 2.93 exact and 4.95 on Winograd, so the borrowed numbers held.
 UNMEASURED_RATIO = {"exact": 3.6, "winograd": 5.4}
 
 
@@ -171,6 +230,10 @@ class VaeMemoryRow:
 
     ``one_tile`` says that a tiled pass holds one tile at a time, so the
     tile term of its fit counts the pixels of one tile and not of all.
+    ``scores`` is what the mid attention holds of its scores, as a factor
+    on the bytes of every score of one image, which is the latent pixels
+    squared times the itemsize. It is added to a measured price, whole or
+    tiled, and is 0 for a VAE whose fits cover its attention.
     ``crop`` gives, for an op and a config, the latent pixels over which a
     tile's result reads its input when the tiles of that op are cropped
     and not blended, and 0 when they are blended. Cropped tiles overlap
@@ -186,6 +249,7 @@ class VaeMemoryRow:
     one_tile: bool = False
     tiles_first: bool = False
     crop: Callable | None = None    # see ``_qwen_image21_vae_crop``
+    scores: float = 0.0
 
     @property
     def auto_tiles(self) -> bool:
@@ -223,11 +287,16 @@ VAE_ROWS = {
     "z_image": VaeMemoryRow(
         measured=True, channels={"decode": 128, "encode": 128},
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED),
-    # The Qwen-Image 2.1 autoencoder. No file of it has run here. The
-    # ladder on the official file sets the fits and ``measured``.
+    # The Qwen-Image 2.1 autoencoder, measured on the official file. Tiles
+    # come first: a whole bf16 decode at 1024 pixels is priced at 6.48 GiB,
+    # which a 16 GB Mac does not have beside the weights, and a tiled one
+    # at 2048 pixels at 3.38 GiB, which it has.
     "qwen_image21": VaeMemoryRow(
-        measured=False, channels={"decode": 144, "encode": 96},
-        floor=_qwen_image21_vae_floor, crop=_qwen_image21_vae_crop),
+        measured=True, channels={"decode": 144, "encode": 96},
+        whole={"decode": QWEN_VAE_DECODE, "encode": QWEN_VAE_ENCODE},
+        tiled=QWEN_VAE_TILED, floor=_qwen_image21_vae_floor, one_tile=True,
+        tiles_first=True, crop=_qwen_image21_vae_crop,
+        scores=QWEN_VAE_SCORES),
 }
 
 
@@ -679,12 +748,14 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
     of ``height`` x ``width`` images by the VAE row of ``family``, on the
     ``conv`` path (the default path when None).
 
-    A measured row gives the footprint under bounded_cache from its fits,
-    at ``channels`` base channels, and a tiled pass follows its tiled
+    A measured row gives the footprint under bounded_cache over the
+    loaded weights from its fits, at ``channels`` base channels, with the
+    scores its mid attention holds, and a tiled pass follows its tiled
     fit. An unmeasured row gives ``unmeasured_bytes`` of the steps of a
-    VAE with ``config``. The plan has no VAE at hand and passes neither,
-    which prices the official file: the row's own channels and config.
-    An image no larger than a tile is priced whole."""
+    VAE with ``config``, which counts the weights. The plan has no VAE at
+    hand and passes neither, which prices the official file: the row's
+    own channels and config. An image no larger than a tile is priced
+    whole."""
     row = vae_row(family)
     if conv is None:
         from gmlx.image.vae.conv import CONV as conv
@@ -699,8 +770,15 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
         channels = row.channels[op]
     fits = row.whole[op]
     fit = fits[conv][itemsize]
+    # The scores count the latent pixels of the VAE at hand. The tiles of
+    # a measured row are laid out at the scale of its family.
+    held = 0
+    if row.scores:
+        latent = _latent_px(family, config)
+        rows = (height // latent) * (width // latent)
+        held = int(row.scores * batch * rows * rows * itemsize)
     if not tiled or (height <= tile and width <= tile):
-        return fit.bytes(batch * height * width, channels, itemsize)
+        return fit.bytes(batch * height * width, channels, itemsize) + held
     scale = vae_scale(family)
     ny, th = tile_layout(height, tile, overlap, scale)
     nx, tw = tile_layout(width, tile, overlap, scale)
@@ -712,7 +790,7 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
         one = batch * th * tw
         out += max(0, fit.bytes(one, channels, itemsize)
                    - fits["exact"][itemsize].bytes(one, channels, itemsize))
-    return out
+    return out + held
 
 
 def free_bytes() -> float | None:
