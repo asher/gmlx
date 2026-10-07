@@ -17,11 +17,14 @@ import block_gates
 from block_gates import (KERNEL_ROUNDINGS, LEAVES, SITE_VELOCITY, Sites,
                          assert_all_dense, exact_products, kernel_calls,
                          plain_velocity, rerun_exact, rerun_sites,
-                         right_sites, stock_ops_only)
-from image_fixtures import glu_rounded_once, kq_z_model, qk_rounded_once
+                         right_sites, stock_ops_only, table_sites)
+from image_fixtures import (glu_rounded_once, kq_leaf, kq_z_model,
+                            lora_rounded_once, qk_rounded_once)
+from lora_fixtures import make_pair
 
-from gmlx.image import ops
+from gmlx.image import api, lora, ops
 from gmlx.image.ops import attention, kq_routes
+from gmlx.image.registry import get_family
 
 kq = pytest.importorskip("mlx_kquant")
 
@@ -182,7 +185,7 @@ def test_the_entries_are_put_back_when_the_run_raises(tiny):
 
 @pytest.fixture
 def routes(monkeypatch):
-    """Both routes in force on stand-in ops with a GPU default device
+    """Every route in force on stand-in ops with a GPU default device
     reported, put back after the test."""
     calls = []
 
@@ -194,10 +197,15 @@ def routes(monkeypatch):
         calls.append("qk")
         return q, k
 
+    def low_rank(x, w, codec, a_t, b_t, *, strength=None, bands=None):
+        calls.append("lora")
+        return x
+
     monkeypatch.setattr(ops, "qk_norm_rope", ops.qk_norm_rope)
     monkeypatch.setattr(kq_routes, "_active", kq_routes._active)
     monkeypatch.setattr(kq_routes, "_OPS", dict(
-        kq_routes._OPS, qk_norm_rope=qk, quantized_matmul_glu=glu, nax=True))
+        kq_routes._OPS, qk_norm_rope=qk, quantized_matmul_glu=glu,
+        quantized_matmul_lora=low_rank, nax=True))
     monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
     assert kq_routes.install(kq_routes.ROUTES) == set(kq_routes.ROUTES)
     return calls
@@ -209,7 +217,14 @@ def _qk_args(dtype=mx.bfloat16) -> tuple:
             mx.zeros((2, 32)), 1e-5)
 
 
-@pytest.mark.parametrize("route", ["glu", "qk"])
+def _lora_args(leaf, x: mx.array) -> tuple:
+    """A rank 2 term for ``leaf`` on ``x``, as ``ops.lora_fused`` takes
+    it."""
+    return (x, leaf, mx.zeros((WIDTH, 2), x.dtype),
+            mx.zeros((2, leaf.weight.shape[0]), x.dtype), mx.ones((2,)), None)
+
+
+@pytest.mark.parametrize("route", ["glu", "qk", "lora"])
 def test_a_kernel_route_left_in_force_is_refused(tiny, routes, route):
     """The routes keep their ops in a table of their own, past the names
     of mlx_kquant that the exact context watches. A route left in force
@@ -225,6 +240,9 @@ def test_a_kernel_route_left_in_force_is_refused(tiny, routes, route):
             pair = ops.glu_pair(tiny.a, tiny.a, half)
             assert pair is not None
             ops.swiglu_fused(half, *pair)
+        elif route == "lora":
+            assert kq_routes.lora_leaf(tiny.a, half) is tiny.a
+            ops.lora_fused(*_lora_args(tiny.a, half))
         else:
             assert ops.qk_norm_rope is kq_routes.qk_norm_rope
             ops.qk_norm_rope(*_qk_args())
@@ -275,7 +293,7 @@ def test_stock_ops_only_puts_the_routes_off_and_back(routes):
     assert kq_routes._OPS == table
 
 
-def test_kernel_calls_names_each_call_a_route_hands_over(routes):
+def test_kernel_calls_names_each_call_a_route_hands_over(tiny, routes):
     seen = []
     table = dict(kq_routes._OPS)
     x = mx.zeros((1, 4), mx.bfloat16)
@@ -283,14 +301,16 @@ def test_kernel_calls_names_each_call_a_route_hands_over(routes):
         assert has
         kq_routes.swiglu_fused(x, x, x, CODEC)
         ops.qk_norm_rope(*_qk_args())
+        ops.lora_fused(*_lora_args(tiny.a, x))
         kq_routes.swiglu_fused(x, x, x, CODEC)
-    assert seen == ["glu", "qk", "glu"] == routes
+    assert seen == ["glu", "qk", "lora", "glu"] == routes
     assert kq_routes._OPS == table
     kq_routes.swiglu_fused(x, x, x, CODEC)
-    assert seen == ["glu", "qk", "glu"]
+    assert seen == ["glu", "qk", "lora", "glu"]
 
 
-@pytest.mark.parametrize("absent", [(), ("qk",), ("glu",), ("qk", "glu")])
+@pytest.mark.parametrize("absent", [(), ("qk",), ("glu",), ("qk", "glu"),
+                                    ("qk", "glu", "lora")])
 def test_kernel_calls_yields_whether_the_build_has_a_route(routes,
                                                            monkeypatch,
                                                            absent):
@@ -299,7 +319,7 @@ def test_kernel_calls_yields_whether_the_build_has_a_route(routes,
                             None)
     table = dict(kq_routes._OPS)
     with kernel_calls(lambda route: None) as has:
-        assert has == (len(absent) < 2)
+        assert has == (len(absent) < 3)
     assert kq_routes._OPS == table
 
 
@@ -310,6 +330,7 @@ def test_kernel_calls_looks_a_cold_op_up_before_it_watches(routes,
     stand_in = kq_routes._OPS["quantized_matmul_glu"]
     monkeypatch.setattr(kq, "quantized_matmul_glu", stand_in, raising=False)
     monkeypatch.setattr(kq, "qk_norm_rope", None, raising=False)
+    monkeypatch.setattr(kq, "quantized_matmul_lora", None, raising=False)
     monkeypatch.setattr(kq_routes, "_OPS", {})
     seen = []
     x = mx.zeros((1, 4), mx.bfloat16)
@@ -318,7 +339,8 @@ def test_kernel_calls_looks_a_cold_op_up_before_it_watches(routes,
         kq_routes.swiglu_fused(x, x, x, CODEC)
     assert seen == ["glu"] == routes
     assert kq_routes._OPS == {"quantized_matmul_glu": stand_in,
-                              "qk_norm_rope": None}
+                              "qk_norm_rope": None,
+                              "quantized_matmul_lora": None}
 
 
 # The child processes of the gated tests.
@@ -381,13 +403,14 @@ def small():
 
 @pytest.fixture
 def kernels(monkeypatch):
-    """Both routes in force on stand-ins with the kernels' arithmetic and
+    """Every route in force on stand-ins with the kernels' arithmetic and
     a GPU default device reported, put back after the test."""
     monkeypatch.setattr(ops, "qk_norm_rope", ops.qk_norm_rope)
     monkeypatch.setattr(kq_routes, "_active", kq_routes._active)
     monkeypatch.setattr(kq_routes, "_OPS", dict(
         kq_routes._OPS, qk_norm_rope=qk_rounded_once,
-        quantized_matmul_glu=glu_rounded_once, nax=True))
+        quantized_matmul_glu=glu_rounded_once,
+        quantized_matmul_lora=lora_rounded_once, nax=True))
     monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
     assert kq_routes.install(kq_routes.ROUTES) == set(kq_routes.ROUTES)
 
@@ -463,7 +486,7 @@ def test_the_right_small_model_passes_the_site_gate(small, kernels,
     # Every block's qk site and the main layers' glu sites ran on a
     # kernel, and each is held to the kernel's count.
     assert sites.routed.keys() == set(QK) | set(GLU)
-    assert KERNEL_ROUNDINGS == {"qk": 1, "glu": 4}
+    assert KERNEL_ROUNDINGS == {"qk": 1, "glu": 4, "lora": 3}
     assert {n: sites.sites[n][1] for n in QK + GLU + STOCK_GLU} == {
         **dict.fromkeys(QK, 1), **dict.fromkeys(GLU, 4),
         **dict.fromkeys(STOCK_GLU, 5)}
@@ -715,6 +738,70 @@ def test_a_pair_without_its_deltas_reads_them_at_its_glu_site(small, kernels):
     assert found[PAIR_SMALL] + own < 1 < found[PAIR_LARGE] - own, found
     assert found[PAIR_LARGE] / found[PAIR_SMALL] == pytest.approx(
         PAIR_LARGE / PAIR_SMALL, rel=0.2)
+
+
+QKV = "layers.0.qkv"
+
+
+@pytest.fixture(scope="module")
+def adapted():
+    """The small model with a q5_k fused qkv in its main layers, as a
+    pipeline, and the entries of a rank 4 adapter on q, k and v of the
+    first."""
+    model = kq_z_model(mx.bfloat16, groups=("layers",))
+    for i, blk in enumerate(model.layers):
+        blk.attention.qkv = kq_leaf("q5_k", 3 * WIDTH, WIDTH, 30 + i)
+    pipe = api.ImagePipeline(dit=model, family=get_family("z_image"),
+                             variant="turbo")
+    rng = np.random.default_rng(5)
+    path = f"layers.0.{LEAVES['qkv']}"
+    return pipe, [(path, (0, i * WIDTH, WIDTH), [(lora.register_pair(
+        pipe, *make_pair(rng, WIDTH, WIDTH, 4)), 0.8)]) for i in range(3)]
+
+
+def test_a_leaf_on_the_lora_op_is_one_site_at_the_count_of_the_op(
+        small, adapted, kernels, monkeypatch):
+    """A K-quant leaf under an adapter with the lora route in force is one
+    site, held to the op's count against the exact product with the
+    delta. On the stock ops the same leaf is three sites: the leaf, its
+    down product and its addmm."""
+    pipe, entries = adapted
+    _, arrays = small
+    # The leaf has 768 outputs, under the floor of the route's table.
+    monkeypatch.setattr(kq_routes, "_LORA_MIN_N", 0)
+    sites, v = table_sites(pipe, arrays, entries)
+    assert sorted(sites.deltas) == [QKV]
+    assert sites.routed[QKV] == "quantized_matmul_lora"
+    assert sites.sites[QKV][1] == KERNEL_ROUNDINGS["lora"]
+    assert sites.gate(QKV) == GATE[3]
+    assert f"{QKV}.add" not in sites.sites
+    assert 0 < sites.readings()[QKV]["all"] < 0.5
+    right_sites(sites, v, "small under an adapter")
+
+    # The op's result times 1.036: 1.54 gates of three roundings.
+    real = kq_routes._OPS["quantized_matmul_lora"]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(kq_routes._OPS, "quantized_matmul_lora",
+                   lambda *a, **k: _scaled(real(*a, **k), np.float32(1.036)))
+        got, v = table_sites(pipe, arrays, entries)
+    assert BAND[0] < got.missed()[QKV] < BAND[1], got.missed()
+    assert QKV in got.missed_rows()
+    with pytest.raises(AssertionError, match="site gate: relative L2"):
+        right_sites(got, v, "small under an adapter, the op scaled")
+
+    # A strength the op does not take: the site reads the delta it left.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(kq_routes._OPS, "quantized_matmul_lora",
+                   lambda *a, strength=None, **k: real(
+                       *a, strength=mx.zeros_like(strength), **k))
+        got, _ = table_sites(pipe, arrays, entries)
+    assert got.missed()[QKV] > 1, got.readings()[QKV]
+
+    with kq_routes.only(("qk", "glu")):
+        stock, v = table_sites(pipe, arrays, entries)
+        assert QKV not in stock.routed and QKV in stock.sites
+        assert {f"{QKV}.down", f"{QKV}.add"} <= stock.sites.keys()
+        right_sites(stock, v, "small under an adapter, stock ops")
 
 
 def test_right_sites_refuses_what_no_site_reads(small, kernels):
