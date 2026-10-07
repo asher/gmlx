@@ -178,6 +178,13 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--strength", type=_strength, default=None, metavar="F",
                    help="How far img2img moves from the init image, above 0 "
                         "and at most 1 (default 0.6, or 1 with --mask).")
+    p.add_argument("--ref", action="append", default=None, metavar="PATH",
+                   help="Edit from this reference image. Repeat the flag for "
+                        "several, in the order the prompt names them. Needs "
+                        "--encoder-mmproj.")
+    p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
+                   help="Resize each reference to about N x N pixels at its "
+                        "own aspect ratio (default 1024).")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",
@@ -199,6 +206,9 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         ".npz file.")
     p.add_argument("--encoder", default=None, metavar="GGUF",
                    help="The text encoder GGUF.")
+    p.add_argument("--encoder-mmproj", default=None, metavar="GGUF",
+                   help="The mmproj GGUF of the text encoder, which reads "
+                        "the --ref images.")
     p.add_argument("--vae", default=None, metavar="PATH",
                    help="The VAE, a GGUF or safetensors file.")
     _add_adapter_flag(p)
@@ -366,13 +376,48 @@ def _check_files(a) -> None:
         raise FileNotFoundError(f"MODEL {a.model}: no such file")
     if a.encoder is None or a.vae is None:
         raise _Usage("--encoder and --vae are required with a DiT path")
+    if a.ref and a.encoder_mmproj is None:
+        raise _Usage("--ref needs --encoder-mmproj with a DiT path")
+    if a.ref_size is not None and not a.ref:
+        raise _Usage("--ref-size needs --ref")
     for flag, path in (("--encoder", a.encoder), ("--vae", a.vae),
-                       ("--init-image", a.init_image), ("--mask", a.mask)):
+                       ("--encoder-mmproj", a.encoder_mmproj),
+                       ("--init-image", a.init_image), ("--mask", a.mask),
+                       *(("--ref", r) for r in a.ref or ())):
         if path is not None and not os.path.isfile(os.path.expanduser(path)):
             raise FileNotFoundError(f"{flag} {path}: no such file")
     for path, _ in a.adapter or ():
         if not os.path.isfile(os.path.expanduser(path)):
             raise FileNotFoundError(f"--adapter {path}: no such file")
+
+
+def _references(a, family) -> tuple:
+    """The ``--ref`` images as the family runs them, in order. A family
+    that takes none, a count over its cap and a size outside what it takes
+    are usage errors."""
+    if not a.ref:
+        return ()
+    edit = family.edit
+    if edit is None:
+        raise _Usage(f"--ref: {family.title} takes no reference images")
+    if len(a.ref) > edit.max_refs:
+        raise _Usage(f"--ref: {family.title} takes at most {edit.max_refs} "
+                     f"reference images, and the request has {len(a.ref)}")
+    low, high = math.isqrt(edit.min_area - 1) + 1, math.isqrt(edit.area)
+    side = high if a.ref_size is None else a.ref_size
+    if not low <= side <= high:
+        raise _Usage(f"--ref-size {side}: {family.title} takes a reference "
+                     f"size from {low} to {high}")
+    from PIL import Image
+
+    out = []
+    for path in a.ref:
+        try:
+            with Image.open(os.path.expanduser(path)) as im:
+                out.append(edit.prepare(im, side * side))
+        except ValueError as e:
+            raise _Usage(f"--ref {path}: {e}") from None
+    return tuple(out)
 
 
 def _vet_adapters(a, ident=None) -> None:
@@ -476,6 +521,11 @@ def _generate(a) -> int:
     from . import image_preflight
 
     prompt = _prompt(a)
+    if a.ref:
+        # The vision tower that reads the references computes in float32,
+        # and its products must be exact. MLX reads this once, at the first
+        # product of the process.
+        os.environ.setdefault("MLX_ENABLE_TF32", "0")
     if a.mask is not None and a.init_image is None:
         raise _Usage("--mask needs --init-image")
     if a.strength is not None and a.init_image is None:
@@ -500,6 +550,11 @@ def _generate(a) -> int:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
     mask = read_mask(a.mask, (width, height)) if a.mask else None
+    refs = _references(a, fam)
+    mmproj = a.encoder_mmproj if refs else None
+    if a.encoder_mmproj is not None and not refs:
+        log("note: --encoder-mmproj is unused without --ref, and is not "
+            "loaded")
     if cfg == 1.0 and a.negative_prompt:
         log("warning: --negative-prompt is unused, since --guidance 1 turns "
             "guidance off")
@@ -519,13 +574,16 @@ def _generate(a) -> int:
 
     _check_release(a, image_preflight.check(
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
-        adapters=_adapter_bytes(a), init_image=init is not None))
-    pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+        adapters=_adapter_bytes(a), init_image=init is not None,
+        mmproj=mmproj, refs=[(r.height, r.width) for r in refs]))
+    pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
+                    mmproj=mmproj, log=log)
     table, adapters = _load_adapters(a, pipe, log)
     t0 = time.perf_counter()
-    cond = api.encode_text(pipe, prompt)
-    neg = None if cfg == 1.0 else api.encode_text(pipe, a.negative_prompt
-                                                   or "")
+    # The VAE encodes the references after the encoder's release.
+    cond = api.encode_text(pipe, prompt, images=refs, ref_latents=False)
+    neg = None if cfg == 1.0 else api.encode_text(
+        pipe, a.negative_prompt or "", images=refs, ref_latents=False)
     encode_s = time.perf_counter() - t0
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
                             conds=[cond] if neg is None else [cond, neg],
@@ -538,10 +596,16 @@ def _generate(a) -> int:
     init_latents = None
     if init is not None:
         init_latents = api.vae_encode(pipe, init[None], plan=plan)
+    if refs:
+        cond = api.encode_references(pipe, cond, plan=plan)
+        if neg is not None:
+            neg = api.encode_references(pipe, neg, plan=plan)
 
     files = {"dit": os.path.basename(a.model),
              "encoder": os.path.basename(a.encoder),
              "vae": os.path.basename(a.vae)}
+    if mmproj is not None:
+        files["mmproj"] = os.path.basename(mmproj)
     # scheduler None is the variant's own schedule, as in the bench record.
     settings = {"prompt": prompt, "seed": seed, "steps": steps,
                 "size": f"{width}x{height}", "sampler": a.sampler,
@@ -551,6 +615,10 @@ def _generate(a) -> int:
         settings["negative_prompt"] = a.negative_prompt or ""
     if alpha:
         settings["background"] = "transparent"
+    if refs:
+        settings["refs"] = [
+            {"file": os.path.basename(p), "size": f"{r.width}x{r.height}",
+             "sha256": r.sha256} for p, r in zip(a.ref, refs)]
     if init is not None:
         settings.update(init_image=os.path.basename(a.init_image),
                         strength=strength)
@@ -739,6 +807,7 @@ def _bench(a) -> int:
     from . import image_preflight
 
     a.init_image = a.mask = None
+    a.ref = a.ref_size = a.encoder_mmproj = None
     _check_files(a)
     _vet_adapters(a)
     if a.json_out is not None:

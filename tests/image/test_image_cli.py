@@ -862,3 +862,219 @@ def test_the_adapter_flag_completes_as_a_file():
         assert "--adapter" in flags
         assert _complete(["image", action, "x.gguf", "--adapter", ""]) == \
             ["::files"]
+
+
+# Reference images.
+
+@pytest.fixture
+def edit(env, monkeypatch, tmp_path):
+    """The env on a family that takes reference images: the toy pipeline
+    under the reference rule of Qwen-Image 2.1. The encoder and the VAE
+    of the references are replaced, and their calls are kept."""
+    import dataclasses
+
+    from PIL import Image
+
+    fam = dataclasses.replace(get_family("z_image"),
+                              edit=get_family("qwen_image21").edit)
+    state = env
+    state.calls, state.loads = [], []
+
+    def load(dit, *, text_encoder=None, vae=None, mmproj=None, log=print):
+        state.loads.append(mmproj)
+        pipe = api.ImagePipeline(dit=_Dit(), family=fam,
+                                 variant=state.variant,
+                                 encoder=_OwnedEncoder(), vae=object(),
+                                 load_seconds={"dit": 0.0}, log=log)
+        pipe.decoded, pipe.encoded_images = [], []
+        state.pipes.append(pipe)
+        return pipe
+
+    text = api.encode_text
+
+    def encode_text(pipe, prompt, *, images=(), ref_latents=True):
+        state.calls.append(("encode", prompt, tuple(images), ref_latents,
+                            pipe.encoder.released))
+        cond = text(pipe, prompt)
+        return dataclasses.replace(cond, refs=tuple(images))
+
+    def encode_references(pipe, cond, *, plan=None):
+        state.calls.append(("vae", cond.refs, plan, pipe.encoder.released))
+        return cond
+
+    monkeypatch.setattr(api, "load", load)
+    monkeypatch.setattr(api, "encode_text", encode_text)
+    monkeypatch.setattr(api, "encode_references", encode_references)
+    view = image_preflight.identify_dit("x").view
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p: SimpleNamespace(family=fam, view=view,
+                                                  variant=state.variant))
+    monkeypatch.setattr(os, "environ", {
+        k: v for k, v in os.environ.items() if k != "MLX_ENABLE_TF32"})
+    rng = np.random.default_rng(0)
+    state.refs = []
+    for name, (w, h), mode in (("a.png", (300, 260), "RGB"),
+                               ("b.png", (200, 320), "RGBA")):
+        px = rng.integers(0, 256, (h, w, len(mode))).astype(np.uint8)
+        Image.fromarray(px, mode).save(tmp_path / name)
+        state.refs.append(str(tmp_path / name))
+    mm = tmp_path / "mmproj.gguf"
+    mm.write_bytes(b"x")
+    state.mmproj = str(mm)
+    return state
+
+
+def test_references_reach_the_encoder_in_order_and_the_vae_after_it(
+        edit, tmp_path, capsys):
+    args = edit.base + [
+        "--prompt", "swap them", "--size", "32x32", "--seed", "3",
+        "--guidance", "3", "--negative-prompt", "blurry", "--ref",
+        edit.refs[0], "--ref", edit.refs[1], "--ref-size", "320",
+        "--encoder-mmproj", edit.mmproj, "--encoder-release", "always",
+        "--output", str(tmp_path / "o.png"), "--json"]
+    assert umbrella_main(args) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert edit.loads == [edit.mmproj]
+    # The float32 products of the tower are exact from the first one.
+    assert os.environ["MLX_ENABLE_TF32"] == "0"
+    kinds = [c[0] for c in edit.calls]
+    assert kinds == ["encode", "encode", "vae", "vae"]
+    for call, prompt in zip(edit.calls[:2], ("swap them", "blurry")):
+        _, got, refs, with_latents, released = call
+        assert got == prompt and not with_latents and not released
+        assert [(r.width, r.height) for r in refs] == [(352, 288),
+                                                      (256, 416)]
+        assert bool((refs[0].pixels[..., 3] == 255).all())
+        assert len(set(refs[1].pixels[..., 3].ravel().tolist())) > 2
+    for call in edit.calls[2:]:
+        assert call[1] == edit.calls[0][2] and call[2] is edit.plan
+        assert call[3] is True
+    # The fit check before the load counts the mmproj and the references.
+    assert edit.checks[0]["mmproj"] == edit.mmproj
+    assert edit.checks[0]["refs"] == [(288, 352), (416, 256)]
+    assert [c.refs for c in edit.planned[0]["conds"]] == [
+        edit.calls[0][2]] * 2
+    assert rec["model"]["mmproj"] == "mmproj.gguf"
+    refs = edit.calls[0][2]
+    assert rec["settings"]["refs"] == [
+        {"file": "a.png", "size": "352x288", "sha256": refs[0].sha256},
+        {"file": "b.png", "size": "256x416", "sha256": refs[1].sha256}]
+    from PIL import Image
+
+    with Image.open(tmp_path / "o.png") as im:
+        assert json.loads(im.text["gmlx"])["refs"] == rec["settings"]["refs"]
+        assert json.loads(im.text["gmlx"])["files"]["mmproj"] == "mmproj.gguf"
+
+
+def test_references_default_to_the_family_size_and_respect_the_user_env(
+        edit, tmp_path):
+    os.environ["MLX_ENABLE_TF32"] = "1"
+    assert umbrella_main(edit.base + [
+        "--prompt", "p", "--size", "32x32", "--ref", edit.refs[0],
+        "--encoder-mmproj", edit.mmproj, "--output",
+        str(tmp_path / "o.png")]) == 0
+    (ref,) = edit.calls[0][2]
+    assert (ref.width, ref.height) == (1088, 960)
+    assert os.environ["MLX_ENABLE_TF32"] == "1"
+    # One conditioning, so one encode of each kind.
+    assert [c[0] for c in edit.calls] == ["encode", "vae"]
+
+
+def test_a_text_request_never_loads_the_mmproj(edit, tmp_path, capsys):
+    assert umbrella_main(edit.base + [
+        "--prompt", "p", "--size", "32x32", "--encoder-mmproj", edit.mmproj,
+        "--output", str(tmp_path / "o.png"), "--json"]) == 0
+    out = capsys.readouterr()
+    assert edit.loads == [None]
+    assert "--encoder-mmproj is unused without --ref" in out.err
+    rec = json.loads(out.out)
+    assert "mmproj" not in rec["model"] and "refs" not in rec["settings"]
+    assert "MLX_ENABLE_TF32" not in os.environ
+    assert edit.calls == [("encode", "p", (), False, False)]
+    assert "mmproj" not in edit.checks[0] or edit.checks[0]["mmproj"] is None
+    assert edit.checks[0]["refs"] == []
+
+
+def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
+                                             monkeypatch):
+    from PIL import Image
+
+    base = edit.base + ["--prompt", "p", "--size", "32x32"]
+    ref = ["--ref", edit.refs[0]]
+    mm = ["--encoder-mmproj", edit.mmproj]
+    long = tmp_path / "long.png"
+    Image.fromarray(np.zeros((8, 4000, 3), np.uint8)).save(long)
+    for flags, code, text in (
+            (ref, 2, "--ref needs --encoder-mmproj with a DiT path"),
+            (mm + ["--ref-size", "512"], 2, "--ref-size needs --ref"),
+            (ref * 11 + mm, 2, "--ref: Z-Image takes at most 10 reference "
+                               "images, and the request has 11"),
+            (ref + mm + ["--ref-size", "128"], 2,
+             "--ref-size 128: Z-Image takes a reference size from 256 to "
+             "1024"),
+            (ref + mm + ["--ref-size", "2048"], 2, "from 256 to 1024"),
+            (["--ref", "missing.png"] + mm, 1,
+             "--ref missing.png: no such file"),
+            (ref + ["--encoder-mmproj", "missing.gguf"], 1,
+             "--encoder-mmproj missing.gguf: no such file"),
+            (["--ref", str(long)] + mm, 2, "is too long for its area")):
+        assert umbrella_main(base + flags) == code, flags
+        assert text in capsys.readouterr().err
+    # A family without reference images refuses the flag by name.
+    plain = get_family("z_image")
+    view = image_preflight.identify_dit("x").view
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p: SimpleNamespace(family=plain, view=view,
+                                                  variant="turbo"))
+    assert umbrella_main(base + ref + mm) == 2
+    assert "--ref: Z-Image takes no reference images" in \
+        capsys.readouterr().err
+    # All refused before any model loads.
+    assert edit.pipes == [] and edit.loads == []
+
+
+def test_the_reference_flags_complete_as_files():
+    from gmlx.commands.completion import _complete
+
+    flags = [c.split("\t")[0] for c in _complete(["image", "generate", "-"])]
+    for flag in ("--ref", "--encoder-mmproj"):
+        assert flag in flags
+        assert _complete(["image", "generate", "x.gguf", flag, ""]) == \
+            ["::files"]
+    assert "--ref-size" in flags
+    assert "--ref" not in [c.split("\t")[0]
+                           for c in _complete(["image", "bench", "-"])]
+
+
+def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
+    from gmlx.image import memfit
+    from gmlx.image import text_encoder as te
+    from gmlx.serve import capacity
+
+    pf = image_preflight
+    fam = get_family("qwen_image21")
+    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+        family=fam, variant="default"))
+    sizes = {"dit": 12 << 30, "encoder": 5 << 30, "vae": 400 << 20}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.setattr(te, "_header_view", lambda path: 2 << 30)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 200 << 30)
+    kw = dict(height=512, width=512, cfg=1.0)
+    text = pf.check("d", "e", "v", **kw)
+    assert text.terms["mmproj"] == 0 and "init" not in text.phases
+    refs = [(1024, 1024), (512, 768)]
+    plan = pf.check("d", "e", "v", mmproj="m", refs=refs, **kw)
+    assert plan.terms["mmproj"] == 2 << 30
+    row = memfit.PEAKS["qwen_image21"]
+    tokens = 64 * 64 + 32 * 48
+    assert plan.terms["prefix_cache"] - text.terms["prefix_cache"] == \
+        row.prefix.cache_bytes(tokens, 2)
+    assert plan.terms["init_peak"] == memfit.vae_peak(
+        "encode", 1024, 1024, family="qwen_image21", itemsize=2)
+    assert list(plan.phases) == ["encode", "init", "denoise", "decode"]
+    # Guidance holds the references in both conditionings.
+    both = pf.check("d", "e", "v", mmproj="m", refs=refs,
+                    **{**kw, "cfg": 4.0})
+    assert both.terms["prefix_cache"] == 2 * plan.terms["prefix_cache"]

@@ -578,8 +578,10 @@ def test_the_plan_prices_the_references_of_its_conditionings(pipe):
 
 
 def test_the_init_phase_runs_a_reference_in_tiles_when_whole_does_not_fit():
+    # The prefix rows of a text prompt, so that the init phase is the
+    # widest one.
     kw = dict(family="qwen_image21", height=256, width=256, cfg=1.0,
-              overcommit=False, text_tokens=36)
+              overcommit=False, prefix_rows=[36])
     price = dict(family="qwen_image21", itemsize=2)
     whole = memfit.vae_peak("encode", 1024, 1024, **price)
     cut = memfit.vae_peak("encode", 1024, 1024, tiled=True, **price)

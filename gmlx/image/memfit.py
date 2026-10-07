@@ -623,13 +623,14 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     for the family's official file on the default conv path.
 
     The prefix rows of a conditioning come from ``text_tokens``, ``refs``
-    and ``ref_px``. ``prefix_rows`` gives them for the request's own
-    conditionings, the positive first, in place of that count, and
-    ``prefix_shared`` says the two of a guided request are one, whose
-    state is held once. A cache of
-    prefix states that holds ``prefix_other`` bytes of other conditionings
-    sheds them to ``prefix_bound`` as the request's states come in, and
-    what stays is part of the prefix cache term.
+    and ``ref_px``. With ``refs`` at 0 the count takes the references of
+    ``ref_sizes`` at their own sizes. ``prefix_rows`` gives the rows of
+    the request's own conditionings, the positive first, in place of
+    that count. ``prefix_shared`` says the two of a guided request are
+    one, whose state is held once. A cache of prefix states that holds
+    ``prefix_other`` bytes of other conditionings sheds them to
+    ``prefix_bound`` as the request's states come in, and what stays is
+    part of the prefix cache term.
     """
     try:
         row = PEAKS[family]
@@ -665,8 +666,14 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     }
     rows = image_rows(row, height, width, caption_tokens)
     text = row.text_rows if text_tokens is None else text_tokens
-    counted = 0 if row.prefix is None else row.prefix.rows(text, refs,
-                                                           ref_px)
+    counted = 0
+    if row.prefix is not None:
+        counted = row.prefix.rows(text, refs, ref_px)
+        if not refs:
+            # The references of the request by their own sizes.
+            counted += sum((int(h) // row.prefix.token_px)
+                           * (int(w) // row.prefix.token_px)
+                           for h, w in ref_sizes)
     given = [] if prefix_rows is None else [int(n) for n in prefix_rows]
     per = [prefix_row_terms(row, rows, n, act)
            for n in (given + [counted] * conds)[:conds]]

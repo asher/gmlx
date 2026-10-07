@@ -14,6 +14,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mlx-community/Qwen3-Embedding-0.6B-8bit`.
 - `gmlx image generate` makes images from a Z-Image-Turbo GGUF, its Qwen3-4B
   text encoder GGUF and its VAE. `bench` times them and `pack-vae` packs a VAE.
+- `gmlx image generate` makes images from a Qwen-Image 2.1 GGUF, its
+  Qwen3-VL-8B text encoder GGUF and its VAE, and `--ref PATH` edits from up to
+  10 reference images with the encoder's mmproj as `--encoder-mmproj`.
+- `gmlx image generate --background transparent` writes the alpha channel that
+  Qwen-Image 2.1 decodes, as a png or a webp.
 - `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA
   safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
