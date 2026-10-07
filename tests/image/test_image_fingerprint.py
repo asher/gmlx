@@ -143,14 +143,72 @@ def test_qwen_relatives_are_refused_by_name():
     assert "a Mage-Flow GGUF" in _refused(mage)
     q20 = {"model.diffusion_model.txt_norm.weight": ((3584,), "F32"),
            _QB0 + "attn.add_q_proj.weight": ((3072, 3072), "Q4_K")}
-    assert "a Qwen-Image 20B GGUF" in _refused(fixture_view(Q_HEADER, add=q20))
-    edit = dict(q20, **{"model.diffusion_model.__index_timestep_zero__":
-                        ((1,), "F32")})
-    assert "Qwen-Image-Edit 2511" in _refused(fixture_view(Q_HEADER, add=edit))
+    # The 20B model and an Edit file without its index tensor have one
+    # header, and the refusal says so.
+    msg = _refused(fixture_view(Q_HEADER, add=q20))
+    assert msg.startswith("this is a Qwen-Image 20B GGUF, or a "
+                          "Qwen-Image-Edit one written without its index "
+                          "tensor, whose header is the same")
+    index = {"model.diffusion_model.__index_timestep_zero__": ((1,), "F32")}
+    edit = dict(q20, **index)
+    assert "this is a Qwen-Image-Edit 2511 GGUF" in _refused(
+        fixture_view(Q_HEADER, add=edit))
     layered = dict(q20, **{
         "model.diffusion_model.time_text_embed.addition_t_embedding.weight":
             ((4096, 2), "F32")})
-    assert "Qwen-Image-Layered" in _refused(fixture_view(Q_HEADER, add=layered))
+    assert "this is a Qwen-Image-Layered GGUF" in _refused(
+        fixture_view(Q_HEADER, add=layered))
+    # The extra timestep embedding names the Layered model with the index
+    # tensor too.
+    both = _refused(fixture_view(Q_HEADER, add=dict(layered, **index)))
+    assert "this is a Qwen-Image-Layered GGUF" in both
+    assert "Edit" not in both
+
+
+def _retyped(change) -> fp.HeaderView:
+    """The Qwen-Image 2.1 header with ``change(name, tensor)`` giving the
+    tensors that stand for each of its own: a dict, or None to keep it."""
+    tensors = {}
+    for n, t in fixture_view(Q_HEADER).tensors.items():
+        got = change(n, t)
+        tensors.update({n: t} if got is None else got)
+    return fp.HeaderView(kv={}, tensors=tensors)
+
+
+def test_an_unfused_pair_of_another_width_is_not_qwen_image21():
+    def pair(shape):
+        def change(n, t):
+            if not n.endswith("img_mlp.gate_up.weight"):
+                return None
+            stem = n[: -len("gate_up.weight")]
+            return {stem + "gate_layer.weight": fp.Tensor(shape, t.codec),
+                    stem + "proj.weight": fp.Tensor(shape, t.codec)}
+        return _retyped(change)
+
+    assert fp.identify(pair((4096, 12288))).layout == "unfused"
+    msg = _refused(pair((4096, 8192)))
+    assert msg.startswith("a Qwen-Image relative")
+    assert ("the image MLP is neither img_mlp.gate_up (4096, 24576) nor the "
+            "img_mlp.gate_layer and img_mlp.proj pair of (4096, 12288) each"
+            ) in msg
+
+
+def test_the_query_width_is_held_in_every_block():
+    def to_q(block: int, shape):
+        name = f"transformer_blocks.{block}.attn.to_q.weight"
+
+        def change(n, t):
+            if not n.endswith(name):
+                return None
+            return {} if shape is None else {n: fp.Tensor(shape, t.codec)}
+        return _retyped(change)
+
+    assert fp.identify(to_q(3, (4096, 4096))).family.name == "qwen_image21"
+    msg = _refused(to_q(3, (4096, 2048)))
+    assert ("attn.to_q.weight is (4096, 4096) in every block of Qwen-Image "
+            "2.1, and block 3 has (4096, 2048)") in msg
+    assert "block 31 has none" in _refused(to_q(31, None))
+    assert "block 0 has (2048, 4096)" in _refused(to_q(0, (2048, 4096)))
 
 
 def test_a_qwen_file_with_biases_is_refused_with_the_reason():
@@ -312,3 +370,44 @@ def test_the_table_holds_turbo_and_base():
     assert fam.variant_names() == ("base", "turbo")
     assert fam.identity_tensors == (
         "x_pad_token", "cap_pad_token", "final_layer.linear.bias")
+
+
+def test_the_real_file_lookup_hides_only_a_refusal(tmp_path, monkeypatch):
+    """image_dits lists the files the fingerprint takes for a family. A
+    refused file is left out, and a fingerprint or a scan that fails any
+    other way raises instead of leaving the file out, which would skip
+    every row on the real file."""
+    from image_fixtures import image_dits
+
+    from gmlx.load import headerscan
+
+    view = fixture_view(Q_HEADER)
+    scan = type("Scan", (), {"kv": {}, "tensors": {}})()
+    monkeypatch.setattr(headerscan, "scan_gguf", lambda p, **k: scan)
+    monkeypatch.setattr(fp, "view_from_scans", lambda scans: view)
+
+    def root(name: str):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "a.gguf").write_bytes(b"x")
+        return d
+
+    assert image_dits(root("taken"), "qwen_image21") == [
+        str(tmp_path / "taken" / "a.gguf")]
+    assert image_dits(root("other"), "z_image") == []
+
+    def refuse(view, **kw):
+        raise fp.ImageModelError("not an image model gmlx takes")
+
+    monkeypatch.setattr(fp, "identify", refuse)
+    assert image_dits(root("refused"), "qwen_image21") == []
+    monkeypatch.setattr(fp, "identify", lambda view, **kw: {}["arch"])
+    with pytest.raises(KeyError):
+        image_dits(root("broken"), "qwen_image21")
+
+    def unreadable(path, **kw):
+        raise OSError("truncated header")
+
+    monkeypatch.setattr(headerscan, "scan_gguf", unreadable)
+    with pytest.raises(OSError, match="truncated"):
+        image_dits(root("truncated"), "qwen_image21")

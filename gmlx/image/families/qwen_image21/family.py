@@ -159,13 +159,45 @@ def _relative(name: str) -> Refusal:
                    "image does not support")
 
 
-def _layout(view: HeaderView) -> str | None:
-    if view.shape(_B0 + "img_mlp.gate_up.weight") == (4096, 24576):
+_GATE_UP = (4096, 24576)        # the fused gate and up projection
+_HALF = (4096, 12288)           # each of the unfused pair
+_TO_Q = (4096, 4096)
+
+
+def _mlp_names(view: HeaderView) -> str | None:
+    """The layout the tensor names of block 0 say, at any width."""
+    if view.has(_B0 + "img_mlp.gate_up.weight"):
         return "fused"
     if (view.has(_B0 + "img_mlp.gate_layer.weight")
             and view.has(_B0 + "img_mlp.proj.weight")):
         return "unfused"
     return None
+
+
+def _layout(view: HeaderView) -> str | None:
+    """The layout of a file whose image MLP has the widths of Qwen-Image
+    2.1, which the fingerprint requires."""
+    if view.shape(_B0 + "img_mlp.gate_up.weight") == _GATE_UP:
+        return "fused"
+    if (view.shape(_B0 + "img_mlp.gate_layer.weight") == _HALF
+            and view.shape(_B0 + "img_mlp.proj.weight") == _HALF):
+        return "unfused"
+    return None
+
+
+def _to_q_diffs(view: HeaderView) -> list[str]:
+    """The blocks whose query projection is absent or not the width of
+    Qwen-Image 2.1, the first few by name."""
+    bad = [(i, view.shape(f"transformer_blocks.{i}.attn.to_q.weight"))
+           for i in range(_N_BLOCKS)]
+    bad = [(i, s) for i, s in bad if s != _TO_Q]
+    if not bad:
+        return []
+    named = ", ".join(f"block {i} has {'none' if s is None else s}"
+                      for i, s in bad[:3])
+    more = f" and {len(bad) - 3} more" if len(bad) > 3 else ""
+    return [f"attn.to_q.weight is {_TO_Q} in every block of Qwen-Image "
+            f"2.1, and {named}{more}"]
 
 
 def fingerprint(view: HeaderView) -> Match | Refusal | None:
@@ -180,17 +212,26 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
     if not (view.has("img_in.weight") and view.count("transformer_blocks")):
         return None
     if txt_norm is not None and view.has(_B0 + "attn.add_q_proj.weight"):
-        if view.has("__index_timestep_zero__"):
-            return _relative("Qwen-Image-Edit 2511")
+        # The Layered model alone has the extra timestep embedding, with
+        # or without the index tensor that marks an Edit 2511 file. An
+        # Edit file written without that marker has the header of the
+        # 20B model, so the two share a name there.
         if view.has("time_text_embed.addition_t_embedding.weight"):
             return _relative("Qwen-Image-Layered")
-        return _relative("Qwen-Image 20B")
+        if view.has("__index_timestep_zero__"):
+            return _relative("Qwen-Image-Edit 2511")
+        return Refusal(
+            "this is a Qwen-Image 20B GGUF, or a Qwen-Image-Edit one "
+            "written without its index tensor, whose header is the same: "
+            "a Qwen-Image relative that gmlx image does not support")
     diffs = [f"{n} is {view.shape(n)}, Qwen-Image 2.1 has {s}"
              for n, s in _REQUIRED if view.shape(n) != s]
     layout = _layout(view)
     if layout is None:
         diffs.append("the image MLP is neither img_mlp.gate_up (4096, 24576) "
-                     "nor the img_mlp.gate_layer and img_mlp.proj pair")
+                     "nor the img_mlp.gate_layer and img_mlp.proj pair of "
+                     "(4096, 12288) each")
+    diffs += _to_q_diffs(view)
     if view.any_suffix(".bias"):
         diffs.append("it has bias tensors")
     if txt_norm is not None:
@@ -214,7 +255,7 @@ def synth_config(view: HeaderView) -> dict:
     s = view.dims
     in_ch, inner = s("img_in.weight")
     head_dim = s(_B0 + "attn.norm_q.weight")[0]
-    layout = _layout(view) or "fused"
+    layout = _mlp_names(view) or "fused"
     if layout == "unfused":
         ffn = s(_B0 + "img_mlp.gate_layer.weight")[1]
     else:
