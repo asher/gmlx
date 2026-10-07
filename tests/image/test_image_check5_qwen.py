@@ -17,23 +17,30 @@ The fp32 gate of the tiny models is 5e-5 max abs: about 7 times the
 largest reading of a right model over these configs, 6.9e-6, where the
 smallest reading of a wrong model is 0.33.
 
-The official tests wait for the VAE file. gmlx decodes the oracle's
-latents and encodes its image with the official VAE, read from a GGUF
-packed from the oracle's safetensors when one is found, else from that
-safetensors file, and holds the manifest's tolerances, tiled passes
-included. Their fp32 max abs is 1e-3, a starting value that the first
-reading on the official file resets. The fp32 items are gated with
-MLX_ENABLE_TF32=0 in a child process, as in the Z-Image check. They are
-skipped until the oracle has run on the official VAE and its manifest is
-committed, and unless GMLX_TEST_IMAGE_DIR holds the VAE and
-GMLX_IMAGE_FIXTURES the fixture.
+The official tests need the VAE file. gmlx decodes the oracle's latents
+and encodes its image with the official VAE, read from a GGUF packed from
+the oracle's safetensors when one is found, else from that safetensors
+file, and holds the manifest's tolerances, tiled passes included. Their
+fp32 max abs is 1e-3, a starting value that the first reading on the
+official file resets. That reading, on an M5 Max with TF32 off, is 3.0e-5
+at 512 pixels and 4.9e-5 at 1024 for the decode on the exact conv path,
+and up to 9.6e-4 for the encoder mean of an image with alpha at 1024,
+which is near its gate of 1e-3. The manifest still holds the starting
+value, since the oracle writes it. The fp32 items are gated with
+MLX_ENABLE_TF32=0 in a child process, as in the Z-Image check. Only the
+default conv path gates: the other path is read and printed, and in bf16
+its decode at 1024 pixels reads 48.06 dB against a gate of 49.21. The
+official tests are skipped unless GMLX_TEST_IMAGE_DIR holds the VAE and
+GMLX_IMAGE_FIXTURES the fixture of the committed manifest, which the
+oracle wrote at 512 and 1024 pixels.
 
 Every pass of an official test goes through ``tiling.decode`` or
 ``tiling.encode``, which price it by the VAE row of the memory plan and
-refuse one that does not fit. That row is unmeasured, so a pass above one
-tile runs whole only when the test forces it. A test that does states the
-price of its largest pass, and none runs a whole pass above 1024 pixels,
-where a bf16 decode is priced at 8.69 GiB against 26.92 GiB at 2048.
+refuse one that does not fit. That row takes tiles first, so a pass above
+one tile runs whole only when the test forces it. A test that does states
+the price of its largest pass over the weights, and none runs a whole pass
+above 1024 pixels, where a bf16 decode is priced at 6.48 GiB against
+22.12 GiB at 2048.
 scripts/image_oracle/check5_qwen_image21_vae.py writes the fixtures."""
 from __future__ import annotations
 
@@ -491,7 +498,10 @@ def test_latent_statistics_are_the_oracle_ones(check5, vaes):
 @official
 def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
     """Whole fp32 decodes, forced. At 1024 pixels the largest is priced at
-    15.38 GiB on the exact conv path and 21.46 GiB on Winograd."""
+    10.18 GiB on the exact conv path and 15.49 GiB on Winograd. The max
+    abs is over the four channels, so the alpha is held to the oracle's
+    fourth channel at the tolerance of the colors, and its own reading is
+    printed."""
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
@@ -501,11 +511,13 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
         for s in _whole_tags(m):
             got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
             ref = arrays[f"decoded_{s}"]
+            assert got.shape == ref.shape and got.shape[1] == 4
             err = fx.max_abs(got, ref)
+            alpha = fx.max_abs(got[:, 3:], ref[:, 3:])
             tol = m["tolerances"]["sizes"][s]["decode_fp32_max_abs"]
             print(f"[check5] {vae_path.name} {s} fp32 {conv} decode, "
-                  f"{_numerics()}, max abs {err:.3e}, rel L2 "
-                  f"{fx.rel_l2(got, ref):.3e}, tolerance {tol:.1e}")
+                  f"{_numerics()}, max abs {err:.3e} (alpha {alpha:.3e}), "
+                  f"rel L2 {fx.rel_l2(got, ref):.3e}, tolerance {tol:.1e}")
             if conv == CONV and err > tol:
                 bad.append(s)
     if _tf32():
@@ -517,7 +529,9 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
 @official
 def test_bf16_decode_psnr(check5, vaes):
     """Whole bf16 decodes, forced. At 1024 pixels the largest is priced at
-    8.69 GiB on the exact conv path and 11.73 GiB on Winograd."""
+    6.48 GiB on the exact conv path and 8.91 GiB on Winograd. The alpha
+    alone, against the oracle's fourth channel, is held to the gate of the
+    four channels."""
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
@@ -527,11 +541,14 @@ def test_bf16_decode_psnr(check5, vaes):
         for s in _whole_tags(m):
             got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
             ref = arrays[f"decoded_{s}"]
+            assert got.shape == ref.shape and got.shape[1] == 4
             db = fx.psnr(to_unit(got), to_unit(ref), 1.0)
+            alpha = fx.psnr(to_unit(got[:, 3:]), to_unit(ref[:, 3:]), 1.0)
             tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
-            print(f"[check5] {s} bf16 {conv} decode PSNR {db:.2f} dB, max "
-                  f"abs {fx.max_abs(got, ref):.3e}, gate {tol:.2f} dB")
-            if conv == CONV and db < tol:
+            print(f"[check5] {s} bf16 {conv} decode PSNR {db:.2f} dB "
+                  f"(alpha {alpha:.2f} dB), max abs "
+                  f"{fx.max_abs(got, ref):.3e}, gate {tol:.2f} dB")
+            if conv == CONV and min(db, alpha) < tol:
                 bad.append(s)
     assert not bad
 
@@ -539,7 +556,7 @@ def test_bf16_decode_psnr(check5, vaes):
 @official
 def test_fp32_encoder_mean(check5, vaes, request):
     """Whole fp32 encodes, forced, through the guarded encode. At 1024
-    pixels the largest is priced at 8.63 GiB."""
+    pixels the largest is priced at 5.05 GiB."""
     arrays, m = check5
     bad = []
     for s in _whole_tags(m):
@@ -564,7 +581,7 @@ def test_fp32_encoder_mean(check5, vaes, request):
 @official
 def test_bf16_encoder_mean(check5, vaes):
     """Whole bf16 encodes, forced, through the guarded encode. At 1024
-    pixels the largest is priced at 5.32 GiB."""
+    pixels the largest is priced at 3.42 GiB."""
     arrays, m = check5
     for s in _whole_tags(m):
         got = _guarded_mean(vaes("bf16"), arrays[f"image_{s}"], m,
@@ -582,7 +599,7 @@ def test_bf16_encoder_mean(check5, vaes):
 def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
     """The tiled bf16 decode, which is the automatic choice above one
     tile, beside one whole decode, forced. At 1024 pixels the tiled pass
-    is priced at 3.52 GiB and the whole one at 8.69 GiB."""
+    is priced at 2.24 GiB and the whole one at 6.48 GiB."""
     from gmlx.image import memfit
     from gmlx.image.vae import tiling
 
@@ -608,8 +625,10 @@ def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
 @official
 def test_tiled_bf16_encode_at_the_largest_size(check5, vaes):
     """A tiled bf16 encode beside a whole one, forced, and two whole
-    decodes, forced. At 1024 pixels the whole encode is priced at 5.32 GiB
-    and each whole decode at 8.69 GiB."""
+    decodes, forced. The tiles of an encode are cropped at the reach of a
+    cut, so it is the whole encode up to the rounding of the device. At
+    1024 pixels the whole encode is priced at 3.42 GiB and each whole
+    decode at 6.48 GiB."""
     arrays, m = check5
     s = _whole_tags(m)[-1]
     vae = vaes("bf16")
