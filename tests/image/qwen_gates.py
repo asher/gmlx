@@ -31,6 +31,7 @@ from contextlib import contextmanager
 import mlx.core as mx
 import numpy as np
 
+import block_gates as bg
 from oracle_fixture import fx
 
 from gmlx.image.conditioning import Conditioning
@@ -425,7 +426,17 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None):
 # The site gate of a block's own ops: the output of each op on its own
 # production input against the stock op in float32 on that input, at most
 # 2 n u. n counts the outputs the stock path of the op writes in the
-# activation dtype, whatever kernel runs at the seam.
+# activation dtype. A q and k site that a kernel route handed to
+# mlx-kquant is held to the kernel's own count, ``bg.KERNEL_ROUNDINGS``:
+# the kernel norms and rotates in float32 and rounds once, so it has half
+# the room of the stock path.
+#
+# One head is a thirty-second of a token row of q or k on the real model,
+# so a fault in one head is a small part of a reading over all rows. Every
+# q and k site is therefore also held head by head: the site's gate on the
+# worst head row, one head of one token of q or of k. That reading has the
+# site's key with ``HEAD`` after it.
+HEAD = "head"
 OP_ROUNDINGS = {
     "layer_norm": 1,      # one op
     "modulate": 2,        # 1 + scale, then the product
@@ -454,13 +465,21 @@ def _rel_l2(got, want) -> float:
 
 
 @contextmanager
-def block_sites(model, sites: dict, leaves: bool = False):
+def block_sites(model, sites: dict, leaves: bool = False,
+                routed: dict | None = None, heads: dict | None = None):
     """Fill ``sites`` with a reading for every op that a block calls
     through ``gmlx.image.ops`` while steps run: (block, call, op, number)
     to (relative L2, gate). ``call`` is prefill or target, and ``number``
     counts the calls of that op in that block and call since the reader
     started. The final norm's two ops read as the block ``norm_out``. An
     op that returns another dtype than its input's gets a gate of zero.
+
+    A q and k site also gets the reading of its worst head row, under its
+    key with ``HEAD`` after it and at the site's gate. ``heads`` takes
+    where that row is: (0 for q or 1 for k, then its index in the
+    array). ``routed`` takes the name of the mlx-kquant op for every q
+    and k site that a kernel route handed to it, and such a site has the
+    gate of the kernel's count.
 
     With ``leaves``, every call of a linear leaf of a model without
     adapter wrappers is read too, as ``leaf_sites`` reads a wrapped one:
@@ -482,14 +501,27 @@ def block_sites(model, sites: dict, leaves: bool = False):
     cur: list = [(NORM_OUT, "target")]
     counts: dict = {}
 
-    def read(op, got, want, like):
+    ran: list = []      # routes that handed a call to mlx-kquant
+
+    def read(op, got, want, like, rounds=None, by_head=False):
         key = (*cur[-1], op)
         n = counts[key] = counts.get(key, 0) + 1
         outs = got if isinstance(got, tuple) else (got,)
         same = all(o.dtype == like.dtype for o in outs)
+        gate = 2 * (rounds or OP_ROUNDINGS[op]) * SITE_UNIT * same
         with mx.stream(mx.cpu):
-            rel = _rel_l2(got, want())
-        sites[(*key, n)] = (rel, 2 * OP_ROUNDINGS[op] * SITE_UNIT * same)
+            exact = want()
+            rel = _rel_l2(got, exact)
+            if by_head:
+                e2, r2 = bg._head_sums(got, exact)
+                mx.eval(e2, r2)
+        sites[(*key, n)] = (rel, gate)
+        if by_head:
+            worst, at = bg._worst(np.array(e2), np.array(r2))
+            sites[(*key, n, HEAD)] = (worst, gate)
+            if heads is not None:
+                heads[(*key, n)] = at
+        return (*key, n)
 
     def within(call, orig):
         def run(blk, *a, **k):
@@ -534,10 +566,16 @@ def block_sites(model, sites: dict, leaves: bool = False):
 
     def qk(orig):
         def run(q, k, q_w, k_w, cos, sin, eps):
+            before = len(ran)
             out = orig(q, k, q_w, k_w, cos, sin, eps)
-            read("qk", tuple(out), lambda: attention.qk_norm_rope(
+            kernel = "qk" in ran[before:]
+            key = read("qk", tuple(out), lambda: attention.qk_norm_rope(
                 q.astype(f), k.astype(f), q_w.astype(f), k_w.astype(f),
-                cos, sin, eps), q)
+                cos, sin, eps), q,
+                rounds=bg.KERNEL_ROUNDINGS["qk"] if kernel else None,
+                by_head=True)
+            if kernel and routed is not None:
+                routed[key] = bg.KERNEL_OPS["qk"]
             return out
         return run
 
@@ -584,10 +622,22 @@ def block_sites(model, sites: dict, leaves: bool = False):
         for obj, attr, hook in hooks:
             saved.append((obj, attr, getattr(obj, attr)))
             setattr(obj, attr, hook(saved[-1][2]))
-        yield sites
+        with bg.kernel_calls(ran.append):
+            yield sites
     finally:
         for obj, attr, orig in reversed(saved):
             setattr(obj, attr, orig)
+
+
+def site_op(key: tuple) -> str:
+    """The op a reading of ``block_sites`` belongs to, or leaf for a
+    linear leaf."""
+    return "leaf" if len(key) == 2 else key[2]
+
+
+def head_sites(sites: dict) -> dict:
+    """The head row readings of the q and k sites, by the site's key."""
+    return {k[:4]: v for k, v in sites.items() if len(k) == 5}
 
 
 def op_sites(sites: dict) -> dict:
@@ -622,9 +672,33 @@ def over_gate(sites: dict) -> dict:
 
 def worst_by_op(sites: dict) -> dict:
     """Op, or leaf for a linear leaf, to its largest reading over its
-    gate."""
+    gate. The head rows of the q and k sites read as ``qk head``."""
     out: dict = {}
     for key, (rel, gate) in sites.items():
-        op = key[2] if len(key) == 4 else "leaf"
+        op = site_op(key) + (" head" if len(key) == 5 else "")
         out[op] = max(out.get(op, 0.0), rel / gate if gate else float("inf"))
     return out
+
+
+def qk_reading(sites: dict, routed: dict, heads: dict) -> str:
+    """The q and k sites in one line: how many ran on a kernel and at
+    which count, the largest reading over its gate of each call, and the
+    worst head row with its place."""
+    qk = {k: v for k, v in op_sites(sites).items() if k[2] == "qk"}
+    by_head = head_sites(sites)
+    parts = [f"{len(qk)} qk sites, {sum(k in routed for k in qk)} on an "
+             f"mlx-kquant kernel at n {bg.KERNEL_ROUNDINGS['qk']}, the "
+             f"others on the stock op at n {OP_ROUNDINGS['qk']}"]
+    for call in sorted({k[1] for k in qk}):
+        share = {k: r / g for k, (r, g) in qk.items() if k[1] == call}
+        vals = sorted(share.values())
+        parts.append(f"{call}: {len(vals)} readings from {vals[0]:.2f} to "
+                     f"{vals[-1]:.2f} of the gate, median "
+                     f"{vals[len(vals) // 2]:.2f}")
+    top = max(by_head, key=lambda k: by_head[k][0] / by_head[k][1])
+    rel, gate = by_head[top]
+    which, *at = heads.get(top, (None,))
+    parts.append(f"worst head row {rel / gate:.2f} of its gate "
+                 f"({rel:.3e} of {gate:.3e}) at {top}, "
+                 f"{'qk'[which] if which is not None else '?'} index {at}")
+    return "; ".join(parts)

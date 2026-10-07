@@ -27,6 +27,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
+import block_gates as bg
 import qwen_gates as qg
 import qwen_tiny as qt
 from block_gates import (EXACT_TOL, assert_all_dense, exact_process,
@@ -39,7 +40,7 @@ from gmlx.image import loader as image_loader
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
 from gmlx.image.lora import install
-from gmlx.image.ops import attention, norms
+from gmlx.image.ops import attention, kq_routes, norms
 
 BLOCKS = "selftest_qwen_image21_tiny_ref2"
 TINY = {c: f"selftest_qwen_image21_tiny_{c}" for c in ("text", "ref1", "ref2")}
@@ -400,13 +401,15 @@ def test_each_wrong_model_fails_on_the_velocities_alone(tiny, monkeypatch,
 
 # The site gate on the tiny model in bf16.
 
-def _tiny_sites(pipe, arrays: dict) -> tuple[dict, int]:
+def _tiny_sites(pipe, arrays: dict, routed: dict | None = None
+                ) -> tuple[dict, int]:
     """The sites of one prefill and two target steps on the path a
     request takes, and the count of the prefix's segments."""
     model = pipe.dit
     cond = qg.conditioning(arrays, key="")
     sites: dict = {}
-    with mx.stream(mx.cpu), qg.block_sites(model, sites, leaves=True):
+    with mx.stream(mx.cpu), qg.block_sites(model, sites, leaves=True,
+                                           routed=routed):
         prefix = qm.prefill_prefix(model, cond)
         for tag in "ab":
             mx.eval(qm.forward_target(
@@ -422,8 +425,16 @@ def test_the_sites_of_a_tiny_step_are_within_their_gates(tiny_bf16, case):
     input, and every op a block calls is read."""
     arrays, _ = committed_fixture(TINY[case])
     model = tiny_bf16.dit
-    sites, segments = _tiny_sites(tiny_bf16, arrays)
+    routed: dict = {}
+    sites, segments = _tiny_sites(tiny_bf16, arrays, routed)
     assert not qg.missing_ops(model, sites, 1, 2, segments)
+    # No kernel takes a head of 16, so every q and k site is the stock op
+    # at the stock count, and each has its head row reading.
+    qk = {k: v for k, v in qg.op_sites(sites).items() if k[2] == "qk"}
+    assert not routed and qk
+    assert {g for _, g in qk.values()} == {
+        2 * qg.OP_ROUNDINGS["qk"] * qg.SITE_UNIT}
+    assert qg.head_sites(sites).keys() == qk.keys()
     assert {k[0] for k in sites if len(k) == 2} == set(
         install.linear_leaves(model))
     worst = qg.worst_by_op(sites)
@@ -440,6 +451,20 @@ def _a_leaf_off(mp, model):
     real = type(leaf).__call__
     mp.setattr(type(leaf), "__call__", lambda self, x: (
         real(self, x) * 1.05 if self is leaf else real(self, x)))
+
+
+def _a_head_off(mp, _):
+    """The seam's own op, a kernel when a route is in force, with head 1
+    of q a twentieth off. The seam returns q as (B, heads, L, D)."""
+    real = ops.qk_norm_rope
+
+    def off(q, k, qw, kw, cos, sin, eps):
+        q2, k2 = real(q, k, qw, kw, cos, sin, eps)
+        scale = mx.array([1.05 if h == 1 else 1.0
+                          for h in range(q2.shape[1])]).astype(q2.dtype)
+        return q2 * scale[:, None, None], k2
+
+    mp.setattr(ops, "qk_norm_rope", off)
 
 
 # name: (the wrong production op, the op whose sites must miss)
@@ -461,6 +486,7 @@ SITE_FAULTS = {
         lambda mp, _: mp.setattr(
             ops, "qk_norm_rope", lambda q, k, qw, kw, cos, sin, eps:
             attention.qk_norm_rope(q, k, qw, kw, sin, cos, eps)), "qk"),
+    "one head of q a twentieth off": (_a_head_off, "qk"),
     "layer norm at another eps": (
         lambda mp, _: mp.setattr(
             ops, "layer_norm", lambda x, eps: norms.layer_norm(x, 0.5)),
@@ -482,12 +508,16 @@ def test_each_wrong_op_fails_the_tiny_site_gate_at_its_own_site(
         sites, _ = _tiny_sites(tiny_bf16, arrays)
     over = qg.over_gate(sites)
     assert over, name
-    assert {k[2] if len(k) == 4 else "leaf" for k in over} == {op}, over
+    assert {qg.site_op(k) for k in over} == {op}, over
     if op == "leaf":
         assert {k[0] for k in over} == {"transformer_blocks.1.attn.to_v"}
     if op == "sdpa":
         # The target rows take no mask.
         assert {k[1] for k in over} == {"prefill"}
+    if name.startswith("one head"):
+        # Every q and k site misses at its worst head row.
+        assert {k[:4] for k in over if len(k) == 5} == {
+            k for k in qg.op_sites(sites) if k[2] == "qk"}
     sites, _ = _tiny_sites(tiny_bf16, arrays)
     assert not qg.over_gate(sites)
 
@@ -542,12 +572,25 @@ def test_check3_site_gate_at_512(real):
     request takes is within its site gate of the stock op in float32 on
     the same input, and that run's velocities pass the product gate."""
     arrays, m = fixture(_real_manifest(REAL[512])["name"])
-    sites: dict = {}
-    with qg.block_sites(real, sites, leaves=True):
+    sites, routed, heads = {}, {}, {}
+    with qg.block_sites(real, sites, leaves=True, routed=routed,
+                        heads=heads):
         free = qg.free_run(real, arrays, own_temb=True)
     cond = qg.conditioning(arrays)
     segments = len(layout.prefix_layout(*qm.prefix_key(cond)).segments)
     assert not qg.missing_ops(real, sites, 1, 2, segments)
+    # With the qk route in force every q and k site of the real model ran
+    # on the kernel and is held to its count, and with the routes off
+    # none did.
+    qk = {k: v for k, v in qg.op_sites(sites).items() if k[2] == "qk"}
+    on = "qk" in kq_routes.active()
+    assert routed.keys() == (qk.keys() if on else set()), (
+        on, len(routed), len(qk))
+    n = bg.KERNEL_ROUNDINGS["qk"] if on else qg.OP_ROUNDINGS["qk"]
+    assert {g for _, g in qk.values()} == {2 * n * qg.SITE_UNIT}
+    assert qg.head_sites(sites).keys() == qk.keys()
+    print("qwen check3 sites 512, q and k: "
+          + qg.qk_reading(sites, routed, heads))
     assert {k[0] for k in sites if len(k) == 2} == set(
         install.linear_leaves(real))
     worst = qg.worst_by_op(sites)
@@ -558,6 +601,33 @@ def test_check3_site_gate_at_512(real):
           + qg.product_reading(m, {}, free))
     assert not qg.over_gate(sites), qg.over_gate(sites)
     assert not qg.product_misses(m, {}, free)
+
+
+@pytest.mark.integration
+def test_check3_one_head_of_q_off_fails_its_head_row_at_512(real,
+                                                           monkeypatch):
+    """One head of q a twentieth off at the seam, on the kernel when the
+    qk route is in force: every q and k site misses at its head row. The
+    reading over all rows of a site is printed beside it: one head is a
+    thirty-second of q."""
+    arrays, _ = fixture(_real_manifest(REAL[512])["name"])
+    sites, routed = {}, {}
+    with monkeypatch.context() as mp:
+        _a_head_off(mp, real)
+        with qg.block_sites(real, sites, routed=routed):
+            qg.free_run(real, arrays, own_temb=True)
+    qk = {k: v for k, v in qg.op_sites(sites).items() if k[2] == "qk"}
+    on = "qk" in kq_routes.active()
+    assert routed.keys() == (qk.keys() if on else set())
+    by_head = qg.head_sites(sites)
+    low = min(r / g for r, g in by_head.values())
+    top = max(r / g for r, g in qk.values())
+    print(f"qwen check3 sites 512, one head of q a twentieth off, "
+          f"{len(routed)} of {len(qk)} sites on the kernel: the smallest "
+          f"worst head row {low:.2f} of its gate, the largest reading over "
+          f"all rows {top:.2f}")
+    assert low > 1, low
+    assert {qg.site_op(k) for k in qg.over_gate(sites)} == {"qk"}
 
 
 @pytest.mark.integration
