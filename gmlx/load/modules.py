@@ -223,6 +223,17 @@ class _FusedMoeCaps:
         # q5_k shared experts (UD builds) joined later; same docstring sniff.
         if "q5_k" in mix_doc:
             self.shexp_upcast += ("q5_k",)
+        # Per-triple queries for shared experts outside the upcast set
+        # (low-bit files that give the shared gate and up tensors their own
+        # codecs); absent on older kq builds. GMLX_FUSED_MOE_SHEXP_SPLIT=0
+        # keeps such blocks on the fused router alone.
+        split_on = os.environ.get("GMLX_FUSED_MOE_SHEXP_SPLIT", "1") != "0"
+        self.shexp_glu_combo = (
+            getattr(kq, "shexp_glu_combo_has_kernel", None)
+            if split_on else None)
+        self.shexp_mix_combo = (
+            getattr(kq, "shexp_mix_combo_has_kernel", None)
+            if split_on else None)
         # [T, S - 1] scores with the shared slot at an implicit weight of 1
         # (saves the per-layer ones-column concat on the fold).
         self.mix_implicit = "implicit weight" in mix_doc
@@ -926,34 +937,66 @@ def _build_gateup_concat(m):
 # Regime 3: qwen3-next-shaped MoE block (router + SwitchGLU + shared expert)
 
 
-def _eligible_kq_block(m, caps):
-    """qwen3-next-shaped MoE block: router + SwitchGLU + shared expert
-    with a sigmoid gate. Fusable when the shared expert's projections are
-    K-quant rows shape-matched to the expert stacks (same codec, or a
-    q6_k/q8_0 upcast), so it rides the gather as one extra slot and the
-    routing mix folds into the down projection (kq.moe_glu_gather_shexp_kq
-    + kq.gather_qmv_mix_kq)."""
-    kq = caps.kq
-    _has_kq_fused = caps.has_kq_fused
-    _GLU_TYPES = caps.glu_types
-    _KQ_FUSED_CODECS = caps.kq_fused_codecs
-    _KQ_SHEXP_UPCAST = caps.shexp_upcast
+def _kq_block_shape_ok(m, caps):
+    """The qwen3-next MoE block shape, not yet swapped: softmax router,
+    SwitchGLU with the stock SwiGLU, plain silu(gate) * up shared expert
+    behind a sigmoid gate."""
     if type(m).__name__ == "_FusedKQuantMoeBlock":
         return False  # already swapped; keep class identity one layer deep
-    if not _has_kq_fused or not hasattr(kq, "moe_glu_gather_shexp_kq"):
+    if not caps.has_kq_fused:
         return False
     for attr in ("gate", "switch_mlp", "shared_expert",
                  "shared_expert_gate", "top_k", "norm_topk_prob"):
         if not hasattr(m, attr):
             return False
     sw = m.switch_mlp
-    if not isinstance(sw, _GLU_TYPES):  # subclasses (incl. fused) OK
+    if not isinstance(sw, caps.glu_types):  # subclasses (incl. fused) OK
         return False
     act = getattr(sw, "activation", None)
     if act is None or type(act).__name__ != "SwiGLU":
         return False
     if "switch_layers" not in type(act).__module__:
         return False
+    se = m.shared_expert
+    for attr in ("gate_proj", "up_proj", "down_proj"):
+        if not hasattr(se, attr):
+            return False
+    # plain silu(gate) * up shared expert only (qwen3-next MLP shape)
+    return not hasattr(se, "activation")
+
+
+# Widths at which a split-codec fold loses to the fused router with the
+# members' own gathers: its GLU gather has no form that shares an expert
+# between two rows of a verify block.
+_KQ_SPLIT_FOLD_SKIP_T = (2, 3)
+
+
+def _kq_shexp_glu_split(m, caps):
+    """Whether a foldable block's shared gate and up tensors need the
+    split-codec GLU gather (codecs outside the experts' own and the
+    upcast set)."""
+    gc = m.shared_expert.gate_proj.kquant_type
+    uc = m.shared_expert.up_proj.kquant_type
+    return not (gc == uc and gc in (
+        m.switch_mlp.gate_proj.kquant_type,) + caps.shexp_upcast)
+
+
+def _eligible_kq_block(m, caps):
+    """qwen3-next-shaped MoE block: router + SwitchGLU + shared expert
+    with a sigmoid gate. Fusable when the shared expert's projections are
+    K-quant rows shape-matched to the expert stacks, in codecs kq pairs
+    with the experts' (the same codec, an upcast, or a gate and up pair
+    the build lists), so it rides the gather as one extra slot and the
+    routing mix folds into the down projection (kq.moe_glu_gather_shexp_kq
+    + kq.gather_qmv_mix_kq)."""
+    kq = caps.kq
+    _KQ_FUSED_CODECS = caps.kq_fused_codecs
+    _KQ_SHEXP_UPCAST = caps.shexp_upcast
+    if not _kq_block_shape_ok(m, caps):
+        return False
+    if not hasattr(kq, "moe_glu_gather_shexp_kq"):
+        return False
+    sw = m.switch_mlp
     for proj in (sw.gate_proj, sw.up_proj, sw.down_proj):
         if not isinstance(proj, KQuantSwitchLinear):
             return False
@@ -973,24 +1016,24 @@ def _eligible_kq_block(m, caps):
     if _kq_wire_k(sw.down_proj.weight, sw.down_proj.kquant_type) != inter:
         return False
     se = m.shared_expert
-    for attr in ("gate_proj", "up_proj", "down_proj"):
-        if not hasattr(se, attr):
-            return False
-    # plain silu(gate) * up shared expert only (qwen3-next MLP shape)
-    if hasattr(se, "activation"):
-        return False
     # unquantized shared expert (e.g. the qwen4exp MTP companion keeps its
     # dense tensors bf16) stays on the unfused path
     for attr in ("gate_proj", "up_proj", "down_proj"):
         if not hasattr(getattr(se, attr), "kquant_type"):
             return False
-    # the GLU gather runs both shexp slots with one codec
-    if se.gate_proj.kquant_type != se.up_proj.kquant_type:
-        return False
+    ec, dc = sw.gate_proj.kquant_type, sw.down_proj.kquant_type
+    gc, uc = se.gate_proj.kquant_type, se.up_proj.kquant_type
+    sdc = se.down_proj.kquant_type
+    if not (gc == uc and gc in (ec,) + _KQ_SHEXP_UPCAST):
+        if caps.shexp_glu_combo is None or not caps.shexp_glu_combo(ec, gc, uc):
+            return False
+    if sdc not in (dc,) + _KQ_SHEXP_UPCAST:
+        if caps.shexp_mix_combo is None or not caps.shexp_mix_combo(dc, sdc):
+            return False
     for proj, stack in ((se.gate_proj, sw.gate_proj),
                         (se.up_proj, sw.up_proj),
                         (se.down_proj, sw.down_proj)):
-        if not _kq_dense(proj, (stack.kquant_type,) + _KQ_SHEXP_UPCAST):
+        if not _kq_dense(proj, (proj.kquant_type,)):
             return False
         # shape-matched in each side's own codec wire bytes
         if proj.weight.shape[0] != stack.weight.shape[1]:
@@ -1001,6 +1044,18 @@ def _eligible_kq_block(m, caps):
     return True
 
 
+def _eligible_kq_router_block(m, caps):
+    """A qwen3-next-shaped block on K-quant expert stacks whose shared
+    expert cannot ride the gathers (unquantized, gate and up in two codecs,
+    or a codec with no kernel pairing). It fuses the router alone: one
+    matvec on the router + shared-gate weight, then kq.moe_router_topk."""
+    if not caps.router_ok or not _kq_block_shape_ok(m, caps):
+        return False
+    sw = m.switch_mlp
+    return all(isinstance(p, KQuantSwitchLinear)
+               for p in (sw.gate_proj, sw.up_proj, sw.down_proj))
+
+
 def _make_fused_block(base_cls, caps):
     kq = caps.kq
 
@@ -1009,7 +1064,25 @@ def _make_fused_block(base_cls, caps):
         shared expert rides the GLU gather as slot R and the routing mix
         (scores-weighted sum + sigmoid-gated shared add) runs inside the
         down gather in f32 -- closer to the f32 reference than stock's
-        bf16 per-slot rounding, so token tie-flips are possible."""
+        bf16 per-slot rounding, so token tie-flips are possible.
+
+        With ``_kq_shexp_fold`` False, or at a width in
+        ``_kq_fold_skip_t``, the block fuses the router only: the expert
+        gathers and the shared expert run as the members' own forwards and
+        the mix stays in the activation dtype."""
+
+        def _kq_router(self):
+            """The router + shared-gate weight for the one-dispatch router,
+            or None when it is off or the block's router does not qualify.
+            Built on first use: at install time the router weights are
+            still load_weights placeholders."""
+            if not _FUSED_MOE_ROUTER_ENABLED:
+                return None
+            rc = getattr(self, "_kq_router_cat", None)
+            if rc is None and getattr(self, "_kq_router_want", False):
+                rc = _build_router_cat(self)
+                object.__setattr__(self, "_kq_router_cat", rc)
+            return None if rc is None or rc is False else rc
 
         def __call__(self, x):
             d = x.shape[-1]
@@ -1024,6 +1097,12 @@ def _make_fused_block(base_cls, caps):
                 from gmlx.stream.moe_experts import qwen3_next_moe_forward
 
                 return qwen3_next_moe_forward(self, x)
+            # False: the shared expert cannot ride the gathers (its codec
+            # has no kernel pairing with the experts'). The block then
+            # fuses the router only and calls its members.
+            fold = getattr(self, "_kq_shexp_fold", True)
+            if t in getattr(self, "_kq_fold_skip_t", ()):
+                fold = False
             projs = None
             if (
                 _FUSED_MOE_ENABLED
@@ -1034,8 +1113,12 @@ def _make_fused_block(base_cls, caps):
                 and getattr(self, "sharding_group", None) is None
                 and _kq_fused_device_ok(self, self.switch_mlp)
             ):
-                # An adapted member sends the block down the stock path.
-                projs = _kq_member_projs(self.switch_mlp, self.shared_expert)
+                if fold:
+                    # An adapted member sends the block down the stock path.
+                    projs = _kq_member_projs(
+                        self.switch_mlp, self.shared_expert)
+                elif self._kq_router() is not None:
+                    projs = ()
             if projs is None:
                 if expert_ctl:
                     # Stock forward with the fan-out hook at the selection
@@ -1045,15 +1128,8 @@ def _make_fused_block(base_cls, caps):
                     return qwen3_next_moe_forward(self, x)
                 return super().__call__(x)
             xf = x.reshape(t, d)
-            rc = getattr(self, "_kq_router_cat", None)
-            if (rc is None and _FUSED_MOE_ROUTER_ENABLED
-                    and getattr(self, "_kq_router_want", False)):
-                # built on first use: at install time the router weights
-                # are still load_weights placeholders
-                rc = _build_router_cat(self)
-                object.__setattr__(self, "_kq_router_cat", rc)
-            if (rc is not None and rc is not False
-                    and _FUSED_MOE_ROUTER_ENABLED):
+            rc = self._kq_router()
+            if rc is not None:
                 logits = xf.astype(rc.dtype) @ rc.T
                 inds, sc = kq.moe_router_topk(
                     logits, self.top_k, bool(self.norm_topk_prob))
@@ -1082,10 +1158,20 @@ def _make_fused_block(base_cls, caps):
                     self, inds.reshape(*rows, k), sc[..., :k].reshape(*rows, k))
                 inds = inds3.reshape(t, k)
                 sc = mx.concatenate([routed.reshape(t, k), sc[..., k:]], axis=-1)
+            if not fold:
+                k = self.top_k
+                rows = x.shape[:-1]
+                w = sc.astype(x.dtype)
+                y = self.switch_mlp(x, inds.reshape(*rows, k))
+                y = (y * w[..., :k].reshape(*rows, k, 1)).sum(axis=-2)
+                return y + w[..., k:].reshape(*rows, 1) * self.shared_expert(x)
             wg, wu, wd, sg, su, sd = projs
             skw = {}
             if sg.kquant_type != wg.kquant_type:
                 skw = {"shexp_kquant_type": sg.kquant_type}
+            if su.kquant_type != sg.kquant_type:
+                skw = {"shexp_kquant_type": sg.kquant_type,
+                       "shexp_up_kquant_type": su.kquant_type}
             h = kq.moe_glu_gather_shexp_kq(
                 xf, wg.weight, wu.weight, sg.weight, su.weight,
                 wg.kquant_type, inds, act="silu", **skw)
@@ -1106,10 +1192,15 @@ def _install_kq_block_fusion(model, caps) -> int:
     classes: dict = {}
     n = 0
     for _, m in model.named_modules():
-        if not _eligible_kq_block(m, caps):
+        fold = _eligible_kq_block(m, caps)
+        if not fold and not _eligible_kq_router_block(m, caps):
             continue
         _swap_class(m, classes, _make_fused_block, caps)
         object.__setattr__(m, "_kq_router_want", caps.router_ok)
+        if not fold:
+            object.__setattr__(m, "_kq_shexp_fold", False)
+        elif _kq_shexp_glu_split(m, caps):
+            object.__setattr__(m, "_kq_fold_skip_t", _KQ_SPLIT_FOLD_SKIP_T)
         n += 1
     return n
 
@@ -1709,7 +1800,9 @@ def install_fused_moe_glu(model) -> int:
     shape-matched to the expert stacks -- same codec, or a q6_k/q8_0 upcast
     (UD-style): the shared expert rides the GLU gather as one extra slot and
     the routing mix folds into the down gather (kq.moe_glu_gather_shexp_kq +
-    kq.gather_qmv_mix_kq). Disable just this level with
+    kq.gather_qmv_mix_kq). A block whose shared expert does not qualify
+    (qwen4exp files that give each shared-expert tensor its own codec)
+    still gets the one-dispatch router. Disable just this level with
     GMLX_FUSED_MOE_BLOCK=0.
 
     hy_v3 MoE blocks (sigmoid+bias router, ungated shared expert) get the

@@ -14,6 +14,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per token of each layer part at exit, and level 2 splits attention into
   its steps.
 
+### Changed
+
+- `qwen4exp` decode runs faster on GGUFs that give the shared expert its
+  own codecs, such as the ISTA-DASLab GSQ-RCO quants.
+  `GMLX_FUSED_MOE_ROUTER=0` and `GMLX_FUSED_MOE_SHEXP_SPLIT=0` restore the
+  previous path.
+
 ### Fixed
 
 - `qwen4exp` decode keeps its speed as the context grows. It fell to about
