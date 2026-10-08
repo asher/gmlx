@@ -253,3 +253,38 @@ def test_two_segment_scores_match_one_buffer(monkeypatch):
     assert cache._bt is not None and cache.n_blocks > cache._nbb >= 512
     for a, b in zip(got[1:], ref[1:]):
         assert mx.array_equal(a, b).item()
+
+
+def test_restored_streams_can_be_read_from_another_thread():
+    """The prompt cache copies an entry, evaluates the copy, and hands it to
+    its disk writer thread. A stream the cache wraps on assignment has to be
+    evaluated too, or the writer evaluates an array of another thread."""
+    import threading
+
+    made, errors = {}, []
+
+    def build():
+        k = mx.random.normal((1, 2, 40, 8)).astype(mx.bfloat16)
+        v = mx.random.normal((1, 2, 40, 8)).astype(mx.bfloat16)
+        ik = mx.random.normal((1, 40, 6)).astype(mx.bfloat16)
+        mx.eval(k, v, ik)
+        c = QSAKVCache(4)
+        # a view, as a clone that keeps a prefix of the entry passes
+        c.state = (k[..., :32, :], v[..., :32, :], ik[:, :32])
+        made["c"], made["k"] = c, k
+
+    def read():
+        try:
+            c = made["c"]
+            got = c.keys[..., :32, :]
+            mx.eval(got, c.values, c.ik)
+            made["got"] = got
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    for fn in (build, read):
+        t = threading.Thread(target=fn)
+        t.start()
+        t.join()
+    assert errors == []
+    assert mx.array_equal(made["got"], made["k"][..., :32, :]).item()

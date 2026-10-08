@@ -1005,7 +1005,7 @@ class QSAKVCache(KVCache):
 
     @keys.setter
     def keys(self, v):
-        self._kb = None if v is None else mx.contiguous(v)
+        self._kb = self._owned(v)
         self._tl = 0
 
     @property
@@ -1015,7 +1015,7 @@ class QSAKVCache(KVCache):
 
     @values.setter
     def values(self, v):
-        self._vb = None if v is None else mx.contiguous(v)
+        self._vb = self._owned(v)
         self._tl = 0
 
     @property
@@ -1025,8 +1025,19 @@ class QSAKVCache(KVCache):
 
     @ik.setter
     def ik(self, v):
-        self._ib = None if v is None else mx.contiguous(v)
+        self._ib = self._owned(v)
         self._tl = 0
+
+    @staticmethod
+    def _owned(v):
+        """``v`` as one compact buffer, evaluated. The prompt cache
+        evaluates what it assigns and then reads the cache from its disk
+        writer thread, which cannot evaluate an array of this thread."""
+        if v is None:
+            return None
+        v = mx.contiguous(v)
+        mx.eval(v)
+        return v
 
     def _tail_rows(self) -> int:
         if self._tail_cap is None:
