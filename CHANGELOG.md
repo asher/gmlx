@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.22] - 2026-10-07
+
 ### Added
 
 - GGUFs with `Q2_0` tensors load, such as the ISTA-DASLab GSQ-RCO quants of
