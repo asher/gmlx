@@ -885,6 +885,21 @@ def _kq_bs_prefill():
     return _kq_bs_fn
 
 
+_kq_score_w: dict = {}
+
+
+def _kq_score_weights(B: int, L: int, n_heads: int, head_dim: int, dtype):
+    """Head weights of the fused scorer, ``[B, L, H]`` of
+    ``1 / sqrt(head_dim)``. Kept per shape: a fill per call is one more GPU
+    dispatch in every indexer layer of every token."""
+    key = (B, L, n_heads, head_dim, dtype)
+    w = _kq_score_w.get(key)
+    if w is None:
+        w = mx.full((B, L, n_heads), 1.0 / math.sqrt(head_dim), dtype=dtype)
+        _kq_score_w[key] = w
+    return w
+
+
 def _kq_topk():
     """kq radix top-k for the QSA block selection, or None (stock
     argpartition). ``GMLX_Q4_QSA_KQ_TOPK=0`` disables."""
@@ -1577,8 +1592,7 @@ class QSAIndexer(nn.Module):
             # finite_min) and the radix top-k consumes its 16-bit rows
             # directly. Replaces the astype/matmul/relu/sum/where chain.
             q = self._queries(x, offset, cos, sin).astype(x.dtype)
-            w = mx.full((B, L, self.n_heads),
-                        1.0 / math.sqrt(self.head_dim), dtype=x.dtype)
+            w = _kq_score_weights(B, L, self.n_heads, self.head_dim, x.dtype)
             s16 = _kq_score()(q, blocks.astype(x.dtype), w, offset, self.ratio)
             if btail is not None:
                 # The scorer numbers blocks from 0, so the tail's call moves
