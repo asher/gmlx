@@ -198,6 +198,8 @@ class HyperConnection(nn.Module):
             lo, inj = front(xn, down.weight, inject.weight,
                             self.norm.weight.dtype)
             return epi(lo, up.weight, xn), inj
+        if kern and B * T <= 8 and plain and self._hcfl_ok(h.dtype):
+            return _hc_float_mix(self, h)
         xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps) if kern else None
         if xn is None:
             xn = self.norm(h)
@@ -238,6 +240,186 @@ class HyperConnection(nn.Module):
         return (ok and _kq_hc() is not None
                 and (h_dtype == mx.float32
                      or h_dtype == self.norm.weight.dtype))
+
+    def _hcfl_ok(self, h_dtype) -> bool:
+        """Eligibility of the float-weight fused path: half down, up and
+        norm gain of one dtype, an inject of that dtype or float32,
+        kernel-aligned shapes. Cached per module like ``_hclr_ok``."""
+        ok = self.__dict__.get("_hcfl_cache")
+        if ok is None:
+            half = self.norm.weight.dtype
+            k = self.hc * self.hidden
+            ok = (
+                self.hc == 4
+                and "inject" in self
+                and half in (mx.float16, mx.bfloat16)
+                and getattr(self.down, "kquant_type", None) is None
+                and getattr(self.up, "kquant_type", None) is None
+                and self.down.weight.dtype == half
+                and self.up.weight.dtype == half
+                and self.inject.weight.dtype in (half, mx.float32)
+                and self.hidden % 64 == 0
+                and k % 256 == 0
+                and self.down.weight.shape[0] % 4 == 0
+                and self.down.weight.shape == (self.down.weight.shape[0], k)
+                and self.up.weight.shape == (k, self.down.weight.shape[0])
+            )
+            self.__dict__["_hcfl_cache"] = ok
+        return (ok and _kq_hc() is not None and _hc_float_kerns() is not None
+                and (h_dtype == mx.float32
+                     or h_dtype == self.norm.weight.dtype))
+
+
+# Decode-width HC kernels for float down and up weights (a GGUF that keeps
+# the low-rank pair at bf16). The eager chain runs each mixer as a dozen
+# ops around three matmuls; here it is the kq norm and two dispatches that
+# read each weight once for every row. Rounding points are the eager
+# chain's: a dot rounds to the result dtype before its activation, and so
+# does each op after it. Accumulation is fp32. GMLX_Q4_HC_FLOAT_KERN=0
+# disables.
+
+# Front: 4 output rows per threadgroup, one simdgroup per K segment, 8
+# values per lane per 256-column chunk. The last threadgroup does the 4
+# inject rows.
+_HC_FLOAT_FRONT_SRC = r"""
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg = thread_position_in_threadgroup.y;
+    uint grp = thread_position_in_grid.y / SG;
+    bool down = grp < (uint)(LR / 4);
+    int out0 = down ? (int)grp * 4 : 0;
+    float result[R * 4];
+    for (int i = 0; i < R * 4; i++) result[i] = 0.0f;
+    int k0 = (int)sg * (K / SG);
+    for (int k = k0; k < k0 + K / SG; k += 256) {
+        int kg = k + (int)lane * 8;
+        float wt[4][8];
+        for (int o = 0; o < 4; o++) {
+            if (down) {
+                auto wr = wd + (size_t)(out0 + o) * K + kg;
+                for (int i = 0; i < 8; i++) wt[o][i] = (float)wr[i];
+            } else {
+                auto wr = wi + (size_t)o * K + kg;
+                for (int i = 0; i < 8; i++) wt[o][i] = (float)wr[i];
+            }
+        }
+        for (int r = 0; r < R; r++) {
+            auto xr = xn + (size_t)r * K + kg;
+            float xt[8];
+            for (int i = 0; i < 8; i++) xt[i] = (float)xr[i];
+            for (int o = 0; o < 4; o++) {
+                float p = 0.0f;
+                for (int i = 0; i < 8; i++) p = metal::fma(xt[i], wt[o][i], p);
+                result[r * 4 + o] += p;
+            }
+        }
+    }
+    threadgroup float part[SG * R * 4];
+    for (int i = 0; i < R * 4; i++) {
+        float v = simd_sum(result[i]);
+        if (lane == 0) part[sg * R * 4 + i] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane < (uint)(R * 4)) {
+        float v = 0.0f;
+        for (int g = 0; g < SG; g++) v += part[g * R * 4 + lane];
+        int r = (int)lane / 4, o = (int)lane % 4;
+        if (down) {
+            float t = (float)(LoT)v * 0.25f;
+            float sig = (float)(LoT)(1.0f / (1.0f + metal::precise::exp(-t)));
+            lo[(size_t)r * LR + out0 + o] = (LoT)(t * sig);
+        } else {
+            float t = (float)(InjT)v * 0.25f;
+            inj[(size_t)r * 4 + o] = (InjT)(2.0f * (float)(InjT)(
+                1.0f / (1.0f + metal::precise::exp(-t))));
+        }
+    }
+"""
+
+# Epilogue: one lane per (d, stream) walks its up row once for every row
+# of lo. The 4 stream lanes of a d are neighbors in a simdgroup, and each
+# reads the other three for the mean.
+_HC_FLOAT_EPI_SRC = r"""
+    uint gid = thread_position_in_grid.x;
+    uint lane = thread_index_in_simdgroup;
+    int s = (int)(gid % 4u);
+    int d = (int)(gid / 4u);
+    bool live = d < D;
+    int dd = live ? d : 0;
+    auto w = wu + (size_t)(s * D + dd) * LR;
+    float acc[R];
+    for (int r = 0; r < R; r++) acc[r] = 0.0f;
+    for (int j = 0; j < LR; j += 4) {
+        float w0 = (float)w[j], w1 = (float)w[j + 1];
+        float w2 = (float)w[j + 2], w3 = (float)w[j + 3];
+        for (int r = 0; r < R; r++) {
+            auto lor = lo + (size_t)r * LR + j;
+            acc[r] += (float)lor[0] * w0 + (float)lor[1] * w1
+                    + (float)lor[2] * w2 + (float)lor[3] * w3;
+        }
+    }
+    ushort base = (ushort)(lane & ~3u);
+    for (int r = 0; r < R; r++) {
+        float a = (float)(LoT)acc[r];
+        float g = (float)(LoT)(1.0f / (1.0f + metal::precise::exp(-a)));
+        float p = (float)(LoT)(g * (float)xn[(size_t)r * 4 * D + s * D + dd]);
+        float m = simd_shuffle(p, base);
+        m += simd_shuffle(p, (ushort)(base + 1));
+        m += simd_shuffle(p, (ushort)(base + 2));
+        m += simd_shuffle(p, (ushort)(base + 3));
+        if (s == 0 && live) mixed[(size_t)r * D + d] = (LoT)(m * 0.25f);
+    }
+"""
+
+_hc_float_kerns_cache = None
+
+
+def _hc_float_kerns():
+    """The decode-width float-weight HC kernels (front, epilogue), or None."""
+    global _hc_float_kerns_cache
+    if _hc_float_kerns_cache is None:
+        from gmlx.envflags import env_bool
+        if (env_bool("GMLX_Q4_HC_FLOAT_KERN", True)
+                and mx.metal.is_available()
+                and mx.default_device().type == mx.DeviceType.gpu):
+            _hc_float_kerns_cache = (
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_float_front",
+                    input_names=["xn", "wd", "wi"],
+                    output_names=["lo", "inj"], source=_HC_FLOAT_FRONT_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_float_epi",
+                    input_names=["lo", "wu", "xn"],
+                    output_names=["mixed"], source=_HC_FLOAT_EPI_SRC),
+            )
+        else:
+            _hc_float_kerns_cache = False
+    return _hc_float_kerns_cache or None
+
+
+def _hc_float_mix(m, h: mx.array):
+    """``HyperConnection.__call__`` for float down and up weights at
+    decode width: (mixed, inject) in the eager chain's dtypes."""
+    B, T, hc, D = h.shape
+    R, K = B * T, hc * D
+    LR = m.down.weight.shape[0]
+    front, epi = _hc_float_kerns()
+    xn = _kq_hc()[0](h, m.norm.weight, m.norm.eps)
+    wi = m.inject.weight
+    injt = mx.float32 if mx.float32 in (xn.dtype, wi.dtype) else xn.dtype
+    sg = next(n for n in (5, 4, 2, 1) if K % (n * 256) == 0)
+    lo, inj = front(
+        inputs=[xn, m.down.weight, wi],
+        template=[("LoT", xn.dtype), ("InjT", injt), ("K", K), ("LR", LR),
+                  ("R", R), ("SG", sg)],
+        grid=(32, sg * (LR // 4 + 1), 1), threadgroup=(32, sg, 1),
+        output_shapes=[(B, T, LR), (B, T, hc)],
+        output_dtypes=[xn.dtype, injt])
+    mixed = epi(
+        inputs=[lo, m.up.weight, xn],
+        template=[("LoT", xn.dtype), ("D", D), ("LR", LR), ("R", R)],
+        grid=(-(-hc * D // 256) * 256, 1, 1), threadgroup=(256, 1, 1),
+        output_shapes=[(B, T, D)], output_dtypes=[xn.dtype])[0]
+    return mixed, inj
 
 
 # Prefill-width HC kernels: the compiled epilogues still run the
