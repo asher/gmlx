@@ -11,6 +11,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `qwen4exp` decode and MTP verify run faster on GGUFs that keep the
   stream mixer weights at BF16 or F16, such as the ISTA-DASLab GSQ-RCO
   quants. `GMLX_Q4_HC_FLOAT_KERN=0` restores the previous path.
+- MTP verify of 2 or 3 tokens runs faster on MoE GGUFs whose shared expert
+  has its own codecs, on an mlx-kquant newer than 0.4.16.
 
 ## [0.4.22] - 2026-10-07
 

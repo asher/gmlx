@@ -234,6 +234,9 @@ class _FusedMoeCaps:
         self.shexp_mix_combo = (
             getattr(kq, "shexp_mix_combo_has_kernel", None)
             if split_on else None)
+        # Whether the folded down gather of a codec pair runs slot-parallel
+        # at verify widths; absent on older kq builds.
+        self.shexp_mix_sp = getattr(kq, "shexp_mix_slot_parallel", None)
         # [T, S - 1] scores with the shared slot at an implicit weight of 1
         # (saves the per-layer ones-column concat on the fold).
         self.mix_implicit = "implicit weight" in mix_doc
@@ -966,8 +969,9 @@ def _kq_block_shape_ok(m, caps):
 
 
 # Widths at which a split-codec fold loses to the fused router with the
-# members' own gathers: its GLU gather has no form that shares an expert
-# between two rows of a verify block.
+# members' own gathers on a kq build with no slot-parallel folded down
+# gather: its GLU gather has no form that shares an expert between two rows
+# of a verify block, and the down gather does not win that back.
 _KQ_SPLIT_FOLD_SKIP_T = (2, 3)
 
 
@@ -979,6 +983,18 @@ def _kq_shexp_glu_split(m, caps):
     uc = m.shared_expert.up_proj.kquant_type
     return not (gc == uc and gc in (
         m.switch_mlp.gate_proj.kquant_type,) + caps.shexp_upcast)
+
+
+def _kq_split_fold_skips(m, caps):
+    """Whether a foldable block skips the fold at the widths of
+    _KQ_SPLIT_FOLD_SKIP_T: a split-codec block, unless kq runs its folded
+    down gather slot-parallel."""
+    if not _kq_shexp_glu_split(m, caps):
+        return False
+    sp = caps.shexp_mix_sp
+    return sp is None or not sp(
+        m.switch_mlp.down_proj.kquant_type,
+        m.shared_expert.down_proj.kquant_type)
 
 
 def _eligible_kq_block(m, caps):
@@ -1200,7 +1216,7 @@ def _install_kq_block_fusion(model, caps) -> int:
         object.__setattr__(m, "_kq_router_want", caps.router_ok)
         if not fold:
             object.__setattr__(m, "_kq_shexp_fold", False)
-        elif _kq_shexp_glu_split(m, caps):
+        elif _kq_split_fold_skips(m, caps):
             object.__setattr__(m, "_kq_fold_skip_t", _KQ_SPLIT_FOLD_SKIP_T)
         n += 1
     return n
