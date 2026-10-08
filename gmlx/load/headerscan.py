@@ -23,6 +23,7 @@ _DEFAULT_ALIGNMENT = 32
 
 # GGML type ids newer than the installed gguf-py: id -> (name, (block, type_size)).
 QUANT_TYPE_FALLBACK = {
+    42: ("Q2_0", (64, 18)),       # llama.cpp GGML_TYPE_Q2_0
     43: ("STQ1_0", (256, 42)),    # llama.cpp PR #22836
     # PrismML/llama.cpp (branch prism, no upstream PR): PQ2_0 is commit
     # 8bbb28b76, PTQ1_0 is e19819227. Private ids; they may move.

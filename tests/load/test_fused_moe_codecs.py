@@ -36,6 +36,19 @@ def test_stq1_0_joins_the_fused_codecs_when_kq_covers_it():
     assert "stq1_0" in _FusedMoeCaps().kq_fused_codecs
 
 
+def test_q2_0_joins_the_fused_codecs_when_kq_covers_it():
+    import mlx_kquant as kq
+
+    probe = getattr(kq, "codec_has_moe_glu", None)
+    if probe is None or not probe("q2_0"):
+        pytest.skip("installed mlx-kquant has no q2_0 moe_glu kernel")
+    assert "q2_0" in _FusedMoeCaps().kq_fused_codecs
+
+
+def test_wire_k_reads_q2_0_geometry_without_gguf_py():
+    assert _kq_wire_k(_Wire(18 * 10), "q2_0") == 640
+
+
 def test_wire_k_reads_stq1_0_geometry_without_gguf_py():
     from gguf.constants import GGMLQuantizationType
 

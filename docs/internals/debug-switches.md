@@ -214,7 +214,7 @@ These switches time a run's parts and print or write the results.
 | `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print the per-token split of a streamed decode between disk stalls and the eval and sync bucket at exit. A clock drop shows as a large sync bucket. |
 | `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses. |
-| `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 decode, evaluate after each layer part and print each part's wall time per token. |
-| `GMLX_DECODE_LAYER_PROFILE=2` | Also evaluate inside attention and the MoE, so each sub-step is one command buffer in a GPU trace. |
+| `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 and `qwen4exp` decode, evaluate after each layer part and print each part's wall time per token. |
+| `GMLX_DECODE_LAYER_PROFILE=2` | Also evaluate inside attention (and the DeepSeek-V4.1 MoE), so each sub-step is one command buffer in a GPU trace. |
 | `GMLX_DECODE_LAYER_PROFILE_LOG` | With the layer profile, write every mark to this path at exit, for aligning a Metal System Trace. |
 | `GMLX_LAYER_PROFILE_PREFILL=1` | With the layer profile, also mark the prefill chunks. The per-token figures then average over forward calls. |

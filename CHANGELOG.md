@@ -6,6 +6,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- GGUFs with `Q2_0` tensors load, such as the ISTA-DASLab GSQ-RCO quants of
+  Qwen3.8-Flash-Next. Requires mlx-kquant 0.4.16.
+- `GMLX_DECODE_LAYER_PROFILE` works on `qwen4exp`. Level 1 prints the time
+  per token of each layer part at exit, and level 2 splits attention into
+  its steps.
+
+### Changed
+
+- `qwen4exp` decode runs faster on GGUFs that give the shared expert its
+  own codecs, such as the ISTA-DASLab GSQ-RCO quants.
+  `GMLX_FUSED_MOE_ROUTER=0` and `GMLX_FUSED_MOE_SHEXP_SPLIT=0` restore the
+  previous path.
+
+### Fixed
+
+- `qwen4exp` decode keeps its speed as the context grows. It fell to about
+  half at 262K tokens, and further on a model that leaves little free
+  memory, because each token copied the whole KV cache.
+
 ## [0.4.21] - 2026-10-06
 
 ### Fixed

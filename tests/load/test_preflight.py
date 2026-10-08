@@ -83,7 +83,7 @@ def test_iq_codecs_now_pass(tmp_path):
 
 def _mint_fallback(path, codec_name, kv=None):
     """A GGUF whose only weight declares a codec newer than the installed
-    gguf-py (STQ1_0, PQ2_0, PTQ1_0): the type id comes from headerscan's
+    gguf-py (STQ1_0, PQ2_0, PTQ1_0, Q2_0): the type id comes from headerscan's
     QUANT_TYPE_FALLBACK and the writer takes a sentinel dtype because
     gguf-py's enum has no member for it."""
     from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
@@ -114,7 +114,7 @@ def _mint_fallback(path, codec_name, kv=None):
         del GGML_QUANT_SIZES[sentinel]
 
 
-@pytest.mark.parametrize("codec", ["STQ1_0", "PQ2_0", "PTQ1_0"])
+@pytest.mark.parametrize("codec", ["STQ1_0", "PQ2_0", "PTQ1_0", "Q2_0"])
 def test_fallback_codecs_pass(tmp_path, codec):
     p = tmp_path / f"{codec.lower()}.gguf"
     _mint_fallback(p, codec)
