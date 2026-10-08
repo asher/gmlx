@@ -1104,6 +1104,7 @@ def _make_fused_block(base_cls, caps):
             if t in getattr(self, "_kq_fold_skip_t", ()):
                 fold = False
             projs = None
+            router_only = False
             if (
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
@@ -1117,9 +1118,9 @@ def _make_fused_block(base_cls, caps):
                     # An adapted member sends the block down the stock path.
                     projs = _kq_member_projs(
                         self.switch_mlp, self.shared_expert)
-                elif self._kq_router() is not None:
-                    projs = ()
-            if projs is None:
+                else:
+                    router_only = self._kq_router() is not None
+            if projs is None and not router_only:
                 if expert_ctl:
                     # Stock forward with the fan-out hook at the selection
                     # seam (the eligibility check asserted this shape).
@@ -1158,7 +1159,7 @@ def _make_fused_block(base_cls, caps):
                     self, inds.reshape(*rows, k), sc[..., :k].reshape(*rows, k))
                 inds = inds3.reshape(t, k)
                 sc = mx.concatenate([routed.reshape(t, k), sc[..., k:]], axis=-1)
-            if not fold:
+            if projs is None:
                 k = self.top_k
                 rows = x.shape[:-1]
                 w = sc.astype(x.dtype)
