@@ -922,7 +922,7 @@ with its file name, the size it ran at and the `sha256` of the file.
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
 | `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, above 0 and at most 1. |
 | `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1. Repeat the flag for up to 10 images, in the order the prompt names them. |
-| `--ref-size N` | `1024` | Resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. Under 320, a reference of some aspect ratios comes out under the 256 x 256 pixels the text encoder takes, and the command exits 2 with the `--ref-size` that image needs. |
+| `--ref-size N` | `1024` | Resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |
 | `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
 | `--format png/jpeg/webp` | From `--output`, else `png` | Encode the images in this format. |
@@ -936,6 +936,10 @@ with its file name, the size it ran at and the `sha256` of the file.
 
 With several images, a `--output` file gains `-<seed>` before its
 extension.
+
+Under a `--ref-size` of 320, a reference that is not square can come out
+under the 256 x 256 pixels the text encoder takes. The command then exits 2
+and names the `--ref-size` that image needs.
 
 ### image bench
 
