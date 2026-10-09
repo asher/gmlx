@@ -91,6 +91,7 @@ Every block is optional. A server needs models, from `models` or from a
 |-------|--------------|
 | [`models`](#models) | The models gmlx can run, each with its GGUF file and settings |
 | [`aliases`](#aliases) | Extra model names, such as `coder` for `qwen3.8-27b-ud-q6@coding` |
+| [`image_models`](#image-models) | Image generation models, each with its DiT, text encoder and VAE files |
 | [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use |
 | [`rules`](#rules) | A profile for every model whose id matches a pattern |
 | [`discover`](#model-discovery) | Folders scanned at each start for GGUFs that have no entry |
@@ -187,6 +188,57 @@ aliases:
 ```
 
 An alias cannot contain `@` or match a model id.
+
+## Image models
+
+Each entry under `image_models` is one image generation model: a DiT GGUF
+with its text encoder and VAE. The entry's key is its id, which a request
+to the image routes puts in its `model` field. Image ids, model ids,
+aliases and served assistants share one set of names, so an image id
+cannot repeat any of them, and it cannot contain `@`.
+
+```yaml
+# doctest: build
+models:
+  qwen3-4b:
+    path: Qwen3-4B-Q4_K_M.gguf
+image_models:
+  z-image-turbo:
+    path: z-image-turbo-Q4_K_M.gguf
+    encoder: qwen3-4b
+    vae: z-image-vae-BF16.gguf
+  qwen-image:
+    path: qwen-image-2.1-Q4_K_M.gguf
+    encoder: Qwen3-VL-8B-Instruct-Q4_K_M.gguf
+    encoder_mmproj: mmproj-Qwen3-VL-8B-Instruct-BF16.gguf
+    vae: qwen-image-2.1-vae-F32.gguf
+    defaults: {size: 1024x1024, steps: 30}
+server:
+  defaults:
+    image_model: z-image-turbo
+```
+
+Image models load into the same memory budget as chat models, and unload
+the same way: by `ttl_s`, by [`POST /unload`](api.md#endpoints), or to
+make room for another model. The memory an entry counts is its weights
+and what one image at its default size needs while it runs.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="image_modelspath"></a>`path` | required | The DiT GGUF, found as a model [`path`](#modelspath) is |
+| <a id="image_modelsencoder"></a>`encoder` | required | The text encoder: the id of an entry under `models`, whose loaded copy it shares, or a GGUF path |
+| <a id="image_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF, which edits from reference images need. A shared encoder brings its model's `mmproj` instead. |
+| <a id="image_modelsvae"></a>`vae` | required | The VAE, a GGUF or a safetensors file |
+| <a id="image_modelsfamily"></a>`family` | detected | The image family, such as `z-image` or `qwen-image-2.1`. A file of another family is refused at load. |
+| <a id="image_modelsadapters"></a>`adapters` | none | LoRA files applied to every request, each a path or `{path, strength}` with strength 1 by default |
+| <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`) and `negative_prompt` |
+| <a id="image_modelsencoder_release"></a>`encoder_release` | `auto` | Release the text encoder after each encode: `always`, `never`, or `auto`, which keeps it while the whole model fits in 80 percent of the working budget |
+| <a id="image_modelspin"></a>`pin` | `false` | Load at start and stay loaded, as a model's [`pin`](#modelspin) |
+| <a id="image_modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |
+
+A shared encoder must be a model without an `adapter`. A quantized chat
+GGUF used as the encoder gives slightly different images than a full
+precision encoder file.
 
 ## Profiles
 
@@ -508,6 +560,7 @@ share one loaded copy.
 | <a id="serverdefaultsttl_s"></a>`defaults.ttl_s` | `900` | Seconds without a request before a model that is not pinned unloads. `null` or `0` turns off the timeout. |
 | <a id="serverdefaultspreload"></a>`defaults.preload` | none | Models loaded at start, one at a time, after the pinned models. `all` loads every model. |
 | <a id="serverdefaultsprofile"></a>`defaults.profile` | none | Profile for every model, below rules and the model's own profile |
+| <a id="serverdefaultsimage_model"></a>`defaults.image_model` | the only image model, else none | Image model for image requests that name none |
 
 [The MLX buffer cache](memory.md#the-mlx-buffer-cache) says when to change
 `cache_limit_gb`.
@@ -542,6 +595,18 @@ its GPU time. `0` runs one chunk per generation step.
 
 [Stochastic acceptance](speculative-decoding.md#stochastic-acceptance)
 describes `stochastic_mtp`.
+
+### Image requests
+
+These keys set how the server answers the image routes for the models
+under [`image_models`](#image-models).
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="serverimageurl_ttl_s"></a>`image.url_ttl_s` | `3600` | Seconds a file behind a `url` response stays available |
+| <a id="serverimageurl_max_bytes"></a>`image.url_max_bytes` | `1G` | Most bytes of such files kept at once, as bytes or a size such as `2G`. The oldest go first. |
+| <a id="serverimagemax_queue"></a>`image.max_queue` | `4` | Image requests that may wait behind the one running. One more gets 429 with `Retry-After`. |
+| <a id="serverimageembed_metadata"></a>`image.embed_metadata` | `false` | Write the prompt and settings into each PNG the routes return |
 
 ### Structured decisions
 

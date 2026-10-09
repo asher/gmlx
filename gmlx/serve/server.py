@@ -1849,17 +1849,27 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
                "rerank", "systemone",
-               "defaults", "cache", "assistants", "assistant_allow_remote")}
+               "defaults", "cache", "assistants", "assistant_allow_remote",
+               "image")}
     # Profile/model names double as dict keys; drop the redundant fields so the
     # entries match the file schema (which has no `name`/`id` keys).
     profiles = {n: {k: v for k, v in p.items() if k != "name"}
                 for n, p in d.pop("profiles").items()}
     models = {mid: {k: v for k, v in m.items() if k != "id"}
               for mid, m in d.pop("models").items()}
+    images = {}
+    for iid, m in d.pop("image_models").items():
+        m.pop("id")
+        m["adapters"] = [{"path": p, "strength": st} for p, st in m["adapters"]]
+        if m["ttl_s"] is None:
+            # An absent key inherits the server's; a written null never unloads.
+            m.pop("ttl_s")
+        images[iid] = m
     talk = d.pop("talk")
     talk.pop("assistant", None)     # attached shared object, not a talk: key
     doc = {"server": server, "profiles": profiles, "rules": d.pop("rules"),
            "models": models, "aliases": d.pop("aliases"),
+           "image_models": images,
            "discover": d.pop("discover"), "talk": talk,
            "launch": d.pop("launch"),
            "assistant": d.pop("assistant"),
