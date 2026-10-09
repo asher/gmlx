@@ -474,6 +474,15 @@ CLAIMS: tuple[Claim, ...] = (
           "media_sinks (stores only under the APC disk path the server's "
           "own build chose)",
           wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "images_generations_endpoint",
+          "patches.images.install_image_routes (replaced: gmlx serves the "
+          "image models of the residency pool, and the copy's handler "
+          "loads a model by the path a request names)",
+          how="route", paths=("/images/generations", "/v1/images/generations")),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "images_edits_endpoint",
+          "patches.images.install_image_routes (replaced, as the "
+          "generations route)",
+          how="route", paths=("/images/edits", "/v1/images/edits")),
     Claim("gmlx._vendor.mlx_vlm.server.openai", "generate_image",
           "patches.media_gate (refuses an output path, a model to load by "
           "path, a size or output_resolution over the pixel cap, and a "

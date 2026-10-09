@@ -95,12 +95,15 @@ _inline_only: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image"})
 _VIDEO_PART_TYPES = frozenset({"video", "video_url", "input_video"})
-_IMAGE_ROUTES = ("/images/generations", "/images/edits")
+_IMAGE_ROUTES = ("/images/generations", "/images/edits", "/images/variations")
 _SPEECH_ROUTE = "/audio/speech"
 # The routes that read a multipart form with a file part. Every other route
 # reads JSON, so a form body there is refused.
 _UPLOAD_ROUTES = ("/audio/transcriptions", "/audio/translations")
 _UPLOAD_PATHS = frozenset(p for r in _UPLOAD_ROUTES for p in (r, "/v1" + r))
+# The routes that also read a multipart form, with the body limit of a
+# JSON body: the image edits and variations take image files.
+_FORM_ROUTES = _UPLOAD_ROUTES + ("/images/edits", "/images/variations")
 # The routes that carry a conversation, whose body grows with its history.
 _CONVERSATION_ROUTES = ("/chat/completions", "/messages", "/messages/count_tokens",
                         "/responses", "/responses/input_tokens")
@@ -507,6 +510,14 @@ def check_body(body, path: str) -> None:
                 refs = body["image"]
                 for ref in refs if isinstance(refs, list) else [refs]:
                     check_image(ref, "image", tally)
+            if path.endswith("/images/edits"):
+                refs = body.get("images")
+                for ref in refs if isinstance(refs, list) else []:
+                    if isinstance(ref, dict) and isinstance(ref.get("image_url"),
+                                                            (str, dict)):
+                        url = ref["image_url"]
+                        check_image(url.get("url") if isinstance(url, dict)
+                                    else url, "images", tally)
         if path.endswith(_SPEECH_ROUTE):
             voice = body.get("voice")
             if voice not in (None, "") and not (isinstance(voice, str)
@@ -607,7 +618,7 @@ async def check_request(method: str, path: str, headers, raw: bytes, *,
     try:
         kind = form_type(headers.get("content-type"))
         if kind == _MULTIPART:
-            if not path.endswith(_UPLOAD_ROUTES):
+            if not path.endswith(_FORM_ROUTES):
                 raise MediaRefused("this route takes a JSON body, not a multipart form")
             try:
                 fields = await multipart_text_fields(headers, raw)

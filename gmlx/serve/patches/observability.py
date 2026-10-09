@@ -26,7 +26,10 @@ _REQUEST_LOG_FLAG = "_kq_gguf_request_log"
 _TIMED_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/responses",
                 "/v1/messages", "/v1/audio/transcriptions", "/v1/audio/speech",
                 "/v1/embeddings", "/v1/images/generations", "/v1/images/edits",
-                "/v1/systemone")
+                "/v1/images/variations", "/v1/systemone")
+# The URL-response image files: their paths carry the token that reads
+# them, which stays out of the access log.
+_SILENT_PREFIXES = ("/v1/images/files/", "/images/files/")
 
 # Pure-poll endpoints with no useful access signal. The models listing is
 # polled by the menu bar (4s) and by web clients (Open WebUI), so it floods
@@ -45,7 +48,8 @@ class _AccessNoiseFilter(logging.Filter):
         if not isinstance(args, tuple) or len(args) < 3:
             return True
         path = str(args[2]).split("?", 1)[0]
-        drop = path in _SILENT_PATHS or path in _TIMED_PATHS
+        drop = (path in _SILENT_PATHS or path in _TIMED_PATHS
+                or path.startswith(_SILENT_PREFIXES))
         return not drop
 
 

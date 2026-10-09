@@ -44,12 +44,16 @@ def install_api_key_auth(api_key: str | None) -> None:
     if getattr(app.state, _AUTH_FLAG, False):
         return
     key_bytes = api_key.encode()         # bytes: str compare_digest rejects non-ASCII
+    from .images import is_file_path
 
     async def _auth_middleware(request, call_next):
         # OPTIONS = CORS preflight, which browsers send credential-less by spec
         # (CORSMiddleware answers it); the actual request still authenticates.
+        # A URL-response image is read by its token alone, since an img tag
+        # sends no key.
         if request.method == "OPTIONS" or request.url.path == "/health" \
-                or request.scope.get(SESSION_SCOPE_KEY) is not None:
+                or request.scope.get(SESSION_SCOPE_KEY) is not None \
+                or is_file_path(request.url.path, request.method):
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         provided = (auth[7:] if auth[:7].lower() == "bearer "

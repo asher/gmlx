@@ -63,6 +63,7 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
+| `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as [Image generation API](images.md) shows |
 | `POST /v1/systemone` | Probabilities for a fixed set of questions, as [Structured decisions](decisions.md) shows |
 | `POST /v1/prewarm` | Read a decision state ahead of its questions, as [Repeated states](decisions-reference.md#repeated-states) shows |
 
@@ -78,9 +79,11 @@ and loads the model in the background. A kept model is not pinned, so the
 server can still unload it to make room, as
 [Keep, pin and idle](glossary.md#keep-pin-and-idle) describes.
 
-Every route except `/health` needs the API key when the server has one. Most
-routes also answer without the `/v1` prefix. Every route takes a JSON body,
-except the two audio upload routes, which take a form.
+Every route except `/health` and the image files of
+[URL responses](images.md#url-responses) needs the API key when the server
+has one. Most routes also answer without the `/v1` prefix. Every route takes
+a JSON body, except the two audio upload routes and the image edits and
+variations, which take a form.
 
 `/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
 `stream_options` and `profile`. It refuses list prompts, `n` above 1,

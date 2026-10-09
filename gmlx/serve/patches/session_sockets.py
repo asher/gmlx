@@ -70,7 +70,7 @@ _SESSION_ROUTES = (
     "responses/input_tokens", "messages", "messages/count_tokens",
     "embeddings", "rerank", "audio/speech", "audio/voices",
     "audio/transcriptions", "audio/translations", "images/generations",
-    "images/edits", "systemone")
+    "images/edits", "images/variations", "systemone")
 SESSION_PATHS = frozenset(
     ["/health"] + [f"/{p}" for p in _SESSION_ROUTES]
     + [f"/v1/{p}" for p in _SESSION_ROUTES])

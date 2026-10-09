@@ -127,7 +127,8 @@ REFERENCES = ConstantsRow(
 SAMPLING = {
     "default": SamplingRow(steps=40, cfg=1.0, shift=1.0,
                            repo="Qwen/Qwen-Image-2.1",
-                           revision="790c92633540aa0cb11d9abf19eb46d861714758"),
+                           revision="790c92633540aa0cb11d9abf19eb46d861714758",
+                           quality=(("low", 16), ("medium", 28), ("high", 40))),
 }
 
 # Norm tensors that identify the encoder weights: GGUF name, path in the

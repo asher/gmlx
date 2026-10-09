@@ -29,6 +29,7 @@ _PATCH_MODULES = {
     "test_server_patches",
     "test_patches_chat_behavior",
     "test_patches_routes",
+    "test_image_routes",
     "test_patches_sampling",
 }
 

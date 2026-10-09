@@ -94,6 +94,7 @@ nav:
           - config.md
           - menubar.md
           - services.md
+          - images.md
           - rag.md
           - decisions.md
       - Agents and containers:

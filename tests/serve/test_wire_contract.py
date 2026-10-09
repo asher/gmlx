@@ -1056,15 +1056,20 @@ def test_the_real_image_route_refuses_a_file_write_without_the_gate(wire, monkey
     assert e.value.status_code == 400 and "output_path" in str(e.value.detail)
 
 
-def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypatch):
+def test_the_copy_edit_handler_hands_an_inline_image_over_as_a_file(wire, monkeypatch):
     """The edit loaders open a reference image by file name, so the wrapped
-    edit_image passes a private temporary file and removes it afterwards."""
+    edit_image passes a private temporary file and removes it afterwards.
+    The route serves gmlx's handler, so the copy's is called directly."""
+    import asyncio
     import base64
     import io
+    import json
     import os
     import types
 
+    from fastapi import HTTPException
     from PIL import Image
+    from starlette.requests import Request
 
     openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     seen = []
@@ -1084,11 +1089,47 @@ def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypa
     png = io.BytesIO()
     Image.new("RGB", (2, 2)).save(png, format="PNG")
     uri = "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()
-    r = wire.client.post("/v1/images/edits",
-                         json={"model": MODEL_ID, "prompt": "p", "image": uri})
-    assert r.status_code == 200, r.text
+
+    def call(image):
+        raw = json.dumps({"model": MODEL_ID, "prompt": "p", "image": image}).encode()
+
+        async def receive():
+            return {"type": "http.request", "body": raw, "more_body": False}
+        scope = {"type": "http", "method": "POST", "path": "/v1/images/edits",
+                 "headers": [(b"content-type", b"application/json")],
+                 "query_string": b""}
+        return asyncio.run(openai_mod.images_edits_endpoint(Request(scope, receive)))
+
+    call(uri)
     assert [size for _, size in seen] == [(2, 2)]
     assert not os.path.exists(os.path.dirname(seen[0][0]))
-    r = wire.client.post("/v1/images/edits",
-                         json={"model": MODEL_ID, "prompt": "p", "image": "/Users/me/a.png"})
-    assert r.status_code == 400 and len(seen) == 1
+    with pytest.raises(HTTPException) as e:
+        call("/Users/me/a.png")
+    assert e.value.status_code == 400 and len(seen) == 1
+
+
+def test_the_stock_image_handlers_are_unreachable(wire, monkeypatch):
+    """Every route list, at either FastAPI layout, holds only gmlx's image
+    handlers, and a request never reaches the copy's image calls."""
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    stock = {openai_mod.images_generations_endpoint,
+             openai_mod.images_edits_endpoint}
+    seen = {}
+    for routes in sp_common._iter_route_lists(_APP.app):
+        for r in routes:
+            path = getattr(r, "path", "")
+            if "/images/" in path:
+                assert getattr(r, "endpoint", None) not in stock, path
+                seen[path] = r.endpoint.__module__
+    for route in ("generations", "edits", "variations"):
+        for path in (f"/v1/images/{route}", f"/images/{route}"):
+            assert seen.get(path) == "gmlx.serve.patches.images", path
+
+    def never(*a, **k):
+        raise AssertionError("the copy's image call ran")
+
+    monkeypatch.setattr(openai_mod, "generate_image", never)
+    monkeypatch.setattr(openai_mod, "edit_image", never)
+    for path in ("/v1/images/generations", "/images/edits"):
+        r = wire.client.post(path, json={"prompt": "x", "model": "/tmp/m"})
+        assert r.status_code in (400, 404), r.text

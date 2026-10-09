@@ -35,6 +35,8 @@ These pages are the starting points:
   bar.
 - [Speech, embeddings and rerank](services.md): The services a server can host
   beside chat models.
+- [Image generation API](images.md): The OpenAI image routes, served by
+  the image models of the configuration file.
 - [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.
 - [Structured decisions](decisions.md): A probability for each answer to a
   fixed set of questions.

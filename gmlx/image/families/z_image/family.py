@@ -63,10 +63,12 @@ CONSTANTS = ConstantsRow(
 SAMPLING = {
     "turbo": SamplingRow(steps=8, cfg=1.0, shift=3.0,
                          repo="Tongyi-MAI/Z-Image-Turbo",
-                         revision="f332072aa78be7aecdf3ee76d5c247082da564a6"),
+                         revision="f332072aa78be7aecdf3ee76d5c247082da564a6",
+                         quality=(("low", 4), ("medium", 6), ("high", 8))),
     "base": SamplingRow(steps=50, cfg=5.0, shift=6.0,
                         repo="Tongyi-MAI/Z-Image",
-                        revision="04cc4abb7c5069926f75c9bfde9ef43d49423021"),
+                        revision="04cc4abb7c5069926f75c9bfde9ef43d49423021",
+                        quality=(("low", 20), ("medium", 30), ("high", 50))),
 }
 
 IDENTITY_TENSORS = ("x_pad_token", "cap_pad_token", "final_layer.linear.bias")

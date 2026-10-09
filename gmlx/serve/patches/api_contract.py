@@ -119,6 +119,22 @@ SYSTEMONE_CONSUMED = frozenset({
 }) | frozenset(JEV_EXTENSIONS) | frozenset(GMLX_EXTENSIONS)
 
 
+# The image routes (patches/images.py). The gmlx extensions follow the
+# OpenAI fields; ``image[]`` is how openai-python names several uploads.
+IMAGES_GENERATIONS_CONSUMED = frozenset({
+    "prompt", "model", "n", "size", "quality", "background",
+    "output_format", "output_compression", "response_format", "stream",
+    "partial_images", "negative_prompt", "steps", "seed", "guidance",
+    "sampler", "scheduler", "adapters",
+})
+IMAGES_EDITS_CONSUMED = IMAGES_GENERATIONS_CONSUMED | frozenset({
+    "image", "image[]", "images", "mask", "strength",
+})
+IMAGES_VARIATIONS_CONSUMED = IMAGES_GENERATIONS_CONSUMED | frozenset({
+    "image", "strength",
+})
+
+
 def warn_ignored_fields(path: str, ignored) -> None:
     """One warning line naming the set-but-unread request fields."""
     ignored = sorted(str(f) for f in ignored)
@@ -278,6 +294,18 @@ def _make_chat_endpoint(original):
     return endpoint
 
 
+def _warn_image_tool(path: str, body: dict) -> None:
+    """One warning line when a request carries the Responses
+    ``image_generation`` tool, which the server does not run: the tool
+    list drops it and the model never sees it."""
+    tools = body.get("tools")
+    if isinstance(tools, list) and any(
+            isinstance(t, dict) and t.get("type") == "image_generation"
+            for t in tools):
+        _log.warning("%s: the image_generation tool is not supported and is "
+                     "dropped; call /v1/images/generations instead", path)
+
+
 def _make_raw_endpoint(consumed, fallback_path):
     """Wrapper factory for the raw-``Request`` routes (responses/anthropic):
     the handler parses the JSON body itself, so warn/enforce on the cached
@@ -297,6 +325,7 @@ def _make_raw_endpoint(consumed, fallback_path):
                 if isinstance(body, dict):
                     tc = body.get("tool_choice")
                     warn_ignored_fields(path, set(body) - consumed)
+                    _warn_image_tool(path, body)
                     if _is_tool_choice_none(tc):
                         body.pop("tools", None)
                         body.pop("tool_choice", None)

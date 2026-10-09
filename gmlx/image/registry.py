@@ -26,12 +26,15 @@ class ConstantsRow:
 class SamplingRow:
     """A variant's official sampling settings, with their source: steps
     are model evaluations, cfg is gmlx's (diffusers guidance_scale g is
-    cfg = 1 + g), and shift is the flow schedule's static shift."""
+    cfg = 1 + g), and shift is the flow schedule's static shift.
+    ``quality`` maps the API quality levels low, medium and high to
+    steps, as (level, steps) pairs; the variant's own steps are high."""
     steps: int
     cfg: float
     shift: float
     repo: str
     revision: str
+    quality: tuple = ()
 
 
 @dataclass(frozen=True)
