@@ -142,14 +142,19 @@ for event in stream:
 
 ## Memory, queueing and errors
 
-Image jobs run one at a time on their own thread, between the decode
-steps of chat requests. While a chat request decodes, an image job pauses
-after each block of its model and lets chat steps run, for as long as the
-image ran since its last pause. A chat reply so keeps streaming at a
-steady pace beside an image, slower than alone, and the image finishes
-later than it would alone. With no chat request decoding, an image runs at
-its full speed. [`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) sets chat's
-share of the GPU, from 0 to 0.9, and `off` runs each image step whole.
+Chat stays responsive while an image renders. Image jobs run one at a
+time on their own thread, and while a chat reply streams, an image job
+pauses after each block of its model so chat steps run in between. The
+reply keeps streaming at a steady pace, somewhat slower than alone, and
+the image slows only while chat is streaming: with no chat reply in
+progress, an image runs at its full speed.
+
+By default chat gets half of the GPU while both run. On an M5 Max, a
+gemma-4-E2B reply beside a 1024x1024 Z-Image-Turbo image streams at about
+74 tokens per second, against about 157 alone, and the image takes about
+1.8 times as long for the part of its run that chat shares. [`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server)
+sets chat's share, from 0 to 0.9 with a default of 0.5, and `off` runs
+each image step whole, which leaves chat waiting for each step to end.
 
 Before a request queues, the server plans its memory at
 its size beside the models that are loaded. A size that does not fit gets
