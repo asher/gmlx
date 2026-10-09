@@ -318,7 +318,14 @@ def test_owned_handle_releases_and_a_borrowed_one_does_not():
     assert got.ids == tuple(ord(c) % 1000 for c in "<u>ab</u>")
     assert len(got.hidden) == 1 and got.hidden[0].shape[-1] == 64
     assert got.template_id == spec.template_id
+    # The release returns the freed buffers MLX keeps, so the DiT that
+    # loads next does not stand beside them.
+    freed = mx.ones((1 << 20,))
+    mx.eval(freed)
+    del freed
+    assert mx.get_cache_memory() > 0
     assert owned.release() is True
+    assert mx.get_cache_memory() == 0
     assert owned.released and owned.model is None
     assert ref() is None
     assert owned.release() is False
