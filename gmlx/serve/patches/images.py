@@ -227,6 +227,14 @@ def _budget(hold):
     return max(0, total - others)
 
 
+def _text_model(model):
+    """The text model an engine serves: a text-only GGUF is served inside
+    a VLM-shaped wrapper, and the encoder reads the model it wraps."""
+    if getattr(model, "_is_text_model", False):
+        return model.language_model._model
+    return model
+
+
 def _borrow_for(spec):
     """``(borrow, release)`` for an image model that shares the encoder of
     a chat model: ``borrow(fn)`` runs ``fn`` with the chat model as the
@@ -251,16 +259,23 @@ def _borrow_for(spec):
         from gmlx.image.text_encoder import encoder_spec
 
         def job(engine_rg, should_stop):
+            # A chat model's engine runs a job as steps between its decode
+            # steps; the encode is one step.
             served_pipe.encoder = api._borrowed(
-                (engine_rg.model, engine_rg.tokenizer),
+                (_text_model(engine_rg.model), engine_rg.tokenizer),
                 encoder_spec(served_pipe.family))
             try:
                 return fn()
             finally:
                 served_pipe.encoder = None
 
-        return run_on_engine(rg, job, request_id=f"img-{id(fn):x}",
-                             prompt_tokens=1, stop=stop, timeout_s=timeout_s)
+        def steps(engine_rg, should_stop):
+            return job(engine_rg, should_stop)
+            yield  # noqa: B901 - a generator of one step
+
+        return run_on_engine(rg, steps, request_id=f"img-{id(fn):x}",
+                             prompt_tokens=1, stop=stop, timeout_s=timeout_s,
+                             stepwise=True)
 
     return borrow, hold
 

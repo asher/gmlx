@@ -468,3 +468,45 @@ def test_a_reinstall_leaves_one_handler_per_path():
     for route in images.ROUTES:
         assert paths.count(f"/v1/images/{route}") == 1
     assert paths.count("/v1/images/files/{name}") == 1
+
+
+def test_a_shared_encoder_encodes_as_a_step_of_the_chat_engine(monkeypatch):
+    """A chat model's engine runs a queued job only as steps between its
+    decode steps; a plain job reaches its generation path and fails."""
+    import importlib
+    from types import SimpleNamespace
+
+    import gmlx.serve.engine_jobs as engine_jobs
+    from gmlx.image import api
+
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    runtime_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
+    # A text-only GGUF is served inside the VLM-shaped wrapper.
+    rg = SimpleNamespace(model=SimpleNamespace(
+        _is_text_model=True,
+        language_model=SimpleNamespace(_model="CHAT")), tokenizer="TOK")
+    monkeypatch.setattr(app_mod, "get_cached_model", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_mod, "runtime",
+                        SimpleNamespace(response_generator=rg))
+    monkeypatch.setattr(api, "_borrowed", lambda pair, spec: ("BORROWED", pair))
+    import gmlx.image.text_encoder as text_encoder
+    monkeypatch.setattr(text_encoder, "encoder_spec", lambda fam: "SPEC")
+    calls = {}
+
+    def run_on_engine(engine_rg, job, *, stepwise=False, **kw):
+        calls["stepwise"] = stepwise
+        gen = job(engine_rg, lambda: False)
+        try:
+            next(gen)
+        except StopIteration as done:
+            return done.value
+        raise AssertionError("the encode took more than one step")
+
+    monkeypatch.setattr(engine_jobs, "run_on_engine", run_on_engine)
+    borrow, hold = images._borrow_for(SimpleNamespace(encoder_model="chat"))
+    pipe = SimpleNamespace(family="FAM", encoder=None)
+    seen = []
+    out = borrow(pipe, lambda: seen.append(pipe.encoder) or "FEATURES",
+                 threading.Event(), None)
+    assert calls == {"stepwise": True} and out == "FEATURES"
+    assert seen == [("BORROWED", ("CHAT", "TOK"))] and pipe.encoder is None
