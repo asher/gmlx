@@ -41,7 +41,7 @@ import time
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 import gmlx.load.loadlog as loadlog
@@ -885,7 +885,7 @@ class _ResidencyPool:
             if self._proxy._last_entry is victim:
                 self._proxy._last_entry = None
 
-    def _image_fn(self, i: int):
+    def _image_fn(self, i: int) -> Callable[..., Any]:
         if self._image_fns is None:
             from . import image_service
 
