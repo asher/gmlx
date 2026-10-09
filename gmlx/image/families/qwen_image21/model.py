@@ -36,7 +36,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from gmlx.image import ops
+from gmlx.image import ops, pacing
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.ops import RMSNorm
 
@@ -473,6 +473,7 @@ def prefill_prefix(model: QwenImage21DiT, cond,
     for i, blk in enumerate(model.transformer_blocks):
         x, k, v = blk.prefill(x, mod, cos, sin, lay.segments)
         mx.eval(x, k, v)
+        pacing.point()
         keys.append(k)
         values.append(v)
         if taps is not None:
@@ -504,6 +505,7 @@ def forward_target(model: QwenImage21DiT, latents: mx.array, sigma, cond,
     x = model.embed_image(latents)
     for i, blk in enumerate(model.transformer_blocks):
         x = blk.target(x, mod, cos, sin, prefix.k[i], prefix.v[i])
+        pacing.point(x)
         if taps is not None:
             taps[f"transformer_blocks.{i}"] = x
     out = model.final(x, mod)

@@ -510,3 +510,35 @@ def test_a_shared_encoder_encodes_as_a_step_of_the_chat_engine(monkeypatch):
                  threading.Event(), None)
     assert calls == {"stepwise": True} and out == "FEATURES"
     assert seen == [("BORROWED", ("CHAT", "TOK"))] and pipe.encoder is None
+
+
+@pytest.mark.parametrize("share, paced", [(None, True), ("0.25", True),
+                                          ("off", False)])
+def test_the_job_runs_under_the_chat_pacer(served, monkeypatch, share, paced):
+    from gmlx.image import pacing
+    from gmlx.serve.gpu_share import ImagePacer
+
+    if share is None:
+        monkeypatch.delenv("GMLX_IMAGE_CHAT_SHARE", raising=False)
+    else:
+        monkeypatch.setenv("GMLX_IMAGE_CHAT_SHARE", share)
+    seen = []
+
+    def job(req, kw):
+        seen.append(getattr(pacing._local, "pacer", None))
+        served.job = None
+        return svc.ImageJobResult(
+            images=[b"img"], size=(64, 32), quality=req.quality, steps=4,
+            seeds=[0], usage={"input_tokens": 1, "output_tokens": 1,
+                              "total_tokens": 2, "input_tokens_details": {
+                                  "text_tokens": 1, "image_tokens": 0}})
+
+    served.job = job
+    r = _client().post("/v1/images/generations", json={"prompt": "a cat"})
+    assert r.status_code == 200
+    assert isinstance(seen[0], ImagePacer) == paced
+    if paced and share is not None:
+        assert seen[0].ratio == pytest.approx(0.25 / 0.75)
+    # The worker thread holds no pacer after the job.
+    assert svc.WORKER.submit(
+        lambda: getattr(pacing._local, "pacer", None)).result() is None

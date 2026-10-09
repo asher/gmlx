@@ -140,8 +140,15 @@ for event in stream:
 
 ## Memory, queueing and errors
 
-Image jobs run one at a time on their own thread, between the decode steps
-of chat requests. Before a request queues, the server plans its memory at
+Image jobs run one at a time on their own thread. While a chat request
+decodes, an image job pauses after each block of its model and lets chat
+steps run, for as long as the image ran since its last pause. Chat so
+keeps about half the GPU, and the image takes longer while chat runs.
+[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) sets chat's share, from 0 to
+0.9, and `off` runs each image step whole. With no chat request decoding,
+an image runs at its full speed.
+
+Before a request queues, the server plans its memory at
 its size beside the models that are loaded. A size that does not fit gets
 400 naming the largest size of the same shape that does. An edit with more
 reference images than fit gets 400 naming the count and the reference size

@@ -32,6 +32,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the chat models, and `ps`, `keep` and `unload` name each model's kind.
 - `gmlx serve` answers the OpenAI image generations, edits and variations
   routes, with streamed partial images and `url` responses.
+- In `gmlx serve`, a chat reply keeps decoding while an image renders, at a
+  share of the GPU that `GMLX_IMAGE_CHAT_SHARE` sets.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
   text models, and read images with their mmproj.
 - `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6

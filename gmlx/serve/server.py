@@ -2113,6 +2113,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         print("[server] command buffer caps: not installed "
               "(GMLX_CB_PHASE=0 or mlx-kquant lacks set_cb_caps); streamed "
               "models run uncapped")
+    from .gpu_share import install_chat_ticks
+    install_chat_ticks()
     # Single-model --hf-source override (niche): re-register the VLM with the
     # explicit processor source (ModelCfg carries no hf_source field).
     if a.model and a.hf_source and a.mmproj:

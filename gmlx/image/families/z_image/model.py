@@ -40,7 +40,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from gmlx.image import ops
+from gmlx.image import ops, pacing
 from gmlx.image.ops import RMSNorm
 
 
@@ -361,6 +361,7 @@ class ZImageDiT(nn.Module):
         for i, blk in enumerate(self.noise_refiner):
             x = blk(x, xc, xs, adaln,
                     None if mod is None else mod.noise_refiner[i])
+            pacing.point(x)
             if taps is not None:
                 taps[f"noise_refiner.{i}"] = x
         if caption is None:
@@ -374,6 +375,7 @@ class ZImageDiT(nn.Module):
         for i, blk in enumerate(self.layers):
             u = blk(u, cos, sin, adaln,
                     None if mod is None else mod.layers[i])
+            pacing.point(u)
             if taps is not None:
                 taps[f"layers.{i}"] = u
         out = self.final_layer(u, adaln,

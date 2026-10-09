@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
-from gmlx.image import ops
+from gmlx.image import ops, pacing
 
 from .conv import Conv2d
 from .group_norm import GroupNorm
@@ -326,6 +326,7 @@ class Decoder(nn.Module):
         x = self.head(z)
         for blk in self.up_blocks:
             x = blk(x)
+            pacing.point(x)
         return self.conv_out(nn.silu(self.conv_norm_out(x)))
 
     def head(self, z: mx.array) -> mx.array:

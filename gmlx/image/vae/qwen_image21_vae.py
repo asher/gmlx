@@ -45,7 +45,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from gmlx.image import ops
+from gmlx.image import ops, pacing
 
 from .conv import Conv2d
 from .flux1_ae import chunked_sdpa
@@ -475,12 +475,14 @@ class Decoder(nn.Module):
         x = self.mid_block(self.conv_in(z))
         for blk in self.up_blocks[:self.whole]:
             x = blk(x)
+            pacing.point(x)
         return x
 
     def tail(self, x: mx.array) -> mx.array:
         """The last up blocks and the output conv."""
         for blk in self.up_blocks[self.whole:]:
             x = blk(x)
+            pacing.point(x)
         return self.conv_out(nn.silu(self.norm_out(x)))
 
 

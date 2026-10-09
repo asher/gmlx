@@ -411,11 +411,18 @@ def make_endpoint(route: str):
             loop.call_soon_threadsafe(events.put_nowait, ("partial", index, blob))
 
         def job():
-            return run_job(served, req, size=size, budget=budget, stop=stop,
-                           timeout_s=timeout_s, submitted=submitted,
-                           borrow=borrow, emit=emit if req.stream else None,
-                           model_dirs=STATE.model_dirs,
-                           embed_metadata=STATE.settings.embed_metadata)
+            from gmlx.image.pacing import paced
+
+            from ..gpu_share import pacer
+
+            # Chat decode keeps its turns on the GPU while the job runs.
+            with paced(pacer()):
+                return run_job(served, req, size=size, budget=budget,
+                               stop=stop, timeout_s=timeout_s,
+                               submitted=submitted, borrow=borrow,
+                               emit=emit if req.stream else None,
+                               model_dirs=STATE.model_dirs,
+                               embed_metadata=STATE.settings.embed_metadata)
 
         future = WORKER.submit(job)
 
