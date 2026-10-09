@@ -153,10 +153,12 @@ fusions.
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |
 | `GMLX_LORA_EPILOGUE` | Where a dense LoRA layer on a K-quant base adds its delta. `auto` picks the in-kernel path by GPU class, rank and row count. `always` and `never` force a path. |
 | `GMLX_IMAGE_LORA_PLACEMENT` | How image LoRA pairs for q, k or v run on a fused `qkv` weight: `block` (default) as one block-diagonal pair, `slice` per band, `split` with a split base. |
-| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image q and k norm with RoPE, the gate product and a K-quant layer under a LoRA on stock ops, not mlx-kquant kernels. `qk`, `glu` or `lora` keeps one. |
+| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image q and k norm with RoPE, the gate product and a K-quant layer under a LoRA on stock ops, not mlx-kquant kernels. `glu,qk` keeps those two. |
 
 The image routes are on when the installed mlx-kquant has the kernels, and
 `GMLX_IMAGE_KQ_ROUTES` is read once, when the image pipeline is imported.
+It takes `0`, `1`, or a comma list of the routes `qk`, `glu` and `lora`
+to keep; another value warns and keeps every route.
 An image at a fixed seed differs between the kernels and the stock ops.
 The difference is rounding, not an error. mlx-kquant's own switches
 (`KQ_GLU`, `KQ_GLU_MIN_ROWS`, `KQ_GLU_BK`) act below the route: when one

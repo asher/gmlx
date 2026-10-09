@@ -14,8 +14,9 @@ No kernel has a gradient with respect to a weight, and the qk kernel has
 none at all, so ``mx.grad`` through a routed qk call raises. The image
 pipeline is inference only.
 
-GMLX_IMAGE_KQ_ROUTES=0 keeps every route on stock ops, and ``qk``,
-``glu`` or ``lora`` keeps that route alone. It is read once, at import.
+GMLX_IMAGE_KQ_ROUTES=0 keeps every route on stock ops, and a comma list
+of ``qk``, ``glu`` and ``lora`` keeps those routes alone. It is read once,
+at import.
 ``only`` puts a set of routes in force for a block, for a check that reads
 the stock ops and the kernels in one process. The routes in force are
 state of the process, and the image pipeline keys the results it keeps by
@@ -24,18 +25,41 @@ them.
 
 from __future__ import annotations
 
+import os
 import sys
 from contextlib import contextmanager
 
 import mlx.core as mx
 
-from gmlx.envflags import env_switch
+from gmlx.envflags import _BOOL_FALSE, _BOOL_TRUE
 
 from . import attention
 
 ROUTES = ("qk", "glu", "lora")
-_CHOICE = env_switch("GMLX_IMAGE_KQ_ROUTES", ROUTES)
-_WANTED = {"1": ROUTES, "0": ()}.get(_CHOICE, (_CHOICE,))
+
+
+def wanted(raw: str | None) -> tuple:
+    """The routes a GMLX_IMAGE_KQ_ROUTES value asks for: every route when
+    it is unset or a true word, none for a false word, else a comma list
+    of names of ROUTES. Any other value warns and gives every route."""
+    if raw is None:
+        return ROUTES
+    val = raw.strip().lower()
+    if val in _BOOL_TRUE:
+        return ROUTES
+    if val in _BOOL_FALSE:
+        return ()
+    names = {n.strip() for n in val.split(",")}
+    if names <= set(ROUTES):
+        return tuple(r for r in ROUTES if r in names)
+    import warnings
+
+    warnings.warn(f"GMLX_IMAGE_KQ_ROUTES={raw!r} is not 0, 1 or a comma "
+                  f"list of {', '.join(ROUTES)}; using 1", stacklevel=2)
+    return ROUTES
+
+
+_WANTED = wanted(os.environ.get("GMLX_IMAGE_KQ_ROUTES"))
 
 _HALF = (mx.float16, mx.bfloat16)
 # Head dims that have a qk_norm_rope kernel.

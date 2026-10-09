@@ -273,6 +273,18 @@ def test_the_import_time_install_follows_the_build():
     assert (ops.qk_norm_rope is attention.qk_norm_rope) == (not routed)
 
 
+def test_the_switch_takes_a_comma_list_of_routes():
+    w = kq_routes.wanted
+    assert w(None) == w("1") == w(" On ") == kq_routes.ROUTES
+    assert w("0") == w("off") == w("") == ()
+    assert w("lora") == ("lora",)
+    assert w("glu,qk") == w(" qk , glu ") == ("qk", "glu")
+    assert w("qk,glu,lora,qk") == kq_routes.ROUTES
+    for bad in ("glu,nope", "qk;glu", "2"):
+        with pytest.warns(UserWarning, match="comma list"):
+            assert w(bad) == kq_routes.ROUTES
+
+
 def test_an_absent_op_keeps_the_stock_ops(routes):
     routes._OPS.update(qk_norm_rope=None, quantized_matmul_glu=None,
                        quantized_matmul_lora=None, nax=True)
