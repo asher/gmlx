@@ -63,6 +63,7 @@ from test_image_check2_qwen import _sha256, token_cosine
 pytestmark = pytest.mark.integration
 
 NAME = "check2_qwen_image21_edit"
+TOWER = "check2_qwen_image21_edit_tower"
 PATCH_TOL = 2e-7        # two float32 roundings of a value in [-1, 1]
 
 
@@ -277,6 +278,52 @@ def test_features_are_within_the_calibrated_tolerance(handle, check2):
         print(_show("gmlx", case, rows[case]))
         assert not _caught(rows[case], ids, arrays[f"ids_{case}"]), (
             case, rows[case])
+
+
+def test_the_tower_of_an_edit_is_float32_against_the_float64_oracle(
+        handle, check2):
+    """The tower's outputs in an edit encode, against the oracle's tower in
+    float64 on the same patches: each output within twice the oracle's
+    own float32 against float64 relative L2 on it. A tower that multiplies
+    at TF32 precision moves them by tens of those gates."""
+    import mlx.nn as nn
+
+    arrays, m = check2
+    tarr, tm = fixture(TOWER)
+    assert tm["inputs"]["source"] == NAME
+    for k, sha in tm["inputs"]["source_npz_sha256"].items():
+        assert m["tensors"][k]["sha256"] == sha, k
+    tower = handle.model.vision_tower
+    seen = []
+
+    class Watched(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = tower
+
+        def __call__(self, pixels, grid):
+            f, d = tower(pixels, grid)
+            seen.append([f, *d])
+            return f, d
+
+    handle.model.vision_tower = Watched()
+    try:
+        for case in ("one", "two"):
+            seen.clear()
+            names, refs = _refs(arrays, m, case)
+            _encode(handle, m["inputs"]["cases"][case]["prompt"], refs)
+            assert len(seen) == len(names)
+            for name, outs in zip(names, seen):
+                h, w = arrays[f"resized_{name}"].shape[:2]
+                assert tm["inputs"]["grids"][name] == [1, h // 16, w // 16]
+                for k, got in zip(tm["inputs"]["outputs"], outs):
+                    tol = tm["tolerances"]["rel_l2"][name][k]
+                    rel = fx.rel_l2(np.array(got), tarr[f"{k}_f64_{name}"])
+                    print(f"[check2e] tower {name} {k}: rel L2 {rel:.3e}, "
+                          f"{rel / tol:.2f} of its gate {tol:.3e}")
+                    assert rel <= tol, (name, k)
+    finally:
+        handle.model.vision_tower = tower
 
 
 def test_the_references_of_a_case_run_one_at_a_time_or_as_the_api_does(
