@@ -305,6 +305,57 @@ def test_img2img_and_inpainting_reach_sample(env, tmp_path, monkeypatch):
     assert k["mask"][:, :24].max() == 0.0
 
 
+def _turned(tmp_path, name: str, upright, mode: str = "RGB"):
+    """``upright`` saved on its side with EXIF orientation 6, as a phone
+    camera stores a photo held upright."""
+    from PIL import Image
+
+    im = Image.fromarray(upright, mode).transpose(Image.Transpose.ROTATE_90)
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    im.save(tmp_path / name, exif=exif)
+    return str(tmp_path / name)
+
+
+def test_images_are_read_upright_by_their_exif_orientation(env, tmp_path,
+                                                           monkeypatch):
+    up = np.zeros((70, 40, 3), np.uint8)
+    up[:35] = 255
+    path = _turned(tmp_path, "in.png", up)
+    got = cmd.read_image(path, None, 16)
+    assert got.shape == (64, 32, 3)
+    assert got[:30].min() == 1.0 and got[38:].max() == 0.0
+    mask = np.zeros((32, 64), np.uint8)
+    mask[:, 32:] = 255
+    m = cmd.read_mask(_turned(tmp_path, "m.png", mask, "L"), (64, 32))
+    assert np.array_equal(m, (mask > 0).astype(np.float32))
+    # A JPEG init image through the command: its size is the upright one.
+    seen = []
+    real = api.sample
+    monkeypatch.setattr(api, "sample",
+                        lambda *a, **k: seen.append(k) or real(*a, **k))
+    assert umbrella_main(env.base + ["--prompt", "p", "--init-image",
+                                     _turned(tmp_path, "in.jpg", up),
+                                     "--output",
+                                     str(tmp_path / "a.png")]) == 0
+    assert (seen[-1]["width"], seen[-1]["height"]) == (32, 64)
+
+
+def test_an_unreadable_image_is_refused_by_its_flag(env, tmp_path, capsys):
+    from PIL import Image
+
+    junk, ok = tmp_path / "junk.png", tmp_path / "ok.png"
+    junk.write_bytes(b"not an image")
+    Image.fromarray(np.zeros((32, 32, 3), np.uint8)).save(ok)
+    for flag, flags in (("--init-image", ["--init-image", str(junk)]),
+                        ("--mask", ["--init-image", str(ok), "--mask",
+                                    str(junk)])):
+        assert umbrella_main(env.base + ["--prompt", "p"] + flags) == 1
+        assert f"{flag} {junk}: cannot read it as an image" in \
+            capsys.readouterr().err
+    assert env.pipes == []
+
+
 def test_encoder_release_follows_the_policy_and_the_plan(env, tmp_path):
     def run(*flags):
         assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
@@ -1158,8 +1209,8 @@ def test_references_reach_the_encoder_in_order_and_the_vae_after_it(
     assert umbrella_main(args) == 0
     rec = json.loads(capsys.readouterr().out)
     assert edit.loads == [edit.mmproj]
-    # The float32 products of the tower are exact from the first one.
-    assert os.environ["MLX_ENABLE_TF32"] == "0"
+    # The tower splits its own products: the process keeps its TF32 state.
+    assert "MLX_ENABLE_TF32" not in os.environ
     kinds = [c[0] for c in edit.calls]
     assert kinds == ["encode", "encode", "vae", "vae"]
     for call, prompt in zip(edit.calls[:2], ("swap them", "blurry")):
@@ -1178,10 +1229,16 @@ def test_references_reach_the_encoder_in_order_and_the_vae_after_it(
     assert [c.refs for c in edit.planned[0]["conds"]] == [
         edit.calls[0][2]] * 2
     assert rec["model"]["mmproj"] == "mmproj.gguf"
-    refs = edit.calls[0][2]
+    # The record names each reference file by its own sha256, as it names
+    # an adapter file.
+    import hashlib
+
+    files = [hashlib.sha256(open(p, "rb").read()).hexdigest()
+             for p in edit.refs]
+    assert files[0] != edit.calls[0][2][0].sha256
     assert rec["settings"]["refs"] == [
-        {"file": "a.png", "size": "352x288", "sha256": refs[0].sha256},
-        {"file": "b.png", "size": "256x416", "sha256": refs[1].sha256}]
+        {"file": "a.png", "size": "352x288", "sha256": files[0]},
+        {"file": "b.png", "size": "256x416", "sha256": files[1]}]
     from PIL import Image
 
     with Image.open(tmp_path / "o.png") as im:
@@ -1189,7 +1246,7 @@ def test_references_reach_the_encoder_in_order_and_the_vae_after_it(
         assert json.loads(im.text["gmlx"])["files"]["mmproj"] == "mmproj.gguf"
 
 
-def test_references_default_to_the_family_size_and_respect_the_user_env(
+def test_references_default_to_the_family_size_and_keep_the_user_env(
         edit, tmp_path):
     os.environ["MLX_ENABLE_TF32"] = "1"
     assert umbrella_main(edit.base + [
@@ -1227,6 +1284,10 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
     mm = ["--encoder-mmproj", edit.mmproj]
     long = tmp_path / "long.png"
     Image.fromarray(np.zeros((8, 4000, 3), np.uint8)).save(long)
+    wide = tmp_path / "wide.png"
+    Image.fromarray(np.zeros((480, 640, 3), np.uint8)).save(wide)
+    junk = tmp_path / "junk.png"
+    junk.write_bytes(b"not an image")
     for flags, code, text in (
             (ref, 2, "--ref needs --encoder-mmproj with a DiT path"),
             (mm + ["--ref-size", "512"], 2, "--ref-size needs --ref"),
@@ -1240,7 +1301,13 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
              "--ref missing.png: no such file"),
             (ref + ["--encoder-mmproj", "missing.gguf"], 1,
              "--encoder-mmproj missing.gguf: no such file"),
-            (["--ref", str(long)] + mm, 2, "is too long for its area")):
+            (["--ref", str(long)] + mm, 2, "is too long for its area"),
+            (["--ref", str(wide), "--ref-size", "256"] + mm, 2,
+             f"--ref {wide}: a reference of 288x224 pixels is under the "
+             "65536 pixels the encoder takes; use a reference area of 264 x "
+             "264 pixels or more for this aspect ratio (--ref-size 264)"),
+            (["--ref", str(junk)] + mm, 1,
+             f"--ref {junk}: cannot read it as an image")):
         assert umbrella_main(base + flags) == code, flags
         assert text in capsys.readouterr().err
     # A family without reference images refuses the flag by name.

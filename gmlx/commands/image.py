@@ -157,8 +157,9 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                    help="The negative prompt, used when --guidance is not "
                         "1 (default empty).")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
-                   help="Image width and height, multiples of 16 (default: "
-                        "the variant's, or the init image's).")
+                   help="Image width and height, multiples of 16, or of 32 "
+                        "on Qwen-Image 2.1 (default: the variant's, or the "
+                        "init image's).")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
@@ -299,35 +300,49 @@ def output_paths(output: str | None, seeds: list, fmt: str,
     return [f"{stem}-{s}{e}" for s in seeds]
 
 
-def read_image(path: str, size: tuple | None, stride: int):
+def open_image(flag: str, path: str):
+    """The image file ``path`` given to ``flag``, read whole and turned
+    upright by its EXIF orientation, as diffusers' load_image reads an
+    image. A file PIL cannot read is refused by the flag and the path."""
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(os.path.expanduser(path)) as im:
+            im.load()
+            return ImageOps.exif_transpose(im)
+    except OSError as e:
+        raise OSError(f"{flag} {path}: cannot read it as an image: {e}") \
+            from None
+
+
+def read_image(path: str, size: tuple | None, stride: int,
+               flag: str = "--init-image"):
     """An image file as (H, W, 3) float32 in [0, 1] at ``size`` (width,
     height), resized with Lanczos. Without ``size`` the image keeps its
     own, cut down to multiples of ``stride``."""
     import numpy as np
     from PIL import Image
 
-    with Image.open(os.path.expanduser(path)) as im:
-        im = im.convert("RGB")
-        if size is None:
-            size = (im.width // stride * stride, im.height // stride * stride)
-            if min(size) <= 0:
-                raise ValueError(f"{path} is smaller than {stride} pixels")
-        if im.size != tuple(size):
-            im = im.resize(tuple(size), Image.Resampling.LANCZOS)
-        return np.asarray(im, np.float32) / 255.0
+    im = open_image(flag, path).convert("RGB")
+    if size is None:
+        size = (im.width // stride * stride, im.height // stride * stride)
+        if min(size) <= 0:
+            raise ValueError(f"{path} is smaller than {stride} pixels")
+    if im.size != tuple(size):
+        im = im.resize(tuple(size), Image.Resampling.LANCZOS)
+    return np.asarray(im, np.float32) / 255.0
 
 
-def read_mask(path: str, size: tuple):
+def read_mask(path: str, size: tuple, flag: str = "--mask"):
     """A mask file as (H, W) float32, 1 where the image changes: white
     pixels, binarized at one half as diffusers does."""
     import numpy as np
     from PIL import Image
 
-    with Image.open(os.path.expanduser(path)) as im:
-        im = im.convert("L")
-        if im.size != tuple(size):
-            im = im.resize(tuple(size), Image.Resampling.BILINEAR)
-        m = np.asarray(im, np.float32) / 255.0
+    im = open_image(flag, path).convert("L")
+    if im.size != tuple(size):
+        im = im.resize(tuple(size), Image.Resampling.BILINEAR)
+    m = np.asarray(im, np.float32) / 255.0
     return (m >= 0.5).astype(np.float32)
 
 
@@ -422,14 +437,16 @@ def _references(a, family) -> tuple:
     if not low <= side <= high:
         raise _Usage(f"--ref-size {side}: {family.title} takes a reference "
                      f"size from {low} to {high}")
-    from PIL import Image
-
     out = []
     for path in a.ref:
+        im = open_image("--ref", path)
         try:
-            with Image.open(os.path.expanduser(path)) as im:
-                out.append(edit.prepare(im, side * side))
+            out.append(edit.prepare(im, side * side))
         except ValueError as e:
+            least = getattr(e, "side", None)
+            if least is not None and least <= high:
+                raise _Usage(f"--ref {path}: {e} (--ref-size {least})") \
+                    from None
             raise _Usage(f"--ref {path}: {e}") from None
     return tuple(out)
 
@@ -549,11 +566,6 @@ def _generate(a) -> int:
     from . import image_preflight
 
     prompt = _prompt(a)
-    if a.ref:
-        # The vision tower that reads the references computes in float32,
-        # and its products must be exact. MLX reads this once, at the first
-        # product of the process.
-        os.environ.setdefault("MLX_ENABLE_TF32", "0")
     if a.mask is not None and a.init_image is None:
         raise _Usage("--mask needs --init-image")
     if a.strength is not None and a.init_image is None:
@@ -662,7 +674,7 @@ def _generate(a) -> int:
     if refs:
         settings["refs"] = [
             {"file": os.path.basename(p), "size": f"{r.width}x{r.height}",
-             "sha256": r.sha256} for p, r in zip(a.ref, refs)]
+             "sha256": _file_sha256(p)} for p, r in zip(a.ref, refs)]
     if init is not None:
         settings.update(init_image=os.path.basename(a.init_image),
                         strength=strength)

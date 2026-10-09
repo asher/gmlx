@@ -22,6 +22,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   DiT loads when the parts do not fit together.
 - `gmlx image generate --background transparent` writes the alpha channel that
   Qwen-Image 2.1 decodes, as a png or a webp.
+- `gmlx image generate` reads `--ref`, `--init-image` and `--mask` images upright
+  by their EXIF orientation, so a phone photo is not encoded on its side.
 - `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA
   safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
 - On GPUs with NAX (M5), an image step under `--adapter` takes 1 to 2% less
