@@ -3295,6 +3295,15 @@ def test_server_image_block():
         embed_metadata=True)
     with pytest.raises(ConfigError, match="steps_api"):
         build_config({"server": {"image": {"steps_api": True}}})
+    cfg = build_config({"server": {"image": {"tensor_cache_mb": 32,
+                                             "adapter_cache_mb": 128}}})
+    assert (cfg.image.tensor_cache_mb, cfg.image.adapter_cache_mb) == (32, 128)
+    base = build_config({}).image
+    assert (base.tensor_cache_mb, base.adapter_cache_mb) == (64, 256)
+    for bad in ({"tensor_cache_mb": 0}, {"adapter_cache_mb": -5},
+                {"tensor_cache_mb": "lots"}):
+        with pytest.raises(ConfigError, match=next(iter(bad))):
+            build_config({"server": {"image": bad}})
     with pytest.raises(ConfigError, match="url_max_bytes"):
         build_config({"server": {"image": {"url_max_bytes": "lots"}}})
     with pytest.raises(ConfigError, match="max_queue"):

@@ -58,11 +58,11 @@ line to the server log.
 | `prompt` | What to draw. Required on generations and edits. |
 | `model` | An image model id, or an OpenAI model name as below. A name that is not an image model gets 404, and a chat model id gets 400 of type `wrong_model_kind`. |
 | `n` | Images to make, 1 to 10. They run one after another, at seeds `seed`, `seed` plus 1 and so on. |
-| `size` | `WxH` or `auto`, the model's default size. Width and height are multiples of the model's size step, which a refusal names. |
+| `size` | `WxH` or `auto`, the model's default size. Width and height are multiples of the model's size step, which a refusal names, and the image holds at most 2048x2048 pixels with no side over 4096. |
 | `quality` | `low`, `medium`, `high` or `auto`, each a step count of the model's family. `standard` reads as `medium`, and `hd` as `high`. |
 | `background` | `transparent`, `opaque` or `auto`. Transparency needs a model whose VAE decodes an alpha channel, such as Qwen-Image 2.1, and png or webp. |
 | `output_format` | `png`, the default, `jpeg` or `webp`. |
-| `output_compression` | 0 to 100 for jpeg and webp, where 0 keeps the most detail. Ignored for png. |
+| `output_compression` | The jpeg and webp quality, 0 to 100, where 100, the default, keeps the most detail. Ignored for png. |
 | `response_format` | `b64_json`, the default, or `url`. |
 | `stream` | Send the result as server-sent events, as [Streaming](#streaming) shows. Takes `n` of 1. |
 | `partial_images` | 0 to 3 images of the work in progress before the final one, in a stream. |
@@ -95,9 +95,9 @@ names. An adapter id that is an absolute path gets 400.
 
 An edit takes its images as files of a multipart form, `image` for one and
 `image[]` for several, which is how the `openai` package sends them. A
-JSON body takes `images` as a list of `{"image_url": "data:image/..."}`.
-A `file_id` gets 400, and the server never reads a local path from a JSON
-body. Images are PNG, JPEG, WebP or GIF.
+JSON body takes `images` as a list of `{"image_url": "data:image/..."}`,
+or of base64 image data. A `file_id` gets 400, and the server never reads
+a local path or fetches a URL from a JSON body. Images are PNG, JPEG, WebP or GIF.
 
 | Model | Edits | Variations |
 |-------|-------|------------|
@@ -105,7 +105,8 @@ body. Images are PNG, JPEG, WebP or GIF.
 | Qwen-Image 2.1 | Up to 10 images, which the model sees as references. The image model needs `encoder_mmproj`. | The image as a reference, with the instruction to make a variation of it |
 
 Without `size` the result takes the size of the first image, cut down to
-the model's size step. With a `mask` the edit starts from the first image
+the model's size step, and a larger image gives the largest size of its
+shape within the size limits. With a `mask` the edit starts from the first image
 at `strength` 1, changes only the masked region, and keeps the other
 pixels as they were.
 
@@ -140,13 +141,14 @@ for event in stream:
 
 ## Memory, queueing and errors
 
-Image jobs run one at a time on their own thread. While a chat request
-decodes, an image job pauses after each block of its model and lets chat
-steps run, for as long as the image ran since its last pause. Chat so
-keeps about half the GPU, and the image takes longer while chat runs.
-[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) sets chat's share, from 0 to
-0.9, and `off` runs each image step whole. With no chat request decoding,
-an image runs at its full speed.
+Image jobs run one at a time on their own thread, between the decode
+steps of chat requests. While a chat request decodes, an image job pauses
+after each block of its model and lets chat steps run, for as long as the
+image ran since its last pause. A chat reply so keeps streaming at a
+steady pace beside an image, slower than alone, and the image finishes
+later than it would alone. With no chat request decoding, an image runs at
+its full speed. [`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) sets chat's
+share of the GPU, from 0 to 0.9, and `off` runs each image step whole.
 
 Before a request queues, the server plans its memory at
 its size beside the models that are loaded. A size that does not fit gets

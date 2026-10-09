@@ -153,7 +153,8 @@ _IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
                                   "negative_prompt"})
 _IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
 _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
-                                "embed_metadata"})
+                                "embed_metadata", "tensor_cache_mb",
+                                "adapter_cache_mb"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
@@ -628,6 +629,8 @@ class ImageServerCfg:
     url_max_bytes: int = 1 << 30     # the url file store, oldest out first
     max_queue: int = 4               # image jobs waiting before a 429
     embed_metadata: bool = False     # API outputs carry the PNG text chunk
+    tensor_cache_mb: int = 64        # each cache of conditionings, latents
+    adapter_cache_mb: int = 256      # each cache of request adapters, tables
 
 
 @dataclass(frozen=True)
@@ -2728,11 +2731,19 @@ def _parse_server_image(raw) -> ImageServerCfg:
     if queue is not None and queue < 0:
         raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
                           f"{queue!r}")
+    caches = {}
+    for key in ("tensor_cache_mb", "adapter_cache_mb"):
+        mb = _coerce_num(key, raw.get(key), int, where=where)
+        if mb is not None and mb <= 0:
+            raise ConfigError(f"{where}.{key}: expected a positive number "
+                              f"of MB, got {mb!r}")
+        caches[key] = getattr(base, key) if mb is None else mb
     return ImageServerCfg(
         url_ttl_s=base.url_ttl_s if ttl is None else ttl,
         url_max_bytes=base.url_max_bytes if cap is None else cap,
         max_queue=base.max_queue if queue is None else queue,
-        embed_metadata=bool(raw.get("embed_metadata", base.embed_metadata)))
+        embed_metadata=bool(raw.get("embed_metadata", base.embed_metadata)),
+        **caches)
 
 
 def _parse_rule(raw: dict) -> Rule:

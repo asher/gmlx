@@ -15,8 +15,10 @@ larger of the encode phase and the denoise phase, not their sum.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,6 +78,34 @@ def default_size(spec, defaults) -> tuple:
     return tuple(defaults.size) if defaults is not None else _DEFAULT_SIZE
 
 
+# The bytes each cache of an image model may hold: conditionings and
+# reference latents (tensor), request adapter pairs and built patch tables
+# (adapter). server.image sets them; an entry books each at its bound.
+_CACHE_BYTES = {"tensor": 64 << 20, "adapter": 256 << 20}
+
+
+def configure_caches(settings) -> None:
+    """Take the cache bounds of ``server.image``."""
+    _CACHE_BYTES["tensor"] = int(settings.tensor_cache_mb) << 20
+    _CACHE_BYTES["adapter"] = int(settings.adapter_cache_mb) << 20
+
+
+def cache_bytes() -> tuple:
+    """(tensor, adapter) bytes each cache of an image model may hold."""
+    return _CACHE_BYTES["tensor"], _CACHE_BYTES["adapter"]
+
+
+def bound_caches(pipe, configured: int = 0) -> None:
+    """Bound the caches of a served pipeline. The adapter cache also holds
+    the ``configured`` bytes of the entry's own adapters, which the entry
+    books on their own."""
+    tensor, adapter = cache_bytes()
+    pipe.conditionings.max_bytes = tensor
+    pipe.reference_latents.max_bytes = tensor
+    pipe.adapters.max_bytes = adapter + int(configured)
+    pipe.tables.max_bytes = adapter + int(configured)
+
+
 def entry_plan(spec) -> EntryPlan:
     """The footprint of an image entry and whether it keeps its encoder,
     from the headers of its files. Raises for a file that is no image
@@ -110,7 +140,9 @@ def entry_plan(spec) -> EntryPlan:
     if cfg is None:
         cfg = defaults.cfg if defaults is not None else 1.0
     act = image_activation(fam.name)
-    adapters = [2 * os.path.getsize(p) for p, _ in spec.adapters]
+    tensor_cache, adapter_cache = cache_bytes()
+    adapters = [2 * os.path.getsize(p) for p, _ in spec.adapters] + [
+        2 * adapter_cache]
     dit = _header_bytes(spec.path, "dit")
     vae = _header_bytes(spec.vae, "vae")
     enc = mmproj = 0
@@ -119,7 +151,8 @@ def entry_plan(spec) -> EntryPlan:
         mmproj = _header_bytes(spec.encoder_mmproj, "mmproj")
     common = dict(adapters=adapters, family=fam.name, height=height,
                   width=width, cfg=cfg, dtype=act.dit, vae_dtype=act.vae,
-                  encoder_owned=False, overcommit=True)
+                  encoder_owned=False, overcommit=True,
+                  cache_bytes=2 * tensor_cache)
     keep = memfit.plan_memory(dit, enc, vae, mmproj, **common)
     budget = working_budget_bytes()
     footprint, keeps = keep.peak, True
@@ -194,6 +227,8 @@ def _load(spec) -> ServedImage:
                 lora.apply_text_adapters(pipe, rows)
             pipe.default_table = api.define_patch_table(
                 pipe, lora.table_entries(rows))
+        bound_caches(pipe, sum(2 * os.path.getsize(p)
+                               for p, _ in spec.adapters))
     except BaseException:
         # The pipeline loaded and an adapter failed: free it here, as the
         # pool never holds it.
@@ -204,9 +239,68 @@ def _load(spec) -> ServedImage:
     return served
 
 
+_reservation = threading.local()
+
+
+@contextlib.contextmanager
+def reserved_worker():
+    """Hold the image worker for the calling thread: wait here, before the
+    caller takes any lock, for the jobs queued ahead to finish, then keep
+    the worker idle until the block ends. ``load_on_worker`` and
+    ``release_on_worker`` called inside the block run on it at once. So a
+    pool build that loads or releases an image pipeline never waits on the
+    worker's queue while it holds the pool's build lock. Nested blocks
+    share the outer hold, and on the worker itself there is nothing to
+    hold."""
+    if getattr(_reservation, "run", None) is not None or \
+            threading.current_thread().name.startswith("image-worker"):
+        yield
+        return
+    import concurrent.futures
+    import queue
+
+    started = threading.Event()
+    jobs: queue.SimpleQueue = queue.SimpleQueue()
+
+    def hold():
+        started.set()
+        while True:
+            item = jobs.get()
+            if item is None:
+                return
+            fn, args, fut = item
+            try:
+                fut.set_result(fn(*args))
+            except BaseException as e:  # noqa: BLE001 - handed to the caller
+                fut.set_exception(e)
+
+    outer = WORKER.submit(hold)
+    started.wait()
+
+    def run(fn, *args):
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        jobs.put((fn, args, fut))
+        return fut.result()
+
+    _reservation.run = run
+    try:
+        yield
+    finally:
+        _reservation.run = None
+        jobs.put(None)
+        outer.result()
+
+
+def _on_worker(fn, *args):
+    run = getattr(_reservation, "run", None)
+    if run is not None:
+        return run(fn, *args)
+    return WORKER.submit(fn, *args).result()
+
+
 def load_on_worker(spec) -> ServedImage:
     """Load an image entry on the image worker and wait for it."""
-    return WORKER.submit(_load, spec).result()
+    return _on_worker(_load, spec)
 
 
 def _release(box: list) -> None:
@@ -233,7 +327,7 @@ def _release(box: list) -> None:
 def release_on_worker(box: list) -> None:
     """Drop the pipeline in ``box``, a one-item list, on the image worker,
     after the jobs queued before it, and return its memory."""
-    WORKER.submit(_release, box).result()
+    _on_worker(_release, box)
 
 
 # Requests: the OpenAI image fields mapped onto the image primitives.
@@ -246,6 +340,9 @@ RESPONSE_FORMATS = ("b64_json", "url")
 MAX_N = 10
 MAX_PARTIALS = 3
 MAX_REFS = 16
+# The largest image a request makes: its pixels and its longer side.
+MAX_PIXELS = 2048 * 2048
+MAX_SIDE = 4096
 # Model names an OpenAI client sends that mean the default image model.
 _ALIAS_PREFIXES = ("gpt-image-", "dall-e-", "chatgpt-image")
 # Accepted and ignored, with one warning line.
@@ -381,6 +478,10 @@ def parse_size(value) -> tuple | None:
         raise _bad(f"size must be WxH or auto, not {value!r}", "size") from None
     if min(size) <= 0:
         raise _bad(f"size {value!r} is not a positive width and height", "size")
+    if size[0] * size[1] > MAX_PIXELS or max(size) > MAX_SIDE:
+        raise _bad(f"size {size[0]}x{size[1]} is over the limit of "
+                   f"{MAX_PIXELS} pixels (2048x2048) and a side of "
+                   f"{MAX_SIDE}", "size")
     return size
 
 
@@ -544,8 +645,9 @@ def mask_from_image(pixels, size: tuple):
 
 def encode_output(pixels, fmt: str, compression: int | None = None,
                   metadata: dict | None = None) -> bytes:
-    """uint8 (H, W, 3 or 4) pixels as png, jpeg or webp bytes. Compression
-    0 to 100 is the jpeg and webp quality loss: 0 keeps the most."""
+    """uint8 (H, W, 3 or 4) pixels as png, jpeg or webp bytes.
+    ``compression`` 0 to 100 is the jpeg and webp quality, as OpenAI's
+    ``output_compression`` is, and None is 100."""
     import io
     import json
 
@@ -560,7 +662,7 @@ def encode_output(pixels, fmt: str, compression: int | None = None,
             info.add_text("gmlx", json.dumps(metadata, sort_keys=True))
         im.save(buf, format="PNG", pnginfo=info)
     else:
-        quality = 100 - (0 if compression is None else int(compression))
+        quality = 100 if compression is None else int(compression)
         quality = max(1, min(100, quality))
         if fmt == "jpeg":
             im.convert("RGB").save(buf, format="JPEG", quality=quality)
@@ -614,7 +716,9 @@ class FileStore:
                      | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        self.sweep()
+        # The new file stays even when it alone is over the byte cap: its
+        # link is the answer of the request that wrote it.
+        self.sweep(keep=path)
         return token
 
     def path(self, token: str, ext: str) -> str | None:
@@ -630,9 +734,9 @@ class FileStore:
             return None
         return path
 
-    def sweep(self) -> int:
-        """Remove expired files, then the oldest past the byte cap.
-        Returns how many it removed."""
+    def sweep(self, keep: str | None = None) -> int:
+        """Remove expired files, then the oldest past the byte cap, never
+        the file ``keep``. Returns how many it removed."""
         with self._lock:
             try:
                 names = os.listdir(self.root)
@@ -651,6 +755,8 @@ class FileStore:
             removed = 0
             total = sum(size for _, size, _ in files)
             for mtime, size, p in files:
+                if p == keep:
+                    continue
                 if now - mtime > self.ttl_s or total > self.max_bytes:
                     try:
                         os.unlink(p)
@@ -661,9 +767,12 @@ class FileStore:
             return removed
 
 
-def default_store_root() -> str:
+def default_store_root(port=None) -> str:
+    """The URL file folder of the server on ``port``: each server keeps its
+    own, so one server's sweep never takes another's files."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "gmlx", "images")
+    root = os.path.join(base, "gmlx", "images")
+    return root if port is None else os.path.join(root, str(int(port)))
 
 
 # The job: encode, plan, sample, decode, on the image worker.
@@ -712,7 +821,9 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
         return w, h
     if req.images:
         h, w = req.images[0].shape[:2]
-        w, h = w // unit * unit, h // unit * unit
+        # A large image gives the largest size of its shape in the limits.
+        scale = min(1.0, (MAX_PIXELS / (w * h)) ** 0.5, MAX_SIDE / max(w, h))
+        w, h = int(w * scale) // unit * unit, int(h * scale) // unit * unit
         if min(w, h) <= 0:
             raise _bad(f"image is smaller than {unit} pixels", "image")
         return w, h
@@ -816,14 +927,22 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
         except memfit.ImageMemoryError as e:
             raise _bad(str(e), "image") from None
     unit = _stride(pipe)
-    best = None
-    for k in range(max(w, h) // unit - 1, 0, -1):
+
+    def scaled(k: int) -> tuple:
         scale = k * unit / max(w, h)
-        cw = max(unit, int(w * scale) // unit * unit)
-        ch = max(unit, int(h * scale) // unit * unit)
-        if fits(cw, ch, refs):
-            best = (cw, ch)
-            break
+        return (max(unit, int(w * scale) // unit * unit),
+                max(unit, int(h * scale) // unit * unit))
+
+    # A smaller size of the shape never needs more memory, so a bisection
+    # over the longer side finds the largest that fits in a few plans.
+    best = None
+    lo, hi = 1, max(w, h) // unit - 1
+    while lo <= hi:
+        k = (lo + hi) // 2
+        if fits(*scaled(k), refs):
+            best, lo = scaled(k), k + 1
+        else:
+            hi = k - 1
     if best is None:
         raise _bad(f"size {w}x{h} does not fit in memory beside the models "
                    "now loaded, and no smaller size of its shape does",

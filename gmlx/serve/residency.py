@@ -523,7 +523,7 @@ class _ResidencyPool:
                 and os.path.isfile(model_path)):
             from gmlx.load.preflight import preflight
             preflight(model_path)
-        with self._build_lock:
+        with self._worker_for(model_kind == IMAGE_KIND), self._build_lock:
             released: list = []
             try:
                 with self._lock:
@@ -591,7 +591,7 @@ class _ResidencyPool:
         a later unload collects it once released. Returns whether anything was
         torn down. ``ignore_retained`` as in :meth:`evict`."""
         released: list = []
-        with self._build_lock:
+        with self._worker_for(False), self._build_lock:
             try:
                 with self._lock:
                     cleared = False
@@ -694,7 +694,7 @@ class _ResidencyPool:
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
         released: list = []
-        with self._build_lock:
+        with self._worker_for(False), self._build_lock:
             try:
                 with self._lock:
                     self._keep_paths.discard(model_path)
@@ -790,7 +790,7 @@ class _ResidencyPool:
         now = self._time_fn()
         reaped = []
         released: list = []
-        with self._build_lock:
+        with self._worker_for(False), self._build_lock:
             try:
                 with self._lock:
                     for entry in list(self._entries.values()):
@@ -1198,6 +1198,23 @@ class _ResidencyPool:
                 released.append(pipe)
             return
         self._teardown_chat(entry)
+
+    def _worker_for(self, image_build: bool):
+        """Hold the image worker before the build lock for a build that
+        loads an image pipeline, or that may release one: an image entry
+        with no job is resident. Then the lock is never held while the
+        worker runs an image job, and a chat cold load does not wait
+        behind one. Without either, nothing is held."""
+        import contextlib
+
+        with self._lock:
+            idle_image = any(e.is_image and e.busy == 0
+                             for e in self._entries.values())
+        if not (image_build or idle_image):
+            return contextlib.nullcontext()
+        from . import image_service
+
+        return image_service.reserved_worker()
 
     def _release_images(self, pipelines: list) -> None:
         """Release image pipelines on the image worker, where their arrays

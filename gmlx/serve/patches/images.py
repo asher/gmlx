@@ -65,11 +65,20 @@ class _State:
     def configure(self, cfg) -> None:
         from gmlx.config import ImageServerCfg
 
-        from ..image_service import FileStore, default_store_root
+        from ..image_service import (
+            FileStore,
+            configure_caches,
+            default_store_root,
+        )
 
         self.settings = getattr(cfg, "image", None) or ImageServerCfg()
         self.model_dirs = tuple(getattr(cfg, "model_dirs", ()) or ())
-        self.store = FileStore(default_store_root(), self.settings.url_ttl_s,
+        configure_caches(self.settings)
+        # A reload keeps the folder the server started with, so its links
+        # stay good.
+        root = (self.store.root if self.store is not None
+                else default_store_root(getattr(cfg, "port", None)))
+        self.store = FileStore(root, self.settings.url_ttl_s,
                                self.settings.url_max_bytes)
 
     def admit(self) -> bool:
@@ -162,10 +171,22 @@ def _json_image(value, param: str):
             value = value.get("url")
     if not isinstance(value, str) or not value:
         raise _bad(f"{param} must be an image_url holding a data URL", param)
-    try:
-        data, _suffix, _px = _decode_edit_image(value)
-    except MediaRefused as e:
-        raise _bad(str(e), param) from None
+    # A JSON body carries its images inline: a data URL or base64. The
+    # server reads no path and fetches no URL from it.
+    if value.startswith("data:"):
+        try:
+            data, _suffix, _px = _decode_edit_image(value)
+        except MediaRefused as e:
+            raise _bad(str(e), param) from None
+    else:
+        import base64
+        import binascii
+
+        try:
+            data = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raise _bad(f"{param} must be a data URL or base64 image data; "
+                       "send a file as multipart form data", param) from None
     return decode_image(data, param)
 
 
@@ -273,9 +294,19 @@ def _borrow_for(spec):
             return job(engine_rg, should_stop)
             yield  # noqa: B901 - a generator of one step
 
-        return run_on_engine(rg, steps, request_id=f"img-{id(fn):x}",
-                             prompt_tokens=1, stop=stop, timeout_s=timeout_s,
-                             stepwise=True)
+        from ..engine_jobs import JobCancelled, JobTimeout
+        from ..image_service import JobStopped
+
+        # A shared encoder that times out or is cancelled ends the job as
+        # the sampler's own stop does: 504 and 499.
+        try:
+            return run_on_engine(rg, steps, request_id=f"img-{id(fn):x}",
+                                 prompt_tokens=1, stop=stop,
+                                 timeout_s=timeout_s, stepwise=True)
+        except JobTimeout:
+            raise JobStopped(timed_out=True) from None
+        except JobCancelled:
+            raise JobStopped(timed_out=False) from None
 
     return borrow, hold
 
@@ -426,7 +457,13 @@ def make_endpoint(route: str):
 
         future = WORKER.submit(job)
 
+        finished: list = []
+
         def finish(status: str, **extra):
+            # Once per request, from the route or from the job's end.
+            if finished:
+                return
+            finished.append(status)
             release()
             STATE.leave(time.monotonic() - submitted if status == "ok" else None)
             _log_aux_request(path, model_id, started, status=status,
@@ -464,16 +501,43 @@ def make_endpoint(route: str):
         common = {"background": req.background, "output_format": req.output_format,
                   "quality": req.quality, "size": f"{size[0]}x{size[1]}"}
 
+        def settle(f):
+            # The end of a streamed job frees its hold and its queue slot,
+            # whether or not the client still reads the stream, and even
+            # when the stream never started.
+            try:
+                loop.call_soon_threadsafe(watcher.cancel)
+            except RuntimeError:
+                pass
+            stop.set()
+            e = None if f.cancelled() else f.exception()
+            if f.cancelled():
+                finish("cancelled")
+            elif e is None:
+                result = f.result()
+                finish("ok", steps=result.steps, fmt=req.output_format,
+                       stream=1)
+            elif isinstance(e, JobStopped):
+                finish("timeout" if e.timed_out else "cancelled")
+            elif isinstance(e, ImageRequestError):
+                finish("refused", error=str(e))
+            else:
+                _log.error("%s: image job failed", path, exc_info=e)
+                finish("failed", error=type(e).__name__)
+
+        future.add_done_callback(settle)
+
         async def stream():
             import base64
 
             done = asyncio.ensure_future(asyncio.wrap_future(future))
+            getter = None
             try:
                 while True:
                     getter = asyncio.ensure_future(events.get())
-                    finished, _ = await asyncio.wait(
+                    finished_, _ = await asyncio.wait(
                         {getter, done}, return_when=asyncio.FIRST_COMPLETED)
-                    if getter in finished:
+                    if getter in finished_:
                         _kind, index, blob = getter.result()
                         yield _sse(f"{event_prefix}.partial_image", {
                             "type": f"{event_prefix}.partial_image",
@@ -493,16 +557,12 @@ def make_endpoint(route: str):
                 try:
                     result = done.result()
                 except JobStopped as e:
-                    finish("timeout" if e.timed_out else "cancelled")
                     if e.timed_out:
                         yield _sse("error", {"error": {
                             "type": "timeout", "message": "the image job timed out"}})
                     return
                 except Exception as e:  # noqa: BLE001 - an error frame, then close
                     status = 400 if isinstance(e, ImageRequestError) else 500
-                    finish("failed", error=type(e).__name__)
-                    if status == 500:
-                        _log.error("%s: image job failed", path, exc_info=e)
                     yield _sse("error", {"error": {
                         "type": ("invalid_request_error" if status == 400
                                  else "server_error"),
@@ -510,31 +570,36 @@ def make_endpoint(route: str):
                                     f"{path} failed ({type(e).__name__}); "
                                     "see the server log")}})
                     return
-                urls = store_urls(result)
                 body = {"type": f"{event_prefix}.completed",
                         "created_at": int(time.time()), "usage": result.usage,
                         **common}
+                urls = store_urls(result)
                 if urls is not None:
                     body["url"] = urls[0]
                 body["b64_json"] = base64.b64encode(result.images[0]).decode("ascii")
-                finish("ok", steps=result.steps, fmt=req.output_format,
-                       stream=1)
                 yield _sse(f"{event_prefix}.completed", body)
             finally:
+                # The client may have left: the job stops at its next step,
+                # and settle frees the slot when it does.
                 stop.set()
                 watcher.cancel()
-                if not done.done():
-                    # The client left: the job stops at its next step and
-                    # the slot frees when it does.
-                    def _late(_f):
-                        if holds:
-                            finish("cancelled")
-                    done.add_done_callback(_late)
+                if getter is not None:
+                    getter.cancel()
+                if done.done():
+                    _retrieved(done)
+                else:
+                    done.add_done_callback(_retrieved)
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
     return endpoint
+
+
+def _retrieved(f) -> None:
+    """Retrieve the outcome of a job future no one awaits any more."""
+    if not f.cancelled():
+        f.exception()
 
 
 def _job_failure(path: str, e: Exception, finish) -> JSONResponse:

@@ -488,6 +488,7 @@ Paths under `~/.cache` and `~/.local/share` follow `XDG_CACHE_HOME` and
 | `~/.cache/gmlx/` | Server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache, when the disk tier is on and has no `path` of its own. |
 | `~/.cache/gmlx/media/` | Media files that requests name, as [Media in requests](api.md#media-in-requests) describes. |
+| `~/.cache/gmlx/images/` | The images behind `url` answers of the [image routes](images.md), a folder per server port. They expire after `server.image.url_ttl_s`. |
 | `~/.cache/gmlx/talk/` | The wake-word and voice-activity models of `gmlx talk`. |
 | `~/.cache/huggingface/` | The files that `hf:` references resolve from. |
 | `~/.local/share/gmlx/chats/` | Saved chat sessions. |

@@ -94,7 +94,7 @@ def served(monkeypatch, tmp_path, request):
     monkeypatch.setattr(svc, "check_family", lambda req, s: None)
     monkeypatch.setattr(svc, "target_size", lambda req, s: (64, 32))
     monkeypatch.setattr(svc, "fit_check", lambda req, s, size, budget: None)
-    monkeypatch.setattr(svc, "default_store_root", lambda: str(tmp_path / "files"))
+    monkeypatch.setattr(svc, "default_store_root", lambda port=None: str(tmp_path / "files"))
     monkeypatch.setattr(images, "_budget", lambda hold: None)
     images.install_image_routes(cfg)
     return rec
@@ -542,3 +542,234 @@ def test_the_job_runs_under_the_chat_pacer(served, monkeypatch, share, paced):
     # The worker thread holds no pacer after the job.
     assert svc.WORKER.submit(
         lambda: getattr(pacing._local, "pacer", None)).result() is None
+
+
+# A request driven through the endpoint itself, with an ASGI receive that
+# can leave, as a client that closes its connection does.
+
+def _scope(path="/v1/images/generations"):
+    return {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1", "method": "POST", "path": path,
+            "raw_path": path.encode(), "query_string": b"", "root_path": "",
+            "headers": [(b"content-type", b"application/json"),
+                        (b"host", b"127.0.0.1")],
+            "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80),
+            "scheme": "http"}
+
+
+def _receive(body: dict, *, gone: bool):
+    import asyncio
+
+    raw = json.dumps(body).encode()
+    state = {"sent": False}
+
+    async def receive():
+        if not state["sent"]:
+            state["sent"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        if not gone:
+            await asyncio.sleep(3600)
+        return {"type": "http.disconnect"}
+
+    return receive
+
+
+def _until(cond, secs=3.0):
+    import time
+
+    end = time.monotonic() + secs
+    while time.monotonic() < end and not cond():
+        time.sleep(0.02)
+    return cond()
+
+
+def test_a_stream_closed_after_its_job_ended_frees_its_hold(served):
+    import asyncio
+
+    from starlette.requests import Request
+
+    images.STATE.in_flight = 0
+
+    async def run():
+        ep = images.make_endpoint("generations")
+        body = {"prompt": "x", "stream": True, "partial_images": 2}
+        resp = await ep(Request(_scope(), _receive(body, gone=False)))
+        it = resp.body_iterator
+        await it.__anext__()               # the first partial
+        await asyncio.sleep(0.3)           # the job has ended
+        await it.aclose()                  # the client left
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run())
+    assert _until(lambda: served.released == [1]), served.released
+    assert images.STATE.in_flight == 0
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_a_stream_whose_body_never_starts_frees_its_hold(served, running):
+    """A client gone before the response starts: the body task is cancelled
+    before the generator runs, so the job's own end frees the slot."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    images.STATE.in_flight = 0
+    if running:
+        def job(req, kw):
+            kw["stop"].wait(2)
+            raise svc.JobStopped(False)
+
+        served.job = job
+
+    async def run():
+        ep = images.make_endpoint("generations")
+        body = {"prompt": "x", "stream": True, "partial_images": 1}
+        receive = _receive(body, gone=True)
+        resp = await ep(Request(_scope(), receive))
+
+        async def send(message):
+            pass
+
+        await resp(_scope(), receive, send)
+        await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    assert _until(lambda: served.released == [1]), served.released
+    assert images.STATE.in_flight == 0
+
+
+def test_a_left_stream_logs_no_unretrieved_future_or_pending_task(
+        served, caplog):
+    import asyncio
+    import gc
+
+    from starlette.requests import Request
+
+    def job(req, kw):
+        kw["emit"](0, b"p0")
+        kw["stop"].wait(2)
+        raise RuntimeError("the job failed after the client left")
+
+    served.job = job
+
+    async def run():
+        ep = images.make_endpoint("generations")
+        body = {"prompt": "x", "stream": True, "partial_images": 1}
+        resp = await ep(Request(_scope(), _receive(body, gone=False)))
+        it = resp.body_iterator
+        await it.__anext__()
+        await it.aclose()
+        await asyncio.sleep(0.3)
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        asyncio.run(run())
+        assert _until(lambda: served.released == [1])
+        gc.collect()
+    bad = [m for m in caplog.messages
+           if "never retrieved" in m or "Task was destroyed" in m]
+    assert bad == []
+
+
+def test_a_gone_client_stops_its_job(served):
+    """The endpoint's disconnect watcher sets the job's stop event."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    seen = []
+
+    def job(req, kw):
+        seen.append(kw["stop"].wait(3))
+        raise svc.JobStopped(False)
+
+    served.job = job
+
+    async def run():
+        ep = images.make_endpoint("generations")
+        return await ep(Request(_scope(), _receive({"prompt": "x"},
+                                                   gone=True)))
+
+    resp = asyncio.run(run())
+    assert seen == [True] and resp.status_code == 499
+    assert served.released == [1]
+
+
+@pytest.mark.parametrize("exc, status", [("JobTimeout", 504),
+                                         ("JobCancelled", 499)])
+def test_a_shared_encoder_timeout_or_cancel_ends_the_job_as_a_stop(
+        monkeypatch, exc, status):
+    import gmlx.serve.engine_jobs as engine_jobs
+
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    runtime_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
+    monkeypatch.setattr(app_mod, "get_cached_model", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_mod, "runtime", SimpleNamespace(
+        response_generator=SimpleNamespace(model=None, tokenizer=None)))
+
+    def run_on_engine(*a, **k):
+        raise getattr(engine_jobs, exc)("the engine job ended")
+
+    monkeypatch.setattr(engine_jobs, "run_on_engine", run_on_engine)
+    borrow, _ = images._borrow_for(SimpleNamespace(encoder_model="chat"))
+    with pytest.raises(svc.JobStopped) as e:
+        borrow(SimpleNamespace(family="F", encoder=None), lambda: None,
+               threading.Event(), 1.0)
+    assert e.value.timed_out == (status == 504)
+
+
+def test_the_budget_counts_the_other_models_not_this_one(monkeypatch):
+    from gmlx.serve import capacity
+
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100)
+    hold = SimpleNamespace(
+        _entry=SimpleNamespace(footprint=30),
+        _pool=SimpleNamespace(stats=lambda: {"resident_bytes": 70}))
+    assert images._budget(hold) == 60
+    monkeypatch.setattr(capacity, "overcommit", lambda: True)
+    assert images._budget(hold) is None
+
+
+def test_the_responses_route_warns_on_the_image_generation_tool(caplog):
+    import asyncio
+
+    from starlette.requests import Request
+
+    from gmlx.serve.patches import api_contract
+
+    async def original(request):
+        return "ANSWER"
+
+    ep = api_contract._make_raw_endpoint(set(), "/v1/responses")(original)
+    raw = json.dumps({"model": "m", "input": "x",
+                      "tools": [{"type": "image_generation"}]}).encode()
+    sent = {"done": False}
+
+    async def receive():
+        if sent["done"]:
+            return {"type": "http.disconnect"}
+        sent["done"] = True
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    with caplog.at_level(logging.WARNING):
+        out = asyncio.run(ep(Request(_scope("/v1/responses"), receive)))
+    assert out == "ANSWER"
+    assert sum("image_generation tool" in m for m in caplog.messages) == 1
+
+
+@pytest.mark.parametrize("value, ok", [
+    ("BASE64", True), ("data:image/png;base64,BASE64", True),
+    ("/tmp/a.png", False), ("https://example.com/a.png", False),
+    ("not base64!", False)])
+def test_a_json_image_string_is_base64_or_a_data_url(served, value, ok):
+    b64 = base64.b64encode(_png()).decode()
+    r = _client().post("/v1/images/edits", json={
+        "prompt": "x", "images": [{"image_url": value.replace("BASE64", b64)}]})
+    assert (r.status_code == 200) == ok, r.text
+
+
+def test_each_server_keeps_its_url_files_under_its_port(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    st = images._State()
+    st.configure(build_config({**_DOC, "server": {"port": 8123}}))
+    assert st.store.root == str(tmp_path / "gmlx" / "images" / "8123")

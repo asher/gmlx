@@ -3,6 +3,7 @@
 CPU-only; the loads and the request path run in the image e2e."""
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -57,9 +58,12 @@ def test_png_keeps_alpha_and_jpeg_and_webp_take_compression():
     im = Image.open(io.BytesIO(image_service.encode_output(px, "png")))
     assert im.mode == "RGBA" and im.size == (24, 16)
     rgb = np.random.default_rng(0).integers(0, 255, (64, 64, 3), np.uint8)
-    hi = image_service.encode_output(rgb, "jpeg", 0)
-    lo = image_service.encode_output(rgb, "jpeg", 90)
+    # output_compression is the quality, as OpenAI's is: 100 is the
+    # default and keeps the most.
+    hi = image_service.encode_output(rgb, "jpeg", 100)
+    lo = image_service.encode_output(rgb, "jpeg", 10)
     assert len(lo) < len(hi) and Image.open(io.BytesIO(hi)).format == "JPEG"
+    assert image_service.encode_output(rgb, "jpeg", None) == hi
     assert Image.open(io.BytesIO(
         image_service.encode_output(px, "webp", 50))).format == "WEBP"
 
@@ -236,6 +240,55 @@ def test_a_request_on_turbo_takes_only_its_own_step_count(variant, steps,
     assert e.value.param == "steps"
 
 
+def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
+                                                         monkeypatch):
+    from gmlx.image import memfit
+
+    seen = []
+    plan = memfit.plan_memory
+
+    def spy(*a, **kw):
+        seen.append((kw["adapters"], kw["cache_bytes"]))
+        return plan(*a, **kw)
+
+    monkeypatch.setattr(memfit, "plan_memory", spy)
+    image_service.configure_caches(SimpleNamespace(tensor_cache_mb=3,
+                                                   adapter_cache_mb=5))
+    try:
+        image_service.entry_plan(_spec())
+    finally:
+        image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
+                                                       adapter_cache_mb=256))
+    assert seen[0] == ([2 * (5 << 20)], 2 * (3 << 20))
+
+
+def test_a_served_pipeline_caches_hold_at_most_their_bound():
+    from gmlx.image.conditioning import ByteLRU as _Lru
+
+    pipe = SimpleNamespace(conditionings=_Lru(1 << 40),
+                           reference_latents=_Lru(1 << 40),
+                           adapters=_Lru(1 << 40), tables=_Lru(1 << 40))
+    image_service.configure_caches(SimpleNamespace(tensor_cache_mb=1,
+                                                   adapter_cache_mb=2))
+    try:
+        image_service.bound_caches(pipe, configured=7)
+    finally:
+        image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
+                                                       adapter_cache_mb=256))
+    assert pipe.conditionings.max_bytes == 1 << 20
+    assert pipe.reference_latents.max_bytes == 1 << 20
+    assert pipe.adapters.max_bytes == (2 << 20) + 7
+    assert pipe.tables.max_bytes == (2 << 20) + 7
+
+
+def test_the_default_cache_bounds_are_small():
+    from gmlx.config import ImageServerCfg
+
+    cfg = ImageServerCfg()
+    assert (cfg.tensor_cache_mb, cfg.adapter_cache_mb) == (64, 256)
+    assert image_service.cache_bytes() == (64 << 20, 256 << 20)
+
+
 def test_the_parts_are_checked_before_the_entry_is_priced(plan_stubs, monkeypatch):
     image_service.entry_plan(_spec())
     assert plan_stubs.checked == ["zit"]
@@ -284,10 +337,15 @@ class _Encoder:
         return True
 
 
+class _Cache(dict):
+    max_bytes = None
+
+
 def _pipe(encoder=None):
-    return SimpleNamespace(encoder=encoder, conditionings={}, captions={},
-                           modulations={}, adapters={}, tables={},
-                           reference_latents={}, default_table=None)
+    return SimpleNamespace(encoder=encoder, conditionings=_Cache(),
+                           captions={}, modulations={}, adapters=_Cache(),
+                           tables=_Cache(), reference_latents=_Cache(),
+                           default_table=None)
 
 
 def test_a_release_drops_the_owned_encoder():
@@ -361,3 +419,182 @@ def test_a_failed_vae_load_releases_the_encoder_it_loaded(monkeypatch):
         api.load("/dit.gguf", text_encoder="/enc.gguf", vae="/vae.gguf",
                  memory="off", log=lambda *a: None)
     assert enc.released == 1
+
+
+# Request limits, the fit search and the family checks.
+
+@pytest.mark.parametrize("size", ["4194304x16", "2049x2048", "4112x64",
+                                  "16777216x16"])
+def test_a_size_over_the_pixel_or_side_limit_is_refused_by_name(size):
+    with pytest.raises(image_service.ImageRequestError,
+                       match="limit of 4194304 pixels") as e:
+        image_service.parse_size(size)
+    assert e.value.param == "size"
+
+
+@pytest.mark.parametrize("size", ["2048x2048", "4096x1024", "16x16"])
+def test_a_size_inside_the_limits_is_taken(size):
+    w, h = (int(v) for v in size.split("x"))
+    assert image_service.parse_size(size) == (w, h)
+
+
+def _fit_served(monkeypatch, fits_px: int):
+    """A served entry whose plan fits sizes of at most ``fits_px`` pixels,
+    counting the plans it makes."""
+    from gmlx.image import memfit
+
+    calls = []
+
+    def plan_memory(*, height, width, _hint=True, **k):
+        calls.append((width, height))
+        ok = width * height <= fits_px
+        if not ok and _hint:
+            raise memfit.ImageMemoryError("no room")
+        return SimpleNamespace(fits=ok)
+
+    monkeypatch.setattr(memfit, "plan_memory", plan_memory)
+    nb = SimpleNamespace(bytes=0)
+    pipe = SimpleNamespace(
+        encoder=None, dit=SimpleNamespace(act_dtype="bfloat16"),
+        weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb,
+        family=SimpleNamespace(name="z_image", edit=None, title="Z-Image"),
+        vae=None, conditionings=nb, modulations=nb, size_multiple=16)
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
+        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"))
+    return served, calls
+
+
+def test_the_fit_check_names_the_largest_fitting_size_in_few_plans(
+        monkeypatch):
+    served, calls = _fit_served(monkeypatch, 1024 * 512)
+    req = image_service.parse_request("generations", {
+        "prompt": "x", "size": "4096x1024"})
+    with pytest.raises(image_service.ImageRequestError,
+                       match="largest size of its shape that fits is "
+                             "1456x352") as e:
+        image_service.fit_check(req, served, req.size, 1)
+    assert e.value.param == "size"
+    # A bisection over the longer side, not a plan per stride.
+    assert len(calls) <= 12, len(calls)
+    calls.clear()
+    image_service.fit_check(req, served, (512, 512), 1)
+    assert len(calls) == 1
+
+
+def test_the_fit_check_passes_without_a_budget(monkeypatch):
+    served, calls = _fit_served(monkeypatch, 0)
+    req = image_service.parse_request("generations", {"prompt": "x"})
+    image_service.fit_check(req, served, (1024, 1024), None)
+    assert calls == []
+
+
+def _edit_served(family: str, mmproj=True):
+    from gmlx.image.registry import get_family
+
+    fam = get_family(family)
+    return SimpleNamespace(
+        pipe=SimpleNamespace(family=fam, variant="base"),
+        spec=SimpleNamespace(id="m", encoder_model=None,
+                             encoder_mmproj="/mm.gguf" if mmproj else None))
+
+
+def _edit_req(n: int):
+    import numpy as np
+
+    req = image_service.parse_request("edits", {"prompt": "x"})
+    req.images = [np.zeros((32, 32, 3), np.uint8)] * n
+    return req
+
+
+def test_an_edit_takes_at_most_the_family_reference_count():
+    served = _edit_served("qwen_image21")
+    image_service.check_family(_edit_req(10), served)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="takes at most 10 images, and the request has "
+                             "11") as e:
+        image_service.check_family(_edit_req(11), served)
+    assert e.value.param == "image"
+
+
+def test_z_image_edits_one_image_at_a_time():
+    served = _edit_served("z_image")
+    image_service.check_family(_edit_req(1), served)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="Z-Image edits one image at a time"):
+        image_service.check_family(_edit_req(2), served)
+
+
+@pytest.mark.parametrize("aid", ["/abs/a.safetensors", "~/a.safetensors",
+                                 "../a.safetensors", "x/../../a.safetensors"])
+def test_an_adapter_id_is_never_an_absolute_or_escaping_path(tmp_path, aid):
+    root = tmp_path / "models"
+    root.mkdir()
+    with pytest.raises(image_service.ImageRequestError, match="never an "
+                       "absolute path"):
+        image_service._adapter_under_roots(aid, [str(root)])
+
+
+def test_an_adapter_id_resolves_only_inside_a_model_folder(tmp_path):
+    root = tmp_path / "models"
+    (root / "lora").mkdir(parents=True)
+    (root / "lora" / "a.safetensors").write_bytes(b"x")
+    outside = tmp_path / "b.safetensors"
+    outside.write_bytes(b"x")
+    (root / "lora" / "b.safetensors").symlink_to(outside)
+    got = image_service._adapter_under_roots("lora/a.safetensors", [str(root)])
+    assert got == str((root / "lora" / "a.safetensors").resolve())
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service._adapter_under_roots("lora/b.safetensors", [str(root)])
+    assert e.value.status == 404
+
+
+@pytest.mark.parametrize("scheduler", ["karras", "simple", "beta"])
+def test_a_scheduler_other_than_the_variant_own_is_refused(scheduler):
+    with pytest.raises(image_service.ImageRequestError,
+                       match="scheduler takes only default") as e:
+        image_service.parse_request("generations", {
+            "prompt": "x", "scheduler": scheduler})
+    assert e.value.param == "scheduler"
+    assert image_service.parse_request("generations", {
+        "prompt": "x", "scheduler": "default"})
+
+
+def test_a_size_off_the_family_stride_is_refused():
+    served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
+                             plan=SimpleNamespace(size=(1024, 1024)))
+    req = image_service.parse_request("generations", {
+        "prompt": "x", "size": "1000x1024"})
+    with pytest.raises(image_service.ImageRequestError,
+                       match="multiples of 16") as e:
+        image_service.target_size(req, served)
+    assert e.value.param == "size"
+
+
+def test_a_large_edit_image_gives_the_largest_size_of_its_shape():
+    import numpy as np
+
+    served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
+                             plan=SimpleNamespace(size=(1024, 1024)))
+    req = image_service.parse_request("edits", {"prompt": "x"})
+    req.images = [np.zeros((3000, 6000, 3), np.uint8)]
+    w, h = image_service.target_size(req, served)
+    assert w * h <= image_service.MAX_PIXELS and max(w, h) <= 4096
+    assert (w % 16, h % 16) == (0, 0) and abs(w / h - 2) < 0.02
+
+
+def test_a_url_file_over_the_byte_cap_keeps_its_link(tmp_path):
+    store = image_service.FileStore(str(tmp_path / "f"), ttl_s=60,
+                                    max_bytes=10)
+    old = store.put(b"y" * 8, "png")
+    tok = store.put(b"x" * 64, "png")
+    assert store.path(tok, "png") is not None
+    # The older file goes to make room, not the new one.
+    assert store.path(old, "png") is None
+
+
+def test_each_server_port_keeps_its_own_url_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    a = image_service.default_store_root(8080)
+    b = image_service.default_store_root(8081)
+    assert a != b and os.path.dirname(a) == os.path.dirname(b)
+    assert a == str(tmp_path / "gmlx" / "images" / "8080")

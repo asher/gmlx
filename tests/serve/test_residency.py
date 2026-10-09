@@ -1316,3 +1316,45 @@ def test_a_refused_chat_load_installs_no_boot_table(monkeypatch):
     with pytest.raises(RuntimeError, match="does not fit"):
         pool.acquire("A.gguf", None, "auto")
     assert order == ["gate"]
+
+
+def test_a_chat_cold_load_completes_while_an_image_job_runs(monkeypatch):
+    """An image build waits for the image worker before it takes the build
+    lock, so a chat load never queues behind a running image job."""
+    import threading
+
+    from gmlx.serve import image_service
+
+    _, pool, _, loads, _ = make_mixed_pool(
+        100, {"A.gguf": 10}, {"/dit.safetensors": 9}, monkeypatch)
+    footprint, _load, release = pool._image_fns
+
+    def load(spec):
+        # As load_on_worker: the pipeline is built on the image worker.
+        return image_service._on_worker(_load, spec)
+
+    pool._image_fns = (footprint, load, release)
+    gate, running = threading.Event(), threading.Event()
+
+    def job():
+        running.set()
+        gate.wait(10)
+
+    busy = image_service.WORKER.submit(job)
+    assert running.wait(5)
+    try:
+        img = threading.Thread(target=acquire_image,
+                               args=(pool, "/dit.safetensors"), daemon=True)
+        img.start()
+        chat = threading.Thread(target=acquire, args=(pool, "A.gguf"),
+                                daemon=True)
+        chat.start()
+        chat.join(3.0)
+        assert not chat.is_alive(), "the chat load waited on the image job"
+        assert loads == []
+    finally:
+        gate.set()
+    busy.result(5)
+    img.join(5.0)
+    assert not img.is_alive() and loads == ["/dit.safetensors"]
+    assert resident(pool) == {"A.gguf", "/dit.safetensors"}
