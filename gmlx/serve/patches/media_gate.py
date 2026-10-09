@@ -826,6 +826,16 @@ def _is_upload(request) -> bool:
             and form_type(request.headers.get("content-type")) == _MULTIPART)
 
 
+def _is_step_tensors(request) -> bool:
+    """True for a safetensors body sent to the image step routes, which
+    read and check it themselves."""
+    from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX
+
+    ctype = (request.headers.get("content-type") or "").split(";", 1)[0]
+    return (request.url.path.startswith(PREFIX + "/")
+            and ctype.strip().lower() == CONTENT_TYPE)
+
+
 def body_limit(upload: bool, session: bool) -> int:
     """The largest body the server reads for a request of this kind."""
     if session:
@@ -901,6 +911,17 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         session = request.scope.get(SESSION_SCOPE_KEY) is not None
         # Taken out of the scope, so that the route does not keep it.
         parsed = request.scope.pop(SESSION_BODY_KEY, None)
+        if _is_step_tensors(request):
+            # Tensors, not JSON: the step routes read the container and
+            # hold it to their own limit, and it names no media.
+            from gmlx.serve.image_wire import MAX_BODY_BYTES
+
+            limit = SESSION_UPLOAD_MAX_BYTES if session else MAX_BODY_BYTES
+            if await _read_body(request, limit) is None:
+                return _refusal(request.url.path, 413,
+                                f"the tensor body is larger than the "
+                                f"{limit >> 20} MiB limit")
+            return await call_next(request)
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return _refusal(request.url.path, 413,

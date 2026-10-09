@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, Response
 
 import gmlx.serve.bridge_vlm as serving
 
+from ..image_wire import MAX_BODY_BYTES
 from ._common import _remove_routes
 
 _log = logging.getLogger(__name__)
@@ -309,7 +310,7 @@ async def put_tensor(request: Request):
     from ..image_steps import MAX_TENSOR_BYTES, STATE
 
     h = _hash_path(request)
-    tensors, _ = await _wire(request, MAX_TENSOR_BYTES + (1 << 20))
+    tensors, _ = await _wire(request, MAX_BODY_BYTES)
     STATE.put_tensor(STATE.tensors, h, tensors, MAX_TENSOR_BYTES)
     return _json(200, {"hash": h})
 
@@ -325,7 +326,7 @@ async def put_adapter(request: Request):
     from ..image_steps import MAX_ADAPTER_BYTES, STATE
 
     h = _hash_path(request)
-    tensors, _ = await _wire(request, MAX_ADAPTER_BYTES + (1 << 20))
+    tensors, _ = await _wire(request, MAX_BODY_BYTES)
     STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES)
     return _json(200, {"hash": h})
 
@@ -408,11 +409,11 @@ def _table(served, tid):
 
 
 async def step(request: Request):
-    from ..image_steps import (CONVENTIONS, MAX_ROWS, MAX_TENSOR_BYTES, STATE,
+    from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE,
                                Missing, StepError, row_hashes, run_step)
 
     t0 = time.perf_counter()
-    tensors, fields = await _wire(request, 4 * MAX_TENSOR_BYTES)
+    tensors, fields = await _wire(request, MAX_BODY_BYTES)
     run = STATE.get_run(fields.get("run"))
     x_w, t_w = tensors.get("x"), tensors.get("timestep")
     if x_w is None or t_w is None:
@@ -499,14 +500,14 @@ async def step(request: Request):
 
 async def encode(request: Request):
     from ..image_service import decode_image
-    from ..image_steps import MAX_TENSOR_BYTES, STATE, StepError
+    from ..image_steps import STATE, StepError
     from ..image_steps import encode as do_encode
     from ..image_wire import CONTENT_TYPE, read, write
 
     ctype = request.headers.get("content-type", "").split(";")[0].strip()
     images = []
     if ctype == CONTENT_TYPE:
-        tensors, fields = await _wire(request, 4 * MAX_TENSOR_BYTES)
+        tensors, fields = await _wire(request, MAX_BODY_BYTES)
         for name in sorted(tensors, key=lambda n: (len(n), n)):
             t = tensors[name]
             if t.dtype != "U8" or len(t.shape) != 3 or t.shape[2] not in (3, 4):
@@ -566,10 +567,10 @@ async def encode(request: Request):
 
 
 async def vae_decode(request: Request):
-    from ..image_steps import MAX_TENSOR_BYTES, StepError
+    from ..image_steps import StepError
     from ..image_steps import vae_decode as do_decode
 
-    tensors, fields = await _wire(request, 4 * MAX_TENSOR_BYTES)
+    tensors, fields = await _wire(request, MAX_BODY_BYTES)
     lat = tensors.get("latents")
     if lat is None or len(lat.shape) != 4:
         raise StepError(400, "vae/decode takes latents (B, C, h, w)")
@@ -584,10 +585,10 @@ async def vae_decode(request: Request):
 
 
 async def vae_encode(request: Request):
-    from ..image_steps import MAX_TENSOR_BYTES, StepError
+    from ..image_steps import StepError
     from ..image_steps import vae_encode as do_encode
 
-    tensors, fields = await _wire(request, 4 * MAX_TENSOR_BYTES)
+    tensors, fields = await _wire(request, MAX_BODY_BYTES)
     img = tensors.get("image")
     if img is None or len(img.shape) != 4:
         raise StepError(400, "vae/encode takes an image (B, H, W, C) in "

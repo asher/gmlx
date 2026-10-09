@@ -32,6 +32,8 @@ DTYPES = {"F32": ("<f4", 4), "F16": ("<f2", 2), "BF16": ("<u2", 2),
 _SHORT = {"F32": "f32", "F16": "f16", "BF16": "bf16", "U8": "u8",
           "BOOL": "bool"}
 MAX_HEADER_BYTES = 1 << 24
+# The largest body a step route reads: one tensor of 1 GiB and its header.
+MAX_BODY_BYTES = (1 << 30) + (1 << 20)
 
 
 class WireError(ValueError):

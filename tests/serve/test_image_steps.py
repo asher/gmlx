@@ -238,6 +238,44 @@ def test_a_tensor_is_put_once_by_its_hash(host):
     assert c.head(f"{P}/tensors/XYZ", headers=V).status_code == 400
 
 
+def test_the_media_gate_passes_tensor_bodies_and_still_reads_json(host):
+    """The media gate parses every body as JSON; a step route's container
+    passes it, up to the routes' own limit, and a JSON body to the same
+    prefix is still checked."""
+    from fastapi import FastAPI
+
+    from gmlx.serve.patches import media_gate as mg
+    from gmlx.serve.patches.hardening import (
+        install_json_content_type_tolerance,
+    )
+
+    app = FastAPI()
+    routes.mount(app, ImageServerCfg(), host)
+    install_json_content_type_tolerance(app)
+    mg.install_media_gate(False, app=app)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    feats = _features(2)
+    h = array_hash(feats)
+    ct = {**V, "Content-Type": wire.CONTENT_TYPE}
+    r = c.put(f"{P}/tensors/{h}", content=wire.write({"c": feats}), headers=ct)
+    assert r.status_code == 200, r.text
+    assert c.head(f"{P}/tensors/{h}", headers=V).status_code == 200
+    # A step body passes too, and its answer is a container.
+    body = wire.write({"x": np.zeros(SHAPE, np.float32),
+                       "timestep": np.array([0.5], np.float32)},
+                      {"model": "zit", "rows": [{"cond": h}]})
+    r = c.post(f"{P}/step", content=body, headers=ct)
+    assert r.status_code == 200 and r.headers["content-type"] == \
+        wire.CONTENT_TYPE
+    # The same bytes typed as JSON are refused by the gate.
+    r = c.put(f"{P}/tensors/{h}", content=wire.write({"c": feats}),
+              headers={**V, "Content-Type": "application/json"})
+    assert r.status_code == 400 and "not valid JSON" in r.text
+    assert mg._is_step_tensors(SimpleNamespace(
+        url=SimpleNamespace(path="/v1/chat/completions"),
+        headers={"content-type": wire.CONTENT_TYPE})) is False
+
+
 def test_a_binary_body_passes_the_serve_middleware(host):
     from gmlx.serve.patches.hardening import (
         install_api_key_auth,
