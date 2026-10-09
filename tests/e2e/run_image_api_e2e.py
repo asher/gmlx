@@ -7,9 +7,9 @@ small chat model and the two image families, then drives it with the
 partial images, edits, variations, a cancelled request and the refusals a
 client sees. ``--with-chat`` keeps a chat stream decoding while each family
 generates, and ``--memguard`` runs ``memguard.py`` beside the server.
-``--measure`` instead times chat decode with and without an image job
-beside it, and the time to the first byte of a streamed image. Writes a
-Markdown and a JSON report.
+``--measure`` instead times chat decode and a 1024x1024 image, each
+alone and beside the other, and the time to the first byte of a streamed
+image. Writes a Markdown and a JSON report.
 
     python tests/e2e/run_image_api_e2e.py --out DIR [--with-chat] [--memguard]
     python tests/e2e/run_image_api_e2e.py --measure --out DIR
@@ -252,24 +252,69 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
         rep.check(f"{tag} chat decode in flight", chat_done)
 
 
-def measure(base: str, out: dict) -> None:
+def _chat_window(base: str, max_tokens: int, state: dict) -> None:
+    """A streamed chat completion that records the time of each content
+    chunk in ``state["times"]`` until ``state["stop"]`` is set."""
     from openai import OpenAI
 
     client = OpenAI(base_url=base + "/v1", api_key="none", timeout=900)
+    stream = client.chat.completions.create(
+        model="chat", stream=True, max_tokens=max_tokens, temperature=0,
+        extra_body={"ignore_eos": True},
+        messages=[{"role": "user", "content":
+                   "Write a long story about a lighthouse keeper."}])
+    try:
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                state["times"].append(time.perf_counter())
+            if state["stop"].is_set():
+                break
+    finally:
+        stream.close()
+
+
+def _median(values: list) -> float:
+    v = sorted(values)
+    return v[len(v) // 2] if len(v) % 2 else (v[len(v) // 2 - 1] + v[len(v) // 2]) / 2
+
+
+def measure(base: str, out: dict, rounds: int = 2) -> None:
+    """Chat decode alone, an image alone, and the two beside each other:
+    a chat stream decodes while one 1024x1024 image runs, and the chat
+    rate counts the tokens inside the image's time."""
+    from openai import OpenAI
+
+    client = OpenAI(base_url=base + "/v1", api_key="none", timeout=900)
+
+    def one_image(seed: int) -> float:
+        t0 = time.perf_counter()
+        client.images.generate(prompt=PROMPT, size="1024x1024",
+                               extra_body={"seed": seed})
+        return time.perf_counter() - t0
+
     # Warm both models and their kernels at the measured shapes.
-    client.images.generate(prompt=PROMPT, size="1024x1024")
+    one_image(0)
     warm = {}
     _chat_stream(base, 64, warm)
     alone = {}
     _chat_stream(base, 512, alone)
-    beside = {}
-    job = threading.Thread(target=lambda: [client.images.generate(
-        prompt=PROMPT, size="1024x1024", n=4, extra_body={"seed": i})
-        for i in range(3)])
-    job.start()
-    time.sleep(1.0)
-    _chat_stream(base, 512, beside)
-    job.join()
+    image_alone = [one_image(1 + i) for i in range(rounds)]
+    image_beside, chat_beside = [], []
+    for i in range(rounds):
+        state = {"times": [], "stop": threading.Event()}
+        th = threading.Thread(target=_chat_window, args=(base, 8000, state))
+        th.start()
+        deadline = time.monotonic() + 120
+        while len(state["times"]) < 32 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        t0 = time.perf_counter()
+        one_image(10 + i)
+        t1 = time.perf_counter()
+        state["stop"].set()
+        th.join(300)
+        inside = sum(1 for t in state["times"] if t0 <= t <= t1)
+        image_beside.append(t1 - t0)
+        chat_beside.append(inside / (t1 - t0))
     import httpx
 
     def first_byte(partials: int) -> tuple:
@@ -293,8 +338,14 @@ def measure(base: str, out: dict) -> None:
     partial = first_byte(1)
     out.update(
         chat_alone_tps=alone["tokens"] / alone["decode_s"],
-        chat_beside_image_tps=beside["tokens"] / beside["decode_s"],
-        chat_alone_tokens=alone["tokens"], chat_beside_tokens=beside["tokens"],
+        chat_alone_tokens=alone["tokens"],
+        image_alone_s=_median(image_alone),
+        image_beside_chat_s=_median(image_beside),
+        chat_beside_image_tps=_median(chat_beside),
+        image_alone_runs=[round(v, 3) for v in image_alone],
+        image_beside_runs=[round(v, 3) for v in image_beside],
+        chat_beside_runs=[round(v, 2) for v in chat_beside],
+        chat_share=os.environ.get("GMLX_IMAGE_CHAT_SHARE", "default"),
         stream_first_byte_s=plain[0], stream_total_s=plain[2],
         stream_partial1_first_byte_s=partial[0],
         stream_partial1_final_s=partial[1], stream_partial1_total_s=partial[2])
@@ -345,7 +396,7 @@ def main() -> int:
                 m: dict = {}
                 rep.check("measurements", lambda: measure(base, m) or json.dumps(
                     {k: round(v, 3) if isinstance(v, float) else v
-                     for k, v in m.items()}))
+                     for k, v in m.items() if not isinstance(v, list)}))
                 result["measurements"] = m
             else:
                 for family, model in (("z", "z-image-turbo"), ("qwen", "qwen-image")):
