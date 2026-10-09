@@ -19,6 +19,7 @@ result = client.images.generate(prompt="a lighthouse at dusk",
 - [URL responses](#url-responses)
 - [Streaming](#streaming)
 - [Memory, queueing and errors](#memory-queueing-and-errors)
+- [Step routes](#step-routes)
 
 ## Setting up a model
 
@@ -171,3 +172,51 @@ tokens of each image as output tokens.
 
 The Responses route does not run the `image_generation` tool. A request
 that sends it gets a warning line in the log, and the tool is dropped.
+
+## Step routes
+
+The step routes run one denoise step at a time for a client whose sampler
+runs elsewhere, such as the ComfyUI node pack. They live under
+`/internal/image-steps/v1` and are an internal interface: their payloads
+can change with each contract version, and the version a client speaks
+goes in the `X-Gmlx-Steps-Contract` header of every request but
+`capabilities`. A major version the server does not speak gets 400 that
+names the side to upgrade.
+
+The routes answer loopback peers only. [`image.steps_remote`](config.md#serverimagesteps_remote)
+serves other peers that the API key admits, and
+[`image.steps_api`](config.md#serverimagesteps_api) set to `false` removes
+the routes.
+
+Tensors travel as a safetensors container with content type
+`application/vnd.gmlx.tensors+safetensors`, in F32, F16, BF16, U8 or
+BOOL, and the request fields of a container travel as JSON under
+`__metadata__["gmlx"]`. Other bodies are JSON. A tensor's hash is the
+sha256 of its dtype name, its shape as JSON and its bytes, and a client
+uploads a conditioning or a LoRA matrix once by that hash.
+
+| Route | Purpose |
+|-------|---------|
+| `GET capabilities` | The contract version, families, wire dtypes and limits |
+| `GET models`, `GET models/{model}/status`, `GET models/{model}/manifest` | The image models; one model's family, latent format, memory and sampling; its DiT tensor names and shapes |
+| `POST models/load`, `POST models/unload` | Load or unload a model |
+| `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash |
+| `PUT` or `HEAD tensors/{hash}`, `PUT` or `HEAD adapters/{hash}` | Upload a tensor or a LoRA matrix, or ask whether the server holds it |
+| `POST adapters/register` | Read a LoRA file under a model folder of the server |
+| `PUT patch-tables/{id}?model=ID` | Define a set of LoRA patches; its id is the sha256 of its JSON with sorted keys and no spaces |
+| `POST step` | The model output for latents at a timestep, one row per conditioning |
+| `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
+| `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
+
+A step names its conditionings and its patch table by hash. When the
+server does not hold one, the step gets 409 with a `missing` list, and
+the client uploads those and sends the step again. A run keeps the
+prefix state of each of its conditionings between steps, and the
+`X-Gmlx-Prefix-Cache` header of a step answers `hit` or `miss`.
+`X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
+time less it is the transport time. A run that sits idle for 120 seconds
+ends.
+
+The steps of all clients queue on the image thread with the jobs of the
+OpenAI routes, and share the GPU with chat in the same way.
+

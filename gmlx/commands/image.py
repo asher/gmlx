@@ -759,6 +759,11 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
                    help="Seed of every run (default 0).")
     p.add_argument("--label", default=None, metavar="TEXT",
                    help="Record this label with the results.")
+    p.add_argument("--via-steps", action="store_true",
+                   help="Run each step through the image step routes on a "
+                        "loopback port of this process, and record the "
+                        "transport time per step and whether the latents "
+                        "equal those of a direct run.")
     p.add_argument("--json", action="store_true",
                    help="Print one JSON record per size on stdout.")
     p.add_argument("--json-out", default=None, metavar="FILE",
@@ -835,6 +840,95 @@ def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
             "peak_bytes": int(mx.get_peak_memory())}
 
 
+def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
+                    width: int, steps: int, cfg: float, sampler: str,
+                    seed: int, clock=time.perf_counter):
+    """``bench_run`` with every step a request of the step contract to
+    ``client``. The prompt is encoded in process and uploaded by hash, the
+    client moves the latents between steps with the bench's sampler, and
+    the decode runs in process. Returns the run record, with each step's
+    transport time, and the final latents."""
+    import mlx.core as mx
+    import numpy as np
+
+    from gmlx.image import api
+    from gmlx.image.samplers import make_sampler, noise_from_seed
+    from gmlx.serve.image_steps_loopback import work
+
+    def start():
+        for cache in (pipe.conditionings, pipe.captions, pipe.modulations):
+            cache.clear()
+        mx.reset_peak_memory()
+
+    def encode():
+        cond = api.encode_text(pipe, prompt)
+        neg = None if cfg == 1.0 else api.encode_text(pipe, "")
+        feats = [c.features.astype(mx.float32)[None]
+                 for c in (cond, neg) if c is not None]
+        mx.eval(*feats)
+        return [np.array(f) for f in feats]
+
+    def schedule():
+        token_px = pipe.vae_scale * pipe.dit.cfg.patch
+        s = pipe.sigmas(steps, (height // token_px) * (width // token_px))
+        shape = (1, pipe.dit.cfg.in_channels, height // pipe.vae_scale,
+                 width // pipe.vae_scale)
+        return np.asarray(s, np.float32), make_sampler(sampler, s), shape
+
+    work(start)
+    t0 = clock()
+    feats = work(encode)
+    rows = [[{"cond": client.put(f), "num_tokens": int(f.shape[1])}]
+            for f in feats]
+    t_enc = clock()
+    sigmas, smp, shape = work(schedule)
+
+    def update(x, v, i):
+        return work(lambda: np.array(smp.step(mx.array(x), mx.array(v), i)))
+
+    marks = [t_enc]
+    first = len(client.records)
+    run = client.begin(model)
+    try:
+        x = client.sample(model, noise_from_seed(seed, shape), sigmas,
+                          rows[0], cfg=cfg,
+                          neg_rows=rows[1] if len(rows) > 1 else None,
+                          run=run, update=update,
+                          on_step=lambda i, _x: marks.append(clock()))
+    finally:
+        client.end(run)
+    t_dec = clock()
+
+    def decode():
+        img = api.vae_decode(pipe, mx.array(x))
+        mx.eval(img)
+        return int(mx.get_peak_memory())
+
+    peak = work(decode)
+    t_end = clock()
+    return {"encode_s": t_enc - t0,
+            "step_s": [b - a for a, b in zip(marks, marks[1:])],
+            "decode_s": t_end - t_dec, "image_s": t_end - t0,
+            "peak_bytes": peak,
+            "transport_ms": [r.overhead_ms for r in client.records[first:]]
+            }, x
+
+
+def _direct_latents(pipe, prompt: str, *, height: int, width: int,
+                    steps: int, cfg: float, sampler: str, seed: int):
+    import mlx.core as mx
+    import numpy as np
+
+    from gmlx.image import api
+
+    cond = api.encode_text(pipe, prompt)
+    neg = None if cfg == 1.0 else api.encode_text(pipe, "")
+    x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height, width=width,
+                   steps=steps, seed=seed, sampler=sampler)
+    mx.eval(x)
+    return np.array(x)
+
+
 def bench_summary(runs: list, load_s: dict) -> dict:
     firsts = [r["step_s"][0] for r in runs]
     rest = [s for r in runs for s in r["step_s"][1:]] or firsts
@@ -857,14 +951,13 @@ def cmd_bench(argv: list[str], prog: str = "gmlx image bench") -> int:
 
 
 def _bench(a) -> int:
-    import mlx.core as mx
-
-    from gmlx import __version__
     from gmlx.image import api
     from gmlx.tune.lora import probe_writable
 
     from . import image_preflight
 
+    if a.via_steps and a.adapter:
+        raise _Usage("--via-steps times the base model; drop --adapter")
     a.init_image = a.mask = None
     a.ref = a.ref_size = a.encoder_mmproj = None
     _check_files(a)
@@ -890,8 +983,50 @@ def _bench(a) -> int:
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
                           keep_encoder=True)
-    pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
-    table, adapters = _load_adapters(a, pipe, log)
+    if a.via_steps:
+        from gmlx.serve.image_steps_loopback import work
+
+        # The step routes run the pipeline on the image worker, so it
+        # loads there.
+        pipe = work(lambda: api.load(a.model, text_encoder=a.encoder,
+                                     vae=a.vae, log=log))
+        table, adapters = None, []
+        with _steps_client(a, pipe) as (client, mid):
+            records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg,
+                                   table, adapters, log, client, mid)
+    else:
+        pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+        table, adapters = _load_adapters(a, pipe, log)
+        records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table,
+                               adapters, log)
+    lines = "".join(json.dumps(r) + "\n" for r in records)
+    if a.json:
+        sys.stdout.write(lines)
+    if a.json_out is not None:
+        with open(a.json_out, "w", encoding="utf-8") as f:
+            f.write(lines)
+    return 0
+
+
+@contextlib.contextmanager
+def _steps_client(a, pipe):
+    from gmlx.serve import image_steps_loopback as loop
+    from gmlx.serve.image_steps_client import StepsClient, http_transport
+
+    mid = loop.model_id(a.model)
+    host = loop.OneModelHost(mid, pipe, {"dit": a.model, "encoder": a.encoder,
+                                         "vae": a.vae})
+    with loop.serve(host) as base:
+        yield StepsClient(http_transport(base)), mid
+
+
+def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
+                 log, client=None, mid: str = "") -> list:
+    import mlx.core as mx
+    import numpy as np
+
+    from gmlx import __version__
+
     model = {
         "id": os.path.basename(a.model), "family": fam.name,
         "variant": pipe.variant,
@@ -906,10 +1041,28 @@ def _bench(a) -> int:
     records = []
     for w, h in sizes:
         kw = dict(height=h, width=w, steps=steps, cfg=cfg,
-                  sampler=a.sampler, seed=a.seed, patch_table=table)
-        for _ in range(a.warmup):
-            bench_run(pipe, a.prompt, **kw)
-        runs = [bench_run(pipe, a.prompt, **kw) for _ in range(a.runs)]
+                  sampler=a.sampler, seed=a.seed)
+        transport = {"mode": "direct", "overhead_ms_median": None}
+        if client is None:
+            kw["patch_table"] = table
+            for _ in range(a.warmup):
+                bench_run(pipe, a.prompt, **kw)
+            runs = [bench_run(pipe, a.prompt, **kw) for _ in range(a.runs)]
+        else:
+            from gmlx.serve.image_steps_loopback import work
+
+            for _ in range(a.warmup):
+                bench_run_steps(pipe, client, mid, a.prompt, **kw)
+            runs, x = [], None
+            for _ in range(a.runs):
+                rec, x = bench_run_steps(pipe, client, mid, a.prompt, **kw)
+                runs.append(rec)
+            direct = work(lambda: _direct_latents(pipe, a.prompt, **kw))
+            ms = [t for r in runs for t in r["transport_ms"]]
+            transport = {"mode": "steps",
+                         "overhead_ms_median": _median(ms),
+                         "equal_to_direct": bool(np.array_equal(
+                             direct, x, equal_nan=True))}
         rec = {"schema": BENCH_SCHEMA, "gmlx_version": __version__,
                "mlx_version": mx.__version__, "label": a.label,
                "machine": _machine(), "model": model,
@@ -920,7 +1073,7 @@ def _bench(a) -> int:
                             "seed": a.seed, "prompt": a.prompt},
                "runs": runs, "summary": bench_summary(runs,
                                                       pipe.load_seconds),
-               "transport": {"mode": "direct", "overhead_ms_median": None}}
+               "transport": transport}
         records.append(rec)
         sm = rec["summary"]
         log(f"[bench] {w}x{h} {steps} steps: step first "
@@ -930,13 +1083,13 @@ def _bench(a) -> int:
             f"{sm['s_per_image']:.2f} s; load "
             f"{sm['load_s']['total']:.1f} s; peak "
             f"{sm['peak_bytes'] / 1e9:.2f} GB")
-    lines = "".join(json.dumps(r) + "\n" for r in records)
-    if a.json:
-        sys.stdout.write(lines)
-    if a.json_out is not None:
-        with open(a.json_out, "w", encoding="utf-8") as f:
-            f.write(lines)
-    return 0
+        if client is not None:
+            log(f"[bench] {w}x{h} via the step routes: transport "
+                f"{transport['overhead_ms_median']:.2f} ms per step "
+                f"(median); its latents "
+                f"{'equal' if transport['equal_to_direct'] else 'differ from'}"
+                " those of a direct run")
+    return records
 
 
 def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:

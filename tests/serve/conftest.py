@@ -30,6 +30,7 @@ _PATCH_MODULES = {
     "test_patches_chat_behavior",
     "test_patches_routes",
     "test_image_routes",
+    "test_image_steps",
     "test_patches_sampling",
 }
 

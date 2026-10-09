@@ -3293,8 +3293,16 @@ def test_server_image_block():
     assert cfg.image == cfgmod.ImageServerCfg(
         url_ttl_s=60.0, url_max_bytes=2 << 30, max_queue=0,
         embed_metadata=True)
-    with pytest.raises(ConfigError, match="steps_api"):
-        build_config({"server": {"image": {"steps_api": True}}})
+    cfg = build_config({"server": {"image": {"steps_api": False,
+                                             "steps_remote": True}}})
+    assert (cfg.image.steps_api, cfg.image.steps_remote) == (False, True)
+    base = build_config({}).image
+    assert (base.steps_api, base.steps_remote) == (True, False)
+    for bad in ({"steps_api": "yes"}, {"steps_remote": 1}):
+        with pytest.raises(ConfigError, match=next(iter(bad))):
+            build_config({"server": {"image": bad}})
+    with pytest.raises(ConfigError, match="steps_api_x"):
+        build_config({"server": {"image": {"steps_api_x": True}}})
     cfg = build_config({"server": {"image": {"tensor_cache_mb": 32,
                                              "adapter_cache_mb": 128}}})
     assert (cfg.image.tensor_cache_mb, cfg.image.adapter_cache_mb) == (32, 128)

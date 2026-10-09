@@ -564,6 +564,50 @@ def test_bench_summary_takes_medians_and_the_first_step_apart():
     assert sm["s_per_image"] == 15.0 and sm["peak_bytes"] == 9
 
 
+@pytest.mark.parametrize("guidance", [[], ["--guidance", "3"]])
+def test_bench_via_steps_gives_the_latents_of_sample(env, capsys, guidance,
+                                                     monkeypatch):
+    latents = []
+    real = cmd.bench_run_steps
+
+    def spy(*a, **k):
+        rec, x = real(*a, **k)
+        latents.append(x)
+        return rec, x
+
+    monkeypatch.setattr(cmd, "bench_run_steps", spy)
+    rc = umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "48x32", "--steps", "3", "--runs", "2", "--warmup", "1",
+        "--seed", "5", "--via-steps", "--json", *guidance])
+    io = capsys.readouterr()
+    assert rc == 0, io.err
+    rec = json.loads(io.out)
+    t = rec["transport"]
+    assert t["mode"] == "steps" and t["equal_to_direct"] is True
+    assert t["overhead_ms_median"] >= 0
+    assert [len(r["transport_ms"]) for r in rec["runs"]] == [3, 3]
+    assert all(len(r["step_s"]) == 3 for r in rec["runs"])
+    fresh = api.ImagePipeline(dit=_Dit(), family=env.pipes[0].family,
+                              variant="turbo", encoder=_OwnedEncoder())
+    kw = {"cfg": 3.0, "neg": api.encode_text(fresh, "")} if guidance else {}
+    want = _direct(env.pipes[0], rec["settings"]["prompt"], 5, steps=3, **kw)
+    assert len(latents) == 3
+    # The toy encoder gives the empty negative prompt no rows, so a guided
+    # velocity is NaN on both paths.
+    assert all(np.array_equal(x, want, equal_nan=True) for x in latents)
+    assert "via the step routes: transport" in io.err
+    # The bench's runs and routes end with it.
+    from gmlx.serve.image_steps import STATE
+    assert STATE.runs == {}
+
+
+def test_bench_via_steps_refuses_adapters(env, capsys):
+    assert umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--via-steps", "--adapter", "a.safetensors"]) == 2
+    assert "drop --adapter" in capsys.readouterr().err
+    assert env.pipes == []
+
+
 def test_bench_refuses_sizes_off_the_stride(env, capsys):
     assert umbrella_main(["image", "bench"] + env.base[2:] + [
         "--sizes", "1024x1000"]) == 2

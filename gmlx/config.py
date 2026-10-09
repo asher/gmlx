@@ -154,7 +154,8 @@ _IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
 _IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
 _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
                                 "embed_metadata", "tensor_cache_mb",
-                                "adapter_cache_mb"})
+                                "adapter_cache_mb", "steps_api",
+                                "steps_remote"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
@@ -631,6 +632,8 @@ class ImageServerCfg:
     embed_metadata: bool = False     # API outputs carry the PNG text chunk
     tensor_cache_mb: int = 64        # each cache of conditionings, latents
     adapter_cache_mb: int = 256      # each cache of request adapters, tables
+    steps_api: bool = True           # serve the image step contract
+    steps_remote: bool = False       # step clients beyond loopback
 
 
 @dataclass(frozen=True)
@@ -2738,12 +2741,19 @@ def _parse_server_image(raw) -> ImageServerCfg:
             raise ConfigError(f"{where}.{key}: expected a positive number "
                               f"of MB, got {mb!r}")
         caches[key] = getattr(base, key) if mb is None else mb
+    flags = {}
+    for key in ("steps_api", "steps_remote"):
+        v = raw.get(key, getattr(base, key))
+        if not isinstance(v, bool):
+            raise ConfigError(f"{where}.{key}: expected true or false, got "
+                              f"{v!r}")
+        flags[key] = v
     return ImageServerCfg(
         url_ttl_s=base.url_ttl_s if ttl is None else ttl,
         url_max_bytes=base.url_max_bytes if cap is None else cap,
         max_queue=base.max_queue if queue is None else queue,
         embed_metadata=bool(raw.get("embed_metadata", base.embed_metadata)),
-        **caches)
+        **caches, **flags)
 
 
 def _parse_rule(raw: dict) -> Rule:

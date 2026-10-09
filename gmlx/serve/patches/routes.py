@@ -946,6 +946,8 @@ def install_service_routes(cfg) -> None:
     install_rerank_route(rerank)
     from .images import install_image_routes
     install_image_routes(cfg)
+    from .image_steps import install_image_step_routes
+    install_image_step_routes(cfg)
     _list_services(stt, tts, embeddings, rerank,
                    getattr(cfg, "model_dirs", ()) or ())
     _refresh_unconfigured_answers(cfg)

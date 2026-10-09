@@ -610,8 +610,10 @@ under [`image_models`](#image-models).
 | <a id="serverimageurl_max_bytes"></a>`image.url_max_bytes` | `1G` | Most bytes of such files kept at once, as bytes or a size such as `2G`. The oldest go first. |
 | <a id="serverimagemax_queue"></a>`image.max_queue` | `4` | Image requests that may wait behind the one running. One more gets 429 with `Retry-After`. |
 | <a id="serverimageembed_metadata"></a>`image.embed_metadata` | `false` | Write the prompt and settings into each PNG the routes return |
-| <a id="serverimagetensor_cache_mb"></a>`image.tensor_cache_mb` | `64` | MB each image model keeps of encoded prompts, and again of reference image latents |
-| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | `256` | MB each image model keeps of request LoRA weights, and again of their merged patches |
+| <a id="serverimagetensor_cache_mb"></a>`image.tensor_cache_mb` | `64` | MB each image model keeps of encoded prompts, and again of reference image latents. The step routes keep as much of uploaded tensors. |
+| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | `256` | MB each image model keeps of request LoRA weights, and again of their merged patches. The step routes keep as much of uploads. Raise it for a larger LoRA. |
+| <a id="serverimagesteps_api"></a>`image.steps_api` | `true` | Serve the [image step routes](images.md#step-routes) that the ComfyUI node pack and `gmlx image bench --via-steps` call. |
+| <a id="serverimagesteps_remote"></a>`image.steps_remote` | `false` | Take step route requests from clients beyond loopback. The routes take uploads of any bytes, so they answer loopback clients alone by default. |
 
 The memory booked for an image model counts both caches at their full size,
 twice each, so the defaults keep one model of either family in reach of a

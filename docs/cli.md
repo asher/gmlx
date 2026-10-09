@@ -973,6 +973,7 @@ the rest, and the medians of the other phases.
 | `--warmup N` | `1` | Run N untimed images per size first. |
 | `--seed N` | `0` | Seed every run. |
 | `--label TEXT` | None | Record this label with the results. |
+| `--via-steps` | Off | Run each step through the [image step routes](images.md#step-routes) on a loopback port of this process. Not with `--adapter`. |
 | `--json` | Off | Print one JSON record per size on stdout, and the summaries on stderr. |
 | `--json-out FILE` | None | Write one JSON record per size to this file. |
 
@@ -980,6 +981,14 @@ A record has schema `gmlx.image.bench/1`. It holds the gmlx and MLX
 versions, the machine's chip, memory and OS, the model's files with their
 sizes, the settings, every run, the summary, and the transport, which is
 `direct` for a run in the same process.
+
+With `--via-steps` the prompt is encoded in the process and uploaded by
+hash, each step is one request to the step routes, and the latents move
+between steps in the bench with its sampler. The transport is `steps`,
+with the median per step of the request's wall time less the forward time
+the server reports, and `equal_to_direct`, whether the final latents of
+the last run equal those of `sample` at the same seed. Each run also
+lists its transport time per step.
 
 ### image pack-vae
 

@@ -40,6 +40,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served image model keeps of encoded prompts and request LoRAs.
 - Qwen-Image 2.1 Turbo GGUFs sample in 8 steps on the model's own schedule,
   instead of the base model's 40.
+- `gmlx serve` answers image step routes under `/internal/image-steps/v1`, one
+  denoise step per request, for samplers that run elsewhere such as ComfyUI.
+- `gmlx image bench --via-steps` runs each step through the step routes and
+  records the transport time per step.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
   text models, and read images with their mmproj.
 - `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6
