@@ -936,7 +936,12 @@ def test_supervise_records_the_token_url(fake_container, tmp_path, monkeypatch):
         real(client, project, rec)
     monkeypatch.setattr(session, "write_record", spy)
     fake = tmp_path / "container"
-    fake.write_text("#!/bin/sh\necho 'dsh web: http://127.0.0.1:3080/?token=t'\n")
+    # The client runs until the supervisor has its URL. A container that
+    # stops first gets its record marked as ending, without the URL.
+    up = tmp_path / "answered"
+    fake.write_text("#!/bin/sh\necho 'dsh web: http://127.0.0.1:3080/?token=t'\n"
+                    f"n=0\nwhile [ ! -e '{up}' ] && [ $n -lt 1000 ]; do\n"
+                    "  sleep 0.01\n  n=$((n + 1))\ndone\n")
     fake.chmod(0o755)
     monkeypatch.setattr(session.cli, "find", lambda: str(fake))
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=None,
@@ -946,8 +951,12 @@ def test_supervise_records_the_token_url(fake_container, tmp_path, monkeypatch):
         "R", (), {"close": lambda self: None})())
     monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": __import__("io").BytesIO()})())
     said, answered = [], []
+
+    def on_answer(url):
+        answered.append(url)
+        up.touch()
     session.supervise(spec, api_targets=None, record=record, say=said.append,
-                      on_answer=answered.append)
+                      on_answer=on_answer)
     assert seen[-1]["url"] == "http://[::1]:3080/?token=t"
     assert answered == ["http://[::1]:3080/?token=t"]
     assert session.read_record("dsh", "default") is None      # removed at the end

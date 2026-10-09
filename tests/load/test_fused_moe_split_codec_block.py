@@ -1,8 +1,9 @@
 """A qwen3-next-shaped MoE block from a low-bit file: the shared expert's
 gate, up and down tensors each carry their own codec, none of them the
-experts'. The fused block folds the shared expert into the gathers at the
-widths where that wins, and fuses the router alone at the others. Both
-must match the block's own forward. Real kq kernels on the GPU."""
+experts'. The fused block folds the shared expert into the gathers. On a
+kq build with no slot-parallel folded down gather it fuses the router
+alone at widths 2 and 3. Both must match the block's own forward. Real kq
+kernels on the GPU."""
 from __future__ import annotations
 
 import os
@@ -89,14 +90,32 @@ def _calls(monkeypatch, name):
     return seen
 
 
-def test_block_folds_with_a_skip_at_widths_two_and_three():
+_HAS_MIX_SP = hasattr(kq, "shexp_mix_slot_parallel")
+_FOLD_T = [1, 2, 3, 4, 6] if _HAS_MIX_SP else [1, 4, 6]
+
+
+def _no_mix_sp(monkeypatch):
+    """A kq build with no slot-parallel folded down gather."""
+    monkeypatch.delattr(kq, "shexp_mix_slot_parallel", raising=False)
+
+
+def test_block_folds_with_a_skip_at_widths_two_and_three(monkeypatch):
+    _no_mix_sp(monkeypatch)
     block, stock = _block()
     assert type(block).__name__ == "_FusedKQuantMoeBlock"
     assert getattr(block, "_kq_shexp_fold", True) is True
     assert block._kq_fold_skip_t == (2, 3)
 
 
-@pytest.mark.parametrize("t", [1, 4, 6])
+@pytest.mark.skipif(not _HAS_MIX_SP, reason="needs kq.shexp_mix_slot_parallel")
+def test_block_folds_at_every_width_on_a_slot_parallel_down_gather():
+    assert kq.shexp_mix_slot_parallel("q2_0", "iq4_nl")
+    block, stock = _block()
+    assert getattr(block, "_kq_shexp_fold", True) is True
+    assert not hasattr(block, "_kq_fold_skip_t")
+
+
+@pytest.mark.parametrize("t", _FOLD_T)
 def test_fold_matches_the_stock_forward(t, monkeypatch):
     block, stock = _block()
     x = _x(t)
@@ -114,6 +133,7 @@ def test_fold_matches_the_stock_forward(t, monkeypatch):
 
 @pytest.mark.parametrize("t", [2, 3])
 def test_widths_two_and_three_fuse_the_router_alone(t, monkeypatch):
+    _no_mix_sp(monkeypatch)
     block, stock = _block()
     x = _x(t)
     want = stock.__call__(block, x)

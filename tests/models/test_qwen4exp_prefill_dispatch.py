@@ -6,6 +6,8 @@ reference, and the QSA training route through blocked attention."""
 from __future__ import annotations
 
 
+import math
+
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
@@ -249,6 +251,15 @@ def test_qsa_gathered_decode_batches_rows(L):
     # fp32 GEMM runs TF32 on M5-class GPUs while a one-row GEMV is exact
     for i in range(2):
         _assert_close(both[i:i + 1], decode(slice(i, i + 1)), 2e-3)
+
+
+def test_score_head_weights_are_kept_per_shape():
+    w = q4._kq_score_weights(1, 4, 4, 128, mx.bfloat16)
+    assert w is q4._kq_score_weights(1, 4, 4, 128, mx.bfloat16)
+    assert w is not q4._kq_score_weights(1, 2, 4, 128, mx.bfloat16)
+    assert q4._kq_score_weights(1, 4, 4, 128, mx.float16).dtype == mx.float16
+    want = mx.full((1, 4, 4), 1.0 / math.sqrt(128), dtype=mx.bfloat16)
+    assert w.dtype == mx.bfloat16 and mx.array_equal(w, want).item()
 
 
 # QSA training route
