@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.23] - 2026-10-07
+
 ### Changed
 
 - `qwen4exp` decode and MTP verify run faster on GGUFs that keep the
