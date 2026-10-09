@@ -312,8 +312,11 @@ def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
                          variant=ident.variant, encoder=handle,
                          weights=weights, load_seconds=seconds, log=log,
                          identified=ident)
-    out = encode(pipe)
-    handle.release()
+    try:
+        out = encode(pipe)
+    finally:
+        # An encode that raises leaves no encoder loaded.
+        handle.release()
     t0 = time.perf_counter()
     model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
                            identified=ident, log=log)

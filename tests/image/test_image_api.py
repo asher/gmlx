@@ -498,6 +498,18 @@ def test_a_staged_load_holds_no_dit_beside_the_encoder(pipe, monkeypatch):
                              encode=lambda p: None)
     assert ("encoder", "e", "m") in seen and got.weights["mmproj"] == 11
     assert got.vae is None and got.encoder.released
+    # An encode that raises releases the encoder and loads no DiT.
+    enc3 = _ReleasedEncoder()
+    monkeypatch.setattr(text_encoder, "load_encoder",
+                        lambda path, spec, log=print, mmproj=None: enc3)
+    n = len(seen)
+
+    def fail(p):
+        raise ValueError("bad prompt")
+
+    with pytest.raises(ValueError, match="bad prompt"):
+        api.load_staged("d", text_encoder="e", encode=fail)
+    assert enc3.released and len(seen) == n
 
 
 def test_the_conditioning_key_covers_its_inputs():
