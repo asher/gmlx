@@ -28,6 +28,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
 - On GPUs with NAX (M5), an image step under `--adapter` takes 1 to 2% less
   time on a Q4_K, Q5_K or Q6_K DiT when mlx-kquant has its low-rank kernel.
+- `gmlx serve` loads the image models of an `image_models` config block beside
+  the chat models, and `ps`, `keep` and `unload` name each model's kind.
+- `gmlx serve` answers the OpenAI image generations, edits and variations
+  routes, with streamed partial images and `url` responses.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
   text models, and read images with their mmproj.
 - `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6
