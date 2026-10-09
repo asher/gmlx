@@ -1014,8 +1014,7 @@ def test_tiny_leaf_sites_under_a_table_are_within_their_gates(tmp_path,
     monkeypatch.setattr(install, "_add", lambda y, z, b_t: y)
     bad, _ = run("dropped")
     missed = {p for (p, _), (rel, gate) in bad.items() if not rel <= gate}
-    assert missed and missed <= adapted, missed
-    assert len(missed) >= len(adapted) - 2, sorted(adapted - missed)
+    assert missed == adapted, sorted(adapted - missed)
 
 
 # Qwen-Image 2.1 Q4_K_M, when the file and its fixtures are there.
