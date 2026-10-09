@@ -50,7 +50,8 @@ def test_qwen_image21_header_matches_and_config_equals_the_official_one():
     got = fp.identify(fixture_view(Q_HEADER))
     assert got.family.name == "qwen_image21"
     assert (got.prefix, got.layout) == ("model.diffusion_model.", "fused")
-    assert got.variant == "default"
+    # A fixture view has no file bytes, so no identity hash.
+    assert (got.variant, got.identity_hash) == ("unknown", None)
     assert "img_in.weight" in got.view.tensors
     official = official_config("qwen_image21_transformer_config.json")
     assert {k: got.config[k] for k in official} == official
@@ -370,6 +371,45 @@ def test_the_table_holds_turbo_and_base():
     assert fam.variant_names() == ("base", "turbo")
     assert fam.identity_tensors == (
         "x_pad_token", "cap_pad_token", "final_layer.linear.bias")
+
+
+def _qwen_identity_file(tmp_path, codec: str, seed: int = 0):
+    from gmlx.load.headerscan import scan_gguf
+
+    rng = np.random.default_rng(seed)
+    tensors = {}
+    for n, shape in (("txt_in.text_norm.weight", (4096,)),):
+        bits = bf16_bits(rng.standard_normal(shape).astype(np.float32))
+        f32 = (bits.astype(np.uint32) << 16).view(np.float32)
+        tensors[n] = (bits, "BF16") if codec == "BF16" else (f32, "F32")
+    p = write_gguf(tmp_path / f"qid-{codec}-{seed}.gguf", tensors, None)
+    return fp.view_from_scans([scan_gguf(p)])
+
+
+def test_qwen_image21_variants_come_from_the_text_norm(tmp_path,
+                                                      monkeypatch):
+    fam = get_family("qwen_image21")
+    assert fam.variant_names() == ("base", "turbo")
+    assert fam.identity_tensors == ("txt_in.text_norm.weight",)
+    assert sorted(r.name for r in fam.variants.values()) == ["base", "turbo"]
+    # A converter may store the norm F32 or BF16: the hash reads bf16 bits.
+    h32 = fp.weight_identity(_qwen_identity_file(tmp_path, "F32"),
+                             fam.identity_tensors)
+    h16 = fp.weight_identity(_qwen_identity_file(tmp_path, "BF16"),
+                             fam.identity_tensors)
+    assert h32 is not None and h32 == h16
+    view = _qwen_identity_file(tmp_path, "BF16")
+    # A fine-tune matches no row: it is unknown and samples as base.
+    assert fp._variant(fam, view, None)["variant"] == "unknown"
+    assert fam.sampling_row("unknown") is fam.sampling["base"]
+    monkeypatch.setitem(fam.variants, h16, fam.variants[next(
+        h for h, r in fam.variants.items() if r.name == "turbo")])
+    assert fp._variant(fam, view, None)["variant"] == "turbo"
+    with pytest.raises(fp.ImageModelError, match="contradicts the weights"):
+        fp._variant(fam, view, "base")
+    with pytest.raises(fp.ImageModelError, match="not a Qwen-Image 2.1 "
+                       "variant"):
+        fp._variant(fam, view, "default")
 
 
 def test_the_real_file_lookup_hides_only_a_refusal(tmp_path, monkeypatch):

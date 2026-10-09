@@ -52,6 +52,24 @@ def _inventory_file(gguf_dir) -> tuple[str, dict]:
     pytest.skip(f"{want['file']} is not under KQUANT_TEST_GGUF_DIR")
 
 
+def test_each_real_file_identifies_as_the_variant_of_its_repo(gguf_dir):
+    """Base and Turbo share every shape: the hash of the text norm names
+    the variant, the same over every quant of a repo."""
+    from gmlx.image import fingerprint as fp
+    from gmlx.image.registry import get_family
+    from gmlx.load.headerscan import scan_gguf
+
+    paths = image_dits(gguf_dir, "qwen_image21")
+    if not paths:
+        pytest.skip("no Qwen-Image 2.1 DiT GGUF under KQUANT_TEST_GGUF_DIR")
+    fam = get_family("qwen_image21")
+    for p in paths:
+        got = fp.identify(fp.view_from_scans([scan_gguf(p)]))
+        row = fam.variants.get(got.identity_hash)
+        assert row is not None and got.variant == row.name, p
+        assert Path(p).name in row.files, p
+
+
 @pytest.fixture(scope="module")
 def load(gguf_dir):
     path, ident = _qwen_file(gguf_dir)
@@ -86,7 +104,7 @@ def test_check1_the_real_header_is_the_committed_inventory(gguf_dir):
                    for t in view.tensors.values()) == Q4_K_M_CODECS
     got = fp.identify(view)
     assert (got.family.name, got.variant, got.layout, got.prefix) == (
-        "qwen_image21", "default", "fused", "model.diffusion_model.")
+        "qwen_image21", "base", "fused", "model.diffusion_model.")
     official = official_config("qwen_image21_transformer_config.json")
     assert {k: got.config[k] for k in official} == official
     assert sorted(set(got.config) - set(official)) == OWN_KEYS

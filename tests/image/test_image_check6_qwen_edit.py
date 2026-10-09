@@ -160,7 +160,7 @@ def test_the_inputs_of_the_oracle(check6, files):
     assert np.array_equal(noise_from_seed(ins["seed"], arrays["noise"].shape),
                           arrays["noise"])
     assert ins["guidance"] > 1.0 and ins["kv_cache"] is True
-    fam = api.sampler_defaults(FAMILY, "default")
+    fam = api.sampler_defaults(FAMILY, "base")
     assert fam.steps == ins["steps"]
     m2 = committed(CHECK2)
     for case in CASES:

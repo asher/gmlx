@@ -540,7 +540,7 @@ def pipe(handle, monkeypatch):
     dit = SimpleNamespace(cfg=SimpleNamespace(in_channels=8, patch=1),
                           act_dtype=mx.bfloat16)
     return api.ImagePipeline(dit=dit, family=get_family("qwen_image21"),
-                             variant="default", encoder=handle, vae=_Vae())
+                             variant="base", encoder=handle, vae=_Vae())
 
 
 def test_references_follow_the_family_rule_and_its_cap(pipe):

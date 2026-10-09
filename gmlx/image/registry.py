@@ -28,13 +28,17 @@ class SamplingRow:
     are model evaluations, cfg is gmlx's (diffusers guidance_scale g is
     cfg = 1 + g), and shift is the flow schedule's static shift.
     ``quality`` maps the API quality levels low, medium and high to
-    steps, as (level, steps) pairs; the variant's own steps are high."""
+    steps, as (level, steps) pairs; the variant's own steps are high.
+    ``sigmas`` is a fixed schedule without its final zero, for a variant
+    distilled to it: such a variant runs that many steps and no other
+    count."""
     steps: int
     cfg: float
     shift: float
     repo: str
     revision: str
     quality: tuple = ()
+    sigmas: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,9 @@ class Family:
     identity_tensors: tuple = ()     # tensors hashed for the variant
     variants: dict = field(default_factory=dict)   # hash -> VariantRow
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
+    # The sampling row of a variant without one, such as a file whose
+    # identity matches no row; None leaves it without defaults.
+    unknown_variant: str | None = None
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
     step: StepParts | None = None      # None runs the DiT's own step
     # () -> text_encoder.EncoderSpec; None reads text_encoder.ENCODERS
@@ -109,6 +116,13 @@ class Family:
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))
+
+    def sampling_row(self, variant: str):
+        """The SamplingRow a variant samples with, or None."""
+        row = self.sampling.get(variant)
+        if row is None and self.unknown_variant is not None:
+            row = self.sampling.get(self.unknown_variant)
+        return row
 
 
 @dataclass(frozen=True)

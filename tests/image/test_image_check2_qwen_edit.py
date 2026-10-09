@@ -340,7 +340,7 @@ def test_the_references_of_a_case_run_one_at_a_time_or_as_the_api_does(
     case = "two"
     row = m["inputs"]["cases"][case]
     pipe = api.ImagePipeline(dit=SimpleNamespace(), family=get_family(
-        "qwen_image21"), variant="default", encoder=handle)
+        "qwen_image21"), variant="base", encoder=handle)
     images = [arrays[f"source_{n}"] for n in row["images"]]
     refs = api.references(pipe, images, area=_area(m))
     cond = api.encode_text(pipe, row["prompt"], images=refs,

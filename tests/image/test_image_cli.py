@@ -135,6 +135,28 @@ def test_cli_latents_equal_sample_with_the_seed_noise(env, tmp_path, capsys):
     assert env.checks[0]["height"] == 32 and env.checks[0]["width"] == 48
 
 
+def test_a_variant_with_fixed_sigmas_runs_them_and_no_other_count(
+        env, tmp_path, capsys, monkeypatch):
+    import dataclasses
+
+    fam = get_family("z_image")
+    sigmas = (1.0, 0.9, 0.6, 0.3)
+    monkeypatch.setitem(fam.sampling, "turbo", dataclasses.replace(
+        fam.sampling["turbo"], steps=4, sigmas=sigmas))
+    lat = tmp_path / "lat.npz"
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "48x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 0
+    assert env.pipes[-1].dit.calls == 4
+    want = _direct(env.pipes[-1], "p", 5, sigmas=[*sigmas, 0.0])
+    assert np.array_equal(np.load(lat)["latents"], want)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--steps", "6", "--output",
+                                     str(tmp_path / "b.png")]) == 1
+    assert "Z-Image turbo runs 4 steps" in capsys.readouterr().err
+
+
 def test_the_png_carries_the_settings_unless_told_not_to(env, tmp_path):
     from PIL import Image
 
@@ -1344,7 +1366,7 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
     pf = image_preflight
     fam = get_family("qwen_image21")
     monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
-        family=fam, variant="default"))
+        family=fam, variant="base"))
     sizes = {"dit": 12 << 30, "encoder": 5 << 30, "vae": 400 << 20}
     monkeypatch.setattr(api, "_header_bytes",
                         lambda path, kind: 0 if path is None else sizes[kind])

@@ -82,7 +82,7 @@ def entry_plan(spec) -> EntryPlan:
     model, a family the config does not name, and an entry that cannot
     hold one image of its default size in the working budget."""
     from gmlx.image import memfit
-    from gmlx.image.api import _header_bytes, sampler_defaults
+    from gmlx.image.api import _header_bytes, check_steps, sampler_defaults
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
 
@@ -97,6 +97,13 @@ def entry_plan(spec) -> EntryPlan:
             f"image model {spec.id!r}: {os.path.basename(spec.path)} is a "
             f"{fam.title} DiT, not the configured family {spec.family!r}")
     check_parts(spec, fam)
+    steps = (spec.defaults or {}).get("steps")
+    if steps is not None:
+        try:
+            check_steps(fam, ident.variant, steps)
+        except ValueError as e:
+            raise ImageModelError(
+                f"image model {spec.id!r}: defaults.steps: {e}") from None
     defaults = sampler_defaults(fam.name, ident.variant)
     width, height = default_size(spec, defaults)
     cfg = (spec.defaults or {}).get("guidance")
@@ -682,7 +689,7 @@ class JobStopped(Exception):
 def quality_steps(family, variant: str, quality: str) -> int | None:
     """The steps of a quality level from the family table, or None for
     auto and a variant without a table."""
-    row = family.sampling.get(variant)
+    row = family.sampling_row(variant)
     if row is None or quality == "auto":
         return None
     return dict(row.quality).get(quality)
@@ -720,10 +727,17 @@ def _guided(req: ImageRequest, served: ServedImage) -> float:
 
 def check_family(req: ImageRequest, served: ServedImage) -> None:
     """Refuse what the family cannot do: transparency without an alpha
-    VAE, more images than an edit takes, and edits without a vision
+    VAE, a step count other than the one a variant with a fixed schedule
+    runs, more images than an edit takes, and edits without a vision
     tower."""
+    from gmlx.image.api import fixed_steps
+
     pipe = served.pipe
     fam = pipe.family
+    n = fixed_steps(fam, pipe.variant)
+    if n is not None and req.steps is not None and req.steps != n:
+        raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
+                   f"schedule it was distilled to, not {req.steps}", "steps")
     if req.background == "transparent":
         from gmlx.image.vae.reader import VAES
 

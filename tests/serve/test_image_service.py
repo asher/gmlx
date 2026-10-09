@@ -16,7 +16,9 @@ def test_family_names_match_on_letters_and_digits():
     z, q = get_family("z_image"), get_family("qwen_image21")
     assert image_service.family_matches("z-image", z, "turbo")
     assert image_service.family_matches("z-image-turbo", z, "turbo")
-    assert image_service.family_matches("qwen-image-2.1", q, "default")
+    assert image_service.family_matches("qwen-image-2.1", q, "base")
+    assert image_service.family_matches("qwen-image-2.1-turbo", q, "turbo")
+    assert not image_service.family_matches("qwen-image-2.1-turbo", q, "base")
     assert not image_service.family_matches("qwen-image-2.1", z, "turbo")
     assert not image_service.family_matches("z-image-base", z, "turbo")
 
@@ -127,8 +129,13 @@ def test_quality_steps_come_from_the_family_table():
     z, q = get_family("z_image"), get_family("qwen_image21")
     assert image_service.quality_steps(z, "turbo", "high") == 8
     assert image_service.quality_steps(z, "turbo", "low") == 4
-    assert image_service.quality_steps(q, "default", "medium") == 28
-    assert image_service.quality_steps(q, "default", "auto") is None
+    assert image_service.quality_steps(q, "base", "medium") == 28
+    assert image_service.quality_steps(q, "base", "auto") is None
+    # Turbo runs its fixed schedule at every level, and a file that
+    # matches no variant takes base's table.
+    assert [image_service.quality_steps(q, "turbo", lv)
+            for lv in ("low", "medium", "high")] == [8, 8, 8]
+    assert image_service.quality_steps(q, "unknown", "low") == 16
 
 
 GB = 1024**3
@@ -188,6 +195,45 @@ def test_auto_keeps_the_encoder_while_the_entry_fits_its_share(
     plan_stubs.budget = budget_gb * GB
     plan = image_service.entry_plan(_spec())
     assert plan.keep_encoder is keeps and plan.footprint == booked * GB
+
+
+def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    q = get_family("qwen_image21")
+    monkeypatch.setattr(loader, "identify_dit", lambda path: SimpleNamespace(
+        family=q, variant="turbo"))
+    plan = image_service.entry_plan(_spec(defaults={"steps": 8}))
+    assert plan.variant == "turbo"
+    with pytest.raises(ImageModelError, match="defaults.steps: Qwen-Image "
+                       "2.1 turbo runs 8 steps"):
+        image_service.entry_plan(_spec(defaults={"steps": 20}))
+    monkeypatch.setattr(loader, "identify_dit", lambda path: SimpleNamespace(
+        family=q, variant="unknown"))
+    assert image_service.entry_plan(_spec(defaults={"steps": 20}))
+
+
+@pytest.mark.parametrize("variant,steps,refused", [
+    ("turbo", 8, False), ("turbo", None, False), ("turbo", 20, True),
+    ("base", 20, False), ("unknown", 20, False)])
+def test_a_request_on_turbo_takes_only_its_own_step_count(variant, steps,
+                                                          refused):
+    from gmlx.image.registry import get_family
+
+    q = get_family("qwen_image21")
+    served = SimpleNamespace(pipe=SimpleNamespace(family=q, variant=variant),
+                             spec=SimpleNamespace(id="qi"))
+    req = image_service.parse_request("generations", {
+        "prompt": "p", **({"steps": steps} if steps else {})})
+    if not refused:
+        image_service.check_family(req, served)
+        return
+    with pytest.raises(image_service.ImageRequestError,
+                       match="runs 8 steps") as e:
+        image_service.check_family(req, served)
+    assert e.value.param == "steps"
 
 
 def test_the_parts_are_checked_before_the_entry_is_priced(plan_stubs, monkeypatch):

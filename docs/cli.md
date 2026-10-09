@@ -855,7 +855,7 @@ latents. The run follows the plan it was admitted under. The
 VAE of Qwen-Image 2.1 runs whole up to 1024x1024 pixels when the plan fits
 that, and in tiles otherwise, and a tiled pass gives the result of the
 whole one. The variant of the DiT sets the steps, guidance and size that the
-flags leave out, and a DiT of an unknown variant needs `--steps` and
+flags leave out, and a Z-Image DiT of an unknown variant needs `--steps` and
 `--guidance`. The latents equal those of the Python `sample` call with the
 noise of the same seed.
 
@@ -866,7 +866,14 @@ the weights load.
 | Family | `--encoder` | `--vae` | Defaults |
 |--------|-------------|---------|----------|
 | Z-Image | Qwen3-4B | The FLUX.1 autoencoder | The variant's steps and guidance. |
-| Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. |
+| Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
+
+Qwen-Image 2.1 Turbo shares the base model's architecture, encoder and VAE.
+gmlx tells the two apart by their weights. Turbo samples on the eight sigmas
+it was distilled to, and refuses any other step count, on the command
+line, in a request and in a config's `defaults.steps`. A Qwen-Image 2.1 file
+that matches neither, such as a fine-tune, samples as the base model, and
+the load line names its variant as unknown.
 
 Qwen-Image 2.1 wraps the prompt in the template of its reference pipeline,
 a fixed system turn before the prompt, and conditions on the rows after

@@ -76,10 +76,26 @@ def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
     an unknown one."""
     from .registry import get_family
 
-    row = get_family(family).sampling.get(variant)
+    row = get_family(family).sampling_row(variant)
     if row is None:
         return None
     return SamplerDefaults(steps=row.steps, cfg=row.cfg, shift=row.shift)
+
+
+def fixed_steps(family, variant: str) -> int | None:
+    """The step count of a variant distilled to a fixed schedule, or None
+    for a variant that runs any count. ``family`` is a Family."""
+    row = family.sampling_row(variant)
+    return len(row.sigmas) if row is not None and row.sigmas else None
+
+
+def check_steps(family, variant: str, steps: int) -> None:
+    """Refuse a step count a variant with a fixed schedule does not run."""
+    n = fixed_steps(family, variant)
+    if n is not None and int(steps) != n:
+        raise ValueError(
+            f"{family.title} {variant} runs {n} steps, the schedule it was "
+            f"distilled to, not {steps}")
 
 
 def _canonical_table(entries: tuple) -> str:
@@ -160,11 +176,14 @@ class ImagePipeline:
     def sigmas(self, steps: int, tokens: int | None = None) -> np.ndarray:
         """The family's schedule of ``steps``. ``tokens`` is the image
         token count of the request, which a dynamic shift reads."""
+        row = self.family.sampling_row(self.variant)
+        if row is not None and row.sigmas:
+            check_steps(self.family, self.variant, steps)
+            return np.asarray((*row.sigmas, 0.0), np.float32)
         if self.family.schedule is not None:
             return self.family.schedule(steps, tokens=tokens,
                                         variant=self.variant)
         if self.family.name == "z_image":
-            row = self.family.sampling.get(self.variant)
             shift = (self.family.constants.values["scheduler_shift"]
                      if row is None else row.shift)
             return zimage_sigmas(steps, shift)

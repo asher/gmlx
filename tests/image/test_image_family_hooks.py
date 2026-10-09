@@ -335,7 +335,7 @@ def test_a_family_without_an_encoder_loads_when_none_is_asked(monkeypatch):
     from gmlx.image import dtypes, loader
 
     fam = replace(get_family("z_image"), name="toy", title="Toy")
-    ident = SimpleNamespace(family=fam, variant="default")
+    ident = SimpleNamespace(family=fam, variant="base")
     loads = []
 
     def load_dit(path, **kw):

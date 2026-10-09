@@ -169,7 +169,10 @@ def load_dit(path: str, *, family: str | None = None,
     if fam.build is None:
         raise ImageModelError(
             f"this is a {fam.title} GGUF, which this gmlx cannot run yet")
-    log(f"[image] {fam.title} ({ident.variant}), layout {ident.layout}, "
+    shown = ident.variant
+    if fam.unknown_variant and ident.variant not in fam.sampling:
+        shown += f", sampling as {fam.unknown_variant}"
+    log(f"[image] {fam.title} ({shown}), layout {ident.layout}, "
         f"{len(view.tensors)} tensors")
     gate_load(file_bytes(view), str(path), what=f"{fam.title} DiT",
               hint="Try a smaller DiT quant")

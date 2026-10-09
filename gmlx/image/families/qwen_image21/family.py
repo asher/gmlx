@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import (ConstantsRow, EditParts, Family,
-                                 SamplingRow, StepParts)
+                                 SamplingRow, StepParts, VariantRow)
 
 _B0 = "transformer_blocks.0."
 
@@ -124,11 +124,42 @@ REFERENCES = ConstantsRow(
 # num_inference_steps=40 and names no guidance, so the guidance is the
 # reference pipeline's default, true_cfg_scale=1.0. The shift is the
 # scheduler config's static shift, which the dynamic shift replaces.
+# Turbo is distilled to the eight sigmas of model_index.json's
+# sample_sigmas, which its scheduler config (shift 1.0, no dynamic
+# shifting) passes as they are, with a final zero; its card samples at
+# CFG 1. A file whose identity matches no row samples as base.
 SAMPLING = {
-    "default": SamplingRow(steps=40, cfg=1.0, shift=1.0,
-                           repo="Qwen/Qwen-Image-2.1",
-                           revision="790c92633540aa0cb11d9abf19eb46d861714758",
-                           quality=(("low", 16), ("medium", 28), ("high", 40))),
+    "base": SamplingRow(steps=40, cfg=1.0, shift=1.0,
+                        repo="Qwen/Qwen-Image-2.1",
+                        revision="790c92633540aa0cb11d9abf19eb46d861714758",
+                        quality=(("low", 16), ("medium", 28), ("high", 40))),
+    "turbo": SamplingRow(steps=8, cfg=1.0, shift=1.0,
+                         repo="Qwen/Qwen-Image-2.1-Turbo",
+                         revision="d65dbc9a7e8f6b5479e33dee6030eaab2a906509",
+                         quality=(("low", 8), ("medium", 8), ("high", 8)),
+                         sigmas=(1.0, 0.978453, 0.95418, 0.926626, 0.89508,
+                                 0.845148, 0.704534, 0.414568)),
+}
+
+# The variants share every shape, so the variant comes from the hash of
+# the text input norm, which Turbo's distillation changed. Every GGUF of
+# both repos keeps it BF16, while some quantize the other norms.
+IDENTITY_TENSORS = ("txt_in.text_norm.weight",)
+_BASE = VariantRow(
+    "base", "unsloth/Qwen-Image-2.1-GGUF",
+    "2c31ccd392b367a6637841a143813320a02dff55",
+    tuple(f"qwen-image-2.1-{q}.gguf" for q in (
+        "F16", "Q2_K", "Q3_K_M", "Q3_K_S", "Q3_K_XL", "Q4_K_M", "Q4_K_S",
+        "Q5_K_M", "Q5_K_S", "Q6_K", "Q6_K_XL", "Q8_0")))
+_TURBO = VariantRow(
+    "turbo", "AtomicChat/Qwen-Image-2.1-Turbo-GGUF",
+    "bb25d06bc74119c12207243d68917951e6d9c232",
+    tuple(f"Qwen-Image-2.1-Turbo-{q}.gguf" for q in (
+        "AD-Q2_K", "AD-Q3_K", "AD-Q4_K", "AD-Q5_K", "AD-Q6_K", "BF16",
+        "Q8_0")))
+VARIANTS = {
+    "b496795d142460d2f72d13b560d7cf54fba3081cc895c2d41b8e00b2470f9efe": _BASE,
+    "bfd1f6efe5e2f6ccbd2a9c041a08ad8613a69563d1a7927e57c0170d07570613": _TURBO,
 }
 
 # Norm tensors that identify the encoder weights: GGUF name, path in the
@@ -423,7 +454,10 @@ FAMILY = Family(
     build=build,
     # diffusers keeps these modules out of its layerwise casting.
     fp32_keep=("norm",),
+    identity_tensors=IDENTITY_TENSORS,
+    variants=VARIANTS,
     sampling=SAMPLING,
+    unknown_variant="base",
     step=StepParts(_modulation, _prefix, _forward, PREFIX_CACHE_BYTES,
                    _prefix_bytes),
     schedule=schedule,

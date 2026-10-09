@@ -395,7 +395,7 @@ def test_load_identifies_the_dit_once(tmp_path, monkeypatch):
 
 
 def test_a_pipeline_loads_without_an_encoder_or_a_vae(pipe):
-    assert pipe.family.name == "qwen_image21" and pipe.variant == "default"
+    assert pipe.family.name == "qwen_image21" and pipe.variant == "unknown"
     assert pipe.encoder is None and pipe.vae is None
     assert type(pipe.dit) is qm.QwenImage21DiT
     assert pipe.dit.act_dtype == mx.bfloat16
@@ -893,6 +893,34 @@ def test_the_schedule_is_refused_without_the_token_count(pipe):
     with pytest.raises(ValueError, match="shifts by the image token count"):
         pipe.family.schedule(4, tokens=None)
     assert np.array_equal(pipe.sigmas(4, 16), qwen21_sigmas(4, 16))
+
+
+TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148,
+                0.704534, 0.414568, 0.0]
+
+
+def test_turbo_samples_on_its_fixed_sigmas_and_takes_no_other_count(pipe):
+    import dataclasses
+
+    turbo = dataclasses.replace(pipe, variant="turbo")
+    assert np.array_equal(turbo.sigmas(8, 24),
+                          np.asarray(TURBO_SIGMAS, np.float32))
+    # The token count does not move a fixed schedule.
+    assert np.array_equal(turbo.sigmas(8, 4096), turbo.sigmas(8))
+    with pytest.raises(ValueError, match="Qwen-Image 2.1 turbo runs 8 "
+                       "steps, the schedule it was distilled to, not 40"):
+        turbo.sigmas(40, 24)
+    d = api.sampler_defaults("qwen_image21", "turbo")
+    assert (d.steps, d.cfg) == (8, 1.0)
+    cond = qt.conditioning("ref1", key="pos")
+    x = api.sample(turbo, cond, height=64, width=96, seed=1)
+    same = api.sample(turbo, cond, height=64, width=96, seed=1,
+                      sigmas=TURBO_SIGMAS)
+    assert np.array_equal(np.array(same), np.array(x))
+    # A file that matches no variant samples as base.
+    unknown = dataclasses.replace(pipe, variant="unknown")
+    assert np.array_equal(unknown.sigmas(6, 24), qwen21_sigmas(6, 24))
+    assert api.sampler_defaults("qwen_image21", "unknown").steps == 40
 
 
 def test_a_conditioning_without_tokens_is_refused(tiny):
