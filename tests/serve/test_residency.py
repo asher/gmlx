@@ -981,3 +981,157 @@ def test_failed_build_of_a_registry_cache_is_torn_down(monkeypatch):
         acquire(pool, "/m.gguf")
     assert teardowns == ["/m.gguf"]
     assert not pool._entries
+
+
+# Image models share the pool with chat models: their own build and
+# teardown, the same budget and LRU.
+def make_mixed_pool(budget_gb, footprints_gb, image_gb, monkeypatch=None):
+    """A pool whose chat builds take the fake stock loaders and whose image
+    builds take injected (footprint, load, release) functions sized from
+    ``image_gb``: image path -> GB."""
+    from gmlx.serve import capacity as cap
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, teardowns = make_pool(budget_gb, footprints_gb)
+    loads, releases = [], []
+
+    def footprint(spec):
+        return int(image_gb[spec.path] * GB)
+
+    def load(spec):
+        loads.append(spec.path)
+        return SimpleNamespace(pipe=f"PIPE:{spec.path}", spec=spec)
+
+    def release(box):
+        releases.append(box[0].spec.path)
+        box.clear()
+
+    pool._image_fns = (footprint, load, release)
+    return proxy, pool, teardowns, loads, releases
+
+
+def acquire_image(pool, path):
+    from gmlx.serve.residency import IMAGE_KIND
+
+    spec = SimpleNamespace(path=path, id=f"img:{path}")
+    entry = pool.acquire(path, None, IMAGE_KIND, build_spec=spec,
+                         cache_key_extra=(path,), loaded_as=spec.id)
+    pool.release(entry)
+    return entry
+
+
+def test_image_build_takes_its_own_load_never_the_stock_get(monkeypatch):
+    proxy, pool, teardowns, loads, _ = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+
+    def no_stock_get(*a, **k):
+        raise AssertionError("an image build reached the stock loader")
+
+    pool._stock_get = no_stock_get
+    entry = acquire_image(pool, "/dit.safetensors")
+    assert loads == ["/dit.safetensors"]
+    assert entry.is_image and entry.pipeline.pipe == "PIPE:/dit.safetensors"
+    assert entry.footprint == 9 * GB
+    assert entry.response_generator is None and entry.apc_manager is None
+    assert proxy._last_entry is None          # never the chat fallback
+    row = pool.stats()["resident"][0]
+    assert row["kind"] == "image" and row["loaded_as"] == "img:/dit.safetensors"
+
+
+def test_image_teardown_releases_on_its_own_path(monkeypatch):
+    _, pool, teardowns, _, releases = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+    entry = acquire_image(pool, "/dit.safetensors")
+    assert pool.evict("/dit.safetensors")
+    assert releases == ["/dit.safetensors"]
+    assert teardowns == []                    # the stock unload never ran
+    assert entry.pipeline is None and not pool._entries
+
+
+def test_image_load_evicts_a_chat_model(monkeypatch):
+    _, pool, teardowns, _, releases = make_mixed_pool(
+        25, {"A.gguf": 10, "B.gguf": 10}, {"/dit.safetensors": 9},
+        monkeypatch)
+    acquire(pool, "A.gguf")
+    acquire(pool, "B.gguf")
+    acquire_image(pool, "/dit.safetensors")   # 20 + 9 > 25: evict LRU A
+    assert teardowns == ["A.gguf"] and releases == []
+    assert resident(pool) == {"B.gguf", "/dit.safetensors"}
+    assert pool.stats()["resident_bytes"] == 19 * GB
+
+
+def test_chat_load_evicts_an_image_model(monkeypatch):
+    proxy, pool, teardowns, _, releases = make_mixed_pool(
+        25, {"A.gguf": 10, "B.gguf": 10}, {"/dit.safetensors": 9},
+        monkeypatch)
+    acquire_image(pool, "/dit.safetensors")
+    acquire(pool, "A.gguf")
+    acquire(pool, "B.gguf")                   # 19 + 10 > 25: evict LRU image
+    assert releases == ["/dit.safetensors"] and teardowns == []
+    assert resident(pool) == {"A.gguf", "B.gguf"}
+    kinds = {e["model_path"]: e["kind"] for e in pool.stats()["resident"]}
+    assert kinds == {"A.gguf": "chat", "B.gguf": "chat"}
+
+
+def test_busy_image_entry_is_not_evicted_for_a_chat_load(monkeypatch):
+    from gmlx.serve.residency import IMAGE_KIND
+
+    _, pool, _, _, releases = make_mixed_pool(
+        15, {"A.gguf": 10}, {"/dit.safetensors": 9}, monkeypatch)
+    spec = SimpleNamespace(path="/dit.safetensors", id="img")
+    pool.acquire("/dit.safetensors", None, IMAGE_KIND, build_spec=spec)
+    acquire(pool, "A.gguf")                   # over budget beside a live job
+    assert releases == []
+    assert resident(pool) == {"A.gguf", "/dit.safetensors"}
+
+
+def test_an_image_footprint_failure_evicts_nothing(monkeypatch):
+    import pytest
+
+    _, pool, teardowns, loads, _ = make_mixed_pool(
+        25, {"A.gguf": 10, "B.gguf": 10}, {}, monkeypatch)
+    acquire(pool, "A.gguf")
+    acquire(pool, "B.gguf")
+
+    def not_an_image_model(spec):
+        raise ValueError("no image model")
+
+    pool._image_fns = (not_an_image_model,) + pool._image_fns[1:]
+    with pytest.raises(ValueError, match="no image model"):
+        acquire_image(pool, "/x.safetensors")
+    assert teardowns == [] and loads == []
+
+
+def test_the_stock_image_kinds_are_refused():
+    import pytest
+
+    _, pool, _ = make_pool(100, {"/m": 1})
+    for kind in ("image_generation", "image_edit"):
+        with pytest.raises(ValueError, match="gmlx_image"):
+            pool.acquire("/m", None, kind)
+    assert not pool._entries
+
+
+def test_the_image_worker_is_one_named_thread():
+    from gmlx.serve import image_service
+
+    names = {image_service.WORKER.submit(
+        lambda: __import__("threading").current_thread().name).result()
+        for _ in range(3)}
+    assert len(names) == 1 and names.pop().startswith("image-worker")
+
+
+def test_no_gmlx_route_passes_a_stock_image_kind():
+    """mlx-vlm's ``image_generation`` and ``image_edit`` kinds load its own
+    pipelines from a request; only the copied mlx-vlm code names them."""
+    import pathlib
+    import re
+
+    import gmlx
+
+    root = pathlib.Path(gmlx.__file__).parent
+    pat = re.compile(r"model_kind\s*=\s*[\"'](image_generation|image_edit)")
+    hits = [str(p.relative_to(root)) for p in root.rglob("*.py")
+            if "_vendor" not in p.parts and pat.search(p.read_text())]
+    assert hits == []

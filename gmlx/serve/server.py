@@ -2223,6 +2223,9 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
 
     resolved = serving.resolved_models()
     pinned_paths = {rm.path for rm in resolved.values() if rm.pin}
+    image_pins = {iid: rm.path for iid, rm in serving.image_models().items()
+                  if rm.pin}
+    pinned_paths |= set(image_pins.values())
     for p in a.pin:
         rp = resolved.get(p)
         pinned_paths.add(rp.path if rp is not None
@@ -2372,6 +2375,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         if rm.path in pinned_paths and rm.path not in warm_paths:
             warm_paths.add(rm.path)
             pinned_ids.append(mid)
+    for iid, path in image_pins.items():
+        if path not in warm_paths:
+            warm_paths.add(path)
+            pinned_ids.append(iid)
     extras = []
     for m in pinned_ids + (list(cfg.models) if pre == "all" else list(pre or ())):
         if m != preload and m not in extras:

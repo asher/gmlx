@@ -37,7 +37,9 @@ sets up the server is in [Configuration](config.md).
 A field in the request, such as `temperature`, overrides the profile. An
 empty `model` uses the server's default model, or its only model. An unknown id gets a 404 of
 type `model_not_found` that lists the served ids, and an unknown profile
-gets a 400 of type `unknown_profile`.
+gets a 400 of type `unknown_profile`. A chat route that names one of the
+[image models](config.md#image-models) gets a 400 of type
+`wrong_model_kind`, and so does an image route that names a chat model.
 
 ## Endpoints
 
@@ -54,8 +56,8 @@ gets a 400 of type `unknown_profile`.
 | `GET /v1/capacity/plan` | Whether `width` streams of `depth` tokens fit, and can start now |
 | `GET /v1/cache/stats` | Prompt cache statistics, or `{"enabled": false}` |
 | `POST /v1/cache/reset` | Clear the prompt cache, for every model or for `{"model": "<id>"}` |
-| `POST /unload` | Unload `{"model": "<id>"}`, or every idle model with no body. 409 while that model streams. |
-| `POST /v1/keep` | Load and warm `{"model": "<id>"}`, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
+| `POST /unload` | Unload `{"model": "<id>"}`, a chat or an image model, or every idle model with no body. 409 while that model streams. |
+| `POST /v1/keep` | Load and warm `{"model": "<id>"}`, a chat or an image model, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
 | `POST /v1/reload` | Re-read the config file and keep models whose load settings did not change |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech to text, with `stt` set up as in [Speech, embeddings and rerank](services.md) |
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |

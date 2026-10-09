@@ -1126,6 +1126,9 @@ def install_gguf_server_bridge() -> None:
 
 _RESOLVED_MODELS: dict[str, Any] = {}          # id -> ResolvedModel
 _PATH_TO_IDS: dict[str, list[str]] = {}        # abspath -> [id, ...]
+# Image models: their own tables, since no chat path may reach them.
+_IMAGE_MODELS: dict[str, Any] = {}             # id -> ResolvedImageModel
+_IMAGE_PATH_TO_IDS: dict[str, list[str]] = {}  # DiT abspath -> [id, ...]
 _SERVER_CFG = None                             # the live ServerCfg (for re-resolve)
 # The ResolvedModel for the request in flight - set at the residency seam, read at
 # the gen-args seam. A ContextVar so concurrent requests don't see each other's.
@@ -1170,6 +1173,23 @@ class ModelFileMissing(ValueError):
             f"model {model_id!r} is configured but its file is missing on "
             f"disk; restore the file, or run `gmlx sync-models` "
             f"to reconcile the config")
+
+
+class WrongModelKind(ModelNotFound):
+    """A chat route named an image model, or an image route a chat model.
+    A ``ModelNotFound`` to every caller that only asks whether the route
+    serves the id; the HTTP layer answers it with a 400 that names the
+    route the id belongs to."""
+
+    def __init__(self, model_id: str, kind: str, available):
+        super().__init__(model_id, available)
+        self.kind = kind
+        if kind == "image":
+            self.message = (f"{model_id!r} is an image model; send it to "
+                            "/v1/images/generations")
+        else:
+            self.message = (f"{model_id!r} is not an image model; the image "
+                            f"models are {self.available}")
 
 
 class UnknownProfile(ValueError):
@@ -1240,6 +1260,8 @@ def register_resolved_models(cfg) -> None:
 def _clear_registries() -> None:
     _RESOLVED_MODELS.clear()
     _PATH_TO_IDS.clear()
+    _IMAGE_MODELS.clear()
+    _IMAGE_PATH_TO_IDS.clear()
     _GGUF_VLM_REGISTRY.clear()
     _GGUF_MTP_REGISTRY.clear()
     _MTP_DRAFTER_STASH.clear()
@@ -1272,8 +1294,13 @@ def _fill_adapters(rm) -> None:
     rm.adapters = tuple(sorted(union))
 
 
+def _register_image(iid: str, rm) -> None:
+    _IMAGE_MODELS[iid] = rm
+    _IMAGE_PATH_TO_IDS.setdefault(rm.path, []).append(iid)
+
+
 def _register_resolved_models_locked(cfg) -> None:
-    from gmlx.config import MissingModelFile, resolve_model
+    from gmlx.config import MissingModelFile, resolve_image_model, resolve_model
 
     _clear_registries()
     for root in getattr(cfg, "model_dirs", None) or []:
@@ -1293,10 +1320,17 @@ def _register_resolved_models_locked(cfg) -> None:
         _register_one(mid, rm)
     for rm in _RESOLVED_MODELS.values():
         _fill_adapters(rm)
+    for iid in getattr(cfg, "image_models", {}):
+        try:
+            _register_image(iid, resolve_image_model(iid, cfg))
+        except MissingModelFile as e:
+            skipped.append((iid, e))
     for mid, e in skipped:
         print(f"[server] skipping model {mid!r}: {e}", file=sys.stderr)
     if skipped:
-        print(f"[server] {len(skipped)} of {len(cfg.models)} configured "
+        print(f"[server] {len(skipped)} of "
+              f"{len(cfg.models) + len(getattr(cfg, 'image_models', {}))} "
+              "configured "
               "model(s) missing on disk; run `gmlx sync-models` to reconcile "
               "the config (drops gone entries, registers new files)",
               file=sys.stderr)
@@ -1329,6 +1363,17 @@ def reregister_missing_models() -> bool:
     if healed:
         for rm in _RESOLVED_MODELS.values():
             _fill_adapters(rm)
+    from gmlx.config import resolve_image_model
+    for iid in getattr(cfg, "image_models", {}):
+        if iid in _IMAGE_MODELS:
+            continue
+        try:
+            _register_image(iid, resolve_image_model(iid, cfg))
+        except ConfigError:
+            continue
+        print(f"[server] image model {iid!r} is back on disk; re-registered",
+              file=sys.stderr)
+        healed = True
     return healed
 
 
@@ -1446,6 +1491,8 @@ def resolve_request_model(model_field: str | None, *,
 
     if request_profile is not None and request_profile not in known:
         raise UnknownProfile(request_profile, known)
+    if model_id not in cfg.models and model_id in getattr(cfg, "image_models", {}):
+        raise WrongModelKind(model_id, "image", cfg.models)
     if model_id not in cfg.models:
         # `<id|alias>@suffix` with a real head but an unknown suffix isn't split off
         # as a profile (last-@ rule keeps hf `org/model@rev` intact), so it lands
@@ -1462,6 +1509,77 @@ def resolve_request_model(model_field: str | None, *,
         raise ModelFileMissing(model_id, str(e)) from None
     _fill_adapters(rm)
     return rm.path, rm
+
+
+def image_models() -> dict:
+    """``{id: ResolvedImageModel}`` for every registered image model."""
+    return dict(_IMAGE_MODELS)
+
+
+def image_ids_for_path(path: str) -> list:
+    """The image model ids whose DiT is ``path``."""
+    return list(_IMAGE_PATH_TO_IDS.get(str(path), []))
+
+
+def default_image_model_id() -> str | None:
+    """``server.defaults.image_model``, else the only image model, else
+    None."""
+    cfg = _SERVER_CFG
+    if cfg is None:
+        return None
+    if getattr(cfg.defaults, "image_model", None):
+        return cfg.defaults.image_model
+    images = getattr(cfg, "image_models", {})
+    if len(images) == 1:
+        return next(iter(images))
+    return None
+
+
+def is_image_model(model_field: str | None) -> bool:
+    """Whether a request ``model`` field names a configured image model."""
+    cfg = _SERVER_CFG
+    raw = str(model_field or "").strip()
+    return (cfg is not None and bool(raw)
+            and raw in getattr(cfg, "image_models", {}))
+
+
+def resolve_image_request(model_field: str | None):
+    """Resolve an image route's ``model`` field to ``(DiT abspath,
+    ResolvedImageModel)``. An empty field takes the default image model.
+    A chat model id or alias raises :class:`WrongModelKind`, an unknown
+    name :class:`ModelNotFound`, a configured id whose file is gone
+    :class:`ModelFileMissing`, and an empty field with no default
+    :class:`NoModelSpecified`. Re-resolves, so an entry whose file comes
+    back serves again."""
+    from gmlx.config import MissingModelFile, resolve_image_model
+
+    cfg = _SERVER_CFG
+    if cfg is None:
+        raise RuntimeError(
+            "no config registered; call register_resolved_models() first")
+    raw = str(model_field or "").strip()
+    image_id = raw or default_image_model_id()
+    if image_id is None:
+        raise NoModelSpecified(cfg.image_models)
+    if image_id not in cfg.image_models:
+        head = split_profile_address(image_id)[0]
+        if head in cfg.models or head in cfg.aliases:
+            raise WrongModelKind(image_id, "chat", cfg.image_models)
+        raise ModelNotFound(image_id, cfg.image_models)
+    try:
+        rm = resolve_image_model(image_id, cfg)
+    except MissingModelFile as e:
+        raise ModelFileMissing(image_id, str(e)) from None
+    return rm.path, rm
+
+
+def resolve_pool_path(model_field: str | None) -> str:
+    """The resident-pool path of a chat or image model id, for the routes
+    that act on either kind (unload, keep). Raises as
+    :func:`resolve_request_model` does."""
+    if is_image_model(model_field):
+        return resolve_image_request(model_field)[0]
+    return resolve_request_model(model_field)[0]
 
 
 def set_active_spec(spec):
