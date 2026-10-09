@@ -221,7 +221,9 @@ server:
 Image models load into the same memory budget as chat models, and unload
 the same way: by `ttl_s`, by [`POST /unload`](api.md#endpoints), or to
 make room for another model. The memory an entry counts is its weights
-and what one image at its default size needs while it runs.
+and what one image at its default size needs while it runs, so two ids
+with the same files and another default `size` or `guidance` load as two
+entries.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -464,7 +466,8 @@ markers such as `mmproj`, `assistant`, `draft` and `mtp`, and imatrix tags,
 and adds the short quantization: `Qwen3-8B-Q4_K_M.gguf` becomes
 `qwen3-8b-q4`. When two files would get the same name, both get the full
 quantization, such as `qwen3-8b-q4-k-m` and `qwen3-8b-q4-k-s`, and a clash
-that remains gets a number. `gmlx list` shows the names.
+that remains gets a number, as does a name that a model or an image model
+already has. `gmlx list` shows the names.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -558,7 +561,7 @@ share one loaded copy.
 | <a id="servercache_limit_gb"></a>`cache_limit_gb` | 4 to 12 GiB, set at start | Limit of the MLX buffer cache, in GiB. `0` turns the cache off, a negative value removes the limit. |
 | <a id="serverdefaultsmodel"></a>`defaults.model` | the only model, else none | Model for requests that name none, and the first one loaded when no model is pinned |
 | <a id="serverdefaultsttl_s"></a>`defaults.ttl_s` | `900` | Seconds without a request before a model that is not pinned unloads. `null` or `0` turns off the timeout. |
-| <a id="serverdefaultspreload"></a>`defaults.preload` | none | Models loaded at start, one at a time, after the pinned models. `all` loads every model. |
+| <a id="serverdefaultspreload"></a>`defaults.preload` | none | Models and image models loaded at start, one at a time, after the pinned models. `all` loads every chat model. |
 | <a id="serverdefaultsprofile"></a>`defaults.profile` | none | Profile for every model, below rules and the model's own profile |
 | <a id="serverdefaultsimage_model"></a>`defaults.image_model` | the only image model, else none | Image model for image requests that name none |
 

@@ -1208,11 +1208,14 @@ class ResolvedImageModel:
     ttl_s: float | None
 
     def load_signature(self) -> tuple:
-        """What makes two loads of the entry the same: every file and the
-        adapter list. Request defaults change no loaded weight."""
+        """What makes two loads of the entry the same: every file, the
+        adapter list, and the defaults its booked memory is priced at,
+        the size and the guidance. The other request defaults change no
+        loaded weight and no price."""
+        d = self.defaults or {}
         return (self.path, self.family, self.encoder, self.encoder_model,
                 self.encoder_mmproj, self.vae, tuple(self.adapters),
-                self.encoder_release)
+                self.encoder_release, d.get("size"), d.get("guidance"))
 
 
 # Path resolution
@@ -3619,13 +3622,13 @@ def _validate(cfg: ServerCfg) -> None:
                 f"server.systemone.model {so_model!r} names unknown profile "
                 f"{prof!r}; known: {sorted(known)}")
 
-    # Preload ids must be configured models.
+    # Preload ids must be configured models or image models.
     if isinstance(cfg.defaults.preload, list):
         for mid in cfg.defaults.preload:
-            if mid not in cfg.models:
+            if mid not in cfg.models and mid not in cfg.image_models:
                 raise ConfigError(
                     f"server.defaults.preload names unknown model {mid!r}; "
-                    f"known: {sorted(cfg.models)}")
+                    f"known: {sorted(cfg.models) + sorted(cfg.image_models)}")
 
     # Assistant aliases: served pseudo-model ids. Each id must be addressable
     # and unambiguous against models and aliases (the request wrapper must be

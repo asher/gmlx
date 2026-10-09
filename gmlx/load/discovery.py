@@ -594,9 +594,11 @@ def discovered_models(cfg, *, progress=False) -> list[ModelCfg]:
         if rp:
             known_paths.add(rp)
     try:
+        # An image model id is taken too: a discovered GGUF must not take
+        # a name that the image routes answer to.
         return scan_dirs(cfg.discover, cfg.model_dirs,
-                         known_ids=set(cfg.models), known_paths=known_paths,
-                         progress=progress)
+                         known_ids=set(cfg.models) | set(cfg.image_models),
+                         known_paths=known_paths, progress=progress)
     except Exception as e:                       # noqa: BLE001 - a flaky scan dir
         print(f"warning: discover scan failed: {e}", file=sys.stderr)
         return []

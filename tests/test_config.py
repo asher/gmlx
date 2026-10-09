@@ -3323,3 +3323,45 @@ def test_image_models_round_trip_through_print_config():
     assert again.image_models == cfg.image_models
     assert again.image == cfg.image
     assert again.defaults.image_model == "zit"
+
+
+def test_image_signature_carries_the_priced_defaults(tmp_path):
+    """The entry books one image at its default size and guidance, so two
+    ids that differ there are two entries with their own price."""
+    for name in ("z.gguf", "e.gguf", "v.gguf"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "image_models": {
+               "small": {"path": "z.gguf", "encoder": "e.gguf", "vae": "v.gguf",
+                         "defaults": {"size": "512x512"}},
+               "big": {"path": "z.gguf", "encoder": "e.gguf", "vae": "v.gguf",
+                       "defaults": {"size": "1024x1024"}},
+               "guided": {"path": "z.gguf", "encoder": "e.gguf",
+                          "vae": "v.gguf",
+                          "defaults": {"size": "1024x1024", "guidance": 4}}}}
+    cfg = build_config(doc)
+    sigs = {i: cfgmod.resolve_image_model(i, cfg).load_signature()
+            for i in ("small", "big", "guided")}
+    assert len(set(sigs.values())) == 3
+
+
+def test_defaults_preload_takes_an_image_id():
+    doc = _image_doc()
+    doc["server"] = {"defaults": {"preload": ["chat", "zit"]}}
+    assert build_config(doc).defaults.preload == ["chat", "zit"]
+
+
+def test_discovery_never_takes_an_image_id(monkeypatch):
+    from gmlx.load import discovery
+
+    seen = {}
+
+    def scan(specs, dirs, *, known_ids, **kw):
+        seen["ids"] = set(known_ids)
+        return []
+
+    monkeypatch.setattr(discovery, "scan_dirs", scan)
+    doc = _image_doc()
+    doc["discover"] = [{"dir": "/m"}]
+    discovery.discovered_models(build_config(doc))
+    assert {"chat", "zit"} <= seen["ids"]

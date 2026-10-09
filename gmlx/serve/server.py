@@ -598,14 +598,16 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         stats = {}
         discovered += discovery.scan_dirs(
             specs, dirs,
-            known_ids=set(cfg.models), known_paths=known_paths,
+            known_ids=set(cfg.models) | set(cfg.image_models),
+            known_paths=known_paths,
             known_models=known_models, progress=True, stats=stats)
         draft_pairs = stats.get("draft_pairs") or {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
         discovered += discovery.scan_hf_cache(
-            known_ids=set(cfg.models) | {m.id for m in discovered},
+            known_ids=(set(cfg.models) | set(cfg.image_models)
+                       | {m.id for m in discovered}),
             known_refs=known_refs, progress=True)
 
     print(f"\nsync-models {path}:")
@@ -645,6 +647,19 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
+
+
+def _pinned_paths(resolved: dict, images: dict, cli_pins) -> tuple:
+    """The pool's pinned paths, from `pin: true` on chat and image models and
+    from --pin, and the pinned image models as {id: path}."""
+    paths = {rm.path for rm in resolved.values() if rm.pin}
+    image_pins = {iid: rm.path for iid, rm in images.items() if rm.pin}
+    paths |= set(image_pins.values())
+    for p in cli_pins:
+        rp = resolved.get(p)
+        paths.add(rp.path if rp is not None
+                  else os.path.abspath(os.path.expanduser(p)))
+    return paths, image_pins
 
 
 def _hf_cache_readable() -> bool:
@@ -765,7 +780,7 @@ def register_downloads(paths: list, config_path=None) -> None:
         specs = [DiscoverSpec(dir=d, recursive=False) for d in parents]
         stats = {}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
-                                    known_ids=set(cfg.models),
+                                    known_ids=set(cfg.models) | set(cfg.image_models),
                                     known_paths=known_paths,
                                     known_models=known_models, stats=stats)
         newly = [m for m in found if os.path.abspath(m.path) in wanted]
@@ -2222,14 +2237,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                       "per-model speculative_width_cap config key")
 
     resolved = serving.resolved_models()
-    pinned_paths = {rm.path for rm in resolved.values() if rm.pin}
-    image_pins = {iid: rm.path for iid, rm in serving.image_models().items()
-                  if rm.pin}
-    pinned_paths |= set(image_pins.values())
-    for p in a.pin:
-        rp = resolved.get(p)
-        pinned_paths.add(rp.path if rp is not None
-                         else os.path.abspath(os.path.expanduser(p)))
+    pinned_paths, image_pins = _pinned_paths(resolved, serving.image_models(),
+                                             a.pin)
 
     # Only an explicit pin (`pin: true`, --pin, or the single-GGUF positional)
     # holds the preload for the process lifetime. A default or sole model
