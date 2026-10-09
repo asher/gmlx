@@ -208,7 +208,7 @@ def float32_products(module):
         # would only add a copy of it the size of the weight. Each check
         # runs alone, so one weight's temporary is live at a time.
         module.update_modules(tree_unflatten(
-            [(p, ExactLinear(m, tf32_exact(m.weight).item()))
+            [(p, ExactLinear(m, bool(tf32_exact(m.weight).item())))
              for p, m in found]))
         stacks = [(m, m.blocks) for _, m in module.named_modules()
                   if isinstance(m.get("blocks"), list)]

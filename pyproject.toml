@@ -212,6 +212,7 @@ include = [
     "gmlx/gen/media_spans.py",
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
+    "gmlx/image/families/qwen_image21/edit.py",
     "gmlx/load/hadamard_modules.py",
     "gmlx/load/loader.py",
     "gmlx/load/mlx_checkpoint.py",
