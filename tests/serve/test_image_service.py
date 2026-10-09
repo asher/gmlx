@@ -129,3 +129,189 @@ def test_quality_steps_come_from_the_family_table():
     assert image_service.quality_steps(z, "turbo", "low") == 4
     assert image_service.quality_steps(q, "default", "medium") == 28
     assert image_service.quality_steps(q, "default", "auto") is None
+
+
+GB = 1024**3
+
+
+def _spec(**kw):
+    base = dict(id="zit", path="/dit.gguf", family=None, defaults={},
+                adapters=(), vae="/vae.gguf", encoder="/enc.gguf",
+                encoder_model=None, encoder_mmproj=None,
+                encoder_release="auto")
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+@pytest.fixture
+def plan_stubs(monkeypatch):
+    """entry_plan over stubbed headers: with the encoder an image peaks at
+    10 GB, 8 of them in the encode phase; without it, at 6 GB."""
+    from gmlx.image import api, dtypes, loader, memfit
+    from gmlx.image.registry import get_family
+    from gmlx.serve import capacity
+
+    fam = get_family("z_image")
+    state = SimpleNamespace(budget=100 * GB, checked=[], planned=[])
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path: SimpleNamespace(family=fam,
+                                                     variant="turbo"))
+    monkeypatch.setattr(api, "sampler_defaults",
+                        lambda *a: SimpleNamespace(size=(1024, 1024), cfg=1.0))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 1)
+    monkeypatch.setattr(dtypes, "image_activation",
+                        lambda name: SimpleNamespace(dit="bf16", vae="bf16"))
+
+    def plan(dit, enc, vae, mmproj=None, **kw):
+        state.planned.append(enc)
+        if enc:
+            return SimpleNamespace(peak=10 * GB, phases={"encode": 8 * GB})
+        return SimpleNamespace(peak=6 * GB, phases={"encode": 0})
+
+    monkeypatch.setattr(memfit, "plan_memory", plan)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: state.budget)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    monkeypatch.setattr(image_service, "check_parts",
+                        lambda spec, fam: state.checked.append(spec.id))
+    return state
+
+
+def test_a_released_encoder_books_the_encode_phase(plan_stubs):
+    plan = image_service.entry_plan(_spec(encoder_release="always"))
+    assert plan.keep_encoder is False and plan.footprint == 8 * GB
+
+
+@pytest.mark.parametrize("budget_gb,keeps,booked", [(100, True, 10),
+                                                    (11, False, 8)])
+def test_auto_keeps_the_encoder_while_the_entry_fits_its_share(
+        plan_stubs, budget_gb, keeps, booked):
+    plan_stubs.budget = budget_gb * GB
+    plan = image_service.entry_plan(_spec())
+    assert plan.keep_encoder is keeps and plan.footprint == booked * GB
+
+
+def test_the_parts_are_checked_before_the_entry_is_priced(plan_stubs, monkeypatch):
+    image_service.entry_plan(_spec())
+    assert plan_stubs.checked == ["zit"]
+
+
+def test_a_vae_or_encoder_of_another_family_is_refused_from_its_header(monkeypatch):
+    from gmlx.image import text_encoder
+    from gmlx.image.registry import get_family
+    from gmlx.image.text_encoder import EncoderMismatchError
+    from gmlx.image.vae import VAEError, reader
+
+    fam = get_family("z_image")
+    monkeypatch.setattr(reader, "read_header", lambda path: path)
+
+    def identify(header, family):
+        if header == "/qwen-vae.gguf":
+            raise VAEError("holds the qwen_image21 VAE")
+
+    monkeypatch.setattr(reader, "identify", identify)
+    monkeypatch.setattr(text_encoder, "_header_view", lambda path: path)
+    monkeypatch.setattr(text_encoder, "encoder_spec", lambda f: "SPEC")
+
+    def check_encoder(view, spec):
+        if view == "/wrong-enc.gguf":
+            raise EncoderMismatchError("not Qwen3-4B")
+
+    monkeypatch.setattr(text_encoder, "check_encoder_file", check_encoder)
+    monkeypatch.setattr(text_encoder, "check_mmproj_file", check_encoder)
+    image_service.check_parts(_spec(), fam)
+    image_service.check_parts(_spec(encoder=None, encoder_model="qwen",
+                                    encoder_mmproj="/wrong-enc.gguf"), fam)
+    with pytest.raises(VAEError):
+        image_service.check_parts(_spec(vae="/qwen-vae.gguf"), fam)
+    with pytest.raises(EncoderMismatchError):
+        image_service.check_parts(_spec(encoder="/wrong-enc.gguf"), fam)
+    with pytest.raises(EncoderMismatchError):
+        image_service.check_parts(_spec(encoder_mmproj="/wrong-enc.gguf"), fam)
+
+
+class _Encoder:
+    def __init__(self):
+        self.released = 0
+
+    def release(self):
+        self.released += 1
+        return True
+
+
+def _pipe(encoder=None):
+    return SimpleNamespace(encoder=encoder, conditionings={}, captions={},
+                           modulations={}, adapters={}, tables={},
+                           reference_latents={}, default_table=None)
+
+
+def test_a_release_drops_the_owned_encoder():
+    enc = _Encoder()
+    served = image_service.ServedImage(pipe=_pipe(enc), spec=_spec(), plan=None)
+    image_service._release([served])
+    assert enc.released == 1 and served.pipe is None
+
+
+@pytest.fixture
+def load_stubs(monkeypatch):
+    from gmlx.image import api
+
+    calls = []
+
+    def load(path, **kw):
+        calls.append(kw)
+        return _pipe(_Encoder() if kw.get("text_encoder") else None)
+
+    monkeypatch.setattr(api, "load", load)
+    monkeypatch.setattr(image_service, "entry_plan", lambda spec: "PLAN")
+    return calls
+
+
+def test_a_shared_encoder_loads_no_mmproj_of_its_own(load_stubs):
+    image_service._load(_spec(encoder=None, encoder_model="qwen",
+                              encoder_mmproj="/chat-mmproj.gguf"))
+    image_service._load(_spec(encoder_mmproj="/own-mmproj.gguf"))
+    assert [c["mmproj"] for c in load_stubs] == [None, "/own-mmproj.gguf"]
+
+
+def test_a_failed_adapter_frees_the_loaded_pipeline(load_stubs, monkeypatch):
+    from gmlx.image import lora
+
+    pipes = []
+    real_release = image_service._release
+    monkeypatch.setattr(image_service, "_release",
+                        lambda box: pipes.append(box[0].pipe.encoder)
+                        or real_release(box))
+
+    def bad_adapter(pipe, path):
+        raise ValueError("not a LoRA")
+
+    monkeypatch.setattr(lora, "load_adapter", bad_adapter)
+    with pytest.raises(ValueError, match="not a LoRA"):
+        image_service._load(_spec(adapters=(("/a.safetensors", 1.0),)))
+    assert len(pipes) == 1 and pipes[0].released == 1
+
+
+def test_a_failed_vae_load_releases_the_encoder_it_loaded(monkeypatch):
+    from gmlx.image import api, dtypes, loader, text_encoder, vae
+    from gmlx.image.registry import get_family
+
+    fam = get_family("z_image")
+    ident = SimpleNamespace(family=fam, variant="turbo")
+    enc = _Encoder()
+    monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 0)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: ident)
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
+        "DIT", SimpleNamespace(identified=ident)))
+    monkeypatch.setattr(dtypes, "image_activation",
+                        lambda name: SimpleNamespace(dit="bf16", vae="bf16"))
+    monkeypatch.setattr(text_encoder, "encoder_spec", lambda f: "SPEC")
+    monkeypatch.setattr(text_encoder, "load_encoder", lambda *a, **k: enc)
+
+    def bad_vae(*a, **k):
+        raise vae.VAEError("holds the qwen_image21 VAE")
+
+    monkeypatch.setattr(vae, "load_vae", bad_vae)
+    with pytest.raises(vae.VAEError):
+        api.load("/dit.gguf", text_encoder="/enc.gguf", vae="/vae.gguf",
+                 memory="off", log=lambda *a: None)
+    assert enc.released == 1

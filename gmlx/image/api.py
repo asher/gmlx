@@ -261,7 +261,14 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     ae = None
     t0 = time.perf_counter()
     if vae is not None:
-        ae = load_vae(str(vae), family=fam.name, dtype=act.vae)
+        try:
+            ae = load_vae(str(vae), family=fam.name, dtype=act.vae)
+        except BaseException:
+            # The encoder this call loaded registered its mapped weights;
+            # a failed load returns no pipeline to release them.
+            if handle is not None and text_encoder is not None:
+                handle.release()
+            raise
     seconds["vae"] = time.perf_counter() - t0
     if encoder_model is not None:
         weights["encoder"] = sum(

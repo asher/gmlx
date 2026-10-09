@@ -88,12 +88,15 @@ def entry_plan(spec) -> EntryPlan:
 
     from .capacity import overcommit, working_budget_bytes
 
+    from gmlx.image.fingerprint import ImageModelError
+
     ident = identify_dit(spec.path)
     fam = ident.family
     if spec.family and not family_matches(spec.family, fam, ident.variant):
-        raise ValueError(
+        raise ImageModelError(
             f"image model {spec.id!r}: {os.path.basename(spec.path)} is a "
             f"{fam.title} DiT, not the configured family {spec.family!r}")
+    check_parts(spec, fam)
     defaults = sampler_defaults(fam.name, ident.variant)
     width, height = default_size(spec, defaults)
     cfg = (spec.defaults or {}).get("guidance")
@@ -131,6 +134,27 @@ def entry_plan(spec) -> EntryPlan:
                      size=(width, height), cfg=float(cfg))
 
 
+def check_parts(spec, fam) -> None:
+    """Refuse a VAE of another family, and an owned encoder or mmproj that
+    is not the family's, from their headers. The pool prices an entry
+    before it evicts anything, so a part that would fail at load is
+    refused while the residents stay."""
+    from gmlx.image.text_encoder import (
+        _header_view,
+        check_encoder_file,
+        check_mmproj_file,
+        encoder_spec,
+    )
+    from gmlx.image.vae import reader
+
+    reader.identify(reader.read_header(str(spec.vae)), fam.name)
+    if spec.encoder is not None:
+        enc = encoder_spec(fam)
+        check_encoder_file(_header_view(str(spec.encoder)), enc)
+        if spec.encoder_mmproj is not None:
+            check_mmproj_file(_header_view(str(spec.encoder_mmproj)), enc)
+
+
 def entry_footprint(spec) -> int:
     return entry_plan(spec).footprint
 
@@ -150,18 +174,27 @@ def _load(spec) -> ServedImage:
     pipe = api.load(spec.path, text_encoder=spec.encoder, vae=spec.vae,
                     mmproj=spec.encoder_mmproj if spec.encoder else None,
                     memory="off", log=_log_line)
-    rows = []
-    if spec.adapters:
-        for path, strength in spec.adapters:
-            ad = lora.load_adapter(pipe, path)
-            for w in ad.warnings:
-                _log.warning("image model %s: %s", spec.id, w)
-            rows.append((ad, strength))
-        if pipe.encoder is not None:
-            lora.apply_text_adapters(pipe, rows)
-        pipe.default_table = api.define_patch_table(
-            pipe, lora.table_entries(rows))
-    return ServedImage(pipe=pipe, spec=spec, plan=plan, adapters=rows)
+    served = ServedImage(pipe=pipe, spec=spec, plan=plan)
+    try:
+        rows = []
+        if spec.adapters:
+            for path, strength in spec.adapters:
+                ad = lora.load_adapter(pipe, path)
+                for w in ad.warnings:
+                    _log.warning("image model %s: %s", spec.id, w)
+                rows.append((ad, strength))
+            if pipe.encoder is not None:
+                lora.apply_text_adapters(pipe, rows)
+            pipe.default_table = api.define_patch_table(
+                pipe, lora.table_entries(rows))
+    except BaseException:
+        # The pipeline loaded and an adapter failed: free it here, as the
+        # pool never holds it.
+        del pipe
+        _release([served])
+        raise
+    served.adapters = rows
+    return served
 
 
 def load_on_worker(spec) -> ServedImage:

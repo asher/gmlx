@@ -524,17 +524,22 @@ class _ResidencyPool:
             from gmlx.load.preflight import preflight
             preflight(model_path)
         with self._build_lock:
-            with self._lock:
-                entry = self._entries.get(cache_key)
-                if entry is not None:
-                    if ttl is not None:
-                        entry.ttl = ttl
-                    self._touch(entry)
-                    entry.busy += 1
-                    return entry
-                self._evict_for_room(
-                    incoming, model_path=model_path,
-                    streaming=getattr(build_spec, "stream", None) == "experts")
+            released: list = []
+            try:
+                with self._lock:
+                    entry = self._entries.get(cache_key)
+                    if entry is not None:
+                        if ttl is not None:
+                            entry.ttl = ttl
+                        self._touch(entry)
+                        entry.busy += 1
+                        return entry
+                    self._evict_for_room(
+                        incoming, model_path=model_path,
+                        streaming=getattr(build_spec, "stream", None) == "experts",
+                        released=released)
+            finally:
+                self._release_images(released)
             try:
                 entry = self._build(cache_key, model_path, adapter_path,
                                     model_kind, file_bytes, ttl=ttl, env=env,
@@ -585,20 +590,25 @@ class _ResidencyPool:
         it down would kill that client's running generation; the TTL reaper or
         a later unload collects it once released. Returns whether anything was
         torn down. ``ignore_retained`` as in :meth:`evict`."""
-        with self._build_lock, self._lock:
-            cleared = False
-            for key, entry in list(self._entries.items()):
-                if self._live_count(entry, ignore_retained) > 0:
-                    loadlog.verbose_print(
-                        f"[residency] unload skipping busy model "
-                        f"{os.path.basename(str(entry.model_path))} "
-                        f"({entry.busy} in-flight)")
-                    continue
-                self._teardown(entry)
-                if self._proxy._last_entry is entry:
-                    self._proxy._last_entry = None
-                del self._entries[key]
-                cleared = True
+        released: list = []
+        with self._build_lock:
+            try:
+                with self._lock:
+                    cleared = False
+                    for key, entry in list(self._entries.items()):
+                        if self._live_count(entry, ignore_retained) > 0:
+                            loadlog.verbose_print(
+                                f"[residency] unload skipping busy model "
+                                f"{os.path.basename(str(entry.model_path))} "
+                                f"({entry.busy} in-flight)")
+                            continue
+                        self._teardown(entry, released)
+                        if self._proxy._last_entry is entry:
+                            self._proxy._last_entry = None
+                        del self._entries[key]
+                        cleared = True
+            finally:
+                self._release_images(released)
             return cleared
 
     def busy_paths(self) -> list:
@@ -683,20 +693,26 @@ class _ResidencyPool:
 
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
-        with self._build_lock, self._lock:
-            self._keep_paths.discard(model_path)
-            keys = [k for k, e in self._entries.items()
-                    if e.model_path == model_path]
-            in_flight = sum(self._live_count(self._entries[k], ignore_retained)
-                            for k in keys)
-            if in_flight:
-                raise ModelBusyError(model_path, in_flight)
-            for k in keys:
-                entry = self._entries[k]
-                self._teardown(entry)
-                if self._proxy._last_entry is entry:
-                    self._proxy._last_entry = None
-                del self._entries[k]
+        released: list = []
+        with self._build_lock:
+            try:
+                with self._lock:
+                    self._keep_paths.discard(model_path)
+                    keys = [k for k, e in self._entries.items()
+                            if e.model_path == model_path]
+                    in_flight = sum(
+                        self._live_count(self._entries[k], ignore_retained)
+                        for k in keys)
+                    if in_flight:
+                        raise ModelBusyError(model_path, in_flight)
+                    for k in keys:
+                        entry = self._entries[k]
+                        self._teardown(entry, released)
+                        if self._proxy._last_entry is entry:
+                            self._proxy._last_entry = None
+                        del self._entries[k]
+            finally:
+                self._release_images(released)
             return bool(keys)
 
     def set_keep(self, model_path, keep: bool) -> None:
@@ -773,20 +789,29 @@ class _ResidencyPool:
             return []                    # busy or unknown -> skip this tick
         now = self._time_fn()
         reaped = []
-        with self._build_lock, self._lock:
-            for entry in list(self._entries.values()):
-                if (entry.pinned or entry.model_path in self._keep_paths
-                        or not entry.ttl or entry.ttl <= 0):
-                    continue
-                if now - entry.last_access < entry.ttl:
-                    continue
-                _log.info("idle TTL unload (%.0fs): %s",
-                          entry.ttl, entry.model_path)
-                self._teardown(entry)
-                del self._entries[entry.cache_key]
-                if self._proxy._last_entry is entry:
-                    self._proxy._last_entry = None
-                reaped.append(entry.model_path)
+        released: list = []
+        with self._build_lock:
+            try:
+                with self._lock:
+                    for entry in list(self._entries.values()):
+                        if (entry.pinned or entry.model_path in self._keep_paths
+                                or not entry.ttl or entry.ttl <= 0):
+                            continue
+                        if now - entry.last_access < entry.ttl:
+                            continue
+                        if entry.is_image and entry.busy > 0:
+                            # An image job is not in the server's in-flight
+                            # count; its hold is.
+                            continue
+                        _log.info("idle TTL unload (%.0fs): %s",
+                                  entry.ttl, entry.model_path)
+                        self._teardown(entry, released)
+                        del self._entries[entry.cache_key]
+                        if self._proxy._last_entry is entry:
+                            self._proxy._last_entry = None
+                        reaped.append(entry.model_path)
+            finally:
+                self._release_images(released)
         return reaped
 
     def _server_in_flight(self):
@@ -843,7 +868,7 @@ class _ResidencyPool:
         return False
 
     def _evict_for_room(self, incoming: int, *, model_path=None,
-                        streaming: bool = False):
+                        streaming: bool = False, released=None):
         # Evict LRU-unpinned models until the incoming one fits the budget (and
         # the optional count cap). Never evict a pinned or busy (in-flight
         # generation) model; if only those remain, exceed the budget rather than
@@ -880,7 +905,7 @@ class _ResidencyPool:
                 "evicting LRU model (%.1f GB) to fit %.1f GB: %s",
                 victim.footprint / 1e9, incoming / 1e9, victim.model_path,
             )
-            self._teardown(victim)
+            self._teardown(victim, released)
             del self._entries[victim.cache_key]
             if self._proxy._last_entry is victim:
                 self._proxy._last_entry = None
@@ -905,14 +930,16 @@ class _ResidencyPool:
                                 model_kind, footprint, ttl=ttl, env=env,
                                 build_spec=build_spec)
 
-    def _gate(self, gate_bytes, model_path, *, streaming: bool = False) -> None:
+    def _gate(self, gate_bytes, model_path, *, streaming: bool = False,
+              image: bool = False) -> None:
         """U4: a model load and swap take the same headroom check a
         request takes, beside the room the resident streamed models keep.
         Raises with the numbers; GMLX_OVERCOMMIT=1 skips."""
         from .capacity import preload_gate
 
+        extra = {"image": True} if image else {}
         preload_gate(gate_bytes, str(model_path), streaming=streaming,
-                     reserved_bytes=self._reserved_room_bytes())
+                     reserved_bytes=self._reserved_room_bytes(), **extra)
 
     def _new_entry(self, cache_key, model_path, footprint, ttl,
                    **fields) -> _Entry:
@@ -926,7 +953,7 @@ class _ResidencyPool:
         """An image entry: the image ``load`` on the image worker, gated on
         the weights and the activation reserve together. Never reaches the
         stock loader."""
-        self._gate(footprint, model_path)
+        self._gate(footprint, model_path, image=True)
         pipe = self._image_fn(1)(build_spec)
         return self._new_entry(cache_key, model_path, footprint, ttl,
                                kind=IMAGE_KIND, pipeline=pipe)
@@ -1157,26 +1184,37 @@ class _ResidencyPool:
             else:
                 os.environ[k] = old
 
-    def _teardown(self, entry: _Entry):
+    def _teardown(self, entry: _Entry, released=None):
+        """Tear ``entry`` down. An image entry's pipeline goes to
+        ``released``, which the caller hands to :meth:`_release_images`
+        once it drops ``_lock``: the release waits on the image worker, and
+        a collection there can finalize a hold whose release takes
+        ``_lock``."""
         if entry.is_image:
-            self._teardown_image(entry)
+            pipe, entry.pipeline = entry.pipeline, None
+            if released is None:
+                self._release_images([pipe])
+            else:
+                released.append(pipe)
             return
         self._teardown_chat(entry)
 
-    def _teardown_image(self, entry: _Entry) -> None:
-        """Release an image entry's pipeline on the image worker, where its
-        arrays were made, and wait for it, so the next gate measures the
-        memory back."""
-        box = [entry.pipeline]
-        entry.pipeline = None
-        try:
-            self._image_fn(2)(box)
-        except Exception:
-            _log.warning("teardown: image pipeline release failed",
-                         exc_info=True)
-        box.clear()
-        import gc
-        gc.collect()
+    def _release_images(self, pipelines: list) -> None:
+        """Release image pipelines on the image worker, where their arrays
+        were made, and wait for each, so the next gate measures the memory
+        back. Call without ``_lock``."""
+        while pipelines:
+            box = [pipelines.pop()]
+            if box[0] is None:
+                continue
+            try:
+                self._image_fn(2)(box)
+            except Exception:
+                _log.warning("teardown: image pipeline release failed",
+                             exc_info=True)
+            box.clear()
+            import gc
+            gc.collect()
 
     def _teardown_chat(self, entry: _Entry):
         from . import bridge_vlm as _serving
@@ -1475,12 +1513,25 @@ def acquire_image_model(model_field, *, pool=None) -> "_BusyHold":
     except (_serving.ModelNotFound, _serving.ModelFileMissing,
             _serving.NoModelSpecified) as e:
         raise (_http_from_resolver_error(e) or e) from e
+    from gmlx.image.fingerprint import ImageModelError
+
     try:
         entry = pool.acquire(path, None, IMAGE_KIND, ttl=spec.ttl_s,
                              cache_key_extra=spec.load_signature(),
                              build_spec=spec, loaded_as=spec.id)
     except LoadDeferred as e:
         raise _http_from_load_deferred(str(model_field or spec.id), e) from e
+    except FileNotFoundError as e:
+        # An absolute path is not checked at resolve; a file that is gone
+        # surfaces here, at load, with the 404 a chat model gets.
+        miss = _serving.ModelFileMissing(spec.id, str(e))
+        raise (_http_from_resolver_error(miss) or miss) from e
+    except ImageModelError as e:
+        # A part of the entry that is not of its family: the config names
+        # the wrong file, which no retry fixes.
+        raise HTTPException(status_code=400, detail={"error": {
+            "type": "image_model_mismatch", "code": "image_model_mismatch",
+            "message": str(e), "model": spec.id}}) from e
     return _BusyHold(pool, entry)
 
 

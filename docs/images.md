@@ -153,6 +153,8 @@ that fit.
 | The client disconnects | The job stops at its next step, and the log line marks the request `cancelled` |
 | The job waits for its turn, or for one step, longer than the token queue timeout | 504, and the log line marks the request `timeout` |
 | No image model is configured | 404 `model_not_found` |
+| The model's file is gone | 404 `model_file_missing` |
+| The model's VAE, encoder or mmproj is not of its family | 400 `image_model_mismatch` |
 
 The usage of an answer counts the encoder tokens of the prompts as text
 tokens, the tokens of reference images as image tokens, and the latent

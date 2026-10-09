@@ -540,7 +540,8 @@ class LoadDeferred(RuntimeError):
 
 
 def preload_gate(weight_bytes: float, model_id: str, *,
-                 streaming: bool = False, reserved_bytes: float = 0.0) -> None:
+                 streaming: bool = False, image: bool = False,
+                 reserved_bytes: float = 0.0) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
@@ -549,14 +550,22 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     experts are already discounted, so a smaller quant of the rest is
     the fix, not streaming. ``reserved_bytes`` is room a resident
     streamed model keeps but has not filled (its prefill ring, its KV
-    room); the measure reads it as free, the load may not take it."""
+    room); the measure reads it as free, the load may not take it.
+    ``image`` names the bytes as an image model's weights and the memory
+    of one image at its default size."""
     if overcommit() or weight_bytes <= 0:
         return
-    what = "every-token weights" if streaming else "weights"
-    fix = ("The routed experts already stream from disk; pick a quant "
-           "with smaller every-token tensors (docs/streaming.md)."
-           if streaming else
-           "for MoE models --stream-experts serves the experts from disk.")
+    if image:
+        what = "weights and one image at its default size"
+        fix = ("set a smaller defaults.size or encoder_release: always, "
+               "or pick a smaller quant of the DiT.")
+    elif streaming:
+        what = "every-token weights"
+        fix = ("The routed experts already stream from disk; pick a quant "
+               "with smaller every-token tensors (docs/streaming.md).")
+    else:
+        what = "weights"
+        fix = "for MoE models --stream-experts serves the experts from disk."
     from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()

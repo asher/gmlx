@@ -1135,3 +1135,184 @@ def test_no_gmlx_route_passes_a_stock_image_kind():
     hits = [str(p.relative_to(root)) for p in root.rglob("*.py")
             if "_vendor" not in p.parts and pat.search(p.read_text())]
     assert hits == []
+
+
+def _release_on_another_thread(releases):
+    """An image release that runs on another thread and collects there, as
+    the image worker does, and waits for it."""
+    import gc
+    import threading
+
+    def release(box):
+        done = threading.Event()
+
+        def run():
+            try:
+                releases.append(box[0].spec.path)
+                box.clear()
+                gc.collect()
+            finally:
+                done.set()
+
+        threading.Thread(target=run, name="image-worker-stub",
+                         daemon=True).start()
+        done.wait()
+    return release
+
+
+def test_image_eviction_with_a_cyclic_busy_hold_does_not_deadlock(monkeypatch):
+    """The image release waits on the worker, whose collection can finalize
+    a hold that takes the pool lock: the pool must not hold it then."""
+    import gc
+    import threading
+
+    _, pool, _, _, releases = make_mixed_pool(
+        100, {"A.gguf": 10}, {"/dit.safetensors": 9}, monkeypatch)
+    acquire_image(pool, "/dit.safetensors")
+    entry = pool.acquire("A.gguf", None, "auto")
+    pool._image_fns = pool._image_fns[:2] + (_release_on_another_thread(releases),)
+    gc.disable()
+    try:
+        cycle = [_BusyHold(pool, entry)]
+        cycle.append(cycle)
+        del cycle
+        t = threading.Thread(target=pool.evict, args=("/dit.safetensors",),
+                             daemon=True)
+        t.start()
+        t.join(5.0)
+        assert not t.is_alive(), "evict deadlocked against the image worker"
+    finally:
+        gc.enable()
+    assert releases == ["/dit.safetensors"] and entry.busy == 0
+
+
+def test_an_image_release_runs_without_the_pool_lock(monkeypatch):
+    """Every path that tears an image entry down releases it with the pool
+    lock free, so a chat acquire on another thread never waits on it."""
+    import threading
+
+    for how in ("evict", "clear", "reap", "room"):
+        _, pool, _, _, releases = make_mixed_pool(
+            10, {"A.gguf": 5}, {"/dit.safetensors": 9}, monkeypatch)
+        acquire_image(pool, "/dit.safetensors")
+        locked = []
+
+        def release(box, _pool=pool):
+            got = []
+
+            def probe():
+                ok = _pool._lock.acquire(timeout=1.0)
+                got.append(ok)
+                if ok:
+                    _pool._lock.release()
+
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+            locked.append(not got[0])
+            box.clear()
+
+        pool._image_fns = pool._image_fns[:2] + (release,)
+        if how == "evict":
+            pool.evict("/dit.safetensors")
+        elif how == "clear":
+            pool.clear()
+        elif how == "reap":
+            pool._in_flight_fn = lambda: 0
+            entry = next(iter(pool._entries.values()))
+            entry.ttl = 1
+            entry.last_access -= 10
+            pool.reap_idle()
+        else:
+            acquire(pool, "A.gguf")
+        assert locked == [False], how
+
+
+def test_reaper_skips_an_image_entry_with_a_job_running(monkeypatch):
+    """The server's in-flight count does not see an image job; its hold
+    does."""
+    from gmlx.serve.residency import IMAGE_KIND
+
+    clock = [1000.0]
+    _, pool, _, _, releases = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+    pool._time_fn = lambda: clock[0]
+    pool._in_flight_fn = lambda: 0
+    spec = SimpleNamespace(path="/dit.safetensors", id="img")
+    entry = pool.acquire("/dit.safetensors", None, IMAGE_KIND,
+                         build_spec=spec, ttl=30)
+    assert entry.busy == 1
+    clock[0] += 60
+    assert pool.reap_idle() == [] and releases == []
+    pool.release(entry)
+    assert pool.reap_idle() == ["/dit.safetensors"]
+
+
+def test_an_image_gguf_takes_no_chat_preflight(monkeypatch, tmp_path):
+    """The chat header preflight refuses a DiT GGUF; an image entry is
+    checked by its own footprint function."""
+    from gmlx.load import preflight as pf
+
+    dit = str(tmp_path / "dit.gguf")
+    open(dit, "wb").write(b"GGUF")
+
+    def chat_preflight(path):
+        raise AssertionError("the chat preflight ran for an image entry")
+
+    monkeypatch.setattr(pf, "preflight", chat_preflight)
+    _, pool, _, loads, _ = make_mixed_pool(100, {}, {dit: 9}, monkeypatch)
+    acquire_image(pool, dit)
+    assert loads == [dit]
+
+
+def test_an_image_build_takes_the_load_gate_as_an_image(monkeypatch):
+    from gmlx.serve import capacity as cap
+
+    _, pool, _, loads, _ = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+    gated = []
+    monkeypatch.setattr(cap, "preload_gate",
+                        lambda b, m, **k: gated.append((b, m, k.get("image"))))
+    acquire_image(pool, "/dit.safetensors")
+    assert gated == [(9 * GB, "/dit.safetensors", True)]
+    assert loads == ["/dit.safetensors"]
+
+
+def test_the_load_gate_names_an_image_entry_by_what_it_books(monkeypatch):
+    import pytest
+
+    from gmlx.serve import capacity as cap
+
+    monkeypatch.setattr(cap, "overcommit", lambda: False)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 10 * GB)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: 12 * GB)
+    import gmlx.gen.prefill_decay as pd
+
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 50 * GB)
+    with pytest.raises(RuntimeError) as e:
+        cap.preload_gate(20 * GB, "zit", image=True)
+    msg = str(e.value)
+    assert "one image at its default size" in msg
+    assert "stream-experts" not in msg and " weights 21" not in msg
+
+
+def test_a_refused_chat_load_installs_no_boot_table(monkeypatch):
+    """The load gate runs before the capacity table of the incoming model
+    replaces the resident one's."""
+    import pytest
+
+    from gmlx.serve import capacity as cap
+
+    _, pool, _ = make_pool(100, {"A.gguf": 10})
+    order = []
+
+    def gate(*a, **k):
+        order.append("gate")
+        raise RuntimeError("model does not fit")
+
+    monkeypatch.setattr(cap, "preload_gate", gate)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda *a, **k: order.append("table"))
+    with pytest.raises(RuntimeError, match="does not fit"):
+        pool.acquire("A.gguf", None, "auto")
+    assert order == ["gate"]

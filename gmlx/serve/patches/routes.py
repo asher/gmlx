@@ -1055,15 +1055,21 @@ def _release_preload_holds(pool, path, *, only_evicted: bool = False) -> int:
     return released
 
 
-def _load_resident(model_id, adapter=_WARM_DEFAULT):
+def _load_resident(model_id, adapter=_WARM_DEFAULT, *, images: bool = False):
     """Load ``model_id`` resident through the pooled resolver and return the busy
     hold it took (or None). Must run off the event loop (a worker/daemon thread):
     the pooled ``get_cached_model`` does the multi-second build synchronously, and
     the whole point is to keep that off the loop. The caller decides the hold's
     fate - release it (a transient warm; the entry stays LRU/TTL-managed) or retain
-    it (a preload kept resident for the server's lifetime)."""
+    it (a preload kept resident for the server's lifetime).
+
+    An image id loads only with ``images`` (keep and preload). The chat
+    routes' warm passes none: it returns None without a load, and the
+    route answers the image id 400."""
     from .. import residency
     if serving.is_image_model(model_id):
+        if not images:
+            return None
         # An image model loads through its own kind, never the chat seam.
         return residency.acquire_image_model(model_id)
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
@@ -1074,11 +1080,13 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT):
     return residency._active_hold.get()
 
 
-def _warm_and_release(model_id, adapter=_WARM_DEFAULT) -> None:
+def _warm_and_release(model_id, adapter=_WARM_DEFAULT, *,
+                      images: bool = False) -> None:
     """Load ``model_id`` resident, then drop the in-flight hold so it stays
     LRU/TTL-managed. The transient warm used by the keep route and the chat
-    load-offload (a later request re-acquires the now-resident entry)."""
-    hold = _load_resident(model_id, adapter)
+    load-offload (a later request re-acquires the now-resident entry).
+    ``images`` as in :func:`_load_resident`."""
+    hold = _load_resident(model_id, adapter, images=images)
     if hold is not None:
         hold.release()
 
@@ -1093,7 +1101,7 @@ def _spawn_keep_warm(model_id: str):
 
     def _run():
         try:
-            _warm_and_release(model_id)
+            _warm_and_release(model_id, images=True)
         except Exception:  # noqa: S110 - a load failure surfaces on the first real request
             pass
 
@@ -1162,7 +1170,7 @@ def spawn_preload_warm(model_id: str | None, extras=(), *, retain: bool = True):
             attempt = 0
             while True:
                 try:
-                    hold = _load_resident(model_id)
+                    hold = _load_resident(model_id, images=True)
                     if hold is not None and not retain:
                         hold.release()
                     elif hold is not None:
@@ -1192,7 +1200,7 @@ def spawn_preload_warm(model_id: str | None, extras=(), *, retain: bool = True):
                       "budget (streams from disk; loads on first request)")
                 continue
             try:
-                _warm_and_release(mid)
+                _warm_and_release(mid, images=True)
             except Exception as exc:
                 print(f"[server] preload: {mid} failed, loads lazily on "
                       f"first request ({type(exc).__name__}: {exc})")
