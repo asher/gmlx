@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 import mlx.core as mx
+import mlx.nn as nn
 
 from image_fixtures import load_json
 
@@ -111,6 +112,31 @@ def test_references_that_the_encoder_cannot_take_are_refused():
         Reference(np.zeros((8, 8, 3), np.uint8))
 
 
+@pytest.mark.parametrize("w, h", [(640, 480), (480, 640), (1000, 600),
+                                  (1200, 1000), (5000, 100), (300, 300)])
+def test_a_small_reference_names_the_least_side_that_takes_it(w, h):
+    """At 256 x 256 pixels a reference of some aspect ratios comes out
+    under the encoder's least area. The refusal names the least side of
+    a square area that takes it, and that side does."""
+    side = edit.least_side(w / h)
+    assert 256 <= side <= 320
+    edit.prepare(_picture(w, h), side * side)
+    if side > 256:
+        with pytest.raises(edit.SmallReference) as e:
+            edit.prepare(_picture(w, h), (side - 1) ** 2)
+        assert e.value.side == side
+        assert f"area of {side} x {side} pixels" in str(e.value)
+    assert max(edit.least_side(r / 64) for r in range(64, 64 * 200, 7)) <= 320
+
+
+def test_a_reference_sha256_given_must_be_its_own():
+    px = _picture(32, 32, alpha=True)
+    ref = Reference(px)
+    assert Reference(px, sha256=ref.sha256).sha256 == ref.sha256
+    with pytest.raises(ValueError, match="not that of the reference pixels"):
+        Reference(px, sha256="0" * 64)
+
+
 def test_the_encoder_sees_the_alpha_over_white():
     px = np.zeros((32, 32, 4), np.uint8)
     px[..., :3] = (10, 200, 90)
@@ -184,7 +210,7 @@ def _spec(layers: int = 4, drop: int = 3):
                    identity=())
 
 
-def _tiny_qwen3_vl(seed: int = 0, layers: int = 4):
+def _tiny_qwen3_vl(seed: int = 0, layers: int = 4, **tower):
     from mlx.utils import tree_flatten
 
     from gmlx._vendor.mlx_vlm.models.qwen3_vl import config as vc
@@ -198,11 +224,12 @@ def _tiny_qwen3_vl(seed: int = 0, layers: int = 4):
         vocab_size=160, num_key_value_heads=2, head_dim=16, rope_theta=1e6,
         max_position_embeddings=1024,
         rope_scaling={"type": "default", "mrope_section": [2, 3, 3]})
-    vision = vc.VisionConfig(
-        depth=3, hidden_size=32, intermediate_size=48,
-        out_hidden_size=HIDDEN, num_heads=4, patch_size=16,
-        spatial_merge_size=2, temporal_patch_size=2,
-        num_position_embeddings=64, deepstack_visual_indexes=[0, 1])
+    vision = vc.VisionConfig(**{
+        **dict(depth=3, hidden_size=32, intermediate_size=48,
+               out_hidden_size=HIDDEN, num_heads=4, patch_size=16,
+               spatial_merge_size=2, temporal_patch_size=2,
+               num_position_embeddings=64, deepstack_visual_indexes=[0, 1]),
+        **tower})
     model = qwen3_vl.Model(vc.ModelConfig(
         text_config=text, vision_config=vision, model_type="qwen3_vl",
         image_token_id=PAD, video_token_id=151, vocab_size=160))
@@ -301,30 +328,124 @@ def test_the_tap_with_images_is_the_forward_of_the_class(handle, refs):
         assert text.features.dtype == mx.float32
 
 
-def test_the_tower_runs_where_float32_products_are_exact(handle, refs,
-                                                         monkeypatch):
-    """On a device that multiplies float32 at lower precision the tower
-    runs on the CPU, and the features are those of the CPU."""
+def test_a_split_product_is_float32_in_this_process():
+    """``exact_matmul`` holds float32 precision whatever MLX's TF32 switch
+    reads in this process, at the magnitudes of the tower's residual
+    stream, for ``a @ b`` and ``a @ b.T``."""
+    rng = np.random.default_rng(0)
+    a = (rng.standard_normal((96, 160)) * 3000).astype(np.float32)
+    b = rng.standard_normal((160, 72)).astype(np.float32) / 12
+    want = a.astype(np.float64) @ b.astype(np.float64)
+    for got in (edit.exact_matmul(mx.array(a), mx.array(b)),
+                edit.exact_matmul(mx.array(a), mx.array(b.T.copy()),
+                                  b_t=True)):
+        assert got.dtype == mx.float32
+        gap = np.linalg.norm(np.array(got, np.float64) - want) \
+            / np.linalg.norm(want)
+        assert gap < 2e-6, gap
+    # The high part keeps 10 mantissa bits, and the parts sum to the input.
+    high, low = edit._split(mx.array(a))
+    assert not (np.array(high).view(np.uint32) & 0x1FFF).any()
+    assert np.array_equal(np.array(high + low), a)
+
+
+def _linears(module) -> dict:
+    return {p: id(m) for p, m in module.named_modules()
+            if isinstance(m, (nn.Linear, edit.ExactLinear))}
+
+
+def _gap(a, b) -> float:
+    a, b = np.array(a, np.float64), np.array(b, np.float64)
+    return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+
+@pytest.mark.parametrize("products, attention, where", [
+    (True, True, "plain"), (True, False, "plain"), (False, True, "split"),
+    (False, False, "cpu")])
+def test_the_tower_computes_float32_where_it_runs(handle, refs, monkeypatch,
+                                                  products, attention, where):
+    """The tower runs on the default device as it is where float32
+    products are exact. Where they are at TF32 its float32 linear layers
+    split each product while it runs and only then, or, where the fused
+    attention is not float32 at its head size, it runs on the CPU."""
     seen = []
     tower = handle.model.vision_tower
+    leaves = _linears(tower)
+    assert leaves
 
-    class Watched:
+    class Watched(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = tower
+
         def __call__(self, pixels, grid):
-            seen.append(mx.default_stream(mx.default_device()))
+            kinds = {type(m) for p, m in tower.named_modules() if p in leaves}
+            seen.append((mx.default_stream(mx.default_device()), kinds))
             return tower(pixels, grid)
 
     monkeypatch.setattr(handle.model, "vision_tower", Watched())
-    for exact in (False, True):
-        seen.clear()
-        monkeypatch.setattr(edit, "f32_products_exact", lambda e=exact: e)
-        edit.encode(handle, "x", refs[:1])
-        assert seen == [mx.default_stream(
-            mx.default_device() if exact else mx.cpu)]
-    monkeypatch.undo()
+    monkeypatch.setattr(edit, "f32_products_exact", lambda: products)
+    monkeypatch.setattr(edit, "sdpa_exact", lambda d: d == 8 and attention)
+    edit.encode(handle, "x", refs)
+    stream = mx.default_stream(mx.cpu if where == "cpu"
+                               else mx.default_device())
+    kind = edit.ExactLinear if where == "split" else nn.Linear
+    assert seen == [(stream, {kind})] * 2
+    assert _linears(tower) == leaves
+
+
+def test_the_split_tower_is_the_float32_tower_on_this_device(refs):
+    """At the head size of the Qwen3-VL tower, 72, the fused attention is
+    float32 on this device, and the tower on the default device gives the
+    outputs of the tower on the CPU to float32 rounding. On a device that
+    multiplies float32 at TF32, the tower without the split does not."""
+    model, proc = _tiny_qwen3_vl(hidden_size=144, num_heads=2,
+                                 intermediate_size=96)
+    tower = model.vision_tower
+    assert edit._head_dims(tower) == {72}
+    assert edit.sdpa_exact(72)
+    h = te.EncoderHandle(model, _Tokenizer(), _spec(), owned=True,
+                         source_key="tiny72+mmproj", processor=proc)
+    for ref in refs:
+        pixels, grid = edit._pixels(h, ref)
+        grid = mx.array([grid])
+        with mx.stream(mx.cpu):
+            f, d = tower(pixels, grid)
+            want = [f, *d]
+        with edit.float32_products(tower):
+            f, d = tower(pixels, grid)
+            got = [f, *d]
+        assert max(_gap(g, w) for g, w in zip(got, want)) < 1e-5
+        if not edit.f32_products_exact():
+            f, d = tower(pixels, grid)
+            assert max(_gap(g, w) for g, w in zip([f, *d], want)) > 1e-4
+
+
+def test_the_attention_check_reads_the_device(monkeypatch):
+    monkeypatch.setattr(edit, "_SDPA_EXACT", {})
+    with mx.stream(mx.cpu):
+        assert edit.sdpa_exact(8) and edit.sdpa_exact(72)
+        cpu = str(mx.default_device())
+    assert set(edit._SDPA_EXACT) == {(cpu, 8), (cpu, 72)}
     with mx.stream(mx.cpu):
         monkeypatch.setattr(edit, "_F32_EXACT", {})
         assert edit.f32_products_exact() is True
         assert edit._F32_EXACT == {str(mx.default_device()): True}
+
+
+def test_the_split_layers_go_back_when_the_tower_raises(handle, monkeypatch):
+    tower = handle.model.vision_tower
+    before = _linears(tower)
+    monkeypatch.setattr(edit, "f32_products_exact", lambda: False)
+    monkeypatch.setattr(edit, "sdpa_exact", lambda d: True)
+    with pytest.raises(RuntimeError, match="stop"):
+        with edit.float32_products(tower):
+            assert {type(m) for p, m in tower.named_modules()
+                    if p in before} == {edit.ExactLinear}
+            raise RuntimeError("stop")
+    assert _linears(tower) == before
+    assert {type(m) for p, m in tower.named_modules()
+            if p in before} == {nn.Linear}
 
 
 def test_an_encoder_without_its_tower_or_with_another_pad_is_refused(refs):
@@ -539,6 +660,31 @@ def test_reference_latents_come_from_the_vae_once_per_image(pipe):
     with pytest.raises(ValueError, match="1 hashes for 2 reference"):
         Conditioning(pos.features, "k", ref_latents=done[0].ref_latents,
                      ref_hashes=("a",))
+
+
+def test_two_references_of_one_size_keep_their_own_latents_and_order(pipe):
+    """Two different images of one resized size in one request, and the
+    same two in the other order: each image has its own latents, from one
+    VAE pass each, and the order is part of the conditioning."""
+    images = [_picture(300, 260, seed=3), _picture(300, 260, seed=4)]
+    a, b = api.references(pipe, images, area=320 * 320)
+    assert (a.width, a.height) == (b.width, b.height) == (352, 288)
+    assert a.sha256 != b.sha256
+    ab = api.encode_text(pipe, "swap them", images=(a, b))
+    ba = api.encode_text(pipe, "swap them", images=(b, a))
+    assert pipe.vae.calls == [(1, 288, 352, 4)] * 2
+    assert ab.key != ba.key and ab.refs == (a, b) and ba.refs == (b, a)
+    for cond, order in ((ab, (a, b)), (ba, (b, a))):
+        for z, ref in zip(cond.ref_latents, order):
+            px = ref.pixels.astype(np.float32) / 255.0 * 2 - 1
+            want = px.reshape(18, 16, 22, 16, 4).mean(axis=(1, 3))
+            np.testing.assert_allclose(np.array(z)[:4].transpose(1, 2, 0),
+                                       want, atol=1e-6)
+    assert ab.ref_hashes == ba.ref_hashes[::-1]
+    assert ab.ref_hashes[0] != ab.ref_hashes[1]
+    # The image rows of each order come from the tower in that order.
+    assert ab.image_slots == ba.image_slots
+    assert not np.allclose(np.array(ab.features), np.array(ba.features))
 
 
 def test_the_plan_prices_the_references_of_its_conditionings(pipe):

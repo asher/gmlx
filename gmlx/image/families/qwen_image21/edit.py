@@ -28,18 +28,26 @@ forward does.
 The tower's matrix products must be exact float32. Its residual stream
 reaches the thousands, and a product at TF32 precision, the default of an
 M5-class GPU, moves the image rows of the features by 5 to 10 percent of
-their norm and single rows to a cosine under 0.5. The tower runs on the
-default device when that device multiplies float32 exactly, which
-``MLX_ENABLE_TF32=0`` before the first product of the process gives, and
-on the CPU otherwise.
+their norm and single rows to a cosine under 0.5. MLX reads its TF32
+switch once per process, so the tower cannot turn it off for itself. On a
+device that multiplies float32 at TF32 the tower's linear layers split
+each product while the tower runs: each operand into a part TF32 holds
+exactly and the rest, three products summed. That product is as exact as
+a float32 one and leaves every other product of the process at TF32. The
+convolution of the patch embedding computes float32 exactly in either
+state, and the fused attention does at some head sizes only: where it
+does not at the tower's, the tower runs on the CPU.
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
+import threading
+from contextlib import contextmanager
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 
 from gmlx.image.conditioning import Reference
@@ -67,6 +75,110 @@ def f32_products_exact() -> bool:
     return hit
 
 
+# A TF32 operand keeps 10 of the 23 mantissa bits of a float32.
+_TF32_HIGH = 0xFFFFE000
+
+
+def _split(a: mx.array) -> tuple[mx.array, mx.array]:
+    """``a`` as the part a TF32 product reads exactly, the low 13 mantissa
+    bits cleared, and the rest, which is exact in float32."""
+    high = mx.view(mx.bitwise_and(mx.view(a, mx.uint32),
+                                  mx.array(_TF32_HIGH, mx.uint32)),
+                   mx.float32)
+    return high, a - high
+
+
+def exact_matmul(a: mx.array, b: mx.array, *, b_t: bool = False) -> mx.array:
+    """``a @ b`` in float32, or ``a @ b.T`` with ``b_t``, at float32
+    precision on a device that multiplies float32 at TF32: the product of
+    the high parts and the two cross products. The product of the two low
+    parts is under the rounding of a float32."""
+    ah, al = _split(a)
+    bh, bl = _split(b)
+    if b_t:
+        bh, bl = bh.T, bl.T
+    return ah @ bh + (ah @ bl + al @ bh)
+
+
+class ExactLinear(nn.Module):
+    """A float32 linear layer computed with ``exact_matmul``. It holds the
+    arrays of the layer it stands for."""
+
+    def __init__(self, linear: nn.Linear):
+        super().__init__()
+        self.weight = linear.weight
+        if "bias" in linear:
+            self.bias = linear.bias
+
+    def __call__(self, x: mx.array) -> mx.array:
+        y = exact_matmul(x, self.weight, b_t=True)
+        return y + self.bias if "bias" in self else y
+
+
+_SDPA_EXACT: dict = {}              # by default device and head size
+_SCOPE = threading.RLock()
+
+
+def sdpa_exact(head_dim: int) -> bool:
+    """Whether the fused attention of the default device computes float32
+    at float32 precision at ``head_dim``, padded as the tower pads it.
+    Each device and size is measured once against the CPU."""
+    from gmlx._vendor.mlx_vlm.models.base import ensure_fused_sdpa
+
+    key = (str(mx.default_device()), int(head_dim))
+    hit = _SDPA_EXACT.get(key)
+    if hit is None:
+        q, k, v = (mx.random.normal((1, 2, 128, head_dim),
+                                    key=mx.random.key(i)) for i in range(3))
+        scale = head_dim ** -0.5
+        got = ensure_fused_sdpa(q, k, v, scale)
+        with mx.stream(mx.cpu):
+            want = ensure_fused_sdpa(q, k, v, scale)
+        gap = mx.linalg.norm(got - want) / mx.linalg.norm(want)
+        hit = _SDPA_EXACT[key] = float(gap) < 1e-5
+    return hit
+
+
+def _head_dims(module) -> set:
+    return {int(m.head_dim) for _, m in module.named_modules()
+            if "qkv" in m and hasattr(m, "head_dim")}
+
+
+@contextmanager
+def float32_products(module):
+    """Inside the block, ``module`` computes at float32 precision on a
+    device that multiplies float32 at TF32: its float32 linear layers
+    split each product, or, where the fused attention is not float32 at
+    its head size, it runs on the CPU. On a device that multiplies
+    float32 exactly, nothing changes. The layers are back as they were
+    after the block."""
+    if f32_products_exact():
+        yield module
+        return
+    heads = _head_dims(module)
+    if not heads or not all(sdpa_exact(d) for d in heads):
+        with mx.stream(mx.cpu):
+            yield module
+        return
+    from mlx.utils import tree_unflatten
+
+    with _SCOPE:
+        found: list = []
+
+        def visit(path: str, m) -> None:
+            if (isinstance(m, nn.Linear) and m.weight.dtype == mx.float32
+                    and path):
+                found.append((path, m))
+
+        module.apply_to_modules(visit)
+        module.update_modules(tree_unflatten(
+            [(p, ExactLinear(m)) for p, m in found]))
+        try:
+            yield module
+        finally:
+            module.update_modules(tree_unflatten(found))
+
+
 def dimensions(area: int, ratio: float) -> tuple[int, int]:
     """(width, height) of a reference of aspect ``ratio``, width over
     height, at ``area`` pixels: each side rounded to the side multiple."""
@@ -89,6 +201,28 @@ def _pil(image):
     return Image.fromarray(arr)
 
 
+class SmallReference(ValueError):
+    """A reference under the encoder's least area at the area asked for.
+    ``side`` is the least side of a square area that takes it."""
+
+    def __init__(self, message: str, side: int):
+        super().__init__(message)
+        self.side = side
+
+
+def least_side(ratio: float) -> int:
+    """The least side of a square area at which a reference of aspect
+    ``ratio`` comes out at the encoder's least area or more."""
+    r = REFERENCES.values
+    side = math.isqrt(r["min_area"] - 1) + 1
+    while True:
+        width, height = dimensions(side * side, ratio)
+        if (width * height >= r["min_area"]
+                and min(width, height) >= r["slot_px"]):
+            return side
+        side += 1
+
+
 def prepare(image, area: int) -> Reference:
     """One reference image at the size the family runs it at."""
     from PIL import Image
@@ -108,10 +242,12 @@ def prepare(image, area: int) -> Reference:
             f"a reference image of {w}x{h} pixels is too long for its "
             f"area: the encoder takes an aspect ratio up to {MAX_ASPECT}")
     if width * height < r["min_area"]:
-        raise ValueError(
+        side = least_side(w / h)
+        raise SmallReference(
             f"a reference of {width}x{height} pixels is under the "
             f"{r['min_area']} pixels the encoder takes; use a reference "
-            "area of 320 x 320 pixels or more for this aspect ratio")
+            f"area of {side} x {side} pixels or more for this aspect ratio",
+            side)
     if (width, height) != (w, h):
         img = img.resize((width, height),
                          getattr(Image.Resampling, r["resample"].upper()))
@@ -227,15 +363,14 @@ def encode(handle, prompt: str, refs, *, deepstack: int | None = None):
                          f"the encoder's image token {int(own)}")
     act = getattr(mx, spec.activation or "float32")
     feats, deep, grids = [], [], []
-    stream = mx.default_device() if f32_products_exact() else mx.cpu
-    for ref in refs:
-        pixels, grid = _pixels(handle, ref)
-        with mx.stream(stream):
+    with float32_products(tower):
+        for ref in refs:
+            pixels, grid = _pixels(handle, ref)
             f, d = tower(pixels.astype(mx.float32), mx.array([grid]))
             mx.eval(f, *d)
-        feats.append(f.astype(act))
-        deep.append([x.astype(act) for x in d])
-        grids.append(grid)
+            feats.append(f.astype(act))
+            deep.append([x.astype(act) for x in d])
+            grids.append(grid)
     rows = np.flatnonzero(np.asarray(ids) == pad)
     image = feats[0] if len(feats) == 1 else mx.concatenate(feats, axis=0)
     if image.shape[0] != rows.size:

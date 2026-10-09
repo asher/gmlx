@@ -27,7 +27,7 @@ import numpy as np
 class Reference:
     """One reference image at the size its family runs it at: ``pixels``
     is (H, W, 4) uint8 with straight alpha, and ``sha256`` names its
-    bytes and size."""
+    bytes and size. A ``sha256`` given that is not theirs is refused."""
     pixels: np.ndarray
     sha256: str = ""
 
@@ -38,10 +38,12 @@ class Reference:
                              f"not {px.dtype} {px.shape}")
         px.setflags(write=False)
         object.__setattr__(self, "pixels", px)
-        if not self.sha256:
-            h = hashlib.sha256(f"{px.shape[0]}x{px.shape[1]}:".encode())
-            h.update(px.tobytes())
-            object.__setattr__(self, "sha256", h.hexdigest())
+        h = hashlib.sha256(f"{px.shape[0]}x{px.shape[1]}:".encode())
+        h.update(px.tobytes())
+        if self.sha256 and self.sha256 != h.hexdigest():
+            raise ValueError("the sha256 given is not that of the "
+                             "reference pixels")
+        object.__setattr__(self, "sha256", h.hexdigest())
 
     @property
     def height(self) -> int:
