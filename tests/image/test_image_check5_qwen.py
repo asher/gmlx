@@ -485,7 +485,9 @@ def vaes(vae_path):
 
 
 def _tf32() -> bool:
-    return os.environ.get("MLX_ENABLE_TF32", "1") != "0"
+    from block_gates import tf32
+
+    return tf32()
 
 
 def _numerics() -> str:

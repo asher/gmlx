@@ -259,7 +259,12 @@ def thin(m: dict, rows: dict | None, vel: dict, free: dict | None = None,
 # The exact path.
 
 def tf32() -> bool:
-    return os.environ.get("MLX_ENABLE_TF32", "1") != "0"
+    """Whether this process multiplies float32 at TF32 precision, as
+    measured: MLX reads MLX_ENABLE_TF32 once, so the variable set after
+    the first product says nothing of the process."""
+    from gmlx.image.families.qwen_image21.edit import f32_products_exact
+
+    return not f32_products_exact()
 
 
 def stock_ops() -> bool:

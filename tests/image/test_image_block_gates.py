@@ -348,6 +348,17 @@ def test_kernel_calls_looks_a_cold_op_up_before_it_watches(routes,
 CHILD = "GMLX_BLOCK_GATES_CHILD"
 
 
+def test_the_exact_path_reads_the_process_not_the_variable(monkeypatch):
+    """A variable set after the first product, as a command run in this
+    process once set it, does not make the process exact."""
+    from gmlx.image.families.qwen_image21.edit import f32_products_exact
+
+    want = not f32_products_exact()
+    for value in ("0", "1"):
+        monkeypatch.setenv("MLX_ENABLE_TF32", value)
+        assert block_gates.tf32() is want
+
+
 def test_the_exact_child_runs_with_tf32_and_the_routes_off(request,
                                                            monkeypatch):
     if os.environ.get(CHILD) != "1":
