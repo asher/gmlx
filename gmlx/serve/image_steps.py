@@ -472,9 +472,77 @@ def row_hashes(row) -> list:
     return [row["cond"], *refs, *([mask] if mask else [])]
 
 
-def conditioning(row: dict, tensors: _Bytes):
-    """The Conditioning of a step row from the tensors held. Raises
-    :class:`Missing` for a tensor the cache no longer holds."""
+# Families whose conditioning splices reference latents into the text at
+# image slots. On the wire a slot is ComfyUI's: the text row a reference
+# goes in before, one per reference, and the cond holds text rows only.
+# The core's encoder layout instead gives each reference a run of slot
+# rows in the features, one per SLOT_TOKENS latent tokens.
+SLOT_FAMILIES = frozenset({"qwen_image21"})
+
+
+def _slot_counts(ref_shapes) -> list:
+    from gmlx.image.families.qwen_image21.layout import SLOT_TOKENS
+
+    counts = []
+    for h, w in ref_shapes:
+        if (int(h) * int(w)) % SLOT_TOKENS:
+            raise StepError(400, f"a reference latent of {h}x{w} tokens "
+                            f"does not fill whole image slots of "
+                            f"{SLOT_TOKENS} tokens")
+        counts.append(int(h) * int(w) // SLOT_TOKENS)
+    return counts
+
+
+def slots_to_wire(n_rows: int, slots, ref_shapes) -> tuple:
+    """The core's encoder layout as the wire's: the text rows of the
+    features, and the text row each reference goes in before."""
+    import numpy as np
+
+    slots = [int(s) for s in slots]
+    counts = _slot_counts(ref_shapes)
+    if sum(counts) != len(slots):
+        raise StepError(500, f"{len(slots)} image slots for references of "
+                        f"{sum(counts)} slots")
+    is_slot = np.zeros(n_rows, bool)
+    is_slot[slots] = True
+    before, at = [], 0
+    for n in counts:
+        block = slots[at:at + n]
+        if block != list(range(block[0], block[0] + n)):
+            raise StepError(500, "a reference's image slots are not "
+                            "consecutive rows")
+        before.append(block[0] - at)
+        at += n
+    return np.flatnonzero(~is_slot), before
+
+
+def slots_from_wire(x, before, ref_shapes) -> tuple:
+    """Text rows ``x`` (T, D) and the wire's slots as the core's layout:
+    each reference's slot rows put in before its text row. A reference
+    without a slot goes after the text, as in ComfyUI."""
+    import mlx.core as mx
+
+    n_text = int(x.shape[0])
+    counts = _slot_counts(ref_shapes)
+    before = ([int(s) for s in before] + [n_text] * len(counts))[:len(counts)]
+    if before != sorted(before) or any(not 0 <= s <= n_text for s in before):
+        raise StepError(400, f"image slots {before} are not ascending text "
+                        f"rows of the cond's {n_text}")
+    parts, slots, prev = [], [], 0
+    for s, n in zip(before, counts):
+        parts.append(x[prev:s])
+        start = len(slots) + s
+        parts.append(mx.zeros((n, x.shape[1]), x.dtype))
+        slots.extend(range(start, start + n))
+        prev = s
+    parts.append(x[prev:])
+    return mx.concatenate(parts, axis=0), tuple(slots)
+
+
+def conditioning(row: dict, tensors: _Bytes, family: str = ""):
+    """The Conditioning of a step row from the tensors held, for a model
+    of ``family``. Raises :class:`Missing` for a tensor the cache no
+    longer holds."""
     from gmlx.image.conditioning import Conditioning
 
     held = {h: tensors.get(h) for h in row_hashes(row)}
@@ -513,6 +581,9 @@ def conditioning(row: dict, tensors: _Bytes):
         z = _f32(t)
         latents.append(z[0] if z.ndim == 4 else z)
     slots = tuple(int(s) for s in row.get("image_slots") or ())
+    if family in SLOT_FAMILIES and latents:
+        x, slots = slots_from_wire(x, slots,
+                                   [tuple(z.shape[-2:]) for z in latents])
     return Conditioning(x, key, ref_latents=tuple(latents),
                         image_slots=slots,
                         ref_hashes=tuple(r for r, _ in refs))
@@ -680,12 +751,22 @@ def encode(served, text: str, images: list, borrow=None,
         enc.release()
     if refs and ref_latents:
         cond = api.encode_references(pipe, cond)
-    feats = cond.features.astype(mx.float32)[None]
+    feats = cond.features.astype(mx.float32)
+    slots = [int(s) for s in cond.image_slots]
+    if refs and pipe.family.name in SLOT_FAMILIES:
+        lat = COMFY[pipe.family.name]["latent"]
+        px = lat["stride"] * lat["patch"]
+        text, slots = slots_to_wire(
+            int(feats.shape[0]), slots,
+            [(r.pixels.shape[0] // px, r.pixels.shape[1] // px)
+             for r in refs])
+        feats = feats[mx.array(text)]
+    feats = feats[None]
     lats = [z.astype(mx.float32)[None] for z in cond.ref_latents] \
         if ref_latents else []
     mx.eval(feats, *lats)
     return {"cond": _host(feats), "refs": [_host(z) for z in lats],
-            "image_slots": [int(s) for s in cond.image_slots]}
+            "image_slots": slots}
 
 
 def _host(a):

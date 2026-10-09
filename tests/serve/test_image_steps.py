@@ -431,12 +431,16 @@ def test_a_table_whose_matrices_are_not_held_is_a_409(host):
 def _qwen_rows(c, case="ref2"):
     import qwen_tiny as qt
 
+    # The fixture is in the core's layout; the wire takes ComfyUI's.
     rule = qt.rule
-    feats = rule.features(case)[None]
-    refs = [z[None] for z in rule.ref_latents(case)]
+    feats = np.asarray(rule.features(case))
+    refs = [np.asarray(z)[None] for z in rule.ref_latents(case)]
+    text, before = steps.slots_to_wire(
+        feats.shape[0], qt.CASES[case][1], [z.shape[-2:] for z in refs])
+    feats = np.ascontiguousarray(feats[text])[None]
     return [{"cond": c.put(feats), "num_tokens": feats.shape[1],
              "ref_latents": [c.put(z) for z in refs],
-             "image_slots": list(qt.CASES[case][1])}]
+             "image_slots": before}]
 
 
 def test_a_qwen_run_keeps_its_prefix_and_a_table_change_misses_it(host,
@@ -624,9 +628,15 @@ def _stub_step_encode(monkeypatch):
     seen, vae = [], []
 
     def stub_encode(served, text, neg, refs, borrow):
+        # Two text rows, each reference's slot rows, three text rows: a
+        # slot covers 32x32 pixels.
         seen.append(refs)
-        return SimpleNamespace(features=mx.ones((5, 16)), ref_latents=(),
-                               image_slots=(2,)), None
+        n = sum((r.pixels.shape[0] // 32) * (r.pixels.shape[1] // 32)
+                for r in refs)
+        feats = mx.concatenate([mx.ones((2, 16)), mx.zeros((n, 16)),
+                                mx.full((3, 16), 2.0)])
+        return SimpleNamespace(features=feats, ref_latents=(),
+                               image_slots=tuple(range(2, 2 + n))), None
 
     monkeypatch.setattr(image_service, "_encode", stub_encode)
     monkeypatch.setattr(api, "encode_references",
@@ -645,7 +655,7 @@ def test_step_encode_runs_no_vae_encode_without_reference_latents(
     got = _on_worker(lambda: steps.encode(served, "a", [img],
                                           ref_latents=False))
     assert vae == [] and got["refs"] == [] and got["image_slots"] == [2]
-    assert got["cond"].shape == (1, 5, 16)
+    assert np.array_equal(got["cond"][0, :, 0], [1, 1, 2, 2, 2])
     _on_worker(lambda: steps.encode(served, "a", [img]))
     assert vae == [1]
 
@@ -656,14 +666,39 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
     served, seen, _ = _stub_step_encode(monkeypatch)
     a = np.full((384, 512, 3), 7, np.uint8)
     b = np.full((512, 512, 3), 9, np.uint8)
-    _on_worker(lambda: steps.encode(served, "a", [a, b]))
+    got = _on_worker(lambda: steps.encode(served, "a", [a, b]))
     assert [r.pixels.shape[:2] for r in seen[0]] == [(384, 512), (512, 512)]
+    # The answer is ComfyUI's: text rows, and each reference's text row.
+    assert got["cond"].shape == (1, 5, 16) and got["image_slots"] == [2, 2]
     assert np.all(seen[0][0].pixels[..., :3] == 7)
     big = np.zeros((1056, 1024, 3), np.uint8)
     small = np.zeros((128, 128, 3), np.uint8)
     for im in (big, small):
         with pytest.raises(steps.StepError) as e:
             _on_worker(lambda im=im: steps.encode(served, "a", [im]))
+        assert e.value.status == 400
+
+
+def test_wire_slots_are_comfyuis_and_map_onto_the_core_layout():
+    xs = np.arange(5 * 2, dtype=np.float32).reshape(5, 2) + 1
+    shapes = [(2, 4), (4, 4)]          # 2 and 4 slot rows
+
+    def expand(before, shapes=shapes):
+        got, slots = steps.slots_from_wire(mx.array(xs), before, shapes)
+        return np.array(got), slots
+
+    got, slots = _on_worker(lambda: expand([1, 3]))
+    assert slots == (1, 2, 5, 6, 7, 8)
+    assert got.shape == (11, 2) and not got[list(slots)].any()
+    text = [i for i in range(11) if i not in slots]
+    assert np.array_equal(got[text], xs)
+    back, before = steps.slots_to_wire(11, slots, shapes)
+    assert list(back) == text and before == [1, 3]
+    # As in ComfyUI, a reference without a slot goes after the text.
+    assert _on_worker(lambda: expand([1]))[1] == (1, 2, 7, 8, 9, 10)
+    for bad, sh in (([3, 1], shapes), ([0, 6], shapes), ([0], [(3, 3)])):
+        with pytest.raises(steps.StepError) as e:
+            _on_worker(lambda bad=bad, sh=sh: expand(bad, sh))
         assert e.value.status == 400
 
 

@@ -462,7 +462,8 @@ async def step(request: Request):
 
             from ..image_steps import _host, conditioning
 
-            conds = [conditioning(r, STATE.tensors) for r in rows]
+            fam = served.pipe.family.name
+            conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             scope = conds
             if run is not None:
                 # The run's conditionings keep their states between its

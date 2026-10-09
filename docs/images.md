@@ -213,6 +213,11 @@ uploads a conditioning or a LoRA matrix once by that hash.
 | `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
 | `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
 
+A conditioning with reference images takes ComfyUI's form: its tensor
+holds the text rows, and `image_slots` names, for each reference image,
+the text row that its latents go in before. A step row that names more
+reference latents than slots puts the others after the text.
+
 An encode keeps each reference image at its own size, so a client that
 sizes its references gives the encoder and its own VAE the same pixels.
 Qwen-Image 2.1 takes references of 256x256 to 1024x1024 pixels in area,

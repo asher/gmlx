@@ -172,14 +172,20 @@ def direct(rep, family: str, k: dict, dit: str) -> None:
 
     from gmlx.image import api
 
+    from gmlx.serve.image_steps import SLOT_FAMILIES, slots_from_wire
+
     pipe = api.load(dit, log=lambda *x: None)
+    slotted = pipe.family.name in SLOT_FAMILIES
 
     def cond(row, tensors, key):
-        return api.Conditioning(
-            mx.array(tensors[row["cond"]][0]), key,
-            ref_latents=tuple(mx.array(tensors[r][0])
-                              for r in row["ref_latents"]),
-            image_slots=tuple(row["image_slots"]))
+        # The wire's slots are ComfyUI's; the core takes its own layout.
+        x = mx.array(tensors[row["cond"]][0])
+        refs = tuple(mx.array(tensors[r][0]) for r in row["ref_latents"])
+        slots = tuple(row["image_slots"])
+        if refs and slotted:
+            x, slots = slots_from_wire(x, slots,
+                                       [z.shape[-2:] for z in refs])
+        return api.Conditioning(x, key, ref_latents=refs, image_slots=slots)
 
     t = k["tensors"]
     c = cond(k["rows"][0], t, "direct")
