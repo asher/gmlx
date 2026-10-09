@@ -245,9 +245,10 @@ def test_classify_header_reads_hadamard_version(tmp_path):
 
 def test_type_name_fallback():
     # gguf-py names what it knows; QUANT_TYPE_FALLBACK covers newer ids
-    # (STQ1_0=43, PQ2_0=142, PTQ1_0=143); anything else keeps the
+    # (Q2_0=42, STQ1_0=43, PQ2_0=142, PTQ1_0=143); anything else keeps the
     # labeled-unknown form.
     assert remote._type_name(int(GT.Q4_0)) == "Q4_0"
+    assert remote._type_name(42) == "Q2_0"
     assert remote._type_name(43) == "STQ1_0"
     assert remote._type_name(142) == "PQ2_0"
     assert remote._type_name(143) == "PTQ1_0"

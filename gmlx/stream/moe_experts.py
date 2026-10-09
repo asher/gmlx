@@ -306,7 +306,9 @@ def qwen3_next_moe_forward(mod, x):
     inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])
     inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
-    y = (y * scores[..., None]).sum(axis=-2)
+    # qwen4exp keeps its router fp32: the cast keeps the mix, and the
+    # residual stream after it, in the activation dtype.
+    y = (y * scores[..., None].astype(y.dtype)).sum(axis=-2)
     shared_y = mod.shared_expert(x)
     shared_y = mx.sigmoid(mod.shared_expert_gate(x)) * shared_y
     y = y + shared_y

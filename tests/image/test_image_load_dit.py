@@ -311,6 +311,74 @@ def test_a_quantized_keep_tensor_loads_as_owned_fp32(monkeypatch, tmp_path):
     assert info.n_owned_casts == 2
 
 
+def _q2_0(rows: int, cols: int, seed: int):
+    """Wire bytes of a ``rows`` x ``cols`` Q2_0 matrix, and the values kq
+    reads from them."""
+    kq = pytest.importorskip("mlx_kquant")
+    from mlx_kquant.codec_geometry import CODEC_GEOMETRY
+
+    if "q2_0" not in CODEC_GEOMETRY:
+        pytest.skip("this mlx-kquant has no q2_0 codec")
+    rng = np.random.default_rng(seed)
+    w = mx.array((rng.standard_normal((rows, cols)) * 0.05).astype(np.float32))
+    wire, scales = kq.quantize(w, "q2_0")
+    values = kq.dequantize(wire, scales, "q2_0", mx.float32).reshape(rows, cols)
+    return np.array(wire).astype(np.uint8).reshape(rows, -1), values
+
+
+def test_a_q2_0_matrix_loads_as_a_kquant_leaf_outside_the_kernel_routes(
+        toy, tmp_path):
+    """Q2_0 is a codec of the text loader. A DiT file that holds it loads
+    its matrix as wire bytes on the plain K-quant matmul, and no kernel
+    route of gmlx image takes the codec."""
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx.image.ops import kq_routes
+    from gmlx.load.headerscan import scan_gguf
+
+    wire, values = _q2_0(32, 64, 3)
+    t = _tensors()
+    t["proj.weight"] = (wire, "Q2_0")
+    p = write_gguf(tmp_path / "q2.gguf", t)
+    named = {m.name: m.type_name for m in scan_gguf(p).tensors}
+    assert named["proj.weight"] == "Q2_0"
+    model, info = _load(p)
+    assert type(model.proj) is KQuantLinear and info.n_kquant == 1
+    assert model.proj.kquant_type == "q2_0"
+    x = mx.array(np.random.default_rng(4).standard_normal((3, 64))
+                 .astype(np.float32)).astype(mx.bfloat16)
+    want = x.astype(mx.float32) @ values.T + model.proj.bias.astype(mx.float32)
+    got = model.proj(x)
+    assert got.dtype == mx.bfloat16
+    err = mx.abs(got.astype(mx.float32) - want).max() / mx.abs(want).max()
+    assert err.item() < 2e-2
+    codecs = {c for c, _ in kq_routes._GLU_K_TILE} | {
+        c for c, _ in kq_routes._LORA_ROWS}
+    assert "q2_0" not in codecs
+    assert not kq_routes.lora_static(model.proj, mx.bfloat16, 16, None)
+
+
+def test_a_q2_0_keep_tensor_loads_as_owned_fp32(monkeypatch, tmp_path):
+    def build(cfg):
+        m = _Toy()
+        m.t_embedder = _WideT()
+        return m
+
+    fam = _family(build=build)
+    monkeypatch.setattr(registry, "families", lambda: (fam,))
+    wire, values = _q2_0(8, 64, 5)
+    rng = np.random.default_rng(6)
+    t = _tensors()
+    t["t_embedder.mlp.0.weight"] = (wire, "Q2_0")
+    t["t_embedder.mlp.2.weight"] = (bf16_bits(
+        rng.standard_normal((4, 8)).astype(np.float32)), "BF16")
+    model, info = _load(write_gguf(tmp_path / "q2.gguf", t))
+    lin = model.t_embedder.mlp[0]
+    assert type(lin) is nn.Linear and info.n_kquant == 1
+    assert lin.weight.dtype == mx.float32 and lin.weight.shape == (8, 64)
+    assert mx.array_equal(lin.weight, values).item()
+
+
 def test_the_memory_gate_runs_on_header_sizes_before_any_bytes_are_read(
         toy, tmp_path, monkeypatch):
     from gmlx.image.memfit import ImageMemoryError

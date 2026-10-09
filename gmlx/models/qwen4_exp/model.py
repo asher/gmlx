@@ -193,6 +193,8 @@ class HyperConnection(nn.Module):
             lo, inj = front(xn, down.weight, inject.weight,
                             self.norm.weight.dtype)
             return epi(lo, up.weight, xn), inj
+        if kern and B * T <= 8 and plain and self._hcfl_ok(h.dtype):
+            return _hc_float_mix(self, h)
         xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps) if kern else None
         if xn is None:
             xn = self.norm(h)
@@ -233,6 +235,186 @@ class HyperConnection(nn.Module):
         return (ok and _kq_hc() is not None
                 and (h_dtype == mx.float32
                      or h_dtype == self.norm.weight.dtype))
+
+    def _hcfl_ok(self, h_dtype) -> bool:
+        """Eligibility of the float-weight fused path: half down, up and
+        norm gain of one dtype, an inject of that dtype or float32,
+        kernel-aligned shapes. Cached per module like ``_hclr_ok``."""
+        ok = self.__dict__.get("_hcfl_cache")
+        if ok is None:
+            half = self.norm.weight.dtype
+            k = self.hc * self.hidden
+            ok = (
+                self.hc == 4
+                and "inject" in self
+                and half in (mx.float16, mx.bfloat16)
+                and getattr(self.down, "kquant_type", None) is None
+                and getattr(self.up, "kquant_type", None) is None
+                and self.down.weight.dtype == half
+                and self.up.weight.dtype == half
+                and self.inject.weight.dtype in (half, mx.float32)
+                and self.hidden % 64 == 0
+                and k % 256 == 0
+                and self.down.weight.shape[0] % 4 == 0
+                and self.down.weight.shape == (self.down.weight.shape[0], k)
+                and self.up.weight.shape == (k, self.down.weight.shape[0])
+            )
+            self.__dict__["_hcfl_cache"] = ok
+        return (ok and _kq_hc() is not None and _hc_float_kerns() is not None
+                and (h_dtype == mx.float32
+                     or h_dtype == self.norm.weight.dtype))
+
+
+# Decode-width HC kernels for float down and up weights (a GGUF that keeps
+# the low-rank pair at bf16). The eager chain runs each mixer as a dozen
+# ops around three matmuls; here it is the kq norm and two dispatches that
+# read each weight once for every row. Rounding points are the eager
+# chain's: a dot rounds to the result dtype before its activation, and so
+# does each op after it. Accumulation is fp32. GMLX_Q4_HC_FLOAT_KERN=0
+# disables.
+
+# Front: 4 output rows per threadgroup, one simdgroup per K segment, 8
+# values per lane per 256-column chunk. The last threadgroup does the 4
+# inject rows.
+_HC_FLOAT_FRONT_SRC = r"""
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg = thread_position_in_threadgroup.y;
+    uint grp = thread_position_in_grid.y / SG;
+    bool down = grp < (uint)(LR / 4);
+    int out0 = down ? (int)grp * 4 : 0;
+    float result[R * 4];
+    for (int i = 0; i < R * 4; i++) result[i] = 0.0f;
+    int k0 = (int)sg * (K / SG);
+    for (int k = k0; k < k0 + K / SG; k += 256) {
+        int kg = k + (int)lane * 8;
+        float wt[4][8];
+        for (int o = 0; o < 4; o++) {
+            if (down) {
+                auto wr = wd + (size_t)(out0 + o) * K + kg;
+                for (int i = 0; i < 8; i++) wt[o][i] = (float)wr[i];
+            } else {
+                auto wr = wi + (size_t)o * K + kg;
+                for (int i = 0; i < 8; i++) wt[o][i] = (float)wr[i];
+            }
+        }
+        for (int r = 0; r < R; r++) {
+            auto xr = xn + (size_t)r * K + kg;
+            float xt[8];
+            for (int i = 0; i < 8; i++) xt[i] = (float)xr[i];
+            for (int o = 0; o < 4; o++) {
+                float p = 0.0f;
+                for (int i = 0; i < 8; i++) p = metal::fma(xt[i], wt[o][i], p);
+                result[r * 4 + o] += p;
+            }
+        }
+    }
+    threadgroup float part[SG * R * 4];
+    for (int i = 0; i < R * 4; i++) {
+        float v = simd_sum(result[i]);
+        if (lane == 0) part[sg * R * 4 + i] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane < (uint)(R * 4)) {
+        float v = 0.0f;
+        for (int g = 0; g < SG; g++) v += part[g * R * 4 + lane];
+        int r = (int)lane / 4, o = (int)lane % 4;
+        if (down) {
+            float t = (float)(LoT)v * 0.25f;
+            float sig = (float)(LoT)(1.0f / (1.0f + metal::precise::exp(-t)));
+            lo[(size_t)r * LR + out0 + o] = (LoT)(t * sig);
+        } else {
+            float t = (float)(InjT)v * 0.25f;
+            inj[(size_t)r * 4 + o] = (InjT)(2.0f * (float)(InjT)(
+                1.0f / (1.0f + metal::precise::exp(-t))));
+        }
+    }
+"""
+
+# Epilogue: one lane per (d, stream) walks its up row once for every row
+# of lo. The 4 stream lanes of a d are neighbors in a simdgroup, and each
+# reads the other three for the mean.
+_HC_FLOAT_EPI_SRC = r"""
+    uint gid = thread_position_in_grid.x;
+    uint lane = thread_index_in_simdgroup;
+    int s = (int)(gid % 4u);
+    int d = (int)(gid / 4u);
+    bool live = d < D;
+    int dd = live ? d : 0;
+    auto w = wu + (size_t)(s * D + dd) * LR;
+    float acc[R];
+    for (int r = 0; r < R; r++) acc[r] = 0.0f;
+    for (int j = 0; j < LR; j += 4) {
+        float w0 = (float)w[j], w1 = (float)w[j + 1];
+        float w2 = (float)w[j + 2], w3 = (float)w[j + 3];
+        for (int r = 0; r < R; r++) {
+            auto lor = lo + (size_t)r * LR + j;
+            acc[r] += (float)lor[0] * w0 + (float)lor[1] * w1
+                    + (float)lor[2] * w2 + (float)lor[3] * w3;
+        }
+    }
+    ushort base = (ushort)(lane & ~3u);
+    for (int r = 0; r < R; r++) {
+        float a = (float)(LoT)acc[r];
+        float g = (float)(LoT)(1.0f / (1.0f + metal::precise::exp(-a)));
+        float p = (float)(LoT)(g * (float)xn[(size_t)r * 4 * D + s * D + dd]);
+        float m = simd_shuffle(p, base);
+        m += simd_shuffle(p, (ushort)(base + 1));
+        m += simd_shuffle(p, (ushort)(base + 2));
+        m += simd_shuffle(p, (ushort)(base + 3));
+        if (s == 0 && live) mixed[(size_t)r * D + d] = (LoT)(m * 0.25f);
+    }
+"""
+
+_hc_float_kerns_cache = None
+
+
+def _hc_float_kerns():
+    """The decode-width float-weight HC kernels (front, epilogue), or None."""
+    global _hc_float_kerns_cache
+    if _hc_float_kerns_cache is None:
+        from gmlx.envflags import env_bool
+        if (env_bool("GMLX_Q4_HC_FLOAT_KERN", True)
+                and mx.metal.is_available()
+                and mx.default_device().type == mx.DeviceType.gpu):
+            _hc_float_kerns_cache = (
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_float_front",
+                    input_names=["xn", "wd", "wi"],
+                    output_names=["lo", "inj"], source=_HC_FLOAT_FRONT_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_float_epi",
+                    input_names=["lo", "wu", "xn"],
+                    output_names=["mixed"], source=_HC_FLOAT_EPI_SRC),
+            )
+        else:
+            _hc_float_kerns_cache = False
+    return _hc_float_kerns_cache or None
+
+
+def _hc_float_mix(m, h: mx.array):
+    """``HyperConnection.__call__`` for float down and up weights at
+    decode width: (mixed, inject) in the eager chain's dtypes."""
+    B, T, hc, D = h.shape
+    R, K = B * T, hc * D
+    LR = m.down.weight.shape[0]
+    front, epi = _hc_float_kerns()
+    xn = _kq_hc()[0](h, m.norm.weight, m.norm.eps)
+    wi = m.inject.weight
+    injt = mx.float32 if mx.float32 in (xn.dtype, wi.dtype) else xn.dtype
+    sg = next(n for n in (5, 4, 2, 1) if K % (n * 256) == 0)
+    lo, inj = front(
+        inputs=[xn, m.down.weight, wi],
+        template=[("LoT", xn.dtype), ("InjT", injt), ("K", K), ("LR", LR),
+                  ("R", R), ("SG", sg)],
+        grid=(32, sg * (LR // 4 + 1), 1), threadgroup=(32, sg, 1),
+        output_shapes=[(B, T, LR), (B, T, hc)],
+        output_dtypes=[xn.dtype, injt])
+    mixed = epi(
+        inputs=[lo, m.up.weight, xn],
+        template=[("LoT", xn.dtype), ("D", D), ("LR", LR), ("R", R)],
+        grid=(-(-hc * D // 256) * 256, 1, 1), threadgroup=(256, 1, 1),
+        output_shapes=[(B, T, D)], output_dtypes=[xn.dtype])[0]
+    return mixed, inj
 
 
 # Prefill-width HC kernels: the compiled epilogues still run the
@@ -700,6 +882,21 @@ def _kq_bs_prefill():
     return _kq_bs_fn
 
 
+_kq_score_w: dict = {}
+
+
+def _kq_score_weights(B: int, L: int, n_heads: int, head_dim: int, dtype):
+    """Head weights of the fused scorer, ``[B, L, H]`` of
+    ``1 / sqrt(head_dim)``. Kept per shape: a fill per call is one more GPU
+    dispatch in every indexer layer of every token."""
+    key = (B, L, n_heads, head_dim, dtype)
+    w = _kq_score_w.get(key)
+    if w is None:
+        w = mx.full((B, L, n_heads), 1.0 / math.sqrt(head_dim), dtype=dtype)
+        _kq_score_w[key] = w
+    return w
+
+
 def _kq_topk():
     """kq radix top-k for the QSA block selection, or None (stock
     argpartition). ``GMLX_Q4_QSA_KQ_TOPK=0`` disables."""
@@ -787,7 +984,171 @@ def _apply_rope_cos_sin(x: mx.array, cos: mx.array, sin: mx.array,
     return mx.concatenate([xr * c + rot * sn, xp], axis=-1)
 
 
+# GMLX_DECODE_LAYER_PROFILE=1: eval after each decode-layer part (ple, hc,
+# attn, gdn, ffn) and print each part's wall per token at exit. Attribution
+# only: the syncs slow the run and stop one step overlapping the next, so a
+# cost that needs that overlap does not show. Level 2 also evals inside
+# attention: a.proj (q, k, v), a.cache (append), a.blocks (pooled index
+# keys), a.score, a.topk, a.core (gather and attention), a.out.
+# GMLX_LAYER_PROFILE_PREFILL=1 also marks steps wider than one token.
+_LAYER_PROFILE_LEVEL = int(os.environ.get("GMLX_DECODE_LAYER_PROFILE", "0") or 0)
+_LAYER_PROFILE = _LAYER_PROFILE_LEVEL >= 1
+_SUB_PROFILE = _LAYER_PROFILE_LEVEL >= 2
+_PROFILE_WIDE = os.environ.get("GMLX_LAYER_PROFILE_PREFILL", "0") == "1"
+_PROF: dict = {}
+_PROF_CALLS = [0]
+_PROF_LOG: list = []
+
+
+def _prof_on(width: int) -> bool:
+    return _LAYER_PROFILE and (width == 1 or _PROFILE_WIDE)
+
+
+def _subprof_on(width: int) -> bool:
+    return _SUB_PROFILE and (width == 1 or _PROFILE_WIDE)
+
+
+def _prof_mark(key: str, li: int, arr, t0: float) -> float:
+    import time
+
+    mx.eval(arr)
+    t1 = time.perf_counter()
+    _PROF[(key, li)] = _PROF.get((key, li), 0.0) + (t1 - t0)
+    if _SUB_PROFILE:
+        w1 = time.time()
+        _PROF_LOG.append((key, li, w1 - (t1 - t0), w1))
+    return t1
+
+
+def _prof_reset() -> None:
+    _PROF.clear()
+    _PROF_LOG.clear()
+    _PROF_CALLS[0] = 0
+
+
+def _prof_summary() -> dict:
+    """Per-token milliseconds by part, and by layer for each part."""
+    n = _PROF_CALLS[0]
+    if not n:
+        return {}
+    parts: dict = {}
+    layers: dict = {}
+    for (k, li), v in _PROF.items():
+        parts[k] = parts.get(k, 0.0) + 1e3 * v / n
+        layers.setdefault(k, {})[li] = 1e3 * v / n
+    return {"tokens": n, "parts": parts, "layers": layers}
+
+
+def _prof_dump() -> None:
+    s = _prof_summary()
+    if not s:
+        return
+    parts = s["parts"]
+    top = [k for k in ("ple", "hc", "attn", "gdn", "ffn", "head") if k in parts]
+    print(
+        "[layerprof] per token ms: "
+        + " | ".join(f"{k} {parts[k]:.1f}" for k in top)
+        + f" | total {sum(parts[k] for k in top):.1f} over {s['tokens']} tokens",
+        flush=True,
+    )
+    for k in ("attn", "gdn", "ffn"):
+        rows = sorted(s["layers"].get(k, {}).items())
+        if rows:
+            print(
+                f"[layerprof] {k} by layer ms/token: "
+                + " ".join(f"{li}:{v:.2f}" for li, v in rows),
+                flush=True,
+            )
+    subs = sorted(k for k in parts if "." in k)
+    if subs:
+        print(
+            "[layerprof] sub per token ms: "
+            + " | ".join(f"{k} {parts[k]:.1f}" for k in subs),
+            flush=True,
+        )
+        for k in subs:
+            rows = sorted(s["layers"][k].items())
+            print(
+                f"[layerprof] {k} by layer ms/token: "
+                + " ".join(f"{li}:{v:.2f}" for li, v in rows),
+                flush=True,
+            )
+    path = os.environ.get("GMLX_DECODE_LAYER_PROFILE_LOG")
+    if path and _PROF_LOG:
+        with open(path, "w") as f:
+            for key, li, w0, w1 in _PROF_LOG:
+                f.write(f"{key} {li} {w0:.6f} {w1:.6f}\n")
+
+
+if _LAYER_PROFILE:
+    import atexit
+
+    atexit.register(_prof_dump)
+
+
 # QSA: cache, indexer, attention
+
+
+def _kv_tail_rows() -> int:
+    """Rows in the decode tail of a QSAKVCache (``GMLX_Q4_KV_TAIL``); 0
+    appends every step to the one buffer."""
+    from gmlx.envflags import env_int
+    return max(0, env_int("GMLX_Q4_KV_TAIL", 1024))
+
+
+def _make_kv_gather_kernel():
+    """One-dispatch K and V row gather over two segments: row ``r`` reads
+    the base when ``r < meta[0]``, else tail row ``r - meta[0]``. Copies
+    only. rows is [B, n] int32; outputs are [B, H, n, D], D a multiple
+    of 16."""
+    source = """
+        const uint gid = thread_position_in_grid.x;
+        const int H = kb_shape[1];
+        const int D = kb_shape[3];
+        const int n = rows_shape[1];
+        const int DC = D / 16;
+        const int c = gid % DC;
+        const int i = (gid / DC) % n;
+        const int bh = gid / (uint)(DC * n);
+        const int row = rows[(bh / H) * n + i];
+        const int bl = meta[0];
+        const size_t o = ((size_t)bh * n + i) * D + c * 16;
+        if (row < bl) {
+            const size_t s = ((size_t)bh * kb_shape[2] + row) * D + c * 16;
+            for (int j = 0; j < 16; j++) {
+                ko[o + j] = kb[s + j];
+                vo[o + j] = vb[s + j];
+            }
+        } else {
+            const size_t s =
+                ((size_t)bh * kt_shape[2] + (row - bl)) * D + c * 16;
+            for (int j = 0; j < 16; j++) {
+                ko[o + j] = kt[s + j];
+                vo[o + j] = vt[s + j];
+            }
+        }
+    """
+    return mx.fast.metal_kernel(
+        name="q4_kv_gather",
+        input_names=["kb", "kt", "vb", "vt", "rows", "meta"],
+        output_names=["ko", "vo"],
+        source=source,
+        ensure_row_contiguous=True,
+    )
+
+
+_kv_gather_kernel = None
+
+
+def _kv_gather():
+    """The fused two-segment gather kernel, or None (take and where)."""
+    global _kv_gather_kernel
+    if _kv_gather_kernel is None:
+        if mx.default_device().type == mx.DeviceType.gpu:
+            _kv_gather_kernel = _make_kv_gather_kernel()
+        else:
+            _kv_gather_kernel = False
+    return _kv_gather_kernel or None
 
 
 class QSAKVCache(KVCache):
@@ -799,6 +1160,20 @@ class QSAKVCache(KVCache):
     derived from ``ik``; it is a pure function of the raw stream, so trim and
     state restore just invalidate it. Quantizing would drop the stream, so
     ``to_quantized`` is refused.
+
+    Each stream is stored as two segments. The base holds rows
+    ``[0, offset - _tl)`` and changes only when a prefill chunk lands or the
+    tail is folded in. Decode steps append to the tail, a buffer of
+    ``GMLX_Q4_KV_TAIL`` rows. Serve dispatches a step before the one
+    before it has finished, and that pending step still holds the buffers it
+    read, so MLX cannot update them in place and copies them whole. With
+    one buffer per stream that copy is the full K and V of every layer on
+    every token. ``keys``, ``values`` and ``ik`` fold the tail in and read as
+    the whole stream.
+
+    ``blocks`` is split the same way: a block that a decode step finishes
+    joins a small tail, so the base, one key per block of the whole context,
+    is not copied for it.
     """
 
     kv_quant_unsupported = True
@@ -807,70 +1182,234 @@ class QSAKVCache(KVCache):
     preserve_auxiliary_kv_state = True
     extract = refusals.no_extract
 
+    _kb = _vb = _ib = None  # base segments
+    _kt = _vt = _it = None  # decode tails
+    _tl = 0                 # rows live in the tails
+    _tail_cap = None
+    _bt = None              # finished blocks after the first _nbb
+    _nbb = 0                # finished blocks live in ``blocks``
+
     def __init__(self, ratio: int = 4):
         super().__init__()
         self.ratio = ratio
-        self.ik = None       # [B, cap, index_dim]
         self.pos = None      # [3, B, cap] mrope positions (VLM loads only)
         self.blocks = None   # [B, n_blocks, index_dim]
         self.n_blocks = 0
 
-    def update_and_fetch_qsa(self, keys, values, ik, pos=None):
+    @property
+    def keys(self):
+        self._fold()
+        return self._kb
+
+    @keys.setter
+    def keys(self, v):
+        self._kb = self._owned(v)
+        self._tl = 0
+
+    @property
+    def values(self):
+        self._fold()
+        return self._vb
+
+    @values.setter
+    def values(self, v):
+        self._vb = self._owned(v)
+        self._tl = 0
+
+    @property
+    def ik(self):
+        self._fold()
+        return self._ib
+
+    @ik.setter
+    def ik(self, v):
+        self._ib = self._owned(v)
+        self._tl = 0
+
+    @staticmethod
+    def _owned(v):
+        """``v`` as one compact buffer, evaluated. The prompt cache
+        evaluates what it assigns and then reads the cache from its disk
+        writer thread, which cannot evaluate an array of this thread."""
+        if v is None:
+            return None
+        v = mx.contiguous(v)
+        mx.eval(v)
+        return v
+
+    def _tail_rows(self) -> int:
+        if self._tail_cap is None:
+            self._tail_cap = _kv_tail_rows()
+        return self._tail_cap
+
+    @staticmethod
+    def _cap_for(need: int) -> int:
+        spare = min(16384, max(256, need // 16))
+        return -(-(need + spare) // 256) * 256
+
+    @classmethod
+    def _write(cls, base, start: int, rows):
+        """``base`` with ``rows`` at ``start`` on the token axis, grown
+        when it is short."""
+        n = rows.shape[-2]
+        if base is None or start + n > base.shape[-2]:
+            shape = list(rows.shape)
+            shape[-2] = cls._cap_for(start + n) - (start + n)
+            parts = [rows, mx.zeros(shape, rows.dtype)]
+            if base is not None and start:
+                parts.insert(0, base[..., :start, :])
+            return mx.concatenate(parts, axis=-2)
+        base[..., start:start + n, :] = rows
+        return base
+
+    def _fold(self) -> None:
+        """Move the tail rows into the base."""
+        tl = self._tl
+        if not tl:
+            return
+        bl = self.offset - tl
+        # A pending step holds the base and would force a copy of it.
+        mx.synchronize()
+        self._kb = self._write(self._kb, bl, self._kt[..., :tl, :])
+        self._vb = self._write(self._vb, bl, self._vt[..., :tl, :])
+        self._ib = self._write(self._ib, bl, self._it[..., :tl, :])
+        self._tl = 0
+
+    def append_qsa(self, keys, values, ik, pos=None) -> bool:
+        """Append one call's rows to the three streams. True when they went
+        to the tail; the caller then reads K and V through ``gather_kv`` or
+        ``kv_full``."""
         prev = self.offset
-        k, v = super().update_and_fetch(keys, values)
-        n = ik.shape[1]
-        if self.ik is None or (prev + n) > self.ik.shape[1]:
-            B, _, idx_dim = ik.shape
-            n_steps = (self.step + n - 1) // self.step
-            new = mx.zeros((B, n_steps * self.step, idx_dim), ik.dtype)
-            if self.ik is not None:
-                if prev % self.step != 0:
-                    self.ik = self.ik[:, :prev, :]
-                self.ik = mx.concatenate([self.ik, new], axis=1)
-            else:
-                self.ik = new
-            if pos is not None:
-                # Width against the TRUNCATED base: growth at a mid-step prev
-                # (verify rollback trims land there) drops pos rows past prev
-                # exactly like ik above; sizing newp against the untruncated
-                # width leaves pos short of ik and later writes clamp.
-                base = None if self.pos is None else (
-                    self.pos[:, :, :prev] if prev % self.step else self.pos)
-                newp = mx.zeros((3, B, self.ik.shape[1] - (
-                    0 if base is None else base.shape[2])), mx.int32)
-                self.pos = (newp if base is None else
-                            mx.concatenate([base, newp], axis=2))
-        self.ik[:, prev:prev + n, :] = ik
+        B, _, n, _ = keys.shape
+        cap = self._tail_rows()
+        tail = self._kb is not None and n <= min(8, cap)
+        if tail:
+            if self._kt is None or self._kt.shape[0] != B:
+                self._kt = mx.zeros(keys.shape[:2] + (cap, keys.shape[3]),
+                                    keys.dtype)
+                self._vt = mx.zeros(values.shape[:2] + (cap, values.shape[3]),
+                                    values.dtype)
+                self._it = mx.zeros((B, cap, ik.shape[2]), ik.dtype)
+            if self._tl + n > cap:
+                self._fold()
+            tl = self._tl
+            self._kt[..., tl:tl + n, :] = keys
+            self._vt[..., tl:tl + n, :] = values
+            self._it[:, tl:tl + n, :] = ik
+            self._tl = tl + n
+        else:
+            self._fold()
+            self._kb = self._write(self._kb, prev, keys)
+            self._vb = self._write(self._vb, prev, values)
+            self._ib = self._write(self._ib, prev, ik)
+        self.offset = prev + n
         if pos is not None:
+            if self.pos is None or prev + n > self.pos.shape[2]:
+                # Rows past prev are stale after a verify rollback.
+                head = None if self.pos is None else self.pos[:, :, :prev]
+                width = self._cap_for(prev + n) - (0 if head is None else prev)
+                newp = mx.zeros((3, B, width), mx.int32)
+                self.pos = (newp if head is None else
+                            mx.concatenate([head, newp], axis=2))
             self.pos[:, :, prev:prev + n] = pos.astype(mx.int32)
-        return k, v, self.ik[:, :self.offset, :]
+        return tail
+
+    def update_and_fetch_qsa(self, keys, values, ik, pos=None):
+        self.append_qsa(keys, values, ik, pos=pos)
+        n = self.offset
+        return (self.keys[..., :n, :], self.values[..., :n, :],
+                self.ik[:, :n, :])
+
+    def kv_full(self):
+        """K and V over all ``offset`` rows. The tail is not folded: with
+        rows in it the result is a copy."""
+        tl = self._tl
+        bl = self.offset - tl
+        k, v = self._kb[..., :bl, :], self._vb[..., :bl, :]
+        if tl:
+            k = mx.concatenate([k, self._kt[..., :tl, :]], axis=2)
+            v = mx.concatenate([v, self._vt[..., :tl, :]], axis=2)
+        return k, v
+
+    def gather_kv(self, rows: mx.array):
+        """K and V at the absolute rows ``[B, n]`` int32, each read from
+        the segment that holds it: two ``[B, Hkv, n, D]`` arrays."""
+        bl = self.offset - self._tl
+        kb, vb, kt, vt = self._kb, self._vb, self._kt, self._vt
+        B, H, _, D = kb.shape
+        n = rows.shape[1]
+        kern = _kv_gather()
+        if (kern is not None and D % 16 == 0 and vb.shape == kb.shape
+                and kt.dtype == kb.dtype and vt.dtype == vb.dtype):
+            total = B * H * n * (D // 16)
+            ko, vo = kern(
+                inputs=[kb, kt, vb, vt, rows,
+                        mx.array([bl], dtype=mx.int32)],
+                grid=(total, 1, 1),
+                threadgroup=(min(256, total), 1, 1),
+                output_shapes=[(B, H, n, D), (B, H, n, D)],
+                output_dtypes=[kb.dtype, vb.dtype],
+            )
+            return ko, vo
+        in_base = (rows < bl)[:, None, :, None]
+        rb = mx.minimum(rows, max(bl - 1, 0))[:, None, :, None]
+        rt = mx.clip(rows - bl, 0, kt.shape[2] - 1)[:, None, :, None]
+        out = []
+        for base, tail in ((kb, kt), (vb, vt)):
+            ib = mx.broadcast_to(rb, (B, H, n, 1))
+            it = mx.broadcast_to(rt, (B, H, n, 1))
+            out.append(mx.where(
+                in_base, mx.take_along_axis(base, ib, axis=2),
+                mx.take_along_axis(tail, it, axis=2).astype(base.dtype)))
+        return out[0], out[1]
+
+    def _ik_rows(self, a: int, b: int) -> mx.array:
+        bl = self.offset - self._tl
+        if b <= bl:
+            return self._ib[:, a:b, :]
+        if a >= bl:
+            return self._it[:, a - bl:b - bl, :]
+        return mx.concatenate(
+            [self._ib[:, a:bl, :], self._it[:, :b - bl, :]], axis=1)
+
+    def block_segments(self, n_blocks: int, finish):
+        """Block keys as ``(base [B, nb, D], tail [B, n_blocks - nb, D] or
+        None)``; ``finish(raw, start_block)`` turns ``[B, m * ratio, D]`` raw
+        keys into ``[B, m, D]`` finished ones."""
+        r = self.ratio
+        if self.blocks is not None and self.blocks.shape[0] != self._ib.shape[0]:
+            self.blocks, self._bt, self.n_blocks, self._nbb = None, None, 0, 0
+        if n_blocks > self.n_blocks:
+            raw = self._ik_rows(self.n_blocks * r, n_blocks * r)
+            new = finish(raw, self.n_blocks)
+            nb, nt = self._nbb, self.n_blocks - self._nbb
+            m = new.shape[1]
+            held = [self.blocks[:, :nb]] if nb else []
+            if nt:
+                held.append(self._bt[:, :nt])
+            if nb and m <= 2 and nt + m <= self._tail_rows() // r:
+                self._bt = mx.concatenate(held[1:] + [new], axis=1)
+            else:
+                self.blocks = mx.concatenate(held + [new], axis=1)
+                self._bt, self._nbb = None, n_blocks
+            self.n_blocks = n_blocks
+        nb = min(self._nbb, n_blocks)
+        base = self.blocks[:, :nb]
+        return base, (self._bt[:, :n_blocks - nb] if n_blocks > nb else None)
 
     def finished_blocks(self, n_blocks: int, finish):
-        """Block keys ``[B, n_blocks, D]``; ``finish(raw, start_block)`` turns
-        ``[B, m * ratio, D]`` raw keys into ``[B, m, D]`` finished ones."""
-        r = self.ratio
-        if self.blocks is not None and self.blocks.shape[0] != self.ik.shape[0]:
-            self.blocks, self.n_blocks = None, 0
-        if n_blocks > self.n_blocks:
-            raw = self.ik[:, self.n_blocks * r:n_blocks * r, :]
-            new = finish(raw, self.n_blocks)
-            self.blocks = new if self.blocks is None else mx.concatenate(
-                [self.blocks[:, :self.n_blocks], new], axis=1)
-            self.n_blocks = n_blocks
-        return self.blocks[:, :n_blocks]
+        """``block_segments`` as one ``[B, n_blocks, D]`` array."""
+        base, tail = self.block_segments(n_blocks, finish)
+        return base if tail is None else mx.concatenate([base, tail], axis=1)
 
     @property
     def state(self):
-        if self.offset == self.keys.shape[2]:
-            base = (self.keys, self.values, self.ik[:, :self.offset])
-            return base if self.pos is None else base + (
-                self.pos[:, :, :self.offset],)
-        tail = () if self.pos is None else (self.pos[:, :, :self.offset],)
-        return (
-            self.keys[..., :self.offset, :],
-            self.values[..., :self.offset, :],
-            self.ik[:, :self.offset],
-        ) + tail
+        k, v, ik = self.keys, self.values, self.ik
+        n = self.offset
+        if n != k.shape[2]:
+            k, v = k[..., :n, :], v[..., :n, :]
+        base = (k, v, ik[:, :n])
+        return base if self.pos is None else base + (self.pos[:, :, :n],)
 
     @state.setter
     def state(self, v):
@@ -879,8 +1418,8 @@ class QSAKVCache(KVCache):
         else:
             self.keys, self.values, self.ik = v
             self.pos = None
-        self.offset = self.keys.shape[2]
-        self.blocks, self.n_blocks = None, 0
+        self.offset = self._kb.shape[2]
+        self.blocks, self._bt, self.n_blocks, self._nbb = None, None, 0, 0
 
     @classmethod
     def from_state(cls, state, meta_state):
@@ -925,8 +1464,11 @@ class QSAKVCache(KVCache):
             self.ratio = int(v)
 
     def trim(self, n):
-        n = super().trim(n)
+        n = min(self.offset, n)
+        self.offset -= n
+        self._tl = max(0, self._tl - n)
         self.n_blocks = min(self.n_blocks, self.offset // self.ratio)
+        self._nbb = min(self._nbb, self.n_blocks)
         return n
 
     def to_quantized(self, group_size: int = 64, bits: int = 4):
@@ -936,12 +1478,10 @@ class QSAKVCache(KVCache):
 
     @property
     def nbytes(self):
-        n = super().nbytes
-        if self.ik is not None:
-            n += self.ik.nbytes
-        if self.blocks is not None:
-            n += self.blocks.nbytes
-        return n
+        return sum(
+            a.nbytes for a in (self._kb, self._vb, self._ib, self._kt,
+                               self._vt, self._it, self.blocks, self._bt)
+            if a is not None)
 
 
 class QSAIndexer(nn.Module):
@@ -960,6 +1500,7 @@ class QSAIndexer(nn.Module):
         self.k_proj = nn.Linear(args.hidden_size, self.head_dim, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
+        self._li = -1
 
     def _rope(self, x, offset, scale=1.0):
         return mx.fast.rope(x, self.rotary_dims, traditional=False,
@@ -1012,11 +1553,13 @@ class QSAIndexer(nn.Module):
         return s * (1.0 / math.sqrt(self.head_dim))
 
     def select(self, x: mx.array, ik_all: mx.array, cache, offset: int,
-               cos=None, sin=None, pos_all=None, selector=None):
+               cos=None, sin=None, pos_all=None, selector=None,
+               key_len=None):
         """Top-k complete blocks per query, or None when every query is
         still dense. Returns ``(blocks [B, L, topk], complete_counts [L])``."""
         B, L, _ = x.shape
-        key_len = ik_all.shape[1]
+        if key_len is None:
+            key_len = ik_all.shape[1]
         r = self.ratio
         n_blocks = key_len // r
         if n_blocks <= self.block_topk:
@@ -1027,10 +1570,17 @@ class QSAIndexer(nn.Module):
                                              selector)
         else:
             finish = self.finish_blocks
+        btail = None
         if cache is not None:
-            blocks = cache.finished_blocks(n_blocks, finish)
+            blocks, btail = cache.block_segments(n_blocks, finish)
         else:
             blocks = finish(ik_all[:, :n_blocks * r], 0)
+        prof = _subprof_on(L)
+        if prof:
+            import time
+            t0 = _prof_mark("a.blocks", self._li,
+                            [blocks] if btail is None else [blocks, btail],
+                            time.perf_counter())
         query_ends = offset + mx.arange(L) + 1
         complete = query_ends // r
         k = self.block_topk
@@ -1043,11 +1593,23 @@ class QSAIndexer(nn.Module):
             # finite_min) and the radix top-k consumes its 16-bit rows
             # directly. Replaces the astype/matmul/relu/sum/where chain.
             q = self._queries(x, offset, cos, sin).astype(x.dtype)
-            w = mx.full((B, L, self.n_heads),
-                        1.0 / math.sqrt(self.head_dim), dtype=x.dtype)
+            w = _kq_score_weights(B, L, self.n_heads, self.head_dim, x.dtype)
             s16 = _kq_score()(q, blocks.astype(x.dtype), w, offset, self.ratio)
+            if btail is not None:
+                # The scorer numbers blocks from 0, so the tail's call moves
+                # the query back by the base's tokens to keep visibility.
+                s16 = mx.concatenate(
+                    [s16, _kq_score()(q, btail.astype(x.dtype), w,
+                                      offset - blocks.shape[1] * r, r)],
+                    axis=-1)
+            if prof:
+                t0 = _prof_mark("a.score", self._li, s16, t0)
             sel = mx.stop_gradient(topk(s16, k, True)[:, 0].astype(mx.int64))
+            if prof:
+                _prof_mark("a.topk", self._li, sel, t0)
             return sel, complete
+        if btail is not None:
+            blocks = mx.concatenate([blocks, btail], axis=1)
         s = self.scores(x, blocks, offset, cos=cos, sin=sin)
         valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
         s = mx.where(valid, s, -mx.inf)
@@ -1108,16 +1670,20 @@ class Attention(nn.Module):
             list(args.mrope_section), self.rotary_dims // 2)
         if self.ratio > 0:
             self.indexer = QSAIndexer(args, self.ratio, self.rotary_dims)
+            self.indexer._li = layer_idx
+        self._li = layer_idx
 
     def _rope(self, x, offset):
         return mx.fast.rope(x, self.rotary_dims, traditional=False,
                             base=self.rope_theta, scale=1.0, offset=offset)
 
-    def _gathered_attention(self, q, k, v, sel, complete, offset, L):
+    def _gathered_attention(self, q, k, v, sel, complete, offset, L,
+                            gather=None):
         """Decode / verify: gather the selected keys per query and run one
-        ``B * L``-batched qL=1 sdpa over ``topk * r + r`` keys."""
+        ``B * L``-batched qL=1 sdpa over ``topk * r + r`` keys. ``gather``
+        reads the rows from a segmented cache in place of ``k`` and ``v``."""
         B, H, _, D = q.shape
-        Hkv = k.shape[1]
+        Hkv = self.num_key_value_heads
         r, topk = self.ratio, self.indexer.block_topk
         members = (sel[..., None] * r + mx.arange(r)).reshape(B, L, topk * r)
         tail_start = (complete * r)[None, :, None]
@@ -1129,9 +1695,15 @@ class Attention(nn.Module):
         W = idx.shape[-1]
         bias = mx.concatenate(
             [mx.ones((B, L, topk * r), dtype=mx.bool_), tail_ok], axis=-1)
-        flat = mx.broadcast_to(idx.reshape(B, 1, L * W, 1), (B, Hkv, L * W, 1))
-        k_sel = mx.take_along_axis(k, flat, axis=2).reshape(B, Hkv, L, W, D)
-        v_sel = mx.take_along_axis(v, flat, axis=2).reshape(B, Hkv, L, W, D)
+        if gather is not None:
+            k_sel, v_sel = gather(idx.reshape(B, L * W).astype(mx.int32))
+        else:
+            flat = mx.broadcast_to(
+                idx.reshape(B, 1, L * W, 1), (B, Hkv, L * W, 1))
+            k_sel = mx.take_along_axis(k, flat, axis=2)
+            v_sel = mx.take_along_axis(v, flat, axis=2)
+        k_sel = k_sel.reshape(B, Hkv, L, W, D)
+        v_sel = v_sel.reshape(B, Hkv, L, W, D)
         k_sel = k_sel.transpose(0, 2, 1, 3, 4).reshape(B * L, Hkv, W, D)
         v_sel = v_sel.transpose(0, 2, 1, 3, 4).reshape(B * L, Hkv, W, D)
         q_l = q.transpose(0, 2, 1, 3).reshape(B * L, H, 1, D)
@@ -1203,6 +1775,32 @@ class Attention(nn.Module):
                 q[..., s:, :], k, v, sel[:, s:], offset + s, key_len, bs))
         return mx.concatenate(outs, axis=2) if len(outs) > 1 else outs[0]
 
+    def _segmented_attention(self, q, cache, sel, complete, offset, L,
+                             key_len, paged):
+        """Decode / verify over a cache with rows in its tail: gather the
+        selected rows from both segments in one dispatch, then attend over
+        the compact copy. At L=1 the paged kernel walks it as consecutive
+        pages, the same rows in the same order as ``_paged_attention``."""
+        if paged is None or L != 1:
+            return self._gathered_attention(
+                q, None, None, sel, complete, offset, L,
+                gather=cache.gather_kv)
+        B = q.shape[0]
+        r = self.ratio
+        rows = (sel[:, 0, :, None] * r + mx.arange(r)).reshape(B, -1)
+        rows = rows.astype(mx.int32)
+        rem = key_len % r
+        if rem:
+            tail = mx.arange(key_len - rem, key_len, dtype=mx.int32)
+            rows = mx.concatenate(
+                [rows, mx.broadcast_to(tail[None], (B, rem))], axis=-1)
+        k_sel, v_sel = cache.gather_kv(rows)
+        n_pages = -(-rows.shape[1] // r)
+        pages = mx.broadcast_to(
+            mx.arange(n_pages, dtype=mx.int32)[None, None],
+            (B, self.num_key_value_heads, n_pages))
+        return paged(q, k_sel, v_sel, self.scale, pages, tile_c=4)
+
     def _paged_attention(self, q, k, v, sel, key_len, paged):
         """Decode (L=1): kq page-gather sdpa straight over the KV cache
         with the selected 4-row blocks as pages -- no per-token K/V copy.
@@ -1241,15 +1839,28 @@ class Attention(nn.Module):
             q = self._rope(q, offset)
             k = self._rope(k, offset)
 
+        prof = _subprof_on(L)
+        if prof:
+            import time
+            t0 = _prof_mark("a.proj", self._li, (q, k, v, gate),
+                            time.perf_counter())
         selection = None
+        seg = False
         if "indexer" in self:
             ik = self.indexer.k_proj(x)
             if cache is not None and hasattr(cache, "update_and_fetch_qsa"):
-                k, v, ik_all = cache.update_and_fetch_qsa(k, v, ik,
-                                                          pos=positions)
+                seg = cache.append_qsa(k, v, ik, pos=positions)
+                if prof:
+                    t0 = _prof_mark(
+                        "a.cache", self._li,
+                        (cache._kt, cache._vt, cache._it) if seg else
+                        (cache._kb, cache._vb, cache._ib), t0)
                 selection = self.indexer.select(
-                    x, ik_all, cache, offset, cos=cos, sin=sin,
-                    pos_all=cache.pos, selector=self._mrope_selector)
+                    x, None, cache, offset, cos=cos, sin=sin,
+                    pos_all=cache.pos, selector=self._mrope_selector,
+                    key_len=cache.offset)
+                if not seg:
+                    k, v = cache.kv_full()
             elif cache is not None:
                 k, v = cache.update_and_fetch(k, v)
             else:
@@ -1262,11 +1873,13 @@ class Attention(nn.Module):
             k, v = cache.update_and_fetch(k, v)
 
         if selection is None:
+            if seg:
+                k, v = cache.kv_full()
             out = scaled_dot_product_attention(
                 q, k, v, cache=cache, scale=self.scale, mask=mask)
         else:
             sel, complete = selection
-            key_len = k.shape[2]
+            key_len = cache.offset if seg else k.shape[2]
             all_sparse = (offset + 1) // self.ratio > self.indexer.block_topk
             # the kq sparse kernels have no backward: a training forward
             # takes the token-mask branch
@@ -1274,7 +1887,14 @@ class Attention(nn.Module):
             paged = _kq_paged() if (
                 kern and L == 1 and self.ratio == 4 and D == 256
                 and q.dtype in (mx.bfloat16, mx.float16)) else None
-            if paged is not None and all_sparse and not isinstance(mask, mx.array):
+            seg_ok = (seg and kern and L <= 8 and all_sparse
+                      and not isinstance(mask, mx.array))
+            if seg and not seg_ok:
+                k, v = cache.kv_full()
+            if seg_ok:
+                out = self._segmented_attention(
+                    q, cache, sel, complete, offset, L, key_len, paged)
+            elif paged is not None and all_sparse and not isinstance(mask, mx.array):
                 out = self._paged_attention(q, k, v, sel, key_len, paged)
             elif kern and L <= 8 and all_sparse and not isinstance(mask, mx.array):
                 out = self._gathered_attention(q, k, v, sel, complete, offset, L)
@@ -1335,8 +1955,13 @@ class Attention(nn.Module):
                 else:
                     out = mx.fast.scaled_dot_product_attention(
                         q, k, v, scale=self.scale, mask=qsa)
+        if prof:
+            t0 = _prof_mark("a.core", self._li, out, time.perf_counter())
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return self.o_proj(out * mx.sigmoid(gate))
+        out = self.o_proj(out * mx.sigmoid(gate))
+        if prof:
+            _prof_mark("a.out", self._li, out, t0)
+        return out
 
 
 # MoE (qwen3-next shape: router + SwitchGLU + sigmoid-gated shared expert)
@@ -1676,18 +2301,39 @@ class DecoderLayer(nn.Module):
 
     def __call__(self, h: mx.array, input_ids: mx.array, mask=None, cache=None,
                  ple_table=None, gdn_sink=None, positions=None):
+        prof = _prof_on(h.shape[1])
+        li = self.layer_idx
+        if prof:
+            import time
+            if li == 0:
+                _PROF_CALLS[0] += 1
+            mx.eval(h)
+            t0 = time.perf_counter()
         if "ple" in self:
             h = self.ple(h, input_ids, cache, ple_table, mask, gdn_sink=gdn_sink)
+            if prof:
+                t0 = _prof_mark("ple", li, h, t0)
         mixed, inject = self.hc_attn(h)
+        if prof:
+            t0 = _prof_mark("hc", li, (mixed, inject), t0)
         if self.is_linear:
             out = self.linear_attn(mixed, mask=mask, cache=cache, gdn_sink=gdn_sink)
         else:
             out = self.self_attn(mixed, mask=mask, cache=cache,
                                  positions=positions)
+        if prof:
+            t0 = _prof_mark("gdn" if self.is_linear else "attn", li, out, t0)
         h = _hc_combine(h, out, inject, kern=not self.training)
         mixed, inject = self.hc_ffn(h)
+        if prof:
+            t0 = _prof_mark("hc", li, (h, mixed, inject), t0)
         out = self.mlp(mixed)
-        return _hc_combine(h, out, inject, kern=not self.training)
+        if prof:
+            t0 = _prof_mark("ffn", li, out, t0)
+        h = _hc_combine(h, out, inject, kern=not self.training)
+        if prof:
+            _prof_mark("hc", li, h, t0)
+        return h
 
 
 class Qwen4ExpModel(nn.Module):

@@ -112,7 +112,7 @@ def _mint_fallback(path, codec_name, kv=None):
         del GGML_QUANT_SIZES[sentinel]
 
 
-@pytest.mark.parametrize("codec", ["STQ1_0", "PQ2_0", "PTQ1_0"])
+@pytest.mark.parametrize("codec", ["STQ1_0", "PQ2_0", "PTQ1_0", "Q2_0"])
 def test_classify_local_fallback_codecs(tmp_path, codec):
     p = tmp_path / f"{codec.lower()}.gguf"
     _mint_fallback(p, codec)

@@ -76,26 +76,61 @@ def image_dits(root, family: str) -> list[str]:
     return list(_image_dits(str(root), family))
 
 
+def _fallback_type(codec: str):
+    """A stand-in for a GGML type that gguf-py has no member for (Q2_0),
+    with its id and block geometry from headerscan's QUANT_TYPE_FALLBACK,
+    entered in gguf-py's size table. The caller removes the entry."""
+    import gguf
+
+    from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
+
+    (type_id, geometry), = [(k, v[1]) for k, v in QUANT_TYPE_FALLBACK.items()
+                            if v[0] == codec]
+
+    class _Type:
+        name, value = codec, type_id
+
+        def __int__(self):
+            return type_id
+
+        def __index__(self):
+            return type_id
+
+    raw = _Type()
+    gguf.GGML_QUANT_SIZES[raw] = geometry
+    return raw
+
+
 def write_gguf(path, tensors: dict, arch: str | None = None) -> str:
     """Write ``tensors`` (name -> (array, codec)) to a GGUF. Arrays are in
-    numpy order. BF16 takes a uint16 array of raw bits. ``arch=None``
-    writes no general.architecture key."""
+    numpy order. BF16 takes a uint16 array of raw bits. A codec that
+    gguf-py does not name takes a uint8 array of wire bytes, one row of
+    blocks per matrix row. ``arch=None`` writes no general.architecture
+    key."""
     import gguf
 
     w = gguf.GGUFWriter(str(path), arch or "none")
     if arch is None:
         w.kv_data[0].pop("general.architecture", None)
-    for name, (arr, codec) in tensors.items():
-        raw = getattr(gguf.GGMLQuantizationType, codec)
-        if codec == "BF16":
-            w.add_tensor(name, np.ascontiguousarray(arr, dtype=np.uint16),
-                         raw_shape=arr.shape, raw_dtype=raw)
-        else:
-            w.add_tensor(name, np.ascontiguousarray(arr), raw_dtype=raw)
-    w.write_header_to_file()
-    w.write_kv_data_to_file()
-    w.write_tensors_to_file()
-    w.close()
+    minted = []
+    try:
+        for name, (arr, codec) in tensors.items():
+            raw = getattr(gguf.GGMLQuantizationType, codec, None)
+            if raw is None:
+                raw = _fallback_type(codec)
+                minted.append(raw)
+            if codec == "BF16":
+                w.add_tensor(name, np.ascontiguousarray(arr, dtype=np.uint16),
+                             raw_shape=arr.shape, raw_dtype=raw)
+            else:
+                w.add_tensor(name, np.ascontiguousarray(arr), raw_dtype=raw)
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+    finally:
+        for raw in minted:
+            del gguf.GGML_QUANT_SIZES[raw]
     return str(path)
 
 

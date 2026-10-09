@@ -2058,7 +2058,9 @@ def _qwen4exp_trace(monkeypatch, m) -> dict:
     def sel(self, x, ik_all, cache, offset, **k):
         r = select(self, x, ik_all, cache, offset, **k)
         if r is not None:
-            n = ik_all.shape[1] // self.ratio
+            # A cached call passes the stream length and no raw keys.
+            key_len = k.get("key_len")
+            n = (ik_all.shape[1] if key_len is None else key_len) // self.ratio
             blocks = (cache.finished_blocks(n, self.finish_blocks)
                       if cache is not None
                       else self.finish_blocks(ik_all[:, :n * self.ratio], 0))
