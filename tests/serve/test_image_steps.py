@@ -557,7 +557,7 @@ def test_encode_answers_the_tensors_and_holds_them(host, monkeypatch,
     cond = _features()
     ref = np.ones((1, 4, 4, 6), np.float32)
 
-    def encode(served, text, images, borrow=None):
+    def encode(served, text, images, borrow=None, ref_latents=True):
         seen.append((text, [i.shape for i in images]))
         return {"cond": cond, "refs": [ref], "image_slots": [2]}
 
@@ -588,6 +588,57 @@ def test_encode_answers_the_tensors_and_holds_them(host, monkeypatch,
                       "image_slots": [2], "num_tokens": 5}
     for h in (array_hash(cond), array_hash(ref)):
         assert h in steps.STATE.tensors
+
+
+def test_encode_with_refs_false_skips_the_reference_latents(host, monkeypatch):
+    seen = []
+    cond = _features()
+
+    def encode(served, text, images, borrow=None, ref_latents=True):
+        seen.append(ref_latents)
+        refs = [np.ones((1, 4, 4, 6), np.float32)] if ref_latents else []
+        return {"cond": cond, "refs": refs, "image_slots": [2]}
+
+    monkeypatch.setattr(steps, "encode", encode)
+    img = np.full((8, 8, 3), 9, np.uint8)
+    body = wire.write({"image_0": img},
+                      {"model": "qit", "text": "a cat", "refs": False})
+    r = _http().post(f"{P}/encode", content=body,
+                     headers={**V, "Content-Type": wire.CONTENT_TYPE})
+    assert r.status_code == 200, r.text
+    tensors, fields = wire.read(r.content)
+    assert seen == [False]
+    assert set(tensors) == {"cond"} and fields["ref_latents"] == []
+    assert fields["image_slots"] == [2]
+    r = _http().post(f"{P}/encode", headers=V,
+                     json={"model": "qit", "text": "a", "refs": "no"})
+    assert r.status_code == 400 and "refs" in r.text
+
+
+def test_step_encode_runs_no_vae_encode_without_reference_latents(
+        monkeypatch):
+    from gmlx.serve import image_service
+
+    def stub_encode(served, text, neg, refs, borrow):
+        return SimpleNamespace(features=mx.ones((5, 16)), ref_latents=(),
+                               image_slots=(2,)), None
+
+    monkeypatch.setattr(api, "references", lambda pipe, images: ("r",))
+    monkeypatch.setattr(image_service, "_encode", stub_encode)
+    vae = []
+    monkeypatch.setattr(api, "encode_references",
+                        lambda pipe, c: vae.append(1) or c)
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=SimpleNamespace(edit=object(), title="Q"),
+                             encoder=None),
+        plan=SimpleNamespace(keep_encoder=True))
+    img = np.zeros((8, 8, 3), np.uint8)
+    got = _on_worker(lambda: steps.encode(served, "a", [img],
+                                          ref_latents=False))
+    assert vae == [] and got["refs"] == [] and got["image_slots"] == [2]
+    assert got["cond"].shape == (1, 5, 16)
+    _on_worker(lambda: steps.encode(served, "a", [img]))
+    assert vae == [1]
 
 
 def test_cache_sizes_follow_server_image(host):

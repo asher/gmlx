@@ -645,11 +645,12 @@ def table_id(body: bytes) -> str:
     return hashlib.sha256(canon).hexdigest()
 
 
-def encode(served, text: str, images: list, borrow=None) -> dict:
+def encode(served, text: str, images: list, borrow=None,
+           ref_latents: bool = True) -> dict:
     """Encode ``text``, with reference images (H, W, 3) uint8 for a family
     that edits, on the image worker. Returns the conditioning features
-    f32 (1, L, D), the reference latents in model space (1, C, h, w) and
-    the image slots."""
+    f32 (1, L, D), the reference latents in model space (1, C, h, w),
+    none when ``ref_latents`` is false, and the image slots."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -668,10 +669,11 @@ def encode(served, text: str, images: list, borrow=None) -> dict:
     if enc is not None and enc.owned and not enc.released and \
             not served.plan.keep_encoder:
         enc.release()
-    if refs:
+    if refs and ref_latents:
         cond = api.encode_references(pipe, cond)
     feats = cond.features.astype(mx.float32)[None]
-    lats = [z.astype(mx.float32)[None] for z in cond.ref_latents]
+    lats = [z.astype(mx.float32)[None] for z in cond.ref_latents] \
+        if ref_latents else []
     mx.eval(feats, *lats)
     return {"cond": _host(feats), "refs": [_host(z) for z in lats],
             "image_slots": [int(s) for s in cond.image_slots]}

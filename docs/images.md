@@ -205,7 +205,7 @@ uploads a conditioning or a LoRA matrix once by that hash.
 | `GET capabilities` | The contract version, families, wire dtypes and limits |
 | `GET models`, `GET models/{model}/status`, `GET models/{model}/manifest` | The image models; one model's family, latent format, memory and sampling; its DiT tensor names and shapes |
 | `POST models/load`, `POST models/unload` | Load or unload a model |
-| `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash |
+| `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash. `refs: false` leaves out the VAE latents of the reference images, for a client that encodes them itself |
 | `PUT` or `HEAD tensors/{hash}`, `PUT` or `HEAD adapters/{hash}` | Upload a tensor or a LoRA matrix, or ask whether the server holds it |
 | `POST adapters/register` | Read a LoRA file under a model folder of the server |
 | `PUT patch-tables/{id}?model=ID` | Define a set of LoRA patches; its id is the sha256 of its JSON with sorted keys and no spaces |

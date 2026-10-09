@@ -524,6 +524,9 @@ async def encode(request: Request):
     text = fields.get("text")
     if not isinstance(text, str):
         raise StepError(400, "encode needs text")
+    want_refs = fields.get("refs", True)
+    if not isinstance(want_refs, bool):
+        raise StepError(400, "refs is true or false")
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
@@ -542,7 +545,8 @@ async def encode(request: Request):
             chat_hold = None
         try:
             got = await _on_worker(do_encode, served, text,
-                                   [i[..., :3] for i in images], borrow)
+                                   [i[..., :3] for i in images], borrow,
+                                   want_refs)
         finally:
             if chat_hold is not None:
                 chat_hold.release()
