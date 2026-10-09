@@ -270,25 +270,34 @@ def measure(base: str, out: dict) -> None:
     time.sleep(1.0)
     _chat_stream(base, 512, beside)
     job.join()
-    t0 = time.perf_counter()
-    first = first_partial = None
     import httpx
 
-    with httpx.stream("POST", base + "/v1/images/generations", timeout=900, json={
-            "prompt": PROMPT, "size": "1024x1024", "stream": True,
-            "partial_images": 1}) as r:
-        for chunk in r.iter_bytes():
-            if first is None and chunk:
-                first = time.perf_counter() - t0
-            if first_partial is None and b"partial_image" in chunk:
-                first_partial = time.perf_counter() - t0
-    total = time.perf_counter() - t0
+    def first_byte(partials: int) -> tuple:
+        """Seconds to the first body byte, to the first byte of the final
+        image event, and to the end, of one streamed request."""
+        t0 = time.perf_counter()
+        first = final = None
+        with httpx.stream("POST", base + "/v1/images/generations", timeout=900,
+                          json={"prompt": PROMPT, "size": "1024x1024",
+                                "stream": True,
+                                "partial_images": partials}) as r:
+            for chunk in r.iter_bytes():
+                now = time.perf_counter() - t0
+                if first is None and chunk:
+                    first = now
+                if final is None and b"image_generation.completed" in chunk:
+                    final = now
+        return first, final, time.perf_counter() - t0
+
+    plain = first_byte(0)
+    partial = first_byte(1)
     out.update(
         chat_alone_tps=alone["tokens"] / alone["decode_s"],
         chat_beside_image_tps=beside["tokens"] / beside["decode_s"],
         chat_alone_tokens=alone["tokens"], chat_beside_tokens=beside["tokens"],
-        stream_first_byte_s=first, stream_first_partial_s=first_partial,
-        stream_total_s=total)
+        stream_first_byte_s=plain[0], stream_total_s=plain[2],
+        stream_partial1_first_byte_s=partial[0],
+        stream_partial1_final_s=partial[1], stream_partial1_total_s=partial[2])
 
 
 def main() -> int:
