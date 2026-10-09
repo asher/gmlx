@@ -58,7 +58,7 @@ line to the server log.
 | `prompt` | What to draw. Required on generations and edits. |
 | `model` | An image model id, or an OpenAI model name as below. A name that is not an image model gets 404, and a chat model id gets 400 of type `wrong_model_kind`. |
 | `n` | Images to make, 1 to 10. They run one after another, at seeds `seed`, `seed` plus 1 and so on. |
-| `size` | `WxH` or `auto`, the model's default size. Width and height are multiples of the model's size step, which a refusal names, and the image holds at most 2048x2048 pixels with no side over 4096. |
+| `size` | `WxH` or `auto`, the model's default size. Sides are multiples of the model's size step and at most 4096, and an image at most 2048x2048 pixels. |
 | `quality` | `low`, `medium`, `high` or `auto`, each a step count of the model's family. `standard` reads as `medium`, and `hd` as `high`. |
 | `background` | `transparent`, `opaque` or `auto`. Transparency needs a model whose VAE decodes an alpha channel, such as Qwen-Image 2.1, and png or webp. |
 | `output_format` | `png`, the default, `jpeg` or `webp`. |
