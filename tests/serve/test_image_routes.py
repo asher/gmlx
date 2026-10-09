@@ -313,21 +313,76 @@ def test_the_queue_cap_answers_429_with_retry_after(served):
     assert int(r.headers["Retry-After"]) >= 2
 
 
-def test_a_disconnect_sets_the_stop_event():
-    async def run():
-        stop = threading.Event()
-        calls = []
-
-        class _Req:
-            async def is_disconnected(self):
-                calls.append(1)
-                return len(calls) > 1
-
-        await images._watch_disconnect(_Req(), stop)
-        return stop.is_set()
-
+def _disconnecting_receive(body: bytes):
+    """An ASGI receive that gives ``body``, then waits until ``leave()``,
+    then answers every call with a disconnect, as uvicorn does."""
     import asyncio
-    assert asyncio.run(run())
+
+    state = {"sent": False, "event": asyncio.Event()}
+
+    async def receive():
+        if not state["sent"]:
+            state["sent"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await state["event"].wait()
+        return {"type": "http.disconnect"}
+
+    def leave():
+        state["event"].set()
+
+    return receive, leave
+
+
+def test_a_disconnect_behind_the_http_middlewares_sets_the_stop_event():
+    """The server stacks http middlewares, through which
+    Request.is_disconnected never sees a disconnect; the watcher must."""
+    import asyncio
+
+    from fastapi import FastAPI
+    from starlette.responses import JSONResponse
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def passthrough(request, call_next):
+        return await call_next(request)
+
+    seen = {}
+
+    async def x(request):
+        await request.body()
+        stop = threading.Event()
+        watcher = asyncio.create_task(images._watch_disconnect(request, stop))
+        for _ in range(200):
+            if stop.is_set():
+                break
+            await asyncio.sleep(0.01)
+        watcher.cancel()
+        seen["stop"] = stop.is_set()
+        return JSONResponse({})
+
+    app.add_route("/x", x, methods=["POST"])
+
+    async def run():
+        receive, leave = _disconnecting_receive(b"{}")
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"},
+                 "http_version": "1.1", "method": "POST", "path": "/x",
+                 "raw_path": b"/x", "query_string": b"", "root_path": "",
+                 "headers": [(b"content-type", b"application/json")],
+                 "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80),
+                 "scheme": "http"}
+        task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.sleep(0.1)
+        leave()
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(run())
+    assert seen["stop"] is True
 
 
 def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, caplog):

@@ -129,14 +129,21 @@ def _from_http_exception(path: str, e: HTTPException) -> JSONResponse:
 
 
 async def _watch_disconnect(request: Request, stop: threading.Event):
+    """Set ``stop`` when the client goes away. The body is read by now, so
+    the next message the request receives is its disconnect.
+    ``Request.is_disconnected`` never sees it behind the server's http
+    middlewares, whose receive yields under its cancelled scope."""
     try:
         while not stop.is_set():
-            if await request.is_disconnected():
+            message = await request.receive()
+            if message.get("type") == "http.disconnect":
                 stop.set()
                 return
             await asyncio.sleep(_DISCONNECT_POLL_S)
     except asyncio.CancelledError:
         pass
+    except Exception:  # noqa: BLE001 - a receive the server no longer serves
+        _log.debug("image request disconnect watch ended", exc_info=True)
 
 
 def _json_image(value, param: str):
