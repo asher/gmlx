@@ -381,13 +381,24 @@ def generated(check6, files, tmp_path_factory):
     from PIL import Image
 
     from gmlx.commands.cli import umbrella_main
+    from gmlx.image import api
 
     arrays, m = check6
     ins = m["inputs"]
     dit, enc, mmproj, vae = files
     d = tmp_path_factory.mktemp("qwen_edit")
     out = {}
+    encode = api.encode_text
+    conds: list = []
+
+    def kept(pipe, prompt, **kw):
+        cond = encode(pipe, prompt, **kw)
+        conds.append((prompt, [int(i) for i in cond.image_slots],
+                      np.array(cond.features.astype(mx.float32))))
+        return cond
+
     for case in CASES:
+        conds.clear()
         row = ins["cases"][case]
         refs = []
         for n in row["images"]:
@@ -395,21 +406,28 @@ def generated(check6, files, tmp_path_factory):
             refs += ["--ref", str(d / f"{n}.png")]
         lat, png = d / f"{case}.npz", d / f"{case}.png"
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = umbrella_main([
-                "image", "generate", dit, "--encoder", enc,
-                "--encoder-mmproj", mmproj, "--vae", vae, "--prompt",
-                row["prompt"], "--negative-prompt", row["negative_prompt"],
-                "--guidance", str(ins["guidance"]), *refs, "--ref-size",
-                str(ins["reference_resolution"]), "--size",
-                f"{ins['size']}x{ins['size']}", "--seed", str(ins["seed"]),
-                "--output", str(png), "--save-latent", str(lat), "--json"])
+        api.encode_text = kept
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = umbrella_main([
+                    "image", "generate", dit, "--encoder", enc,
+                    "--encoder-mmproj", mmproj, "--vae", vae, "--prompt",
+                    row["prompt"], "--negative-prompt",
+                    row["negative_prompt"], "--guidance",
+                    str(ins["guidance"]), *refs, "--ref-size",
+                    str(ins["reference_resolution"]), "--size",
+                    f"{ins['size']}x{ins['size']}", "--seed",
+                    str(ins["seed"]), "--output", str(png), "--save-latent",
+                    str(lat), "--json"])
+        finally:
+            api.encode_text = encode
         assert rc == 0, buf.getvalue()
         with Image.open(png) as im:
             pixels = np.asarray(im.convert("RGB"))
         out[case] = {"latents": np.load(lat)["latents"], "pixels": pixels,
                      "record": json.loads(
-                         buf.getvalue().strip().splitlines()[-1])}
+                         buf.getvalue().strip().splitlines()[-1]),
+                     "conds": list(conds)}
         gc.collect()
         mx.clear_cache()
     return out
@@ -435,6 +453,27 @@ def test_check6_edit_final_latents_from_the_files(check6, generated, case):
           f"{tol:.4e}, the gate of the loop {loop:.4e}{note} plus the gate "
           f"of a reference encode; cosine {got['cosine']:.6f}")
     assert got["rel_l2"] <= tol, got
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_check6_edit_conditionings_from_the_files(check6, generated, case):
+    """The command encodes the prompt and the negative prompt each with
+    the references, as the reference pipeline does: each conditioning of
+    a run from the files has the oracle's image rows, and its features are
+    within the check 2 gate of the oracle's."""
+    arrays, m = check6
+    row = m["inputs"]["cases"][case]
+    keys = [row[k].split(" ")[0].removeprefix("tap_")
+            for k in ("features", "negative_features")]
+    gates = committed(CHECK2)["tolerances"]["rel_l2"]
+    got = generated[case]["conds"]
+    assert [p for p, _, _ in got] == [row["prompt"], row["negative_prompt"]]
+    for (_, slots, feats), k in zip(got, keys):
+        assert slots == arrays[f"slots_{k}"].tolist(), k
+        rel = fx.rel_l2(feats, arrays[f"features_{k}"])
+        print(f"qwen check6 edit {k}, the command's conditioning: rel L2 "
+              f"{rel:.4e}, {rel / gates[k]:.2f} of the check 2 gate")
+        assert rel <= gates[k], k
 
 
 def test_the_image_of_an_edit(check6, files, generated):
