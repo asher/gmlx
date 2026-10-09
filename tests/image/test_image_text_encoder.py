@@ -90,6 +90,9 @@ def test_the_qwen_image21_spec_is_the_row_of_the_reference_pipeline():
     assert row.revision in m["oracle"]["packages"]["diffusers"]["source"]
     assert m["files"]["encoder"]["sha256"] in spec.identity_source
     assert len(spec.identity) == 3
+    edit = load_json("oracle/check2_qwen_image21_edit.manifest.json")
+    assert edit["files"]["mmproj"]["sha256"] in spec.vision_identity_source
+    assert len(spec.vision_identity) == 3
     # The Z-Image row keeps its key: no dropped rows, an empty prompt as
     # it stands.
     z = te.Z_IMAGE
@@ -239,6 +242,70 @@ def test_check_encoder_file_reads_the_header_and_norm_bytes(tmp_path):
     te.check_encoder_file(view, _spec(identity=bad), override=True)
     with pytest.raises(te.EncoderMismatchError, match="4 layers, expected 5"):
         te.check_encoder_file(view, _spec(layers=5, identity=rows))
+
+
+def _mmproj(path, arch="clip", width=64):
+    import gguf
+
+    rng = np.random.default_rng(1)
+    norms = {n: rng.standard_normal(16).astype(np.float32)
+             for n in ("v.blk.0.ln1.weight", "v.post_ln.weight")}
+    w = gguf.GGUFWriter(str(path), arch)
+    w.add_bool("clip.has_vision_encoder", True)
+    w.add_uint32("clip.vision.projection_dim", width)
+    for n, a in norms.items():
+        w.add_tensor(n, a)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return tuple(te.IdentityTensor(n, "x", te._bf16_digest(mx.array(a)))
+                 for n, a in norms.items())
+
+
+def test_an_mmproj_is_checked_by_its_header_and_norm_bytes(tmp_path):
+    """The mmproj is refused by name before any weights load: another
+    architecture, a projector to another width, or norm bytes that differ
+    from the spec's rows unless the override accepts them."""
+    rows = _mmproj(tmp_path / "mm.gguf")
+    view = te._header_view(str(tmp_path / "mm.gguf"))
+    spec = _spec(vision_type="qwen3_vl", vision_identity=rows,
+                 vision_identity_source="the tiny mmproj")
+    te.check_mmproj_file(view, spec)
+    bad = (rows[0], te.IdentityTensor("v.post_ln.weight", "x", "0" * 64))
+    other = dataclasses.replace(spec, vision_identity=bad)
+    with pytest.raises(te.EncoderMismatchError,
+                       match=r"v\.post_ln\.weight differ from the tiny"):
+        te.check_mmproj_file(view, other)
+    te.check_mmproj_file(view, other, override=True)
+    with pytest.raises(te.EncoderMismatchError,
+                       match="projects to 64, and the encoder's hidden size "
+                             "is 32"):
+        te.check_mmproj_file(view, dataclasses.replace(spec, hidden=32),
+                             override=True)
+    _mmproj(tmp_path / "llm.gguf", arch="qwen3")
+    with pytest.raises(te.EncoderMismatchError,
+                       match="architecture is 'qwen3', expected a clip"):
+        te.check_mmproj_file(te._header_view(str(tmp_path / "llm.gguf")),
+                             spec, override=True)
+
+
+def test_an_mmproj_is_checked_before_the_tower_loads(monkeypatch):
+    seen = []
+    monkeypatch.setattr(te, "_header_view", lambda path: path)
+    monkeypatch.setattr(te, "check_encoder_file", lambda *a, **k: None)
+
+    def refuse(view, spec, *, override=False):
+        seen.append((view, override))
+        raise te.EncoderMismatchError("not the tower")
+
+    monkeypatch.setattr(te, "check_mmproj_file", refuse)
+    monkeypatch.setattr(te, "_load_owned", lambda *a: seen.append("load"))
+    spec = _spec(vision_type="qwen3_vl")
+    with pytest.raises(te.EncoderMismatchError, match="not the tower"):
+        te.load_encoder("enc.gguf", spec, mmproj="mm.gguf", override=True,
+                        log=lambda *_: None)
+    assert seen == [("mm.gguf", True)]
 
 
 def test_owned_handle_releases_and_a_borrowed_one_does_not():

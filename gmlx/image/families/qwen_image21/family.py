@@ -146,6 +146,20 @@ ENCODER_IDENTITY_SOURCE = (
     "with sha256 108e7ff92b78eefd3db4741885104acba514255c11b617d3c7b197a5"
     "f46efe89")
 
+# Norm tensors that identify the vision tower in the mmproj GGUF, in the
+# same form.
+MMPROJ_IDENTITY = (
+    ("v.blk.0.ln1.weight", "vision_tower.blocks.0.norm1.weight",
+     "e6f31c471b644ea73eeddfb1f2e7de3c9920943b691cde08d117ae42574cf723"),
+    ("v.blk.26.ln2.weight", "vision_tower.blocks.26.norm2.weight",
+     "2a3754a9b47717d80a5907841487308e3af392f0d328b579848a38e943c07047"),
+    ("v.post_ln.weight", "vision_tower.merger.norm.weight",
+     "c9726ac50eb0344e10ce376368440eff0c56a19cf6f1b8d36399e0e3bf5e5ac8"),
+)
+MMPROJ_IDENTITY_SOURCE = (
+    "unsloth/Qwen3-VL-8B-Instruct-GGUF, mmproj-BF16.gguf with sha256 "
+    "6516bb64bae1503a0fcd7ec9fa39655f8c481580be0a0a066397941d9761c9f4")
+
 # A pipeline holds the conditioning states of the request it runs, and
 # beside them up to this much of other requests' states less the bytes of
 # its own. It is both text states of a guided request twice over. The
@@ -353,6 +367,8 @@ def encoder():
         empty=p["empty_prompt"],
         activation="float32",
         vision_type="qwen3_vl",
+        vision_identity=tuple(IdentityTensor(*row) for row in MMPROJ_IDENTITY),
+        vision_identity_source=MMPROJ_IDENTITY_SOURCE,
     )
 
 

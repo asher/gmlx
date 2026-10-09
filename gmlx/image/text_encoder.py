@@ -28,6 +28,7 @@ never released and keeps every weight.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -66,6 +67,8 @@ class EncoderSpec:
                                      # model's own when None
     vision_type: str | None = None   # model_type of the encoder loaded with
                                      # its vision tower, None without one
+    vision_identity: tuple = ()      # IdentityTensor rows of its mmproj
+    vision_identity_source: str = ""
 
     @property
     def template_id(self) -> str:
@@ -288,6 +291,37 @@ def check_encoder_file(view, spec: EncoderSpec, *,
            None if override else file_identity(view, spec))
 
 
+def check_mmproj_file(view, spec: EncoderSpec, *,
+                      override: bool = False) -> None:
+    """Refuse an mmproj GGUF that is not the vision tower of the spec's
+    encoder, from its header before any weights load: a CLIP projector
+    to the encoder's hidden size, then the identity digests of its norm
+    tensors unless ``override`` accepts other weights of the same
+    shape."""
+    kv = view.kv
+    what = f"the mmproj is not the vision tower of {spec.name}"
+    if view.arch != "clip":
+        raise EncoderMismatchError(
+            f"{what}: its architecture is {view.arch!r}, expected a clip "
+            "vision encoder")
+    width = kv.get("clip.vision.projection_dim")
+    if width != spec.hidden:
+        raise EncoderMismatchError(
+            f"{what}: it projects to {width}, and the encoder's hidden size "
+            f"is {spec.hidden}")
+    if override or not spec.vision_identity:
+        return
+    got = file_identity(view, dataclasses.replace(
+        spec, identity=spec.vision_identity))
+    bad = [r.gguf_name for r in spec.vision_identity
+           if got.get(r.gguf_name) != r.sha256]
+    if bad:
+        raise EncoderMismatchError(
+            f"{what}: {', '.join(bad)} differ from "
+            f"{spec.vision_identity_source}. A fine-tuned encoder needs the "
+            "explicit encoder override")
+
+
 def check_encoder(model, config: dict, spec: EncoderSpec, *,
                   override: bool = False) -> None:
     """Refuse a loaded model that is not the family's encoder: its model
@@ -487,6 +521,8 @@ def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
             f"the {spec.name} text encoder takes no mmproj: its family "
             "conditions on no reference images")
     check_encoder_file(_header_view(path), spec, override=override)
+    if mmproj is not None:
+        check_mmproj_file(_header_view(mmproj), spec, override=override)
     model, config, tokenizer, processor, owner = _load_owned(path, mmproj)
     if mmproj is not None:
         config = _vision_config(config, spec)
