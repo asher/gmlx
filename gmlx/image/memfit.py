@@ -90,13 +90,22 @@ GiB = 1 << 30
 @dataclass(frozen=True)
 class StepFit:
     """Footprint of one denoise step over the weights: ``base`` bytes plus
-    ``k`` times the step formula, the rows times the widest outputs per
-    row times the activation itemsize."""
+    ``k`` times the step formula of one row, the image rows times the
+    widest outputs per row times the activation itemsize. Each further row
+    the step evaluates with it adds ``row_k`` times the formula, ``k`` if
+    None. ``read_k`` times the K and V of one block over the prefix rows
+    the step reads adds to it, at most ``read_cap`` bytes."""
     base: float
     k: float
+    row_k: float | None = None
+    read_k: float = 0.0
+    read_cap: float = 0.0
 
-    def bytes(self, formula: float) -> int:
-        return int(self.base + self.k * formula)
+    def bytes(self, formula: float, rows: int = 1, read: float = 0) -> int:
+        more = self.k if self.row_k is None else self.row_k
+        return int(self.base + self.k * formula
+                   + more * (rows - 1) * formula
+                   + min(self.read_k * read, self.read_cap))
 
 
 # One Z-Image-Turbo Q4_K_M step through ``api.sample`` under bounded_cache
@@ -112,17 +121,27 @@ Z_IMAGE_STEP = StepFit(base=1.0 * GiB, k=5.5)
 # on an M5 Max, in fresh processes, over the settled process and less the
 # prefix states of its conditionings. The cells are in
 # tests/fixtures/image/memfit/qwen_image21_cells.json: text requests of
-# 256 to 4096 image rows with 36 to 512 text rows, and requests with one
-# and two reference images of 256, 512 and 1024 pixels and with four of
-# 1024, with and without guidance, each on the stock ops and with the
-# kernel routes in force.
+# 256 to 4096 image rows with 36 to 1000 text rows, guided ones to 9216,
+# and requests with one to four reference images of 256 to 1024 pixels,
+# with and without guidance, on the stock ops and with the kernel routes
+# in force.
 # Two cells of 16384 image rows read 5.63 and 5.34 GiB. A line in the
 # formula bytes through the 4096 and 16384 row cells has a slope of 3.6,
 # raised 10 percent to 4.0 rounded up. The base is 0.25 GiB above every
-# cell on both paths: the stock ops read highest, at 1764 to 2304 image
-# rows with 512 text rows, where the cache holds 1.4 GiB of freed
-# buffers.
-QWEN_IMAGE21_STEP = StepFit(base=1.25 * GiB, k=4.0)
+# text cell on both paths.
+# The second row of a guided step runs after the first in the same
+# evaluation and reuses its freed buffers: one row at a time reads 0.07
+# and 0.13 GiB under two rows together, 0.29 and 0.33 of the formula of
+# a row. The slope of the second row is 0.5.
+# On the stock ops a step that reads a long prefix keeps more freed
+# buffers in the cache: up to 0.88 GiB over the line above, at 5096
+# prefix rows and 1600 image rows, where it is 11.3 times the K and V of
+# one block over the prefix rows. The cache bound holds it past that, and
+# at 16896 prefix rows it is gone. The term is 16 times, at
+# most 1 GiB, which leaves 0.25 GiB over every cell. The kernel routes
+# read at most 0.31 GiB over the line, and the one fit prices both.
+QWEN_IMAGE21_STEP = StepFit(base=1.25 * GiB, k=4.0, row_k=0.5, read_k=16.0,
+                            read_cap=1.0 * GiB)
 
 # The first step of a Qwen-Image 2.1 request comes after the prefill of
 # its conditionings, whose freed buffers the cache still holds. In the
@@ -425,10 +444,13 @@ class PeakRow:
     mmproj_fp32: bool = False       # the encoder's load casts the float
                                     # tensors of its mmproj to float32
 
-    def step_peak(self, step: int, prefill: int) -> int:
+    def step_peak(self, step: int, prefill: int, rows: int = 1,
+                  read: int = 0) -> int:
         """Bytes of the wider of a step and a prefill, from the formula
-        bytes of each."""
-        return max(self.step.bytes(step),
+        bytes of each: ``step`` of one row of the ``rows`` a step
+        evaluates together, which read ``read`` bytes of one block's
+        prefix K and V."""
+        return max(self.step.bytes(step, rows, read),
                    (self.prefill or self.step).bytes(prefill))
 
 
@@ -448,8 +470,8 @@ PEAKS = {
     # under guidance the scores of a step are 6.3 GiB, and the step reads
     # 3.5 GiB above its states. A reference token holds exactly its cache
     # bytes, 2 x 32 x 4096 elements, per conditioning. An encode with
-    # reference images reads up to 1.44 GiB above the encoder at one
-    # 512 pixel reference and 1.98 GiB at two of 1024 pixels with 600 text
+    # reference images reads up to 0.76 GiB above the encoder at two 512
+    # pixel references and 1.31 GiB at two of 1024 pixels with 600 text
     # rows, the vision tower's pass over one image being the peak.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
                             width=24576 + 12288, step=QWEN_IMAGE21_STEP,
@@ -767,10 +789,12 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         # The image rows the encoder runs beside the text.
         slots = (counted - text) // row.prefix.slot_tokens
     given = [] if prefix_rows is None else [int(n) for n in prefix_rows]
-    per = [prefix_row_terms(row, rows, n, act)
-           for n in (given + [counted] * conds)[:conds]]
+    mine = (given + [counted] * conds)[:conds]
+    per = [prefix_row_terms(row, rows, n, act) for n in mine]
     own = per[0][0] if prefix_shared else sum(p[0] for p in per)
     step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
+    read = (0 if row.prefix is None
+            else row.prefix.join_bytes(max(mine), act))
     terms["prefix_cache"] = own + min(int(prefix_other),
                                       max(0, int(prefix_bound) - own))
     def price(op: str, tiled: bool, h: int = height, w: int = width) -> int:
@@ -803,7 +827,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     def build(b: int, release: bool, tiled: bool, levers: tuple,
               staged: bool = False) -> MemoryPlan:
         t = dict(terms)
-        t["step_peak"] = row.step_peak(b * step_one, prefill)
+        t["step_peak"] = row.step_peak(step_one, prefill, b, read)
         t["decode_peak"] = decode[tiled]
         t["encode_peak"] = int(encode_peak)
         resident = sum(t[n] for n in ("dit", "encoder", "vae", "mmproj",

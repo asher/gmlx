@@ -112,7 +112,8 @@ def test_a_qwen_step_holds_the_joined_keys_and_the_prefill(q_view):
     # Text to image: 4096 target rows over the K and V of 512 text rows.
     p = plan_memory(q_view, 0, 0, **kw)
     assert p.terms["prefix_cache"] == 2 * 32 * 512 * 4096 * 2 == GiB // 4
-    assert p.terms["step_peak"] == row.step.bytes(image + join(512 + 4096))
+    assert p.terms["step_peak"] == row.step.bytes(image + join(512 + 4096),
+                                                  1, join(512))
     assert p.phases["denoise"] == (p.terms["dit"] + p.terms["prefix_cache"]
                                    + p.terms["step_peak"])
     assert memfit.prefix_terms(row, 4096, 512, 0, 0, 2) == (
@@ -127,15 +128,16 @@ def test_a_qwen_step_holds_the_joined_keys_and_the_prefill(q_view):
     assert row.prefill.bytes(prefill) > row.step.bytes(step)
     p = plan_memory(q_view, 0, 0, refs=2, ref_px=1024, cfg=4.0, **kw)
     assert p.rows == 2
-    assert p.terms["step_peak"] == row.step_peak(2 * step, prefill)
+    assert p.terms["step_peak"] == row.step_peak(step, prefill, 2,
+                                                 join(prefix))
     assert p.terms["prefix_cache"] == 2 * 32 * prefix * 4096 * 2 * 2
     # One 512 pixel reference under guidance: the two rows of a step are
     # the term.
     prefix = 512 + 1024
     step, prefill = image + join(prefix + 4096), prefix * 36864 * 2
     p = plan_memory(q_view, 0, 0, refs=1, ref_px=512, cfg=4.0, **kw)
-    assert p.terms["step_peak"] == row.step.bytes(2 * step)
-    assert row.step.bytes(2 * step) > row.prefill.bytes(prefill)
+    assert p.terms["step_peak"] == row.step.bytes(step, 2, join(prefix))
+    assert row.step.bytes(step, 2, join(prefix)) > row.prefill.bytes(prefill)
     # A family without a prefix has neither term.
     z = memfit.PEAKS["z_image"]
     assert memfit.prefix_terms(z, 4128, 512, 2, 1024, 2) == (
@@ -184,8 +186,9 @@ def test_prefix_rows_of_the_conditionings_replace_the_counts(q_view,
         g = plan_memory(q_view, 0, 0, cfg=4.0, prefix_rows=rows, **kw)
         assert g.rows == 2
         assert g.terms["prefix_cache"] == pos[0] + neg[0]
-        assert g.terms["step_peak"] == max(row.step.bytes(2 * pos[1]),
-                                           row.prefill.bytes(pos[2]))
+        assert g.terms["step_peak"] == max(
+            row.step.bytes(pos[1], 2, row.prefix.join_bytes(4608, 2)),
+            row.prefill.bytes(pos[2]))
     # A conditioning the request does not name counts as text rows, and
     # one it does not run is left out.
     h = plan_memory(q_view, 0, 0, cfg=4.0, prefix_rows=[4608], **kw)
@@ -629,10 +632,12 @@ def _qwen_cells() -> list[dict]:
     for c in doc["cells"]:
         image = (c["height"] // 16) * (c["width"] // 16)
         prefix = c["text_rows"] + c["refs"] * (c["ref_px"] // 16) ** 2
-        cells.append(dict(c, image=image, prefix=prefix,
-                          conds=2 if c["guided"] else 1))
+        conds = 2 if c["guided"] else 1
+        cells.append(dict(c, image=image, prefix=prefix, conds=conds,
+                          rows=c.get("rows", conds)))
     for text, gib in MEASURED_QWEN_STEP_2048.items():
-        cells.append(dict(image=16384, prefix=text, conds=1, routes=[],
+        cells.append(dict(image=16384, prefix=text, conds=1, rows=1,
+                          routes=[],
                           refs=0, ref_px=0, guided=False, steps_gib=[gib],
                           state_bytes=text * 2 * 32 * 4096 * 2,
                           prefill_gib=None))
@@ -646,7 +651,8 @@ def _room(row, cell: dict) -> tuple[float, float]:
         row, cell["image"], cell["prefix"], 2)
     assert state == cell["state_bytes"]
     n = cell["conds"]
-    plan = n * state + row.step_peak(n * step, prefill)
+    read = row.prefix.join_bytes(cell["prefix"], 2)
+    plan = n * state + row.step_peak(step, prefill, cell["rows"], read)
     alone = math.inf
     if cell["prefill_gib"] is not None:
         alone = (state + (row.prefill or row.step).bytes(prefill)
@@ -660,15 +666,23 @@ def test_the_qwen_rows_cover_every_measured_cell():
     assert row.prefill is memfit.QWEN_IMAGE21_PREFILL
     cells = _qwen_cells()
     # Both paths, text requests and requests with references, guided and
-    # not, are among the cells.
-    for routes in (True, False):
+    # not, are among the cells, with one to four references.
+    for routes, counts in ((True, (50, 34, 35)), (False, (93, 30, 80))):
         mine = [c for c in cells if bool(c["routes"]) is routes]
-        assert sum(1 for c in mine if not c["refs"]) >= 44
-        assert sum(1 for c in mine if c["refs"] and c["guided"]) == 25
-        assert sum(1 for c in mine if c["refs"] and not c["guided"]) == 25
-        assert {(c["refs"], c["ref_px"]) for c in mine if c["refs"]} == {
-            (n, px) for n in (1, 2) for px in (256, 512, 1024)} | {
-            (4, 1024)}
+        assert (sum(1 for c in mine if not c["refs"]),
+                sum(1 for c in mine if c["refs"] and c["guided"]),
+                sum(1 for c in mine if c["refs"] and not c["guided"])) == \
+            counts
+        sizes = {(c["refs"], c["ref_px"]) for c in mine if c["refs"]}
+        assert {(n, px) for n in (1, 2) for px in (256, 512, 1024)} | {
+            (4, 1024)} <= sizes
+        assert any(n == 3 for n, _ in sizes)
+    # On the stock ops, one reference of 544 to 736 pixels, where a step
+    # reads a long prefix.
+    assert {px for c in cells if not c["routes"] and c["refs"] == 1
+            for px in [c["ref_px"]]} >= set(range(544, 737, 32))
+    # Two guided requests planned one row at a time.
+    assert sum(1 for c in cells if c["conds"] == 2 and c["rows"] == 1) == 2
     for c in cells:
         step, alone = _room(row, c)
         assert step >= ROOM and alone >= ROOM, c
@@ -677,9 +691,9 @@ def test_the_qwen_rows_cover_every_measured_cell():
     # to 4096 image rows, and within 1.5 GiB at 16384.
     text = [c for c in cells if not c["refs"] and not c["routes"]]
     assert max(_room(row, c)[0] for c in text
-               if c["image"] <= 4096) <= 1.0 * GiB
+               if c["image"] <= 4096) <= 1.25 * GiB
     assert max(_room(row, c)[0] for c in text) <= 1.5 * GiB
-    assert min(_room(row, c)[0] for c in cells) <= 0.3 * GiB
+    assert min(_room(row, c)[0] for c in cells) <= 0.35 * GiB
 
 
 def test_a_thinner_qwen_row_misses_a_measured_cell():
@@ -691,20 +705,56 @@ def test_a_thinner_qwen_row_misses_a_measured_cell():
         return min(min(_room(thin, c)) for c in cells)
 
     assert worst() >= ROOM
-    # The step base the stock ops read over, at 1936 image rows with 512
-    # text rows.
-    for base in (0.9, 1.0):
-        assert worst(step=memfit.StepFit(base * GiB, 4.0)) < 0.05 * GiB
-    assert worst(step=memfit.StepFit(0.9 * GiB, 4.0)) < 0
-    # The prefill fit of another family, and the step's own fit, leave
-    # the first step after the prefill of one 1024 pixel reference no
-    # room.
-    assert worst(prefill=memfit.Z_IMAGE_STEP) < 0.05 * GiB
+    step = row.step
+
+    def thin(**change) -> float:
+        return worst(step=dataclasses.replace(step, **change))
+
+    # The step base the stock ops read over.
+    assert thin(base=1.1 * GiB) < ROOM and thin(base=1.0 * GiB) < 0.1 * GiB
+    # Without the term of the prefix a step reads, a step on the stock ops
+    # at 736x736 with 1000 text rows and one 640 pixel reference is over
+    # its plan; with half the term or a lower bound there is no room.
+    assert thin(read_k=0.0) < 0
+    assert thin(read_k=8.0) < 0.05 * GiB
+    assert thin(read_cap=0.6 * GiB) < ROOM
+    # The second row of a guided step is not free.
+    assert thin(row_k=0.0) < ROOM
+    # The prefill fit of another family, the step's own fit, or none
+    # leave the first step after the prefill of one 1024 pixel reference
+    # less than the room.
+    assert worst(prefill=memfit.Z_IMAGE_STEP) < ROOM
     assert worst(prefill=memfit.StepFit(1.25 * GiB, 5.5)) < ROOM
-    assert worst(prefill=None) < 0.05 * GiB
+    assert worst(prefill=None) < ROOM
     # Both under the rows that were in force before these cells.
     assert worst(step=memfit.StepFit(1.0 * GiB, 4.0),
                  prefill=memfit.Z_IMAGE_STEP) < -0.1 * GiB
+
+
+def test_the_one_row_lever_frees_what_its_cells_measured():
+    """A guided request planned one row at a time reads 0.07 and 0.13 GiB
+    under its two rows together. The plan credits the lever within
+    0.1 GiB of that, and both plans stay above their cells."""
+    row = memfit.PEAKS["qwen_image21"]
+    cells = _qwen_cells()
+    pairs = 0
+    for one in (c for c in cells if c["conds"] == 2 and c["rows"] == 1):
+        boths = [c for c in cells if c["rows"] == 2 and all(
+            c[k] == one[k] for k in ("width", "height", "text_rows", "refs",
+                                     "ref_px", "routes"))]
+        assert boths
+        both = max(boths, key=lambda c: max(c["steps_gib"]))
+        saved = (max(both["steps_gib"]) - max(one["steps_gib"])) * GiB
+        assert 0.05 * GiB < saved < 0.15 * GiB
+        _, step, prefill = memfit.prefix_row_terms(row, one["image"],
+                                                    one["prefix"], 2)
+        read = row.prefix.join_bytes(one["prefix"], 2)
+        credit = (row.step_peak(step, prefill, 2, read)
+                  - row.step_peak(step, prefill, 1, read))
+        assert abs(credit - saved) < 0.1 * GiB, (credit / GiB, saved / GiB)
+        assert min(_room(row, one)) >= ROOM and min(_room(row, both)) >= ROOM
+        pairs += 1
+    assert pairs == 2
 
 
 def test_a_reference_token_holds_its_cache_bytes():
@@ -743,12 +793,12 @@ def test_a_prefill_keeps_its_own_fit(q_view):
 
 # MLX peak in GiB of one Qwen3-VL-8B Q4_K_M encode over the encoder with
 # its tower, on an M5 Max in fresh processes, by (references, reference
-# side, feature rows). The tower ran on the GPU with float32 products
-# exact, the arm that reads higher.
-MEASURED_QWEN_ENCODE = {(0, 0, 614): 0.51, (1, 256, 82): 0.48,
-                        (2, 256, 754): 0.67, (1, 512, 274): 1.44,
-                        (2, 512, 1138): 1.46, (1, 1024, 1042): 1.91,
-                        (2, 1024, 2674): 1.98}
+# side, feature rows). The tower ran on the GPU with split float32
+# products, one block at a time.
+MEASURED_QWEN_ENCODE = {(0, 0, 614): 0.51, (1, 256, 82): 0.46,
+                        (2, 256, 754): 0.67, (1, 512, 274): 0.38,
+                        (2, 512, 1138): 0.77, (1, 1024, 1042): 1.25,
+                        (2, 1024, 2674): 1.32}
 
 
 def test_the_encode_phase_counts_the_image_rows_and_the_tower(q_view):
@@ -766,9 +816,9 @@ def test_the_encode_phase_counts_the_image_rows_and_the_tower(q_view):
             assert p.terms["encode_peak"] >= gib * GiB + ROOM, (refs, side)
         else:
             assert p.terms["encode_peak"] >= gib * GiB
-    # Without the tower term the encode of one 512 pixel reference is
+    # Without the tower term the encode of one 1024 pixel reference is
     # under its reading.
-    assert 274 * row.encode_row_bytes * memfit.ENCODE_LIVE < 1.44 * GiB
+    assert 1042 * row.encode_row_bytes * memfit.ENCODE_LIVE < 1.25 * GiB
     # A family without references has no such term.
     assert memfit.PEAKS["z_image"].encode_tower_bytes == 0
 
@@ -948,9 +998,9 @@ def test_a_16_gib_machine_runs_qwen_image_staged(q_view, size, cfg, refs):
 
 
 @pytest.mark.parametrize("size, cfg, refs, phase, peak", [
-    (512, 4.0, (512,), "decode", 8.92), (1024, 4.0, (512,), "decode", 8.95),
+    (512, 4.0, (512,), "decode", 8.92), (1024, 4.0, (512,), "denoise", 9.14),
     (512, 1.0, (512,), "encode", 8.69), (1024, 1.0, (1024,), "denoise",
-                                         10.10)])
+                                         10.70)])
 def test_a_16_gib_machine_refuses_the_larger_qwen_edits(q_view, size, cfg,
                                                         refs, phase, peak):
     with pytest.raises(ImageMemoryError) as e:
