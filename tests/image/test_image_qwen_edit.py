@@ -347,6 +347,16 @@ def test_a_split_product_is_float32_in_this_process():
     high, low = edit._split(mx.array(a))
     assert not (np.array(high).view(np.uint32) & 0x1FFF).any()
     assert np.array_equal(np.array(high + low), a)
+    # A matrix read from bfloat16 is its own high part: the product that
+    # leaves it whole is the split product, bit for bit.
+    b16 = mx.array(b).astype(mx.bfloat16).astype(mx.float32)
+    assert edit.tf32_exact(b16).item() and not edit.tf32_exact(
+        mx.array(b)).item()
+    for t in (False, True):
+        w = b16.T if t else b16
+        assert mx.array_equal(
+            edit.exact_matmul(mx.array(a), w, b_t=t, b_exact=True),
+            edit.exact_matmul(mx.array(a), w, b_t=t)).item()
 
 
 def _linears(module) -> dict:
@@ -366,12 +376,14 @@ def test_the_tower_computes_float32_where_it_runs(handle, refs, monkeypatch,
                                                   products, attention, where):
     """The tower runs on the default device as it is where float32
     products are exact. Where they are at TF32 its float32 linear layers
-    split each product while it runs and only then, or, where the fused
-    attention is not float32 at its head size, it runs on the CPU."""
+    split each product and its blocks are evaluated one at a time while it
+    runs and only then, or, where the fused attention is not float32 at
+    its head size, it runs on the CPU."""
     seen = []
     tower = handle.model.vision_tower
     leaves = _linears(tower)
-    assert leaves
+    blocks = list(tower.blocks)
+    assert leaves and blocks
 
     class Watched(nn.Module):
         def __init__(self):
@@ -379,7 +391,9 @@ def test_the_tower_computes_float32_where_it_runs(handle, refs, monkeypatch,
             self.inner = tower
 
         def __call__(self, pixels, grid):
-            kinds = {type(m) for p, m in tower.named_modules() if p in leaves}
+            kinds = {type(m) for m in tower.modules()
+                     if isinstance(m, (nn.Linear, edit.ExactLinear))}
+            kinds |= {type(b) for b in tower.blocks}
             seen.append((mx.default_stream(mx.default_device()), kinds))
             return tower(pixels, grid)
 
@@ -389,19 +403,30 @@ def test_the_tower_computes_float32_where_it_runs(handle, refs, monkeypatch,
     edit.encode(handle, "x", refs)
     stream = mx.default_stream(mx.cpu if where == "cpu"
                                else mx.default_device())
-    kind = edit.ExactLinear if where == "split" else nn.Linear
-    assert seen == [(stream, {kind})] * 2
+    kinds = ({edit.ExactLinear, edit.EvaluatedBlock} if where == "split"
+             else {nn.Linear, type(blocks[0])})
+    assert seen == [(stream, kinds)] * 2
     assert _linears(tower) == leaves
+    assert all(a is b for a, b in zip(tower.blocks, blocks, strict=True))
 
 
-def test_the_split_tower_is_the_float32_tower_on_this_device(refs):
+@pytest.mark.parametrize("bf16", [False, True], ids=["float32", "bfloat16"])
+def test_the_split_tower_is_the_float32_tower_on_this_device(refs, bf16):
     """At the head size of the Qwen3-VL tower, 72, the fused attention is
     float32 on this device, and the tower on the default device gives the
-    outputs of the tower on the CPU to float32 rounding. On a device that
-    multiplies float32 at TF32, the tower without the split does not."""
+    outputs of the tower on the CPU to float32 rounding, with weights of
+    full float32 or read from bfloat16, which are not split. On a device
+    that multiplies float32 at TF32, the tower without the split does
+    not."""
+    from mlx.utils import tree_map
+
     model, proc = _tiny_qwen3_vl(hidden_size=144, num_heads=2,
                                  intermediate_size=96)
     tower = model.vision_tower
+    if bf16:
+        tower.update(tree_map(
+            lambda a: a.astype(mx.bfloat16).astype(mx.float32)
+            if a.dtype == mx.float32 else a, tower.parameters()))
     assert edit._head_dims(tower) == {72}
     assert edit.sdpa_exact(72)
     h = te.EncoderHandle(model, _Tokenizer(), _spec(), owned=True,
@@ -415,6 +440,10 @@ def test_the_split_tower_is_the_float32_tower_on_this_device(refs):
         with edit.float32_products(tower):
             f, d = tower(pixels, grid)
             got = [f, *d]
+            split = [m for _, m in tower.named_modules()
+                     if isinstance(m, edit.ExactLinear)]
+        if not edit.f32_products_exact():
+            assert split and {m.weight_exact for m in split} == {bf16}
         assert max(_gap(g, w) for g, w in zip(got, want)) < 1e-5
         if not edit.f32_products_exact():
             f, d = tower(pixels, grid)
@@ -436,14 +465,18 @@ def test_the_attention_check_reads_the_device(monkeypatch):
 def test_the_split_layers_go_back_when_the_tower_raises(handle, monkeypatch):
     tower = handle.model.vision_tower
     before = _linears(tower)
+    blocks = list(tower.blocks)
     monkeypatch.setattr(edit, "f32_products_exact", lambda: False)
     monkeypatch.setattr(edit, "sdpa_exact", lambda d: True)
     with pytest.raises(RuntimeError, match="stop"):
         with edit.float32_products(tower):
-            assert {type(m) for p, m in tower.named_modules()
-                    if p in before} == {edit.ExactLinear}
+            assert {type(m) for m in tower.modules() if isinstance(
+                m, (nn.Linear, edit.ExactLinear))} == {edit.ExactLinear}
+            assert all(w.block is b for w, b in zip(tower.blocks, blocks,
+                                                    strict=True))
             raise RuntimeError("stop")
     assert _linears(tower) == before
+    assert all(a is b for a, b in zip(tower.blocks, blocks, strict=True))
     assert {type(m) for p, m in tower.named_modules()
             if p in before} == {nn.Linear}
 

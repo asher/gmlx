@@ -88,12 +88,26 @@ def _split(a: mx.array) -> tuple[mx.array, mx.array]:
     return high, a - high
 
 
-def exact_matmul(a: mx.array, b: mx.array, *, b_t: bool = False) -> mx.array:
+def tf32_exact(a: mx.array) -> mx.array:
+    """Whether every value of float32 ``a`` is its own high part, as the
+    values of a bfloat16 tensor read as float32 are."""
+    low = mx.bitwise_and(mx.view(a, mx.uint32),
+                         mx.array(~_TF32_HIGH & 0xFFFFFFFF, mx.uint32))
+    return mx.all(low == 0)
+
+
+def exact_matmul(a: mx.array, b: mx.array, *, b_t: bool = False,
+                 b_exact: bool = False) -> mx.array:
     """``a @ b`` in float32, or ``a @ b.T`` with ``b_t``, at float32
     precision on a device that multiplies float32 at TF32: the product of
     the high parts and the two cross products. The product of the two low
-    parts is under the rounding of a float32."""
+    parts is under the rounding of a float32. With ``b_exact``, ``b`` is
+    its own high part and its cross product is zero, so ``b`` is not
+    split."""
     ah, al = _split(a)
+    if b_exact:
+        bh = b.T if b_t else b
+        return ah @ bh + al @ bh
     bh, bl = _split(b)
     if b_t:
         bh, bl = bh.T, bl.T
@@ -102,17 +116,35 @@ def exact_matmul(a: mx.array, b: mx.array, *, b_t: bool = False) -> mx.array:
 
 class ExactLinear(nn.Module):
     """A float32 linear layer computed with ``exact_matmul``. It holds the
-    arrays of the layer it stands for."""
+    arrays of the layer it stands for, and whether its weight is its own
+    high part."""
 
-    def __init__(self, linear: nn.Linear):
+    def __init__(self, linear: nn.Linear, weight_exact: bool = False):
         super().__init__()
         self.weight = linear.weight
         if "bias" in linear:
             self.bias = linear.bias
+        self.weight_exact = weight_exact
 
     def __call__(self, x: mx.array) -> mx.array:
-        y = exact_matmul(x, self.weight, b_t=True)
+        y = exact_matmul(x, self.weight, b_t=True,
+                         b_exact=self.weight_exact)
         return y + self.bias if "bias" in self else y
+
+
+class EvaluatedBlock(nn.Module):
+    """A block whose output is evaluated before the next block runs, so
+    the temporaries of the split products of one block are released
+    before those of the next are made."""
+
+    def __init__(self, block: nn.Module):
+        super().__init__()
+        self.block = block
+
+    def __call__(self, *args, **kwargs):
+        out = self.block(*args, **kwargs)
+        mx.eval(out)
+        return out
 
 
 _SDPA_EXACT: dict = {}              # by default device and head size
@@ -148,8 +180,9 @@ def _head_dims(module) -> set:
 def float32_products(module):
     """Inside the block, ``module`` computes at float32 precision on a
     device that multiplies float32 at TF32: its float32 linear layers
-    split each product, or, where the fused attention is not float32 at
-    its head size, it runs on the CPU. On a device that multiplies
+    split each product and its blocks are evaluated one at a time, or,
+    where the fused attention is not float32 at its head size, it runs on
+    the CPU. On a device that multiplies
     float32 exactly, nothing changes. The layers are back as they were
     after the block."""
     if f32_products_exact():
@@ -171,11 +204,21 @@ def float32_products(module):
                 found.append((path, m))
 
         module.apply_to_modules(visit)
+        # A weight read from bfloat16 is its own high part: its split
+        # would only add a copy of it the size of the weight. Each check
+        # runs alone, so one weight's temporary is live at a time.
         module.update_modules(tree_unflatten(
-            [(p, ExactLinear(m)) for p, m in found]))
+            [(p, ExactLinear(m, tf32_exact(m.weight).item()))
+             for p, m in found]))
+        stacks = [(m, m.blocks) for _, m in module.named_modules()
+                  if isinstance(m.get("blocks"), list)]
+        for m, blocks in stacks:
+            m.blocks = [EvaluatedBlock(b) for b in blocks]
         try:
             yield module
         finally:
+            for m, blocks in stacks:
+                m.blocks = blocks
             module.update_modules(tree_unflatten(found))
 
 
