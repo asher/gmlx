@@ -1043,6 +1043,13 @@ def tile_overlap(family: str, op: str, tile: int = TILE_PX,
     return max(int(overlap), 2 * reach * scale)
 
 
+def _priced_path(conv: str) -> str:
+    """The conv path whose fits price ``conv``. The kq path writes no patch
+    buffer, and its decodes measured below the exact path's, so it takes
+    the exact path's fits."""
+    return "exact" if conv == "kq" else conv
+
+
 def unmeasured_bytes(steps, weights: int, conv: str = "exact") -> int:
     """The price of a VAE pass on an unmeasured row. This is the one rule
     for such a row, whole or in tiles.
@@ -1065,7 +1072,7 @@ def unmeasured_bytes(steps, weights: int, conv: str = "exact") -> int:
     can hold more than this ratio of its floor, so ``vae_tiling`` never
     picks a whole pass on an unmeasured row for an image larger than one
     tile."""
-    ratio = UNMEASURED_RATIO[conv]
+    ratio = UNMEASURED_RATIO[_priced_path(conv)]
     return int(max(ratio * (device + softmax) + host
                    for _, device, softmax, host in steps)
                + weights + CACHE_BOUND)
@@ -1090,6 +1097,7 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
     row = vae_row(family)
     if conv is None:
         from gmlx.image.vae.conv import CONV as conv
+    conv = _priced_path(conv)
     if tiled and (height > tile or width > tile):
         overlap = tile_overlap(family, op, tile, overlap, config)
     if not row.measured:

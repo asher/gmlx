@@ -153,18 +153,34 @@ fusions.
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |
 | `GMLX_LORA_EPILOGUE` | Where a dense LoRA layer on a K-quant base adds its delta. `auto` picks the in-kernel path by GPU class, rank and row count. `always` and `never` force a path. |
 | `GMLX_IMAGE_LORA_PLACEMENT` | How image LoRA pairs for q, k or v run on a fused `qkv` weight: `block` (default) as one block-diagonal pair, `slice` per band, `split` with a split base. |
-| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image q and k norm with RoPE, the gate product and a K-quant layer under a LoRA on stock ops, not mlx-kquant kernels. `glu,qk` keeps those two. |
+| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image ops that have mlx-kquant kernels on stock ops. `glu,qk` keeps those two routes; the routes are in the table below. |
 
 The image routes are on when the installed mlx-kquant has the kernels, and
 `GMLX_IMAGE_KQ_ROUTES` is read once, when the image pipeline is imported.
-It takes `0`, `1`, or a comma list of the routes `qk`, `glu` and `lora`
-to keep; another value warns and keeps every route.
+It takes `0`, `1`, or a comma list of the routes to keep; another value
+warns and keeps every route.
+
+| Route | What runs on an mlx-kquant kernel |
+|---|---|
+| `qk` | The q and k norm with RoPE |
+| `glu` | The gate and up products of a Z-Image feed-forward with their swiglu |
+| `lora` | A K-quant layer under a LoRA with its delta |
+| `resid` | The Qwen-Image 2.1 attention output and MLP output products with the gated residual add after each |
+| `conv` | The 3x3 convs of the VAE on the default `kq` conv path, in bfloat16 |
+
 An image at a fixed seed differs between the kernels and the stock ops.
 The difference is rounding, not an error. mlx-kquant's own switches
 (`KQ_GLU`, `KQ_GLU_MIN_ROWS`, `KQ_GLU_BK`) act below the route: when one
 makes the op compose its two products, gmlx still hands the pair to the op
 and its records name the kernel. `KQ_QMM_LORA` and `KQ_QMM_LORA_MIN_ROWS`
-do the same below the `lora` route.
+do the same below the `lora` route, `KQ_QMM_RESID` below the `resid` route
+and `KQ_CONV_NAX` below the `conv` route.
+
+The `resid` route takes a layer with no bias in `Q4_K`, `Q5_K`, `Q6_K` or
+`Q8_0` on bfloat16 activations. The op rounds once over the rows of the
+whole batch, so with guidance above 1 the two rows of a step can differ in
+the last bit from one row run alone. With the `conv` route off, the `kq`
+conv path runs as the `exact` one.
 
 The `lora` route takes a K-quant layer under an adapter when its codec is
 `Q4_K`, `Q5_K` or `Q6_K`, its input is at most 4096 wide and its output at

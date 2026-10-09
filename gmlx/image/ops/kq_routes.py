@@ -7,15 +7,18 @@ when the installed mlx-kquant has the op. ``glu_pair`` and ``swiglu_fused``
 run the gate and up products of a feed-forward and their swiglu as one
 kernel over two K-quant weights. ``lora_leaf`` and ``lora_fused`` run the
 product of a K-quant leaf and the low-rank term of its adapter as one op.
-A call that a kernel does not take runs the stock ops, and so does every
-call on an mlx-kquant without the op.
+``resid_leaf`` and ``resid_fused`` run the product of a K-quant leaf and
+the gated residual add after it as one op, and ``conv3x3`` runs a 3x3 VAE
+conv on the "kq" conv path. A call that a kernel does not take runs the
+stock ops, and so does every call on an mlx-kquant without the op.
 
 No kernel has a gradient with respect to a weight, and the qk kernel has
 none at all, so ``mx.grad`` through a routed qk call raises. The image
 pipeline is inference only.
 
 GMLX_IMAGE_KQ_ROUTES=0 keeps every route on stock ops, and a comma list
-of ``qk``, ``glu`` and ``lora`` keeps those routes alone. It is read once,
+of ``qk``, ``glu``, ``lora``, ``resid`` and ``conv`` keeps those routes
+alone. It is read once,
 at import.
 ``only`` puts a set of routes in force for a block, for a check that reads
 the stock ops and the kernels in one process. The routes in force are
@@ -35,7 +38,7 @@ from gmlx.envflags import _BOOL_FALSE, _BOOL_TRUE
 
 from . import attention
 
-ROUTES = ("qk", "glu", "lora")
+ROUTES = ("qk", "glu", "lora", "resid", "conv")
 
 
 def wanted(raw: str | None) -> tuple:
@@ -90,6 +93,10 @@ _LORA_MIN_N = 8192
 _LORA_MIN_ROWS = 1024
 _LORA_MAX_RANKS = 256
 _LORA_MAX_BANDS = 16
+# The codecs mlx-kquant's quantized_matmul_residual has a kernel for, on
+# bfloat16 activations. The op composes every other call from its unfused
+# ops, which the stock ops already are.
+_RESID_CODECS = ("q4_k", "q5_k", "q6_k", "q8_0")
 
 _OPS: dict = {}
 _active: frozenset = frozenset()
@@ -166,6 +173,10 @@ def install(routes=None) -> frozenset:
         on.add("glu")
     if "lora" in want and _kq_op("quantized_matmul_lora") is not None:
         on.add("lora")
+    if "resid" in want and _kq_op("quantized_matmul_residual") is not None:
+        on.add("resid")
+    if "conv" in want and _kq_op("conv2d_3x3") is not None:
+        on.add("conv")
     ns.qk_norm_rope = qk_norm_rope if "qk" in on else attention.qk_norm_rope
     _active = frozenset(on)
     return _active
@@ -346,3 +357,68 @@ def lora_fused(x: mx.array, base, a_t: mx.array, b_t: mx.array,
     return _kq_op("quantized_matmul_lora")(
         x, base["weight"], base.kquant_type, a_t, b_t, strength=strength,
         bands=bands)
+
+
+def resid_leaf(lin, x: mx.array, residual: mx.array, gate: mx.array):
+    """The K-quant leaf of ``lin`` when ``resid_fused`` takes
+    ``residual + gate * lin(x)``, else None, and the caller then composes
+    the product and the gated add. The kernel takes a leaf with no bias and
+    no live LoRA delta in a codec it is built for, a bfloat16 x, residual
+    and gate, a residual of the output shape and a gate of shape (N,) or
+    x's batch dims, then 1, then N, on a GPU with tensor ops."""
+    if "resid" not in _active or x.ndim < 2 or x.dtype != mx.bfloat16:
+        return None
+    if residual.dtype != x.dtype or gate.dtype != x.dtype:
+        return None
+    if not _gpu() or not _nax():
+        return None
+    leaf = kquant_leaf(lin, x.dtype)
+    if leaf is None or "bias" in leaf or leaf.kquant_type not in _RESID_CODECS:
+        return None
+    n = leaf["weight"].shape[0]
+    if tuple(residual.shape) != (*x.shape[:-1], n):
+        return None
+    if tuple(gate.shape) not in ((n,), (*x.shape[:-2], 1, n)):
+        return None
+    return leaf
+
+
+def resid_fused(x: mx.array, leaf, residual: mx.array,
+                gate: mx.array) -> mx.array:
+    """``residual + gate * (x @ W^T)`` over the wire bytes of the K-quant
+    leaf ``leaf``, for a leaf that ``resid_leaf`` returned. From 1024 rows
+    counted across the batch the kernel adds the gated product in fp32 and
+    rounds once, where the stock ops round the product and the gated
+    product, so a batch of two can differ in the last bit from each row on
+    its own. No gradient with respect to the weight."""
+    return _kq_op("quantized_matmul_residual")(
+        x, leaf["weight"], leaf.kquant_type, residual, gate=gate)
+
+
+def _pair(v) -> tuple:
+    return tuple(v) if isinstance(v, (tuple, list)) else (v, v)
+
+
+def conv3x3(x: mx.array, weight: mx.array, bias, stride, padding, dilation,
+            groups: int):
+    """The conv of ``x`` and an (O, 3, 3, C) ``weight`` plus ``bias`` on
+    mlx-kquant's ``conv2d_3x3``, or None, and the caller then runs the
+    exact path. The route takes a 3x3 kernel at stride 1, padding 1, no
+    dilation and one group, with x, the weight and the bias in bfloat16 and
+    C on a multiple of 16, on the GPU. The kernel sums in fp32, adds the
+    bias in fp32 and rounds once; outside its own dispatch the op runs the
+    exact path."""
+    if "conv" not in _active or x.ndim != 4 or x.dtype != mx.bfloat16:
+        return None
+    if (tuple(weight.shape[1:3]) != (3, 3) or _pair(stride) != (1, 1)
+            or _pair(padding) != (1, 1) or _pair(dilation) != (1, 1)
+            or groups != 1):
+        return None
+    c = x.shape[-1]
+    if weight.dtype != x.dtype or weight.shape[-1] != c or c % 16:
+        return None
+    if bias is not None and bias.dtype != x.dtype:
+        return None
+    if not _gpu():
+        return None
+    return _kq_op("conv2d_3x3")(x, weight, bias=bias)

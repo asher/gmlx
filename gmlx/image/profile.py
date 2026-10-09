@@ -11,7 +11,9 @@ A feed-forward pair on the fused kernel books one ``swiglu_fused`` record
 in place of its two leaf calls and their ``swiglu``, under the path that
 ``swiglu`` record takes. A K-quant leaf whose product and adapter delta
 run on the low-rank op books one ``lora_fused`` record in place of its
-leaf call, under the leaf's path.
+leaf call, under the leaf's path, and one whose product and gated residual
+run on the residual op books one ``resid_fused`` record in place of its
+leaf call and its ``gated_residual``.
 
 The glue records close every gap, so the records always add up to the
 instrumented step's own wall time. Each timed op also pays one eval round
@@ -147,6 +149,7 @@ class StepProfiler:
             self._hold(name, self._timed_seam(name, getattr(ops, name)))
         self._hold("glu_pair", self._placed_pair(ops.glu_pair))
         self._hold("lora_fused", self._timed_lora(ops.lora_fused))
+        self._hold("resid_fused", self._timed_resid(ops.resid_fused))
 
     def _hold(self, name: str, timed) -> None:
         self._saved[name] = (getattr(ops, name), timed)
@@ -192,6 +195,18 @@ class StepProfiler:
                 lambda x, a_t, b_t, strength: fn(x, base, a_t, b_t, strength,
                                                  bands),
                 (x, a_t, b_t, strength), {})
+        return wrapper
+
+    def _timed_resid(self, fn):
+        """``resid_fused`` as one seam record under the path of its leaf,
+        whose own call does not run."""
+        @functools.wraps(fn)
+        def wrapper(x, leaf, residual, gate):
+            path = getattr(leaf, "_prof_path", self._caller)
+            return self._timed(
+                "seam", "resid_fused", path, "",
+                lambda x, residual, gate: fn(x, leaf, residual, gate),
+                (x, residual, gate), {})
         return wrapper
 
     def _timed_seam(self, name: str, fn):

@@ -214,9 +214,14 @@ class Attention(nn.Module):
             self.norm_q.weight, self.norm_k.weight, cos, sin, self.eps)
         return q, k, self.to_v(x).reshape(shape).transpose(0, 2, 1, 3)
 
-    def out(self, o: mx.array) -> mx.array:
+    def heads_joined(self, o: mx.array) -> mx.array:
+        """Attention output (B, H, L, D) as the rows (B, L, H * D) that
+        ``to_out`` takes."""
         b, _, n, _ = o.shape
-        return self.to_out[0](o.transpose(0, 2, 1, 3).reshape(b, n, -1))
+        return o.transpose(0, 2, 1, 3).reshape(b, n, -1)
+
+    def out(self, o: mx.array) -> mx.array:
+        return self.to_out[0](self.heads_joined(o))
 
 
 class ImageMLP(nn.Module):
@@ -230,12 +235,26 @@ class ImageMLP(nn.Module):
         self.out = nn.Linear(cfg.ffn_dim, cfg.dim, bias=False)
         self.fused = cfg.fused_mlp
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def hidden(self, x: mx.array) -> mx.array:
+        """The rows that ``out`` takes."""
         if self.fused:
             gate, up = split_gate_up(self.gate_up(x))
         else:
             gate, up = self.gate_layer(x), self.proj(x)
-        return self.out(ops.swiglu(gate, up))
+        return ops.swiglu(gate, up)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.out(self.hidden(x))
+
+
+def gated_projection(x: mx.array, gate: mx.array, lin,
+                     h: mx.array) -> mx.array:
+    """``x + gate * lin(h)``: on mlx-kquant's residual epilogue when
+    ``ops.resid_leaf`` takes the leaf, else on the stock ops."""
+    leaf = ops.resid_leaf(lin, h, x, gate)
+    if leaf is not None:
+        return ops.resid_fused(h, leaf, x, gate)
+    return ops.gated_residual(x, gate, lin(h))
 
 
 class Block(nn.Module):
@@ -249,10 +268,13 @@ class Block(nn.Module):
         self.eps = cfg.eps
 
     def _update(self, x: mx.array, mod: "Modulation",
-                attn: mx.array) -> mx.array:
-        x = ops.gated_residual(x, mod.gate1, attn)
+                o: mx.array) -> mx.array:
+        """The rows after the block from its attention output ``o``."""
+        x = gated_projection(x, mod.gate1, self.attn.to_out[0],
+                             self.attn.heads_joined(o))
         h = ops.modulate(ops.layer_norm(x, self.eps), mod.scale2)
-        return ops.gated_residual(x, mod.gate2, self.img_mlp(h))
+        return gated_projection(x, mod.gate2, self.img_mlp.out,
+                                self.img_mlp.hidden(h))
 
     def _qkv(self, x: mx.array, mod: "Modulation", cos: mx.array,
              sin: mx.array) -> tuple:
@@ -263,15 +285,15 @@ class Block(nn.Module):
                 sin: mx.array, segments: tuple) -> tuple:
         """The prefix rows after the block, and their K and V."""
         q, k, v = self._qkv(x, mod, cos, sin)
-        a = self.attn.out(prefix_attention(q, k, v, segments))
-        return self._update(x, mod, a), k, v
+        o = prefix_attention(q, k, v, segments)
+        return self._update(x, mod, o), k, v
 
     def target(self, x: mx.array, mod: "Modulation", cos: mx.array,
                sin: mx.array, prefix_k: mx.array,
                prefix_v: mx.array) -> mx.array:
         q, k, v = self._qkv(x, mod, cos, sin)
-        a = self.attn.out(target_attention(q, k, v, prefix_k, prefix_v))
-        return self._update(x, mod, a)
+        o = target_attention(q, k, v, prefix_k, prefix_v)
+        return self._update(x, mod, o)
 
 
 class NormOut(nn.Module):

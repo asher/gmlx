@@ -421,7 +421,7 @@ def test_a_call_the_route_does_not_take_is_the_path_of_today(
         assert kq_routes.install(("qk", "glu")) <= {"qk", "glu"}
     elif case == "op_absent":
         kq_routes._OPS["quantized_matmul_lora"] = None
-        assert kq_routes.install(kq_routes.ROUTES) <= {"qk", "glu"}
+        assert "lora" not in kq_routes.install(kq_routes.ROUTES)
     elif case == "float_leaf":
         path = "layers.0.attention.out"
     elif case == "bias":

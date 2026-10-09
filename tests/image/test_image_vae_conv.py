@@ -58,12 +58,12 @@ def test_every_vae_conv_is_the_guarded_conv():
     assert convs and all(isinstance(m, Conv2d) for m in convs)
 
 
-@pytest.mark.parametrize("exact", [True, False])
-def test_both_conv_paths_equal_stock_conv_in_fp32(exact):
+@pytest.mark.parametrize("path", ["kq", "exact", "winograd"])
+def test_every_conv_path_equals_stock_conv_in_fp32(path):
     rng = np.random.default_rng(1)
     for stride, k, pad in ((1, 3, 1), (2, 3, 0), (1, 1, 0)):
         conv = Conv2d(32, 64, k, stride=stride, padding=pad)
-        conv.exact = exact
+        conv.path = path
         x = mx.array(rng.standard_normal((1, 9, 9, 32)).astype(np.float32))
         want = nn.Conv2d.__call__(conv, x)
         got = conv(x)
@@ -71,8 +71,8 @@ def test_both_conv_paths_equal_stock_conv_in_fp32(exact):
                                    rtol=1e-4, atol=1e-4)
 
 
-def test_the_default_path_is_exact_and_a_path_is_checked():
-    assert conv_mod.CONV == "exact" and Conv2d.exact
+def test_the_default_path_is_kq_and_a_path_is_checked():
+    assert conv_mod.CONV == "kq" and Conv2d.path == "exact"
     assert conv_mod.conv_path() == conv_mod.CONV
     with pytest.raises(ValueError, match="conv must be one of"):
         conv_mod.conv_path("fast")
@@ -83,9 +83,9 @@ def test_the_default_path_is_exact_and_a_path_is_checked():
     vae = flux1_ae.Flux1AE(cfg)
     convs = [m for _, m in vae.named_modules() if isinstance(m, Conv2d)]
     assert conv_mod.set_conv_path(vae, "winograd") == "winograd"
-    assert not any(m.exact for m in convs)
-    assert conv_mod.set_conv_path(vae) == "exact"
-    assert all(m.exact for m in convs)
+    assert all(m.path == "winograd" for m in convs)
+    assert conv_mod.set_conv_path(vae) == "kq"
+    assert all(m.path == "kq" for m in convs)
 
 
 @metal
@@ -109,5 +109,5 @@ def test_the_winograd_path_is_stock_conv2d():
     x, k = _operands(1, 64, 64, 128, 128)
     conv = Conv2d(128, 128, 3, padding=1, bias=False)
     conv.weight = k
-    conv.exact = False
+    conv.path = "winograd"
     assert mx.array_equal(conv(x), mx.conv2d(x, k, padding=1)).item()

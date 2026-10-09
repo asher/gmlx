@@ -47,7 +47,9 @@ STEP_TOL = {mx.bfloat16: 7e-3, mx.float16: 9e-4}
 HAS_QK = hasattr(kq, "qk_norm_rope")
 HAS_GLU = hasattr(kq, "quantized_matmul_glu")
 HAS_LORA = hasattr(kq, "quantized_matmul_lora")
-BUILT = (("qk", HAS_QK), ("glu", HAS_GLU), ("lora", HAS_LORA))
+BUILT = (("qk", HAS_QK), ("glu", HAS_GLU), ("lora", HAS_LORA),
+         ("resid", hasattr(kq, "quantized_matmul_residual")),
+         ("conv", hasattr(kq, "conv2d_3x3")))
 needs_qk = pytest.mark.skipif(
     not HAS_QK, reason="mlx-kquant has no qk_norm_rope")
 needs_glu = pytest.mark.skipif(
@@ -279,7 +281,8 @@ def test_the_switch_takes_a_comma_list_of_routes():
     assert w("0") == w("off") == w("") == ()
     assert w("lora") == ("lora",)
     assert w("glu,qk") == w(" qk , glu ") == ("qk", "glu")
-    assert w("qk,glu,lora,qk") == kq_routes.ROUTES
+    assert w("qk,glu,lora,resid,conv,qk") == kq_routes.ROUTES
+    assert w("conv,resid") == ("resid", "conv")
     for bad in ("glu,nope", "qk;glu", "2"):
         with pytest.warns(UserWarning, match="comma list"):
             assert w(bad) == kq_routes.ROUTES
@@ -287,7 +290,9 @@ def test_the_switch_takes_a_comma_list_of_routes():
 
 def test_an_absent_op_keeps_the_stock_ops(routes):
     routes._OPS.update(qk_norm_rope=None, quantized_matmul_glu=None,
-                       quantized_matmul_lora=None, nax=True)
+                       quantized_matmul_lora=None,
+                       quantized_matmul_residual=None, conv2d_3x3=None,
+                       nax=True)
     assert routes.install(routes.ROUTES) == frozenset()
     assert ops.qk_norm_rope is attention.qk_norm_rope
     gate, up = _leaf("q4_k", 64, 256, 1), _leaf("q4_k", 64, 256, 2)
@@ -307,13 +312,14 @@ def test_the_switch_is_read_once_at_import():
         "from gmlx.image.ops import attention, kq_routes as r\n"
         "print(json.dumps([list(r._WANTED), sorted(r.active()),\n"
         "    ops.qk_norm_rope is attention.qk_norm_rope]))\n")
-    every = ("qk", "glu", "lora")
+    every = kq_routes.ROUTES
     for value, want, warns in (
             (None, every, False), ("1", every, False), ("on", every, False),
             ("0", (), False), (" 0 ", (), False), ("off", (), False),
             ("False", (), False), ("no", (), False), ("", (), False),
             ("qk", ("qk",), False), ("GLU", ("glu",), False),
-            ("lora", ("lora",), False),
+            ("lora", ("lora",), False), ("resid", ("resid",), False),
+            ("conv,qk", ("qk", "conv"), False),
             ("sometimes", every, True), ("2", every, True)):
         env = {k: v for k, v in os.environ.items()
                if k != "GMLX_IMAGE_KQ_ROUTES"}

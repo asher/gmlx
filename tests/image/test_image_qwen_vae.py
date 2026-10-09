@@ -642,8 +642,7 @@ def test_weights_are_cast_to_the_decode_dtype(st_file):
 def test_load_vae_puts_every_conv_on_the_chosen_path(st_file):
     from gmlx.image.vae.conv import CONV, Conv2d
 
-    for conv, exact in ((None, CONV == "exact"), ("exact", True),
-                        ("winograd", False)):
+    for conv in (None, "kq", "exact", "winograd"):
         vae = reader.load_vae(st_file, family=FAMILY, dtype=mx.float32,
                               conv=conv)
         convs = [m for _, m in vae.named_modules()
@@ -653,7 +652,7 @@ def test_load_vae_puts_every_conv_on_the_chosen_path(st_file):
         assert len(convs) == 82 == sum(
             n.endswith(".weight") and ".time_conv." not in n
             for n in tiny.shapes(tiny.TINY))
-        assert all(isinstance(m, Conv2d) and m.exact == exact
+        assert all(isinstance(m, Conv2d) and m.path == (conv or CONV)
                    for m in convs)
     with pytest.raises(ValueError, match="conv must be one of"):
         reader.load_vae(st_file, family=FAMILY, conv="fast")
@@ -1709,8 +1708,8 @@ def test_a_pass_is_priced_by_the_family_row_and_the_config_of_the_vae(
     monkeypatch.setattr(memfit, "vae_tiling", spy)
     tiling.decode(vae, np.zeros((1, 64, 2, 3), np.float32))
     tiling.encode(vae, np.zeros((1, 32, 48, 3), np.float32))
-    assert seen == [("decode", 32, 48, FAMILY, vae.config, 6, 4, "exact"),
-                    ("encode", 32, 48, FAMILY, vae.config, 4, 4, "exact")]
+    assert seen == [("decode", 32, 48, FAMILY, vae.config, 6, 4, vae.conv),
+                    ("encode", 32, 48, FAMILY, vae.config, 4, 4, vae.conv)]
     other = reader.load_vae(st_file, family=FAMILY, dtype="bf16",
                             conv="winograd")
     tiling.decode(other, np.zeros((1, 64, 2, 3), np.float32))

@@ -328,8 +328,8 @@ def _file_arrays(header: VaeHeader) -> dict:
 
 def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
     """The VAE module for ``family`` from a GGUF or safetensors file, with
-    weights in the decode dtype. ``conv`` picks the conv path, "exact" or
-    "winograd" (``conv.CONV`` when None; see ``conv``). The module carries
+    weights in the decode dtype. ``conv`` picks the conv path, "kq",
+    "exact" or "winograd" (``conv.CONV`` when None; see ``conv``). The module carries
     ``family``, ``source``, ``source_format`` and ``conv``."""
     dt = resolve_dtype(dtype)
     conv = conv_path(conv)
