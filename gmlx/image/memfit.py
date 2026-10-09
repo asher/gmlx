@@ -537,10 +537,16 @@ class MemoryPlan:
         parts = [f"{k} {v / GiB:.2f} GiB" for k, v in self.terms.items() if v]
         phases = ", ".join(f"{k} {v / GiB:.2f}" for k, v in
                            self.phases.items())
-        budget = ("unknown" if self.budget is None
-                  else f"{self.budget / GiB:.2f} GiB")
+        peak, budget = f"{self.peak / GiB:.2f}", "unknown"
+        if self.budget is not None:
+            budget = f"{self.budget / GiB:.2f} GiB"
+            if self.peak > self.budget:
+                # Rounded apart, so a refusal never reads as equal.
+                peak = f"{math.ceil(self.peak / GiB * 100) / 100:.2f}"
+                budget = (f"{math.floor(self.budget / GiB * 100) / 100:.2f}"
+                          " GiB")
         levers = ", ".join(self.levers) or "none"
-        return (f"peak {self.peak / GiB:.2f} GiB against a budget of "
+        return (f"peak {peak} GiB against a budget of "
                 f"{budget} (phases {phases}; levers {levers}): "
                 + ", ".join(parts))
 
@@ -610,10 +616,12 @@ def vae_bytes(src, itemsize: int) -> int:
 # and 1.26 GiB there, and the term is those times this.
 LOAD_ROOM = 1.1
 # A plan takes the staged order when its budget is nearly full, so each
-# of its two load phases holds this over its load term. The terms alone
-# are 0.04 and 0.06 GiB over the readings of the Qwen-Image 2.1 encoder
-# and VAE, loaded in that order in one process.
-STAGE_ROOM = GiB // 8
+# of its two load phases holds this over its load term: the 0.25 GiB room
+# every measured step, VAE and load cell keeps over its reading. The terms
+# alone are 0.04 to 0.06 GiB over the readings of the Qwen-Image 2.1
+# encoder, with and without its mmproj, and of the DiT and VAE, loaded in
+# that order in one process.
+STAGE_ROOM = GiB // 4
 
 
 def load_transient(encoder=None, vae=None, mmproj=None) -> int:

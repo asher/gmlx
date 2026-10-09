@@ -287,7 +287,7 @@ def test_refusal_names_every_term_in_gib_and_the_largest(z_view):
         _z(z_view, height=2048, width=2048, budget=BUDGET_16)
     msg = str(e.value)
     for term in ("dit 4.67 GiB", "encoder 2.32 GiB", "step_peak",
-                 "decode_peak", "budget of 8.55 GiB"):
+                 "decode_peak", "budget of 8.54 GiB"):
         assert term in msg
     assert "The largest term is decode_peak; try a lower resolution" in msg
     assert "GMLX_OVERCOMMIT=1 overrides" in msg
@@ -423,7 +423,9 @@ def test_each_qwen_lever_has_a_budget_that_forces_it(q_view):
                  "step_peak", "decode_peak", "encode_peak"):
         value = refused.terms[name]
         assert value > 0 and f"{name} {value / GiB:.2f} GiB" in msg, name
-    assert f"against a budget of {(last.peak - 1) / GiB:.2f} GiB" in msg
+    # One byte apart, the peak rounds up and the budget down.
+    up = math.ceil(last.peak / GiB * 100) / 100
+    assert f"peak {up:.2f} GiB against a budget of {up - 0.01:.2f} GiB" in msg
     assert "levers sequential rows, release the encoder, tiled decode" in msg
     assert "GMLX_OVERCOMMIT=1 overrides" in msg
 
@@ -970,13 +972,14 @@ Q_PARTS = dict(encoder=4.20, mmproj=2.15, vae=0.63, load_text=0.52,
                load_mmproj=1.71, load_vae=1.38)
 
 
-def _q16(q_view, size, cfg, refs=(), budget=BUDGET_16):
+def _q16(q_view, size, cfg, refs=(), budget=BUDGET_16, overcommit=False):
     g = {k: int(v * GiB) for k, v in Q_PARTS.items()}
     first = g["load_mmproj"] if refs else g["load_text"]
     return plan_memory(
         q_view, g["encoder"], g["vae"], g["mmproj"] if refs else 0,
         family="qwen_image21", height=size, width=size, cfg=cfg,
-        ref_sizes=[(r, r) for r in refs], budget=budget, overcommit=False,
+        ref_sizes=[(r, r) for r in refs], budget=budget,
+        overcommit=overcommit,
         load_peak=max(first, g["load_vae"]),
         load_parts=(first, g["load_vae"]))
 
@@ -1009,28 +1012,46 @@ def test_a_16_gib_machine_refuses_the_larger_qwen_edits(q_view, size, cfg,
     assert p.staged_load and p.levers[-1] == "staged load"
     assert max(p.phases, key=p.phases.get) == phase
     assert abs(p.peak / GiB - peak) < 0.02
-    assert "against a budget of 8.55 GiB" in str(e.value)
+    assert "against a budget of 8.54 GiB" in str(e.value)
 
 
-# MLX peak in GiB of the load phases of a staged run of those files under
-# the budget of a 16 GiB machine, on an M5 Max: the encoder alone, the
-# encoder with its mmproj, and the DiT with the VAE.
-MEASURED_STAGED = {"load_encoder": 4.681, "load_encoder with mmproj": 7.902,
-                   "load": 5.864}
+# MLX peak in GiB of each phase of staged runs of those files under the
+# budget of a 16 GiB machine, on an M5 Max, 4 steps, seed 1, by (size,
+# guidance, references). The requests the plan refuses ran under
+# GMLX_OVERCOMMIT=1. The step and VAE terms are footprints under the
+# cache bound, which an MLX peak leaves out, so those phases read well
+# under their plans.
+MEASURED_STAGED = {
+    (384, 4.0, ()): dict(load_encoder=4.681, encode=4.379, load=5.862,
+                         denoise=5.032, decode=5.342),
+    (768, 4.0, ()): dict(load_encoder=4.681, encode=4.379, load=5.862,
+                         denoise=5.288, decode=5.603),
+    (1536, 4.0, ()): dict(load_encoder=4.681, encode=4.379, load=5.862,
+                          denoise=6.108, decode=5.672),
+    (512, 4.0, (256, 256)): dict(load_encoder=7.902, encode=6.839,
+                                 load=5.866, init=4.887, denoise=5.652,
+                                 decode=6.126),
+    (512, 4.0, (512, 512)): dict(load_encoder=7.902, encode=7.817,
+                                 load=5.878, init=5.363, denoise=7.072,
+                                 decode=7.639),
+}
 
 
-def test_the_staged_load_phases_cover_the_measured_loads(q_view):
-    """A load phase of a staged plan is a tenth of a GiB or more over
-    its reading. The load terms alone leave less."""
-    text, edit = _q16(q_view, 1024, 1.0), _q16(q_view, 512, 4.0, (256,))
-    room = GiB // 10
-    for p, phase, name in ((text, "load_encoder", "load_encoder"),
-                           (edit, "load_encoder", "load_encoder with mmproj"),
-                           (text, "load", "load"), (edit, "load", "load")):
-        read = MEASURED_STAGED[name] * GiB
-        assert p.phases[phase] >= read + room, (name, p.phases[phase] / GiB)
-    bare = text.phases["load_encoder"] - memfit.STAGE_ROOM
-    assert bare < MEASURED_STAGED["load_encoder"] * GiB + room
+@pytest.mark.parametrize("cell", sorted(MEASURED_STAGED), ids=str)
+def test_the_staged_phases_cover_the_measured_runs(q_view, cell):
+    """Every phase of a staged plan is ROOM or more over its reading. The
+    load terms alone leave less, and STAGE_ROOM is that room."""
+    size, cfg, refs = cell
+    p = _q16(q_view, size, cfg, refs, overcommit=True)
+    assert p.staged_load
+    for phase, read in MEASURED_STAGED[cell].items():
+        assert p.phases[phase] >= read * GiB + ROOM, (phase, p.phases[phase]
+                                                      / GiB)
+    assert memfit.STAGE_ROOM == ROOM
+    for phase in ("load_encoder", "load"):
+        bare = p.phases[phase] - memfit.STAGE_ROOM
+        assert MEASURED_STAGED[cell][phase] * GiB < bare < (
+            MEASURED_STAGED[cell][phase] * GiB + ROOM)
 
 
 def test_z_image_stages_its_load_only_when_a_budget_needs_it(z_view):
