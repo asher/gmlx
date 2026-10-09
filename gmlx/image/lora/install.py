@@ -294,17 +294,20 @@ class _Kernel:
     the stock path from the pair's arrays, on the first call the route
     does not take, such as one of few rows."""
 
-    def __init__(self, pair: tuple, strength: mx.array, plain):
+    def __init__(self, pair: tuple, strength: mx.array, plain,
+                 kept=lambda: False):
         self.a_t, self.b_t, self.bands = pair
         self.strength = strength
         self._plain, self._stock = plain, None
+        self._kept = kept
 
     def arrays(self) -> list:
-        """The arrays this table alone holds. The pair is counted where
-        it is kept."""
+        """The arrays this table holds that are not counted elsewhere:
+        the pair too once the cache that kept it has shed it."""
         stock = [] if self._stock is None else self._stock.arrays()
-        return [self.strength, *(a for a in stock
-                                 if a is not self.a_t and a is not self.b_t)]
+        pair = [] if self._kept() else [self.a_t, self.b_t]
+        return [self.strength, *pair,
+                *(a for a in stock if a is not self.a_t and a is not self.b_t)]
 
     def stock(self):
         if self._stock is None:
@@ -322,19 +325,16 @@ class _Kernel:
 
 def kernel_pair(path: str, parts: list, dims: tuple, dtype) -> tuple:
     """A^T, B^T and the band table of the parts for mlx-kquant's low-rank
-    op, in the order ``plan.band_table`` gives, with no strength in
-    them."""
-    order, bands = plan.band_table(parts, dims)
-    lm = plan.unit_pair(path, [parts[i] for i in order], dims)
-    return (*_transposed(lm, dtype), bands)
+    op, with no strength in them."""
+    bands = plan.band_table(parts, dims)
+    return (*_transposed(plan.unit_pair(path, parts, dims), dtype), bands)
 
 
-def _strengths(parts: list, dims: tuple) -> mx.array:
+def _strengths(parts: list) -> mx.array:
     """One strength per rank of ``kernel_pair``, in float32."""
-    order, _ = plan.band_table(parts, dims)
     return mx.array(np.concatenate(
-        [np.full(int(parts[i].down.shape[0]), parts[i].strength, np.float32)
-         for i in order]))
+        [np.full(int(p.down.shape[0]), p.strength, np.float32)
+         for p in parts]))
 
 
 def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
@@ -342,21 +342,20 @@ def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
     if how == KERNEL:
         how = "block"
         ranks = sum(int(p.down.shape[0]) for p in parts)
-        order, bands = plan.band_table(parts, dims)
+        bands = plan.band_table(parts, dims)
         if pair is not None and kq_routes.lora_static(base, dtype, ranks,
                                                       bands):
             def plain(a_t: mx.array, b_t: mx.array):
-                # The block-diagonal pair of the stock path. With the
-                # parts in the pair's order its A is the pair's, and so is
-                # its B when every strength is 1.0, the factor it then
-                # holds. Any other strength is folded into a B of its own.
-                if order != list(range(len(parts))):
-                    return _factors(path, parts, dims, dtype, how, base)
+                # The block-diagonal pair of the stock path: its A is the
+                # pair's, and so is its B when every strength is 1.0, the
+                # factor it then holds. Any other strength is folded into
+                # a B of its own.
                 if any(p.strength != 1.0 for p in parts):
                     b = plan.block_diagonal(path, parts, dims).b
                     b_t = mx.contiguous(b.T).astype(dtype)
                 return _Block(a_t, b_t)
-            return _Kernel(pair(), _strengths(parts, dims), plain)
+            got, kept = pair()
+            return _Kernel(got, _strengths(parts), plain, kept)
     if how != "block":
         bands = plan.banded(path, parts, dims)
         if bands is not None and not (len(bands) == 1 and bands[0][:2]
@@ -465,7 +464,9 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
 
         def pairs(path: str, parts: list, dims: tuple) -> tuple:
             # The pair of a module is named by its parts without their
-            # strengths, so every table of those parts shares it.
+            # strengths, so every table of those parts shares it. It is
+            # counted in the cache while the cache keeps it, and in each
+            # table that holds it after that.
             key = (KERNEL, path, tuple(named[path]), dtype)
             held = owner()
             hit = None if held is None else held.tables.get(key)
@@ -475,7 +476,12 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                 if held is not None:
                     held.tables.put(key, hit, int(hit[0].nbytes)
                                     + int(hit[1].nbytes))
-            return hit
+
+            def kept() -> bool:
+                p = owner()
+                return p is not None and p.tables.peek(key) is hit
+
+            return hit, kept
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
                       how, pairs)
 

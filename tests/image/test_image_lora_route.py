@@ -257,31 +257,38 @@ def test_a_table_no_band_table_holds_goes_in_whole(op, case):
     entries = _entries(pipe, QKV, rows)
     y = _run(pipe, entries, QKV, x)
     assert op.calls == 1 and op.seen[0][1]["bands"] is None
-    order, table = plan.band_table(
+    assert plan.band_table(
         [plan.Part(mx.array(d), mx.array(u), a, band, s)
-         for band, (d, u, a), s in rows], (3 * DIM, DIM))
-    assert table is None and order == list(range(len(rows)))
+         for band, (d, u, a), s in rows], (3 * DIM, DIM)) is None
     assert rel_l2(_f64(y), _f64(_today(pipe, entries, QKV, x))) <= 2 * TOL
 
 
-def test_the_band_table_orders_parts_by_band_and_joins_ranks():
+def test_the_band_table_joins_the_ranks_of_parts_in_band_order():
+    """A frozen table lists a module's parts in band order, so the parts
+    reach the band table in it; parts out of it are refused."""
     def part(band, rank):
         return plan.Part(mx.zeros((rank, DIM)), mx.zeros((DIM, rank)), None,
                          band, 1.0)
 
     dims = (3 * DIM, DIM)
-    parts = [part(BANDS[2], 2), part(BANDS[0], 4), part(BANDS[2], 3),
-             part(BANDS[1], 1)]
-    order, table = plan.band_table(parts, dims)
-    assert order == [1, 3, 0, 2]
+    parts = [part(BANDS[0], 4), part(BANDS[1], 1), part(BANDS[2], 2),
+             part(BANDS[2], 3)]
+    table = plan.band_table(parts, dims)
     assert table == [(0, 256, 0, 4), (256, 512, 4, 1), (512, 768, 5, 5)]
-    assert plan.band_table([part(None, 4), part(None, 2)], dims) == (
-        [0, 1], None)
+    with pytest.raises(ValueError, match="band order"):
+        plan.band_table([parts[2], parts[0], parts[3], parts[1]], dims)
+    # The entries of a frozen table come out in that order whatever order
+    # they went in.
+    _, frozen = api._freeze_table(tuple(
+        (QKV, b, ()) for b in (BANDS[2], BANDS[0], BANDS[1])))
+    assert [e[1] for e in frozen["entries"]] == [BANDS[0], BANDS[1],
+                                                 BANDS[2]]
+    assert plan.band_table([part(None, 4), part(None, 2)], dims) is None
     # A band over the whole output beside another is an overlap.
     assert plan.band_table([part((0, 0, 3 * DIM), 4), part(BANDS[1], 2)],
-                           dims)[1] is None
+                           dims) is None
     assert plan.band_table([part((0, 128, 256), 4), part(BANDS[1], 2)],
-                           dims)[1] is None
+                           dims) is None
 
 
 def test_a_strength_change_builds_no_new_pair(op):
@@ -311,6 +318,38 @@ def test_a_strength_change_builds_no_new_pair(op):
     assert op.seen[3][0][3] is not first[3]
     assert len([k for k in pipe.tables._items
                 if k[0] == install.KERNEL]) == 2
+
+
+def test_a_shed_pair_is_counted_in_the_tables_that_hold_it(op):
+    """The pair two tables share is counted once while the cache keeps
+    it. Shed, it is counted in each built table that still holds it, so
+    the cache's bytes never leave it out."""
+    pipe = _pipe()
+    pairs = _pairs(7)
+    x = _x()
+    tids = []
+    for s in (1.0, 0.6):
+        entries = _entries(pipe, QKV, _qkv_rows(pairs, s))
+        _run(pipe, entries, QKV, x)
+        tids.append(api.define_patch_table(pipe, entries))
+    (key,) = [k for k in pipe.tables._items if k[0] == install.KERNEL]
+    a_t, b_t, _ = pipe.tables.peek(key)
+    pair = int(a_t.nbytes) + int(b_t.nbytes)
+    keys = [k for k in pipe.tables._items if k[0] in tids]
+    assert len(keys) == 2
+
+    def recount():
+        for k in keys:
+            pipe.tables.put(k, pipe.tables.peek(k), pipe.tables.peek(k).nbytes)
+        return pipe.tables.bytes
+
+    before = [pipe.tables.peek(k).nbytes for k in keys]
+    assert recount() == sum(before) + pair
+    pipe.tables.shed_others(set(keys), 0)
+    assert pipe.tables.peek(key) is None
+    assert [pipe.tables.peek(k).nbytes for k in keys] == [
+        n + pair for n in before]
+    assert recount() == sum(before) + 2 * pair
 
 
 @pytest.mark.parametrize("strength,alpha", [(1.0, None), (1.0, 3.0),
@@ -600,6 +639,41 @@ def test_the_op_against_the_float64_reference(op, codec, rows, bands):
     bad = _f64(_run(pipe, _entries(pipe, QKV, swapped), QKV, x))
     assert rel_l2(bad, ref) > WRONG
     assert rel_l2(bad, _ref(pipe, QKV, x, swapped)) <= TOL
+
+
+@pytest.mark.parametrize("inp, out, bands", [(3840, 11520, 3),
+                                              (3072, 24576, 2)],
+                         ids=["z_qkv", "qwen_gate_up"])
+def test_the_op_at_a_table_width_against_the_float64_reference(
+        op, inp, out, bands):
+    """The same row at the widths of the route's table: the fused qkv
+    weight of Z-Image, three bands of 3840, and the fused gate and up
+    weight of Qwen-Image 2.1, two bands of 12288. A strength a tenth off
+    at these widths alone moves the output many gates."""
+    pipe = _pipe()
+    pipe.dit.layers[0].attention.qkv = kq_leaf("q4_k", out, inp, 40)
+    width = out // bands
+    on = [(0, i * width, width) for i in range(bands)]
+    rng = np.random.default_rng(16)
+    one = [make_pair(rng, width, inp, 4, 2.0) for _ in range(bands)]
+    two = [make_pair(rng, width, inp, 2) for _ in range(bands)]
+    rows = _qkv_rows(one, 0.8, on) + _qkv_rows(two, -0.5, on)
+    rng = np.random.default_rng(17)
+    x = mx.array(rng.standard_normal((1, 1024, inp)).astype(np.float32)
+                 ).astype(mx.bfloat16)
+    entries = _entries(pipe, QKV, rows)
+    got = _f64(_run(pipe, entries, QKV, x))
+    stock = _f64(_today(pipe, entries, QKV, x))
+    assert op.calls == 1 and op.seen[0][1]["bands"] == [
+        (c, c + width, 6 * i, 6) for i, c in enumerate(range(0, out, width))]
+    ref = _ref(pipe, QKV, x, rows)
+    err, err_stock = rel_l2(got, ref), rel_l2(stock, ref)
+    print(f"lora {inp}x{out} bands {bands}: op {err:.3e} stock "
+          f"{err_stock:.3e}")
+    assert err <= TOL and err <= 1.1 * err_stock, (err, err_stock)
+    # The delta at a tenth less strength is many gates away.
+    low = _qkv_rows(one, 0.72, on) + _qkv_rows(two, -0.45, on)
+    assert rel_l2(got, _ref(pipe, QKV, x, low)) > WRONG / 4
 
 
 # Kept results, and the profiler.

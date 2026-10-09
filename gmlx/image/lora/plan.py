@@ -129,32 +129,33 @@ def banded(path: str, parts, dims: tuple) -> list | None:
     return rows
 
 
-def band_table(parts, dims: tuple) -> tuple[list, list | None]:
-    """The order of the parts by output band, as indexes into ``parts``,
-    and the band table of that order: rows of (first row, end row, first
+def band_table(parts, dims: tuple) -> list | None:
+    """The band table of ``parts``: rows of (first row, end row, first
     rank, ranks) of the weight's output, in order and disjoint. Parts on
     one band are adjacent and their ranks join. The table is None when
     every part covers the whole output, and also when a part bands the
     input or two bands overlap, where every output row takes every rank
-    of the block-diagonal pair. The order is then the given one."""
+    of the block-diagonal pair. The parts come in band order, as a frozen
+    patch table lists them; others are refused."""
     out, _ = dims
     spans = []
     for p in parts:
         if p.band is not None and p.band[0] != 0:
-            return list(range(len(parts))), None
+            return None
         spans.append((0, out) if p.band is None
                      else (p.band[1], p.band[1] + p.band[2]))
     uniq = sorted(set(spans))
     if uniq == [(0, out)] or any(a[1] > b[0] for a, b in zip(uniq, uniq[1:])):
-        return list(range(len(parts))), None
-    order = sorted(range(len(parts)), key=lambda i: spans[i])
+        return None
+    if spans != sorted(spans):
+        raise ValueError("the parts of a band table come in band order")
     table, z = [], 0
     for span in uniq:
-        ranks = sum(int(parts[i].down.shape[0]) for i in order
+        ranks = sum(int(parts[i].down.shape[0]) for i in range(len(parts))
                     if spans[i] == span)
         table.append((span[0], span[1], z, ranks))
         z += ranks
-    return order, table
+    return table
 
 
 def unit_pair(path: str, parts, dims: tuple) -> LoraModule:

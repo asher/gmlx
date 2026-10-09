@@ -147,6 +147,13 @@ class ByteLRU:
             self._items.move_to_end(key)
             return hit[0]
 
+    def peek(self, key):
+        """The value at ``key``, or None, without a use: the order of use
+        does not change."""
+        with self._lock:
+            hit = self._items.get(key)
+            return None if hit is None else hit[0]
+
     def nbytes(self, key) -> int:
         """Bytes of the entry at ``key``, 0 without one. The order of use
         does not change."""
