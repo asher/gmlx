@@ -402,3 +402,55 @@ def test_release_preload_holds_keeps_hold_on_release_failure(caplog):
         assert any("keeping it tracked" in r.message for r in caplog.records)
     finally:
         sp_routes._PRELOAD_HOLDS.clear()
+
+
+_IMAGE_DOC = {"models": {"qwen": {"path": "/abs/qwen.gguf"}},
+              "image_models": {"zit": {"path": "/abs/zit.safetensors",
+                                       "encoder": "/abs/enc.gguf",
+                                       "vae": "/abs/vae.safetensors"}}}
+
+
+def test_snapshot_names_the_kind_of_each_resident_model():
+    _APP._server_runtime_snapshot = lambda: {}
+
+    row = {"pinned": False, "busy": 0, "footprint_bytes": 1, "idle_s": 0.0,
+           "ttl_s": None}
+
+    class _FakePool:
+        def stats(self):
+            return {"resident": [
+                dict(row, model_path="/abs/qwen.gguf", kind="chat"),
+                dict(row, model_path="/abs/zit.safetensors", kind="image")]}
+
+    _register(_IMAGE_DOC)
+    _PKG._kq_residency_pool = _FakePool()
+    try:
+        sp.install_runtime_snapshot_enrichment()
+        rows = _APP._server_runtime_snapshot()["resident_models"]
+    finally:
+        serving.clear_resolved_models()
+    assert [(r["ids"], r["kind"]) for r in rows] == [
+        (["qwen"], "chat"), (["zit"], "image")]
+
+
+def test_keep_and_unload_take_an_image_model(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(sp_routes, "_spawn_keep_warm", lambda model_id: None)
+    _register(_IMAGE_DOC)
+    pool = _FakeKeepPool()
+    evicted = []
+    pool.evict = lambda path, **k: evicted.append(path) or True
+    _PKG._kq_residency_pool = pool
+    try:
+        sp.install_keep_route()
+        sp.install_pool_aware_unload()
+        client = TestClient(_APP.app)
+        r = client.post("/v1/keep", json={"model": "zit", "warm": False})
+        assert r.status_code == 200, r.text
+        assert pool.kept == [("/abs/zit.safetensors", True)]
+        r = client.post("/unload", json={"model": "zit"})
+        assert r.status_code == 200, r.text
+        assert evicted == ["/abs/zit.safetensors"]
+    finally:
+        serving.clear_resolved_models()

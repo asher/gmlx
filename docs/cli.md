@@ -677,7 +677,8 @@ An entry on an unmounted drive is kept and reported, not dropped.
 ## gmlx ps
 
 `gmlx ps` shows the models resident in a running server, with the id,
-size, idle time, TTL, pinned and kept state, and path of each.
+kind (`chat` or `image`), size, idle time, TTL, pinned and kept state,
+and path of each.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

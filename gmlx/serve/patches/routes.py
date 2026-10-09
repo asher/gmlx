@@ -375,8 +375,12 @@ def _resident_models_view() -> list:
     path_to_ids = getattr(serving, "_PATH_TO_IDS", {})
     out = []
     for e in pool.stats()["resident"]:
+        kind = e.get("kind", "chat")
+        ids = (serving.image_ids_for_path(e["model_path"]) if kind == "image"
+               else path_to_ids.get(e["model_path"], []))
         out.append({
-            "ids": path_to_ids.get(e["model_path"], []),
+            "ids": ids,
+            "kind": kind,
             "model_path": e["model_path"],
             "loaded_as": e.get("loaded_as"),
             "profile": e.get("profile"),
@@ -532,7 +536,7 @@ def install_pool_aware_unload() -> None:
                 return JSONResponse(status_code=503, content={
                     "status": "error", "message": "no residency pool"})
             try:
-                path, _spec = serving.resolve_request_model(model_id)
+                path = serving.resolve_pool_path(model_id)
             except (KeyError, serving.ModelFileMissing):
                 # 404, matching /v1/keep: a typo'd unload must not read as
                 # success (clients check the status code).
@@ -1057,6 +1061,9 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT):
     fate - release it (a transient warm; the entry stays LRU/TTL-managed) or retain
     it (a preload kept resident for the server's lifetime)."""
     from .. import residency
+    if serving.is_image_model(model_id):
+        # An image model loads through its own kind, never the chat seam.
+        return residency.acquire_image_model(model_id)
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if adapter is _WARM_DEFAULT:
         app.get_cached_model(model_id)            # pooled: resolve -> acquire
@@ -1222,7 +1229,7 @@ def install_keep_route() -> None:
             return JSONResponse(status_code=400, content={
                 "status": "error", "message": "missing 'model'"})
         try:
-            path, _spec = serving.resolve_request_model(model_id)
+            path = serving.resolve_pool_path(model_id)
         except (serving.ModelNotFound, serving.ModelFileMissing):
             # 404, not 200: a typo'd keep must not read as success (the
             # `launch` client checks the status code and this exact body shape).
@@ -1274,6 +1281,11 @@ def install_resolver_error_handlers() -> None:
     @app.exception_handler(serving.ModelNotFound)
     async def _model_not_found(request, exc):
         return _resolver_response(request, 404, "model_not_found", exc,
+                                  available_models=exc.available)
+
+    @app.exception_handler(serving.WrongModelKind)
+    async def _wrong_model_kind(request, exc):
+        return _resolver_response(request, 400, "wrong_model_kind", exc,
                                   available_models=exc.available)
 
     @app.exception_handler(serving.ModelFileMissing)

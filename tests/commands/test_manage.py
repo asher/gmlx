@@ -1335,6 +1335,35 @@ def test_ps_bare_resolves_managed_target(monkeypatch, capsys):
     assert "127.0.0.1:1" in capsys.readouterr().err       # probed the resolved target
 
 
+def test_ps_shows_the_kind_of_each_resident_model(monkeypatch, capsys):
+    import io
+    import json as _json
+
+    body = {"server": {"resident_models": [
+        {"ids": ["chat"], "kind": "chat", "model_path": "/m/chat.gguf",
+         "footprint_bytes": 4 << 30, "idle_s": 3, "ttl_s": 900},
+        {"ids": ["zit"], "kind": "image", "model_path": "/m/z.gguf",
+         "footprint_bytes": 9 << 30, "idle_s": 1, "ttl_s": None,
+         "pinned": True}]}}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(manage.urllib.request, "urlopen",
+                        lambda req, timeout=None: _Resp(
+                            _json.dumps(body).encode()))
+    assert manage.cmd_ps(["--url", "http://127.0.0.1:9"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "KIND" in lines[1]
+    rows = {ln.split()[0]: ln.split() for ln in lines[2:]
+            if ln and not ln.startswith(" ")}
+    assert rows["chat"][1] == "chat" and rows["zit"][1] == "image"
+
+
 # rm - delete a model's files and its config entry
 
 _RM_CFG = """

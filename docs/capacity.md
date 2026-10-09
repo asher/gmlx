@@ -126,7 +126,7 @@ sections and fields.
 | `concurrency` | Decode width, queue cap, streams generating now, and requests waiting. |
 | `queue` | Waiting count, its cap, the `Retry-After` a rejected request would get now, and rejections so far. |
 | `requests` | One row per request, queued rows first. `state` is `queued`, `prefill` or `decode`. |
-| `resident_models` | Each loaded model, with its own `in_flight`. Each model decodes on its own engine, so compare it with `decode_batch`. |
+| `resident_models` | Each loaded model, with its own `in_flight` and its `kind`, `chat` or `image`. Each model decodes on its own engine, so compare it with `decode_batch`. |
 | `governor` | The memory band, `green`, `yellow`, `orange` or `red`, and what the governor has done. |
 | `memory` | Active and cached bytes, free working set, and for a [streamed](streaming.md) model its [arena](glossary.md#arena). |
 | `capacity` | The capacity table that the plan route reads. |

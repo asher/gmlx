@@ -1657,13 +1657,16 @@ def cmd_ps(argv: list | None = None, prog: str = "gmlx ps") -> int:
              or os.path.basename(e.get("model_path") or "?")
              for e in resident]
     wid = max(len(n) for n in names)
-    print(f"{'ID':<{wid}}  {'SIZE':>8}  {'IDLE':>7}  {'TTL':>6}  PINNED  KEPT")
+    print(f"{'ID':<{wid}}  {'KIND':<5}  {'SIZE':>8}  {'IDLE':>7}  {'TTL':>6}  "
+          "PINNED  KEPT")
     for name, e in zip(names, resident):
         ttl = e.get("ttl_s")
         ttl_str = "-" if not ttl else f"{int(ttl)}s"
         pin = "yes" if e.get("pinned") else "no"
         kept = "yes" if e.get("kept") else "no"
-        print(f"{name:<{wid}}  {_human_gb(e.get('footprint_bytes') or 0):>8}  "
+        kind = str(e.get("kind") or "chat")
+        print(f"{name:<{wid}}  {kind:<5}  "
+              f"{_human_gb(e.get('footprint_bytes') or 0):>8}  "
               f"{e.get('idle_s', 0):>6.0f}s  {ttl_str:>6}  {pin:>6}  {kept}")
         print(f"{'':<{wid}}  {e.get('model_path') or '?'}")
     return 0
