@@ -205,13 +205,16 @@ uploads a conditioning or a LoRA matrix once by that hash.
 | `GET capabilities` | The contract version, families, wire dtypes and limits |
 | `GET models`, `GET models/{model}/status`, `GET models/{model}/manifest` | The image models; one model's family, latent format, memory and sampling; its DiT tensor names and shapes |
 | `POST models/load`, `POST models/unload` | Load or unload a model |
-| `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash. `refs: false` leaves out the VAE latents of the reference images, for a client that encodes them itself |
+| `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash |
 | `PUT` or `HEAD tensors/{hash}`, `PUT` or `HEAD adapters/{hash}` | Upload a tensor or a LoRA matrix, or ask whether the server holds it |
 | `POST adapters/register` | Read a LoRA file under a model folder of the server |
 | `PUT patch-tables/{id}?model=ID` | Define a set of LoRA patches; its id is the sha256 of its JSON with sorted keys and no spaces |
 | `POST step` | The model output for latents at a timestep, one row per conditioning |
 | `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
 | `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
+
+An encode with `refs: false` leaves out the VAE latents of its reference
+images, for a client that encodes them with a VAE of its own.
 
 A step names its conditionings and its patch table by hash. When the
 server does not hold one, the step gets 409 with a `missing` list, and
