@@ -648,9 +648,11 @@ def table_id(body: bytes) -> str:
 def encode(served, text: str, images: list, borrow=None,
            ref_latents: bool = True) -> dict:
     """Encode ``text``, with reference images (H, W, 3) uint8 for a family
-    that edits, on the image worker. Returns the conditioning features
-    f32 (1, L, D), the reference latents in model space (1, C, h, w),
-    none when ``ref_latents`` is false, and the image slots."""
+    that edits, on the image worker. Each image keeps its own area, so a
+    client that sizes its references feeds the encoder and its VAE the
+    same pixels. Returns the conditioning features f32 (1, L, D), the
+    reference latents in model space (1, C, h, w), none when
+    ``ref_latents`` is false, and the image slots."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -660,10 +662,17 @@ def encode(served, text: str, images: list, borrow=None,
     pipe = served.pipe
     refs: tuple = ()
     if images:
-        if pipe.family.edit is None:
+        edit = pipe.family.edit
+        if edit is None:
             raise StepError(400, f"{pipe.family.title} takes no reference "
                             "images")
-        refs = api.references(pipe, images)
+        try:
+            refs = api.references(pipe, [
+                api.references(pipe, [im],
+                               area=im.shape[0] * im.shape[1])[0]
+                for im in images[:edit.max_refs + 1]])
+        except ValueError as e:
+            raise StepError(400, str(e)) from None
     cond, _ = _encode(served, text, None, refs, borrow)
     enc = pipe.encoder
     if enc is not None and enc.owned and not enc.released and \

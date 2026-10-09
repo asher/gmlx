@@ -213,7 +213,11 @@ uploads a conditioning or a LoRA matrix once by that hash.
 | `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
 | `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
 
-An encode with `refs: false` leaves out the VAE latents of its reference
+An encode keeps each reference image at its own size, so a client that
+sizes its references gives the encoder and its own VAE the same pixels.
+Qwen-Image 2.1 takes references of 256x256 to 1024x1024 pixels in area,
+with sides a multiple of 32, and an image outside that area gets 400. An
+encode with `refs: false` leaves out the VAE latents of its reference
 images, for a client that encodes them with a VAE of its own.
 
 A step names its conditionings and its patch table by hash. When the

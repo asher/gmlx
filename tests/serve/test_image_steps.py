@@ -615,30 +615,56 @@ def test_encode_with_refs_false_skips_the_reference_latents(host, monkeypatch):
     assert r.status_code == 400 and "refs" in r.text
 
 
-def test_step_encode_runs_no_vae_encode_without_reference_latents(
-        monkeypatch):
+def _stub_step_encode(monkeypatch):
+    """steps.encode on the Qwen-Image 2.1 family's reference rules with the
+    text encoder and the VAE stubbed. Returns the served model, the
+    references the encoder saw and the VAE encode calls."""
     from gmlx.serve import image_service
 
+    seen, vae = [], []
+
     def stub_encode(served, text, neg, refs, borrow):
+        seen.append(refs)
         return SimpleNamespace(features=mx.ones((5, 16)), ref_latents=(),
                                image_slots=(2,)), None
 
-    monkeypatch.setattr(api, "references", lambda pipe, images: ("r",))
     monkeypatch.setattr(image_service, "_encode", stub_encode)
-    vae = []
     monkeypatch.setattr(api, "encode_references",
                         lambda pipe, c: vae.append(1) or c)
+    fam = get_family("qwen_image21")
     served = SimpleNamespace(
-        pipe=SimpleNamespace(family=SimpleNamespace(edit=object(), title="Q"),
-                             encoder=None),
+        pipe=SimpleNamespace(family=fam, encoder=None),
         plan=SimpleNamespace(keep_encoder=True))
-    img = np.zeros((8, 8, 3), np.uint8)
+    return served, seen, vae
+
+
+def test_step_encode_runs_no_vae_encode_without_reference_latents(
+        monkeypatch):
+    served, _, vae = _stub_step_encode(monkeypatch)
+    img = np.zeros((256, 256, 3), np.uint8)
     got = _on_worker(lambda: steps.encode(served, "a", [img],
                                           ref_latents=False))
     assert vae == [] and got["refs"] == [] and got["image_slots"] == [2]
     assert got["cond"].shape == (1, 5, 16)
     _on_worker(lambda: steps.encode(served, "a", [img]))
     assert vae == [1]
+
+
+def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
+    # A client that sizes its references gives its VAE the same pixels, so
+    # the encoder's image slots match the latents it sends with the step.
+    served, seen, _ = _stub_step_encode(monkeypatch)
+    a = np.full((384, 512, 3), 7, np.uint8)
+    b = np.full((512, 512, 3), 9, np.uint8)
+    _on_worker(lambda: steps.encode(served, "a", [a, b]))
+    assert [r.pixels.shape[:2] for r in seen[0]] == [(384, 512), (512, 512)]
+    assert np.all(seen[0][0].pixels[..., :3] == 7)
+    big = np.zeros((1056, 1024, 3), np.uint8)
+    small = np.zeros((128, 128, 3), np.uint8)
+    for im in (big, small):
+        with pytest.raises(steps.StepError) as e:
+            _on_worker(lambda im=im: steps.encode(served, "a", [im]))
+        assert e.value.status == 400
 
 
 def test_cache_sizes_follow_server_image(host):
