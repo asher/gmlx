@@ -45,7 +45,12 @@ and grows outlier channels that the bf16 rounding then spreads. With
 --latents, --sizes is the size of the recorded latents.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
-      check3_krea2.py --dit Krea-2-Turbo-Q4_K_M.gguf --sizes 512 1024
+      check3_krea2.py --dit Krea-2-Turbo-Q4_K_M.gguf --sizes 512 \\
+      --features check2_krea2_check8.npz --features-key features_check8 \\
+      --latents check8_stock16_512.npz --step 4 --name check3_krea2_s4
+
+writes the committed fixture of step 4 at 512; the four committed ones
+are steps 4 and 7 at 512 and at 1024.
 
 --self-test writes a tiny model in GGUF tensor names with diffusers' own
 class on random weights, so the gmlx side can check its conventions on

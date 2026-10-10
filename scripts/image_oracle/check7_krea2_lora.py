@@ -29,13 +29,16 @@ with an alpha of half its rank, its down rows at unit spread over the
 input and its up rows at --gain over the rank. The default gain moves
 a leaf's output by about 8 percent, as the Comfy-Org LoRA moves its
 leaves by 5 to 15: a delta under a leaf's bf16 rounding is one the site
-gate cannot see. The fixture also holds
-the pairs as ``down.<target>`` and ``up.<target>`` in the diffusers
-names, so the gmlx side writes the same adapter in each dialect.
+gate cannot see. The fixture also holds the pairs as ``down.<target>``
+and ``up.<target>`` in the diffusers names, so the gmlx side writes the
+same adapter in each dialect.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check7_krea2_lora.py --dit Krea-2-Turbo-Q4_K_M.gguf \\
       --lora krea2_kidsdrawing.safetensors
+  python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
+      check7_krea2_lora.py --dit Krea-2-Turbo-Q4_K_M.gguf \\
+      --synthetic 7 --name check7_krea2_synthetic_512
 """
 
 from __future__ import annotations
@@ -50,8 +53,8 @@ import check3_krea2 as c3
 import fixtures
 import oracle
 
-NAME = "check7_krea2_lora_512"
-SOURCE = "check3_krea2_512"
+NAME = "check7_krea2_comfy_512"
+SOURCE = "check3_krea2_s4_512"
 SCRIPT = "scripts/image_oracle/check7_krea2_lora.py"
 
 
