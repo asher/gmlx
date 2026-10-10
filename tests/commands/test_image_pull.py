@@ -175,7 +175,8 @@ def test_parts_on_disk_are_used_where_they_are(lib, monkeypatch, capsys):
     assert "on disk" in capsys.readouterr().out
 
 
-def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch):
+def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch,
+                                                            capsys):
     root, cfg = lib
     (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"e")
     Disk(monkeypatch, root)
@@ -184,6 +185,9 @@ def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch):
     assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg),
                             "--encoder-quant", "q8_0"]) == 0
     assert (Z.encoder_repo, "Qwen3-4B-Q8_0.gguf", "main") in got
+    # A quant asked for is not the memory class default.
+    head = capsys.readouterr().out.splitlines()[0]
+    assert head.endswith("encoder Q8_0") and "default" not in head
 
 
 def test_a_configured_chat_model_is_written_as_the_encoder_id(lib,
@@ -230,7 +234,10 @@ def test_only_fetches_the_named_parts_and_registers_once_whole(lib,
                             "--only", "vae"]) == 0
     assert [g[0] for g in got] == [Z.vae_repo, Z.vae_repo]
     assert _cfg(cfg).image_models == {}
-    assert "not registered: dit, encoder" in capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert "not registered: dit, encoder" in err
+    # A part left out has no file yet, so the plan names none for it.
+    assert "skipped (--only)" in out and "unsloth__Z-Image-Turbo-GGUF" not in out
     assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg),
                             "--only", "dit,encoder"]) == 0
     assert "z-image-turbo" in _cfg(cfg).image_models

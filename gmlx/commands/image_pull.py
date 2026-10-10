@@ -50,6 +50,7 @@ class Plan:
     encoder_quant: str
     memory_class: int
     parts: list = field(default_factory=list)
+    default: bool = True            # the quants of the memory class
 
     def part(self, role: str) -> Part | None:
         return next((p for p in self.parts if p.role == role), None)
@@ -235,7 +236,7 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
     r = plan.recipe
     head = (f"pull {r.name} ({r.title}): DiT {plan.dit_quant}, encoder "
             f"{plan.encoder_quant}")
-    if ram:
+    if ram and plan.default:
         head += f", the default for a {plan.memory_class} GB Mac" \
             if plan.memory_class < 64 else ", the default for 64 GB and up"
     print(head)
@@ -251,7 +252,7 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
         else:
             state = "download"
         print(f"  {p.role:<8} {p.name:<{wid}}  {_gb(p.size):>8}  {state}")
-        if not p.download or not p.wanted:
+        if not p.download:
             print(f"  {'':<8} {p.path}")
     need = _need(plan)
     line = f"  download {_gb(need)}"
@@ -479,6 +480,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                      encoder_quant_given=bool(a.encoder_quant), only=only,
                      roots=roots, base_dir=base_dir, nest=nest, cfg=cfg,
                      ram=ram)
+    plan.default = (dit_q, enc_q) == catalog.default_quants(r, ram)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:
