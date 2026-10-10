@@ -913,6 +913,22 @@ def test_a_step_or_vae_pass_that_does_not_fit_is_400(host, path, tensors,
     assert host.held == 0
 
 
+def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
+        host, monkeypatch):
+    from gmlx.serve import image_service
+
+    seen = []
+    monkeypatch.setattr(image_service, "size_fits",
+                        lambda served, w, h, budget, cfg=1.0, init=False:
+                        seen.append(init) or False)
+    for path, tensors in (
+            ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)}),
+            ("vae/decode", {"latents": np.zeros((1, 4, 4, 6), np.float32)})):
+        r = _put_container(path, tensors, {"model": "zit"})
+        assert r.status_code == 400, r.text
+    assert seen == [True, False]
+
+
 def test_a_patch_table_body_that_is_no_object_is_400(host):
     body = b"[1]"
     r = _http().put(f"{P}/patch-tables/{steps.table_id(body)}?model=zit",

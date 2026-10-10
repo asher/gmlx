@@ -209,6 +209,20 @@ def test_parts_on_disk_are_used_where_they_are(lib, monkeypatch, capsys):
     assert "on disk" in capsys.readouterr().out
 
 
+def test_a_packed_vae_of_another_source_is_not_reused(lib, monkeypatch):
+    root, cfg = lib
+    other = root / "elsewhere"
+    other.mkdir()
+    (other / "packed-vae.gguf").write_bytes(b"v")
+    Disk(monkeypatch, root, sha="0" * 64)
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
+    assert (Z.vae_repo, Z.vae_file, Z.vae_revision) in got
+    assert _cfg(cfg).image_models["z-image-turbo"].vae != \
+        "elsewhere/packed-vae.gguf"
+
+
 def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch,
                                                             capsys):
     root, cfg = lib
@@ -773,6 +787,21 @@ def test_doctor_checks_every_file_and_the_identity_of_each_part(
     os.remove(lib / "qvae.gguf")
     m = doctor.check_models(c)
     assert m["status"] == "FAIL" and "qi: missing vae" in m["detail"]
+
+
+def test_doctor_flags_a_vae_of_another_family(images, monkeypatch):
+    import gmlx.commands.doctor as doctor
+    from gmlx.config import load_config
+
+    _lib, cfg = images
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: ("qwen_image21", None))
+    monkeypatch.setattr(catalog, "encoder_matches", lambda p, f, kv=None: True)
+    monkeypatch.setattr(catalog, "mmproj_matches", lambda p, f: True)
+    row = doctor.check_image(load_config(cfg))
+    assert row["status"] == "FAIL"
+    assert "zit: the VAE is not the z_image VAE" in row["detail"]
+    assert "qi:" not in row["detail"]
 
 
 def test_doctor_memory_counts_an_image_model_with_its_parts(images,
