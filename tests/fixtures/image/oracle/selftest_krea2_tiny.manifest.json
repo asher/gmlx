@@ -1,0 +1,411 @@
+{
+ "schema": 1,
+ "name": "selftest_krea2_tiny",
+ "check": 3,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check3_krea2.py",
+ "argv": [
+  "check3_krea2.py",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "config": {
+   "in_channels": 16,
+   "num_layers": 2,
+   "attention_head_dim": 16,
+   "num_attention_heads": 4,
+   "num_key_value_heads": 2,
+   "intermediate_size": 96,
+   "timestep_embed_dim": 32,
+   "text_hidden_dim": 32,
+   "num_text_layers": 3,
+   "text_num_attention_heads": 2,
+   "text_num_key_value_heads": 2,
+   "text_intermediate_size": 48,
+   "num_layerwise_text_blocks": 2,
+   "num_refiner_text_blocks": 2,
+   "axes_dims_rope": [
+    4,
+    6,
+    6
+   ],
+   "rope_theta": 1000.0,
+   "norm_eps": 1e-05
+  },
+  "case": {
+   "latent": [
+    4,
+    6
+   ],
+   "text": 5,
+   "sigma": 0.6875
+  },
+  "seed": 0
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.009011939806595376,
+   "cosine": 0.9999595724323579,
+   "max_abs": 0.04697918891906738
+  },
+  "rows_bf16_vs_fp32": {
+   "tmlp": {
+    "rel_l2": 0.0034919527096880006,
+    "cosine": 0.9999939533192653,
+    "max_abs": 0.00469517707824707,
+    "teacher_forced": false
+   },
+   "tproj": {
+    "rel_l2": 0.004032618041406238,
+    "cosine": 0.9999919978219147,
+    "max_abs": 0.004847273230552673,
+    "teacher_forced": false
+   },
+   "txtfusion.layerwise_blocks.0": {
+    "rel_l2": 0.005223661307286853,
+    "cosine": 0.9999864334308627,
+    "max_abs": 0.03183937072753906,
+    "teacher_forced": false
+   },
+   "txtfusion.layerwise_blocks.1": {
+    "rel_l2": 0.007138323241570426,
+    "cosine": 0.9999745248012986,
+    "max_abs": 0.04158163070678711,
+    "teacher_forced": false
+   },
+   "txtfusion.projector": {
+    "rel_l2": 0.007416186228602039,
+    "cosine": 0.9999736565706575,
+    "max_abs": 0.06659173965454102,
+    "teacher_forced": false
+   },
+   "txtfusion.refiner_blocks.0": {
+    "rel_l2": 0.008115778795444704,
+    "cosine": 0.9999682385599444,
+    "max_abs": 0.07537269592285156,
+    "teacher_forced": false
+   },
+   "txtfusion.refiner_blocks.1": {
+    "rel_l2": 0.009222109938049242,
+    "cosine": 0.999958001564745,
+    "max_abs": 0.08044004440307617,
+    "teacher_forced": false
+   },
+   "txtmlp": {
+    "rel_l2": 0.00971909603914764,
+    "cosine": 0.999953433476722,
+    "max_abs": 0.022496461868286133,
+    "teacher_forced": false
+   },
+   "first": {
+    "rel_l2": 0.002798270981295456,
+    "cosine": 0.9999960849859706,
+    "max_abs": 0.016215085983276367,
+    "teacher_forced": false
+   },
+   "blocks.0": {
+    "rel_l2": 0.005320263365209948,
+    "cosine": 0.9999858676999765,
+    "max_abs": 0.045619308948516846,
+    "teacher_forced": true
+   },
+   "blocks.1": {
+    "rel_l2": 0.004446122117235577,
+    "cosine": 0.9999901183079256,
+    "max_abs": 0.03287076950073242,
+    "teacher_forced": true
+   },
+   "last": {
+    "rel_l2": 0.004484774373227249,
+    "cosine": 0.999990048908588,
+    "max_abs": 0.0198327898979187,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "blocks.0": 0.0074090519478363336,
+   "blocks.1": 0.009275256606875528
+  },
+  "times": {
+   "fp32_s": 0.1,
+   "bf16_s": 0.0,
+   "bf16_teacher_forced_s": 0.0
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.01802387961319075,
+   "cosine_min": 0.9998382897294316
+  },
+  "tmlp": {
+   "rel_l2": 0.006983905419376001,
+   "teacher_forced": false
+  },
+  "tproj": {
+   "rel_l2": 0.008065236082812476,
+   "teacher_forced": false
+  },
+  "txtfusion.layerwise_blocks.0": {
+   "rel_l2": 0.010447322614573706,
+   "teacher_forced": false
+  },
+  "txtfusion.layerwise_blocks.1": {
+   "rel_l2": 0.014276646483140852,
+   "teacher_forced": false
+  },
+  "txtfusion.projector": {
+   "rel_l2": 0.014832372457204078,
+   "teacher_forced": false
+  },
+  "txtfusion.refiner_blocks.0": {
+   "rel_l2": 0.016231557590889407,
+   "teacher_forced": false
+  },
+  "txtfusion.refiner_blocks.1": {
+   "rel_l2": 0.018444219876098483,
+   "teacher_forced": false
+  },
+  "txtmlp": {
+   "rel_l2": 0.01943819207829528,
+   "teacher_forced": false
+  },
+  "first": {
+   "rel_l2": 0.005596541962590912,
+   "teacher_forced": false
+  },
+  "blocks.0": {
+   "rel_l2": 0.010640526730419896,
+   "teacher_forced": true
+  },
+  "blocks.1": {
+   "rel_l2": 0.008892244234471155,
+   "teacher_forced": true
+  },
+  "last": {
+   "rel_l2": 0.008969548746454498,
+   "teacher_forced": true
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity"
+ },
+ "notes": [
+  "the weights are in selftest_krea2_tiny_weights by GGUF name in torch order; mod.lin is the (6, dim) table of the class"
+ ],
+ "created": "2026-10-10T06:34:54Z",
+ "npz": "selftest_krea2_tiny.npz",
+ "tensors": {
+  "blocks.0": {
+   "shape": [
+    1,
+    29,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "faa27695f13159f6d1b773f1bc954e81752b324af56958eb246c6ae7fd28bf25"
+  },
+  "blocks.1": {
+   "shape": [
+    1,
+    29,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "3d0d7969fc158104ddaa136c876e922e2f140c2c49f93de4463bb31fcb17ed69"
+  },
+  "features": {
+   "shape": [
+    5,
+    96
+   ],
+   "dtype": "float32",
+   "sha256": "a8f181953615442d72969e7c90d41b3a6ef7a0057392f434dff518f207e2e423"
+  },
+  "first": {
+   "shape": [
+    1,
+    24,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "9d6e10c5447cba927943d4ac01224103bc65bf2822d61906a6435166726cd32a"
+  },
+  "in.blocks.0": {
+   "shape": [
+    1,
+    29,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "35689a3fb005e9ddfed9ef35ea21be44bbe3cbacc61b3cd80ba6ff082fdb5006"
+  },
+  "in.last": {
+   "shape": [
+    1,
+    24,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "eff0551a6ba82a84f826ccab52e589b9576584b2a41bbf93ba04336fc4c8e2b3"
+  },
+  "last": {
+   "shape": [
+    1,
+    24,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "bdac619f69b9270fc419bfadc56286046f3f8bf3745f949e82ce93a93a9f1359"
+  },
+  "latents": {
+   "shape": [
+    1,
+    4,
+    8,
+    12
+   ],
+   "dtype": "float32",
+   "sha256": "e4d6c3cda54699327da3210d00c9b2c7bfa1121c2291d819767ea8a45f6ced27"
+  },
+  "position_ids": {
+   "shape": [
+    29,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "873e8b48139b92852d68742f60ce98e024241ebddcff02db265c5413f72f5202"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "06ebd70f712594b2c876556943aaa43db9d26e9c3f4fa8fcfe39e589eae9940c"
+  },
+  "tmlp": {
+   "shape": [
+    1,
+    1,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "7f73882f834e823b5c7584d1eb5d4ec254cb9f4d09e100088fde3e6e8da1a85c"
+  },
+  "tproj": {
+   "shape": [
+    1,
+    1,
+    384
+   ],
+   "dtype": "float32",
+   "sha256": "58209a0a94439224e06668a1dd1826602c162a9a0ef1f30d8756b90fb2894a4a"
+  },
+  "txtfusion.layerwise_blocks.0": {
+   "shape": [
+    5,
+    3,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "677fac500fc62760b70564ec22bdab31277962c3f9713aaa338d16177beeb63f"
+  },
+  "txtfusion.layerwise_blocks.1": {
+   "shape": [
+    5,
+    3,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "3d29b243d2684b9c0659f47df099de0ecc6cb0547dcc34eb67a257bf486657af"
+  },
+  "txtfusion.projector": {
+   "shape": [
+    1,
+    5,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "93a69922df3606a07ea862142cf67019b66b4be772b613b0d522a84203d3750a"
+  },
+  "txtfusion.refiner_blocks.0": {
+   "shape": [
+    1,
+    5,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "7a4ed07a9c7828c392e0984d357f4b663599ff0a4cd298a4ae3dea021e7ca16f"
+  },
+  "txtfusion.refiner_blocks.1": {
+   "shape": [
+    1,
+    5,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "71674ddeee586ef05f96c3fb6d8bbeeaf75860c4e3f0665be97c1e97ee5762d9"
+  },
+  "txtmlp": {
+   "shape": [
+    1,
+    5,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "33a7934ae6b9fd68f2f4c7350334ddfef65b2d899d7279da8f5e35dc87336817"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    4,
+    8,
+    12
+   ],
+   "dtype": "float32",
+   "sha256": "08689d383ff8b0ca63e53f8810003ca2f39706ab1aedf157262dcea79d1d59e5"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    4,
+    8,
+    12
+   ],
+   "dtype": "float32",
+   "sha256": "782f5c4578b8e9fd081d7226c988b03cb804f4830b21070935ffca7266aa6d91"
+  }
+ }
+}
