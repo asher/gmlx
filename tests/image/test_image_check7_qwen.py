@@ -1355,7 +1355,8 @@ def test_check7_site_gate_at_512(real, tmp_path, variant):
     sites: dict = {}
     shares: dict = {}
     routed: dict = {}
-    with qg.leaf_sites(real, tid, sites, shares, routed):
+    fused: dict = {}
+    with qg.leaf_sites(real, tid, sites, shares, routed, fused):
         vel = step_velocities(real, arrays, tid, f"{variant} sites")
     adapted = {p for p, _, _ in real.patch_tables[tid]["entries"]}
     assert routed.keys() <= shares.keys()
@@ -1384,8 +1385,18 @@ def test_check7_site_gate_at_512(real, tmp_path, variant):
     # Most calls, not all, would miss their site without the delta.
     assert mid > gate and len(under) < len(shares) / 2, (mid, len(under))
     assert {p for p, _ in sites} == set(install.linear_leaves(real.dit))
-    assert {p for (p, _), (_, gate) in sites.items()
-            if gate == 6 * qg.SITE_UNIT} == adapted
+    assert {key[0] for key, (_, gate) in sites.items()
+            if gate == 6 * qg.SITE_UNIT and key not in fused} == adapted
+    # The residual route takes only leaves with no delta. Where it ran, it
+    # took every attention output and MLP down leaf the table leaves alone.
+    on_resid = {p for p, _ in fused}
+    assert not on_resid & adapted
+    if on_resid:
+        assert on_resid == {
+            p for p in install.linear_leaves(real.dit)
+            if p.endswith((".attn.to_out.0", ".img_mlp.out"))} - adapted
+    print(f"qwen check7 sites {variant}: {len(fused)} leaf calls on the "
+          "residual op")
     where = max(sites, key=lambda k: sites[k][0] / sites[k][1])
     print(f"qwen check7 sites {variant}: {len(sites)} leaf calls, worst "
           f"{sites[where][0]:.2e} of {sites[where][1]:.2e} at {where}")

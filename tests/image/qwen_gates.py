@@ -26,6 +26,7 @@ not the sinusoid.
 """
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 
 import mlx.core as mx
@@ -438,7 +439,7 @@ LEAF_ROUNDINGS = {False: 1, True: 3}
 
 @contextmanager
 def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None,
-               routed: dict | None = None):
+               routed: dict | None = None, fused: dict | None = None):
     """Fill ``sites`` with a reading for every call of a linear leaf of
     the DiT while a step runs under ``table``: (module path, call number)
     to (relative L2, gate). A reading is the leaf's output on the path a
@@ -450,10 +451,18 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None,
     call of a leaf the table adapts, the norm of the delta over the norm
     of the leaf's output, both in float32: what a leaf that dropped its
     delta would read at its site. ``routed`` takes the name of the
-    mlx-kquant op for every call that the lora route handed to it."""
+    mlx-kquant op for every call that the lora route handed to it.
+
+    A leaf with no delta whose product the residual route hands to
+    mlx-kquant with the gated residual add after it is not called on its
+    own. That call reads as the leaf's, the op's output against
+    ``residual + gate * product`` in float32, at the op's count of
+    roundings, and ``fused`` takes the name of the op for it."""
     import mlx_kquant as kq
 
+    from gmlx.image import ops
     from gmlx.image.lora import install
+    from gmlx.image.ops import epilogues
 
     assert pipe.lora is not None, "no table with entries was defined"
     built = None
@@ -499,12 +508,37 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None,
         sites[(self._path, n)] = (rel, 2 * rounds * SITE_UNIT)
         return y
 
+    bases = {id(m): p for p, m in install.linear_leaves(pipe.dit).items()}
+    resid = ops.resid_fused
+
+    def resid_call(x, leaf, residual, gate):
+        out = resid(x, leaf, residual, gate)
+        path = bases.get(id(leaf))
+        if path is None:
+            return out
+        f32 = mx.float32
+        with mx.stream(mx.cpu):
+            w = kq.dequantize(leaf["weight"], leaf["scales"],
+                              leaf.kquant_type, f32)
+            want = epilogues.gated_residual(
+                residual.astype(f32), gate.astype(f32), x.astype(f32) @ w.T)
+            rel = _rel_l2(out, want)
+        n = counts[path] = counts.get(path, 0) + 1
+        rows = math.prod(x.shape[:-1])
+        rounds = 1 if rows >= RESID_ONE_ROUNDING_ROWS else 3
+        sites[(path, n)] = (rel, 2 * rounds * SITE_UNIT)
+        if fused is not None:
+            fused[(path, n)] = "quantized_matmul_residual"
+        return out
+
     install.ImageLoRALinear.__call__ = call
+    ops.resid_fused = resid_call
     try:
         with bg.kernel_calls(ran.append):
             yield sites
     finally:
         install.ImageLoRALinear.__call__ = real
+        ops.resid_fused = resid
 
 
 # The site gate of a block's own ops: the output of each op on its own
@@ -521,6 +555,11 @@ def leaf_sites(pipe, table: str, sites: dict, shares: dict | None = None,
 # worst head row, one head of one token of q or of k. That reading has the
 # site's key with ``HEAD`` after it.
 HEAD = "head"
+
+# From this many rows across the batch the residual op adds the gated
+# product in float32 and rounds once (``kq_routes.resid_fused``).
+RESID_ONE_ROUNDING_ROWS = 1024
+
 OP_ROUNDINGS = {
     "layer_norm": 1,      # one op
     "modulate": 2,        # 1 + scale, then the product
@@ -640,6 +679,31 @@ def block_sites(model, sites: dict, leaves: bool = False,
             return out
         return run
 
+    def resid(orig):
+        # The residual route's op: ``residual + gate * (x @ W^T)`` in one
+        # call, read as the block's gated residual add and, with
+        # ``leaves``, as the call of its leaf. From 1024 rows the kernel
+        # rounds once, below that it rounds as the stock ops do: the
+        # product, the gated product and the sum.
+        def run(x, leaf, residual, gate):
+            out = orig(x, leaf, residual, gate)
+            rows = math.prod(x.shape[:-1])
+            rounds = 1 if rows >= RESID_ONE_ROUNDING_ROWS else 3
+
+            def want():
+                w = kq.dequantize(leaf["weight"], leaf["scales"],
+                                  leaf.kquant_type, f)
+                return epilogues.gated_residual(
+                    residual.astype(f), gate.astype(f), x.astype(f) @ w.T)
+
+            key = read("gated_residual", out, want, residual, rounds=rounds)
+            path = paths.get(id(leaf))
+            if leaves and path is not None:
+                n = calls[path] = calls.get(path, 0) + 1
+                sites[(path, n)] = sites[key]
+            return out
+        return run
+
     def swiglu(orig):
         def run(a, b):
             out = orig(a, b)
@@ -695,7 +759,8 @@ def block_sites(model, sites: dict, leaves: bool = False,
              (block, "target", lambda o: within("target", o)),
              (ops, "layer_norm", layer_norm), (ops, "modulate", modulate),
              (ops, "gated_residual", gated_residual), (ops, "swiglu", swiglu),
-             (ops, "qk_norm_rope", qk), (ops, "sdpa", sdpa)]
+             (ops, "qk_norm_rope", qk), (ops, "sdpa", sdpa),
+             (ops, "resid_fused", resid)]
     if leaves:
         assert not any(isinstance(m, install.ImageLoRALinear)
                        for m in install.modules(model).values())
