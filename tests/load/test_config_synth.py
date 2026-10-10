@@ -2588,12 +2588,25 @@ def test_mistral3_without_yarn_factor_is_plain_rope():
 
 def test_mistral3_with_yarn_factor_keeps_yarn():
     m = _base_meta("mistral3")
+    m["mistral3.rope.scaling.type"] = "yarn"
     m["mistral3.rope.scaling.factor"] = 4.0
     m["mistral3.rope.scaling.original_context_length"] = 256
     c = synthesize_config(m, tensor_shapes={})
     rp = c["rope_parameters"]
     assert rp["type"] == "yarn" and rp["factor"] == 4.0
     assert rp["original_max_position_embeddings"] == 256
+
+
+@pytest.mark.parametrize("scaling_type", [None, "linear"])
+def test_mistral3_factor_under_a_linear_type_is_linear(scaling_type):
+    """llama.cpp reads a missing type as linear; a factor alone is not yarn."""
+    m = _base_meta("mistral3")
+    if scaling_type:
+        m["mistral3.rope.scaling.type"] = scaling_type
+    m["mistral3.rope.scaling.factor"] = 4.0
+    c = synthesize_config(m, tensor_shapes={})
+    rp = c["rope_parameters"]
+    assert rp["type"] == "linear" and rp["factor"] == 4.0
 
 
 def test_qwen3_rope_scaling_none_omitted():

@@ -2203,10 +2203,13 @@ def _synth_mistral3(meta, shapes, config: dict) -> None:
     # without the scaling KV the model is plain RoPE. The bag itself is
     # mandatory (ministral3 indexes rope_theta / llama_4_scaling_beta /
     # original_max_position_embeddings unconditionally).
+    # The type comes from the header key as llama.cpp reads it: a factor
+    # under a missing or linear type is linear scaling, not yarn.
     factor = _read_float(meta, f"{arch}.rope.scaling.factor")
-    if factor is not None:
-        rp: dict[str, Any] = {"rope_type": "yarn", "type": "yarn",
-                              "factor": factor}
+    scaling_type = _read_string(meta, f"{arch}.rope.scaling.type") or "linear"
+    if factor is not None and scaling_type in ("yarn", "linear"):
+        rp: dict[str, Any] = {"rope_type": scaling_type,
+                              "type": scaling_type, "factor": factor}
     else:
         rp = {"rope_type": "default", "type": "default"}
 
