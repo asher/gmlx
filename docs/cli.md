@@ -291,8 +291,9 @@ For the menu bar side, read [Menu bar app](menubar.md).
 
 `gmlx list` lists the model ids a request can address. Discovered models
 are tagged, aliases follow, and the default model is marked with `*`. The
-KIND column reads `chat` or `image`, and an image model's size counts its
-DiT, text encoder and VAE.
+KIND column reads `chat` or `image`. An image model's size counts its DiT,
+VAE and vision tower, and its text encoder unless it shares a chat model's,
+which that model's row counts.
 
 ```sh
 gmlx list
@@ -306,7 +307,7 @@ gmlx list --image --edit
 | `--json` | Off | Emit JSON. |
 | `--image` | Off | List only the [image models](images.md). |
 | `--family NAME` | All | List only the image models of this family, such as `z-image` or `qwen-image-2.1`. |
-| `--edit` | Off | List only the image models that edit from reference images. |
+| `--edit` | Off | List only the image models that edit from reference images: a family that takes them, with the encoder's vision tower. |
 | `--shared-encoder` | Off | List only the image models whose text encoder is a chat model they share. |
 
 ## gmlx run
@@ -660,7 +661,7 @@ and removes its entry, aliases and default from the config. A file another
 model still uses is kept. `rm` prints the plan and asks before it deletes
 anything.
 
-An image model id removes its DiT, VAE and text encoder. A text encoder
+An image model id removes its DiT, VAE, text encoder and vision tower. A text encoder
 that is a chat model, or that another image model uses, is kept, and `rm`
 refuses a chat model that an image model uses as its encoder.
 
@@ -1062,7 +1063,9 @@ refused by name. So is a `--source-config` whose `temperal_downsample`,
 FAIL or SKIP line for each check, with the fix named. It covers the
 runtime, the config, each model and service, background servers, login
 items, container mode, optional extras, the Hugging Face token, RAM and
-disk space. No check uses the network.
+disk space. Its `image` check reads the headers of each image model's DiT,
+text encoder, vision tower and VAE, and fails one whose parts are not of
+one family. No check uses the network.
 
 ```sh
 gmlx doctor
@@ -1072,7 +1075,7 @@ gmlx doctor --deep
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--config FILE` | The first default location | Read this config. |
-| `--deep` | Off | Also read each configured model's header. |
+| `--deep` | Off | Also read each configured chat model's header. The `image` check reads the image models' headers on every run. |
 | `--json` | Off | Emit JSON. |
 
 ## gmlx completion
@@ -1124,7 +1127,7 @@ message that names the cause and the next step. A script can retry after
 |------|---------|
 | 0 | `--config-only`, `--remove-home`, `--stop`, `--list` or `--forget-share` finished, or `--detach` started the session. |
 | 1 | Launch refused, such as a folder it will not share or a flag that does not fit this launch. |
-| 2 | A flag is unknown, abbreviated or refused, or the command names a client it should not, or none where it needs one. |
+| 2 | A flag is unknown, abbreviated or refused, the command names a client it should not or none where it needs one, or ComfyUI lacks the node pack. |
 | 69 | Something launch needs is missing or does not answer: Apple container, its kernel, the client, the server or a model. |
 | 75 | Something is busy: a project another launch uses, a volume or port in use, or a server that is starting or full. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |

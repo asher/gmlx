@@ -61,7 +61,8 @@ depends on the client:
 | `goose` | goose's `config.yaml` |
 | `elia` | The `XDG_CONFIG_HOME` folder |
 | `open-webui` | Open WebUI's data folder, in place of `~/.open-webui` |
-| `hermes`, `comfyui` | Refused. Set `HERMES_HOME` to use another hermes folder. |
+| `hermes` | Refused. Set `HERMES_HOME` to use another hermes folder. |
+| `comfyui` | Refused. `--comfyui-dir` names the ComfyUI folder. |
 | `claude-code` | Nothing, because Claude Code gets only environment variables |
 
 Container mode refuses `--config-path`, because the settings go into the
@@ -245,5 +246,8 @@ ComfyUI is a node editor for image workflows, and the gmlx node pack runs
 the server's image models in its graphs. `launch` runs ComfyUI from
 `~/ComfyUI`, or the folder `--comfyui-dir` names, on that folder's own
 Python environment, and passes it the server's address, API key and image
-model. [ComfyUI](comfyui.md) covers the install, the graphs and what the
-pack refuses.
+model. ComfyUI runs on the Mac, where it uses the GPU, so `launch` refuses
+`--container` and the other container flags for it. Without the gmlx node
+pack in the folder's `custom_nodes`, `launch` prints the command that
+installs it and exits with 2. [ComfyUI](comfyui.md) covers the install, the
+graphs and what the pack refuses.
