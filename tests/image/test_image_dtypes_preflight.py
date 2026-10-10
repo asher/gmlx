@@ -27,8 +27,10 @@ def test_m1_and_m2_need_the_override(monkeypatch):
         with pytest.raises(ImageDtypeError) as e:
             image_activation("z_image", gen=gen)
         msg = str(e.value)
-        assert chip in msg and "z_image" in msg
-        assert "GMLX_IMAGE_ALLOW_FP16=1" in msg
+        assert msg == (f"Z-Image runs in float16 on the {chip} chip, which "
+                       "misses the reference checks, so its images differ "
+                       "from an M3 or newer. Set GMLX_IMAGE_ALLOW_FP16=1 to "
+                       "run it anyway")
         act = image_activation("z_image", gen=gen, allow=True)
         assert (act.dit, act.vae) == (mx.float16, mx.float32)
         assert dtypes.vae_dtype(gen=gen) == mx.float32
@@ -43,7 +45,7 @@ def test_families_without_fp16_are_refused_even_with_the_override(
         monkeypatch):
     monkeypatch.setenv(dtypes.ALLOW_FP16_ENV, "1")
     with pytest.raises(ImageDtypeError,
-                       match="qwen_image21 needs bfloat16.*never runs in "
+                       match="Qwen-Image 2.1 needs bfloat16.*never runs in "
                              "float16"):
         image_activation("qwen_image21", gen=14)
 

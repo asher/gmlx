@@ -1,10 +1,11 @@
 """The activation dtype of an image model, from the chip generation.
 
 M3 and later chips run the DiT and the VAE in bfloat16. M1 and M2 chips
-have no native bfloat16, so a DiT would run in float16 there, which has
-not been checked against the reference on that hardware. It is refused
-unless GMLX_IMAGE_ALLOW_FP16=1, and only families that tolerate float16
-run under the override. The VAE then runs in float32, never float16.
+have no native bfloat16, and software bfloat16 there is too slow, so a DiT
+would run in float16. In float16 a Z-Image DiT misses the reference checks
+by a wide margin, so it is refused unless GMLX_IMAGE_ALLOW_FP16=1, and
+only families that tolerate float16 run under the override. The VAE then
+runs in float32, never float16.
 float32 is not an option for the DiT, because a K-quant matmul promotes a
 float32 input to bfloat16.
 """
@@ -75,6 +76,16 @@ def chip_refusal(family: str, title: str) -> str | None:
     return None
 
 
+def _title(family: str) -> str:
+    """The family's title, such as Z-Image, or its name when unknown."""
+    from .registry import get_family
+
+    try:
+        return get_family(family).title
+    except ValueError:
+        return family
+
+
 def _native_bf16(gen: int) -> bool:
     return gen == 0 or gen >= _NATIVE_BF16_GEN
 
@@ -94,11 +105,11 @@ def image_activation(family: str, *, gen: int | None = None,
     chip = chip_name(gen)
     if family not in FP16_FAMILIES:
         raise ImageDtypeError(
-            f"{family} needs bfloat16, which the {chip} chip lacks, and it "
-            f"never runs in float16, with or without {ALLOW_FP16_ENV}")
+            f"{_title(family)} needs bfloat16, which the {chip} chip lacks, "
+            f"and it never runs in float16, with or without {ALLOW_FP16_ENV}")
     if not (allow_fp16() if allow is None else allow):
         raise ImageDtypeError(
-            f"{family} would run in float16 on the {chip} chip, which is not "
-            f"yet checked against the reference there. Set "
-            f"{ALLOW_FP16_ENV}=1 to run it anyway")
+            f"{_title(family)} runs in float16 on the {chip} chip, which "
+            f"misses the reference checks, so its images differ from an M3 "
+            f"or newer. Set {ALLOW_FP16_ENV}=1 to run it anyway")
     return Activation(mx.float16, mx.float32, gen)

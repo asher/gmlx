@@ -55,6 +55,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and registers it.
 - Image generation needs an M3 or newer. On an M1 or M2, `gmlx pull` refuses an
   image model before it downloads anything, unless `--force`.
+- On an M1 or M2, `GMLX_IMAGE_ALLOW_FP16=1` runs Z-Image-Turbo in float16, with
+  images that differ from an M3's, and lets `gmlx pull` take it.
 - On a 16 GB Mac, `gmlx pull krea-2-turbo` writes `defaults.size: 512x512`
   into the entry, and `image generate` takes an entry's `defaults.size`.
 - An `image_models` entry takes `variant`, and `image generate` and `bench`
