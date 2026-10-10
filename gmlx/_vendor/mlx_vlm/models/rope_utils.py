@@ -1266,13 +1266,19 @@ class MRoPERotaryEmbedding(nn.Module):
                     self._compiled_apply[position_ids.ndim] = compiled_apply
 
             if compiled_apply is not None:
-                return compiled_apply(
+                q, k = compiled_apply(
                     q,
                     k,
                     position_ids,
                     self.inv_freq,
                     self.position_selector,
                 )
+                # gmlx: the kernel rotates without the cos and sin magnitude
+                # the cos/sin path applies, so the rotated dims take it here.
+                if self.attention_scaling != 1.0:
+                    q = scale_rotated_dims(q, self.dim, self.attention_scaling)
+                    k = scale_rotated_dims(k, self.dim, self.attention_scaling)
+                return q, k
 
         cos, sin = self(k, position_ids)
         return apply_multimodal_rotary_pos_emb(
@@ -1285,6 +1291,13 @@ class MRoPERotaryEmbedding(nn.Module):
             style=self.style,
             cast_output=cast_output,
         )
+
+
+# gmlx: the cos and sin magnitude on the rotated dims of a fused apply.
+def scale_rotated_dims(x, dims, scale):
+    if x.shape[-1] == dims:
+        return x * scale
+    return mx.concatenate([x[..., :dims] * scale, x[..., dims:]], axis=-1)
 
 
 def rotate_half(x):

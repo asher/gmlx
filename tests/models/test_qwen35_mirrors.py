@@ -245,7 +245,7 @@ def test_rope_apply_rotary_mirror():
                 "cos, sin = rope_cos_sin(rotary_emb, k, position_ids)",
                 1,
             ),
-            ("self.", "rotary_emb.", 9),
+            ("self.", "rotary_emb.", 14),
             # The fused kernel is Metal-only; the owned mirror also
             # checks the active device.
             ("rotary_emb.fused_apply", "fused_rope_active(rotary_emb)", 1),

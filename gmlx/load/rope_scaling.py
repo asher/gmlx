@@ -451,7 +451,7 @@ def scoped(fn):
 SWAP_ARCHES = frozenset({
     "llama", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "glm4", "glm4moe",
     "mistral3", "gpt-oss", "seed_oss", "smollm3", "granite", "qwen3next",
-    "minimax-m2",
+    "minimax-m2", "qwen35", "qwen35moe", "qwen3vl", "qwen3vlmoe",
 })
 
 # Architectures whose every rope site applies the run options. A load of any

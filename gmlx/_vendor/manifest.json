@@ -1320,7 +1320,7 @@
   "mlx_vlm/models/rfdetr/segmentation.py": {"status": "verbatim", "upstream": "6009f81f40a80ff3f89c0aca87a4add159a8a3422bdc122c4b3506ca7f02ebf6"},
   "mlx_vlm/models/rfdetr/transformer.py": {"status": "verbatim", "upstream": "85b1f83410a0e539ea0dd9405bed4f6aa3ece419f0dc81236f7eeee2cb35c865"},
   "mlx_vlm/models/rfdetr/vision.py": {"status": "verbatim", "upstream": "adf77dda03724a06c028e5030253e3fb8854d3c1d4f41caef9f679b99e704d3d"},
-  "mlx_vlm/models/rope_utils.py": {"status": "verbatim", "upstream": "6944f69a03c41cbb9613afbd2f1b54b71c504840aaeb0eade39c6109dbfdd25b"},
+  "mlx_vlm/models/rope_utils.py": {"sha256": "01f096f79bfb01e33ec282b0f90a1e6176ae9bf440326b58ccad6c1dd2057872", "status": "edited", "upstream": "6944f69a03c41cbb9613afbd2f1b54b71c504840aaeb0eade39c6109dbfdd25b"},
   "mlx_vlm/models/rt_detr_v2/__init__.py": {"status": "verbatim", "upstream": "5ef876624a47e5e81caa884921b114327a8def9eaa79ac2416172efa5ef6fba7"},
   "mlx_vlm/models/rt_detr_v2/config.py": {"status": "verbatim", "upstream": "11911438de3f4bcae182523bc23df7fdc6424a74ba1d9c6e0f24c516fc36ca83"},
   "mlx_vlm/models/rt_detr_v2/convert.py": {"status": "verbatim", "upstream": "b8626ec095ade8f335f4438709e427bba65e4911093c201ed778ce707a4ded96"},

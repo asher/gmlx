@@ -61,6 +61,24 @@ def _swappable(r) -> bool:
             or type(r).__name__ == "_FactoredRoPE")
 
 
+def _is_mrope(r) -> bool:
+    from gmlx._vendor.mlx_vlm.models.rope_utils import MRoPERotaryEmbedding
+
+    return isinstance(r, MRoPERotaryEmbedding)
+
+
+def _scale_mrope(r, scaling: rs.RopeScaling, base: float) -> None:
+    """Multi-axis rope (the Qwen 3.5 family): the kernel and the cos/sin
+    path both read ``inv_freq``, and ``attention_scaling`` is the cos and
+    sin magnitude, which the fused apply takes beside the kernel. The
+    sections pick a position axis per pair and leave the table alone."""
+    inv = rs.inv_freq(int(r.dim), base, scaling)
+    r._inv_freq = mx.array(inv, dtype=mx.float32)
+    r.attention_scaling = scaling.mscale
+    r._gmlx_rope_scaled = True
+    mx.eval(r._inv_freq)
+
+
 def _rope_like(r) -> bool:
     tn = type(r).__name__.lower()
     return ("rope" in tn or "rotary" in tn) and "nope" not in tn
@@ -130,9 +148,11 @@ def apply(model, config) -> int:
             if r is None or not isinstance(r, nn.Module):
                 continue
             path = f"{name}.{attr}" if name else attr
-            if isinstance(r, ScaledRoPE):
+            if isinstance(r, ScaledRoPE) or getattr(r, "_gmlx_rope_scaled",
+                                                    False):
                 continue
-            if not _swappable(r):
+            mrope = _is_mrope(r)
+            if not mrope and not _swappable(r):
                 if _rope_like(r):
                     unswapped.append(f"{path} ({type(r).__name__})")
                 continue
@@ -148,7 +168,10 @@ def apply(model, config) -> int:
                 base = (scaling.freq_base if scaling.freq_base_override
                         else mb or scaling.freq_base_train
                         or rs._DEFAULT_FREQ_BASE)
-            setattr(mod, attr, _scaled(r, s, base))
+            if mrope:
+                _scale_mrope(r, s, base)
+            else:
+                setattr(mod, attr, _scaled(r, s, base))
             n += 1
     if unswapped:
         raise NotImplementedError(
