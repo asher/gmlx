@@ -1326,6 +1326,42 @@ def reload_config(config_abspath: str) -> list:
     return signalled
 
 
+def reload_over_http(config_abspath: str) -> tuple | None:
+    """POST /v1/reload to the server at the address of the config at
+    ``config_abspath``, for a server that keeps no runfile, such as one
+    started with ``--foreground``. Returns ``(host:port, None)`` when it
+    reloaded, ``(host:port, reason)`` when it answered but did not reload,
+    and None when no server answers there or the config does not load."""
+    try:
+        from gmlx.config import load_config
+        cfg = load_config(config_abspath)
+    except Exception:  # noqa: BLE001 - best-effort, as the SIGHUP reload
+        return None
+    host = cfg.host or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    port = int(cfg.port or 8080)
+    # A server with a runfile there runs from another config.
+    if any(int(r.get("port") or 0) == port and identity_ok(r)
+           for r in list_runs()):
+        return None
+    if not _health_ok(host, port):
+        return None
+    where = host_port(host, port)
+    try:
+        post_json(f"http://{where}/v1/reload", api_key=cfg.api_key,
+                  timeout=120)
+    except urllib.error.HTTPError as e:
+        try:
+            why = json.loads(e.read()).get("message") or f"HTTP {e.code}"
+        except Exception:  # noqa: BLE001 - not our JSON body
+            why = f"HTTP {e.code}"
+        return where, why
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return where, str(getattr(e, "reason", None) or e)
+    return where, None
+
+
 def _configured_count(config_abspath: str | None) -> int:
     """The number of ``models:`` entries in the config, or 0 when it cannot be read."""
     if not config_abspath or not os.path.isabs(config_abspath):

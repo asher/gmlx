@@ -163,6 +163,23 @@ def _reload_running(config_path, *, skip: bool) -> None:
     for host, port, pid in signalled:
         print(f"reloaded the running server at {host}:{port} (pid {pid}) "
               f"to pick up the config change")
+    if signalled:
+        return
+    # A server with no runfile, such as `gmlx serve --foreground`, reloads
+    # over HTTP at the config's address.
+    try:
+        got = lifecycle.reload_over_http(target)
+    except Exception:
+        return
+    if got is None:
+        return
+    where, why = got
+    if why is None:
+        print(f"reloaded the running server at {where} to pick up the "
+              "config change")
+    else:
+        print(f"note: the server at {where} did not reload ({why}); "
+              "restart it to pick up the config change", file=sys.stderr)
 
 
 # init - scaffold a starter config (guided wizard, or flag-driven)

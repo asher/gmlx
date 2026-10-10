@@ -400,6 +400,10 @@ def _no_live_server(monkeypatch):
     import gmlx.commands.launch as _launch
     monkeypatch.setattr(_launch, "_server_ready",
                         lambda base_url, api_key=None: False)
+    # A config write never reloads a server on the dev machine; tests of the
+    # HTTP reload take the function at import and patch it back.
+    import gmlx.serve.lifecycle as _lifecycle
+    monkeypatch.setattr(_lifecycle, "reload_over_http", lambda path: None)
 
 
 @pytest.fixture(autouse=True)

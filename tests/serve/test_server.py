@@ -15,6 +15,7 @@ import types
 import pytest
 
 import gmlx.serve.server as srv  # noqa: E402
+from gmlx.serve.lifecycle import reload_over_http as _RELOAD_OVER_HTTP  # noqa: E402
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import observability as sp_obs  # noqa: E402
 from gmlx.config import ConfigError, ModelCfg, ServerCfg, ServerDefaults  # noqa: E402
@@ -1364,6 +1365,66 @@ def test_reload_running_no_servers_is_quiet(monkeypatch, capsys):
     monkeypatch.setattr(lc, "reload_config", lambda p: [])
     srv._reload_running("/some/cfg.yaml", skip=False)
     assert capsys.readouterr().out == ""               # nothing running -> no note
+
+
+def _foreground(monkeypatch, tmp_path, *, answer):
+    """A config at port 18431, a server that answers /health there with no
+    runfile, and a /v1/reload that answers ``answer``."""
+    import io
+    import json
+    import urllib.error
+
+    import gmlx.serve.lifecycle as lc
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("server:\n  port: 18431\n  api_key: k\n  model_dirs: []\n")
+    monkeypatch.setattr(lc, "reload_over_http", _RELOAD_OVER_HTTP)
+    monkeypatch.setattr(lc, "reload_config", lambda p: [])
+    monkeypatch.setattr(lc, "list_runs", lambda: [])
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: True)
+    posted = []
+
+    def post(url, payload=None, *, api_key=None, timeout=5.0):
+        posted.append((url, api_key))
+        if answer != 200:
+            body = io.BytesIO(json.dumps({
+                "message": "reload requires a --config launch"}).encode())
+            raise urllib.error.HTTPError(url, answer, "", {}, body)
+        return {"status": "success"}
+
+    monkeypatch.setattr(lc, "post_json", post)
+    return str(cfg), posted
+
+
+def test_a_server_with_no_runfile_reloads_over_http(monkeypatch, tmp_path,
+                                                    capsys):
+    cfg, posted = _foreground(monkeypatch, tmp_path, answer=200)
+    srv._reload_running(cfg, skip=False)
+    assert posted == [("http://127.0.0.1:18431/v1/reload", "k")]
+    assert ("reloaded the running server at 127.0.0.1:18431 to pick up the "
+            "config change") in capsys.readouterr().out
+
+
+def test_a_server_that_cannot_reload_is_named_with_why(monkeypatch, tmp_path,
+                                                       capsys):
+    cfg, posted = _foreground(monkeypatch, tmp_path, answer=501)
+    srv._reload_running(cfg, skip=False)
+    assert posted
+    assert ("the server at 127.0.0.1:18431 did not reload (reload requires a "
+            "--config launch); restart it") in capsys.readouterr().err
+
+
+def test_no_http_reload_reaches_a_server_with_a_runfile_or_none(
+        monkeypatch, tmp_path, capsys):
+    import gmlx.serve.lifecycle as lc
+    cfg, posted = _foreground(monkeypatch, tmp_path, answer=200)
+    # A managed server of another config holds the port.
+    monkeypatch.setattr(lc, "list_runs", lambda: [{"port": 18431}])
+    monkeypatch.setattr(lc, "identity_ok", lambda r: True)
+    srv._reload_running(cfg, skip=False)
+    monkeypatch.setattr(lc, "list_runs", lambda: [])
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: False)
+    srv._reload_running(cfg, skip=False)
+    assert posted == [] and capsys.readouterr() == ("", "")
 
 
 def test_sync_reloads_running_server(monkeypatch, tmp_path):

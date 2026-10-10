@@ -586,7 +586,9 @@ background `serve` starts it automatically. What it shows is in
 
 `gmlx pull` checks a remote GGUF's header and, when it will load, downloads
 all its shards into your model directory. A file saved under a
-`model_dirs` root is added to the config, and a running server reloads it.
+`model_dirs` root is added to the config, and a running server reloads it:
+one started from that config, or one in the foreground at the config's
+address.
 
 ```sh
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
