@@ -130,5 +130,6 @@ for event in stream:
 | The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |
 | The job waits for its turn, or for one step, longer than [`token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) | 504, and the log marks the request `timeout` |
 
-The Responses route does not run the `image_generation`
+[Troubleshooting](troubleshooting.md#image-generation) has the fix for
+each message. The Responses route does not run the `image_generation`
 tool: it drops the tool and logs a warning.

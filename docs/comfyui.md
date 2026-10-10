@@ -69,7 +69,9 @@ The image shows in the `Save Image` node, and ComfyUI saves it as
 run. To make another image, change the text of the `Positive prompt` node
 and press Run again.
 
-Stop ComfyUI with Ctrl+C in the terminal where `launch` runs.
+Stop ComfyUI with Ctrl+C in the terminal where `launch` runs. When `launch`
+stops with an error, [Troubleshooting](troubleshooting.md#image-generation)
+has the fix.
 
 ## The nodes you use
 

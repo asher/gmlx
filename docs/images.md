@@ -5,6 +5,8 @@ the Z-Image-Turbo, Qwen-Image 2.1 and Krea 2 Turbo models. You can run them
 from the command line, call them from an app through the OpenAI image API,
 or use them in [ComfyUI](comfyui.md). Image generation came with gmlx 0.5
 and needs a Mac with an M3 chip or newer and 16 GB of memory or more.
+[An M1 or M2](troubleshooting.md#needs-an-m3-or-newer) runs only
+Z-Image-Turbo, in float16, when you allow it.
 
 ## Choose a model
 
@@ -59,7 +61,9 @@ prompt, the seed and the settings it was made with. Each `generate` loads
 the model before its first step, which takes a while on every run.
 
 [`gmlx image generate`](cli.md#image-generate) has the flags for size,
-steps, edits from an image and several images at once.
+steps, edits from an image and several images at once. When a command
+stops with an error, [Troubleshooting](troubleshooting.md#image-generation)
+has the fix.
 
 - [Call it from an app](#call-it-from-an-app)
 - [Use a LoRA](#use-a-lora)

@@ -10,6 +10,7 @@ agent or chat app that does not connect, read its entry under
 - [Starting the server](#starting-the-server)
 - [Requests](#requests)
 - [Memory](#memory)
+- [Image generation](#image-generation)
 - [Container mode](#container-mode)
 - [Custom agents](#custom-agents)
 - [Voice](#voice)
@@ -214,6 +215,137 @@ The weights plus the KV cache need more memory than the GPU may use.
 
 To try anyway on `run` and `chat`, set
 [`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#commands).
+
+## Image generation
+
+### `image request does not fit`
+
+The image at this size needs more memory than gmlx may use, and the message
+names the largest part. Try these in order:
+
+- A smaller image, such as `--size 768x768` on `gmlx image generate`, or
+  `"size": "768x768"` in a request.
+- A smaller DiT quant. `gmlx pull z-image-turbo --quant Q3_K_M` downloads
+  it and adds it as a new model, `z-image-turbo-q3-k-m`.
+- A smaller text encoder as well, with `--encoder-quant Q4_K_M` on that
+  pull.
+
+`GMLX_OVERCOMMIT=1` skips the check. The run then takes more memory than
+macOS can give it, so the Mac swaps and slows down. On a 16 GB Mac it can
+stop responding until it restarts.
+
+### `VAE decode of ... needs ... GiB, and ... GiB is free`
+
+The last step, which turns the result into pixels, does not fit in the
+memory that is free at this size. A `VAE encode` message is the same check
+for the image an edit starts from. Make a smaller image, or quit apps that
+hold a lot of memory. `GMLX_OVERCOMMIT=1` overrides it, with the risk the
+entry above describes.
+
+### `The ... weights of ... GiB exceed the working budget of ... GiB`
+
+The model's files alone are larger than the memory gmlx may use, which
+happens with a quant meant for a Mac with more memory. Pull the model
+without `--quant` to get the quant for this Mac, or a smaller one, as
+[`image request does not fit`](#image-request-does-not-fit) shows.
+
+### `size WxH does not fit in memory beside the models now loaded`
+
+The server answers 400 when an image of that size does not fit beside the
+chat models it has loaded. The message names the largest size of the same
+shape that fits. Send that size, leave out `size` to get the model's
+default, or unload chat models with [`POST /unload`](api.md#endpoints).
+
+### `needs an M3 or newer`
+
+`gmlx pull` refuses an image model on an M1 or M2 Mac before it downloads
+anything, and `--force` downloads the files anyway. The models run in
+bfloat16, which M1 and M2 chips lack. On those Macs `gmlx image generate`
+and the server refuse Qwen-Image 2.1 and Krea 2 with `needs bfloat16, which
+the M1 chip lacks`. Z-Image-Turbo can run in float16, as the next entry
+describes.
+
+### `runs in float16 on the M1 chip, which misses the reference checks`
+
+Z-Image-Turbo can run in float16 on an M1 or M2, where the other image
+models cannot. Its images then differ from those of an M3 or newer, because
+float16 misses the reference checks. With
+[`GMLX_IMAGE_ALLOW_FP16=1`](env-vars.md#runtime) set, `gmlx pull`,
+`gmlx image generate` and the server run it that way.
+
+### `no such file, and no image model of that id`
+
+`gmlx image generate` takes the id of an image model in your configuration,
+or the path of a DiT file. The message lists the ids the configuration has,
+and `gmlx list --image` lists them too. `gmlx pull z-image-turbo` adds one.
+
+### `--encoder and --vae are required with a DiT path`
+
+Given the path of a DiT file, `generate` also needs the text encoder and VAE
+files. Use the id that `gmlx pull` added instead, which brings both.
+
+### `no image model is configured on this server`
+
+The server has no image model, and answers 404 `model_not_found`.
+`gmlx pull z-image-turbo` downloads one and adds it to the running server.
+
+### `is not an image model` or `is an image model`
+
+The request sent a chat model to an image route, or an image model to a
+chat route, and got 400 `wrong_model_kind`. The message lists the image
+models, or names the route the model takes.
+
+### 400 `image_model_mismatch`
+
+The text encoder, VAE or mmproj of an image model's entry belongs to
+another model, and the message names the part. Set the entry's `encoder`,
+`vae` or `encoder_mmproj` to the file made for this model, or pull the
+model by name, which takes the parts that match.
+
+### `is not the ... VAE, and a download would land on it`
+
+`gmlx pull` found another file where it would save one of the model's parts.
+Move or delete that file, and pull again.
+
+### `has sha256 ..., and the ... VAE at ... has ...`
+
+The VAE that `gmlx pull` downloaded is not the published file. Delete the
+file that the message names, and pull again.
+
+### `gmlx image does not apply` or `is not a ... adapter`
+
+The LoRA is of a kind gmlx does not apply, or it was made for another
+model. [Use a LoRA](images.md#use-a-lora) says which LoRAs work.
+
+### `has text encoder layers; set it on the image model's adapters instead`
+
+A LoRA in a request applies to the DiT only, so the server refuses one that
+also trains the text encoder. List it in the image model's
+[`adapters`](config.md#image_modelsadapters), where both halves apply.
+
+### `never an absolute path` or `is not a configured adapter or a file in a model folder`
+
+A LoRA in a request is named by a path inside one of your model folders,
+such as `loras/watercolor.safetensors`, or by the file name of one in the
+entry's `adapters`. Move the file into a model folder and use its path
+there.
+
+### `is not a ComfyUI folder` or `has no Python environment of its own`
+
+`gmlx launch comfyui` looks for ComfyUI in `~/ComfyUI`, with its Python
+environment in a `.venv` or `venv` folder there. Install it as
+[Install ComfyUI and the pack](comfyui.md#install-comfyui-and-the-pack)
+shows, or pass `--comfyui-dir` with the folder that holds it.
+
+### `the ComfyUI-gmlx node pack is not in`
+
+The pack is not in ComfyUI's `custom_nodes` folder. Run the `git clone`
+command that the message prints, then launch again.
+
+### `the server offers no image model`
+
+`gmlx launch comfyui` found a server with no image model.
+`gmlx pull z-image-turbo` downloads one and adds it to the running server.
 
 ## Container mode
 
