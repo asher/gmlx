@@ -1474,7 +1474,8 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
                          port: int = _OPEN_WEBUI_PORT, data_dir: str,
                          stt: bool = False, tts: bool = False,
                          rerank: bool = False, origins: str | None = None,
-                         image_model: str | None = None) -> dict:
+                         image_model: str | None = None,
+                         image_edit: bool = False) -> dict:
     """Open WebUI backend settings as env-var pairs (it has no config file). Points its
     single OpenAI endpoint at the gmlx server, disables the Ollama probe, pins its
     own port + an on-disk DATA_DIR, preselects the default model when known, and routes
@@ -1484,7 +1485,8 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
     capability (see :func:`_launch_open_webui`), so a chat-only server doesn't break
     Open WebUI's built-in browser TTS / local reranker. ``image_model`` turns on
     image generation through the server's ``/v1/images/generations`` with that
-    model. ``origins`` lists the
+    model, and ``image_edit`` image edits through ``/v1/images/edits``, for a
+    model whose ``/v1/models`` entry says ``edit``. ``origins`` lists the
     addresses of Open WebUI's own pages, split by ``;``. Without that list, Open
     WebUI lets every other page read its answers with the sign-in cookie and
     send it JSON calls, such as one that makes a Function, which runs Python.
@@ -1545,6 +1547,14 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
             "IMAGE_GENERATION_MODEL": image_model,
             "IMAGE_SIZE": "1024x1024",
         })
+        if image_edit:
+            pairs.update({
+                "ENABLE_IMAGE_EDIT": "true",         # edit an image in chat
+                "IMAGE_EDIT_ENGINE": "openai",       # -> /v1/images/edits
+                "IMAGES_EDIT_OPENAI_API_BASE_URL": base_url,
+                "IMAGES_EDIT_OPENAI_API_KEY": key,
+                "IMAGE_EDIT_MODEL": image_model,
+            })
     if default_model:
         pairs["DEFAULT_MODELS"] = default_model
     if origins:
@@ -1581,7 +1591,9 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     pairs = build_open_webui_env(base_url, default_model=default_model,
                                  api_key=_client_key(a), port=webui_port, data_dir=data_dir,
                                  stt=stt, tts=tts, rerank=rerank, origins=origins,
-                                 image_model=image)
+                                 image_model=image,
+                                 image_edit=any(m.get("edit") for m in models
+                                                if m.get("id") == image))
     if tts and os.environ.get("AUDIO_TTS_VOICE"):
         # A voice the user exported wins over the Kokoro default.
         pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]

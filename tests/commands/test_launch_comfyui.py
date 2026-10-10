@@ -157,6 +157,32 @@ def test_open_webui_turns_image_generation_on_for_the_image_default():
     assert env["IMAGE_GENERATION_MODEL"] == "z-image-turbo"
     off = launch.build_open_webui_env("http://h:1/v1", data_dir="/d")
     assert not any(k.startswith(("IMAGE", "ENABLE_IMAGE")) for k in off)
+    assert "ENABLE_IMAGE_EDIT" not in env
+
+
+def test_open_webui_turns_image_edits_on_for_a_model_that_edits():
+    env = launch.build_open_webui_env("http://h:1/v1", data_dir="/d",
+                                      image_model="qwen-image",
+                                      image_edit=True)
+    assert env["ENABLE_IMAGE_EDIT"] == "true"
+    assert env["IMAGE_EDIT_ENGINE"] == "openai"
+    assert env["IMAGES_EDIT_OPENAI_API_BASE_URL"] == "http://h:1/v1"
+    assert env["IMAGES_EDIT_OPENAI_API_KEY"] == env["IMAGES_OPENAI_API_KEY"]
+    assert env["IMAGE_EDIT_MODEL"] == "qwen-image"
+
+
+@pytest.mark.parametrize("model,edits", [("z-image-turbo", False),
+                                         ("qwen-image", True)])
+def test_open_webui_launch_edits_only_with_a_model_that_edits(
+        monkeypatch, tmp_path, model, edits):
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    models = [dict(m, default=m["id"] == model) if m.get("image") else m
+              for m in _MODELS]
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None, client=None, **k: models)
+    rc, calls = _run(["open-webui", "--config-path", str(tmp_path)])
+    assert rc == 0
+    assert calls["env"].get("IMAGE_EDIT_MODEL") == (model if edits else None)
 
 
 def test_open_webui_launch_reads_the_image_default_from_the_server(

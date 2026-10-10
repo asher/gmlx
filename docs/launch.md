@@ -199,7 +199,13 @@ Open WebUI gets a feature for each service the gmlx server runs, as
 | `rerank` | Hybrid search with the server's reranker. |
 | `stt` | Speech input. |
 | `tts` | Spoken replies. |
-| An [image model](images.md) | Image generation with the server's default image model, at 1024x1024. |
+| An [image model](images.md) | Image generation with the server's default image model, at 1024x1024, and image edits when that model edits. |
+
+Open WebUI keeps a setting in its database once you save it in its admin
+panel, and from then on the saved value wins over the one `launch` passes.
+To have `launch` set them on every run, export `ENABLE_PERSISTENT_CONFIG=false`
+before you launch. Open WebUI then forgets at each restart the settings you
+change in its panel.
 
 ### dsh
 
