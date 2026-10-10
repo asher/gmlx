@@ -76,7 +76,10 @@ the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
 
 Each [image model](config.md#image-models) is listed too, with
 `"image": true`, its `family` and `variant`, and `edit`, which is true when
-the model takes reference images. It carries `resident`, `pinned` and
+the model makes instruction edits from reference images, with its
+encoder's vision tower. With `edit: false`, `/v1/images/edits` still runs
+image to image on Z-Image and Krea 2, as [Edits and
+variations](images.md#edits-and-variations) shows. It carries `resident`, `pinned` and
 `default` but no context figures. Its `default` marks the default image
 model.
 

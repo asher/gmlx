@@ -277,6 +277,12 @@ shape within the size limits. With a `mask` the edit starts from the first image
 at `strength` 1, changes only the masked region, and keeps the other
 pixels as they were.
 
+In `/v1/models` an image model has `edit: true` when it makes instruction
+edits from reference images, which takes Qwen-Image 2.1 with
+`encoder_mmproj`. `edit: false` means no instruction edits. On Z-Image and
+Krea 2 this route still runs image to image from the first image, at the
+`strength` of the request, 0.6 without one and 1 with a `mask`.
+
 ## URL responses
 
 With `response_format: url` each image is written to a file under the
