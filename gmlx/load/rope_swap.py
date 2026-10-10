@@ -210,9 +210,10 @@ def apply(model, config) -> int:
                 base = mb or scaling.freq_base_train or rs._DEFAULT_FREQ_BASE
             else:
                 s = scaling
-                base = (scaling.freq_base if scaling.freq_base_override
-                        else mb or scaling.freq_base_train
-                        or rs._DEFAULT_FREQ_BASE)
+                over = (scaling.freq_base if scaling.freq_base_override
+                        else None)
+                base = over if over is not None else (
+                    mb or scaling.freq_base_train or rs._DEFAULT_FREQ_BASE)
             if mrope:
                 _scale_mrope(r, s, base)
             else:

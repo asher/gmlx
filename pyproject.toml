@@ -218,6 +218,7 @@ include = [
     "gmlx/load/mlx_checkpoint.py",
     "gmlx/load/modules.py",
     "gmlx/load/mtp_target.py",
+    "gmlx/load/rope_swap.py",
     "gmlx/load/vlm.py",
     "gmlx/lora_rows.py",
     "gmlx/serve/bridge_lm.py",
