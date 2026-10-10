@@ -955,7 +955,7 @@ def _install_fork_free_free_ram() -> None:
         _apc._free_ram_bytes = _cached_free_ram(_vm_stat_free_ram_bytes)
 
 
-def build_apc_manager(model_namespace=None):
+def build_apc_manager(model_namespace=None, rope_override=None):
     """Build the gmlx APC manager from the env vars ``from_env`` reads.
 
     Gated on ``GMLX_APC_ENABLED``, which the residency build window sets to
@@ -964,7 +964,8 @@ def build_apc_manager(model_namespace=None):
     bridge) builds nothing, and stock wiring applies there untouched. The knob
     vars keep their stock names and parsing: ``APC_BLOCK_SIZE``,
     ``APC_NUM_BLOCKS``, and the ``APC_DISK_*`` family. The disk namespace
-    is ``APC_DISK_NAMESPACE`` when set, else the model path.
+    is ``APC_DISK_NAMESPACE`` when set, else the model path, with the rope
+    options (``rope_scaling.cache_suffix``) folded in.
     """
     if os.environ.get("GMLX_APC_ENABLED") != "1":
         return None
@@ -977,8 +978,10 @@ def build_apc_manager(model_namespace=None):
     disk = None
     disk_path = os.environ.get("APC_DISK_PATH")
     if disk_path:
+        from gmlx.load.rope_scaling import cache_suffix
+
         ns = (os.environ.get("APC_DISK_NAMESPACE") or model_namespace
-              or "default")
+              or "default") + cache_suffix(rope_override)
         max_gb = float(os.environ.get("APC_DISK_MAX_GB", 0))
         max_bytes = int(max_gb * (1 << 30)) if max_gb > 0 else None
         workers = int(os.environ.get("APC_DISK_WORKERS", "1"))

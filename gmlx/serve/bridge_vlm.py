@@ -950,7 +950,10 @@ def install_gguf_server_bridge() -> None:
         # wired in by residency after the load returns. Applies to GGUF and
         # fall-through loads alike - any pooled model can enable the cache.
         from gmlx.cache.apc_manager import build_apc_manager
-        manager = build_apc_manager(model_namespace=model_path)
+        rope = getattr(get_build_spec(), "rope_scaling", None)
+        manager = build_apc_manager(
+            model_namespace=model_path,
+            **({"rope_override": rope} if rope is not None else {}))
         if manager is not None:
             publish_built_apc_manager(manager)
         if _is_gguf(model_path):

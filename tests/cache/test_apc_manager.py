@@ -61,6 +61,38 @@ def test_disk_namespace_key_wins_over_the_model_path(monkeypatch, tmp_path):
     assert seen["ns"] == "/m/a.gguf"
 
 
+def test_disk_namespace_folds_in_the_rope_options(monkeypatch, tmp_path):
+    """The disk tier outlives a model instance: KV made under one rope
+    scaling must never be read under another, and no options keep the
+    namespace as it was."""
+    from gmlx.load.rope_scaling import RopeOverride
+
+    seen = []
+
+    class FakeStore:
+        def __init__(self, path, *, namespace, **kw):
+            seen.append(namespace)
+
+        def set_write_callbacks(self, success, failure):
+            pass
+
+    monkeypatch.setattr(apc, "DiskBlockStore", FakeStore)
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    monkeypatch.setenv("APC_DISK_PATH", str(tmp_path))
+    monkeypatch.delenv("APC_DISK_NAMESPACE", raising=False)
+    four = RopeOverride(rope_scaling="yarn", rope_scale=4.0)
+    for ov in (None, RopeOverride(), four,
+               RopeOverride(rope_scaling="yarn", rope_scale=2.0), four):
+        build_apc_manager(model_namespace="/m/a.gguf", rope_override=ov)
+    assert seen[0] == seen[1] == "/m/a.gguf"
+    assert seen[2].startswith("/m/a.gguf#rope-")
+    assert len({seen[0], seen[2], seen[3]}) == 3
+    assert seen[2] == seen[4]
+    monkeypatch.setenv("APC_DISK_NAMESPACE", "shared")
+    build_apc_manager(model_namespace="/m/a.gguf", rope_override=four)
+    assert seen[-1] == "shared" + seen[2][len("/m/a.gguf"):]
+
+
 def test_build_defaults_match_stock(monkeypatch):
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
     for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):

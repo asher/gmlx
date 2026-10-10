@@ -464,3 +464,15 @@ def from_config(config) -> RopeScaling:
         return NO_SCALING
     return RopeScaling(**raw)
 
+
+def cache_suffix(override: RopeOverride | None) -> str:
+    """A stable suffix for the name of a cache that outlives one model
+    instance (the APC disk tier): empty without options, so default names
+    stay as they were. KV made under one scaling is wrong under another."""
+    if override is None or override.is_empty():
+        return ""
+    import hashlib
+
+    text = repr(tuple((f.name, getattr(override, f.name))
+                      for f in fields(override)))
+    return "#rope-" + hashlib.sha256(text.encode()).hexdigest()[:12]
