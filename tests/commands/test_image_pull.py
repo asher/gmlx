@@ -178,16 +178,16 @@ def test_parts_on_disk_are_used_where_they_are(lib, monkeypatch, capsys):
 def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch,
                                                             capsys):
     root, cfg = lib
-    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"e")
+    (root / "Qwen3-4B-Q8_0.gguf").write_bytes(b"e")
     Disk(monkeypatch, root)
     got = _downloads(monkeypatch)
     _packs(monkeypatch)
     assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg),
-                            "--encoder-quant", "q8_0"]) == 0
-    assert (Z.encoder_repo, "Qwen3-4B-Q8_0.gguf", "main") in got
+                            "--encoder-quant", "q4_k_m"]) == 0
+    assert (Z.encoder_repo, "Qwen3-4B-Q4_K_M.gguf", "main") in got
     # A quant asked for is not the memory class default.
     head = capsys.readouterr().out.splitlines()[0]
-    assert head.endswith("encoder Q8_0") and "default" not in head
+    assert head.endswith("encoder Q4_K_M") and "default" not in head
 
 
 def test_a_configured_chat_model_is_written_as_the_encoder_id(lib,
@@ -207,7 +207,8 @@ def test_the_summary_gives_sizes_and_free_disk_before_the_download(
         lib, monkeypatch, capsys):
     root, cfg = lib
     Disk(monkeypatch, root)
-    listing = {Z.dit_name("Q4_K_M"): 5 << 30, Z.encoder_name("Q4_K_M"): 2 << 30,
+    dq, eq = catalog.DEFAULT_QUANTS["z-image-turbo"][32]
+    listing = {Z.dit_name(dq): 5 << 30, Z.encoder_name(eq): 2 << 30,
                Z.vae_file: 160 << 20, Z.vae_config: 1000}
     monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
                         **k: [(n, "file", s) for n, s in listing.items()])

@@ -206,3 +206,15 @@ def test_sha256_file_reads_the_whole_file(tmp_path):
     p.write_bytes(b"x" * (3 << 20))
     assert catalog.sha256_file(str(p)) == hashlib.sha256(
         b"x" * (3 << 20)).hexdigest()
+
+
+def test_every_class_pulls_the_q8_encoder_and_the_largest_the_reference_dit():
+    for r in catalog.RECIPES.values():
+        assert {catalog.DEFAULT_QUANTS[r.name][c][1]
+                for c in catalog.MEMORY_CLASSES} == {"Q8_0"}
+        assert catalog.DEFAULT_QUANTS[r.name][64][0] == r.dit_quants[-1]
+
+
+def test_a_32_gb_mac_pulls_qwen_image_at_q8_0_since_its_f16_load_does_not_fit():
+    assert catalog.default_quants(catalog.RECIPES["qwen-image"],
+                                  32 << 30) == ("Q8_0", "Q8_0")

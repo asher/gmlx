@@ -74,7 +74,7 @@ RECIPES = {r.name: r for r in (
         license="apache-2.0",
         license_url="https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
         encoder_license="apache-2.0",
-        encoder_bytes=2_497_281_312, vae_bytes=167_660_192),
+        encoder_bytes=4_280_405_792, vae_bytes=167_660_192),
     Recipe(
         name="qwen-image", title="Qwen-Image 2.1", family="qwen_image21",
         variant="base",
@@ -93,7 +93,7 @@ RECIPES = {r.name: r for r in (
         license_url="https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
         license_note="non-commercial use only",
         encoder_license="apache-2.0",
-        encoder_bytes=5_027_785_568 + 1_162_569_280, vae_bytes=1_350_985_376,
+        encoder_bytes=8_709_520_224 + 1_162_569_280, vae_bytes=1_350_985_376,
         aliases=("qwen-image-2.1",)),
     Recipe(
         name="qwen-image-turbo", title="Qwen-Image 2.1 Turbo",
@@ -114,18 +114,20 @@ RECIPES = {r.name: r for r in (
         license_url="https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE",
         license_note="non-commercial use only",
         encoder_license="apache-2.0",
-        encoder_bytes=5_027_785_568 + 1_162_569_280, vae_bytes=1_350_985_376,
+        encoder_bytes=8_709_520_224 + 1_162_569_280, vae_bytes=1_350_985_376,
         aliases=("qwen-image-2.1-turbo",)),
 )}
 
 # The DiT and encoder quants a recipe pulls on each memory class.
 DEFAULT_QUANTS = {
-    "z-image-turbo": {16: ("Q4_K_M", "Q4_K_M"), 24: ("Q4_K_M", "Q4_K_M"),
-                      32: ("Q4_K_M", "Q4_K_M"), 64: ("Q4_K_M", "Q4_K_M")},
-    "qwen-image": {16: ("Q4_K_M", "Q4_K_M"), 24: ("Q4_K_M", "Q4_K_M"),
-                   32: ("Q4_K_M", "Q4_K_M"), 64: ("Q4_K_M", "Q4_K_M")},
-    "qwen-image-turbo": {16: ("AD-Q4_K", "Q4_K_M"), 24: ("AD-Q4_K", "Q4_K_M"),
-                         32: ("AD-Q4_K", "Q4_K_M"), 64: ("AD-Q4_K", "Q4_K_M")},
+    "z-image-turbo": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                      32: ("BF16", "Q8_0"), 64: ("BF16", "Q8_0")},
+    # An F16 DiT loads at twice its size under bf16 activations, so the
+    # 32 GB class keeps Q8_0.
+    "qwen-image": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                   32: ("Q8_0", "Q8_0"), 64: ("F16", "Q8_0")},
+    "qwen-image-turbo": {16: ("AD-Q4_K", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                         32: ("BF16", "Q8_0"), 64: ("BF16", "Q8_0")},
 }
 
 
