@@ -27,7 +27,7 @@ import mlx.core as mx
 from transformers import BaseVideoProcessor as _BaseVideoProcessor
 from transformers.image_processing_utils import ImageProcessingMixin
 
-from . import loadlog, rope_scaling
+from . import loadlog, rope_scaling, rope_swap
 from .config_synth import synthesize_config
 from gmlx.upstream.gdn_patches import require_tiled_gdn
 from .gguf_meta import first_nonzero_int, read_int
@@ -3618,6 +3618,9 @@ def load_vlm_model(
     #     though the no-cache forward (and dense towers) look fine, so a
     #     tree that would run it is refused.
     require_tiled_gdn(model, text_config)
+
+    # 4b. rope scaling on the text tower (gmlx.load.rope_swap).
+    rope_swap.apply(getattr(model, "language_model", model), text_config)
 
     # 5. swap kquant leaves + load all weights. install_kquant swaps every leaf
     #    whose <path>.weight carries a codec - the LLM text tower always, plus the

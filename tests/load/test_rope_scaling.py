@@ -263,6 +263,40 @@ def test_table_and_scale_match_llama_cpp(name):
     np.testing.assert_allclose(1.0 / fr, ref, rtol=4e-6)
 
 
+# llama.cpp loaders that set rope_freq_scale_train_swa to the trained scale.
+_SWA_TRAIN = ("gpt-oss", "gemma2")
+
+
+@pytest.mark.parametrize("arch", ["qwen3", "gpt-oss"])
+@pytest.mark.parametrize("p", [_params(type="yarn", fs=0.25, base=500000.0),
+                               _params(), _params(type="none")],
+                         ids=["options", "header", "none"])
+def test_sliding_layers_match_llama_cpp(arch, p):
+    """A sliding layer rotates with llama_model::get_rope_freq_scale and
+    get_rope_freq_base (llama-model.cpp): the trained sliding scale (1, or
+    the trained scale for the archs above) and the trained base. The
+    extrapolation mix, the attention factor, the betas and the original
+    context stay the run's."""
+    meta = {
+        f"{arch}.context_length": 131072,
+        f"{arch}.rope.freq_base": 150000.0,
+        f"{arch}.rope.scaling.type": "yarn",
+        f"{arch}.rope.scaling.factor": 32.0,
+        f"{arch}.rope.scaling.original_context_length": 4096,
+    }
+    dims = 64
+    h = _ref_hparams(meta, arch)
+    c = dict(_ref_cparams(h, arch, p))
+    c["freq_scale"] = h["freq_scale_train"] if arch in _SWA_TRAIN else F(1.0)
+    c["freq_base"] = h["freq_base"]
+    ref, ref_mag = _ref_angles(1, dims, c)
+    got = rs.resolve(meta, arch, _override_from(p)).for_sliding()
+    assert got.freq_base == float(h["freq_base"])
+    np.testing.assert_allclose(rs.inv_freq(dims, got.freq_base, got), ref,
+                               rtol=4e-6, atol=0)
+    assert got.mscale == pytest.approx(float(ref_mag), rel=1e-6)
+
+
 def test_model_card_numbers():
     meta = CASES["model-card"][1]
     s = rs.resolve(meta, "qwen4exp", RopeOverride(

@@ -26,7 +26,7 @@ from mlx.utils import tree_flatten
 
 import mlx_kquant as kq
 
-from . import loadlog, rope_scaling
+from . import loadlog, rope_scaling, rope_swap
 from .dtypes import activation_dtype, activation_dtype_name, dtype_name
 from gmlx.device import cpu_default_device, metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_int
@@ -571,6 +571,8 @@ class _FactoredRoPE(nn.Module):
         self.dims = dims
         self.traditional = traditional
         self.scale = scale
+        self.base = base
+        self._factors = factors
         freqs = base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims)
         self._freqs = freqs * factors.astype(mx.float32)
 
@@ -1611,6 +1613,10 @@ def load_model(
     #       llama.cpp baked into rope_freqs.weight (see _patch_rope_factors).
     if rope_factors is not None and config.get("model_type") == "llama":
         _patch_rope_factors(model, rope_factors)
+
+    # 4a'''. rope scaling: the resolved table replaces the class's rope on
+    #        the architectures the swap covers (gmlx.load.rope_swap).
+    rope_swap.apply(model, config)
 
     # 4b. GGUF V-head order for asymmetric K/V heads: each gated-delta
     #     layer took it from kv_head_layout in the config. Refuse a tree

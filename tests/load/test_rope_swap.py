@@ -1,0 +1,277 @@
+"""The rope swap on class-built models: every attention rope takes the
+resolved table and llama.cpp's magnitude, sliding layers take the sliding
+scaling, and a plain rope leaves the model as it was. Tiny synthesized
+models, no files."""
+
+from __future__ import annotations
+
+import math
+
+import mlx.core as mx
+import mlx.nn as nn
+import numpy as np
+import pytest
+
+from gmlx.load import rope_scaling as rs
+from gmlx.load import rope_swap
+from gmlx.load.config_synth import synthesize_config
+from gmlx.load.loader import build_model
+from gmlx.load.rope_scaling import RopeOverride
+from test_config_synth import (
+    VOCAB,
+    _MINIMAX_SHAPES,
+    _base_meta,
+    _glm4moe_meta,
+    _gpt_oss_meta,
+    _meta_for,
+    _minimax_meta,
+    _qwen3next_meta,
+)
+
+YARN4 = RopeOverride(rope_scaling="yarn", rope_scale=4.0)
+
+
+def _moe(arch, ffn=64):
+    m = _base_meta(arch)
+    m[f"{arch}.expert_count"] = 4
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = ffn
+    return m
+
+
+# arch -> (meta, tensor shapes)
+ARCHES = {
+    "llama": lambda: (_meta_for("llama"), {}),
+    "qwen2": lambda: (_meta_for("qwen2"), {}),
+    "qwen3": lambda: (_meta_for("qwen3"), {}),
+    "glm4": lambda: (_meta_for("glm4"), {}),
+    "seed_oss": lambda: (_meta_for("seed_oss"), {}),
+    "smollm3": lambda: (_meta_for("smollm3"), {}),
+    "granite": lambda: (_meta_for("granite"), {}),
+    "qwen3moe": lambda: (_moe("qwen3moe"), {}),
+    "qwen2moe": lambda: (_moe("qwen2moe"),
+                         {"blk.0.ffn_gate_exps.weight": [64, 48, 4]}),
+    "glm4moe": lambda: (_glm4moe_meta(), {"output.weight": [64, VOCAB]}),
+    "gpt-oss": lambda: (_gpt_oss_meta(), {"output.weight": [64, VOCAB]}),
+    "minimax-m2": lambda: (_minimax_meta(), _MINIMAX_SHAPES),
+    "qwen3next": lambda: (_qwen3next_meta(), {}),
+    "mistral3": lambda: (_meta_for("mistral3"), {}),
+}
+
+
+def _build(arch, override=None, meta_edit=None):
+    meta, shapes = ARCHES[arch]()
+    if meta_edit:
+        meta_edit(meta)
+    cfg = synthesize_config(meta, shapes, rope_override=override)
+    model, cfg = build_model(cfg)
+    n = rope_swap.apply(model, cfg)
+    return model, cfg, n, meta
+
+
+def _ropes(model):
+    return [(name, m.rope) for name, m in model.named_modules()
+            if isinstance(getattr(m, "rope", None), nn.Module)]
+
+
+def _ref_rotate(x, pos, dims, inv, mscale, traditional):
+    """float64 rope of the first ``dims`` of ``x [..., D]`` at one position."""
+    x = np.asarray(x.astype(mx.float32), dtype=np.float64)
+    ang = (np.float32(pos) * inv.astype(np.float32)).astype(np.float64)
+    c, s = np.cos(ang) * mscale, np.sin(ang) * mscale
+    out = x.copy()
+    if traditional:
+        a, b = x[..., 0:dims:2], x[..., 1:dims:2]
+        out[..., 0:dims:2] = a * c - b * s
+        out[..., 1:dims:2] = b * c + a * s
+    else:
+        h = dims // 2
+        a, b = x[..., :h], x[..., h:dims]
+        out[..., :h] = a * c - b * s
+        out[..., h:dims] = b * c + a * s
+    return out
+
+
+def _check_rope(r, scaling, base, pos=300):
+    """Rotate a probe with module ``r`` and compare with the reference
+    rotation from the resolver's table."""
+    mx.random.seed(0)
+    x = mx.random.normal((1, 1, 1, r.dims + 4))
+    inv = rs.inv_freq(r.dims, base, scaling).astype(np.float64)
+    got = np.asarray(r(x, offset=pos))
+    want = _ref_rotate(x, pos, r.dims, inv, scaling.mscale, r.traditional)
+    np.testing.assert_allclose(got, want, atol=3e-5, rtol=3e-5)
+
+
+@pytest.mark.parametrize("arch", sorted(ARCHES))
+def test_options_reach_every_rope(arch):
+    assert arch in rs.SWAP_ARCHES and arch in rs.WIRED_ARCHES
+    model, cfg, n, meta = _build(arch, YARN4)
+    ropes = _ropes(model)
+    assert n > 0 and ropes
+    assert all(isinstance(r, rope_swap.ScaledRoPE) for _, r in ropes
+               if type(r).__name__ != "NoPE")
+    s = rs.from_config(cfg)
+    assert s.factor == 4.0 and s.type == "yarn"
+    base = meta[f"{arch}.rope.freq_base"]
+    sliding = {i for i, t in enumerate(cfg.get("layer_types") or [])
+               if t == "sliding_attention"}
+    for name, r in ropes:
+        if not isinstance(r, rope_swap.ScaledRoPE):
+            continue
+        layer = int(name.split("layers.")[1].split(".")[0])
+        _check_rope(r, s.for_sliding() if layer in sliding else s, base)
+    out = model(mx.array([[1, 2, 3]]))
+    mx.eval(out)
+    assert out.shape[-1] == VOCAB
+    # A second pass changes nothing.
+    assert rope_swap.apply(model, cfg) == 0
+
+
+@pytest.mark.parametrize("arch", sorted(set(ARCHES) - {"gpt-oss"}))
+def test_plain_rope_leaves_the_model_as_built(arch):
+    model, cfg, n, _ = _build(arch)
+    assert n == 0 and rs.CONFIG_KEY not in cfg
+    assert not any(isinstance(r, rope_swap.ScaledRoPE)
+                   for _, r in _ropes(model))
+
+
+def _header_yarn(arch, factor=4.0, orig=None):
+    def edit(meta):
+        meta[f"{arch}.rope.scaling.type"] = "yarn"
+        meta[f"{arch}.rope.scaling.factor"] = factor
+        if orig is not None:
+            meta[f"{arch}.rope.scaling.original_context_length"] = orig
+    return edit
+
+
+@pytest.mark.parametrize("arch", ["qwen3moe", "glm4moe", "qwen2moe"])
+def test_header_yarn_reaches_classes_that_ignored_it(arch):
+    """These classes build their rope from the base alone, so a GGUF with
+    yarn keys ran with a plain rope."""
+    model, cfg, n, meta = _build(arch, meta_edit=_header_yarn(arch, 4.0, 256))
+    s = rs.from_config(cfg)
+    assert n > 0 and s.factor == 4.0 and s.original_context == 256
+    _, r = _ropes(model)[0]
+    _check_rope(r, s, meta[f"{arch}.rope.freq_base"])
+    assert r.mscale == pytest.approx(1 + 0.1 * math.log(4.0), rel=1e-6)
+
+
+@pytest.mark.parametrize("arch", ["qwen3", "seed_oss", "granite", "smollm3"])
+def test_header_yarn_without_original_context_uses_the_trained_one(arch):
+    """llama.cpp falls back to the trained context (1024 here); the class
+    defaults put the ramp at 4096."""
+    model, cfg, n, meta = _build(arch, meta_edit=_header_yarn(arch))
+    s = rs.from_config(cfg)
+    assert s.original_context == 1024
+    for _, r in _ropes(model):
+        if isinstance(r, rope_swap.ScaledRoPE):
+            _check_rope(r, s, meta[f"{arch}.rope.freq_base"])
+
+
+def test_gpt_oss_sliding_layers_keep_the_trained_scale():
+    """gpt-oss sets rope_freq_scale_train_swa to the trained scale, so its
+    sliding layers keep factor 32 under a factor 4 option while the full
+    layers take 4 (llama.cpp openai-moe loader)."""
+    model, cfg, n, meta = _build("gpt-oss", YARN4)
+    s = rs.from_config(cfg)
+    assert s.factor == 4.0 and s.for_sliding().factor == 32.0
+    layers = cfg["layer_types"]
+    seen = set()
+    for name, r in _ropes(model):
+        i = int(name.split("layers.")[1].split(".")[0])
+        want = s.for_sliding() if layers[i] == "sliding_attention" else s
+        _check_rope(r, want, meta["gpt-oss.rope.freq_base"])
+        seen.add(layers[i])
+    assert seen == {"sliding_attention", "full_attention"}
+    # Header only: every layer is the header's factor 32 table.
+    model, cfg, n, meta = _build("gpt-oss")
+    s = rs.from_config(cfg)
+    assert n > 0 and s.factor == 32.0
+    for _, r in _ropes(model):
+        _check_rope(r, s, meta["gpt-oss.rope.freq_base"])
+
+
+def test_header_yarn_through_the_swap_matches_the_class_rope():
+    """On a class that read the header correctly (gpt-oss), the swapped
+    rope rotates as the class's own yarn rope did."""
+    meta, shapes = ARCHES["gpt-oss"]()
+    cfg = synthesize_config(meta, shapes)
+    before, _ = build_model(cfg)
+    after, cfg2 = build_model(cfg)
+    assert rope_swap.apply(after, cfg2) > 0
+    mx.random.seed(1)
+    x = mx.random.normal((1, 2, 3, 16))
+    for (_, a), (_, b) in zip(_ropes(before), _ropes(after)):
+        np.testing.assert_allclose(np.asarray(a(x, offset=5000)),
+                                   np.asarray(b(x, offset=5000)),
+                                   atol=2e-4, rtol=1e-4)
+
+
+def test_freq_base_option_moves_full_layers_only():
+    ov = RopeOverride(rope_scaling="yarn", rope_scale=4.0,
+                      rope_freq_base=500000.0)
+    model, cfg, n, meta = _build("gpt-oss", ov)
+    s = rs.from_config(cfg)
+    for name, r in _ropes(model):
+        i = int(name.split("layers.")[1].split(".")[0])
+        if cfg["layer_types"][i] == "sliding_attention":
+            _check_rope(r, s.for_sliding(), meta["gpt-oss.rope.freq_base"])
+        else:
+            _check_rope(r, s, 500000.0)
+
+
+def test_factored_rope_composes_with_the_scaling():
+    """llama rope_freqs factors divide the angle before the yarn blend."""
+    from gmlx.load.loader import _patch_rope_factors
+
+    meta, shapes = ARCHES["llama"]()
+    cfg = synthesize_config(meta, shapes, rope_override=YARN4)
+    model, cfg = build_model(cfg)
+    factors = mx.linspace(1.0, 8.0, 8)
+    _patch_rope_factors(model, factors)
+    assert rope_swap.apply(model, cfg) > 0
+    s = rs.from_config(cfg)
+    _, r = _ropes(model)[0]
+    inv = rs.inv_freq(16, 10000.0, s) / np.asarray(factors, dtype=np.float64)
+    np.testing.assert_allclose(1.0 / np.asarray(r._freqs), inv, rtol=1e-6)
+
+
+def test_unswappable_rope_refuses():
+    class Odd(nn.Module):
+        def __call__(self, x, offset=0):
+            return x
+
+    model, cfg, n, _ = _build("qwen3", YARN4)
+    model.model.layers[0].self_attn.rope = type("OddRoPE", (Odd,), {})()
+    with pytest.raises(NotImplementedError, match="no scaled form"):
+        rope_swap.apply(model, cfg)
+
+
+def test_scaled_rope_partial_dims_pass_through():
+    r = rope_swap.ScaledRoPE(8, False, mx.full((4,), 100.0), 1.25)
+    x = mx.random.normal((1, 1, 2, 12))
+    out = r(x, offset=3)
+    np.testing.assert_array_equal(np.asarray(out[..., 8:]),
+                                  np.asarray(x[..., 8:]))
+
+
+@pytest.mark.parametrize("family", ["llava", "pixtral"])
+def test_vlm_text_tower_builds_and_swaps_under_yarn(family):
+    """The llava and pixtral text configs raised on a yarn type; they now
+    build a plain rope that the swap rebuilds."""
+    import importlib
+
+    meta = _meta_for("llama")
+    meta["llama.rope.scaling.type"] = "yarn"
+    meta["llama.rope.scaling.factor"] = 4.0
+    meta["llama.rope.scaling.original_context_length"] = 256
+    cfg = synthesize_config(meta, {})
+    assert cfg["rope_scaling"]["type"] == "yarn"
+    mod = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{family}")
+    tc = mod.TextConfig.from_dict({**cfg, "model_type": "llama"})
+    lm = mod.LanguageModel(tc)
+    assert rope_swap.apply(lm, cfg) > 0
+    s = rs.from_config(cfg)
+    for _, r in _ropes(lm):
+        _check_rope(r, s, 10000.0)

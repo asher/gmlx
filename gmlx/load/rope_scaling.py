@@ -40,6 +40,10 @@ _LOG_MUL_DIV10_ARCHES = frozenset({"deepseek2", "deepseek32"})
 _LOG_MUL_RAW_ARCHES = frozenset({"mistral3"})
 
 _DEFAULT_FREQ_BASE = 10000.0
+# Architectures whose sliding-window layers keep the trained frequency scale
+# (rope_freq_scale_train_swa = rope_freq_scale_train in their llama.cpp
+# loaders); every other one rotates them with scale 1.
+_SWA_TRAIN_SCALE_ARCHES = frozenset({"gpt-oss", "gemma2"})
 _DEFAULT_BETA_FAST = 32.0
 _DEFAULT_BETA_SLOW = 1.0
 
@@ -166,6 +170,12 @@ class RopeScaling:
     freq_base: float | None = None
     freq_base_override: bool = False
     alpha: float | None = None
+    # The GGUF architecture, the header base, and the frequency scale of
+    # sliding-window layers, which llama.cpp rotates with the trained scale
+    # of the architecture rather than the run options.
+    arch: str = ""
+    freq_base_train: float | None = None
+    freq_scale_swa: float = 1.0
 
     @property
     def factor(self) -> float:
@@ -180,6 +190,15 @@ class RopeScaling:
             m = m * (np.float32(1.0) + np.float32(0.1)
                      * np.log(np.float32(1.0) / np.float32(self.freq_scale)))
         return float(np.float32(m))
+
+    def for_sliding(self) -> "RopeScaling":
+        """The scaling of a sliding-window layer: llama.cpp's
+        get_rope_freq_scale and get_rope_freq_base pick the trained sliding
+        values there (llama-model.cpp), while the extrapolation mix, the
+        attention factor and the betas stay the run's."""
+        return replace(self, freq_scale=self.freq_scale_swa,
+                       freq_base=self.freq_base_train,
+                       freq_base_override=False)
 
     @property
     def scales_frequencies(self) -> bool:
@@ -326,6 +345,10 @@ def resolve(meta, arch: str, override: RopeOverride | None = None, *,
         freq_base=None if freq_base is None else float(freq_base),
         freq_base_override=ov.rope_freq_base is not None,
         alpha=alpha,
+        arch=arch,
+        freq_base_train=None if base_hdr is None else float(base_hdr),
+        freq_scale_swa=(float(freq_scale_train)
+                        if arch in _SWA_TRAIN_SCALE_ARCHES else 1.0),
     )
 
 
@@ -421,10 +444,20 @@ def scoped(fn):
     return wrapper
 
 
+# Class-built architectures whose rope modules the loader replaces with the
+# resolved table after the build (gmlx.load.rope_swap). Their header scaling
+# goes through the swap too, so the model class's own reading of it no
+# longer decides the rope.
+SWAP_ARCHES = frozenset({
+    "llama", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "glm4", "glm4moe",
+    "mistral3", "gpt-oss", "seed_oss", "smollm3", "granite", "qwen3next",
+    "minimax-m2",
+})
+
 # Architectures whose every rope site applies the run options. A load of any
 # other architecture with options refuses before it reads the weights,
 # rather than running with a rope the options did not ask for.
-WIRED_ARCHES: set[str] = {"qwen4exp"}
+WIRED_ARCHES: set[str] = {"qwen4exp", *SWAP_ARCHES}
 
 
 def require_wired(arch: str, override: RopeOverride | None) -> None:

@@ -20,6 +20,7 @@ import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
 import gmlx.load.rope_scaling as rope_mod
+import gmlx.load.rope_swap as rope_swap
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
 from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_int
@@ -1946,6 +1947,7 @@ def load_mtp_model(
     loadlog.stage("building model")
     model, config = build_model(config_dict, mtp=True)
     loadlog.fact("model_type", config.get("model_type"))
+    rope_swap.apply(model, config)
 
     # deepseek_v4 needs sanitize=True (the vendored Model.sanitize does the
     # wo_a 2D->3D MultiLinear reshape, same as the plain-text load path) and

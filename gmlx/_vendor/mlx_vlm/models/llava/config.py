@@ -29,8 +29,11 @@ class TextConfig(BaseModelConfig):
             if not all(key in self.rope_scaling for key in required_keys):
                 raise ValueError(f"rope_scaling must contain keys {required_keys}")
 
-            if self.rope_scaling["type"] != "linear":
-                raise ValueError("rope_scaling 'type' currently only supports 'linear'")
+            # gmlx: yarn builds as plain rope here, and the loader rebuilds the table
+            # after the build (gmlx.load.rope_swap).
+            if self.rope_scaling["type"] not in ("linear", "yarn"):
+                raise ValueError(
+                    "rope_scaling 'type' currently only supports 'linear' and 'yarn'")
 
 
 @dataclass
