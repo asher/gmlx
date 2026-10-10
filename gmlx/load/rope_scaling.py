@@ -33,7 +33,7 @@ SCALING_TYPES = ("none", "linear", "yarn", "longrope")
 USER_SCALING_TYPES = ("none", "linear", "yarn")
 
 # Header keys llama.cpp reads for some architectures only.
-_BETA_ARCHES = frozenset({"mistral3", "grok", "k2-horizon"})
+_BETA_ARCHES = frozenset({"mistral3"})
 _EXT_ATTN_ARCHES = frozenset({"grok"})
 # log multiplier: the deepseek converters write 0.1 * mscale_all_dim.
 _LOG_MUL_DIV10_ARCHES = frozenset({"deepseek2", "deepseek32"})
@@ -354,11 +354,6 @@ def resolve(meta, arch: str, override: RopeOverride | None = None, *,
                         if arch in _SWA_TRAIN_SCALE_ARCHES else 1.0),
         from_options=not ov.is_empty(),
     )
-
-
-def with_base(scaling: RopeScaling, base: float) -> RopeScaling:
-    """The same scaling with ``base`` as its frequency base."""
-    return replace(scaling, freq_base=float(base))
 
 
 def corr_dims(dims: int, base: float, scaling: RopeScaling) -> tuple[float, float]:
