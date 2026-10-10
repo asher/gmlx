@@ -966,7 +966,7 @@ with its file name, the size it ran at and the `sha256` of the file.
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
 | `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
-| `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, above 0 and at most 1. |
+| `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
 | `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1. Repeat the flag for up to 10 images, in the order the prompt names them. |
 | `--ref-size N` | `1024` | Resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |

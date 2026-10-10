@@ -761,12 +761,12 @@ def resized(pixels, size: tuple, *, resample: str = "lanczos"):
 
 def mask_from_image(pixels, size: tuple):
     """An edit mask as (H, W) float32, 1 where the image changes: the
-    fully transparent pixels of the mask image, as OpenAI reads it."""
+    pixels of the mask image with alpha below 128."""
     import numpy as np
 
     if pixels.shape[-1] != 4:
-        raise _bad("mask must be an image with an alpha channel; its fully "
-                   "transparent pixels mark the region to edit", "mask")
+        raise _bad("mask must be an image with an alpha channel; its pixels "
+                   "with alpha below 128 mark the region to edit", "mask")
     a = resized(pixels, size, resample="bilinear")[..., 3]
     return (a < 128).astype(np.float32)
 

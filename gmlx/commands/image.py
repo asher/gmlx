@@ -94,9 +94,10 @@ def _strength(text: str) -> float:
         x = float(text)
     except ValueError:
         x = -1.0
-    if not 0.0 < x <= 1.0:
+    # The range the image routes take.
+    if not 0.01 <= x <= 1.0:
         raise argparse.ArgumentTypeError(
-            f"a strength above 0 and at most 1 is required, got {text!r}")
+            f"a strength from 0.01 to 1 is required, got {text!r}")
     return x
 
 

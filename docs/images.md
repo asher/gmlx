@@ -240,10 +240,10 @@ line to the server log.
 | `guidance` | Classifier-free guidance, 1 to 30. 1 turns guidance off. |
 | `sampler` | `euler` or `uni_pc_bh2`. |
 | `scheduler` | `default` only: the model's own schedule. |
-| `strength` | How far an edit or a variation departs from its image, above 0 and at most 1. |
+| `strength` | How far an edit or a variation departs from its image, from 0.01 to 1. |
 | `adapters` | LoRA adapters for this request, as a list of `{"id", "strength"}`. The ids are described below the table. |
 | `image`, `image[]`, `images` | The images of an edit or a variation, as below. |
-| `mask` | An image with an alpha channel: an edit changes the pixels where it is fully transparent. |
+| `mask` | An image with an alpha channel: an edit changes the pixels whose alpha is below 128. |
 
 An empty `model`, `default`, and a name that starts with `gpt-image-`,
 `dall-e-` or `chatgpt-image` take the default image model: the one that
