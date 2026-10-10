@@ -83,10 +83,12 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # (gmlx.models.muse_glimmer.vlm_model), which loads ahead of the
         # muse_glimmer package mlx-vlm ships from 0.6.15.
         return "muse_glimmer"
-    if proj == "glm5next":
-        # GLM-5.3-Flash: the GLM-OCR ViT (qwen2vl-style dynamic patches, 2-D
-        # rope, per-head qk-norm, clamped-swiglu FFN) + a conv-downsample
-        # projector onto the glm5next hybrid text tower. Both halves are
+    if proj in ("glm5v", "glm5next"):
+        # GLM-5.3-Flash ("glm5v" upstream; "glm5next", the name of the closed
+        # PR 27754, in the first mmproj uploads): the GLM-OCR ViT
+        # (qwen2vl-style dynamic patches, 2-D rope, per-head qk-norm,
+        # clamped-swiglu FFN) + a conv-downsample projector onto the
+        # glm5-next hybrid text tower. Both halves are
         # vendored (gmlx.models.glm5_next.vlm_model), which loads ahead of the
         # glm5_next package mlx-vlm ships from 0.7.3.
         return "glm5_next"
@@ -1646,7 +1648,10 @@ def _synthesize_glm5next_vlm_config(
     eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
     if eps is not None:
         vision_config["rms_norm_eps"] = float(eps)
-    limit = _mm(mm_meta, "clip.vision.swiglu_limit")
+    # glm5v writes the clamp as swiglu_clamp, PR 27754 as swiglu_limit.
+    limit = _mm(mm_meta, "clip.vision.swiglu_clamp")
+    if limit is None:
+        limit = _mm(mm_meta, "clip.vision.swiglu_limit")
     if limit is not None:
         vision_config["swiglu_limit"] = float(limit)
     up = (mm_shapes or {}).get("mm.up.weight")
@@ -2815,15 +2820,17 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
 class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
     """Torch-free GLM-5.3-Flash image preprocessing (numpy + PIL only).
 
-    Ports ``mtmd_image_preprocessor_glm5next`` (llama.cpp PR 27754,
-    ``tools/mtmd/mtmd-image.cpp``): align both edges UP to ``factor`` (28),
-    upscale a below-minimum image by the sqrt area ratio, binary-search the
-    tallest content height whose aligned canvas fits the token budget (the
-    reference divides in float64 before flooring - kept bit-identical), then
-    resize the content BICUBIC, composite it top-left on a black canvas, and
-    never upscale an image already spending the minimum budget to fill the
-    canvas. The 16/8000 token limits are clip.cpp arch constants
-    (``set_limit_image_tokens(16, 8000)``), not GGUF metadata.
+    Ports ``mtmd_image_preprocessor_glm5v`` (llama.cpp
+    ``tools/mtmd/mtmd-image.cpp``; ``glm5next`` in PR 27754): align both
+    edges UP to ``factor`` (28), upscale a below-minimum image by the sqrt
+    area ratio, binary-search the tallest content height whose aligned
+    canvas fits the pixel budget (the width in int64 division, which equals
+    the PR's float64 floor for every real image size), then resize the content
+    BICUBIC, composite it top-left on a black canvas, and never upscale an
+    image already spending the minimum budget to fill the canvas. A glm5v
+    mmproj carries the budget as ``clip.vision.image_min_pixels`` and
+    ``image_max_pixels``; a glm5next one has no keys and takes PR 27754's
+    clip.cpp constants, 16 and 8000 tokens.
 
     The canvas patchifies with the qwen2vl conventions: the still frame
     duplicates along the temporal axis and the h//2,2,w//2,2 shuffle makes
@@ -2835,7 +2842,8 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
 
     def __init__(self, image_mean, image_std, patch_size=14,
                  spatial_merge_size=2, temporal_patch_size=2,
-                 min_image_tokens=16, max_image_tokens=8000):
+                 min_image_tokens=16, max_image_tokens=8000,
+                 min_pixels=None, max_pixels=None):
         super().__init__()
         self.image_mean = list(image_mean)
         self.image_std = list(image_std)
@@ -2843,8 +2851,9 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
         self.spatial_merge_size = int(spatial_merge_size)
         self.temporal_patch_size = int(temporal_patch_size)
         self.factor = self.patch_size * self.spatial_merge_size
-        self.min_pixels = int(min_image_tokens) * self.factor * self.factor
-        self.max_pixels = int(max_image_tokens) * self.factor * self.factor
+        f2 = self.factor * self.factor
+        self.min_pixels = int(min_pixels or int(min_image_tokens) * f2)
+        self.max_pixels = int(max_pixels or int(max_image_tokens) * f2)
 
     def soft_tokens(self, grid) -> int:
         t, gh, gw = (int(v) for v in grid)
@@ -2868,7 +2877,7 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
             ah = aw = f
             while low <= high:
                 ch = (low + high) // 2
-                cw = max(1, math.floor(float(width) * ch / float(height)))
+                cw = max(1, width * ch // height)
                 cand_h, cand_w = align(ch), align(cw)
                 if cand_h * cand_w <= self.max_pixels:
                     ah, aw = cand_h, cand_w
@@ -2930,6 +2939,21 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
         }
 
 
+def _glm5next_image_processor(mm_meta: dict) -> _Glm5NextGgufImageProcessor:
+    """The GLM-5.3-Flash image processor from the mmproj's ``clip.vision.*``
+    keys, with the pixel budget from the glm5v keys when present."""
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    return _Glm5NextGgufImageProcessor(
+        image_mean=(_mm_floats(mm_meta, "clip.vision.image_mean")
+                    or [0.5, 0.5, 0.5]),
+        image_std=(_mm_floats(mm_meta, "clip.vision.image_std")
+                   or [0.5, 0.5, 0.5]),
+        patch_size=_mm_int(mm_meta, "clip.vision.patch_size"),
+        spatial_merge_size=int(merge) if merge is not None else 2,
+        min_pixels=_mm(mm_meta, "clip.vision.image_min_pixels"),
+        max_pixels=_mm(mm_meta, "clip.vision.image_max_pixels"))
+
+
 def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     """Build the GLM-5.3-Flash processor from the GGUFs alone.
 
@@ -2945,14 +2969,7 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
 
     from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
 
-    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
-    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
-    image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
-    image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
-
-    image_processor = _Glm5NextGgufImageProcessor(
-        image_mean=image_mean, image_std=image_std, patch_size=patch_size,
-        spatial_merge_size=int(merge) if merge is not None else 2)
+    image_processor = _glm5next_image_processor(mm_meta)
 
     class Glm5NextProcessor(ProcessorMixin):
         attributes = ["image_processor", "tokenizer"]

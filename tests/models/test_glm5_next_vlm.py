@@ -82,6 +82,61 @@ def test_canvas_is_aligned_and_inside_the_token_budget(h, w):
     assert p.min_pixels <= ch * cw <= p.max_pixels
 
 
+def _glm5v_reference(height, width, min_px, max_px, factor=28):
+    """``mtmd_image_preprocessor_glm5v::preprocess`` (llama.cpp
+    tools/mtmd/mtmd-image.cpp) transcribed line by line: int64 arithmetic,
+    the width in integer division, the scale in double. Returns
+    ((canvas_h, canvas_w), (content_h, content_w))."""
+    import math
+
+    def align(v):
+        return (v + factor - 1) // factor * factor
+
+    canvas_h, canvas_w = align(height), align(width)
+    if canvas_h * canvas_w < min_px:
+        scale = math.sqrt(min_px / (height * width))
+        canvas_h = align(max(1, math.ceil(height * scale)))
+        canvas_w = align(max(1, math.ceil(width * scale)))
+    if canvas_h * canvas_w > max_px:
+        lo, hi = 1, height
+        best_h = best_w = factor
+        while lo <= hi:
+            ch = (lo + hi) // 2
+            cw = max(1, width * ch // height)
+            ah, aw = align(ch), align(cw)
+            if ah * aw <= max_px:
+                best_h, best_w = ah, aw
+                lo = ch + 1
+            else:
+                hi = ch - 1
+        canvas_h, canvas_w = best_h, best_w
+    scale = min(canvas_h / height, canvas_w / width)
+    if height * width >= min_px:
+        scale = min(1.0, scale)
+    content_h = max(1, min(canvas_h, math.floor(height * scale)))
+    content_w = max(1, min(canvas_w, math.floor(width * scale)))
+    return (canvas_h, canvas_w), (content_h, content_w)
+
+
+def test_canvas_search_matches_the_glm5v_formula():
+    """The geometry equals llama.cpp's glm5v preprocessor at the shipped
+    budget (12544 to 6272000 pixels) and at an off-default one, over edge
+    cases and a seeded spread of sizes up to 20000 px a side."""
+    from gmlx.load.vlm import _glm5next_image_processor
+
+    rng = np.random.default_rng(5)
+    sizes = [(1, 1), (28, 28), (448, 448), (450, 300), (10, 2000),
+             (10000, 2000), (100000, 100), (3, 4096), (12345, 6789)]
+    sizes += [tuple(int(v) for v in rng.integers(1, 20000, 2))
+              for _ in range(400)]
+    for lo, hi in ((12544, 6272000), (20 * 784, 3000 * 784)):
+        p = _glm5next_image_processor(dict(
+            _MM_META, **{"clip.vision.image_min_pixels": lo,
+                         "clip.vision.image_max_pixels": hi}))
+        for h, w in sizes:
+            assert p._geometry(h, w) == _glm5v_reference(h, w, lo, hi), (h, w)
+
+
 # --- content geometry (resize vs pad) ----------------------------------------
 
 
@@ -303,6 +358,76 @@ def test_image_token_id_comes_from_the_vocab_with_a_pinned_fallback():
     assert cfg["image_token_id"] == cfg["image_token_index"] == 5
     cfg = _synthesize_glm5next_vlm_config({}, _MM_META, {})
     assert cfg["image_token_id"] == 154854
+
+
+def _write_mmproj(path, projector, meta):
+    """A small mmproj GGUF: the fixture's tensor set at tiny shapes and the
+    given clip.* keys, written with gguf-py like a converter would."""
+    from gguf import GGUFWriter
+
+    w = GGUFWriter(str(path), "clip")
+    w.add_string("general.type", "mmproj")
+    w.add_string("clip.projector_type", projector)
+    w.add_bool("clip.has_vision_encoder", True)
+    for k, v in meta.items():
+        if isinstance(v, bool):
+            w.add_bool(k, v)
+        elif isinstance(v, int):
+            w.add_uint32(k, v)
+        elif isinstance(v, float):
+            w.add_float32(k, v)
+        else:
+            w.add_array(k, v)
+    arrays = _mmproj_arrays()
+    # The projector width is read off mm.up.weight against projection_dim.
+    arrays["mm.up.weight"] = mx.zeros((40, meta["clip.vision.projection_dim"]))
+    for name, arr in arrays.items():
+        a = np.zeros(arr.shape, dtype=np.float32)
+        w.add_tensor(name, a if a.ndim == 1 else a.astype(np.float16))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+_GLM5V_KEYS = {
+    "clip.vision.swiglu_clamp": 7.5,
+    "clip.vision.image_min_pixels": 20 * 784,
+    "clip.vision.image_max_pixels": 3000 * 784,
+}
+
+
+@pytest.mark.parametrize("projector,keys,limit,pixels", [
+    ("glm5v", _GLM5V_KEYS, 7.5, (20 * 784, 3000 * 784)),
+    ("glm5next", {"clip.vision.swiglu_limit": 7.5}, 7.5,
+     (16 * 784, 8000 * 784)),
+])
+def test_mmproj_header_loads_under_both_projector_names(
+        tmp_path, projector, keys, limit, pixels):
+    """A glm5v mmproj (llama.cpp's name) and a glm5next one (PR 27754's)
+    both resolve to the vendored container, synthesize the clamp and the
+    pixel budget each writes, and remap every tensor."""
+    from gmlx.load.wire import load_gguf_wire_bytes
+
+    meta = {k: v for k, v in _MM_META.items()
+            if k != "clip.vision.swiglu_limit"}
+    meta.update(keys)
+    path = tmp_path / "mmproj.gguf"
+    _write_mmproj(path, projector, meta)
+    arrays, _, arch, mm_meta, mm_shapes = load_gguf_wire_bytes(
+        str(path), expect_quant=False)
+    assert arch == "clip"
+    for llm_arch in ("glm5-next", "glm5next"):
+        assert resolve_vlm_model_type(llm_arch, mm_meta) == "glm5_next"
+    cfg = _synthesize_glm5next_vlm_config(
+        {"vocab_size": 154880}, mm_meta, {}, mm_shapes=mm_shapes)
+    assert cfg["vision_config"]["swiglu_limit"] == limit
+    assert cfg["vision_config"]["proj_intermediate_size"] == 40
+    from gmlx.load.vlm import _glm5next_image_processor
+    p = _glm5next_image_processor(mm_meta)
+    assert (p.min_pixels, p.max_pixels) == pixels
+    _, skipped, _ = remap_vision_arrays(arrays, "glm5_next")
+    assert skipped == []
 
 
 # --- vision tower -------------------------------------------------------------

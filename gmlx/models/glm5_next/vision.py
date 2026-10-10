@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""GLM-5.3-Flash vision tower + projector (mmproj ``glm5next``).
+"""GLM-5.3-Flash vision tower + projector (mmproj ``glm5v``, ``glm5next`` in
+the first uploads).
 
 The ViT is the GLM-OCR encoder (llama.cpp PR 27754, clip_graph_glm4v):
 qwen2vl-style dynamic-resolution patches with 2-D interleaved rope (theta

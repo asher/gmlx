@@ -139,6 +139,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - GLM-5.3-Flash GGUFs whose architecture is llama.cpp's `glm5-next` load
   instead of failing as an unsupported architecture. `glm5next` files still load.
+- GLM-5.3-Flash mmproj files with llama.cpp's `glm5v` projector load instead
+  of failing as unsupported, with the vision SwiGLU clamp read from the file.
 - `gmlx launch` output sent to a file or a pipe keeps the summary it prints
   before the client starts.
 - `gmlx pull`, `init` and `sync-models` reload a server started with

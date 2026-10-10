@@ -82,7 +82,7 @@ projector and architecture that it found. gmlx supports these families:
 | Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | It reads images and audio. |
 | gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | It reads images and audio. |
 | gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | It reads images, and audio when the companion has an audio encoder. |
-| GLM-5.3-Flash | `glm5next` | GLM-5.3-Flash | |
+| GLM-5.3-Flash | `glm5v` with `glm5-next` | GLM-5.3-Flash | The first uploads name both files `glm5next`, and those load too. |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5next``).
+"""Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5v``,
+``glm5next`` in the first uploads).
 
 This container loads ahead of the glm5_next package mlx-vlm ships from 0.7.3.
 It pairs the vendored text tower (:mod:`gmlx.models.glm5_next.model`) with
