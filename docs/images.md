@@ -83,9 +83,7 @@ know, such as a merge, runs as Turbo only when its entry sets
 gmlx pull qwen-image-turbo
 ```
 
-`pull` prints its plan, then downloads. The plan names each part, its
-size, whether it is on disk already, the space the download takes beside
-the free space, and the model's license. The VAE comes as a safetensors
+`pull` prints its plan, then downloads. The VAE comes as a safetensors
 file, which `pull` checks against its published digest and packs to a
 GGUF. The new entry goes under [`image_models`](config.md#image-models),
 and the first image model becomes the server's default image model.
@@ -216,8 +214,7 @@ models.
 | `POST /v1/images/variations` | Multipart form | Images like the one given |
 | `GET /v1/images/files/{name}` | None | An image that a request with `response_format: url` wrote |
 
-Each route also answers without the `/v1` prefix. Each request writes one
-line to the server log.
+Each route also answers without the `/v1` prefix.
 
 ## Request fields
 
@@ -323,11 +320,8 @@ reply keeps streaming at a steady pace, somewhat slower than alone, and
 the image slows only while chat is streaming: with no chat reply in
 progress, an image runs at its full speed.
 
-By default chat gets half of the GPU while both run. On an M5 Max, a
-gemma-4-E2B reply beside a 1024x1024 Z-Image-Turbo image streams at about
-74 tokens per second, against about 157 alone, and the image takes about
-1.8 times as long for the part of its run that chat shares. [`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server)
-sets chat's share, from 0 to 0.9 with a default of 0.5, and `off` runs
+By default chat gets half of the GPU while both run.
+[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) sets chat's share, from 0 to 0.9 with a default of 0.5, and `off` runs
 each image step whole, which leaves chat waiting for each step to end.
 
 Before a request queues, the server plans its memory at
@@ -345,10 +339,6 @@ that fit.
 | The model's file is gone | 404 `model_file_missing` |
 | The model's VAE, encoder or mmproj is not of its family | 400 `image_model_mismatch` |
 
-The usage of an answer counts the encoder tokens of the prompts as text
-tokens, the tokens of reference images as image tokens, and the latent
-tokens of each image as output tokens.
-
 The Responses route does not run the `image_generation` tool. A request
 that sends it gets a warning line in the log, and the tool is dropped.
 
@@ -359,11 +349,8 @@ runs elsewhere, such as the [ComfyUI node pack](comfyui.md). They live under
 `/internal/image-steps/v1` and are an internal interface, which
 [Image step routes](internals/image-steps.md) describes.
 
-The routes answer loopback peers only. [`image.steps_remote`](config.md#serverimagesteps_remote)
-serves other peers that the API key admits, and
-[`image.steps_api`](config.md#serverimagesteps_api) set to `false` removes
-the routes. The steps of all clients queue on the image thread with the
-jobs of the OpenAI routes, and share the GPU with chat in the same way.
+[Access](internals/image-steps.md#access) says which peers the routes
+answer and how their steps queue with the other image jobs.
 
 ## Licenses
 
