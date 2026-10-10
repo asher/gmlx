@@ -108,7 +108,8 @@ grow to tens of GB, and without a limit it can use up the Mac's free memory
 and freeze it instead of failing with an error.
 
 The server limits the pool by default, to between 4 and 12 GiB, and logs
-the limit on a `[serve] MLX cache limit:` line.
+the limit on a `[serve] MLX cache limit:` line. `gmlx run` and `gmlx chat`
+set the same default limit, and `--verbose` prints it.
 [`server.cache_limit_gb`](config.md#servercache_limit_gb) or
 [`GMLX_CACHE_LIMIT_GB`](env-vars.md#runtime) sets it. Set a fixed limit for
 benchmarks, so that the runs are comparable.

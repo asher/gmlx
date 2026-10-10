@@ -432,3 +432,24 @@ def apply_cache_limit(cfg) -> None:
 
     note_cache_limit(limit)
     print(f"[serve] MLX cache limit: {limit / GIB:.1f} GiB ({source})")
+
+
+def apply_local_cache_limit(model_paths, verbose: bool = False) -> None:
+    """The serve policy for the in-process verbs (run, chat), set before
+    the load: GMLX_CACHE_LIMIT_GB, else the auto policy. A later owner
+    (expert streaming's allocator) replaces it."""
+    import mlx.core as mx
+
+    from .capacity import working_set_bytes
+
+    ws = working_set_bytes() or 0.0
+    paths = [str(p) for p in model_paths if p]
+    limit, source = resolve_cache_limit(None, paths, ws)
+    if limit is None:
+        return
+    mx.set_cache_limit(limit)
+    from gmlx.gen.prefill_decay import note_cache_limit
+
+    note_cache_limit(limit)
+    if verbose:
+        print(f"[cache] MLX cache limit: {limit / GIB:.1f} GiB ({source})")

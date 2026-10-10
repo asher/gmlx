@@ -2472,6 +2472,12 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     try:
         if args.report_only:
             return _report_only(args)
+        # Unbounded, MLX caches freed prefill buffers up to 1.5x the
+        # working set; serve's policy bounds them here too.
+        from gmlx.serve.memory import apply_local_cache_limit
+
+        apply_local_cache_limit((args.gguf, args.mmproj, args.draft_gguf),
+                                verbose=args.verbose)
         if args.mmproj:
             # A loaded VLM serves text-only requests in place: route a text-only
             # request through the MTP path when a drafter is available

@@ -142,6 +142,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx run` and `gmlx chat` kept every freed MLX buffer, so a deep prompt
+  grew memory use with depth; they now cap the buffer cache as `serve` does.
 - GLM-5.3-Flash mmproj files with llama.cpp's `glm5v` projector load instead
   of failing as unsupported, with the vision SwiGLU clamp read from the file.
 - A Gemma 3 4B or larger GGUF ran its full attention layers without the linear

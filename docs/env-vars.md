@@ -58,7 +58,7 @@ is internal and may change between releases.
 
 | Name | Default | Meaning |
 |------|---------|---------|
-| `GMLX_CACHE_LIMIT_GB` | Sized from the weights | MLX buffer cache limit of `serve` in GiB, over `server.cache_limit_gb`. `0` disables it, and `unlimited` lifts the limit. |
+| `GMLX_CACHE_LIMIT_GB` | Sized from the weights | MLX buffer cache limit of `serve`, `run` and `chat` in GiB, over `server.cache_limit_gb` in `serve`. `0` disables it, and `unlimited` lifts the limit. |
 | `GMLX_DECODE_ARENA_GB` | What the memory ceiling leaves | Size of a streamed model's expert [arena](glossary.md#arena) in GiB. Lower it to keep a second model loaded. |
 | `GMLX_GOVERNOR` | `1` | `0` turns off the [governor](glossary.md#governor) that sheds requests when memory runs out. |
 | `GMLX_SPARSE_ATTN` | `0` | `1` turns on top-k sparse attention for deep decode, which is lossy. |

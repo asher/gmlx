@@ -3201,6 +3201,11 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
 
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False))
+    from gmlx.serve.memory import apply_local_cache_limit
+
+    apply_local_cache_limit(
+        (args.gguf, args.mmproj, getattr(args, "draft_gguf", None)),
+        verbose=getattr(args, "verbose", False))
     if vlm_mtp:
         return _backend_vlm_mtp(args)
     if args.mmproj is not None:
