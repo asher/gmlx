@@ -42,7 +42,7 @@ def _stub_loaders(monkeypatch, arches):
                 calls.append((_n, path)) or _n)
     monkeypatch.setattr(
         mtp_load, "_load_gemma4_assistant_drafter",
-        lambda path, model, *, zero_copy, log:
+        lambda path, model, *, zero_copy, log, target_config=None:
             calls.append(("_load_gemma4_assistant_drafter", path))
             or "_load_gemma4_assistant_drafter")
     return calls
@@ -225,3 +225,18 @@ def test_qwen4exp_ba_cat_is_idempotent():
     assert second["gdn_fused"] == first["gdn_fused"]
     for k, v in nn.utils.tree_flatten(model.parameters()):
         assert mx.array_equal(v, weights_before[k]), k
+
+
+def test_the_gemma4_assistant_gets_the_target_config(monkeypatch):
+    """The assistant attends the target's KV, so its loader needs the
+    target's rope scaling."""
+    seen = {}
+    monkeypatch.setattr(mtp_load, "_assistant_kind", lambda mt, p: "gemma4")
+    monkeypatch.setattr(
+        mtp_load, "_load_gemma4_assistant_drafter",
+        lambda path, model, *, zero_copy, log, target_config=None:
+            seen.update(target_config=target_config))
+    cfg = {"model_type": "gemma4_text", "gmlx_rope_scaling": {"arch": "gemma4"}}
+    _load_assistant_drafter("d.gguf", model=None, text_config_dict=cfg,
+                            zero_copy=True, log=lambda *a: None)
+    assert seen["target_config"] is cfg

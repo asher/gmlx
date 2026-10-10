@@ -448,8 +448,20 @@ def _patch_draft_head_quantized(drafter, head_attr: str = "_lm_head_fn") -> None
     drafter.bind = _bind_with_quant_head
 
 
+def _rotate_as_target(drafter, drafter_text_config: dict,
+                      target_config: dict | None) -> int:
+    """A drafter that attends the target's KV rotates as the target does:
+    the target's resolved rope scaling goes onto the drafter's ropes."""
+    target_rope = (target_config or {}).get(rope_mod.CONFIG_KEY)
+    if target_rope is None:
+        return 0
+    return rope_swap.apply(
+        drafter, {**drafter_text_config, rope_mod.CONFIG_KEY: target_rope})
+
+
 def _load_gemma4_assistant_drafter(
-    draft_gguf_path: str, target, *, zero_copy: bool = True, log=loadlog.verbose_print
+    draft_gguf_path: str, target, *, zero_copy: bool = True, log=loadlog.verbose_print,
+    target_config: dict | None = None,
 ):
     """Build + load + bind the gemma4 assistant drafter from a companion GGUF.
 
@@ -497,6 +509,7 @@ def _load_gemma4_assistant_drafter(
     )
     dcfg = cfg_mod.Gemma4AssistantConfig.from_dict(drafter_cfg)
     drafter = drafter_mod.Gemma4AssistantDraftModel(dcfg)
+    _rotate_as_target(drafter, tc, target_config)
 
     d_weights, d_meta, d_stats = remap_gemma4_assistant_arrays(arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
@@ -1852,7 +1865,8 @@ def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
             draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log
         )
     return _load_gemma4_assistant_drafter(
-        draft_gguf_path, model, zero_copy=zero_copy, log=log
+        draft_gguf_path, model, zero_copy=zero_copy, log=log,
+        target_config=text_config_dict,
     )
 
 

@@ -469,3 +469,28 @@ def test_proportional_rope_swap_keeps_the_class_rotation():
                                np.asarray(r(x, offset=5000)),
                                atol=2e-5, rtol=1e-5)
 
+
+def test_gemma4_assistant_rotates_as_its_target():
+    import importlib
+
+    import gmlx.spec.mtp_load as mtp_load
+
+    dcfg = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.config")
+    dmod = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant."
+        "gemma4_assistant")
+    tc = _gemma4_text(num_hidden_layers=2)
+    drafter = dmod.Gemma4AssistantDraftModel(
+        dcfg.Gemma4AssistantConfig.from_dict(
+            {"backbone_hidden_size": 64, "text_config": tc}))
+    assert mtp_load._rotate_as_target(drafter, tc, {"model_type": "x"}) == 0
+    target = dict(tc)
+    s = _gemma4_scaling()
+    rs.to_config(target, s)
+    assert mtp_load._rotate_as_target(drafter, tc, target) == 2
+    for i, r in _layer_ropes(drafter):
+        if i % 2 == 0:
+            _check_rope(r, s.for_sliding(), 10000.0)
+        else:
+            _check_proportional(r, s, 1000000.0, rotated=2)
