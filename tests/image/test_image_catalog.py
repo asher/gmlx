@@ -164,6 +164,20 @@ def test_a_configured_chat_model_is_shared_as_the_encoder(tmp_path,
     assert images[0].encoder == "qwen3-4b"
 
 
+@pytest.mark.parametrize("towers, shared", [(set(), False),
+                                            ({"vl"}, True)])
+def test_a_chat_model_is_shared_only_with_the_tower_its_family_wants(
+        tmp_path, tiny_spec, monkeypatch, towers, shared):
+    monkeypatch.setattr(catalog, "wants_tower", lambda fam: True)
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    enc = _encoder(tmp_path / "Qwen3-4B-Q4_K_M.gguf")
+    _dit(lib / "z-image-turbo-Q4_K_M.gguf")
+    _vae(lib / "v.gguf")
+    _chat, images = _scan(lib, encoder_ids={enc: "vl"}, tower_ids=towers)
+    assert images[0].encoder == ("vl" if shared else enc)
+
+
 def test_an_incomplete_set_names_the_pull_that_fills_it(tmp_path, tiny_spec,
                                                         capsys):
     _dit(tmp_path / "z-image-turbo-Q4_K_M.gguf")

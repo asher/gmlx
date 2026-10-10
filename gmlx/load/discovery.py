@@ -615,6 +615,7 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
 
     known_paths = set()
     encoder_ids = {}
+    tower_ids: set = set()
     for m in cfg.models.values():
         known_paths.add(m.path)
         try:
@@ -625,6 +626,8 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
             known_paths.add(rp)
             if not m.adapter:
                 encoder_ids[rp] = m.id
+                if m.mmproj:
+                    tower_ids.add(m.id)
     for im in cfg.image_models.values():
         try:
             rp = resolve_path(im.path, cfg.model_dirs)
@@ -638,7 +641,8 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
         return scan_dirs(cfg.discover, cfg.model_dirs,
                          known_ids=set(cfg.models) | set(cfg.image_models),
                          known_paths=known_paths, progress=progress,
-                         images=images, encoder_ids=encoder_ids)
+                         images=images, encoder_ids=encoder_ids,
+                         tower_ids=tower_ids)
     except Exception as e:                       # noqa: BLE001 - a flaky scan dir
         print(f"warning: discover scan failed: {e}", file=sys.stderr)
         return []
@@ -668,6 +672,7 @@ def scan_dirs(
     stats=None,
     images=None,
     encoder_ids=None,
+    tower_ids=None,
 ) -> list[ModelCfg]:
     """Discover servable models from ``specs`` (each a :class:`config.DiscoverSpec`).
 
@@ -693,7 +698,8 @@ def scan_dirs(
     scan finds, nearest folder first (see :func:`_pair_images`); each whole
     set appends an :class:`config.ImageModelCfg` to ``images`` when it is a
     list. ``encoder_ids`` maps a configured chat model's resolved path to
-    its id, so an encoder that is a configured model is shared by id."""
+    its id, so an encoder that is a configured model is shared by id;
+    ``tower_ids`` are the configured ones with an ``mmproj``."""
     known_paths = {os.path.abspath(os.path.expanduser(p)) for p in known_paths}
     configured = {os.path.abspath(os.path.expanduser(p)): mc
                   for p, mc in (known_models or {}).items()}
@@ -724,7 +730,8 @@ def scan_dirs(
             _emit_dir(classified, spec, used_ids, out,
                       configured=configured, draft_pairs=draft_pairs)
     if any(c.kind == "image-dit" for c in every):
-        _pair_images(every, out, used_ids, images, encoder_ids or {})
+        _pair_images(every, out, used_ids, images, encoder_ids or {},
+                     tower_ids or set())
     if stats is not None:
         stats["skipped"] = skipped
         stats["draft_pairs"] = draft_pairs
@@ -732,14 +739,15 @@ def scan_dirs(
 
 
 def _pair_images(classified, chat, used_ids: set, images,
-                 encoder_ids: dict) -> None:
+                 encoder_ids: dict, tower_ids: set = frozenset()) -> None:
     """Pair each image DiT in ``classified`` with the text encoder and VAE
     of its family, matched by weight identity and nearest folder first. A
     whole set appends an ImageModelCfg to ``images`` (when a list); a set
     with a part missing prints the pull command that fills it. The encoder
     is named by its chat model id when it is one of ``chat`` (this scan's
     models) or of ``encoder_ids`` (the configured ones), so the entry
-    shares it."""
+    shares it, unless the family wants a vision tower that chat model has
+    not (``tower_ids`` names the configured ones that have one)."""
     from gmlx.config import ImageModelCfg
     from gmlx.image import catalog
 
@@ -764,6 +772,7 @@ def _pair_images(classified, chat, used_ids: set, images,
                 vaes.append(catalog.ImageFile(c.path, "vae", got[0],
                                               sha256=got[1]))
     chat_ids = {os.path.abspath(m.path): m.id for m in chat}
+    towered = {m.id for m in chat if m.mmproj} | set(tower_ids)
     chat_ids.update({os.path.abspath(p): i for p, i in encoder_ids.items()})
     encs, towers = [], []
     for fam in fams:
@@ -794,6 +803,9 @@ def _pair_images(classified, chat, used_ids: set, images,
                   f"{c.path}", file=sys.stderr)
             continue
         chat_id = chat_ids.get(os.path.abspath(enc[0].path))
+        if chat_id is not None and catalog.wants_tower(fam) and \
+                chat_id not in towered:
+            chat_id = None
         mmproj = None
         if chat_id is None and catalog.wants_tower(fam):
             near = catalog.nearest(enc[0].path,

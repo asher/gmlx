@@ -492,7 +492,8 @@ An image DiT becomes an [image model](#image-models) when the scan also
 finds its family's text encoder and VAE. Files are matched by their
 weights, not their names, and the nearest match to the DiT wins. A text
 encoder that is also a chat model, scanned or configured without an
-`adapter`, is shared by its id. A DiT without its encoder or VAE is
+`adapter`, is shared by its id; for the Qwen-Image models the chat model
+must also have its `mmproj`. A DiT without its encoder or VAE is
 reported with the `gmlx pull` command that fetches them.
 
 ## Server
