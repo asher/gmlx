@@ -22,6 +22,8 @@ import gmlx.load.remote as remote
 from gmlx.image import catalog
 
 PARTS = ("dit", "encoder", "vae")
+_ROLE = {"dit": "DiT", "encoder": "text encoder", "mmproj": "vision tower",
+         "vae": "VAE"}
 
 
 @dataclass
@@ -52,6 +54,7 @@ class Plan:
     memory_class: int
     parts: list = field(default_factory=list)
     default: bool = True            # the quants of the memory class
+    blocked: list = field(default_factory=list)  # parts whose path is taken
 
     def part(self, role: str) -> Part | None:
         return next((p for p in self.parts if p.role == role), None)
@@ -128,6 +131,16 @@ def _chat_encoders(cfg, family: str) -> dict:
     return out
 
 
+def _download(plan: Plan, part: Part, dest: str) -> Part:
+    """``part`` downloads to ``dest``. A file already there that the
+    identity scan did not take is in the way: the pull refuses it rather
+    than take it unchecked. A ``.part`` beside it resumes."""
+    if os.path.exists(dest):
+        plan.blocked.append(part)
+    plan.parts.append(part)
+    return part
+
+
 def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
               encoder_quant_given: bool, only: tuple, roots: list,
               base_dir: str, nest: bool, cfg=None,
@@ -151,11 +164,11 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
     else:
         dest = os.path.join(_dest(r.dit_repo, base_dir, nest), name)
         size = _repo_sizes(r.dit_repo, "main", sizes).get(name)
-        plan.parts.append(Part("dit", name, dest, repo=r.dit_repo,
-                               files=(name,),
-                               root=_dest(r.dit_repo, base_dir, nest),
-                               size=size,
-                               need=_remaining(dest, size)))
+        _download(plan, Part("dit", name, dest, repo=r.dit_repo,
+                             files=(name,),
+                             root=_dest(r.dit_repo, base_dir, nest),
+                             size=size,
+                             need=_remaining(dest, size)), dest)
 
     # The encoder: a configured chat model first, then any matching file.
     shared = _chat_encoders(cfg, r.family)
@@ -173,11 +186,11 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
     else:
         dest = os.path.join(_dest(r.encoder_repo, base_dir, nest), name)
         size = _repo_sizes(r.encoder_repo, "main", sizes).get(name)
-        plan.parts.append(Part("encoder", name, dest, repo=r.encoder_repo,
-                               files=(name,),
-                               root=_dest(r.encoder_repo, base_dir, nest),
-                               size=size,
-                               need=_remaining(dest, size)))
+        _download(plan, Part("encoder", name, dest, repo=r.encoder_repo,
+                             files=(name,),
+                             root=_dest(r.encoder_repo, base_dir, nest),
+                             size=size,
+                             need=_remaining(dest, size)), dest)
 
     # The vision tower, unless the shared chat model brings its own.
     enc = plan.part("encoder")
@@ -193,12 +206,12 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
                                 r.mmproj_file)
             size = _repo_sizes(r.encoder_repo, "main", sizes).get(
                 r.mmproj_file)
-            plan.parts.append(Part("mmproj", r.mmproj_file, dest,
-                                   repo=r.encoder_repo,
-                                   files=(r.mmproj_file,),
-                                   root=_dest(r.encoder_repo, base_dir, nest),
-                                   size=size,
-                                   need=_remaining(dest, size)))
+            _download(plan, Part("mmproj", r.mmproj_file, dest,
+                                 repo=r.encoder_repo,
+                                 files=(r.mmproj_file,),
+                                 root=_dest(r.encoder_repo, base_dir, nest),
+                                 size=size,
+                                 need=_remaining(dest, size)), dest)
 
     # The VAE: a packed GGUF of the same source, else the source to pack.
     vaes = [f for f in of("vae") if f.sha256 == r.vae_sha256]
@@ -213,12 +226,12 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
         size = listing.get(r.vae_file)
         cfg_size = (listing.get(r.vae_config) or 0) if r.vae_config else 0
         need = _remaining(os.path.join(d, r.vae_file), size)
-        plan.parts.append(Part(
+        _download(plan, Part(
             "vae", r.vae_file, dest, repo=r.vae_repo,
             files=(r.vae_file, r.vae_config) if r.vae_config
             else (r.vae_file,), root=d, revision=r.vae_revision,
             size=None if size is None else size + cfg_size,
-            need=None if need is None else need + cfg_size))
+            need=None if need is None else need + cfg_size), dest)
 
     for p in plan.parts:
         role = "encoder" if p.role == "mmproj" else p.role
@@ -510,6 +523,13 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             indent=2))
     else:
         _print_plan(plan, ram=ram, free=free, dest=base_dir)
+    blocked = [p for p in plan.blocked if p.wanted]
+    if blocked:
+        for p in blocked:
+            print(f"error: {p.path} is not the {r.title} {_ROLE[p.role]}, "
+                  "and a download would land on it; move or delete it, and "
+                  "pull again", file=sys.stderr)
+        return 1
     if need and free is not None and free < need and not a.force:
         print(f"error: not enough disk space: need {_gb(need)}, "
               f"{_gb(free)} free at {base_dir} (free space, pass --to DIR "

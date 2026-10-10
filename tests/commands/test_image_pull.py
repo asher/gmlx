@@ -124,6 +124,40 @@ def test_a_bare_pull_fetches_all_three_packs_the_vae_and_registers(
     assert "the default for a 32 GB Mac" in out
 
 
+def test_a_file_in_the_way_of_a_download_is_refused_by_name(lib, monkeypatch,
+                                                          capsys):
+    root, cfg = lib
+    dq, _eq = catalog.DEFAULT_QUANTS["z-image-turbo"][32]
+    d = root / "unsloth__Z-Image-Turbo-GGUF"
+    d.mkdir()
+    junk = d / Z.dit_name(dq)
+    junk.write_bytes(b"not a dit")
+    disk = Disk(monkeypatch, root)
+    scan = disk.scan
+    monkeypatch.setattr(catalog, "scan", lambda roots, **k: [
+        f for f in scan(roots) if f.path != str(junk)])
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 1
+    assert got == [] and junk.read_bytes() == b"not a dit"
+    assert (f"error: {junk} is not the Z-Image-Turbo DiT, and a download "
+            "would land on it" in capsys.readouterr().err)
+    assert _cfg(cfg).image_models == {}
+
+
+def test_a_partial_download_resumes(lib, monkeypatch):
+    root, cfg = lib
+    dq, _eq = catalog.DEFAULT_QUANTS["z-image-turbo"][32]
+    d = root / "unsloth__Z-Image-Turbo-GGUF"
+    d.mkdir()
+    (d / (Z.dit_name(dq) + ".part")).write_bytes(b"x" * 4)
+    Disk(monkeypatch, root)
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
+    assert (Z.dit_repo, Z.dit_name(dq), "main") in got
+
+
 def test_keep_source_keeps_the_safetensors(lib, monkeypatch):
     root, cfg = lib
     Disk(monkeypatch, root)
