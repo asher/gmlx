@@ -217,6 +217,9 @@ def load_dit(path: str, *, family: str | None = None,
     if fam.build is None:
         raise ImageModelError(
             f"this is a {fam.title} GGUF, which this gmlx cannot run yet")
+    why = fam.variant_needed(ident.variant)
+    if why:
+        raise ImageModelError(why)
     shown = ident.variant
     if fam.unknown_variant and ident.variant not in fam.sampling:
         shown += f", sampling as {fam.unknown_variant}"

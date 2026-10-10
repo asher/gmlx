@@ -3181,6 +3181,7 @@ def test_image_models_parse_with_defaults():
     assert (m.path, m.encoder, m.vae) == ("/m/z.gguf", "/m/qwen3-4b.gguf",
                                           "/m/z-vae.gguf")
     assert m.family is None and m.encoder_mmproj is None
+    assert m.variant is None
     assert m.adapters == () and m.defaults == {}
     assert m.encoder_release == "auto" and m.pin is False and m.ttl_s is None
     assert cfg.image == cfgmod.ImageServerCfg()
@@ -3206,6 +3207,8 @@ def test_image_model_keys_are_strict():
         build_config(_image_doc(defaults={"size": "big"}))
     with pytest.raises(ConfigError, match="strength"):
         build_config(_image_doc(adapters=[{"path": "/a", "strength": "x"}]))
+    with pytest.raises(ConfigError, match="variant: expected a string"):
+        build_config(_image_doc(variant=1))
 
 
 def test_image_model_defaults_and_adapters_normalize():
@@ -3281,6 +3284,10 @@ def test_resolve_image_model_and_signature(tmp_path):
     doc["image_models"]["zit"]["defaults"] = {"steps": 4}
     assert cfgmod.resolve_image_model(
         "zit", build_config(doc)).load_signature() == sig
+    doc["image_models"]["zit"]["variant"] = "turbo"
+    rv = cfgmod.resolve_image_model("zit", build_config(doc))
+    assert rv.variant == "turbo" and rv.load_signature() != sig
+    del doc["image_models"]["zit"]["variant"]
     doc["image_models"]["zit"]["adapters"] = []
     assert cfgmod.resolve_image_model(
         "zit", build_config(doc)).load_signature() != sig

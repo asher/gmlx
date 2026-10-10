@@ -94,7 +94,7 @@ def env(tmp_path, monkeypatch):
         "c": SimpleNamespace(shape=(4, 4), codec="BF16"),
         "d": SimpleNamespace(shape=(4,), codec="F32")})
     monkeypatch.setattr(image_preflight, "identify_dit",
-                        lambda p: SimpleNamespace(family=fam, view=view,
+                        lambda p, **k: SimpleNamespace(family=fam, view=view,
                                                   variant=state.variant))
     monkeypatch.setattr(image_preflight, "check",
                         lambda *a, **k: state.checks.append(k)
@@ -467,6 +467,30 @@ def test_an_unknown_variant_needs_steps_and_guidance(env, tmp_path, capsys):
     assert env.pipes[-1].dit.calls == 2
 
 
+def test_a_krea_2_file_of_unknown_weights_runs_under_a_variant_by_name(
+        env, tmp_path, monkeypatch, capsys):
+    asked = []
+    k2 = get_family("krea2")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, variant=None: asked.append(variant) or
+                        SimpleNamespace(family=k2, view=SimpleNamespace(
+                            tensors={}), variant=variant or "unknown"))
+    out = str(tmp_path / "a.png")
+    args = ["--prompt", "p", "--size", "32x32", "--output", out]
+    assert umbrella_main(env.base + args) == 1
+    err = capsys.readouterr().err
+    assert "--variant turbo" in err and "`variant: turbo`" in err
+    assert umbrella_main(env.base + args + ["--variant", "turbo"]) == 0
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "image_models:\n  k2:\n    path: dit.gguf\n"
+                   "    encoder: enc.gguf\n    vae: vae.gguf\n"
+                   "    variant: turbo\n")
+    assert umbrella_main(["image", "generate", "k2", "--config", str(cfg)]
+                         + args) == 0
+    assert asked == [None, "turbo", "turbo"]
+
+
 @pytest.mark.parametrize("flags, code, text", [
     ([], 2, "--prompt or --prompt-file is required"),
     (["--prompt", "p", "--size", "40x32"], 2, "multiples of 16"),
@@ -665,7 +689,7 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
 
     pf = image_preflight
     fam = get_family("z_image")
-    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
         family=fam, variant="turbo"))
     sizes = {"dit": 5 << 30, "encoder": 2 << 30, "vae": 160 << 20}
     monkeypatch.setattr(api, "_header_bytes",
@@ -708,7 +732,7 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     monkeypatch.setenv("GMLX_TOOL_PREFLIGHT", "0")
     assert pf.check("d", "e", "v", height=1024, width=1024, cfg=1.0) is None
     monkeypatch.delenv("GMLX_TOOL_PREFLIGHT")
-    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
         family=fam, variant="unknown"))
     assert pf.check("d", "e", "v", height=1024, width=1024, cfg=None) is None
 
@@ -725,7 +749,7 @@ def test_the_preflight_counts_the_dit_tensors_its_load_casts(monkeypatch):
 
     pf = image_preflight
     fam = get_family("qwen_image21")
-    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
         family=fam, variant="turbo"))
     weights = int(13.25 * memfit.GiB)
     sizes = {"dit": weights, "encoder": 4 << 30, "vae": 1 << 30}
@@ -757,7 +781,7 @@ def test_the_preflight_stages_the_load_when_no_other_lever_fits(
 
     pf = image_preflight
     fam = get_family("z_image")
-    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
         family=fam, variant="turbo"))
     sizes = {"dit": 3 << 30, "encoder": 4 << 30, "vae": 160 << 20}
     monkeypatch.setattr(api, "_header_bytes",
@@ -828,7 +852,7 @@ def tiny(env, monkeypatch, tmp_path):
     names = {k: SimpleNamespace(shape=tuple(v.shape), codec="Q4_K")
              for k, v in tree_flatten(tiny_z_model()[0].parameters())}
     monkeypatch.setattr(image_preflight, "identify_dit",
-                        lambda p: SimpleNamespace(
+                        lambda p, **k: SimpleNamespace(
                             family=get_family("z_image"), variant=env.variant,
                             config=dict(TINY_Z_CONFIG),
                             view=SimpleNamespace(tensors=names)))
@@ -1235,7 +1259,7 @@ def test_an_adapter_for_a_module_the_dit_file_lacks_is_refused_unloaded(
             if k != f"{gone}.weight"}
     assert len(held) == len(ident.view.tensors) - 1
     monkeypatch.setattr(image_preflight, "identify_dit",
-                        lambda p: SimpleNamespace(
+                        lambda p, **k: SimpleNamespace(
                             family=ident.family, variant=ident.variant,
                             config=ident.config,
                             view=SimpleNamespace(tensors=held)))
@@ -1329,7 +1353,7 @@ def edit(env, monkeypatch, tmp_path):
     monkeypatch.setattr(api, "encode_references", encode_references)
     view = image_preflight.identify_dit("x").view
     monkeypatch.setattr(image_preflight, "identify_dit",
-                        lambda p: SimpleNamespace(family=fam, view=view,
+                        lambda p, **k: SimpleNamespace(family=fam, view=view,
                                                   variant=state.variant))
     monkeypatch.setattr(os, "environ", {
         k: v for k, v in os.environ.items() if k != "MLX_ENABLE_TF32"})
@@ -1462,7 +1486,7 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
     plain = get_family("z_image")
     view = image_preflight.identify_dit("x").view
     monkeypatch.setattr(image_preflight, "identify_dit",
-                        lambda p: SimpleNamespace(family=plain, view=view,
+                        lambda p, **k: SimpleNamespace(family=plain, view=view,
                                                   variant="turbo"))
     assert umbrella_main(base + ref + mm) == 2
     assert "--ref: Z-Image takes no reference images" in \
@@ -1491,7 +1515,7 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
 
     pf = image_preflight
     fam = get_family("qwen_image21")
-    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
         family=fam, variant="base"))
     sizes = {"dit": 12 << 30, "encoder": 5 << 30, "vae": 400 << 20}
     monkeypatch.setattr(api, "_header_bytes",

@@ -146,7 +146,8 @@ GB = 1024**3
 
 
 def _spec(**kw):
-    base = dict(id="zit", path="/dit.gguf", family=None, defaults={},
+    base = dict(id="zit", path="/dit.gguf", family=None, variant=None,
+                defaults={},
                 adapters=(), vae="/vae.gguf", encoder="/enc.gguf",
                 encoder_model=None, encoder_mmproj=None,
                 encoder_release="auto")
@@ -165,7 +166,7 @@ def plan_stubs(monkeypatch):
     fam = get_family("z_image")
     state = SimpleNamespace(budget=100 * GB, checked=[], planned=[])
     monkeypatch.setattr(loader, "identify_dit",
-                        lambda path: SimpleNamespace(family=fam,
+                        lambda path, **k: SimpleNamespace(family=fam,
                                                      variant="turbo"))
     monkeypatch.setattr(api, "sampler_defaults",
                         lambda *a: SimpleNamespace(size=(1024, 1024), cfg=1.0))
@@ -187,6 +188,23 @@ def plan_stubs(monkeypatch):
     monkeypatch.setattr(image_service, "_load_figures", lambda spec, act: {
         "peak": 0, "text_peak": 0, "parts": (1, 2), "tower_parts": (3, 2)})
     return state
+
+
+def test_an_entry_of_unknown_krea_2_weights_needs_its_variant(
+        plan_stubs, monkeypatch):
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    asked = []
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
+        asked.append(variant) or SimpleNamespace(
+            family=get_family("krea2"), variant=variant or "unknown")))
+    with pytest.raises(ImageModelError,
+                       match="image model 'k2': .*--variant turbo"):
+        image_service.entry_plan(_spec(id="k2"))
+    assert image_service.entry_plan(_spec(id="k2", variant="turbo"))
+    assert asked == [None, "turbo"]
 
 
 def test_a_released_encoder_books_the_encode_phase(plan_stubs):
@@ -277,14 +295,14 @@ def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
     from gmlx.image.registry import get_family
 
     q = get_family("qwen_image21")
-    monkeypatch.setattr(loader, "identify_dit", lambda path: SimpleNamespace(
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
         family=q, variant="turbo"))
     plan = image_service.entry_plan(_spec(defaults={"steps": 8}))
     assert plan.variant == "turbo"
     with pytest.raises(ImageModelError, match="defaults.steps: Qwen-Image "
                        "2.1 turbo runs 8 steps"):
         image_service.entry_plan(_spec(defaults={"steps": 20}))
-    monkeypatch.setattr(loader, "identify_dit", lambda path: SimpleNamespace(
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
         family=q, variant="unknown"))
     assert image_service.entry_plan(_spec(defaults={"steps": 20}))
 

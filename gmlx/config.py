@@ -146,9 +146,10 @@ _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload",
                             "image_model"})
 # An image model entry: the DiT and its companions, never merged with the
 # chat layers (profiles, sampling, cache), so a sibling block of its own.
-_IMAGE_MODEL_KEYS = frozenset({"path", "family", "encoder", "encoder_mmproj",
-                               "vae", "adapters", "defaults",
-                               "encoder_release", "pin", "ttl_s"})
+_IMAGE_MODEL_KEYS = frozenset({"path", "family", "variant", "encoder",
+                               "encoder_mmproj", "vae", "adapters",
+                               "defaults", "encoder_release", "pin",
+                               "ttl_s"})
 _IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
                                   "negative_prompt"})
 _IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
@@ -621,6 +622,7 @@ class ImageModelCfg:
     encoder_release: str = "auto"
     pin: bool = False
     ttl_s: float | None = None      # None => server default; 0 => never
+    variant: str | None = None      # None => from the weights
 
 
 @dataclass(frozen=True)
@@ -1212,6 +1214,7 @@ class ResolvedImageModel:
     encoder_release: str
     pin: bool
     ttl_s: float | None
+    variant: str | None = None
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
@@ -1219,9 +1222,10 @@ class ResolvedImageModel:
         the size and the guidance. The other request defaults change no
         loaded weight and no price."""
         d = self.defaults or {}
-        return (self.path, self.family, self.encoder, self.encoder_model,
-                self.encoder_mmproj, self.vae, tuple(self.adapters),
-                self.encoder_release, d.get("size"), d.get("guidance"))
+        return (self.path, self.family, self.variant, self.encoder,
+                self.encoder_model, self.encoder_mmproj, self.vae,
+                tuple(self.adapters), self.encoder_release, d.get("size"),
+                d.get("guidance"))
 
 
 # Path resolution
@@ -2059,7 +2063,7 @@ def resolve_image_model(image_id: str, cfg: ServerCfg) -> ResolvedImageModel:
         adapters=tuple((resolve_path(a, dirs), float(st))
                        for a, st in m.adapters),
         defaults=dict(m.defaults), encoder_release=m.encoder_release,
-        pin=bool(m.pin), ttl_s=ttl_s)
+        pin=bool(m.pin), ttl_s=ttl_s, variant=m.variant)
 
 
 def env_for(resolved: ResolvedModel) -> dict[str, str]:
@@ -2686,7 +2690,7 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
         if not isinstance(raw.get(key), str) or not raw[key]:
             raise ConfigError(f"{where} needs `{key}` (keys present: "
                               f"{sorted(raw)})")
-    for key in ("family", "encoder_mmproj"):
+    for key in ("family", "variant", "encoder_mmproj"):
         if raw.get(key) is not None and not isinstance(raw[key], str):
             raise ConfigError(f"{where}.{key}: expected a string, got "
                               f"{raw[key]!r}")
@@ -2698,6 +2702,7 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
     return ImageModelCfg(
         id=image_id, path=raw["path"], encoder=raw["encoder"],
         vae=raw["vae"], family=raw.get("family"),
+        variant=raw.get("variant"),
         encoder_mmproj=raw.get("encoder_mmproj"),
         adapters=_parse_image_adapters(f"{where}.adapters",
                                        raw.get("adapters")),

@@ -154,6 +154,10 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--config", default=None, metavar="FILE",
                    help="The config whose image_models MODEL names (default: "
                         "the usual config search).")
+    p.add_argument("--variant", default=None, metavar="NAME",
+                   help="The DiT's variant, such as turbo, for a file whose "
+                        "weights match no known variant (default: from the "
+                        "weights, or the entry's variant).")
     src = p.add_mutually_exclusive_group()
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
@@ -406,9 +410,9 @@ def write_image(path: str, pixels, fmt: str, quality: int,
 
 
 def _from_config(a) -> None:
-    """Fill the DiT, encoder, VAE, vision tower and image size from the
-    image_models entry that MODEL names, when MODEL is no file. Flags given
-    win."""
+    """Fill the DiT, encoder, VAE, vision tower, variant and image size
+    from the image_models entry that MODEL names, when MODEL is no file.
+    Flags given win."""
     import gmlx.config as cfgmod
 
     if os.path.isfile(os.path.expanduser(a.model)):
@@ -435,6 +439,7 @@ def _from_config(a) -> None:
     a.model = rm.path
     a.encoder = a.encoder or encoder
     a.vae = a.vae or rm.vae
+    a.variant = a.variant or rm.variant
     if rm.defaults.get("size"):
         a.entry_size = _size(rm.defaults["size"])
     if getattr(a, "ref", None) and a.encoder_mmproj is None:
@@ -576,6 +581,9 @@ def _load_adapters(a, pipe, log) -> tuple:
 
 def _settings(a, ident, defaults):
     """Steps, cfg and strength from the flags and the variant's defaults."""
+    why = ident.family.variant_needed(ident.variant)
+    if why:
+        raise ValueError(why)
     if defaults is None and (a.steps is None or a.guidance is None):
         raise ValueError(
             f"{a.model} matches no known {ident.family.title} variant; pass "
@@ -621,7 +629,7 @@ def _generate(a) -> int:
     _vet_adapters(a)
     log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
 
-    ident = image_preflight.identify_dit(a.model)
+    ident = image_preflight.identify_dit(a.model, variant=a.variant)
     _vet_adapters(a, ident)
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
@@ -663,7 +671,8 @@ def _generate(a) -> int:
     before = image_preflight.check(
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
-        mmproj=mmproj, refs=[(r.height, r.width) for r in refs])
+        mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
+        variant=a.variant)
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
 
@@ -681,12 +690,12 @@ def _generate(a) -> int:
             "released before the DiT loads")
         pipe, (rows, (cond, neg, encode_s)) = api.load_staged(
             a.model, text_encoder=a.encoder, vae=a.vae, mmproj=mmproj,
-            log=log,
+            variant=a.variant, log=log,
             encode=lambda pipe: (_read_adapters(a, pipe, log), encode(pipe)))
         table, adapters = _adapter_table(pipe, rows, log)
     else:
         pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
-                        mmproj=mmproj, log=log)
+                        mmproj=mmproj, variant=a.variant, log=log)
         table, adapters = _load_adapters(a, pipe, log)
         cond, neg, encode_s = encode(pipe)
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
@@ -784,6 +793,10 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--config", default=None, metavar="FILE",
                    help="The config whose image_models MODEL names (default: "
                         "the usual config search).")
+    p.add_argument("--variant", default=None, metavar="NAME",
+                   help="The DiT's variant, such as turbo, for a file whose "
+                        "weights match no known variant (default: from the "
+                        "weights, or the entry's variant).")
     p.add_argument("--encoder", default=None, metavar="GGUF",
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",
@@ -1018,7 +1031,7 @@ def _bench(a) -> int:
         if err is not None:
             raise OSError(f"cannot write {a.json_out}: {err}")
     log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
-    ident = image_preflight.identify_dit(a.model)
+    ident = image_preflight.identify_dit(a.model, variant=a.variant)
     _vet_adapters(a, ident)
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
@@ -1034,20 +1047,21 @@ def _bench(a) -> int:
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
-                          keep_encoder=True)
+                          keep_encoder=True, variant=a.variant)
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
 
         # The step routes run the pipeline on the image worker, so it
         # loads there.
         pipe = work(lambda: api.load(a.model, text_encoder=a.encoder,
-                                     vae=a.vae, log=log))
+                                     vae=a.vae, variant=a.variant, log=log))
         table, adapters = None, []
         with _steps_client(a, pipe) as (client, mid):
             records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg,
                                    table, adapters, log, client, mid)
     else:
-        pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+        pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
+                        variant=a.variant, log=log)
         table, adapters = _load_adapters(a, pipe, log)
         records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table,
                                adapters, log)

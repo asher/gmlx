@@ -445,7 +445,7 @@ def test_models_payload_lists_image_models_with_their_markers(
         f.write_bytes(b"x")
     edit = SimpleNamespace(name="qwen_image21", edit=object())
     plain = SimpleNamespace(name="z_image", edit=None)
-    monkeypatch.setattr(loader, "identify_dit", lambda path: SimpleNamespace(
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
         family=edit if path.endswith("qi.gguf") else plain,
         variant="turbo"))
     sp_routes._IMAGE_IDENTITY.clear()
@@ -506,7 +506,7 @@ def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
         (tmp_path / n).write_bytes(b"x")
     # A header names the family; the variant comes from the weight hash,
     # which a header fixture does not carry.
-    monkeypatch.setattr(loader, "identify_dit", lambda path: replace(
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: replace(
         fingerprint.identify(views[Path(path).name]),
         variant={"k2t": "turbo", "k2r": "unknown"}[Path(path).stem]))
     sp_routes._IMAGE_IDENTITY.clear()
@@ -579,3 +579,21 @@ def test_a_models_entry_edits_only_with_the_vision_tower(monkeypatch, tower,
     entry = sp_routes._image_entry("qi", rm, resident=False, pinned=False,
                                    default=False)
     assert entry["edit"] is edit
+
+
+def test_image_identity_reads_the_entry_variant(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from gmlx.image import loader
+
+    p = tmp_path / "d.gguf"
+    p.write_bytes(b"x")
+    asked = []
+    fam = SimpleNamespace(name="krea2", edit=None)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
+        asked.append(variant)
+        or SimpleNamespace(family=fam, variant=variant or "unknown")))
+    sp_routes._IMAGE_IDENTITY.clear()
+    assert sp_routes._image_identity(str(p))[1] == "unknown"
+    assert sp_routes._image_identity(str(p), "turbo")[1] == "turbo"
+    assert asked == [None, "turbo"]

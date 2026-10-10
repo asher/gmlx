@@ -72,7 +72,10 @@ free for commercial use only under $1M of annual revenue and 50 seats, as
 [Licenses](#licenses) describes. [Benchmarks](benchmarks.md#image-generation)
 compares the speed of the first three with ComfyUI and stable-diffusion.cpp,
 and of Krea 2 Turbo with ComfyUI. Of Krea 2, gmlx runs Turbo, and it
-refuses a Krea 2 Raw GGUF by name.
+refuses a Krea 2 Raw GGUF by name. A Krea 2 GGUF of weights gmlx does not
+know, such as a merge, runs as Turbo only when its entry sets
+[`variant: turbo`](config.md#image_modelsvariant) or the command passes
+`--variant turbo`.
 
 ## Pull a model
 

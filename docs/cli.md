@@ -949,6 +949,7 @@ with its file name, the size it ran at and the `sha256` of the file.
 |------|---------|---------|
 | `MODEL`, positional | Required | Sample with this DiT GGUF, or with the `image_models` entry of this id, which supplies the encoder, mmproj, VAE and adapters. |
 | `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | From the weights, or the entry's `variant` | Run the DiT as this variant, such as `turbo`, when its weights match no known variant. A Krea 2 file of unknown weights needs `--variant turbo`. |
 | `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
 | `--encoder-mmproj GGUF` | None | Read the `--ref` images with this mmproj GGUF of the text encoder. It is required with `--ref` and is not loaded without it. |
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE, a GGUF or safetensors file. |
@@ -996,6 +997,7 @@ the rest, and the medians of the other phases.
 |------|---------|---------|
 | `MODEL`, positional | Required | Time this DiT GGUF, or the `image_models` entry of this id. |
 | `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | From the weights, or the entry's `variant` | Run the DiT as this variant, such as `turbo`, when its weights match no known variant. A Krea 2 file of unknown weights needs `--variant turbo`. |
 | `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
 | `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |

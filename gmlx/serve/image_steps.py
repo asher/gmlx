@@ -389,7 +389,7 @@ def family_of(spec) -> tuple:
     header."""
     from gmlx.image.loader import identify_dit
 
-    ident = identify_dit(spec.path)
+    ident = identify_dit(spec.path, variant=getattr(spec, "variant", None))
     return ident.family, ident.variant
 
 

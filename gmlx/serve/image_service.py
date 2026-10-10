@@ -175,12 +175,18 @@ def entry_plan(spec) -> EntryPlan:
 
     from gmlx.image.fingerprint import ImageModelError
 
-    ident = identify_dit(spec.path)
+    try:
+        ident = identify_dit(spec.path, variant=spec.variant)
+    except ImageModelError as e:
+        raise ImageModelError(f"image model {spec.id!r}: {e}") from None
     fam = ident.family
     if spec.family and not family_matches(spec.family, fam, ident.variant):
         raise ImageModelError(
             f"image model {spec.id!r}: {os.path.basename(spec.path)} is a "
             f"{fam.title} DiT, not the configured family {spec.family!r}")
+    why = fam.variant_needed(ident.variant)
+    if why:
+        raise ImageModelError(f"image model {spec.id!r}: {why}")
     check_parts(spec, fam)
     steps = (spec.defaults or {}).get("steps")
     if steps is not None:
@@ -330,7 +336,7 @@ def _load(spec) -> ServedImage:
     owned = spec.encoder if not plan.staged else None
     pipe = api.load(spec.path, text_encoder=owned, vae=spec.vae,
                     mmproj=spec.encoder_mmproj if owned else None,
-                    memory="off", log=_log_line)
+                    memory="off", variant=spec.variant, log=_log_line)
     served = ServedImage(pipe=pipe, spec=spec, plan=plan)
     try:
         rows = []
@@ -1154,7 +1160,7 @@ def _ensure_dit(served: ServedImage) -> None:
     act = image_activation(pipe.family.name)
     if pipe.dit is None:
         pipe.dit, _ = load_dit(str(served.spec.path), act_dtype=act.dit,
-                               log=_log_line)
+                               variant=served.spec.variant, log=_log_line)
         install.rewrap(pipe)
     if pipe.vae is None:
         pipe.vae = load_vae(str(served.spec.vae), family=pipe.family.name,

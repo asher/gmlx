@@ -297,6 +297,8 @@ FAMILY = Family(
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     refused=REFUSED,
+    # Only Turbo has a schedule; a merge with new weights may not be Turbo.
+    needs_variant=True,
     sampling=SAMPLING,
     lora_map=lora_map,
     encoder=encoder,

@@ -170,3 +170,38 @@ def test_a_raw_file_is_refused_and_named_against_turbo(monkeypatch,
     monkeypatch.setattr(fp, "weight_identity", lambda view, names: RAW_HASH)
     msg = _refused(fixture_view(RAW), variant=variant)
     assert "Krea 2 Raw" in msg and "Krea 2 Turbo" in msg
+
+
+def test_a_file_of_unknown_weights_runs_only_under_a_variant_by_name():
+    """A Krea 2 file whose identity matches no row samples on no default
+    schedule: the load and the request refuse it until a variant is
+    given, and the refusal names both settings."""
+    fam = get_family("krea2")
+    got = fp.identify(fixture_view(TURBO))
+    assert got.variant == "unknown"
+    why = fam.variant_needed(got.variant)
+    assert "`variant: turbo` on its image_models entry" in why
+    assert "--variant turbo" in why
+    assert fam.variant_needed("turbo") is None
+    assert fp.identify(fixture_view(TURBO), variant="turbo").variant == \
+        "turbo"
+    assert "not a Krea 2 variant" in _refused(fixture_view(TURBO),
+                                              variant="raw")
+    # Z-Image samples an unknown file on steps and guidance given.
+    assert get_family("z_image").variant_needed("unknown") is None
+
+
+def test_the_load_refuses_a_file_of_unknown_weights(monkeypatch):
+    from types import SimpleNamespace
+
+    import gmlx.load.preflight as pre
+    from gmlx.image import loader
+
+    view = fixture_view(TURBO)
+    monkeypatch.setattr(pre, "find_split_shards", lambda path: [path])
+    monkeypatch.setattr(loader, "_scan_shard", lambda s: SimpleNamespace(
+        truncated=False, kv={}, skipped={}))
+    monkeypatch.setattr(loader, "view_from_scans", lambda scans: view)
+    with pytest.raises(fp.ImageModelError, match="--variant turbo"):
+        loader.load_dit("/k.gguf", identified=fp.identify(view),
+                        log=lambda *a: None)

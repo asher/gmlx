@@ -53,6 +53,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and registers it.
 - On a 16 GB Mac, `gmlx pull krea-2-turbo` writes `defaults.size: 512x512`
   into the entry, and `image generate` takes an entry's `defaults.size`.
+- An `image_models` entry takes `variant`, and `image generate` and `bench`
+  take `--variant`, for a DiT whose weights match no known variant.
 - Model discovery and `gmlx sync-models` add an image DiT found with its text
   encoder and VAE, and name the `gmlx pull` that completes a partial set.
 - `gmlx list` shows a KIND column and takes `--image`, `--family`, `--edit` and

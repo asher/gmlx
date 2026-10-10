@@ -108,6 +108,9 @@ class Family:
     # The sampling row of a variant without one, such as a file whose
     # identity matches no row; None leaves it without defaults.
     unknown_variant: str | None = None
+    # A file whose identity matches no row runs only under a variant
+    # given by name, as when the schedule depends on the variant.
+    needs_variant: bool = False
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
     step: StepParts | None = None      # None runs the DiT's own step
     # () -> text_encoder.EncoderSpec; None reads text_encoder.ENCODERS
@@ -121,6 +124,18 @@ class Family:
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))
+
+    def variant_needed(self, variant: str) -> str | None:
+        """Why a file of ``variant`` cannot run without a variant given
+        by name, or None when it can."""
+        if not self.needs_variant or variant in self.sampling:
+            return None
+        names = self.variant_names()
+        return (f"this {self.title} GGUF matches no known {self.title} "
+                f"weights, and its schedule depends on the variant: set "
+                f"`variant: {names[0]}` on its image_models entry, or pass "
+                f"--variant {names[0]}, if it is {self.title} "
+                f"{names[0]}. Known variants: {', '.join(names)}")
 
     def sampling_row(self, variant: str):
         """The SamplingRow a variant samples with, or None."""

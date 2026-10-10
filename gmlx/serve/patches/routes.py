@@ -133,21 +133,21 @@ def _models_payload() -> dict:
 _IMAGE_IDENTITY: dict = {}
 
 
-def _image_identity(path: str) -> tuple:
-    """``(family, variant, edits)`` of a DiT from its header, cached on
-    the file's size and mtime; ``(None, None, False)`` for a file that
-    does not identify."""
+def _image_identity(path: str, variant: str | None = None) -> tuple:
+    """``(family, variant, edits)`` of a DiT from its header, under the
+    entry's ``variant`` when it names one, cached on the file's size and
+    mtime; ``(None, None, False)`` for a file that does not identify."""
     try:
         st = os.stat(path)
     except OSError:
         return None, None, False
-    key = (path, st.st_size, st.st_mtime_ns)
+    key = (path, variant, st.st_size, st.st_mtime_ns)
     hit = _IMAGE_IDENTITY.get(key)
     if hit is None:
         from gmlx.image.loader import identify_dit
 
         try:
-            ident = identify_dit(path)
+            ident = identify_dit(path, variant=variant)
             hit = (ident.family.name, ident.variant,
                    ident.family.edit is not None)
         except Exception:  # noqa: BLE001 - a bad file is listed without them
@@ -164,7 +164,8 @@ def _image_entry(iid: str, rm, *, resident: bool, pinned: bool,
     the context figures, plus ``image``, the family, the variant and
     ``edit``, which is true when the family takes reference images and
     the entry has its vision tower."""
-    family, variant, edits = _image_identity(rm.path)
+    family, variant, edits = _image_identity(rm.path,
+                                             getattr(rm, "variant", None))
     return {
         "id": iid, "object": "model", "created": _mtime(rm.path),
         "owned_by": "gmlx", "resident": resident, "kv_quant": None,

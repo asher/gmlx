@@ -17,11 +17,12 @@ def enabled() -> bool:
     return os.environ.get("GMLX_TOOL_PREFLIGHT", "1") != "0"
 
 
-def identify_dit(path: str):
-    """The fingerprint of the DiT GGUF at ``path``, from its header."""
+def identify_dit(path: str, variant: str | None = None):
+    """The fingerprint of the DiT GGUF at ``path``, from its header, under
+    ``variant`` when one is given."""
     from gmlx.image.loader import identify_dit as identify
 
-    return identify(path)
+    return identify(path, variant=variant)
 
 
 def load_transient(encoder: str | None, vae: str | None,
@@ -89,7 +90,7 @@ def quant_cast_bytes(quant: str, size: int, family: str) -> int:
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,
-          mmproj: str | None = None, refs=()):
+          mmproj: str | None = None, refs=(), variant: str | None = None):
     """The memory plan of one request, or None when the check is off or
     the variant has no defaults and no cfg is given. ``adapters`` is the
     byte count of each adapter, ``init_image`` says the request encodes
@@ -104,7 +105,7 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     from gmlx.image.dtypes import image_activation
     from gmlx.image.text_encoder import _header_view
 
-    ident = identify_dit(dit)
+    ident = identify_dit(dit, variant=variant)
     fam = ident.family.name
     if cfg is None:
         row = sampler_defaults(fam, ident.variant)
