@@ -168,26 +168,31 @@ def _shift_dropped(mp, model):
     mp.setattr(km.Block, "modulation", mod)
 
 
-def _gate_on_q(mp, model):
-    """The attention output gate read from the k product's rows."""
-    real_gated = km.Attention.gated
-
+def _gate_on_rows(mp, model):
+    """The attention output gate read from the attention rows instead of
+    the block input."""
     def gated(self, x, o):
-        g = self.gate
-        self.gate = self.wq
-        try:
-            return real_gated(self, x, o)
-        finally:
-            self.gate = g
+        b, _, n, _ = o.shape
+        rows = o.transpose(0, 2, 1, 3).reshape(b, n, -1)
+        return rows * mx.sigmoid(self.gate(rows))
     mp.setattr(km.Attention, "gated", gated)
 
 
 # Wrong models the exact gate must fail.
 EXACT_FAULTS = {"gate and up swapped": _gate_and_up_swapped,
                 "pre-attention shift dropped": _shift_dropped,
-                "output gate on the q product": _gate_on_q}
+                "output gate on the attention rows": _gate_on_rows}
 
 
+# The plan's EXACT_TOL holds every teacher-forced row: 1.31e-5 at block 0
+# and 6e-8 to 7e-7 in blocks 1 to 27 at step 4. It does not hold the
+# free-running rows of blocks 17 to 26, up to 1.56e-4 at step 4 and
+# 7.4e-5 at step 7. Block 0 reads 1.3e-5 because its input carries
+# channels 122 times its rms: the same exact step on the GPU and on the
+# CPU, two fp32 summation orders of the same ops, differs there by
+# 1.4e-5. Blocks 12 to 25 amplify a change at block 0's output about 50
+# times, so the free rows carry that rounding past the gate. The gate
+# stays at EXACT_TOL, and its faults read before the free rows assert.
 @pytest.mark.integration
 @pytest.mark.parametrize("step", STEPS)
 def test_check3_exact_gate_at_512(real, request, monkeypatch, step):
