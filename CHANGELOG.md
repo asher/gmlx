@@ -137,6 +137,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- GLM-5.3-Flash GGUFs whose architecture is llama.cpp's `glm5-next` load
+  instead of failing as an unsupported architecture. `glm5next` files still load.
 - `gmlx launch` output sent to a file or a pipe keeps the summary it prints
   before the client starts.
 - `gmlx pull`, `init` and `sync-models` reload a server started with
