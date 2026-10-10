@@ -46,6 +46,7 @@ class Recipe:
     encoder_bytes: int = 0            # the default encoder's size, for a fit
     vae_bytes: int = 0                # the packed VAE's size, for a fit
     aliases: tuple = ()
+    license_note: str = ""            # what the license allows, if limited
 
     def dit_name(self, quant: str) -> str:
         return self.dit_file.format(quant=quant)
@@ -89,7 +90,8 @@ RECIPES = {r.name: r for r in (
         vae_sha256="a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
         vae_pack="qwen-image-2.1-vae-F32.gguf",
         license="qwen-research",
-        license_url="https://huggingface.co/Qwen/Qwen-Image-2.1",
+        license_url="https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+        license_note="non-commercial use only",
         encoder_license="apache-2.0",
         encoder_bytes=5_027_785_568 + 1_162_569_280, vae_bytes=1_350_985_376,
         aliases=("qwen-image-2.1",)),
@@ -109,7 +111,8 @@ RECIPES = {r.name: r for r in (
         vae_sha256="a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
         vae_pack="qwen-image-2.1-vae-F32.gguf",
         license="qwen-research",
-        license_url="https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-GGUF",
+        license_url="https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE",
+        license_note="non-commercial use only",
         encoder_license="apache-2.0",
         encoder_bytes=5_027_785_568 + 1_162_569_280, vae_bytes=1_350_985_376,
         aliases=("qwen-image-2.1-turbo",)),

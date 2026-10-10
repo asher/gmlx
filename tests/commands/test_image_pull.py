@@ -288,7 +288,7 @@ def test_json_prints_the_plan(lib, monkeypatch, capsys):
 
 
 def test_the_qwen_recipe_takes_the_vision_tower_beside_its_encoder(
-        lib, monkeypatch):
+        lib, monkeypatch, capsys):
     root, cfg = lib
     monkeypatch.setattr(catalog, "scan", lambda *a, **k: [])
     got = _downloads(monkeypatch)
@@ -303,6 +303,10 @@ def test_the_qwen_recipe_takes_the_vision_tower_beside_its_encoder(
     m = _cfg(cfg).image_models["qwen-image"]
     assert m.encoder_mmproj.endswith(Q.mmproj_file)
     assert m.vae.endswith(Q.vae_pack)
+    # The research license allows no commercial use, and the plan says so.
+    assert ("license: Qwen-Image 2.1 qwen-research, non-commercial use only "
+            "(https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE)"
+            in capsys.readouterr().out)
 
 
 # validate and pull of a single image GGUF
