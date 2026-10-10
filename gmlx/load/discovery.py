@@ -796,8 +796,14 @@ def _pair_images(classified, chat, used_ids: set, images,
         missing = [n for n, got in (("encoder", enc), ("vae", vae)) if not got]
         if missing:
             r = catalog.recipe_for(fam, variant)
-            hint = (f"; `gmlx pull {r.name} --only {','.join(missing)}` "
-                    "fetches it" if r is not None else "")
+            hint = ""
+            if r is not None:
+                # The pull looks for the DiT at its quant, so name it.
+                tag = (quant_tag(os.path.basename(c.path)) or "").upper()
+                q = next((q for q in r.dit_quants if q.upper() == tag), None)
+                quant = f" --quant {q}" if q else ""
+                hint = (f"; `gmlx pull {r.name}{quant} --only "
+                        f"{','.join(missing)}` fetches it")
             print(f"[discover] image DiT without its "
                   f"{' and '.join(missing)} in the model folders{hint}: "
                   f"{c.path}", file=sys.stderr)

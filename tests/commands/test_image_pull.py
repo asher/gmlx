@@ -304,6 +304,33 @@ def test_only_fetches_the_named_parts_and_registers_once_whole(lib,
     assert "z-image-turbo" in _cfg(cfg).image_models
 
 
+def test_the_discovery_hint_completes_the_set_of_the_dit_on_disk(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    (root / "z-image-turbo-Q4_K_M.gguf").write_bytes(b"d")
+    Disk(monkeypatch, root)
+    _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg), "--quant",
+                            "Q4_K_M", "--only", "encoder,vae"]) == 0
+    m = _cfg(cfg).image_models["z-image-turbo"]
+    assert m.path == "z-image-turbo-Q4_K_M.gguf"
+
+
+def test_a_renamed_dit_of_the_published_size_is_used(lib, monkeypatch):
+    root, cfg = lib
+    dq, _eq = catalog.DEFAULT_QUANTS["z-image-turbo"][32]
+    (root / "z-image-turbo.gguf").write_bytes(b"d" * 7)
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
+                        **k: [(Z.dit_name(dq), "file", 7)])
+    Disk(monkeypatch, root)
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
+    assert (Z.dit_repo, Z.dit_name(dq), "main") not in got
+    assert _cfg(cfg).image_models["z-image-turbo"].path == "z-image-turbo.gguf"
+
+
 def test_a_second_pull_of_the_same_dit_adds_no_entry(lib, monkeypatch,
                                                      capsys):
     root, cfg = lib

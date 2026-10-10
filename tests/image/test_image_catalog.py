@@ -185,7 +185,7 @@ def test_an_incomplete_set_names_the_pull_that_fills_it(tmp_path, tiny_spec,
     assert images == []
     err = capsys.readouterr().err
     assert "without its encoder and vae" in err
-    assert "gmlx pull z-image-turbo --only encoder,vae" in err
+    assert "gmlx pull z-image-turbo --quant Q4_K_M --only encoder,vae" in err
 
 
 def test_merge_adds_the_paired_image_models(tmp_path, tiny_spec):

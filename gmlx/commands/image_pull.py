@@ -153,22 +153,25 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
     def of(role):
         return [f for f in found if f.role == role and f.family == r.family]
 
-    # The DiT: this variant at this quant.
-    dits = [f for f in of("dit")
-            if f.variant == r.variant and _same_quant(f.path, dit_quant)]
+    # The DiT: this variant at this quant. A renamed file whose name has no
+    # quant is that quant when its size is the published file's.
     name = r.dit_name(dit_quant)
+    want = _repo_sizes(r.dit_repo, "main", sizes).get(name)
+    dits = [f for f in of("dit") if f.variant == r.variant and (
+        _same_quant(f.path, dit_quant) or (
+            not _quant_of(f.path) and want is not None
+            and os.path.getsize(f.path) == want))]
     if dits:
         p = dits[0].path
         plan.parts.append(Part("dit", os.path.basename(p), p,
                                size=os.path.getsize(p), need=0))
     else:
         dest = os.path.join(_dest(r.dit_repo, base_dir, nest), name)
-        size = _repo_sizes(r.dit_repo, "main", sizes).get(name)
         _download(plan, Part("dit", name, dest, repo=r.dit_repo,
                              files=(name,),
                              root=_dest(r.dit_repo, base_dir, nest),
-                             size=size,
-                             need=_remaining(dest, size)), dest)
+                             size=want,
+                             need=_remaining(dest, want)), dest)
 
     # The encoder: the quant asked for or the class default first, then a
     # configured chat model, then the file nearest the DiT.
