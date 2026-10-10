@@ -291,6 +291,57 @@ def add_config_profile_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
+ROPE_FLAGS = ("rope_scaling", "rope_scale", "rope_freq_base",
+              "rope_freq_scale", "yarn_orig_ctx", "yarn_ext_factor",
+              "yarn_attn_factor", "yarn_beta_slow", "yarn_beta_fast")
+
+
+def add_rope_args(ap: argparse.ArgumentParser, *, title: str = "rope scaling",
+                  description: str = "Run past the trained context. Each "
+                  "flag wins over its GGUF header key, as in llama.cpp."
+                  ) -> None:
+    """The rope scaling flags, with llama.cpp's names and meanings. Shared
+    by ``run``, ``chat`` and ``serve``."""
+    g = ap.add_argument_group(title, description)
+    g.add_argument("--rope-scaling", choices=("none", "linear", "yarn"),
+                   default=None,
+                   help="Rope frequency scaling method (default: the GGUF "
+                   "header's, else linear with factor 1).")
+    g.add_argument("--rope-scale", type=float, default=None, metavar="N",
+                   help="Rope context scaling factor: expands the context "
+                   "by a factor of N.")
+    g.add_argument("--rope-freq-base", type=float, default=None, metavar="N",
+                   help="Rope base frequency (default: from the GGUF).")
+    g.add_argument("--rope-freq-scale", type=float, default=None, metavar="N",
+                   help="Rope frequency scaling factor: expands the context "
+                   "by a factor of 1/N.")
+    g.add_argument("--yarn-orig-ctx", type=int, default=None, metavar="N",
+                   help="YaRN: original context size of the model (default: "
+                   "the GGUF's, else its trained context).")
+    g.add_argument("--yarn-ext-factor", type=float, default=None, metavar="N",
+                   help="YaRN: extrapolation mix factor (default: 1 for "
+                   "yarn, 0 otherwise; 0 is full interpolation).")
+    g.add_argument("--yarn-attn-factor", type=float, default=None,
+                   metavar="N",
+                   help="YaRN: attention magnitude scale (default: 1).")
+    g.add_argument("--yarn-beta-slow", type=float, default=None, metavar="N",
+                   help="YaRN: high correction dim or alpha (default: 1).")
+    g.add_argument("--yarn-beta-fast", type=float, default=None, metavar="N",
+                   help="YaRN: low correction dim or beta (default: 32).")
+
+
+def rope_override_from_args(args):
+    """The rope options of a parsed command line, or None when none was
+    given. Raises ``SystemExit`` with the reason on an invalid set."""
+    from gmlx.load.rope_scaling import RopeOverride
+
+    try:
+        ov = RopeOverride.from_args(args)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from None
+    return None if ov.is_empty() else ov
+
+
 def add_load_args(ap: argparse.ArgumentParser) -> None:
     """Add the loader/template flags. Shared by ``run`` and ``chat``."""
     ap.add_argument(
@@ -346,6 +397,7 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         "arithmetic (M1, M2), and bfloat16 on all other devices. Also "
         "settable as GMLX_ACTIVATION_DTYPE, which serve reads too.",
     )
+    add_rope_args(ap)
 
 
 def add_sampling_args(parser: argparse.ArgumentParser) -> None:
@@ -1215,6 +1267,7 @@ def _run_bench(args) -> int:
             chat_template=args.chat_template,
             no_remap=args.no_remap,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     print_family_note(args)
@@ -1297,6 +1350,7 @@ def _run_bench_depths(args) -> int:
                 draft_gguf_path=args.draft_gguf,
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not getattr(args, "stream_experts", False),
             )
@@ -1309,6 +1363,7 @@ def _run_bench_depths(args) -> int:
                 chat_template=args.chat_template,
                 no_remap=args.no_remap,
                 zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
             )
     _apply_cli_adapter(args, model, _config)
@@ -1556,6 +1611,7 @@ def _run_generate(args) -> int:
                 draft_gguf_path=args.draft_gguf,
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not args.stream_experts,
             )
@@ -1620,6 +1676,7 @@ def _run_generate(args) -> int:
             chat_template=args.chat_template,
             no_remap=args.no_remap,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     print_family_note(args)
@@ -1716,6 +1773,7 @@ def _run_vlm(args) -> int:
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     # The streaming placement applies only to the text tower. The vision
@@ -1871,6 +1929,7 @@ def _run_vlm_mtp(args) -> int:
             draft_gguf_path=args.draft_gguf,
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     _apply_placement(args, getattr(model, "language_model", model))
@@ -2039,6 +2098,15 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
+    rope = getattr(rm, "rope_scaling", None)
+    if rope is not None:
+        # The config's rope_scaling block, one flag at a time, so an explicit
+        # flag wins over its key.
+        scale_given = {"rope_scale", "rope_freq_scale"} & explicit
+        for dest in ROPE_FLAGS:
+            if scale_given and dest in ("rope_scale", "rope_freq_scale"):
+                continue  # two spellings of one value: the flag wins
+            _set(dest, getattr(rope, dest), dest.replace("_", "-"))
     if hasattr(args, "speculative") and "speculative" not in explicit:
         # Config is authoritative for a configured model id: write the resolved bool
         # (True or False) so the native-head auto never second-guesses a config

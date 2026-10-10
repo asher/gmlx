@@ -59,6 +59,7 @@ from gmlx.models.vlm_text_only import Model as TextOnlyModel
 from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
 from gmlx.spec.drafter_protocol import native_block_size
+from gmlx.load import rope_scaling
 from gmlx.load.loader import load_model
 
 _log = logging.getLogger(__name__)
@@ -574,6 +575,7 @@ def _install_stream_placement(
         install_moe_layer_shed(text_model, moe_layer_shed)
 
 
+@rope_scaling.scoped
 def load_serveable_model(
     gguf_path: str,
     *,
@@ -592,6 +594,7 @@ def load_serveable_model(
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
     fast_disk: str | None = None,
+    rope_override=None,
 ) -> tuple[object, object, object]:
     """Load a GGUF model into the form mlx-vlm's server expects.
 
@@ -996,6 +999,10 @@ def install_gguf_server_bridge() -> None:
                 feeder_decode=getattr(spec, "decode_feeder", None),
                 fast_disk=getattr(spec, "stream_fast_disk", None),
             )
+            # The rope options (config `rope_scaling:` / the serve rope
+            # flags) act before the model is built.
+            if getattr(spec, "rope_scaling", None) is not None:
+                feeders["rope_override"] = spec.rope_scaling
             # Path registry + the per-build MLX_VLM_GGUF_SPECULATIVE env window
             # (set by residency) decide MTP vs plain - both process-global, so they
             # reach this bridge in the engine's generation worker thread, unlike the

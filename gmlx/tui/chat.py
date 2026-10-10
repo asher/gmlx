@@ -2263,6 +2263,15 @@ _ASSISTANT_REJECT = (
     ("chat_template", "--chat-template"),
     ("no_chat_template", "--no-chat-template"),
     ("chat_template_config", "--chat-template-config"),
+    ("rope_scaling", "--rope-scaling"),
+    ("rope_scale", "--rope-scale"),
+    ("rope_freq_base", "--rope-freq-base"),
+    ("rope_freq_scale", "--rope-freq-scale"),
+    ("yarn_orig_ctx", "--yarn-orig-ctx"),
+    ("yarn_ext_factor", "--yarn-ext-factor"),
+    ("yarn_attn_factor", "--yarn-attn-factor"),
+    ("yarn_beta_slow", "--yarn-beta-slow"),
+    ("yarn_beta_fast", "--yarn-beta-fast"),
 )
 
 # (attr, flag, is-set) triples the server owns; each passed one gets a note.
@@ -2830,6 +2839,12 @@ def _require_chat_template(tok, *, verbatim_hint: bool = False) -> None:
     raise _ChatExit(1)
 
 
+def rope_override_from_args(args):
+    from gmlx.commands.cli import rope_override_from_args as from_args
+
+    return from_args(args)
+
+
 def _backend_vlm_mtp(args) -> _ChatBackend:
     # VLM loaded on mlx-vlm classes + an assistant drafter: text-only turns
     # run through the MTP engine over a persistent text KV cache
@@ -2848,6 +2863,7 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
             draft_gguf_path=args.draft_gguf,
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     b.model_type = _model_type(b.config)
@@ -2868,6 +2884,7 @@ def _backend_vlm(args) -> _ChatBackend:
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     b.model_type = _model_type(b.config)
@@ -2894,6 +2911,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             draft_gguf_path=args.draft_gguf,
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
             wire=not getattr(args, "stream_experts", False),
         )
@@ -2999,6 +3017,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             chat_template=args.chat_template,
             no_remap=args.no_remap,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
 

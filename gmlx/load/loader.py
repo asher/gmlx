@@ -26,7 +26,7 @@ from mlx.utils import tree_flatten
 
 import mlx_kquant as kq
 
-from . import loadlog
+from . import loadlog, rope_scaling
 from .dtypes import activation_dtype, activation_dtype_name, dtype_name
 from gmlx.device import cpu_default_device, metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_int
@@ -1416,6 +1416,7 @@ def _resolve_indexer_sidecar(
 
 
 @loadlog.seeds
+@rope_scaling.scoped
 def load_model(
     gguf_path: str,
     *,
@@ -1427,6 +1428,7 @@ def load_model(
     fail_on_unknown: bool = False,
     zero_copy: bool = True,
     verbose: bool = False,
+    rope_override: rope_scaling.RopeOverride | None = None,
 ):
     """Load a text-only GGUF K-quant file into an mlx-lm model.
 
@@ -1451,6 +1453,8 @@ def load_model(
         zero_copy: load tensors as no-copy mmap views (default) vs memcpy.
         verbose: print load diagnostics (default quiet; the CLI drives
             its own spinner/summary session instead).
+        rope_override: rope scaling options (``--rope-scaling`` and the
+            other llama.cpp rope flags) over the GGUF header keys.
     """
 
     _log = loadlog.verbose_print

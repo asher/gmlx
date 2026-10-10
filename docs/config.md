@@ -175,6 +175,40 @@ placement and how to size the `moe_*` keys, which all change the output.
 | <a id="modelsdecode_feeder"></a>`decode_feeder` | `true` with `stream: experts` | Decoding keeps the most used experts in a wired arena |
 | <a id="modelsstream_fast_disk"></a>`stream_fast_disk` | `auto` | Read-ahead for streamed decoding. `auto` tests the drive, `on` and `off` force the choice. |
 
+### Rope scaling
+
+`rope_scaling` runs a model past its trained context. Its keys are the
+[rope scaling flags](cli.md#rope-scaling-flags) of `gmlx run`, and each one
+wins over its key in the GGUF header:
+
+```yaml
+models:
+  qwen3.8-flash-next-1m:
+    path: Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
+    rope_scaling:
+      type: yarn
+      factor: 4.0
+      original_context: 262144
+```
+
+| Key | Flag | Meaning |
+|-----|------|---------|
+| <a id="modelsrope_scaling"></a>`type` | `--rope-scaling` | `none`, `linear` or `yarn` |
+| `factor` | `--rope-scale` | Expand the context by this factor |
+| `freq_scale` | `--rope-freq-scale` | The same value as `factor`, spelled as its inverse |
+| `freq_base` | `--rope-freq-base` | Rope base frequency |
+| `original_context` | `--yarn-orig-ctx` | The context the model was trained at |
+| `ext_factor` | `--yarn-ext-factor` | Extrapolation mix, 1 under yarn and 0 otherwise by default |
+| `attn_factor` | `--yarn-attn-factor` | Attention magnitude scale |
+| `beta_fast` | `--yarn-beta-fast` | Low correction dimension, 32 by default |
+| `beta_slow` | `--yarn-beta-slow` | High correction dimension, 1 by default |
+
+Two ids on one GGUF with different `rope_scaling` load as separate models,
+and the prompt cache on disk keeps their KV apart. A YaRN factor extends
+the context that `/v1/models` reports to `original_context` times the
+factor. A constant factor can cost quality on short prompts, so pick the
+smallest factor that fits.
+
 ## Aliases
 
 An alias gives a model a second name, and can fix a profile to it. The

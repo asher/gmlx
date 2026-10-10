@@ -11,7 +11,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, rope_scaling, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -187,7 +187,7 @@ _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
                          "prefill_feeder", "decode_feeder",
                          "stream_fast_disk", "speculative",
-                         "speculative_width_cap",
+                         "speculative_width_cap", "rope_scaling",
                          "overrides", "pin", "ttl_s"})
 _RULE_KEYS = frozenset({"match", "profile"})
 _DISCOVER_KEYS = frozenset({"dir", "recursive", "pair_mmproj", "speculative"})
@@ -582,6 +582,9 @@ class ModelCfg:
     # loaded). None = the drafter family's measured default; 0 = uncapped;
     # N = cap. Clamped by a per-drafter hard limit (B=1-only drafters).
     speculative_width_cap: int | None = None
+    # Rope scaling options (a RopeOverride): llama.cpp's rope flags, keyed
+    # as in the `rope_scaling:` block. None = the GGUF header's scaling.
+    rope_scaling: Any = None
     overrides: dict = field(default_factory=dict)   # {sampling, load, cache, system}
     pin: bool = False
     ttl_s: float | None = None      # None => server default; 0 => never
@@ -1130,6 +1133,10 @@ class ResolvedModel:
     # N = speculate only while the live decode batch is <= N wide.
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
+    # Rope scaling options (a RopeOverride, None = the header's). Load-
+    # affecting: the rope tables are built at load, and KV made under one
+    # scaling is wrong under another.
+    rope_scaling: Any = None
 
     def effective_adapters(self) -> tuple:
         """The adapters the resident entry serving this id carries: the
@@ -1193,6 +1200,7 @@ class ResolvedModel:
             *levers,
             tuple(sorted((k, str(v)) for k, v in self.load.items())),
             tuple(sorted((k, str(v)) for k, v in _flatten_cache(self.cache).items())),
+            *((self.rope_scaling,) if self.rope_scaling is not None else ()),
         )
 
 
@@ -1984,6 +1992,7 @@ def resolve_model(
         prefill_feeder=model.prefill_feeder,
         decode_feeder=model.decode_feeder,
         stream_fast_disk=model.stream_fast_disk,
+        rope_scaling=model.rope_scaling,
         pin=bool(model.pin),
         ttl_s=ttl_s,
         profile_name=effective,
@@ -2297,6 +2306,21 @@ def _normalize_moe_layer_shed(value, where: str = "model"):
             f"{where}.moe_layer_shed: expected a probability in (0, 1), "
             f"got {value!r}")
     return p
+
+
+def _normalize_rope_scaling(value, where: str = "model"):
+    """Validate a ``rope_scaling`` block into a RopeOverride, or None when
+    absent or empty."""
+    from gmlx.load.rope_scaling import RopeOverride
+
+    if value is None:
+        return None
+    try:
+        ov = RopeOverride.from_config(value)
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"{where}.{e}" if str(e).startswith("rope_scaling")
+                          else f"{where}.rope_scaling: {e}") from None
+    return None if ov.is_empty() else ov
 
 
 def _normalize_moe_prestage(value, where: str = "model"):
@@ -2613,6 +2637,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         speculative=bool(raw.get("speculative", False)),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
+        rope_scaling=_normalize_rope_scaling(
+            raw.get("rope_scaling"), f"model {model_id!r}"),
         overrides=dict(ov),
         pin=bool(raw.get("pin", False)),
         # An explicit `ttl_s: null` means never unload, as it does in

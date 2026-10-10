@@ -475,7 +475,10 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
             # for), and say which limit the verdict used
             from . import capacity as _capacity
 
-            trained = _capacity.trained_context_length(path)
+            from .bridge_vlm import get_active_spec
+
+            trained = _capacity.effective_context_length(
+                path, getattr(get_active_spec(), "rope_scaling", None))
             if trained:
                 out["context_limit"], out["context_limit_source"] = int(trained), "trained"
                 out["context_ok"] = bool(tokens + max(0, pinned) <= int(trained))

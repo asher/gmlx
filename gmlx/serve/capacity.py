@@ -787,6 +787,39 @@ def trained_context_length(gguf_path) -> int | None:
     return value
 
 
+def effective_context_length(gguf_path, rope_override=None) -> int | None:
+    """The context the model runs at: the trained context, or with rope
+    options (a RopeOverride) the context they extend it to
+    (``rope_scaling.effective_context``). Cached by path, options and
+    mtime."""
+    if rope_override is None:
+        return trained_context_length(gguf_path)
+    try:
+        mtime = os.path.getmtime(gguf_path)
+    except OSError:
+        return None
+    key = (gguf_path, rope_override)
+    hit = _CTX_CACHE.get(key)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    trained = trained_context_length(gguf_path)
+    value = trained
+    try:
+        from gmlx.load import rope_scaling
+        from gmlx.load.headerscan import scan_gguf
+
+        kv = scan_gguf(gguf_path, include_tensors=False).kv
+        arch = kv.get("general.architecture")
+        if arch and trained:
+            scaling = rope_scaling.resolve(kv, arch, rope_override,
+                                           n_ctx_train=trained)
+            value = rope_scaling.effective_context(trained, scaling)
+    except Exception:
+        _log.debug("rope scaling read failed for %s", gguf_path, exc_info=True)
+    _CTX_CACHE[key] = (mtime, value)
+    return value
+
+
 def max_context_at_width_1(gguf_path) -> int | None:
     """What the installed capacity table says fits at width 1 - only for
     the model it was derived from (the boot model); None otherwise, or

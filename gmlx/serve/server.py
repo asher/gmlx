@@ -1000,6 +1000,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "single positional model, passed through verbatim, "
                          "e.g. '{\"enable_thinking\": false}' (config mode: the "
                          "`chat_template_kwargs:` key).")
+    from gmlx.commands.cli import add_rope_args
+
+    add_rope_args(
+        ap, title="Rope scaling of a single positional model",
+        description="llama.cpp's rope flags, each over its GGUF header key. "
+        "In config mode they are the model's `rope_scaling:` block; see "
+        "docs/config.md.")
     kv = ap.add_argument_group(
         "KV cache of a single positional model",
         "Each flag is a `load:` key in config mode; see docs/config.md.")
@@ -1265,6 +1272,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "(default 40; a slow model load keeps starting past it).")
 
 
+def _rope_override(a):
+    """The positional model's rope options, or None."""
+    from gmlx.commands.cli import rope_override_from_args
+
+    return rope_override_from_args(a)
+
+
 def _bg_serve_args(a, cfg_path) -> list:
     """Rebuild a clean, absolute-pathed serve argv from the parsed args, for a
     faithful detached/launchd relaunch from any cwd. Omits host/port (the caller bakes
@@ -1341,6 +1355,11 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--moe-layer-shed", str(a.moe_layer_shed)]
     if getattr(a, "moe_prestage", None) is not None:
         out += ["--moe-prestage", str(a.moe_prestage)]
+    from gmlx.commands.cli import ROPE_FLAGS
+
+    for dest in ROPE_FLAGS:
+        if getattr(a, dest, None) is not None:
+            out += ["--" + dest.replace("_", "-"), str(getattr(a, dest))]
     if a.budget_gb is not None:
         out += ["--budget-gb", str(a.budget_gb)]
     if a.max_models is not None:
@@ -1775,6 +1794,12 @@ def _resolve_cfg(a) -> tuple:
 
 
 def _resolve_mode_cfg(a) -> tuple:
+    if ((a.config or a.models_dir or not a.model)
+            and _rope_override(a) is not None):
+        # One set of rope options cannot fit every configured model.
+        raise ConfigError(
+            "the rope scaling flags apply to a single positional model; "
+            "set a model's rope_scaling block in the config instead")
     if a.config:
         path = a.config
         return _load_with_discover(path), _make_reload_fn(path, a)
@@ -2033,6 +2058,7 @@ def _single_model_cfg(a) -> ServerCfg:
         prefill_feeder=getattr(a, "prefill_feeder", None),
         decode_feeder=getattr(a, "decode_feeder", None),
         stream_fast_disk=getattr(a, "stream_fast_disk", None),
+        rope_scaling=_rope_override(a),
         pin=True,                            # the single model is always pinned
     )
     models = {mid: model}

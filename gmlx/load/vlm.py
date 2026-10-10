@@ -27,7 +27,7 @@ import mlx.core as mx
 from transformers import BaseVideoProcessor as _BaseVideoProcessor
 from transformers.image_processing_utils import ImageProcessingMixin
 
-from . import loadlog
+from . import loadlog, rope_scaling
 from .config_synth import synthesize_config
 from gmlx.upstream.gdn_patches import require_tiled_gdn
 from .gguf_meta import first_nonzero_int, read_int
@@ -3479,6 +3479,7 @@ def _swap_spec_language_model(model, model_type: str, *, log) -> None:
 # Public entry point
 
 @loadlog.seeds
+@rope_scaling.scoped
 def load_vlm_model(
     gguf_path: str,
     mmproj_path: str,
@@ -3489,6 +3490,7 @@ def load_vlm_model(
     verbose: bool = False,
     return_tokenizer: bool = False,
     spec_target: bool = False,
+    rope_override: rope_scaling.RopeOverride | None = None,
 ):
     """Load a K-quant LLM GGUF + a float mmproj GGUF into an mlx-vlm ``Model``.
 

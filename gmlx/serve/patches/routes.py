@@ -38,7 +38,8 @@ def _mtime(path) -> int:
 
 def _context_length(spec) -> int | None:
     """The GGUF's trained context, capped by the model's context limit."""
-    trained = _capacity.trained_context_length(spec.path)
+    trained = _capacity.effective_context_length(
+        spec.path, getattr(spec, "rope_scaling", None))
     limit = model_context_limit(spec)
     if trained and limit:
         return min(trained, limit)
@@ -1196,7 +1197,8 @@ def _warm_context_lengths() -> None:
     the header scans on the request path. Best-effort."""
     try:
         for rm in serving.resolved_models().values():
-            _capacity.trained_context_length(rm.path)
+            _capacity.effective_context_length(
+                rm.path, getattr(rm, "rope_scaling", None))
     except Exception:  # noqa: S110 - warm only; the request path scans on demand
         pass
 

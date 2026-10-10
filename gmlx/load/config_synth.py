@@ -257,7 +257,8 @@ def _zero_count_guard(fn):
 
 
 @_zero_count_guard
-def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
+def synthesize_config(meta, tensor_shapes=None, *,
+                      rope_override=None) -> dict[str, Any]:
     """Build a config dict from GGUF metadata.
 
     Args:
@@ -269,6 +270,10 @@ def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
     Returns a dict shaped like a HuggingFace `config.json` for the relevant
     text-model class, ready to feed into mlx_lm's `_get_classes(config)` +
     `ModelArgs.from_dict(config)`.
+
+    ``rope_override`` (a ``RopeOverride``) defaults to the options of the
+    load in progress. The resolved rope scaling rides in the config
+    (``rope_scaling.from_config``) when it changes the rope.
     """
     if tensor_shapes is None:
         if not _is_reader(meta):
@@ -300,9 +305,27 @@ def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
 
     _add_universal_fields(meta, shapes, config, arch)
     synth(meta, shapes, config)
+    _add_rope_scaling(meta, config, arch, rope_override)
 
     _print_summary(config, arch)
     return config
+
+
+def _add_rope_scaling(meta, config: dict, arch: str, override) -> None:
+    from . import rope_scaling as rs
+
+    ov = override if override is not None else rs.active_override()
+    rs.require_wired(arch, ov)
+    trained = config.get("max_position_embeddings")
+    if trained is None and isinstance(config.get("text_config"), dict):
+        trained = config["text_config"].get("max_position_embeddings")
+    scaling = rs.resolve(meta, arch, ov, n_ctx_train=trained)
+    target = config.get("text_config") if (
+        "max_position_embeddings" not in config
+        and isinstance(config.get("text_config"), dict)) else config
+    rs.to_config(target, scaling)
+    if target is not config and scaling.active:
+        config[rs.CONFIG_KEY] = target[rs.CONFIG_KEY]
 
 
 # Universal field extraction

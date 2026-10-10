@@ -17,8 +17,11 @@ same numbers on both runtimes.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import math
-from dataclasses import dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Mapping
 
 import numpy as np
@@ -382,3 +385,82 @@ def effective_context(trained: int | None, scaling: RopeScaling) -> int | None:
             and scaling.original_context > 0):
         return int(scaling.original_context / np.float32(scaling.freq_scale))
     return trained
+
+
+# The options of the load in progress. The load entry points set it around
+# their body, so the config synthesizers they reach (target, VLM tower, MTP
+# head) all see the same options without a parameter at every hop. A drafter
+# with its own GGUF resolves from its own header and does not read it.
+_ACTIVE: contextvars.ContextVar[RopeOverride] = contextvars.ContextVar(
+    "gmlx_rope_override", default=NO_OVERRIDE)
+
+
+@contextlib.contextmanager
+def override_scope(override: RopeOverride | None):
+    token = _ACTIVE.set(override or NO_OVERRIDE)
+    try:
+        yield
+    finally:
+        _ACTIVE.reset(token)
+
+
+def active_override() -> RopeOverride:
+    return _ACTIVE.get()
+
+
+def scoped(fn):
+    """Run a load entry point under the ``rope_override`` keyword it was
+    called with. Without one, an outer scope stays in force."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        ov = kwargs.get("rope_override")
+        if ov is None:
+            return fn(*args, **kwargs)
+        with override_scope(ov):
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+# Architectures whose every rope site applies the run options. A load of any
+# other architecture with options refuses before it reads the weights,
+# rather than running with a rope the options did not ask for.
+WIRED_ARCHES: set[str] = set()
+
+
+def require_wired(arch: str, override: RopeOverride | None) -> None:
+    if override is None or override.is_empty() or arch in WIRED_ARCHES:
+        return
+    raise NotImplementedError(
+        f"the rope scaling options are not supported for the {arch} "
+        f"architecture; supported: {', '.join(sorted(WIRED_ARCHES)) or 'none'}")
+
+
+# Config keys the synthesizers add. ``max_position_embeddings`` carries the
+# effective context, as llama.cpp rewrites its trained context; the trained
+# value stays under its own key.
+CONFIG_KEY = "gmlx_rope_scaling"
+TRAINED_CONTEXT_KEY = "gmlx_trained_context"
+
+
+def to_config(config: dict, scaling: RopeScaling) -> None:
+    """Record ``scaling`` in a synthesized config and move the context
+    length to the effective one. A plain rope leaves the config as is."""
+    if not scaling.active:
+        return
+    config[CONFIG_KEY] = asdict(scaling)
+    trained = config.get("max_position_embeddings")
+    if trained is not None:
+        eff = effective_context(int(trained), scaling)
+        if eff != trained:
+            config[TRAINED_CONTEXT_KEY] = int(trained)
+            config["max_position_embeddings"] = eff
+
+
+def from_config(config) -> RopeScaling:
+    """The scaling a synthesized config carries; plain when it has none."""
+    raw = (config.get(CONFIG_KEY) if isinstance(config, dict)
+           else getattr(config, CONFIG_KEY, None))
+    if not raw:
+        return NO_SCALING
+    return RopeScaling(**raw)
+

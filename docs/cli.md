@@ -190,6 +190,13 @@ and `--moe-prestage` stream a positional model bigger than memory. They
 work as under [run](#streaming-flags), and `--gpu-keepwarm` applies to the
 whole server.
 
+`--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`,
+`--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`,
+`--yarn-beta-slow` and `--yarn-beta-fast` work as under
+[run](#rope-scaling-flags) for a positional model. In config mode they are
+the model's [`rope_scaling`](config.md#rope-scaling) block, and serve
+refuses them on the command line.
+
 These flags enable the services in
 [Speech, embeddings and rerank](services.md). Each is also a `server` key:
 
@@ -443,6 +450,33 @@ These flags run a model bigger than memory, as
 | `--moe-layer-shed P` | Off | Skip a streamed layer's experts with probability P, which is lossy. |
 | `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy, so it needs `--moe-miss-shed`. |
 
+### Rope scaling flags
+
+These flags run a model past its trained context. They take llama.cpp's
+names and meanings, so a llama.cpp command line ports unchanged, and each
+one wins over its key in the GGUF header:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--rope-scaling {none,linear,yarn}` | The header's, else `linear` | Pick the rope frequency scaling method. `none` turns the header's scaling off. |
+| `--rope-scale N` | The header's, else 1 | Expand the context by a factor of N. |
+| `--rope-freq-scale N` | The header's, else 1 | Expand the context by a factor of 1/N, the same value as `--rope-scale` spelled the other way. |
+| `--rope-freq-base N` | The header's | Set the rope base frequency. |
+| `--yarn-orig-ctx N` | The header's, else the trained context | Set the context the model was trained at. |
+| `--yarn-ext-factor N` | 1 under yarn, else 0 | Set the extrapolation mix. `0` is full interpolation. |
+| `--yarn-attn-factor N` | 1 | Scale the attention magnitude when `--yarn-ext-factor` is 0. |
+| `--yarn-beta-fast N` | 32 | Set the low correction dimension. |
+| `--yarn-beta-slow N` | 1 | Set the high correction dimension. |
+
+```sh
+gmlx run model.gguf --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
+```
+
+A YaRN factor from these flags extends the reported context to the original
+context times the factor. A constant factor can cost quality on short
+prompts, so pick the smallest factor that fits your context. A model whose
+rope gmlx cannot scale yet refuses the flags at load.
+
 ## gmlx chat
 
 `gmlx chat` is an interactive chat in the terminal. Locally the model loads
@@ -503,9 +537,12 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk` |
 | Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
+| Rope scaling | `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale` |
+| YaRN | `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-slow`, `--yarn-beta-fast` |
 
 A server client refuses `--adapter`, `--mmproj`, `--chat-template`,
-`--no-chat-template` and `--chat-template-config`, and ignores the other
+`--no-chat-template`, `--chat-template-config` and the rope scaling flags,
+and ignores the other
 loading, memory, speculation and streaming flags. A base model with no
 chat template needs `--chat-template` or `--no-chat-template`.
 

@@ -19,6 +19,7 @@ import mlx.nn as nn
 import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
+import gmlx.load.rope_scaling as rope_mod
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
 from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_int
@@ -1847,6 +1848,7 @@ def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
 
 
 @loadlog.seeds
+@rope_mod.scoped
 def load_mtp_model(
     gguf_path: str,
     *,
@@ -1856,6 +1858,7 @@ def load_mtp_model(
     zero_copy: bool = True,
     verbose: bool = False,
     wire: bool = True,
+    rope_override: rope_mod.RopeOverride | None = None,
 ):
     """Load an MTP target+drafter pair: the text target on mlx-vlm classes plus
     a drafter. Two drafter-acquisition shapes:
@@ -2066,6 +2069,7 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
 
 
 @loadlog.seeds
+@rope_mod.scoped
 def load_vlm_mtp_model(
     gguf_path: str,
     mmproj_path: str,
@@ -2076,6 +2080,7 @@ def load_vlm_mtp_model(
     hf_source: str | None = None,
     zero_copy: bool = True,
     verbose: bool = False,
+    rope_override: rope_mod.RopeOverride | None = None,
 ):
     """Load a VLM target + MTP drafter for TEXT-ONLY speculative decoding.
 
