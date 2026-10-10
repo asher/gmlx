@@ -653,6 +653,26 @@ def test_install_server_patches_wires_every_aux_route():
             "/v1/audio/transcriptions", "/v1/audio/translations"} <= paths
 
 
+def test_the_seam_restore_lets_the_media_salt_install_again(engine_seams):
+    """The restore after each test here puts the engine classes back. The
+    media salt wraps three of their methods and keeps its install flag on
+    the apc module, so the restore puts that back too: the next install
+    wraps the classes again. Without it, the cache tests that install the
+    salt after this module get the stock salt (an int)."""
+    from gmlx.cache.media_salt import install_media_salt
+
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    saved = engine_seams.snapshot()
+    assert install_media_salt()
+    engine_seams.restore(saved)
+    assert install_media_salt()
+    for seam in (gen.ResponseGenerator.generate,
+                 gen.ResponseGenerator._preprocess_request,
+                 ar.BatchGenerator._apc_extra_hash):
+        assert seam.__qualname__.startswith("install_media_salt."), seam
+
+
 def test_models_payload_advertises_embeddings_when_configured():
     sp.install_models_endpoint_override(embeddings_model=EMB_REPO)
     from fastapi.testclient import TestClient

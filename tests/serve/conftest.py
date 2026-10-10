@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import importlib
 import sys
+import types
 
 import pytest
 
 try:
     import gmlx.lora_rows as lora_rows
+    from gmlx.cache import media_salt
     import gmlx.serve.bridge_vlm as serving
     from gmlx.serve.patches import _common as sp_common
     from gmlx.serve.patches import hardening as sp_hardening
@@ -82,6 +84,46 @@ def _restore_class(cls, attrs: dict) -> None:
             setattr(cls, name, value)
 
 
+_UNSET = object()
+
+
+def _snapshot_engine_seams() -> dict:
+    """The engine classes, and each process flag that stops a second
+    install of a patch on them."""
+    # The LoRA row channel wraps methods of several engine classes, and a
+    # process flag stops a second install. Restore the classes and the flag
+    # together, or a later install finds the flag set and does nothing.
+    # The media salt wraps three methods of the engine classes and two apc
+    # functions, and keeps its flag on the apc module. Restore them
+    # together for the same reason.
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    salt = ("hash_image_payload", "semantic_extra_hash",
+            media_salt._INSTALLED_FLAG)
+    return {"classes": [(cls, dict(vars(cls))) for cls in _engine_classes()],
+            "lora_channel": lora_rows._channel_installed,
+            "media_salt": {n: vars(apc).get(n, _UNSET) for n in salt}}
+
+
+def _restore_engine_seams(saved: dict) -> None:
+    for cls, attrs in saved["classes"]:
+        _restore_class(cls, attrs)
+    lora_rows._channel_installed = saved["lora_channel"]
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    for name, value in saved["media_salt"].items():
+        if value is _UNSET:
+            vars(apc).pop(name, None)
+        else:
+            setattr(apc, name, value)
+
+
+@pytest.fixture
+def engine_seams():
+    """The snapshot and restore of the engine seams that ``_restore_mlxvlm``
+    runs around each test of the patch modules."""
+    return types.SimpleNamespace(snapshot=_snapshot_engine_seams,
+                                 restore=_restore_engine_seams)
+
+
 @pytest.fixture(autouse=True)
 def _restore_mlxvlm(request):
     if _APP is None or request.module.__name__ not in _PATCH_MODULES:
@@ -115,11 +157,7 @@ def _restore_mlxvlm(request):
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     saved["get_chat_template"] = pu.get_chat_template
-    # The LoRA row channel wraps methods of several engine classes, and a
-    # process flag stops a second install. Restore the classes and the flag
-    # together, or a later install finds the flag set and does nothing.
-    saved["engine_classes"] = [(cls, dict(vars(cls))) for cls in _engine_classes()]
-    saved["lora_channel"] = lora_rows._channel_installed
+    saved["engine_seams"] = _snapshot_engine_seams()
     schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
     saved["stopping_call"] = _UTILS.StoppingCriteria.__call__
@@ -130,9 +168,7 @@ def _restore_mlxvlm(request):
     apc._kq_lone_harvest = saved["apc_lone_flag"]
     gen.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
     pu.get_chat_template = saved["get_chat_template"]
-    for cls, attrs in saved["engine_classes"]:
-        _restore_class(cls, attrs)
-    lora_rows._channel_installed = saved["lora_channel"]
+    _restore_engine_seams(saved["engine_seams"])
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
     _APP._server_runtime_snapshot = saved["snapshot"]
