@@ -153,6 +153,17 @@ QWEN_IMAGE21_STEP = StepFit(base=1.25 * GiB, k=4.0, row_k=0.5, read_k=16.0,
 # step's base for 0.25 GiB of room. The slope is raised 10 percent.
 QWEN_IMAGE21_PREFILL = StepFit(base=1.25 * GiB, k=6.5)
 
+# One Krea 2 Q4_K_M step through ``api.sample`` under bounded_cache on an
+# M5 Max, in fresh processes, over the settled process. The cells are in
+# tests/fixtures/image/memfit/krea2_cells.json: 256 to 1536 pixels with 36
+# or 512 text rows, two of them guided. With 512 text rows the cache
+# reaches its bound in the first step at every size, so a 256 pixel step
+# reads 1.94 GiB. A line through the 1280 and 1536 pixel cells has a slope
+# of 2.2, raised 10 percent to 2.4. The base is 0.25 GiB above every cell,
+# the 768 pixel cell the closest. A guided step reads as Qwen-Image 2.1's
+# does, and takes its slope of 0.5 for the second row.
+KREA2_STEP = StepFit(base=2.35 * GiB, k=2.4, row_k=0.5)
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -509,11 +520,10 @@ PEAKS = {
                             mmproj_fp32=True),
     # Krea 2 joins up to 512 text rows to the image rows in every block. The
     # MLP's gate and up products and the attention's query and gate are the
-    # widest outputs: 28 blocks, 6144 wide, a 16384 MLP. The step fit is
-    # Qwen-Image 2.1's until a Krea 2 step is measured. The encoder's tap
+    # widest outputs: 28 blocks, 6144 wide, a 16384 MLP. The encoder's tap
     # runs in float32.
     "krea2": PeakRow(token_px=16, row_multiple=1, caption_rows=512,
-                     width=2 * 16384 + 2 * 6144, step=QWEN_IMAGE21_STEP,
+                     width=2 * 16384 + 2 * 6144, step=KREA2_STEP,
                      encode_row_bytes=3 * 9728 * 4, text_rows=546),
 }
 

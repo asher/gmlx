@@ -698,6 +698,26 @@ def test_the_qwen_rows_cover_every_measured_cell():
     assert min(_room(row, c)[0] for c in cells) <= 0.35 * GiB
 
 
+KREA2_CELLS = QWEN_CELLS.with_name("krea2_cells.json")
+
+
+def test_the_krea2_row_covers_every_measured_step():
+    row = memfit.PEAKS["krea2"]
+    assert row.step is memfit.KREA2_STEP
+    cells = json.loads(KREA2_CELLS.read_text())["cells"]
+    assert {c["size"] for c in cells} >= {256, 512, 768, 1024, 1280, 1536}
+    assert sum(c["guided"] for c in cells) == 2
+    room = []
+    for c in cells:
+        rows = memfit.image_rows(row, c["size"], c["size"], c["text_rows"])
+        plan = row.step.bytes(rows * row.width * 2, 2 if c["guided"] else 1)
+        room.append(plan - max(c["steps_gib"]) * GiB)
+    assert min(room) >= ROOM
+    # A fit, not a ceiling: the closest cell is within 0.35 GiB, and none
+    # is priced more than 1.75 GiB above its reading.
+    assert min(room) <= 0.35 * GiB and max(room) <= 1.75 * GiB
+
+
 def test_a_thinner_qwen_row_misses_a_measured_cell():
     row = memfit.PEAKS["qwen_image21"]
     cells = _qwen_cells()
