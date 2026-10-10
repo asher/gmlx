@@ -179,10 +179,14 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
     pick = (chat or encs or [None])[0]
     name = r.encoder_name(encoder_quant)
     if pick is not None:
+        chat_id = shared.get(os.path.abspath(pick))
+        if chat_id and r.mmproj_file and not cfg.models[chat_id].mmproj:
+            # A chat model without its vision tower cannot be shared: the
+            # entry names the file and its own tower, so it can edit.
+            chat_id = None
         plan.parts.append(Part(
             "encoder", os.path.basename(pick), pick,
-            size=os.path.getsize(pick), need=0,
-            chat_id=shared.get(os.path.abspath(pick))))
+            size=os.path.getsize(pick), need=0, chat_id=chat_id))
     else:
         dest = os.path.join(_dest(r.encoder_repo, base_dir, nest), name)
         size = _repo_sizes(r.encoder_repo, "main", sizes).get(name)

@@ -381,6 +381,48 @@ def test_krea_2_pulls_raw_from_its_subfolder_and_packs_a_vae_without_config(
             "filter content" in capsys.readouterr().out)
 
 
+def _qwen_pull(lib, monkeypatch, chat_mmproj):
+    root, cfg = lib
+    (root / "Qwen3-VL-8B-Instruct-Q8_0.gguf").write_bytes(b"e")
+    files = [root / "Qwen3-VL-8B-Instruct-Q8_0.gguf"]
+    extra = ""
+    if chat_mmproj:
+        (root / "chat-tower.gguf").write_bytes(b"t")
+        extra = "    mmproj: chat-tower.gguf\n"
+    cfg.write_text(cfg.read_text() + "models:\n  vl:\n    path: "
+                   "Qwen3-VL-8B-Instruct-Q8_0.gguf\n" + extra)
+    monkeypatch.setattr(catalog, "scan", lambda roots, **k: [
+        catalog.ImageFile(str(f), "encoder", "qwen_image21") for f in files])
+    got = _downloads(monkeypatch)
+    monkeypatch.setattr(catalog, "sha256_file", lambda p: Q.vae_sha256)
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: ("qwen_image21", Q.vae_sha256))
+    import gmlx.image.vae as vae_pkg
+    monkeypatch.setattr(vae_pkg, "pack_vae", lambda src, dst, **kw: open(
+        dst, "wb").write(b"g"))
+    assert manage.cmd_pull(["qwen-image", "--config", str(cfg)]) == 0
+    return got, _cfg(cfg)
+
+
+def test_a_shared_chat_encoder_brings_its_own_tower(lib, monkeypatch):
+    got, c = _qwen_pull(lib, monkeypatch, chat_mmproj=True)
+    assert (Q.encoder_repo, Q.mmproj_file, "main") not in got
+    m = c.image_models["qwen-image"]
+    assert m.encoder == "vl" and m.encoder_mmproj is None
+
+
+def test_a_chat_encoder_without_a_tower_is_named_by_file_with_the_tower(
+        lib, monkeypatch):
+    from gmlx.config import resolve_image_model
+
+    got, c = _qwen_pull(lib, monkeypatch, chat_mmproj=False)
+    assert (Q.encoder_repo, Q.mmproj_file, "main") in got
+    m = c.image_models["qwen-image"]
+    assert m.encoder.endswith("Qwen3-VL-8B-Instruct-Q8_0.gguf")
+    assert m.encoder_mmproj.endswith(Q.mmproj_file)
+    assert resolve_image_model("qwen-image", c).encoder_mmproj is not None
+
+
 # validate and pull of a single image GGUF
 def _report(arch, gtype=None):
     return remote.HeaderReport(arch, {"Q4_K": 3}, {}, 3, gtype)

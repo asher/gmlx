@@ -90,6 +90,9 @@ and the first image model becomes the server's default image model.
 A text encoder or VAE already in a model folder is used where it is, at
 any quant, when its weights match the model's. A chat model that is the
 text encoder is shared by its id, so the server holds its weights once.
+For the Qwen-Image models the chat model must have its `mmproj` vision
+tower; without one, the entry names the encoder file and the tower that
+`pull` adds.
 These flags change what `pull` takes:
 
 | Flag | Effect |
