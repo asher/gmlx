@@ -816,10 +816,12 @@ def test_cast_predicate_pins_fp32_params():
     assert qpred("model.layers.0.self_attn.q_proj", None) is True
 
 
-def test_remap_covers_every_wire_tensor_onto_real_params():
-    # Enumerate every GGUF name the PR-27754 converter emits for the tiny
-    # config and assert each one remaps onto an actual parameter path of the
-    # built model. Catches typos in both directions.
+@pytest.mark.parametrize("arch", ["glm5-next", "glm5next"])
+def test_remap_covers_every_wire_tensor_onto_real_params(arch):
+    # Enumerate every GGUF name the converter emits for the tiny config and
+    # assert each one remaps onto an actual parameter path of the built
+    # model, under the llama.cpp arch name and the earlier PR-27754 one.
+    # Catches typos in both directions.
     from mlx.utils import tree_flatten
 
     from gmlx.load.remap import RemapDecision, parse_gguf_name
@@ -862,19 +864,19 @@ def test_remap_covers_every_wire_tensor_onto_real_params():
                 "ffn_up_shexp.weight", "ffn_down_shexp.weight")]
 
     for name in names:
-        dec = parse_gguf_name("glm5next", name)
+        dec = parse_gguf_name(arch, name)
         assert dec.kind == RemapDecision.KIND_MAP, (name, dec.reason)
         assert dec.hf_name in params, (name, dec.hf_name)
 
     # The MTP tail block: standard tensors map one past the trunk (sanitize
     # drops them; the drafter loads them separately); nextn extras skip.
     n = args.num_hidden_layers
-    dec = parse_gguf_name("glm5next", f"blk.{n}.attn_q_a.weight")
+    dec = parse_gguf_name(arch, f"blk.{n}.attn_q_a.weight")
     assert dec.kind == RemapDecision.KIND_MAP
     assert dec.hf_name.startswith(f"model.layers.{n}.")
     for t in ("nextn.eh_proj.weight", "nextn.enorm.weight",
               "nextn.hnorm.weight", "nextn.shared_head_norm.weight"):
-        dec = parse_gguf_name("glm5next", f"blk.{n}.{t}")
+        dec = parse_gguf_name(arch, f"blk.{n}.{t}")
         assert dec.kind == RemapDecision.KIND_SKIP, (t, dec.kind)
 
 

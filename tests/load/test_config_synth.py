@@ -842,8 +842,9 @@ def test_kimi_k3_optional_gate_lower_bound():
     assert "kda_gate_lower_bound" not in c
 
 
-def _glm5next_meta() -> dict:
-    arch = "glm5next"
+def _glm5next_meta(arch: str = "glm5next") -> dict:
+    """GLM-5.3-Flash metadata under ``arch``: 'glm5-next' (llama.cpp) or
+    'glm5next' (the closed PR 27754 the first uploads carry)."""
     m = _base_meta(arch)
     # 5 GGUF blocks = 4 trunk + 1 MTP tail (the universal nextn subtraction).
     m[f"{arch}.block_count"] = 5
@@ -895,8 +896,9 @@ _GLM5NEXT_SHAPES = {
 }
 
 
-def test_glm5next_synth_fields():
-    c = synthesize_config(_glm5next_meta(), tensor_shapes=_GLM5NEXT_SHAPES)
+@pytest.mark.parametrize("arch", ["glm5-next", "glm5next"])
+def test_glm5next_synth_fields(arch):
+    c = synthesize_config(_glm5next_meta(arch), tensor_shapes=_GLM5NEXT_SHAPES)
     assert c["model_type"] == "glm5_next"
     assert c["num_hidden_layers"] == 4            # nextn tail subtracted
     assert c["mtp_num_hidden_layers"] == 1
@@ -952,6 +954,59 @@ def test_glm5next_required_keys_fail_loud(key):
     del m[key]
     with pytest.raises(ValueError, match=key.rsplit(".", 1)[-1]):
         synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+
+
+def test_glm5next_both_arch_names_synthesize_one_config():
+    # The newer uploads rename the arch to llama.cpp's 'glm5-next' and add
+    # index_share_mtp; every other key is the same under the new prefix.
+    new = _glm5next_meta("glm5-next")
+    new["glm5-next.attention.indexer.index_share_mtp"] = True
+    a = synthesize_config(new, tensor_shapes=_GLM5NEXT_SHAPES)
+    b = synthesize_config(_glm5next_meta("glm5next"),
+                          tensor_shapes=_GLM5NEXT_SHAPES)
+    assert a.pop("index_share_mtp") is True
+    assert "index_share_mtp" not in b
+    assert a == b
+
+
+@pytest.mark.parametrize("arch", ["glm5-next", "glm5next"])
+def test_glm5next_header_path_both_names(tmp_path, arch):
+    # A real GGUF header through the header scan the loader reads, under
+    # each arch name: the keys resolve under the file's own prefix.
+    from gmlx.load.headerscan import scan_gguf
+
+    meta = _glm5next_meta(arch)
+    meta[f"{arch}.attention.indexer.index_share_mtp"] = True
+    path = tmp_path / f"{arch}.gguf"
+    _write_meta_gguf(path, arch, meta)
+    kv = scan_gguf(str(path), include_tensors=False).kv
+    assert kv["general.architecture"] == arch
+    got = synthesize_config(kv, tensor_shapes=_GLM5NEXT_SHAPES)
+    want = synthesize_config(meta, tensor_shapes=_GLM5NEXT_SHAPES)
+    _assert_configs_equal(got, want)
+    assert got["model_type"] == "glm5_next"
+    assert got["index_share_mtp"] is True
+
+
+@pytest.mark.parametrize("key, value, match", [
+    ("attention.indexer.kpool_select_tail", False, "kpool_select_tail"),
+    ("attention.indexer.types", [True, False, True, True, True],
+     "indexer.types"),
+])
+def test_glm5next_unsupported_indexer_variants_refused(key, value, match):
+    # llama.cpp reads both keys; gmlx implements only the default shape.
+    m = _glm5next_meta("glm5-next")
+    m[f"glm5-next.{key}"] = value
+    with pytest.raises(NotImplementedError, match=match):
+        synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+
+
+def test_glm5next_default_indexer_keys_accepted():
+    m = _glm5next_meta("glm5-next")
+    m["glm5-next.attention.indexer.kpool_select_tail"] = True
+    m["glm5-next.attention.indexer.types"] = [True] * 5
+    c = synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+    assert c["index_kpool"] == 4
 
 
 def test_glm5next_scalar_head_count_kv_rejected():

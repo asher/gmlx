@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- GLM-5.3-Flash GGUFs whose architecture is llama.cpp's `glm5-next` load
+  instead of failing as an unsupported architecture. `glm5next` files still load.
+
 ## [0.4.23] - 2026-10-07
 
 ### Changed

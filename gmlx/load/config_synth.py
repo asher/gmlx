@@ -97,10 +97,13 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # "lightning indexer" + an MTP/nextn layer. mlx-lm's glm_moe_dsa subclasses
     # deepseek_v32 (which adds the Indexer to the deepseek_v3 backbone).
     "glm-dsa": "glm_moe_dsa",
-    # GLM-5.3-Flash (llama.cpp PR 27754 'glm5next'): hybrid 3:1 KDA linear
+    # GLM-5.3-Flash (llama.cpp 'glm5-next'): hybrid 3:1 KDA linear
     # attention / NoPE MLA with a pooled (kpool-4) lightning indexer,
     # sigmoid MoE with clamped SwiGLU, 4-stream sinkhorn hyper-connections,
     # and an in-GGUF MTP/nextn layer. Vendored gmlx.models.glm5_next.
+    # 'glm5next' is the name from llama.cpp PR 27754, closed unmerged, which
+    # the first GGUF uploads carry; the two differ only in the name.
+    "glm5-next": "glm5_next",
     "glm5next": "glm5_next",
     # HY4-preview (llama.cpp arch 'hyv4'): absorbed MLA with per-head sinks
     # and a sigmoid output gate, a per-token DSA lightning indexer on 21 of
@@ -3097,11 +3100,12 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
 
 
 
-# glm5next (GLM-5.3-Flash 320B-A18B)
+# glm5-next (GLM-5.3-Flash 320B-A18B)
 
-def _synth_glm5next(meta, shapes, config: dict) -> None:
-    """Synthesize a glm5_next config from a 'glm5next'-arch GGUF (llama.cpp
-    PR 27754 conversion).
+def _synth_glm5next(meta, shapes, config: dict, arch: str) -> None:
+    """Synthesize a glm5_next config from a 'glm5-next'-arch GGUF (llama.cpp)
+    or a 'glm5next'-arch one (the earlier PR 27754 conversion). ``arch`` is
+    the file's own name, which prefixes every metadata key.
 
     Hybrid layer schedule from the per-layer head_count_kv array (0 marks a
     KDA/recurrent layer, 1 an MLA layer). MLA is NoPE-only: rope.dimension_count
@@ -3117,9 +3121,10 @@ def _synth_glm5next(meta, shapes, config: dict) -> None:
     The PR converter hard-refuses conversions that deviate from this shape
     (nope-only, kpool compression on, tail-select on, uniform layer plan), so
     the glm5next-specific keys are REQUIRED: a silent default loads cleanly
-    and produces garbage.
+    and produces garbage. The llama.cpp converter writes tail-select and the
+    indexer layer plan as keys instead, so a file that sets either away from
+    that shape is refused here.
     """
-    arch = "glm5next"
     config["model_type"] = "glm5_next"
 
     # The universal default set head_dim to key_length (= kv_lora_rank, 512),
@@ -3206,6 +3211,25 @@ def _synth_glm5next(meta, shapes, config: dict) -> None:
     config["index_kpool"] = _require(
         _read_int(meta, f"{arch}.attention.indexer.kpool"),
         arch=arch, gguf_field=f"{arch}.attention.indexer.kpool")
+    # The model always selects the partial tail pool and gives every MLA
+    # layer its own indexer. llama.cpp defaults both keys to that shape when
+    # they are absent, and gmlx has neither variant.
+    if _read_bool(meta, f"{arch}.attention.indexer.kpool_select_tail") is False:
+        raise NotImplementedError(
+            f"{arch} synth: {arch}.attention.indexer.kpool_select_tail is "
+            "false; gmlx always selects the tail pool.")
+    idx_types = _read_bool_array(meta, f"{arch}.attention.indexer.types")
+    if idx_types is not None and not all(idx_types):
+        raise NotImplementedError(
+            f"{arch} synth: {arch}.attention.indexer.types marks shared "
+            "indexer layers; gmlx runs a full indexer on every MLA layer.")
+    # index_share_mtp (newer uploads, true on GLM-5.3-Flash) is read and
+    # kept but changes nothing: llama.cpp does not read it, and its NextN
+    # block runs its own indexer from the blk.<n>.indexer.* tensors the file
+    # ships, as gmlx.models.glm5_next.mtp does.
+    share_mtp = _read_bool(meta, f"{arch}.attention.indexer.index_share_mtp")
+    if share_mtp is not None:
+        config["index_share_mtp"] = share_mtp
     knorm_eps = _read_float(meta, f"{arch}.attention.layer_norm_epsilon")
     config["index_knorm_eps"] = knorm_eps if knorm_eps is not None else 1e-6
 
@@ -3647,7 +3671,8 @@ _SYNTH = {
     "nemotron_h_moe": _synth_nemotron_h_moe,
     "deepseek2": _synth_deepseek2,
     "glm-dsa": _synth_glm_moe_dsa,
-    "glm5next": _synth_glm5next,
+    "glm5-next": lambda m, s, c: _synth_glm5next(m, s, c, "glm5-next"),
+    "glm5next": lambda m, s, c: _synth_glm5next(m, s, c, "glm5next"),
     "hyv4": _synth_hyv4,
     "kimi-k3": _synth_kimi_k3,
     "deepseek4": _synth_deepseek4,
