@@ -1,6 +1,6 @@
 {
   "_class_name": "Krea2Transformer2DModel",
-  "_source": "The defaults of Krea2Transformer2DModel.__init__ in diffusers 0.41.0.dev0. The config files of krea/Krea-2-Turbo and krea/Krea-2-Raw are gated.",
+  "_source": "The defaults of Krea2Transformer2DModel.__init__ in diffusers at commit e0abab83b5df05de9e7abd788643c1a7c1e42e28. The config files of krea/Krea-2-Turbo and krea/Krea-2-Raw are gated.",
   "in_channels": 64,
   "num_layers": 28,
   "attention_head_dim": 128,

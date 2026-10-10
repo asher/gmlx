@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright 2026 Krea AI and The HuggingFace Team
 # Ported from diffusers' src/diffusers/models/transformers/transformer_krea2.py
 # (the single-stream block, the shared modulation, the text fusion, the
-# text and timestep projections and the final layer) at 0.41.0.dev0 and
-# modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
+# text and timestep projections and the final layer) at commit e0abab83
+# and modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
 """Krea 2 DiT module tree and forward.
 
 Attribute paths equal the GGUF tensor names, so numbered elements are plain

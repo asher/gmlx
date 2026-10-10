@@ -21,7 +21,7 @@ from __future__ import annotations
 # The prompt template, the encoder layers, the timestep shift of each
 # variant and the scheduler values are those of diffusers'
 # src/diffusers/pipelines/krea2/pipeline_krea2.py and
-# src/diffusers/modular_pipelines/krea2/ at 0.41.0.dev0 (Apache-2.0; see
+# src/diffusers/modular_pipelines/krea2/ at commit e0abab83 (Apache-2.0; see
 # licenses/diffusers-LICENSE).
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
@@ -73,7 +73,7 @@ CONSTANTS = ConstantsRow(
         "turbo_mu": 1.15,
     },
     repo="huggingface/diffusers",
-    revision="0.41.0.dev0",
+    revision="e0abab83b5df05de9e7abd788643c1a7c1e42e28",
 )
 
 # The template of every prompt: a fixed system turn and the opening of
@@ -95,7 +95,7 @@ PROMPT = ConstantsRow(
         "tap_layers": (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35),
     },
     repo="huggingface/diffusers",
-    revision="0.41.0.dev0",
+    revision="e0abab83b5df05de9e7abd788643c1a7c1e42e28",
 )
 
 # The model card's own run: Turbo at 8 steps with guidance_scale 0, which

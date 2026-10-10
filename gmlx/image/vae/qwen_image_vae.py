@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright 2026 The Qwen Team and The HuggingFace Team
 # Ported from diffusers'
-# src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py at
-# 0.41.0.dev0, for one frame, and modified for gmlx (Apache-2.0; see
+# src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py at commit
+# e0abab83, for one frame, and modified for gmlx (Apache-2.0; see
 # licenses/diffusers-LICENSE).
 """The Qwen-Image autoencoder, which is the Wan 2.1 video VAE, and the VAE
 of Krea 2.
@@ -63,7 +63,8 @@ CONSTANTS = {
         2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
         3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.916),
 }
-CONSTANTS_SOURCE = ("huggingface/diffusers", "0.41.0.dev0")
+CONSTANTS_SOURCE = ("huggingface/diffusers",
+                    "e0abab83b5df05de9e7abd788643c1a7c1e42e28")
 
 LATENT_CHANNELS = 16
 IMAGE_CHANNELS = 3

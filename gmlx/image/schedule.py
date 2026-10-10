@@ -4,8 +4,10 @@
 # calculate_shift is ported from diffusers'
 # src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py, and
 # shift_exponential and stretch_to_terminal from
-# src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py, at
-# e0abab83 and modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
+# src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py, and the
+# base sigmas of krea2_sigmas from
+# src/diffusers/pipelines/krea2/pipeline_krea2.py, at e0abab83 and
+# modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
 """Sigma schedules, computed on the host in numpy with float32 results.
 
 A schedule is part of a family's numerics, so it must equal the reference

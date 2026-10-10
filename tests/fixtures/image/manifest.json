@@ -68,7 +68,7 @@
   },
   "krea2_transformer_config.json": {
     "repo": "huggingface/diffusers",
-    "revision": "0.41.0.dev0",
+    "revision": "e0abab83b5df05de9e7abd788643c1a7c1e42e28",
     "file": "src/diffusers/models/transformers/transformer_krea2.py",
     "key": "Krea2Transformer2DModel.__init__ defaults"
   },
