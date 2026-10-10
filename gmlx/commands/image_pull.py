@@ -309,6 +309,18 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
                     else "")
             print(f"  the three parts: {_gb(total)}{load}, which {where} "
                   f"this Mac's {_gb(ram, 0)} RAM")
+        # Generate and serve load the encoder alone, encode and release
+        # it, then load the DiT and the VAE, when the parts do not fit.
+        staged = max(sum(p.size or 0 for p in plan.parts
+                         if p.role in ("encoder", "mmproj")),
+                     sum(p.size or 0 for p in plan.parts
+                         if p.role in ("dit", "vae")) + cast)
+        later = {FIT_FITS: "fit", FIT_TIGHT: "are tight on"}.get(
+            classify_fit(staged, ram) or "")
+        if fit != FIT_FITS and later and staged < total + cast:
+            print(f"  in stages, the encoder alone and then the DiT and the "
+                  f"VAE, they need {_gb(staged)} at most, which {later} "
+                  f"this Mac's {_gb(ram, 0)} RAM")
     if plan.size:
         print(f"  the entry gets defaults.size {plan.size}, the largest image "
               f"this DiT makes on a {plan.memory_class} GB Mac")

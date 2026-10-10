@@ -363,6 +363,26 @@ def test_the_fit_line_counts_the_cast_of_a_16_bit_dit(lib, monkeypatch,
         "are tight on this Mac's 32 GB RAM" in out
 
 
+def test_the_fit_line_says_when_the_parts_fit_in_stages(lib, monkeypatch,
+                                                        capsys):
+    root, cfg = lib
+    Disk(monkeypatch, root)
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes", lambda: 16 << 30)
+    listing = {Q.dit_name("Q4_K_M"): 3900 << 20,
+               Q.encoder_name("Q8_0"): 8100 << 20,
+               Q.mmproj_file: 1100 << 20, Q.vae_file: 1300 << 20,
+               Q.vae_config: 1000}
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
+                        **k: [(n, "file", s) for n, s in listing.items()])
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 1 << 30)
+    _downloads(monkeypatch)
+    assert manage.cmd_pull(["qwen-image", "--config", str(cfg)]) == 1
+    out = capsys.readouterr().out
+    assert "which are more than this Mac's 16 GB RAM" in out
+    assert ("in stages, the encoder alone and then the DiT and the VAE, they "
+            "need 9.0 GB at most, which fit this Mac's 16 GB RAM") in out
+
+
 def test_the_disk_check_counts_the_packed_vae_beside_its_source(
         lib, monkeypatch, capsys):
     root, cfg = lib
