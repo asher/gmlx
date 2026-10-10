@@ -51,6 +51,15 @@ class ScaledRoPE(nn.Module):
                             freqs=self._freqs)
 
 
+def scaled_rope(dims: int, base: float, scaling: rs.RopeScaling,
+                traditional: bool = False) -> ScaledRoPE:
+    """A rope module for ``scaling`` at width ``dims`` (a drafter's own
+    rope, built from its own header)."""
+    inv = rs.inv_freq(dims, base, scaling).astype(np.float64)
+    return ScaledRoPE(dims, traditional, mx.array(1.0 / inv, dtype=mx.float32),
+                      scaling.mscale)
+
+
 def _swappable(r) -> bool:
     """A rope module whose table the swap rebuilds: plain, yarn, linear, and
     the rope_freqs factored rope. Others (NoPE, longrope, own classes) stay."""

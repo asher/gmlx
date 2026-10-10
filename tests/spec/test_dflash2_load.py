@@ -212,6 +212,43 @@ def test_rope_scaling_passes_through():
     assert config.rope_scaling == {"type": "yarn", "rope_type": "yarn", "factor": 4.0}
 
 
+def test_rope_scaling_reads_the_whole_header():
+    """The Kimi K3 DSpark drafter carries factor 32 and original context
+    32768; reading type and factor only built the table for 4096."""
+    import math
+
+    import numpy as np
+
+    from gmlx.load import rope_scaling as rs
+    from gmlx.load.rope_swap import ScaledRoPE
+
+    arrays, _ = _skeleton()
+    meta = _meta(**{"dflash.rope.scaling.type": "yarn",
+                    "dflash.rope.scaling.factor": 32.0,
+                    "dflash.rope.scaling.original_context_length": 32768})
+    config, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(),
+                                         "dflash2", arrays=arrays)
+    s = rs.RopeScaling(**config.gmlx_rope_scaling)
+    assert s.factor == 32.0 and s.original_context == 32768
+    rope = DFlash2Drafter(config).rope
+    assert isinstance(rope, ScaledRoPE)
+    assert rope.mscale == pytest.approx(1 + 0.1 * math.log(32.0), rel=1e-6)
+    np.testing.assert_allclose(
+        1.0 / np.asarray(rope._freqs), rs.inv_freq(16, 10000.0, s), rtol=1e-6)
+    # Without the key the original context is the drafter's trained one.
+    config, _ = _dflash_config_from_meta(
+        "d.gguf", _meta(**{"dflash.rope.scaling.type": "yarn",
+                           "dflash.rope.scaling.factor": 4.0,
+                           "dflash.context_length": 8192}),
+        _target_dict(), "dflash2", arrays=arrays)
+    assert rs.RopeScaling(**config.gmlx_rope_scaling).original_context == 8192
+    # No scaling keeps the class rope.
+    config, _ = _dflash_config_from_meta("d.gguf", _meta(), _target_dict(),
+                                         "dflash2", arrays=arrays)
+    assert config.gmlx_rope_scaling is None
+    assert not isinstance(DFlash2Drafter(config).rope, ScaledRoPE)
+
+
 @pytest.mark.parametrize("container,gguf_block,want", [
     ("dflash2", 8, (8, 8)),
     ("dflash2", 16, (16, 16)),

@@ -89,6 +89,9 @@ class DFlashConfig:
     target_layer_ids: List[int]
     num_target_layers: int
     rope_scaling: Optional[dict] = None
+    # The rope scaling of the drafter's own header (gmlx.load.rope_scaling),
+    # present only when it changes the rope.
+    gmlx_rope_scaling: Optional[dict] = None
     attention_bias: bool = False
     tie_word_embeddings: bool = False
     # The checkpoint's trained diffusion block: the deepest block the drafter
@@ -513,10 +516,22 @@ class DFlashDrafter(nn.Module):
         self.layers = [self.layer_class(config, i)
                        for i in range(config.num_hidden_layers)]
         self.norm = nn.RMSNorm(hidden, eps=config.rms_norm_eps)
-        self.rope = initialize_rope(
-            dims=config.head_dim, base=config.rope_theta, traditional=False,
-            scaling_config=config.rope_scaling,
-            max_position_embeddings=config.max_position_embeddings)
+        if config.gmlx_rope_scaling:
+            # llama.cpp's table and magnitude; the drafter has one rope, so
+            # its sliding layers rotate as its full ones (llama.cpp dflash
+            # loader sets the sliding scale to the trained one).
+            from gmlx.load import rope_scaling as rs
+            from gmlx.load.rope_swap import scaled_rope
+
+            scaling = rs.RopeScaling(**config.gmlx_rope_scaling)
+            self.rope = scaled_rope(
+                int(config.head_dim), scaling.freq_base or config.rope_theta,
+                scaling)
+        else:
+            self.rope = initialize_rope(
+                dims=config.head_dim, base=config.rope_theta,
+                traditional=False, scaling_config=config.rope_scaling,
+                max_position_embeddings=config.max_position_embeddings)
         self.embed_tokens = None
         self.embed_scale = 1.0
         self.lm_head = None

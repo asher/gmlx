@@ -8,6 +8,7 @@ needs.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sys
@@ -1219,6 +1220,11 @@ def _dflash_config_from_meta(
         factor = meta.get("dflash.rope.scaling.factor")
         if factor is not None:
             rope_scaling["factor"] = float(factor)
+    # The drafter's own header decides its rope (llama.cpp's rules); the
+    # class reads type and factor only and defaults the rest.
+    scaling = rope_mod.resolve(meta, "dflash", n_ctx_train=int(
+        meta.get("dflash.context_length")
+        or target_config_dict["max_position_embeddings"]))
     causal = meta.get("dflash.attention.causal")
     softcap = meta.get("dflash.final_logit_softcapping",
                        target_config_dict.get("final_logit_softcapping"))
@@ -1243,6 +1249,8 @@ def _dflash_config_from_meta(
                                     or target_config_dict["max_position_embeddings"]),
         rope_theta=float(meta["dflash.rope.freq_base"]),
         rope_scaling=rope_scaling,
+        gmlx_rope_scaling=(dataclasses.asdict(scaling) if scaling.active
+                           else None),
         tie_word_embeddings=False,
         block_size=block_total,
         native_block_size=native_total,
