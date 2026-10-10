@@ -83,5 +83,6 @@ flags refuses before it reads the weights.
 ## Speculative decoding
 
 An MTP head built into the model scales with it. The Gemma 4 assistant
-reads the target's KV, so it takes the target's scaling. A DFlash drafter
-reads its own GGUF header, as llama.cpp does.
+reads the target's KV, so it takes the target's scaling. A DFlash or DSpark
+drafter in its own GGUF takes the flags over its own header, with its own
+trained context, as llama.cpp does.

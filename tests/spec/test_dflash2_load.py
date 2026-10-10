@@ -249,6 +249,34 @@ def test_rope_scaling_reads_the_whole_header():
     assert not isinstance(DFlash2Drafter(config).rope, ScaledRoPE)
 
 
+def test_rope_options_reach_the_drafter():
+    """llama.cpp copies the rope flags into the draft context: the run
+    options apply over the drafter header, and the YaRN ramp sits at the
+    drafter's trained context, not at the target's extended one."""
+    from gmlx.load import rope_scaling as rs
+
+    arrays, _ = _skeleton()
+    yarn4 = rs.RopeOverride(rope_scaling="yarn", rope_scale=4.0)
+    with rs.override_scope(yarn4):
+        config, _ = _dflash_config_from_meta(
+            "d.gguf", _meta(**{"dflash.context_length": 8192}),
+            _target_dict(max_position_embeddings=32768), "dflash2",
+            arrays=arrays)
+    s = rs.RopeScaling(**config.gmlx_rope_scaling)
+    assert s.type == "yarn" and s.factor == 4.0
+    assert s.original_context == 8192
+    # A header without a context length falls back to the target's trained
+    # context, which the target config keeps beside the extended one.
+    with rs.override_scope(yarn4):
+        config, _ = _dflash_config_from_meta(
+            "d.gguf", _meta(**{"dflash.context_length": None}),
+            _target_dict(max_position_embeddings=8192,
+                         **{rs.TRAINED_CONTEXT_KEY: 2048}),
+            "dflash2", arrays=arrays)
+    assert rs.RopeScaling(**config.gmlx_rope_scaling).original_context == 2048
+    assert config.max_position_embeddings == 2048
+
+
 @pytest.mark.parametrize("container,gguf_block,want", [
     ("dflash2", 8, (8, 8)),
     ("dflash2", 16, (16, 16)),

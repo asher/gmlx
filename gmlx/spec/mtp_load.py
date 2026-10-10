@@ -1237,11 +1237,16 @@ def _dflash_config_from_meta(
         factor = meta.get("dflash.rope.scaling.factor")
         if factor is not None:
             rope_scaling["factor"] = float(factor)
-    # The drafter's own header decides its rope (llama.cpp's rules); the
-    # class reads type and factor only and defaults the rest.
-    scaling = rope_mod.resolve(meta, "dflash", n_ctx_train=int(
+    # The drafter's own header and the run options decide its rope, as
+    # llama.cpp copies the rope flags into the draft context; its trained
+    # context is its own (or the target's trained one, never the target's
+    # extended one). The class reads type and factor only.
+    n_ctx_train = int(
         meta.get("dflash.context_length")
-        or target_config_dict["max_position_embeddings"]))
+        or target_config_dict.get(rope_mod.TRAINED_CONTEXT_KEY)
+        or target_config_dict["max_position_embeddings"])
+    scaling = rope_mod.resolve(meta, "dflash", rope_mod.active_override(),
+                               n_ctx_train=n_ctx_train)
     causal = meta.get("dflash.attention.causal")
     softcap = meta.get("dflash.final_logit_softcapping",
                        target_config_dict.get("final_logit_softcapping"))
@@ -1262,8 +1267,7 @@ def _dflash_config_from_meta(
         head_dim=int(meta["dflash.attention.key_length"]),
         rms_norm_eps=float(meta["dflash.attention.layer_norm_rms_epsilon"]),
         vocab_size=vocab,
-        max_position_embeddings=int(meta.get("dflash.context_length")
-                                    or target_config_dict["max_position_embeddings"]),
+        max_position_embeddings=n_ctx_train,
         rope_theta=float(meta["dflash.rope.freq_base"]),
         rope_scaling=rope_scaling,
         gmlx_rope_scaling=(dataclasses.asdict(scaling) if scaling.active

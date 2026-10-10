@@ -155,6 +155,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A llava or pixtral GGUF with YaRN in its header refused to load.
 - A deepseek4 config whose YaRN block lacked a factor or an original context
   refused to build.
+- A DFlash or DSpark drafter with YaRN in its header, such as the Kimi K3 DSpark
+  one, placed the YaRN ramp at 4096 tokens rather than at its original context.
 - `gmlx launch` output sent to a file or a pipe keeps the summary it prints
   before the client starts.
 - `gmlx pull`, `init` and `sync-models` reload a server started with
