@@ -128,6 +128,35 @@ def test_a_quantized_norm_matrix_loads_as_owned_fp32(tiny, tmp_path):
     assert info.n_kquant == 0 and info.n_owned_casts == 1
 
 
+def test_a_quantized_keep_tensor_ahead_of_its_scales_is_cast_once(tiny,
+                                                                   tmp_path):
+    """The wire loader may list a quantized tensor's scales after it, as
+    the Qwen-Image 2.1 Turbo Q8_0 file does for its norm_k rows. The cast
+    drops the scales, and the loop over the names taken before must step
+    over them."""
+    from gmlx.load.wire import load_gguf_wire_bytes
+
+    w = qt.weights(2)
+    name = "norm_out.linear.weight"
+    path = qt.write(tmp_path / "q.gguf", w, codecs={name: "Q8_0"})
+    arrays, meta, _, _, _ = load_gguf_wire_bytes(
+        path, zero_copy=True, expect_quant=False, arch="qwen_image")
+    p = qt.PREFIX
+    arrays = {k[len(p):]: v for k, v in arrays.items()}
+    sk = name[:-len(".weight")] + ".scales"
+    assert sk in arrays
+    weights = {k: v for k, v in arrays.items() if k != sk}
+    order = list(weights)
+    order.insert(order.index(name) + 1, sk)
+    weights = {k: arrays[k] for k in order}
+    codecs = {k[len(p):]: c for k, c in meta.items()}
+    shapes = {name: np.shape(w[name])}
+    cast = image_loader.owned_casts(weights, codecs, ("norm",), mx.bfloat16,
+                                    shapes)
+    assert cast == {name} and sk not in weights and name not in codecs
+    assert weights[name].dtype == mx.float32
+
+
 @pytest.mark.parametrize("fused", [True, False], ids=["fused", "unfused"])
 def test_a_missing_and_an_extra_tensor_are_refused_by_name(tiny, tmp_path,
                                                           fused):

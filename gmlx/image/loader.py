@@ -64,7 +64,9 @@ def owned_casts(weights: dict, codecs: dict, fp32_keep: tuple,
     buffer into the read-only mapping. Returns the names cast."""
     cast: set[str] = set()
     for k in list(weights):
-        v = weights[k]
+        v = weights.get(k)
+        if v is None:               # scales a cast above dropped
+            continue
         if k in codecs and any(s in k for s in fp32_keep):
             weights[k] = _dequantize(weights, codecs, k, (shapes or {})[k])
             cast.add(k)
