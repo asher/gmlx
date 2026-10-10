@@ -56,6 +56,12 @@ The scan that finds GGUF files in a folder, names each model and pairs it
 with its mmproj and drafter. `gmlx init` and `gmlx sync-models` use it. See
 [Model discovery](config.md#model-discovery).
 
+## DiT
+
+The diffusion transformer, the file of an image model that makes the image.
+Starting from random noise, it predicts a little more of the image at each
+[step](#steps), guided by the prompt. See [Image generation](images.md).
+
 ## Drafter
 
 The small predictor that [speculative decoding](#speculative-decoding-and-mtp)
@@ -107,6 +113,13 @@ memory runs short, its band moves from `green` to `yellow`, `orange` and
 4. As a last step, it [sheds](#shed) the largest request.
 
 See [Memory](memory.md) and [Capacity and metrics](capacity.md).
+
+## Guidance
+
+How strongly each image [step](#steps) is pushed toward the prompt and away
+from a negative prompt. A guidance of 1 turns it off, and the
+[DiT](#dit) then runs once per step instead of twice. Turbo models are made
+for guidance 1.
 
 ## Hadamard fold
 
@@ -211,6 +224,12 @@ smaller file that loses more quality.
 Loaded and ready to answer. Several models can be resident within the
 [budget](#budget), and `gmlx ps` lists them.
 
+## Sampler
+
+The rule that takes the [DiT](#dit)'s prediction at one [step](#steps) and
+makes the next, less noisy image from it. gmlx has `euler`, the default,
+and `uni_pc_bh2`.
+
 ## Shed
 
 To end a request early to free memory. The [governor](#governor) ends the
@@ -221,6 +240,12 @@ largest one with the error type `server_overloaded_shed`.
 A [drafter](#drafter) proposes several tokens, and the model checks them in
 one pass, with the same output. gmlx's flags and logs call this MTP. See
 [Speculative decoding](speculative-decoding.md).
+
+## Steps
+
+The number of times an image model runs the [DiT](#dit) to make one image.
+Turbo models take 8 and Qwen-Image 2.1 takes 40. Each step takes about the
+same time, so more steps make a slower image.
 
 ## Stream
 
@@ -234,6 +259,12 @@ How [`/v1/systemone`](decisions.md) answers on DiffusionGemma. The model
 predicts every answer position of a template on its [canvas](#canvas) at
 once, limited to each question's labels.
 
+## Text encoder
+
+The language model that reads the prompt of an image model and passes what
+it reads to the [DiT](#dit). Each image model needs the one it was trained
+with, such as Qwen3-4B for Z-Image-Turbo.
+
 ## Thinking model
 
 A model that reasons before it answers, between markers such as `<think>`
@@ -243,6 +274,12 @@ and `</think>`. The chat client shows the reasoning under a label.
 
 The unit that models read and write, about three quarters of an English
 word. Speeds are in tokens per second.
+
+## VAE
+
+The part of an image model that turns the [DiT](#dit)'s result, a small grid
+of numbers called latents, into pixels. It also turns an input image into
+latents for an edit.
 
 ## Wired memory
 
