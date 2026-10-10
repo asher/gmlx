@@ -1,7 +1,7 @@
 """The quants ``gmlx pull`` takes on each memory class, priced by serve
 on the real headers: the entry plan admits the class default of every
-recipe at that class's working budget, at the image size the docs give
-that class. Header reads only. Skipped unless KQUANT_TEST_GGUF_DIR holds
+recipe at that class's working budget, at the ``defaults.size`` the pull
+writes on that class. Header reads only. Skipped unless KQUANT_TEST_GGUF_DIR holds
 the files under their published names."""
 from __future__ import annotations
 
@@ -24,11 +24,6 @@ def _class_budget(gb: int) -> float:
     ram = gb << 30
     ws = ram * (3 / 4 if gb >= 64 else 2 / 3)
     return min(ws * (1 - capacity.margin()), ram - capacity.reserve_bytes(ram))
-
-
-# The image size a class default makes where the docs give one below
-# the family's default: Krea 2 on 16 GB makes images up to 512x512.
-_SIZE = {("krea2", 16): "512x512"}
 
 
 @functools.lru_cache(maxsize=1)
@@ -57,7 +52,7 @@ def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
                                                    name, gb):
     r = catalog.RECIPES[name]
     dq, eq = catalog.DEFAULT_QUANTS[name][gb]
-    size = _SIZE.get((r.family, gb))
+    size = catalog.DEFAULT_SIZES.get(name, {}).get(gb)
     enc = _file(gguf_dir, r.encoder_name(eq))
     spec = ResolvedImageModel(
         id=name, path=_file(gguf_dir, r.dit_name(dq)),
@@ -80,7 +75,7 @@ def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
 
 
 @pytest.mark.parametrize("name", sorted(
-    n for n, r in catalog.RECIPES.items() if (r.family, 16) in _SIZE))
+    n for n in catalog.RECIPES if 16 in catalog.DEFAULT_SIZES.get(n, {})))
 def test_serve_refuses_the_16_gb_default_above_its_documented_size(
         gguf_dir, monkeypatch, name):
     r = catalog.RECIPES[name]

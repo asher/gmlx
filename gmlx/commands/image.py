@@ -163,8 +163,8 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "1 (default empty).")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
-                        "on Qwen-Image 2.1 (default: the variant's, or the "
-                        "init image's).")
+                        "on Qwen-Image 2.1 (default: the init image's, else the "
+                        "entry's defaults.size, else the variant's).")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
@@ -406,8 +406,9 @@ def write_image(path: str, pixels, fmt: str, quality: int,
 
 
 def _from_config(a) -> None:
-    """Fill the DiT, encoder, VAE and vision tower from the image_models
-    entry that MODEL names, when MODEL is no file. Flags given win."""
+    """Fill the DiT, encoder, VAE, vision tower and image size from the
+    image_models entry that MODEL names, when MODEL is no file. Flags given
+    win."""
     import gmlx.config as cfgmod
 
     if os.path.isfile(os.path.expanduser(a.model)):
@@ -434,6 +435,8 @@ def _from_config(a) -> None:
     a.model = rm.path
     a.encoder = a.encoder or encoder
     a.vae = a.vae or rm.vae
+    if rm.defaults.get("size"):
+        a.entry_size = _size(rm.defaults["size"])
     if getattr(a, "ref", None) and a.encoder_mmproj is None:
         a.encoder_mmproj = rm.encoder_mmproj
     if rm.adapters:
@@ -629,7 +632,8 @@ def _generate(a) -> int:
         init = read_image(a.init_image, a.size, stride)
         width, height = init.shape[1], init.shape[0]
     else:
-        width, height = a.size or (defaults.size if defaults else (1024, 1024))
+        width, height = a.size or getattr(a, "entry_size", None) or (
+            defaults.size if defaults else (1024, 1024))
     if width % stride or height % stride:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
@@ -789,7 +793,8 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
                    help="The prompt (default a fixed bench prompt).")
     p.add_argument("--sizes", type=_sizes, default=None, metavar="LIST",
                    help="Comma-separated sizes such as 1024x1024,2048x2048 "
-                        "(default: the variant's size).")
+                        "(default: the entry's defaults.size, else the "
+                        "variant's size).")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--guidance", type=float, default=None, metavar="CFG",
@@ -1019,7 +1024,8 @@ def _bench(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     a.strength = None
     steps, cfg, _ = _settings(a, ident, defaults)
-    sizes = a.sizes or [defaults.size if defaults else (1024, 1024)]
+    sizes = a.sizes or [getattr(a, "entry_size", None) or (
+        defaults.size if defaults else (1024, 1024))]
     stride = _stride(fam)
     for w, h in sizes:
         if w % stride or h % stride:

@@ -176,6 +176,11 @@ DEFAULT_QUANTS = {
 }
 
 
+# The image size an entry pulled with the class default DiT gets in its
+# defaults, where that DiT makes images smaller than the family's size.
+DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}, "krea-2": {16: "512x512"}}
+
+
 def recipe(name: str) -> Recipe | None:
     """The recipe of ``name`` or one of its aliases, or None."""
     key = str(name).strip().lower()
@@ -208,6 +213,16 @@ def memory_class(ram_bytes: int | None) -> int:
 def default_quants(r: Recipe, ram_bytes: int | None) -> tuple[str, str]:
     """(DiT quant, encoder quant) the recipe pulls on this Mac."""
     return DEFAULT_QUANTS[r.name][memory_class(ram_bytes)]
+
+
+def default_size(r: Recipe, ram_bytes: int | None,
+                 dit_quant: str) -> str | None:
+    """The ``defaults.size`` a pull of ``r`` at ``dit_quant`` writes on
+    this Mac: the class's size when the quant is the class default."""
+    cls = memory_class(ram_bytes)
+    if dit_quant != DEFAULT_QUANTS[r.name][cls][0]:
+        return None
+    return DEFAULT_SIZES.get(r.name, {}).get(cls)
 
 
 def sha256_file(path: str) -> str:

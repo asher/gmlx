@@ -142,7 +142,11 @@ of prompts and request LoRAs. Pull with `--encoder-quant q4_k_m` to leave
 more room for other work.
 
 Krea 2 has a 12B DiT, and no quant of it fits a 1024x1024 image on
-16 GB. There Q3_K_M, the smallest, makes images up to 512x512.
+16 GB. There Q3_K_M, the smallest, makes images up to 512x512. A pull of
+that default writes `defaults: {size: 512x512}` into the entry it
+registers, and its plan says so. `gmlx image generate` and `serve` then
+make 512x512 images from a prompt that names no size. A pull with another
+`--quant` writes no size.
 
 `--quant` and `--encoder-quant` pick other quants:
 

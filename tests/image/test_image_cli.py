@@ -182,6 +182,24 @@ def test_model_may_name_an_image_models_entry(env, tmp_path, monkeypatch,
     assert "no image model of that id" in capsys.readouterr().err
 
 
+def test_an_entry_defaults_size_is_the_size_without_size(env, tmp_path):
+    from PIL import Image
+
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "image_models:\n  zit:\n    path: dit.gguf\n"
+                   "    encoder: enc.gguf\n    vae: vae.gguf\n"
+                   "    defaults: {size: 48x32}\n")
+    base = ["image", "generate", "zit", "--config", str(cfg), "--prompt",
+            "p", "--seed", "1", "--output"]
+    assert umbrella_main(base + [str(tmp_path / "a.png")]) == 0
+    assert umbrella_main(base + [str(tmp_path / "b.png"), "--size",
+                                 "32x32"]) == 0
+    with Image.open(tmp_path / "a.png") as a, \
+            Image.open(tmp_path / "b.png") as b:
+        assert (a.size, b.size) == ((48, 32), (32, 32))
+
+
 def test_the_png_carries_the_settings_unless_told_not_to(env, tmp_path):
     from PIL import Image
 

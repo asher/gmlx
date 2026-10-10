@@ -923,10 +923,10 @@ the first picture and the second. Each reference is resized to about
 multiple of 32, and a reference keeps its alpha channel. The text encoder
 reads the references through its vision tower, which `--encoder-mmproj`
 loads from the encoder's mmproj GGUF, and the VAE encodes them. `--size`
-sets the size of the output, which defaults to the variant's and not to a
-reference's. The fit check counts the references, and a request that does
-not fit is refused before any model loads. Z-Image takes no reference
-images, and `--ref` exits 2 on it.
+sets the size of the output, which defaults to the entry's `defaults.size`
+or the variant's, and not to a reference's. The fit check counts the references, and a request that does
+not fit is refused before any model loads. Z-Image and Krea 2 take no
+reference images, and `--ref` exits 2 on them.
 
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
@@ -955,7 +955,7 @@ with its file name, the size it ran at and the `sha256` of the file.
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
-| `--size WxH` | The variant's, or the init image's | Set the width and height, each a multiple of 16 on Z-Image and of 32 on Qwen-Image 2.1. Another size exits 2 and names the multiple. |
+| `--size WxH` | The init image's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 16 on Z-Image and of 32 on Qwen-Image 2.1. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
@@ -1000,7 +1000,7 @@ the rest, and the medians of the other phases.
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
 | `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
 | `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
-| `--sizes LIST` | The variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
+| `--sizes LIST` | The entry's `defaults.size`, else the variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. |
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |

@@ -55,6 +55,7 @@ class Plan:
     parts: list = field(default_factory=list)
     default: bool = True            # the quants of the memory class
     blocked: list = field(default_factory=list)  # parts whose path is taken
+    size: str | None = None         # the defaults.size the entry gets
 
     def part(self, role: str) -> Part | None:
         return next((p for p in self.parts if p.role == role), None)
@@ -308,6 +309,9 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
                     else "")
             print(f"  the three parts: {_gb(total)}{load}, which {where} "
                   f"this Mac's {_gb(ram, 0)} RAM")
+    if plan.size:
+        print(f"  the entry gets defaults.size {plan.size}, the largest image "
+              f"this DiT makes on a {plan.memory_class} GB Mac")
     note = f", {r.license_note}" if r.license_note else ""
     print(f"  license: {r.title} {r.license}{note} ({r.license_url}); "
           f"encoder {r.encoder_license}")
@@ -409,6 +413,8 @@ def _entry(plan: Plan, cfg) -> dict:
     if mm is not None and not enc.chat_id:
         out["encoder_mmproj"] = _rel(mm.path, dirs)
     out["vae"] = _rel(plan.part("vae").path, dirs)
+    if plan.size:
+        out["defaults"] = {"size": plan.size}
     return out
 
 
@@ -539,13 +545,15 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                      ram=ram)
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
         catalog.default_quants(r, ram)
+    plan.size = catalog.default_size(r, ram, plan.dit_quant)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:
         print(json.dumps({
             "recipe": r.name, "dit_quant": plan.dit_quant,
             "encoder_quant": plan.encoder_quant,
-            "memory_class": plan.memory_class, "download_bytes": need,
+            "memory_class": plan.memory_class, "default_size": plan.size,
+            "download_bytes": need,
             "free_bytes": free, "license": r.license,
             "license_note": r.license_note or None,
             "encoder_license": r.encoder_license,

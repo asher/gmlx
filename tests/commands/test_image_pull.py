@@ -494,6 +494,50 @@ def test_krea_2_pulls_raw_from_its_subfolder_and_packs_a_vae_without_config(
             "filter content" in capsys.readouterr().out)
 
 
+def _krea_pull(lib, monkeypatch, ram_gb, *args):
+    root, cfg = lib
+    K = catalog.RECIPES["krea-2-turbo"]
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
+                        lambda: ram_gb << 30)
+    monkeypatch.setattr(catalog, "scan", lambda *a, **k: [])
+    _downloads(monkeypatch)
+    monkeypatch.setattr(catalog, "sha256_file", lambda p: K.vae_sha256)
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: ("krea2", K.vae_sha256))
+    import gmlx.image.vae as vae_pkg
+    monkeypatch.setattr(vae_pkg, "pack_vae", lambda src, dst, **kw: open(
+        dst, "wb").write(b"g"))
+    assert manage.cmd_pull(["krea-2-turbo", "--config", str(cfg),
+                            *args]) == 0
+    return _cfg(cfg).image_models.get("krea-2-turbo")
+
+
+@pytest.mark.parametrize("ram_gb, args, size", [
+    (16, (), "512x512"),
+    (8, (), "512x512"),
+    (16, ("--encoder-quant", "q4_k_m"), "512x512"),
+    (16, ("--quant", "q4_k_m"), None),
+    (24, (), None),
+    (24, ("--quant", "q3_k_m"), None),
+    (32, (), None),
+])
+def test_a_krea_2_pull_writes_the_size_the_16_gb_default_makes(
+        lib, monkeypatch, capsys, ram_gb, args, size):
+    m = _krea_pull(lib, monkeypatch, ram_gb, *args)
+    assert m.defaults.get("size") == size
+    out = capsys.readouterr().out
+    assert ("the entry gets defaults.size 512x512, the largest image this "
+            "DiT makes on a 16 GB Mac" in out) == (size is not None)
+
+
+def test_the_json_plan_names_the_size_the_entry_gets(lib, monkeypatch,
+                                                     capsys):
+    assert _krea_pull(lib, monkeypatch, 16, "--json", "--no-register") is None
+    out = capsys.readouterr().out
+    plan = json.loads(out[:out.index("\n}\n") + 2])
+    assert plan["memory_class"] == 16 and plan["default_size"] == "512x512"
+
+
 def _qwen_pull(lib, monkeypatch, chat_mmproj):
     root, cfg = lib
     (root / "Qwen3-VL-8B-Instruct-Q8_0.gguf").write_bytes(b"e")
