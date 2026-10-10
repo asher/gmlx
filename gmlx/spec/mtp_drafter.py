@@ -383,6 +383,10 @@ class QwenMTPDrafter(nn.Module):
             tokens.append(tok)
             self._seed_token = None
             self._seed_hidden = None
+            # The engine async-evaluates the seed with the head's cache state.
+            # Wait for it: a step built while it runs cannot write the head's
+            # KV in place, and its first append copies all of the K and V.
+            mx.eval(tok, h_prev)
 
         while len(tokens) < block_size - 1:
             h = self._forward(tok, h_prev)

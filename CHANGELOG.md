@@ -109,6 +109,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by rank and row count. `GMLX_LORA_EPILOGUE=always` keeps the earlier path.
 - With such an adapter, time to first token drops, most at rank 32 and above,
   and greedy output can differ from earlier releases where the path changes.
+- MTP decode at long context no longer copies the draft head's KV cache every
+  round: at 128K a round peaks about 0.5 GB lower and runs 2 to 6 percent faster.
 
 ### Removed
 
