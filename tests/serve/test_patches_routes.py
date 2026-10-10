@@ -573,7 +573,8 @@ def test_a_models_entry_edits_only_with_the_vision_tower(monkeypatch, tower,
     from types import SimpleNamespace
 
     monkeypatch.setattr(sp_routes, "_image_identity",
-                        lambda path: ("qwen_image21", "base", True))
+                        lambda path, variant=None: ("qwen_image21", "base",
+                                                    True))
     rm = SimpleNamespace(path="/qi.gguf", family=None, pin=False,
                          encoder_mmproj=tower)
     entry = sp_routes._image_entry("qi", rm, resident=False, pinned=False,

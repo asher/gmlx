@@ -1326,7 +1326,8 @@ def edit(env, monkeypatch, tmp_path):
     state = env
     state.calls, state.loads = [], []
 
-    def load(dit, *, text_encoder=None, vae=None, mmproj=None, log=print):
+    def load(dit, *, text_encoder=None, vae=None, mmproj=None, log=print,
+             **kw):
         state.loads.append(mmproj)
         pipe = api.ImagePipeline(dit=_Dit(), family=fam,
                                  variant=state.variant,
