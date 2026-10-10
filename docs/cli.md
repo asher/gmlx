@@ -531,7 +531,7 @@ gmlx launch claude-code -- --continue
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh`, `menubar` or a [custom agent](launch-agents.md). |
+| `client`, positional | None | Launch a [client](launch.md#the-clients), such as `opencode`, `open-webui` or `comfyui`, `menubar`, or a [custom agent](launch-agents.md). |
 | `--model ID[@profile]` | An agent's `model`, else the server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
@@ -543,6 +543,7 @@ gmlx launch claude-code -- --continue
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, as [dsh](launch.md#dsh) describes. |
+| `--comfyui-dir DIR` | `~/ComfyUI` | Run the ComfyUI in this folder, on its `.venv` or `venv`, as [comfyui](launch.md#comfyui) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, beside the configured [mounts](config.md#launchcontainermounts). Repeatable. |
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |

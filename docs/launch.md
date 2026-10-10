@@ -40,6 +40,7 @@ different place:
 | `elia` | A terminal chat app | `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME` |
 | `open-webui` | A chat app in the browser | `OPENAI_API_BASE_URL` and related variables |
 | `dsh` | DeepSeek Harness, an agent app in the browser | `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch` |
+| `comfyui` | ComfyUI, a node editor for image workflows | `GMLX_BASE_URL` and related variables, which the gmlx node pack reads |
 
 Where `launch` adds a provider to a tool's own file, it keeps everything
 else in the file. It refuses to change a file it cannot parse, and never
@@ -60,7 +61,7 @@ depends on the client:
 | `goose` | goose's `config.yaml` |
 | `elia` | The `XDG_CONFIG_HOME` folder |
 | `open-webui` | Open WebUI's data folder, in place of `~/.open-webui` |
-| `hermes` | Refused. Set `HERMES_HOME` to use another folder. |
+| `hermes`, `comfyui` | Refused. Set `HERMES_HOME` to use another hermes folder. |
 | `claude-code` | Nothing, because Claude Code gets only environment variables |
 
 Container mode refuses `--config-path`, because the settings go into the
@@ -198,6 +199,7 @@ Open WebUI gets a feature for each service the gmlx server runs, as
 | `rerank` | Hybrid search with the server's reranker. |
 | `stt` | Speech input. |
 | `tts` | Spoken replies. |
+| An [image model](images.md) | Image generation with the server's default image model, at 1024x1024. |
 
 ### dsh
 
@@ -230,3 +232,26 @@ command, with `--config-only`.
 dsh's `web_search` tool uses DeepSeek's search service and needs
 `DEEPSEEK_API_KEY`. Set `DSH_TELEMETRY_MODE=DISABLED` to stop dsh from
 sending feedback conversations to DeepSeek.
+
+### comfyui
+
+ComfyUI is a node editor for image workflows. The gmlx node pack adds nodes
+that run each step of an image model on the gmlx server. Install the pack
+into ComfyUI's `custom_nodes` folder:
+
+```sh
+cd ~/ComfyUI/custom_nodes
+git clone https://github.com/asher/ComfyUI-gmlx
+```
+
+`gmlx launch comfyui` runs `~/ComfyUI/main.py` on the interpreter of that
+folder's `.venv` or `venv`, so ComfyUI keeps its own packages. Name another
+folder with `--comfyui-dir DIR`. Without the pack, `launch` prints the
+install command and exits 2 before it starts a server.
+
+ComfyUI opens on port 8188, or 8189 when gmlx uses 8188, and listens only on
+`127.0.0.1`. `launch` passes the server address, the API key and the image
+model to the pack in `GMLX_BASE_URL`, `GMLX_API_KEY` and
+`GMLX_DEFAULT_IMAGE_MODEL`. `--model` picks the image model, and a chat
+model there is refused. ComfyUI runs on the Mac only, so `--container` and
+`--config-path` are refused.

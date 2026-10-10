@@ -54,6 +54,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--shared-encoder`, and `gmlx ps --image` shows the resident image models.
 - `gmlx rm` removes an image model's files, keeping an encoder another model uses.
 - `gmlx doctor` checks that each image model's DiT, encoder and VAE belong together.
+- `gmlx launch comfyui` runs ComfyUI with the gmlx node pack pointed at the server.
+- `gmlx launch open-webui` turns on image generation when the server has an
+  image model.
 - `gmlx image generate` and `bench` take an `image_models` id in place of the files.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
   text models, and read images with their mmproj.

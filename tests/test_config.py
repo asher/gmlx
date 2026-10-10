@@ -2674,8 +2674,11 @@ def test_a_named_pipe_at_the_local_config_never_blocks(tmp_path, monkeypatch, ca
 
 
 def test_launch_clients_match_the_launch_handlers():
-    from gmlx.commands.launch import _HARNESSES
-    assert set(_HARNESSES) == set(cfgmod.LAUNCH_CLIENTS)
+    # The container settings name every client but those that run on the
+    # Mac only.
+    from gmlx.commands.launch import _HARNESSES, HOST_ONLY
+    assert set(_HARNESSES) - HOST_ONLY == set(cfgmod.LAUNCH_CLIENTS)
+    assert HOST_ONLY <= set(_HARNESSES)
 
 
 @pytest.mark.parametrize("block, want", [

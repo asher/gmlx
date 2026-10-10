@@ -3114,7 +3114,8 @@ def test_an_unknown_name_lists_the_clients_and_the_agents(tmp_path, monkeypatch,
     assert e.value.code == 2
     err = capsys.readouterr().err
     assert ("'no-such-harness' is not a client or a configured agent. The clients are "
-            "aichat, claude-code, dsh, elia, goose, hermes, omp, open-webui, opencode, pi. "
+            "aichat, claude-code, comfyui, dsh, elia, goose, hermes, omp, open-webui, opencode, "
+            "pi. "
             "The agents, from launch.agents, are bot, ally.") in err
     _agent_home(tmp_path, monkeypatch, "server: {port: 8123}\n")
     with pytest.raises(SystemExit):

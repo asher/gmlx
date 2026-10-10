@@ -3179,7 +3179,8 @@ def _written_files(home: Path) -> list[Path]:
                   and not p.name.startswith(".gmlx-entry"))
 
 
-@pytest.mark.parametrize("client", sorted(set(launch._HARNESSES) - {"claude-code", "open-webui"}))
+@pytest.mark.parametrize("client", sorted(set(launch._HARNESSES) - {"claude-code", "open-webui"}
+                                           - launch.HOST_ONLY))
 def test_a_planted_link_never_reaches_a_mac_file(env, client, tmp_path, capsys):
     assert _run([client, "--container"]) == 0
     home = settings.private_home_path(client, _project(env, client))
@@ -3428,7 +3429,7 @@ def test_attach_defaults_match_the_parser(monkeypatch, tmp_path):
     rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough",
                                            "argv_given", "remove_home", "detach", "stop",
                                            "list", "mount_cwd", "dsh_profile",
-                                           "forget_share"}
+                                           "comfyui_dir", "forget_share"}
     assert rest == set(), rest
 
 
