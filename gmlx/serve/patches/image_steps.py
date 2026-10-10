@@ -70,6 +70,12 @@ class ServeHost:
 
         return entry_plan(spec)
 
+    def budget(self, hold):
+        """The bytes a step may plan on, as an image request may."""
+        from .images import _budget
+
+        return _budget(hold)
+
     def unload(self, path, spec):
         from ..residency import ModelBusyError, _installed_pool
         from .routes import _evict_ignoring_retained, _release_preload_holds
@@ -243,6 +249,39 @@ def _served(hold):
     return hold._entry.pipeline
 
 
+def _check_size(hold, width: int, height: int, *, what: str,
+                cfg: float = 1.0, init: bool = False) -> None:
+    """Refuse a step or a VAE pass over the size limits of the image
+    routes with 413, and one whose memory plan does not fit beside the
+    models loaded with 400."""
+    from ..image_service import MAX_PIXELS, MAX_SIDE, size_fits
+    from ..image_steps import StepError
+
+    if width * height > MAX_PIXELS or max(width, height) > MAX_SIDE:
+        raise StepError(413, f"{what} of {width}x{height} pixels is over the "
+                        f"limit of {MAX_PIXELS} pixels (2048x2048) and a "
+                        f"side of {MAX_SIDE}")
+    budget_fn = getattr(SETTINGS.host, "budget", None)
+    budget = budget_fn(hold) if budget_fn is not None else None
+    if not size_fits(_served(hold), width, height, budget, cfg=cfg,
+                     init=init):
+        raise StepError(400, f"{what} of {width}x{height} pixels does not "
+                        "fit in memory beside the models now loaded")
+
+
+def _px(served, part: str, h: int, w: int) -> tuple:
+    """(width, height) in pixels of latents (h, w) in the model's latent
+    space (``part`` "latent") or the VAE's (``part`` "vae")."""
+    from ..image_steps import COMFY, StepError
+
+    facts = COMFY.get(served.pipe.family.name)
+    if facts is None:
+        raise StepError(400, f"{served.pipe.family.title} has no step "
+                        "contract adapter")
+    stride = int(facts[part]["stride"])
+    return int(w) * stride, int(h) * stride
+
+
 # Endpoints.
 
 async def capabilities(request: Request):
@@ -381,6 +420,8 @@ async def put_patch_table(request: Request):
         raise StepError(400, "the table's id is not the one in the path",
                         got=got)
     body = json.loads(raw)
+    if not isinstance(body, dict):
+        raise StepError(400, "a patch table body is a JSON object")
     model = request.query_params.get("model") or body.get("model")
     hold = await _acquire(model)
     try:
@@ -434,6 +475,8 @@ async def step(request: Request):
     hold = await _acquire(model)
     try:
         served = _served(hold)
+        _check_size(hold, *_px(served, "latent", *x_w.shape[2:]),
+                    what="a step", cfg=2.0 if len(rows) > 1 else 1.0)
         fam = served.pipe.family.name
         conv = CONVENTIONS.get(fields.get("convention", "comfy"), {}).get(fam)
         if conv is None:
@@ -572,16 +615,20 @@ async def encode(request: Request):
 
 
 async def vae_decode(request: Request):
-    from ..image_steps import StepError
+    from ..image_steps import MAX_ROWS, StepError
     from ..image_steps import vae_decode as do_decode
 
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
     lat = tensors.get("latents")
     if lat is None or len(lat.shape) != 4:
         raise StepError(400, "vae/decode takes latents (B, C, h, w)")
+    if lat.shape[0] > MAX_ROWS:
+        raise StepError(413, f"a VAE pass takes at most {MAX_ROWS} images")
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
+        _check_size(hold, *_px(served, "vae", *lat.shape[2:]),
+                    what="a VAE decode")
         img = await _on_worker(do_decode, served, lat,
                                bool(fields.get("alpha")))
     finally:
@@ -590,7 +637,7 @@ async def vae_decode(request: Request):
 
 
 async def vae_encode(request: Request):
-    from ..image_steps import StepError
+    from ..image_steps import MAX_ROWS, StepError
     from ..image_steps import vae_encode as do_encode
 
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
@@ -598,9 +645,13 @@ async def vae_encode(request: Request):
     if img is None or len(img.shape) != 4:
         raise StepError(400, "vae/encode takes an image (B, H, W, C) in "
                         "[0, 1]")
+    if img.shape[0] > MAX_ROWS:
+        raise StepError(413, f"a VAE pass takes at most {MAX_ROWS} images")
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
+        _check_size(hold, int(img.shape[2]), int(img.shape[1]),
+                    what="a VAE encode", init=True)
         lat = await _on_worker(do_encode, served, img)
     finally:
         hold.release()
@@ -610,10 +661,13 @@ async def vae_encode(request: Request):
 async def run_begin(request: Request):
     from ..image_steps import RUN_IDLE_S, STATE
 
-    STATE.sweep()
     body = await _fields(request)
     hold = await _acquire(body.get("model"))
-    run = STATE.begin(_served(hold).spec.id, hold)
+    try:
+        run = STATE.begin(_served(hold).spec.id, hold)
+    except BaseException:
+        hold.release()
+        raise
     return _json(200, {"run": run.id, "idle_s": RUN_IDLE_S})
 
 

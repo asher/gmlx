@@ -231,8 +231,25 @@ the client uploads those and sends the step again. A run keeps the
 prefix state of each of its conditionings between steps, and the
 `X-Gmlx-Prefix-Cache` header of a step answers `hit` or `miss`.
 `X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
-time less it is the transport time. A run that sits idle for 120 seconds
-ends.
+time less it is the transport time.
+
+A run that sits idle for 120 seconds ends within a few seconds after, and
+lets the model go. The server holds at most 32 runs, and a begin past that
+gets 429. An interrupt names its run and takes effect at the next step:
+the step running when it lands finishes on the GPU, gets 409 with code
+`interrupted`, and every later step of the run gets the same. An end
+does the same to a step in flight. An interrupt that names no run stops
+nothing.
+
+A step, a VAE decode and a VAE encode take the size limits of the OpenAI
+routes: an image over 2048x2048 pixels or with a side over 4096 gets 413,
+as does a VAE pass of more than 16 images. One whose memory plan does not
+fit beside the models loaded gets 400. The VAE routes decode and encode
+the images of a batch one at a time. `capabilities` gives the largest
+tensor and adapter upload, which are the
+[`image.tensor_cache_mb`](config.md#serverimagetensor_cache_mb) and
+[`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) caches.
+Each image model books those two caches while the step routes are on.
 
 The steps of all clients queue on the image thread with the jobs of the
 OpenAI routes, and share the GPU with chat in the same way.

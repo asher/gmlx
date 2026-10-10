@@ -252,14 +252,17 @@ def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
         return plan(*a, **kw)
 
     monkeypatch.setattr(memfit, "plan_memory", spy)
-    image_service.configure_caches(SimpleNamespace(tensor_cache_mb=3,
-                                                   adapter_cache_mb=5))
     try:
-        image_service.entry_plan(_spec())
+        for steps_api in (False, True):
+            image_service.configure_caches(SimpleNamespace(
+                tensor_cache_mb=3, adapter_cache_mb=5, steps_api=steps_api))
+            image_service.entry_plan(_spec())
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
                                                        adapter_cache_mb=256))
+    # With the step routes on, the entry also books their two caches.
     assert seen[0] == ([2 * (5 << 20)], 2 * (3 << 20))
+    assert seen[-1] == ([2 * (5 << 20)], 2 * (3 << 20) + (8 << 20))
 
 
 def test_a_served_pipeline_caches_hold_at_most_their_bound():
@@ -368,6 +371,41 @@ def load_stubs(monkeypatch):
     monkeypatch.setattr(api, "load", load)
     monkeypatch.setattr(image_service, "entry_plan", lambda spec: "PLAN")
     return calls
+
+
+def test_a_loaded_entry_bounds_its_caches(load_stubs):
+    image_service.configure_caches(SimpleNamespace(tensor_cache_mb=1,
+                                                   adapter_cache_mb=2))
+    try:
+        served = image_service._load(_spec(encoder=None))
+    finally:
+        image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
+                                                       adapter_cache_mb=256))
+    pipe = served.pipe
+    assert pipe.conditionings.max_bytes == 1 << 20
+    assert pipe.reference_latents.max_bytes == 1 << 20
+    assert pipe.adapters.max_bytes == pipe.tables.max_bytes == 2 << 20
+
+
+def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
+    from gmlx.image import memfit
+    from gmlx.serve import image_steps
+
+    seen = []
+    monkeypatch.setattr(memfit, "plan_memory", lambda **kw: seen.append(
+        kw["cache_bytes"]) or SimpleNamespace(fits=kw["height"] < 512))
+    monkeypatch.setattr(image_steps.STATE.tensors, "_bytes", 5)
+    monkeypatch.setattr(image_steps.STATE.adapters, "_bytes", 7)
+    held = SimpleNamespace(bytes=100)
+    pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
+                           weights={"dit": 1, "vae": 1}, adapters=held,
+                           tables=held, family=SimpleNamespace(name="z_image"),
+                           vae=None, conditionings=held, modulations=held)
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True))
+    assert image_service.size_fits(served, 64, 64, 1 << 30)
+    assert not image_service.size_fits(served, 512, 512, 1 << 30)
+    assert image_service.size_fits(served, 4096, 4096, None)
+    assert seen == [212, 212]
 
 
 def test_a_shared_encoder_loads_no_mmproj_of_its_own(load_stubs):

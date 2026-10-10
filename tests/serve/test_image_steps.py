@@ -73,17 +73,17 @@ class _Host(routes.ServeHost):
         return served.spec.path, served.spec
 
     def acquire(self, model):
+        from gmlx.serve.residency import _BusyHold
+
         served = self.served[self.resolve(model)[1].id]
         self.held += 1
         host = self
 
-        class Hold:
-            _entry = SimpleNamespace(pipeline=served)
-
-            def release(self):
+        class Pool:
+            def release(self, entry):
                 host.held -= 1
 
-        return Hold()
+        return _BusyHold(Pool(), SimpleNamespace(pipeline=served))
 
     def models(self):
         return {mid: s.spec for mid, s in self.served.items()}
@@ -93,6 +93,11 @@ class _Host(routes.ServeHost):
 
     def plan(self, spec):
         return None
+
+    budget_bytes = None
+
+    def budget(self, hold):
+        return self.budget_bytes
 
 
 @pytest.fixture(scope="module")
@@ -502,10 +507,117 @@ def test_an_interrupt_stops_the_step_in_flight(host, monkeypatch):
         c.step("zit", run, x, [0.5], rows)
     assert e.value.status == 409 and e.value.body["code"] == "interrupted"
     monkeypatch.setattr(steps, "step_pacer", real)
-    # The run goes on with its next step.
-    assert c.step("zit", run, x, [0.5], rows).shape == SHAPE
+    # Every later step of the run is refused, and the run ends as usual.
+    with pytest.raises(StepsClientError) as e:
+        c.step("zit", run, x, [0.5], rows)
+    assert e.value.status == 409 and e.value.body["code"] == "interrupted"
     assert c.interrupt(run) == 1 and c.interrupt("nope") == 0
     assert host.held == 1                     # the run's own hold
+    assert c.end(run)["ended"] and host.held == 0
+
+
+@pytest.mark.parametrize("lands", ["interrupt", "end"])
+def test_a_stop_that_lands_during_the_eval_discards_the_step(host,
+                                                             monkeypatch,
+                                                             lands):
+    c = _client()
+    rows = _rows(c, _features())
+    run = c.begin("zit")
+    held = steps.STATE.runs[run]
+    gen = held.gen
+    real = api.denoise_step
+
+    def denoise_step(*a, **kw):
+        # The graph is built; the stop lands before its one evaluation.
+        out = real(*a, **kw)
+        if lands == "interrupt":
+            steps.STATE.interrupt(run)
+        else:
+            steps.STATE.end(held)
+        return out
+
+    monkeypatch.setattr(api, "denoise_step", denoise_step)
+    x = noise_from_seed(3, SHAPE)
+    with pytest.raises(StepsClientError) as e:
+        c.step("zit", run, x, [0.5], rows)
+    assert e.value.status == 409 and e.value.body["code"] == "interrupted"
+    assert held.steps == 0 and held.gen == gen + 1
+    monkeypatch.setattr(api, "denoise_step", real)
+    with pytest.raises(StepsClientError) as e:
+        c.step("zit", run, x, [0.5], rows)
+    if lands == "end":
+        assert held.ended and run not in steps.STATE.runs
+        assert e.value.status == 404 and host.held == 0
+    else:
+        assert e.value.status == 409 and host.held == 1
+
+
+def test_a_step_gives_chat_its_share_of_the_gpu(host, monkeypatch):
+    from gmlx.serve import gpu_share
+
+    seen = []
+    monkeypatch.setattr(gpu_share, "pacer", lambda: seen.append)
+    c = _client()
+    rows = _rows(c, _features())
+    c.step("zit", None, np.zeros(SHAPE, np.float32), [0.5], rows)
+    # The chat pacer is called at each point between the DiT blocks.
+    assert seen and all(isinstance(a, tuple) for a in seen)
+
+
+def test_an_interrupt_naming_no_run_reaches_none(host):
+    c = _client()
+    rows = _rows(c, _features())
+    runs = [c.begin("zit"), c.begin("zit")]
+    for named in (None, ""):
+        r = _http().post(f"{P}/interrupt", json={"run": named}, headers=V)
+        assert r.status_code == 200 and r.json() == {"interrupted": 0}
+    for run in runs:
+        assert c.step("zit", run, np.zeros(SHAPE, np.float32), [0.5],
+                      rows).shape == SHAPE
+
+
+def test_an_ended_run_sheds_its_prefix_states(host, qpipe):
+    import qwen_tiny as qt
+
+    c = _client()
+    rows = _qwen_rows(c)
+    run = c.begin("qit")
+
+    def held():
+        return [k for k in list(qpipe.captions._items)
+                if isinstance(k, tuple) and str(k[0]).startswith("wire:")]
+
+    c.step("qit", run, np.asarray(qt.latents()), [0.75], rows)
+    assert held()
+    c.end(run)
+    _on_worker(lambda: None)                 # the shed queued before it
+    assert held() == [] and host.held == 0
+
+
+def test_an_idle_run_ends_on_the_timer(host, monkeypatch):
+    import time
+
+    c = _client()
+    now = [100.0]
+    monkeypatch.setattr(steps.STATE, "clock", lambda: now[0])
+    monkeypatch.setattr(steps.STATE, "sweep_s", 0.01)
+    run = c.begin("zit")
+    assert host.held == 1
+    now[0] += steps.RUN_IDLE_S + 1
+    deadline = time.monotonic() + 5
+    while run in steps.STATE.runs and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert run not in steps.STATE.runs and host.held == 0
+
+
+def test_the_runs_held_at_once_are_bounded(host, monkeypatch):
+    monkeypatch.setattr(steps, "MAX_RUNS", 2)
+    c = _client()
+    c.begin("zit")
+    c.begin("zit")
+    r = _http().post(f"{P}/runs/begin", json={"model": "zit"}, headers=V)
+    assert r.status_code == 429 and "2 runs are held" in r.json()["error"]
+    assert host.held == 2
 
 
 def test_a_run_ends_once_and_its_steps_are_refused_after(host):
@@ -707,3 +819,81 @@ def test_cache_sizes_follow_server_image(host):
         ImageServerCfg(), tensor_cache_mb=3, adapter_cache_mb=5), host)
     assert steps.STATE.tensors.max_bytes == 3 << 20
     assert steps.STATE.adapters.max_bytes == 5 << 20
+    limits = _http().get(f"{P}/capabilities").json()["limits"]
+    assert limits["max_tensor_bytes"] == 3 << 20
+    assert limits["max_adapter_bytes"] == 5 << 20
+
+
+def test_the_default_step_caches_are_the_configured_ones():
+    cfg = ImageServerCfg()
+    fresh = steps.StepsState()
+    assert fresh.tensors.max_bytes == cfg.tensor_cache_mb << 20
+    assert fresh.adapters.max_bytes == cfg.adapter_cache_mb << 20
+
+
+def test_a_tensor_over_the_cache_is_refused_before_it_is_copied(
+        host, monkeypatch):
+    routes.mount(_APP.app, dataclasses.replace(
+        ImageServerCfg(), tensor_cache_mb=1), host)
+    copied = []
+    monkeypatch.setattr(steps, "_wire_copy", lambda t: copied.append(t) or t)
+    big = np.zeros((1, 300_000, 1), np.float32)
+    r = _http().put(f"{P}/tensors/{array_hash(big)}",
+                    content=wire.write({"cond": big}),
+                    headers={**V, "Content-Type": wire.CONTENT_TYPE})
+    assert r.status_code == 413 and copied == []
+
+
+# Size limits and the memory plan.
+
+def _put_container(path, tensors, fields=None):
+    return _http().post(f"{P}/{path}", content=wire.write(tensors, fields),
+                        headers={**V, "Content-Type": wire.CONTENT_TYPE})
+
+
+@pytest.mark.parametrize("path, tensors, fields", [
+    # 80x4800 pixels at Z-Image's stride of 8: a side over 4096.
+    ("step", {"x": np.zeros((1, 4, 600, 10), np.float32),
+              "timestep": np.zeros((1,), np.float32)},
+     {"model": "zit", "rows": [{"cond": "0" * 64}]}),
+    ("vae/decode", {"latents": np.zeros((1, 4, 600, 10), np.float32)},
+     {"model": "zit"}),
+    ("vae/decode", {"latents": np.zeros((17, 4, 2, 2), np.float32)},
+     {"model": "zit"}),
+    ("vae/encode", {"image": np.zeros((1, 4800, 8, 3), np.float32)},
+     {"model": "zit"}),
+])
+def test_a_step_or_vae_pass_over_the_size_limits_is_413(host, path, tensors,
+                                                         fields):
+    r = _put_container(path, tensors, fields)
+    assert r.status_code == 413, r.text
+    assert host.held == 0
+
+
+@pytest.mark.parametrize("path, tensors, fields", [
+    ("step", {"x": np.zeros(SHAPE, np.float32),
+              "timestep": np.zeros((1,), np.float32)},
+     {"model": "zit", "rows": [{"cond": "0" * 64}]}),
+    ("vae/decode", {"latents": np.zeros((1, 4, 4, 6), np.float32)},
+     {"model": "zit"}),
+    ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)},
+     {"model": "zit"}),
+])
+def test_a_step_or_vae_pass_that_does_not_fit_is_400(host, path, tensors,
+                                                     fields):
+    host.budget_bytes = 1
+    try:
+        r = _put_container(path, tensors, fields)
+    finally:
+        host.budget_bytes = None
+    assert r.status_code == 400, r.text
+    assert "does not fit in memory" in r.json()["error"]
+    assert host.held == 0
+
+
+def test_a_patch_table_body_that_is_no_object_is_400(host):
+    body = b"[1]"
+    r = _http().put(f"{P}/patch-tables/{steps.table_id(body)}?model=zit",
+                    content=body, headers={**V,
+                                           "Content-Type": "application/json"})
+    assert r.status_code == 400 and "JSON object" in r.json()["error"]

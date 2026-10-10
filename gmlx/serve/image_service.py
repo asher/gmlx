@@ -81,13 +81,25 @@ def default_size(spec, defaults) -> tuple:
 # The bytes each cache of an image model may hold: conditionings and
 # reference latents (tensor), request adapter pairs and built patch tables
 # (adapter). server.image sets them; an entry books each at its bound.
-_CACHE_BYTES = {"tensor": 64 << 20, "adapter": 256 << 20}
+# The step routes keep one cache of uploaded tensors and one of adapter
+# matrices for the server (steps), which each image entry books too.
+_CACHE_BYTES = {"tensor": 64 << 20, "adapter": 256 << 20,
+                "steps": (64 + 256) << 20}
 
 
 def configure_caches(settings) -> None:
     """Take the cache bounds of ``server.image``."""
     _CACHE_BYTES["tensor"] = int(settings.tensor_cache_mb) << 20
     _CACHE_BYTES["adapter"] = int(settings.adapter_cache_mb) << 20
+    _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"] + _CACHE_BYTES["adapter"]
+                             if getattr(settings, "steps_api", True) else 0)
+
+
+def _steps_cache_bytes() -> int:
+    """What the step routes' caches hold now."""
+    from .image_steps import STATE
+
+    return STATE.tensors.bytes + STATE.adapters.bytes
 
 
 def cache_bytes() -> tuple:
@@ -152,7 +164,7 @@ def entry_plan(spec) -> EntryPlan:
     common = dict(adapters=adapters, family=fam.name, height=height,
                   width=width, cfg=cfg, dtype=act.dit, vae_dtype=act.vae,
                   encoder_owned=False, overcommit=True,
-                  cache_bytes=2 * tensor_cache)
+                  cache_bytes=2 * tensor_cache + _CACHE_BYTES["steps"])
     keep = memfit.plan_memory(dit, enc, vae, mmproj, **common)
     budget = working_budget_bytes()
     footprint, keeps = keep.peak, True
@@ -892,7 +904,8 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float) -> dict:
         vae_dtype=getattr(pipe.vae, "dtype", None),
         encoder_owned=bool(resident and enc.owned
                            and not served.plan.keep_encoder),
-        cache_bytes=pipe.conditionings.bytes + pipe.modulations.bytes,
+        cache_bytes=(pipe.conditionings.bytes + pipe.modulations.bytes
+                     + _steps_cache_bytes()),
         budget=budget, overcommit=False)
 
 
@@ -953,6 +966,23 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     raise _bad(f"size {w}x{h} does not fit in memory beside the models now "
                f"loaded; the largest size of its shape that fits is "
                f"{best[0]}x{best[1]}", "size")
+
+
+def size_fits(served: ServedImage, width: int, height: int, budget, *,
+              cfg: float = 1.0, init: bool = False) -> bool:
+    """Whether the memory plan of an image of ``width`` x ``height`` on
+    ``served`` fits ``budget``, as the image routes plan a request. The
+    step routes ask it before a step, a VAE decode and a VAE encode."""
+    from gmlx.image import memfit
+
+    if budget is None:
+        return True
+    args = _fit_args(served.pipe, served, budget, cfg)
+    try:
+        return memfit.plan_memory(height=int(height), width=int(width),
+                                  init_image=init, _hint=False, **args).fits
+    except memfit.ImageMemoryError:
+        return False
 
 
 def _ensure_encoder(served: ServedImage) -> None:

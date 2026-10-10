@@ -8,10 +8,12 @@ family facts a client builds its model from, and the work each route runs
 on the image worker.
 
 A run is a cache scope and a busy marker. It holds the image model in the
-pool until it ends or sits idle for ``RUN_IDLE_S``, and its end sheds the
-prefix states of the conditionings it stepped and stops a step of it that
-is still running. Steps of every client queue on the image worker in the
-order they come, between the jobs of the OpenAI image routes.
+pool until it ends or sits idle for ``RUN_IDLE_S``, which a timer checks,
+and its end sheds the prefix states of the conditionings it stepped. An
+interrupt or an end of a run discards the step of it that is running when
+that step's evaluation finishes, and every later step of the run is
+refused. Steps of every client queue on the image worker in the order
+they come, between the jobs of the OpenAI image routes.
 
 Under ``convention: "comfy"`` a step takes what ComfyUI hands its DiT, the
 latents in model space and a timestep per row, and gives back what
@@ -40,6 +42,9 @@ from .image_wire import WireError, WireTensor, short_dtype
 _log = logging.getLogger(__name__)
 
 RUN_IDLE_S = 120.0
+# How often the timer ends idle runs, and the most runs held at once.
+SWEEP_S = 5.0
+MAX_RUNS = 32
 MAX_ROWS = 16
 MAX_TENSOR_BYTES = 1 << 30
 MAX_ADAPTER_BYTES = 1 << 30
@@ -154,8 +159,9 @@ class Run:
     hold: Any
     began: float
     last: float
-    gen: int = 0                       # an interrupt bumps it
+    gen: int = 0                       # an interrupt or end bumps it
     ended: bool = False
+    interrupted: bool = False
     steps: int = 0
     rows: int = 0
     forward_s: float = 0.0
@@ -169,8 +175,11 @@ class StepsState:
     sizes from ``server.image``."""
 
     def __init__(self):
-        self.tensors = _Bytes(1024 << 20)
-        self.adapters = _Bytes(2048 << 20)
+        from gmlx.config import ImageServerCfg
+
+        cfg = ImageServerCfg()
+        self.tensors = _Bytes(cfg.tensor_cache_mb << 20)
+        self.adapters = _Bytes(cfg.adapter_cache_mb << 20)
         self.runs: dict = {}
         # model id -> (pipeline, {contract table id: core table id})
         self.tables: dict = {}
@@ -180,6 +189,8 @@ class StepsState:
         # The server writes a log line per run and per refusal; the bench's
         # loopback routes write none, so its stdout stays JSON.
         self.log_requests = True
+        self.sweep_s = SWEEP_S
+        self._sweeper: threading.Thread | None = None
 
     def configure(self, settings) -> None:
         self.settings = settings
@@ -198,6 +209,7 @@ class StepsState:
             raise StepError(400, f"an upload holds one tensor, not "
                             f"{len(tensors)}")
         (t,) = tensors.values()
+        limit = min(limit, store.max_bytes)
         if t.nbytes > limit:
             raise StepError(413, f"a tensor of {t.nbytes} bytes is over the "
                             f"limit of {limit}")
@@ -211,12 +223,45 @@ class StepsState:
     # Runs.
 
     def begin(self, model: str, hold) -> Run:
+        """A new run on ``hold``. Refuses with 429 while ``MAX_RUNS`` runs
+        are held, so clients that never end their runs cannot hold the
+        model past ``RUN_IDLE_S``."""
+        self.sweep()
         now = self.clock()
         run = Run(id=uuid.uuid4().hex[:16], model=model, hold=hold,
                   began=now, last=now)
         with self.lock:
-            self.runs[run.id] = run
+            full = len(self.runs) >= MAX_RUNS
+            if not full:
+                self.runs[run.id] = run
+        if full:
+            raise StepError(429, f"{MAX_RUNS} runs are held; end a run or "
+                            f"wait for one to sit idle past "
+                            f"{RUN_IDLE_S:.0f} seconds")
+        self._start_sweeper()
         return run
+
+    def _start_sweeper(self) -> None:
+        with self.lock:
+            if self._sweeper is not None and self._sweeper.is_alive():
+                return
+            th = threading.Thread(target=self._sweep_loop, daemon=True,
+                                  name="gmlx-image-runs")
+            self._sweeper = th
+        th.start()
+
+    def _sweep_loop(self) -> None:
+        stop = threading.Event()
+        while True:
+            stop.wait(self.sweep_s)
+            try:
+                self.sweep()
+            except Exception:  # noqa: BLE001 - the timer must keep running
+                _log.debug("run sweep failed", exc_info=True)
+            with self.lock:
+                if not self.runs:
+                    self._sweeper = None
+                    return
 
     def get_run(self, run_id: str | None) -> Run | None:
         if not run_id:
@@ -227,6 +272,8 @@ class StepsState:
             raise StepError(404, f"no run {run_id!r}; it ended or sat idle "
                             f"past {RUN_IDLE_S:.0f} seconds")
         run.last = self.clock()
+        if run.interrupted:
+            raise StepInterrupted()
         return run
 
     def end(self, run: Run, reason: str = "end") -> None:
@@ -235,11 +282,7 @@ class StepsState:
                 return
         run.ended = True
         run.gen += 1
-        try:
-            if run.hold is not None:
-                run.hold.release()
-        except Exception:  # noqa: BLE001 - a release must not fail the end
-            _log.debug("run hold release failed", exc_info=True)
+        # The hold's release drops its entry, so the states are shed first.
         if run.conds:
             served = getattr(getattr(run.hold, "_entry", None), "pipeline",
                              None)
@@ -247,6 +290,11 @@ class StepsState:
                 from .image_service import WORKER
 
                 WORKER.submit(shed_states, served.pipe, set(run.conds))
+        try:
+            if run.hold is not None:
+                run.hold.release()
+        except Exception:  # noqa: BLE001 - a release must not fail the end
+            _log.debug("run hold release failed", exc_info=True)
         if not self.log_requests:
             return
         from .patches.routes import _log_aux_request
@@ -268,14 +316,18 @@ class StepsState:
         return [r.id for r in idle]
 
     def interrupt(self, run_id: str | None) -> int:
-        """Interrupt the in-flight step of a run, or of every run when
-        ``run_id`` is None. Returns how many runs it reached."""
+        """Interrupt the run ``run_id``: its step in flight is discarded
+        and its later steps are refused. A request that names no run
+        interrupts nothing. Returns how many runs it reached."""
+        if not run_id:
+            return 0
         with self.lock:
-            runs = list(self.runs.values()) if not run_id else [
-                r for r in self.runs.values() if r.id == run_id]
-        for r in runs:
-            r.gen += 1
-        return len(runs)
+            run = self.runs.get(run_id)
+        if run is None:
+            return 0
+        run.interrupted = True
+        run.gen += 1
+        return 1
 
     # Patch tables.
 
@@ -438,9 +490,11 @@ def capabilities() -> dict:
             "conventions": sorted(CONVENTIONS),
             "patch_kinds": ["lora"],
             "features": list(FEATURES),
-            "limits": {"max_tensor_bytes": MAX_TENSOR_BYTES,
-                       "max_adapter_bytes": MAX_ADAPTER_BYTES,
-                       "max_rows": MAX_ROWS}}
+            "limits": {"max_tensor_bytes": min(MAX_TENSOR_BYTES,
+                                               STATE.tensors.max_bytes),
+                       "max_adapter_bytes": min(MAX_ADAPTER_BYTES,
+                                                STATE.adapters.max_bytes),
+                       "max_rows": MAX_ROWS, "max_runs": MAX_RUNS}}
 
 
 # Work on the image worker.
@@ -639,6 +693,10 @@ def run_step(served, x, sigmas, conds, table, run, gen) -> tuple:
         v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table)
         v = v.astype(mx.float32)
         mx.eval(v)
+    # Without chat the step is one evaluation, which an interrupt or an end
+    # cannot cut short: its result is discarded here.
+    if run is not None and (run.gen != gen or run.ended):
+        raise StepInterrupted()
     return v, time.perf_counter() - t0, cache
 
 
@@ -779,18 +837,23 @@ def _host(a):
 
 def vae_decode(served, raw: WireTensor, alpha: bool):
     """VAE-space latents (B, C, h, w) to an image (B, H, W, C) f32 in
-    [0, 1], as numpy."""
+    [0, 1], as numpy. The images decode one at a time, as the routes plan
+    them."""
     import mlx.core as mx
+    import numpy as np
 
     from gmlx.image import api
 
     pipe = served.pipe
     vae = pipe.vae
     z = _f32(raw).transpose(0, 2, 3, 1)
-    model = vae.to_model_space(z)
-    img = api.vae_decode(pipe, model, alpha=alpha)
-    mx.eval(img)
-    return _host(img.astype(mx.float32))
+    out = []
+    for i in range(z.shape[0]):
+        img = api.vae_decode(pipe, vae.to_model_space(z[i:i + 1]),
+                             alpha=alpha)
+        mx.eval(img)
+        out.append(_host(img.astype(mx.float32)))
+    return np.concatenate(out, axis=0)
 
 
 def vae_encode(served, image: WireTensor):
@@ -800,13 +863,19 @@ def vae_encode(served, image: WireTensor):
 
     from gmlx.image import api
 
+    import numpy as np
+
     pipe = served.pipe
     img = _f32(image)
-    model = api.vae_encode(pipe, img[..., :3] if pipe.vae.config.in_channels
-                           == 3 else img)
-    raw = pipe.vae.to_vae_space(model).transpose(0, 3, 1, 2)
-    mx.eval(raw)
-    return _host(raw.astype(mx.float32))
+    if pipe.vae.config.in_channels == 3:
+        img = img[..., :3]
+    out = []
+    for i in range(img.shape[0]):
+        model = api.vae_encode(pipe, img[i:i + 1])
+        raw = pipe.vae.to_vae_space(model).transpose(0, 3, 1, 2)
+        mx.eval(raw)
+        out.append(_host(raw.astype(mx.float32)))
+    return np.concatenate(out, axis=0)
 
 
 def wire_dtype_name(dtype: str) -> str:
