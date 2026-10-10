@@ -321,8 +321,8 @@ def test_later_class_built_arches_take_the_options(arch):
 
 
 # Gemma families. llama.cpp lays sliding layers out with load_swa_pattern:
-# period 6 for gemma3, the last layer of each period full.
-_GEMMA_PERIOD = {"gemma3": 6}
+# period 2 for gemma2, 6 for gemma3, the last layer of each period full.
+_GEMMA_PERIOD = {"gemma": None, "gemma2": 2, "gemma3": 6}
 
 
 def _gemma_build(arch, override=None, meta_edit=None):
@@ -343,7 +343,7 @@ def _layer_ropes(model):
             for name, r in _ropes(model) if "layers." in name]
 
 
-@pytest.mark.parametrize("arch", ["gemma3"])
+@pytest.mark.parametrize("arch", ["gemma", "gemma2", "gemma3"])
 def test_gemma_families_take_the_options(arch):
     assert arch in rs.SWAP_ARCHES and arch in rs.WIRED_ARCHES
     before, model, cfg, n = _gemma_build(arch, YARN4)
@@ -360,6 +360,18 @@ def test_gemma_families_take_the_options(arch):
     assert kinds == ({False} if period is None else {True, False})
     mx.eval(model(mx.array([[1, 2, 3]])))
     assert rope_swap.apply(model, cfg) == 0
+
+
+def test_gemma2_sliding_layers_keep_the_trained_scale():
+    """gemma2.cpp sets rope_freq_scale_train_swa to the trained scale."""
+    def edit(meta):
+        meta["gemma2.rope.scaling.type"] = "linear"
+        meta["gemma2.rope.scaling.factor"] = 2.0
+    _, model, cfg, _ = _gemma_build("gemma2", YARN4, edit)
+    s = rs.from_config(cfg)
+    assert s.factor == 4.0 and s.for_sliding().factor == 2.0
+    for i, r in _layer_ropes(model):
+        _check_rope(r, s.for_sliding() if i % 2 == 0 else s, 10000.0)
 
 
 def test_gemma3_full_layers_take_the_header_linear_factor():

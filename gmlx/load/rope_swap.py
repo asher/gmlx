@@ -23,6 +23,9 @@ from . import rope_scaling as rs
 
 _SLIDING_TYPES = frozenset({"sliding_attention", "sliding", "swa"})
 _LAYER_RE = re.compile(r"^(.*?layers)\.(\d+)\.")
+# Sliding-window period of archs whose config carries neither layer_types nor
+# a per-module flag: llama.cpp's load_swa_pattern default (gemma2.cpp).
+_SWA_PERIOD = {"gemma2": 2}
 
 
 class ScaledRoPE(nn.Module):
@@ -100,11 +103,27 @@ def _text_config(config) -> dict:
     return config
 
 
-def _sliding_layers(config: dict, model) -> tuple[str | None, set[int]]:
-    """The layer list path holding the trunk and the indices of its sliding
-    layers, from the config's ``layer_types``."""
+def _layer_types(config: dict, arch: str) -> list[bool]:
+    """Per layer, True for a sliding-window layer: the config's
+    ``layer_types``, else the arch's period as llama.cpp's set_swa_pattern
+    lays it out (the last layer of each period is full)."""
     types = config.get("layer_types") or []
-    sliding = {i for i, t in enumerate(types) if t in _SLIDING_TYPES}
+    if types:
+        return [t in _SLIDING_TYPES for t in types]
+    period = _SWA_PERIOD.get(arch)
+    n = config.get("num_hidden_layers")
+    if not period or not n:
+        return []
+    period = int(config.get("sliding_window_pattern") or period)
+    return [i % period < period - 1 for i in range(int(n))]
+
+
+def _sliding_layers(config: dict, model,
+                    arch: str = "") -> tuple[str | None, set[int]]:
+    """The layer list path holding the trunk and the indices of its sliding
+    layers."""
+    types = _layer_types(config, arch)
+    sliding = {i for i, t in enumerate(types) if t}
     if not sliding:
         return None, set()
     counts: dict[str, int] = {}
@@ -147,7 +166,7 @@ def apply(model, config) -> int:
     scaling = rs.from_config(cfg)
     if not scaling.active or scaling.arch not in rs.SWAP_ARCHES:
         return 0
-    trunk, sliding = _sliding_layers(cfg, model)
+    trunk, sliding = _sliding_layers(cfg, model, scaling.arch)
     sliding_scaling = scaling.for_sliding()
     n = n_swa = 0
     unswapped = []
