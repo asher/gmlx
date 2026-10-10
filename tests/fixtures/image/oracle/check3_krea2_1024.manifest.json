@@ -1,0 +1,160 @@
+{
+ "schema": 1,
+ "name": "check3_krea2_1024",
+ "check": 3,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check3_krea2.py",
+ "argv": [
+  "check3_krea2.py",
+  "--dit",
+  "Krea-2-Turbo-Q4_K_M.gguf",
+  "--sizes",
+  "512",
+  "1024",
+  "--rows",
+  "512",
+  "--features",
+  "check2_krea2_plain_features.npz",
+  "--features-source",
+  "check2_krea2 fp32 features of the plain prompt"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "Krea-2-Turbo-Q4_K_M.gguf",
+   "size": 7486289232,
+   "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07"
+  },
+  "features": {
+   "name": "check2_krea2_plain_features.npz",
+   "size": 4055310,
+   "sha256": "a9fc4f9ace0230ffa2a8a58fbdedf4342a19919f834d9a18d21a0620d017e3e9"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "blocks": 28,
+  "sigma": 0.75,
+  "seed": 1024,
+  "features": "check2_krea2 fp32 features of the plain prompt",
+  "text_rows": 33,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "float32 in both modes",
+  "gguf_codecs": {
+   "F32": 167,
+   "F16": 1,
+   "Q5_K": 61,
+   "Q4_K": 201
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.25984659815225936,
+   "cosine": 0.9656971427314783,
+   "max_abs": 4.384006500244141
+  },
+  "times": {
+   "fp32_s": 69.8,
+   "bf16_s": 363.4
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.5196931963045187,
+   "cosine_min": 0.8627885709259133
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity"
+ },
+ "notes": [],
+ "created": "2026-10-10T06:54:27Z",
+ "npz": "check3_krea2_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    33,
+    30720
+   ],
+   "dtype": "float32",
+   "sha256": "811128d73c767a209605b6b6585b955e834aa467ca1484e5cfa7c4e86c2c151a"
+  },
+  "latents": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "e0638f249db9b6bc884bdfd3e8ac2d792076c1e69656a1fcf07f489cbd1055f4"
+  },
+  "position_ids": {
+   "shape": [
+    4129,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "5822b05335bc7a47e201192d09f6ef4780c58ebb5e8c599ba839e9f406da1a75"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "8408aa9a43cc4cbf02cea379f96ad31f0286a309e2e9b8e99a63652c240b5d80"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "1f2365fd1a7706ca61980f88b2c83ac9c49f692dbc5d0321a15c652c226bf2ec"
+  }
+ }
+}

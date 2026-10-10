@@ -103,6 +103,47 @@ class Krea2Config:
             last_mlp=bool(c.get("last_mlp", False)))
 
 
+def gelu(x: mx.array) -> mx.array:
+    """The tanh gelu in fp32, rounded once to the input dtype, as torch
+    computes it for a half-precision input."""
+    return nn.gelu_approx(x.astype(mx.float32)).astype(x.dtype)
+
+
+_PRECISE_ROWS = 4096
+
+
+def precise(lin, x: mx.array) -> mx.array:
+    """``lin(x)`` in fp32 for the one row per sigma of the time vectors.
+    A K-quant product of a row rounds its output to bf16 whatever the
+    input dtype, which puts the time vectors past the reference's own
+    rounding. A K-quant leaf with no live adapter delta therefore runs as
+    an fp32 product on its weight dequantized a band of rows at a time;
+    any other leaf runs its own call on the fp32 row."""
+    from gmlx.image.ops.kq_routes import kquant_leaf
+
+    leaf = kquant_leaf(lin, mx.bfloat16)
+    x = x.astype(mx.float32)
+    if leaf is None:
+        return lin(x).astype(mx.float32)
+    import mlx_kquant as kq
+
+    w = leaf["weight"]
+    parts = []
+    for r in range(0, w.shape[0], _PRECISE_ROWS):
+        band = kq.dequantize(w[r:r + _PRECISE_ROWS], leaf["scales"],
+                             leaf.kquant_type, mx.float32)
+        parts.append(x @ band.T)
+        mx.eval(parts[-1])
+    y = mx.concatenate(parts, axis=-1)
+    if "bias" in leaf:
+        y = y + leaf["bias"].astype(mx.float32)
+    return y
+
+
+def _own(lin, x: mx.array) -> mx.array:
+    return lin(x)
+
+
 def rope_tables(ids: np.ndarray, axes_dims, theta: float) -> tuple:
     """cos and sin tables (L, sum(axes_dims) // 2) for integer position ids
     (L, n_axes). Angles, cos and sin are float64 and round to fp32 once, as
@@ -404,15 +445,20 @@ class Krea2DiT(nn.Module):
                   / np.float32(1000))
         return np.float32(1000) * passed
 
-    def temb(self, t) -> mx.array:
-        """The timestep embedding (B, 1, dim) of embedder inputs ``t``."""
-        freq = ops.timestep_embedding(t, self.cfg.t_freq_dim)
-        freq = freq.astype(self.act_dtype)[:, None, :]
-        return self.tmlp[2](nn.gelu_approx(self.tmlp[0](freq)))
+    def time_vectors(self, sigma, batch: int) -> tuple:
+        """The timestep embedding and the shared modulation vectors, (B,
+        1, dim) and (B, 1, 6 dim), in the activation dtype. Both run in
+        fp32 and round once, by ``precise``. Under fp32 activations each
+        leaf runs its own call."""
+        lin = precise if self.act_dtype != mx.float32 else _own
+        t = self.timesteps(sigma, batch)
+        freq = ops.timestep_embedding(t, self.cfg.t_freq_dim)[:, None, :]
+        temb = lin(self.tmlp[2], gelu(lin(self.tmlp[0], freq)))
+        tvec = lin(self.tproj[1], gelu(temb))
+        return temb.astype(self.act_dtype), tvec.astype(self.act_dtype)
 
     def modulation(self, sigma, batch: int) -> StepModulation:
-        temb = self.temb(self.timesteps(sigma, batch))
-        tvec = self.tproj[1](nn.gelu_approx(temb))
+        temb, tvec = self.time_vectors(sigma, batch)
         scale, shift = self.last.scale_shift(temb)
         return StepModulation(
             blocks=tuple(b.modulation(tvec) for b in self.blocks),
@@ -422,7 +468,7 @@ class Krea2DiT(nn.Module):
         """The text rows of features (B, L, layers * text dim)."""
         x = self.txtfusion(feats.astype(self.act_dtype), taps)
         x = self.txtmlp[0](x)
-        x = self.txtmlp[3](nn.gelu_approx(self.txtmlp[1](x)))
+        x = self.txtmlp[3](gelu(self.txtmlp[1](x)))
         if taps is not None:
             taps["txtmlp"] = x
         return Caption(x)

@@ -5,7 +5,6 @@ fixture's float32 input to it."""
 from __future__ import annotations
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 
 from gmlx.image.families.krea2 import model as km
@@ -58,10 +57,8 @@ def free_rows(model, arrays: dict, mod=None) -> dict:
     velocity."""
     lat, feats, sigma = _inputs(model, arrays)
     taps: dict = {}
-    t = model.timesteps(sigma, 1)
-    temb = model.temb(t)
-    out = {"tmlp": temb,
-           "tproj": model.tproj[1](nn.gelu_approx(temb))}
+    temb, tvec = model.time_vectors(sigma, 1)
+    out = {"tmlp": temb, "tproj": tvec}
     vel = model(lat, sigma, feats, taps, mod=mod)
     out.update(taps)
     got = {k: _np(v) for k, v in out.items()}
