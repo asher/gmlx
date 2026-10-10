@@ -224,6 +224,32 @@ def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch,
     assert head.endswith("encoder Q4_K_M") and "default" not in head
 
 
+def test_a_default_pull_takes_the_class_encoder_quant_over_another_on_disk(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"e")
+    (root / "Qwen3-4B-Q8_0.gguf").write_bytes(b"e")
+    Disk(monkeypatch, root)
+    _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
+    assert _cfg(cfg).image_models["z-image-turbo"].encoder == \
+        "Qwen3-4B-Q8_0.gguf"
+
+
+def test_an_encoder_of_another_quant_is_used_and_named_in_the_plan(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"e")
+    Disk(monkeypatch, root)
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
+    assert not any(f.startswith("Qwen3-4B") for _r, f, _v in got)
+    head = capsys.readouterr().out.splitlines()[0]
+    assert head.endswith("encoder Q4_K_M") and "default" not in head
+
+
 def test_a_configured_chat_model_is_written_as_the_encoder_id(lib,
                                                               monkeypatch):
     root, cfg = lib

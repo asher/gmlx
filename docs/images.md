@@ -87,8 +87,10 @@ file, which `pull` checks against its published digest and packs to a
 GGUF. The new entry goes under [`image_models`](config.md#image-models),
 and the first image model becomes the server's default image model.
 
-A text encoder or VAE already in a model folder is used where it is, at
-any quant, when its weights match the model's. A chat model that is the
+A text encoder or VAE already in a model folder is used where it is when
+its weights match the model's. Of several encoders, `pull` takes the
+quant for your Mac first, then a chat model, then the file nearest the
+DiT, and the plan names the quant it takes. A chat model that is the
 text encoder is shared by its id, so the server holds its weights once.
 For the Qwen-Image models the chat model must have its `mmproj` vision
 tower; without one, the entry names the encoder file and the tower that

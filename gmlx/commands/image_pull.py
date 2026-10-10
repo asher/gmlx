@@ -170,14 +170,22 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
                              size=size,
                              need=_remaining(dest, size)), dest)
 
-    # The encoder: a configured chat model first, then any matching file.
+    # The encoder: the quant asked for or the class default first, then a
+    # configured chat model, then the file nearest the DiT.
     shared = _chat_encoders(cfg, r.family)
-    encs = [f.path for f in of("encoder")]
+    encs = catalog.nearest(plan.parts[0].path, of("encoder"))
     if encoder_quant_given:
-        encs = [p for p in encs if _same_quant(p, encoder_quant)]
-    chat = [p for p in encs if os.path.abspath(p) in shared]
-    pick = (chat or encs or [None])[0]
+        encs = [f for f in encs if _same_quant(f.path, encoder_quant)]
+    encs = sorted(encs, key=lambda f: (
+        not _same_quant(f.path, encoder_quant),
+        os.path.abspath(f.path) not in shared))
+    pick = encs[0].path if encs else None
     name = r.encoder_name(encoder_quant)
+    if pick is not None and not _same_quant(pick, encoder_quant):
+        # Another quant on disk serves; the plan names the one it takes.
+        got = _quant_of(pick)
+        plan.encoder_quant = next((q for q in r.encoder_quants
+                                   if q.upper() == got), got or "?")
     if pick is not None:
         chat_id = shared.get(os.path.abspath(pick))
         if chat_id and r.mmproj_file and not cfg.models[chat_id].mmproj:
@@ -510,12 +518,14 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                      encoder_quant_given=bool(a.encoder_quant), only=only,
                      roots=roots, base_dir=base_dir, nest=nest, cfg=cfg,
                      ram=ram)
-    plan.default = (dit_q, enc_q) == catalog.default_quants(r, ram)
+    plan.default = (plan.dit_quant, plan.encoder_quant) == \
+        catalog.default_quants(r, ram)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:
         print(json.dumps({
-            "recipe": r.name, "dit_quant": dit_q, "encoder_quant": enc_q,
+            "recipe": r.name, "dit_quant": plan.dit_quant,
+            "encoder_quant": plan.encoder_quant,
             "memory_class": plan.memory_class, "download_bytes": need,
             "free_bytes": free, "license": r.license,
             "license_note": r.license_note or None,
