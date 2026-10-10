@@ -1,7 +1,8 @@
 # Installation
 
 gmlx needs an Apple Silicon Mac with macOS 26.2 or newer. It does not run on
-Intel Macs or Linux. Install it with Homebrew:
+Intel Macs or Linux, and [image generation](images.md) needs an M3 chip or
+newer. Install it with Homebrew:
 
 ```sh
 brew install asher/gmlx/gmlx
