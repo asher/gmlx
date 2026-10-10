@@ -396,3 +396,76 @@ def test_gemma3_full_layers_take_the_header_linear_factor():
             _check_rope(r, s.for_sliding(), 10000.0)
             assert s.for_sliding().freq_scale == 1.0
 
+
+def _gemma4_text(**kw):
+    return {
+        "model_type": "gemma4_text", "hidden_size": 64,
+        "num_hidden_layers": 4, "intermediate_size": 128,
+        "num_attention_heads": 4, "head_dim": 16, "global_head_dim": 16,
+        "num_key_value_heads": 2, "num_global_key_value_heads": 2,
+        "num_kv_shared_layers": 0, "vocab_size": 128,
+        "vocab_size_per_layer_input": 128,
+        "hidden_size_per_layer_input": 0, "sliding_window": 64,
+        "sliding_window_pattern": 2, "attention_k_eq_v": False,
+        "rms_norm_eps": 1e-6, "tie_word_embeddings": True,
+        "max_position_embeddings": 1024,
+        "rope_parameters": {
+            "full_attention": {"partial_rotary_factor": 0.25,
+                               "rope_theta": 1000000.0,
+                               "rope_type": "proportional"},
+            "sliding_attention": {"partial_rotary_factor": 1.0,
+                                  "rope_theta": 10000.0,
+                                  "rope_type": "default"}},
+        **kw}
+
+
+def _gemma4_scaling(override=YARN4):
+    meta = {"gemma4.rope.freq_base": 1000000.0, "gemma4.context_length": 1024}
+    return rs.resolve(meta, "gemma4", override)
+
+
+def _check_proportional(r, s, base, rotated):
+    """llama.cpp's full gemma4 layers: rope_freqs 1 on the rotated pairs and
+    1e30 on the rest, so those pairs keep angle 0 but take the magnitude."""
+    assert r.dims == 16
+    inv = rs.inv_freq(16, base, s).astype(np.float64)
+    inv[rotated:] = 0.0
+    mx.random.seed(0)
+    x = mx.random.normal((1, 1, 1, 16))
+    want = _ref_rotate(x, 700, 16, inv, s.mscale, False)
+    np.testing.assert_allclose(np.asarray(r(x, offset=700)), want,
+                               atol=3e-5, rtol=3e-5)
+
+
+def test_gemma4_full_layers_rotate_their_proportional_pairs_scaled():
+    cfg = _gemma4_text()
+    s = _gemma4_scaling()
+    rs.to_config(cfg, s)
+    model, cfg = build_model(cfg)
+    assert rope_swap.apply(model, cfg) == 4
+    for i, r in _layer_ropes(model):
+        assert isinstance(r, rope_swap.ScaledRoPE)
+        if i % 2 == 0:
+            _check_rope(r, s.for_sliding(), 10000.0)
+        else:
+            _check_proportional(r, s, 1000000.0, rotated=2)
+    out = model(mx.array([[1, 2, 3]]))
+    mx.eval(getattr(out, "logits", out))
+
+
+def test_proportional_rope_swap_keeps_the_class_rotation():
+    """With a plain table the swapped proportional rope rotates as the
+    class did."""
+    from gmlx._vendor.mlx_vlm.models.rope_utils import ProportionalRoPE
+
+    r = ProportionalRoPE(16, base=1000000.0,
+                         scaling_config={"partial_rotary_factor": 0.25})
+    s = _gemma4_scaling(RopeOverride(rope_freq_base=1000000.0))
+    assert s.mscale == 1.0 and not s.scales_frequencies
+    swapped = rope_swap._scaled(r, s, 1000000.0)
+    mx.random.seed(2)
+    x = mx.random.normal((1, 2, 3, 16))
+    np.testing.assert_allclose(np.asarray(swapped(x, offset=5000)),
+                               np.asarray(r(x, offset=5000)),
+                               atol=2e-5, rtol=1e-5)
+

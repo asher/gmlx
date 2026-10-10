@@ -70,7 +70,7 @@ def _swappable(r) -> bool:
     from gmlx._vendor.mlx_vlm.models.rope_utils import YarnRoPE as VlmYarnRoPE
 
     return (type(r) in (nn.RoPE, YarnRoPE, VlmYarnRoPE)
-            or type(r).__name__ == "_FactoredRoPE")
+            or type(r).__name__ in ("_FactoredRoPE", "ProportionalRoPE"))
 
 
 def _is_mrope(r) -> bool:
@@ -141,15 +141,29 @@ def _module_base(r) -> float | None:
     return None if b is None else float(b)
 
 
+def _factors(r) -> np.ndarray | None:
+    """The rope_freqs factors of a factored rope. A proportional rope
+    (gemma4 full layers) is llama.cpp's rope_freqs with factor 1 on the
+    rotated pairs and an infinite one on the rest (gemma4.cpp)."""
+    f = getattr(r, "_factors", None)
+    if f is not None:
+        return np.asarray(f.astype(mx.float32), dtype=np.float64)
+    if type(r).__name__ == "ProportionalRoPE":
+        own = np.asarray(r._freqs.astype(mx.float32), dtype=np.float64)
+        return np.where(np.isinf(own), np.inf, 1.0)
+    return None
+
+
 def _scaled(r, scaling: rs.RopeScaling, base: float) -> ScaledRoPE:
     dims = int(r.dims)
     inv = rs.inv_freq(dims, base, scaling).astype(np.float64)
-    factors = getattr(r, "_factors", None)
+    factors = _factors(r)
     if factors is not None:
         # ggml rope with freq_factors divides the extrapolated angle before
         # the yarn blend, which scales the blended angle the same way.
-        inv = inv / np.asarray(factors.astype(mx.float32), dtype=np.float64)
-    freqs = mx.array(1.0 / inv, dtype=mx.float32)
+        inv = inv / factors
+    with np.errstate(divide="ignore"):
+        freqs = mx.array(1.0 / inv, dtype=mx.float32)
     return ScaledRoPE(dims, bool(r.traditional), freqs, scaling.mscale)
 
 

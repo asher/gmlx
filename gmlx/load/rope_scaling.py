@@ -453,7 +453,7 @@ SWAP_ARCHES = frozenset({
     "mistral3", "gpt-oss", "seed_oss", "smollm3", "granite", "qwen3next",
     "minimax-m2", "qwen35", "qwen35moe", "qwen3vl", "qwen3vlmoe",
     "hy_v3", "hyv4", "muse-glimmer", "minimax-m3", "falcon-h1",
-    "granitehybrid", "ernie4_5-moe", "gemma", "gemma2", "gemma3",
+    "granitehybrid", "ernie4_5-moe", "gemma", "gemma2", "gemma3", "gemma4",
 })
 
 # Architectures whose every rope site applies the run options. A load of any
