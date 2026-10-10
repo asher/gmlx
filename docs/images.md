@@ -146,7 +146,8 @@ model folder, such as `loras/watercolor.safetensors` for
 An absolute path gets 400, and so does a request LoRA with text encoder
 layers. List that one in the entry's `adapters`, where both halves apply.
 LoHa, LoKr, DoRA and the other kinds that are not plain LoRA pairs are
-refused by name, as is a LoRA of another model.
+refused by name, as is a LoRA of another model. ComfyUI takes LoRAs as
+[LoRAs](comfyui.md#loras) describes.
 
 ## ComfyUI
 
