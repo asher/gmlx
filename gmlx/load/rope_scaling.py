@@ -456,7 +456,7 @@ SWAP_ARCHES = frozenset({
 })
 
 # Architectures whose every rope site applies the run options. A load of any
-# other architecture with options refuses before it reads the weights,
+# other architecture with options refuses when it synthesizes the config,
 # rather than running with a rope the options did not ask for.
 WIRED_ARCHES: set[str] = {"qwen4exp", "deepseek4", "deepseek41",
                           *SWAP_ARCHES}

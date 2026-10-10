@@ -183,11 +183,11 @@ wins over its key in the GGUF header:
 
 ```yaml
 models:
-  qwen3.8-flash-next-1m:
+  qwen3.8-flash-next-512k:
     path: Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
     rope_scaling:
       type: yarn
-      factor: 4.0
+      factor: 2.0
       original_context: 262144
 ```
 
@@ -200,13 +200,13 @@ models:
 | `original_context` | `--yarn-orig-ctx` | The context the model was trained at |
 | `ext_factor` | `--yarn-ext-factor` | Extrapolation mix, 1 under yarn and 0 otherwise by default |
 | `attn_factor` | `--yarn-attn-factor` | Attention magnitude scale |
-| `beta_fast` | `--yarn-beta-fast` | Low correction dimension, 32 by default |
-| `beta_slow` | `--yarn-beta-slow` | High correction dimension, 1 by default |
+| `beta_fast` | `--yarn-beta-fast` | Low correction dimension, 32 by default, or a mistral3 header's |
+| `beta_slow` | `--yarn-beta-slow` | High correction dimension, 1 by default, or a mistral3 header's |
 
 Two ids on one GGUF with different `rope_scaling` load as separate models,
 and the prompt cache on disk keeps their KV apart. A YaRN factor extends
 the context that `/v1/models` reports to `original_context` times the
-factor. A constant factor can cost quality on short prompts, so pick the
+factor. A linear factor leaves it at the trained context. A constant factor can cost quality on short prompts, so pick the
 smallest factor that fits.
 
 ## Aliases

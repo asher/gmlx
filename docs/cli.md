@@ -465,18 +465,19 @@ one wins over its key in the GGUF header:
 | `--yarn-orig-ctx N` | The header's, else the trained context | Set the context the model was trained at. |
 | `--yarn-ext-factor N` | 1 under yarn, else 0 | Set the extrapolation mix. `0` is full interpolation. |
 | `--yarn-attn-factor N` | 1 | Scale the attention magnitude when `--yarn-ext-factor` is 0. |
-| `--yarn-beta-fast N` | 32 | Set the low correction dimension. |
-| `--yarn-beta-slow N` | 1 | Set the high correction dimension. |
+| `--yarn-beta-fast N` | A mistral3 header's, else 32 | Set the low correction dimension. |
+| `--yarn-beta-slow N` | A mistral3 header's, else 1 | Set the high correction dimension. |
 
 ```sh
-gmlx run model.gguf --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
+gmlx run model.gguf --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
 ```
 
 A YaRN factor from these flags extends the reported context to the original
-context times the factor. A constant factor can cost quality on short
-prompts, so pick the smallest factor that fits your context. A model whose
-rope gmlx cannot scale yet refuses the flags at load, and so does a load
-with `--hf-source`, whose config does not take them.
+context times the factor. A linear factor does not: requests still stop at
+the trained context. A constant factor can cost quality on short prompts,
+so pick the smallest factor that fits your context. A model whose rope gmlx
+cannot scale yet refuses the flags at load, and so does a load with
+`--hf-source`, whose config does not take them.
 
 ## gmlx chat
 
