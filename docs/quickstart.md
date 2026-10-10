@@ -165,6 +165,8 @@ you. This needs [Apple container](installation.md#apple-container), and
 - [Configuration](config.md): profiles, aliases, the prompt cache and memory
   limits.
 - [Voice chat](talk.md): `gmlx talk` answers spoken questions aloud.
+- [Image generation](images.md): images from a text prompt, on the command
+  line, from an app or in ComfyUI.
 - [Menu bar app](menubar.md): the server's status, models and voice
   sessions in the macOS menu bar.
 - [Performance tuning](performance.md): speculative decoding, KV cache
