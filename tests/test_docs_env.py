@@ -3,7 +3,9 @@ docs-to-code direction: every backticked GMLX_* or MLX_VLM_* name either file
 documents must be read somewhere in gmlx/, so a renamed or removed variable
 cannot linger in the docs. A must-document set built from the code and from
 the names the docs carried when the file was created catches the reverse
-drift for the variables that matter. CPU-only, no imports of gmlx runtime."""
+drift for the variables that matter. A name that only the ComfyUI node
+pack reads is exempt from the first check. CPU-only, no imports of gmlx
+runtime."""
 from __future__ import annotations
 
 import re
@@ -40,7 +42,7 @@ _MUST_DOCUMENT = {
     "GMLX_IMAGE_ALLOW_FP16", "GMLX_IMAGE_LORA_PLACEMENT",
     "GMLX_LORA_EPILOGUE", "GMLX_QWEN35_VISION_FP32",
     "GMLX_IMAGE_KQ_ROUTES", "GMLX_IMAGE_CHAT_SHARE", "GMLX_BASE_URL",
-    "GMLX_DEFAULT_IMAGE_MODEL",
+    "GMLX_DEFAULT_IMAGE_MODEL", "GMLX_COMFY_SETTINGS",
     "MLX_VLM_RESIDENT_BUDGET_GB", "MLX_VLM_MAX_RESIDENT_MODELS",
     "MLX_VLM_PINNED_MODELS", "MLX_VLM_RESIDENT_TTL_DISABLE",
     "MLX_VLM_RESIDENT_TTL_TICK", "MLX_VLM_TOKEN_QUEUE_TIMEOUT",
@@ -62,8 +64,12 @@ def _read_in_code() -> set:
     return names
 
 
+# Names that the ComfyUI node pack reads and gmlx does not.
+_READ_BY_THE_PACK = {"GMLX_COMFY_SETTINGS"}
+
+
 def test_every_documented_name_is_read_by_the_code():
-    stale = _documented() - _read_in_code()
+    stale = _documented() - _read_in_code() - _READ_BY_THE_PACK
     assert not stale, f"documented but never read in gmlx/: {sorted(stale)}"
 
 
