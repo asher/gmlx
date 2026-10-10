@@ -109,6 +109,29 @@ def test_a_step_under_an_adapter_equals_the_step_on_merged_weights(
     print(f"tiny adapter step {dialect}: worst relative L2 {worst:.3e}")
 
 
+def test_a_dit_loaded_again_runs_the_table_the_pipeline_holds(tmp_path):
+    """A staged serve entry lets its DiT go for each encode and loads it
+    again. The built tables, which hold the old leaves, go with it, and
+    the leaves of the new DiT read the pipeline's table."""
+    import gc
+    import weakref
+
+    one = tiny_z_adapter(1, 4.0, wide=True)
+    pipe = _pipe()
+    tid = _table(pipe, [(lora.load_adapter(pipe, write_adapter(
+        tmp_path / "one.safetensors", "kohya", one)), 1.0)])
+    want = _step(pipe, tid)
+    old = weakref.ref(install.linear_leaves(pipe.dit)[QKV])
+    install.drop_built(pipe)
+    pipe.dit = None
+    gc.collect()
+    assert old() is None
+    pipe.dit, _ = tiny_z_model()
+    install.rewrap(pipe)
+    assert np.array_equal(_step(pipe, tid), want)
+    assert not np.array_equal(_step(pipe), want)
+
+
 def test_two_pipelines_over_one_dit_each_run_their_own_table(tmp_path):
     one, two = tiny_z_adapter(1, 4.0, wide=True), tiny_z_adapter(2)
     f1 = write_adapter(tmp_path / "one.safetensors", "kohya", one)

@@ -416,6 +416,18 @@ def test_encode_text_caches_by_key_and_survives_release(pipe):
         api.encode_text(pipe, "ab", images=[np.zeros((8, 8, 3))])
 
 
+def test_a_released_encoder_tells_a_cached_prompt_without_encoding(pipe):
+    assert not api.conditioning_cached(pipe, "ab")      # no encoder yet
+    pipe.encoder = enc = _Encoder()
+    api.encode_text(pipe, "ab")
+    enc.model = None                        # released
+    assert api.conditioning_cached(pipe, "ab")
+    assert not api.conditioning_cached(pipe, "cd")
+    enc.adapters = "other"                  # the text adapters are keyed
+    assert not api.conditioning_cached(pipe, "ab")
+    assert enc.encoded == ["ab"]
+
+
 class _ReleasedEncoder(_Encoder):
     owned = True
 

@@ -184,6 +184,8 @@ def plan_stubs(monkeypatch):
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     monkeypatch.setattr(image_service, "check_parts",
                         lambda spec, fam: state.checked.append(spec.id))
+    monkeypatch.setattr(image_service, "_load_figures", lambda spec, act: {
+        "peak": 0, "text_peak": 0, "parts": (1, 2), "tower_parts": (3, 2)})
     return state
 
 
@@ -199,6 +201,74 @@ def test_auto_keeps_the_encoder_while_the_entry_fits_its_share(
     plan_stubs.budget = budget_gb * GB
     plan = image_service.entry_plan(_spec())
     assert plan.keep_encoder is keeps and plan.footprint == booked * GB
+
+
+def _modes(monkeypatch, keep=10, release=8, alone=6, staged=5,
+           caches=False):
+    """plan_memory by how serve runs the entry, in GB: the encoder kept,
+    the encoder released after each encode (its encode phase and the
+    image without it), and the staged order. With ``caches`` the booked
+    caches add to each figure."""
+    from gmlx.image import memfit
+
+    seen = []
+
+    def plan(dit, enc, vae, mmproj=None, **kw):
+        seen.append(kw)
+        extra = (kw["cache_bytes"] + sum(kw["adapters"])) if caches else 0
+        if kw.get("load_parts") is not None:
+            assert kw["encoder_owned"] and not mmproj   # text, no tower
+            return SimpleNamespace(peak=staged * GB + extra, phases={},
+                                   staged_load=True)
+        if enc:
+            return SimpleNamespace(peak=keep * GB + extra,
+                                   phases={"encode": release * GB + extra})
+        return SimpleNamespace(peak=alone * GB + extra, phases={})
+
+    monkeypatch.setattr(memfit, "plan_memory", plan)
+    return seen
+
+
+@pytest.mark.parametrize("budget_gb,release,staged,booked", [
+    (100, "auto", False, 10), (9, "auto", False, 8), (9, "always", False, 8),
+    (7, "auto", True, 5), (7, "always", True, 5)])
+def test_an_entry_whose_encoder_does_not_fit_beside_the_dit_is_staged(
+        plan_stubs, monkeypatch, budget_gb, release, staged, booked):
+    _modes(monkeypatch)
+    plan_stubs.budget = budget_gb * GB
+    plan = image_service.entry_plan(_spec(encoder_release=release))
+    assert plan.staged is staged and plan.footprint == booked * GB
+    assert plan.cache_share == 1.0
+    if staged:
+        assert plan.keep_encoder is False and plan.load_parts == (1, 2)
+        assert plan.tower_parts == (3, 2)
+
+
+def test_the_caches_of_a_tight_entry_take_the_room_its_image_leaves(
+        plan_stubs, monkeypatch):
+    _modes(monkeypatch, caches=True)
+    b = image_service._CACHE_BYTES
+    full = 2 * b["tensor"] + b["steps"] + 2 * b["adapter"]
+    plan_stubs.budget = 5 * GB + full // 2
+    plan = image_service.entry_plan(_spec())
+    assert plan.staged and 0.4 < plan.cache_share <= 0.5
+    assert 5 * GB < plan.footprint <= plan_stubs.budget
+
+
+@pytest.mark.parametrize("release,budget_gb,hint", [
+    ("auto", 4, "use a smaller quant of the DiT or of the text encoder"),
+    ("always", 4, "use a smaller quant of the DiT or of the text encoder"),
+    ("never", 7, "set encoder_release: auto")])
+def test_a_refusal_names_a_change_that_makes_the_entry_fit(
+        plan_stubs, monkeypatch, release, budget_gb, hint):
+    from gmlx.image import memfit
+
+    _modes(monkeypatch)
+    plan_stubs.budget = budget_gb * GB
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        image_service.entry_plan(_spec(encoder_release=release))
+    assert hint in str(e.value)
+    assert "encoder_release: always" not in str(e.value)
 
 
 def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
@@ -369,8 +439,15 @@ def load_stubs(monkeypatch):
         return _pipe(_Encoder() if kw.get("text_encoder") else None)
 
     monkeypatch.setattr(api, "load", load)
-    monkeypatch.setattr(image_service, "entry_plan", lambda spec: "PLAN")
+    monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan())
+    monkeypatch.setattr(image_service, "_SHARES", {})
     return calls
+
+
+def _plan(**kw):
+    base = dict(footprint=0, keep_encoder=True, family="z_image",
+                variant="turbo", size=(1024, 1024), cfg=1.0)
+    return image_service.EntryPlan(**(base | kw))
 
 
 def test_a_loaded_entry_bounds_its_caches(load_stubs):
@@ -408,11 +485,126 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
     assert seen == [212, 212]
 
 
+def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
+    held = SimpleNamespace(bytes=0)
+    pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
+                           weights={"dit": 1, "vae": 1}, adapters=held,
+                           tables=held, family=SimpleNamespace(name="z_image"),
+                           vae=None, conditionings=held, modulations=held)
+    served = SimpleNamespace(pipe=pipe, plan=_plan(
+        staged=True, keep_encoder=False, encoder_bytes=5, mmproj_bytes=7,
+        load_parts=(1, 2), tower_parts=(3, 2)))
+    text = image_service._fit_args(pipe, served, 1 << 30, 1.0)
+    edit = image_service._fit_args(pipe, served, 1 << 30, 1.0, tower=True)
+    assert (text["encoder"], text["mmproj"], text["load_parts"]) == (
+        5, 0, (1, 2))
+    assert (edit["encoder"], edit["mmproj"], edit["load_parts"]) == (
+        5, 7, (3, 2))
+    assert text["encoder_owned"] and edit["encoder_owned"]
+
+
 def test_a_shared_encoder_loads_no_mmproj_of_its_own(load_stubs):
     image_service._load(_spec(encoder=None, encoder_model="qwen",
                               encoder_mmproj="/chat-mmproj.gguf"))
     image_service._load(_spec(encoder_mmproj="/own-mmproj.gguf"))
     assert [c["mmproj"] for c in load_stubs] == [None, "/own-mmproj.gguf"]
+
+
+def test_a_staged_entry_loads_no_encoder_and_shares_its_caches(
+        load_stubs, monkeypatch):
+    from gmlx.serve import image_steps
+
+    monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan(
+        staged=True, keep_encoder=False, cache_share=0.25))
+    scaled = []
+    monkeypatch.setattr(image_steps.STATE, "scale_caches", scaled.append)
+    served = image_service._load(_spec(encoder_mmproj="/own-mmproj.gguf"))
+    assert load_stubs[-1]["text_encoder"] is None
+    assert load_stubs[-1]["mmproj"] is None
+    tensor, adapter = image_service.cache_bytes()
+    assert served.pipe.conditionings.max_bytes == tensor // 4
+    assert served.pipe.adapters.max_bytes == adapter // 4
+    image_service._release([served])
+    assert scaled == [0.25, 1.0]
+
+
+@pytest.fixture
+def staged_stubs(monkeypatch):
+    """A staged entry over stubbed loads: ``events`` records each load,
+    drop, encode and release, with what is resident at an encode."""
+    import mlx.core as mx
+
+    from gmlx.image import api, dtypes, loader, text_encoder, vae
+    from gmlx.image.lora import install
+
+    events, cached = [], set()
+
+    class Enc:
+        owned = True
+
+        def __init__(self):
+            self.released = False
+
+        def release(self):
+            events.append("release")
+            self.released = True
+            return True
+
+    def load_encoder(path, spec, log=None, mmproj=None):
+        events.append(("encoder", mmproj))
+        return Enc()
+
+    def encode_text(pipe, prompt, images=(), ref_latents=True):
+        events.append(("encode", prompt, pipe.dit, pipe.vae))
+        if prompt == "boom":
+            raise RuntimeError("encode failed")
+        cached.add(prompt)
+        return SimpleNamespace(features=mx.zeros((1,)))
+
+    monkeypatch.setattr(text_encoder, "load_encoder", load_encoder)
+    monkeypatch.setattr(text_encoder, "encoder_spec", lambda fam: "SPEC")
+    monkeypatch.setattr(loader, "load_dit", lambda path, **k: (
+        events.append("dit") or "DIT2", None))
+    monkeypatch.setattr(vae, "load_vae", lambda path, **k: (
+        events.append("vae") or "VAE2"))
+    monkeypatch.setattr(dtypes, "image_activation",
+                        lambda name: SimpleNamespace(dit="bf16", vae="bf16"))
+    monkeypatch.setattr(install, "drop_built",
+                        lambda pipe: events.append("drop"))
+    monkeypatch.setattr(install, "rewrap", lambda pipe: events.append("wrap"))
+    monkeypatch.setattr(api, "encode_text", encode_text)
+    monkeypatch.setattr(api, "conditioning_cached",
+                        lambda pipe, p, images=(): p in cached)
+    pipe = SimpleNamespace(dit="DIT", vae="VAE", encoder=None,
+                           family=SimpleNamespace(name="z_image"))
+    served = image_service.ServedImage(
+        pipe=pipe, spec=_spec(encoder_mmproj="/tower.gguf"),
+        plan=_plan(staged=True, keep_encoder=False))
+    return SimpleNamespace(served=served, pipe=pipe, events=events)
+
+
+def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
+    st = staged_stubs
+    image_service._encode(st.served, "a", None, ())
+    assert st.events == ["drop", ("encoder", None), ("encode", "a", None, None),
+                         "release", "dit", "wrap", "vae"]
+    assert (st.pipe.dit, st.pipe.vae) == ("DIT2", "VAE2")
+    # A prompt in the cache runs on the released encoder's tokenizer.
+    del st.events[:]
+    image_service._encode(st.served, "a", None, ())
+    assert st.events == [("encode", "a", "DIT2", "VAE2")]
+    # Reference images load the encoder with its vision tower.
+    del st.events[:]
+    image_service._encode(st.served, "b", "a", ("REF",))
+    assert st.events[:2] == ["drop", ("encoder", "/tower.gguf")]
+
+
+def test_a_failed_staged_encode_leaves_the_dit_loaded(staged_stubs):
+    st = staged_stubs
+    with pytest.raises(RuntimeError, match="encode failed"):
+        image_service._encode(st.served, "boom", None, ())
+    assert st.events[-4:] == ["release", "dit", "wrap", "vae"]
+    assert st.pipe.encoder.released and st.pipe.dit == "DIT2"
 
 
 def test_a_failed_adapter_frees_the_loaded_pipeline(load_stubs, monkeypatch):

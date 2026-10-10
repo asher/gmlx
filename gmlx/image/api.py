@@ -477,15 +477,41 @@ def references(pipe: ImagePipeline, images, *,
                  for r in images)
 
 
+def _cond_key(pipe: ImagePipeline, prompt: str, refs: tuple) -> str:
+    """The cache key of the conditioning of ``prompt`` with ``refs``. It
+    reads the encoder's tokenizer alone, which a released encoder keeps."""
+    enc = pipe.encoder
+    if refs:
+        edit = pipe.family.edit
+        return conditioning_key(
+            family=pipe.family.name, encoder=str(enc.source_key),
+            adapters=getattr(enc, "adapters", ""),
+            template=edit.template_id(),
+            ids=edit.token_ids(enc, prompt, refs),
+            tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name,
+            images=[r.identity for r in refs])
+    return conditioning_key(
+        family=pipe.family.name, encoder=str(enc.source_key),
+        adapters=getattr(enc, "adapters", ""),
+        template=enc.spec.template_id, ids=enc.token_ids(prompt),
+        tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name)
+
+
+def conditioning_cached(pipe: ImagePipeline, prompt: str, *,
+                        images=()) -> bool:
+    """Whether ``encode_text`` takes the conditioning of ``prompt`` with
+    ``images`` from the cache, so the encoder need not be loaded for it.
+    False for a pipeline whose encoder has not loaded yet."""
+    if pipe.encoder is None:
+        return False
+    refs = references(pipe, images) if images else ()
+    return pipe.conditionings.peek(_cond_key(pipe, prompt, refs)) is not None
+
+
 def _encode_with_images(pipe: ImagePipeline, prompt: str,
                         refs: tuple) -> Conditioning:
     edit, enc = pipe.family.edit, pipe.encoder
-    ids = edit.token_ids(enc, prompt, refs)
-    key = conditioning_key(
-        family=pipe.family.name, encoder=str(enc.source_key),
-        adapters=getattr(enc, "adapters", ""), template=edit.template_id(),
-        ids=ids, tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name,
-        images=[r.identity for r in refs])
+    key = _cond_key(pipe, prompt, refs)
     hit = pipe.conditionings.get(key)
     if hit is None:
         _, features, slots = edit.encode(enc, prompt, refs)
@@ -560,12 +586,7 @@ def encode_text(pipe: ImagePipeline, prompt: str, *, images=(),
         return encode_references(pipe, cond) if ref_latents else cond
     if enc is None:
         raise ValueError("this pipeline has no text encoder")
-    ids = enc.token_ids(prompt)
-    key = conditioning_key(
-        family=pipe.family.name, encoder=str(enc.source_key),
-        adapters=getattr(enc, "adapters", ""),
-        template=enc.spec.template_id, ids=ids,
-        tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name)
+    key = _cond_key(pipe, prompt, ())
     hit = pipe.conditionings.get(key)
     if hit is not None:
         return hit

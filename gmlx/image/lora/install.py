@@ -612,6 +612,25 @@ def ensure_wrapped(pipe) -> None:
     pipe.lora = state
 
 
+def drop_built(pipe) -> None:
+    """Drop the built tables of the pipeline, which hold the leaves of
+    its DiT, so that a DiT the pipeline lets go is freed."""
+    pipe.tables.drop_where(lambda v: isinstance(v, BuiltTable))
+    if pipe.lora is not None:
+        pipe.lora._cur.clear()
+
+
+def rewrap(pipe) -> None:
+    """Wrap the linear leaves of a DiT loaded again into the pipeline with
+    the patch state the pipeline holds, so its tables reach them."""
+    state = pipe.lora
+    if state is None:
+        return
+    for path, leaf in linear_leaves(pipe.dit).items():
+        _set(pipe.dit, path, ImageLoRALinear(leaf, path, state))
+    state._cur.clear()
+
+
 def activate(pipe, tid: str):
     """Set the pipeline and the table the next DiT calls run under and
     return the previous ones, for ``restore``."""

@@ -10,7 +10,12 @@ one at a time in the order they come, and interleave with chat decode.
 The pool counts an entry at its weights plus an activation reserve: the
 peak of one image at the entry's default size, from the image memory
 plan. With the text encoder released after each encode, that is the
-larger of the encode phase and the denoise phase, not their sum.
+larger of the encode phase and the denoise phase, not their sum. An
+entry whose encoder does not fit beside its DiT is staged as the image
+command stages a load: each encode that the cache does not hold lets
+the DiT and the VAE go, loads the encoder alone, and loads them again
+after its release. Its caches take the room its image leaves, up to
+their bounds.
 """
 
 from __future__ import annotations
@@ -42,6 +47,14 @@ class EntryPlan:
     variant: str
     size: tuple                     # default (width, height)
     cfg: float
+    # Each encode runs with the DiT and the VAE out of memory: the owned
+    # encoder loads, encodes and goes, and the DiT and the VAE load again.
+    staged: bool = False
+    cache_share: float = 1.0        # of each cache's configured bound
+    encoder_bytes: int = 0          # an owned encoder's, from its header
+    mmproj_bytes: int = 0
+    load_parts: tuple | None = None   # see memfit.plan_memory, no tower
+    tower_parts: tuple | None = None  # the same with the vision tower
 
 
 @dataclass(eq=False)
@@ -107,15 +120,45 @@ def cache_bytes() -> tuple:
     return _CACHE_BYTES["tensor"], _CACHE_BYTES["adapter"]
 
 
-def bound_caches(pipe, configured: int = 0) -> None:
-    """Bound the caches of a served pipeline. The adapter cache also holds
-    the ``configured`` bytes of the entry's own adapters, which the entry
-    books on their own."""
+def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
+    """Bound the caches of a served pipeline at ``share`` of their
+    configured bounds. The adapter cache also holds the ``configured``
+    bytes of the entry's own adapters, which the entry books on their
+    own."""
     tensor, adapter = cache_bytes()
+    tensor, adapter = int(tensor * share), int(adapter * share)
     pipe.conditionings.max_bytes = tensor
     pipe.reference_latents.max_bytes = tensor
     pipe.adapters.max_bytes = adapter + int(configured)
     pipe.tables.max_bytes = adapter + int(configured)
+
+
+# The cache share of each loaded entry, by id of its ServedImage. The
+# step routes' caches serve every entry and take the smallest share.
+_SHARES: dict = {}
+
+
+def _scale_step_caches() -> None:
+    from .image_steps import STATE
+
+    STATE.scale_caches(min(_SHARES.values(), default=1.0))
+
+
+def _load_figures(spec, act) -> dict:
+    """What the loads of an entry's parts hold over what stays resident,
+    from their headers, as the image command counts them: the 16-bit
+    cast of the DiT, and each part loaded with the others or alone."""
+    from gmlx.commands.image_preflight import dit_transient, load_transient
+
+    enc, vae, tower = spec.encoder, spec.vae, None
+    if enc is not None:
+        tower = spec.encoder_mmproj
+    cast = dit_transient(str(spec.path), act.dit)
+    later = max(load_transient(None, vae, None), cast)
+    return {"peak": max(load_transient(enc, vae, tower), cast),
+            "text_peak": max(load_transient(enc, vae, None), cast),
+            "parts": (load_transient(enc, None, None), later),
+            "tower_parts": (load_transient(enc, None, tower), later)}
 
 
 def entry_plan(spec) -> EntryPlan:
@@ -153,37 +196,97 @@ def entry_plan(spec) -> EntryPlan:
         cfg = defaults.cfg if defaults is not None else 1.0
     act = image_activation(fam.name)
     tensor_cache, adapter_cache = cache_bytes()
-    adapters = [2 * os.path.getsize(p) for p, _ in spec.adapters] + [
-        2 * adapter_cache]
+    own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
+    caches = 2 * tensor_cache + _CACHE_BYTES["steps"]
     dit = _header_bytes(spec.path, "dit")
     vae = _header_bytes(spec.vae, "vae")
     enc = mmproj = 0
     if spec.encoder is not None:
         enc = _header_bytes(spec.encoder, "encoder")
         mmproj = _header_bytes(spec.encoder_mmproj, "mmproj")
-    common = dict(adapters=adapters, family=fam.name, height=height,
-                  width=width, cfg=cfg, dtype=act.dit, vae_dtype=act.vae,
-                  encoder_owned=False, overcommit=True,
-                  cache_bytes=2 * tensor_cache + _CACHE_BYTES["steps"])
-    keep = memfit.plan_memory(dit, enc, vae, mmproj, **common)
+    load = _load_figures(spec, act)
     budget = working_budget_bytes()
-    footprint, keeps = keep.peak, True
-    if enc and (spec.encoder_release == "always" or (
-            spec.encoder_release == "auto" and budget is not None
-            and keep.peak > _KEEP_SHARE * budget)):
-        # The encoder loads for each encode beside the DiT and the VAE,
-        # and is gone before the first step.
-        alone = memfit.plan_memory(dit, 0, vae, **common)
-        footprint, keeps = max(keep.phases["encode"], alone.peak), False
-    if budget is not None and footprint > budget and not overcommit():
+
+    def common(share: float) -> dict:
+        return dict(adapters=own + [int(2 * adapter_cache * share)],
+                    family=fam.name, height=height, width=width, cfg=cfg,
+                    dtype=act.dit, vae_dtype=act.vae, overcommit=True,
+                    cache_bytes=int(caches * share))
+
+    def kept(share: float):
+        return memfit.plan_memory(dit, enc, vae, mmproj,
+                                  encoder_owned=False,
+                                  load_peak=load["peak"], **common(share))
+
+    def price(mode: str, share: float) -> int:
+        """The peak of an image at the default size, as serve runs it in
+        ``mode``, with each cache at ``share`` of its bound."""
+        if mode == "keep":
+            return kept(share).peak
+        if mode == "release":
+            # The encoder loads for each encode beside the DiT and the VAE,
+            # and is gone before the first step.
+            keep = kept(share)
+            alone = memfit.plan_memory(dit, 0, vae, **common(share))
+            return max(keep.phases["encode"], keep.phases.get("load", 0),
+                       alone.peak)
+        # The encoder loads alone for each encode, without its vision
+        # tower unless the request has reference images, and the DiT and
+        # the VAE load again after it.
+        return memfit.plan_memory(dit, enc, vae, 0, encoder_owned=True,
+                                  load_peak=load["text_peak"],
+                                  load_parts=load["parts"],
+                                  **common(share)).peak
+
+    def mode_of(release: str) -> str:
+        if not enc or release == "never":
+            return "keep"
+        if release == "auto" and (budget is None
+                                  or kept(1.0).peak <= _KEEP_SHARE * budget):
+            return "keep"
+        if budget is None or price("release", 1.0) <= budget:
+            return "release"
+        return "staged"
+
+    def fitted(mode: str):
+        """(footprint, cache share) of ``mode``, or None when it does not
+        fit with its caches empty. Each cache takes the room the image
+        leaves, up to its bound."""
+        full = price(mode, 1.0)
+        if budget is None or full <= budget:
+            return full, 1.0
+        bare = price(mode, 0.0)
+        if bare > budget:
+            return None
+        steps = 64
+        k = min(steps - 1, int(steps * (budget - bare) / max(1, full - bare)))
+        while k > 0 and price(mode, k / steps) > budget:
+            k -= 1
+        return price(mode, k / steps), k / steps
+
+    mode = mode_of(spec.encoder_release)
+    got = fitted(mode)
+    if got is None and overcommit():
+        got = price(mode, 1.0), 1.0
+    if got is None:
+        need = price(mode, 0.0)
+        hint = "use a smaller quant of the DiT or of the text encoder"
+        if spec.encoder_release == "never" and enc and fitted(
+                mode_of("auto")) is not None:
+            hint = "set encoder_release: auto"
         raise memfit.ImageMemoryError(
-            f"image model {spec.id!r} needs {footprint / memfit.GiB:.2f} GiB "
+            f"image model {spec.id!r} needs {need / memfit.GiB:.2f} GiB "
             f"for one {width}x{height} image, over the working budget of "
             f"{budget / memfit.GiB:.2f} GiB. Set a smaller defaults.size, or "
-            "encoder_release: always. GMLX_OVERCOMMIT=1 overrides.")
-    return EntryPlan(footprint=int(footprint), keep_encoder=keeps,
+            f"{hint}. GMLX_OVERCOMMIT=1 overrides.")
+    footprint, share = got
+    return EntryPlan(footprint=int(footprint), keep_encoder=mode == "keep",
                      family=fam.name, variant=ident.variant,
-                     size=(width, height), cfg=float(cfg))
+                     size=(width, height), cfg=float(cfg),
+                     staged=mode == "staged", cache_share=share,
+                     encoder_bytes=int(enc), mmproj_bytes=int(mmproj),
+                     load_parts=load["parts"],
+                     tower_parts=load["tower_parts"])
 
 
 def check_parts(spec, fam) -> None:
@@ -222,9 +325,11 @@ def _load(spec) -> ServedImage:
     # A shared encoder is a chat model of the pool, which this entry does
     # not load; its footprint is counted there. An owned encoder loads
     # here, and one the plan does not keep is released after each encode
-    # and loaded again for the next.
-    pipe = api.load(spec.path, text_encoder=spec.encoder, vae=spec.vae,
-                    mmproj=spec.encoder_mmproj if spec.encoder else None,
+    # and loaded again for the next. A staged entry loads its encoder at
+    # its first encode.
+    owned = spec.encoder if not plan.staged else None
+    pipe = api.load(spec.path, text_encoder=owned, vae=spec.vae,
+                    mmproj=spec.encoder_mmproj if owned else None,
                     memory="off", log=_log_line)
     served = ServedImage(pipe=pipe, spec=spec, plan=plan)
     try:
@@ -240,7 +345,10 @@ def _load(spec) -> ServedImage:
             pipe.default_table = api.define_patch_table(
                 pipe, lora.table_entries(rows))
         bound_caches(pipe, sum(2 * os.path.getsize(p)
-                               for p, _ in spec.adapters))
+                               for p, _ in spec.adapters),
+                     plan.cache_share)
+        _SHARES[id(served)] = plan.cache_share
+        _scale_step_caches()
     except BaseException:
         # The pipeline loaded and an adapter failed: free it here, as the
         # pool never holds it.
@@ -319,6 +427,8 @@ def _release(box: list) -> None:
     served = box.pop() if box else None
     if served is None:
         return
+    if _SHARES.pop(id(served), None) is not None:
+        _scale_step_caches()
     pipe, served.pipe = served.pipe, None
     if pipe is not None:
         enc = pipe.encoder
@@ -890,10 +1000,21 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
                    "tower: set encoder_mmproj on the image model", "image")
 
 
-def _fit_args(pipe, served: ServedImage, budget, cfg: float) -> dict:
+def _fit_args(pipe, served: ServedImage, budget, cfg: float,
+              tower: bool = False) -> dict:
+    """The plan_memory arguments of a request on ``served``. A staged
+    entry's request loads its encoder alone, with the vision tower when
+    ``tower`` says it has reference images."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
+    staged = {}
+    if getattr(served.plan, "staged", False):
+        plan = served.plan
+        staged = dict(
+            encoder=plan.encoder_bytes,
+            mmproj=plan.mmproj_bytes if tower else 0, encoder_owned=True,
+            load_parts=plan.tower_parts if tower else plan.load_parts)
     return dict(
         dit=pipe.weights.get("dit", 0),
         encoder=pipe.weights.get("encoder", 0) if resident else 0,
@@ -906,7 +1027,7 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float) -> dict:
                            and not served.plan.keep_encoder),
         cache_bytes=(pipe.conditionings.bytes + pipe.modulations.bytes
                      + _steps_cache_bytes()),
-        budget=budget, overcommit=False)
+        budget=budget, overcommit=False) | staged
 
 
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
@@ -917,12 +1038,12 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 
     pipe = served.pipe
     cfg = _guided(req, served)
-    args = _fit_args(pipe, served, budget, cfg)
+    refs = [] if pipe.family.edit is None else [
+        r.shape[:2] for r in req.images]
+    args = _fit_args(pipe, served, budget, cfg, tower=bool(refs))
     plan_memory = memfit.plan_memory
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
-    refs = [] if pipe.family.edit is None else [
-        r.shape[:2] for r in req.images]
 
     def fits(w: int, h: int, ref_sizes) -> bool:
         try:
@@ -985,9 +1106,10 @@ def size_fits(served: ServedImage, width: int, height: int, budget, *,
         return False
 
 
-def _ensure_encoder(served: ServedImage) -> None:
+def _ensure_encoder(served: ServedImage, tower: bool = True) -> None:
     """Load an owned encoder again after its release, with the text
-    halves of the configured adapters."""
+    halves of the configured adapters, and its vision tower when
+    ``tower`` says so."""
     pipe = served.pipe
     enc = pipe.encoder
     if served.spec.encoder is None or (enc is not None and not enc.released):
@@ -997,9 +1119,69 @@ def _ensure_encoder(served: ServedImage) -> None:
 
     pipe.encoder = load_encoder(
         served.spec.encoder, encoder_spec(pipe.family), log=_log_line,
-        mmproj=served.spec.encoder_mmproj)
+        mmproj=served.spec.encoder_mmproj if tower else None)
     if served.adapters:
         lora.apply_text_adapters(pipe, served.adapters)
+
+
+def _drop_dit(served: ServedImage) -> None:
+    """Let the DiT and the VAE of a staged entry go before its encoder
+    loads."""
+    import gc
+
+    import mlx.core as mx
+
+    from gmlx.image.lora import install
+
+    pipe = served.pipe
+    install.drop_built(pipe)
+    pipe.dit = pipe.vae = None
+    gc.collect()
+    mx.clear_cache()
+
+
+def _ensure_dit(served: ServedImage) -> None:
+    """Load the DiT and the VAE of a staged entry again, with the DiT's
+    leaves wrapped for the patch tables the pipeline holds."""
+    pipe = served.pipe
+    if pipe.dit is not None and pipe.vae is not None:
+        return
+    from gmlx.image.dtypes import image_activation
+    from gmlx.image.loader import load_dit
+    from gmlx.image.lora import install
+    from gmlx.image.vae import load_vae
+
+    act = image_activation(pipe.family.name)
+    if pipe.dit is None:
+        pipe.dit, _ = load_dit(str(served.spec.path), act_dtype=act.dit,
+                               log=_log_line)
+        install.rewrap(pipe)
+    if pipe.vae is None:
+        pipe.vae = load_vae(str(served.spec.vae), family=pipe.family.name,
+                            dtype=act.vae)
+
+
+def _staged_encode(served: ServedImage, run, prompts: list, refs):
+    """``run()`` on a staged entry. A request whose conditionings are all
+    in the cache runs on the released encoder's tokenizer. Any other
+    lets the DiT and the VAE go, loads the encoder, encodes, releases it
+    and loads the DiT and the VAE again, so the encoder is never resident
+    beside them."""
+    from gmlx.image import api
+
+    pipe = served.pipe
+    if all(api.conditioning_cached(pipe, p, images=refs) for p in prompts):
+        _ensure_dit(served)
+        return run()
+    _drop_dit(served)
+    try:
+        _ensure_encoder(served, tower=bool(refs))
+        try:
+            return run()
+        finally:
+            pipe.encoder.release()
+    finally:
+        _ensure_dit(served)
 
 
 def _encode(served: ServedImage, prompt: str, neg: str | None, refs,
@@ -1026,6 +1208,9 @@ def _encode(served: ServedImage, prompt: str, neg: str | None, refs,
                        f"{served.spec.encoder_model!r}, which is not loaded",
                        "model", err_type="server_error")
         return borrow(run)
+    if getattr(served.plan, "staged", False):
+        return _staged_encode(served, run,
+                              [prompt] + ([] if neg is None else [neg]), refs)
     _ensure_encoder(served)
     return run()
 

@@ -236,7 +236,7 @@ entries.
 | <a id="image_modelsfamily"></a>`family` | detected | The image family, such as `z-image` or `qwen-image-2.1`. A file of another family is refused at load. |
 | <a id="image_modelsadapters"></a>`adapters` | none | LoRA files applied to every request, each a path or `{path, strength}` with strength 1 by default |
 | <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`) and `negative_prompt` |
-| <a id="image_modelsencoder_release"></a>`encoder_release` | `auto` | Release the text encoder after each encode: `always`, `never`, or `auto`, which keeps it while the whole model fits in 80 percent of the working budget |
+| <a id="image_modelsencoder_release"></a>`encoder_release` | `auto` | Release the text encoder after each encode: `always`, `never`, or `auto`, which keeps it while the whole model fits in 80 percent of the working budget. When the encoder does not fit beside the DiT, `auto` and `always` load it alone for each new prompt and load the DiT and the VAE again after it |
 | <a id="image_modelspin"></a>`pin` | `false` | Load at start and stay loaded, as a model's [`pin`](#modelspin) |
 | <a id="image_modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |
 
@@ -620,8 +620,8 @@ under [`image_models`](#image-models).
 | <a id="serverimageurl_max_bytes"></a>`image.url_max_bytes` | `1G` | Most bytes of such files kept at once, as bytes or a size such as `2G`. The oldest go first. |
 | <a id="serverimagemax_queue"></a>`image.max_queue` | `4` | Image requests that may wait behind the one running. One more gets 429 with `Retry-After`. |
 | <a id="serverimageembed_metadata"></a>`image.embed_metadata` | `false` | Write the prompt and settings into each PNG the routes return |
-| <a id="serverimagetensor_cache_mb"></a>`image.tensor_cache_mb` | `64` | MB each image model keeps of encoded prompts, and again of reference image latents. The step routes keep as much of uploaded tensors. |
-| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | `256` | MB each image model keeps of request LoRA weights, and again of their merged patches. The step routes keep as much of uploads. Raise it for a larger LoRA. |
+| <a id="serverimagetensor_cache_mb"></a>`image.tensor_cache_mb` | `64` | MB each image model keeps of encoded prompts, and again of reference image latents. The step routes keep as much of uploaded tensors. An image model that leaves less room in the working budget keeps less. |
+| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | `256` | MB each image model keeps of request LoRA weights, and again of their merged patches. The step routes keep as much of uploads. Raise it for a larger LoRA. An image model that leaves less room in the working budget keeps less. |
 | <a id="serverimagesteps_api"></a>`image.steps_api` | `true` | Serve the [image step routes](images.md#step-routes) that the ComfyUI node pack and `gmlx image bench --via-steps` call. |
 | <a id="serverimagesteps_remote"></a>`image.steps_remote` | `false` | Take step route requests from clients beyond loopback. The routes take uploads of any bytes, so they answer loopback clients alone by default. |
 

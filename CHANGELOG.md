@@ -36,6 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routes, with streamed partial images and `url` responses.
 - In `gmlx serve`, a chat reply keeps decoding while an image renders, at a
   share of the GPU that `GMLX_IMAGE_CHAT_SHARE` sets.
+- `gmlx serve` runs an image model whose text encoder does not fit beside its
+  DiT by loading the encoder alone for each new prompt, as `image generate` does.
 - `server.image.tensor_cache_mb` and `adapter_cache_mb` set how much each
   served image model keeps of encoded prompts and request LoRAs.
 - `/v1/models` lists each image model with its family, variant and `edit`, and

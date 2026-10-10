@@ -132,10 +132,14 @@ The table gives the DiT quant, and the text encoder is Q8_0 on every
 class. A Mac takes the column of the largest class its RAM holds, and a
 Mac under 16 GB takes the 16 GB column.
 
-Each pick is the DiT closest to the full precision images whose load and
-image fit that class. On 16 GB the image job releases the encoder before
-the denoise, decodes in tiles and loads the parts one at a time; pull with
-`--encoder-quant q4_k_m` to leave more room for other work.
+Each pick is the quant whose images come closest to full precision among
+those that fit the memory of that class, both in `gmlx image generate` and
+in `gmlx serve`. When the text encoder and the DiT do not fit side by side,
+as on 16 GB, both load the encoder for each new prompt, encode, release it,
+and then load the DiT and the VAE. A prompt encoded before is taken from the
+cache, and nothing loads for it. On 16 GB `serve` also keeps smaller caches
+of prompts and request LoRAs. Pull with `--encoder-quant q4_k_m` to leave
+more room for other work.
 
 Krea 2 has a 12B DiT, and no quant of it fits a 1024x1024 image on
 16 GB. There Q3_K_M, the smallest, makes images up to 512x512.

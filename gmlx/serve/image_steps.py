@@ -151,6 +151,14 @@ class _Bytes:
     def bytes(self) -> int:
         return self._bytes
 
+    def bound(self, max_bytes: int) -> None:
+        """Set the bound and shed the oldest tensors over it."""
+        with self._lock:
+            self.max_bytes = int(max_bytes)
+            while self._bytes > self.max_bytes and self._items:
+                _, gone = self._items.popitem(last=False)
+                self._bytes -= gone.nbytes
+
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
@@ -185,6 +193,7 @@ class StepsState:
         cfg = ImageServerCfg()
         self.tensors = _Bytes(cfg.tensor_cache_mb << 20)
         self.adapters = _Bytes(cfg.adapter_cache_mb << 20)
+        self._bounds = (self.tensors.max_bytes, self.adapters.max_bytes)
         self.runs: dict = {}
         # model id -> (pipeline, {contract table id: core table id})
         self.tables: dict = {}
@@ -205,6 +214,13 @@ class StepsState:
             self.tensors = _Bytes(tmb)
         if amb != self.adapters.max_bytes:
             self.adapters = _Bytes(amb)
+        self._bounds = (tmb, amb)
+
+    def scale_caches(self, share: float) -> None:
+        """Bound the two caches at ``share`` of their configured sizes, for
+        an image model whose plan leaves its caches only that room."""
+        self.tensors.bound(int(self._bounds[0] * share))
+        self.adapters.bound(int(self._bounds[1] * share))
 
     # Tensors and adapters.
 

@@ -197,6 +197,12 @@ class ByteLRU:
                 held -= n
                 self._bytes -= n
 
+    def drop_where(self, match) -> None:
+        """Drop the entries whose value ``match`` takes."""
+        with self._lock:
+            for k in [k for k, v in self._items.items() if match(v[0])]:
+                self._bytes -= self._items.pop(k)[1]
+
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
