@@ -275,3 +275,47 @@ def test_vlm_text_tower_builds_and_swaps_under_yarn(family):
     s = rs.from_config(cfg)
     for _, r in _ropes(lm):
         _check_rope(r, s, 10000.0)
+
+
+# More class-built archs: the same swap, checked on the
+# built rope modules (their forwards need caches or kernels the tiny
+# synthesized models skip).
+def _later_arches():
+    import test_config_synth as t
+
+    return {
+        "hy_v3": (t._hy_v3_meta, t._HY_V3_SHAPES),
+        "hyv4": (t._hyv4_meta, t._HYV4_SHAPES),
+        "muse-glimmer": (t._muse_glimmer_meta, t._MUSE_GLIMMER_SHAPES),
+        "minimax-m3": (t._minimax_m3_meta, t._MINIMAX_M3_SHAPES),
+        "falcon-h1": (t._falcon_h1_meta, t._FALCON_H1_SHAPES),
+        "granitehybrid": (t._granitehybrid_meta, {}),
+        "ernie4_5-moe": (t._ernie_meta, {}),
+    }
+
+
+@pytest.mark.parametrize("arch", ["hy_v3", "hyv4", "muse-glimmer",
+                                  "minimax-m3", "falcon-h1", "granitehybrid",
+                                  "ernie4_5-moe"])
+def test_later_class_built_arches_take_the_options(arch):
+    assert arch in rs.SWAP_ARCHES and arch in rs.WIRED_ARCHES
+    meta_fn, shapes = _later_arches()[arch]
+    meta = meta_fn()
+    plain = synthesize_config(meta, dict(shapes))
+    before, _ = build_model(plain)
+    bases = {name: float(r.base) for name, r in _ropes(before)
+             if hasattr(r, "base")}
+    cfg = synthesize_config(meta, dict(shapes), rope_override=YARN4)
+    model, cfg = build_model(cfg)
+    assert rope_swap.apply(model, cfg) > 0
+    s = rs.from_config(cfg)
+    assert s.factor == 4.0
+    sliding = {i for i, t in enumerate(cfg.get("layer_types") or [])
+               if t in ("sliding_attention", "sliding")}
+    for name, r in _ropes(model):
+        assert isinstance(r, rope_swap.ScaledRoPE), name
+        layer = name.split("layers.")
+        i = int(layer[1].split(".")[0]) if len(layer) > 1 else -1
+        base = bases.get(name) or meta.get(f"{arch}.rope.freq_base", 10000.0)
+        _check_rope(r, s.for_sliding() if i in sliding else s, base)
+
