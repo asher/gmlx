@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
 # Portions copyright (c) 2026 Apple Inc. (mlx-lm kimi_linear skeleton, MIT)
-"""Vendored mlx-lm-style model for GLM-5.3-Flash (GGUF arch ``glm5next``).
+"""Vendored mlx-lm-style model for GLM-5.3-Flash (GGUF arch ``glm5-next``,
+``glm5next`` in the first uploads).
 
 mlx-lm has no glm5_next class; this module is the runtime for llama.cpp PR
 27754 conversions. The architecture is a hybrid of mechanisms gmlx already

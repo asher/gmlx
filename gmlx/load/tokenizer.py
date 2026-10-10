@@ -93,7 +93,7 @@ _DIGIT_CLAUSE_BY_PRE = {
     "qwen35": r"\p{N}", "qwen35moe": r"\p{N}",
     "llama-bpe": r"\p{N}{1,3}", "llama3": r"\p{N}{1,3}",
     "gpt-2": r"\p{N}+",
-    # llama.cpp CHATGLM4 (glm4/glm4moe/glm-dsa/glm5next GGUFs) is the generic
+    # llama.cpp CHATGLM4 (glm4/glm4moe/glm-dsa/glm5-next GGUFs) is the generic
     # pattern with cl100k digit grouping.
     "glm4": r"\p{N}{1,3}", "chatglm-bpe": r"\p{N}{1,3}",
 }

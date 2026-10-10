@@ -45,17 +45,18 @@ CANDIDATE_ARCHES = [
     "nemotron_h_moe", "deepseek2", "mixtral", "glm4moe", "gpt-oss",
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
-    "kimi-k3", "muse-glimmer", "qwen4exp", "glm5next", "hyv4",
+    "kimi-k3", "muse-glimmer", "qwen4exp", "glm5-next", "glm5next", "hyv4",
 ]
 
 # Per-arch extra flags for the llama.cpp reference run.
-#   glm5next - the flash-attention path casts the NoPE MLA latents to f16
-#   and corrupts; llama.cpp PR 27754 is verified with -fa off.
+#   glm5-next / glm5next - the flash-attention path casts the NoPE MLA
+#   latents to f16 and corrupts; llama.cpp PR 27754 is verified with -fa off.
 #   hyv4 - the STQ1_0 patch implements CPU and CUDA only. llama.cpp's
 #   op-offload sends host tensor ops to Metal even at -ngl 0, and the
 #   batched expert matmul then aborts on a missing pipeline
 #   (kernel_mul_mm_id_stq1_0_f32), so every prefill segfaults without these.
 PARITY_EXTRA_ARGS: dict[str, list[str]] = {
+    "glm5-next": ["-fa", "off"],
     "glm5next": ["-fa", "off"],
     "hyv4": ["-dev", "none", "--no-op-offload"],
 }

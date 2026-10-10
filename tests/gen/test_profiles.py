@@ -67,6 +67,7 @@ def test_families_never_set_max_tokens():
     ("gemma4", "gemma"), ("gemma3", "gemma"), ("diffusion-gemma", "gemma"),
     ("gpt-oss", "gpt-oss"),
     ("glm4moe", "glm"), ("glm-dsa", "glm"),
+    ("glm5-next", "glm"), ("glm5next", "glm"),
     ("deepseek2", "deepseek"), ("deepseek4", "deepseek"),
     ("minimax-m2", "minimax"),
     ("minimax-m3", "minimax"),

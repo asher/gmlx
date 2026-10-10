@@ -178,6 +178,51 @@ def test_batched_matches_single():
             rtol=2e-2, atol=2e-2)
 
 
+def test_fused_hc_cycle_decode_matches_pair(monkeypatch):
+    """Decode on the one-dispatch hyper-connection cycle gives the same
+    logits, bit for bit, as the two-kernel pair at GLM-5.3-Flash's hidden
+    size. An M5 Ultra decoded garbage on the fused cycle (issue #187)."""
+    import gmlx.models.deepseek_v4.hyper_connection as hcm
+
+    if not hcm._KQ_HC_CYCLE:
+        pytest.skip("mlx-kquant hc_front_expand_collapse unavailable here")
+    args = _tiny_args(hidden_size=4096, vocab_size=256)
+    model = _random_model(args, seed=5)
+    from mlx.utils import tree_flatten, tree_unflatten
+    keep = model.cast_predicate
+    model.update(tree_unflatten([
+        (k, v.astype(mx.bfloat16) if keep(k) else v)
+        for k, v in tree_flatten(model.parameters())]))
+    model.eval()
+    probe = mx.zeros((1, 1, args.hc_mult, args.hidden_size), mx.bfloat16)
+    if not model.layers[0].attn_hc.m1_fused_ok(probe):
+        pytest.skip("fused hyper-connection front unavailable here")
+
+    calls = []
+    fused_op = hcm._kq.hc_front_expand_collapse
+
+    def spy(*a, **k):
+        calls.append(1)
+        return fused_op(*a, **k)
+
+    monkeypatch.setattr(hcm._kq, "hc_front_expand_collapse", spy)
+    toks = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 44, 8, 21, 50, 1, 30]
+
+    def decode(flag):
+        monkeypatch.setenv("GMLX_HC_FUSED_CYCLE", flag)
+        cache = model.make_cache()
+        out = [model(mx.array([[t]]), cache=cache) for t in toks]
+        mx.eval(out)
+        return out
+
+    pair = decode("0")
+    assert not calls
+    fused = decode("1")
+    assert calls
+    for t, (f, p) in enumerate(zip(fused, pair)):
+        assert mx.array_equal(f, p), f"logits differ at step {t}"
+
+
 def _np_rms(x, eps):
     x = np.asarray(x, dtype=np.float64)
     return x / np.sqrt((x ** 2).mean(-1, keepdims=True) + eps)
@@ -816,10 +861,12 @@ def test_cast_predicate_pins_fp32_params():
     assert qpred("model.layers.0.self_attn.q_proj", None) is True
 
 
-def test_remap_covers_every_wire_tensor_onto_real_params():
-    # Enumerate every GGUF name the PR-27754 converter emits for the tiny
-    # config and assert each one remaps onto an actual parameter path of the
-    # built model. Catches typos in both directions.
+@pytest.mark.parametrize("arch", ["glm5-next", "glm5next"])
+def test_remap_covers_every_wire_tensor_onto_real_params(arch):
+    # Enumerate every GGUF name the converter emits for the tiny config and
+    # assert each one remaps onto an actual parameter path of the built
+    # model, under the llama.cpp arch name and the earlier PR-27754 one.
+    # Catches typos in both directions.
     from mlx.utils import tree_flatten
 
     from gmlx.load.remap import RemapDecision, parse_gguf_name
@@ -862,19 +909,19 @@ def test_remap_covers_every_wire_tensor_onto_real_params():
                 "ffn_up_shexp.weight", "ffn_down_shexp.weight")]
 
     for name in names:
-        dec = parse_gguf_name("glm5next", name)
+        dec = parse_gguf_name(arch, name)
         assert dec.kind == RemapDecision.KIND_MAP, (name, dec.reason)
         assert dec.hf_name in params, (name, dec.hf_name)
 
     # The MTP tail block: standard tensors map one past the trunk (sanitize
     # drops them; the drafter loads them separately); nextn extras skip.
     n = args.num_hidden_layers
-    dec = parse_gguf_name("glm5next", f"blk.{n}.attn_q_a.weight")
+    dec = parse_gguf_name(arch, f"blk.{n}.attn_q_a.weight")
     assert dec.kind == RemapDecision.KIND_MAP
     assert dec.hf_name.startswith(f"model.layers.{n}.")
     for t in ("nextn.eh_proj.weight", "nextn.enorm.weight",
               "nextn.hnorm.weight", "nextn.shared_head_norm.weight"):
-        dec = parse_gguf_name("glm5next", f"blk.{n}.{t}")
+        dec = parse_gguf_name(arch, f"blk.{n}.{t}")
         assert dec.kind == RemapDecision.KIND_SKIP, (t, dec.kind)
 
 

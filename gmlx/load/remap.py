@@ -99,7 +99,8 @@ ARCH_ALIAS = {
     # block. Targets follow gmlx.models.kimi_k3. ssm_a stays the folded
     # -exp(A_log) (a_folded) and must NOT go through ssm_a_to_a_log.
     "kimi-k3": "KIMI_K3",
-    # GLM-5.3-Flash (llama.cpp PR #27754 'glm5next'): hybrid KDA linear
+    # GLM-5.3-Flash (llama.cpp 'glm5-next', 'glm5next' in the closed PR
+    # #27754 that the first uploads carry): hybrid KDA linear
     # attention + nope-only MLA (per-layer head_count_kv, 0 = KDA) like
     # kimi-k3, but with a pooled lightning indexer on the MLA layers, 4-stream
     # hyper-connections (deepseek4-style hc_* tensors at the layer level), a
@@ -110,6 +111,7 @@ ARCH_ALIAS = {
     # extras to canonical enums with no HF target (auto-SKIP); its standard
     # tensors land on model.layers.45.* and glm5_next.sanitize drops them
     # (the MTP drafter loads them separately).
+    "glm5-next": "GLM5NEXT",
     "glm5next": "GLM5NEXT",
     # HY4-preview (llama.cpp 'hyv4'): absorbed MLA in the DeepSeek-V3.2 shape
     # plus a sigmoid attention gate, per-head sinks, a per-token lightning

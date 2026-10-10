@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 41 GGUF architectures to model types, and 40 of them load end-to-end
+gmlx maps 42 GGUF architectures to model types, and 41 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the installed mlx-lm, so do not edit it by hand.
 
@@ -39,7 +39,8 @@ family, backend, status and caveat:
 | `glm-dsa` | deepseek | mlx-lm | loadable |  |
 | `glm4` | glm | mlx-lm | loadable |  |
 | `glm4moe` | glm | mlx-lm | loadable |  |
-| `glm5next` | glm | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
+| `glm5-next` | glm | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
+| `glm5next` | glm | mlx-lm | loadable | The earlier name of `glm5-next`, which the first GLM-5.3-Flash uploads carry. Both load the same way. |
 | `gpt-oss` | gpt-oss | mlx-lm | loadable |  |
 | `granite` | granite | mlx-lm | loadable |  |
 | `granitehybrid` | granite | mlx-lm | loadable |  |
