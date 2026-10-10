@@ -488,3 +488,37 @@ def test_a_tap_runs_in_the_dtype_its_spec_names():
     assert plain.encode("ab").hidden[0].dtype == mx.bfloat16
     assert te.encoder_spec("qwen_image21").activation == "float32"
     assert te.Z_IMAGE.activation is None
+
+
+def test_a_kept_tail_survives_the_token_cap():
+    """The cap cuts the prompt and keeps the rows after it, as Krea 2's
+    pipeline does: the first ``max_tokens - keep_tail`` ids, then the last
+    ``keep_tail``."""
+    tok = _CharTokenizer()
+    spec = _spec(keep_tail=5)
+    full = [ord(c) % 1000 for c in te.render(spec, "x" * 40)]
+    got = te.token_ids(spec, tok, "x" * 40)
+    assert len(got) == 16
+    assert got == full[:11] + full[-5:]
+    assert got[-5:] == [ord(c) for c in "x</u>"]
+    # Under the cap the ids are the rendered text.
+    assert te.token_ids(spec, tok, "ab") == [
+        ord(c) % 1000 for c in te.render(spec, "ab")]
+    assert te.token_ids(_spec(), tok, "x" * 40) == full[:16]
+
+
+def test_stacked_features_hold_every_tap_side_by_side():
+    m, _ = _tiny_qwen3()
+    tok = _CharTokenizer()
+    one = te.EncoderHandle(m, tok, _spec(tap=(1, 3), drop=2),
+                           owned=False).encode("ab")
+    spec = _spec(tap=(1, 3), drop=2, stack=True)
+    got = te.EncoderHandle(m, tok, spec, owned=False).encode("ab")
+    assert got.stack and not one.stack
+    n = len(got.ids) - 2
+    assert got.features.shape == (n, 2 * 64)
+    assert mx.array_equal(got.features[:, :64], got.hidden[0][0, 2:]).item()
+    assert mx.array_equal(got.features[:, 64:], got.hidden[1][0, 2:]).item()
+    assert mx.array_equal(one.features, got.features[:, :64]).item()
+    # Stacking is part of what a conditioning depends on.
+    assert spec.template_id != _spec(tap=(1, 3), drop=2).template_id

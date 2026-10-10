@@ -74,15 +74,20 @@ class EncoderSpec:
                                      # its vision tower, None without one
     vision_identity: tuple = ()      # IdentityTensor rows of its mmproj
     vision_identity_source: str = ""
+    keep_tail: int = 0               # last ids the token cap never cuts
+    stack: bool = False              # features hold every tap side by side
 
     @property
     def template_id(self) -> str:
         """sha256 of what turns a prompt into the rows of a conditioning
         beside the token ids: the template, and the count of dropped rows
-        when the spec drops any."""
+        when the spec drops any, and that the features stack the taps when
+        they do."""
         text = self.template
         if self.drop:
             text += f"\x00drop={self.drop}"
+        if self.stack:
+            text += "\x00stack"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -156,10 +161,13 @@ def render(spec: EncoderSpec, prompt: str) -> str:
 
 def token_ids(spec: EncoderSpec, tokenizer, prompt: str) -> list[int]:
     """Token ids of the rendered prompt, cut at the family's token cap. The
-    cap applies to the whole rendered text, as in the reference."""
+    cap applies to the whole rendered text, as in the reference, and a
+    spec that keeps a tail cuts the ids before its last ``keep_tail``."""
     ids = list(tokenizer.encode(render(spec, prompt), add_special_tokens=False))
-    if spec.max_tokens is not None:
-        ids = ids[: spec.max_tokens]
+    if spec.max_tokens is not None and len(ids) > spec.max_tokens:
+        n = spec.keep_tail
+        ids = (ids[: spec.max_tokens - n] + ids[len(ids) - n:] if n
+               else ids[: spec.max_tokens])
     if len(ids) <= spec.drop:
         raise ValueError("the rendered prompt has no tokens" if not spec.drop
                          else f"the rendered prompt has {len(ids)} tokens, "
@@ -397,15 +405,20 @@ def check_encoder(model, config: dict, spec: EncoderSpec, *,
 class TextTap:
     """One prompt's encoding: its token ids and one hidden state per tap
     layer, each (1, L, hidden). ``features`` are the rows of the first tap
-    that condition the DiT, (L - drop, hidden)."""
+    that condition the DiT, (L - drop, hidden), or with ``stack`` the rows
+    of every tap side by side in tap order, (L - drop, taps * hidden)."""
     ids: tuple
     hidden: tuple
     template_id: str
     tap_layers: tuple
     drop: int = 0
+    stack: bool = False
 
     @property
     def features(self) -> mx.array:
+        if self.stack:
+            return mx.concatenate([h[0, self.drop:] for h in self.hidden],
+                                  axis=-1)
         return self.hidden[0][0, self.drop:]
 
 
@@ -468,7 +481,7 @@ class EncoderHandle:
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
                        template_id=self.spec.template_id,
                        tap_layers=tuple(self.spec.tap_layers),
-                       drop=self.spec.drop)
+                       drop=self.spec.drop, stack=self.spec.stack)
 
     def token_ids(self, prompt: str) -> list[int]:
         return token_ids(self.spec, self.tokenizer, prompt)
