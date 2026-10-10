@@ -298,6 +298,42 @@ def test_the_summary_gives_sizes_and_free_disk_before_the_download(
     assert "not enough disk space" in err
 
 
+def test_the_plan_reaches_a_pipe_before_the_first_download(lib, monkeypatch):
+    import sys
+
+    root, cfg = lib
+    Disk(monkeypatch, root)
+    _packs(monkeypatch)
+    calls = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+            self.text = []
+
+        def write(self, text):
+            self.text.append(text)
+            return len(text)
+
+        def flush(self):
+            if any("license:" in t for t in self.text):
+                calls.append(f"{self.name} plan")
+
+    out = Stream("stdout")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", Stream("stderr"))
+    got = _downloads(monkeypatch)
+
+    def fetch(*a):
+        calls.append("download")
+        return got_fetch(*a)
+
+    got_fetch = manage._hf_download
+    monkeypatch.setattr(manage, "_hf_download", fetch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
+    assert got and calls[0] == "stdout plan"
+
+
 def _bf16(monkeypatch):
     from types import SimpleNamespace
 

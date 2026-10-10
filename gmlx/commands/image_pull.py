@@ -564,6 +564,9 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             indent=2))
     else:
         _print_plan(plan, ram=ram, free=free, dest=base_dir)
+    # The plan goes to stdout and the download lines to stderr: a pipe or a
+    # file gets the plan and its license line first.
+    sys.stdout.flush()
     blocked = [p for p in plan.blocked if p.wanted]
     if blocked:
         for p in blocked:
@@ -595,7 +598,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
         except (remote.RemoteError, OSError, ValueError) as e:
             print(f"error: {part.role} failed: {e}", file=sys.stderr)
             return 1
-        print(f"  {part.role}: {part.path}")
+        print(f"  {part.role}: {part.path}", flush=True)
 
     missing = [p.role for p in plan.parts if p.download]
     if missing:
