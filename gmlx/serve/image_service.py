@@ -1235,11 +1235,20 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
         named[os.path.basename(ad.path)] = ad.path
         named[os.path.splitext(os.path.basename(ad.path))[0]] = ad.path
     table_rows = list(served.adapters)
+    # A request that names a configured adapter sets its strength on the
+    # DiT for the request, in place of the entry's, and never adds it twice.
+    configured = {os.path.realpath(ad.path): i
+                  for i, (ad, _st) in enumerate(served.adapters)}
     shown = []
     for aid, strength in rows:
         path = named.get(aid)
         if path is None:
             path = _adapter_under_roots(aid, model_dirs)
+        at = configured.get(os.path.realpath(path))
+        if at is not None:
+            table_rows[at] = (table_rows[at][0], strength)
+            shown.append({"id": aid, "strength": strength})
+            continue
         ad = lora.load_adapter(pipe, path)
         if ad.text:
             raise _bad(f"adapter {aid!r} has text encoder layers; set it on "

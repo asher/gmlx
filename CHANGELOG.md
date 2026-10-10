@@ -28,6 +28,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by their EXIF orientation, so a phone photo is not encoded on its side.
 - `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA
   safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
+- An image request's `adapters` adds LoRAs for that request, and naming one of
+  the model's own adapters sets its strength instead of applying it twice.
 - On GPUs with NAX (M5), an image step under `--adapter` takes 1 to 2% less
   time on a Q4_K, Q5_K or Q6_K DiT when mlx-kquant has its low-rank kernel.
 - On GPUs with NAX (M5), both image VAEs decode and Qwen-Image 2.1 steps run

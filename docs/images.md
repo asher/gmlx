@@ -140,7 +140,8 @@ On the server, the LoRAs in the entry's
 [`adapters`](config.md#image_modelsadapters) apply to every request, both
 halves. A request adds its own in `adapters`. Each id is a path inside a
 model folder, such as `loras/watercolor.safetensors` for
-`~/models/loras/watercolor.safetensors`:
+`~/models/loras/watercolor.safetensors`, or the file name of an entry
+adapter, which sets that adapter's strength for the request:
 
 ```json
 {"model": "z-image-turbo", "prompt": "a lighthouse at dusk",

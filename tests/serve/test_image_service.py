@@ -796,6 +796,32 @@ def test_an_adapter_id_resolves_only_inside_a_model_folder(tmp_path):
     assert e.value.status == 404
 
 
+@pytest.mark.parametrize("aid", ["style.safetensors", "style",
+                                 "lora/style.safetensors"])
+def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
+        tmp_path, monkeypatch, aid):
+    from gmlx.image import api, lora
+
+    root = tmp_path / "models"
+    (root / "lora").mkdir(parents=True)
+    path = root / "lora" / "style.safetensors"
+    path.write_bytes(b"x")
+    entry = SimpleNamespace(path=str(path), text=("t",))
+    other = SimpleNamespace(path=str(root / "lora" / "b.safetensors"), text=())
+    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p: (
+        entry if os.path.realpath(p) == os.path.realpath(path) else other))
+    monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
+    monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: rows)
+    (root / "lora" / "b.safetensors").write_bytes(b"x")
+    served = SimpleNamespace(pipe=object(), adapters=[(entry, 1.0)])
+    table, shown = image_service._adapter_table(
+        served, [(aid, 0.4), ("lora/b.safetensors", 0.7)], [str(root)])
+    assert table == [(entry, 0.4), (other, 0.7)]
+    assert shown == [{"id": aid, "strength": 0.4},
+                     {"id": "lora/b.safetensors", "strength": 0.7}]
+    assert served.adapters == [(entry, 1.0)]
+
+
 @pytest.mark.parametrize("scheduler", ["karras", "simple", "beta"])
 def test_a_scheduler_other_than_the_variant_own_is_refused(scheduler):
     with pytest.raises(image_service.ImageRequestError,
