@@ -3,7 +3,11 @@
 Tensor bytes are copied unchanged under their official names in torch
 layout, so other GGUF readers can use the file. The default dtype is the
 source dtype, which is the lossless case. A downcast is an explicit option
-and records ``gmlx.vae.lossless = false``. The packer writes to a partial
+and records ``gmlx.vae.lossless = false``. A GGUF tensor has at most four
+dims, so a tensor of more, such as the kernel of a video conv, is written
+with its first two dims, the product of the middle ones and its last,
+and its own shape goes under ``comfy.gguf.orig_shape``, the key the
+ComfyUI GGUF loader reads. The packer writes to a partial
 file, reads it back, compares every tensor's sha256 and the metadata with
 what it meant to write, and only then moves it into place.
 """
@@ -18,8 +22,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..fingerprint import canonical_bf16
-from .reader import (CONFIG_KEY, VAES, VAEError, check_config, check_names,
-                     identify, read_header, safetensors_header)
+from .reader import (CONFIG_KEY, ORIG_SHAPE_KEY, VAES, VAEError,
+                     check_config, check_names, identify, read_header,
+                     safetensors_header)
 
 PACKER_VERSION = "1"
 
@@ -145,6 +150,9 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
         out_dt = dtype or info["dtype"]
         data, exact = _convert(raw, info["dtype"], out_dt)
         lossless = lossless and exact
+        if len(shape) > 4:
+            meta[ORIG_SHAPE_KEY + name] = list(shape)
+            shape = (*shape[:2], int(np.prod(shape[2:-1])), shape[-1])
         data = data.reshape(shape)
         digests[name] = hashlib.sha256(data.tobytes()).hexdigest()
         tensors.append((name, data, shape, out_dt))
@@ -177,6 +185,8 @@ def _write(path: str, meta: dict, tensors: list) -> None:
             continue
         if isinstance(value, bool):
             w.add_bool(key, value)
+        elif isinstance(value, list):
+            w.add_array(key, value)
         else:
             w.add_string(key, value)
     for name, data, shape, dt in tensors:

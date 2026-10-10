@@ -2,7 +2,8 @@
 
 A VAE is identified by tensor names and shapes, never by an arch string.
 The prefixes ``vae.`` and ``first_stage_model.`` are stripped, and the
-FLUX.1 autoencoder is also read in its original layout. The whole header is
+FLUX.1 and Qwen-Image autoencoders are also read in their original
+layouts. The whole header is
 checked before any tensor bytes are read. Loading is strict both ways:
 every module parameter is filled, and every file tensor is consumed or is
 one that the family's config leaves unread, at the shape the config gives
@@ -14,12 +15,16 @@ constants differs there.
 
 Both formats hold torch layout. Conv kernels (O, I, kH, kW) become
 (O, kH, kW, I), and every weight is cast to the decode dtype as an owned,
-contiguous array.
+contiguous array. A kernel of rank 5, (O, I, T, kH, kW), is a causal
+video conv, which pads its frames in front: one frame reads its last time
+slice alone, and that slice is the kernel. A GGUF holds such a kernel
+flattened to rank 4, with its shape under ``comfy.gguf.orig_shape``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import struct
 from dataclasses import dataclass, replace
 from typing import Callable
@@ -28,13 +33,14 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 from ..fingerprint import ImageModelError
-from . import flux1_ae, qwen_image21_vae
+from . import flux1_ae, qwen_image21_vae, qwen_image_vae
 from .conv import conv_path, set_conv_path
 
 STRIP_PREFIXES = ("vae.", "first_stage_model.")
 FLOAT_CODECS = ("F32", "F16", "BF16")
 LAYOUT = "torch-oihw"
 CONFIG_KEY = "gmlx.vae.config_json"
+ORIG_SHAPE_KEY = "comfy.gguf.orig_shape."
 
 
 class VAEError(ImageModelError):
@@ -82,6 +88,14 @@ VAES = {
         image_channels=qwen_image21_vae.IMAGE_CHANNELS,
         relative=qwen_image21_vae.relative,
         config_disagreements=qwen_image21_vae.config_disagreements),
+    # The latent mean and deviation come with the VAE's own constants.
+    "krea2": VaeRow(
+        "the Qwen-Image autoencoder",
+        qwen_image_vae.config_from_shapes, qwen_image_vae.QwenImageVAE,
+        qwen_image_vae.LATENT_CHANNELS, _own_space,
+        qwen_image_vae.expected_unused,
+        image_channels=qwen_image_vae.IMAGE_CHANNELS,
+        config_disagreements=qwen_image_vae.config_disagreements),
 }
 
 
@@ -91,7 +105,8 @@ class VaeHeader:
     names, shapes torch order."""
     path: str
     format: str                     # "gguf" or "safetensors"
-    layout: str                     # "diffusers" or "original"
+    layout: str                     # "diffusers", "original" (FLUX.1)
+                                    # or "wan" (Qwen-Image)
     names: dict                     # diffusers name -> file name
     shapes: dict                    # diffusers name -> torch shape
     dtypes: dict                    # diffusers name -> "F32", "F16", "BF16"
@@ -140,7 +155,8 @@ def _raw_header(path: str):
         shapes = {t.name: tuple(int(d) for d in reversed(t.shape))
                   for t in scan.tensors}
         dtypes = {t.name: t.type_name for t in scan.tensors}
-        return "gguf", shapes, dtypes, dict(scan.kv)
+        return ("gguf", restore_shapes(path, shapes, scan.kv), dtypes,
+                dict(scan.kv))
     header, start = safetensors_header(path)
     meta = header.pop("__metadata__", None) or {}
     try:
@@ -159,6 +175,23 @@ def _raw_header(path: str):
     return "safetensors", shapes, dtypes, dict(meta)
 
 
+def restore_shapes(path: str, shapes: dict, kv: dict) -> dict:
+    """``shapes`` with the shape each ``comfy.gguf.orig_shape`` key stores
+    for a tensor the GGUF holds flattened."""
+    out = dict(shapes)
+    for key, value in kv.items():
+        name = key[len(ORIG_SHAPE_KEY):]
+        if not key.startswith(ORIG_SHAPE_KEY) or name not in out:
+            continue
+        shape = tuple(int(v) for v in value)
+        if math.prod(shape) != math.prod(out[name]):
+            raise VAEError(f"{path}: {name} holds {math.prod(out[name])} "
+                           f"values, and its stored shape {shape} has "
+                           f"{math.prod(shape)}")
+        out[name] = shape
+    return out
+
+
 def strip_names(names) -> dict:
     """Stripped name to file name, after the first VAE prefix any name
     carries."""
@@ -166,6 +199,19 @@ def strip_names(names) -> dict:
         if any(n.startswith(p) for n in names):
             return {(n[len(p):] if n.startswith(p) else n): n for n in names}
     return {n: n for n in names}
+
+
+def diffusers_names(names: dict) -> tuple[str, dict]:
+    """The layout of stripped names (name -> file name) and the names
+    under diffusers names: "original" for the FLUX.1 autoencoder's own
+    layout, "wan" for the Qwen-Image autoencoder's, else "diffusers"."""
+    if flux1_ae.is_original_layout(names):
+        levels = flux1_ae.original_levels(names)
+        return "original", {flux1_ae.original_name(n, levels): f
+                            for n, f in names.items()}
+    if qwen_image_vae.is_original_layout(names):
+        return "wan", qwen_image_vae.diffusers_names(names)
+    return "diffusers", names
 
 
 def read_header(path: str) -> VaeHeader:
@@ -176,13 +222,7 @@ def read_header(path: str) -> VaeHeader:
         if layout != LAYOUT:
             raise VAEError(f"{path} has VAE layout {layout!r}; gmlx reads "
                            f"{LAYOUT!r}")
-    names = strip_names(shapes)
-    layout = "diffusers"
-    if flux1_ae.is_original_layout(names):
-        layout = "original"
-        levels = flux1_ae.original_levels(names)
-        names = {flux1_ae.original_name(n, levels): f
-                 for n, f in names.items()}
+    layout, names = diffusers_names(strip_names(shapes))
     out_shapes = {}
     for n, f in names.items():
         s = shapes[f]
@@ -292,7 +332,15 @@ def check_names(header: VaeHeader, params: dict, row: VaeRow, cfg) -> None:
 
 
 def _mlx_shape(shape: tuple) -> tuple:
+    if len(shape) == 5:
+        return (shape[0], *shape[3:], shape[1])
     return (shape[0], *shape[2:], shape[1]) if len(shape) == 4 else shape
+
+
+def frame_kernel(a: mx.array) -> mx.array:
+    """The kernel a causal video conv (O, I, T, kH, kW) runs on one frame:
+    its last time slice."""
+    return a[:, :, -1]
 
 
 def resolve_dtype(dtype) -> mx.Dtype:
@@ -346,6 +394,8 @@ def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
         a = arrays.pop(header.names[name])
         if tuple(a.shape) != header.shapes[name]:
             a = a.reshape(header.shapes[name])
+        if a.ndim == 5:
+            a = frame_kernel(a)
         if a.ndim == 4:
             a = a.transpose(0, 2, 3, 1)
         weights.append((name, mx.contiguous(a.astype(dt))))

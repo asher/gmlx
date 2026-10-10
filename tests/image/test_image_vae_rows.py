@@ -100,7 +100,7 @@ def test_every_family_has_a_vae_row():
     assert not hasattr(memfit.PEAKS[FAMILY], "vae_channels")
     for price in (memfit.vae_peak, memfit.vae_tiling):
         with pytest.raises(ValueError, match="no VAE memory row for image "
-                           "family 'flux'; known: qwen_image21, z_image"):
+                           "family 'flux'; known: krea2, qwen_image21, z_image"):
             price("decode", 512, 512, family="flux", itemsize=2)
 
 

@@ -71,5 +71,12 @@
     "revision": "0.41.0.dev0",
     "file": "src/diffusers/models/transformers/transformer_krea2.py",
     "key": "Krea2Transformer2DModel.__init__ defaults"
+  },
+  "krea2_vae.header.json": {
+    "repo": "Comfy-Org/Krea-2",
+    "revision": "eb1eddd3983a54678545a9b2c178c5853b30f7be",
+    "file": "vae/qwen_image_vae.safetensors",
+    "size": 253806246,
+    "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
   }
 }

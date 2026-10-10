@@ -39,16 +39,17 @@ def _image_dit(view) -> bool:
 
 
 def _vae(view) -> bool:
-    from .vae import flux1_ae
-    from .vae.reader import VAES, strip_names
+    from .vae.reader import (VAES, VAEError, diffusers_names,
+                             restore_shapes, strip_names)
 
-    names = strip_names(view.tensors)
-    if flux1_ae.is_original_layout(names):
-        levels = flux1_ae.original_levels(names)
-        names = {flux1_ae.original_name(n, levels): f
-                 for n, f in names.items()}
-    shapes = {n: tuple(reversed(view.tensors[f].shape))
-              for n, f in names.items()}
+    _, names = diffusers_names(strip_names(view.tensors))
+    try:
+        stored = restore_shapes("", {f: tuple(reversed(t.shape))
+                                     for f, t in view.tensors.items()},
+                                view.kv)
+    except VAEError:
+        return False
+    shapes = {n: stored[f] for n, f in names.items()}
     return any(row.config_from_shapes(shapes) is not None
                for row in VAES.values())
 

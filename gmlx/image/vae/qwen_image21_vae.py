@@ -592,11 +592,18 @@ def reach(cfg: QwenImage21VAEConfig, op: str) -> int:
     own resolution. The tiled part of a decode is ``Decoder.tail``, the
     up blocks from ``whole_up_blocks`` on, and that of an encode is
     ``Encoder.head``."""
-    n = len(cfg.dim_mult)
+    return crop_reach(len(cfg.dim_mult), cfg.num_res_blocks,
+                      whole_up_blocks(cfg), op)
+
+
+def crop_reach(n: int, res: int, whole: int, op: str) -> int:
+    """``reach`` of a VAE with ``n`` levels, ``res`` resnets per down block
+    and one more per up block, whose tiled decode starts at up block
+    ``whole``."""
     r = 0.0
     if op == "decode":
-        for i in range(whole_up_blocks(cfg), n):
-            r += 2 * (cfg.num_res_blocks + 1) / 2 ** i
+        for i in range(whole, n):
+            r += 2 * (res + 1) / 2 ** i
             if i < n - 1:
                 r += 1 / 2 ** (i + 1)
         r += 1 / 2 ** (n - 1)
@@ -604,7 +611,7 @@ def reach(cfg: QwenImage21VAEConfig, op: str) -> int:
         r += 1 / 2 ** (n - 1)
         for i in range(n):
             j = n - 1 - i
-            r += 2 * cfg.num_res_blocks / 2 ** j
+            r += 2 * res / 2 ** j
             if i < n - 1:
                 r += 2 / 2 ** j
     return math.ceil(r)

@@ -376,6 +376,26 @@ def _qwen_image21_vae_crop(op: str, config=None) -> int:
     return reach(m.OFFICIAL if config is None else config, op)
 
 
+def _qwen_image_vae_floor(op: str, height: int, width: int, *,
+                          config=None, **kw):
+    """The steps of a Qwen-Image VAE pass and the weight count, as
+    ``_qwen_image21_vae_floor`` gives them."""
+    from .vae import qwen_image_memory as m
+
+    cfg = m.OFFICIAL if config is None else config
+    return (m.memory_terms(cfg, op, height, width, **kw),
+            m.weight_count(cfg))
+
+
+def _qwen_image_vae_crop(op: str, config=None) -> int:
+    """The reach of a cut in a tiled pass of the Qwen-Image VAE, whose
+    tiles are cropped in a decode and in an encode."""
+    from .vae import qwen_image_memory as m
+    from .vae.qwen_image_vae import reach
+
+    return reach(m.OFFICIAL if config is None else config, op)
+
+
 VAE_ROWS = {
     # The FLUX.1 autoencoder.
     "z_image": VaeMemoryRow(
@@ -395,6 +415,12 @@ VAE_ROWS = {
         tiled=QWEN_VAE_TILED, floor=_qwen_image21_vae_floor, one_tile=True,
         crop=_qwen_image21_vae_crop, scores=QWEN_VAE_SCORES,
         whole_px=1024 * 1024),
+    # The Qwen-Image autoencoder of Krea 2, priced by the rule for an
+    # unmeasured VAE: tiles first, one at a time, cropped.
+    "krea2": VaeMemoryRow(
+        measured=False, channels={"decode": 96, "encode": 96},
+        floor=_qwen_image_vae_floor, one_tile=True,
+        crop=_qwen_image_vae_crop),
 }
 
 
@@ -481,6 +507,14 @@ PEAKS = {
                             encode_row_bytes=3 * 12288 * 2,
                             encode_tower_bytes=int(1.5 * GiB),
                             mmproj_fp32=True),
+    # Krea 2 joins up to 512 text rows to the image rows in every block. The
+    # MLP's gate and up products and the attention's query and gate are the
+    # widest outputs: 28 blocks, 6144 wide, a 16384 MLP. The step fit is
+    # Qwen-Image 2.1's until a Krea 2 step is measured. The encoder's tap
+    # runs in float32.
+    "krea2": PeakRow(token_px=16, row_multiple=1, caption_rows=512,
+                     width=2 * 16384 + 2 * 6144, step=QWEN_IMAGE21_STEP,
+                     encode_row_bytes=3 * 9728 * 4, text_rows=546),
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
