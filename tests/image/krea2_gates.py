@@ -188,14 +188,15 @@ def free_row(name: str) -> bool:
     return not forced_row(name) and name != "velocity"
 
 
-# The exact gate's free-running rows carry fp32 rounding that no other
-# summation order reproduces: block 0's input holds channels 122 times its
-# rms, and blocks 12 to 25 amplify a summation-order change at its output
-# about 50 times. Each fixture records gmlx's own fp32 floor on those
-# rows, the worst relative L2 between the exact step on the GPU and the
-# same step on the CPU stream, and its free rows take the larger of
-# EXACT_TOL and twice that floor. The teacher-forced rows and the
-# velocity keep EXACT_TOL.
+# The exact gate's free-running rows and velocity carry fp32 rounding
+# that no other summation order reproduces: block 0's input holds
+# channels 122 times its rms, and blocks 12 to 25 amplify a
+# summation-order change at its output about 50 times. Each fixture
+# records gmlx's own fp32 floor on the free rows (the worst of them) and
+# on the velocity, the relative L2 between the exact step on the GPU and
+# the same step on the CPU stream. The free rows and the velocity each
+# take the larger of EXACT_TOL and twice their floor. The teacher-forced
+# rows keep EXACT_TOL.
 
 def exact_free_floor(model, arrays: dict) -> dict:
     """Relative L2 of each free row of ``measures`` and of the velocity
@@ -207,67 +208,84 @@ def exact_free_floor(model, arrays: dict) -> dict:
     out = {}
     for k, v in gpu.items():
         name = f"free {k}" if forced_row(k) else k
-        if k in arrays and (free_row(name) or k == "velocity"):
+        if k in arrays and not forced_row(name):
             out[name] = rel(v, cpu[k])
     return out
 
 
-def exact_free_tol(m: dict) -> float:
-    """The free-row tolerance a manifest records, which must follow the
-    rule from the floor beside it."""
-    floor = m["results"]["exact_free_floor"]["rel_l2"]
-    tol = m["tolerances"]["exact_free"]["rel_l2"]
-    assert tol == max(bg.EXACT_TOL, 2 * floor), (tol, floor)
-    return tol
+# The kinds of measure with a floor: manifest result and tolerance keys.
+FLOORS = {"free": ("exact_free_floor", "exact_free"),
+          "velocity": ("exact_velocity_floor", "exact_velocity")}
 
 
-def check_floor(m: dict, floor: dict, label: str) -> None:
-    """The floor measured now is the floor the manifest records."""
+def exact_tols(m: dict) -> dict:
+    """The free-row and velocity tolerances a manifest records, each of
+    which must follow the rule from the floor beside it."""
+    out = {}
+    for kind, (res, key) in FLOORS.items():
+        floor = m["results"][res]["rel_l2"]
+        tol = m["tolerances"][key]["rel_l2"]
+        assert tol == max(bg.EXACT_TOL, 2 * floor), (kind, tol, floor)
+        out[kind] = tol
+    return out
+
+
+def check_floor(m: dict, floor: dict, label: str) -> dict:
+    """The floors measured now are the floors the manifest records.
+    Returns the manifest's tolerances."""
     free = {k: v for k, v in floor.items() if free_row(k)}
     top = max(free, key=free.get)
-    print(f"{label}: free-row fp32 floor {free[top]!r} at {top}, velocity "
-          f"{floor['velocity']:.2e}")
-    rec = m["results"].get("exact_free_floor")
-    assert rec, f"{m['name']} records no exact_free_floor: record it"
-    print(f"{label}: recorded floor {rec['rel_l2']:.2e}, free-row gate "
-          f"{exact_free_tol(m):.2e}")
-    assert free[top] <= 1.25 * rec["rel_l2"], (free[top], rec)
+    now = {"free": free[top], "velocity": floor["velocity"]}
+    print(f"{label}: fp32 floor of the free rows {now['free']!r} at {top}, "
+          f"of the velocity {now['velocity']!r}")
+    for kind, (res, _) in FLOORS.items():
+        assert res in m["results"], f"{m['name']} records no {res}"
+    tols = exact_tols(m)
+    for kind, (res, _) in FLOORS.items():
+        rec = m["results"][res]["rel_l2"]
+        print(f"{label}: recorded {kind} floor {rec:.2e}, gate "
+              f"{tols[kind]:.2e}")
+        assert now[kind] <= 1.25 * rec, (kind, now[kind], rec)
+    return tols
 
 
-def exact_gate(name: str, free_tol: float) -> float:
-    return free_tol if free_row(name) else bg.EXACT_TOL
+def exact_gate(name: str, tols: dict) -> float:
+    if name == "velocity":
+        return tols["velocity"]
+    return tols["free"] if free_row(name) else bg.EXACT_TOL
 
 
-def exact_over(got: dict, free_tol: float) -> dict:
-    return {k: (v, exact_gate(k, free_tol)) for k, v in got.items()
-            if not v <= exact_gate(k, free_tol)}
+def exact_over(got: dict, tols: dict) -> dict:
+    return {k: (v, exact_gate(k, tols)) for k, v in got.items()
+            if not v <= exact_gate(k, tols)}
 
 
-def exact_line(label: str, got: dict, free_tol: float) -> str:
+def exact_line(label: str, got: dict, tols: dict) -> str:
     def worst(keys):
         k = max(keys, key=got.get)
         return f"{got[k]:.2e} at {k}"
     forced = [k for k in got if forced_row(k)]
     free = [k for k in got if free_row(k)]
-    return (f"{label}: teacher-forced rows within {worst(forced)}, "
-            f"velocity {got['velocity']:.2e}, gate {bg.EXACT_TOL:.0e}; "
-            f"free rows within {worst(free)}, gate {free_tol:.2e}")
+    return (f"{label}: teacher-forced rows within {worst(forced)}, gate "
+            f"{bg.EXACT_TOL:.0e}; velocity {got['velocity']:.2e}, gate "
+            f"{tols['velocity']:.2e}; free rows within {worst(free)}, gate "
+            f"{tols['free']:.2e}")
 
 
-def fault_line(label: str, bad: dict, free_tol: float) -> tuple[str, float]:
+def fault_line(label: str, bad: dict, tols: dict) -> tuple[str, float]:
     """Where a wrong model misses the exact gate, by kind of row, and the
     largest ratio of a measure to its gate."""
     parts = []
     for kind, keep in (("teacher-forced", forced_row),
                        ("velocity", lambda k: k == "velocity"),
                        ("free", free_row)):
-        r = {k: bad[k] / exact_gate(k, free_tol) for k in bad if keep(k)}
+        r = {k: bad[k] / exact_gate(k, tols) for k in bad if keep(k)}
         miss = [k for k, v in r.items() if v > 1]
         if miss:
             top = max(miss, key=r.get)
             parts.append(f"{kind} {len(miss)} rows, up to {r[top]:.0f} of "
                          f"the gate at {top}")
-    top = max(bad[k] / exact_gate(k, free_tol) for k in bad)
+    top = max(bad[k] / exact_gate(k, tols) for k in bad)
     return (f"{label}: misses through " + ("; ".join(parts) or "nothing"),
             top)
 

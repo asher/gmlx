@@ -9,21 +9,23 @@ Comfy-Org Krea 2 LoRA, and one with a synthetic adapter that the script
 writes from a seed, one pair on every read linear layer of blocks 0, 13
 and 27, of a layerwise and a refiner text block and of three layers
 outside the blocks, at ranks 4 to 16 with an alpha of half the rank,
-each moving its leaf by about 8 percent. The synthetic fixture holds its pairs, and the test writes them in each
-dialect. Every row is in fp32, with the oracle's own bf16 against fp32
-gap of each and check 3's rule.
+each moving its leaf by about 8 percent. The synthetic fixture holds
+its pairs, and the test writes them in each dialect. Every row is in
+fp32, with the oracle's own bf16 against fp32 gap of each and check 3's
+rule.
 
 The product gate holds each row to twice the oracle's gap, and the base
 model and the adapter at strength 0.8 miss it. The velocity of the
 request path, api.denoise_step with the kernel routes at their default,
 passes its gate too. The exact gate runs the step in the oracle's fp32
-arithmetic in a child process and holds the teacher-forced rows and the
-velocity to EXACT_TOL and the free rows to the gate of check 3's rule
-from the floor each manifest records; it is the gate that holds the table, and each wrong table of
-``wrong_tables`` must miss it. The site gate holds each op of every
-block and each linear leaf, the leaves under the adapter included, to
-the stock op in float32 on the same input with the table's delta. The
-delta half runs on the CPU in test_image_krea2_lora_map.py.
+arithmetic in a child process and holds the teacher-forced rows to
+EXACT_TOL, and the free rows and the velocity to the gates of check 3's
+rule from the floors each manifest records; it is the gate that holds
+the table, and each wrong table of ``wrong_tables`` must miss it. The
+site gate holds each op of every block and each linear leaf, the leaves
+under the adapter included, to the stock op in float32 on the same
+input with the table's delta. The delta half runs on the CPU in
+test_image_krea2_lora_map.py.
 
 Skipped unless the manifests are committed, GMLX_IMAGE_FIXTURES holds
 their arrays, KQUANT_TEST_GGUF_DIR the DiT GGUF and, for the Comfy-Org
@@ -175,7 +177,7 @@ def test_the_manifests_read_the_trajectory_step_and_follow_the_rule():
     """The committed manifests alone: both fixtures take check 3's
     on-trajectory step, the synthetic one holds a pair for every target
     it names, every row tolerance is twice the gap beside it, and the
-    exact gate's free-row tolerance follows its floor."""
+    exact gate's free-row and velocity tolerances follow their floors."""
     src = committed(SOURCE)
     for name in (COMFY, SYNTHETIC):
         m = _manifest(name)
@@ -185,7 +187,7 @@ def test_the_manifests_read_the_trajectory_step_and_follow_the_rule():
         assert m["files"]["dit"] == src["files"]["dit"]
         for k, g in m["results"]["rows_bf16_vs_fp32"].items():
             assert m["tolerances"][k]["rel_l2"] == 2 * g["rel_l2"], k
-        kg.exact_free_tol(m)
+        kg.exact_tols(m)
     m = _manifest(SYNTHETIC)
     targets = m["inputs"]["targets"]
     assert sorted(m["inputs"]["lora_pair_alphas"]) == targets
@@ -309,8 +311,8 @@ def wrong_tables(entries: list, strength: float, moved: bool) -> dict:
 @pytest.mark.parametrize("kind", ["comfy", "synthetic"])
 def test_check7_exact_gate_at_512(pipe, tmp_path, request, kind):
     """Every measure within its exact gate under the right table, the
-    free-row gate from the floor measured now, and each wrong table of
-    ``wrong_tables`` over the gate."""
+    free-row and velocity gates from the floors measured now, and each
+    wrong table of ``wrong_tables`` over the gate."""
     from gmlx.image import api
 
     name = COMFY if kind == "comfy" else SYNTHETIC
@@ -324,8 +326,8 @@ def test_check7_exact_gate_at_512(pipe, tmp_path, request, kind):
     entries = _entries(ad, strength)
     tid = api.define_patch_table(pipe, entries)
     label = f"krea2 check7 exact {kind}"
-    kg.check_floor(m, _under(pipe, tid, kg.exact_free_floor, arrays), label)
-    tol = kg.exact_free_tol(m)
+    tol = kg.check_floor(m, _under(pipe, tid, kg.exact_free_floor,
+                                       arrays), label)
     got = _under(pipe, tid, kg.exact_measures, arrays)
     print(kg.exact_line(f"{label}, {len(ad.dit)} pairs", got, tol))
     over = kg.exact_over(got, tol)
