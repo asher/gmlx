@@ -1,4 +1,4 @@
-{"what":"Krea 2 Turbo Q4_K_M on an M5 Max, one fresh process per cell, through api.sample under the bounded cache, with random features of text_rows rows. steps_gib is the footprint of each step over the settled process, the DiT loaded. A guided cell runs cfg 4.5, its two rows together.","cells":[
+{"what":"Krea 2 Turbo Q4_K_M, or the DiT a cell names, on an M5 Max, one fresh process per cell, through api.sample under the bounded cache, with random features of text_rows rows. steps_gib is the footprint of each step over the settled process, the DiT loaded. A guided cell runs cfg 4.5, its two rows together.","cells":[
 {"size":256,"text_rows":512,"guided":false,"steps_gib":[1.8465,1.9425,1.9448]},
 {"size":384,"text_rows":512,"guided":false,"steps_gib":[2.0506,2.053,2.0552]},
 {"size":512,"text_rows":36,"guided":false,"steps_gib":[0.9514,1.0482,1.0505]},
@@ -10,5 +10,9 @@
 {"size":1024,"text_rows":512,"guided":true,"steps_gib":[2.9752,2.7511,2.5497]},
 {"size":1280,"text_rows":512,"guided":false,"steps_gib":[2.9237,2.8454,2.7663]},
 {"size":1536,"text_rows":36,"guided":false,"steps_gib":[2.5522,2.5522,2.4887]},
-{"size":1536,"text_rows":512,"guided":false,"steps_gib":[3.444,2.9856,2.9083]}
+{"size":1536,"text_rows":512,"guided":false,"steps_gib":[3.444,2.9856,2.9083]},
+{"size":640,"text_rows":512,"guided":false,"steps_gib":[2.2341,2.2341,2.2131]},
+{"size":896,"text_rows":512,"guided":false,"steps_gib":[2.7604,2.7604,2.7058]},
+{"size":768,"text_rows":512,"guided":false,"steps_gib":[2.6545,2.6545,2.5423],"dit":"Q8_0"},
+{"size":1024,"text_rows":512,"guided":false,"steps_gib":[2.3877,2.3877,2.1419],"dit":"Q8_0"}
 ]}
