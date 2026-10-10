@@ -119,6 +119,8 @@ def _header(spec: dict, data: bytes = b"") -> bytes:
              b"\0" * 8), "dtype 'I64'"),
     (_header({"a": {"dtype": "F32", "shape": [2], "data_offsets": [0, 4]}},
              b"\0" * 4), "do not hold 2 F32"),
+    (_header({"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}},
+             b"\0" * 2), "do not hold 1 F32"),
     (_header({"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
               "b": {"dtype": "F32", "shape": [1], "data_offsets": [2, 6]}},
              b"\0" * 8), "overlap"),

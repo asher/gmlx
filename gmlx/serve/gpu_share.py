@@ -30,8 +30,10 @@ import time
 _IDLE_S = 0.25
 # The longest the pacer waits for one chat step before it goes on.
 _WAIT_S = 0.1
-# The most image time one pause pays for, so the first pause after chat
-# starts does not wait for all the image work before it.
+# The most image time one pause pays for. A job's pacer lives across its
+# steps and images, so the time since its last pause can hold host work
+# between two steps, such as the encode of a partial image, which is no
+# GPU work; the cap keeps one pause from stalling the image for it.
 _MAX_PIECE_S = 0.25
 DEFAULT_SHARE = 0.5
 MAX_SHARE = 0.9

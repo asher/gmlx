@@ -139,6 +139,47 @@ def test_a_larger_share_gives_chat_more_steps_per_pause():
     assert len(steps) == 3
 
 
+def _ticking(clock, steps):
+    chat = ChatActivity(clock=clock)
+    chat.begin()
+    chat.end()
+
+    def wait_tick(timeout):
+        steps.append(1)
+        clock.t += 1 / 128
+        return True
+
+    chat.wait_tick = wait_tick
+    return chat
+
+
+def test_one_pause_pays_for_at_most_the_longest_piece():
+    clock, steps = _Clock(), []
+    chat = _ticking(clock, steps)
+    pacer = ImagePacer(chat, share=0.5, clock=clock, evaluate=lambda *a: None)
+    pacer(())
+    clock.t += 4.0                  # host work between two steps
+    chat.last_end = clock.t         # chat stayed active through it
+    steps.clear()
+    pacer(())
+    assert len(steps) == round(gpu_share._MAX_PIECE_S * 128)
+
+
+def test_chat_that_goes_idle_starts_the_next_pause_afresh():
+    clock, steps = _Clock(), []
+    chat = _ticking(clock, steps)
+    pacer = ImagePacer(chat, share=0.5, clock=clock, evaluate=lambda *a: None)
+    pacer(())
+    clock.t += 1.0                  # chat goes idle, the image runs alone
+    pacer(())
+    assert pacer.mark is None
+    chat.last_end = clock.t         # chat comes back
+    steps.clear()
+    pacer(())
+    # The image time while chat was idle is not paid for: one step.
+    assert len(steps) == 1
+
+
 def test_a_pause_stops_waiting_when_chat_goes_idle():
     chat = ChatActivity()
     chat.begin()

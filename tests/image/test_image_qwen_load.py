@@ -55,6 +55,13 @@ def test_the_real_file_tests_find_a_dit_with_no_arch_key(tiny, tmp_path):
     assert image_dits(tmp_path, "z_image") == []
 
 
+def test_an_unknown_variant_says_what_it_samples_as(tiny, tmp_path):
+    path = qt.write(tmp_path / "tiny.gguf", qt.weights(0))
+    lines: list = []
+    image_loader.load_dit(str(path), log=lines.append)
+    assert "(unknown, sampling as base)" in lines[0]
+
+
 def _params(model) -> dict:
     return dict(tree_flatten(model.parameters()))
 
