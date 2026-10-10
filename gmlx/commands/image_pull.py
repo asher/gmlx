@@ -547,6 +547,10 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                   "and a download would land on it; move or delete it, and "
                   "pull again", file=sys.stderr)
         return 1
+    # The packed VAE is written while its source is still on disk.
+    vae = plan.part("vae")
+    if need is not None and vae is not None and vae.download and vae.wanted:
+        need += r.vae_bytes
     if need and free is not None and free < need and not a.force:
         print(f"error: not enough disk space: need {_gb(need)}, "
               f"{_gb(free)} free at {base_dir} (free space, pass --to DIR "

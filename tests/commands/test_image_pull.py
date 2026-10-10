@@ -284,6 +284,23 @@ def test_the_summary_gives_sizes_and_free_disk_before_the_download(
     assert "not enough disk space" in err
 
 
+def test_the_disk_check_counts_the_packed_vae_beside_its_source(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    Disk(monkeypatch, root)
+    dq, eq = catalog.DEFAULT_QUANTS["z-image-turbo"][32]
+    listing = {Z.dit_name(dq): 5 << 30, Z.encoder_name(eq): 2 << 30,
+               Z.vae_file: 160 << 20, Z.vae_config: 1000}
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
+                        **k: [(n, "file", s) for n, s in listing.items()])
+    # Room for the downloads, but not for the VAE packed beside its source.
+    monkeypatch.setattr(manage, "_disk_free",
+                        lambda p: sum(listing.values()) + Z.vae_bytes - 1)
+    got = _downloads(monkeypatch)
+    assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 1
+    assert got == [] and "not enough disk space" in capsys.readouterr().err
+
+
 def test_only_fetches_the_named_parts_and_registers_once_whole(lib,
                                                                monkeypatch,
                                                                capsys):
