@@ -20,9 +20,10 @@ latents in model space and a timestep per row, and gives back what
 ComfyUI expects, which ``CONVENTIONS`` holds per family. ComfyUI's
 Lumina2 forward, which runs Z-Image, takes ``1 - timestep`` as the time of
 the native model and negates its output; its Qwen-Image 2.1 forward takes
-the timestep as it is and returns the native output. Both give, for the
-flow schedule, the velocity ``d x / d sigma`` at ``sigma = timestep``,
-which ``denoise_step`` returns.
+the timestep as it is and returns the native output, as its Krea 2
+forward does. All give, for the flow schedule, the velocity
+``d x / d sigma`` at ``sigma = timestep``, which ``denoise_step``
+returns.
 """
 
 from __future__ import annotations
@@ -62,7 +63,8 @@ class Convention:
 
 
 CONVENTIONS = {
-    "comfy": {"z_image": Convention(), "qwen_image21": Convention()},
+    "comfy": {"z_image": Convention(), "qwen_image21": Convention(),
+              "krea2": Convention()},
 }
 
 # What a client builds its model from, per family: ComfyUI's model class
@@ -75,6 +77,9 @@ COMFY = {
                      "image_model": "qwen_image21",
                      "latent": {"channels": 64, "stride": 16, "patch": 1},
                      "vae": {"channels_out": 4, "stride": 16}},
+    "krea2": {"model_class": "Krea2", "image_model": "krea2",
+              "latent": {"channels": 16, "stride": 8, "patch": 2},
+              "vae": {"channels_out": 3, "stride": 8}},
 }
 
 

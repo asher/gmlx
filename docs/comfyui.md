@@ -83,6 +83,10 @@ the pack is not installed, and prints the clone command.
    `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 3. Queue the prompt.
 
+The loaders take Z-Image, Qwen-Image 2.1 and Krea 2 models. ComfyUI
+detects each one as its own model class, so its stock nodes for that
+model work too.
+
 The sampler, the noise, the guidance and the schedule run in ComfyUI. Each
 model call is one request to the server, which runs the DiT with the LoRAs
 applied, encodes the text, and runs the VAE. The tiled VAE nodes call the

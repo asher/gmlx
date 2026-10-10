@@ -170,7 +170,7 @@ def test_capabilities_answer_without_the_version_header(host):
     assert r.status_code == 200
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
-    assert caps["families"] == ["qwen_image21", "z_image"]
+    assert caps["families"] == ["krea2", "qwen_image21", "z_image"]
     assert caps["conventions"] == ["comfy"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -369,9 +369,9 @@ def test_num_tokens_and_an_attention_mask_trim_the_cond(host, pipe):
 
 def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
-    # ComfyUI hands both families sigma as the timestep and wants the
-    # velocity back, so both conventions are the identity.
-    for fam in ("z_image", "qwen_image21"):
+    # ComfyUI hands every family sigma as the timestep and wants the
+    # velocity back, so every convention is the identity.
+    for fam in ("z_image", "qwen_image21", "krea2"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
@@ -647,7 +647,7 @@ def test_an_idle_run_ends_at_the_next_begin(host, monkeypatch):
 # Status and encode.
 
 def test_status_carries_the_turbo_sampling_schedule(host, monkeypatch):
-    fam = {"zit": "z_image", "qit": "qwen_image21"}
+    fam = {"zit": "z_image", "qit": "qwen_image21", "k2t": "krea2"}
     monkeypatch.setattr(steps, "family_of",
                         lambda spec: (get_family(fam[spec.id]), "turbo"))
     monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
@@ -664,6 +664,28 @@ def test_status_carries_the_turbo_sampling_schedule(host, monkeypatch):
     z = c.status("zit")
     assert z["comfy"]["model_class"] == "ZImage"
     assert z["sampling"]["sigmas"] is None and z["sampling"]["steps"] == 8
+    # Krea 2 Turbo: ComfyUI's Krea2 class on 16 channel latents at 8x, in
+    # 2x2 patches, an RGB VAE, 8 steps on its family schedule, no guidance.
+    q = host.served["qit"]
+    host.served["k2t"] = SimpleNamespace(**{**vars(q), "spec": SimpleNamespace(
+        **{**vars(q.spec), "id": "k2t", "path": "/abs/k2t.gguf"})})
+    k = c.status("k2t")
+    assert k["comfy"] == {"model_class": "Krea2", "image_model": "krea2"}
+    assert k["latent"] == {"channels": 16, "stride": 8, "patch": 2}
+    assert k["vae"] == {"channels_out": 3, "stride": 8}
+    assert k["sampling"]["sigmas"] is None and k["sampling"]["steps"] == 8
+    assert k["sampling"]["cfg"] == 1.0 and not k["edit_capable"]
+
+
+@pytest.mark.parametrize("kv, ne", [
+    ({}, [12, 1]),
+    ({"comfy.gguf.orig_shape.txtfusion.projector.weight": [1, 12]}, [12]),
+])
+def test_the_manifest_gives_the_krea2_projector_its_torch_shape(kv, ne):
+    """ComfyUI detects Krea 2 by the projector and reads its second dim
+    as the encoder layer count, from either converter's layout."""
+    assert steps._torch_shape(kv, "txtfusion.projector.weight", ne) == \
+        [1, 12]
 
 
 @pytest.mark.parametrize("as_container", [False, True])
