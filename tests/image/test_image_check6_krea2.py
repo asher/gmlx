@@ -5,8 +5,8 @@ the final latents and the latents after each step the oracle kept must
 stay within twice the oracle's own bf16 against fp32 gap after that step,
 as the manifest records it. The seed's noise must equal the oracle's,
 and the schedule of the request must equal the schedule of the
-pipeline's own call bit for bit. The Raw schedule at the same size fails
-the schedule row and the kept steps.
+pipeline's own call bit for bit. A schedule shifted by the image token
+count at the same size fails the schedule row and the kept steps.
 
 Skipped unless the manifest of scripts/image_oracle/check6_krea2.py is
 committed, GMLX_IMAGE_FIXTURES holds its arrays and
@@ -134,19 +134,20 @@ def test_the_schedule_of_a_request_is_the_schedule_of_the_pipeline(check6,
                                     arrays, size)
 
 
-def test_the_raw_schedule_fails_the_turbo_rows(check6, pipe):
-    from gmlx.image.registry import get_family
+def test_a_token_count_shift_fails_the_turbo_rows(check6, pipe):
+    from gmlx.image.schedule import calculate_shift, krea2_sigmas
 
     arrays, m = check6
     size = _sizes(m)[0]
     steps = m["inputs"]["steps"]
     tokens = (size // 16) ** 2
-    raw = get_family("krea2").schedule(steps, tokens=tokens, variant="raw")
+    # The dynamic shift the Krea2Pipeline docstring gives.
+    raw = krea2_sigmas(steps, calculate_shift(tokens, 256, 6400, 0.5, 1.15))
     assert _schedule_misses(raw, arrays, size)
     gates = _gates(m, size)
     got = _run(pipe, arrays, m, size, sigmas=raw, stop=2)
     share = {k: v / gates[k] for k, v in got.items()}
-    print(f"krea2 check6 raw schedule {size}: kept steps "
+    print(f"krea2 check6 token count shift {size}: kept steps "
           + ", ".join(f"{k} {v:.2f} of its gate" for k, v in share.items()))
     assert max(share.values()) > 1.0, share
 

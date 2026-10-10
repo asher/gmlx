@@ -16,6 +16,8 @@ from gmlx.image.families.krea2 import family as kf
 from gmlx.image.registry import get_family
 
 TURBO = "krea2_turbo_q4_k_m.header.json"
+# The header of a Krea 2 Raw file, the one fixture of the krea2 arch
+# layout; its shapes are those of Turbo.
 RAW = "krea2_raw_q4_k_m.header.json"
 DEFAULTS = "krea2_transformer_config.json"
 
@@ -137,17 +139,15 @@ def test_the_identity_is_the_same_for_every_storage(tmp_path):
     assert other not in hashes
 
 
-def test_the_identity_table_holds_turbo_and_raw_with_their_sampling():
+def test_the_identity_table_holds_turbo_with_its_sampling():
     fam = get_family("krea2")
-    assert fam.variant_names() == ("raw", "turbo")
+    assert fam.variant_names() == ("turbo",)
     rows = {v.name: v for v in fam.variants.values()}
     assert "Krea-2-Turbo-Q4_K_M.gguf" in rows["turbo"].files
-    assert "BASE/Krea-2-Base-Q8_0.gguf" in rows["raw"].files
-    turbo, raw = fam.sampling["turbo"], fam.sampling["raw"]
+    assert list(fam.sampling) == ["turbo"]
+    turbo = fam.sampling["turbo"]
     assert (turbo.steps, turbo.cfg) == (8, 1.0)
-    assert (raw.steps, raw.cfg) == (52, 4.5)
     assert dict(turbo.quality)["high"] == 8
-    assert dict(raw.quality)["high"] == 52
     # A file whose identity matches no row samples without defaults.
     assert fam.unknown_variant is None
 
@@ -159,3 +159,14 @@ def test_the_encoder_taps_twelve_layers_on_the_reference_template():
     assert spec.max_tokens == 34 + 512
     assert spec.template.count("{}") == 1
     assert spec.template.endswith("<|im_end|>\n<|im_start|>assistant\n")
+
+
+RAW_HASH = "284b54edd003f36239b1d30e62b64fba898dc0598d4434eb7985639fcaa6112c"
+
+
+@pytest.mark.parametrize("variant", [None, "turbo"])
+def test_a_raw_file_is_refused_and_named_against_turbo(monkeypatch,
+                                                       variant):
+    monkeypatch.setattr(fp, "weight_identity", lambda view, names: RAW_HASH)
+    msg = _refused(fixture_view(RAW), variant=variant)
+    assert "Krea 2 Raw" in msg and "Krea 2 Turbo" in msg

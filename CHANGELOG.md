@@ -48,10 +48,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   denoise step per request, for samplers that run elsewhere such as ComfyUI.
 - `gmlx image bench --via-steps` runs each step through the step routes and
   records the transport time per step.
-- `gmlx pull z-image-turbo`, `qwen-image`, `qwen-image-turbo`, `krea-2-turbo`
-  or `krea-2` downloads the DiT, text encoder and VAE at the quants for this
-  Mac's memory, and registers it.
-- On a 16 GB Mac, `gmlx pull` of a Krea 2 model writes `defaults.size: 512x512`
+- `gmlx pull z-image-turbo`, `qwen-image`, `qwen-image-turbo` or `krea-2-turbo`
+  downloads the DiT, text encoder and VAE at the quants for this Mac's memory,
+  and registers it.
+- On a 16 GB Mac, `gmlx pull krea-2-turbo` writes `defaults.size: 512x512`
   into the entry, and `image generate` takes an entry's `defaults.size`.
 - Model discovery and `gmlx sync-models` add an image DiT found with its text
   encoder and VAE, and name the `gmlx pull` that completes a partial set.

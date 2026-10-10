@@ -12,7 +12,8 @@ names every tensor the file has.
 
 Turbo and Raw share every shape, so the variant comes from the hash of
 the text layer projector and the bias of the patch embedder, which every
-converter keeps in float32.
+converter keeps in float32. gmlx image runs Turbo and refuses Raw, whose
+scheduler config is not published.
 """
 
 from __future__ import annotations
@@ -68,14 +69,8 @@ CONSTANTS = ConstantsRow(
         "num_train_timesteps": 1000,
         "vae_scale_factor": 8,
         "size_multiple": 16,
-        # The Turbo checkpoint's fixed timestep shift, and the dynamic
-        # shift of Raw, which the pipeline documents as the scheduler
-        # config it expects.
+        # The Turbo checkpoint's fixed timestep shift.
         "turbo_mu": 1.15,
-        "base_image_seq_len": 256,
-        "max_image_seq_len": 6400,
-        "base_shift": 0.5,
-        "max_shift": 1.15,
     },
     repo="huggingface/diffusers",
     revision="0.41.0.dev0",
@@ -103,19 +98,14 @@ PROMPT = ConstantsRow(
     revision="0.41.0.dev0",
 )
 
-# The model cards' own runs: Turbo at 8 steps with guidance_scale 0,
-# which is no guidance, and Raw at 52 steps with guidance_scale 3.5, in
-# Krea's convention cond + g * (cond - uncond), which is gmlx cfg 1 + g.
-# The schedule is the family's own, so the shift field is unused.
+# The model card's own run: Turbo at 8 steps with guidance_scale 0, which
+# is no guidance. The schedule is the family's own, so the shift field is
+# unused.
 SAMPLING = {
     "turbo": SamplingRow(steps=8, cfg=1.0, shift=1.0,
                          repo="krea/Krea-2-Turbo",
                          revision="98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
                          quality=(("low", 4), ("medium", 6), ("high", 8))),
-    "raw": SamplingRow(steps=52, cfg=4.5, shift=1.0,
-                       repo="krea/Krea-2-Raw",
-                       revision="6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603",
-                       quality=(("low", 20), ("medium", 36), ("high", 52))),
 }
 
 IDENTITY_TENSORS = (PROJECTOR, "first.bias")
@@ -125,15 +115,15 @@ _TURBO = VariantRow(
     tuple(f"Krea-2-Turbo-{q}.gguf" for q in (
         "Q3_K_M", "Q3_K_S", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K",
         "Q8_0")))
-_RAW = VariantRow(
-    "raw", "realrebelai/KREA-2_GGUFs",
-    "9721c3ec932c43dff6dbb5793a816d9ad105277f",
-    tuple(f"BASE/Krea-2-Base-{q}.gguf" for q in (
-        "Q3_K_M", "Q3_K_S", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K",
-        "Q8_0")))
 VARIANTS = {
     "c46a6ba550c75b757a63d3a26ba3a4985c59fec525a73800832bb0b9bc205137": _TURBO,
-    "284b54edd003f36239b1d30e62b64fba898dc0598d4434eb7985639fcaa6112c": _RAW,
+}
+# Krea 2 Raw, as realrebelai/KREA-2_GGUFs at
+# 9721c3ec932c43dff6dbb5793a816d9ad105277f stores it under BASE/.
+REFUSED = {
+    "284b54edd003f36239b1d30e62b64fba898dc0598d4434eb7985639fcaa6112c": (
+        "this is a Krea 2 Raw GGUF, which gmlx image does not run; Krea 2 "
+        "Turbo is the Krea 2 variant it supports"),
 }
 
 # Norm tensors that identify the encoder weights: GGUF name, path in the
@@ -281,21 +271,14 @@ def encoder():
 
 
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
-    """Sigmas of ``steps``: Turbo shifts by its fixed mu, any other
-    variant by the mu of the image token count."""
-    from gmlx.image.schedule import calculate_shift, krea2_sigmas
+    """Sigmas of ``steps``, shifted by Turbo's fixed mu. Any other variant
+    has no schedule."""
+    from gmlx.image.schedule import krea2_sigmas
 
-    c = CONSTANTS.values
-    if variant == "turbo":
-        mu = c["turbo_mu"]
-    else:
-        if tokens is None:
-            raise ValueError("the Krea 2 schedule shifts by the image token "
-                             "count; pass tokens")
-        mu = calculate_shift(tokens, c["base_image_seq_len"],
-                             c["max_image_seq_len"], c["base_shift"],
-                             c["max_shift"])
-    return krea2_sigmas(steps, mu)
+    if variant != "turbo":
+        raise ValueError(f"Krea 2 has a schedule for turbo only, not "
+                         f"{variant!r}")
+    return krea2_sigmas(steps, CONSTANTS.values["turbo_mu"])
 
 
 FAMILY = Family(
@@ -313,6 +296,7 @@ FAMILY = Family(
     fp32_keep=("norm.scale", "txtmlp.0.scale"),
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
+    refused=REFUSED,
     sampling=SAMPLING,
     lora_map=lora_map,
     encoder=encoder,

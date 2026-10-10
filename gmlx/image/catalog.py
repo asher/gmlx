@@ -59,7 +59,7 @@ class Recipe:
 _K_QUANTS = ("Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0")
 
 # Krea 2's VAE is ComfyUI's file of the Qwen-Image autoencoder, which comes
-# without a config.json. Both variants share it and the text encoder.
+# without a config.json.
 _KREA2_VAE = dict(
     vae_repo="Comfy-Org/Krea-2",
     vae_revision="eb1eddd3983a54678545a9b2c178c5853b30f7be",
@@ -143,17 +143,6 @@ RECIPES = {r.name: r for r in (
         license="krea-2-community", license_url=_KREA2_LICENSE,
         license_note=_KREA2_NOTE, encoder_license="apache-2.0",
         encoder_bytes=4_280_406_816, vae_bytes=253_807_712),
-    Recipe(
-        name="krea-2", title="Krea 2 Raw", family="krea2", variant="raw",
-        dit_repo="realrebelai/KREA-2_GGUFs",
-        dit_file="BASE/Krea-2-Base-{quant}.gguf", dit_quants=_K_QUANTS,
-        encoder_repo=_KREA2_ENCODER,
-        encoder_file="Qwen3-VL-4B-Instruct-{quant}.gguf",
-        encoder_quants=("Q4_K_M", "Q8_0"), **_KREA2_VAE,
-        license="krea-2-community", license_url=_KREA2_LICENSE,
-        license_note=_KREA2_NOTE, encoder_license="apache-2.0",
-        encoder_bytes=4_280_406_816, vae_bytes=253_807_712,
-        aliases=("krea-2-raw",)),
 )}
 
 # The DiT and encoder quants a recipe pulls on each memory class.
@@ -171,14 +160,12 @@ DEFAULT_QUANTS = {
     # the staged load. Q8_0 needs the 32 GB class.
     "krea-2-turbo": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
-    "krea-2": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
-               32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
 }
 
 
 # The image size an entry pulled with the class default DiT gets in its
 # defaults, where that DiT makes images smaller than the family's size.
-DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}, "krea-2": {16: "512x512"}}
+DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}}
 
 
 def recipe(name: str) -> Recipe | None:

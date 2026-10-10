@@ -508,7 +508,7 @@ def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
     # which a header fixture does not carry.
     monkeypatch.setattr(loader, "identify_dit", lambda path: replace(
         fingerprint.identify(views[Path(path).name]),
-        variant={"k2t": "turbo", "k2r": "raw"}[Path(path).stem]))
+        variant={"k2t": "turbo", "k2r": "unknown"}[Path(path).stem]))
     sp_routes._IMAGE_IDENTITY.clear()
     entry = {"encoder": str(tmp_path / "enc.gguf"),
              "vae": str(tmp_path / "vae.gguf")}
@@ -525,7 +525,7 @@ def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
         serving.clear_resolved_models()
     assert [(by_id[i]["image"], by_id[i]["family"], by_id[i]["variant"],
              by_id[i]["edit"]) for i in ("k2t", "k2r")] == [
-        (True, "krea2", "turbo", False), (True, "krea2", "raw", False)]
+        (True, "krea2", "turbo", False), (True, "krea2", "unknown", False)]
 
 
 def test_snapshot_carries_the_image_section_with_image_models():

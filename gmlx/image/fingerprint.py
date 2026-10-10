@@ -301,6 +301,8 @@ def _variant(fam, view: HeaderView, variant: str | None) -> dict:
     if not fam.identity_tensors:
         return {"variant": variant or "default", "identity_hash": None}
     h = weight_identity(view, fam.identity_tensors)
+    if h is not None and h in fam.refused:
+        raise ImageModelError(fam.refused[h])
     row = fam.variants.get(h) if h else None
     if variant is None:
         return {"variant": row.name if row else "unknown",

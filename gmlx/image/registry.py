@@ -102,6 +102,8 @@ class Family:
     fp32_keep: tuple = ()
     identity_tensors: tuple = ()     # tensors hashed for the variant
     variants: dict = field(default_factory=dict)   # hash -> VariantRow
+    # hash -> why gmlx image refuses a file of known weights
+    refused: dict = field(default_factory=dict)
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
     # The sampling row of a variant without one, such as a file whose
     # identity matches no row; None leaves it without defaults.

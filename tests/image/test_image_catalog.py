@@ -23,8 +23,8 @@ def test_a_recipe_resolves_by_name_or_alias():
     assert catalog.recipe_for("qwen_image21", "turbo").name == \
         "qwen-image-turbo"
     assert catalog.recipe_for("qwen_image21", "unknown").name == "qwen-image"
-    assert catalog.recipe("krea-2-raw").variant == "raw"
-    assert catalog.recipe_for("krea2", "raw").name == "krea-2"
+    assert catalog.recipe("krea-2-raw") is None
+    assert catalog.recipe("krea-2") is None
     assert catalog.recipe_for("krea2", "turbo").name == "krea-2-turbo"
 
 

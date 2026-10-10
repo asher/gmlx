@@ -155,10 +155,8 @@ def test_the_krea2_schedule_shifts_turbo_by_its_constant():
     turbo = fam.schedule(8, tokens=4096, variant="turbo")
     assert np.array_equal(turbo, schedule.krea2_sigmas(8, 1.15))
     assert np.array_equal(turbo, fam.schedule(8, tokens=64, variant="turbo"))
-    raw = fam.schedule(52, tokens=4096, variant="raw")
-    mu = schedule.calculate_shift(4096, 256, 6400, 0.5, 1.15)
-    assert np.array_equal(raw, schedule.krea2_sigmas(52, mu))
-    assert not np.array_equal(raw, fam.schedule(52, tokens=1024,
-                                                variant="raw"))
-    with pytest.raises(ValueError, match="pass tokens"):
-        fam.schedule(8, tokens=None, variant=None)
+    # Any other variant, and a file whose identity matches none, has no
+    # schedule to fall back on.
+    for variant in (None, "unknown", "raw"):
+        with pytest.raises(ValueError, match="turbo only"):
+            fam.schedule(8, tokens=4096, variant=variant)

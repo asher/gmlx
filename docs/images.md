@@ -66,13 +66,13 @@ pixels. `gmlx pull` takes a model by its name:
 | `qwen-image` | Qwen-Image 2.1 | 40 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `qwen-image-turbo` | Qwen-Image 2.1 Turbo | 8 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `krea-2-turbo` | Krea 2 Turbo | 8 | From one image | Qwen3-VL-4B-Instruct |
-| `krea-2` | Krea 2 Raw | 52 | From one image | Qwen3-VL-4B-Instruct |
 
 The Qwen-Image 2.1 models are for non-commercial use only, and Krea 2 is
 free for commercial use only under $1M of annual revenue and 50 seats, as
 [Licenses](#licenses) describes. [Benchmarks](benchmarks.md#image-generation)
 compares the speed of the first three with ComfyUI and stable-diffusion.cpp,
-and of Krea 2 Turbo with ComfyUI.
+and of Krea 2 Turbo with ComfyUI. Of Krea 2, gmlx runs Turbo, and it
+refuses a Krea 2 Raw GGUF by name.
 
 ## Pull a model
 
@@ -126,7 +126,6 @@ runs on:
 | `qwen-image` | Q4_K_M | Q8_0 | Q8_0 | F16 |
 | `qwen-image-turbo` | AD-Q4_K | Q8_0 | BF16 | BF16 |
 | `krea-2-turbo` | Q3_K_M | Q6_K | Q8_0 | Q8_0 |
-| `krea-2` | Q3_K_M | Q6_K | Q8_0 | Q8_0 |
 
 The table gives the DiT quant, and the text encoder is Q8_0 on every
 class. A Mac takes the column of the largest class its RAM holds, and a
@@ -371,12 +370,10 @@ jobs of the OpenAI routes, and share the GPU with chat in the same way.
 | Qwen-Image 2.1 | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
 | Qwen-Image 2.1 Turbo | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
 | Krea 2 Turbo | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use only under $1M of annual revenue and 50 seats. A deployment must filter the content it makes. |
-| Krea 2 Raw | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use only under $1M of annual revenue and 50 seats. A deployment must filter the content it makes. |
 | Qwen3-4B, Qwen3-VL-8B-Instruct, the text encoders | Apache 2.0 | Any, under the license's terms |
 | Qwen3-VL-4B-Instruct, the Krea 2 text encoder | Apache 2.0 | Any, under the license's terms |
 
 `gmlx pull` prints the license of each model before it downloads. The
 GGUF files are quantized by unsloth, and the Qwen-Image 2.1 Turbo files by
 AtomicChat, under the same licenses. The Krea 2 Turbo files are quantized by
-Abiray and the Krea 2 Raw files by realrebelai, and the Krea 2 VAE file comes
-from Comfy-Org's Krea 2 repository.
+Abiray, and the Krea 2 VAE file comes from Comfy-Org's Krea 2 repository.
