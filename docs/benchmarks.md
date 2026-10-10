@@ -363,8 +363,9 @@ each model's ds4-server build.
 ## Image generation
 
 gmlx draws a 1024x1024 image faster than ComfyUI and
-stable-diffusion.cpp for each of the three image models, and faster
-than mflux for Z-Image-Turbo, on the M5 Max listed under
+stable-diffusion.cpp for Z-Image-Turbo and both Qwen-Image 2.1 models,
+faster than ComfyUI for Krea 2 Turbo, and faster than mflux for
+Z-Image-Turbo, on the M5 Max listed under
 [Methodology](#methodology). Each speedup is the other engine's time
 divided by gmlx's, with the same GGUF file on both sides, except for
 mflux, which runs its own MLX quants against the gmlx file nearest in
@@ -379,8 +380,8 @@ bits.
   load; for mflux they cover the steps alone.
 - ComfyUI 0.37.0 ran with ComfyUI-GGUF and torch 2.14 on MPS in bf16,
   started with `--use-pytorch-cross-attention`. For the Qwen-Image
-  models it took the prompt conditioning from gmlx, so its times cover
-  the DiT, the sampler and the VAE.
+  and Krea 2 models it took the prompt conditioning from gmlx, so its
+  times cover the DiT, the sampler and the VAE.
 - stable-diffusion.cpp f89d9b13 was built with Metal and run with
   `--diffusion-fa`.
 - mflux 0.20.0 ran its 4-bit and 8-bit Z-Image-Turbo quants.
@@ -407,6 +408,12 @@ bits.
 |---|---|--:|--:|--:|--:|--:|--:|
 | ComfyUI with ComfyUI-GGUF | qwen-image-2.1-Q4_K_M.gguf | 3.06 | 1.66 | 125.1 | 66.5 | 1.84x | 1.88x |
 | stable-diffusion.cpp | qwen-image-2.1-Q4_K_M.gguf | 5.39 | 1.66 | 221.1 | 66.5 | 3.24x | 3.32x |
+
+### Krea 2 Turbo, 8 steps
+
+| Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
+|---|---|--:|--:|--:|--:|--:|--:|
+| ComfyUI with ComfyUI-GGUF | Krea-2-Turbo-Q4_K_M.gguf | 5.55 | 2.89 | 45.1 | 23.4 | 1.92x | 1.93x |
 
 ## Serving measurements
 

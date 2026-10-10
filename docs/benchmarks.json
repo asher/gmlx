@@ -3356,6 +3356,24 @@
             "speedup_image": 3.32
           }
         ]
+      },
+      "base-krea2": {
+        "model": "Krea 2 Turbo",
+        "steps": 8,
+        "size": 1024,
+        "rows": [
+          {
+            "engine": "ComfyUI with ComfyUI-GGUF",
+            "weights": "Krea-2-Turbo-Q4_K_M.gguf",
+            "step_s": 5.555,
+            "image_s": 45.12,
+            "gmlx_weights": "Krea-2-Turbo-Q4_K_M.gguf",
+            "gmlx_step_s": 2.888,
+            "gmlx_image_s": 23.39,
+            "speedup_step": 1.92,
+            "speedup_image": 1.93
+          }
+        ]
       }
     }
   }
