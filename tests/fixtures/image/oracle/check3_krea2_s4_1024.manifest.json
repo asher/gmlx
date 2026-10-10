@@ -1,0 +1,175 @@
+{
+ "schema": 1,
+ "name": "check3_krea2_s4_1024",
+ "check": 3,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check3_krea2.py",
+ "argv": [
+  "check3_krea2.py",
+  "--dit",
+  "Krea-2-Turbo-Q4_K_M.gguf",
+  "--sizes",
+  "1024",
+  "--rows",
+  "512",
+  "--features",
+  "check2_krea2_check8.npz",
+  "--features-key",
+  "features_check8",
+  "--features-source",
+  "check2_krea2_check8 fp32 features of check 8's prompt",
+  "--latents",
+  "check8_stock16_1024.npz",
+  "--step",
+  "4",
+  "--latents-source",
+  "check 8 stock16 x_i at 1024, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
+  "--name",
+  "check3_krea2_s4"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "Krea-2-Turbo-Q4_K_M.gguf",
+   "size": 7486289232,
+   "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07"
+  },
+  "features": {
+   "name": "check2_krea2_check8.npz",
+   "size": 4670672,
+   "sha256": "d9083d541e7c0b6bae6170a98b11cc05fa39ffa54e40d22829cb852692a0692c"
+  },
+  "latents": {
+   "name": "check8_stock16_1024.npz",
+   "size": 16778002,
+   "sha256": "63b69b595ed16dc31d6c57c17bcc8b151c3e0e6620cc4fb3171da1523c85739f"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "blocks": 28,
+  "sigma": 0.7595109343528748,
+  "latents": "check 8 stock16 x_i at 1024, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
+  "step": 4,
+  "features": "check2_krea2_check8 fp32 features of check 8's prompt",
+  "text_rows": 19,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "float32 in both modes",
+  "gguf_codecs": {
+   "F32": 167,
+   "F16": 1,
+   "Q5_K": 61,
+   "Q4_K": 201
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.04487070425215275,
+   "cosine": 0.9989942006353565,
+   "max_abs": 1.2415932416915894
+  },
+  "times": {
+   "fp32_s": 67.6,
+   "bf16_s": 340.0
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.0897414085043055,
+   "cosine_min": 0.995976802541426
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity"
+ },
+ "notes": [],
+ "created": "2026-10-10T09:51:00Z",
+ "npz": "check3_krea2_s4_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    19,
+    30720
+   ],
+   "dtype": "float32",
+   "sha256": "aed9293f823f338c5f30a12d990e83dfc302ff8412875d2959ec7b5a13431248"
+  },
+  "latents": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "21d0702c7dc17dd86fbb2792ae61dd05901047bbb6005878f43b9e4fc7dd1d54"
+  },
+  "position_ids": {
+   "shape": [
+    4115,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "f66cebbbc896a91ea3ee016bf3d9604831be7dd21325eab92ad803a8a507b2a9"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9be87bae00e1dd8dbf473fb8439b14e4f9e3da217749730d53876c0406babf34"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "783768ebc06870945fab6e4f16bb10998e85df3bc2b1dbb5eb0e6a7713c296cc"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "f0572acb5e03735794ddd37b30b1c33fb8de51ced9ca9cfe01181c8a2cac3291"
+  }
+ }
+}

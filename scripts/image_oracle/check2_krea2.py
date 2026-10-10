@@ -155,7 +155,12 @@ def main(argv=None) -> int:
                          "text_encoder config)")
     ap.add_argument("--name", default=NAME)
     ap.add_argument("--prompts", nargs="*", default=list(PROMPTS))
+    ap.add_argument("--prompt", nargs=2, action="append", default=[],
+                    metavar=("NAME", "TEXT"),
+                    help="one more prompt by name, such as the prompt of "
+                         "check 8's trajectory")
     a = ap.parse_args(argv)
+    prompts = {**{k: PROMPTS[k] for k in a.prompts}, **dict(a.prompt)}
     torch = oracle.setup()
     t0 = time.perf_counter()
     te, census = load_encoder(torch, a)
@@ -165,7 +170,7 @@ def main(argv=None) -> int:
     fx = fixtures.FixtureWriter(a.name, check=2, family="krea2",
                                 script=SCRIPT)
     fx.add_file("encoder", a.encoder)
-    fx.inputs.update(prompts={k: PROMPTS[k] for k in a.prompts},
+    fx.inputs.update(prompts=prompts,
                      drop_index=DROP, tap_layers=list(LAYERS),
                      max_sequence_length=MAX_LEN, suffix_tokens=N_SUFFIX,
                      gguf_codecs=census, config=str(a.config.name),
@@ -176,11 +181,11 @@ def main(argv=None) -> int:
         if mode == "bf16":
             te = te.to(torch.bfloat16)
             oracle.emulate_bf16_matmul(True)
-        runs[mode] = {k: features(torch, te, tok, PROMPTS[k])
-                      for k in a.prompts}
+        runs[mode] = {k: features(torch, te, tok, v)
+                      for k, v in prompts.items()}
     oracle.emulate_bf16_matmul(False)
     rel, cos, rows, secs = {}, {}, {}, {}
-    for k in a.prompts:
+    for k in prompts:
         f32, b16 = runs["fp32"][k], runs["bf16"][k]
         assert np.array_equal(f32["ids"], b16["ids"])
         fx.add(f"ids_{k}", f32["ids"])

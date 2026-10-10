@@ -32,9 +32,17 @@ bf16 against fp32 gap: teacher-forced for the blocks, free running for
 the rows before them and for the velocity. For the other sizes the
 fixture holds the inputs and the velocities.
 
-The features are --features, an .npz with ``features`` (L, layers *
+The features are --features, an .npz with --features-key (L, layers *
 dim), or seeded normal features with the spread of each encoder layer
 given by --feature-std.
+
+The latents are seeded normal at --sigma, or with --latents and --step
+a point on a sampling trajectory: x_i and sigma_i of step i of an .npz
+with ``xs`` (steps, 1, C, [1,] H, W) and ``sigmas``, as check 8's step
+sampler records them. A trajectory gives the step the activations a
+real run has; a random latent at a middle sigma is off every trajectory
+and grows outlier channels that the bf16 rounding then spreads. With
+--latents, --sizes is the size of the recorded latents.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check3_krea2.py --dit Krea-2-Turbo-Q4_K_M.gguf --sizes 512 1024
@@ -427,6 +435,14 @@ def main(argv=None) -> int:
                     help="sizes whose fixture holds every row")
     ap.add_argument("--features", type=Path,
                     help=".npz with features (L, layers * dim)")
+    ap.add_argument("--features-key", default="features",
+                    help="array of --features to read")
+    ap.add_argument("--latents", type=Path,
+                    help=".npz with xs and sigmas of a sampling trajectory")
+    ap.add_argument("--step", type=int,
+                    help="step of --latents whose x and sigma the step takes")
+    ap.add_argument("--latents-source", default="",
+                    help="what --latents is, for the manifest")
     ap.add_argument("--features-source", default="",
                     help="what the features are, for the manifest")
     ap.add_argument("--text-len", type=int, default=48)
@@ -455,7 +471,7 @@ def main(argv=None) -> int:
     layers = cfg["num_text_layers"]
     rng = np.random.default_rng(a.seed)
     if a.features is not None:
-        feats = np.load(a.features)["features"].astype(np.float32)
+        feats = np.load(a.features)[a.features_key].astype(np.float32)
         source = a.features_source or a.features.name
     else:
         feats = (rng.standard_normal(
@@ -465,19 +481,37 @@ def main(argv=None) -> int:
     files = {"dit": a.dit}
     if a.features is not None:
         files["features"] = a.features
+    traj = None
+    if a.latents is not None:
+        if a.step is None or len(a.sizes) != 1:
+            ap.error("--latents takes --step and one size in --sizes")
+        files["latents"] = a.latents
+        with np.load(a.latents) as z:
+            x = z["xs"][a.step].astype(np.float32)
+            traj = (x.reshape(1, x.shape[1], *x.shape[-2:]),
+                    float(z["sigmas"][a.step]))
+        if traj[0].shape[-1] * 8 != a.sizes[0]:
+            ap.error(f"--latents holds {traj[0].shape}, not size "
+                     f"{a.sizes[0]}")
     for size in a.sizes:
         n = size // 8
-        lat = np.random.default_rng(a.seed + size).standard_normal(
-            (1, 16, n, n)).astype(np.float32)
+        if traj is None:
+            lat = np.random.default_rng(a.seed + size).standard_normal(
+                (1, 16, n, n)).astype(np.float32)
+            sigma, origin = a.sigma, {"seed": a.seed + size}
+        else:
+            lat, sigma = traj
+            origin = {"latents": a.latents_source or a.latents.name,
+                      "step": a.step}
         inputs = {"size": size, "blocks": cfg["num_layers"],
-                  "sigma": a.sigma, "seed": a.seed + size,
+                  "sigma": sigma, **origin,
                   "features": source, "text_rows": int(feats.shape[0]),
                   "dequant": oracle.dequant_mode(),
                   "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 "
                                  "rounding", "timestep": "float32 in both "
                                  "modes", "gguf_codecs": census}
         tag = f"_{a.blocks}b" if a.blocks is not None else ""
-        run_case(torch, models, lat, feats, a.sigma, layers,
+        run_case(torch, models, lat, feats, sigma, layers,
                  size in a.rows, f"{a.name}{tag}_{size}", inputs, files, [])
     return 0
 
