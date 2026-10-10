@@ -91,8 +91,8 @@ server can still unload it to make room, as
 Every route except `/health` and the image files of
 [URL responses](images.md#url-responses) needs the API key when the server
 has one. Most routes also answer without the `/v1` prefix. Every route takes
-a JSON body, except the two audio upload routes and the image edits and
-variations, which take a form.
+a JSON body, except the two audio upload routes and image variations, which
+take a form, and image edits, which take a form or a JSON body.
 
 `/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
 `stream_options` and `profile`. It refuses list prompts, `n` above 1,
