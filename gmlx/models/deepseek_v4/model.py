@@ -345,6 +345,9 @@ class ModelArgs(BaseModelArgs):
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
     rope_scaling: Optional[Dict] = None
+    # Resolved rope scaling (gmlx.load.rope_scaling), present only when it
+    # changes the rope.
+    gmlx_rope_scaling: Optional[Dict] = None
     attention_bias: bool = False
     attention_dropout: float = 0.0
     head_dim: int = 512
@@ -828,12 +831,37 @@ class LimitedSwiGLU(nn.Module):
         return _limited_swiglu(gate, x, self.limit)
 
 
+def _resolved_rope(config):
+    raw = getattr(config, "gmlx_rope_scaling", None)
+    if not raw:
+        return None
+    from gmlx.load import rope_scaling as rs
+
+    return rs.RopeScaling(**raw)
+
+
+def rope_scaling_for(config):
+    """The scaling of a compressed layer: the resolved one (llama.cpp's
+    rules, the run options included), else the config's own block."""
+    s = _resolved_rope(config)
+    return s if s is not None else config.rope_scaling
+
+
+def plain_rope_base(config) -> float:
+    """The base of an uncompressed layer, which rotates with the run's base
+    and no scaling (llama.cpp deepseek4 graph, freq_base_l)."""
+    s = _resolved_rope(config)
+    if s is not None and s.freq_base_override and s.freq_base is not None:
+        return float(s.freq_base)
+    return config.rope_theta
+
+
 class DeepseekV4RoPE(nn.Module):
     def __init__(
         self,
         dims: int,
         base: float,
-        scaling_config: Optional[Dict] = None,
+        scaling_config: Any = None,
         max_position_embeddings: int = 1048576,
         freq_scale: int = 1,
     ):
@@ -843,14 +871,19 @@ class DeepseekV4RoPE(nn.Module):
 
         inv_freq = 1.0 / (base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims))
         rope_type = None
-        if scaling_config is not None:
+        if scaling_config is not None and not isinstance(scaling_config, dict):
+            # A resolved RopeScaling: llama.cpp's table. The magnitude stays
+            # 1, as dsv4_rope_attn_factor cancels it in llama.cpp.
+            from gmlx.load import rope_scaling as rs
+
+            inv_freq = mx.array(rs.inv_freq(dims, base, scaling_config))
+        elif scaling_config is not None:
             rope_type = scaling_config.get("type") or scaling_config.get("rope_type")
 
         if rope_type in ("yarn", "deepseek_yarn"):
-            factor = scaling_config["factor"]
-            original_max_position_embeddings = scaling_config[
-                "original_max_position_embeddings"
-            ]
+            factor = scaling_config.get("factor", 1.0)
+            original_max_position_embeddings = scaling_config.get(
+                "original_max_position_embeddings", max_position_embeddings)
             beta_fast = scaling_config.get("beta_fast", 32)
             beta_slow = scaling_config.get("beta_slow", 1)
 
@@ -1913,7 +1946,7 @@ class Compressor(nn.Module):
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
             config.compress_rope_theta,
-            config.rope_scaling,
+            rope_scaling_for(config),
             config.max_position_embeddings,
             freq_scale=compress_ratio,
         )
@@ -2254,7 +2287,7 @@ class LocalAttention(nn.Module):
 
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
-            config.rope_theta,
+            plain_rope_base(config),
             None,
             config.max_position_embeddings,
         )
@@ -2389,7 +2422,7 @@ class CompressedAttention(nn.Module):
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
             config.compress_rope_theta,
-            config.rope_scaling,
+            rope_scaling_for(config),
             config.max_position_embeddings,
         )
         self.compressor = Compressor(config, self.compress_ratio, self.head_dim)
@@ -2583,7 +2616,7 @@ class SparseCompressedAttention(nn.Module):
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
             config.compress_rope_theta,
-            config.rope_scaling,
+            rope_scaling_for(config),
             config.max_position_embeddings,
         )
         self.compressor = Compressor(config, self.compress_ratio, self.head_dim)

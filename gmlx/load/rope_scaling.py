@@ -457,7 +457,8 @@ SWAP_ARCHES = frozenset({
 # Architectures whose every rope site applies the run options. A load of any
 # other architecture with options refuses before it reads the weights,
 # rather than running with a rope the options did not ask for.
-WIRED_ARCHES: set[str] = {"qwen4exp", *SWAP_ARCHES}
+WIRED_ARCHES: set[str] = {"qwen4exp", "deepseek4", "deepseek41",
+                          *SWAP_ARCHES}
 
 
 def require_wired(arch: str, override: RopeOverride | None) -> None:

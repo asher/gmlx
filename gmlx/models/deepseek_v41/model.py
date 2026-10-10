@@ -102,6 +102,9 @@ class ModelArgs(BaseModelArgs):
     rms_norm_eps: float = 1e-20
     rope_theta: float = 10000.0
     rope_scaling: Optional[Dict] = None
+    # Resolved rope scaling (gmlx.load.rope_scaling), present only when it
+    # changes the rope.
+    gmlx_rope_scaling: Optional[Dict] = None
     attention_bias: bool = False
     head_dim: int = 512
     scoring_func: str = "sqrtsoftplus"
@@ -1051,8 +1054,9 @@ class DeepseekV41Attention(nn.Module):
         # One frequency table per layer, shared by q, the window KV, the
         # latent and the indexer. A ratio-0 layer keeps the plain theta and
         # drops YaRN.
-        theta = config.compress_rope_theta if self.compress_ratio else config.rope_theta
-        scaling = config.rope_scaling if self.compress_ratio else None
+        theta = (config.compress_rope_theta if self.compress_ratio
+                 else _v4.plain_rope_base(config))
+        scaling = _v4.rope_scaling_for(config) if self.compress_ratio else None
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim, theta, scaling, config.max_position_embeddings
         )
