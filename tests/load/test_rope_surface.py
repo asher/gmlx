@@ -164,6 +164,16 @@ def test_options_on_an_unwired_arch_refuse(monkeypatch):
     config_synth._add_rope_scaling(_meta(), {}, "qwen3", None)
 
 
+def test_hf_source_with_options_refuses(tmp_path):
+    """A config from hf_source skips the synthesizer that applies the
+    options, so the load refuses before it reads the file."""
+    from gmlx.load.loader import load_model
+
+    with pytest.raises(ValueError, match="hf_source"):
+        load_model(str(tmp_path / "absent.gguf"), hf_source=str(tmp_path),
+                   rope_override=CARD)
+
+
 def test_scoped_entry_point_sets_and_restores():
     seen = []
 

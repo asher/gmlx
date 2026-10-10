@@ -1461,6 +1461,11 @@ def load_model(
 
     _log = loadlog.verbose_print
     active_before = _active_now()
+    if hf_source is not None and not rope_scaling.active_override().is_empty():
+        # The supplied config skips the synthesizer, which applies them.
+        raise ValueError(
+            "the rope scaling options do not apply to a config from "
+            "hf_source (--hf-source); drop one of them")
 
     # 0. preflight - discover shards, classify codecs (IQ / unsupported types
     #    refuse here, naming the codec, before kq.load_gguf's cryptic

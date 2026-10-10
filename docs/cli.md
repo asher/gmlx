@@ -475,7 +475,8 @@ gmlx run model.gguf --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144
 A YaRN factor from these flags extends the reported context to the original
 context times the factor. A constant factor can cost quality on short
 prompts, so pick the smallest factor that fits your context. A model whose
-rope gmlx cannot scale yet refuses the flags at load.
+rope gmlx cannot scale yet refuses the flags at load, and so does a load
+with `--hf-source`, whose config does not take them.
 
 ## gmlx chat
 
