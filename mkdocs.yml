@@ -117,6 +117,7 @@ nav:
           - arch-coverage.md
           - vlm.md
           - streaming.md
+          - long-context.md
           - lora.md
           - distill.md
           - distill-walkthrough.md

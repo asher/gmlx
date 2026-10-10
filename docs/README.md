@@ -81,6 +81,8 @@ These pages are the starting points:
 - [Vision and audio](vlm.md): Multimodal models and their `mmproj` files.
 - [Models larger than memory](streaming.md): Mixture-of-experts models that
   stream their experts from disk.
+- [Long context](long-context.md): Running a model past its trained
+  context with rope scaling.
 - [LoRA adapters](lora.md): Training an adapter and serving several on one
   base model.
 - [Distillation](distill.md): Teaching a small model a document or a larger

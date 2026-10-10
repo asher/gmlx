@@ -77,6 +77,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text models, and read images with their mmproj.
 - `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6
   pair in float32, which makes its image features more exact.
+- `gmlx run`, `chat` and `serve` take llama.cpp's rope scaling flags, such as
+  `--rope-scaling yarn --rope-scale 4`, and a `rope_scaling` model key, to run a
+  model past its trained context. See [Long context](docs/long-context.md).
 
 ### Changed
 
@@ -143,6 +146,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of failing as unsupported, with the vision SwiGLU clamp read from the file.
 - A Gemma 3 4B or larger GGUF ran its full attention layers without the linear
   rope factor 8 in its header, so its output differed from llama.cpp's.
+- A qwen2moe, qwen3moe or glm4moe GGUF with YaRN in its header ran with a plain
+  rope, and its output drifted from llama.cpp's at every position.
+- A GGUF with YaRN in its header and no original context, such as a qwen3 one,
+  placed the YaRN ramp at 4096 tokens rather than at its trained context.
+- A mistral3 GGUF with a rope scaling factor under a linear or missing type ran
+  as YaRN.
+- A llava or pixtral GGUF with YaRN in its header refused to load.
+- A deepseek4 config whose YaRN block lacked a factor or an original context
+  refused to build.
 - `gmlx launch` output sent to a file or a pipe keeps the summary it prints
   before the client starts.
 - `gmlx pull`, `init` and `sync-models` reload a server started with
