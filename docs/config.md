@@ -626,9 +626,9 @@ under [`image_models`](#image-models).
 | <a id="serverimagesteps_api"></a>`image.steps_api` | `true` | Serve the [image step routes](internals/image-steps.md) that the ComfyUI node pack and `gmlx image bench --via-steps` call. |
 | <a id="serverimagesteps_remote"></a>`image.steps_remote` | `false` | Take step route requests from clients beyond loopback. The routes take uploads of any bytes, so they answer loopback clients alone by default. |
 
-The memory booked for an image model counts both caches at their full size,
-twice each, so the defaults keep one model of any family in reach of a
-16 GB Mac.
+The memory gmlx counts for an image model includes both caches at their
+full size, twice each. At the defaults, one model of any family still fits
+on a 16 GB Mac at its default quant and size.
 
 ### Structured decisions
 

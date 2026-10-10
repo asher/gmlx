@@ -52,7 +52,7 @@ is internal and may change between releases.
 | `GMLX_PREFLIGHT_MEM` | `1` | `0` turns off the memory check that answers 400 when a prompt cannot fit. |
 | `GMLX_OVERCOMMIT` | `0` | `1` loads a model even when it does not fit beside the resident models. |
 | `GMLX_MTP_WIDTH_CAP` | Each drafter's default | Speculative width cap for every model, over each model's `speculative_width_cap`. `0` removes the cap. |
-| `GMLX_IMAGE_CHAT_SHARE` | `0.5` | GPU share of chat decode while an image runs, `0` to `0.9`. `0` gives one chat step per image block; `off` runs image steps whole. |
+| `GMLX_IMAGE_CHAT_SHARE` | `0.5` | Share of the GPU that chat replies get while an image runs, `0` to `0.9`, or `off`, as [Image serving](internals/image-serving.md) describes. |
 
 ## Runtime
 

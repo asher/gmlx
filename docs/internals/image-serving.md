@@ -14,8 +14,8 @@ no chat reply in progress, an image runs at its full speed.
 
 By default chat gets half of the GPU while both run.
 [`GMLX_IMAGE_CHAT_SHARE`](../env-vars.md#server) sets chat's share, from 0
-to 0.9, and `off` runs each image step whole, which leaves chat waiting for
-each step to end.
+to 0.9. At 0, chat runs one step after each block of the image model. `off`
+runs each image step whole, which leaves chat waiting for each step to end.
 
 ## Memory plan of a request
 
