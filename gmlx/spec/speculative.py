@@ -1500,6 +1500,9 @@ def stream_speculative(
     hidden = hiddens[0] if len(hiddens) == 1 else mx.concatenate(hiddens, axis=1)
     shared_kv = out.shared_kv_states
     b = int(first.item())
+    # out holds the last chunk's full logits and first_logits is a view of
+    # them. The decode rounds read neither, so release them here.
+    del out, first_logits
     if row_procs is not None:
         row_procs.start(b)
 
