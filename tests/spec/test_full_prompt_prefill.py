@@ -155,15 +155,31 @@ def _build_text_prompt(tokenizer, n_tokens, start=0):
     return ids[:cut]
 
 
-def _ref_first_token(model, ids):
-    """Un-chunked greedy first token from the bare language model."""
+def _last_logits(model, ids):
+    """Logits of the last position of an un-chunked forward of the bare
+    language model. A model that skips its head on request and returns its
+    final hidden states gets the head on the last row only: logits for every
+    position of a 16k prompt take 7.6 GiB. Any other model keeps the full
+    head."""
     from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
     lm = model.language_model
     cache = make_prompt_cache(lm)
     input_ids = mx.array([ids], dtype=mx.int32)
-    out = lm(input_ids, cache=cache)
+    if hasattr(lm, "speculative_logits_from_hidden"):
+        out = lm(input_ids, cache=cache, return_hidden=True, skip_logits=True)
+        hidden = getattr(out, "hidden_states", None)
+        if getattr(out, "logits", None) is None and hidden:
+            last = lm.speculative_logits_from_hidden(hidden[-1][:, -1:])
+            return last[0, -1]
+    else:
+        out = lm(input_ids, cache=cache)
     logits = out.logits if hasattr(out, "logits") else out
-    return int(mx.argmax(logits[:, -1, :], axis=-1).item())
+    return logits[0, -1]
+
+
+def _ref_first_token(model, ids):
+    """Un-chunked greedy first token from the bare language model."""
+    return int(mx.argmax(_last_logits(model, ids)).item())
 
 
 # Two engine paths compared under greedy agree token for token until the
@@ -178,12 +194,7 @@ _NEAR_TIE_LOGITS = 1.0
 def _greedy_margin(model, ids, a, b):
     """Bare-model logit gap logits[a] - logits[b] at the position after ids
     (teacher-forced, fp16 KV)."""
-    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
-    lm = model.language_model
-    cache = make_prompt_cache(lm)
-    out = lm(mx.array([ids], dtype=mx.int32), cache=cache)
-    logits = out.logits if hasattr(out, "logits") else out
-    row = logits[0, -1, :].astype(mx.float32)
+    row = _last_logits(model, ids).astype(mx.float32)
     return float(row[a] - row[b])
 
 
@@ -492,9 +503,9 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
 def test_long_context_token_parity(mtp_model):
     """8192 and 16384 token prompts: chunked prefill produces the same greedy
     first token as the unchunked reference. At these lengths, batch-GEMM
-    numerics in the logit head cause a bounded logit diff (~1-1.5) between
-    unchunked (all positions in one matmul) and chunked (2048 per matmul), but
-    the argmax must be stable."""
+    numerics cause a bounded logit diff (~1-1.5) between the unchunked
+    reference and the chunked prefill (2048 per matmul), but the argmax must
+    be stable."""
     model, drafter, config, tokenizer = mtp_model
 
     cases = [
@@ -502,15 +513,16 @@ def test_long_context_token_parity(mtp_model):
         (16384, _SEED_E),
     ]
 
-    refs = {}
+    # Each length runs its reference and its engine pass before the next
+    # length starts, with the buffer cache cleared between them, so the
+    # transients of two lengths never stack.
     for length, seed in cases:
+        mx.clear_cache()
         ids = _build_prompt(tokenizer, length, seed=seed)
-        refs[length] = (ids, _ref_first_token(model, ids))
-
-    for length, seed in cases:
+        ref = _ref_first_token(model, ids)
+        mx.clear_cache()
         if hasattr(model, "_spec_prefix_cache"):
             del model._spec_prefix_cache
-        ids, ref = refs[length]
         toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
         assert len(toks) > 0, f"length={length}: no tokens generated"
         assert toks[0] == ref, (
