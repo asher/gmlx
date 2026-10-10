@@ -100,6 +100,8 @@ _OWNED = {
                    ("model.layers.1.ffn.shared_experts.down_proj", "blk.1.ffn_down_shexp.weight", IN)],
     "diffusion-gemma": [("model.decoder.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),
                         ("model.decoder.layers.1.mlp.down_proj", "blk.1.ffn_down.weight", IN)],
+    "glm5-next": [("model.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),
+                  ("model.layers.1.self_attn.f_a_proj", "blk.1.ssm_f_a.weight", IN)],
     "glm5next": [("model.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),
                  ("model.layers.1.self_attn.f_a_proj", "blk.1.ssm_f_a.weight", IN)],
     "hy_v3": [("model.layers.0.self_attn.k_proj", "blk.0.attn_k.weight", IN),
