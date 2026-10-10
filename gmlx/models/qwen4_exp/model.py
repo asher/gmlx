@@ -112,6 +112,9 @@ class ModelArgs(BaseModelArgs):
     ple_head_vocab_sizes: List[int] = field(default_factory=list)
     tie_word_embeddings: bool = False
     kv_head_layout: str = "tiled"
+    # Resolved rope scaling (gmlx.load.rope_scaling), present only when it
+    # changes the rope.
+    gmlx_rope_scaling: Optional[dict] = None
 
     def __post_init__(self):
         if self.layer_types is None:
@@ -960,17 +963,52 @@ def _mrope_selector(sections: List[int], half: int) -> mx.array:
 
 
 def _mrope_cos_sin(positions: mx.array, rotary_dims: int, base: float,
-                   selector: mx.array):
+                   selector: mx.array, rope=None):
     """``positions [3, B, L]`` -> ``(cos, sin)`` each ``[B, L, rotary_dims]``
-    in the non-traditional (rotate-half) layout."""
+    in the non-traditional (rotate-half) layout. ``rope`` (a ``_RopeTable``)
+    replaces the plain table and scales cos and sin by its magnitude."""
     half = rotary_dims // 2
-    inv = mx.power(base, -mx.arange(0, half, dtype=mx.float32) / half)
+    if rope is not None and rope.inv is not None:
+        inv = rope.inv
+    else:
+        inv = mx.power(base, -mx.arange(0, half, dtype=mx.float32) / half)
     freqs = positions.astype(mx.float32)[..., None] * inv  # [3, B, L, half]
     _, B, L, _ = freqs.shape
     idx = mx.broadcast_to(selector[None, None, None, :], (1, B, L, half))
     freqs = mx.take_along_axis(freqs, idx.astype(mx.uint32), axis=0)[0]
     emb = mx.concatenate([freqs, freqs], axis=-1)
+    if rope is not None and rope.mscale != 1.0:
+        return mx.cos(emb) * rope.mscale, mx.sin(emb) * rope.mscale
     return mx.cos(emb), mx.sin(emb)
+
+
+class _RopeTable:
+    """The scaled rope of one site (gmlx.load.rope_scaling): the
+    ``mx.fast.rope`` table, its reciprocal for the cos/sin path, and the
+    magnitude llama.cpp multiplies cos and sin by (ggml rope_yarn)."""
+
+    def __init__(self, raw: dict, rotary_dims: int, base: float):
+        from gmlx.load import rope_scaling as rs
+
+        scaling = rs.RopeScaling(**raw)
+        if scaling.freq_base_override and scaling.freq_base is not None:
+            base = scaling.freq_base
+        self.dims = rotary_dims
+        self.freqs = rs.freqs(rotary_dims, base, scaling)
+        self.inv = mx.array(rs.inv_freq(rotary_dims, base, scaling))
+        self.mscale = scaling.mscale
+
+    def __call__(self, x, offset, scale=1.0):
+        if self.mscale != 1.0:
+            d = self.dims
+            x = mx.concatenate([x[..., :d] * self.mscale, x[..., d:]], axis=-1)
+        return mx.fast.rope(x, self.dims, traditional=False, base=None,
+                            scale=scale, offset=offset, freqs=self.freqs)
+
+
+def _rope_table(args, rotary_dims: int) -> "_RopeTable | None":
+    raw = getattr(args, "gmlx_rope_scaling", None)
+    return _RopeTable(raw, rotary_dims, args.rope_theta) if raw else None
 
 
 def _apply_rope_cos_sin(x: mx.array, cos: mx.array, sin: mx.array,
@@ -1495,6 +1533,7 @@ class QSAIndexer(nn.Module):
         self.block_topk = args.indexer_budget // ratio
         self.rotary_dims = rotary_dims
         self.rope_theta = args.rope_theta
+        self._rope_scaled = _rope_table(args, rotary_dims)
         self.q_proj = nn.Linear(args.hidden_size, self.n_heads * self.head_dim,
                                 bias=False)
         self.k_proj = nn.Linear(args.hidden_size, self.head_dim, bias=False)
@@ -1503,6 +1542,8 @@ class QSAIndexer(nn.Module):
         self._li = -1
 
     def _rope(self, x, offset, scale=1.0):
+        if self._rope_scaled is not None:
+            return self._rope_scaled(x, offset, scale)
         return mx.fast.rope(x, self.rotary_dims, traditional=False,
                             base=self.rope_theta, scale=scale, offset=offset)
 
@@ -1531,7 +1572,7 @@ class QSAIndexer(nn.Module):
         starts = (start_block + mx.arange(m, dtype=mx.int32)) * self.ratio
         pos = mx.take(pos_all, starts.astype(mx.uint32), axis=2)  # [3, B, m]
         cos, sin = _mrope_cos_sin(pos, self.rotary_dims, self.rope_theta,
-                                  selector)
+                                  selector, self._rope_scaled)
         return _apply_rope_cos_sin(pooled[:, None], cos, sin,
                                    self.rotary_dims)[:, 0]
 
@@ -1658,6 +1699,7 @@ class Attention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.rotary_dims = int(self.head_dim * args.partial_rotary_factor)
         self.rope_theta = args.rope_theta
+        self._rope_scaled = _rope_table(args, self.rotary_dims)
         H, Hkv, D = self.num_attention_heads, self.num_key_value_heads, self.head_dim
         self.q_proj = nn.Linear(args.hidden_size, H * D * 2, bias=False)
         self.k_proj = nn.Linear(args.hidden_size, Hkv * D, bias=False)
@@ -1674,6 +1716,8 @@ class Attention(nn.Module):
         self._li = layer_idx
 
     def _rope(self, x, offset):
+        if self._rope_scaled is not None:
+            return self._rope_scaled(x, offset)
         return mx.fast.rope(x, self.rotary_dims, traditional=False,
                             base=self.rope_theta, scale=1.0, offset=offset)
 
@@ -1832,7 +1876,8 @@ class Attention(nn.Module):
         cos = sin = None
         if positions is not None:
             cos, sin = _mrope_cos_sin(positions, self.rotary_dims,
-                                      self.rope_theta, self._mrope_selector)
+                                      self.rope_theta, self._mrope_selector,
+                                      self._rope_scaled)
             q = _apply_rope_cos_sin(q, cos, sin, self.rotary_dims)
             k = _apply_rope_cos_sin(k, cos, sin, self.rotary_dims)
         else:
