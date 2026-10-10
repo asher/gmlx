@@ -142,8 +142,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- GLM-5.3-Flash GGUFs whose architecture is llama.cpp's `glm5-next` load
-  instead of failing as an unsupported architecture. `glm5next` files still load.
 - GLM-5.3-Flash mmproj files with llama.cpp's `glm5v` projector load instead
   of failing as unsupported, with the vision SwiGLU clamp read from the file.
 - A Gemma 3 4B or larger GGUF ran its full attention layers without the linear
