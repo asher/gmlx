@@ -624,6 +624,30 @@ LOAD_ROOM = 1.1
 STAGE_ROOM = GiB // 4
 
 
+_ACT_CODECS = {"bfloat16": "BF16", "bf16": "BF16", "float16": "F16",
+               "fp16": "F16"}
+
+
+def cast_bytes(src, act) -> int:
+    """File bytes of the 16-bit float tensors of a DiT that its load casts
+    to the activation dtype ``act``, from a header view. Each is held
+    beside its copy until the load ends: a Qwen-Image 2.1 F16 DiT under
+    bf16 activations peaks at twice its weights. A number or None counts
+    nothing."""
+    if src is None or isinstance(src, (int, float)):
+        return 0
+    keep = _ACT_CODECS[_dtype_name(act)]
+    return sum(t.nbytes or tensor_bytes(t.shape, t.codec)
+               for t in src.tensors.values()
+               if t.codec in ("F16", "BF16") and t.codec != keep)
+
+
+def dit_transient(dit, act) -> int:
+    """What the load of a DiT holds over what stays resident, as
+    ``load_transient`` counts the other parts: its cast tensors."""
+    return int(LOAD_ROOM * cast_bytes(dit, act))
+
+
 def load_transient(encoder=None, vae=None, mmproj=None) -> int:
     """Bytes the load of an image pipeline holds at its peak over what
     stays resident, from the header views of the encoder and its mmproj

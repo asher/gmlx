@@ -653,6 +653,7 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     monkeypatch.setattr(api, "_header_bytes",
                         lambda path, kind: 0 if path is None else sizes[kind])
     seen = []
+    monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
     monkeypatch.setattr(pf, "load_transient",
                         lambda *parts: seen.append(parts) or 300 << 20)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
@@ -694,6 +695,43 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     assert pf.check("d", "e", "v", height=1024, width=1024, cfg=None) is None
 
 
+def test_the_preflight_counts_the_dit_tensors_its_load_casts(monkeypatch):
+    """A Qwen-Image 2.1 F16 DiT loads under bf16 activations, so each of
+    its tensors is held beside its cast copy: on a 32 GB Mac the load
+    peaked at 28.2 GiB against a budget of 20.3 GiB. The plan counts the
+    cast in each load phase and refuses the file, as it would a quant too
+    large."""
+    from gmlx.image import memfit
+    from gmlx.image import text_encoder as te
+    from gmlx.serve import capacity
+
+    pf = image_preflight
+    fam = get_family("qwen_image21")
+    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+        family=fam, variant="turbo"))
+    weights = int(13.25 * memfit.GiB)
+    sizes = {"dit": weights, "encoder": 4 << 30, "vae": 1 << 30}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.setattr(pf, "load_transient", lambda e, v, m: 300 << 20)
+
+    def view(codec):
+        return SimpleNamespace(tensors={"w": SimpleNamespace(
+            shape=(), codec=codec, nbytes=weights)})
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: int(20.27 * memfit.GiB))
+    kw = dict(height=1024, width=1024, cfg=None)
+    monkeypatch.setattr(te, "_header_view", lambda path: view("BF16"))
+    assert pf.check("d", "e", "v", **kw).fits
+    monkeypatch.setattr(te, "_header_view", lambda path: view("F16"))
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        pf.check("d", "e", "v", **kw)
+    assert e.value.plan.terms["load_peak"] >= weights
+    assert "smaller DiT quant" in str(e.value)
+
+
 def test_the_preflight_stages_the_load_when_no_other_lever_fits(
         monkeypatch):
     from gmlx.image import memfit
@@ -706,6 +744,7 @@ def test_the_preflight_stages_the_load_when_no_other_lever_fits(
     sizes = {"dit": 3 << 30, "encoder": 4 << 30, "vae": 160 << 20}
     monkeypatch.setattr(api, "_header_bytes",
                         lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
     monkeypatch.setattr(pf, "load_transient", lambda e, v, m: (
         (500 << 20 if e else 0) if v is None else 300 << 20 if e is None
         else 500 << 20))
@@ -1441,6 +1480,7 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
                         lambda path, kind: 0 if path is None else sizes[kind])
     monkeypatch.setattr(te, "_header_view", lambda path: 2 << 30)
     seen = []
+    monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
     monkeypatch.setattr(pf, "load_transient",
                         lambda *parts: seen.append(parts) or 1 << 30)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)

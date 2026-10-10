@@ -407,6 +407,35 @@ def test_the_memory_gate_runs_on_header_sizes_before_any_bytes_are_read(
     assert seen == [(float(size), str(p))]
 
 
+def test_the_memory_gate_counts_the_tensors_the_load_casts(toy, tmp_path,
+                                                          monkeypatch):
+    """A 16-bit tensor of the other float type is held beside its copy in
+    the activation dtype until the load ends, so the gate counts it
+    twice."""
+    from gmlx.serve import capacity
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    t = _tensors()
+    name = "final_layer.linear.weight"
+    w16 = np.random.default_rng(1).standard_normal((16, 64)).astype(
+        np.float16)
+    t[name] = (w16, "F16")
+    p = write_gguf(tmp_path / "toy.gguf", t)
+    size = sum(a.nbytes for a, _ in t.values())
+    seen = []
+
+    def defer(weight_bytes, model_id):
+        seen.append(weight_bytes)
+        raise capacity.LoadDeferred("busy")
+
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1 << 30)
+    monkeypatch.setattr(capacity, "preload_gate", defer)
+    _forbid_tensor_reads(monkeypatch)
+    with pytest.raises(capacity.LoadDeferred):
+        _load(p)
+    assert seen == [float(size + w16.nbytes)]
+
+
 def test_overcommit_skips_the_memory_gate(toy, tmp_path, monkeypatch):
     from gmlx.serve import capacity
 

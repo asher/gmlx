@@ -38,6 +38,15 @@ def load_transient(encoder: str | None, vae: str | None,
         None if mmproj is None else _header_view(mmproj))
 
 
+def dit_transient(dit: str, act) -> int:
+    """Bytes the load of the DiT holds over what stays resident, from its
+    header: the 16-bit float tensors it casts to ``act``."""
+    from gmlx.image import memfit
+    from gmlx.image.text_encoder import _header_view
+
+    return memfit.dit_transient(_header_view(dit), act)
+
+
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,
@@ -65,14 +74,16 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
         cfg = row.cfg
     act = image_activation(fam)
     tower = None if mmproj is None else _header_view(mmproj)
+    # The DiT loads after the encoder, in either order.
+    cast = dit_transient(dit, act.dit)
     return memfit.plan_memory(
         _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
         _header_bytes(vae, "vae"), tower,
         adapters=adapters, family=fam, height=height, width=width, cfg=cfg,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
         ref_sizes=[(int(h), int(w)) for h, w in refs],
-        load_peak=load_transient(encoder, vae, mmproj),
+        load_peak=max(load_transient(encoder, vae, mmproj), cast),
         # Each part alone, for the staged order.
         load_parts=(load_transient(encoder, None, mmproj),
-                    load_transient(None, vae, None)),
+                    max(load_transient(None, vae, None), cast)),
         encoder_owned=not keep_encoder)

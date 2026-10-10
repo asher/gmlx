@@ -864,6 +864,20 @@ def test_the_load_term_covers_the_measured_loads():
     assert t(enc, vae, mm) == max(t(enc, None, mm), t(None, vae))
 
 
+def test_the_dit_load_term_is_the_16_bit_tensors_it_casts():
+    view = SimpleNamespace(tensors={
+        "a": SimpleNamespace(shape=(), codec="F16", nbytes=8 << 20),
+        "b": SimpleNamespace(shape=(), codec="BF16", nbytes=4 << 20),
+        "c": SimpleNamespace(shape=(), codec="Q4_K", nbytes=2 << 20),
+        "d": SimpleNamespace(shape=(), codec="F32", nbytes=1 << 20)})
+    assert memfit.cast_bytes(view, "bfloat16") == 8 << 20
+    assert memfit.cast_bytes(view, "float16") == 4 << 20
+    assert memfit.cast_bytes(1 << 30, "bfloat16") == 0
+    assert memfit.cast_bytes(None, "bfloat16") == 0
+    assert memfit.dit_transient(view, "bf16") == int(
+        memfit.LOAD_ROOM * (8 << 20))
+
+
 def test_a_plan_made_before_the_load_has_a_load_phase(q_view):
     kw = dict(family="qwen_image21", height=512, width=512,
               overcommit=False)

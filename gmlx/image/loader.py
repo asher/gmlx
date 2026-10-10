@@ -18,7 +18,7 @@ import mlx.nn as nn
 from mlx.utils import tree_flatten
 
 from .fingerprint import ImageModelError, Identified, identify, view_from_scans
-from .memfit import file_bytes, gate_load
+from .memfit import cast_bytes, file_bytes, gate_load
 
 _ACT_DTYPES = (mx.bfloat16, mx.float16)
 _ORIG_SHAPE_KEY = "comfy.gguf.orig_shape."
@@ -176,8 +176,10 @@ def load_dit(path: str, *, family: str | None = None,
         shown += f", sampling as {fam.unknown_variant}"
     log(f"[image] {fam.title} ({shown}), layout {ident.layout}, "
         f"{len(view.tensors)} tensors")
-    gate_load(file_bytes(view), str(path), what=f"{fam.title} DiT",
-              hint="Try a smaller DiT quant")
+    # The tensors cast to the activation dtype are held twice until the
+    # load ends.
+    gate_load(file_bytes(view) + cast_bytes(view, act), str(path),
+              what=f"{fam.title} DiT", hint="Try a smaller DiT quant")
 
     before = _active_now()
     arrays, meta, _, _, _ = load_gguf_wire_bytes(
