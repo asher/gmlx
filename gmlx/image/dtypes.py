@@ -54,6 +54,27 @@ def _gen(gen: int | None) -> int:
     return gpu_arch_gen()
 
 
+def chip_name(gen: int | None = None) -> str:
+    """M1 or M2 by GPU generation, else the generation number."""
+    gen = _gen(gen)
+    return _CHIPS.get(gen, f"Apple GPU generation {gen}")
+
+
+def chip_refusal(family: str, title: str) -> str | None:
+    """Why this Mac does not run ``family``, named ``title``, in words for
+    a download refusal, or None when it runs it."""
+    try:
+        image_activation(family)
+    except ImageDtypeError:
+        why = (f"{title} needs an M3 or newer, and this Mac has an "
+               f"{chip_name()} chip")
+        if family in FP16_FAMILIES:
+            why += (f". Set {ALLOW_FP16_ENV}=1 to run it in float16 anyway, "
+                    "with images that differ from an M3's")
+        return why
+    return None
+
+
 def _native_bf16(gen: int) -> bool:
     return gen == 0 or gen >= _NATIVE_BF16_GEN
 
@@ -70,7 +91,7 @@ def image_activation(family: str, *, gen: int | None = None,
     gen = _gen(gen)
     if _native_bf16(gen):
         return Activation(mx.bfloat16, mx.bfloat16, gen)
-    chip = _CHIPS.get(gen, f"Apple GPU generation {gen}")
+    chip = chip_name(gen)
     if family not in FP16_FAMILIES:
         raise ImageDtypeError(
             f"{family} needs bfloat16, which the {chip} chip lacks, and it "

@@ -272,6 +272,13 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # encoder and VAE too.
     image, image_family = ((None, None) if mmproj or adapter or drafter
                            else _image_role(report, scans))
+    # A DiT this chip does not run is refused like an unloadable file; its
+    # cast below then counts 0.
+    chip_error = None
+    if image == "dit" and image_family:
+        from gmlx.image.dtypes import chip_refusal
+        from gmlx.image.registry import get_family
+        chip_error = chip_refusal(image_family, get_family(image_family).title)
     combined = None
     if image == "dit" and size_bytes:
         extra = _image_companion_bytes(image_family)
@@ -315,6 +322,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "image": image,
         "image_family": image_family,
         "combined_bytes": combined,
+        "chip_error": chip_error,
         "n_shards": n_shards,
         "n_tensors": report.n_tensors,
         "codecs": dict(sorted(report.histogram.items())),
@@ -332,7 +340,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # (mmproj / LoRA adapter).
         "usable": runs
                   or (bool(mmproj or adapter or drafter or image)
-                      and report.loadable_codecs),
+                      and report.loadable_codecs and chip_error is None),
     }
 
 
@@ -408,7 +416,8 @@ def _print_report(v: dict) -> None:
         print("  => adapter companion: a LoRA adapter, not a standalone model -")
         print("     attach it to its base GGUF: --adapter on run/chat/serve, or")
         print("     `adapter:` per model in the server config.")
-    elif v.get("image") == "dit" and v["codecs_loadable"]:
+    elif v.get("image") == "dit" and v["codecs_loadable"] \
+            and not v.get("chip_error"):
         print("  => image DiT: it runs with its text encoder and VAE. `gmlx pull`")
         print("     with the model name fetches all three, and `image_models:` in")
         print("     the server config serves them.")
@@ -430,6 +439,8 @@ def _print_report(v: dict) -> None:
             reasons.append("architecture not supported")
         if v.get("hadamard_error"):
             reasons.append("Hadamard fold not supported for this file")
+        if v.get("chip_error"):
+            reasons.append(v["chip_error"])
         print(f"  => not loadable: {'; '.join(reasons)}")
 
 
@@ -1118,8 +1129,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "destination (default: search the standard config "
                          "locations).")
     ap.add_argument("--force", action="store_true",
-                    help="Download even if the header check says it won't load "
-                         "or the disk-space check fails.")
+                    help="Download even if the header check says it won't load, "
+                         "the disk-space check fails, or this chip does not "
+                         "run the image model.")
     ap.add_argument("--hf-source", default=None,
                     help="Treat the arch as loadable with this config override.")
     ap.add_argument("--max-mb", type=int, default=None,
@@ -1218,6 +1230,13 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                                                 or v.get("drafter")
                                                 or v.get("image")):
                 reasons.append(f"unsupported arch: {v['arch'] or '?'}")
+            if v.get("chip_error") and not reasons:
+                print(f"\nerror: {v['chip_error']}. Pass --force to download "
+                      "it anyway", file=sys.stderr)
+                all_ok = False
+                continue
+            if v.get("chip_error"):
+                reasons.append(v["chip_error"])
             why = f" - {'; '.join(reasons)}" if reasons else ""
             print(f"\nrefusing to download an unloadable GGUF{why}. Pass --force to "
                   "override, or pick a different quant.", file=sys.stderr)

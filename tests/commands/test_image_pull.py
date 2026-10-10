@@ -648,6 +648,47 @@ def test_an_image_dit_skips_the_chat_arch_gate_and_fits_with_its_parts():
     assert v["usable"] and v["arch_error"] is None
 
 
+@pytest.mark.parametrize("gen, chip", [(13, "M1"), (14, "M2")])
+def test_a_dit_this_chip_does_not_run_is_refused_by_name(monkeypatch, capsys,
+                                                         gen, chip):
+    import gmlx.load.dtypes as load_dtypes
+
+    monkeypatch.setattr(load_dtypes, "gpu_arch_gen", lambda: gen)
+    monkeypatch.delenv("GMLX_IMAGE_ALLOW_FP16", raising=False)
+    ref = remote.parse_ref("hf:unsloth/Z-Image-Turbo-GGUF/z-image-turbo-Q4_K_M.gguf")
+    v = manage._verdict(ref, _report("lumina2"), size_bytes=5 << 30)
+    assert not v["usable"]
+    assert v["chip_error"].startswith("Z-Image needs an M3 or newer, and "
+                                      f"this Mac has an {chip} chip. Set "
+                                      "GMLX_IMAGE_ALLOW_FP16=1")
+    manage._print_report(v)
+    assert f"not loadable: {v['chip_error']}" in capsys.readouterr().out
+    monkeypatch.setenv("GMLX_IMAGE_ALLOW_FP16", "1")
+    assert manage._verdict(ref, _report("lumina2"), size_bytes=5 << 30)["usable"]
+
+
+def test_a_dit_pull_this_chip_does_not_run_says_so_alone(tmp_path,
+                                                        monkeypatch, capsys):
+    import gmlx.load.dtypes as load_dtypes
+
+    monkeypatch.setattr(load_dtypes, "gpu_arch_gen", lambda: 14)
+    monkeypatch.delenv("GMLX_IMAGE_ALLOW_FP16", raising=False)
+    monkeypatch.setattr(manage, "_resolve_to_file", lambda ref: ref)
+    monkeypatch.setattr(manage, "_build_report", lambda ref, max_mb: (
+        _report("lumina2"), 1, None))
+    monkeypatch.setattr(manage, "_ref_size_bytes", lambda ref, rep: 5 << 30)
+    monkeypatch.setattr(manage, "_download_ref",
+                        lambda ref, dest: pytest.fail("must not download"))
+    rc = manage.cmd_pull(["hf:unsloth/Z-Image-Turbo-GGUF/"
+                          "z-image-turbo-Q4_K_M.gguf", "--to", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: Z-Image needs an M3 or newer, and this Mac has an M2 chip" \
+        in err
+    assert err.rstrip().endswith(". Pass --force to download it anyway")
+    assert "unloadable" not in err and "quant" not in err
+
+
 def test_a_16_bit_dit_fits_with_the_cast_its_load_holds(monkeypatch):
     from types import SimpleNamespace
 
@@ -950,3 +991,48 @@ def test_every_image_model_name_in_the_pull_help_resolves(capsys):
     for listed in lists:
         names = {n.strip() for n in listed.split(",")}
         assert names == set(catalog.RECIPES)
+
+
+@pytest.mark.parametrize("name", sorted(catalog.RECIPES))
+@pytest.mark.parametrize("gen, chip", [(13, "M1"), (14, "M2")])
+def test_a_chip_without_bfloat16_refuses_the_pull_before_any_download(
+        lib, monkeypatch, capsys, name, gen, chip):
+    import gmlx.load.dtypes as load_dtypes
+
+    root, cfg = lib
+    Disk(monkeypatch, root)
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    monkeypatch.setattr(load_dtypes, "gpu_arch_gen", lambda: gen)
+    monkeypatch.delenv("GMLX_IMAGE_ALLOW_FP16", raising=False)
+    assert manage.cmd_pull([name, "--config", str(cfg)]) == 1
+    assert got == []
+    err = capsys.readouterr().err
+    title = catalog.RECIPES[name].title
+    assert f"{title} needs an M3 or newer, and this Mac has an {chip} chip" \
+        in err
+    assert err.rstrip().endswith(". Pass --force to download it anyway")
+    assert ("GMLX_IMAGE_ALLOW_FP16=1" in err) == (name == "z-image-turbo")
+    assert manage.cmd_pull([name, "--config", str(cfg), "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"].startswith(
+        f"{title} needs an M3 or newer")
+    manage.cmd_pull([name, "--config", str(cfg), "--force"])
+    assert got
+
+
+@pytest.mark.parametrize("name, goes", [("z-image-turbo", True),
+                                        ("qwen-image", False)])
+def test_the_float16_opt_in_lets_only_z_image_pull_on_an_m1(
+        lib, monkeypatch, capsys, name, goes):
+    import gmlx.load.dtypes as load_dtypes
+
+    root, cfg = lib
+    Disk(monkeypatch, root)
+    got = _downloads(monkeypatch)
+    _packs(monkeypatch)
+    monkeypatch.setattr(load_dtypes, "gpu_arch_gen", lambda: 13)
+    monkeypatch.setenv("GMLX_IMAGE_ALLOW_FP16", "1")
+    manage.cmd_pull([name, "--config", str(cfg)])
+    err = capsys.readouterr().err
+    assert ("needs an M3 or newer" not in err) == goes
+    assert bool(got) == goes

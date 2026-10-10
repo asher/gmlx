@@ -610,7 +610,7 @@ used again when its weights match.
 | `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs, or one image model name. Later bare filenames resolve in the first ref's repo. |
 | `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. |
 | `--config FILE` | The first default location | Read `model_dirs` from this config. |
-| `--force` | Off | Download even when the header check or the disk-space check fails. |
+| `--force` | Off | Download even when the header check, the disk-space check or the chip check of an image model fails. |
 | `--no-register` | Off | Do not add the file to the config. |
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |

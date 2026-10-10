@@ -53,6 +53,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx pull z-image-turbo`, `qwen-image`, `qwen-image-turbo` or `krea-2-turbo`
   downloads the DiT, text encoder and VAE at the quants for this Mac's memory,
   and registers it.
+- Image generation needs an M3 or newer. On an M1 or M2, `gmlx pull` refuses an
+  image model before it downloads anything, unless `--force`.
 - On a 16 GB Mac, `gmlx pull krea-2-turbo` writes `defaults.size: 512x512`
   into the entry, and `image generate` takes an entry's `defaults.size`.
 - An `image_models` entry takes `variant`, and `image generate` and `bench`

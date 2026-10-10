@@ -515,6 +515,15 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    from gmlx.image.dtypes import chip_refusal
+
+    refusal = chip_refusal(r.family, r.title)
+    if refusal and not a.force:
+        if a.json:
+            print(json.dumps({"recipe": r.name, "error": refusal}, indent=2))
+        print(f"error: {refusal}. Pass --force to download it anyway",
+              file=sys.stderr)
+        return 1
     ram = total_ram_bytes()
     dit_q, enc_q = catalog.default_quants(r, ram)
     if a.quant:
