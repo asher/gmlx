@@ -224,6 +224,41 @@ def test_fused_cycle_matches_pair(length, monkeypatch):
     assert mx.array_equal(comb_f, comb_p)
 
 
+def test_cycle_takes_the_pair_by_default(monkeypatch):
+    """A decode cycle runs the two-kernel pair unless GMLX_HC_FUSED_CYCLE=1
+    asks for the one-dispatch cycle, which serves slower."""
+    import gmlx.models.deepseek_v4.hyper_connection as hcm
+
+    if not hcm._KQ_HC_CYCLE:
+        pytest.skip("mlx-kquant hc_front_expand_collapse unavailable here")
+    cfg = _Cfg()
+    cfg.hidden_size = 1024
+    mx.random.seed(41)
+    hc = HyperConnection(cfg)
+    hc.eval()
+    w = mx.ones((cfg.hidden_size,), dtype=mx.bfloat16)
+    x = mx.random.normal((1, 1, cfg.hc_mult, cfg.hidden_size)).astype(
+        mx.bfloat16)
+    if not hc.m1_fused_ok(x):
+        pytest.skip("fused hyper-connection front unavailable here")
+    _, post, comb = hc.fused_m1(x, w)
+    x_sub = mx.random.normal((1, 1, cfg.hidden_size)).astype(mx.bfloat16)
+    calls = []
+    fused_op = hcm._kq.hc_front_expand_collapse
+
+    def spy(*a, **k):
+        calls.append(1)
+        return fused_op(*a, **k)
+
+    monkeypatch.setattr(hcm._kq, "hc_front_expand_collapse", spy)
+    monkeypatch.delenv("GMLX_HC_FUSED_CYCLE", raising=False)
+    mx.eval(hc.fused_m1_expand((x_sub, x, post, comb), w))
+    assert not calls
+    monkeypatch.setenv("GMLX_HC_FUSED_CYCLE", "1")
+    mx.eval(hc.fused_m1_expand((x_sub, x, post, comb), w))
+    assert calls
+
+
 @pytest.mark.parametrize("length", [1, 2, 5])
 def test_lag_collapse_matches_reference(length):
     """The lagged M=1 route (V4.1): the front reduction plus the sinkhorn

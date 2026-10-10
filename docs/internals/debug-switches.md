@@ -133,7 +133,7 @@ fusions.
 | `GMLX_GLM5_KDA_CONV=0` | Keep the eager GLM-5.3-Flash KDA prefill chain instead of the mlx-kquant glue kernels. |
 | `GMLX_HC_M1_MAX_ROWS` | Run hyper-connected steps up to this many rows on the fused per-row kernels. Wider steps take the GEMM route. |
 | `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels, leaving every step on the GEMM route. |
-| `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of one mlx-kquant dispatch. Output is bit-identical. |
+| `GMLX_HC_FUSED_CYCLE=1` | Run each hyper-connection cycle of a decode or verify step as one mlx-kquant dispatch instead of two. Bit-identical and slower. |
 | `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 hyper-connection cycles op by op instead of on the fused kernels. |
 | `GMLX_DS41_QAT_FUSED=0` | Run DeepSeek-V4.1 quantization round trips as compiled op chains instead of one kernel each. Output is bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL=0` | Run DeepSeek-V4.1 decode attention as a gather and op chain instead of `sdpa_sparse_decode`. |

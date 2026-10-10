@@ -28,9 +28,11 @@ except ImportError:
 
 
 def _hc_fused_cycle() -> bool:
-    """Gate for the one-dispatch hyper-connection cycle. Read on every
-    call, never cached, so a toggle harness can flip it mid-process."""
-    return os.environ.get("GMLX_HC_FUSED_CYCLE", "1") != "0"
+    """Gate for the one-dispatch hyper-connection cycle, off by default:
+    the two-kernel pair is faster at every row count on mlx-kquant 0.5.
+    Read on every call, never cached, so a toggle harness can flip it
+    mid-process."""
+    return os.environ.get("GMLX_HC_FUSED_CYCLE", "0") == "1"
 
 
 def _make_hc_sinkhorn_collapse_kernel():
@@ -490,7 +492,8 @@ class HyperConnection(nn.Module):
             # One dispatch for the expand, the front reduction and the
             # collapse: the last threadgroup of each row to publish
             # its mix dot runs the sinkhorn and the collapse.
-            # Bit-identical to the pair below.
+            # Bit-identical to the pair below, and slower than it, so
+            # only GMLX_HC_FUSED_CYCLE=1 takes it.
             x_sub, resid, post, comb = carry
             h, x, post_o, comb_o = _kq.hc_front_expand_collapse(
                 x_sub, resid, post, comb, self.fn, self.scale,
