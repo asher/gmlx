@@ -35,8 +35,10 @@ These pages are the starting points:
   bar.
 - [Speech, embeddings and rerank](services.md): The services a server can host
   beside chat models.
-- [Image generation API](images.md): The OpenAI image routes, served by
-  the image models of the configuration file.
+- [Image generation](images.md): Z-Image and Qwen-Image 2.1 models, pulled
+  by name, drawn on the command line and served on the OpenAI image routes.
+- [ComfyUI](comfyui.md): The gmlx node pack, which runs the server's image
+  models in ComfyUI graphs.
 - [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.
 - [Structured decisions](decisions.md): A probability for each answer to a
   fixed set of questions.

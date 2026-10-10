@@ -21,6 +21,8 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
   rotation, and where gmlx undoes it.
 - [Distillation internals](distill.md): How the teacher pass and the
   training head bound their memory, and the costs of the worked run.
+- [Image step routes](image-steps.md): The contract that lets a sampler in
+  another program, such as ComfyUI, run an image model one step at a time.
 
 ## Working on gmlx
 

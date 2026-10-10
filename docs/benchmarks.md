@@ -19,6 +19,7 @@ in [a JSON file](benchmarks.json), and the
 - [Model provenance](#model-provenance)
 - [Per-model detail](#per-model-detail)
 - [DeepSeek-V4 against ds4-server](#deepseek-v4-against-ds4-server)
+- [Image generation](#image-generation)
 - [Serving measurements](#serving-measurements)
 - [KV cache fidelity](#kv-cache-fidelity)
 
@@ -358,6 +359,54 @@ each model's ds4-server build.
 | 110k | 19.6 (18.9-20.5) | 14.8 (13.4-15.1) | 1.32x | 798.5 (759.8-835.1) | 626.8 (585.8-632) | 1.27x |
 | 200k | 18.7 (18.1-18.9) | 13.1 (12.9-13.4) | 1.43x | 807.9 (782.1-831.4) | 556.5 (536.1-564.9) | 1.45x |
 | 384k | 17.4 (12.9-18.2) | 12.2 (10.6-12.7) | 1.43x | 796.9 (790.7-807.7) | 612.5 (592.9-633.5) | 1.30x |
+
+## Image generation
+
+gmlx draws a 1024x1024 image faster than ComfyUI and
+stable-diffusion.cpp for each of the three image models, and faster
+than mflux for Z-Image-Turbo, on the M5 Max listed under
+[Methodology](#methodology). Each speedup is the other engine's time
+divided by gmlx's, with the same GGUF file on both sides, except for
+mflux, which runs its own MLX quants against the gmlx file nearest in
+bits.
+
+- Each engine ran 1024x1024 images with seed 42, cfg 1, euler and the
+  model's default steps, one engine at a time in its own process, over
+  three rounds in alternating order. The tables give the median of
+  rounds 2 and 3.
+- Seconds per step leave out the first step. Seconds per image cover
+  the prompt encode, the steps and the VAE decode, without the model
+  load; for mflux they cover the steps alone.
+- ComfyUI 0.37.0 ran with ComfyUI-GGUF and torch 2.14 on MPS in bf16,
+  started with `--use-pytorch-cross-attention`. For the Qwen-Image
+  models it took the prompt conditioning from gmlx, so its times cover
+  the DiT, the sampler and the VAE.
+- stable-diffusion.cpp f89d9b13 was built with Metal and run with
+  `--diffusion-fa`.
+- mflux 0.20.0 ran its 4-bit and 8-bit Z-Image-Turbo quants.
+
+### Z-Image-Turbo, 8 steps
+
+| Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
+|---|---|--:|--:|--:|--:|--:|--:|
+| ComfyUI with ComfyUI-GGUF | z-image-turbo-Q4_K_M.gguf | 2.74 | 1.48 | 22.4 | 12.2 | 1.86x | 1.84x |
+| stable-diffusion.cpp | z-image-turbo-Q4_K_M.gguf | 4.65 | 1.48 | 41.0 | 12.2 | 3.15x | 3.36x |
+| mflux | mflux 4-bit, gmlx z-image-turbo-Q4_K_M.gguf | 2.22 | 1.48 | 17.8 | 12.2 | 1.50x | 1.46x |
+| mflux | mflux 8-bit, gmlx z-image-turbo-Q8_0.gguf | 2.40 | 1.50 | 19.2 | 12.4 | 1.60x | 1.54x |
+
+### Qwen-Image 2.1 Turbo, 8 steps
+
+| Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
+|---|---|--:|--:|--:|--:|--:|--:|
+| ComfyUI with ComfyUI-GGUF | Qwen-Image-2.1-Turbo-AD-Q4_K.gguf | 3.19 | 1.76 | 28.0 | 14.7 | 1.81x | 1.91x |
+| stable-diffusion.cpp | Qwen-Image-2.1-Turbo-AD-Q4_K.gguf | 5.62 | 1.76 | 49.5 | 14.7 | 3.20x | 3.37x |
+
+### Qwen-Image 2.1, 40 steps
+
+| Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
+|---|---|--:|--:|--:|--:|--:|--:|
+| ComfyUI with ComfyUI-GGUF | qwen-image-2.1-Q4_K_M.gguf | 3.06 | 1.66 | 125.1 | 66.5 | 1.84x | 1.88x |
+| stable-diffusion.cpp | qwen-image-2.1-Q4_K_M.gguf | 5.39 | 1.66 | 221.1 | 66.5 | 3.24x | 3.32x |
 
 ## Serving measurements
 

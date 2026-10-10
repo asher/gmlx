@@ -63,7 +63,7 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
-| `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as [Image generation API](images.md) shows |
+| `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as [Image generation](images.md#setting-up-a-model) shows |
 | `POST /v1/systemone` | Probabilities for a fixed set of questions, as [Structured decisions](decisions.md) shows |
 | `POST /v1/prewarm` | Read a decision state ahead of its questions, as [Repeated states](decisions-reference.md#repeated-states) shows |
 

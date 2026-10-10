@@ -95,6 +95,7 @@ nav:
           - menubar.md
           - services.md
           - images.md
+          - comfyui.md
           - rag.md
           - decisions.md
       - Agents and containers:
@@ -155,4 +156,5 @@ nav:
       - internals/hadamard-fold.md
       - internals/debug-switches.md
       - internals/distill.md
+      - internals/image-steps.md
       - Contributing: https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md

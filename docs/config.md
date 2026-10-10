@@ -192,7 +192,9 @@ An alias cannot contain `@` or match a model id.
 ## Image models
 
 Each entry under `image_models` is one image generation model: a DiT GGUF
-with its text encoder and VAE. The entry's key is its id, which a request
+with its text encoder and VAE. [`gmlx pull`](images.md#pull-a-model) writes
+one for a model it downloads, and [model discovery](#model-discovery) adds
+one for a DiT it finds with its parts. The entry's key is its id, which a request
 to the image routes puts in its `model` field. Image ids, model ids,
 aliases and served assistants share one set of names, so an image id
 cannot repeat any of them, and it cannot contain `@`.

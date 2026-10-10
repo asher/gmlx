@@ -128,6 +128,14 @@ def test_comfyui_dir_goes_with_comfyui_only(capsys):
     assert "--comfyui-dir applies only to comfyui" in capsys.readouterr().err
 
 
+def test_comfyui_takes_its_own_flags_after_the_separator(tmp_path):
+    d = _comfy(tmp_path)
+    _rc, calls = _run(["comfyui", "--comfyui-dir", str(d), "--",
+                       "--use-pytorch-cross-attention"])
+    assert calls["argv"][-3:] == ["--port", "8188",
+                                  "--use-pytorch-cross-attention"]
+
+
 def test_comfyui_moves_off_the_server_port(tmp_path):
     d = _comfy(tmp_path)
     _rc, calls = _run(["comfyui", "--comfyui-dir", str(d), "--port", "8188"])

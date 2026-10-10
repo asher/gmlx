@@ -1,17 +1,49 @@
-# Image generation API
+# Image generation
 
-The server answers the OpenAI image routes with the image models of its
-configuration file. An OpenAI client, such as the `openai` Python package,
-works against it unchanged:
+gmlx makes images from Z-Image-Turbo and Qwen-Image 2.1 GGUF files: on the
+command line, on the server's OpenAI image routes, and in ComfyUI. With a
+config from [`gmlx init`](cli.md#gmlx-init), one command downloads a model
+and adds it to the config, and the next one draws:
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
-result = client.images.generate(prompt="a lighthouse at dusk",
-                                size="1024x1024")
+```sh
+gmlx pull z-image-turbo
+gmlx image generate z-image-turbo --prompt "a lighthouse at dusk" --seed 1 --output lighthouse.png
 ```
 
+On a Mac with 128 GB, `pull` takes the BF16 DiT and the Q8_0 text
+encoder, and the two commands print:
+
+```text
+pull z-image-turbo (Z-Image-Turbo): DiT BF16, encoder Q8_0, the default for 64 GB and up
+  dit      z-image-turbo-BF16.gguf                   11.5 GB  download
+  encoder  Qwen3-4B-Q8_0.gguf                         4.0 GB  download
+  vae      vae/diffusion_pytorch_model.safetensors    0.2 GB  download, packed to z-image-vae-BF16.gguf
+  download 15.6 GB, 248.2 GB free at ~/models
+  the three parts: 15.6 GB, which fit this Mac's 128 GB RAM
+  license: Z-Image-Turbo apache-2.0 (https://huggingface.co/Tongyi-MAI/Z-Image-Turbo); encoder apache-2.0
+downloading unsloth/Z-Image-Turbo-GGUF/z-image-turbo-BF16.gguf
+  dit: ~/models/unsloth__Z-Image-Turbo-GGUF/z-image-turbo-BF16.gguf
+downloading unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q8_0.gguf
+  encoder: ~/models/unsloth__Qwen3-4B-GGUF/Qwen3-4B-Q8_0.gguf
+downloading Tongyi-MAI/Z-Image-Turbo/vae/diffusion_pytorch_model.safetensors
+downloading Tongyi-MAI/Z-Image-Turbo/vae/config.json
+  vae: ~/models/Tongyi-MAI__Z-Image-Turbo/z-image-vae-BF16.gguf
+registered z-image-turbo in ~/.config/gmlx/gmlx.yaml (the image default)
+try it: gmlx image generate z-image-turbo --prompt "a red bicycle" --output out.png
+
+[image] Z-Image (turbo), layout default, 453 tensors
+[install] replaced 0 leaves with kquant modules
+[dtype] cast 242 float params (norms etc.) to bf16
+[load_weights] loaded 453 / 453 model parameters
+[verify] zero-copy views OK (453 params)
+[image] text encoder qwen3-4b, tap after layer 35 of 36
+[image] wrote lighthouse.png (seed 1, 9.91 s)
+```
+
+- [Models](#models)
+- [Pull a model](#pull-a-model)
+- [Which quant for your Mac](#which-quant-for-your-mac)
+- [Generate on the command line](#generate-on-the-command-line)
 - [Setting up a model](#setting-up-a-model)
 - [Routes](#routes)
 - [Request fields](#request-fields)
@@ -20,12 +52,109 @@ result = client.images.generate(prompt="a lighthouse at dusk",
 - [Streaming](#streaming)
 - [Memory, queueing and errors](#memory-queueing-and-errors)
 - [Step routes](#step-routes)
+- [Licenses](#licenses)
+
+## Models
+
+An image model is three files: a DiT GGUF that draws, the text encoder
+GGUF that reads the prompt, and a VAE that turns the DiT's latents into
+pixels. `gmlx pull` takes a model by its name:
+
+| Name | Model | Steps | Edits | Text encoder |
+|------|-------|-------|-------|--------------|
+| `z-image-turbo` | Z-Image-Turbo | 8 | From one image | Qwen3-4B |
+| `qwen-image` | Qwen-Image 2.1 | 40 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
+| `qwen-image-turbo` | Qwen-Image 2.1 Turbo | 8 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
+
+The Qwen-Image 2.1 models are for non-commercial use only, as
+[Licenses](#licenses) describes. [Benchmarks](benchmarks.md#image-generation)
+compares the speed of all three with ComfyUI and stable-diffusion.cpp.
+
+## Pull a model
+
+```sh
+gmlx pull qwen-image-turbo
+```
+
+`pull` prints its plan, then downloads. The plan names each part, its
+size, whether it is on disk already, the space the download takes beside
+the free space, and the model's license. The VAE comes as a safetensors
+file, which `pull` checks against its published digest and packs to a
+GGUF. The new entry goes under [`image_models`](config.md#image-models),
+and the first image model becomes the server's default image model.
+
+A text encoder or VAE already in a model folder is used where it is, at
+any quant, when its weights match the model's. A chat model that is the
+text encoder is shared by its id, so the server holds its weights once.
+These flags change what `pull` takes:
+
+| Flag | Effect |
+|------|--------|
+| `--quant QUANT` | Download the DiT at this quant. |
+| `--encoder-quant QUANT` | Download the text encoder at this quant, even when another quant is on disk. |
+| `--only dit,encoder,vae` | Download only these parts. The entry is added once all of them are on disk. |
+| `--keep-source` | Keep the safetensors VAE beside its GGUF. |
+| `--to DIR` | Download into this folder. |
+| `--no-register` | Download without adding an entry. |
+
+The [`gmlx pull`](cli.md#gmlx-pull) reference has every flag. Model
+discovery finds image files too: a DiT in a scanned folder with its text
+encoder and VAE becomes an image model, and a DiT without them is reported
+with the `gmlx pull ... --only encoder,vae` command that completes it.
+
+`gmlx list --image` lists the image models, `gmlx rm ID` removes one with
+the files no other model uses, and `gmlx doctor` checks that each DiT has
+its family's text encoder and VAE.
+
+## Which quant for your Mac
+
+Without `--quant`, `pull` picks the quants for the memory of the Mac it
+runs on:
+
+| Model | 16 GB | 24 GB | 32 GB | 64 GB or more |
+|-------|-------|-------|-------|---------------|
+| `z-image-turbo` | Q4_K_M | Q8_0 | BF16 | BF16 |
+| `qwen-image` | Q4_K_M | Q8_0 | Q8_0 | F16 |
+| `qwen-image-turbo` | AD-Q4_K | Q8_0 | BF16 | BF16 |
+
+The table gives the DiT quant, and the text encoder is Q8_0 on every
+class. A Mac takes the column of the largest class its RAM holds, and a
+Mac under 16 GB takes the 16 GB column.
+
+Each pick is the DiT closest to the full precision images whose load and
+image fit that class. On 16 GB the image job releases the encoder before
+the denoise, decodes in tiles and loads the parts one at a time; pull with
+`--encoder-quant q4_k_m` to leave more room for other work.
+
+`--quant` and `--encoder-quant` pick other quants:
+
+```sh
+gmlx pull qwen-image-turbo --quant ad-q5_k --encoder-quant q4_k_m
+```
+
+## Generate on the command line
+
+`gmlx image generate` takes the id of an `image_models` entry, or the DiT
+GGUF with `--encoder` and `--vae`:
+
+```sh
+gmlx image generate z-image-turbo --prompt "a red bicycle" --size 1024x1024 --output bicycle.png
+gmlx image generate qwen-image-turbo --prompt "make it a watercolor" --ref photo.jpg --output watercolor.png
+gmlx image generate z-image-turbo --prompt "a red bicycle" --init-image sketch.png --strength 0.6 --output bicycle.png
+```
+
+A PNG keeps the prompt, seed and settings in a text chunk. Before it
+loads, `generate` checks that the image fits in memory, and refuses with
+what does not fit. The
+[`gmlx image`](cli.md#gmlx-image) reference has the flags, and `gmlx image
+bench` times a model on this Mac.
 
 ## Setting up a model
 
-Add the model under [`image_models`](config.md#image-models) in the
-configuration file and reload the server. Its id is the `model` of a
-request:
+The server answers the OpenAI image routes with the image models of its
+configuration file. `gmlx pull` adds an entry, and an entry written by hand
+under [`image_models`](config.md#image-models) works the same way. Its id is
+the `model` of a request:
 
 ```sh
 curl localhost:8080/v1/images/generations -d '{
@@ -35,10 +164,24 @@ curl localhost:8080/v1/images/generations -d '{
 }'
 ```
 
+An OpenAI client, such as the `openai` Python package, works against it
+unchanged:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
+result = client.images.generate(prompt="a lighthouse at dusk",
+                                size="1024x1024")
+```
+
 An image model loads on its first request and shares the memory budget,
 the idle timeout and `/unload` with the chat models, as
 [Image models](config.md#image-models) describes. Without an image model
 in the file the routes answer 404 with type `model_not_found`.
+[Open WebUI](launch.md#open-webui) draws with the server's default image
+model, and [ComfyUI](comfyui.md) runs its own graphs on the server's image
+models.
 
 ## Routes
 
@@ -181,76 +324,25 @@ that sends it gets a warning line in the log, and the tool is dropped.
 ## Step routes
 
 The step routes run one denoise step at a time for a client whose sampler
-runs elsewhere, such as the ComfyUI node pack. They live under
-`/internal/image-steps/v1` and are an internal interface: their payloads
-can change with each contract version, and the version a client speaks
-goes in the `X-Gmlx-Steps-Contract` header of every request but
-`capabilities`. A major version the server does not speak gets 400 that
-names the side to upgrade.
+runs elsewhere, such as the [ComfyUI node pack](comfyui.md). They live under
+`/internal/image-steps/v1` and are an internal interface, which
+[Image step routes](internals/image-steps.md) describes.
 
 The routes answer loopback peers only. [`image.steps_remote`](config.md#serverimagesteps_remote)
 serves other peers that the API key admits, and
 [`image.steps_api`](config.md#serverimagesteps_api) set to `false` removes
-the routes.
+the routes. The steps of all clients queue on the image thread with the
+jobs of the OpenAI routes, and share the GPU with chat in the same way.
 
-Tensors travel as a safetensors container with content type
-`application/vnd.gmlx.tensors+safetensors`, in F32, F16, BF16, U8 or
-BOOL, and the request fields of a container travel as JSON under
-`__metadata__["gmlx"]`. Other bodies are JSON. A tensor's hash is the
-sha256 of its dtype name, its shape as JSON and its bytes, and a client
-uploads a conditioning or a LoRA matrix once by that hash.
+## Licenses
 
-| Route | Purpose |
-|-------|---------|
-| `GET capabilities` | The contract version, families, wire dtypes and limits |
-| `GET models`, `GET models/{model}/status`, `GET models/{model}/manifest` | The image models; one model's family, latent format, memory and sampling; its DiT tensor names and shapes |
-| `POST models/load`, `POST models/unload` | Load or unload a model |
-| `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash |
-| `PUT` or `HEAD tensors/{hash}`, `PUT` or `HEAD adapters/{hash}` | Upload a tensor or a LoRA matrix, or ask whether the server holds it |
-| `POST adapters/register` | Read a LoRA file under a model folder of the server |
-| `PUT patch-tables/{id}?model=ID` | Define a set of LoRA patches; its id is the sha256 of its JSON with sorted keys and no spaces |
-| `POST step` | The model output for latents at a timestep, one row per conditioning |
-| `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
-| `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
+| Model | License | Use |
+|-------|---------|-----|
+| Z-Image-Turbo | [Apache 2.0](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | Any, under the license's terms |
+| Qwen-Image 2.1 | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
+| Qwen-Image 2.1 Turbo | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
+| Qwen3-4B, Qwen3-VL-8B-Instruct, the text encoders | Apache 2.0 | Any, under the license's terms |
 
-A conditioning with reference images takes ComfyUI's form: its tensor
-holds the text rows, and `image_slots` names, for each reference image,
-the text row that its latents go in before. A step row that names more
-reference latents than slots puts the others after the text.
-
-An encode keeps each reference image at its own size, so a client that
-sizes its references gives the encoder and its own VAE the same pixels.
-Qwen-Image 2.1 takes references of 256x256 to 1024x1024 pixels in area,
-with sides a multiple of 32, and an image outside that area gets 400. An
-encode with `refs: false` leaves out the VAE latents of its reference
-images, for a client that encodes them with a VAE of its own.
-
-A step names its conditionings and its patch table by hash. When the
-server does not hold one, the step gets 409 with a `missing` list, and
-the client uploads those and sends the step again. A run keeps the
-prefix state of each of its conditionings between steps, and the
-`X-Gmlx-Prefix-Cache` header of a step answers `hit` or `miss`.
-`X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
-time less it is the transport time.
-
-A run that sits idle for 120 seconds ends within a few seconds after, and
-lets the model go. The server holds at most 32 runs, and a begin past that
-gets 429. An interrupt names its run and takes effect at the next step:
-the step running when it lands finishes on the GPU, gets 409 with code
-`interrupted`, and every later step of the run gets the same. An end
-does the same to a step in flight. An interrupt that names no run stops
-nothing.
-
-A step, a VAE decode and a VAE encode take the size limits of the OpenAI
-routes: an image over 2048x2048 pixels or with a side over 4096 gets 413,
-as does a VAE pass of more than 16 images. One whose memory plan does not
-fit beside the models loaded gets 400. The VAE routes decode and encode
-the images of a batch one at a time. `capabilities` gives the largest
-tensor and adapter upload, which are the
-[`image.tensor_cache_mb`](config.md#serverimagetensor_cache_mb) and
-[`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) caches.
-Each image model books those two caches while the step routes are on.
-
-The steps of all clients queue on the image thread with the jobs of the
-OpenAI routes, and share the GPU with chat in the same way.
-
+`gmlx pull` prints the license of each model before it downloads. The
+GGUF files are quantized by unsloth, and the Qwen-Image 2.1 Turbo files by
+AtomicChat, under the same licenses.

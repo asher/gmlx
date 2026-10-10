@@ -3244,5 +3244,119 @@
         }
       ]
     }
+  },
+  "image": {
+    "hardware": "Apple M5 Max, 128 GB unified memory (MacBook Pro)",
+    "models": {
+      "base-z": {
+        "model": "Z-Image-Turbo",
+        "steps": 8,
+        "size": 1024,
+        "rows": [
+          {
+            "engine": "ComfyUI with ComfyUI-GGUF",
+            "weights": "z-image-turbo-Q4_K_M.gguf",
+            "step_s": 2.74,
+            "image_s": 22.45,
+            "gmlx_weights": "z-image-turbo-Q4_K_M.gguf",
+            "gmlx_step_s": 1.476,
+            "gmlx_image_s": 12.21,
+            "speedup_step": 1.86,
+            "speedup_image": 1.84
+          },
+          {
+            "engine": "stable-diffusion.cpp",
+            "weights": "z-image-turbo-Q4_K_M.gguf",
+            "step_s": 4.65,
+            "image_s": 41.01,
+            "gmlx_weights": "z-image-turbo-Q4_K_M.gguf",
+            "gmlx_step_s": 1.476,
+            "gmlx_image_s": 12.21,
+            "speedup_step": 3.15,
+            "speedup_image": 3.36
+          },
+          {
+            "engine": "mflux",
+            "weights": "mflux 4-bit",
+            "step_s": 2.22,
+            "image_s": 17.77,
+            "gmlx_weights": "z-image-turbo-Q4_K_M.gguf",
+            "gmlx_step_s": 1.476,
+            "gmlx_image_s": 12.21,
+            "speedup_step": 1.5,
+            "speedup_image": 1.46
+          },
+          {
+            "engine": "mflux",
+            "weights": "mflux 8-bit",
+            "step_s": 2.401,
+            "image_s": 19.2,
+            "gmlx_weights": "z-image-turbo-Q8_0.gguf",
+            "gmlx_step_s": 1.501,
+            "gmlx_image_s": 12.45,
+            "speedup_step": 1.6,
+            "speedup_image": 1.54
+          }
+        ]
+      },
+      "base-qwen-turbo": {
+        "model": "Qwen-Image 2.1 Turbo",
+        "steps": 8,
+        "size": 1024,
+        "rows": [
+          {
+            "engine": "ComfyUI with ComfyUI-GGUF",
+            "weights": "Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+            "step_s": 3.185,
+            "image_s": 28.03,
+            "gmlx_weights": "Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+            "gmlx_step_s": 1.756,
+            "gmlx_image_s": 14.71,
+            "speedup_step": 1.81,
+            "speedup_image": 1.91
+          },
+          {
+            "engine": "stable-diffusion.cpp",
+            "weights": "Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+            "step_s": 5.62,
+            "image_s": 49.49,
+            "gmlx_weights": "Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+            "gmlx_step_s": 1.756,
+            "gmlx_image_s": 14.71,
+            "speedup_step": 3.2,
+            "speedup_image": 3.37
+          }
+        ]
+      },
+      "base-qwen": {
+        "model": "Qwen-Image 2.1",
+        "steps": 40,
+        "size": 1024,
+        "rows": [
+          {
+            "engine": "ComfyUI with ComfyUI-GGUF",
+            "weights": "qwen-image-2.1-Q4_K_M.gguf",
+            "step_s": 3.063,
+            "image_s": 125.14,
+            "gmlx_weights": "qwen-image-2.1-Q4_K_M.gguf",
+            "gmlx_step_s": 1.664,
+            "gmlx_image_s": 66.55,
+            "speedup_step": 1.84,
+            "speedup_image": 1.88
+          },
+          {
+            "engine": "stable-diffusion.cpp",
+            "weights": "qwen-image-2.1-Q4_K_M.gguf",
+            "step_s": 5.39,
+            "image_s": 221.11,
+            "gmlx_weights": "qwen-image-2.1-Q4_K_M.gguf",
+            "gmlx_step_s": 1.664,
+            "gmlx_image_s": 66.55,
+            "speedup_step": 3.24,
+            "speedup_image": 3.32
+          }
+        ]
+      }
+    }
   }
 }

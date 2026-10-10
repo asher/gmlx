@@ -543,7 +543,7 @@ gmlx launch claude-code -- --continue
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, as [dsh](launch.md#dsh) describes. |
-| `--comfyui-dir DIR` | `~/ComfyUI` | Run the ComfyUI in this folder, on its `.venv` or `venv`, as [comfyui](launch.md#comfyui) describes. |
+| `--comfyui-dir DIR` | `~/ComfyUI` | Run the ComfyUI in this folder, on its `.venv` or `venv`, as [ComfyUI](comfyui.md) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, beside the configured [mounts](config.md#launchcontainermounts). Repeatable. |
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
@@ -599,7 +599,7 @@ An image model name, `z-image-turbo`, `qwen-image` or `qwen-image-turbo`,
 pulls its DiT, text encoder and VAE, packs the VAE to GGUF, and adds an
 `image_models` entry. The quants default to the ones for this Mac's memory,
 and an encoder or VAE already on disk is used again when its weights match.
-[Setting up a model](images.md#setting-up-a-model) has the details.
+[Pull a model](images.md#pull-a-model) has the details.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -852,14 +852,15 @@ and every action's flags are in the
 
 ## gmlx image
 
-`gmlx image` generates images from GGUF diffusion models. Its actions
-follow.
+`gmlx image` generates images from GGUF diffusion models, which
+[Image generation](images.md) introduces. Its actions follow.
 
 - `generate` samples images from a DiT GGUF with its text encoder and VAE.
 - `bench` times whole images and their phases, with a JSON record.
 - `pack-vae` writes a lossless VAE GGUF from a safetensors VAE.
 
 ```sh
+gmlx image generate z-image-turbo --prompt "a red bicycle" --seed 1 --output bicycle.png
 gmlx image pack-vae vae/diffusion_pytorch_model.safetensors --out z-image-vae-BF16.gguf
 gmlx image generate z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
     --vae z-image-vae-BF16.gguf --prompt "a red bicycle" --seed 1 --output bicycle.png
