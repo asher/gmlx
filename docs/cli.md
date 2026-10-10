@@ -900,6 +900,7 @@ the weights load.
 |--------|-------------|---------|----------|
 | Z-Image | Qwen3-4B | The FLUX.1 autoencoder | The variant's steps and guidance. |
 | Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
+| Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
 
 Qwen-Image 2.1 Turbo shares the base model's architecture, encoder and VAE.
 gmlx tells the two apart by their weights. Turbo samples on the eight sigmas
@@ -956,7 +957,7 @@ with its file name, the size it ran at and the `sha256` of the file.
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
-| `--size WxH` | The init image's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 16 on Z-Image and of 32 on Qwen-Image 2.1. Another size exits 2 and names the multiple. |
+| `--size WxH` | The init image's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 16 on Z-Image and Krea 2 and of 32 on Qwen-Image 2.1. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
@@ -1035,11 +1036,12 @@ lossless and other GGUF readers can use it. It then reads the GGUF back
 and compares every tensor bit for bit before the file replaces `--out`.
 
 It packs the VAE of each image family: the FLUX.1 autoencoder for
-`z_image`, and the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
-official file is F32 and stays F32. The family follows from the tensor
-names and shapes. A file that fills neither is refused with what it
-holds, for example the other family's VAE under `--family`, or a video
-VAE of the same layout.
+`z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
+official file is F32 and stays F32, and the Qwen-Image autoencoder for
+`krea2`, whose file is BF16. The family follows from the tensor names and
+shapes. A file that fills none of them is refused with what it holds, for
+example another family's VAE under `--family`, or a video VAE of the same
+layout.
 
 A Qwen-Image 2.1 file may leave out its `time_conv` tensors, which one
 image never reads. The places where the video layout halves time come

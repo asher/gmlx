@@ -627,7 +627,7 @@ under [`image_models`](#image-models).
 | <a id="serverimagesteps_remote"></a>`image.steps_remote` | `false` | Take step route requests from clients beyond loopback. The routes take uploads of any bytes, so they answer loopback clients alone by default. |
 
 The memory booked for an image model counts both caches at their full size,
-twice each, so the defaults keep one model of either family in reach of a
+twice each, so the defaults keep one model of any family in reach of a
 16 GB Mac.
 
 ### Structured decisions
