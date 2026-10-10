@@ -842,9 +842,10 @@ def _resolved_rope(config):
 
 def rope_scaling_for(config):
     """The scaling of a compressed layer: the resolved one (llama.cpp's
-    rules, the run options included), else the config's own block."""
+    rules) when the run options set it, else the config's own block, so a
+    run without options keeps the class table."""
     s = _resolved_rope(config)
-    return s if s is not None else config.rope_scaling
+    return s if s is not None and s.from_options else config.rope_scaling
 
 
 def plain_rope_base(config) -> float:

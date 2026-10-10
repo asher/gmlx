@@ -83,5 +83,34 @@ def test_layers_follow_llama_cpp(override):
         assert s.factor == 4.0
 
 
+@pytest.mark.parametrize("arch", ["deepseek4", "deepseek41"])
+def test_no_options_keep_the_class_table(arch):
+    """Without run options every rope of the model is bit for bit the one
+    the class builds from the config's own yarn block."""
+    from gmlx.models.deepseek_v41 import model as v41
+    from test_config_synth import (_DEEPSEEK41_SHAPES, _deepseek41_meta)
+
+    mod, meta, shapes = ((v4, _deepseek4_meta(), _DEEPSEEK4_SHAPES)
+                         if arch == "deepseek4" else
+                         (v41, _deepseek41_meta(), _DEEPSEEK41_SHAPES))
+    mod.ensure_registered()
+    cfg = synthesize_config(meta, tensor_shapes=shapes)
+    assert rs.from_config(cfg).active
+    plain = {k: v for k, v in cfg.items() if k != rs.CONFIG_KEY}
+    # The class block itself reaches the rope: on the CPU the two tables
+    # can round alike, on the GPU they do not.
+    assert v4.rope_scaling_for(mod.ModelArgs.from_dict(cfg)) == cfg["rope_scaling"]
+
+    def ropes(c):
+        m = mod.Model(mod.ModelArgs.from_dict(c))
+        return [r for _, r in m.named_modules()
+                if isinstance(r, v4.DeepseekV4RoPE)]
+
+    a, b = ropes(cfg), ropes(plain)
+    assert a and len(a) == len(b)
+    for x, y in zip(a, b):
+        assert np.array_equal(np.asarray(x._freqs), np.asarray(y._freqs))
+
+
 def test_deepseek_is_wired():
     assert {"deepseek4", "deepseek41"} <= rs.WIRED_ARCHES

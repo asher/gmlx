@@ -176,6 +176,9 @@ class RopeScaling:
     arch: str = ""
     freq_base_train: float | None = None
     freq_scale_swa: float = 1.0
+    # True when the run options set any rope key; False for a scaling the
+    # GGUF header alone asks for.
+    from_options: bool = False
 
     @property
     def factor(self) -> float:
@@ -349,6 +352,7 @@ def resolve(meta, arch: str, override: RopeOverride | None = None, *,
         freq_base_train=None if base_hdr is None else float(base_hdr),
         freq_scale_swa=(float(freq_scale_train)
                         if arch in _SWA_TRAIN_SCALE_ARCHES else 1.0),
+        from_options=not ov.is_empty(),
     )
 
 
