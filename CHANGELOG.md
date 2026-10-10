@@ -120,6 +120,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and greedy output can differ from earlier releases where the path changes.
 - MTP decode at long context no longer copies the draft head's KV cache every
   round: at 128K a round peaks about 0.5 GB lower and runs 2 to 6 percent faster.
+- `gmlx distill cache --resume` refuses a run that an earlier gmlx started on a
+  teacher GGUF with rope scaling in its header, whose logits have changed.
 
 ### Removed
 

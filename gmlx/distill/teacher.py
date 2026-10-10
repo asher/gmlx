@@ -418,9 +418,12 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
     and leading bytes (its path may be spelled another way), its
     vocabulary and, when rows are framed, its chat template (a directory
     checkpoint keeps both outside the hashed files), the config source,
-    the hidden sketch, the render kwargs and the version of the row
-    sidecar format. Any difference refuses the resume. A key this build
-    added compares as None against a record that predates it."""
+    the hidden sketch, the render kwargs, the rope scaling the teacher's
+    header resolves to and the version of the row sidecar format. Any
+    difference refuses the resume. A key this build added compares as None
+    against a record that predates it."""
+    from gmlx.load import rope_scaling as _rope
+
     template = _frames.template_text(tokenizer) if tokenizer is not None else ""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens, "source": source,
             "generator_id": generator_id,
@@ -436,6 +439,8 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "per_turn": bool(opts.per_turn),
             "close_final_windows": bool(opts.close_final_windows),
             "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None,
+            # None for a plain rope, as in a record that predates the key
+            "rope": _rope.cache_key(_rope.resolve_file(opts.teacher)) or None,
             # 1: rows carry doc_sha, which train pairs across caches by;
             # 2: content_start is the answer after an inline think block
             "row_format": ROW_FORMAT}

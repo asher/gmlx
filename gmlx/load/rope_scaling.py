@@ -505,14 +505,46 @@ def from_config(config) -> RopeScaling:
     return RopeScaling(**raw)
 
 
-def cache_suffix(override: RopeOverride | None) -> str:
+# The revision of how a resolved scaling becomes rope tables. Raise it with
+# any change that alters the rotation of a model under the same scaling, so
+# that caches keyed by ``cache_key`` stop matching.
+ROPE_REVISION = 1
+
+
+def resolve_file(path, override: RopeOverride | None = None) -> RopeScaling:
+    """The scaling a load of the GGUF at ``path`` resolves, from its header
+    and ``override``. A path whose header cannot be read resolves from the
+    options alone."""
+    kv: Any = {}
+    arch = ""
+    try:
+        from .headerscan import scan_gguf
+
+        kv = scan_gguf(str(path), include_tensors=False).kv
+        arch = kv.get("general.architecture") or ""
+    except (OSError, ValueError):
+        kv = {}
+    if not arch:
+        kv = {}
+    return resolve(kv, arch, override)
+
+
+def cache_key(scaling: RopeScaling) -> str:
     """A stable suffix for the name of a cache that outlives one model
-    instance (the APC disk tier): empty without options, so default names
-    stay as they were. KV made under one scaling is wrong under another."""
-    if override is None or override.is_empty():
+    instance (the APC disk tier, a distill cache): empty for a plain rope,
+    so those names stay as they were. It covers the resolved scaling and
+    ``ROPE_REVISION``, since KV made under one rotation is wrong under
+    another."""
+    ident = scaling.identity()
+    if ident is None:
         return ""
     import hashlib
 
-    text = repr(tuple((f.name, getattr(override, f.name))
-                      for f in fields(override)))
+    text = repr((ROPE_REVISION, ident))
     return "#rope-" + hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def cache_suffix(path, override: RopeOverride | None) -> str:
+    """``cache_key`` of the scaling a load of ``path`` with ``override``
+    resolves."""
+    return cache_key(resolve_file(path, override))

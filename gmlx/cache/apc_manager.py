@@ -965,7 +965,8 @@ def build_apc_manager(model_namespace=None, rope_override=None):
     vars keep their stock names and parsing: ``APC_BLOCK_SIZE``,
     ``APC_NUM_BLOCKS``, and the ``APC_DISK_*`` family. The disk namespace
     is ``APC_DISK_NAMESPACE`` when set, else the model path, with the rope
-    options (``rope_scaling.cache_suffix``) folded in.
+    scaling the model path's header and the options resolve
+    (``rope_scaling.cache_suffix``) folded in.
     """
     if os.environ.get("GMLX_APC_ENABLED") != "1":
         return None
@@ -981,7 +982,8 @@ def build_apc_manager(model_namespace=None, rope_override=None):
         from gmlx.load.rope_scaling import cache_suffix
 
         ns = (os.environ.get("APC_DISK_NAMESPACE") or model_namespace
-              or "default") + cache_suffix(rope_override)
+              or "default") + cache_suffix(model_namespace or "",
+                                           rope_override)
         max_gb = float(os.environ.get("APC_DISK_MAX_GB", 0))
         max_bytes = int(max_gb * (1 << 30)) if max_gb > 0 else None
         workers = int(os.environ.get("APC_DISK_WORKERS", "1"))
