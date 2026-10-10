@@ -1790,6 +1790,18 @@ def _synthesize_deepseek41v_vlm_config(
     return config
 
 
+def scale_text_rope(model, config: dict) -> int:
+    """Give the text tower of a built VLM the rope scaling its text config
+    carries (gmlx.load.rope_swap). Qwen3-Omni nests the tower and its config
+    under the thinker. Returns the number of rope modules changed."""
+    owner, cfg = model, config
+    thinker = config.get("thinker_config")
+    if isinstance(thinker, dict) and hasattr(model, "thinker"):
+        owner, cfg = model.thinker, thinker
+    return rope_swap.apply(getattr(owner, "language_model", owner),
+                           cfg.get("text_config", {}))
+
+
 def synthesize_vlm_config(
     model_type: str, llm_meta: dict, llm_shapes: dict, mm_meta: dict,
     *, mm_tensor_names: set[str] | None = None,
@@ -3620,7 +3632,7 @@ def load_vlm_model(
     require_tiled_gdn(model, text_config)
 
     # 4b. rope scaling on the text tower (gmlx.load.rope_swap).
-    rope_swap.apply(getattr(model, "language_model", model), text_config)
+    scale_text_rope(model, config)
 
     # 5. swap kquant leaves + load all weights. install_kquant swaps every leaf
     #    whose <path>.weight carries a codec - the LLM text tower always, plus the
