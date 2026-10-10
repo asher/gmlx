@@ -149,7 +149,7 @@ def apply(model, config) -> int:
         return 0
     trunk, sliding = _sliding_layers(cfg, model)
     sliding_scaling = scaling.for_sliding()
-    n = 0
+    n = n_swa = 0
     unswapped = []
     for name, mod in list(model.named_modules()):
         for attr in ("rope", "rotary_emb"):
@@ -168,8 +168,11 @@ def apply(model, config) -> int:
             m = _LAYER_RE.match(path)
             is_swa = (trunk is not None and m is not None
                       and m.group(1) == trunk and int(m.group(2)) in sliding)
+            # The gemma classes mark the layer on the attention module.
+            is_swa = is_swa or getattr(mod, "is_sliding", False) is True
             mb = _module_base(r)
             if is_swa:
+                n_swa += 1
                 s = sliding_scaling
                 base = mb or scaling.freq_base_train or rs._DEFAULT_FREQ_BASE
             else:
@@ -190,5 +193,5 @@ def apply(model, config) -> int:
     if n:
         loadlog.verbose_print(
             f"[rope] {scaling.describe()} on {n} rope modules"
-            + (f" ({len(sliding)} sliding layers)" if sliding else ""))
+            + (f" ({n_swa} on sliding layers)" if n_swa else ""))
     return n

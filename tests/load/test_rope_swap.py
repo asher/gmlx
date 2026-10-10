@@ -319,3 +319,68 @@ def test_later_class_built_arches_take_the_options(arch):
         base = bases.get(name) or meta.get(f"{arch}.rope.freq_base", 10000.0)
         _check_rope(r, s.for_sliding() if i in sliding else s, base)
 
+
+# Gemma families. llama.cpp lays sliding layers out with load_swa_pattern:
+# period 6 for gemma3, the last layer of each period full.
+_GEMMA_PERIOD = {"gemma3": 6}
+
+
+def _gemma_build(arch, override=None, meta_edit=None):
+    meta = _meta_for(arch)
+    if arch == "gemma3":
+        meta["gemma3.rope.freq_base"] = 1000000.0
+    if meta_edit:
+        meta_edit(meta)
+    before, _ = build_model(synthesize_config(meta, {}))
+    cfg = synthesize_config(meta, {}, rope_override=override)
+    model, cfg = build_model(cfg)
+    n = rope_swap.apply(model, cfg)
+    return before, model, cfg, n
+
+
+def _layer_ropes(model):
+    return [(int(name.split("layers.")[1].split(".")[0]), r)
+            for name, r in _ropes(model) if "layers." in name]
+
+
+@pytest.mark.parametrize("arch", ["gemma3"])
+def test_gemma_families_take_the_options(arch):
+    assert arch in rs.SWAP_ARCHES and arch in rs.WIRED_ARCHES
+    before, model, cfg, n = _gemma_build(arch, YARN4)
+    s = rs.from_config(cfg)
+    assert n > 0 and s.factor == 4.0
+    bases = {i: float(r.base) for i, r in _layer_ropes(before)}
+    period = _GEMMA_PERIOD[arch]
+    kinds = set()
+    for i, r in _layer_ropes(model):
+        assert isinstance(r, rope_swap.ScaledRoPE)
+        swa = period is not None and i % period < period - 1
+        kinds.add(swa)
+        _check_rope(r, s.for_sliding() if swa else s, bases[i])
+    assert kinds == ({False} if period is None else {True, False})
+    mx.eval(model(mx.array([[1, 2, 3]])))
+    assert rope_swap.apply(model, cfg) == 0
+
+
+def test_gemma3_full_layers_take_the_header_linear_factor():
+    """Gemma 3 4B and up carry rope.scaling linear 8 for the full-attention
+    layers. The synthesized config never passed it to the class, so those
+    layers rotated unscaled. Sliding layers keep scale 1 (gemma3.cpp)."""
+    def edit(meta):
+        meta["gemma3.rope.scaling.type"] = "linear"
+        meta["gemma3.rope.scaling.factor"] = 8.0
+    _, model, cfg, n = _gemma_build("gemma3", meta_edit=edit)
+    s = rs.from_config(cfg)
+    assert n == 6 and s.factor == 8.0 and s.mscale == 1.0
+    mx.random.seed(0)
+    x = mx.random.normal((1, 1, 1, 16))
+    for i, r in _layer_ropes(model):
+        if i % 6 == 5:
+            want = mx.fast.rope(x, 16, traditional=False, base=1000000.0,
+                                scale=1 / 8, offset=800)
+            np.testing.assert_allclose(np.asarray(r(x, offset=800)),
+                                       np.asarray(want), atol=3e-5)
+        else:
+            _check_rope(r, s.for_sliding(), 10000.0)
+            assert s.for_sliding().freq_scale == 1.0
+
