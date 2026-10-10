@@ -37,6 +37,7 @@ from oracle_fixture import fx
 from gmlx.image.conditioning import Conditioning
 from gmlx.image.families.qwen_image21 import layout
 from gmlx.image.families.qwen_image21 import model as qm
+from gmlx.image.ops import kq_routes
 
 CALLS = (("joint", "a"), ("cached", "b"))
 BRANCHES = ("attn", "img_mlp")
@@ -89,7 +90,8 @@ def oracle_temb(model, arrays: dict):
 @contextmanager
 def recorded_branches(model, store: list):
     """Append ``(block, branch, output)`` to ``store`` at every call of a
-    block's attention output and of its MLP."""
+    block's attention output and of its MLP. The residual route is off
+    while it records: on that route a branch is never its own array."""
     names = {}
     for i, blk in enumerate(model.transformer_blocks):
         names[id(blk.attn)] = (i, "attn")
@@ -103,14 +105,15 @@ def recorded_branches(model, store: list):
         store.append((*names[id(self)], y))
         return y
 
-    def call(self, x):
-        y = real_call(self, x)
+    def call(self, x, rows=None):
+        y = real_call(self, x, rows)
         store.append((*names[id(self)], y))
         return y
 
     attn.out, mlp.__call__ = out, call
     try:
-        yield store
+        with kq_routes.only(tuple(kq_routes.active() - {"resid"})):
+            yield store
     finally:
         attn.out, mlp.__call__ = real_out, real_call
 

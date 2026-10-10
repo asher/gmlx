@@ -243,18 +243,22 @@ class ImageMLP(nn.Module):
             gate, up = self.gate_layer(x), self.proj(x)
         return ops.swiglu(gate, up)
 
-    def __call__(self, x: mx.array) -> mx.array:
-        return self.out(self.hidden(x))
+    def __call__(self, x: mx.array, rows=None) -> mx.array:
+        """``out(hidden(x))``, from ``rows`` when the caller has
+        ``hidden(x)`` already."""
+        return self.out(self.hidden(x) if rows is None else rows)
 
 
-def gated_projection(x: mx.array, gate: mx.array, lin,
-                     h: mx.array) -> mx.array:
+def gated_projection(x: mx.array, gate: mx.array, lin, h: mx.array,
+                     branch) -> mx.array:
     """``x + gate * lin(h)``: on mlx-kquant's residual epilogue when
-    ``ops.resid_leaf`` takes the leaf, else on the stock ops."""
+    ``ops.resid_leaf`` takes the leaf, else ``x + gate * branch()`` on the
+    stock ops, where ``branch`` is the module call that gives ``lin(h)``,
+    so a hook on that module sees the branch."""
     leaf = ops.resid_leaf(lin, h, x, gate)
     if leaf is not None:
         return ops.resid_fused(h, leaf, x, gate)
-    return ops.gated_residual(x, gate, lin(h))
+    return ops.gated_residual(x, gate, branch())
 
 
 class Block(nn.Module):
@@ -271,10 +275,12 @@ class Block(nn.Module):
                 o: mx.array) -> mx.array:
         """The rows after the block from its attention output ``o``."""
         x = gated_projection(x, mod.gate1, self.attn.to_out[0],
-                             self.attn.heads_joined(o))
+                             self.attn.heads_joined(o),
+                             lambda: self.attn.out(o))
         h = ops.modulate(ops.layer_norm(x, self.eps), mod.scale2)
-        return gated_projection(x, mod.gate2, self.img_mlp.out,
-                                self.img_mlp.hidden(h))
+        rows = self.img_mlp.hidden(h)
+        return gated_projection(x, mod.gate2, self.img_mlp.out, rows,
+                                lambda: self.img_mlp(h, rows))
 
     def _qkv(self, x: mx.array, mod: "Modulation", cos: mx.array,
              sin: mx.array) -> tuple:

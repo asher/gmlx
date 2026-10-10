@@ -179,7 +179,7 @@ def test_resid_declines_and_the_stock_ops_run(spies, monkeypatch, case):
         monkeypatch.setattr(kq_routes, "_gpu", lambda: False)
     assert ops.resid_leaf(leaf, x, residual, gate) is None
     if case not in ("residual_shape", "gate_shape"):
-        y = qm.gated_projection(residual, gate, leaf, x)
+        y = qm.gated_projection(residual, gate, leaf, x, lambda: leaf(x))
         mx.eval(y)
         assert spies.resid.calls == 0
         assert mx.array_equal(y, ops.gated_residual(residual, gate,
