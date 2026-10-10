@@ -653,24 +653,43 @@ def test_install_server_patches_wires_every_aux_route():
             "/v1/audio/transcriptions", "/v1/audio/translations"} <= paths
 
 
-def test_the_seam_restore_lets_the_media_salt_install_again(engine_seams):
-    """The restore after each test here puts the engine classes back. The
-    media salt wraps three of their methods and keeps its install flag on
-    the apc module, so the restore puts that back too: the next install
-    wraps the classes again. Without it, the cache tests that install the
-    salt after this module get the stock salt (an int)."""
-    from gmlx.cache.media_salt import install_media_salt
+def _media_salt_layers() -> list:
+    """For each seam the media salt wraps, whether its layer is in the
+    seam's wrap chain. Other installers wrap over it (install_server_patches
+    puts the retire capture over its ``_preprocess_request``), so the layer
+    need not be the outermost function."""
+    from gmlx.upstream.patching import _walk
 
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    seams = (gen.ResponseGenerator.generate,
+             gen.ResponseGenerator._preprocess_request,
+             ar.BatchGenerator._apc_extra_hash,
+             apc.hash_image_payload, apc.semantic_extra_hash)
+    return [any(getattr(f, "__qualname__", "").startswith("install_media_salt.")
+                for f in _walk(seam)) for seam in seams]
+
+
+def test_the_seam_restore_lets_the_media_salt_install_again(engine_seams):
+    """The restore after each test here puts the engine classes back. The
+    media salt wraps three of their methods and two apc functions and keeps
+    its install flag on the apc module, so the restore puts the flag and the
+    apc functions back too: the flag is set exactly when every layer is
+    there, and the next install wraps the classes again. Without it, the
+    cache tests that install the salt after this module get the stock salt
+    (an int). The salt may already be installed when this test starts."""
+    from gmlx.cache import media_salt
+
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     saved = engine_seams.snapshot()
-    assert install_media_salt()
+    assert media_salt.install_media_salt()
+    assert all(_media_salt_layers())
     engine_seams.restore(saved)
-    assert install_media_salt()
-    for seam in (gen.ResponseGenerator.generate,
-                 gen.ResponseGenerator._preprocess_request,
-                 ar.BatchGenerator._apc_extra_hash):
-        assert seam.__qualname__.startswith("install_media_salt."), seam
+    flag = bool(getattr(apc, media_salt._INSTALLED_FLAG, False))
+    assert _media_salt_layers() == [flag] * 5
+    assert media_salt.install_media_salt()
+    assert all(_media_salt_layers())
 
 
 def test_models_payload_advertises_embeddings_when_configured():
