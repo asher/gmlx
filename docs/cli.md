@@ -888,18 +888,17 @@ a usage error and 130 on an interrupt.
 
 `generate` loads the DiT, the text encoder and the VAE, encodes the prompt
 once and samples each image in turn, at the seed plus the image's index.
-Before the load it checks from the file headers that the request fits the
-memory budget, and it refuses with the plan's terms when no lever makes it
-fit. The plan takes its levers in one order: the two rows of a guided step
-run one at a time, the text encoder is released after encoding, the VAE
-decodes in tiles, and last the load runs in stages. A staged load reads the
-text encoder first, encodes every prompt and reference of the request and
-releases the encoder before the DiT and the VAE load, which gives the same
-latents. The run follows the plan it was admitted under. The
-VAE of Qwen-Image 2.1 runs whole up to 1024x1024 pixels when the plan fits
-that, and in tiles otherwise, and a tiled pass gives the result of the
-whole one. The variant of the DiT sets the steps, guidance and size that the
-flags leave out, and a Z-Image DiT of an unknown variant needs `--steps` and
+Before anything loads, it checks from the file headers that the request
+fits in memory. When it does not, `generate` refuses with
+[`image request does not fit`](troubleshooting.md#image-request-does-not-fit).
+
+To fit, `generate` runs the two halves of a guided step one at a time,
+releases the text encoder after encoding and decodes in tiles. Last, it
+loads the text encoder alone, encodes every prompt and reference, and
+releases it before the DiT loads, which gives the same image.
+
+The variant of the DiT sets the steps, guidance and size that the flags
+leave out, and a Z-Image DiT of an unknown variant needs `--steps` and
 `--guidance`. The latents equal those of the Python `sample` call with the
 noise of the same seed.
 
@@ -920,9 +919,8 @@ line, in a request and in a config's `defaults.steps`. A Qwen-Image 2.1 file
 that matches neither, such as a fine-tune, samples as the base model, and
 the load line names its variant as unknown.
 
-Qwen-Image 2.1 wraps the prompt in the template of its reference pipeline,
-a fixed system turn before the prompt, and conditions on the rows after
-that turn. An empty prompt is encoded as one space, as the reference does.
+Qwen-Image 2.1 encodes the prompt in the template of its reference
+pipeline, so a prompt gives the same conditioning as it does there.
 
 A guidance other than 1 runs the DiT twice in each step, on the prompt and on
 the negative prompt. With no `--negative-prompt` it guides against the
@@ -953,9 +951,10 @@ text encoder pairs are applied to the text encoder at the same strength.
 A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
 sampler, scheduler, guidance, adapters, file names and gmlx version, unless
 `--no-metadata` is set. Each adapter is recorded with its file name, its
-strength, the `sha256` of the file, and `rows_sha256`, which names the pairs
-gmlx placed and the modules it placed them on. Each reference is recorded
-with its file name, the size it ran at and the `sha256` of the file.
+strength, the `sha256` of the file, and `rows_sha256`, a digest of the
+LoRA pairs gmlx applied and the layers it applied them to. Each reference
+is recorded with its file name, the size it ran at and the `sha256` of the
+file.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1031,13 +1030,9 @@ versions, the machine's chip, memory and OS, the model's files with their
 sizes, the settings, every run, the summary, and the transport, which is
 `direct` for a run in the same process.
 
-With `--via-steps` the prompt is encoded in the process and uploaded by
-hash, each step is one request to the step routes, and the latents move
-between steps in the bench with its sampler. The transport is `steps`,
-with the median per step of the request's wall time less the forward time
-the server reports, and `equal_to_direct`, whether the final latents of
-the last run equal those of `sample` at the same seed. Each run also
-lists its transport time per step.
+With `--via-steps` the transport is `steps`, and the record holds the
+fields that [Timing the step routes](internals/image-steps.md#timing-the-step-routes)
+describes.
 
 ### image pack-vae
 

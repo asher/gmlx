@@ -127,3 +127,15 @@ peers that the API key admits, and
 [`image.steps_api`](../config.md#serverimagesteps_api) set to `false`
 removes the routes. The steps of all clients queue on the image thread with
 the jobs of the OpenAI routes, and share the GPU with chat in the same way.
+
+## Timing the step routes
+
+`gmlx image bench --via-steps` runs each step through these routes on a
+loopback port of its own process. The prompt is encoded in the process and
+uploaded by hash, each step is one request, and the latents move between
+steps in the bench with its sampler.
+
+The record's transport is `steps`. It holds the median per step of the
+request's wall time less the forward time the server reports, and
+`equal_to_direct`, whether the final latents of the last run equal those of
+`sample` at the same seed. Each run also lists its transport time per step.
