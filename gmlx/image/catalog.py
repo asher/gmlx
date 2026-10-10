@@ -70,8 +70,8 @@ _KREA2_ENCODER = "unsloth/Qwen3-VL-4B-Instruct-GGUF"
 _KREA2_LICENSE = ("https://cdn.jsdelivr.net/gh/krea-ai/krea-2@"
                   "db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/"
                   "hf_samples/LICENSE.pdf")
-_KREA2_NOTE = ("free commercial use only under $1M annual revenue and 50 "
-               "seats, and a deployer must filter content")
+_KREA2_NOTE = ("free commercial use only under $1M annual revenue, "
+               "affiliates counted, and a deployer must filter content")
 
 RECIPES = {r.name: r for r in (
     Recipe(

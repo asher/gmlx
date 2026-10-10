@@ -68,7 +68,7 @@ pixels. `gmlx pull` takes a model by its name:
 | `krea-2-turbo` | Krea 2 Turbo | 8 | From one image | Qwen3-VL-4B-Instruct |
 
 The Qwen-Image 2.1 models are for non-commercial use only, and Krea 2 is
-free for commercial use only under $1M of annual revenue and 50 seats, as
+free for commercial use only under $1M of annual revenue, as
 [Licenses](#licenses) describes. [Benchmarks](benchmarks.md#image-generation)
 compares the speed of the first three with ComfyUI and stable-diffusion.cpp,
 and of Krea 2 Turbo with ComfyUI. Of Krea 2, gmlx runs Turbo, and it
@@ -372,7 +372,7 @@ jobs of the OpenAI routes, and share the GPU with chat in the same way.
 | Z-Image-Turbo | [Apache 2.0](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | Any, under the license's terms |
 | Qwen-Image 2.1 | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
 | Qwen-Image 2.1 Turbo | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
-| Krea 2 Turbo | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use only under $1M of annual revenue and 50 seats. A deployment must filter the content it makes. |
+| Krea 2 Turbo | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use only for a company whose annual revenue over the last twelve months, with its affiliates, is under $1M. A deployment must filter the content it makes. |
 | Qwen3-4B, Qwen3-VL-8B-Instruct, the text encoders | Apache 2.0 | Any, under the license's terms |
 | Qwen3-VL-4B-Instruct, the Krea 2 text encoder | Apache 2.0 | Any, under the license's terms |
 

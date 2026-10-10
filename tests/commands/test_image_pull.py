@@ -489,8 +489,8 @@ def test_krea_2_packs_a_vae_without_config(lib, monkeypatch, capsys):
     assert m.encoder.endswith(K.encoder_name(eq)) and m.encoder_mmproj is None
     assert m.vae == f"Comfy-Org__Krea-2/{K.vae_pack}"
     assert ("license: Krea 2 Turbo krea-2-community, free commercial use only "
-            "under $1M annual revenue and 50 seats, and a deployer must "
-            "filter content" in capsys.readouterr().out)
+            "under $1M annual revenue, affiliates counted, and a deployer "
+            "must filter content" in capsys.readouterr().out)
 
 
 def _krea_pull(lib, monkeypatch, ram_gb, *args):
