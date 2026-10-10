@@ -46,6 +46,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   denoise step per request, for samplers that run elsewhere such as ComfyUI.
 - `gmlx image bench --via-steps` runs each step through the step routes and
   records the transport time per step.
+- `gmlx pull z-image-turbo`, `qwen-image` or `qwen-image-turbo` downloads the
+  DiT, text encoder and VAE at the quants for this Mac's memory, and registers it.
+- Model discovery and `gmlx sync-models` add an image DiT found with its text
+  encoder and VAE, and name the `gmlx pull` that completes a partial set.
+- `gmlx list` shows a KIND column and takes `--image`, `--family`, `--edit` and
+  `--shared-encoder`, and `gmlx ps --image` shows the resident image models.
+- `gmlx rm` removes an image model's files, keeping an encoder another model uses.
+- `gmlx doctor` checks that each image model's DiT, encoder and VAE belong together.
+- `gmlx image generate` and `bench` take an `image_models` id in place of the files.
 - Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
   text models, and read images with their mmproj.
 - `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6

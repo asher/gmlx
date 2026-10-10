@@ -142,10 +142,22 @@ def check_config(config_path):
     return _check("config", "PASS", path), cfg, path
 
 
+def _image_files(cfg, m) -> list:
+    """(label, path) of every file of an image_models entry: the DiT, the
+    VAE, the encoder unless it is a shared chat model id, its vision tower
+    and the adapters."""
+    out = [("path", m.path), ("vae", m.vae)]
+    if m.encoder not in cfg.models:
+        out.append(("encoder", m.encoder))
+    out.append(("encoder_mmproj", m.encoder_mmproj))
+    out += [("adapter", p) for p, _st in m.adapters]
+    return [(label, p) for label, p in out if p]
+
+
 def check_models(cfg, *, deep: bool = False) -> dict:
     if cfg is None:
         return _check("models", "SKIP", "no config")
-    if not cfg.models:
+    if not cfg.models and not cfg.image_models:
         if cfg.discover:
             return _check("models", "PASS",
                           "none configured (discover: scan active)")
@@ -154,9 +166,13 @@ def check_models(cfg, *, deep: bool = False) -> dict:
     from gmlx.config import ConfigError, resolve_path
     from .manage import _shard_names
     misses: list[str] = []
-    for mid, m in cfg.models.items():
-        for label, p in (("path", m.path), ("mmproj", m.mmproj),
-                         ("draft", m.draft_gguf), ("adapter", m.adapter)):
+    entries = [(mid, (("path", m.path), ("mmproj", m.mmproj),
+                      ("draft", m.draft_gguf), ("adapter", m.adapter)))
+               for mid, m in cfg.models.items()]
+    entries += [(iid, _image_files(cfg, m))
+                for iid, m in cfg.image_models.items()]
+    for mid, files in entries:
+        for label, p in files:
             if not p:
                 continue
             try:
@@ -171,7 +187,7 @@ def check_models(cfg, *, deep: bool = False) -> dict:
                 if gaps:
                     misses.append(
                         f"{mid}: missing shard(s) {', '.join(gaps[:3])}")
-                elif deep:
+                elif deep and mid in cfg.models:
                     from gmlx.load.preflight import preflight
                     try:
                         preflight(rp)
@@ -185,10 +201,64 @@ def check_models(cfg, *, deep: bool = False) -> dict:
     # Dangling aliases / defaults.model are hard ConfigErrors at load time,
     # so they surface through the config check, not here.
     n = len(cfg.models)
-    detail = f"{n} model{_s(n)}, all paths present"
+    detail = f"{n} model{_s(n)}"
+    if cfg.image_models:
+        k = len(cfg.image_models)
+        detail += f" and {k} image model{_s(k)}"
+    detail += ", all paths present"
     if deep:
         detail += ", headers ok"
     return _check("models", "PASS", detail)
+
+
+def check_image(cfg):
+    """One row over the image_models entries: each DiT is one gmlx loads,
+    and its VAE, text encoder and vision tower are the ones its family
+    takes, by weight identity. None when no image model is configured."""
+    if cfg is None or not cfg.image_models:
+        return None
+    from gmlx.config import ConfigError, resolve_path
+    from gmlx.image import catalog
+
+    def rp(p):
+        try:
+            return resolve_path(p, cfg.model_dirs)
+        except ConfigError:
+            return None
+
+    bad: list[str] = []
+    for iid, m in cfg.image_models.items():
+        dit = rp(m.path)
+        if dit is None:
+            continue                     # the models row names the miss
+        got = catalog.dit_identity(dit)
+        if got is None:
+            bad.append(f"{iid}: {m.path} is no image DiT gmlx loads")
+            continue
+        fam = got[0]
+        vae = rp(m.vae)
+        if vae is not None and vae.endswith(".gguf"):
+            v = catalog.vae_identity(vae)
+            if v is None or v[0] != fam:
+                bad.append(f"{iid}: the VAE is not the {fam} VAE")
+        shared = cfg.models.get(m.encoder)
+        enc = rp(shared.path if shared is not None else m.encoder)
+        if enc is not None and not catalog.encoder_matches(enc, fam):
+            bad.append(f"{iid}: the text encoder is not the one {fam} "
+                       "conditions on")
+        tower = (rp(shared.mmproj) if shared is not None and shared.mmproj
+                 else rp(m.encoder_mmproj) if m.encoder_mmproj else None)
+        if tower is not None and not catalog.mmproj_matches(tower, fam):
+            bad.append(f"{iid}: the vision tower is not the encoder's")
+    if bad:
+        more = f" (+{len(bad) - 3} more)" if len(bad) > 3 else ""
+        return _check("image", "FAIL", "; ".join(bad[:3]) + more
+                      + " (gmlx pull with the model name fetches the right "
+                        "parts)")
+    n = len(cfg.image_models)
+    return _check("image", "PASS",
+                  f"{n} image model{_s(n)}, each DiT with its family's "
+                  "encoder and VAE")
 
 
 def check_services(cfg):
@@ -848,7 +918,7 @@ def check_memory(cfg) -> dict:
     if ram is None:
         return _check("memory", "SKIP", "could not read machine RAM")
     detail = f"{human_gb(ram, 0)} RAM"
-    if cfg is None or not cfg.models:
+    if cfg is None or not (cfg.models or cfg.image_models):
         return _check("memory", "PASS", detail)
     from .manage import _model_size_bytes
     flagged: list[str] = []
@@ -865,6 +935,17 @@ def check_memory(cfg) -> dict:
         size = _model_size_bytes(m.path, cfg.model_dirs)
         if size and classify_fit(size, ram) == "over":
             flagged.append(f"{mid} ({human_gb(size)})")
+    # An image model runs its DiT, text encoder and VAE together.
+    for iid, im in cfg.image_models.items():
+        files = [p for _label, p in _image_files(cfg, im)]
+        shared = cfg.models.get(im.encoder)
+        if shared is not None:
+            files += [p for p in (shared.path, shared.mmproj) if p]
+        sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files]
+        size = sum(x for x in sizes if x)
+        if size and classify_fit(size, ram) == "over":
+            flagged.append(f"{iid} ({human_gb(size)} with its encoder and "
+                           "VAE)")
     if flagged:
         more = f" (+{len(flagged) - 3} more)" if len(flagged) > 3 else ""
         return _check(
@@ -922,6 +1003,7 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
               check_models(cfg, deep=deep), check_server()]
     for c in (check_agents(), check_login_start(), check_launcher(), check_container(),
               *check_homes(),
+              check_image(cfg),
               check_services(cfg), check_extras(cfg, running), check_ffmpeg(cfg, running),
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:

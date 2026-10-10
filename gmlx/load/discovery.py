@@ -97,7 +97,9 @@ _EMBED_RE = re.compile(r"(?i)(?:^|[-._])embed(?:ding)?(?:[-._]|$)")
 class ClassifiedGguf:
     """The header-only verdict for one GGUF file."""
     path: str               # absolute path
-    kind: str               # "model" | "mmproj" | "drafter" | "embedding" | "reranker" | "adapter"
+    # "model" | "mmproj" | "drafter" | "embedding" | "reranker" | "adapter"
+    # | "image-dit" | "image-vae"
+    kind: str
     arch: str | None
     mtp: bool               # native-head MTP (model kind only)
     quant: str | None    # quant tag from the filename, or None
@@ -223,6 +225,8 @@ def _classify_meta(
                               n_embd=_drafter_hidden_size(meta, arch),
                               drafter_kind=_drafter_kind(meta, arch),
                               declared=_declared_base_ids(meta))
+    if read_string(meta, "general.type") == "vae" or arch == "autoencoder":
+        return ClassifiedGguf(ap, "image-vae", arch, False, quant, False)
     emb = embedding_kind(meta, basename, arch)
     if emb:
         return ClassifiedGguf(ap, emb, arch, False, quant, False)
@@ -231,11 +235,23 @@ def _classify_meta(
     mtp = bool(nextn and nextn > 0)
     experts = read_int(meta, f"{arch}.expert_count") if arch else None
     loadable = bool(arch) and arch in supported_arches()
+    if not loadable and _image_dit_arch(arch):
+        return ClassifiedGguf(ap, "image-dit", arch, False, quant, False)
     return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable,
                           moe=bool(experts and experts > 0),
                           name=read_string(meta, "general.name"),
                           n_embd=_hidden_size(meta, arch),
                           declared=_declared_base_ids(meta))
+
+
+def _image_dit_arch(arch: str | None) -> bool:
+    """Whether an arch that no chat class builds is an image DiT's. Only
+    such a file reads the image tables, so a folder of chat models never
+    imports gmlx.image."""
+    if arch is None:
+        return False
+    from gmlx.image.catalog import image_arches
+    return arch in image_arches()
 
 
 def _probe_mtp_only(path: str, kv) -> bool:
@@ -267,8 +283,19 @@ def classify_gguf(path: str) -> ClassifiedGguf | None:
     except Exception as e:                       # not a GGUF / unreadable
         print(f"[discover] skipping {path}: {e}", file=sys.stderr)
         return None
-    return _classify_meta(kv, basename=os.path.basename(path), path=path,
-                          mtp_only=_probe_mtp_only(path, kv))
+    c = _classify_meta(kv, basename=os.path.basename(path), path=path,
+                       mtp_only=_probe_mtp_only(path, kv))
+    if c.kind == "model" and c.arch is None:
+        # Some DiT GGUFs carry no arch; their tensors tell.
+        from gmlx.image.preflight import classify as image_kind
+        try:
+            dit = image_kind(path) == "image_dit"
+        except Exception:                        # noqa: BLE001 - stays a model
+            dit = False
+        if dit:
+            return ClassifiedGguf(c.path, "image-dit", None, False, c.quant,
+                                  False)
+    return c
 
 
 # Header-meta cache - the cheap serve-time answer to "what is this GGUF?"
@@ -574,21 +601,33 @@ def _iter_gguf_files(root: str, recursive: bool):
         yield p
 
 
-def discovered_models(cfg, *, progress=False) -> list[ModelCfg]:
+def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
     """The models the config's ``discover`` scans find beyond ``cfg.models``.
 
     Configured entries win: the scan skips their ids and their resolved paths.
     A scan that fails prints one warning and finds nothing, so a flaky folder
-    never stops the caller."""
+    never stops the caller. ``images``, when a list, receives the image
+    models the scans pair (see :func:`scan_dirs`) beyond
+    ``cfg.image_models``."""
     if not cfg.discover:
         return []
     from gmlx.config import ConfigError, resolve_path
 
     known_paths = set()
+    encoder_ids = {}
     for m in cfg.models.values():
         known_paths.add(m.path)
         try:
             rp = resolve_path(m.path, cfg.model_dirs)
+        except ConfigError:
+            rp = None
+        if rp:
+            known_paths.add(rp)
+            if not m.adapter:
+                encoder_ids[rp] = m.id
+    for im in cfg.image_models.values():
+        try:
+            rp = resolve_path(im.path, cfg.model_dirs)
         except ConfigError:
             rp = None
         if rp:
@@ -598,17 +637,23 @@ def discovered_models(cfg, *, progress=False) -> list[ModelCfg]:
         # a name that the image routes answer to.
         return scan_dirs(cfg.discover, cfg.model_dirs,
                          known_ids=set(cfg.models) | set(cfg.image_models),
-                         known_paths=known_paths, progress=progress)
+                         known_paths=known_paths, progress=progress,
+                         images=images, encoder_ids=encoder_ids)
     except Exception as e:                       # noqa: BLE001 - a flaky scan dir
         print(f"warning: discover scan failed: {e}", file=sys.stderr)
         return []
 
 
 def merge_discovered(cfg, *, progress=False) -> list[ModelCfg]:
-    """Add :func:`discovered_models` to ``cfg.models`` and return them."""
-    found = discovered_models(cfg, progress=progress)
+    """Add :func:`discovered_models` to ``cfg.models``, and the image models
+    the scans pair to ``cfg.image_models``, and return the chat models."""
+    images: list = []
+    found = discovered_models(cfg, progress=progress, images=images)
     for m in found:
         cfg.models.setdefault(m.id, m)
+    for im in images:
+        if im.id not in cfg.models:
+            cfg.image_models.setdefault(im.id, im)
     return found
 
 
@@ -621,6 +666,8 @@ def scan_dirs(
     known_models=None,
     progress=False,
     stats=None,
+    images=None,
+    encoder_ids=None,
 ) -> list[ModelCfg]:
     """Discover servable models from ``specs`` (each a :class:`config.DiscoverSpec`).
 
@@ -641,7 +688,12 @@ def scan_dirs(
     ``stats``, if given, is a dict that receives ``skipped``: the count of
     .gguf files seen but unreadable as GGUF (so callers can distinguish an
     empty dir from a dir of truncated downloads); and ``draft_pairs``:
-    ``{configured id: drafter path}``."""
+    ``{configured id: drafter path}``.
+    An image DiT pairs with the text encoder and VAE of its family that the
+    scan finds, nearest folder first (see :func:`_pair_images`); each whole
+    set appends an :class:`config.ImageModelCfg` to ``images`` when it is a
+    list. ``encoder_ids`` maps a configured chat model's resolved path to
+    its id, so an encoder that is a configured model is shared by id."""
     known_paths = {os.path.abspath(os.path.expanduser(p)) for p in known_paths}
     configured = {os.path.abspath(os.path.expanduser(p)): mc
                   for p, mc in (known_models or {}).items()}
@@ -652,6 +704,7 @@ def scan_dirs(
     # Overlapping roots (`dir: null` + an explicit subdir, or `-r` over a parent)
     # would otherwise emit the same GGUF twice, under two ids.
     seen: set[str] = set()
+    every: list[ClassifiedGguf] = []
 
     for spec in specs:
         roots = [spec.dir] if spec.dir else list(model_dirs)
@@ -667,12 +720,93 @@ def scan_dirs(
                 paths.append(p)
             classified = [c for c in _classify_each(paths, progress=progress) if c]
             skipped += len(paths) - len(classified)
+            every += classified
             _emit_dir(classified, spec, used_ids, out,
                       configured=configured, draft_pairs=draft_pairs)
+    if any(c.kind == "image-dit" for c in every):
+        _pair_images(every, out, used_ids, images, encoder_ids or {})
     if stats is not None:
         stats["skipped"] = skipped
         stats["draft_pairs"] = draft_pairs
     return out
+
+
+def _pair_images(classified, chat, used_ids: set, images,
+                 encoder_ids: dict) -> None:
+    """Pair each image DiT in ``classified`` with the text encoder and VAE
+    of its family, matched by weight identity and nearest folder first. A
+    whole set appends an ImageModelCfg to ``images`` (when a list); a set
+    with a part missing prints the pull command that fills it. The encoder
+    is named by its chat model id when it is one of ``chat`` (this scan's
+    models) or of ``encoder_ids`` (the configured ones), so the entry
+    shares it."""
+    from gmlx.config import ImageModelCfg
+    from gmlx.image import catalog
+
+    dits = []
+    for c in classified:
+        if c.kind != "image-dit":
+            continue
+        got = catalog.dit_identity(c.path)
+        if got is None:
+            print(f"[discover] skip (an image GGUF gmlx does not load): "
+                  f"{c.path}", file=sys.stderr)
+            continue
+        dits.append((c, got[0], got[1]))
+    if not dits:
+        return
+    fams = sorted({fam for _c, fam, _v in dits})
+    vaes = []
+    for c in classified:
+        if c.kind == "image-vae":
+            got = catalog.vae_identity(c.path)
+            if got is not None:
+                vaes.append(catalog.ImageFile(c.path, "vae", got[0],
+                                              sha256=got[1]))
+    chat_ids = {os.path.abspath(m.path): m.id for m in chat}
+    chat_ids.update({os.path.abspath(p): i for p, i in encoder_ids.items()})
+    encs, towers = [], []
+    for fam in fams:
+        spec = catalog._spec(fam)
+        if spec is None:
+            continue
+        # The header verdict rules out most files before a tensor read.
+        texts = [c.path for c in classified if c.kind == "model"
+                 and c.arch == spec.arch and c.n_embd in (None, spec.hidden)]
+        for p in dict.fromkeys(texts + list(encoder_ids)):
+            if catalog.encoder_matches(p, fam):
+                encs.append(catalog.ImageFile(p, "encoder", fam))
+        if catalog.wants_tower(fam):
+            towers += [catalog.ImageFile(c.path, "mmproj", fam)
+                       for c in classified if c.kind == "mmproj"
+                       and catalog.mmproj_matches(c.path, fam)]
+    id_for = _assign_ids([c for c, _f, _v in dits], used_ids)
+    for c, fam, variant in dits:
+        enc = catalog.nearest(c.path, [e for e in encs if e.family == fam])
+        vae = catalog.nearest(c.path, [v for v in vaes if v.family == fam])
+        missing = [n for n, got in (("encoder", enc), ("vae", vae)) if not got]
+        if missing:
+            r = catalog.recipe_for(fam, variant)
+            hint = (f"; `gmlx pull {r.name} --only {','.join(missing)}` "
+                    "fetches it" if r is not None else "")
+            print(f"[discover] image DiT without its "
+                  f"{' and '.join(missing)} in the model folders{hint}: "
+                  f"{c.path}", file=sys.stderr)
+            continue
+        chat_id = chat_ids.get(os.path.abspath(enc[0].path))
+        mmproj = None
+        if chat_id is None and catalog.wants_tower(fam):
+            near = catalog.nearest(enc[0].path,
+                                   [t for t in towers if t.family == fam])
+            mmproj = near[0].path if near else None
+        im = ImageModelCfg(id=id_for[c.path], path=c.path,
+                           encoder=chat_id or enc[0].path,
+                           vae=vae[0].path, encoder_mmproj=mmproj)
+        if images is not None:
+            images.append(im)
+        print(f"[discover] image model {im.id} (encoder "
+              f"{chat_id or os.path.basename(enc[0].path)}): {c.path}",
+              file=sys.stderr)
 
 
 def find_retrieval_models(dirs, *, recursive=True):

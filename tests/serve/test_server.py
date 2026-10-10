@@ -326,9 +326,18 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
 def test_discovery_cfg_wraps_scan(monkeypatch):
     fake = [ModelCfg(id="qwen", path="/m/qwen.gguf"),
             ModelCfg(id="gemma", path="/m/gemma.gguf")]
-    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs: fake)
+    from gmlx.config import ImageModelCfg
+
+    def scan(specs, dirs, *, images):
+        # The image models the scan pairs are served too.
+        images.append(ImageModelCfg(id="z", path="/m/z.gguf",
+                                    encoder="qwen", vae="/m/v.gguf"))
+        return fake
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
     cfg = srv._discovery_cfg(["/m"], _ns(port=9000))
     assert set(cfg.models) == {"qwen", "gemma"}
+    assert set(cfg.image_models) == {"z"}
     assert cfg.model_dirs == ["/m"]
     assert cfg.port == 9000
 
@@ -2101,6 +2110,54 @@ def _reg_config(tmp_path, body="models:\n  old:\n    path: old.gguf\n"):
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(f"server:\n  model_dirs:\n    - {lib}\n" + body)
     return cfg_path, lib
+
+
+def test_sync_writes_the_image_models_the_scan_pairs(monkeypatch, tmp_path,
+                                                     capsys):
+    cfg_path, lib = _sync_config(
+        tmp_path, "models:\n  enc:\n    path: enc.gguf\n")
+    (lib / "enc.gguf").write_bytes(b"x")
+    from gmlx.config import ImageModelCfg, load_config
+    seen = {}
+
+    def scan(specs, dirs, *, images, encoder_ids, **kw):
+        seen["encoder_ids"] = dict(encoder_ids)
+        images.append(ImageModelCfg(
+            id="z-image-turbo-q4", path=str(lib / "d" / "z.gguf"),
+            encoder="enc", vae=str(lib / "v" / "vae.gguf")))
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    # A configured chat model is offered as a shared encoder by its id.
+    assert list(seen["encoder_ids"].values()) == ["enc"]
+    m = load_config(cfg_path).image_models["z-image-turbo-q4"]
+    assert (m.path, m.encoder, m.vae) == ("d/z.gguf", "enc", "v/vae.gguf")
+    assert "add:     z-image-turbo-q4  (image, d/z.gguf)" in \
+        capsys.readouterr().out
+
+
+def test_register_downloads_adds_a_downloaded_image_dit(monkeypatch, tmp_path,
+                                                        capsys):
+    cfg_path, lib = _reg_config(tmp_path)
+    dit = lib / "z.gguf"
+    dit.write_bytes(b"x")
+    from gmlx.config import ImageModelCfg, load_config
+
+    def scan(specs, dirs, *, images, **kw):
+        images.append(ImageModelCfg(id="z", path=str(dit), encoder="old",
+                                    vae=str(lib / "v.gguf")))
+        images.append(ImageModelCfg(id="other", path=str(lib / "o.gguf"),
+                                    encoder="old", vae=str(lib / "v.gguf")))
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(dit)], str(cfg_path))
+    # Only the downloaded DiT registers; a neighbour stays unregistered.
+    assert set(load_config(cfg_path).image_models) == {"z"}
+    assert "registered z in" in capsys.readouterr().out
 
 
 def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys):

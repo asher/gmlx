@@ -157,6 +157,31 @@ def test_a_variant_with_fixed_sigmas_runs_them_and_no_other_count(
     assert "Z-Image turbo runs 4 steps" in capsys.readouterr().err
 
 
+def test_model_may_name_an_image_models_entry(env, tmp_path, monkeypatch,
+                                             capsys):
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "models:\n  qwen3-4b:\n    path: enc.gguf\n"
+                   "image_models:\n  zit:\n    path: dit.gguf\n"
+                   "    encoder: qwen3-4b\n    vae: vae.gguf\n")
+    loads = []
+    real = api.load
+    monkeypatch.setattr(api, "load", lambda dit, **kw: loads.append(
+        (dit, kw.get("text_encoder"), kw.get("vae"))) or real(dit, **kw))
+    rc = umbrella_main(["image", "generate", "zit", "--config", str(cfg),
+                        "--prompt", "p", "--size", "48x32", "--seed", "1",
+                        "--output", str(tmp_path / "o.png"), "--json"])
+    assert rc == 0
+    # The entry brings the DiT, the shared chat model's GGUF and the VAE.
+    f = env.files
+    assert loads == [(f["dit.gguf"], f["enc.gguf"], f["vae.gguf"])]
+    capsys.readouterr()
+    rc = umbrella_main(["image", "generate", "nope", "--config", str(cfg),
+                        "--prompt", "p"])
+    assert rc != 0
+    assert "no image model of that id" in capsys.readouterr().err
+
+
 def test_the_png_carries_the_settings_unless_told_not_to(env, tmp_path):
     from PIL import Image
 

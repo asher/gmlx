@@ -486,6 +486,13 @@ A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
 A drafter whose header names its base model pairs with that model in any
 scanned folder. A model with `stream` set gets no drafter.
 
+An image DiT becomes an [image model](#image-models) when the scan also
+finds its family's text encoder and VAE. Files are matched by their
+weights, not their names, and the nearest match to the DiT wins. A text
+encoder that is also a chat model, scanned or configured without an
+`adapter`, is shared by its id. A DiT without its encoder or VAE is
+reported with the `gmlx pull` command that fetches them.
+
 ## Server
 
 The `server` block sets where the server listens, who may call it, where

@@ -290,13 +290,24 @@ For the menu bar side, read [Menu bar app](menubar.md).
 ## gmlx list
 
 `gmlx list` lists the model ids a request can address. Discovered models
-are tagged, aliases follow, and the default model is marked with `*`.
+are tagged, aliases follow, and the default model is marked with `*`. The
+KIND column reads `chat` or `image`, and an image model's size counts its
+DiT, text encoder and VAE.
+
+```sh
+gmlx list
+gmlx list --image --edit
+```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--config FILE` | The first default location | Read this config. |
 | `-v`, `--paths` | Off | Also show each model's GGUF path. |
 | `--json` | Off | Emit JSON. |
+| `--image` | Off | List only the [image models](images.md). |
+| `--family NAME` | All | List only the image models of this family, such as `z-image` or `qwen-image-2.1`. |
+| `--edit` | Off | List only the image models that edit from reference images. |
+| `--shared-encoder` | Off | List only the image models whose text encoder is a chat model they share. |
 
 ## gmlx run
 
@@ -579,11 +590,19 @@ all its shards into your model directory. A file saved under a
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
 gmlx pull hf:org/repo/model.gguf --to ~/models
 gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
+gmlx pull z-image-turbo
+gmlx pull qwen-image --quant Q5_K_M
 ```
+
+An image model name, `z-image-turbo`, `qwen-image` or `qwen-image-turbo`,
+pulls its DiT, text encoder and VAE, packs the VAE to GGUF, and adds an
+`image_models` entry. The quants default to the ones for this Mac's memory,
+and an encoder or VAE already on disk is used again when its weights match.
+[Setting up a model](images.md#setting-up-a-model) has the details.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs. Later bare filenames resolve in the first ref's repo. |
+| `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs, or one image model name. Later bare filenames resolve in the first ref's repo. |
 | `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. |
 | `--config FILE` | The first default location | Read `model_dirs` from this config. |
 | `--force` | Off | Download even when the header check or the disk-space check fails. |
@@ -591,6 +610,10 @@ gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |
 | `--json` | Off | Emit each verdict as JSON before downloading. |
+| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. |
+| `--encoder-quant QUANT` | The one for this Mac's memory | Image models: download the text encoder at this quant. Without it, a matching encoder on disk is used at any quant. |
+| `--only PARTS` | All three | Image models: pull only these parts, a comma list of `dit`, `encoder` and `vae`. |
+| `--keep-source` | Off | Image models: keep the safetensors VAE after packing it. |
 
 Inside a `model_dirs` root, downloads go under `<org>__<repo>/`. An
 interrupted `pull` resumes on the next run. A gated or private repo needs a
@@ -635,6 +658,10 @@ and removes its entry, aliases and default from the config. A file another
 model still uses is kept. `rm` prints the plan and asks before it deletes
 anything.
 
+An image model id removes its DiT, VAE and text encoder. A text encoder
+that is a chat model, or that another image model uses, is kept, and `rm`
+refuses a chat model that an image model uses as its encoder.
+
 ```sh
 gmlx rm old-model
 gmlx rm old-model --yes
@@ -655,7 +682,8 @@ gmlx rm old-model --keep-files
 `gmlx sync-models` rescans the model directories and updates the `models`
 block to match disk. Existing entries keep their comments and edits,
 entries whose file is gone are dropped, and new files are added. Run it
-after adding files by hand or pulling with `--no-register`.
+after adding files by hand or pulling with `--no-register`. An image DiT
+found with its text encoder and VAE is added to `image_models`.
 
 ```sh
 gmlx sync-models
@@ -686,6 +714,7 @@ and path of each.
 | `--host H`, `--port P` | The managed server | Select the server. |
 | `--api-key KEY` | The `GMLX_API_KEY` variable | Send this key to a keyed server. |
 | `--json` | Off | Emit JSON. |
+| `--image` | Off | Show only the resident image models. |
 
 ## gmlx systemone
 
@@ -914,10 +943,11 @@ with its file name, the size it ran at and the `sha256` of the file.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `MODEL`, positional | Required | Sample with this DiT GGUF. |
-| `--encoder GGUF` | Required | Encode the prompt with this text encoder. |
+| `MODEL`, positional | Required | Sample with this DiT GGUF, or with the `image_models` entry of this id, which supplies the encoder, mmproj, VAE and adapters. |
+| `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
+| `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
 | `--encoder-mmproj GGUF` | None | Read the `--ref` images with this mmproj GGUF of the text encoder. It is required with `--ref` and is not loaded without it. |
-| `--vae PATH` | Required | Decode with this VAE, a GGUF or safetensors file. |
+| `--vae PATH` | Required with a DiT GGUF | Decode with this VAE, a GGUF or safetensors file. |
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
@@ -960,9 +990,10 @@ the rest, and the medians of the other phases.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `MODEL`, positional | Required | Time this DiT GGUF. |
-| `--encoder GGUF` | Required | Encode the prompt with this text encoder. |
-| `--vae PATH` | Required | Decode with this VAE. |
+| `MODEL`, positional | Required | Time this DiT GGUF, or the `image_models` entry of this id. |
+| `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
+| `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
+| `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
 | `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
 | `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
 | `--sizes LIST` | The variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |

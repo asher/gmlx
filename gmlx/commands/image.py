@@ -148,7 +148,12 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                     "and VAE. Steps, guidance and size default to the "
                     "model's variant. Images run in sequence at the seed "
                     "plus their index.")
-    p.add_argument("model", metavar="MODEL", help="The DiT GGUF.")
+    p.add_argument("model", metavar="MODEL",
+                   help="The DiT GGUF, or the id of an image_models entry in "
+                        "the config, which brings its encoder and VAE.")
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="The config whose image_models MODEL names (default: "
+                        "the usual config search).")
     src = p.add_mutually_exclusive_group()
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
@@ -400,7 +405,43 @@ def write_image(path: str, pixels, fmt: str, quality: int,
         raise
 
 
+def _from_config(a) -> None:
+    """Fill the DiT, encoder, VAE and vision tower from the image_models
+    entry that MODEL names, when MODEL is no file. Flags given win."""
+    import gmlx.config as cfgmod
+
+    if os.path.isfile(os.path.expanduser(a.model)):
+        return
+    path = (os.path.expanduser(a.config) if getattr(a, "config", None)
+            else next((str(c) for c in cfgmod.default_config_paths()
+                       if os.path.exists(c)), None))
+    if path is None or not os.path.exists(path):
+        raise FileNotFoundError(f"MODEL {a.model}: no such file")
+    try:
+        cfg = cfgmod.load_config(path)
+        if a.model not in cfg.image_models:
+            known = ", ".join(sorted(cfg.image_models)) or "none"
+            raise FileNotFoundError(f"MODEL {a.model}: no such file, and no "
+                                    f"image model of that id in {path} (it "
+                                    f"has {known})")
+        rm = cfgmod.resolve_image_model(a.model, cfg)
+        encoder = rm.encoder
+        if rm.encoder_model is not None:
+            encoder = cfgmod.resolve_path(cfg.models[rm.encoder_model].path,
+                                          cfg.model_dirs)
+    except cfgmod.ConfigError as e:
+        raise FileNotFoundError(f"MODEL {a.model}: {e}") from None
+    a.model = rm.path
+    a.encoder = a.encoder or encoder
+    a.vae = a.vae or rm.vae
+    if getattr(a, "ref", None) and a.encoder_mmproj is None:
+        a.encoder_mmproj = rm.encoder_mmproj
+    if rm.adapters:
+        a.adapter = list(rm.adapters) + list(a.adapter or ())
+
+
 def _check_files(a) -> None:
+    _from_config(a)
     if not os.path.isfile(os.path.expanduser(a.model)):
         raise FileNotFoundError(f"MODEL {a.model}: no such file")
     if a.encoder is None or a.vae is None:
@@ -733,7 +774,12 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
                     "starts with empty conditioning caches. Prints a "
                     "summary per size, or JSON records of schema "
                     f"{BENCH_SCHEMA}.")
-    p.add_argument("model", metavar="MODEL", help="The DiT GGUF.")
+    p.add_argument("model", metavar="MODEL",
+                   help="The DiT GGUF, or the id of an image_models entry in "
+                        "the config, which brings its encoder and VAE.")
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="The config whose image_models MODEL names (default: "
+                        "the usual config search).")
     p.add_argument("--encoder", default=None, metavar="GGUF",
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",

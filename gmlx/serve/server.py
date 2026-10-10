@@ -592,15 +592,16 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
 
     # Discover, skipping anything already configured (by id or by resolved path).
     # `draft_pairs`: sibling drafters that pair into an entry already configured.
-    discovered, draft_pairs = [], {}
+    discovered, draft_pairs, images = [], {}, []
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
         stats = {}
         discovered += discovery.scan_dirs(
             specs, dirs,
             known_ids=set(cfg.models) | set(cfg.image_models),
-            known_paths=known_paths,
-            known_models=known_models, progress=True, stats=stats)
+            known_paths=known_paths | _image_paths(cfg),
+            known_models=known_models, progress=True, stats=stats,
+            images=images, encoder_ids=_encoder_ids(known_models))
         draft_pairs = stats.get("draft_pairs") or {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
@@ -618,9 +619,11 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  remove:  {mid}  ({cfg.models[mid].path} - gone)")
     for m in discovered:
         print(f"  add:     {m.id}  ({discovery._rel(m.path, dirs)})")
+    for im in images:
+        print(f"  add:     {im.id}  (image, {discovery._rel(im.path, dirs)})")
     for mid, dpath in draft_pairs.items():
         print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
-    if not removed and not discovered and not draft_pairs:
+    if not removed and not discovered and not draft_pairs and not images:
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -638,11 +641,12 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
                  if a.models_dir else [])
     try:
         _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
-                    draft_pairs=draft_pairs)
+                    draft_pairs=draft_pairs, images=images)
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    changed = (f"\nupdated {path} (+{len(discovered)} / -{len(removed)}"
+    changed = (f"\nupdated {path} (+{len(discovered) + len(images)} / "
+               f"-{len(removed)}"
                + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
     print(changed)
     _reload_running(path, skip=a.no_reload)
@@ -662,6 +666,36 @@ def _pinned_paths(resolved: dict, images: dict, cli_pins) -> tuple:
     return paths, image_pins
 
 
+def _image_paths(cfg) -> set:
+    """The resolved DiT paths of the configured image models."""
+    out = set()
+    for m in cfg.image_models.values():
+        try:
+            rp = resolve_path(m.path, cfg.model_dirs)
+        except ConfigError:
+            continue
+        if rp:
+            out.add(rp)
+    return out
+
+
+def _encoder_ids(known_models: dict) -> dict:
+    """Resolved path -> id of the configured chat models an image entry
+    may share as its encoder: those without an adapter."""
+    return {p: mc.id for p, mc in known_models.items() if not mc.adapter}
+
+
+def _image_entry(im, dirs) -> dict:
+    """The ``image_models:`` entry of a paired image model."""
+    entry = {"path": discovery._rel(im.path, dirs),
+             "encoder": (im.encoder if not os.path.isabs(im.encoder)
+                         else discovery._rel(im.encoder, dirs))}
+    if im.encoder_mmproj:
+        entry["encoder_mmproj"] = discovery._rel(im.encoder_mmproj, dirs)
+    entry["vae"] = discovery._rel(im.vae, dirs)
+    return entry
+
+
 def _hf_cache_readable() -> bool:
     """Whether the local Hugging Face cache can be scanned at all. False means
     hf: entries cannot be VERIFIED - which must never read as 'gone'."""
@@ -673,14 +707,15 @@ def _hf_cache_readable() -> bool:
 
 
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
-                draft_pairs=None) -> None:
+                draft_pairs=None, images=()) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
     ``new_roots`` are --models-dir override roots absent from
     ``server.model_dirs``; they're appended so the new entries resolve.
     ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
-    to that entry; an entry that already has one keeps its value."""
+    to that entry; an entry that already has one keeps its value. ``images``
+    (paired :class:`ImageModelCfg`) go under ``image_models:``."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -725,6 +760,13 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             ent = models.get(mid)
             if isinstance(ent, dict) and not ent.get("draft_gguf"):
                 ent["draft_gguf"] = discovery._rel(dpath, dirs)
+        if images:
+            block = doc.get("image_models")
+            if not isinstance(block, dict):
+                block = CommentedMap()
+                doc["image_models"] = block
+            for im in images:
+                block[im.id] = CommentedMap(_image_entry(im, dirs))
         # Cache-resident entries need server.hf_cache to resolve from the cache.
         if any(str(mc.path).startswith("hf:") for mc in discovered):
             srv = doc.get("server")
@@ -779,18 +821,23 @@ def register_downloads(paths: list, config_path=None) -> None:
         parents = sorted({os.path.dirname(p) for p in wanted})
         specs = [DiscoverSpec(dir=d, recursive=False) for d in parents]
         stats = {}
+        images: list = []
         found = discovery.scan_dirs(specs, cfg.model_dirs,
                                     known_ids=set(cfg.models) | set(cfg.image_models),
-                                    known_paths=known_paths,
-                                    known_models=known_models, stats=stats)
+                                    known_paths=known_paths | _image_paths(cfg),
+                                    known_models=known_models, stats=stats,
+                                    images=images,
+                                    encoder_ids=_encoder_ids(known_models))
         newly = [m for m in found if os.path.abspath(m.path) in wanted]
+        images = [im for im in images if os.path.abspath(im.path) in wanted]
         # Only a drafter from this download may change a configured entry: a
         # file the user left beside a model stays unregistered.
         pairs = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
                  if os.path.abspath(dp) in wanted}
-        if not newly and not pairs:
+        if not newly and not pairs and not images:
             return                     # already configured (a re-pull) - quiet
-        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs)
+        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs,
+                    images=images)
         for mid, dp in pairs.items():
             print(f"registered {os.path.basename(dp)} as the drafter of "
                   f"{mid} in {path}")
@@ -799,6 +846,8 @@ def register_downloads(paths: list, config_path=None) -> None:
                                       ("mtp", m.speculative)) if on]
             note = f"  ({', '.join(extras)})" if extras else ""
             print(f"registered {m.id} in {path}{note}")
+        for im in images:
+            print(f"registered {im.id} in {path}  (image)")
         _reload_running(path, skip=False)
     except ConfigWriteError as e:
         # sync-models would meet the same refusal, so the message gives its own step.
@@ -1898,7 +1947,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
 
 def _discovery_cfg(dirs: list, a) -> ServerCfg:
     specs = [DiscoverSpec(dir=d, recursive=a.recursive) for d in dirs]
-    models = discovery.scan_dirs(specs, dirs)
+    images: list = []
+    models = discovery.scan_dirs(specs, dirs, images=images)
     return ServerCfg(
         host=a.host or "127.0.0.1",
         port=a.port or 8080,
@@ -1908,6 +1958,7 @@ def _discovery_cfg(dirs: list, a) -> ServerCfg:
         hf_cache=a.hf_cache,
         defaults=ServerDefaults(),
         models={m.id: m for m in models},
+        image_models={im.id: im for im in images},
     )
 
 
