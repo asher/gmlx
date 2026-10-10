@@ -217,10 +217,10 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
     return plan
 
 
-def _gb(n: int | None) -> str:
+def _gb(n: int | None, digits: int = 1) -> str:
     from gmlx.serve.lifecycle import human_gb
 
-    return "?" if n is None else human_gb(n)
+    return "?" if n is None else human_gb(n, digits)
 
 
 def _combined(plan: Plan) -> int | None:
@@ -260,11 +260,14 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
     print(line)
     total = _combined(plan)
     if total and ram:
-        from gmlx.load.memfit import fit_sentence
+        from gmlx.load.memfit import FIT_FITS, FIT_TIGHT, classify_fit
 
-        note = fit_sentence(total, ram)
-        if note:
-            print(f"  the three parts: {_gb(total)}, {note}")
+        fit = classify_fit(total, ram)
+        where = {FIT_FITS: "fit", FIT_TIGHT: "are tight on"}.get(
+            fit, "are more than") if fit else None
+        if where:
+            print(f"  the three parts: {_gb(total)}, which {where} this "
+                  f"Mac's {_gb(ram, 0)} RAM")
     print(f"  license: {r.title} {r.license} ({r.license_url}); encoder "
           f"{r.encoder_license}")
 

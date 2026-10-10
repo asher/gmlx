@@ -213,6 +213,9 @@ def test_the_summary_gives_sizes_and_free_disk_before_the_download(
     assert got == []
     out, err = capsys.readouterr()
     assert "download 7.2 GB, 3.0 GB free at" in out
+    # An image model holds no KV cache, so the fit line names none.
+    assert "the three parts: 7.2 GB, which fit this Mac's 32 GB RAM" in out
+    assert "KV" not in out
     assert "not enough disk space" in err
 
 
