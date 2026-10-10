@@ -1,9 +1,9 @@
 # Image generation
 
-gmlx makes images from Z-Image-Turbo and Qwen-Image 2.1 GGUF files: on the
-command line, on the server's OpenAI image routes, and in ComfyUI. With a
-config from [`gmlx init`](cli.md#gmlx-init), one command downloads a model
-and adds it to the config, and the next one draws:
+gmlx makes images from Z-Image-Turbo, Qwen-Image 2.1 and Krea 2 GGUF
+files: on the command line, on the server's OpenAI image routes, and in
+ComfyUI. With a config from [`gmlx init`](cli.md#gmlx-init), one command
+downloads a model and adds it to the config, and the next one draws:
 
 ```sh
 gmlx pull z-image-turbo
@@ -65,10 +65,14 @@ pixels. `gmlx pull` takes a model by its name:
 | `z-image-turbo` | Z-Image-Turbo | 8 | From one image | Qwen3-4B |
 | `qwen-image` | Qwen-Image 2.1 | 40 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `qwen-image-turbo` | Qwen-Image 2.1 Turbo | 8 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
+| `krea-2-turbo` | Krea 2 Turbo | 8 | From one image | Qwen3-VL-4B-Instruct |
+| `krea-2` | Krea 2 Raw | 52 | From one image | Qwen3-VL-4B-Instruct |
 
-The Qwen-Image 2.1 models are for non-commercial use only, as
+The Qwen-Image 2.1 models are for non-commercial use only, and Krea 2 is
+free for commercial use only under $1M of annual revenue and 50 seats, as
 [Licenses](#licenses) describes. [Benchmarks](benchmarks.md#image-generation)
-compares the speed of all three with ComfyUI and stable-diffusion.cpp.
+compares the speed of the first three with ComfyUI and stable-diffusion.cpp,
+and of Krea 2 Turbo with ComfyUI.
 
 ## Pull a model
 
@@ -116,6 +120,8 @@ runs on:
 | `z-image-turbo` | Q4_K_M | Q8_0 | BF16 | BF16 |
 | `qwen-image` | Q4_K_M | Q8_0 | Q8_0 | F16 |
 | `qwen-image-turbo` | AD-Q4_K | Q8_0 | BF16 | BF16 |
+| `krea-2-turbo` | Q3_K_M | Q6_K | Q8_0 | Q8_0 |
+| `krea-2` | Q3_K_M | Q6_K | Q8_0 | Q8_0 |
 
 The table gives the DiT quant, and the text encoder is Q8_0 on every
 class. A Mac takes the column of the largest class its RAM holds, and a
@@ -125,6 +131,9 @@ Each pick is the DiT closest to the full precision images whose load and
 image fit that class. On 16 GB the image job releases the encoder before
 the denoise, decodes in tiles and loads the parts one at a time; pull with
 `--encoder-quant q4_k_m` to leave more room for other work.
+
+Krea 2 has a 12B DiT, and no quant of it fits a 1024x1024 image on
+16 GB. There Q3_K_M, the smallest, makes images up to 512x512.
 
 `--quant` and `--encoder-quant` pick other quants:
 
@@ -247,6 +256,7 @@ a local path or fetches a URL from a JSON body. Images are PNG, JPEG, WebP or GI
 |-------|-------|------------|
 | Z-Image | One image, which the result starts from at `strength`, 0.6 by default. More than one image gets 400. | The image with an empty prompt, at the default `strength` |
 | Qwen-Image 2.1 | Up to 10 images, which the model sees as references. The image model needs `encoder_mmproj`. | The image as a reference, with the instruction to make a variation of it |
+| Krea 2 | One image, which the result starts from at `strength`, 0.6 by default. More than one image gets 400. | The image with an empty prompt, at the default `strength` |
 
 Without `size` the result takes the size of the first image, cut down to
 the model's size step, and a larger image gives the largest size of its
@@ -341,8 +351,13 @@ jobs of the OpenAI routes, and share the GPU with chat in the same way.
 | Z-Image-Turbo | [Apache 2.0](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | Any, under the license's terms |
 | Qwen-Image 2.1 | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
 | Qwen-Image 2.1 Turbo | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a separate license from Qwen. |
+| Krea 2 Turbo | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use only under $1M of annual revenue and 50 seats. A deployment must filter the content it makes. |
+| Krea 2 Raw | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use only under $1M of annual revenue and 50 seats. A deployment must filter the content it makes. |
 | Qwen3-4B, Qwen3-VL-8B-Instruct, the text encoders | Apache 2.0 | Any, under the license's terms |
+| Qwen3-VL-4B-Instruct, the Krea 2 text encoder | Apache 2.0 | Any, under the license's terms |
 
 `gmlx pull` prints the license of each model before it downloads. The
 GGUF files are quantized by unsloth, and the Qwen-Image 2.1 Turbo files by
-AtomicChat, under the same licenses.
+AtomicChat, under the same licenses. The Krea 2 Turbo files are quantized by
+Abiray and the Krea 2 Raw files by realrebelai, and the Krea 2 VAE file comes
+from Comfy-Org's Krea 2 repository.
