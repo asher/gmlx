@@ -178,6 +178,51 @@ def test_batched_matches_single():
             rtol=2e-2, atol=2e-2)
 
 
+def test_fused_hc_cycle_decode_matches_pair(monkeypatch):
+    """Decode on the one-dispatch hyper-connection cycle gives the same
+    logits, bit for bit, as the two-kernel pair at GLM-5.3-Flash's hidden
+    size. An M5 Ultra decoded garbage on the fused cycle (issue #187)."""
+    import gmlx.models.deepseek_v4.hyper_connection as hcm
+
+    if not hcm._KQ_HC_CYCLE:
+        pytest.skip("mlx-kquant hc_front_expand_collapse unavailable here")
+    args = _tiny_args(hidden_size=4096, vocab_size=256)
+    model = _random_model(args, seed=5)
+    from mlx.utils import tree_flatten, tree_unflatten
+    keep = model.cast_predicate
+    model.update(tree_unflatten([
+        (k, v.astype(mx.bfloat16) if keep(k) else v)
+        for k, v in tree_flatten(model.parameters())]))
+    model.eval()
+    probe = mx.zeros((1, 1, args.hc_mult, args.hidden_size), mx.bfloat16)
+    if not model.layers[0].attn_hc.m1_fused_ok(probe):
+        pytest.skip("fused hyper-connection front unavailable here")
+
+    calls = []
+    fused_op = hcm._kq.hc_front_expand_collapse
+
+    def spy(*a, **k):
+        calls.append(1)
+        return fused_op(*a, **k)
+
+    monkeypatch.setattr(hcm._kq, "hc_front_expand_collapse", spy)
+    toks = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 44, 8, 21, 50, 1, 30]
+
+    def decode(flag):
+        monkeypatch.setenv("GMLX_HC_FUSED_CYCLE", flag)
+        cache = model.make_cache()
+        out = [model(mx.array([[t]]), cache=cache) for t in toks]
+        mx.eval(out)
+        return out
+
+    pair = decode("0")
+    assert not calls
+    fused = decode("1")
+    assert calls
+    for t, (f, p) in enumerate(zip(fused, pair)):
+        assert mx.array_equal(f, p), f"logits differ at step {t}"
+
+
 def _np_rms(x, eps):
     x = np.asarray(x, dtype=np.float64)
     return x / np.sqrt((x ** 2).mean(-1, keepdims=True) + eps)
