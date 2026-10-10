@@ -362,6 +362,10 @@ def _load_mtp_drafter(
             drafter = drafter_mod.Qwen3_5MTPDraftModel(mtp_config)
             log("[mtp] drafter: mlx-vlm Qwen3_5MTPDraftModel")
 
+    # The head attends at the trunk's positions, so it rotates as the trunk
+    # does: the target's resolved rope scaling goes onto its ropes.
+    rope_swap.apply(drafter, config_dict)
+
     d_weights, d_meta, d_stats = remap_mtp_arrays(
         arrays,
         kquant_meta,
