@@ -132,3 +132,33 @@ def test_seeded_noise_is_float32_c_order_and_stable():
     assert not np.array_equal(samplers.noise_from_seed(2, (8,)), flat)
     with pytest.raises(ValueError):
         samplers.noise_from_seed(-1, (2,))
+
+
+def test_krea2_sigmas_are_the_shifted_base_with_a_final_zero():
+    for steps, mu in ((8, 1.15), (52, 0.93), (1, 1.15)):
+        got = schedule.krea2_sigmas(steps, mu)
+        base = np.linspace(1.0, 1.0 / steps, steps).astype(np.float32)
+        e = np.float32(np.exp(mu))
+        want = (e / (e + (np.float32(1) / base - np.float32(1))))
+        assert got.dtype == np.float32 and got.shape == (steps + 1,)
+        assert np.array_equal(got[:-1], want.astype(np.float32))
+        assert got[0] == 1.0 and got[-1] == 0.0
+        assert np.all(np.diff(got) < 0)
+    with pytest.raises(ValueError, match="at least 1"):
+        schedule.krea2_sigmas(0, 1.15)
+
+
+def test_the_krea2_schedule_shifts_turbo_by_its_constant():
+    from gmlx.image.registry import get_family
+
+    fam = get_family("krea2")
+    turbo = fam.schedule(8, tokens=4096, variant="turbo")
+    assert np.array_equal(turbo, schedule.krea2_sigmas(8, 1.15))
+    assert np.array_equal(turbo, fam.schedule(8, tokens=64, variant="turbo"))
+    raw = fam.schedule(52, tokens=4096, variant="raw")
+    mu = schedule.calculate_shift(4096, 256, 6400, 0.5, 1.15)
+    assert np.array_equal(raw, schedule.krea2_sigmas(52, mu))
+    assert not np.array_equal(raw, fam.schedule(52, tokens=1024,
+                                                variant="raw"))
+    with pytest.raises(ValueError, match="pass tokens"):
+        fam.schedule(8, tokens=None, variant=None)

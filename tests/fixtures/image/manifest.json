@@ -49,5 +49,27 @@
     "file": "scheduler/scheduler_config.json",
     "size": 485,
     "sha256": "5895f3a167c14a967fe9ac70c64924ae5acc79799e0679fd12907e594a713cd1"
+  },
+  "krea2_turbo_q4_k_m.header.json": {
+    "repo": "Abiray/Krea-2-Turbo-GGUF",
+    "revision": "ac1417a9e773b4244b683744b5264f5944d0ff0f",
+    "file": "Krea-2-Turbo-Q4_K_M.gguf",
+    "size": 7486289232,
+    "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07",
+    "kv_kept": "general.architecture and the comfy.gguf keys"
+  },
+  "krea2_raw_q4_k_m.header.json": {
+    "repo": "realrebelai/KREA-2_GGUFs",
+    "revision": "9721c3ec932c43dff6dbb5793a816d9ad105277f",
+    "file": "BASE/Krea-2-Base-Q4_K_M.gguf",
+    "size": 7259460832,
+    "sha256": "f52b99ec56380db4ea05614a2299b9420e04b1214fcfb5151059cc569bdf5b9e",
+    "kv_kept": "general.architecture and the comfy.gguf keys"
+  },
+  "krea2_transformer_config.json": {
+    "repo": "huggingface/diffusers",
+    "revision": "0.41.0.dev0",
+    "file": "src/diffusers/models/transformers/transformer_krea2.py",
+    "key": "Krea2Transformer2DModel.__init__ defaults"
   }
 }

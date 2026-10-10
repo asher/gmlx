@@ -25,6 +25,9 @@ exponentially by a mu that grows with the image token count, and stretches
 them so that the last one is the terminal value. Every operation after the
 first rounding is in float32, with each Python scalar rounded to float32
 where it meets an array, as NumPy 2 does.
+
+Krea 2's reference forms the same base sigmas and shifts them by a mu,
+fixed for Turbo and of the image token count otherwise, with no stretch.
 """
 
 from __future__ import annotations
@@ -144,6 +147,15 @@ def qwen21_sigmas(steps: int, image_tokens: int, *, base_len: int = 256,
                          max_shift)
     s = stretch_to_terminal(shift_exponential(base, mu), terminal)
     return np.append(s, _F32(0)).astype(_F32)
+
+
+def krea2_sigmas(steps: int, mu: float) -> np.ndarray:
+    """Krea 2 sigmas shifted by ``mu``, length ``steps + 1`` with a final
+    zero."""
+    if steps < 1:
+        raise ValueError(f"steps must be at least 1, not {steps}")
+    base = np.linspace(1.0, 1.0 / steps, steps).astype(_F32)
+    return np.append(shift_exponential(base, mu), _F32(0)).astype(_F32)
 
 
 def check_sigmas(sigmas) -> np.ndarray:
