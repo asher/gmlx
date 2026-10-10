@@ -178,6 +178,64 @@ def test_reshaped_tensors_are_refused(toy, tmp_path, dims):
         _load(path)
 
 
+def _write_flat(path, dims, flat="x_pad_token", size=64) -> str:
+    """The toy tensors with ``flat`` stored flattened to ``size`` values
+    and ``dims`` under its comfy.gguf.orig_shape key."""
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), "none")
+    w.kv_data[0].pop("general.architecture", None)
+    w.add_array("comfy.gguf.orig_shape." + flat, dims)
+    for name, (arr, codec) in _tensors().items():
+        if name == flat:
+            arr = arr.reshape(-1)[:size]
+        w.add_tensor(name, np.ascontiguousarray(arr),
+                     raw_dtype=getattr(gguf.GGMLQuantizationType, codec))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+@pytest.fixture
+def flat_toy(monkeypatch):
+    from dataclasses import replace
+
+    fam = replace(_family(), reshaped=("x_pad_token",))
+    monkeypatch.setattr(registry, "families", lambda: (fam,))
+    return fam
+
+
+def test_a_family_restores_the_shape_of_a_tensor_it_names(flat_toy,
+                                                          tmp_path):
+    p = _write_flat(tmp_path / "flat.gguf", [1, 64])
+    model, _ = _load(p)
+    want = _tensors()["x_pad_token"][0]
+    assert model.x_pad_token.shape == (1, 64)
+    got = np.array(model.x_pad_token.astype(mx.float32))
+    ref = np.array(mx.array(want).astype(mx.bfloat16).astype(mx.float32))
+    assert np.array_equal(got, ref)
+
+
+@pytest.mark.parametrize("dims,size,match", [
+    ([2, 64], 64, "cannot take the shape"),
+    ([1] * 3000, 64, "in a key too long to read"),
+], ids=["wrong size", "over the scan's array limit"])
+def test_a_restore_that_cannot_hold_is_refused(flat_toy, tmp_path, dims,
+                                               size, match):
+    p = _write_flat(tmp_path / "flat.gguf", dims, size=size)
+    with pytest.raises(fp.ImageModelError, match=match):
+        _load(p)
+
+
+def test_a_family_restores_only_the_tensors_it_names(flat_toy, tmp_path):
+    p = _write_flat(tmp_path / "flat.gguf", [32, 2, 32], flat="proj.bias",
+                    size=32)
+    with pytest.raises(fp.ImageModelError, match="reshaped by the converter"):
+        _load(p)
+
+
 def _forbid_tensor_reads(monkeypatch):
     """Fail any read of tensor bytes: the wire load and the identity reads.
     The header scan maps the file and reads only the header."""

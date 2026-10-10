@@ -113,6 +113,9 @@ class Family:
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
     edit: EditParts | None = None      # None takes no reference images
+    # Tensors a converter may store flattened with their shape under
+    # comfy.gguf.orig_shape, which the load restores.
+    reshaped: tuple = ()
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

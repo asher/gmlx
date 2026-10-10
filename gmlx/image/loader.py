@@ -97,6 +97,45 @@ def _dequantize(weights: dict, codecs: dict, k: str, shape) -> mx.array:
     return out.reshape(shape)
 
 
+def _all_families():
+    from .registry import families
+
+    return families()
+
+
+def _strip_any(name: str) -> str:
+    from .fingerprint import _GENERIC_PREFIXES
+
+    for p in _GENERIC_PREFIXES:
+        if name.startswith(p):
+            return name[len(p):]
+    return name
+
+
+def _refuse_reshaped(keys: list) -> None:
+    if keys:
+        raise ImageModelError(
+            f"{len(keys)} tensors were reshaped by the converter "
+            f"({keys[0][len(_ORIG_SHAPE_KEY):]} first). gmlx image "
+            "loads DiT files whose tensors keep their original shapes")
+
+
+def _kv_value(scans, key: str):
+    for s in scans:
+        if key in s.kv:
+            return s.kv[key]
+    raise ImageModelError(
+        f"the converter stored the shape of {key[len(_ORIG_SHAPE_KEY):]} "
+        "in a key too long to read")
+
+
+def _prod(shape) -> int:
+    n = 1
+    for d in shape:
+        n *= int(d)
+    return n
+
+
 def _scan_shard(path: str):
     """The header scan of one shard. A file cut inside its header or
     tensor table raises ``ImageModelError`` as a truncated GGUF."""
@@ -158,16 +197,23 @@ def load_dit(path: str, *, family: str | None = None,
     # A shape array over the scan's array limit lands in skipped, not kv.
     reshaped = sorted(k for s in scans for k in (*s.kv, *s.skipped)
                       if k.startswith(_ORIG_SHAPE_KEY))
-    if reshaped:
-        raise ImageModelError(
-            f"{len(reshaped)} tensors were reshaped by the converter "
-            f"({reshaped[0][len(_ORIG_SHAPE_KEY):]} first). gmlx image "
-            "loads DiT files whose tensors keep their original shapes")
+    restorable = {n for f in _all_families() for n in f.reshaped}
+    _refuse_reshaped([k for k in reshaped
+                      if _strip_any(k[len(_ORIG_SHAPE_KEY):])
+                      not in restorable])
 
     ident = identified
     if ident is None:
         ident = identify(view, family=family, variant=variant)
     fam = ident.family
+    p = ident.prefix
+    restore = {}
+    for k in reshaped:
+        name = k[len(_ORIG_SHAPE_KEY):]
+        bare = name[len(p):] if p and name.startswith(p) else name
+        if bare not in fam.reshaped:
+            _refuse_reshaped([k])
+        restore[bare] = tuple(int(v) for v in _kv_value(scans, k))
     if fam.build is None:
         raise ImageModelError(
             f"this is a {fam.title} GGUF, which this gmlx cannot run yet")
@@ -185,7 +231,6 @@ def load_dit(path: str, *, family: str | None = None,
     arrays, meta, _, _, _ = load_gguf_wire_bytes(
         path, zero_copy=True, shards=shards, expect_quant=False,
         arch=view.arch)
-    p = ident.prefix
 
     def strip(k: str) -> str:
         return k[len(p):] if p and k.startswith(p) else k
@@ -194,6 +239,12 @@ def load_dit(path: str, *, family: str | None = None,
     for k, v in arrays.items():
         stripped[strip(k)] = v
     weights = dict(stripped)
+    for k, shape in restore.items():
+        if k not in weights or k in meta or weights[k].size != _prod(shape):
+            raise ImageModelError(
+                f"{k} cannot take the shape {shape} the converter stored "
+                "for it")
+        weights[k] = weights[k].reshape(shape)
     codecs = {strip(k): c for k, c in meta.items()}
     del arrays, stripped
 
