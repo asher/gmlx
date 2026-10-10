@@ -89,12 +89,13 @@ nav:
       - Getting started:
           - installation.md
           - quickstart.md
+          - images.md
           - migrating.md
       - Serving:
           - config.md
           - menubar.md
           - services.md
-          - images.md
+          - image-api.md
           - comfyui.md
           - rag.md
           - decisions.md
@@ -156,5 +157,6 @@ nav:
       - internals/hadamard-fold.md
       - internals/debug-switches.md
       - internals/distill.md
+      - internals/image-serving.md
       - internals/image-steps.md
       - Contributing: https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md

@@ -480,11 +480,12 @@ def test_the_consumed_sets_name_every_documented_field():
 
     from gmlx.serve.patches import api_contract as c
 
-    text = (Path(__file__).resolve().parents[2] / "docs" / "images.md").read_text()
+    text = (Path(__file__).resolve().parents[2] / "docs"
+            / "image-api.md").read_text()
     every = (c.IMAGES_GENERATIONS_CONSUMED | c.IMAGES_EDITS_CONSUMED
              | c.IMAGES_VARIATIONS_CONSUMED)
     missing = sorted(f for f in every if f"`{f}`" not in text)
-    assert not missing, f"docs/images.md does not name {missing}"
+    assert not missing, f"docs/image-api.md does not name {missing}"
 
 
 def test_a_reinstall_leaves_one_handler_per_path():

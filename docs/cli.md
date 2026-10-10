@@ -599,16 +599,23 @@ gmlx pull qwen-image --quant Q5_K_M
 ```
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo` or
-`krea-2-turbo`, pulls its DiT, text encoder and VAE, packs
-the VAE to GGUF, and adds an `image_models` entry. The quants default to
+`krea-2-turbo`, pulls its DiT, text encoder and VAE, checks the VAE
+against its published sha256, packs it to GGUF, and adds an `image_models`
+entry. The quants default to
 the ones for this Mac's memory, and an encoder or VAE already on disk is
 used again when its weights match.
-[Pull a model](images.md#pull-a-model) has the details.
+[Models and quants](images.md#models-and-quants) has the quants for each Mac.
+
+Of several encoders on disk, `pull` takes the quant for this Mac first,
+then a chat model, then the file nearest the DiT. A chat model taken as
+the encoder is shared by its id, so the server holds its weights once. For
+Qwen-Image 2.1 that chat model needs its `mmproj`. Without one, the entry
+names the encoder file and the vision tower that `pull` adds.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs, or one image model name. Later bare filenames resolve in the first ref's repo. |
-| `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. |
+| `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. A file outside every `model_dirs` root is not added to the config. |
 | `--config FILE` | The first default location | Read `model_dirs` from this config. |
 | `--force` | Off | Download even when the header check, the disk-space check or the chip check of an image model fails. |
 | `--no-register` | Off | Do not add the file to the config. |
@@ -865,6 +872,8 @@ and every action's flags are in the
 
 ```sh
 gmlx image generate z-image-turbo --prompt "a red bicycle" --seed 1 --output bicycle.png
+gmlx image generate z-image-turbo --prompt "a red bicycle" --init-image sketch.png --strength 0.6
+gmlx image generate qwen-image-turbo --prompt "make it a watercolor" --ref photo.jpg
 gmlx image pack-vae vae/diffusion_pytorch_model.safetensors --out z-image-vae-BF16.gguf
 gmlx image generate z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
     --vae z-image-vae-BF16.gguf --prompt "a red bicycle" --seed 1 --output bicycle.png
@@ -1013,7 +1022,7 @@ the rest, and the medians of the other phases.
 | `--warmup N` | `1` | Run N untimed images per size first. |
 | `--seed N` | `0` | Seed every run. |
 | `--label TEXT` | None | Record this label with the results. |
-| `--via-steps` | Off | Run each step through the [image step routes](images.md#step-routes) on a loopback port of this process. Not with `--adapter`. |
+| `--via-steps` | Off | Run each step through the [image step routes](internals/image-steps.md) on a loopback port of this process. Not with `--adapter`. |
 | `--json` | Off | Print one JSON record per size on stdout, and the summaries on stderr. |
 | `--json-out FILE` | None | Write one JSON record per size to this file. |
 

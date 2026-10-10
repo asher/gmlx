@@ -63,7 +63,7 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
-| `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as [Image generation](images.md#setting-up-a-model) shows |
+| `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as the [Image API](image-api.md) shows |
 | `POST /v1/systemone` | Probabilities for a fixed set of questions, as [Structured decisions](decisions.md) shows |
 | `POST /v1/prewarm` | Read a decision state ahead of its questions, as [Repeated states](decisions-reference.md#repeated-states) shows |
 
@@ -74,14 +74,8 @@ and `/v1/capacity/plan`.
 the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
 `speculative`, `vlm`, `profile` and `default`.
 
-Each [image model](config.md#image-models) is listed too, with
-`"image": true`, its `family` and `variant`, and `edit`, which is true when
-the model makes instruction edits from reference images, with its
-encoder's vision tower. With `edit: false`, `/v1/images/edits` still runs
-image to image on Z-Image and Krea 2, as [Edits and
-variations](images.md#edits-and-variations) shows. It carries `resident`, `pinned` and
-`default` but no context figures. Its `default` marks the default image
-model.
+Each [image model](config.md#image-models) is listed too, with the fields
+that [Routes](image-api.md#routes) describes.
 
 `/v1/keep` answers `{"status": "kept", "model": "<id>", "warming": true}`
 and loads the model in the background. A kept model is not pinned, so the
@@ -89,7 +83,7 @@ server can still unload it to make room, as
 [Keep, pin and idle](glossary.md#keep-pin-and-idle) describes.
 
 Every route except `/health` and the image files of
-[URL responses](images.md#url-responses) needs the API key when the server
+[URL responses](image-api.md#url-responses) needs the API key when the server
 has one. Most routes also answer without the `/v1` prefix. Every route takes
 a JSON body, except the two audio upload routes and image variations, which
 take a form, and image edits, which take a form or a JSON body.

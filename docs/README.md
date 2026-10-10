@@ -24,6 +24,8 @@ These pages are the starting points:
   features, upgrading and removal.
 - [Quickstart](quickstart.md): A first model, the server, a request and a
   connected client.
+- [Image generation](images.md): Choosing an image model, a first image on
+  the command line, the API, and LoRAs.
 - [Migrating from other tools](migrating.md): What carries over from
   llama.cpp, Ollama and LM Studio.
 
@@ -35,8 +37,8 @@ These pages are the starting points:
   bar.
 - [Speech, embeddings and rerank](services.md): The services a server can host
   beside chat models.
-- [Image generation](images.md): Z-Image, Qwen-Image 2.1 and Krea 2 Turbo models, pulled
-  by name, drawn on the command line and served on the OpenAI image routes.
+- [Image API](image-api.md): The OpenAI image routes, their request fields
+  and their errors.
 - [ComfyUI](comfyui.md): The gmlx node pack, which runs the server's image
   models in ComfyUI graphs.
 - [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.

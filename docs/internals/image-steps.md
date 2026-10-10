@@ -4,7 +4,7 @@ The step routes let a sampler that runs in another program, such as the
 [ComfyUI node pack](../comfyui.md), call an image model one step at a time.
 The server holds the weights, encodes prompts, and runs each DiT forward
 and the VAE. The client keeps the noise, the schedule, the guidance and the
-sampler. The user side is in [Image generation](../images.md#step-routes).
+sampler. The user side is in [ComfyUI](../comfyui.md).
 
 ## The contract
 
