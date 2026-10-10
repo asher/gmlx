@@ -91,6 +91,28 @@ An architecture is done when all of the following pass.
 The config-synth fixture and the parity run are the required deliverables
 of a new-architecture pull request, beside the code.
 
+## KV cache copies at decode depth
+
+Serve builds decode step t+1 before step t has finished. Step t+1 appends
+to each layer's K and V while the attention of step t may still read them.
+When a command buffer that has not run yet still holds a layer's buffer,
+the slice update copies the whole buffer instead of writing in place. The
+output stays correct, but decode slows as the context grows.
+
+A deep model splits each step into many command buffers and does not hit
+this. A step that fits in a few command buffers does: a drafter or MTP
+head with a few layers and its own cache, a model of fewer than about 8
+layers, or an architecture whose step is a few large fused kernels.
+`qwen4exp` is such an architecture.
+
+To check, decode at 16k and at 128k tokens twice: once evaluating each
+step before building the next, and once pipelined as serve runs it.
+Compare `mx.get_peak_memory()` of the two. When the pipelined peak is
+higher by about one layer's K and V buffer, the appends copy. The fix is
+to store the cache in two segments, a base and a small tail that takes the
+decode appends, as `QSAKVCache` in `gmlx/models/qwen4_exp/model.py` does.
+Where it costs less, evaluate each step instead.
+
 ## Smoke commands
 
 ```sh
