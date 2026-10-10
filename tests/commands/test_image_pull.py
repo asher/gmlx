@@ -625,6 +625,15 @@ def test_list_shows_the_kind_and_the_image_entries(images, capsys):
     assert "edit" in q
 
 
+def test_list_edit_needs_the_vision_tower(images, capsys):
+    _lib, cfg = images
+    cfg.write_text(cfg.read_text().replace("    encoder_mmproj: tower.gguf\n",
+                                           ""))
+    assert manage.cmd_list(["--config", str(cfg), "--json", "--edit"]) == 0
+    rows = json.loads(capsys.readouterr().out)["models"]
+    assert {r["id"] for r in rows} == {"qi"}
+
+
 @pytest.mark.parametrize("flags, ids", [
     (["--image"], {"zit", "qi", "qt"}),
     (["--family", "qwen-image-2.1"], {"qi", "qt"}),

@@ -1906,6 +1906,10 @@ def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
     except (ValueError, OSError):
         pass
     shared = im.encoder if im.encoder in cfg.models else None
+    # An edit runs the encoder's vision tower, the entry's own or that of
+    # the chat model it shares, as /v1/models says.
+    edit = edit and bool(im.encoder_mmproj
+                         or (shared and cfg.models[shared].mmproj))
     files = [im.path, im.vae, im.encoder_mmproj]
     if shared is None:
         files.append(im.encoder)
