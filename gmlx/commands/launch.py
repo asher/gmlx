@@ -1285,6 +1285,30 @@ def _launch_served(a) -> tuple[str | None, dict] | None:
     return _served_config(a.host, a.port)
 
 
+def _image_size(a, image: str | None) -> str:
+    """The ``defaults.size`` of the image model ``image`` in the config of
+    the server the launch uses, else in the first default config, else
+    1024x1024."""
+    import gmlx.config as config
+
+    size = None
+    if image:
+        served = _launch_served(a)
+        if served is not None and served[0] is not None:
+            entry = (served[1].get("image_models") or {}).get(image)
+            if isinstance(entry, dict) and isinstance(entry.get("defaults"),
+                                                      dict):
+                size = entry["defaults"].get("size")
+        else:
+            cfg, _ = _discover_config()
+            if cfg is not None and image in cfg.image_models:
+                size = cfg.image_models[image].defaults.get("size")
+    try:
+        return config._image_size("size", size) if size else "1024x1024"
+    except config.ConfigError:
+        return "1024x1024"
+
+
 def _launch_claude_code(a, *, exec_fn) -> int:
     binary = _find_binary("claude-code", a)
     base_url, models, default_model = _probe_target(a)
@@ -1475,7 +1499,8 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
                          stt: bool = False, tts: bool = False,
                          rerank: bool = False, origins: str | None = None,
                          image_model: str | None = None,
-                         image_edit: bool = False) -> dict:
+                         image_edit: bool = False,
+                         image_size: str = "1024x1024") -> dict:
     """Open WebUI backend settings as env-var pairs (it has no config file). Points its
     single OpenAI endpoint at the gmlx server, disables the Ollama probe, pins its
     own port + an on-disk DATA_DIR, preselects the default model when known, and routes
@@ -1485,8 +1510,8 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
     capability (see :func:`_launch_open_webui`), so a chat-only server doesn't break
     Open WebUI's built-in browser TTS / local reranker. ``image_model`` turns on
     image generation through the server's ``/v1/images/generations`` with that
-    model, and ``image_edit`` image edits through ``/v1/images/edits``, for a
-    model whose ``/v1/models`` entry says ``edit``. ``origins`` lists the
+    model at ``image_size``, and ``image_edit`` image edits through
+    ``/v1/images/edits``, for a model whose ``/v1/models`` entry says ``edit``. ``origins`` lists the
     addresses of Open WebUI's own pages, split by ``;``. Without that list, Open
     WebUI lets every other page read its answers with the sign-in cookie and
     send it JSON calls, such as one that makes a Function, which runs Python.
@@ -1545,7 +1570,7 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
             "IMAGES_OPENAI_API_BASE_URL": base_url,
             "IMAGES_OPENAI_API_KEY": key,
             "IMAGE_GENERATION_MODEL": image_model,
-            "IMAGE_SIZE": "1024x1024",
+            "IMAGE_SIZE": image_size,
         })
         if image_edit:
             pairs.update({
@@ -1593,7 +1618,8 @@ def _launch_open_webui(a, *, exec_fn) -> int:
                                  stt=stt, tts=tts, rerank=rerank, origins=origins,
                                  image_model=image,
                                  image_edit=any(m.get("edit") for m in models
-                                                if m.get("id") == image))
+                                                if m.get("id") == image),
+                                 image_size=_image_size(a, image))
     if tts and os.environ.get("AUDIO_TTS_VOICE"):
         # A voice the user exported wins over the Kokoro default.
         pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]

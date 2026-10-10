@@ -192,3 +192,29 @@ def test_open_webui_launch_reads_the_image_default_from_the_server(
     assert rc == 0
     assert calls["env"]["IMAGE_GENERATION_MODEL"] == "z-image-turbo"
     assert calls["env"]["DEFAULT_MODELS"] == "chat"
+
+
+@pytest.mark.parametrize("served, found, size", [
+    (("/srv.yaml", {"image_models": {"z-image-turbo": {
+        "defaults": {"size": "512x512"}}}}), None, "512x512"),
+    (("/srv.yaml", {"image_models": {"z-image-turbo": {}}}), "768x768",
+     "1024x1024"),
+    (None, "768x768", "768x768"),
+    (None, None, "1024x1024"),
+    (("/srv.yaml", {"image_models": {"z-image-turbo": {
+        "defaults": {"size": "big"}}}}), None, "1024x1024"),
+])
+def test_open_webui_takes_the_image_size_of_the_default_entry(
+        monkeypatch, tmp_path, served, found, size):
+    """The size comes from the config of the server the launch uses, else
+    from the first default config, else it is 1024x1024."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(launch, "_launch_served", lambda a: served)
+    cfg = None if found is None else SimpleNamespace(image_models={
+        "z-image-turbo": SimpleNamespace(defaults={"size": found})})
+    monkeypatch.setattr(launch, "_discover_config", lambda: (cfg, None))
+    rc, calls = _run(["open-webui", "--config-path", str(tmp_path)])
+    assert rc == 0
+    assert calls["env"]["IMAGE_SIZE"] == size
