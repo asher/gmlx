@@ -3,6 +3,7 @@ found by their weights, then paired by discovery."""
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import gguf
 import numpy as np
@@ -22,6 +23,9 @@ def test_a_recipe_resolves_by_name_or_alias():
     assert catalog.recipe_for("qwen_image21", "turbo").name == \
         "qwen-image-turbo"
     assert catalog.recipe_for("qwen_image21", "unknown").name == "qwen-image"
+    assert catalog.recipe("krea-2-raw").variant == "raw"
+    assert catalog.recipe_for("krea2", "raw").name == "krea-2"
+    assert catalog.recipe_for("krea2", "turbo").name == "krea-2-turbo"
 
 
 @pytest.mark.parametrize("gb, cls", [(8, 16), (16, 16), (18, 16), (24, 24),
@@ -213,6 +217,35 @@ def test_every_class_pulls_the_q8_encoder_and_the_largest_the_reference_dit():
         assert {catalog.DEFAULT_QUANTS[r.name][c][1]
                 for c in catalog.MEMORY_CLASSES} == {"Q8_0"}
         assert catalog.DEFAULT_QUANTS[r.name][64][0] == r.dit_quants[-1]
+
+
+@pytest.mark.integration
+def test_a_krea_2_pull_takes_the_parts_on_disk_by_their_weights(gguf_dir,
+                                                               tmp_path):
+    from image_dir import image_dir
+
+    from gmlx.commands import image_pull
+
+    r = catalog.RECIPES["krea-2-turbo"]
+    roots = [str(gguf_dir), str(image_dir())]
+    found = catalog.scan(roots, families=("krea2",))
+    dits = [f.path for f in found if f.role == "dit" and f.variant == "turbo"]
+    vaes = [f for f in found if f.role == "vae"]
+    if not dits or not vaes or not any(
+            p.name.startswith("Qwen3-VL-4B-Instruct-")
+            for d in roots for p in Path(d).rglob("*.gguf")):
+        pytest.skip("a Krea 2 Turbo DiT, its encoder and its packed VAE are "
+                    "not all under KQUANT_TEST_GGUF_DIR and GMLX_TEST_IMAGE_DIR")
+    plan = image_pull.plan_pull(
+        r, dit_quant=image_pull._quant_of(dits[0]), encoder_quant="Q8_0",
+        encoder_quant_given=False, only=image_pull.PARTS, roots=roots,
+        base_dir=str(tmp_path), nest=True)
+    assert [(p.role, p.download) for p in plan.parts] == [
+        ("dit", False), ("encoder", False), ("vae", False)]
+    assert Path(plan.part("encoder").path).name.startswith(
+        "Qwen3-VL-4B-Instruct-")
+    assert catalog.vae_identity(plan.part("vae").path) == ("krea2",
+                                                           r.vae_sha256)
 
 
 def test_a_32_gb_mac_pulls_qwen_image_at_q8_0_since_its_f16_load_does_not_fit():

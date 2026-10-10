@@ -487,6 +487,47 @@ def test_models_payload_lists_image_models_with_their_markers(
         <= set(zit)
 
 
+def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+
+    from gmlx.image import fingerprint, loader
+
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "image"
+    views = {}
+    for variant in ("turbo", "raw"):
+        d = json.loads((fixtures / f"krea2_{variant}_q4_k_m.header.json")
+                       .read_text())
+        views[f"k2{variant[0]}.gguf"] = fingerprint.HeaderView(
+            kv=dict(d["kv"]), tensors={n: fingerprint.Tensor(tuple(sh), c)
+                                       for n, sh, c in d["tensors"]})
+    for n in (*views, "enc.gguf", "mm.gguf", "vae.gguf"):
+        (tmp_path / n).write_bytes(b"x")
+    # A header names the family; the variant comes from the weight hash,
+    # which a header fixture does not carry.
+    monkeypatch.setattr(loader, "identify_dit", lambda path: replace(
+        fingerprint.identify(views[Path(path).name]),
+        variant={"k2t": "turbo", "k2r": "raw"}[Path(path).stem]))
+    sp_routes._IMAGE_IDENTITY.clear()
+    entry = {"encoder": str(tmp_path / "enc.gguf"),
+             "vae": str(tmp_path / "vae.gguf")}
+    _register({"image_models": {
+        "k2t": {"path": str(tmp_path / "k2t.gguf"), **entry},
+        # A vision tower does not make a family that takes no reference
+        # images an editing one.
+        "k2r": {"path": str(tmp_path / "k2r.gguf"), **entry,
+                "encoder_mmproj": str(tmp_path / "mm.gguf")}}})
+    _PKG._kq_residency_pool = None
+    try:
+        by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        serving.clear_resolved_models()
+    assert [(by_id[i]["image"], by_id[i]["family"], by_id[i]["variant"],
+             by_id[i]["edit"]) for i in ("k2t", "k2r")] == [
+        (True, "krea2", "turbo", False), (True, "krea2", "raw", False)]
+
+
 def test_snapshot_carries_the_image_section_with_image_models():
     from gmlx.serve.patches import images
 

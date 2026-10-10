@@ -36,7 +36,8 @@ class Recipe:
     vae_repo: str
     vae_revision: str
     vae_file: str                     # the safetensors source in the repo
-    vae_config: str                   # its config.json in the repo
+    vae_config: str                   # its config.json in the repo, or ""
+                                      # for a file that has none
     vae_sha256: str                   # sha256 of the source file
     vae_pack: str                     # the packed GGUF's file name
     license: str
@@ -56,6 +57,21 @@ class Recipe:
 
 
 _K_QUANTS = ("Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0")
+
+# Krea 2's VAE is ComfyUI's file of the Qwen-Image autoencoder, which comes
+# without a config.json. Both variants share it and the text encoder.
+_KREA2_VAE = dict(
+    vae_repo="Comfy-Org/Krea-2",
+    vae_revision="eb1eddd3983a54678545a9b2c178c5853b30f7be",
+    vae_file="vae/qwen_image_vae.safetensors", vae_config="",
+    vae_sha256="a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
+    vae_pack="qwen-image-vae-BF16.gguf")
+_KREA2_ENCODER = "unsloth/Qwen3-VL-4B-Instruct-GGUF"
+_KREA2_LICENSE = ("https://cdn.jsdelivr.net/gh/krea-ai/krea-2@"
+                  "db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/"
+                  "hf_samples/LICENSE.pdf")
+_KREA2_NOTE = ("free commercial use only under $1M annual revenue and 50 "
+               "seats, and a deployer must filter content")
 
 RECIPES = {r.name: r for r in (
     Recipe(
@@ -116,6 +132,28 @@ RECIPES = {r.name: r for r in (
         encoder_license="apache-2.0",
         encoder_bytes=8_709_520_224 + 1_162_569_280, vae_bytes=1_350_985_376,
         aliases=("qwen-image-2.1-turbo",)),
+    Recipe(
+        name="krea-2-turbo", title="Krea 2 Turbo", family="krea2",
+        variant="turbo",
+        dit_repo="Abiray/Krea-2-Turbo-GGUF",
+        dit_file="Krea-2-Turbo-{quant}.gguf", dit_quants=_K_QUANTS,
+        encoder_repo=_KREA2_ENCODER,
+        encoder_file="Qwen3-VL-4B-Instruct-{quant}.gguf",
+        encoder_quants=("Q4_K_M", "Q8_0"), **_KREA2_VAE,
+        license="krea-2-community", license_url=_KREA2_LICENSE,
+        license_note=_KREA2_NOTE, encoder_license="apache-2.0",
+        encoder_bytes=4_280_406_816, vae_bytes=253_807_712),
+    Recipe(
+        name="krea-2", title="Krea 2 Raw", family="krea2", variant="raw",
+        dit_repo="realrebelai/KREA-2_GGUFs",
+        dit_file="BASE/Krea-2-Base-{quant}.gguf", dit_quants=_K_QUANTS,
+        encoder_repo=_KREA2_ENCODER,
+        encoder_file="Qwen3-VL-4B-Instruct-{quant}.gguf",
+        encoder_quants=("Q4_K_M", "Q8_0"), **_KREA2_VAE,
+        license="krea-2-community", license_url=_KREA2_LICENSE,
+        license_note=_KREA2_NOTE, encoder_license="apache-2.0",
+        encoder_bytes=4_280_406_816, vae_bytes=253_807_712,
+        aliases=("krea-2-raw",)),
 )}
 
 # The DiT and encoder quants a recipe pulls on each memory class.
@@ -128,6 +166,13 @@ DEFAULT_QUANTS = {
                    32: ("Q8_0", "Q8_0"), 64: ("F16", "Q8_0")},
     "qwen-image-turbo": {16: ("AD-Q4_K", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                          32: ("BF16", "Q8_0"), 64: ("BF16", "Q8_0")},
+    # No Krea 2 DiT fits a 1024 pixel image in the 16 GB class: Q3_K_M,
+    # the smallest, fits up to 512 pixels with the encoder released and
+    # the staged load. Q8_0 needs the 32 GB class.
+    "krea-2-turbo": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
+                     32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    "krea-2": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
+               32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
 }
 
 

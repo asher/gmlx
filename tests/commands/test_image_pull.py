@@ -310,6 +310,43 @@ def test_the_qwen_recipe_takes_the_vision_tower_beside_its_encoder(
             in capsys.readouterr().out)
 
 
+def test_krea_2_pulls_raw_from_its_subfolder_and_packs_a_vae_without_config(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    K = catalog.RECIPES["krea-2"]
+    monkeypatch.setattr(catalog, "scan", lambda *a, **k: [])
+    got = _downloads(monkeypatch)
+    monkeypatch.setattr(catalog, "sha256_file", lambda p: K.vae_sha256)
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: ("krea2", K.vae_sha256))
+    import gmlx.image.vae as vae_pkg
+    packed = []
+
+    def pack(src, dst, **kw):
+        with open(dst, "wb") as f:
+            f.write(b"g")
+        packed.append((src, kw))
+
+    monkeypatch.setattr(vae_pkg, "pack_vae", pack)
+    assert manage.cmd_pull(["krea-2", "--config", str(cfg)]) == 0
+    dq, eq = catalog.DEFAULT_QUANTS["krea-2"][32]
+    assert (K.dit_repo, f"BASE/Krea-2-Base-{dq}.gguf", "main") in got
+    # The VAE repo holds no config.json, so only the safetensors comes.
+    assert [g for g in got if g[0] == K.vae_repo] == [
+        (K.vae_repo, K.vae_file, K.vae_revision)]
+    ((src, kw),) = packed
+    assert kw["config_json"] == "{}" and kw["family"] == "krea2"
+    assert not os.path.exists(src)
+    m = _cfg(cfg).image_models["krea-2"]
+    assert m.path == f"realrebelai__KREA-2_GGUFs/BASE/Krea-2-Base-{dq}.gguf"
+    assert (root / m.path).is_file()
+    assert m.encoder.endswith(K.encoder_name(eq)) and m.encoder_mmproj is None
+    assert m.vae == f"Comfy-Org__Krea-2/{K.vae_pack}"
+    assert ("license: Krea 2 Raw krea-2-community, free commercial use only "
+            "under $1M annual revenue and 50 seats, and a deployer must "
+            "filter content" in capsys.readouterr().out)
+
+
 # validate and pull of a single image GGUF
 def _report(arch, gtype=None):
     return remote.HeaderReport(arch, {"Q4_K": 3}, {}, 3, gtype)

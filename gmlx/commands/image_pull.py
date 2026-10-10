@@ -32,6 +32,7 @@ class Part:
     path: str | None = None         # on disk, or where it lands
     repo: str | None = None         # set when it downloads
     files: tuple = ()               # repo files to download
+    root: str | None = None         # the folder they download into
     revision: str = "main"
     size: int | None = None         # bytes of the download, or on disk
     need: int | None = None         # bytes still to download
@@ -151,7 +152,9 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
         dest = os.path.join(_dest(r.dit_repo, base_dir, nest), name)
         size = _repo_sizes(r.dit_repo, "main", sizes).get(name)
         plan.parts.append(Part("dit", name, dest, repo=r.dit_repo,
-                               files=(name,), size=size,
+                               files=(name,),
+                               root=_dest(r.dit_repo, base_dir, nest),
+                               size=size,
                                need=_remaining(dest, size)))
 
     # The encoder: a configured chat model first, then any matching file.
@@ -171,7 +174,9 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
         dest = os.path.join(_dest(r.encoder_repo, base_dir, nest), name)
         size = _repo_sizes(r.encoder_repo, "main", sizes).get(name)
         plan.parts.append(Part("encoder", name, dest, repo=r.encoder_repo,
-                               files=(name,), size=size,
+                               files=(name,),
+                               root=_dest(r.encoder_repo, base_dir, nest),
+                               size=size,
                                need=_remaining(dest, size)))
 
     # The vision tower, unless the shared chat model brings its own.
@@ -190,7 +195,9 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
                 r.mmproj_file)
             plan.parts.append(Part("mmproj", r.mmproj_file, dest,
                                    repo=r.encoder_repo,
-                                   files=(r.mmproj_file,), size=size,
+                                   files=(r.mmproj_file,),
+                                   root=_dest(r.encoder_repo, base_dir, nest),
+                                   size=size,
                                    need=_remaining(dest, size)))
 
     # The VAE: a packed GGUF of the same source, else the source to pack.
@@ -204,11 +211,12 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
         dest = os.path.join(d, r.vae_pack)
         listing = _repo_sizes(r.vae_repo, r.vae_revision, sizes)
         size = listing.get(r.vae_file)
-        cfg_size = listing.get(r.vae_config) or 0
+        cfg_size = (listing.get(r.vae_config) or 0) if r.vae_config else 0
         need = _remaining(os.path.join(d, r.vae_file), size)
         plan.parts.append(Part(
             "vae", r.vae_file, dest, repo=r.vae_repo,
-            files=(r.vae_file, r.vae_config), revision=r.vae_revision,
+            files=(r.vae_file, r.vae_config) if r.vae_config
+            else (r.vae_file,), root=d, revision=r.vae_revision,
             size=None if size is None else size + cfg_size,
             need=None if need is None else need + cfg_size))
 
@@ -288,7 +296,7 @@ def _need(plan: Plan) -> int | None:
 def _fetch(plan: Plan, part: Part) -> list:
     from gmlx.commands import manage
 
-    d = os.path.dirname(part.path)
+    d = part.root or os.path.dirname(part.path)
     out = []
     for name in part.files:
         print(f"downloading {part.repo}/{name}", file=sys.stderr)
@@ -298,19 +306,22 @@ def _fetch(plan: Plan, part: Part) -> list:
 
 def _pack(plan: Plan, part: Part, got: list, *, keep_source: bool) -> str:
     """Check the VAE source against the recipe, pack it, check the
-    GGUF, and delete the source unless ``keep_source``."""
+    GGUF, and delete the source unless ``keep_source``. A VAE source
+    without a config.json packs with an empty one."""
     from gmlx.image.vae import pack_vae
 
     r = plan.recipe
-    src, conf = got[0], got[1]
+    src, conf = got[0], (got[1] if len(got) > 1 else None)
     sha = catalog.sha256_file(src)
     if sha != r.vae_sha256:
         raise remote.RemoteError(
             f"{src} has sha256 {sha}, and the {r.title} VAE at "
             f"{r.vae_revision[:12]} has {r.vae_sha256}; delete it and pull "
             "again")
-    with open(conf, encoding="utf-8") as f:
-        config_json = f.read()
+    config_json = "{}"
+    if conf is not None:
+        with open(conf, encoding="utf-8") as f:
+            config_json = f.read()
     pack_vae(src, part.path, source_repo=r.vae_repo,
              source_revision=r.vae_revision, config_json=config_json,
              family=r.family, overwrite=True)
@@ -319,7 +330,8 @@ def _pack(plan: Plan, part: Part, got: list, *, keep_source: bool) -> str:
                                  "back as its source")
     if not keep_source:
         for p in (src, conf):
-            os.remove(p)
+            if p is not None:
+                os.remove(p)
         sub = os.path.dirname(src)
         if sub != os.path.dirname(part.path) and not os.listdir(sub):
             os.rmdir(sub)
