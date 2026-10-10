@@ -257,6 +257,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when the program had made the CPU the MLX default device.
 - `gmlx distill --cpu` failed to load a model with a table past the Metal
   buffer ceiling.
+- `gmlx run` and `gmlx chat` with MTP copied the whole KV cache for every
+  prompt chunk, so memory use during a deep prefill ran gigabytes high.
 
 ## [0.4.24] - 2026-10-10
 

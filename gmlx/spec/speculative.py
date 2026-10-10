@@ -1359,6 +1359,19 @@ def _owned_decode_rounds(
         _walk_report()
 
 
+def _reserve_prompt_kv(caches, more: int) -> None:
+    """Give each cache room for ``more`` further tokens in one allocation.
+    Without it a KVCache regrows on every prefill chunk: the whole KV is
+    copied and the old buffer freed each time, and at depth the freed
+    buffers stay in the footprint until the driver reclaims them. Only the
+    plain classes: subclasses keep side arrays that grow on their own."""
+    from gmlx.cache.kv_cache import KVCache, QuantizedKVCache
+
+    for c in caches or ():
+        if type(c) in (KVCache, QuantizedKVCache) and isinstance(c.offset, int):
+            c.prefix_cache_reserve(c.offset + more)
+
+
 def stream_speculative(
     model,
     drafter,
@@ -1469,6 +1482,9 @@ def stream_speculative(
                 hiddens = [ch]
             i += take
             if not last:
+                if i == take:
+                    _reserve_prompt_kv(prompt_cache, n - i)
+                    _reserve_prompt_kv(seed_kv, n - i)
                 mx.eval([c.state for c in prompt_cache] + [ch]
                         + ([c.state for c in seed_kv] if streamed else []))
                 mx.clear_cache()

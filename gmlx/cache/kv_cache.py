@@ -585,27 +585,16 @@ class KVCache(_BaseCache):
             capacity = ((capacity + self.step - 1) // self.step) * self.step
         if capacity <= self.keys.shape[2]:
             return ()
-        pad_tokens = capacity - self.keys.shape[2]
-        self.keys = mx.concatenate(
-            [
-                self.keys,
-                mx.zeros(
-                    (*self.keys.shape[:2], pad_tokens, self.keys.shape[3]),
-                    dtype=self.keys.dtype,
-                ),
-            ],
-            axis=2,
-        )
-        self.values = mx.concatenate(
-            [
-                self.values,
-                mx.zeros(
-                    (*self.values.shape[:2], pad_tokens, self.values.shape[3]),
-                    dtype=self.values.dtype,
-                ),
-            ],
-            axis=2,
-        )
+
+        # Fill one full-size buffer in place. A concat with a zeros pad
+        # also allocates the pad, a second buffer nearly as large.
+        def grown(a):
+            out = mx.zeros((*a.shape[:2], capacity, a.shape[3]), dtype=a.dtype)
+            out[..., : a.shape[2], :] = a
+            return out
+
+        self.keys = grown(self.keys)
+        self.values = grown(self.values)
         return self.keys, self.values
 
     def is_trimmable(self):
