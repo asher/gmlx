@@ -1,0 +1,1246 @@
+{
+ "schema": 1,
+ "name": "check7_krea2_lora_512",
+ "check": 7,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check7_krea2_lora.py",
+ "argv": [
+  "check7_krea2_lora.py",
+  "--dit",
+  "Krea-2-Turbo-Q4_K_M.gguf",
+  "--lora",
+  "krea2_kidsdrawing.safetensors",
+  "--lora-source",
+  "krea2_kidsdrawing.safetensors at eb1eddd3983a54678545a9b2c178c5853b30f7be"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "Krea-2-Turbo-Q4_K_M.gguf",
+   "size": 7486289232,
+   "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07"
+  },
+  "lora": {
+   "name": "krea2_kidsdrawing.safetensors",
+   "size": 469291992,
+   "sha256": "8c1d45d204aeb4e34a7d9e16a7d473917592ba0048b03f4e03e037e3578ca500"
+  }
+ },
+ "inputs": {
+  "size": 512,
+  "blocks": 28,
+  "sigma": 0.75,
+  "seed": 512,
+  "features": "check2_krea2 fp32 features of the plain prompt",
+  "text_rows": 33,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "float32 in both modes",
+  "gguf_codecs": {
+   "F32": 167,
+   "F16": 1,
+   "Q5_K": 61,
+   "Q4_K": 201
+  },
+  "source": "check3_krea2_512",
+  "strength": 1.0,
+  "lora_pairs": 264,
+  "lora_ranks": [
+   32
+  ],
+  "lora_alphas": [],
+  "lora_source": "Comfy-Org/Krea-2 loras/krea2_kidsdrawing.safetensors at eb1eddd3983a54678545a9b2c178c5853b30f7be",
+  "targets": [
+   "final_layer.linear",
+   "img_in",
+   "text_fusion.layerwise_blocks.0.attn.to_gate",
+   "text_fusion.layerwise_blocks.0.attn.to_k",
+   "text_fusion.layerwise_blocks.0.attn.to_out.0",
+   "text_fusion.layerwise_blocks.0.attn.to_q",
+   "text_fusion.layerwise_blocks.0.attn.to_v",
+   "text_fusion.layerwise_blocks.0.ff.down",
+   "text_fusion.layerwise_blocks.0.ff.gate",
+   "text_fusion.layerwise_blocks.0.ff.up",
+   "text_fusion.layerwise_blocks.1.attn.to_gate",
+   "text_fusion.layerwise_blocks.1.attn.to_k",
+   "text_fusion.layerwise_blocks.1.attn.to_out.0",
+   "text_fusion.layerwise_blocks.1.attn.to_q",
+   "text_fusion.layerwise_blocks.1.attn.to_v",
+   "text_fusion.layerwise_blocks.1.ff.down",
+   "text_fusion.layerwise_blocks.1.ff.gate",
+   "text_fusion.layerwise_blocks.1.ff.up",
+   "text_fusion.projector",
+   "text_fusion.refiner_blocks.0.attn.to_gate",
+   "text_fusion.refiner_blocks.0.attn.to_k",
+   "text_fusion.refiner_blocks.0.attn.to_out.0",
+   "text_fusion.refiner_blocks.0.attn.to_q",
+   "text_fusion.refiner_blocks.0.attn.to_v",
+   "text_fusion.refiner_blocks.0.ff.down",
+   "text_fusion.refiner_blocks.0.ff.gate",
+   "text_fusion.refiner_blocks.0.ff.up",
+   "text_fusion.refiner_blocks.1.attn.to_gate",
+   "text_fusion.refiner_blocks.1.attn.to_k",
+   "text_fusion.refiner_blocks.1.attn.to_out.0",
+   "text_fusion.refiner_blocks.1.attn.to_q",
+   "text_fusion.refiner_blocks.1.attn.to_v",
+   "text_fusion.refiner_blocks.1.ff.down",
+   "text_fusion.refiner_blocks.1.ff.gate",
+   "text_fusion.refiner_blocks.1.ff.up",
+   "time_embed.linear_1",
+   "time_embed.linear_2",
+   "time_mod_proj",
+   "transformer_blocks.0.attn.to_gate",
+   "transformer_blocks.0.attn.to_k",
+   "transformer_blocks.0.attn.to_out.0",
+   "transformer_blocks.0.attn.to_q",
+   "transformer_blocks.0.attn.to_v",
+   "transformer_blocks.0.ff.down",
+   "transformer_blocks.0.ff.gate",
+   "transformer_blocks.0.ff.up",
+   "transformer_blocks.1.attn.to_gate",
+   "transformer_blocks.1.attn.to_k",
+   "transformer_blocks.1.attn.to_out.0",
+   "transformer_blocks.1.attn.to_q",
+   "transformer_blocks.1.attn.to_v",
+   "transformer_blocks.1.ff.down",
+   "transformer_blocks.1.ff.gate",
+   "transformer_blocks.1.ff.up",
+   "transformer_blocks.10.attn.to_gate",
+   "transformer_blocks.10.attn.to_k",
+   "transformer_blocks.10.attn.to_out.0",
+   "transformer_blocks.10.attn.to_q",
+   "transformer_blocks.10.attn.to_v",
+   "transformer_blocks.10.ff.down",
+   "transformer_blocks.10.ff.gate",
+   "transformer_blocks.10.ff.up",
+   "transformer_blocks.11.attn.to_gate",
+   "transformer_blocks.11.attn.to_k",
+   "transformer_blocks.11.attn.to_out.0",
+   "transformer_blocks.11.attn.to_q",
+   "transformer_blocks.11.attn.to_v",
+   "transformer_blocks.11.ff.down",
+   "transformer_blocks.11.ff.gate",
+   "transformer_blocks.11.ff.up",
+   "transformer_blocks.12.attn.to_gate",
+   "transformer_blocks.12.attn.to_k",
+   "transformer_blocks.12.attn.to_out.0",
+   "transformer_blocks.12.attn.to_q",
+   "transformer_blocks.12.attn.to_v",
+   "transformer_blocks.12.ff.down",
+   "transformer_blocks.12.ff.gate",
+   "transformer_blocks.12.ff.up",
+   "transformer_blocks.13.attn.to_gate",
+   "transformer_blocks.13.attn.to_k",
+   "transformer_blocks.13.attn.to_out.0",
+   "transformer_blocks.13.attn.to_q",
+   "transformer_blocks.13.attn.to_v",
+   "transformer_blocks.13.ff.down",
+   "transformer_blocks.13.ff.gate",
+   "transformer_blocks.13.ff.up",
+   "transformer_blocks.14.attn.to_gate",
+   "transformer_blocks.14.attn.to_k",
+   "transformer_blocks.14.attn.to_out.0",
+   "transformer_blocks.14.attn.to_q",
+   "transformer_blocks.14.attn.to_v",
+   "transformer_blocks.14.ff.down",
+   "transformer_blocks.14.ff.gate",
+   "transformer_blocks.14.ff.up",
+   "transformer_blocks.15.attn.to_gate",
+   "transformer_blocks.15.attn.to_k",
+   "transformer_blocks.15.attn.to_out.0",
+   "transformer_blocks.15.attn.to_q",
+   "transformer_blocks.15.attn.to_v",
+   "transformer_blocks.15.ff.down",
+   "transformer_blocks.15.ff.gate",
+   "transformer_blocks.15.ff.up",
+   "transformer_blocks.16.attn.to_gate",
+   "transformer_blocks.16.attn.to_k",
+   "transformer_blocks.16.attn.to_out.0",
+   "transformer_blocks.16.attn.to_q",
+   "transformer_blocks.16.attn.to_v",
+   "transformer_blocks.16.ff.down",
+   "transformer_blocks.16.ff.gate",
+   "transformer_blocks.16.ff.up",
+   "transformer_blocks.17.attn.to_gate",
+   "transformer_blocks.17.attn.to_k",
+   "transformer_blocks.17.attn.to_out.0",
+   "transformer_blocks.17.attn.to_q",
+   "transformer_blocks.17.attn.to_v",
+   "transformer_blocks.17.ff.down",
+   "transformer_blocks.17.ff.gate",
+   "transformer_blocks.17.ff.up",
+   "transformer_blocks.18.attn.to_gate",
+   "transformer_blocks.18.attn.to_k",
+   "transformer_blocks.18.attn.to_out.0",
+   "transformer_blocks.18.attn.to_q",
+   "transformer_blocks.18.attn.to_v",
+   "transformer_blocks.18.ff.down",
+   "transformer_blocks.18.ff.gate",
+   "transformer_blocks.18.ff.up",
+   "transformer_blocks.19.attn.to_gate",
+   "transformer_blocks.19.attn.to_k",
+   "transformer_blocks.19.attn.to_out.0",
+   "transformer_blocks.19.attn.to_q",
+   "transformer_blocks.19.attn.to_v",
+   "transformer_blocks.19.ff.down",
+   "transformer_blocks.19.ff.gate",
+   "transformer_blocks.19.ff.up",
+   "transformer_blocks.2.attn.to_gate",
+   "transformer_blocks.2.attn.to_k",
+   "transformer_blocks.2.attn.to_out.0",
+   "transformer_blocks.2.attn.to_q",
+   "transformer_blocks.2.attn.to_v",
+   "transformer_blocks.2.ff.down",
+   "transformer_blocks.2.ff.gate",
+   "transformer_blocks.2.ff.up",
+   "transformer_blocks.20.attn.to_gate",
+   "transformer_blocks.20.attn.to_k",
+   "transformer_blocks.20.attn.to_out.0",
+   "transformer_blocks.20.attn.to_q",
+   "transformer_blocks.20.attn.to_v",
+   "transformer_blocks.20.ff.down",
+   "transformer_blocks.20.ff.gate",
+   "transformer_blocks.20.ff.up",
+   "transformer_blocks.21.attn.to_gate",
+   "transformer_blocks.21.attn.to_k",
+   "transformer_blocks.21.attn.to_out.0",
+   "transformer_blocks.21.attn.to_q",
+   "transformer_blocks.21.attn.to_v",
+   "transformer_blocks.21.ff.down",
+   "transformer_blocks.21.ff.gate",
+   "transformer_blocks.21.ff.up",
+   "transformer_blocks.22.attn.to_gate",
+   "transformer_blocks.22.attn.to_k",
+   "transformer_blocks.22.attn.to_out.0",
+   "transformer_blocks.22.attn.to_q",
+   "transformer_blocks.22.attn.to_v",
+   "transformer_blocks.22.ff.down",
+   "transformer_blocks.22.ff.gate",
+   "transformer_blocks.22.ff.up",
+   "transformer_blocks.23.attn.to_gate",
+   "transformer_blocks.23.attn.to_k",
+   "transformer_blocks.23.attn.to_out.0",
+   "transformer_blocks.23.attn.to_q",
+   "transformer_blocks.23.attn.to_v",
+   "transformer_blocks.23.ff.down",
+   "transformer_blocks.23.ff.gate",
+   "transformer_blocks.23.ff.up",
+   "transformer_blocks.24.attn.to_gate",
+   "transformer_blocks.24.attn.to_k",
+   "transformer_blocks.24.attn.to_out.0",
+   "transformer_blocks.24.attn.to_q",
+   "transformer_blocks.24.attn.to_v",
+   "transformer_blocks.24.ff.down",
+   "transformer_blocks.24.ff.gate",
+   "transformer_blocks.24.ff.up",
+   "transformer_blocks.25.attn.to_gate",
+   "transformer_blocks.25.attn.to_k",
+   "transformer_blocks.25.attn.to_out.0",
+   "transformer_blocks.25.attn.to_q",
+   "transformer_blocks.25.attn.to_v",
+   "transformer_blocks.25.ff.down",
+   "transformer_blocks.25.ff.gate",
+   "transformer_blocks.25.ff.up",
+   "transformer_blocks.26.attn.to_gate",
+   "transformer_blocks.26.attn.to_k",
+   "transformer_blocks.26.attn.to_out.0",
+   "transformer_blocks.26.attn.to_q",
+   "transformer_blocks.26.attn.to_v",
+   "transformer_blocks.26.ff.down",
+   "transformer_blocks.26.ff.gate",
+   "transformer_blocks.26.ff.up",
+   "transformer_blocks.27.attn.to_gate",
+   "transformer_blocks.27.attn.to_k",
+   "transformer_blocks.27.attn.to_out.0",
+   "transformer_blocks.27.attn.to_q",
+   "transformer_blocks.27.attn.to_v",
+   "transformer_blocks.27.ff.down",
+   "transformer_blocks.27.ff.gate",
+   "transformer_blocks.27.ff.up",
+   "transformer_blocks.3.attn.to_gate",
+   "transformer_blocks.3.attn.to_k",
+   "transformer_blocks.3.attn.to_out.0",
+   "transformer_blocks.3.attn.to_q",
+   "transformer_blocks.3.attn.to_v",
+   "transformer_blocks.3.ff.down",
+   "transformer_blocks.3.ff.gate",
+   "transformer_blocks.3.ff.up",
+   "transformer_blocks.4.attn.to_gate",
+   "transformer_blocks.4.attn.to_k",
+   "transformer_blocks.4.attn.to_out.0",
+   "transformer_blocks.4.attn.to_q",
+   "transformer_blocks.4.attn.to_v",
+   "transformer_blocks.4.ff.down",
+   "transformer_blocks.4.ff.gate",
+   "transformer_blocks.4.ff.up",
+   "transformer_blocks.5.attn.to_gate",
+   "transformer_blocks.5.attn.to_k",
+   "transformer_blocks.5.attn.to_out.0",
+   "transformer_blocks.5.attn.to_q",
+   "transformer_blocks.5.attn.to_v",
+   "transformer_blocks.5.ff.down",
+   "transformer_blocks.5.ff.gate",
+   "transformer_blocks.5.ff.up",
+   "transformer_blocks.6.attn.to_gate",
+   "transformer_blocks.6.attn.to_k",
+   "transformer_blocks.6.attn.to_out.0",
+   "transformer_blocks.6.attn.to_q",
+   "transformer_blocks.6.attn.to_v",
+   "transformer_blocks.6.ff.down",
+   "transformer_blocks.6.ff.gate",
+   "transformer_blocks.6.ff.up",
+   "transformer_blocks.7.attn.to_gate",
+   "transformer_blocks.7.attn.to_k",
+   "transformer_blocks.7.attn.to_out.0",
+   "transformer_blocks.7.attn.to_q",
+   "transformer_blocks.7.attn.to_v",
+   "transformer_blocks.7.ff.down",
+   "transformer_blocks.7.ff.gate",
+   "transformer_blocks.7.ff.up",
+   "transformer_blocks.8.attn.to_gate",
+   "transformer_blocks.8.attn.to_k",
+   "transformer_blocks.8.attn.to_out.0",
+   "transformer_blocks.8.attn.to_q",
+   "transformer_blocks.8.attn.to_v",
+   "transformer_blocks.8.ff.down",
+   "transformer_blocks.8.ff.gate",
+   "transformer_blocks.8.ff.up",
+   "transformer_blocks.9.attn.to_gate",
+   "transformer_blocks.9.attn.to_k",
+   "transformer_blocks.9.attn.to_out.0",
+   "transformer_blocks.9.attn.to_q",
+   "transformer_blocks.9.attn.to_v",
+   "transformer_blocks.9.ff.down",
+   "transformer_blocks.9.ff.gate",
+   "transformer_blocks.9.ff.up",
+   "txt_in.linear_1",
+   "txt_in.linear_2"
+  ],
+  "application": "unmerged: strength * (alpha / rank) * up(down(x)) added to each target's output in the mode's dtype, alpha absent gives 1.0"
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.07294871979185177,
+   "cosine": 0.9973364477921292,
+   "max_abs": 1.0083213448524475
+  },
+  "rows_bf16_vs_fp32": {
+   "tmlp": {
+    "rel_l2": 0.0032727455124073055,
+    "cosine": 0.9999964593919475,
+    "max_abs": 0.0038498640060424805,
+    "teacher_forced": false
+   },
+   "tproj": {
+    "rel_l2": 0.003287232540671714,
+    "cosine": 0.999996768789329,
+    "max_abs": 0.02443408966064453,
+    "teacher_forced": false
+   },
+   "txtfusion.layerwise_blocks.0": {
+    "rel_l2": 0.0027351243092383717,
+    "cosine": 0.9999962910862868,
+    "max_abs": 6.72186279296875,
+    "teacher_forced": false
+   },
+   "txtfusion.layerwise_blocks.1": {
+    "rel_l2": 0.0034939473613155086,
+    "cosine": 0.9999939005822159,
+    "max_abs": 9.049072265625,
+    "teacher_forced": false
+   },
+   "txtfusion.projector": {
+    "rel_l2": 0.0037166887812064794,
+    "cosine": 0.9999931866751003,
+    "max_abs": 11.0343017578125,
+    "teacher_forced": false
+   },
+   "txtfusion.refiner_blocks.0": {
+    "rel_l2": 0.003644452253851162,
+    "cosine": 0.9999934174935539,
+    "max_abs": 10.4482421875,
+    "teacher_forced": false
+   },
+   "txtfusion.refiner_blocks.1": {
+    "rel_l2": 0.0033314629363723675,
+    "cosine": 0.999994474385882,
+    "max_abs": 17.559326171875,
+    "teacher_forced": false
+   },
+   "txtmlp": {
+    "rel_l2": 0.004789411259022695,
+    "cosine": 0.9999885344141148,
+    "max_abs": 0.5580825805664062,
+    "teacher_forced": false
+   },
+   "first": {
+    "rel_l2": 0.0028777771133412407,
+    "cosine": 0.9999958591943925,
+    "max_abs": 0.03619861602783203,
+    "teacher_forced": false
+   },
+   "blocks.0": {
+    "rel_l2": 0.032821840978702076,
+    "cosine": 0.9995435651868546,
+    "max_abs": 55.885162353515625,
+    "teacher_forced": true
+   },
+   "blocks.1": {
+    "rel_l2": 0.0028403163264097728,
+    "cosine": 0.9999959707395056,
+    "max_abs": 9.6419677734375,
+    "teacher_forced": true
+   },
+   "blocks.2": {
+    "rel_l2": 0.002446855341167426,
+    "cosine": 0.9999970086266128,
+    "max_abs": 20.9033203125,
+    "teacher_forced": true
+   },
+   "blocks.3": {
+    "rel_l2": 0.0019136448390968002,
+    "cosine": 0.9999981692395218,
+    "max_abs": 18.291259765625,
+    "teacher_forced": true
+   },
+   "blocks.4": {
+    "rel_l2": 0.0019043532729649427,
+    "cosine": 0.999998186857725,
+    "max_abs": 11.14111328125,
+    "teacher_forced": true
+   },
+   "blocks.5": {
+    "rel_l2": 0.001898006105272103,
+    "cosine": 0.999998198788199,
+    "max_abs": 15.625244140625,
+    "teacher_forced": true
+   },
+   "blocks.6": {
+    "rel_l2": 0.0019616860621269926,
+    "cosine": 0.9999980774078094,
+    "max_abs": 10.1591796875,
+    "teacher_forced": true
+   },
+   "blocks.7": {
+    "rel_l2": 0.001992980354808149,
+    "cosine": 0.9999980184048759,
+    "max_abs": 12.765380859375,
+    "teacher_forced": true
+   },
+   "blocks.8": {
+    "rel_l2": 0.0021878635070193475,
+    "cosine": 0.999997622743602,
+    "max_abs": 13.671875,
+    "teacher_forced": true
+   },
+   "blocks.9": {
+    "rel_l2": 0.002213120961846816,
+    "cosine": 0.9999975510996899,
+    "max_abs": 10.573974609375,
+    "teacher_forced": true
+   },
+   "blocks.10": {
+    "rel_l2": 0.0026582966444282166,
+    "cosine": 0.9999967228741438,
+    "max_abs": 21.4375,
+    "teacher_forced": true
+   },
+   "blocks.11": {
+    "rel_l2": 0.0024378550284045266,
+    "cosine": 0.9999971171336287,
+    "max_abs": 29.23876953125,
+    "teacher_forced": true
+   },
+   "blocks.12": {
+    "rel_l2": 0.002462599609326138,
+    "cosine": 0.9999970212482109,
+    "max_abs": 19.493408203125,
+    "teacher_forced": true
+   },
+   "blocks.13": {
+    "rel_l2": 0.0024564001807107975,
+    "cosine": 0.9999969993257118,
+    "max_abs": 17.8076171875,
+    "teacher_forced": true
+   },
+   "blocks.14": {
+    "rel_l2": 0.002630266386437155,
+    "cosine": 0.9999965454654557,
+    "max_abs": 16.90234375,
+    "teacher_forced": true
+   },
+   "blocks.15": {
+    "rel_l2": 0.0025666335292951507,
+    "cosine": 0.9999967090208699,
+    "max_abs": 19.069091796875,
+    "teacher_forced": true
+   },
+   "blocks.16": {
+    "rel_l2": 0.0028454342395836333,
+    "cosine": 0.9999959816217883,
+    "max_abs": 21.48291015625,
+    "teacher_forced": true
+   },
+   "blocks.17": {
+    "rel_l2": 0.003049163232003005,
+    "cosine": 0.9999954017011355,
+    "max_abs": 27.140625,
+    "teacher_forced": true
+   },
+   "blocks.18": {
+    "rel_l2": 0.003468858033621722,
+    "cosine": 0.9999943000849895,
+    "max_abs": 35.96142578125,
+    "teacher_forced": true
+   },
+   "blocks.19": {
+    "rel_l2": 0.004251361297475724,
+    "cosine": 0.9999911926328559,
+    "max_abs": 34.55859375,
+    "teacher_forced": true
+   },
+   "blocks.20": {
+    "rel_l2": 0.004575378133749944,
+    "cosine": 0.9999898993601443,
+    "max_abs": 61.41162109375,
+    "teacher_forced": true
+   },
+   "blocks.21": {
+    "rel_l2": 0.00415157019573431,
+    "cosine": 0.9999915693911001,
+    "max_abs": 29.298828125,
+    "teacher_forced": true
+   },
+   "blocks.22": {
+    "rel_l2": 0.005121412214748834,
+    "cosine": 0.9999869508192042,
+    "max_abs": 35.64453125,
+    "teacher_forced": true
+   },
+   "blocks.23": {
+    "rel_l2": 0.005604888545635953,
+    "cosine": 0.999984345134268,
+    "max_abs": 65.278076171875,
+    "teacher_forced": true
+   },
+   "blocks.24": {
+    "rel_l2": 0.005734781816353752,
+    "cosine": 0.9999835630261822,
+    "max_abs": 37.3681640625,
+    "teacher_forced": true
+   },
+   "blocks.25": {
+    "rel_l2": 0.005912209692507925,
+    "cosine": 0.9999825256551199,
+    "max_abs": 32.272705078125,
+    "teacher_forced": true
+   },
+   "blocks.26": {
+    "rel_l2": 0.004836624696809376,
+    "cosine": 0.9999883222974423,
+    "max_abs": 42.4326171875,
+    "teacher_forced": true
+   },
+   "blocks.27": {
+    "rel_l2": 0.0038093220780817554,
+    "cosine": 0.999992746699697,
+    "max_abs": 89.2177734375,
+    "teacher_forced": true
+   },
+   "last": {
+    "rel_l2": 0.0031083188152038993,
+    "cosine": 0.9999951702927573,
+    "max_abs": 0.033709049224853516,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "blocks.0": 0.03246564601416371,
+   "blocks.1": 0.03274299669727619,
+   "blocks.2": 0.034642482666410665,
+   "blocks.3": 0.03571246894052941,
+   "blocks.4": 0.03710692714731742,
+   "blocks.5": 0.03796492814248546,
+   "blocks.6": 0.038209546847387546,
+   "blocks.7": 0.03848324799541642,
+   "blocks.8": 0.03930798141178474,
+   "blocks.9": 0.041238946622885,
+   "blocks.10": 0.03227055854546322,
+   "blocks.11": 0.02978824713635023,
+   "blocks.12": 0.03459812756663281,
+   "blocks.13": 0.03817534400626348,
+   "blocks.14": 0.04432638172751787,
+   "blocks.15": 0.04815869975414196,
+   "blocks.16": 0.05889149536547618,
+   "blocks.17": 0.07491565773819622,
+   "blocks.18": 0.09047360867792703,
+   "blocks.19": 0.12185617580357559,
+   "blocks.20": 0.13831849704021643,
+   "blocks.21": 0.16875905539486585,
+   "blocks.22": 0.20141992047133242,
+   "blocks.23": 0.23787354170632277,
+   "blocks.24": 0.25648093051109966,
+   "blocks.25": 0.2741146634532624,
+   "blocks.26": 0.24078023570637797,
+   "blocks.27": 0.1438435494927276
+  },
+  "times": {
+   "fp32_s": 18.5,
+   "bf16_s": 38.2,
+   "bf16_teacher_forced_s": 37.5
+  },
+  "adapter_effect": {
+   "velocity": 0.5670430078140742,
+   "tmlp": 0.5127212332651098,
+   "tproj": 0.05731383922080305,
+   "txtfusion.layerwise_blocks.0": 0.03553094421440081,
+   "txtfusion.layerwise_blocks.1": 0.04283278975959812,
+   "txtfusion.projector": 0.03507755665698562,
+   "txtfusion.refiner_blocks.0": 0.03307309238626566,
+   "txtfusion.refiner_blocks.1": 0.0302328401773658,
+   "txtmlp": 0.2596220099863937,
+   "first": 0.0497138889979292,
+   "blocks.0": 0.04892661498567384,
+   "blocks.1": 0.06210953790191847,
+   "blocks.2": 0.059196821058162416,
+   "blocks.3": 0.06484433238927301,
+   "blocks.4": 0.0718714777075665,
+   "blocks.5": 0.08110635202081379,
+   "blocks.6": 0.09517725203181596,
+   "blocks.7": 0.11970088618905043,
+   "blocks.8": 0.14271450370973737,
+   "blocks.9": 0.1680975691139275,
+   "blocks.10": 0.1493057057790313,
+   "blocks.11": 0.17043381981205288,
+   "blocks.12": 0.19461461616041864,
+   "blocks.13": 0.21838800746399056,
+   "blocks.14": 0.2497631626995979,
+   "blocks.15": 0.2532934517254804,
+   "blocks.16": 0.2956988095384705,
+   "blocks.17": 0.3765791469264537,
+   "blocks.18": 0.4064762267361389,
+   "blocks.19": 0.5572322722186791,
+   "blocks.20": 0.583775955067418,
+   "blocks.21": 0.6872219638762458,
+   "blocks.22": 0.8228679049947352,
+   "blocks.23": 0.9510721036809492,
+   "blocks.24": 1.004543865140637,
+   "blocks.25": 1.0846331635152542,
+   "blocks.26": 1.0492713173821735,
+   "blocks.27": 0.6200528500118677,
+   "last": 0.5670430078140744
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.14589743958370355,
+   "cosine_min": 0.9893457911685166
+  },
+  "tmlp": {
+   "rel_l2": 0.006545491024814611,
+   "teacher_forced": false
+  },
+  "tproj": {
+   "rel_l2": 0.006574465081343428,
+   "teacher_forced": false
+  },
+  "txtfusion.layerwise_blocks.0": {
+   "rel_l2": 0.005470248618476743,
+   "teacher_forced": false
+  },
+  "txtfusion.layerwise_blocks.1": {
+   "rel_l2": 0.006987894722631017,
+   "teacher_forced": false
+  },
+  "txtfusion.projector": {
+   "rel_l2": 0.007433377562412959,
+   "teacher_forced": false
+  },
+  "txtfusion.refiner_blocks.0": {
+   "rel_l2": 0.007288904507702324,
+   "teacher_forced": false
+  },
+  "txtfusion.refiner_blocks.1": {
+   "rel_l2": 0.006662925872744735,
+   "teacher_forced": false
+  },
+  "txtmlp": {
+   "rel_l2": 0.00957882251804539,
+   "teacher_forced": false
+  },
+  "first": {
+   "rel_l2": 0.005755554226682481,
+   "teacher_forced": false
+  },
+  "blocks.0": {
+   "rel_l2": 0.06564368195740415,
+   "teacher_forced": true
+  },
+  "blocks.1": {
+   "rel_l2": 0.0056806326528195455,
+   "teacher_forced": true
+  },
+  "blocks.2": {
+   "rel_l2": 0.004893710682334852,
+   "teacher_forced": true
+  },
+  "blocks.3": {
+   "rel_l2": 0.0038272896781936004,
+   "teacher_forced": true
+  },
+  "blocks.4": {
+   "rel_l2": 0.0038087065459298853,
+   "teacher_forced": true
+  },
+  "blocks.5": {
+   "rel_l2": 0.003796012210544206,
+   "teacher_forced": true
+  },
+  "blocks.6": {
+   "rel_l2": 0.003923372124253985,
+   "teacher_forced": true
+  },
+  "blocks.7": {
+   "rel_l2": 0.003985960709616298,
+   "teacher_forced": true
+  },
+  "blocks.8": {
+   "rel_l2": 0.004375727014038695,
+   "teacher_forced": true
+  },
+  "blocks.9": {
+   "rel_l2": 0.004426241923693632,
+   "teacher_forced": true
+  },
+  "blocks.10": {
+   "rel_l2": 0.005316593288856433,
+   "teacher_forced": true
+  },
+  "blocks.11": {
+   "rel_l2": 0.004875710056809053,
+   "teacher_forced": true
+  },
+  "blocks.12": {
+   "rel_l2": 0.004925199218652276,
+   "teacher_forced": true
+  },
+  "blocks.13": {
+   "rel_l2": 0.004912800361421595,
+   "teacher_forced": true
+  },
+  "blocks.14": {
+   "rel_l2": 0.00526053277287431,
+   "teacher_forced": true
+  },
+  "blocks.15": {
+   "rel_l2": 0.005133267058590301,
+   "teacher_forced": true
+  },
+  "blocks.16": {
+   "rel_l2": 0.005690868479167267,
+   "teacher_forced": true
+  },
+  "blocks.17": {
+   "rel_l2": 0.00609832646400601,
+   "teacher_forced": true
+  },
+  "blocks.18": {
+   "rel_l2": 0.006937716067243444,
+   "teacher_forced": true
+  },
+  "blocks.19": {
+   "rel_l2": 0.008502722594951448,
+   "teacher_forced": true
+  },
+  "blocks.20": {
+   "rel_l2": 0.009150756267499888,
+   "teacher_forced": true
+  },
+  "blocks.21": {
+   "rel_l2": 0.00830314039146862,
+   "teacher_forced": true
+  },
+  "blocks.22": {
+   "rel_l2": 0.010242824429497668,
+   "teacher_forced": true
+  },
+  "blocks.23": {
+   "rel_l2": 0.011209777091271906,
+   "teacher_forced": true
+  },
+  "blocks.24": {
+   "rel_l2": 0.011469563632707505,
+   "teacher_forced": true
+  },
+  "blocks.25": {
+   "rel_l2": 0.01182441938501585,
+   "teacher_forced": true
+  },
+  "blocks.26": {
+   "rel_l2": 0.009673249393618752,
+   "teacher_forced": true
+  },
+  "blocks.27": {
+   "rel_l2": 0.007618644156163511,
+   "teacher_forced": true
+  },
+  "last": {
+   "rel_l2": 0.0062166376304077986,
+   "teacher_forced": true
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity"
+ },
+ "notes": [
+  "the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"
+ ],
+ "created": "2026-10-10T07:31:22Z",
+ "npz": "check7_krea2_lora_512.npz",
+ "tensors": {
+  "blocks.0": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "8e3ca140510593fbc45e1069535b9ce90759e26cda626d7f3116efd56b164bb6"
+  },
+  "blocks.1": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "9edb0c6e9869d9a11f1d9344aaa6f858aec99be082c287f087e8bfd36804ac94"
+  },
+  "blocks.10": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "38fa9bc180672ee0daa5b95c4715892a9fea483a1c5280b1569f1d8746ba5604"
+  },
+  "blocks.11": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "64b567b309c8811d4a81b2529c47a6ddb55e1095ba683c7282a90ed2e79429aa"
+  },
+  "blocks.12": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "130edc763405e327f4f8ffbaa4e07298c65cb118db67b99057e90443a9dd93f0"
+  },
+  "blocks.13": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "2e0ded51c2fc095c8a742702d82743016245ecaa16d0de4c7c7f7f0629809faa"
+  },
+  "blocks.14": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "d64aed95df42de63ae58b068b9809544f01ac919b6649228e93867ecfb5b395e"
+  },
+  "blocks.15": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "efdb4261a598408a1f266de452c890e3007fade631ea3cea8cd139afd9a98d4b"
+  },
+  "blocks.16": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "a3139a07e0d29a879afafd66ac67c08fae8aad38c8b54340a28d13571db9e1ea"
+  },
+  "blocks.17": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "fc83c89efab572f632bd3274a645dbadd44ceaf8c597bc35365e08d05e54d229"
+  },
+  "blocks.18": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "bb2fb6e6a9e460bd46f7d86373e49676ea5c80cd245a28d64c5b371dfbf743b9"
+  },
+  "blocks.19": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "77cb79aedb6568733c369e04c196e70a11aa6cd89b6db667b45a3989efeb6a78"
+  },
+  "blocks.2": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "1332571a45b918e9da9390a50bc83de37407fa87f7bcb548d0f4361d6ced3865"
+  },
+  "blocks.20": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "8d21d950e64716964cb6f8f8c24e7cf6c90af8e09281253812f2760a097685db"
+  },
+  "blocks.21": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "43933824da861d51cf88ee428f66c013d962e34c7efcd7610328a0d116a0a7a8"
+  },
+  "blocks.22": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "cfbbcabc4a695d5e0a901190d2e17c22981bbbd72478a903f50e22d18bdcd843"
+  },
+  "blocks.23": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "115cdff832e64406f8ee382407cd9a7f6a6d0f88373d06f3fec0edfcfb1967ca"
+  },
+  "blocks.24": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "f1ee3342c2e034d1ac1fcccce018278dadca08d0f463e546c5fe34a888028a9f"
+  },
+  "blocks.25": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "537bae7b344dcac9ca7e64fa300735c5332100cf8d2d2de737a8baf6f89f02c1"
+  },
+  "blocks.26": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "98e4da7d4184090838f84c36b097be1709fdcbed6335918e3677507050140749"
+  },
+  "blocks.27": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "0196a911c3e800e49653fa56a96af138f5d80da08d583069d3ed905d7e7bcfb6"
+  },
+  "blocks.3": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "acaa6f89bbed2fd695f0e589b95b4b09e5579f592d54f54c6124efc1ba5ba2ff"
+  },
+  "blocks.4": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "db3b8ea36588436770b70fc8d7cb75640cf9e06a1b76367471b974be138ebc6e"
+  },
+  "blocks.5": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "9fdf971d83432215e2525b84b04feac1cff327a380c345a8e2338d0ba2c07ee0"
+  },
+  "blocks.6": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "d9064cf26cf7bb25398b6d2f9adc58c1da2b5f6286a2e8c6d1e58effafa23a31"
+  },
+  "blocks.7": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "53a515b863f7709ab77ff27617ec4dfe4e3fdfabb3d37c7652bd51f79125cd33"
+  },
+  "blocks.8": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "c2b3e3352267eaa6d4f30a277a23718f97992494f1e6fb9089f2b3012aae9a1f"
+  },
+  "blocks.9": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "fd109a5e3de366f915a67a22f79777673303e22ab9f3655f4d81e301caf901ac"
+  },
+  "features": {
+   "shape": [
+    33,
+    30720
+   ],
+   "dtype": "float32",
+   "sha256": "811128d73c767a209605b6b6585b955e834aa467ca1484e5cfa7c4e86c2c151a"
+  },
+  "first": {
+   "shape": [
+    1,
+    1024,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "5bc7573db15d865f4249dcca51971ae90844e45e2afa6157bf2cdc74cc1d7a2d"
+  },
+  "in.blocks.0": {
+   "shape": [
+    1,
+    1057,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "28b546a02b29342e4b7826dab4fdb0c89ecc88a3da6db80fc2691feffa106301"
+  },
+  "in.last": {
+   "shape": [
+    1,
+    1024,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "4719a491b429083c1beadae0dcff2fe203279d541db4f0fd4e441fc878d219e3"
+  },
+  "last": {
+   "shape": [
+    1,
+    1024,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "8219bcdb434f2b8aa08fa84de216d993bf60c9a892f1e9e223d3c362f2710f52"
+  },
+  "latents": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "53e5773367fc25345578bc44381f9bb754857918e4e366a7a85cd74d506199c8"
+  },
+  "position_ids": {
+   "shape": [
+    1057,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "99cdec377a330015b010e55ae49f2c5270f07f7d6e0d3884d7a5ef10edfb91c5"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
+  },
+  "tmlp": {
+   "shape": [
+    1,
+    1,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "aee858eab95757db9c6f6c235faa504de87cef729a19518807bd81c831d6325a"
+  },
+  "tproj": {
+   "shape": [
+    1,
+    1,
+    36864
+   ],
+   "dtype": "float32",
+   "sha256": "472aaa4cb2cfc9bb0e6b159eb46af1601dcbed46c25f1d3914e36b1338b54089"
+  },
+  "txtfusion.layerwise_blocks.0": {
+   "shape": [
+    33,
+    12,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "3cbd2f73f2a4ffc6eb969167b8b70c02083f94e705c49d94bd8dde458bd8db23"
+  },
+  "txtfusion.layerwise_blocks.1": {
+   "shape": [
+    33,
+    12,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "da09a6999083671e545470ccc32577badb19ce40de94ed65bd9fc3244912ada9"
+  },
+  "txtfusion.projector": {
+   "shape": [
+    1,
+    33,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "3d316ae597dd48470f88ac79f5aea81656f926bb8aa61ca5ce61c2faa45c0802"
+  },
+  "txtfusion.refiner_blocks.0": {
+   "shape": [
+    1,
+    33,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "4ed31e7da1b8436adb9f0118cd167e5578df9b687095a3fe1443806ed98c71f7"
+  },
+  "txtfusion.refiner_blocks.1": {
+   "shape": [
+    1,
+    33,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "ce2df1f824b9dcf1cb5fe51fd5f4b22183920bb7d67226c0828619e4967e7ac7"
+  },
+  "txtmlp": {
+   "shape": [
+    1,
+    33,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "332eca7b832332c9c6feb1eb60a4ec99670a67b766427cea7a395d68da8ff689"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "33eeb053d629ea88091c433ed52cc6e0851411df280f88588d09f7a6f273104b"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "0ba6800c96478064528a9e102f44ff9be88847b187394fc37498d6a572c73214"
+  }
+ }
+}

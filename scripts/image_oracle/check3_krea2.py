@@ -283,8 +283,13 @@ def rows_of(cap: Capture) -> dict:
 
 
 def run_case(torch, models: dict, lat, feats, sigma, layers, rows: bool,
-             name: str, inputs: dict, files: dict, notes: list) -> None:
-    fx = fixtures.FixtureWriter(name, check=3, family="krea2", script=SCRIPT)
+             name: str, inputs: dict, files: dict, notes: list, *,
+             check: int = 3, script: str = SCRIPT, more=None) -> dict:
+    """One step in fp32 and bf16 written as fixture ``name``. ``more``
+    takes the writer and the fp32 velocity before the write. Returns the
+    velocity of each mode."""
+    fx = fixtures.FixtureWriter(name, check=check, family="krea2",
+                                script=script)
     fx.inputs.update(inputs)
     for role, path in files.items():
         fx.add_file(role, path)
@@ -330,9 +335,12 @@ def run_case(torch, models: dict, lat, feats, sigma, layers, rows: bool,
             for k in r32 if k.startswith("blocks.")}
     fx.results["times"] = times
     fx.tolerances["rule"] = RULE
+    if more is not None:
+        more(fx, vel["fp32"])
     path = fx.write()
-    print(f"[check3] {name}: velocity bf16 vs fp32 rel L2 "
+    print(f"[check{check}] {name}: velocity bf16 vs fp32 rel L2 "
           f"{gap['rel_l2']:.3e}, {times}, wrote {path}", flush=True)
+    return vel
 
 
 def tiny_state(torch, seed: int) -> dict:
