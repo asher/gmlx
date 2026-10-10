@@ -74,6 +74,12 @@ and `/v1/capacity/plan`.
 the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
 `speculative`, `vlm`, `profile` and `default`.
 
+Each [image model](config.md#image-models) is listed too, with
+`"image": true`, its `family` and `variant`, and `edit`, which is true when
+the model takes reference images. It carries `resident`, `pinned` and
+`default` but no context figures. Its `default` marks the default image
+model.
+
 `/v1/keep` answers `{"status": "kept", "model": "<id>", "warming": true}`
 and loads the model in the background. A kept model is not pinned, so the
 server can still unload it to make room, as

@@ -131,6 +131,7 @@ sections and fields.
 | `memory` | Active and cached bytes, free working set, and for a [streamed](streaming.md) model its [arena](glossary.md#arena). |
 | `capacity` | The capacity table that the plan route reads. |
 | `rates` | Decode rate now, means over recent requests, and the lifetime mean. |
+| `images` | Image jobs done, failed and cancelled, jobs running and waiting, and the median seconds per image and per step. |
 
 In a request row, `cache.tier` is where its prefix hit in the
 [prompt cache](prompt-cache.md): `exact`, `block`, `ckpt`, `anchor` or

@@ -38,6 +38,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   share of the GPU that `GMLX_IMAGE_CHAT_SHARE` sets.
 - `server.image.tensor_cache_mb` and `adapter_cache_mb` set how much each
   served image model keeps of encoded prompts and request LoRAs.
+- `/v1/models` lists each image model with its family, variant and `edit`, and
+  `/v1/metrics` counts image jobs and times each image and step.
 - Qwen-Image 2.1 Turbo GGUFs sample in 8 steps on the model's own schedule,
   instead of the base model's 40.
 - `gmlx serve` answers image step routes under `/internal/image-steps/v1`, one

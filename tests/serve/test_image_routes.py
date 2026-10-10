@@ -289,6 +289,34 @@ def test_a_cancelled_job_answers_499_and_a_timeout_504(served):
     assert served.released == [1, 1]
 
 
+def test_image_metrics_count_jobs_and_time_each_image_and_step(
+        served, monkeypatch):
+    monkeypatch.setattr(images.STATE, "counts", dict.fromkeys(
+        ("jobs", "failed", "cancelled", "images", "steps"), 0))
+    monkeypatch.setattr(images.STATE, "recent", [])
+
+    def job(req, kw):
+        return svc.ImageJobResult(
+            images=[b"a", b"b"], size=(64, 32), quality="auto", usage={},
+            seeds=[0, 1], steps=8, run_steps=8, image_s=6.0, step_s=4.0)
+
+    served.job = job
+    assert _client().post("/v1/images/generations",
+                          json={"prompt": "x", "n": 2}).status_code == 200
+    served.job = lambda req, kw: (_ for _ in ()).throw(svc.JobStopped(False))
+    assert _client().post("/v1/images/generations",
+                          json={"prompt": "x"}).status_code == 499
+    served.job = lambda req, kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert _client().post("/v1/images/generations",
+                          json={"prompt": "x"}).status_code == 500
+    m = images.STATE.metrics()
+    assert (m["jobs_total"], m["jobs_cancelled_total"], m["jobs_failed_total"],
+            m["images_total"], m["steps_total"]) == (1, 1, 1, 2, 16)
+    assert m["image_s"] == 3.0 and m["step_s"] == 0.25
+    assert m["in_flight"] == 0 and m["waiting"] == 0
+    assert m["max_queue"] == images.STATE.settings.max_queue
+
+
 def test_the_queue_cap_answers_429_with_retry_after(served):
     gate, entered = threading.Event(), threading.Event()
 

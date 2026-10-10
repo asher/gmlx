@@ -122,7 +122,58 @@ def _models_payload() -> dict:
             data.append(_entry(name, rm, alias_of=target_id,
                                profile=profile or rm.profile_name,
                                spec=_alias_spec(name, rm)))
+    default_image = serving.default_image_model_id()
+    for iid, rm in serving.image_models().items():
+        data.append(_image_entry(iid, rm, resident=rm.path in resident,
+                                 pinned=rm.path in pinned,
+                                 default=iid == default_image))
     return {"object": "list", "data": data}
+
+
+_IMAGE_IDENTITY: dict = {}
+
+
+def _image_identity(path: str) -> tuple:
+    """``(family, variant, edits)`` of a DiT from its header, cached on
+    the file's size and mtime; ``(None, None, False)`` for a file that
+    does not identify."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None, False
+    key = (path, st.st_size, st.st_mtime_ns)
+    hit = _IMAGE_IDENTITY.get(key)
+    if hit is None:
+        from gmlx.image.loader import identify_dit
+
+        try:
+            ident = identify_dit(path)
+            hit = (ident.family.name, ident.variant,
+                   ident.family.edit is not None)
+        except Exception:  # noqa: BLE001 - a bad file is listed without them
+            hit = (None, None, False)
+        if len(_IMAGE_IDENTITY) > 64:
+            _IMAGE_IDENTITY.clear()
+        _IMAGE_IDENTITY[key] = hit
+    return hit
+
+
+def _image_entry(iid: str, rm, *, resident: bool, pinned: bool,
+                 default: bool) -> dict:
+    """An image model in ``/v1/models``: the keys of a chat entry without
+    the context figures, plus ``image``, the family, the variant and
+    ``edit``, which is true when the family takes reference images and
+    the entry has its vision tower."""
+    family, variant, edits = _image_identity(rm.path)
+    return {
+        "id": iid, "object": "model", "created": _mtime(rm.path),
+        "owned_by": "gmlx", "resident": resident, "kv_quant": None,
+        "pinned": bool(rm.pin) or pinned, "speculative": False,
+        "vlm": False, "profile": None,
+        "family": family or rm.family, "default": default,
+        "image": True, "variant": variant,
+        "edit": bool(edits and rm.encoder_mmproj),
+    }
 
 
 def _service_entry(sid: str, marker: str, value) -> dict:
@@ -496,6 +547,13 @@ def install_runtime_snapshot_enrichment() -> None:
             base["rates"] = rates_view()
         except Exception:
             _log.debug("metrics snapshot: rates unavailable", exc_info=True)
+        try:
+            if serving.image_models():
+                from .images import STATE as _images
+
+                base["images"] = _images.metrics()
+        except Exception:
+            _log.debug("metrics snapshot: images unavailable", exc_info=True)
         try:
             from ..live_requests import live_requests_view
 

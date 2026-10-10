@@ -433,6 +433,76 @@ def test_snapshot_names_the_kind_of_each_resident_model():
         (["qwen"], "chat"), (["zit"], "image")]
 
 
+def test_models_payload_lists_image_models_with_their_markers(
+        monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from gmlx.image import loader
+
+    files = {n: tmp_path / n for n in ("zit.gguf", "qi.gguf", "enc.gguf",
+                                         "mm.gguf", "vae.gguf")}
+    for f in files.values():
+        f.write_bytes(b"x")
+    edit = SimpleNamespace(name="qwen_image21", edit=object())
+    plain = SimpleNamespace(name="z_image", edit=None)
+    monkeypatch.setattr(loader, "identify_dit", lambda path: SimpleNamespace(
+        family=edit if path.endswith("qi.gguf") else plain,
+        variant="turbo"))
+    sp_routes._IMAGE_IDENTITY.clear()
+    _register({
+        "server": {"defaults": {"image_model": "qi"}},
+        "models": {"qwen": {"path": "/abs/qwen.gguf"}},
+        "image_models": {
+            "zit": {"path": str(files["zit.gguf"]),
+                    "encoder": str(files["enc.gguf"]),
+                    "vae": str(files["vae.gguf"]), "pin": True},
+            "qi": {"path": str(files["qi.gguf"]),
+                   "encoder": str(files["enc.gguf"]),
+                   "encoder_mmproj": str(files["mm.gguf"]),
+                   "vae": str(files["vae.gguf"])}}})
+
+    class _FakePool:
+        def stats(self):
+            return {"resident": [{"model_path": str(files["qi.gguf"]),
+                                  "pinned": False, "kind": "image",
+                                  "footprint_bytes": 1, "idle_s": 0.0}]}
+
+    _PKG._kq_residency_pool = _FakePool()
+    try:
+        by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        _PKG._kq_residency_pool = None
+        serving.clear_resolved_models()
+    assert by_id["qwen"].get("image") is None
+    zit, qi = by_id["zit"], by_id["qi"]
+    assert zit["image"] is True and qi["image"] is True
+    assert (zit["family"], zit["variant"], zit["edit"]) == ("z_image", "turbo",
+                                                           False)
+    assert (qi["family"], qi["edit"]) == ("qwen_image21", True)
+    assert (zit["resident"], zit["pinned"], zit["default"]) == (False, True,
+                                                                False)
+    assert (qi["resident"], qi["pinned"], qi["default"]) == (True, False, True)
+    assert "context_length" not in zit
+    assert set(by_id["qwen"]) - {"context_length", "max_context_at_width_1"} \
+        <= set(zit)
+
+
+def test_snapshot_carries_the_image_section_with_image_models():
+    from gmlx.serve.patches import images
+
+    _APP._server_runtime_snapshot = lambda: {}
+    _PKG._kq_residency_pool = None
+    sp.install_runtime_snapshot_enrichment()
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"}}})
+    try:
+        assert "images" not in _APP._server_runtime_snapshot()
+        _register(_IMAGE_DOC)
+        snap = _APP._server_runtime_snapshot()
+    finally:
+        serving.clear_resolved_models()
+    assert snap["images"] == images.STATE.metrics()
+
+
 def test_keep_and_unload_take_an_image_model(monkeypatch):
     from fastapi.testclient import TestClient
 

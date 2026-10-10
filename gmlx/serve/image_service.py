@@ -785,6 +785,9 @@ class ImageJobResult:
     usage: dict
     seeds: list
     steps: int
+    run_steps: int = 0              # denoise steps per image
+    image_s: float = 0.0            # sampling and decode, all images
+    step_s: float = 0.0             # sampling alone, all images
 
 
 class JobStopped(Exception):
@@ -1147,6 +1150,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
     seed = req.seed if req.seed is not None else secrets.randbelow(1 << 32)
     seeds = [seed + i for i in range(req.n)]
     out = []
+    image_s = step_s = 0.0
     meta = None
     if embed_metadata and req.output_format == "png":
         meta = {"prompt": prompt, "steps": steps, "size": f"{width}x{height}",
@@ -1182,6 +1186,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
                 _pi[0] += 1
             _prev["x"] = x
 
+        t_img = time.perf_counter()
         try:
             x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
                            width=width, steps=steps, seed=s, sampler=sampler,
@@ -1191,9 +1196,11 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
                            should_stop=should_stop)
         except api.SampleStopped:
             raise JobStopped(timed_out=not stop.is_set()) from None
+        step_s += time.perf_counter() - t_img   # sample evaluates each step
         data = encode_output(finish(x), req.output_format, req.compression,
                              None if meta is None else {**meta, "seed": s})
         out.append(data)
+        image_s += time.perf_counter() - t_img
         del x
         mx.clear_cache()
 
@@ -1216,4 +1223,5 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
               req.n, width, height, run_steps, encode_s)
     return ImageJobResult(images=out, size=(width, height),
                           quality=req.quality, usage=usage, seeds=seeds,
-                          steps=steps)
+                          steps=steps, run_steps=run_steps, image_s=image_s,
+                          step_s=step_s)

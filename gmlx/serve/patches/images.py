@@ -61,6 +61,9 @@ class _State:
         self.lock = threading.Lock()
         self.in_flight = 0
         self.durations: list = []           # seconds of recent jobs
+        self.counts = {"jobs": 0, "failed": 0, "cancelled": 0, "images": 0,
+                       "steps": 0}
+        self.recent: list = []              # (image_s, step_s) per image
 
     def configure(self, cfg) -> None:
         from gmlx.config import ImageServerCfg
@@ -95,6 +98,43 @@ class _State:
             self.in_flight = max(0, self.in_flight - 1)
             if seconds is not None:
                 self.durations = (self.durations + [seconds])[-16:]
+
+    def record(self, status: str, result=None) -> None:
+        """Count a finished job; an ``ok`` one adds its seconds per image
+        and per step."""
+        with self.lock:
+            if status == "ok":
+                self.counts["jobs"] += 1
+                if result is not None and result.images:
+                    n = len(result.images)
+                    self.counts["images"] += n
+                    self.counts["steps"] += n * result.run_steps
+                    per = (result.image_s / n,
+                           result.step_s / (n * result.run_steps)
+                           if result.run_steps else None)
+                    self.recent = (self.recent + [per])[-16:]
+            elif status == "cancelled":
+                self.counts["cancelled"] += 1
+            elif status in ("failed", "timeout"):
+                self.counts["failed"] += 1
+
+    def metrics(self) -> dict:
+        """The ``images`` section of ``/v1/metrics``."""
+        with self.lock:
+            img = [a for a, _ in self.recent]
+            step = [b for _, b in self.recent if b is not None]
+            return {
+                "jobs_total": self.counts["jobs"],
+                "jobs_failed_total": self.counts["failed"],
+                "jobs_cancelled_total": self.counts["cancelled"],
+                "images_total": self.counts["images"],
+                "steps_total": self.counts["steps"],
+                "in_flight": self.in_flight,
+                "waiting": max(0, self.in_flight - 1),
+                "max_queue": self.settings.max_queue,
+                "image_s": round(statistics.median(img), 3) if img else None,
+                "step_s": round(statistics.median(step), 4) if step else None,
+            }
 
     def retry_after(self) -> int:
         with self.lock:
@@ -459,13 +499,14 @@ def make_endpoint(route: str):
 
         finished: list = []
 
-        def finish(status: str, **extra):
+        def finish(status: str, result=None, **extra):
             # Once per request, from the route or from the job's end.
             if finished:
                 return
             finished.append(status)
             release()
             STATE.leave(time.monotonic() - submitted if status == "ok" else None)
+            STATE.record(status, result)
             _log_aux_request(path, model_id, started, status=status,
                              n=req.n, size=f"{size[0]}x{size[1]}", **extra)
 
@@ -495,7 +536,7 @@ def make_endpoint(route: str):
                 stop.set()
                 watcher.cancel()
             urls = store_urls(result)
-            finish("ok", steps=result.steps, fmt=req.output_format)
+            finish("ok", result, steps=result.steps, fmt=req.output_format)
             return JSONResponse(content=_response_body(req, result, urls))
 
         common = {"background": req.background, "output_format": req.output_format,
@@ -515,8 +556,8 @@ def make_endpoint(route: str):
                 finish("cancelled")
             elif e is None:
                 result = f.result()
-                finish("ok", steps=result.steps, fmt=req.output_format,
-                       stream=1)
+                finish("ok", result, steps=result.steps,
+                       fmt=req.output_format, stream=1)
             elif isinstance(e, JobStopped):
                 finish("timeout" if e.timed_out else "cancelled")
             elif isinstance(e, ImageRequestError):
