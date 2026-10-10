@@ -1057,7 +1057,7 @@ a second quant). Files landing under a model_dirs root are registered in the
 config and served immediately. Refuses an unloadable GGUF unless --force.
 
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
-krea-2-turbo, krea-2) pulls the DiT, its text encoder and its VAE, uses the
+krea-2-turbo) pulls the DiT, its text encoder and its VAE, uses the
 parts your model folders already hold, and adds the model under
 image_models: in the config.
 """
@@ -1106,7 +1106,7 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "/tree/ or /blob/ link resolves the same way. "
                          "Additional bare filenames are fetched from the first "
                          "ref's repo. An image model name (z-image-turbo, "
-                         "qwen-image, qwen-image-turbo, krea-2-turbo, krea-2) "
+                         "qwen-image, qwen-image-turbo, krea-2-turbo) "
                          "pulls the model with its text encoder and VAE. See "
                          "the examples below.")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",

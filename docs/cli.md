@@ -598,8 +598,8 @@ gmlx pull z-image-turbo
 gmlx pull qwen-image --quant Q5_K_M
 ```
 
-An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
-`krea-2-turbo` or `krea-2`, pulls its DiT, text encoder and VAE, packs
+An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo` or
+`krea-2-turbo`, pulls its DiT, text encoder and VAE, packs
 the VAE to GGUF, and adds an `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder or VAE already on disk is
 used again when its weights match.

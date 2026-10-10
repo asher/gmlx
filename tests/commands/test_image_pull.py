@@ -936,3 +936,17 @@ def test_doctor_memory_counts_the_shared_encoder_and_the_dit_cast(
     monkeypatch.setattr(pf, "dit_cast_bytes", lambda path, family=None: (
         100 if path.endswith("zit.gguf") else 0))
     assert "zit" in doctor.check_memory(load_config(cfg))["detail"]
+
+
+def test_every_image_model_name_in_the_pull_help_resolves(capsys):
+    import re
+
+    with pytest.raises(SystemExit):
+        manage.cmd_pull(["--help"])
+    # argparse wraps the help at hyphens.
+    text = re.sub(r"-\s+", "-", " ".join(capsys.readouterr().out.split()))
+    lists = re.findall(r"An image model name \(([^)]*)\)", text)
+    assert lists
+    for listed in lists:
+        names = {n.strip() for n in listed.split(",")}
+        assert names == set(catalog.RECIPES)
