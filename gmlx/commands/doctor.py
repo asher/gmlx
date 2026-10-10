@@ -935,7 +935,11 @@ def check_memory(cfg) -> dict:
         size = _model_size_bytes(m.path, cfg.model_dirs)
         if size and classify_fit(size, ram) == "over":
             flagged.append(f"{mid} ({human_gb(size)})")
-    # An image model runs its DiT, text encoder and VAE together.
+    # An image model runs its DiT, text encoder and VAE together, and the
+    # load of the DiT holds its cast 16-bit tensors beside them.
+    import gmlx.config as cfgmod
+
+    from .image_preflight import dit_cast_bytes
     for iid, im in cfg.image_models.items():
         files = [p for _label, p in _image_files(cfg, im)]
         shared = cfg.models.get(im.encoder)
@@ -943,6 +947,9 @@ def check_memory(cfg) -> dict:
             files += [p for p in (shared.path, shared.mmproj) if p]
         sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files]
         size = sum(x for x in sizes if x)
+        if size:
+            size += dit_cast_bytes(cfgmod.resolve_path(im.path,
+                                                       cfg.model_dirs))
         if size and classify_fit(size, ram) == "over":
             flagged.append(f"{iid} ({human_gb(size)} with its encoder and "
                            "VAE)")

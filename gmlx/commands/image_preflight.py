@@ -47,6 +47,45 @@ def dit_transient(dit: str, act) -> int:
     return memfit.dit_transient(_header_view(dit), act)
 
 
+def cast_of(view, family: str) -> int:
+    """File bytes of the 16-bit float tensors of a DiT header view that
+    its load casts to the activation dtype of ``family`` on this chip, as
+    the load gate counts them. 0 on a chip that runs the family in no
+    dtype."""
+    from gmlx.image import memfit
+    from gmlx.image.dtypes import ImageDtypeError, image_activation
+
+    try:
+        act = image_activation(family).dit
+    except ImageDtypeError:
+        return 0
+    return memfit.cast_bytes(view, act)
+
+
+def dit_cast_bytes(dit: str, family: str | None = None) -> int:
+    """``cast_of`` the DiT file at ``dit``, of ``family`` or the family
+    its header names. 0 for a header that cannot be read."""
+    from gmlx.image.text_encoder import _header_view
+
+    try:
+        if family is None:
+            family = identify_dit(str(dit)).family.name
+        return cast_of(_header_view(str(dit)), family)
+    except Exception:                          # noqa: BLE001 - advisory
+        return 0
+
+
+def quant_cast_bytes(quant: str, size: int, family: str) -> int:
+    """``cast_of`` a DiT not on disk, from its quant and file size: the
+    whole file for a 16-bit float quant the family does not run in."""
+    from types import SimpleNamespace
+
+    q = quant.upper()
+    view = SimpleNamespace(tensors={"weight": SimpleNamespace(
+        codec=q, nbytes=int(size), shape=())})
+    return cast_of(view, family) if q in ("F16", "BF16") else 0
+
+
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,

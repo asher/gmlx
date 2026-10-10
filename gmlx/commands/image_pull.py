@@ -299,15 +299,31 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
     if total and ram:
         from gmlx.load.memfit import FIT_FITS, FIT_TIGHT, classify_fit
 
-        fit = classify_fit(total, ram)
+        cast = _cast(plan)
+        fit = classify_fit(total + cast, ram)
         where = {FIT_FITS: "fit", FIT_TIGHT: "are tight on"}.get(
             fit, "are more than") if fit else None
         if where:
-            print(f"  the three parts: {_gb(total)}, which {where} this "
-                  f"Mac's {_gb(ram, 0)} RAM")
+            load = (f", {_gb(total + cast)} while the DiT loads" if cast
+                    else "")
+            print(f"  the three parts: {_gb(total)}{load}, which {where} "
+                  f"this Mac's {_gb(ram, 0)} RAM")
     note = f", {r.license_note}" if r.license_note else ""
     print(f"  license: {r.title} {r.license}{note} ({r.license_url}); "
           f"encoder {r.encoder_license}")
+
+
+def _cast(plan: Plan) -> int:
+    """What the load of the DiT holds beside it while it casts its 16-bit
+    tensors, as the load gate counts it: from the header of a DiT on
+    disk, else from its quant."""
+    from .image_preflight import dit_cast_bytes, quant_cast_bytes
+
+    dit = next(p for p in plan.parts if p.role == "dit")
+    if not dit.download and dit.path and os.path.isfile(dit.path):
+        return dit_cast_bytes(dit.path, plan.recipe.family)
+    return quant_cast_bytes(plan.dit_quant, dit.size or 0,
+                            plan.recipe.family)
 
 
 def _need(plan: Plan) -> int | None:

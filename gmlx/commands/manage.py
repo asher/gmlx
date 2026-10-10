@@ -275,7 +275,14 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     combined = None
     if image == "dit" and size_bytes:
         extra = _image_companion_bytes(image_family)
-        combined = size_bytes + extra if extra else None
+        # The load gate counts the 16-bit tensors the DiT casts too.
+        cast = 0
+        if scans and image_family:
+            from gmlx.image.fingerprint import view_from_scans
+
+            from .image_preflight import cast_of
+            cast = cast_of(view_from_scans(scans), image_family)
+        combined = size_bytes + cast + extra if extra else None
     if mmproj or adapter or drafter or image:
         arch_ok, arch_err = False, None
     else:

@@ -284,6 +284,35 @@ def test_the_summary_gives_sizes_and_free_disk_before_the_download(
     assert "not enough disk space" in err
 
 
+def _bf16(monkeypatch):
+    from types import SimpleNamespace
+
+    from gmlx.image import dtypes
+    monkeypatch.setattr(dtypes, "image_activation", lambda fam, **k:
+                        SimpleNamespace(dit="bfloat16", vae="bfloat16"))
+
+
+def test_the_fit_line_counts_the_cast_of_a_16_bit_dit(lib, monkeypatch,
+                                                      capsys):
+    root, cfg = lib
+    Disk(monkeypatch, root)
+    _bf16(monkeypatch)
+    listing = {Q.dit_name("F16"): 10 << 30, Q.encoder_name("Q8_0"): 2 << 30,
+               Q.mmproj_file: 1 << 30, Q.vae_file: 160 << 20,
+               Q.vae_config: 1000}
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
+                        **k: [(n, "file", s) for n, s in listing.items()])
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 1 << 30)
+    _downloads(monkeypatch)
+    assert manage.cmd_pull(["qwen-image", "--quant", "F16", "--config",
+                            str(cfg)]) == 1
+    out = capsys.readouterr().out
+    # 13.2 GB alone fit a 32 GB Mac; with the F16 tensors the load casts
+    # to bfloat16 beside them they are tight.
+    assert "the three parts: 13.2 GB, 23.2 GB while the DiT loads, which " \
+        "are tight on this Mac's 32 GB RAM" in out
+
+
 def test_the_disk_check_counts_the_packed_vae_beside_its_source(
         lib, monkeypatch, capsys):
     root, cfg = lib
@@ -504,6 +533,22 @@ def test_an_image_dit_skips_the_chat_arch_gate_and_fits_with_its_parts():
     assert v["image"] == "dit" and v["image_family"] == "z_image"
     assert v["combined_bytes"] == (5 << 30) + Z.encoder_bytes + Z.vae_bytes
     assert v["usable"] and v["arch_error"] is None
+
+
+def test_a_16_bit_dit_fits_with_the_cast_its_load_holds(monkeypatch):
+    from types import SimpleNamespace
+
+    _bf16(monkeypatch)
+    monkeypatch.setattr(manage, "_image_role",
+                        lambda report, scans: ("dit", "qwen_image21"))
+    t = SimpleNamespace(name="w", shape=(4, 4), type_name="F16", offset=0,
+                        nbytes=3 << 30)
+    scans = [SimpleNamespace(path="/d.gguf", data_offset=0, tensors=[t],
+                             kv={})]
+    ref = remote.parse_ref("hf:unsloth/Qwen-Image-2.1-GGUF/qwen-image-2.1-F16.gguf")
+    v = manage._verdict(ref, _report("qwen_image"), size_bytes=4 << 30,
+                        scans=scans)
+    assert v["combined_bytes"] == (7 << 30) + Q.encoder_bytes + Q.vae_bytes
 
 
 def test_an_image_vae_is_a_companion():
@@ -735,3 +780,22 @@ def test_doctor_memory_counts_an_image_model_with_its_parts(images,
     # encoder and tower to its DiT and VAE (400 B).
     assert row["status"] == "WARN" and "zit" not in row["detail"]
     assert "qt (0 KB with its encoder and VAE)" in row["detail"]
+
+
+def test_doctor_memory_counts_the_shared_encoder_and_the_dit_cast(
+        images, monkeypatch):
+    import gmlx.commands.doctor as doctor
+    import gmlx.commands.image_preflight as pf
+    from gmlx.config import load_config
+
+    _lib, cfg = images
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes", lambda: 1 << 30)
+    monkeypatch.setattr("gmlx.load.memfit.classify_fit",
+                        lambda size, ram: "over" if size > 250 else "fits")
+    # zit is 300 B with its shared encoder, 200 B without it.
+    assert "zit" in doctor.check_memory(load_config(cfg))["detail"]
+    monkeypatch.setattr("gmlx.load.memfit.classify_fit",
+                        lambda size, ram: "over" if size > 350 else "fits")
+    monkeypatch.setattr(pf, "dit_cast_bytes", lambda path, family=None: (
+        100 if path.endswith("zit.gguf") else 0))
+    assert "zit" in doctor.check_memory(load_config(cfg))["detail"]
