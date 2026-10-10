@@ -144,6 +144,28 @@ def test_a_text_prompt_through_the_encoder_with_its_tower(handle):
     assert rel <= m["tolerances"]["rel_l2"][key]
 
 
+def test_a_text_prompt_taps_the_same_without_the_tower(handle, gguf_index):
+    """A text prompt through the encoder loaded without its tower gives
+    the conditioning of the encoder with it, in bits, so a server that
+    loads the tower for edits makes the CLI's text to image results."""
+    from gmlx.image import text_encoder as te
+
+    _, m = fixture("check2_qwen_image21")
+    enc = _find(gguf_index.get(handle.spec.arch, []),
+                m["files"]["encoder"])
+    if enc is None:
+        pytest.skip(f"{m['files']['encoder']['name']} is not under "
+                    "KQUANT_TEST_GGUF_DIR")
+    text = te.load_encoder(enc, handle.spec, log=lambda *_: None)
+    try:
+        for key, prompt in m["inputs"]["prompts"].items():
+            a, b = handle.encode(prompt), text.encode(prompt)
+            assert a.ids == b.ids, key
+            assert mx.array_equal(a.features, b.features).item(), key
+    finally:
+        text.release()
+
+
 def test_references_are_resized_as_the_reference_pipeline_resizes(check2):
     from gmlx.image.families.qwen_image21 import edit
 

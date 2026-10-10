@@ -18,7 +18,10 @@ the conditioning, after they ran: the rows it keeps attended to them.
 A family that conditions on reference images loads the encoder with its
 vision tower, from the encoder GGUF and its mmproj, as the multimodal
 class of the model. A text prompt taps that class by the same walk, and
-the family's own code runs a prompt with images.
+the family's own code runs a prompt with images. The text class of such
+an encoder rotates its queries and keys with the multimodal class's rope
+for the tap, so a text prompt gives the same conditioning with and
+without the tower loaded.
 
 An ``EncoderHandle`` owns the encoder it loaded and releases it on request,
 so the DiT and the VAE can use its memory. An owned encoder holds no
@@ -28,8 +31,10 @@ never released and keeps every weight.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
+import importlib
 import json
 import os
 from dataclasses import dataclass
@@ -200,6 +205,61 @@ def tap(model, ids, *, layers: tuple,
         if i + 1 in stops:
             out[i + 1] = h
     return [out[n] for n in layers]
+
+
+class _VisionRope:
+    """The multimodal class's rotary embedding in the text class's call:
+    one tensor and an offset. A text prompt puts one position on all
+    three axes."""
+
+    def __init__(self, dims: int, base: float):
+        lang = importlib.import_module(
+            "gmlx._vendor.mlx_vlm.models.qwen3_vl.language")
+        self.emb = lang.Qwen3VLRotaryEmbedding(dims, base=base)
+
+    def __call__(self, x: mx.array, offset: int = 0) -> mx.array:
+        n = x.shape[-2]
+        pos = mx.tile(mx.arange(offset, offset + n)[None, None], (3, 1, 1))
+        return self.emb.apply_rotary(x, x, pos, unsqueeze_dim=1)[0]
+
+
+def _plain_ropes(model, spec: EncoderSpec) -> list:
+    """The attention modules of a text class that the multimodal class of
+    ``spec`` would rotate with its own rope, with the plain rope each has.
+    Empty for a model with its tower, a spec without one, or a rope with
+    scaling."""
+    if spec.vision_type is None or getattr(model, "vision_tower", None) \
+            is not None:
+        return []
+    import mlx.nn as nn
+
+    _, blocks = _text_stack(model)
+    out = []
+    for b in blocks:
+        attn = getattr(b, "self_attn", None)
+        rope = getattr(attn, "rope", None)
+        if type(rope) is not nn.RoPE or rope.traditional or rope.scale != 1.0:
+            return []
+        out.append((attn, rope))
+    return out
+
+
+@contextlib.contextmanager
+def vision_rope(model, spec: EncoderSpec):
+    """Run a tap of a text class with the rope of its multimodal class,
+    and restore the model's own rope after."""
+    found = _plain_ropes(model, spec)
+    if not found:
+        yield
+        return
+    swap = _VisionRope(found[0][1].dims, found[0][1].base)
+    try:
+        for attn, _ in found:
+            attn.rope = swap
+        yield
+    finally:
+        for attn, rope in found:
+            attn.rope = rope
 
 
 def _model_param(model, path: str):
@@ -401,9 +461,10 @@ class EncoderHandle:
             raise RuntimeError(
                 f"the {self.spec.name} text encoder was released")
         ids = token_ids(self.spec, self.tokenizer, prompt)
-        hidden = tap(self.model, ids, layers=self.spec.tap_layers,
-                     activation=self.spec.activation)
-        mx.eval(hidden)
+        with vision_rope(self.model, self.spec):
+            hidden = tap(self.model, ids, layers=self.spec.tap_layers,
+                         activation=self.spec.activation)
+            mx.eval(hidden)
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
                        template_id=self.spec.template_id,
                        tap_layers=tuple(self.spec.tap_layers),

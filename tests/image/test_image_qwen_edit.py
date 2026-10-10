@@ -245,6 +245,42 @@ def _tiny_qwen3_vl(seed: int = 0, layers: int = 4, **tower):
     return model, proc
 
 
+def _text_twin(vl):
+    """The text class of the tiny encoder, holding its language weights,
+    as the text loader builds a Qwen3-VL GGUF without its mmproj."""
+    from mlx.utils import tree_flatten
+
+    from gmlx._vendor.mlx_lm.models import qwen3
+
+    model = qwen3.Model(qwen3.ModelArgs(
+        model_type="qwen3", hidden_size=HIDDEN, num_hidden_layers=4,
+        intermediate_size=96, num_attention_heads=4, rms_norm_eps=1e-6,
+        vocab_size=160, num_key_value_heads=2, max_position_embeddings=1024,
+        rope_theta=1e6, head_dim=16, tie_word_embeddings=False))
+    weights = dict(tree_flatten(vl.language_model.parameters()))
+    model.load_weights([(k, weights[k]) for k, _ in
+                        tree_flatten(model.parameters())])
+    model.eval()
+    return model
+
+
+def test_a_text_prompt_taps_the_same_with_and_without_the_tower():
+    """The text class rotates with the multimodal class's rope for the
+    tap, so a server that loads the tower conditions a text prompt as the
+    CLI does without it."""
+    vl, _ = _tiny_qwen3_vl()
+    text = _text_twin(vl)
+    own = text.model.layers[0].self_attn.rope
+    prompt = "a red bicycle leaning on a wall in the rain"
+    with_tower = te.EncoderHandle(vl, _Tokenizer(), _spec(), owned=True)
+    without = te.EncoderHandle(text, _Tokenizer(), _spec(), owned=True)
+    a, b = with_tower.encode(prompt), without.encode(prompt)
+    assert a.ids == b.ids and len(a.ids) > 20
+    assert mx.array_equal(a.hidden[0], b.hidden[0]).item()
+    assert text.model.layers[0].self_attn.rope is own
+    assert type(own) is nn.RoPE
+
+
 @pytest.fixture(scope="module")
 def handle():
     model, proc = _tiny_qwen3_vl()
