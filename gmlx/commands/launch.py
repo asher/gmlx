@@ -2048,6 +2048,9 @@ _HARNESSES = {
 def _default_exec(binary: str, argv: list, env: dict) -> int:
     """Replace this process with the harness (so signals/TTY are the harness's).
     Seam: tests pass a recording fake instead."""
+    # exec drops what the streams still buffer, as the summary to a pipe.
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execvpe(binary, argv, env)        # never returns on success
     return 127                           # unreachable; satisfies the type
 

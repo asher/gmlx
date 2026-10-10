@@ -3251,3 +3251,25 @@ def test_the_per_client_tables_miss_an_agent_key():
     assert key not in images.CLIENT_BINARY and key not in settings.NO_CWD_CLIENTS
     assert key not in launch._NEEDS_DEFAULT and key not in launch._HARNESSES
     assert launch.check_model_choice(key, [{"id": "m", "default": False}], None) is None
+
+
+def test_the_launch_summary_reaches_a_pipe_before_the_client_replaces_gmlx(
+        monkeypatch):
+    calls = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def write(self, text):
+            return len(text)
+
+        def flush(self):
+            calls.append(self.name)
+
+    monkeypatch.setattr(launch.sys, "stdout", Stream("stdout"))
+    monkeypatch.setattr(launch.sys, "stderr", Stream("stderr"))
+    monkeypatch.setattr(launch.os, "execvpe",
+                        lambda binary, argv, env: calls.append("exec"))
+    launch._default_exec("client", ["client"], {})
+    assert calls == ["stdout", "stderr", "exec"]

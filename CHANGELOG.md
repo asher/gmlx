@@ -120,6 +120,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx launch` output sent to a file or a pipe keeps the summary it prints
+  before the client starts.
 - On the CPU default device, a Qwen3.5 or 3.6 GGUF loaded with its mmproj
   gave wrong text after a prompt of more than one token.
 - An MLX-format Qwen3.5 or Qwen3-Next checkpoint gave wrong text in a process
