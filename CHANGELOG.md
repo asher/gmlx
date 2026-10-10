@@ -10,6 +10,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - GLM-5.3-Flash GGUFs whose architecture is llama.cpp's `glm5-next` load
   instead of failing as an unsupported architecture. `glm5next` files still load.
+- GLM-5.3-Flash and DeepSeek-V4 decode coherent text on an M5 Ultra instead
+  of garbage. Requires mlx-kquant 0.4.18.
 
 ## [0.4.23] - 2026-10-07
 
