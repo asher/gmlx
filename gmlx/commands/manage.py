@@ -1292,9 +1292,11 @@ def _rm_resolve_target(cfg, requested):
     return target, m, entry is not None, disc, notes
 
 
-def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes):
+def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
+                      images=()):
     """Files to delete (all shards + companions no other model references)
-    and their sizes; explanatory notes append to ``notes``."""
+    and their sizes; explanatory notes append to ``notes``. ``images`` are
+    the discovered image models."""
     # Paths any other model (configured or discovered) still resolves to.
     others = [mc for mid, mc in cfg.models.items() if mid != target]
     others += [mc for mc in disc if mc.id != target]
@@ -1305,7 +1307,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes):
             if rp:
                 ref_paths.add(os.path.abspath(rp))
     # An image model that names this model's GGUF as its encoder keeps it.
-    for im in cfg.image_models.values():
+    for im in _all_images(cfg, images):
         for p in (im.encoder, im.encoder_mmproj):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
@@ -1507,20 +1509,21 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         return 2
 
     target, m, is_configured, disc, notes = _rm_resolve_target(cfg, a.id)
+    # The image models discovery pairs load files too, so rm keeps them.
+    images: list = []
+    if cfg.discover:
+        import gmlx.load.discovery as discovery
+        discovery.discovered_models(cfg, images=images)
     if m is None:
-        images: list = []
-        if cfg.discover:
-            import gmlx.load.discovery as discovery
-            discovery.discovered_models(cfg, images=images)
         im = cfg.image_models.get(a.id) or next(
             (i for i in images if i.id == a.id), None)
         if im is not None:
-            return _rm_image(a, cfg, cfg_path, im, disc,
+            return _rm_image(a, cfg, cfg_path, im, disc, images,
                              configured=a.id in cfg.image_models)
         print(f"error: unknown model id {a.id!r} (see: gmlx list)",
               file=sys.stderr)
         return 2
-    users = sorted(iid for iid, im in cfg.image_models.items()
+    users = sorted(im.id for im in _all_images(cfg, images)
                    if im.encoder == target)
     if users:
         print(f"error: {target} is the text encoder of image model"
@@ -1530,7 +1533,8 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         return 2
 
     to_delete, sizes = _rm_deletion_plan(
-        cfg, target, m, disc, keep_files=a.keep_files, notes=notes)
+        cfg, target, m, disc, keep_files=a.keep_files, notes=notes,
+        images=images)
     aliases_to_drop = [name for name, tgt in cfg.aliases.items()
                        if tgt == target or tgt.startswith(target + "@")]
     default_model = cfg.defaults.model if cfg.defaults else None
@@ -1585,17 +1589,24 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
     return rc
 
 
-def _image_refs(cfg, disc, skip: str) -> set:
+def _all_images(cfg, images=()) -> list:
+    """The configured image entries, then the discovered ones."""
+    return list(cfg.image_models.values()) + [
+        i for i in images if i.id not in cfg.image_models]
+
+
+def _image_refs(cfg, disc, skip: str, images=()) -> set:
     """Resolved paths every model but the image entry ``skip`` loads: chat
-    models (configured and discovered) and the other image entries."""
+    models (configured and discovered) and the other image entries,
+    configured and discovered (``images``)."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 refs.add(os.path.abspath(rp))
-    for iid, im in cfg.image_models.items():
-        if iid == skip:
+    for im in _all_images(cfg, images):
+        if im.id == skip:
             continue
         for p in (im.path, im.vae, im.encoder, im.encoder_mmproj,
                   *(a for a, _st in im.adapters)):
@@ -1605,14 +1616,15 @@ def _image_refs(cfg, disc, skip: str) -> set:
     return refs
 
 
-def _rm_image(a, cfg, cfg_path, im, disc, *, configured: bool) -> int:
+def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
+              configured: bool) -> int:
     """``gmlx rm`` of an image model: its DiT, and its VAE, encoder and
     vision tower unless another model loads them. A shared chat model
     encoder always stays."""
     import gmlx.config as cfgmod
 
     notes: list[str] = []
-    refs = _image_refs(cfg, disc, im.id)
+    refs = _image_refs(cfg, disc, im.id, images)
     to_delete: list[str] = []
     if not a.keep_files:
         parts = [("model file", im.path), ("vae", im.vae),

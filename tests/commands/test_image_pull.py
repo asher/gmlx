@@ -471,6 +471,49 @@ def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     assert "qwen3-4b" in c.models
 
 
+def _discovered_image(monkeypatch, lib, **kw):
+    import gmlx.load.discovery as discovery
+    from gmlx.config import ImageModelCfg
+
+    def disc(cfg, *, progress=False, images=None):
+        if images is not None:
+            images.append(ImageModelCfg(id="qt8", path=str(lib / "qt8.gguf"),
+                                        **kw))
+        return []
+    monkeypatch.setattr(discovery, "discovered_models", disc)
+
+
+def test_rm_keeps_the_encoder_and_vae_a_discovered_image_model_uses(
+        images, monkeypatch, capsys):
+    lib, cfg = images
+    (lib / "qt8.gguf").write_bytes(b"x" * 100)
+    # qi no longer uses qvae, so only the discovered DiT beside qt does.
+    cfg.write_text(cfg.read_text().replace(
+        "  qi:\n    path: qi.gguf\n    encoder: vl\n    vae: qvae.gguf\n",
+        "") + f"discover:\n  - dir: {lib}\n")
+    _discovered_image(monkeypatch, lib, encoder=str(lib / "own.gguf"),
+                      vae=str(lib / "qvae.gguf"))
+    assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0
+    assert not (lib / "qt.gguf").exists()
+    assert (lib / "own.gguf").exists() and (lib / "qvae.gguf").exists()
+    out = capsys.readouterr().out
+    assert "encoder kept" in out and "vae kept" in out
+
+
+def test_rm_never_removes_a_chat_model_a_discovered_image_model_shares(
+        images, monkeypatch, capsys):
+    lib, cfg = images
+    (lib / "qt8.gguf").write_bytes(b"x" * 100)
+    cfg.write_text(f"server:\n  model_dirs:\n    - {lib}\nmodels:\n  vl:\n"
+                   f"    path: vl.gguf\n    mmproj: tower.gguf\n"
+                   f"discover:\n  - dir: {lib}\n")
+    _discovered_image(monkeypatch, lib, encoder="vl",
+                      vae=str(lib / "qvae.gguf"))
+    assert manage.cmd_rm(["vl", "--config", str(cfg), "--yes"]) == 2
+    assert "text encoder of image model qt8" in capsys.readouterr().err
+    assert (lib / "vl.gguf").exists()
+
+
 def test_rm_never_removes_a_chat_model_an_image_model_shares(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qwen3-4b", "--config", str(cfg), "--yes"]) == 2
