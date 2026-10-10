@@ -78,12 +78,19 @@ def _sigmas(family: str, variant: str, sampling, steps: int, tokens: int):
     """The schedule the client samples on: the variant's fixed sigmas from
     the status, else the family's schedule of ``steps``."""
     from gmlx.image.registry import get_family
+    from gmlx.image.schedule import zimage_sigmas
 
     if sampling and sampling.get("sigmas"):
         return np.asarray(sampling["sigmas"], np.float32)
     fam = get_family(family)
-    return np.asarray(fam.schedule(steps, tokens=tokens, variant=variant),
-                      np.float32)
+    if fam.schedule is not None:
+        return np.asarray(fam.schedule(steps, tokens=tokens,
+                                       variant=variant), np.float32)
+    if fam.name != "z_image":
+        raise ValueError(f"no schedule for {fam.title}")
+    shift = (sampling or {}).get("shift") or \
+        fam.constants.values["scheduler_shift"]
+    return np.asarray(zimage_sigmas(steps, shift), np.float32)
 
 
 class Report:
