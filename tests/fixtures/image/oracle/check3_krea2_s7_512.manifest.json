@@ -368,6 +368,11 @@
    "fp32_s": 17.9,
    "bf16_s": 37.1,
    "bf16_teacher_forced_s": 38.0
+  },
+  "exact_free_floor": {
+   "rel_l2": 0.0002422353326609694,
+   "row": "free blocks.22",
+   "measured": "gmlx's exact step on the GPU against the same step on the CPU stream, worst free row; tests/image/krea2_gates.py exact_free_floor on krea2-gates-wip, Apple M5 Max"
   }
  },
  "tolerances": {
@@ -527,7 +532,10 @@
    "rel_l2": 0.0054893658599693375,
    "teacher_forced": true
   },
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity"
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity",
+  "exact_free": {
+   "rel_l2": 0.0004844706653219388
+  }
  },
  "notes": [],
  "created": "2026-10-10T09:44:07Z",

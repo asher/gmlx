@@ -157,30 +157,119 @@ def exact_floats(model, path: str) -> int:
     return len(pairs)
 
 
-def exact_measures(model, arrays: dict) -> dict:
-    """``measures`` in the oracle's arithmetic, every K-quant product
-    dense on its dequantized weight."""
+@contextmanager
+def _exact(model):
+    """The oracle's arithmetic: every K-quant product dense on its
+    dequantized weight, each one checked at the exit."""
     from gmlx.image.lora import install
 
     with bg.exact_products(model) as used:
-        got = measures(model, arrays)
+        yield
         # The reference never reads the final layer's two extra matrices.
         if model.cfg.last_mlp:
             leaves = install.linear_leaves(model)
             used.update({id(leaves["last.up"]), id(leaves["last.down"])})
         bg.assert_all_dense(model, used)
-    return got
 
 
-def exact_line(label: str, got: dict) -> str:
-    forced = {k: v for k, v in got.items()
-              if k.startswith("blocks.") or k == "last"}
-    free = {k: v for k, v in got.items() if k not in forced}
-    hi_f = max(forced, key=forced.get)
-    hi = max(free, key=free.get)
-    return (f"{label}: teacher-forced rows within {forced[hi_f]:.2e} at "
-            f"{hi_f}, free-running measures within {free[hi]:.2e} at {hi}, "
-            f"gate {bg.EXACT_TOL:.0e} on every measure")
+def exact_measures(model, arrays: dict) -> dict:
+    """``measures`` in the oracle's arithmetic."""
+    with _exact(model):
+        return measures(model, arrays)
+
+
+def forced_row(name: str) -> bool:
+    return name.startswith("blocks.") or name == "last"
+
+
+def free_row(name: str) -> bool:
+    """A free-running row of ``measures``: every measure but the
+    teacher-forced rows and the velocity."""
+    return not forced_row(name) and name != "velocity"
+
+
+# The exact gate's free-running rows carry fp32 rounding that no other
+# summation order reproduces: block 0's input holds channels 122 times its
+# rms, and blocks 12 to 25 amplify a summation-order change at its output
+# about 50 times. Each fixture records gmlx's own fp32 floor on those
+# rows, the worst relative L2 between the exact step on the GPU and the
+# same step on the CPU stream, and its free rows take the larger of
+# EXACT_TOL and twice that floor. The teacher-forced rows and the
+# velocity keep EXACT_TOL.
+
+def exact_free_floor(model, arrays: dict) -> dict:
+    """Relative L2 of each free row of ``measures`` and of the velocity
+    between the exact step on the GPU and on the CPU stream."""
+    with _exact(model):
+        gpu = free_rows(model, arrays)
+        with mx.stream(mx.cpu):
+            cpu = free_rows(model, arrays)
+    out = {}
+    for k, v in gpu.items():
+        name = f"free {k}" if forced_row(k) else k
+        if k in arrays and (free_row(name) or k == "velocity"):
+            out[name] = rel(v, cpu[k])
+    return out
+
+
+def exact_free_tol(m: dict) -> float:
+    """The free-row tolerance a manifest records, which must follow the
+    rule from the floor beside it."""
+    floor = m["results"]["exact_free_floor"]["rel_l2"]
+    tol = m["tolerances"]["exact_free"]["rel_l2"]
+    assert tol == max(bg.EXACT_TOL, 2 * floor), (tol, floor)
+    return tol
+
+
+def check_floor(m: dict, floor: dict, label: str) -> None:
+    """The floor measured now is the floor the manifest records."""
+    free = {k: v for k, v in floor.items() if free_row(k)}
+    top = max(free, key=free.get)
+    print(f"{label}: free-row fp32 floor {free[top]!r} at {top}, velocity "
+          f"{floor['velocity']:.2e}")
+    rec = m["results"].get("exact_free_floor")
+    assert rec, f"{m['name']} records no exact_free_floor: record it"
+    print(f"{label}: recorded floor {rec['rel_l2']:.2e}, free-row gate "
+          f"{exact_free_tol(m):.2e}")
+    assert free[top] <= 1.25 * rec["rel_l2"], (free[top], rec)
+
+
+def exact_gate(name: str, free_tol: float) -> float:
+    return free_tol if free_row(name) else bg.EXACT_TOL
+
+
+def exact_over(got: dict, free_tol: float) -> dict:
+    return {k: (v, exact_gate(k, free_tol)) for k, v in got.items()
+            if not v <= exact_gate(k, free_tol)}
+
+
+def exact_line(label: str, got: dict, free_tol: float) -> str:
+    def worst(keys):
+        k = max(keys, key=got.get)
+        return f"{got[k]:.2e} at {k}"
+    forced = [k for k in got if forced_row(k)]
+    free = [k for k in got if free_row(k)]
+    return (f"{label}: teacher-forced rows within {worst(forced)}, "
+            f"velocity {got['velocity']:.2e}, gate {bg.EXACT_TOL:.0e}; "
+            f"free rows within {worst(free)}, gate {free_tol:.2e}")
+
+
+def fault_line(label: str, bad: dict, free_tol: float) -> tuple[str, float]:
+    """Where a wrong model misses the exact gate, by kind of row, and the
+    largest ratio of a measure to its gate."""
+    parts = []
+    for kind, keep in (("teacher-forced", forced_row),
+                       ("velocity", lambda k: k == "velocity"),
+                       ("free", free_row)):
+        r = {k: bad[k] / exact_gate(k, free_tol) for k in bad if keep(k)}
+        miss = [k for k, v in r.items() if v > 1]
+        if miss:
+            top = max(miss, key=r.get)
+            parts.append(f"{kind} {len(miss)} rows, up to {r[top]:.0f} of "
+                         f"the gate at {top}")
+    top = max(bad[k] / exact_gate(k, free_tol) for k in bad)
+    return (f"{label}: misses through " + ("; ".join(parts) or "nothing"),
+            top)
 
 
 # The site gate: each op of a block on the path a request takes, against

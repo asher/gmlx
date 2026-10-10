@@ -18,8 +18,9 @@ routes at their default, and holds each row to twice the oracle's gap:
 teacher-forced for each block and the final layer, free running for the
 rest. The exact gate runs the model in the oracle's fp32 arithmetic,
 every K-quant product dense on its dequantized weight and every float
-tensor of the file in float32, and holds every measure to EXACT_TOL. The
-site gate holds each op of every block and each linear leaf on the path
+tensor of the file in float32. It holds the teacher-forced rows and the
+velocity to EXACT_TOL, and the free rows to the larger of EXACT_TOL and
+twice gmlx's own fp32 floor that the manifest records. The site gate holds each op of every block and each linear leaf on the path
 a request takes to the stock op in float32 on the same input, within 2 n
 u (krea2_gates.py).
 
@@ -36,7 +37,7 @@ import pytest
 
 import krea2_gates as kg
 import qwen_gates as qg
-from block_gates import EXACT_TOL, exact_process, rerun_exact
+from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
 
@@ -87,7 +88,8 @@ def _depth(real, m: dict, blocks: int | None = None):
 def test_the_manifests_take_a_trajectory_and_follow_the_rule():
     """The committed manifests alone: each fixture takes x_i and sigma_i
     of check 8's trajectory at its step, with the features of check 8's
-    prompt, and every tolerance is twice the gap beside it."""
+    prompt, every row tolerance is twice the gap beside it, and the exact
+    gate's free-row tolerance follows its floor."""
     for step in STEPS:
         for name in (ROWS[step], VELOCITY[step]):
             m = _manifest(name)
@@ -109,6 +111,7 @@ def test_the_manifests_take_a_trajectory_and_follow_the_rule():
         rows = _manifest(ROWS[step])
         for k, g in rows["results"]["rows_bf16_vs_fp32"].items():
             assert rows["tolerances"][k]["rel_l2"] == 2 * g["rel_l2"], k
+        kg.exact_free_tol(rows)
         assert (rows["inputs"]["sigma"]
                 == _manifest(VELOCITY[step])["inputs"]["sigma"])
 
@@ -184,41 +187,35 @@ EXACT_FAULTS = {"gate and up swapped": _gate_and_up_swapped,
                 "output gate on the attention rows": _gate_on_rows}
 
 
-# The plan's EXACT_TOL holds every teacher-forced row: 1.31e-5 at block 0
-# and 6e-8 to 7e-7 in blocks 1 to 27 at step 4. It does not hold the
-# free-running rows of blocks 17 to 26, up to 1.56e-4 at step 4 and
-# 7.4e-5 at step 7. Block 0 reads 1.3e-5 because its input carries
-# channels 122 times its rms: the same exact step on the GPU and on the
-# CPU, two fp32 summation orders of the same ops, differs there by
-# 1.4e-5. Blocks 12 to 25 amplify a change at block 0's output about 50
-# times, so the free rows carry that rounding past the gate. The gate
-# stays at EXACT_TOL, and its faults read before the free rows assert.
+# Free rows take max(EXACT_TOL, 2 x gmlx's own fp32 floor), krea2_gates.py:
+# block 0's input carries channels 122 times its rms, and blocks 12 to 25
+# amplify a summation-order change at its output about 50 times.
 @pytest.mark.integration
 @pytest.mark.parametrize("step", STEPS)
 def test_check3_exact_gate_at_512(real, request, monkeypatch, step):
-    """Every measure within EXACT_TOL of the oracle in its arithmetic, and
-    each wrong model of EXACT_FAULTS over it."""
+    """Every teacher-forced row and the velocity within EXACT_TOL of the
+    oracle in its arithmetic, every free row within the fixture's free-row
+    gate, that gate from the floor measured now, and each wrong model of
+    EXACT_FAULTS over the gate."""
     arrays, m = fixture(_manifest(ROWS[step])["name"])
     if not exact_process():
         return rerun_exact(request, "krea2 check3 exact")
     model = _depth(real, m)
     n = kg.exact_floats(model, real[1])
+    label = f"krea2 check3 exact 512 step {step}"
+    kg.check_floor(m, kg.exact_free_floor(model, arrays), label)
+    tol = kg.exact_free_tol(m)
     got = kg.exact_measures(model, arrays)
-    print(kg.exact_line(f"krea2 check3 exact 512 step {step}, {n} float "
-                     "tensors in fp32", got))
-    over = {k: v for k, v in got.items() if not v <= EXACT_TOL}
-    forced = {k: v for k, v in over.items()
-              if k.startswith("blocks.") or k == "last"}
-    assert not forced, forced
+    print(kg.exact_line(f"{label}, {n} float tensors in fp32", got, tol))
+    over = kg.exact_over(got, tol)
     for name, apply in EXACT_FAULTS.items() if step == STEPS[0] else ():
         with monkeypatch.context() as mp:
             apply(mp, model)
             bad = kg.exact_measures(model, arrays)
-        top = max(bad, key=bad.get)
-        miss = sum(not v <= EXACT_TOL for v in bad.values())
-        print(f"krea2 check3 exact 512, {name}: {miss} measures miss, up "
-              f"to {bad[top]:.2e} at {top}")
-        assert bad[top] > 10 * EXACT_TOL, (name, bad[top])
+        line, top = kg.fault_line(f"krea2 check3 exact 512, {name}", bad,
+                                  tol)
+        print(line)
+        assert top > 10, (name, top)
     assert not over, over
 
 

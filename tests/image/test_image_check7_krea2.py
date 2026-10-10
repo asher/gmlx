@@ -17,8 +17,9 @@ The product gate holds each row to twice the oracle's gap, and the base
 model and the adapter at strength 0.8 miss it. The velocity of the
 request path, api.denoise_step with the kernel routes at their default,
 passes its gate too. The exact gate runs the step in the oracle's fp32
-arithmetic in a child process and holds every measure to EXACT_TOL; it
-is the gate that holds the table, and each wrong table of
+arithmetic in a child process and holds the teacher-forced rows and the
+velocity to EXACT_TOL and the free rows to the gate of check 3's rule
+from the floor each manifest records; it is the gate that holds the table, and each wrong table of
 ``wrong_tables`` must miss it. The site gate holds each op of every
 block and each linear leaf, the leaves under the adapter included, to
 the stock op in float32 on the same input with the table's delta. The
@@ -38,7 +39,7 @@ import pytest
 
 import krea2_gates as kg
 import qwen_gates as qg
-from block_gates import EXACT_TOL, exact_process, rerun_exact
+from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
@@ -173,7 +174,8 @@ def _rows(pipe, arrays: dict, tid: str | None) -> dict:
 def test_the_manifests_read_the_trajectory_step_and_follow_the_rule():
     """The committed manifests alone: both fixtures take check 3's
     on-trajectory step, the synthetic one holds a pair for every target
-    it names, and every tolerance is twice the gap beside it."""
+    it names, every row tolerance is twice the gap beside it, and the
+    exact gate's free-row tolerance follows its floor."""
     src = committed(SOURCE)
     for name in (COMFY, SYNTHETIC):
         m = _manifest(name)
@@ -183,6 +185,7 @@ def test_the_manifests_read_the_trajectory_step_and_follow_the_rule():
         assert m["files"]["dit"] == src["files"]["dit"]
         for k, g in m["results"]["rows_bf16_vs_fp32"].items():
             assert m["tolerances"][k]["rel_l2"] == 2 * g["rel_l2"], k
+        kg.exact_free_tol(m)
     m = _manifest(SYNTHETIC)
     targets = m["inputs"]["targets"]
     assert sorted(m["inputs"]["lora_pair_alphas"]) == targets
@@ -305,9 +308,9 @@ def wrong_tables(entries: list, strength: float, moved: bool) -> dict:
 
 @pytest.mark.parametrize("kind", ["comfy", "synthetic"])
 def test_check7_exact_gate_at_512(pipe, tmp_path, request, kind):
-    """Every measure within EXACT_TOL of the oracle in its arithmetic
-    under the right table, and each wrong table of ``wrong_tables`` over
-    it."""
+    """Every measure within its exact gate under the right table, the
+    free-row gate from the floor measured now, and each wrong table of
+    ``wrong_tables`` over the gate."""
     from gmlx.image import api
 
     name = COMFY if kind == "comfy" else SYNTHETIC
@@ -319,35 +322,35 @@ def test_check7_exact_gate_at_512(pipe, tmp_path, request, kind):
     ad = _adapter(pipe, kind, tmp_path, lp, EXACT_DIALECT)
     strength = m["inputs"]["strength"]
     entries = _entries(ad, strength)
-    got = _rows_exact(pipe, arrays, api.define_patch_table(pipe, entries))
-    print(kg.exact_line(f"krea2 check7 exact {kind}, {len(ad.dit)} pairs",
-                        got))
-    over = {k: v for k, v in got.items() if not v <= EXACT_TOL}
-    forced = {k: v for k, v in over.items()
-              if k.startswith("blocks.") or k == "last"}
-    assert not forced, forced
+    tid = api.define_patch_table(pipe, entries)
+    label = f"krea2 check7 exact {kind}"
+    kg.check_floor(m, _under(pipe, tid, kg.exact_free_floor, arrays), label)
+    tol = kg.exact_free_tol(m)
+    got = _under(pipe, tid, kg.exact_measures, arrays)
+    print(kg.exact_line(f"{label}, {len(ad.dit)} pairs", got, tol))
+    over = kg.exact_over(got, tol)
     weakest = None
     for fault, table in wrong_tables(entries, strength,
                                      moved=kind == "synthetic").items():
-        bad = _rows_exact(pipe, arrays, api.define_patch_table(pipe, table))
-        top = max(bad, key=bad.get)
-        miss = sum(not v <= EXACT_TOL for v in bad.values())
-        print(f"krea2 check7 exact {kind}, {fault}: {miss} measures miss, "
-              f"up to {bad[top]:.2e} at {top}")
-        assert bad[top] > 10 * EXACT_TOL, (fault, bad[top])
-        if weakest is None or bad[top] < weakest[0]:
-            weakest = (bad[top], fault)
-    print(f"krea2 check7 exact {kind}: the weakest wrong table is "
-          f"{weakest[1]} at {weakest[0] / EXACT_TOL:.0f} of the gate")
+        bad = _under(pipe, api.define_patch_table(pipe, table),
+                     kg.exact_measures, arrays)
+        line, top = kg.fault_line(f"{label}, {fault}", bad, tol)
+        print(line)
+        assert top > 10, (fault, top)
+        if weakest is None or top < weakest[0]:
+            weakest = (top, fault)
+    print(f"{label}: the weakest wrong table is {weakest[1]} at "
+          f"{weakest[0]:.0f} of the gate")
     assert not over, over
 
 
-def _rows_exact(pipe, arrays: dict, tid: str) -> dict:
+def _under(pipe, tid: str, read, arrays: dict):
+    """``read(dit, arrays)`` with the table ``tid`` active."""
     from gmlx.image.lora import install
 
     prev = install.activate(pipe, tid)
     try:
-        return kg.exact_measures(pipe.dit, arrays)
+        return read(pipe.dit, arrays)
     finally:
         install.restore(pipe, prev)
 
