@@ -33,8 +33,9 @@ is internal and may change between releases.
 | `GMLX_PULL_TIMEOUT` | `60` | Socket timeout of `pull` in seconds, which also bounds one stalled read. |
 | `GMLX_TOOL_PREFLIGHT` | `1` | `0` skips the fit checks that `run`, `chat` and `image generate` make before a load. `run` and `chat` refuse with `cannot fit:`. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Unset | Any value turns off the family sampling defaults on bare-path `run` and `chat`, as `--no-family-defaults` does. |
-| `GMLX_BASE_URL` | The address `gmlx status` reports, else `http://127.0.0.1:8080` | Server root that the [ComfyUI node pack](comfyui.md) calls. `gmlx launch comfyui` sets it, and the pack also reads `GMLX_API_KEY`. |
-| `GMLX_DEFAULT_IMAGE_MODEL` | The server's default image model | Image model that the ComfyUI node pack selects first. `gmlx launch comfyui` sets it from `--model`, else to the server's default image model. |
+| `GMLX_BASE_URL` | The settings file's `base_url`, else the address `gmlx status` reports, else `http://127.0.0.1:8080` | Server root that the [ComfyUI node pack](comfyui.md) calls. `gmlx launch comfyui` sets it, and the pack also reads `GMLX_API_KEY`. |
+| `GMLX_COMFY_SETTINGS` | `~/.config/gmlx/comfyui.json` | Settings file of the ComfyUI node pack, a JSON object whose `base_url` and `api_key` it reads after the variables. |
+| `GMLX_DEFAULT_IMAGE_MODEL` | `z-image-turbo` | Image model that the ComfyUI node pack selects first. `gmlx launch comfyui` sets it from `--model`, else to the server's default image model. |
 | `XDG_CACHE_HOME` | `~/.cache` | Root of the `gmlx/` cache directory, which [Where files are on disk](troubleshooting.md#where-files-are-on-disk) lists. |
 | `XDG_DATA_HOME` | `~/.local/share` | Root of the `gmlx/` data directory, with saved chat sessions and the assistant's memory. |
 

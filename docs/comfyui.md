@@ -3,8 +3,10 @@
 The gmlx node pack runs the image models of a gmlx server inside ComfyUI
 graphs. Its loaders give ComfyUI a model, a text encoder and a VAE, so the
 stock sampler, LoRA, conditioning, latent and image nodes work with them,
-while the weights stay on the server. With `gmlx serve` running, pull an
-image model, install the pack, then launch ComfyUI against the server:
+while the weights stay on the server. It needs a config from `gmlx init`
+and a ComfyUI install at `~/ComfyUI` with its own `.venv`, as
+[Install](#install) shows. With `gmlx serve` running, pull an image
+model, install the pack, then launch ComfyUI against the server:
 
 ```sh
 gmlx pull z-image-turbo
@@ -71,8 +73,12 @@ show first from the environment, which `launch` sets:
 | `GMLX_DEFAULT_IMAGE_MODEL` | `--model`, or the server's default image model |
 
 A ComfyUI started another way finds the server through the loader's
-`server_url` input, then `GMLX_BASE_URL`, then `gmlx status`, then
-`http://127.0.0.1:8080`. `launch` exits 2 without starting anything when
+`server_url` input, then `GMLX_BASE_URL`, then the `base_url` of the
+settings file `~/.config/gmlx/comfyui.json` (or the file that
+`GMLX_COMFY_SETTINGS` names), then `gmlx status`, then
+`http://127.0.0.1:8080`. With their `start_server` input on, the default,
+the loaders run a detached `gmlx serve` when no server answers. Unset,
+`GMLX_DEFAULT_IMAGE_MODEL` gives the loaders `z-image-turbo`. `launch` exits 2 without starting anything when
 the pack is not installed, and prints the clone command.
 
 ## Build a graph
@@ -129,7 +135,8 @@ an error that names it:
 - A quantized Qwen-Image 2.1 prefix cache: `QwenImage21Cache` with a dtype
   other than the default.
 - LoHa, LoKr, GLoRA, OFT, BOFT and DoRA files, LoRAs with a mid tensor,
-  model merges, and a patch `strength_model` other than 1.
+  model merges, and a patch whose own model strength, the third field of
+  ComfyUI's patch, is not 1. `LoraLoader` works at any `strength_model`.
 - Saving a gmlx model, text encoder or VAE with the checkpoint save nodes,
   since ComfyUI holds no weights for them.
 
@@ -139,13 +146,9 @@ sampling shows on the sampler and names the node upstream that caused it.
 ## Comparing with ComfyUI's own nodes
 
 On a Mac, start ComfyUI with `--use-pytorch-cross-attention` when you
-compare a gmlx model with ComfyUI's own Qwen-Image 2.1 nodes:
+compare a gmlx model with ComfyUI's own Qwen-Image 2.1 nodes, so that
+ComfyUI's model masks the prompt as the reference does:
 
 ```sh
 gmlx launch comfyui -- --use-pytorch-cross-attention
 ```
-
-ComfyUI's default attention on a Mac adds the text mask of Qwen-Image 2.1
-to the attention logits as a small bias, so text rows also see the later
-text tokens, and ComfyUI's own model departs from the reference
-implementation. PyTorch attention applies the mask as a mask.
