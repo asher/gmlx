@@ -38,5 +38,5 @@ def test_config_example_builds_the_override():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         cfg = config.build_config(yaml.safe_load(block))
-    ov = cfg.models["qwen3.8-flash-next-1m"].rope_scaling
-    assert (ov.rope_scaling, ov.rope_scale, ov.yarn_orig_ctx) == ("yarn", 4.0, 262144)
+    ov = cfg.models["qwen3.8-flash-next-512k"].rope_scaling
+    assert (ov.rope_scaling, ov.rope_scale, ov.yarn_orig_ctx) == ("yarn", 2.0, 262144)
