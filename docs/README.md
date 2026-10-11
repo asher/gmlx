@@ -128,6 +128,8 @@ These pages are the starting points:
   decision request and response.
 - [Distillation reference](distill-reference.md): The flags of every
   `gmlx distill` action.
+- [ComfyUI reference](comfyui-reference.md): The launch options of
+  ComfyUI, how the gmlx nodes find the server and what they refuse.
 - [Environment variables](env-vars.md): The variables a user can set.
 - [Python API](python.md): Using gmlx from Python.
 

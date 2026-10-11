@@ -254,5 +254,6 @@ ComfyUI older than the gmlx nodes need exits with 1 and the steps that
 update it. With several ComfyUI installs and no `--comfyui-dir`, it lists
 them and exits with 2. ComfyUI runs on the Mac, where it uses the GPU, so
 `launch` refuses `--container` and the other container flags for it.
-[ComfyUI](comfyui.md) covers the install, Comfy Desktop, the graphs and
+[ComfyUI](comfyui.md) covers the install, Comfy Desktop and the graphs,
+and the [ComfyUI reference](comfyui-reference.md) the launch options and
 what the nodes refuse.

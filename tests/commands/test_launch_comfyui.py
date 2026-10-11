@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -84,6 +85,20 @@ def test_comfyui_passes_the_api_key_and_the_image_model_asked_for(tmp_path):
     assert rc == 0
     assert calls["env"]["GMLX_API_KEY"] == "k"
     assert calls["env"]["GMLX_DEFAULT_IMAGE_MODEL"] == "qwen-image"
+
+
+def test_the_comfyui_reference_lists_the_variables_launch_sets():
+    """The reference page's table names each variable the launch passes to
+    ComfyUI, and the page is in the Reference section of the site."""
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "docs" / "comfyui-reference.md").read_text()
+    section = text.split("## Launch options", 1)[1].split("\n## ", 1)[0]
+    rows = set(re.findall(r"^\| `(GMLX_[A-Z_]+)` \|", section, re.M))
+    assert rows == set(launch.build_comfyui_env("http://127.0.0.1:8080/v1",
+                                                image_model="m", api_key="k"))
+    nav = (root / "mkdocs.yml").read_text()
+    reference = nav.split("\n  - Reference:\n", 1)[1].split("\n  - ", 1)[0]
+    assert "      - comfyui-reference.md" in reference.splitlines()
 
 
 def test_comfyui_refuses_a_chat_model(tmp_path, capsys):

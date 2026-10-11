@@ -136,6 +136,7 @@ nav:
   - Reference:
       - cli.md
       - distill-reference.md
+      - comfyui-reference.md
       - family-defaults.md
       - api.md
       - decisions-reference.md
