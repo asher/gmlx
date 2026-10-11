@@ -16,7 +16,7 @@ Per-arch surface pinned here (the plan's hook table):
            rollback_speculative_cache (KV trim + GDN state restore),
            chunked_prefill_policy, _rope_deltas text zeroing.
   gemma4:  output holder (pre-final-norm hidden capture), skip_final_norm,
-           capture_layer_ids, caller-supplied sinks, shared_kv_sink,
+           skip_logits, capture_layer_ids, caller-supplied sinks, shared_kv_sink,
            speculative_draft_hidden / speculative_logits_from_hidden,
            rollback_speculative_cache, chunked_prefill_policy.
 
@@ -291,6 +291,16 @@ def test_g4_skip_final_norm_matches_prenorm_capture():
     out = lm(ids, return_hidden=True)
     assert _close(h_skip, out.hidden_states[-1], atol=1e-6)
     assert _close(lm.model.norm(h_skip), lm.model(ids), atol=1e-6)
+
+
+def test_g4_skip_logits_still_captures_hidden():
+    lm = _g4_lm()
+    ids = _ids(*PROMPT)
+    out = lm(ids, return_hidden=True, skip_logits=True)
+    assert out.logits is None
+    assert out.hidden_states is not None and len(out.hidden_states) == 1
+    head = lm.speculative_logits_from_hidden(out.hidden_states[-1])
+    assert _close(head, lm(ids).logits)
 
 
 def test_g4_capture_layer_ids_and_caller_sink():

@@ -899,6 +899,9 @@ class LanguageModel(nn.Module):
         hidden_sink = kwargs.pop("hidden_sink", hidden_sink)
         shared_kv_sink = kwargs.pop("shared_kv_sink", shared_kv_sink)
         logits_to_keep = kwargs.pop("logits_to_keep", None)
+        # gmlx: skip_logits leaves out the head, as in the qwen3_5 forward.
+        # speculative_logits_from_hidden projects the captured hidden.
+        skip_logits = kwargs.pop("skip_logits", False)
 
         out = self.model(
             inputs,
@@ -914,7 +917,7 @@ class LanguageModel(nn.Module):
         )
         if logits_to_keep:
             out = out[:, -int(logits_to_keep) :, :]
-        out = self.logits_from_hidden(out)
+        out = None if skip_logits else self.logits_from_hidden(out)
         return LanguageModelOutput(
             logits=out,
             hidden_states=hidden_sink,
