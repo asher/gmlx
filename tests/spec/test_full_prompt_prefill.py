@@ -8,6 +8,9 @@ server uses.
 ``integration`` + ``slow``; skips unless ``KQUANT_TEST_MTP_GGUF`` points at a
 GGUF with MTP support. For assistant-model drafters (gemma-4), also set
 ``KQUANT_TEST_MTP_DRAFT_GGUF`` to the companion drafter GGUF.
+``KQUANT_TEST_MTP_STREAM=experts`` loads the target as ``--stream-experts``
+does, for a model over the GPU budget: a declared lookup table or the
+routed experts stream from the file.
 """
 from __future__ import annotations
 
@@ -89,9 +92,17 @@ def mtp_draft_gguf():
 @pytest.fixture(scope="session")
 def mtp_model(mtp_gguf, mtp_draft_gguf):
     from gmlx.spec.mtp_load import load_mtp_model
-    return load_mtp_model(
-        mtp_gguf, draft_gguf_path=mtp_draft_gguf, verbose=False
+    stream = os.environ.get("KQUANT_TEST_MTP_STREAM") == "experts"
+    loaded = load_mtp_model(
+        mtp_gguf, draft_gguf_path=mtp_draft_gguf, verbose=False,
+        wire=not stream,
     )
+    if stream:
+        from gmlx.stream.expert_streaming import install_expert_streaming
+        model = loaded[0]
+        install_expert_streaming(getattr(model, "language_model", model),
+                                 gguf_path=mtp_gguf)
+    return loaded
 
 
 def _build_prompt(tokenizer, n_tokens, seed=_SEED):
