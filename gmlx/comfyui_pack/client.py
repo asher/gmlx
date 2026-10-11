@@ -21,10 +21,10 @@ import hashlib
 import http.client
 import json
 import logging
-import os
 import selectors
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -33,14 +33,12 @@ import weakref
 import numpy as np
 import torch
 
-from . import settings
+from . import discovery, settings
+from .discovery import (CONTRACT, CONTRACT_HEADER, DEFAULT_URL, PREFIX,  # noqa: F401
+                        resolve_api_key, resolve_base_url)
 from .version import __version__ as PACK_VERSION
 
-PREFIX = "/internal/image-steps/v1"
 CONTENT_TYPE = "application/vnd.gmlx.tensors+safetensors"
-CONTRACT_HEADER = "X-Gmlx-Steps-Contract"
-CONTRACT = (1, 0)
-DEFAULT_URL = "http://127.0.0.1:8080"
 
 _TO_NAME = {torch.float32: "F32", torch.float16: "F16", torch.bfloat16: "BF16",
             torch.uint8: "U8", torch.bool: "BOOL"}
@@ -167,38 +165,59 @@ def _version(t) -> int | None:
         return None
 
 
-# Discovery.
+# Discovery: the server address and the API key come from discovery.py.
 
 settings_path = settings.settings_path
 _settings = settings.load
 
 
-def _gmlx_status_url() -> str | None:
-    exe = settings.gmlx_command()
-    if exe is None:
-        return None
-    try:
-        out = subprocess.run([exe, "status", "--json"], capture_output=True,
-                             text=True, timeout=10)
-        doc = json.loads(out.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    if isinstance(doc, dict) and doc.get("running") and doc.get("url"):
-        return str(doc["url"])
-    return None
+# Interrupts. ComfyUI's side installs a check that raises when the user
+# cancels the prompt; every request and the wait for a starting server call
+# it, so Cancel stops any wait at once. Without one, nothing is checked.
+
+_CHECK = None
+_LOCAL = threading.local()
 
 
-def resolve_base_url(widget: str | None = None) -> str:
-    """The server address: the node's widget, then ``GMLX_BASE_URL``, then
-    the settings file, then ``gmlx status --json``, then the default."""
-    for v in (widget, os.environ.get("GMLX_BASE_URL"), _settings().get("base_url")):
-        if v and str(v).strip():
-            return str(v).strip().rstrip("/")
-    return (_gmlx_status_url() or DEFAULT_URL).rstrip("/")
+def set_interrupt_check(fn) -> None:
+    global _CHECK
+    _CHECK = fn
 
 
-def resolve_api_key() -> str | None:
-    return os.environ.get("GMLX_API_KEY") or _settings().get("api_key") or None
+def check_interrupt() -> None:
+    """Raise ComfyUI's interrupt when the user cancelled the prompt."""
+    if _CHECK is not None:
+        _CHECK()
+
+
+def interruptible(fn, on_interrupt=None):
+    """``fn()``, waited for on a worker thread so a cancel raises at once.
+    ``on_interrupt`` runs first, such as to tell the server. A call made
+    inside the worker runs as it is."""
+    if _CHECK is None or getattr(_LOCAL, "inside", False):
+        return fn()
+    result: dict = {}
+
+    def go():
+        _LOCAL.inside = True
+        try:
+            result["r"] = fn()
+        except BaseException as e:  # noqa: BLE001: re-raised on the caller's thread
+            result["e"] = e
+
+    th = threading.Thread(target=go, daemon=True, name="gmlx-request")
+    th.start()
+    while th.is_alive():
+        th.join(0.1)
+        try:
+            check_interrupt()
+        except BaseException:
+            if on_interrupt is not None:
+                on_interrupt()
+            raise
+    if "e" in result:
+        raise result["e"]
+    return result["r"]
 
 
 # HTTP.
@@ -245,7 +264,13 @@ class StepClient:
 
     def request(self, method: str, path: str, body: bytes | None = None,
                 headers: dict | None = None, *, versioned: bool = True,
-                timeout: float | None = None):
+                timeout: float | None = None, on_interrupt=None):
+        return interruptible(lambda: self._request(method, path, body, headers,
+                                                   versioned=versioned, timeout=timeout),
+                             on_interrupt)
+
+    def _request(self, method: str, path: str, body: bytes | None, headers: dict | None,
+                 *, versioned: bool, timeout: float | None):
         hdrs = {}
         if versioned:
             hdrs[CONTRACT_HEADER] = f"{CONTRACT[0]}.{CONTRACT[1]}"
@@ -344,9 +369,9 @@ class StepClient:
         return json.loads(d) if d else {}
 
     def call_tensors(self, path: str, tensors: dict, fields: dict | None, *,
-                     what: str = "", method: str = "POST"):
+                     what: str = "", method: str = "POST", on_interrupt=None):
         s, h, d = self.request(method, PREFIX + path, pack(tensors, fields),
-                               {"Content-Type": CONTENT_TYPE})
+                               {"Content-Type": CONTENT_TYPE}, on_interrupt=on_interrupt)
         if s != 200:
             self._fail(s, d, what or path)
         return unpack(d) + (h,)
@@ -502,9 +527,9 @@ class StepClient:
             self.known_tensors.add(h)
         return out, fields
 
-    def step(self, x: torch.Tensor, timestep: torch.Tensor, fields: dict):
+    def step(self, x: torch.Tensor, timestep: torch.Tensor, fields: dict, on_interrupt=None):
         out, _, h = self.call_tensors("/step", {"x": x, "timestep": timestep}, fields,
-                                      what="the step")
+                                      what="the step", on_interrupt=on_interrupt)
         self.stats["steps"] += 1
         return out["out"], h
 
@@ -562,21 +587,48 @@ _CLIENTS: dict = {}
 _CLIENTS_LOCK = threading.Lock()
 
 
-def get_client(base_url: str | None = None, *, start_server: bool = False,
-               start_timeout: float = 180.0) -> StepClient:
-    """The shared client of a server, with the handshake done. When the
-    server is down and ``start_server`` is set, runs ``gmlx serve``, which
-    starts detached, and waits for ``/health``. The loader and status nodes
-    call it once per run, never per step, so the handshake runs each time:
-    the server at the address may have restarted as another gmlx."""
-    url = resolve_base_url(base_url)
-    key = resolve_api_key()
-    doc = settings.load()
+def _client(url: str, key: str | None) -> StepClient:
     with _CLIENTS_LOCK:
         c = _CLIENTS.get((url, key))
         if c is None:
             c = _CLIENTS[(url, key)] = StepClient(url, key)
-    if not c.health():
+    return c
+
+
+def _tail(f, lines: int = 20) -> str:
+    """The last lines a command wrote to the file ``f``."""
+    try:
+        f.seek(0)
+        text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    kept = [ln.rstrip() for ln in text.splitlines() if ln.strip()][-lines:]
+    return "\n".join(kept)[-3000:]
+
+
+def get_client(base_url: str | None = None, *, start_server: bool = False,
+               start_timeout: float = 180.0) -> StepClient:
+    """The shared client of a server, with the handshake done. A 127.0.0.1
+    address that does not answer gives way to the address found without
+    it, as an empty one does: a workflow from another Mac names that Mac's
+    port. When no server answers and ``start_server`` is set, runs
+    ``gmlx serve``, which starts the server detached and exits, and waits
+    for ``/health``; a serve that fails raises with its error at once. The
+    loader and status nodes call it once per run, never per step, so the
+    handshake runs each time: the server at the address may have restarted
+    as another gmlx."""
+    url = resolve_base_url(base_url)
+    key = resolve_api_key()
+    doc = settings.load()
+    c = _client(url, key)
+    healthy = c.health()
+    if not healthy and base_url and str(base_url).strip() and discovery.is_loopback(url):
+        found = resolve_base_url(None)
+        if found != url:
+            log.info("gmlx: no server answers at %s; using %s", url, found)
+            url, c = found, _client(found, key)
+            healthy = c.health()
+    if not healthy:
         exe = settings.gmlx_command(doc)
         if exe is None:
             raise GmlxError(f"gmlx: no server answers at {url}, and "
@@ -586,19 +638,33 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
             raise GmlxError(f"gmlx: no server answers at {url}; run `gmlx serve`, or set the "
                             "loader's server_url or GMLX_BASE_URL")
         log.info("gmlx: starting `gmlx serve` for %s", url)
-        try:
-            subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
-        except OSError as e:
-            raise GmlxError(f"gmlx: no server answers at {url}, and "
-                            f"{settings.not_installed(doc, f'{exe} does not run ({e.strerror or e})')}"
-                            ) from None
-        deadline = time.monotonic() + start_timeout
-        while not c.health():
-            if time.monotonic() > deadline:
-                raise GmlxError(f"gmlx: `gmlx serve` did not answer at {url} within "
-                                f"{start_timeout:.0f} s; see `gmlx logs`")
-            time.sleep(0.5)
+        with tempfile.TemporaryFile() as out:
+            try:
+                proc = subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL,
+                                        stdout=out, stderr=subprocess.STDOUT,
+                                        start_new_session=True)
+            except OSError as e:
+                raise GmlxError(f"gmlx: no server answers at {url}, and "
+                                f"{settings.not_installed(doc, f'{exe} does not run ({e.strerror or e})')}"
+                                ) from None
+            deadline = time.monotonic() + start_timeout
+            probe = 0.0
+            while True:
+                check_interrupt()
+                now = time.monotonic()
+                if now >= probe:
+                    if c.health():
+                        break
+                    probe = now + 0.5
+                # `gmlx serve` exits 0 once the server is up, or while it is
+                # still loading; any other exit is the start failing.
+                code = proc.poll()
+                if code not in (None, 0) and not c.health():
+                    raise GmlxError(f"gmlx: `gmlx serve` failed (exit {code}) and no server "
+                                    f"answers at {url}. It printed:\n{_tail(out)}")
+                if now > deadline:
+                    raise GmlxError(f"gmlx: `gmlx serve` did not answer at {url} within "
+                                    f"{start_timeout:.0f} s; see `gmlx logs`")
+                time.sleep(0.1)
     c.handshake()
     return c

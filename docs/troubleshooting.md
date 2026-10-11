@@ -440,6 +440,20 @@ newer, restart ComfyUI so it loads the new nodes, and run
 `gmlx comfyui install` if they stay old. When the nodes are newer, run
 `gmlx restart`.
 
+### `the gmlx server at ... has no image model`
+
+The loader names a model that the server's config does not have, such as
+the model of an example workflow you have not pulled. Run the `gmlx pull`
+command that the message gives, then run the workflow again. To use a
+model you already have, pick it in the loader's `model_name` list.
+
+### `gmlx serve` failed (exit ...)
+
+The loader started `gmlx serve` because no server answered, and the server
+stopped before it was ready. The message ends with what `gmlx serve`
+printed, which names the cause. Fix that, then run the workflow again, or
+start the server yourself with `gmlx serve` to see the whole output.
+
 ### `gmlx is not installed`
 
 The nodes found neither the `gmlx` command that `install` recorded nor one

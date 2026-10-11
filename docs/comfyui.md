@@ -111,10 +111,17 @@ is running, then starts ComfyUI. Among its lines it prints:
 
 With Comfy Desktop, run `gmlx comfyui install` in place of `launch`, then
 start the app. The loaders start the gmlx server when none is running.
-Open ComfyUI in the browser, or in the app. In its template browser, open
-`z-image-turbo-t2i` from the `comfyui-gmlx` templates, or drag
-`custom_nodes/comfyui-gmlx/example_workflows/z-image-turbo-t2i.json` onto
-the page. Press Run. The first run waits while the server loads the model.
+Open ComfyUI in the browser, or in the app, then open the example workflow:
+
+1. Click Templates in the left sidebar.
+2. At the bottom of the list on the left, click Extensions, then
+   `comfyui-gmlx`. The template search does not find these templates.
+3. Click `z-image-turbo-t2i`.
+
+Or drag `custom_nodes/comfyui-gmlx/example_workflows/z-image-turbo-t2i.json`
+onto the page. Press Run. The first run waits while the server loads the
+model. If you skipped `gmlx pull`, the run stops with an error that gives
+the pull command; run it, then press Run again.
 
 The image shows in the `Save Image` node, and ComfyUI saves it as
 `gmlx/z-image-turbo_00001_.png` in its `output` folder, counting up with
@@ -129,7 +136,7 @@ The first workflow has these nodes, under the titles they show:
 
 | Node | What it does |
 |------|--------------|
-| `gmlx Model Loader` | Loads the [DiT](glossary.md#dit) of the image model that `model_name` names, an id from `gmlx list --image`. |
+| `gmlx Model Loader` | Loads the [DiT](glossary.md#dit) of the image model picked in `model_name`. `server_url` shows the server's address. |
 | `gmlx CLIP Loader` | Loads the model's [text encoder](glossary.md#text-encoder), which ComfyUI calls CLIP. |
 | `gmlx VAE Loader` | Loads the model's [VAE](glossary.md#vae). |
 | `Positive prompt` | What to make. |
@@ -138,6 +145,14 @@ The first workflow has these nodes, under the titles they show:
 | `KSampler` | The `seed`, the `steps`, the `cfg` ([guidance](glossary.md#guidance)) and the [sampler](glossary.md#sampler). |
 | `VAE Decode` | Turns the result into pixels. |
 | `Save Image` | Shows the image and saves it in `output`, named by `filename_prefix`. |
+
+The `model_name` list of each loader holds the image models in the gmlx
+server's config. Before you pull one, it holds the models `gmlx pull`
+downloads, and a run with one of them stops with its pull command. After a
+pull, press R in ComfyUI to refresh the list. A new loader's `server_url`
+shows the address the nodes found, as
+[How the nodes find the server](comfyui-reference.md#how-the-nodes-find-the-server)
+describes.
 
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or

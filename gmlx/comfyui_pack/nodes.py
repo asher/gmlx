@@ -13,7 +13,7 @@ import torch
 
 import comfy.samplers
 
-from . import settings
+from . import discovery
 from .client import GmlxError, GmlxRefusal, get_client
 from .clip import GmlxCLIP
 from .model import load_model
@@ -27,65 +27,65 @@ MANAGED = (f"These gmlx nodes are from gmlx {__version__}. gmlx manages them and
            "them as an unknown pack that it cannot update.")
 
 
-def _default_model() -> str:
-    return settings.default_image_model()
-
-
 def _common():
-    return {"model_name": ("STRING", {"default": _default_model(),
-                                      "tooltip": "The image model id in the gmlx server's config."}),
-            "server_url": ("STRING", {"default": "",
-                                      "tooltip": "Empty uses GMLX_BASE_URL, the settings file, "
-                                                 "gmlx status, then http://127.0.0.1:8080."}),
-            "start_server": ("BOOLEAN", {"default": True,
-                                         "tooltip": "Run gmlx serve when no server answers."})}
+    return discovery.loader_inputs()["required"]
 
 
-class GmlxModelLoader:
+def connect(model_name, server_url="", start_server=True):
+    """The client of the node's server and the model name, after checking
+    that the server has that image model. A name it lacks is refused with
+    the `gmlx pull` that adds it."""
+    name = str(model_name).strip()
+    client = get_client(server_url, start_server=start_server)
+    ids = [str(m.get("model")) for m in client.models() if isinstance(m, dict)]
+    if name not in ids:
+        raise GmlxRefusal(discovery.not_on_server(name, client.base_url, ids))
+    return client, name
+
+
+class _Loader:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": _common()}
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, model_name):
+        return discovery.validate(model_name)
+
+
+class GmlxModelLoader(_Loader):
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
     CATEGORY = CATEGORY
     DESCRIPTION = "A diffusion model whose steps run on the gmlx server."
 
     def load(self, model_name, server_url="", start_server=True):
-        client = get_client(server_url, start_server=start_server)
-        return (load_model(client, model_name.strip()),)
+        client, name = connect(model_name, server_url, start_server)
+        return (load_model(client, name),)
 
 
-class GmlxCLIPLoader:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": _common()}
-
+class GmlxCLIPLoader(_Loader):
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load"
     CATEGORY = CATEGORY
     DESCRIPTION = "The text encoder of a gmlx image model, run on the gmlx server."
 
     def load(self, model_name, server_url="", start_server=True):
-        client = get_client(server_url, start_server=start_server)
-        status = client.status(model_name.strip())
-        return (GmlxCLIP(client, model_name.strip(), status.get("family")),)
+        client, name = connect(model_name, server_url, start_server)
+        status = client.status(name)
+        return (GmlxCLIP(client, name, status.get("family")),)
 
 
-class GmlxVAELoader:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": _common()}
-
+class GmlxVAELoader(_Loader):
     RETURN_TYPES = ("VAE",)
     FUNCTION = "load"
     CATEGORY = CATEGORY
     DESCRIPTION = "The VAE of a gmlx image model, run on the gmlx server."
 
     def load(self, model_name, server_url="", start_server=True):
-        client = get_client(server_url, start_server=start_server)
-        status = client.status(model_name.strip())
-        return (GmlxVAE(client, model_name.strip(), status),)
+        client, name = connect(model_name, server_url, start_server)
+        status = client.status(name)
+        return (GmlxVAE(client, name, status),)
 
 
 def variant_sigmas(model, steps: int = 0, denoise: float = 1.0) -> torch.Tensor:
@@ -133,11 +133,7 @@ class GmlxSigmas:
         return (variant_sigmas(model, steps, denoise), cfg)
 
 
-class GmlxServerStatus:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": _common()}
-
+class GmlxServerStatus(_Loader):
     RETURN_TYPES = ("STRING",)
     FUNCTION = "status"
     CATEGORY = CATEGORY
@@ -148,8 +144,8 @@ class GmlxServerStatus:
     def status(self, model_name, server_url="", start_server=False):
         note = None
         try:
-            client = get_client(server_url, start_server=start_server)
-            s = client.status(model_name.strip())
+            client, name = connect(model_name, server_url, start_server)
+            s = client.status(name)
             note = client.version_note
         except GmlxError as e:
             text = str(e)

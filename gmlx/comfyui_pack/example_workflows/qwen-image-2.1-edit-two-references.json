@@ -58,7 +58,7 @@
    },
    "widgets_values": [
     "qwen-image",
-    "",
+    "http://127.0.0.1:8080",
     true
    ]
   },
@@ -92,7 +92,7 @@
    },
    "widgets_values": [
     "qwen-image",
-    "",
+    "http://127.0.0.1:8080",
     true
    ]
   },
@@ -127,7 +127,7 @@
    },
    "widgets_values": [
     "qwen-image",
-    "",
+    "http://127.0.0.1:8080",
     true
    ]
   },

@@ -36,9 +36,25 @@ A ComfyUI started another way, such as Comfy Desktop, finds the server
 through the loader's `server_url` input, then `GMLX_BASE_URL`, then
 `base_url` in `~/.config/gmlx/comfyui.json` or the file that
 `GMLX_COMFY_SETTINGS` names. After those it tries the address
-`gmlx status` reports, then `http://127.0.0.1:8080`. With their
-`start_server` input on, the default, the loaders start `gmlx serve` when
-no server answers.
+`gmlx status` reports, which is the port in your gmlx config when no
+server runs, then `http://127.0.0.1:8080`.
+
+A new loader's `server_url` shows the address found this way. The example
+workflows carry `http://127.0.0.1:8080`. When a `127.0.0.1` or `localhost`
+address does not answer, the loaders use the address found without it, so
+a workflow saved on a Mac whose server uses another port still runs. An
+empty `server_url` does the same. An address on another machine is used as
+it is.
+
+With their `start_server` input on, the default, the loaders start
+`gmlx serve` when no server answers. When `gmlx serve` fails, the run stops
+with what it printed. Cancel in ComfyUI stops the wait for the server.
+
+The `model_name` list holds the image models of the server at the address
+found, else those that `gmlx list --image` prints, with the default image
+model first. With none, it holds the models `gmlx pull` downloads. A
+loader whose model the server does not have stops with the `gmlx pull`
+command that adds it.
 
 Desktop starts ComfyUI without your shell's `PATH`, so the nodes run the
 `gmlx` command whose path `gmlx comfyui install` recorded. After you

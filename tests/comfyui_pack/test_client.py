@@ -405,6 +405,9 @@ class Discovery(unittest.TestCase):
     def setUp(self):
         self.env = {k: os.environ.get(k) for k in ("GMLX_BASE_URL", "GMLX_COMFY_SETTINGS", "PATH",
                                                     "GMLX_API_KEY")}
+        # A 127.0.0.1 address that does not answer gives way to the one found
+        # without it: that one answers nowhere either, whatever runs here.
+        os.environ["GMLX_BASE_URL"] = _dead_url()
 
     def tearDown(self):
         for k, v in self.env.items():
@@ -511,6 +514,118 @@ class Discovery(unittest.TestCase):
         msg = str(e.exception)
         self.assertIn("gmlx is not installed: /gone/bin/gmlx does not exist", msg)
         self.assertIn(f"deleting {C.settings.PACK_DIR} and /data/gmlx/comfyui", msg)
+
+
+def _dead_url() -> str:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{s.getsockname()[1]}"
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _cancel_after(seconds: float):
+    """An interrupt check that raises once ``seconds`` have passed."""
+    t0 = time.monotonic()
+
+    def check():
+        if time.monotonic() - t0 > seconds:
+            raise _Cancelled()
+    return check
+
+
+class StartAndCancel(unittest.TestCase):
+    """A serve that fails names its error at once, Cancel stops every wait,
+    and a 127.0.0.1 address that does not answer gives way."""
+
+    def setUp(self):
+        self.env = {k: os.environ.get(k) for k in ("GMLX_BASE_URL", "GMLX_COMFY_SETTINGS", "PATH",
+                                                    "GMLX_API_KEY")}
+        d = tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "comfyui.json")
+        os.environ["PATH"] = "/nonexistent"
+        os.environ["GMLX_BASE_URL"] = _dead_url()
+        os.environ.pop("GMLX_API_KEY", None)
+        self.dir = d
+
+    def tearDown(self):
+        C.set_interrupt_check(None)
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def gmlx(self, serve: str):
+        """A recorded gmlx whose `serve` runs the shell ``serve``."""
+        exe = os.path.join(self.dir, "gmlx")
+        with open(exe, "w") as f:
+            f.write(f"#!/bin/sh\ncase \"$1\" in\n  serve) {serve} ;;\n  *) echo '{{}}' ;;\nesac\n")
+        os.chmod(exe, 0o755)
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_command": exe}, f)
+
+    def test_a_serve_that_fails_raises_its_error_at_once(self):
+        self.gmlx("echo 'error: speech-to-text requires the optional stt extra' >&2; exit 1")
+        t0 = time.monotonic()
+        with self.assertRaises(C.GmlxError) as e:
+            C.get_client(None, start_server=True, start_timeout=20)
+        self.assertLess(time.monotonic() - t0, 3.0)
+        msg = str(e.exception)
+        self.assertIn("`gmlx serve` failed (exit 1)", msg)
+        self.assertIn("error: speech-to-text requires the optional stt extra", msg)
+
+    def test_a_serve_that_exits_0_is_waited_for(self):
+        self.gmlx("exit 0")
+        t0 = time.monotonic()
+        with self.assertRaises(C.GmlxError) as e:
+            C.get_client(None, start_server=True, start_timeout=1.5)
+        self.assertGreater(time.monotonic() - t0, 1.4)
+        self.assertIn("did not answer", str(e.exception))
+
+    def test_cancel_stops_the_wait_for_a_starting_server(self):
+        self.gmlx("exit 0")
+        C.set_interrupt_check(_cancel_after(0.5))
+        t0 = time.monotonic()
+        with self.assertRaises(_Cancelled):
+            C.get_client(None, start_server=True, start_timeout=30)
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_cancel_stops_a_request_and_tells_the_server(self):
+        stub = Stub("--step-delay-ms", "3000")
+        try:
+            c = C.StepClient(stub.url)
+            _, fields = c.encode("z-image-turbo", "x")
+            told = []
+            C.set_interrupt_check(_cancel_after(0.3))
+            t0 = time.monotonic()
+            with self.assertRaises(_Cancelled):
+                c.step(torch.zeros(1, 16, 4, 4), torch.tensor([0.5]),
+                       {"model": "z-image-turbo", "run": None, "convention": "comfy",
+                        "patch_table": None, "rows": [{"cond": fields["cond"]}]},
+                       on_interrupt=lambda: told.append(1))
+            self.assertLess(time.monotonic() - t0, 1.5)
+            self.assertEqual(told, [1])
+            # Without a cancel, a call waits for its answer as before.
+            C.set_interrupt_check(lambda: None)
+            self.assertEqual(c.status("z-image-turbo")["model"], "z-image-turbo")
+        finally:
+            stub.close()
+
+    def test_a_loopback_address_that_does_not_answer_gives_way(self):
+        stub = Stub()
+        try:
+            os.environ["GMLX_BASE_URL"] = stub.url
+            c = C.get_client(_dead_url(), start_server=False)
+            self.assertEqual(c.base_url, stub.url)
+            with self.assertRaises(C.GmlxError) as e:
+                C.get_client("http://192.0.2.1:9", start_server=False)
+            self.assertIn("192.0.2.1", str(e.exception))
+        finally:
+            stub.close()
 
 
 if __name__ == "__main__":

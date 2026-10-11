@@ -58,7 +58,7 @@
    },
    "widgets_values": [
     "z-image-turbo",
-    "",
+    "http://127.0.0.1:8080",
     true
    ]
   },
@@ -92,7 +92,7 @@
    },
    "widgets_values": [
     "z-image-turbo",
-    "",
+    "http://127.0.0.1:8080",
     true
    ]
   },
@@ -126,7 +126,7 @@
    },
    "widgets_values": [
     "z-image-turbo",
-    "",
+    "http://127.0.0.1:8080",
     true
    ]
   },

@@ -702,6 +702,81 @@ class ClipAndVae(Base):
             zvae.get_sd()
 
 
+class Widgets(unittest.TestCase):
+    """The loaders list the server's image models, the default first, and
+    show the address they use; a name the server lacks is refused with its
+    `gmlx pull`; Cancel stops the wait for a starting server."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.stub = support.Stub()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.stub.close()
+
+    def setUp(self):
+        keys = ("GMLX_BASE_URL", "GMLX_COMFY_SETTINGS", "GMLX_DEFAULT_IMAGE_MODEL", "PATH")
+        self.env = {k: os.environ.get(k) for k in keys}
+        self.dir = tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(self.dir, "comfyui.json")
+        os.environ["GMLX_BASE_URL"] = self.stub.url
+        os.environ["GMLX_DEFAULT_IMAGE_MODEL"] = QID
+        os.environ["PATH"] = "/nonexistent"
+        P.discovery.forget()
+
+    def tearDown(self):
+        mm.interrupt_current_processing(False)
+        P.discovery.forget()
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_the_loaders_list_the_server_models_default_first(self):
+        want = [QID, ZID, QTID, KID]
+        for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
+            node = P.NODE_CLASS_MAPPINGS[name]
+            req = node.INPUT_TYPES()["required"]
+            names, opts = req["model_name"]
+            self.assertEqual(names, want, name)
+            self.assertEqual(opts["default"], QID, name)
+            self.assertEqual(req["server_url"][0], "STRING")
+            self.assertEqual(req["server_url"][1]["default"], self.stub.url, name)
+            # A saved name the list lacks passes validation and reaches the node.
+            self.assertIs(node.VALIDATE_INPUTS("qwen-image"), True)
+
+    def test_a_model_the_server_lacks_is_refused_with_its_pull(self):
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.nodes.GmlxModelLoader().load("qwen-image", self.stub.url, False)
+        self.assertIn("`gmlx pull qwen-image`", str(e.exception))
+        self.assertIn(ZID, str(e.exception))
+        out = P.nodes.GmlxServerStatus().status("qwen-image", server_url=self.stub.url)
+        self.assertIn("`gmlx pull qwen-image`", out["result"][0])
+
+    def test_cancel_stops_the_wait_for_a_starting_server(self):
+        exe = os.path.join(self.dir, "gmlx")
+        with open(exe, "w") as f:
+            f.write("#!/bin/sh\ncase \"$1\" in\n  serve) exit 0 ;;\n  *) echo '{}' ;;\nesac\n")
+        os.chmod(exe, 0o755)
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_command": exe}, f)
+        import socket
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            os.environ["GMLX_BASE_URL"] = f"http://127.0.0.1:{sk.getsockname()[1]}"
+        timer = threading.Timer(0.5, mm.interrupt_current_processing, (True,))
+        timer.start()
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(mm.InterruptProcessingException):
+                P.nodes.GmlxModelLoader().load(ZID, "", True)
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - t0, 2.5)
+
+
 class RoundTrip(Base):
     """The stub round trip at 1024x1024 latents."""
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 import base64
 import collections
 import logging
-import threading
 import time
 
 import numpy as np
@@ -29,10 +28,15 @@ import comfy.model_management
 import comfy.patcher_extension
 import comfy.utils
 
-from .client import GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient, tensor_hash
+from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
+                     set_interrupt_check, tensor_hash)
 from .patcher import CPU, GmlxBinding, GmlxModelPatcher
 
 log = logging.getLogger("gmlx")
+
+# Cancel in ComfyUI stops any wait on the server: a step, a load, an encode,
+# a VAE call or the start of the server.
+set_interrupt_check(comfy.model_management.throw_exception_if_processing_interrupted)
 
 _DTYPES = {"f32": torch.float32, "f16": torch.float16, "bf16": torch.bfloat16,
            "quant": torch.bfloat16}
@@ -238,27 +242,14 @@ class RemoteForward:
 
     def _send(self, x, timesteps, fields):
         client: StepClient = self.b.client
-        result = {}
 
-        def go():
+        def stop():
             try:
-                result["r"] = client.step(x, timesteps, fields)
-            except BaseException as e:  # noqa: BLE001: re-raised on the caller's thread
-                result["e"] = e
+                client.interrupt(fields.get("run"))
+            except GmlxError as e:
+                log.warning("gmlx: the interrupt did not reach the server: %s", e)
 
-        th = threading.Thread(target=go, daemon=True, name="gmlx-step")
-        th.start()
-        while th.is_alive():
-            th.join(0.1)
-            if comfy.model_management.processing_interrupted():
-                try:
-                    client.interrupt(fields.get("run"))
-                except GmlxError as e:
-                    log.warning("gmlx: the interrupt did not reach the server: %s", e)
-                comfy.model_management.throw_exception_if_processing_interrupted()
-        if "e" in result:
-            raise result["e"]
-        return result["r"]
+        return client.step(x, timesteps, fields, on_interrupt=stop)
 
     def __call__(self, x, timesteps, context=None, control=None, transformer_options={}, **kwargs):
         t0 = time.perf_counter()

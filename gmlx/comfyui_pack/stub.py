@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 
-from . import compat, settings
+from . import compat, discovery, settings
 from .version import COMFYUI_FLOOR, COMFYUI_TESTED, __version__
 
 log = logging.getLogger("gmlx")
@@ -55,10 +55,7 @@ def message(error: BaseException) -> str:
 
 
 def _loader():
-    return {"required": {
-        "model_name": ("STRING", {"default": settings.default_image_model()}),
-        "server_url": ("STRING", {"default": ""}),
-        "start_server": ("BOOLEAN", {"default": True})}}
+    return discovery.loader_inputs()
 
 
 def _sigmas():
@@ -100,6 +97,9 @@ def _node(name: str, text: str):
              "DESCRIPTION": "Not loaded: " + text, "run": run}
     if names:
         attrs["RETURN_NAMES"] = names
+    if inputs is _loader:
+        # A saved model name the list lacks still reaches run, which names the fix.
+        attrs["VALIDATE_INPUTS"] = classmethod(lambda cls, model_name: discovery.validate(model_name))
     return type(name, (), attrs)
 
 

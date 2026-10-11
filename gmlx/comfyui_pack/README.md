@@ -34,7 +34,7 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 ## Use
 
 1. Add the image model to the gmlx config and run `gmlx serve`. The loaders also start `gmlx serve` when no server answers and `start_server` is on.
-2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and set `model_name` on each to the model id in the gmlx config.
+2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or the models `gmlx pull` downloads when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
 The `example_workflows` folder has three graphs, which ComfyUI's template browser lists under the pack:
@@ -45,12 +45,15 @@ The `example_workflows` folder has three graphs, which ComfyUI's template browse
 
 ### Server address
 
-Each loader has a `server_url` input. When it is empty, the pack uses the first of:
+Each loader has a `server_url` input, which a new node fills with the first of:
 
 1. the `GMLX_BASE_URL` environment variable;
 2. `base_url` in `~/.config/gmlx/comfyui.json` (or the file `GMLX_COMFY_SETTINGS` names);
-3. the address `gmlx status --json` reports;
+3. the address `gmlx status --json` reports, the port in the gmlx config when no server runs;
 4. `http://127.0.0.1:8080`.
+
+An empty `server_url`, or a `127.0.0.1` or `localhost` address that does not answer, uses that address when the node runs.
+When `gmlx serve` fails to start, the run stops with what it printed, and Cancel stops the wait for a starting server.
 
 When the server has an API key, set `GMLX_API_KEY`, or `api_key` in the settings file.
 The pack and the server check that they speak the same step contract. On a mismatch, or when they come from two gmlx versions, the error or the `gmlx Server Status` node says whether to restart ComfyUI or the server.

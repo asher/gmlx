@@ -2,7 +2,7 @@
   "1": {
     "inputs": {
       "model_name": "qwen-image",
-      "server_url": "",
+      "server_url": "http://127.0.0.1:8080",
       "start_server": true
     },
     "class_type": "GmlxModelLoader",
@@ -13,7 +13,7 @@
   "2": {
     "inputs": {
       "model_name": "qwen-image",
-      "server_url": "",
+      "server_url": "http://127.0.0.1:8080",
       "start_server": true
     },
     "class_type": "GmlxCLIPLoader",
@@ -24,7 +24,7 @@
   "3": {
     "inputs": {
       "model_name": "qwen-image",
-      "server_url": "",
+      "server_url": "http://127.0.0.1:8080",
       "start_server": true
     },
     "class_type": "GmlxVAELoader",

@@ -13,6 +13,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -52,6 +56,31 @@ def _settings(link: Path):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+def _discovery(link: Path):
+    """The pack's discovery module, loaded through the link as part of a
+    package whose __init__ does not run, with nothing kept from a probe."""
+    name = "_pack_standalone"
+    for key in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
+        del sys.modules[key]
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [str(link)]
+    sys.modules[name] = pkg
+    return importlib.import_module(f"{name}.discovery")
+
+
+def _catalog() -> list:
+    from gmlx.image.catalog import RECIPES
+    return list(RECIPES)
+
+
+def _dead_port() -> int:
+    """A loopback port nothing listens on."""
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _record(**changes):
@@ -159,6 +188,7 @@ except ImportError as e:
 nodes = m.NODE_CLASS_MAPPINGS
 out = {"names": sorted(nodes), "display": m.NODE_DISPLAY_NAME_MAPPINGS,
        "inputs": nodes["GmlxModelLoader"].INPUT_TYPES(),
+       "validate": nodes["GmlxModelLoader"].VALIDATE_INPUTS("not-listed"),
        "status": nodes["GmlxServerStatus"]().run(model_name="x")["result"][0],
        "torch": "torch" in sys.modules,
        "logged": [[r.levelname, r.exc_info[0].__name__ if r.exc_info else None]
@@ -172,8 +202,9 @@ print(json.dumps(out))
 
 
 def _load_in_a_comfyui(link: Path, root: Path | None, path: str) -> dict:
+    # A server that answers nowhere, so no server on this Mac feeds the list.
     env = {"GMLX_COMFY_SETTINGS": str(cu.settings_path()), "PATH": path,
-           "HOME": os.environ["HOME"]}
+           "HOME": os.environ["HOME"], "GMLX_BASE_URL": f"http://127.0.0.1:{_dead_port()}"}
     r = subprocess.run([sys.executable, "-I", "-c", _LOAD, str(link), str(root or "")],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
@@ -213,7 +244,12 @@ def test_a_failing_import_registers_stand_ins_that_name_the_fix(link, tmp_path, 
     out = _load_in_a_comfyui(link, _fake_comfyui(tmp_path), str(tmp_path / "empty"))
     assert out["names"] == _node_names()
     assert all(v.endswith("(not loaded)") for v in out["display"].values())
-    assert out["inputs"]["required"]["model_name"][1]["default"] == "qwen-image"
+    # gmlx answers with nothing, so the list is what `gmlx pull` downloads,
+    # the recorded default first, and any saved name still reaches run.
+    names, opts = out["inputs"]["required"]["model_name"]
+    assert names[0] == opts["default"] == "qwen-image"
+    assert names == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
+    assert out["validate"] is True
     assert out["torch"] is False
     err = out["error"]
     for want in ("comfy.model_patcher.ModelPatcher", "ComfyUI 0.99.0",
@@ -264,3 +300,176 @@ def test_a_stand_in_with_gmlx_gone_names_the_two_paths(link, tmp_path):
 def test_outside_comfyui_the_import_fails_as_it_is(link, tmp_path):
     out = _load_in_a_comfyui(link, None, str(tmp_path / "empty"))
     assert "comfy" in out["import_error"]
+
+
+# The loaders' widgets: the model list and the server address.
+
+def _gmlx_script(folder: Path, body: str) -> Path:
+    """A gmlx command whose shell ``body`` sees the arguments as "$1 $2"."""
+    folder.mkdir(parents=True, exist_ok=True)
+    exe = folder / "gmlx"
+    exe.write_text("#!/bin/sh\n" + body + "\n")
+    exe.chmod(0o755)
+    return exe
+
+
+def _answers(listing: dict | None = None, status: dict | None = None) -> str:
+    """Shell that prints ``listing`` for `list` and ``status`` for `status`,
+    with builtins only, as the tests run with an empty PATH."""
+    lines = ['case "$1" in']
+    if listing is not None:
+        lines.append(f"  list) echo '{json.dumps(listing)}' ;;")
+    if status is not None:
+        lines.append(f"  status) echo '{json.dumps(status)}' ;;")
+    lines.append("esac")
+    return "\n".join(lines)
+
+
+def _listing(*ids, default=None) -> dict:
+    return {"config": "/x/gmlx.yaml", "aliases": {}, "default_model": None,
+            "default_image_model": default,
+            "models": [{"id": i, "kind": "image", "default": i == default} for i in ids]}
+
+
+@pytest.fixture
+def widgets(link, monkeypatch, tmp_path):
+    """The discovery module of the installed pack, with no server answering."""
+    d = _discovery(link)
+    monkeypatch.setenv("GMLX_BASE_URL", f"http://127.0.0.1:{_dead_port()}")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.delenv("GMLX_API_KEY", raising=False)
+    _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
+    return d
+
+
+def test_pull_names_are_the_catalog_recipes(widgets):
+    from gmlx.image.catalog import RECIPES
+    assert widgets.PULL_NAMES == {r.name: tuple(r.aliases) for r in RECIPES.values()}
+    assert list(widgets.PULL_NAMES) == _catalog()
+    assert widgets.settings.FALLBACK_MODEL in widgets.PULL_NAMES
+
+
+def test_the_model_list_is_the_configured_ids_default_first(widgets, tmp_path, monkeypatch):
+    exe = _gmlx_script(tmp_path / "bin", _answers(
+        _listing("krea-2-turbo", "my-qwen", "z-image-turbo", default="my-qwen")))
+    _record(gmlx_command=str(exe), default_image_model="z-image-turbo")
+    req = widgets.loader_inputs()["required"]
+    names, opts = req["model_name"]
+    assert names == ["my-qwen", "krea-2-turbo", "z-image-turbo"]
+    assert opts["default"] == "my-qwen"
+    assert widgets.widgets()["source"] == "config"
+    # launch's --model comes first.
+    monkeypatch.setenv("GMLX_DEFAULT_IMAGE_MODEL", "z-image-turbo")
+    widgets.forget()
+    assert widgets.loader_inputs()["required"]["model_name"][0][0] == "z-image-turbo"
+
+
+class _Models(BaseHTTPRequestHandler):
+    ids: list = []
+
+    def do_GET(self):
+        ok = (self.path == "/internal/image-steps/v1/models"
+              and self.headers.get("X-Gmlx-Steps-Contract") == "1.0")
+        body = json.dumps({"models": [{"model": i} for i in self.ids]}).encode()
+        self.send_response(200 if ok else 400)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_a_server_that_answers_gives_the_list(widgets, tmp_path, monkeypatch):
+    _Models.ids = ["qwen-image-2.1", "z-image-turbo"]
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Models)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"
+        monkeypatch.setenv("GMLX_BASE_URL", url)
+        exe = _gmlx_script(tmp_path / "bin", _answers(_listing("other")))
+        _record(gmlx_command=str(exe))
+        w = widgets.widgets()
+        # The recorded default (qwen-image) is not there; z-image-turbo is.
+        assert w == {"url": url, "models": ["z-image-turbo", "qwen-image-2.1"], "source": "server"}
+        assert widgets.loader_inputs()["required"]["server_url"][1]["default"] == url
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_without_gmlx_or_models_the_list_is_what_pull_downloads(widgets, tmp_path):
+    _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
+    w = widgets.widgets()
+    assert w["source"] == "pull"
+    assert w["models"] == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
+    exe = _gmlx_script(tmp_path / "bin", _answers(_listing()))
+    _record(gmlx_command=str(exe))
+    widgets.forget()
+    assert widgets.widgets()["source"] == "pull"
+
+
+def test_a_hung_gmlx_never_stalls_or_fails_the_widgets(widgets, tmp_path, monkeypatch):
+    exe = _gmlx_script(tmp_path / "bin", "exec sleep 30")
+    _record(gmlx_command=str(exe))
+    monkeypatch.delenv("GMLX_BASE_URL")
+    monkeypatch.setattr(widgets, "DEFAULT_URL", f"http://127.0.0.1:{_dead_port()}")
+    monkeypatch.setattr(widgets, "STATUS_TIMEOUT", 0.5)
+    monkeypatch.setattr(widgets, "LIST_TIMEOUT", 0.5)
+    t0 = time.monotonic()
+    req = widgets.loader_inputs()["required"]
+    assert time.monotonic() - t0 < 3.0
+    assert req["model_name"][0][0] == "qwen-image"
+    assert req["server_url"][1]["default"] == widgets.DEFAULT_URL
+    # The answer is kept: the next calls run no command.
+    t0 = time.monotonic()
+    for _ in range(20):
+        widgets.loader_inputs()
+    assert time.monotonic() - t0 < 0.5
+
+
+def test_a_probe_that_raises_still_gives_widgets(widgets, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("probe")
+    monkeypatch.setattr(widgets, "resolve_base_url", boom)
+    req = widgets.loader_inputs()["required"]
+    assert req["model_name"][0][0] == "qwen-image"
+    assert req["server_url"][1]["default"] == widgets.DEFAULT_URL
+
+
+def test_the_address_default_is_the_resolved_one(widgets, tmp_path, monkeypatch):
+    assert widgets.loader_inputs()["required"]["server_url"][1]["default"] == \
+        os.environ["GMLX_BASE_URL"]
+    monkeypatch.delenv("GMLX_BASE_URL")
+    # No server runs: gmlx status names the host and port of gmlx's config.
+    exe = _gmlx_script(tmp_path / "bin", _answers(
+        status={"running": False, "host": "0.0.0.0", "port": 9132, "answering": False}))
+    _record(gmlx_command=str(exe))
+    widgets.forget()
+    assert widgets.loader_inputs()["required"]["server_url"][1]["default"] == \
+        "http://127.0.0.1:9132"
+    assert widgets.resolve_base_url("") == "http://127.0.0.1:9132"
+    _gmlx_script(tmp_path / "bin", _answers(
+        status={"running": True, "url": "http://127.0.0.1:9133"}))
+    assert widgets.resolve_base_url("") == "http://127.0.0.1:9133"
+    _gmlx_script(tmp_path / "bin", _answers(status={"servers": [
+        {"running": True, "url": "http://127.0.0.1:9134"},
+        {"running": False, "url": "http://127.0.0.1:9135"}]}))
+    assert widgets.resolve_base_url("") == "http://127.0.0.1:9134"
+
+
+def test_an_unconfigured_model_is_refused_with_its_pull(widgets):
+    msg = widgets.not_on_server("qwen-image-2.1", "http://127.0.0.1:8080", ["z-image-turbo"])
+    assert "`gmlx pull qwen-image-2.1`" in msg and "z-image-turbo" in msg
+    assert "http://127.0.0.1:8080" in msg
+    msg = widgets.not_on_server("flux", "http://h:1", [])
+    assert "`gmlx pull z-image-turbo`" in msg and "(it has: none)" in msg
+    assert widgets.validate("anything") is True
+    assert widgets.validate(" ") == "model_name is empty"
+
+
+def test_loopback_addresses(widgets):
+    for url in ("http://127.0.0.1:8080", "http://localhost:1", "http://[::1]:2"):
+        assert widgets.is_loopback(url), url
+    for url in ("http://192.168.1.2:8080", "http://studio.local:8080", "not a url"):
+        assert not widgets.is_loopback(url), url
