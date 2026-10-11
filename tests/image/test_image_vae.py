@@ -595,7 +595,10 @@ def test_tiles_normalize_with_the_statistics_of_the_whole_image(tiny_vae):
     a = np.array(tiling.encode(vae, img, tiled=False, free=1e12))
     b = np.array(tiling.encode(vae, img, tiled=True, tile=32, overlap=8,
                                free=1e12))
-    np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4)
+    # The encoder's tiled convs round at TF32 on a GPU that multiplies
+    # float32 that way: about 1.2e-4 from the whole pass here. Tiles
+    # normalized with their own statistics land 6.6e-2 off.
+    np.testing.assert_allclose(b, a, rtol=1e-3, atol=1e-3)
 
 
 def test_owned_regions_partition_the_image():
