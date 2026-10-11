@@ -662,6 +662,53 @@ def test_two_installs_at_once_both_stay_in_the_record(home, tmp_path):
     assert got == [str(a / "custom_nodes"), str(b / "custom_nodes")]
 
 
+def _install_while_waiting_for_the_lock(monkeypatch, folder):
+    """Make the next taker of the lock find that an install into
+    ``folder`` ran while it waited."""
+    import contextlib
+
+    real = cu.locked
+
+    @contextlib.contextmanager
+    def waited():
+        monkeypatch.setattr(cu, "locked", real)
+        assert cu.cmd_comfyui(["install", "--comfyui-dir", str(folder)]) == 0
+        with real():
+            yield
+
+    monkeypatch.setattr(cu, "locked", waited)
+
+
+def _recorded() -> list:
+    return sorted(r["custom_nodes"] for r in cu.load_record()["installs"])
+
+
+def test_an_uninstall_keeps_an_install_that_ran_while_it_waited(home, tmp_path,
+                                                                monkeypatch):
+    a, b = make_comfy(tmp_path / "a"), make_comfy(tmp_path / "b")
+    assert _install_cli("--comfyui-dir", str(a)) == 0
+    _install_while_waiting_for_the_lock(monkeypatch, b)
+    assert cu.cmd_comfyui(["uninstall", "--comfyui-dir", str(a)]) == 0
+    assert _recorded() == [str(b / "custom_nodes")]
+    assert (b / "custom_nodes" / cu.LINK_NAME).exists()
+    assert not (a / "custom_nodes" / cu.LINK_NAME).exists()
+
+
+def test_a_refresh_keeps_an_install_that_ran_while_it_waited(home, tmp_path,
+                                                            monkeypatch):
+    a, b = make_comfy(tmp_path / "a"), make_comfy(tmp_path / "b")
+    assert _install_cli("--comfyui-dir", str(a)) == 0
+    # A recorded gmlx that is gone makes the refresh write the record.
+    doc = cu.load_record()
+    doc["gmlx_command"] = str(tmp_path / "gone" / "gmlx")
+    cu.save_record(doc)
+    new = tmp_path / "bin" / "gmlx"
+    monkeypatch.setattr(cu, "gmlx_command", lambda: str(new))
+    _install_while_waiting_for_the_lock(monkeypatch, b)
+    cu.refresh_for_serve()
+    assert _recorded() == [str(a / "custom_nodes"), str(b / "custom_nodes")]
+
+
 def test_no_record_means_no_refresh(home):
     make_comfy(home / "ComfyUI")
     assert cu.refresh_for_serve() is None
@@ -953,12 +1000,13 @@ def test_the_recorded_gmlx_is_the_running_one_never_a_path_lookup(monkeypatch, t
     monkeypatch.setattr(cu.sys, "prefix", str(venv))
     monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
     monkeypatch.setattr(cu.sys, "argv", [str(tmp_path / "src" / "gmlx" / "__main__.py")])
-    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [(str(tmp_path / "no-scripts"), False)])
+    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [str(tmp_path / "no-scripts")])
     assert cu.gmlx_command() is None
     started = _fake_exe(tmp_path / "bin" / "gmlx")
     monkeypatch.setattr(cu.sys, "argv", [str(started), "comfyui", "install"])
     assert cu.gmlx_command() == os.path.realpath(started)
     script = _fake_exe(venv / "bin" / "gmlx")
+    script.write_text(f"#!{venv / 'bin' / 'python'}\nimport gmlx\n")
     assert cu.gmlx_command() == str(script)
 
 
@@ -967,6 +1015,7 @@ def test_the_recorded_gmlx_of_homebrew_is_its_link_that_survives_upgrades(monkey
     prefix = tmp_path / "homebrew"
     libexec = prefix / "Cellar" / "gmlx" / "0.5.0" / "libexec"
     script = _fake_exe(libexec / "bin" / "gmlx")
+    script.write_text(f"#!{libexec / 'bin' / 'python'}\nimport gmlx\n")
     (prefix / "bin").mkdir()
     (prefix / "bin" / "gmlx").symlink_to(script)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
@@ -1032,11 +1081,65 @@ def test_another_installs_gmlx_in_the_users_scripts_folder_is_not_recorded(monke
     assert cu.gmlx_command() is None
 
 
+def test_brews_gmlx_in_homebrew_pythons_scripts_folder_is_not_recorded(monkeypatch,
+                                                                       tmp_path):
+    """Homebrew's Python puts console scripts in Homebrew's bin folder,
+    where brew also links its own gmlx, which runs on the gmlx formula's
+    Python. `python3.13 -m gmlx` from a checkout records none of it,
+    whether the interpreter runs from its opt folder or from that bin
+    folder."""
+    brew = tmp_path / "homebrew"
+    formula = brew / "Cellar" / "gmlx" / "0.5.0" / "libexec" / "bin" / "python"
+    _fake_exe(formula.parent / "gmlx").write_text(f"#!{formula}\nimport gmlx\n")
+    (brew / "bin").mkdir(parents=True)
+    (brew / "bin" / "gmlx").symlink_to(formula.parent / "gmlx")
+    monkeypatch.setenv("PATH", str(brew / "bin"))
+    monkeypatch.setattr(cu.sys, "prefix", str(brew / "opt" / "python"))
+    monkeypatch.setattr(cu.sys, "base_prefix", str(brew / "opt" / "python"))
+    monkeypatch.setattr(cu.sys, "argv", ["-m"])
+    monkeypatch.setattr(cu.sysconfig, "get_path",
+                        lambda name, scheme=None: str(
+                            tmp_path / "user-bin" if scheme else brew / "bin"))
+    for python in (brew / "opt" / "python" / "bin" / "python3.13",
+                   brew / "bin" / "python3.13"):
+        monkeypatch.setattr(cu.sys, "executable", str(python))
+        assert cu.gmlx_command() is None, python
+    # A pip install into that Python names it in its shebang, and is recorded.
+    (brew / "bin" / "gmlx").unlink()
+    _fake_exe(brew / "bin" / "gmlx").write_text(f"#!{python}\nimport gmlx\n")
+    assert cu.gmlx_command() == str(brew / "bin" / "gmlx")
+
+
+def _sh_launcher(python) -> str:
+    """The script head pip writes when the interpreter path has spaces."""
+    q = "'" * 3
+    return f'#!/bin/sh\n{q}exec\' "{python}" "$0" "$@"\n\' {q}\nimport gmlx\n'
+
+
+def test_pips_shell_shebang_for_a_path_with_spaces_names_the_python(monkeypatch,
+                                                                    tmp_path):
+    user, python = _user_scripts(monkeypatch, tmp_path, venv=False)
+    _fake_exe(user).write_text(_sh_launcher(python))
+    assert cu.gmlx_command() == str(user)
+    user.write_text(_sh_launcher(tmp_path / "other app" / "python"))
+    assert cu.gmlx_command() is None
+
+
+def test_a_shebang_may_name_this_python_by_another_name_in_its_folder(monkeypatch,
+                                                                      tmp_path):
+    user, python = _user_scripts(monkeypatch, tmp_path, venv=False)
+    real = _fake_exe(Path(python))
+    alias = real.parent / "python3"
+    alias.symlink_to(real.name)
+    _fake_exe(user).write_text(f"#!{alias}\nimport gmlx\n")
+    assert cu.gmlx_command() == str(user)
+
+
 def test_a_venv_has_no_users_scripts_folder(monkeypatch, tmp_path):
     user, python = _user_scripts(monkeypatch, tmp_path, venv=True)
     _fake_exe(user).write_text(f"#!{python}\nimport gmlx\n")
     assert cu.gmlx_command() is None
-    assert cu._scripts_dirs() == [(str(tmp_path / "scripts"), False)]
+    assert cu._scripts_dirs() == [str(tmp_path / "scripts")]
 
 
 def test_a_gmlx_on_path_is_recorded_only_when_it_runs_on_this_python(monkeypatch,

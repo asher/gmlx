@@ -155,62 +155,75 @@ def _runnable(path) -> bool:
 
 
 def _scripts_dirs() -> list:
-    """Where pip put this interpreter's console scripts, as (folder, user)
-    pairs: the install's own scripts folder, then the user's, for a
-    ``pip install --user``. A venv has no user scripts folder of its own."""
+    """Where pip put this interpreter's console scripts: the install's own
+    scripts folder, then the user's, for a ``pip install --user``. A venv
+    has no user scripts folder of its own."""
     out = []
     try:
         d = sysconfig.get_path("scripts")
     except KeyError:
         d = None
     if d:
-        out.append((d, False))
+        out.append(d)
     if sys.prefix == sys.base_prefix:
         try:
             u = sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user"))
         except KeyError:
             u = None
         if u and u != d:
-            out.append((u, True))
+            out.append(u)
     return out
 
 
 def _runs_on_this_python(path: str) -> bool:
-    """Whether the script's shebang names this interpreter. The path is
-    compared as written, since every venv's python links to one base
-    Python."""
+    """Whether the script's shebang names this interpreter: its path as
+    written, or another name of it in the same folder, such as python3 for
+    python3.13. Every venv's python links to one base Python, so a link in
+    another folder is another install."""
     try:
         with open(path, "rb") as f:
             first = f.readline(4096).decode("utf-8", "replace")
+            second = f.readline(4096).decode("utf-8", "replace")
     except OSError:
         return False
     if not first.startswith("#!"):
         return False
     words = first[2:].split()
-    return bool(words) and os.path.normpath(words[0]) == os.path.normpath(sys.executable)
+    if words == ["/bin/sh"]:
+        # pip's form for an interpreter path with spaces or past the
+        # shebang length: '''exec' "/path/python" "$0" "$@"
+        m = re.match(r"""'''exec' "([^"]+)" """, second)
+        words = [m.group(1)] if m else []
+    if not words:
+        return False
+    named, here = os.path.normpath(words[0]), os.path.normpath(sys.executable)
+    return named == here or (
+        os.path.dirname(named) == os.path.dirname(here)
+        and os.path.realpath(named) == os.path.realpath(here))
 
 
 def gmlx_command() -> str | None:
     """The absolute path of the running gmlx's command, or None when none is
-    found. For Homebrew it is the link in Homebrew's bin folder, whose path
-    stays across upgrades; else the console script beside the interpreter;
-    else the one in pip's scripts folder; else the one in the user's
-    scripts folder whose shebang names this interpreter; else the script
-    this process started from; else a gmlx on PATH whose shebang names this
-    interpreter. The user's scripts folder, such as ~/.local/bin, and PATH
-    can hold the gmlx of another install, such as one from uv tool or
-    pipx, which is never recorded."""
+    found. Each candidate but the script this process started from must
+    name this interpreter in its shebang. For Homebrew it is the link in
+    Homebrew's bin folder, whose path stays across upgrades; else the
+    console script beside the interpreter; else the one in pip's scripts
+    folder or in the user's; else the script this process started from;
+    else a gmlx on PATH. A folder can hold another install's gmlx: the
+    scripts folder of Homebrew's Python is Homebrew's bin folder, where
+    brew links its own gmlx, and the user's, such as ~/.local/bin, holds
+    those of uv tool and pipx. Such a gmlx is never recorded."""
     script = Path(sys.executable).parent / "gmlx"
-    if _runnable(script):
+    if _runnable(script) and _runs_on_this_python(str(script)):
         parts = Path(sys.prefix).resolve().parts
         if "Cellar" in parts:
             brew = Path(*parts[:parts.index("Cellar")]) / "bin" / "gmlx"
             if os.path.realpath(brew) == os.path.realpath(script):
                 return str(brew)
         return str(script)
-    for d, user in _scripts_dirs():
+    for d in _scripts_dirs():
         cand = os.path.join(d, "gmlx")
-        if _runnable(cand) and (not user or _runs_on_this_python(cand)):
+        if _runnable(cand) and _runs_on_this_python(cand):
             return cand
     argv0 = sys.argv[0] or ""
     if os.path.basename(argv0) == "gmlx" and _runnable(argv0):
@@ -829,8 +842,10 @@ def install(targets: list, *, link_source: bool = False, model: str | None = Non
             remember: bool = True) -> tuple[list, Sync | None, list]:
     """Check, copy, link and record ``targets``. Returns what was installed,
     the copy's sync and the recorded custom_nodes folders that are gone,
-    which leave the record. Raises ComfyError on a refusal, before anything
-    is written."""
+    which leave the record. `gmlx comfyui install` has dropped those
+    already, with drop_gone_records, so for it the list holds only a folder
+    that went meanwhile. Raises ComfyError on a refusal, before this call
+    writes anything."""
     load_record()
     meta = pack_meta()
     checked = [(t, *check_version(t, meta)) for t in targets]
