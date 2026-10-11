@@ -167,6 +167,18 @@ def test_return_hidden_yields_the_four_stream_hidden():
     assert float(mx.abs(relogits - out.logits).max()) < 1e-5
 
 
+def test_skip_logits_leaves_out_the_head():
+    model = _tiny_vlm()
+    lm = model.language_model
+    ids = mx.random.randint(0, lm.args.vocab_size, (1, 6))
+    out = lm(ids, cache=lm.make_cache())
+    spec = lm(ids, cache=lm.make_cache(), return_hidden=True, skip_logits=True)
+    assert spec.logits is None
+    assert lm(ids, cache=lm.make_cache(), skip_logits=True).logits is None
+    relogits = lm.speculative_logits_from_hidden(spec.hidden_states[-1])
+    assert float(mx.abs(relogits - out.logits).max()) < 1e-5
+
+
 def test_verify_positions_follow_the_resolved_mrope():
     """After an image turn set _rope_deltas, the verify forward must run at
     the same positions plain decode does (spec vs plain logits equal)."""

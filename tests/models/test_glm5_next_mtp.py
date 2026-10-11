@@ -173,6 +173,15 @@ def test_logits_from_hidden_matches_forward():
         mx.argmax(ref, axis=-1))
 
 
+def test_skip_logits_still_returns_the_raw_hidden():
+    lm = _build_lm()
+    ids = mx.random.randint(0, lm.args.vocab_size, (1, 5))
+    out = lm(ids, return_hidden=True, skip_logits=True)
+    assert out.logits is None
+    got = lm.speculative_logits_from_hidden(out.hidden_states[-1])
+    assert float(mx.abs(got - lm(ids).logits).max()) < 1e-5
+
+
 def _wrap_target(lm):
     from gmlx.load.mtp_target import MTPTextTarget
 

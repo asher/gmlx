@@ -168,11 +168,14 @@ class Qwen4ExpSpecLM(Qwen4ExpSpecHooks, q4.Model):
     ):
         # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
         # keyword; shared_kv is never used (the drafter owns its KV).
+        # skip_logits leaves out the head; speculative_logits_from_hidden
+        # projects the returned streams.
+        skip_logits = kwargs.pop("skip_logits", False)
         del n_to_process, kwargs
         want_hidden = return_hidden or return_shared_kv
         out, streams = self.model(
             inputs, cache, input_embeddings=inputs_embeds, return_streams=True)
-        logits = self._head(out)
+        logits = None if skip_logits else self._head(out)
         if not want_hidden:
             from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 

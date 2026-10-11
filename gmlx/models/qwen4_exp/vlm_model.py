@@ -151,6 +151,8 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
         return_shared_kv: bool = False,
         **kwargs,
     ):
+        # skip_logits leaves out the head, as in Qwen4ExpSpecLM.
+        skip_logits = kwargs.pop("skip_logits", False)
         del mask, kwargs  # the backbone builds masks from the caches
         positions = self._resolve_positions(
             inputs, cache, position_ids, rope_deltas)
@@ -158,10 +160,12 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
             out, streams = self.model(
                 inputs, cache, input_embeddings=inputs_embeds,
                 position_ids=positions, return_streams=True)
-            return _SpecOutput(logits=self._head(out), hidden_states=[streams])
+            logits = None if skip_logits else self._head(out)
+            return _SpecOutput(logits=logits, hidden_states=[streams])
         out = self.model(inputs, cache, input_embeddings=inputs_embeds,
                          position_ids=positions)
-        return LanguageModelOutput(logits=self._head(out))
+        return LanguageModelOutput(
+            logits=None if skip_logits else self._head(out))
 
     @property
     def layers(self):
