@@ -8,8 +8,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from image_fixtures import (Q_HEADER, bf16_bits, fixture_view, load_json,
-                            official_config, write_gguf)
+from image_fixtures import (Q_HEADER, Z_HEADER, bf16_bits, fixture_view,
+                            load_json, official_config, write_gguf)
 
 from gmlx.image import fingerprint as fp
 from gmlx.image.families.krea2 import family as kf
@@ -130,8 +130,6 @@ def test_a_label_of_another_layout_names_every_krea2_label():
 def test_manage_names_a_krea2_file_under_a_shared_label_by_its_tensors():
     """The header-only check of `gmlx pull` names a family by its tensors.
     Without them, a shared label names none, and krea-2 names Krea 2."""
-    from types import SimpleNamespace
-
     from gmlx.commands import manage
     from gmlx.load.remote import HeaderReport
 
@@ -139,13 +137,52 @@ def test_manage_names_a_krea2_file_under_a_shared_label_by_its_tensors():
                        ("krea-2", ("dit", "krea2")),
                        ("qwen_image21", ("dit", "qwen_image21"))):
         assert manage._image_role(HeaderReport(arch), None) == want, arch
-    # A shard scan as the header-only read gives it.
-    scan = SimpleNamespace(
-        path="x.gguf", data_offset=0, kv={"general.architecture": "pig"},
+    assert manage._image_role(HeaderReport("pig"), [_scan(TURBO, "pig")]) \
+        == ("dit", "krea2")
+
+
+def _scan(name, arch, **change):
+    """A shard scan of a header fixture as the header-only read gives it."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        path="x.gguf", data_offset=0, kv={"general.architecture": arch},
         tensors=[SimpleNamespace(name=n, shape=t.shape, type_name=t.codec,
                                  offset=0, nbytes=0)
-                 for n, t in fixture_view(TURBO).tensors.items()])
-    assert manage._image_role(HeaderReport("pig"), [scan]) == ("dit", "krea2")
+                 for n, t in fixture_view(name, **change).tensors.items()])
+
+
+_QB0 = "model.diffusion_model.transformer_blocks.0."
+_REFUSED = {
+    "Z-Image": (Z_HEADER, {}),
+    "Qwen-Image 2.1": (Q_HEADER, {}),
+    "Ming-Image": (Z_HEADER, {"drop": ("x_pad_token", "cap_pad_token")}),
+    "Lens": (Q_HEADER, {"add": {
+        _QB0 + "attn.norm_added_q.weight": ((128,), "F32"),
+        _QB0 + "img_mlp.w1.weight": ((4096, 12288), "Q4_K")}}),
+}
+
+
+@pytest.mark.parametrize("arch", ["flux", "pig"])
+@pytest.mark.parametrize("model", sorted(_REFUSED))
+def test_pull_refuses_a_file_under_a_shared_label_that_gmlx_image_refuses(
+        model, arch):
+    """`gmlx pull` and `check` name a family only where gmlx image loads
+    the file, and word the refusal as `gmlx list` does."""
+    from gmlx.commands import manage
+    from gmlx.load import remote
+
+    name, change = _REFUSED[model]
+    scan = _scan(name, arch, **change)
+    with pytest.raises(fp.ImageModelError):
+        fp.identify(fp.HeaderView(kv=scan.kv, tensors=fixture_view(
+            name, **change).tensors))
+    report = remote.HeaderReport(arch, {"Q4_K": 3}, {}, 3)
+    assert manage._image_role(report, [scan]) == (None, None)
+    v = manage._verdict(remote.parse_ref("hf:o/r/m.gguf"), report,
+                        size_bytes=1 << 30, scans=[scan])
+    assert v["image"] is None and not v["usable"]
+    assert v["arch_error"] == "an image GGUF gmlx does not load"
 
 
 def _identity_file(tmp_path, codec: str, seed: int, flat: bool):
@@ -244,3 +281,33 @@ def test_the_load_refuses_a_file_of_unknown_weights(monkeypatch):
     with pytest.raises(fp.ImageModelError, match="--variant turbo"):
         loader.load_dit("/k.gguf", identified=fp.identify(view),
                         log=lambda *a: None)
+
+
+@pytest.mark.parametrize("model,arch", [("Ming-Image", "lumina2"),
+                                        ("Ming-Image", None),
+                                        ("Lens", "qwen_image")])
+def test_pull_names_no_family_for_a_relative_its_family_refuses(model, arch):
+    """A relative that a family refuses by name names no family in `gmlx
+    pull`, under that family's own label too."""
+    from gmlx.commands import manage
+    from gmlx.load import remote
+
+    name, change = _REFUSED[model]
+    report = remote.HeaderReport(arch, {"Q4_K": 3}, {}, 3)
+    assert manage._image_role(report, [_scan(name, arch, **change)]) == (
+        None, None)
+
+
+@pytest.mark.parametrize("arch", ["flux", "pig"])
+def test_image_pull_reuses_a_krea2_file_on_disk_under_a_shared_label(
+        monkeypatch, arch):
+    """The scan `gmlx image pull` reuses files from reads the tensors of a
+    file labeled flux or pig, and takes a Krea 2 one as its DiT."""
+    from gmlx.image import catalog
+
+    kv = dict(load_json(TURBO)["kv"], **{"general.architecture": arch})
+    monkeypatch.setattr(catalog, "_kv", lambda path: kv)
+    monkeypatch.setattr(catalog, "_view",
+                        lambda path: fixture_view(TURBO, kv=kv))
+    (got,) = catalog.classify("krea-2-turbo.gguf")
+    assert (got.role, got.family) == ("dit", "krea2")

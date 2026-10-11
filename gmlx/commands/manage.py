@@ -229,18 +229,34 @@ def _image_role(report: remote.HeaderReport,
     if report.arch is not None and report.arch not in image_arches():
         return None, None
     if scans:
-        from gmlx.image.fingerprint import strip_prefix, view_from_scans
+        from gmlx.image.fingerprint import (Refusal, strip_prefix,
+                                            view_from_scans)
         view = view_from_scans(scans)
         for fam in families():
             try:
                 hit = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
             except ValueError:
                 continue
-            if hit is not None:
-                return "dit", fam.name
+            if hit is None:
+                continue
+            # The first family whose tensors answer decides, as in
+            # identify(): a refusal, or a label that family does not
+            # carry, is a file gmlx image refuses.
+            if isinstance(hit, Refusal) or (
+                    report.arch is not None and report.arch not in
+                    fam.arch_strings | fam.shared_arch_strings):
+                return None, None
+            return "dit", fam.name
     named = [f.name for f in families() if report.arch in f.arch_strings
              and report.arch is not None]
     return ("dit", named[0]) if named else (None, None)
+
+
+def _image_label(arch: str | None) -> bool:
+    """Whether ``arch`` is a label image DiTs carry, so a file under it
+    that _image_role does not name is an image GGUF gmlx image refuses."""
+    from gmlx.image.catalog import image_arches
+    return arch is not None and arch in image_arches()
 
 
 def _image_companion_bytes(family: str | None) -> int | None:
@@ -294,6 +310,8 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
+        if not arch_ok and _image_label(report.arch):
+            arch_err = "an image GGUF gmlx does not load"
     from gmlx.load.preflight import hadamard_fold_error
     fold_err = hadamard_fold_error(report.arch, report.hadamard)
     runs = report.loadable_codecs and arch_ok and fold_err is None
