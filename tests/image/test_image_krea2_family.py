@@ -109,6 +109,45 @@ def test_a_krea2_file_under_a_qwen_name_keeps_krea2():
     assert fp.identify(view).family.name == "krea2"
 
 
+@pytest.mark.parametrize("name", [TURBO, RAW])
+@pytest.mark.parametrize("arch", ["krea-2", "flux", "pig"])
+def test_the_labels_other_converters_write_load_as_krea2(name, arch):
+    """krea-2 names Krea 2. flux and pig are labels that converters write
+    for other models too, and the tensors decide."""
+    kv = dict(load_json(name)["kv"], **{"general.architecture": arch})
+    got = fp.identify(fixture_view(name, kv=kv))
+    assert (got.family.name, got.layout) == ("krea2", "last_mlp")
+
+
+def test_a_label_of_another_layout_names_every_krea2_label():
+    view = fixture_view(TURBO, kv={"general.architecture": "lumina2"})
+    assert _refused(view) == (
+        "arch 'lumina2' contradicts the tensor layout, which is Krea 2 "
+        "(arch 'flux' or 'krea-2' or 'krea2' or 'pig' or 'qwen_image' or "
+        "none)")
+
+
+def test_manage_names_a_krea2_file_under_a_shared_label_by_its_tensors():
+    """The header-only check of `gmlx pull` names a family by its tensors.
+    Without them, a shared label names none, and krea-2 names Krea 2."""
+    from types import SimpleNamespace
+
+    from gmlx.commands import manage
+    from gmlx.load.remote import HeaderReport
+
+    for arch, want in (("pig", (None, None)), ("flux", (None, None)),
+                       ("krea-2", ("dit", "krea2")),
+                       ("qwen_image21", ("dit", "qwen_image21"))):
+        assert manage._image_role(HeaderReport(arch), None) == want, arch
+    # A shard scan as the header-only read gives it.
+    scan = SimpleNamespace(
+        path="x.gguf", data_offset=0, kv={"general.architecture": "pig"},
+        tensors=[SimpleNamespace(name=n, shape=t.shape, type_name=t.codec,
+                                 offset=0, nbytes=0)
+                 for n, t in fixture_view(TURBO).tensors.items()])
+    assert manage._image_role(HeaderReport("pig"), [scan]) == ("dit", "krea2")
+
+
 def _identity_file(tmp_path, codec: str, seed: int, flat: bool):
     from gmlx.load.headerscan import scan_gguf
 

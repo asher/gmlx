@@ -286,7 +286,10 @@ FAMILY = Family(
     title="Krea 2",
     # Before Qwen-Image 2.1, whose arch string one Krea 2 layout carries.
     order=15,
-    arch_strings=frozenset({"qwen_image", "krea2", None}),
+    arch_strings=frozenset({"qwen_image", "krea2", "krea-2", None}),
+    # Labels that converters also write for other models. A FLUX file keeps
+    # its refusal by name, since its tensors never match those of Krea 2.
+    shared_arch_strings=frozenset({"flux", "pig"}),
     strip_prefixes=("model.diffusion_model.", "diffusion_model."),
     fingerprint=fingerprint,
     synth_config=synth_config,

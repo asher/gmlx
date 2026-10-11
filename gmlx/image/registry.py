@@ -121,6 +121,10 @@ class Family:
     # Tensors a converter may store flattened with their shape under
     # comfy.gguf.orig_shape, which the load restores.
     reshaped: tuple = ()
+    # general.architecture values that converters also write for other
+    # models, such as "flux". A file with one loads when its tensors match
+    # this family, but the value alone never names the family.
+    shared_arch_strings: frozenset = frozenset()
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

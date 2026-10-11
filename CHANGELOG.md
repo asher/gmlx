@@ -19,6 +19,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   10 reference images with the encoder's mmproj as `--encoder-mmproj`.
 - `gmlx image generate`, `serve` and the ComfyUI pack make images from a
   Krea 2 Turbo GGUF, its Qwen3-VL-4B-Instruct text encoder GGUF and its VAE.
+- A Qwen-Image 2.1 GGUF labeled `qwen_image21`, and a Krea 2 GGUF labeled
+  `krea-2`, `flux` or `pig`, load as their tensors say.
 - `gmlx image generate` fits Qwen-Image 2.1 at 1024x1024 in the memory budget
   of a 16 GB Mac: the text encoder loads, encodes and is released before the
   DiT loads when the parts do not fit together.

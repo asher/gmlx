@@ -43,14 +43,14 @@ def fixture_view(name: str, *, drop=(), add=None, kv=None, rename=None):
 @functools.lru_cache(maxsize=None)
 def _image_dits(root: str, family: str) -> tuple:
     from gmlx.image import fingerprint as fp
-    from gmlx.image.registry import is_image_arch
+    from gmlx.image.catalog import image_arches
     from gmlx.load.headerscan import scan_gguf
 
     found = []
     for path in sorted(Path(root).rglob("*.gguf")):
         arch = scan_gguf(str(path), include_tensors=False).kv.get(
             "general.architecture")
-        if arch is not None and not is_image_arch(arch):
+        if arch is not None and arch not in image_arches():
             continue
         try:
             got = fp.identify(fp.view_from_scans([scan_gguf(str(path))]))

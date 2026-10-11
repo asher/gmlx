@@ -323,12 +323,14 @@ def mmproj_matches(path: str, family: str) -> bool:
 
 
 def image_arches() -> frozenset:
-    """The arch strings of the image DiTs gmlx loads."""
+    """The arch strings that an image DiT gmlx loads can carry, those that
+    other models share too included, so a file with one is worth a look at
+    its tensors."""
     from .registry import families
 
     out: set = set()
     for fam in families():
-        out |= {a for a in fam.arch_strings if a}
+        out |= {a for a in fam.arch_strings | fam.shared_arch_strings if a}
     return frozenset(out)
 
 

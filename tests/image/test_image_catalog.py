@@ -128,6 +128,21 @@ def test_discovery_classifies_image_files_by_their_header(tmp_path):
         == "model"
 
 
+def test_a_flux_labeled_file_of_another_model_is_skipped_as_an_image_file(
+        tmp_path, capsys):
+    """Krea 2 files may carry the flux label, so discovery reads the
+    tensors of a flux file, and skips one whose tensors are another
+    model's."""
+    flux = _write(tmp_path / "flux1-dev-Q4_K_M.gguf", "flux", tensors=(
+        ("double_blocks.0.img_attn.proj.weight", np.zeros((8, 8), np.float32)),))
+    assert discovery.classify_gguf(flux).kind == "image-dit"
+    assert catalog.classify(flux) == []
+    chat, images = _scan(tmp_path)
+    assert (chat, images) == ([], [])
+    assert (f"skip (an image GGUF gmlx does not load): {flux}"
+            in capsys.readouterr().err)
+
+
 def _scan(root, **kw):
     images: list = []
     chat = discovery.scan_dirs([DiscoverSpec(dir=str(root), recursive=True)],

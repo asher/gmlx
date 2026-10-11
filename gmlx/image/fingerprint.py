@@ -273,7 +273,7 @@ def identify(view: HeaderView, *, family: str | None = None,
             continue
         if isinstance(res, Refusal):
             raise ImageModelError(res.reason)
-        if arch not in fam.arch_strings:
+        if arch not in fam.arch_strings | fam.shared_arch_strings:
             raise ImageModelError(
                 f"arch {arch!r} contradicts the tensor layout, which is "
                 f"{fam.title} (arch {_arch_list(fam)})")
@@ -294,7 +294,7 @@ def identify(view: HeaderView, *, family: str | None = None,
 
 def _arch_list(fam) -> str:
     return " or ".join(sorted(repr(a) if a else "none"
-                              for a in fam.arch_strings))
+                              for a in fam.arch_strings | fam.shared_arch_strings))
 
 
 def _variant(fam, view: HeaderView, variant: str | None) -> dict:

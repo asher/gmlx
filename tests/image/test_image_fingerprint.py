@@ -234,6 +234,84 @@ def test_an_arch_that_contradicts_the_layout_names_both():
                               "none)")
 
 
+def test_qwen_image21_takes_its_own_label():
+    view = fixture_view(Q_HEADER, kv={"general.architecture": "qwen_image21"})
+    assert fp.identify(view).family.name == "qwen_image21"
+
+
+@pytest.mark.parametrize("arch", ["flux", "pig"])
+@pytest.mark.parametrize("name,title,archs", [
+    (Z_HEADER, "Z-Image", "'lumina2' or none"),
+    (Q_HEADER, "Qwen-Image 2.1", "'qwen_image' or 'qwen_image21' or none")])
+def test_the_labels_krea2_shares_still_contradict_the_other_layouts(
+        arch, name, title, archs):
+    view = fixture_view(name, kv={"general.architecture": arch})
+    assert _refused(view) == (f"arch {arch!r} contradicts the tensor layout, "
+                              f"which is {title} (arch {archs})")
+
+
+def test_shared_labels_open_the_tensor_read_but_name_no_family():
+    """A file labeled flux or pig is read for its tensors, but the label
+    alone neither calls it an image model nor names a family."""
+    from gmlx.image import preflight
+    from gmlx.image.catalog import image_arches
+
+    assert {"flux", "pig", "krea-2", "qwen_image21"} <= image_arches()
+    for arch in ("flux", "pig"):
+        assert not is_image_arch(arch) and preflight.arch_hint(arch) == ""
+    for arch in ("krea-2", "qwen_image21"):
+        assert is_image_arch(arch)
+        assert preflight.arch_hint(arch) == preflight.IMAGE_HINT
+
+
+def _bfl(txt_in: tuple, img_in: tuple, *extra: str) -> fp.HeaderView:
+    """A file in the FLUX block names, with the given text and image input
+    shapes and extra tensor names."""
+    tensors = {"double_blocks.0.img_attn.proj.weight": ((3072, 3072), "Q4_K"),
+               "single_blocks.0.linear1.weight": ((3072, 21504), "Q4_K"),
+               "txt_in.weight": (txt_in, "Q4_K"),
+               "img_in.weight": (img_in, "BF16")}
+    tensors.update({n: ((3072, 18432), "Q4_K") for n in extra})
+    return fp.HeaderView(kv={}, tensors={
+        n: fp.Tensor(s, c) for n, (s, c) in tensors.items()})
+
+
+# Files whose converters write flux or pig, and the name each refusal gives.
+_SHARED_LABEL_FILES = {
+    "FLUX.1": (lambda: _bfl((4096, 3072), (64, 3072)), "a FLUX GGUF"),
+    "FLUX.2 klein": (lambda: _bfl(
+        (7680, 3072), (128, 3072), "double_stream_modulation_img.lin.weight",
+        "single_stream_modulation.lin.weight"), "a FLUX GGUF"),
+    # LongCat-Image as ComfyUI stores it: the FLUX.1 block names, with the
+    # text width of Qwen2.5-VL-7B.
+    "LongCat-Image": (lambda: _bfl((3584, 3072), (64, 3072)), "a FLUX GGUF"),
+    "Lens": (lambda: fixture_view(Q_HEADER, add={
+        _QB0 + "attn.norm_added_q.weight": ((128,), "F32"),
+        _QB0 + "img_mlp.w1.weight": ((4096, 12288), "Q4_K")}), "a Lens GGUF"),
+    "Mage-Flow": (lambda: fixture_view(Q_HEADER, add={
+        "model.diffusion_model.txt_norm.weight": ((2560,), "F32"),
+        "model.diffusion_model.proj_out.weight": ((4096, 128), "Q8_0")}),
+        "a Mage-Flow GGUF"),
+    "Ming-Image": (lambda: fixture_view(
+        Z_HEADER, drop=("x_pad_token", "cap_pad_token")), "a Ming-Image GGUF"),
+}
+
+
+@pytest.mark.parametrize("arch", ["flux", "pig"])
+@pytest.mark.parametrize("model", sorted(_SHARED_LABEL_FILES))
+def test_a_shared_label_keeps_each_refusal_by_name(model, arch):
+    """flux and pig load a file whose tensors are those of Krea 2. A file
+    of any other model under either label keeps the refusal that names
+    it."""
+    make, name = _SHARED_LABEL_FILES[model]
+    view = make()
+    bare = _refused(fp.HeaderView(kv={}, tensors=view.tensors))
+    labeled = _refused(fp.HeaderView(kv={"general.architecture": arch},
+                                     tensors=view.tensors))
+    assert labeled == bare and name in labeled
+    assert "Krea 2" not in labeled
+
+
 def test_other_diffusion_families_are_refused_by_name():
     view = fp.HeaderView(kv={"general.architecture": "flux"}, tensors={
         "double_blocks.0.img_attn.proj.weight": fp.Tensor((3072, 3072), "Q4_K"),
