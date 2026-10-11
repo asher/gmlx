@@ -174,15 +174,23 @@ def test_pull_refuses_a_file_under_a_shared_label_that_gmlx_image_refuses(
 
     name, change = _REFUSED[model]
     scan = _scan(name, arch, **change)
-    with pytest.raises(fp.ImageModelError):
-        fp.identify(fp.HeaderView(kv=scan.kv, tensors=fixture_view(
-            name, **change).tensors))
     report = remote.HeaderReport(arch, {"Q4_K": 3}, {}, 3)
     assert manage._image_role(report, [scan]) == (None, None)
+    _refused_by_pull(report, scan, name, change)
+
+
+def _refused_by_pull(report, scan, name, change):
+    """Pull's verdict refuses the file with the reason gmlx image gives."""
+    from gmlx.commands import manage
+    from gmlx.load import remote
+
+    with pytest.raises(fp.ImageModelError) as ei:
+        fp.identify(fp.HeaderView(kv=scan.kv, tensors=fixture_view(
+            name, **change).tensors))
     v = manage._verdict(remote.parse_ref("hf:o/r/m.gguf"), report,
                         size_bytes=1 << 30, scans=[scan])
     assert v["image"] is None and not v["usable"]
-    assert v["arch_error"] == "an image GGUF gmlx does not load"
+    assert v["arch_error"] == f"an image GGUF gmlx does not load: {ei.value}"
 
 
 def _identity_file(tmp_path, codec: str, seed: int, flat: bool):
@@ -285,17 +293,37 @@ def test_the_load_refuses_a_file_of_unknown_weights(monkeypatch):
 
 @pytest.mark.parametrize("model,arch", [("Ming-Image", "lumina2"),
                                         ("Ming-Image", None),
-                                        ("Lens", "qwen_image")])
+                                        ("Lens", "qwen_image"),
+                                        ("Lens", None)])
 def test_pull_names_no_family_for_a_relative_its_family_refuses(model, arch):
     """A relative that a family refuses by name names no family in `gmlx
-    pull`, under that family's own label too."""
+    pull`, under that family's own label or none, and the refusal is the
+    one gmlx image gives."""
     from gmlx.commands import manage
     from gmlx.load import remote
 
     name, change = _REFUSED[model]
+    scan = _scan(name, arch, **change)
+    if arch is None:
+        scan.kv = {}
     report = remote.HeaderReport(arch, {"Q4_K": 3}, {}, 3)
-    assert manage._image_role(report, [_scan(name, arch, **change)]) == (
-        None, None)
+    assert manage._image_role(report, [scan]) == (None, None)
+    _refused_by_pull(report, scan, name, change)
+
+
+def test_pull_keeps_its_wording_for_a_file_that_is_no_image():
+    """A file with no label whose tensors no image family answers is not
+    called an image GGUF."""
+    from gmlx.commands import manage
+    from gmlx.load import remote
+
+    scan = _scan(TURBO, None, drop=(kf.PROJECTOR,))
+    scan.kv = {}
+    v = manage._verdict(remote.parse_ref("hf:o/r/m.gguf"),
+                        remote.HeaderReport(None, {"Q4_K": 3}, {}, 3),
+                        size_bytes=1 << 30, scans=[scan])
+    assert v["arch_error"] == ("could not determine architecture from GGUF "
+                               "metadata")
 
 
 @pytest.mark.parametrize("arch", ["flux", "pig"])
