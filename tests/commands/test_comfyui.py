@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import stat
 
 import pytest
@@ -104,6 +105,15 @@ def test_detects_comfy_cli_workspaces(home):
     assert {t.kind for t in found.values()} == {"comfy-cli"}
     assert set(found) == {os.path.realpath(code / "custom_nodes")
                           for code in (mac, linux, other, recent)}
+
+
+def test_a_comfy_cli_config_with_only_a_recent_workspace(home):
+    recent = make_comfy(home / "projects" / "ComfyUI")
+    ini = _support(home) / "comfy-cli" / "config.ini"
+    ini.parent.mkdir(parents=True)
+    ini.write_text(f"[DEFAULT]\nrecent_workspace = {recent}\n")
+    [t] = cu.detect()
+    assert (t.kind, t.code) == ("comfy-cli", recent)
 
 
 def test_the_help_names_comfy_clis_macos_workspace(capsys):
@@ -386,7 +396,8 @@ def test_a_second_install_changes_nothing(home, capsys):
     before = (os.lstat(link).st_ino, os.lstat(cu.copy_dir()).st_ino,
               os.readlink(cu.copy_dir()))
     capsys.readouterr()
-    [d], sync = cu.install([cu.target_for_dir(code)])
+    [d], sync, dropped = cu.install([cu.target_for_dir(code)])
+    assert dropped == []
     assert sync.state == "current" and d.changed is False
     assert (os.lstat(link).st_ino, os.lstat(cu.copy_dir()).st_ino,
             os.readlink(cu.copy_dir())) == before
@@ -523,17 +534,38 @@ def test_an_unchanged_stamp_touches_nothing(home):
     assert cu.settings_path().read_text() == record
 
 
-def test_a_missing_recorded_folder_touches_nothing(home, monkeypatch, tmp_path):
+def test_a_missing_recorded_folder_still_gets_the_refresh(home, monkeypatch, tmp_path):
+    """The links point at the copy's fixed path, so the folders that are
+    there load the new nodes, and a folder on a drive that comes back does
+    too."""
     a = make_comfy(home / "ComfyUI")
     b = make_comfy(tmp_path / "volume" / "ComfyUI")
     assert _install_cli("--comfyui-dir", str(a)) == 0
     assert _install_cli("--comfyui-dir", str(b)) == 0
-    # The second folder is on a volume this process does not see.
     b.rename(tmp_path / "volume" / "gone")
     monkeypatch.setattr(cu, "gmlx_version", lambda: "99.0.0")
-    before = os.readlink(cu.copy_dir())
-    assert cu.refresh_for_serve() is None
-    assert os.readlink(cu.copy_dir()) == before
+    assert "99.0.0" in cu.refresh_for_serve()
+    assert cu.read_stamp(a / "custom_nodes" / cu.LINK_NAME)["gmlx_version"] == "99.0.0"
+    (tmp_path / "volume" / "gone").rename(b)
+    assert cu.read_stamp(b / "custom_nodes" / cu.LINK_NAME)["gmlx_version"] == "99.0.0"
+
+
+def test_install_drops_a_recorded_folder_that_is_gone(home, tmp_path, capsys):
+    a = make_comfy(home / "ComfyUI")
+    b = make_comfy(tmp_path / "volume" / "ComfyUI")
+    assert _install_cli("--comfyui-dir", str(a)) == 0
+    assert _install_cli("--comfyui-dir", str(b)) == 0
+    shutil.rmtree(b)
+    capsys.readouterr()
+    assert cu.cmd_comfyui(["status"]) == 1
+    assert f"{b / 'custom_nodes'}: folder missing; run gmlx comfyui install" in \
+        capsys.readouterr().out
+    assert _install_cli() == 0
+    out = capsys.readouterr().out
+    assert out.count("from the record") == 1
+    assert f"removed {b / 'custom_nodes'} from the record: the folder is gone" in out
+    assert [r["custom_nodes"] for r in cu.load_record()["installs"]] == [str(a / "custom_nodes")]
+    assert cu.cmd_comfyui(["status"]) == 0
 
 
 def test_no_record_means_no_refresh(home):
@@ -792,6 +824,12 @@ def test_doctor_passes_a_comfyui_newer_than_tested_with_a_note(home):
     assert row["status"] == "PASS"
     assert (f"~/ComfyUI/custom_nodes (ComfyUI 9.0.0, newer than {tested}, the newest this "
             "gmlx was tested on)") in row["detail"]
+    # Older than the floor is a problem.
+    (home / "ComfyUI" / "comfyui_version.py").write_text('__version__ = "0.30.0"\n')
+    row = doctor.check_comfyui()
+    floor = cu.pack_meta()["COMFYUI_FLOOR"]
+    assert row["status"] == "WARN"
+    assert f"ComfyUI 0.30.0 is older than {floor}, which the nodes need" in row["detail"]
 
 
 def test_doctor_reports_any_failure_to_read_the_pack_as_a_row(home, monkeypatch):
@@ -821,6 +859,7 @@ def test_the_recorded_gmlx_is_the_running_one_never_a_path_lookup(monkeypatch, t
     monkeypatch.setattr(cu.sys, "prefix", str(venv))
     monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
     monkeypatch.setattr(cu.sys, "argv", [str(tmp_path / "src" / "gmlx" / "__main__.py")])
+    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [str(tmp_path / "no-scripts")])
     assert cu.gmlx_command() is None
     started = _fake_exe(tmp_path / "bin" / "gmlx")
     monkeypatch.setattr(cu.sys, "argv", [str(started), "comfyui", "install"])
@@ -858,3 +897,42 @@ def test_install_kind_is_read_from_where_gmlx_runs(monkeypatch, tmp_path):
     assert cu.gmlx_install() == "uv"
     monkeypatch.setattr(cu.sys, "prefix", str(tmp_path))
     assert cu.gmlx_install() == "pip"
+
+
+def test_the_recorded_gmlx_may_come_from_pips_scripts_folders(monkeypatch, tmp_path):
+    """A pip install --user puts the console script in the user's scripts
+    folder, not beside the interpreter."""
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    venv = tmp_path / "venv"
+    monkeypatch.setattr(cu.sys, "prefix", str(venv))
+    monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(cu.sys, "argv", ["-m"])
+    user = _fake_exe(tmp_path / "Library" / "Python" / "3.12" / "bin" / "gmlx")
+
+    def get_path(name, scheme=None):
+        assert name == "scripts"
+        return str(user.parent) if scheme else str(tmp_path / "venv-scripts")
+
+    monkeypatch.setattr(cu.sysconfig, "get_path", get_path)
+    assert cu.gmlx_command() == str(user)
+
+
+def test_a_gmlx_on_path_is_recorded_only_when_it_runs_on_this_python(monkeypatch,
+                                                                     tmp_path):
+    base = _fake_exe(tmp_path / "base" / "python3")
+    venv, other = tmp_path / "venv", tmp_path / "other-venv"
+    for v in (venv, other):
+        (v / "bin").mkdir(parents=True)
+        (v / "bin" / "python").symlink_to(base)
+    monkeypatch.setattr(cu.sys, "prefix", str(venv))
+    monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(cu.sys, "argv", ["-m"])
+    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [])
+    on_path = tmp_path / "path" / "gmlx"
+    _fake_exe(on_path).write_text(f"#!{venv / 'bin' / 'python'}\nimport gmlx\n")
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    assert cu.gmlx_command() == str(on_path)
+    # Another venv's python links to the same base Python, and is still
+    # another install.
+    on_path.write_text(f"#!{other / 'bin' / 'python'}\nimport gmlx\n")
+    assert cu.gmlx_command() is None

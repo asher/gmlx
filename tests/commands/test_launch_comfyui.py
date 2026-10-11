@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,17 @@ def test_the_launch_puts_the_pack_in_once_and_says_so(tmp_path, capsys):
     assert (link / "__init__.py").is_file()
     rc, _calls = _run(["comfyui", "--comfyui-dir", str(d)])
     assert rc == 0 and "installed the gmlx nodes" not in capsys.readouterr().out
+
+
+def test_the_launch_says_which_recorded_folder_left_the_record(tmp_path, capsys):
+    a, b = _comfy(tmp_path / "a"), _comfy(tmp_path / "b")
+    assert _run(["comfyui", "--comfyui-dir", str(a)])[0] == 0
+    assert _run(["comfyui", "--comfyui-dir", str(b)])[0] == 0
+    shutil.rmtree(b)
+    capsys.readouterr()
+    assert _run(["comfyui", "--comfyui-dir", str(a)])[0] == 0
+    out = capsys.readouterr().out
+    assert f"[launch] removed {b / 'custom_nodes'} from the record: the folder is gone" in out
 
 
 def test_the_launch_remembers_the_folder(tmp_path):

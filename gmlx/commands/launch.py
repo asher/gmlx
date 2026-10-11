@@ -1736,16 +1736,17 @@ def _comfyui_prepare(a) -> tuple[Path, str]:
         or not (target.code / "main.py").is_file()
     binary = None if desktop else _comfyui_python(target.code)
     try:
-        done, sync = comfyui.install([target])
+        done, sync, dropped = comfyui.install([target])
     except comfyui.ComfyError as e:
         raise LaunchError(str(e), EXIT_FAILURE) from None
     except OSError as e:
         raise LaunchError(f"could not put the gmlx nodes into {target.custom_nodes}: {e}",
                           EXIT_FAILURE) from None
-    changed = any(d.changed for d in done) or (sync is not None and sync.state != "current")
+    changed = any(d.changed for d in done) or bool(dropped) \
+        or (sync is not None and sync.state != "current")
     if desktop:
         # The error printer puts [launch] before the first line only.
-        did = "\n".join(comfyui.install_lines(done, sync))
+        did = "\n".join(comfyui.install_lines(done, sync, dropped))
         if target.kind.startswith("desktop"):
             raise LaunchError(
                 f"{did}\n{target.describe()} runs its own ComfyUI, so launch does not start "
@@ -1755,7 +1756,7 @@ def _comfyui_prepare(a) -> tuple[Path, str]:
             f"{did}\n{comfyui._short(target.custom_nodes.parent)} has no main.py, so launch "
             "cannot start ComfyUI from it. Start that ComfyUI the way you installed it, or "
             "pass --comfyui-dir with a folder that holds main.py.", EXIT_UNAVAILABLE)
-    lines = comfyui.install_lines(done, sync, prefix="[launch] ")
+    lines = comfyui.install_lines(done, sync, dropped, prefix="[launch] ")
     if changed:
         print("\n".join(lines))
     else:

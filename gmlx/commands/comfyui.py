@@ -36,6 +36,7 @@ import re
 import shlex
 import shutil
 import sys
+import sysconfig
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -149,23 +150,63 @@ def gmlx_install() -> str:
     return "pip"
 
 
+def _runnable(path) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _scripts_dirs() -> list:
+    """Where pip put this interpreter's console scripts: the install's own
+    scripts folder, then the user's, for a ``pip install --user``."""
+    out = []
+    for scheme in (None, sysconfig.get_preferred_scheme("user")):
+        try:
+            d = sysconfig.get_path("scripts", scheme) if scheme else sysconfig.get_path("scripts")
+        except KeyError:
+            continue
+        if d and d not in out:
+            out.append(d)
+    return out
+
+
+def _runs_on_this_python(path: str) -> bool:
+    """Whether the script's shebang names this interpreter. The path is
+    compared as written, since every venv's python links to one base
+    Python."""
+    try:
+        with open(path, "rb") as f:
+            first = f.readline(4096).decode("utf-8", "replace")
+    except OSError:
+        return False
+    if not first.startswith("#!"):
+        return False
+    words = first[2:].split()
+    return bool(words) and os.path.normpath(words[0]) == os.path.normpath(sys.executable)
+
+
 def gmlx_command() -> str | None:
-    """The absolute path of the running gmlx's command, or None when it runs
-    as ``python -m gmlx``. Never a PATH lookup, which can find another gmlx.
-    For Homebrew it is the link in Homebrew's bin folder, whose path stays
-    across upgrades; else the console script beside the interpreter; else
-    the script this process started from."""
+    """The absolute path of the running gmlx's command, or None when none is
+    found. For Homebrew it is the link in Homebrew's bin folder, whose path
+    stays across upgrades; else the console script beside the interpreter
+    or in pip's scripts folders; else the script this process started from;
+    else a gmlx on PATH whose shebang names this interpreter. Any other gmlx
+    on PATH is another install and is never recorded."""
     script = Path(sys.executable).parent / "gmlx"
-    if os.access(script, os.X_OK):
+    if _runnable(script):
         parts = Path(sys.prefix).resolve().parts
         if "Cellar" in parts:
             brew = Path(*parts[:parts.index("Cellar")]) / "bin" / "gmlx"
             if os.path.realpath(brew) == os.path.realpath(script):
                 return str(brew)
         return str(script)
+    for d in _scripts_dirs():
+        if _runnable(os.path.join(d, "gmlx")):
+            return os.path.join(d, "gmlx")
     argv0 = sys.argv[0] or ""
-    if os.path.basename(argv0) == "gmlx" and os.access(argv0, os.X_OK):
+    if os.path.basename(argv0) == "gmlx" and _runnable(argv0):
         return os.path.realpath(argv0)
+    on_path = shutil.which("gmlx")
+    if on_path and _runs_on_this_python(on_path):
+        return os.path.abspath(on_path)
     return None
 
 
@@ -774,9 +815,11 @@ class Installed:
 
 
 def install(targets: list, *, link_source: bool = False, model: str | None = None,
-            remember: bool = True) -> tuple[list, Sync | None]:
-    """Check, copy, link and record ``targets``. Raises ComfyError on a
-    refusal, before anything is written."""
+            remember: bool = True) -> tuple[list, Sync | None, list]:
+    """Check, copy, link and record ``targets``. Returns what was installed,
+    the copy's sync and the recorded custom_nodes folders that are gone,
+    which leave the record. Raises ComfyError on a refusal, before anything
+    is written."""
     doc = load_record()
     meta = pack_meta()
     checked = [(t, *check_version(t, meta)) for t in targets]
@@ -785,13 +828,15 @@ def install(targets: list, *, link_source: bool = False, model: str | None = Non
 
 
 def _install(doc: dict, checked: list, link_source: bool, model: str | None,
-             remember: bool) -> tuple[list, Sync | None]:
+             remember: bool) -> tuple[list, Sync | None, list]:
     targets = [t for t, _v, _notes in checked]
     sync = None if link_source else sync_copy()
     dest = PACK_SOURCE if link_source else copy_dir()
     done = [Installed(t, v, notes, *link_into(t, dest)) for t, v, notes in checked]
-    keep = [r for r in install_records(doc)
-            if os.path.realpath(r["custom_nodes"]) not in {t.key() for t in targets}]
+    keys = {t.key() for t in targets}
+    others = [r for r in install_records(doc) if os.path.realpath(r["custom_nodes"]) not in keys]
+    keep = [r for r in others if Path(r["custom_nodes"]).parent.is_dir()]
+    dropped = [r["custom_nodes"] for r in others if r not in keep]
     doc["installs"] = keep + [t.to_record() for t in targets]
     doc.update(gmlx_command=gmlx_command(), gmlx_install=gmlx_install(),
                gmlx_python=sys.executable, gmlx_version=gmlx_version(),
@@ -804,7 +849,7 @@ def _install(doc: dict, checked: list, link_source: bool, model: str | None,
             if t.code is not None and not t.kind.startswith("desktop"):
                 doc["comfyui_dir"] = str(t.code)
     save_record(doc)
-    return done, sync
+    return done, sync, dropped
 
 
 def resolve_targets(comfyui_dir, doc: dict, verb: str = "gmlx comfyui install") -> list:
@@ -823,7 +868,8 @@ def resolve_targets(comfyui_dir, doc: dict, verb: str = "gmlx comfyui install") 
     return found
 
 
-def install_lines(done: list, sync: Sync | None, *, prefix: str = "") -> list:
+def install_lines(done: list, sync: Sync | None, dropped: list = (), *,
+                  prefix: str = "") -> list:
     out = []
     if sync is not None and sync.warning:
         out.append(f"{prefix}warning: {sync.warning}")
@@ -838,6 +884,8 @@ def install_lines(done: list, sync: Sync | None, *, prefix: str = "") -> list:
             out.append(f"{prefix}  the folder that was there moved to {_short(d.moved)}")
         for n in d.notes:
             out.append(f"{prefix}  note: {n}")
+    for cn in dropped:
+        out.append(f"{prefix}removed {_short(cn)} from the record: the folder is gone")
     return out
 
 
@@ -861,11 +909,11 @@ def _cmd_install(argv: list, prog: str) -> int:
     a = ap.parse_args(argv)
     try:
         targets = resolve_targets(a.comfyui_dir, load_record())
-        done, sync = install(targets, link_source=a.link_source, model=a.model)
+        done, sync, dropped = install(targets, link_source=a.link_source, model=a.model)
     except ComfyError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.code
-    for line in install_lines(done, sync):
+    for line in install_lines(done, sync, dropped):
         print(line)
     print("Restart ComfyUI, or Comfy Desktop, if it is running, so it loads the nodes.")
     return 0
@@ -1050,15 +1098,14 @@ def _cmd_status(argv: list, prog: str) -> int:
 # Callers.
 
 def refresh_for_serve() -> str | None:
-    """Refresh the copy at server start, only when an install record
-    exists and every recorded ComfyUI folder exists on this filesystem.
-    Returns a line to print, or None. Never raises."""
+    """Refresh the copy at server start when an install record exists. The
+    links in ComfyUI point at the copy's fixed path, so a recorded folder
+    that is gone, such as one on a drive that is not mounted, takes the
+    refresh too when it comes back. Returns a line to print, or None.
+    Never raises."""
     try:
         doc = load_record()
-        targets = recorded_targets(doc)
-        if not targets or doc.get("pack_source"):
-            return None
-        if not all(t.custom_nodes.parent.is_dir() for t in targets):
+        if not recorded_targets(doc) or doc.get("pack_source"):
             return None
         sync = sync_copy()
         cmd = doc.get("gmlx_command")
