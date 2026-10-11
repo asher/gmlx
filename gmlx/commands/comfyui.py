@@ -177,9 +177,12 @@ def _scripts_dirs() -> list:
 
 def _runs_on_this_python(path: str) -> bool:
     """Whether the script's shebang names this interpreter: its path as
-    written, or another name of it in the same folder, such as python3 for
-    python3.13. Every venv's python links to one base Python, so a link in
-    another folder is another install."""
+    written, or the same file in the same folder once links resolve, such
+    as python3 for python3.13 or Homebrew's opt and Cellar spellings of one
+    Python. Every venv's python links to one base Python, so the folders
+    must match too. pip's and uv's ``/bin/sh`` launchers name the
+    interpreter on their second line, uv's relocatable one relative to the
+    script's own folder."""
     try:
         with open(path, "rb") as f:
             first = f.readline(4096).decode("utf-8", "replace")
@@ -190,16 +193,21 @@ def _runs_on_this_python(path: str) -> bool:
         return False
     words = first[2:].split()
     if words == ["/bin/sh"]:
-        # pip's form for an interpreter path with spaces or past the
-        # shebang length: '''exec' "/path/python" "$0" "$@"
-        m = re.match(r"""'''exec' "([^"]+)" """, second)
-        words = [m.group(1)] if m else []
+        words = []
+        m = re.match(r"""'''exec' "([^"$]+)" """, second)
+        if m:
+            words = [m.group(1)]
+        m = re.match(r"""'''exec' "\$\(dirname -- "\$\(realpath -- "\$0"\)"\)"/'([^'/]+)' """,
+                     second)
+        if m:
+            words = [os.path.join(os.path.dirname(os.path.realpath(path)), m.group(1))]
     if not words:
         return False
     named, here = os.path.normpath(words[0]), os.path.normpath(sys.executable)
+    real = os.path.realpath
     return named == here or (
-        os.path.dirname(named) == os.path.dirname(here)
-        and os.path.realpath(named) == os.path.realpath(here))
+        real(os.path.dirname(named)) == real(os.path.dirname(here))
+        and real(named) == real(here))
 
 
 def gmlx_command() -> str | None:

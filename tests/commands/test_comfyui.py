@@ -1125,6 +1125,57 @@ def test_pips_shell_shebang_for_a_path_with_spaces_names_the_python(monkeypatch,
     assert cu.gmlx_command() is None
 
 
+def _uv_relocatable(name="python") -> str:
+    """The script head uv writes in a venv made with --relocatable."""
+    q = "'" * 3
+    return (f"#!/bin/sh\n{q}exec' \"$(dirname -- \"$(realpath -- \"$0\")\")\"/'{name}' "
+            f"\"$0\" \"$@\"\n' {q}\nimport gmlx\n")
+
+
+def test_a_relocatable_venvs_gmlx_is_recorded(monkeypatch, tmp_path):
+    """uv's relocatable launcher names python beside the script itself."""
+    base = _fake_exe(tmp_path / "base" / "bin" / "python3.12")
+    venv, other = tmp_path / "venv", tmp_path / "other"
+    for v in (venv, other):
+        (v / "bin").mkdir(parents=True)
+        (v / "bin" / "python").symlink_to(base)
+        (v / "bin" / "python3").symlink_to(base)
+        _fake_exe(v / "bin" / "gmlx").write_text(_uv_relocatable())
+    monkeypatch.setattr(cu.sys, "prefix", str(venv))
+    monkeypatch.setattr(cu.sys, "argv", ["-m"])
+    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [])
+    monkeypatch.setenv("PATH", str(other / "bin"))
+    for exe in ("python", "python3"):
+        monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / exe))
+        assert cu.gmlx_command() == str(venv / "bin" / "gmlx"), exe
+    # Another venv's relocatable gmlx names its own python.
+    (venv / "bin" / "gmlx").unlink()
+    assert cu.gmlx_command() is None
+
+
+def test_homebrews_opt_and_cellar_spellings_are_one_python(monkeypatch, tmp_path):
+    """Homebrew's Python runs as opt/python@3.13/bin/python3.13 while pip
+    writes the Cellar path in a shebang, or the other way round."""
+    cellar = tmp_path / "Cellar" / "python@3.13" / "3.13.11"
+    real = _fake_exe(cellar / "bin" / "python3.13")
+    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt" / "python@3.13").symlink_to(cellar)
+    opt = tmp_path / "opt" / "python@3.13" / "bin" / "python3.13"
+    script = tmp_path / "scripts" / "gmlx"
+    monkeypatch.setattr(cu.sys, "executable", str(opt))
+    _fake_exe(script).write_text(f"#!{real}\nimport gmlx\n")
+    assert cu._runs_on_this_python(str(script))
+    monkeypatch.setattr(cu.sys, "executable", str(real))
+    script.write_text(f"#!{opt}\nimport gmlx\n")
+    assert cu._runs_on_this_python(str(script))
+    # A venv's python links to that Python from another folder.
+    venv = tmp_path / "venv" / "bin" / "python"
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(real)
+    script.write_text(f"#!{venv}\nimport gmlx\n")
+    assert not cu._runs_on_this_python(str(script))
+
+
 def test_a_shebang_may_name_this_python_by_another_name_in_its_folder(monkeypatch,
                                                                       tmp_path):
     user, python = _user_scripts(monkeypatch, tmp_path, venv=False)
