@@ -226,8 +226,9 @@ jobs:
 
   pack-changes:
     # Whether a push or pull request changes the ComfyUI node pack, its
-    # tests, the verb that installs it or this workflow, which the
-    # comfyui-pack job needs outside the schedule and tags.
+    # tests, the verb that installs it, the path python -m gmlx takes to that
+    # verb or this workflow, which the comfyui-pack job needs outside the
+    # schedule and tags.
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
     runs-on: ubuntu-latest
     outputs:
@@ -243,7 +244,8 @@ jobs:
           # A new branch has no usable base, so its push runs the job.
           if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack \
-              gmlx/commands/comfyui.py .github/workflows/test.yml)
+              gmlx/commands/comfyui.py gmlx/commands/cli.py gmlx/__init__.py gmlx/__main__.py \
+              .github/workflows/test.yml)
           else
             changed=all
           fi
