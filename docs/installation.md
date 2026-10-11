@@ -122,8 +122,10 @@ newer release in the
 [changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md). They list
 what may need a change to your config or scripts.
 
-A running server keeps the old version until you run `gmlx restart`. Update
-ffmpeg with `brew upgrade ffmpeg`.
+A running server keeps the old version until you run `gmlx restart`. The
+next server start also updates the gmlx nodes in ComfyUI, and a running
+ComfyUI loads them when you restart it. Update ffmpeg with
+`brew upgrade ffmpeg`.
 
 ## Removing gmlx
 
@@ -131,11 +133,17 @@ ffmpeg with `brew upgrade ffmpeg`.
    as [Removing container data](launch-container.md#removing-container-data)
    describes. Do this first, because those steps run gmlx commands.
 2. If you installed the login item, run `gmlx service uninstall`.
-3. Uninstall the package: `brew uninstall gmlx`, `uv tool uninstall gmlx`,
+3. If you put the gmlx nodes into ComfyUI, run `gmlx comfyui uninstall`.
+4. Uninstall the package: `brew uninstall gmlx`, `uv tool uninstall gmlx`,
    or `pip uninstall gmlx mlx-kquant` in its environment.
-4. Delete the files that gmlx wrote, listed in
+5. Delete the files that gmlx wrote, listed in
    [Where files are on disk](troubleshooting.md#where-files-are-on-disk),
    and the models you downloaded.
 
-Steps 2 and 3 leave your configuration, caches and models in place, so a
+Steps 2 to 4 leave your configuration, caches and models in place, so a
 later install finds them again.
+
+If you uninstalled gmlx before step 3, the gmlx nodes in ComfyUI say that
+gmlx is not installed. Delete the two paths they name: the `comfyui-gmlx`
+link in the `custom_nodes` folder of each ComfyUI, and
+`~/.local/share/gmlx/comfyui`.

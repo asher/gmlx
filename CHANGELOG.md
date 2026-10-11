@@ -70,6 +70,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx rm` removes an image model's files, keeping an encoder another model uses.
 - `gmlx doctor` checks that each image model's DiT, encoder and VAE belong together.
 - `gmlx launch comfyui` runs ComfyUI with the gmlx node pack pointed at the server.
+- The ComfyUI node pack ships with gmlx. `gmlx comfyui install` puts it into
+  ComfyUI or Comfy Desktop, and `launch comfyui` does so itself.
+- A gmlx upgrade updates the node pack in ComfyUI at the next server start.
+- When a ComfyUI update breaks the node pack, its nodes still load, and
+  running one names the change and the command that upgrades gmlx.
 - `gmlx launch open-webui` turns on image generation with the server's default
   image model, and image edits when that model edits.
 - `gmlx image generate` and `bench` take an `image_models` id in place of the files.

@@ -301,6 +301,29 @@ A serve performance claim is measured in the real server process, with
 the round profile switch that [Debug switches](debug-switches.md#profiling)
 lists.
 
+## ComfyUI node pack suites
+
+The node pack's own tests live in `tests/comfyui_pack`, beside a stub
+server that speaks the image step contract with no model. They need a
+ComfyUI checkout and its Python, which has torch, so gmlx's pytest
+collects none of them. `run_tests.py` runs the wire, client and in-process
+ComfyUI suites on the CPU, then a headless ComfyUI with the pack:
+
+```sh
+gmlx comfyui install --comfyui-dir ~/ComfyUI
+~/ComfyUI/.venv/bin/python tests/comfyui_pack/run_tests.py --comfy ~/ComfyUI \
+    --label main --out /tmp/pack --pack ~/ComfyUI/custom_nodes/comfyui-gmlx
+```
+
+`--pack` tests the pack through the link that `install` made; without it
+the suites load the source in `gmlx/comfyui_pack`. The `comfyui-pack` job
+in CI runs the same on the schedule, on a release tag and when the pack or
+its tests change.
+
+The CPU tier covers the rest without ComfyUI: `install` and its detection
+on fake folders, the copy and its refresh, and the stand-in nodes that load
+when the pack's full import fails.
+
 ## Voice loop manual pass
 
 Run this checklist by hand before merging a change to the `gmlx talk`

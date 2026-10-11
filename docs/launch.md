@@ -243,11 +243,12 @@ sending feedback conversations to DeepSeek.
 ### comfyui
 
 ComfyUI is a node editor for image workflows, and the gmlx node pack runs
-the server's image models in its graphs. `launch` runs ComfyUI from
-`~/ComfyUI`, or the folder `--comfyui-dir` names, on that folder's own
-Python environment, and passes it the server's address, API key and image
-model. ComfyUI runs on the Mac, where it uses the GPU, so `launch` refuses
-`--container` and the other container flags for it. Without the gmlx node
-pack in the folder's `custom_nodes`, `launch` prints the command that
-installs it and exits with 2. [ComfyUI](comfyui.md) covers the install, the
-graphs and what the pack refuses.
+the server's image models in its graphs. `launch` runs ComfyUI from the
+folder `--comfyui-dir` names, else the folder it used last, else
+`~/ComfyUI`, on that folder's own Python environment, and passes it the
+server's address, API key and image model. Before the server starts, it
+puts the gmlx nodes into that ComfyUI as `gmlx comfyui install` does. With
+no ComfyUI on the Mac, it prints how to get one and exits with 1. ComfyUI
+runs on the Mac, where it uses the GPU, so `launch` refuses `--container`
+and the other container flags for it. [ComfyUI](comfyui.md) covers the
+install, Comfy Desktop, the graphs and what the nodes refuse.

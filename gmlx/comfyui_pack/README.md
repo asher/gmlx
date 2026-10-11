@@ -25,10 +25,11 @@ gmlx comfyui install
 ```
 
 The command finds ComfyUI, copies the pack to a folder gmlx owns and links it into ComfyUI's `custom_nodes` folder as `comfyui-gmlx`.
-A gmlx upgrade updates the copy. The [ComfyUI guide](https://asher.github.io/gmlx/comfyui.html) covers the install, Comfy Desktop and the upgrades.
+gmlx manages the pack, and a gmlx upgrade updates the copy. ComfyUI-Manager lists the pack as unknown and cannot update it, and Comfy Desktop does not list it.
+The [ComfyUI guide](https://asher.github.io/gmlx/comfyui.html) covers the install, Comfy Desktop, the upgrades and the removal.
 
 The pack needs no Python packages beyond those ComfyUI already has.
-At startup it checks the ComfyUI internals it uses; if one is missing, ComfyUI's log names it and the ComfyUI version.
+At startup it checks the ComfyUI internals it uses. When one is missing, the nodes load as `(not loaded)` stand-ins, and running one names the missing internal, the ComfyUI version, the newest ComfyUI this gmlx was tested on and the command that upgrades gmlx.
 
 ## Use
 
@@ -52,7 +53,8 @@ Each loader has a `server_url` input. When it is empty, the pack uses the first 
 4. `http://127.0.0.1:8080`.
 
 When the server has an API key, set `GMLX_API_KEY`, or `api_key` in the settings file.
-The pack and the server check that they speak the same step contract; on a mismatch the error names which one to upgrade.
+The pack and the server check that they speak the same step contract. On a mismatch, or when they come from two gmlx versions, the error or the `gmlx Server Status` node says whether to restart ComfyUI or the server.
+The loaders start the server with the `gmlx` command that `gmlx comfyui install` recorded, then one on `PATH`. With neither, they say gmlx is not installed and name the two paths that remove the pack.
 
 ### LoRA
 

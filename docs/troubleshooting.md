@@ -11,6 +11,7 @@ agent or chat app that does not connect, read its entry under
 - [Requests](#requests)
 - [Memory](#memory)
 - [Image generation](#image-generation)
+- [ComfyUI](#comfyui)
 - [Container mode](#container-mode)
 - [Custom agents](#custom-agents)
 - [Voice](#voice)
@@ -330,17 +331,110 @@ such as `loras/watercolor.safetensors`, or by the file name of one in the
 entry's `adapters`. Move the file into a model folder and use its path
 there.
 
-### `is not a ComfyUI folder` or `has no Python environment of its own`
+## ComfyUI
 
-`gmlx launch comfyui` looks for ComfyUI in `~/ComfyUI`, with its Python
-environment in a `.venv` or `venv` folder there. Install it as
-[Install ComfyUI and the pack](comfyui.md#install-comfyui-and-the-pack)
-shows, or pass `--comfyui-dir` with the folder that holds it.
+### `no ComfyUI found`
 
-### `the ComfyUI-gmlx node pack is not in`
+`gmlx comfyui install` and `gmlx launch comfyui` found no ComfyUI in the
+places that [Put the gmlx nodes into ComfyUI](comfyui.md#put-the-gmlx-nodes-into-comfyui)
+lists. Get ComfyUI as [Get ComfyUI](comfyui.md#get-comfyui) shows, or pass
+`--comfyui-dir` with the folder that holds it.
 
-The pack is not in ComfyUI's `custom_nodes` folder. Run the `git clone`
-command that the message prints, then launch again.
+### `found ... ComfyUI installs`
+
+More than one ComfyUI is on this Mac. Run the command again with
+`--comfyui-dir` and one of the folders it lists, once for each ComfyUI that
+should have the gmlx nodes.
+
+### `is not a ComfyUI folder`
+
+The folder that `--comfyui-dir` names has neither ComfyUI's `main.py` nor a
+`custom_nodes` folder. Pass the folder you cloned ComfyUI into, or a Comfy
+Desktop install folder.
+
+### `has no Python environment of its own`
+
+`gmlx launch comfyui` runs ComfyUI on the Python of a `.venv` or `venv`
+folder inside it. Create one with the commands the message prints.
+
+### `is older than ..., the oldest the gmlx nodes run on`
+
+The gmlx nodes need a newer ComfyUI. The message gives the steps for that
+kind of ComfyUI, such as `git -C ~/ComfyUI pull` for a clone. Update it,
+then run `gmlx comfyui install` again. The old ComfyUI desktop app cannot
+update that far, so install Comfy Desktop in its place.
+
+### `the ComfyUI version in ... is unknown`
+
+The ComfyUI folder has no `comfyui_version.py`, so `install` cannot check
+the version. The nodes are installed, and they load on ComfyUI 0.37 or
+newer.
+
+### `is newer than ..., the newest this gmlx was tested on`
+
+The nodes are installed and usually work. When a change in that ComfyUI
+breaks them, they show as `(not loaded)`, as the entry below describes.
+
+### `carries a signed policy`
+
+A Comfy Desktop build with a signed policy can refuse custom nodes that the
+policy does not list. If the gmlx nodes do not show in ComfyUI, ask whoever
+manages the build to allow them, or use a Comfy Desktop install without a
+policy.
+
+### `the folder that was there moved to`
+
+`custom_nodes` held a folder named `comfyui-gmlx`, such as a clone of the
+old ComfyUI-gmlx repository. `install` moved it into `custom_nodes/.disabled`,
+where ComfyUI skips it. Delete it when you no longer need it.
+
+### `runs its own ComfyUI, so launch does not start it`
+
+The ComfyUI that `launch` found is a Comfy Desktop install. `launch` put
+the gmlx nodes into it. Start the app, or restart it, from the Dock.
+
+### `has no main.py, so launch cannot start ComfyUI from it`
+
+`launch` put the gmlx nodes into that folder, but it holds no ComfyUI to
+start. Start that ComfyUI the way you installed it, or pass
+`--comfyui-dir` with the folder that holds `main.py`.
+
+### The gmlx nodes show `(not loaded)`
+
+A ComfyUI update changed a part of ComfyUI that this version of the nodes
+uses. Running one of them gives an error that names the change and the
+command that upgrades gmlx, such as `brew upgrade gmlx`. Upgrade, then
+start `gmlx serve` or run `gmlx comfyui install` and restart ComfyUI.
+
+### `the server runs gmlx ... and these nodes are from gmlx ...`
+
+The server and the nodes come from two gmlx versions. When the server is
+newer, restart ComfyUI so it loads the new nodes, and run
+`gmlx comfyui install` if they stay old. When the nodes are newer, run
+`gmlx restart`.
+
+### `gmlx is not installed`
+
+The nodes found neither the `gmlx` command that `install` recorded nor one
+on `PATH`. Install gmlx again and run `gmlx comfyui install`, or remove the
+nodes by deleting the two paths the message names: the `comfyui-gmlx` link
+in `custom_nodes` and `~/.local/share/gmlx/comfyui`.
+
+### `the pack copy is missing` or `the pack copy is from gmlx`
+
+`gmlx comfyui status` and `gmlx doctor` found the copy of the nodes gone or
+older than the gmlx that runs. Run `gmlx comfyui install`.
+
+### `could not refresh the ComfyUI node pack`
+
+The server could not replace the copy of the nodes, and it started anyway.
+The message names the cause, such as a full disk. Fix it, then run
+`gmlx comfyui install`.
+
+### `replaced the gmlx nodes from gmlx ... with those of the older gmlx`
+
+An older gmlx ran `install` or a server start after a newer one, so the
+nodes are now the older version. Run the newer gmlx, or upgrade.
 
 ### `the server offers no image model`
 
@@ -616,6 +710,8 @@ Paths under `~/.cache` and `~/.local/share` follow `XDG_CACHE_HOME` and
 |------|----------|
 | `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | The config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
 | `~/.config/gmlx/` | Client configs that `gmlx launch` writes. |
+| `~/.config/gmlx/comfyui.json` | The ComfyUI settings and what `gmlx comfyui install` recorded. |
+| `~/.local/share/gmlx/comfyui/` | The copy of the gmlx nodes that each ComfyUI's `custom_nodes/comfyui-gmlx` links to. |
 | `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml`, `~/.hermes/config.yaml` | Client files that `gmlx launch` adds its settings to. Delete those settings to remove gmlx. |
 | `~/.cache/gmlx/` | Server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache, when the disk tier is on and has no `path` of its own. |

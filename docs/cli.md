@@ -584,7 +584,7 @@ gmlx launch claude-code -- --continue
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, as [dsh](launch.md#dsh) describes. |
-| `--comfyui-dir DIR` | The folder used last, else `~/ComfyUI` | Run the ComfyUI in this folder, on its `.venv` or `venv`, as [ComfyUI](comfyui.md) describes. |
+| `--comfyui-dir DIR` | The folder used last, else `~/ComfyUI`, else the ComfyUI found | Put the gmlx nodes into the ComfyUI in this folder and run it on its `.venv` or `venv`, as [ComfyUI](comfyui.md) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, beside the configured [mounts](config.md#launchcontainermounts). Repeatable. |
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
@@ -1125,7 +1125,7 @@ again, it refreshes the copy and the links it made before.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--comfyui-dir DIR` | The folders installed before, else the one ComfyUI found | Install into this ComfyUI: its folder, the folder above its `custom_nodes`, or a Comfy Desktop install folder. |
+| `--comfyui-dir DIR` | The folders installed before, else the ComfyUI found | Install into this ComfyUI: its folder, the folder above its `custom_nodes`, or a Comfy Desktop install folder. |
 | `--link-source` | Off | Link to the pack in the gmlx source tree instead of a copy, for work on the pack. |
 | `--model ID` | The config's default image model | The image model a new loader node starts on. |
 
@@ -1160,8 +1160,9 @@ gmlx doctor --deep
 ## gmlx completion
 
 `gmlx completion` prints a completion script for zsh, bash or fish. It
-completes verbs, flags, model ids from your config, client names for
-`launch`, and the host, port and URL of your background servers.
+completes verbs and their actions, flags, model ids from your config,
+client names for `launch`, and the host, port and URL of your background
+servers.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
