@@ -14,8 +14,7 @@ With ComfyUI on your Mac, this command puts the gmlx nodes into it:
 gmlx comfyui install
 ```
 
-Without ComfyUI, [get it](#get-comfyui) first, then
-[make your first image](#make-your-first-image). The
+Without ComfyUI, [get it](#get-comfyui) first. The
 [ComfyUI reference](comfyui-reference.md) has the launch options, how the
 nodes find the server and what they refuse.
 
@@ -58,7 +57,8 @@ beyond ComfyUI's own.
 | The old ComfyUI desktop app | The `custom_nodes` folder in its base folder, by default `~/Documents/ComfyUI` |
 
 With more than one, it lists them and asks for `--comfyui-dir`. Run it once
-for each ComfyUI that should have the nodes:
+for each ComfyUI that should have the nodes. A ComfyUI that you add later
+needs `--comfyui-dir` too, and `install` names the command for it:
 
 ```sh
 gmlx comfyui install --comfyui-dir ~/ComfyUI
@@ -169,7 +169,6 @@ to a workflow, double-click an empty part of the canvas, search for
 the MODEL and CLIP outputs of the gmlx loaders to its inputs, and its
 outputs to the nodes that the loaders fed before. The gmlx nodes send each
 LoRA to the server once, so a change of strength costs one small request.
-
 `LoraLoader` works at any `strength_model`. The text encoder half of a
 LoRA is not applied in ComfyUI, so set `strength_clip` to 0. To apply both
 halves, use the LoRA with [`gmlx image generate`](images.md#use-a-lora).
@@ -179,12 +178,11 @@ halves, use the LoRA with [`gmlx image generate`](images.md#use-a-lora).
 The gmlx nodes come with gmlx, so an upgrade of gmlx upgrades them. The
 next `gmlx serve`, `gmlx launch comfyui` or `gmlx comfyui install` replaces
 the copy, and the server prints a line when it does. A ComfyUI that was
-running keeps the old nodes until you restart it.
-
-A new ComfyUI release can change a part of ComfyUI that the nodes use.
-Then the nodes show with `(not loaded)` after their names, and running one
-gives an error that names the change. Upgrade gmlx as it says, such as
-with `brew upgrade gmlx`, then run `gmlx comfyui install` and restart ComfyUI.
+running keeps the old nodes until you restart it. A new ComfyUI release
+can change a part of ComfyUI that the nodes use. Then the nodes show with
+`(not loaded)` after their names, and running one gives an error that
+names the change. Upgrade gmlx as it says, such as with
+`brew upgrade gmlx`, then run `gmlx comfyui install` and restart ComfyUI.
 
 ## Remove the gmlx nodes
 

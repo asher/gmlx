@@ -443,9 +443,10 @@ newer, restart ComfyUI so it loads the new nodes, and run
 ### `gmlx is not installed`
 
 The nodes found neither the `gmlx` command that `install` recorded nor one
-on `PATH`, or the one they found does not run. Install gmlx again and run `gmlx comfyui install`, or remove the
-nodes by deleting the two paths the message names: the `comfyui-gmlx` link
-in `custom_nodes` and `~/.local/share/gmlx/comfyui`.
+on `PATH`, or the one they found does not run. Install gmlx again and run
+`gmlx comfyui install`, or remove the nodes by deleting the two paths the
+message names: the `comfyui-gmlx` link in `custom_nodes` and
+`~/.local/share/gmlx/comfyui`.
 
 ### `the pack copy is missing` or `the pack copy is from gmlx`
 
@@ -458,9 +459,14 @@ from another gmlx version than the one that runs. Run
 A ComfyUI that the record lists is gone: deleted, moved, or on a drive that
 is not mounted. A drive that comes back needs nothing, since its link
 points at the copy that gmlx keeps current. For a ComfyUI that is gone for
-good, run `gmlx comfyui install`, which removes it from the record and says
-so. If it comes back after that, run `gmlx comfyui install --comfyui-dir`
-with its folder to record it again.
+good, run `gmlx comfyui install`. It removes the folder from the record and
+says so, then installs into the other ComfyUI folders it has or finds.
+When it finds no other ComfyUI, it stops with `no ComfyUI found`, and when
+it finds several, it lists them. The record is clean either way, so status
+and `gmlx doctor` stop naming the folder. Running
+`gmlx comfyui uninstall --comfyui-dir DIR` with its path removes it from
+the record without installing anything. If the folder comes back, run
+`gmlx comfyui install --comfyui-dir DIR` to record it again.
 
 ### `missing; run gmlx comfyui install`, `elsewhere; run gmlx comfyui install` or `folder; run gmlx comfyui install`
 

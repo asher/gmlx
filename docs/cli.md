@@ -1187,7 +1187,7 @@ These verbs also use other codes:
 | `serve` | 2 when a bare `serve` finds no config. |
 | `status` | 0 when a server is running, 3 when none is. |
 | `restart` | 1 when a file the server needs is gone or its config does not load. The old server keeps running. |
-| `comfyui` | 1 for no ComfyUI, a `--comfyui-dir` that is not one, one too old, a `status` problem or no install, or a settings file that is no JSON object. 2 for several. |
+| `comfyui` | 1 for no ComfyUI, a `--comfyui-dir` that is not one, one too old, a `status` problem or no install, or a settings file that is not a JSON object. 2 for several. |
 | `list` | 2 when no config was found or it failed to load. |
 | `run` | 1 when the model fails to load or to generate, 2 when a flag, id or file is wrong and nothing has loaded yet, 130 when interrupted. |
 | `validate` | 0 when the file will load or the quants are listed, 1 when it will not load, 2 when the reference cannot be read. |
