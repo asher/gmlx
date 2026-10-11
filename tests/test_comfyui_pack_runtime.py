@@ -98,6 +98,17 @@ def test_no_gmlx_names_the_link_and_the_copy_folder_to_delete(link, monkeypatch,
     assert not os.listdir(link.parent)
 
 
+def test_a_source_link_names_only_the_link_to_delete(link):
+    """A --link-source install points into a gmlx checkout, whose folders
+    are never named for deletion."""
+    code = link.parent.parent
+    cu.install([cu.target_for_dir(code)], link_source=True)
+    s = _settings(link)
+    assert os.path.realpath(link) == os.path.realpath(_PACK)
+    assert s.leftovers() == [str(link)]
+    assert str(_PACK.parent) not in s.not_installed()
+
+
 def test_upgrade_command_per_install_kind(link):
     s = _settings(link)
     assert s.upgrade_command({"gmlx_install": "homebrew"}) == "brew upgrade gmlx"
@@ -135,6 +146,11 @@ spec = importlib.util.spec_from_file_location("comfyui-gmlx", link + "/__init__.
                                               submodule_search_locations=[link])
 m = importlib.util.module_from_spec(spec)
 sys.modules["comfyui-gmlx"] = m
+import logging
+records = []
+handler = logging.Handler()
+handler.emit = records.append
+logging.getLogger("gmlx").addHandler(handler)
 try:
     spec.loader.exec_module(m)
 except ImportError as e:
@@ -144,7 +160,9 @@ nodes = m.NODE_CLASS_MAPPINGS
 out = {"names": sorted(nodes), "display": m.NODE_DISPLAY_NAME_MAPPINGS,
        "inputs": nodes["GmlxModelLoader"].INPUT_TYPES(),
        "status": nodes["GmlxServerStatus"]().run(model_name="x")["result"][0],
-       "torch": "torch" in sys.modules}
+       "torch": "torch" in sys.modules,
+       "logged": [[r.levelname, r.exc_info[0].__name__ if r.exc_info else None]
+                  for r in records]}
 try:
     nodes["GmlxModelLoader"]().run(model_name="x")
 except RuntimeError as e:
@@ -162,12 +180,15 @@ def _load_in_a_comfyui(link: Path, root: Path | None, path: str) -> dict:
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-def _fake_comfyui(tmp_path) -> Path:
-    """A ComfyUI that changed every internal the pack uses."""
+def _fake_comfyui(tmp_path, version: str = "0.99.0", patcher: str | None = None) -> Path:
+    """A ComfyUI that changed every internal the pack uses, or whose
+    model_patcher module runs ``patcher`` when imported."""
     root = tmp_path / "newcomfy"
     (root / "comfy").mkdir(parents=True)
     (root / "comfy" / "__init__.py").write_text("")
-    (root / "comfyui_version.py").write_text('__version__ = "0.99.0"\n')
+    if patcher is not None:
+        (root / "comfy" / "model_patcher.py").write_text(patcher)
+    (root / "comfyui_version.py").write_text(f'__version__ = "{version}"\n')
     return root
 
 
@@ -196,10 +217,32 @@ def test_a_failing_import_registers_stand_ins_that_name_the_fix(link, tmp_path, 
     assert out["torch"] is False
     err = out["error"]
     for want in ("comfy.model_patcher.ModelPatcher", "ComfyUI 0.99.0",
-                 f"up to {cu.pack_meta()['COMFYUI_TESTED']}", says, "restart ComfyUI"):
+                 f"up to {cu.pack_meta()['COMFYUI_TESTED']}", says,
+                 "then run `gmlx comfyui install` and restart ComfyUI"):
         assert want in err, want
     assert "not installed" not in err
     assert out["status"] == err
+    # The log keeps the traceback of the import that failed.
+    assert out["logged"] == [["ERROR", "ImportError"]]
+
+
+def test_any_error_in_the_pack_import_registers_stand_ins(link, tmp_path):
+    _record(gmlx_install="homebrew", gmlx_command=str(_fake_exe(tmp_path / "bin")))
+    root = _fake_comfyui(tmp_path, patcher="raise RuntimeError('a ComfyUI module broke')\n")
+    out = _load_in_a_comfyui(link, root, str(tmp_path / "empty"))
+    assert out["names"] == _node_names()
+    assert "RuntimeError: a ComfyUI module broke" in out["error"]
+    assert out["logged"] == [["ERROR", "RuntimeError"]]
+
+
+def test_a_comfyui_older_than_the_floor_is_the_one_to_update(link, tmp_path):
+    _record(gmlx_install="homebrew", gmlx_command=str(_fake_exe(tmp_path / "bin")))
+    out = _load_in_a_comfyui(link, _fake_comfyui(tmp_path, version="0.30.0"),
+                             str(tmp_path / "empty"))
+    err = out["error"]
+    assert f"They need ComfyUI {cu.pack_meta()['COMFYUI_FLOOR']} or newer" in err
+    assert "Update ComfyUI, then restart it" in err and f"{gmlx.DOCS_URL}comfyui.html" in err
+    assert "brew upgrade gmlx" not in err
 
 
 def test_a_stand_in_with_gmlx_gone_names_the_two_paths(link, tmp_path):

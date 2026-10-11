@@ -11,13 +11,18 @@ install. This module imports neither torch nor ComfyUI.
 from __future__ import annotations
 
 import logging
+import re
 
 from . import compat, settings
-from .version import COMFYUI_TESTED, __version__
+from .version import COMFYUI_FLOOR, COMFYUI_TESTED, __version__
 
 log = logging.getLogger("gmlx")
 
 CATEGORY = "gmlx"
+
+
+def _nums(version: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", version)[:3])
 
 
 def message(error: BaseException) -> str:
@@ -29,10 +34,18 @@ def message(error: BaseException) -> str:
     cause = (f"it needs {missing}, which this ComfyUI does not have" if missing
              else f"{type(error).__name__}: {error}")
     doc = settings.load()
-    text = (f"gmlx: the gmlx nodes of gmlx {__version__} do not load on ComfyUI "
-            f"{compat.comfyui_version()}: {cause}. This gmlx was tested on ComfyUI up to "
-            f"{COMFYUI_TESTED}. To fix it, {settings.upgrade_step(doc)}, which brings the "
-            "nodes for newer ComfyUI releases, then restart ComfyUI.")
+    version = compat.comfyui_version()
+    head = (f"gmlx: the gmlx nodes of gmlx {__version__} do not load on ComfyUI "
+            f"{version}: {cause}.")
+    if _nums(version) and _nums(version) < _nums(COMFYUI_FLOOR):
+        # An older ComfyUI than the nodes support: ComfyUI is what to update.
+        text = (f"{head} They need ComfyUI {COMFYUI_FLOOR} or newer. Update ComfyUI, then "
+                f"restart it. The ComfyUI guide: {settings.GUIDE_URL}")
+    else:
+        # The copy in ComfyUI changes only when a gmlx command refreshes it.
+        text = (f"{head} This gmlx was tested on ComfyUI up to {COMFYUI_TESTED}. To fix it, "
+                f"{settings.upgrade_step(doc)}, which brings the nodes for newer ComfyUI "
+                "releases, then run `gmlx comfyui install` and restart ComfyUI.")
     if settings.gmlx_command(doc) is None:
         text += " " + settings.not_installed(doc) + "."
     return text
@@ -90,6 +103,6 @@ def _node(name: str, text: str):
 def nodes(error: BaseException) -> tuple[dict, dict]:
     """The stand-in NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS."""
     text = message(error)
-    log.error("%s", text)
+    log.error("%s", text, exc_info=error)
     return ({name: _node(name, text) for name in SPECS},
             {name: f"{label} (not loaded)" for name, label in DISPLAY_NAMES.items()})

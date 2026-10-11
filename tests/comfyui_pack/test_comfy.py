@@ -163,7 +163,8 @@ class StandIns(unittest.TestCase):
             fakes["GmlxModelLoader"]().run(model_name="z-image-turbo")
         msg = str(e.exception)
         for want in ("comfy.model_patcher.ModelPatcher.no_such_name", P.compat.comfyui_version(),
-                     P.version.COMFYUI_TESTED, "brew upgrade gmlx", "restart ComfyUI"):
+                     P.version.COMFYUI_TESTED, "brew upgrade gmlx",
+                     "then run `gmlx comfyui install` and restart ComfyUI"):
             self.assertIn(want, msg)
         self.assertNotIn("not installed", msg)
         shown = fakes["GmlxServerStatus"]().run(model_name="z-image-turbo")
