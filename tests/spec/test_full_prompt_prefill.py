@@ -15,6 +15,7 @@ import contextlib
 import logging
 import os
 import re
+import warnings
 
 import pytest
 
@@ -172,29 +173,66 @@ def _head_last(lm, input_ids, cache):
     return logits[0, -1]
 
 
-def _last_logits(model, ids, step=None, tail=1):
-    """Logits of the last position from the bare language model: one
-    un-chunked forward, or with ``step`` the engine's order, which runs
-    ``ids`` up to its last ``tail`` tokens in chunks of ``step`` and then
-    each of those tokens alone, as decode does."""
+def _last_logits(model, ids, chunks=None, tail=1):
+    """Float32 logits of the last position from the bare language model:
+    one un-chunked forward, or with ``chunks`` the engine's order, which
+    runs ``ids`` up to its last ``tail`` tokens in prefill chunks of those
+    lengths and then each of those tokens alone, as decode does."""
     from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
+    mx.clear_cache()
     lm = model.language_model
     cache = make_prompt_cache(lm)
-    if step is None:
-        chunks = [ids]
+    if chunks is None:
+        parts = [list(ids)]
     else:
-        body = list(ids[:-tail])
-        chunks = [body[i:i + step] for i in range(0, len(body), step)]
-        chunks += [[t] for t in ids[-tail:]]
-    for chunk in chunks:
-        row = _head_last(lm, mx.array([chunk], dtype=mx.int32), cache)
+        body, parts, pos = list(ids[:-tail]), [], 0
+        assert sum(chunks) == len(body), (chunks, len(body))
+        for n in chunks:
+            parts.append(body[pos:pos + n])
+            pos += n
+        parts += [[t] for t in ids[-tail:]]
+    for part in parts:
+        row = _head_last(lm, mx.array([part], dtype=mx.int32), cache)
         mx.eval(row)
-    return row
+    return row.astype(mx.float32)
+
+
+# The last few one-forward rows, so a divergence check does not run a 16k
+# reference twice.
+_ONE_FORWARD: dict = {}
 
 
 def _ref_first_token(model, ids):
     """Un-chunked greedy first token from the bare language model."""
-    return int(mx.argmax(_last_logits(model, ids)).item())
+    row = _last_logits(model, ids)
+    if len(_ONE_FORWARD) >= 4:
+        _ONE_FORWARD.pop(next(iter(_ONE_FORWARD)))
+    _ONE_FORWARD[tuple(ids)] = row
+    return int(mx.argmax(row).item())
+
+
+# _run_mtp's prefill step.
+_ENGINE_STEP = 2048
+
+# Prefill chunk lengths of the engine's B=1 runs, by prompt. The engine
+# folds short tails, decays the step with depth and takes an arch's own
+# base step, so its chunks are recorded rather than rebuilt.
+_ENGINE_CHUNKS: dict = {}
+
+
+def _engine_chunks(ids):
+    """Prefill chunk lengths of the engine's B=1 run on ``ids``. A prompt
+    with no such run (a batch row, an APC hit) gets chunks of _ENGINE_STEP
+    with a short tail folded in, which approximates the engine's order."""
+    rec = _ENGINE_CHUNKS.get(tuple(ids))
+    if rec is not None:
+        return rec
+    n = len(ids) - 1
+    chunks = [min(_ENGINE_STEP, n - i) for i in range(0, n, _ENGINE_STEP)]
+    if len(chunks) > 1 and chunks[-1] < int(
+            os.environ.get("GMLX_PREFILL_MIN_TAIL", "48")):
+        chunks[-2] += chunks.pop()
+    return chunks
 
 
 # Two engine paths compared under greedy agree token for token until the
@@ -205,52 +243,51 @@ def _ref_first_token(model, ids):
 # below, a rounding fork lands within this band.
 _NEAR_TIE_LOGITS = 1.0
 
-# A model can move its logits by more than the band with the evaluation
-# order alone: on gemma-4-26B-A4B one forward and the engine's order differ
-# by several logits, and stock llama.cpp changes its own greedy token with
-# its batch size on the same file. There the bare model forks too: its two
-# orders disagree on which candidate wins.
-_ENGINE_STEP = 2048
+
+def _near_top(row, t):
+    return float(mx.max(row) - row[t]) <= _NEAR_TIE_LOGITS
 
 
-def _greedy_margin(model, ids, a, b, step=None, tail=1):
-    """Bare-model logit gap logits[a] - logits[b] at the position after ids
-    (teacher-forced, fp16 KV), in one forward or in the engine's order (see
-    _last_logits)."""
-    row = _last_logits(model, ids, step, tail).astype(mx.float32)
-    return float(row[a] - row[b])
-
-
-def _assert_greedy_match(model, ids, ref, got, label, step=_ENGINE_STEP):
+def _assert_greedy_match(model, ids, ref, got, label):
     """``got`` reproduces ``ref`` token for token, except that the first
-    divergence is accepted as a rounding fork: a near tie (see
-    _NEAR_TIE_LOGITS), or a position where the bare model's own two
-    evaluation orders pick different candidates. The two streams have
-    legitimately forked there, so nothing after it is compared. ``step`` is
-    the engine's prefill step."""
+    divergence is accepted as a fork the bare model makes too: a near tie
+    (see _NEAR_TIE_LOGITS), or a position where the bare model's greedy pick
+    is one stream's token in one forward and the other's in the engine's
+    order. A model can move its logits by more than the band with the order
+    alone: gemma-4-26B-A4B does on a repeated paragraph, and stock llama.cpp
+    changes its own greedy token with its batch size there. Nothing after
+    the fork is compared, and an accepted order fork is reported as a
+    warning."""
     n = min(len(ref), len(got))
     for i in range(n):
         if ref[i] == got[i]:
             continue
+        a, b = ref[i], got[i]
         prefix = list(ids) + list(ref[:i])
-        margin = _greedy_margin(model, prefix, ref[i], got[i])
+        one = _ONE_FORWARD.get(tuple(prefix))
+        if one is None:
+            one = _last_logits(model, prefix)
+        margin = float(one[a] - one[b])
         if abs(margin) <= _NEAR_TIE_LOGITS:
             return
-        ordered = _greedy_margin(model, prefix, ref[i], got[i], step=step,
-                                 tail=i + 1)
-        assert (margin > 0) != (ordered > 0), (
-            f"{label}: diverged at token {i}: {list(got[:i + 2])} vs "
+        rep = _last_logits(model, prefix, _engine_chunks(ids), tail=i + 1)
+        forked = ((_near_top(one, a) and _near_top(rep, b))
+                  or (_near_top(one, b) and _near_top(rep, a)))
+        detail = (
+            f"diverged at token {i}: {list(got[:i + 2])} vs "
             f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits in "
-            f"one forward, {ordered:+.3f} in the engine's order (a rounding "
-            f"fork is within {_NEAR_TIE_LOGITS}, or the two orders disagree)"
-        )
+            f"one forward (top {int(mx.argmax(one).item())}), "
+            f"{float(rep[a] - rep[b]):+.3f} in the engine's order "
+            f"(top {int(mx.argmax(rep).item())})")
+        assert forked, f"{label}: {detail}"
+        warnings.warn(f"{label}: accepted an evaluation-order fork: {detail}")
         return
 
 
-def _assert_first_token(model, ids, ref, got, label, step=_ENGINE_STEP):
+def _assert_first_token(model, ids, ref, got, label):
     """``got``, the engine's first token, is the bare model's greedy first
-    token ``ref``, or a rounding fork from it (see _assert_greedy_match)."""
-    _assert_greedy_match(model, ids, [ref], [got], label, step=step)
+    token ``ref``, or a fork from it (see _assert_greedy_match)."""
+    _assert_greedy_match(model, ids, [ref], [got], label)
 
 
 def _make_processor(tokenizer):
@@ -352,7 +389,7 @@ def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
     exactly as the server's generation worker does, and each row carries
     the salt the server computes for it.
     """
-    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator, PromptProcessingBatch
 
     _install_patches()
 
@@ -370,20 +407,35 @@ def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
         draft_kind="mtp",
         greedy_sampling=True,
         max_tokens=n,
-        prefill_step_size=2048,
+        prefill_step_size=_ENGINE_STEP,
         apc_manager=apc_manager,
     )
-    uids = gen.insert(
-        ids_list, [n] * len(ids_list),
-        prompt_kwargs=prompt_kwargs_list,
-    )
-    results = {u: [] for u in uids}
-    while gen.has_work:
-        _prompt_responses, gen_responses = gen.next()
-        for r in gen_responses:
-            if r.finish_reason is None:
-                results[r.uid].append(int(r.token))
-    gen.close()
+    orig_step = PromptProcessingBatch.prompt_step
+    chunks = []
+
+    def record(self):
+        done = orig_step(self)
+        if done:
+            chunks.append(int(done))
+        return done
+
+    PromptProcessingBatch.prompt_step = record
+    try:
+        uids = gen.insert(
+            ids_list, [n] * len(ids_list),
+            prompt_kwargs=prompt_kwargs_list,
+        )
+        results = {u: [] for u in uids}
+        while gen.has_work:
+            _prompt_responses, gen_responses = gen.next()
+            for r in gen_responses:
+                if r.finish_reason is None:
+                    results[r.uid].append(int(r.token))
+        gen.close()
+    finally:
+        PromptProcessingBatch.prompt_step = orig_step
+    if len(ids_list) == 1 and sum(chunks) == len(ids_list[0]) - 1:
+        _ENGINE_CHUNKS[tuple(ids_list[0])] = chunks
     return [results[u] for u in uids]
 
 
@@ -497,10 +549,13 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
 
     orig_step = PromptProcessingBatch.prompt_step
     steps = set()
+    chunks = []
 
     def spy(self):
         n = orig_step(self)
         steps.add(self.prefill_step_size)
+        if n:
+            chunks.append(int(n))
         return n
 
     monkeypatch.setattr(PromptProcessingBatch, "prompt_step", spy)
@@ -529,7 +584,9 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
     gen.close()
     assert steps == {97}, f"env step not used in chunked prefill: {steps}"
     assert len(toks) > 0, "no tokens generated"
-    _assert_first_token(model, ids, ref, toks[0], "first token", step=97)
+    if sum(chunks) == len(ids) - 1:
+        _ENGINE_CHUNKS[tuple(ids)] = chunks
+    _assert_first_token(model, ids, ref, toks[0], "first token")
 
 
 def test_long_context_token_parity(mtp_model):
@@ -1226,7 +1283,7 @@ def test_continuous_batch_injection(mtp_model):
         draft_kind="mtp",
         greedy_sampling=True,
         max_tokens=N_DECODE,
-        prefill_step_size=2048,
+        prefill_step_size=_ENGINE_STEP,
     )
 
     kwargs_first = _embed_prompts(model, [ids_first])
@@ -1368,7 +1425,7 @@ def test_scalar_injection_defers_and_completes(mtp_model):
     gen = BatchGenerator(
         model, processor, sampler=GREEDY, draft_model=drafter,
         draft_kind="mtp", greedy_sampling=True, max_tokens=N_DECODE,
-        prefill_step_size=2048)
+        prefill_step_size=_ENGINE_STEP)
     uids_a = gen.insert([ids_a], [N_DECODE],
                         prompt_kwargs=_embed_prompts(model, [ids_a]))
     results = {uids_a[0]: []}
@@ -1410,7 +1467,7 @@ def test_injection_when_all_rows_finish_same_round(mtp_model):
     gen = BatchGenerator(
         model, processor, sampler=GREEDY, draft_model=drafter,
         draft_kind="mtp", greedy_sampling=True, max_tokens=N_DECODE,
-        prefill_step_size=2048)
+        prefill_step_size=_ENGINE_STEP)
     # Tight budgets so the batch's final round comes fast; C lands either
     # mid-final-round (exit-path drain) or at a round top (loop drain) --
     # both must adopt it with correct content.
@@ -1497,7 +1554,7 @@ def test_apc_hit_on_injected_request(mtp_model):
         draft_kind="mtp",
         greedy_sampling=True,
         max_tokens=N_DECODE,
-        prefill_step_size=2048,
+        prefill_step_size=_ENGINE_STEP,
     )
 
     # Insert request A -- its prefill stores the APC entry.
