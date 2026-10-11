@@ -595,8 +595,10 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
     gen.close()
     assert steps == {97}, f"env step not used in chunked prefill: {steps}"
     assert len(toks) > 0, "no tokens generated"
+    # The step-97 chunks hold for this test only; a later test with the same
+    # prompt runs at _ENGINE_STEP.
     if sum(chunks) == len(ids) - 1:
-        _ENGINE_CHUNKS[tuple(ids)] = chunks
+        monkeypatch.setitem(_ENGINE_CHUNKS, tuple(ids), chunks)
     _assert_first_token(model, ids, ref, toks[0], "first token")
 
 
