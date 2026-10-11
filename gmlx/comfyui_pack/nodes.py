@@ -23,8 +23,8 @@ from .version import __version__
 CATEGORY = "gmlx"
 
 MANAGED = (f"These gmlx nodes are from gmlx {__version__}. gmlx manages them and updates "
-           "them with itself, so ComfyUI-Manager and Comfy Desktop do not list or update "
-           "them.")
+           "them with itself. Comfy Desktop does not list them, and ComfyUI-Manager lists "
+           "them as an unknown pack that it cannot update.")
 
 
 def _default_model() -> str:

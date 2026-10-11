@@ -171,6 +171,37 @@ class StandIns(unittest.TestCase):
         self.assertEqual(shown["result"], (msg,))
 
 
+class ServerStatus(unittest.TestCase):
+    """The status node: the server's view of a model, the note about a
+    server from another gmlx, and how gmlx manages the nodes."""
+
+    def setUp(self):
+        self.env = os.environ.get("GMLX_COMFY_SETTINGS")
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(tempfile.mkdtemp(), "comfyui.json")
+
+    def tearDown(self):
+        if self.env is None:
+            os.environ.pop("GMLX_COMFY_SETTINGS", None)
+        else:
+            os.environ["GMLX_COMFY_SETTINGS"] = self.env
+
+    def test_the_status_carries_the_version_note_and_how_the_nodes_update(self):
+        stub = support.Stub("--gmlx-version", "99.0.0")
+        try:
+            out = P.nodes.GmlxServerStatus().status(ZID, server_url=stub.url)
+        finally:
+            stub.close()
+        text = out["result"][0]
+        self.assertEqual(out["ui"]["text"], [text])
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("resident", lines[0])
+        self.assertTrue(lines[1].startswith("gmlx: the server runs gmlx 99.0.0"), lines[1])
+        self.assertIn("Restart ComfyUI", lines[1])
+        self.assertEqual(lines[2], P.nodes.MANAGED)
+        self.assertIn("ComfyUI-Manager lists them as an unknown pack", lines[2])
+
+
 class Weightless(Base):
     """Weightless builds on the meta device, and the class check against the server's answer."""
 
