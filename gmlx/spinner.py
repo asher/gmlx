@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from typing import Literal
 
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -63,13 +64,13 @@ class Spinner:
         self._thread.start()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        # Returns None, so exceptions are never suppressed.
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
             self._stream.write("\r\x1b[K")
             self._stream.flush()
+        return False                      # never suppress exceptions
 
     def _run(self) -> None:
         i = 0
