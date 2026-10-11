@@ -132,18 +132,19 @@ def _copy_mlx_floor() -> str:
 
 def test_kquant_pin_admits_the_copy_mlx_floor():
     """An mlx-kquant release pins mlx exactly. The CI pin must name one whose
-    mlx satisfies the floor the copied mlx-vlm declares, or gmlx refuses to
-    run on it. Read from the local install; skipped when the local
-    mlx-kquant is not the pinned version."""
+    mlx meets the floor the copied mlx-vlm declares, or gmlx refuses to run
+    on it. Read from the local install; skipped when the local mlx-kquant
+    is not the pinned version."""
     kq = _local_requirements("mlx-kquant", _exact(_ci_pins()["mlx-kquant"]))
     if kq is None:
         pytest.skip("the local mlx-kquant is not the pinned version")
     floor = _copy_mlx_floor()
     kq_mlx = _mlx_specifier(kq)
-    assert kq_mlx.contains(floor, prereleases=True), (
-        f"the pinned mlx-kquant requires mlx{kq_mlx}, which excludes mlx "
-        f"{floor}, the floor of the copied mlx-vlm. Bump the mlx-kquant pin "
-        "to a release built against that mlx.")
+    pins = [s.version for s in kq_mlx if s.operator == "=="]
+    assert pins and all(Version(p) >= Version(floor) for p in pins), (
+        f"the pinned mlx-kquant requires mlx{kq_mlx}, below mlx {floor}, the "
+        "floor of the copied mlx-vlm. Bump the mlx-kquant pin to a release "
+        "built against that mlx or a later one.")
 
 
 def test_ci_mlx_pin_meets_the_copy_floor():

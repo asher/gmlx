@@ -33,7 +33,7 @@ classifiers = [
 # a stale venv resolves these constraints only once, so the pip pin alone
 # can't catch it. See docs/internals/upstream-upgrades.md.
 dependencies = [
-    # 0.5.0 on pins mlx 0.32.2, the floor of the copied mlx-vlm
+    # 0.5.0 on pins mlx 0.32.3, above the copied mlx-vlm's floor of 0.32.2
     # (tests/test_ci_pins.py checks the CI pin); <0.6 guards the next
     # kquant breaking change.
     "mlx-kquant>=0.5.0,<0.6",

@@ -84,7 +84,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Batched decode of GLM-5.3-Flash and DeepSeek-V4 runs slightly faster.
-- Requires mlx 0.32.2 and mlx-kquant 0.5.0, and no longer requires mlx-vlm,
+- Requires mlx 0.32.3 and mlx-kquant 0.5.0, and no longer requires mlx-vlm,
   mlx-lm or OpenCV.
 - Video input and DeepSeek-VL image input need the new `video` extra.
 - `/v1/chat/completions` merges all system messages into one leading system

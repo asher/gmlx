@@ -7,7 +7,7 @@ the defect.
 
 ## `mx.addmm` misreads a first argument of one column on the GPU
 
-- Dependency: mlx 0.32.2, GPU streams. The CPU stream is right.
+- Dependency: mlx 0.32.2 and 0.32.3, GPU streams. The CPU stream is right.
 - Affected: `mx.addmm(c, a, b)` whose result has one column and more than one row, so c is
   [..., M, 1] with M above 1, when c is a view whose M values are not consecutive in memory: a
   column of a wider array, every second row of a taller one, reversed rows, a transposed row.
