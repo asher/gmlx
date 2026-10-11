@@ -59,7 +59,7 @@ gmlx comfyui install
 | ComfyUI | Where its `custom_nodes` folder is |
 |---------|------------------------------------|
 | A clone | `~/ComfyUI/custom_nodes` |
-| comfy-cli | `~/comfy/ComfyUI/custom_nodes`, or in the workspace that comfy-cli's config names |
+| comfy-cli | `~/Documents/comfy/ComfyUI/custom_nodes`, or in the default or recent workspace that comfy-cli's config names |
 | Comfy Desktop | `ComfyUI/custom_nodes` in each install's folder, which is in `~/ComfyUI-Installs` unless you moved it |
 | The old ComfyUI desktop app | The `custom_nodes` folder in its base folder, by default `~/Documents/ComfyUI` |
 

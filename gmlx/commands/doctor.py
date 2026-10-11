@@ -264,27 +264,24 @@ def check_image(cfg):
 def check_comfyui():
     """The ComfyUI node pack: each folder `gmlx comfyui install` linked, the
     pack copy's version and each ComfyUI's version against the range the
-    pack was tested on. None when the pack was never installed."""
+    pack was tested on. A ComfyUI newer than that range passes with a note.
+    None when the pack was never installed."""
     from gmlx.commands import comfyui
 
     try:
         s = comfyui.status()
-    except (OSError, ValueError, SyntaxError) as e:
+        problems = comfyui.status_problems(s)
+    except Exception as e:  # noqa: BLE001 - a broken record is a row, never a doctor crash
         return _check("comfyui", "WARN", f"the ComfyUI node pack cannot be read: {e}")
     if not s["installed"]:
         return None
-    folders = "; ".join(
-        f"{comfyui._short(f['custom_nodes'])} (ComfyUI {f['comfyui_version'] or 'unknown'})"
-        for f in s["folders"])
-    problems = comfyui.status_problems(s)
-    notes = [f"{comfyui._short(f['custom_nodes'])}: ComfyUI {f['version_note']}"
-             for f in s["folders"] if f["version_note"] and "newer" in f["version_note"]]
     if problems:
         return _check("comfyui", "WARN", "; ".join(problems))
-    detail = f"gmlx nodes {s['pack_version']} in {folders}"
-    if notes:
-        return _check("comfyui", "WARN", f"{detail}. " + "; ".join(notes))
-    return _check("comfyui", "PASS", detail)
+    folders = "; ".join(
+        f"{comfyui._short(f['custom_nodes'])} (ComfyUI {f['comfyui_version'] or 'unknown'}"
+        + (f", {f['version_note']}" if f["version_note"] else "") + ")"
+        for f in s["folders"])
+    return _check("comfyui", "PASS", f"gmlx nodes {s['pack_version']} in {folders}")
 
 
 def check_services(cfg):

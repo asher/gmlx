@@ -352,6 +352,14 @@ The folder that `--comfyui-dir` names has neither ComfyUI's `main.py` nor a
 `custom_nodes` folder. Pass the folder you cloned ComfyUI into, or a Comfy
 Desktop install folder.
 
+### `comfyui.json is not a JSON object`
+
+The settings file that the gmlx nodes read, `~/.config/gmlx/comfyui.json`
+or the file that `GMLX_COMFY_SETTINGS` names, does not parse, often after
+a hand edit left a trailing comma. It may hold your own `base_url` and
+`api_key`, so `gmlx comfyui` leaves it as it is. Fix the file, or move it
+aside, and run the command again.
+
 ### `has no Python environment of its own`
 
 `gmlx launch comfyui` runs ComfyUI on the Python of a `.venv` or `venv`

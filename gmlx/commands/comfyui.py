@@ -18,14 +18,17 @@ the stamp differs from the running gmlx.
 gmlx never imports the pack, which runs in ComfyUI's Python: this module
 reads the pack's version file as text.
 
-Exit codes: 0 on success, 1 for a refusal (no ComfyUI, one too old), 2 for
-a usage error such as several ComfyUI folders and no ``--comfyui-dir``.
+Exit codes: 0 on success, 1 for a refusal (no ComfyUI, one too old, a
+settings file that is not a JSON object), 2 for a usage error such as
+several ComfyUI folders and no ``--comfyui-dir``.
 """
 from __future__ import annotations
 
 import argparse
 import ast
 import configparser
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -146,20 +149,24 @@ def gmlx_install() -> str:
     return "pip"
 
 
-def gmlx_command() -> str:
-    """The absolute path of the ``gmlx`` command of this install: the one on
-    PATH when it is this install's, since Homebrew and uv keep that path
-    across upgrades, else the script beside the interpreter."""
-    script = Path(sys.prefix) / "bin" / "gmlx"
-    on_path = shutil.which("gmlx")
-    if on_path and script.exists() and \
-            os.path.realpath(on_path) == os.path.realpath(script):
-        return os.path.abspath(on_path)
-    if script.exists():
+def gmlx_command() -> str | None:
+    """The absolute path of the running gmlx's command, or None when it runs
+    as ``python -m gmlx``. Never a PATH lookup, which can find another gmlx.
+    For Homebrew it is the link in Homebrew's bin folder, whose path stays
+    across upgrades; else the console script beside the interpreter; else
+    the script this process started from."""
+    script = Path(sys.executable).parent / "gmlx"
+    if os.access(script, os.X_OK):
+        parts = Path(sys.prefix).resolve().parts
+        if "Cellar" in parts:
+            brew = Path(*parts[:parts.index("Cellar")]) / "bin" / "gmlx"
+            if os.path.realpath(brew) == os.path.realpath(script):
+                return str(brew)
         return str(script)
-    if os.path.basename(sys.argv[0] or "") == "gmlx":
-        return os.path.abspath(sys.argv[0])
-    return os.path.abspath(on_path) if on_path else "gmlx"
+    argv0 = sys.argv[0] or ""
+    if os.path.basename(argv0) == "gmlx" and os.access(argv0, os.X_OK):
+        return os.path.realpath(argv0)
+    return None
 
 
 # ComfyUI folders.
@@ -245,18 +252,20 @@ def _clone_targets() -> list:
 
 
 def _comfy_cli_workspaces() -> list:
-    """comfy-cli's default workspace, and the one its config names."""
-    out = [_home() / "comfy"]
+    """comfy-cli's default workspaces, ~/Documents/comfy on macOS and ~/comfy
+    on Linux, and the default_workspace and recent_workspace of its
+    config.ini."""
+    out = [_home() / "Documents" / "comfy", _home() / "comfy"]
     ini = _app_support() / "comfy-cli" / "config.ini"
     if ini.is_file():
         cp = configparser.ConfigParser()
         try:
             cp.read(ini)
-            ws = cp.get("DEFAULT", "default_workspace", fallback="")
+            named = [cp.get("DEFAULT", k, fallback="")
+                     for k in ("default_workspace", "recent_workspace")]
         except (configparser.Error, OSError):
-            ws = ""
-        if ws:
-            out.append(Path(os.path.expanduser(ws)))
+            named = []
+        out += [Path(os.path.expanduser(ws)) for ws in named if ws]
     return out
 
 
@@ -415,8 +424,9 @@ def no_comfyui_help() -> str:
     """How to get ComfyUI, for a Mac without one."""
     from gmlx import DOCS_URL
 
-    return ("no ComfyUI found in ~/ComfyUI, in comfy-cli's ~/comfy/ComfyUI or among the "
-            "installs of Comfy Desktop. Get ComfyUI one of two ways:\n\n"
+    return ("no ComfyUI found in ~/ComfyUI, in comfy-cli's ~/Documents/comfy/ComfyUI or "
+            "the workspace its config names, or among the installs of Comfy Desktop. Get "
+            "ComfyUI one of two ways:\n\n"
             f"Comfy Desktop, the app: download it from {DESKTOP_DOWNLOAD}, open it and "
             "create an install, then run gmlx comfyui install.\n\n"
             "A ComfyUI folder that gmlx launch comfyui runs:\n"
@@ -452,10 +462,23 @@ def upgrade_comfyui_steps(t: Target) -> str:
     if t.code is not None and (t.code / ".git").exists():
         d = shlex.quote(str(t.code))
         py = shlex.quote(str(t.python)) if t.python else f"{d}/.venv/bin/python"
-        return (f"Update it:\n  git -C {d} pull\n"
-                f"  {py} -m pip install -r {d}/requirements.txt\n"
+        venv_py = t.python or t.code / ".venv" / "bin" / "python"
+        # A venv that uv made has no pip.
+        req = (f"uv pip install --python {py} -r {d}/requirements.txt" if _made_by_uv(venv_py)
+               else f"{py} -m pip install -r {d}/requirements.txt")
+        return (f"Update it:\n  git -C {d} pull\n  {req}\n"
                 "then run gmlx comfyui install again.")
     return "Update it the way you installed it, then run gmlx comfyui install again."
+
+
+def _made_by_uv(python: Path) -> bool:
+    """Whether the venv of ``python`` was made by uv: its pyvenv.cfg has a
+    ``uv`` line."""
+    try:
+        text = (Path(python).parent.parent / "pyvenv.cfg").read_text()
+    except OSError:
+        return False
+    return re.search(r"^\s*uv\s*=", text, re.MULTILINE) is not None
 
 
 def check_version(t: Target, meta: dict) -> tuple[str | None, list]:
@@ -468,8 +491,11 @@ def check_version(t: Target, meta: dict) -> tuple[str | None, list]:
         notes.append(f"the ComfyUI version in {_short(t.custom_nodes.parent)} is unknown; the "
                      f"gmlx nodes need {floor} or newer")
     elif version_tuple(v) < version_tuple(floor):
+        from gmlx import DOCS_URL
+
         raise ComfyError(f"ComfyUI {v} in {_short(t.code)} is older than {floor}, the oldest "
-                         f"the gmlx nodes run on. {upgrade_comfyui_steps(t)}")
+                         f"the gmlx nodes run on. {upgrade_comfyui_steps(t)}\n"
+                         f"The ComfyUI guide:\n  {DOCS_URL}comfyui.html")
     elif version_tuple(v) > version_tuple(tested):
         notes.append(f"ComfyUI {v} is newer than {tested}, the newest this gmlx was tested on")
     if t.policy is not None:
@@ -481,11 +507,26 @@ def check_version(t: Target, meta: dict) -> tuple[str | None, list]:
 # The record.
 
 def load_record() -> dict:
+    """The settings file, or {} when there is none. A file that does not
+    read as a JSON object raises ComfyError: it may hold the user's own
+    settings, so gmlx never writes over it or deletes it."""
+    path = settings_path()
     try:
-        doc = json.loads(settings_path().read_text())
-    except (OSError, ValueError):
+        text = path.read_text()
+    except FileNotFoundError:
         return {}
-    return doc if isinstance(doc, dict) else {}
+    except OSError as e:
+        raise ComfyError(f"cannot read {_short(path)}: {e}") from None
+    try:
+        doc = json.loads(text)
+    except ValueError as e:
+        doc, why = None, f"it is not valid JSON ({e})"
+    else:
+        why = "it holds no JSON object"
+    if not isinstance(doc, dict):
+        raise ComfyError(f"{_short(path)} is not a JSON object: {why}. gmlx leaves the file "
+                         "as it is. Fix it, or move it aside, then run the command again.")
+    return doc
 
 
 _RECORD_KEYS = ("installs", "comfyui_dir", "gmlx_command", "gmlx_install", "gmlx_python",
@@ -504,12 +545,22 @@ def save_record(doc: dict) -> None:
     os.replace(tmp, path)
 
 
+def install_records(doc: dict) -> list:
+    """The well-formed entries of the record's installs: objects whose
+    custom_nodes is a path and whose other fields are text or null. A hand
+    edit can leave anything there, and the rest is skipped."""
+    recs = doc.get("installs")
+    if not isinstance(recs, list):
+        return []
+    return [r for r in recs
+            if isinstance(r, dict) and isinstance(r.get("custom_nodes"), str)
+            and r["custom_nodes"]
+            and all(r.get(k) is None or isinstance(r[k], str)
+                    for k in ("comfyui", "kind", "python", "label"))]
+
+
 def recorded_targets(doc: dict) -> list:
-    out = []
-    for rec in doc.get("installs") or []:
-        if isinstance(rec, dict) and rec.get("custom_nodes"):
-            out.append(Target.from_record(rec))
-    return out
+    return [Target.from_record(rec) for rec in install_records(doc)]
 
 
 def default_image_model() -> str | None:
@@ -572,11 +623,52 @@ class Sync:
     warning: str | None = None
 
 
+_lock_depth = 0
+
+
+@contextlib.contextmanager
+def locked():
+    """Hold the lock on the folder gmlx owns for the pack, so two gmlx
+    processes never refresh or remove the copy at once. A process that
+    holds it can take it again."""
+    global _lock_depth
+    if _lock_depth:
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+        return
+    path = data_root() / ".lock"
+    while True:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            if os.stat(path).st_ino == os.fstat(fd).st_ino:
+                break
+        except FileNotFoundError:
+            pass
+        # An uninstall removed the lock file while this process waited.
+        os.close(fd)
+    _lock_depth = 1
+    try:
+        yield
+    finally:
+        _lock_depth = 0
+        os.close(fd)
+
+
 def sync_copy(source: Path = PACK_SOURCE) -> Sync:
     """Make the copy match the running gmlx. The files go to a temporary
     folder, which a rename makes the new version, and a link swapped in one
     rename points the copy at it, so a ComfyUI that starts meanwhile loads
     either the old pack or the new one, never a mix."""
+    with locked():
+        return _sync_copy(source)
+
+
+def _sync_copy(source: Path) -> Sync:
     want = want_stamp(source)
     link = copy_dir()
     old = read_stamp(link)
@@ -606,8 +698,10 @@ def sync_copy(source: Path = PACK_SOURCE) -> Sync:
         swap.unlink()
     os.symlink(os.path.join("versions", name), swap)
     os.replace(swap, link)
+    # Old versions go, but never the one the copy points at now.
+    keep = {name, os.path.basename(os.readlink(link)) if link.is_symlink() else name}
     for other in versions.iterdir():
-        if other.name != name and not other.name.startswith("moved-"):
+        if other.name not in keep and not other.name.startswith("moved-"):
             shutil.rmtree(other, ignore_errors=True)
     return Sync("refreshed", old, want, warning)
 
@@ -683,15 +777,21 @@ def install(targets: list, *, link_source: bool = False, model: str | None = Non
             remember: bool = True) -> tuple[list, Sync | None]:
     """Check, copy, link and record ``targets``. Raises ComfyError on a
     refusal, before anything is written."""
+    doc = load_record()
     meta = pack_meta()
     checked = [(t, *check_version(t, meta)) for t in targets]
+    with locked():
+        return _install(doc, checked, link_source, model, remember)
+
+
+def _install(doc: dict, checked: list, link_source: bool, model: str | None,
+             remember: bool) -> tuple[list, Sync | None]:
+    targets = [t for t, _v, _notes in checked]
     sync = None if link_source else sync_copy()
     dest = PACK_SOURCE if link_source else copy_dir()
     done = [Installed(t, v, notes, *link_into(t, dest)) for t, v, notes in checked]
-    doc = load_record()
-    keep = [r for r in doc.get("installs") or []
-            if isinstance(r, dict) and r.get("custom_nodes")
-            and os.path.realpath(r["custom_nodes"]) not in {t.key() for t in targets}]
+    keep = [r for r in install_records(doc)
+            if os.path.realpath(r["custom_nodes"]) not in {t.key() for t in targets}]
     doc["installs"] = keep + [t.to_record() for t in targets]
     doc.update(gmlx_command=gmlx_command(), gmlx_install=gmlx_install(),
                gmlx_python=sys.executable, gmlx_version=gmlx_version(),
@@ -727,6 +827,9 @@ def install_lines(done: list, sync: Sync | None, *, prefix: str = "") -> list:
     out = []
     if sync is not None and sync.warning:
         out.append(f"{prefix}warning: {sync.warning}")
+    elif sync is not None and sync.state == "refreshed" and sync.old:
+        out.append(f"{prefix}updated the gmlx nodes from gmlx {sync.old.get('gmlx_version')} "
+                   f"to {sync.new['gmlx_version']}")
     for d in done:
         where = _short(d.target.custom_nodes / LINK_NAME)
         ver = f", ComfyUI {d.version}" if d.version else ""
@@ -743,8 +846,9 @@ def _cmd_install(argv: list, prog: str) -> int:
         prog=prog,
         description="Put the gmlx nodes into ComfyUI, or refresh them. Without "
                     "--comfyui-dir it uses the folders installed before, else the "
-                    "ComfyUI it finds: ~/ComfyUI, comfy-cli's ~/comfy/ComfyUI, the "
-                    "installs of Comfy Desktop and the old ComfyUI desktop app.")
+                    "ComfyUI it finds: ~/ComfyUI, comfy-cli's ~/Documents/comfy/ComfyUI "
+                    "or the workspace its config names, the installs of Comfy Desktop "
+                    "and the old ComfyUI desktop app.")
     ap.add_argument("--comfyui-dir", metavar="DIR",
                     help="The ComfyUI folder, its custom_nodes parent or a Comfy Desktop "
                          "install folder. Run once per ComfyUI that should have the nodes.")
@@ -755,18 +859,14 @@ def _cmd_install(argv: list, prog: str) -> int:
                     help="The image model a new loader node starts on (default: the "
                          "config's default image model).")
     a = ap.parse_args(argv)
-    doc = load_record()
     try:
-        targets = resolve_targets(a.comfyui_dir, doc)
+        targets = resolve_targets(a.comfyui_dir, load_record())
         done, sync = install(targets, link_source=a.link_source, model=a.model)
     except ComfyError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.code
     for line in install_lines(done, sync):
         print(line)
-    if sync is not None and sync.state == "refreshed" and sync.old:
-        print(f"updated the gmlx nodes from gmlx {sync.old.get('gmlx_version')} to "
-              f"{sync.new['gmlx_version']}")
     print("Restart ComfyUI, or Comfy Desktop, if it is running, so it loads the nodes.")
     return 0
 
@@ -789,29 +889,43 @@ def _cmd_uninstall(argv: list, prog: str) -> int:
     ap.add_argument("--comfyui-dir", metavar="DIR",
                     help="Remove the nodes from this ComfyUI only.")
     a = ap.parse_args(argv)
-    doc = load_record()
+    try:
+        doc = load_record()
+        recorded = recorded_targets(doc)
+        if a.comfyui_dir:
+            d = Path(os.path.abspath(os.path.expanduser(a.comfyui_dir)))
+            chosen = [t for t in recorded if t.matches(d)] or [target_for_dir(d)]
+        else:
+            chosen = list(recorded)
+            keys = {t.key() for t in chosen}
+            chosen += [t for t in detect() if t.key() not in keys]
+    except ComfyError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return e.code
+    had_copy = data_root().exists()
+    with locked():
+        return _uninstall(doc, chosen, had_copy)
+
+
+def own_dests(doc: dict) -> list:
+    """Where a link of gmlx's own points: the copy, this gmlx's pack source
+    and the pack folder the record names, which a --link-source install of
+    another gmlx tree wrote."""
     dests = [copy_dir(), PACK_SOURCE]
-    recorded = recorded_targets(doc)
-    if a.comfyui_dir:
-        d = Path(os.path.abspath(os.path.expanduser(a.comfyui_dir)))
-        chosen = [t for t in recorded if t.matches(d)]
-        if not chosen:
-            try:
-                chosen = [target_for_dir(d)]
-            except ComfyError as e:
-                print(f"error: {e}", file=sys.stderr)
-                return e.code
-    else:
-        chosen = list(recorded)
-        keys = {t.key() for t in chosen}
-        chosen += [t for t in detect() if t.key() not in keys]
+    pack_dir = doc.get("pack_dir")
+    if isinstance(pack_dir, str) and pack_dir:
+        dests.append(Path(pack_dir))
+    return dests
+
+
+def _uninstall(doc: dict, chosen: list, had_copy: bool) -> int:
+    dests = own_dests(doc)
     removed = [t for t in chosen if _remove_link(t.custom_nodes, dests)]
     for t in removed:
         print(f"removed {_short(t.custom_nodes / LINK_NAME)}")
     gone = {t.key() for t in chosen}
-    left = [r for r in doc.get("installs") or []
-            if isinstance(r, dict) and r.get("custom_nodes")
-            and os.path.realpath(r["custom_nodes"]) not in gone]
+    left = [r for r in install_records(doc)
+            if os.path.realpath(r["custom_nodes"]) not in gone]
     if left:
         doc["installs"] = left
         save_record(doc)
@@ -820,7 +934,8 @@ def _cmd_uninstall(argv: list, prog: str) -> int:
         return 0
     if data_root().exists():
         shutil.rmtree(data_root())
-        print(f"removed {_short(data_root())}")
+        if had_copy:
+            print(f"removed {_short(data_root())}")
     for k in _RECORD_KEYS:
         doc.pop(k, None)
     if settings_path().exists():
@@ -894,7 +1009,11 @@ def _cmd_status(argv: list, prog: str) -> int:
                                              "whether each ComfyUI fits them.")
     ap.add_argument("--json", action="store_true", help="Print the status as JSON.")
     a = ap.parse_args(argv)
-    s = status()
+    try:
+        s = status()
+    except ComfyError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return e.code
     problems = status_problems(s) if s["installed"] else ["not installed"]
     if a.json:
         print(json.dumps({**s, "problems": problems}, indent=2))
@@ -943,9 +1062,11 @@ def refresh_for_serve() -> str | None:
             return None
         sync = sync_copy()
         cmd = doc.get("gmlx_command")
-        if cmd and not os.path.exists(cmd):
-            doc["gmlx_command"] = gmlx_command()
-            save_record(doc)
+        if not (isinstance(cmd, str) and os.path.exists(cmd)):
+            new = gmlx_command()
+            if new and new != cmd:
+                doc["gmlx_command"] = new
+                save_record(doc)
     except Exception as e:  # noqa: BLE001 - the server starts whatever the pack's state
         return f"could not refresh the ComfyUI node pack: {e}"
     if sync.state == "current":
@@ -957,8 +1078,14 @@ def refresh_for_serve() -> str | None:
 
 
 def remembered_dir(doc: dict | None = None) -> Path | None:
-    """The ComfyUI folder that launch used or install linked last."""
-    doc = load_record() if doc is None else doc
+    """The ComfyUI folder that launch used or install linked last. A
+    settings file that does not load names none here; the install step
+    then says what is wrong with it."""
+    if doc is None:
+        try:
+            doc = load_record()
+        except ComfyError:
+            return None
     d = doc.get("comfyui_dir")
     return Path(d) if isinstance(d, str) and (Path(d) / "main.py").is_file() else None
 

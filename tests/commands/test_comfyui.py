@@ -3,6 +3,7 @@ the record, uninstall, status, the refresh at server start and the doctor
 row, all on fake ComfyUI folders under a temporary home. CPU only."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
@@ -12,6 +13,7 @@ import yaml
 
 import gmlx.commands.comfyui as cu
 import gmlx.commands.doctor as doctor
+from gmlx import DOCS_URL
 
 
 @pytest.fixture(autouse=True)
@@ -88,15 +90,29 @@ def test_detects_the_clone_at_home(home):
 
 
 def test_detects_comfy_cli_workspaces(home):
-    default = make_comfy(home / "comfy" / "ComfyUI")
+    """comfy-cli's macOS default, its Linux default, and the default and
+    recent workspaces of its config."""
+    mac = make_comfy(home / "Documents" / "comfy" / "ComfyUI")
+    linux = make_comfy(home / "comfy" / "ComfyUI")
     other = make_comfy(home / "work" / "ComfyUI")
+    recent = make_comfy(home / "recent" / "ComfyUI")
     ini = _support(home) / "comfy-cli" / "config.ini"
     ini.parent.mkdir(parents=True)
-    ini.write_text(f"[DEFAULT]\ndefault_workspace = {home / 'work'}\n")
+    ini.write_text(f"[DEFAULT]\ndefault_workspace = {home / 'work'}\n"
+                   f"recent_workspace = {recent}\n")
     found = _by_nodes(cu.detect())
     assert {t.kind for t in found.values()} == {"comfy-cli"}
-    assert set(found) == {os.path.realpath(default / "custom_nodes"),
-                          os.path.realpath(other / "custom_nodes")}
+    assert set(found) == {os.path.realpath(code / "custom_nodes")
+                          for code in (mac, linux, other, recent)}
+
+
+def test_the_help_names_comfy_clis_macos_workspace(capsys):
+    assert "comfy-cli's ~/Documents/comfy/ComfyUI or the workspace its config names" in \
+        cu.no_comfyui_help()
+    with pytest.raises(SystemExit):
+        cu.cmd_comfyui(["install", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "comfy-cli's ~/Documents/comfy/ComfyUI or the workspace its config names" in out
 
 
 def test_detects_the_old_desktop_app_through_its_yaml(home):
@@ -219,9 +235,22 @@ def test_refuses_a_comfyui_older_than_the_floor_and_writes_nothing(home):
     assert "0.36.9" in msg and cu.pack_meta()["COMFYUI_FLOOR"] in msg
     assert f"git -C {code} pull" in msg
     assert f"{code / '.venv' / 'bin' / 'python'} -m pip install -r {code}/requirements.txt" in msg
+    assert msg.endswith(f"The ComfyUI guide:\n  {DOCS_URL}comfyui.html")
     assert not cu.data_root().exists()
     assert not os.path.lexists(code / "custom_nodes" / cu.LINK_NAME)
     assert not cu.settings_path().exists()
+
+
+def test_a_venv_that_uv_made_updates_with_uv_pip(home):
+    """A venv from uv has no pip, so the update step runs uv pip."""
+    code = make_comfy(home / "ComfyUI", version="0.36.9", git=True)
+    (code / ".venv" / "pyvenv.cfg").write_text("home = /x\nimplementation = CPython\n"
+                                               "uv = 0.9.2\nversion_info = 3.12.11\n")
+    with pytest.raises(cu.ComfyError) as e:
+        cu.install([cu.target_for_dir(code)])
+    py = code / ".venv" / "bin" / "python"
+    assert f"uv pip install --python {py} -r {code}/requirements.txt" in str(e.value)
+    assert "-m pip" not in str(e.value)
 
 
 @pytest.mark.parametrize("kind, says", [
@@ -280,7 +309,7 @@ def test_install_copies_links_and_records(home, capsys):
     assert doc["comfyui_dir"] == str(code)
     assert doc["default_image_model"] == "z-image-turbo"
     assert doc["gmlx_install"] in ("homebrew", "uv", "pip")
-    assert os.path.isabs(doc["gmlx_command"]) or doc["gmlx_command"] == "gmlx"
+    assert doc["gmlx_command"] == cu.gmlx_command()
     assert doc["gmlx_version"] == cu.gmlx_version()
     assert doc["pack_dir"] == str(copy) and doc["pack_source"] is False
 
@@ -292,6 +321,62 @@ def test_install_keeps_the_users_own_settings(home):
     assert _install_cli() == 0
     doc = json.loads(cu.settings_path().read_text())
     assert doc["base_url"] == "http://h:1" and doc["api_key"] == "k"
+
+
+@pytest.mark.parametrize("text", [
+    '{"base_url": "http://studio:8080", "api_key": "sk-secret",}\n',
+    '["http://studio:8080"]\n',
+])
+def test_a_settings_file_that_is_no_json_object_is_never_written_over(home, capsys, text):
+    """A hand-edited file that does not parse may hold the user's own
+    settings: every action refuses and names it, and none writes over it or
+    deletes it."""
+    code = make_comfy(home / "ComfyUI")
+    path = cu.settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    for verb in (["install"], ["uninstall"], ["status"], ["status", "--json"]):
+        assert cu.cmd_comfyui(verb) == 1, verb
+        err = capsys.readouterr().err
+        assert f"{path} is not a JSON object" in err and "Fix it" in err, verb
+        assert path.read_text() == text, verb
+    assert not os.path.lexists(code / "custom_nodes" / cu.LINK_NAME)
+    assert not cu.data_root().exists()
+    with pytest.raises(cu.ComfyError):
+        cu.install([cu.target_for_dir(code)])
+    assert not cu.data_root().exists() and path.read_text() == text
+    assert "is not a JSON object" in cu.refresh_for_serve()
+    row = doctor.check_comfyui()
+    assert row["status"] == "WARN" and "is not a JSON object" in row["detail"]
+    assert cu.remembered_dir() is None
+    assert path.read_text() == text
+
+
+_BAD_ENTRIES = [5, None, "x", {"custom_nodes": 5}, {"custom_nodes": ""},
+                {"custom_nodes": ["/x"]}, {"custom_nodes": "/x/custom_nodes", "comfyui": 7},
+                {"custom_nodes": "/y", "python": {}}]
+
+
+@pytest.mark.parametrize("installs", [5, "~/ComfyUI", {"custom_nodes": "/x"}, _BAD_ENTRIES])
+def test_malformed_install_records_are_skipped(home, capsys, installs):
+    """A hand edit can leave anything in installs. Status, install,
+    uninstall and doctor skip what is not a record and keep working."""
+    code = make_comfy(home / "ComfyUI")
+    path = cu.settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"installs": installs, "base_url": "http://h:1"}))
+    assert cu.recorded_targets(cu.load_record()) == []
+    assert cu.cmd_comfyui(["status"]) == 1
+    assert doctor.check_comfyui() is None
+    assert cu.cmd_comfyui(["install"]) == 0
+    doc = cu.load_record()
+    assert [r["custom_nodes"] for r in doc["installs"]] == [str(code / "custom_nodes")]
+    assert doctor.check_comfyui()["status"] == "PASS"
+    path.write_text(json.dumps({**doc, "installs": [*doc["installs"], *_BAD_ENTRIES]}))
+    assert cu.cmd_comfyui(["status"]) == 0
+    assert cu.cmd_comfyui(["uninstall"]) == 0
+    assert not os.path.lexists(code / "custom_nodes" / cu.LINK_NAME)
+    assert json.loads(path.read_text()) == {"base_url": "http://h:1"}
 
 
 def test_a_second_install_changes_nothing(home, capsys):
@@ -477,6 +562,111 @@ def test_the_refresh_never_stops_the_server(home, monkeypatch):
     assert "could not refresh" in cu.refresh_for_serve()
 
 
+def _lock_is_held() -> bool:
+    """Whether some open file holds the copy's lock: a new open file of it
+    cannot take the lock then."""
+    fd = os.open(cu.data_root() / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def test_a_refresh_holds_the_lock_while_it_copies(home, monkeypatch):
+    """Two gmlx processes that refresh at once would delete each other's
+    folders, so the copy and the swap happen under one lock."""
+    make_comfy(home / "ComfyUI")
+    assert _install_cli() == 0
+    assert not _lock_is_held()
+    monkeypatch.setattr(cu, "gmlx_version", lambda: "99.0.0")
+    held = []
+    real_copytree, real_replace = cu.shutil.copytree, os.replace
+
+    def copytree(*a, **k):
+        held.append(("copy", _lock_is_held()))
+        return real_copytree(*a, **k)
+
+    def replace(src, dst):
+        held.append(("swap", _lock_is_held()))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cu.shutil, "copytree", copytree)
+    monkeypatch.setattr(cu.os, "replace", replace)
+    assert "99.0.0" in cu.refresh_for_serve()
+    # copytree calls itself for each subfolder.
+    assert {step for step, _ in held} == {"copy", "swap"} and all(h for _, h in held)
+    assert not _lock_is_held()
+
+
+def test_the_version_the_copy_points_at_is_never_deleted(home, monkeypatch):
+    """When another process turns the copy to its own version between the
+    swap and the cleanup, that version stays."""
+    make_comfy(home / "ComfyUI")
+    assert _install_cli() == 0
+    theirs = os.readlink(cu.copy_dir())
+    monkeypatch.setattr(cu, "gmlx_version", lambda: "99.0.0")
+    real_replace = os.replace
+
+    def replace(src, dst):
+        real_replace(src, dst)
+        if str(dst) == str(cu.copy_dir()):
+            tmp = cu.data_root() / ".other"
+            os.symlink(theirs, tmp)
+            real_replace(tmp, dst)
+
+    monkeypatch.setattr(cu.os, "replace", replace)
+    cu.sync_copy()
+    assert os.readlink(cu.copy_dir()) == theirs
+    assert (cu.copy_dir() / "__init__.py").is_file()
+
+
+def test_the_lock_nests_and_is_taken_again_after_an_uninstall_removed_it(home,
+                                                                        monkeypatch):
+    make_comfy(home / "ComfyUI")
+    assert _install_cli() == 0
+    with cu.locked():
+        with cu.locked():
+            assert _lock_is_held()
+        assert _lock_is_held()
+    assert not _lock_is_held()
+    # An uninstall deletes the lock file while this process waits for it:
+    # the lock it then holds must be on the file that is there.
+    real_flock, waited = fcntl.flock, []
+
+    def flock(fd, op):
+        real_flock(fd, op)
+        if not waited:
+            waited.append(fd)
+            os.unlink(cu.data_root() / ".lock")
+
+    monkeypatch.setattr(cu.fcntl, "flock", flock)
+    with cu.locked():
+        assert waited and _lock_is_held()
+    monkeypatch.setattr(cu.fcntl, "flock", real_flock)
+    assert cu.cmd_comfyui(["uninstall"]) == 0
+    assert not cu.data_root().exists()
+
+
+def test_the_refresh_records_the_running_gmlx_when_the_recorded_one_is_gone(
+        home, monkeypatch, tmp_path):
+    make_comfy(home / "ComfyUI")
+    assert _install_cli() == 0
+    doc = cu.load_record()
+    cu.save_record({**doc, "gmlx_command": str(tmp_path / "gone" / "gmlx")})
+    now = _fake_exe(tmp_path / "bin" / "gmlx")
+    monkeypatch.setattr(cu, "gmlx_command", lambda: str(now))
+    assert cu.refresh_for_serve() is None
+    assert cu.load_record()["gmlx_command"] == str(now)
+    # With no command to record, the record stays as it is.
+    cu.save_record({**doc, "gmlx_command": None})
+    monkeypatch.setattr(cu, "gmlx_command", lambda: None)
+    assert cu.refresh_for_serve() is None
+    assert cu.load_record()["gmlx_command"] is None
+
+
 def test_serve_start_refreshes_the_copy(home, monkeypatch, tmp_path, capsys):
     import gmlx.serve.server as srv
     from gmlx.config import ModelCfg, ServerCfg
@@ -537,6 +727,17 @@ def test_uninstall_leaves_a_folder_that_is_not_its_link(home, tmp_path):
     assert os.path.islink(code / "custom_nodes" / "comfyui-gmlx")
 
 
+def test_uninstall_from_another_gmlx_removes_a_source_link(home, monkeypatch, tmp_path):
+    """A --link-source install from one gmlx tree, removed by a gmlx whose
+    own pack is elsewhere: the recorded pack folder makes the link gmlx's."""
+    code = make_comfy(home / "ComfyUI")
+    assert _install_cli("--link-source") == 0
+    monkeypatch.setattr(cu, "PACK_SOURCE", tmp_path / "other-gmlx" / "comfyui_pack")
+    assert cu.cmd_comfyui(["uninstall"]) == 0
+    assert not os.path.lexists(code / "custom_nodes" / cu.LINK_NAME)
+    assert not cu.settings_path().exists()
+
+
 def test_status_before_and_after_install(home, capsys):
     make_comfy(home / "ComfyUI", version="9.0.0")
     assert cu.cmd_comfyui(["status"]) == 1
@@ -581,6 +782,68 @@ def test_doctor_row(home):
     os.unlink(code / "custom_nodes" / "comfyui-gmlx")
     row = doctor.check_comfyui()
     assert row["status"] == "WARN" and "missing" in row["detail"]
+
+
+def test_doctor_passes_a_comfyui_newer_than_tested_with_a_note(home):
+    make_comfy(home / "ComfyUI", version="9.0.0")
+    assert _install_cli() == 0
+    row = doctor.check_comfyui()
+    tested = cu.pack_meta()["COMFYUI_TESTED"]
+    assert row["status"] == "PASS"
+    assert (f"~/ComfyUI/custom_nodes (ComfyUI 9.0.0, newer than {tested}, the newest this "
+            "gmlx was tested on)") in row["detail"]
+
+
+def test_doctor_reports_any_failure_to_read_the_pack_as_a_row(home, monkeypatch):
+    make_comfy(home / "ComfyUI")
+    assert _install_cli() == 0
+
+    def broken(doc=None):
+        raise TypeError("'int' object is not iterable")
+
+    monkeypatch.setattr(cu, "status", broken)
+    row = doctor.check_comfyui()
+    assert row["status"] == "WARN" and "not iterable" in row["detail"]
+
+
+def _fake_exe(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_the_recorded_gmlx_is_the_running_one_never_a_path_lookup(monkeypatch, tmp_path):
+    """Another gmlx on PATH is never recorded: the console script beside the
+    interpreter, else the script this process started from, else none."""
+    monkeypatch.setenv("PATH", str(_fake_exe(tmp_path / "other" / "gmlx").parent))
+    venv = tmp_path / "venv"
+    monkeypatch.setattr(cu.sys, "prefix", str(venv))
+    monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(cu.sys, "argv", [str(tmp_path / "src" / "gmlx" / "__main__.py")])
+    assert cu.gmlx_command() is None
+    started = _fake_exe(tmp_path / "bin" / "gmlx")
+    monkeypatch.setattr(cu.sys, "argv", [str(started), "comfyui", "install"])
+    assert cu.gmlx_command() == os.path.realpath(started)
+    script = _fake_exe(venv / "bin" / "gmlx")
+    assert cu.gmlx_command() == str(script)
+
+
+def test_the_recorded_gmlx_of_homebrew_is_its_link_that_survives_upgrades(monkeypatch,
+                                                                         tmp_path):
+    prefix = tmp_path / "homebrew"
+    libexec = prefix / "Cellar" / "gmlx" / "0.5.0" / "libexec"
+    script = _fake_exe(libexec / "bin" / "gmlx")
+    (prefix / "bin").mkdir()
+    (prefix / "bin" / "gmlx").symlink_to(script)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(cu.sys, "prefix", str(libexec))
+    monkeypatch.setattr(cu.sys, "executable", str(libexec / "bin" / "python"))
+    assert cu.gmlx_command() == str(prefix / "bin" / "gmlx")
+    # A brew link to another formula's gmlx is not this install's.
+    (prefix / "bin" / "gmlx").unlink()
+    (prefix / "bin" / "gmlx").symlink_to(_fake_exe(tmp_path / "elsewhere" / "gmlx"))
+    assert cu.gmlx_command() == str(script)
 
 
 def test_install_kind_is_read_from_where_gmlx_runs(monkeypatch, tmp_path):
