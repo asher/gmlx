@@ -174,7 +174,7 @@
   "mlx_vlm/__init__.py": {"status": "verbatim", "upstream": "dab53f12a80f3afd5cad5533b47ba650a8058279c6bb62ffc063db1b1f8dc94d"},
   "mlx_vlm/__main__.py": {"sha256": "7dade349905bb966c5ee64631fe01cf076c4e5e4f4f9749d01b8e5f38c65051f", "status": "codemod", "upstream": "df76e62ebc786aab1b3b3cf522ae0e80da0668d6d9883ea04d9730ee23409f5b"},
   "mlx_vlm/_stream_cleanup.py": {"status": "verbatim", "upstream": "00bf5797510f088cfe4cea7798dce0f2902af99a956888748ff0ddc11de21c5d"},
-  "mlx_vlm/apc.py": {"sha256": "a016e2d1c151bc3ade9a3c4fd3c75e025ea70341d9d6c8e8c4955743310b2bbe", "status": "edited", "upstream": "67f96ba52d44f31749a5bf6b3355a58948f81e525d23465c78821c3e84d9825b"},
+  "mlx_vlm/apc.py": {"sha256": "3428ee1e60e1cad6d7055eb08d13a4911c18ba33754e868b2c409b150f14a323", "status": "edited", "upstream": "67f96ba52d44f31749a5bf6b3355a58948f81e525d23465c78821c3e84d9825b"},
   "mlx_vlm/apc_adapters.py": {"status": "verbatim", "upstream": "d6acb80ea781df4122fa083bed37cfb9d87f928b23626645d652b112a6802e78"},
   "mlx_vlm/apc_coordinator.py": {"status": "verbatim", "upstream": "a2f1f07f0f103f67abc9e1ffc968eb3447393e3f3a5a68a7cca67d66ceb538db"},
   "mlx_vlm/apc_storage.py": {"status": "verbatim", "upstream": "e58b3a5aa5fa875764194712e38a7752006aeb31db5abe132057c667759e7010"},
