@@ -210,7 +210,7 @@ def _help_epilog(client: str | None, launch_cfg=None) -> str:
         return ("ComfyUI is a separate program, and the gmlx node pack runs its image "
                 "models on the gmlx server. The launch puts the pack into ComfyUI first. "
                 "--comfyui-dir names the ComfyUI folder (the one used last, else "
-                f"{_COMFYUI_HOME}), whose own Python runs it.\n"
+                f"{_COMFYUI_HOME}, else the ComfyUI found), whose own Python runs it.\n"
                 f"The ComfyUI guide covers the pack:\n  {DOCS_URL}comfyui.html\n\n"
                 f"{common}")
     label = CLIENT_INSTALL[client][1]
@@ -1688,7 +1688,8 @@ def _comfyui_dir(a) -> Path:
 
 def _comfyui_target(a):
     """The ComfyUI the launch runs: the folder _comfyui_dir names when it
-    holds main.py, else, with no --comfyui-dir, the one ComfyUI found."""
+    holds main.py, else, with no --comfyui-dir, the one ComfyUI found. No
+    ComfyUI, or a folder that is not one, is a client that is not there."""
     from . import comfyui
 
     d = _comfyui_dir(a)
@@ -1697,12 +1698,12 @@ def _comfyui_target(a):
         if (d / "main.py").is_file() or given:
             return comfyui.target_for_dir(d)
     except comfyui.ComfyError as e:
-        raise LaunchError(str(e), EXIT_FAILURE) from None
+        raise LaunchError(str(e), EXIT_UNAVAILABLE) from None
     found = comfyui.detect()
     runnable = [t for t in found if not t.kind.startswith("desktop")]
     pick = runnable or found
     if not pick:
-        raise LaunchError(comfyui.no_comfyui_help(), EXIT_FAILURE)
+        raise LaunchError(comfyui.no_comfyui_help(), EXIT_UNAVAILABLE)
     if len(pick) > 1:
         raise LaunchError(comfyui.several_help(pick, "gmlx launch comfyui"), EXIT_USAGE)
     return pick[0]
@@ -2720,8 +2721,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                     help="Let --model, or an agent's model setting, unload while idle. "
                          "By default launch asks the server to keep it loaded.")
     ap.add_argument("--comfyui-dir", default=None, metavar="DIR",
-                    help=f"The ComfyUI folder for comfyui (default {_COMFYUI_HOME}). Its "
-                         ".venv or venv runs ComfyUI.")
+                    help=f"The ComfyUI folder for comfyui (default: the folder used last, "
+                         f"else {_COMFYUI_HOME}, else the ComfyUI found). Its .venv or venv "
+                         "runs ComfyUI.")
     ap.add_argument("--dsh-profile", default=None, metavar="NAME",
                     help=f"dsh only: boot this dsh profile with the gmlx overlay "
                          f"instead of the {_DSH_PROFILE} profile, for example "

@@ -1207,9 +1207,9 @@ message that names the cause and the next step. A script can retry after
 | Code | Meaning |
 |------|---------|
 | 0 | `--config-only`, `--remove-home`, `--stop`, `--list` or `--forget-share` finished, or `--detach` started the session. |
-| 1 | Launch refused, such as a folder it will not share or a flag that does not fit this launch. |
-| 2 | A flag is unknown, abbreviated or refused, the command names a client it should not or none where it needs one, or ComfyUI lacks the node pack. |
-| 69 | Something launch needs is missing or does not answer: Apple container, its kernel, the client, the server or a model. |
+| 1 | Launch refused, such as a folder it will not share, a flag that does not fit this launch or a ComfyUI too old for the gmlx nodes. |
+| 2 | A flag is unknown, abbreviated or refused, the command names a client it should not or none where it needs one, or several ComfyUI installs fit. |
+| 69 | Something launch needs is missing or does not answer: Apple container, its kernel, the client or ComfyUI's environment, the server or a model. |
 | 75 | Something is busy: a project another launch uses, a volume or port in use, or a server that is starting or full. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
 | 125 | The container could not open its connections to the Mac, such as when the image already uses a port that launch forwards. |

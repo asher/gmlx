@@ -9,6 +9,7 @@ import pytest
 
 import gmlx.commands.comfyui as comfyui
 import gmlx.commands.launch as launch
+from gmlx import DOCS_URL
 
 _MODELS = [
     {"id": "qwen3-4b", "default": False},
@@ -121,10 +122,10 @@ def test_a_real_pack_folder_moves_aside(tmp_path, capsys):
             for p in (d / "custom_nodes" / ".disabled").iterdir()] == [True]
 
 
-def test_no_comfyui_prints_how_to_get_it_and_exits_1(monkeypatch, capsys):
+def test_no_comfyui_prints_how_to_get_it_and_exits_69(monkeypatch, capsys):
     started = _no_server(monkeypatch)
     rc, calls = _run(["comfyui"])
-    assert rc == launch.EXIT_FAILURE == 1 and calls == {} and started == []
+    assert rc == launch.EXIT_UNAVAILABLE == 69 and calls == {} and started == []
     err = capsys.readouterr().err
     assert "no ComfyUI found in ~/ComfyUI," in err
     assert "https://comfy.org/download" in err
@@ -136,18 +137,76 @@ def test_a_comfyui_too_old_names_the_floor_and_its_upgrade(tmp_path, monkeypatch
     d = _comfy(tmp_path, version="0.30.1", git=True)
     started = _no_server(monkeypatch)
     rc, calls = _run(["comfyui", "--comfyui-dir", str(d)])
-    assert rc == launch.EXIT_FAILURE and calls == {} and started == []
+    assert rc == launch.EXIT_FAILURE == 1 and calls == {} and started == []
     err = capsys.readouterr().err
     assert "ComfyUI 0.30.1" in err and comfyui.pack_meta()["COMFYUI_FLOOR"] in err
     assert f"git -C {d} pull" in err
+    assert f"{DOCS_URL}comfyui.html" in err
     assert not os.path.lexists(d / "custom_nodes" / "comfyui-gmlx")
 
 
-def test_a_folder_that_is_not_comfyui_exits_1(tmp_path, monkeypatch, capsys):
+def test_the_old_desktop_app_is_refused_with_the_new_app(monkeypatch, capsys):
+    """The old ComfyUI desktop app stays below the floor: launch names
+    Comfy Desktop instead and exits 1."""
+    home = Path(os.environ["HOME"])
+    base = home / "Documents" / "ComfyUI"
+    (base / "custom_nodes").mkdir(parents=True)
+    app = home / "App" / "ComfyUI"
+    (app / "custom_nodes").mkdir(parents=True)
+    (app / "main.py").write_text("")
+    (app / "comfyui_version.py").write_text('__version__ = "0.3.76"\n')
+    cfg = home / "Library" / "Application Support" / "ComfyUI" / "extra_models_config.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(f"comfyui_desktop:\n  base_path: {base}\n  custom_nodes: custom_nodes/\n"
+                   f"desktop_extensions:\n  custom_nodes: {app / 'custom_nodes'}\n")
+    started = _no_server(monkeypatch)
+    rc, calls = _run(["comfyui"])
+    assert rc == launch.EXIT_FAILURE and calls == {} and started == []
+    err = capsys.readouterr().err
+    assert "ComfyUI 0.3.76" in err and "old ComfyUI desktop app" in err
+    assert "https://comfy.org/download" in err
+    assert not os.path.lexists(base / "custom_nodes" / "comfyui-gmlx")
+
+
+def test_a_pack_from_another_gmlx_version_is_replaced(tmp_path, monkeypatch, capsys):
+    d = _comfy(tmp_path)
+    monkeypatch.setattr(comfyui, "gmlx_version", lambda: "0.0.1")
+    assert _run(["comfyui", "--comfyui-dir", str(d)])[0] == 0
+    assert comfyui.read_stamp(comfyui.copy_dir())["gmlx_version"] == "0.0.1"
+    capsys.readouterr()
+    monkeypatch.setattr(comfyui, "gmlx_version", lambda: "99.0.0")
+    rc, calls = _run(["comfyui", "--comfyui-dir", str(d)])
+    assert rc == 0 and calls["binary"] == str(d / ".venv" / "bin" / "python")
+    out = capsys.readouterr().out
+    assert "[launch] updated the gmlx nodes from gmlx 0.0.1 to 99.0.0" in out
+    assert comfyui.read_stamp(d / "custom_nodes" / "comfyui-gmlx")["gmlx_version"] == "99.0.0"
+
+
+def test_a_folder_that_is_not_comfyui_exits_69(tmp_path, monkeypatch, capsys):
     started = _no_server(monkeypatch)
     rc, _calls = _run(["comfyui", "--comfyui-dir", str(tmp_path / "nothing")])
-    assert rc == launch.EXIT_FAILURE and started == []
+    assert rc == launch.EXIT_UNAVAILABLE and started == []
     assert "is not a ComfyUI folder" in capsys.readouterr().err
+
+
+def test_a_settings_file_that_does_not_load_is_named_and_kept(monkeypatch, capsys):
+    d = _comfy(Path(os.environ["HOME"]))
+    path = comfyui.settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"api_key": "k",}\n')
+    started = _no_server(monkeypatch)
+    rc, calls = _run(["comfyui"])
+    assert rc == launch.EXIT_FAILURE and calls == {} and started == []
+    assert f"{path} is not a JSON object" in capsys.readouterr().err
+    assert path.read_text() == '{"api_key": "k",}\n'
+    assert not os.path.lexists(d / "custom_nodes" / "comfyui-gmlx")
+
+
+def test_the_comfyui_dir_help_names_each_default(capsys):
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "(default: the folder used last, else ~/ComfyUI, else the ComfyUI found)" in out
 
 
 def test_a_comfyui_without_its_environment_says_how_to_make_one(tmp_path, monkeypatch,
