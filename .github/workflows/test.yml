@@ -244,7 +244,8 @@ jobs:
           # A new branch has no usable base, so its push runs the job.
           if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack \
-              gmlx/commands/comfyui.py gmlx/commands/cli.py gmlx/__init__.py gmlx/__main__.py \
+              gmlx/commands/comfyui.py gmlx/commands/cli.py gmlx/commands/__init__.py \
+              gmlx/__init__.py gmlx/__main__.py \
               .github/workflows/test.yml)
           else
             changed=all
