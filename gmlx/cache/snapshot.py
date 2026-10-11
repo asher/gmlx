@@ -1621,10 +1621,11 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
                 entries.append(states[arr_i])
                 arr_i += 1
         # The upstream writer drops zero-array shards; the sentinel keeps
-        # an all-placeholder skeleton persistable. Stripped on lookup.
+        # an all-placeholder skeleton persistable. Stripped on lookup. It
+        # also records b_full, where a QSA tail starts.
         import mlx.core as mx
         sent = ArraysCache(size=1)
-        sent.cache[0] = mx.array([float(p)], dtype=mx.float32)
+        sent.cache[0] = mx.array([float(p), float(b_full)], dtype=mx.float32)
         entries.append(sent)
         from gmlx._vendor.mlx_vlm import apc as _apc
         tid = tuple(ids)
@@ -1937,8 +1938,10 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         return None, 0
     # Strip the skeleton writer's sentinel: exact by length when the live
     # layout is known, by shape otherwise.
+    sent = None
     if layout is not None:
         if len(entries) == len(layout) + 1:
+            sent = entries[-1]
             entries = entries[:-1]
     else:
         last = entries[-1] if entries else None
@@ -1946,7 +1949,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 and not isinstance(last, (KVCache, RotatingKVCache))
                 and hasattr(last, "cache") and len(last.cache) == 1
                 and last.cache[0] is not None
-                and getattr(last.cache[0], "size", 0) == 1):
+                and getattr(last.cache[0], "size", 0) in (1, 2)):
+            sent = last
             entries = entries[:-1]
     from .kvarn_cache import KVarNKVCache
     tags = []
@@ -1970,6 +1974,16 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     salted = ckpt_extra_hash(int(salt_at(extra_hash, p)))
     bs = int(manager.block_size)
     b_full = _ckpt_block_prefix(p, bs)
+    if any(_is_qsa(t) for t in tags):
+        # A QSA tail starts at the writer's b_full, and the disk namespace
+        # does not key on block size.
+        sv = getattr(sent, "cache", [None])[0]
+        b_w = (int(sv[1].item())
+               if sv is not None and getattr(sv, "size", 0) == 2 else -1)
+        if b_w != b_full:
+            _log.info("APC ckpt disk miss: qsa block prefix %d != %d",
+                      b_w, b_full)
+            return None, 0
     n_kv = sum(1 for t in tags if _is_chain(t))
     blocks = []
     wblocks = []

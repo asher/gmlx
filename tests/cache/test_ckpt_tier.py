@@ -28,6 +28,7 @@ from gmlx.cache.snapshot import (
     retirement_store,
     sidecar_extra_hash,
 )
+from helpers import pin_apc_arms
 
 # Runtime-origin cache classes: the hybrid stacks these fixtures mimic are
 # built by the mlx-vlm generate stack (vlm-origin classes since 0.6.4).
@@ -1128,32 +1129,47 @@ def _qsa_hybrid_cache(p, seed=0):
     return caches
 
 
-@pytest.mark.parametrize("p", [33, 32])
-def test_qsa_disk_restart_roundtrip(tmp_path, p):
-    """A QSA skeleton restores at its own p after a restart. The restore
-    grows the key buffer past the stored tail, so the tail length cannot
-    come from the buffer width."""
+def _qsa_disk_restart(tmp_path, monkeypatch, p, write_bs, read_bs):
     from gmlx.cache.apc_qsa import install_qsa_apc_support
 
+    apc = pin_apc_arms(monkeypatch)
+    monkeypatch.setattr(apc, "_kq_qsa_apc", False, raising=False)
     install_qsa_apc_support()
     cache = _qsa_hybrid_cache(p, seed=4)
     ids = list(range(7, 7 + p))
     disk = DiskBlockStore(root=tmp_path, namespace="m")
-    man = APCManager(num_blocks=64, block_size=16, disk=disk)
+    man = APCManager(num_blocks=64, block_size=write_bs, disk=disk)
     assert ckpt_store(man, ids, cache, extra_hash=3)
     disk.close()
     disk2 = DiskBlockStore(root=tmp_path, namespace="m")
-    man2 = APCManager(num_blocks=64, block_size=16, disk=disk2)
+    man2 = APCManager(num_blocks=64, block_size=read_bs, disk=disk2)
     try:
         warm, got = ckpt_lookup(man2, ids + [77], extra_hash=3)
-        assert got == p
-        for w, o in zip(warm, cache):
-            if hasattr(o, "update_and_fetch_qsa"):
-                assert type(w) is type(o) and int(w.offset) == p
-                for a, b in zip(w.state, o.state):
-                    assert mx.array_equal(a, b).item()
     finally:
         disk2.close()
+    return cache, warm, got
+
+
+@pytest.mark.parametrize("p", [33, 32])
+def test_qsa_disk_restart_roundtrip(tmp_path, monkeypatch, p):
+    """A QSA skeleton restores at its own p after a restart. The restore
+    grows the key buffer past the stored tail, so the tail length cannot
+    come from the buffer width."""
+    cache, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, p, 16, 16)
+    assert got == p and len(warm) == len(cache)
+    for w, o in zip(warm, cache):
+        if hasattr(o, "update_and_fetch_qsa"):
+            assert type(w) is type(o) and int(w.offset) == p
+            for a, b in zip(w.state, o.state):
+                assert mx.array_equal(a, b).item()
+
+
+def test_qsa_disk_restart_other_block_size_misses(tmp_path, monkeypatch):
+    """The disk namespace does not key on block size. A QSA skeleton
+    written at another block size misses, since its tail starts at the
+    writer's block boundary."""
+    _, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, 33, 16, 64)
+    assert (warm, got) == (None, 0)
 
 
 class _HybridModel:
