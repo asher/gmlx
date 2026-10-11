@@ -225,8 +225,9 @@ jobs:
           scripts/upstream_canary.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
   pack-changes:
-    # Whether a push or pull request changes the ComfyUI node pack or its
-    # tests, which the comfyui-pack job needs outside the schedule and tags.
+    # Whether a push or pull request changes the ComfyUI node pack, its
+    # tests, the verb that installs it or this workflow, which the
+    # comfyui-pack job needs outside the schedule and tags.
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
     runs-on: ubuntu-latest
     outputs:
@@ -241,7 +242,8 @@ jobs:
         run: |
           # A new branch has no usable base, so its push runs the job.
           if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-            changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack)
+            changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack \
+              gmlx/commands/comfyui.py .github/workflows/test.yml)
           else
             changed=all
           fi
@@ -253,9 +255,10 @@ jobs:
     # makes. Each run clones ComfyUI and installs torch, so the job runs on
     # the weekly schedule, on a release tag, and when a push or pull request
     # changes the pack or its tests. It checks the ComfyUI commit that the
-    # release tests pin and a ComfyUI release: on the schedule the newest
-    # tag, otherwise the version that gmlx/comfyui_pack/version.py names as
-    # tested. On the schedule it also runs ComfyUI master, which only
+    # release tests pin, the oldest ComfyUI release the pack supports, as
+    # gmlx/comfyui_pack/version.py names it, and a newer release: on the
+    # schedule the newest tag, otherwise the version that version.py names
+    # as tested. On the schedule it also runs ComfyUI master, which only
     # reports.
     needs: [pack-changes]
     if: >-
@@ -263,11 +266,12 @@ jobs:
       || github.ref_type == 'tag'
       || needs.pack-changes.outputs.pack == 'true') }}
     runs-on: macos-26
+    timeout-minutes: 60
     continue-on-error: ${{ matrix.comfyui == 'master' }}
     strategy:
       fail-fast: false
       matrix:
-        comfyui: [pin, release, master]
+        comfyui: [pin, floor, release, master]
         exclude:
           - comfyui: ${{ github.event_name == 'schedule' && 'none' || 'master' }}
     steps:
@@ -282,6 +286,7 @@ jobs:
         run: |
           case "${{ matrix.comfyui }}" in
             pin) ref=$PIN ;;
+            floor) ref=v$(sed -n 's/^COMFYUI_FLOOR = "\(.*\)"$/\1/p' gmlx/comfyui_pack/version.py) ;;
             release)
               if [ "${{ github.event_name }}" = schedule ]; then
                 ref=$(git ls-remote --tags --refs "$REPO" 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -1)
