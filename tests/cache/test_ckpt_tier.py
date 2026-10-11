@@ -22,6 +22,7 @@ from gmlx.cache.snapshot import (
     _CKPT_SALT,
     _SIDECAR_SALT,
     ckpt_extra_hash,
+    ckpt_layout,
     ckpt_lookup,
     ckpt_store,
     ckpt_supported,
@@ -1129,6 +1130,25 @@ def _qsa_hybrid_cache(p, seed=0):
     return caches
 
 
+def _qsa_store(tmp_path, cache, ids, bs):
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=bs, disk=disk)
+    try:
+        assert ckpt_store(man, ids, cache, extra_hash=3)
+    finally:
+        disk.close()
+
+
+def _qsa_restart_lookup(tmp_path, cache, ids, bs):
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=bs, disk=disk)
+    try:
+        return ckpt_lookup(man, ids + [77], extra_hash=3,
+                           layout=ckpt_layout(cache, bs))
+    finally:
+        disk.close()
+
+
 def _qsa_disk_restart(tmp_path, monkeypatch, p, write_bs, read_bs):
     from gmlx.cache.apc_qsa import install_qsa_apc_support
 
@@ -1137,16 +1157,8 @@ def _qsa_disk_restart(tmp_path, monkeypatch, p, write_bs, read_bs):
     install_qsa_apc_support()
     cache = _qsa_hybrid_cache(p, seed=4)
     ids = list(range(7, 7 + p))
-    disk = DiskBlockStore(root=tmp_path, namespace="m")
-    man = APCManager(num_blocks=64, block_size=write_bs, disk=disk)
-    assert ckpt_store(man, ids, cache, extra_hash=3)
-    disk.close()
-    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
-    man2 = APCManager(num_blocks=64, block_size=read_bs, disk=disk2)
-    try:
-        warm, got = ckpt_lookup(man2, ids + [77], extra_hash=3)
-    finally:
-        disk2.close()
+    _qsa_store(tmp_path, cache, ids, write_bs)
+    warm, got = _qsa_restart_lookup(tmp_path, cache, ids, read_bs)
     return cache, warm, got
 
 
@@ -1164,12 +1176,32 @@ def test_qsa_disk_restart_roundtrip(tmp_path, monkeypatch, p):
                 assert mx.array_equal(a, b).item()
 
 
-def test_qsa_disk_restart_other_block_size_misses(tmp_path, monkeypatch):
-    """The disk namespace does not key on block size. A QSA skeleton
-    written at another block size misses, since its tail starts at the
-    writer's block boundary."""
-    _, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, 33, 16, 64)
+def test_qsa_disk_restart_each_block_size_restores_its_own(tmp_path,
+                                                           monkeypatch):
+    """The disk namespace does not key on block size, and the exact lookup
+    matches on tokens and salt. Skeletons for one prompt at two block
+    sizes each restore at their own, whichever the index lists first."""
+    cache, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, 33, 16, 64)
     assert (warm, got) == (None, 0)
+    ids = list(range(7, 40))
+    _qsa_store(tmp_path, cache, ids, 64)
+    for bs in (16, 64):
+        warm, got = _qsa_restart_lookup(tmp_path, cache, ids, bs)
+        assert got == 33, bs
+
+
+def test_qsa_disk_restart_backstop_refuses_other_block_prefix(
+        tmp_path, monkeypatch, caplog):
+    """Without the block size in the salt, the sentinel's b_full still
+    refuses a skeleton whose tail starts elsewhere."""
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setattr(cs, "_skeleton_salt", lambda s, layout, bs: s)
+    with caplog.at_level("INFO", logger="gmlx.cache.snapshot"):
+        _, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, 33, 16, 64)
+    assert (warm, got) == (None, 0)
+    assert any("qsa block prefix 32 != 0" in r.getMessage()
+               for r in caplog.records)
 
 
 class _HybridModel:

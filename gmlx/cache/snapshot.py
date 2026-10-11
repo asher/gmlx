@@ -665,6 +665,7 @@ def rotating_invariant(cache):
 
 _CKPT_SALT = 0x7C_4B_D2_0A_86_E5_93
 _BOUNDED_SALT = 0x3A_91_C7_55_0E_D4_26
+_QSA_SKEL_SALT = 0x2E_B4_19_C6_57_A0_D3
 
 _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
 # Strip-on-extend: newest N restorable checkpoints per chain, plus the
@@ -731,6 +732,17 @@ def _is_rot(tag: str) -> bool:
 
 def _is_qsa(tag: str) -> bool:
     return tag.startswith("qsa")
+
+
+def _skeleton_salt(salted, layout, block_size: int):
+    """Disk skeleton salt. A QSA skeleton's tail starts at its writer's
+    block boundary and the disk namespace has no block size, so QSA
+    skeletons key on it: one written at another block size, or by a release
+    without the b_full sentinel, is unreachable rather than loaded and
+    refused."""
+    if layout and any(_is_qsa(t) for t in layout):
+        return salted ^ (_QSA_SKEL_SALT + int(block_size))
+    return salted
 
 
 def _is_chain(tag: str) -> bool:
@@ -1634,7 +1646,8 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         # that feeds both the sequence hash and the persisted-metadata
         # check -- a write missing either half is a permanent restart
         # miss on every salted (kvarn) boot. One variable salts both.
-        salted = int(salted) ^ int(
+        salted = int(_skeleton_salt(
+            salted, layout, manager.block_size)) ^ int(
             getattr(manager, "_exact_extra_salt", 0) or 0)
         khash = _apc._sequence_hash(tid, extra_hash=salted,
                                     block_size=manager.block_size)
@@ -1931,7 +1944,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     import mlx.core as mx
     from .kv_cache import KVCache, RotatingKVCache
 
-    salted = ckpt_extra_hash(extra_hash)
+    salted = _skeleton_salt(ckpt_extra_hash(extra_hash), layout,
+                            manager.block_size)
     entries, p = manager.lookup_exact_cache(
         ids, extra_hash=salted, min_prefix_tokens=min_prefix_tokens)
     if entries is None or p <= 0:
