@@ -183,6 +183,29 @@ jobs:
           brew audit --strict --formula asher/gmlx/gmlx
           brew install asher/gmlx/gmlx
           brew test asher/gmlx/gmlx
+      - name: The ComfyUI node pack installs from the formula
+        # gmlx comfyui install finds the pack inside the Homebrew install,
+        # copies it, links it into a fake ComfyUI folder and records the
+        # install kind. Uninstall removes the link again.
+        run: |
+          comfy="$RUNNER_TEMP/ComfyUI"
+          mkdir -p "$comfy/custom_nodes"
+          touch "$comfy/main.py"
+          tested=$( (gmlx comfyui status --json || true) \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["comfyui_tested"])')
+          echo "__version__ = \"$tested\"" > "$comfy/comfyui_version.py"
+          gmlx comfyui install --comfyui-dir "$comfy"
+          test -f "$comfy/custom_nodes/comfyui-gmlx/__init__.py"
+          test -f "$comfy/custom_nodes/comfyui-gmlx/example_workflows/z-image-turbo-t2i.json"
+          gmlx comfyui status --json > "$RUNNER_TEMP/comfyui-status.json"
+          python3 - "$RUNNER_TEMP/comfyui-status.json" <<'EOF'
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          assert s["copy"] == "current" and s["gmlx_install"] == "homebrew", s
+          assert not s["problems"], s["problems"]
+          EOF
+          gmlx comfyui uninstall
+          test ! -e "$comfy/custom_nodes/comfyui-gmlx"
       - name: Revert the formula
         if: failure()
         working-directory: tap

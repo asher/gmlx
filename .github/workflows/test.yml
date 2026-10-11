@@ -3,11 +3,14 @@ name: tests
 on:
   push:
     branches: [main]
+    # A release tag runs only the comfyui-pack job.
+    tags: ["v*.*.*"]
   pull_request:
   schedule:
-    # Weekly drift report (the drift job): what the newest mlx-vlm and mlx-lm
-    # releases change in the copy under gmlx/_vendor. The test and lint jobs
-    # do not run on the schedule.
+    # Weekly: the drift report (the drift job), what the newest mlx-vlm and
+    # mlx-lm releases change in the copy under gmlx/_vendor, and the
+    # comfyui-pack job against ComfyUI's newest release and master. The test
+    # and lint jobs do not run on the schedule.
     - cron: "0 6 * * 1"
 
 concurrency:
@@ -16,7 +19,7 @@ concurrency:
 
 jobs:
   test:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && github.ref_type != 'tag'
     # macos-26, not older images: the published mlx-kquant wheels are tagged
     # macosx_26_0_arm64 (built with MACOSX_DEPLOYMENT_TARGET=26.2 for the
     # Xcode 26.5 SDK miscompile workaround) - an older runner can't install
@@ -151,6 +154,7 @@ jobs:
   guest-entry:
     # The static Linux binary `gmlx launch --container` ships, built the way
     # the release job builds it and tested as is, without a VM.
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
@@ -174,7 +178,7 @@ jobs:
           python scripts/check_guest_entry_dist.py
 
   lint:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -219,3 +223,93 @@ jobs:
         run: |
           set -o pipefail
           scripts/upstream_canary.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+  pack-changes:
+    # Whether a push or pull request changes the ComfyUI node pack or its
+    # tests, which the comfyui-pack job needs outside the schedule and tags.
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    outputs:
+      pack: ${{ steps.diff.outputs.pack }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # A new branch has no usable base, so its push runs the job.
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack)
+          else
+            changed=all
+          fi
+          echo "pack=$([ -n "$changed" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  comfyui-pack:
+    # The ComfyUI node pack against real ComfyUI and the stub server in
+    # tests/comfyui_pack, loaded through the link that `gmlx comfyui install`
+    # makes. Each run clones ComfyUI and installs torch, so the job runs on
+    # the weekly schedule, on a release tag, and when a push or pull request
+    # changes the pack or its tests. It checks the ComfyUI commit that the
+    # release tests pin and a ComfyUI release: on the schedule the newest
+    # tag, otherwise the version that gmlx/comfyui_pack/version.py names as
+    # tested. On the schedule it also runs ComfyUI master, which only
+    # reports.
+    needs: [pack-changes]
+    if: >-
+      ${{ !cancelled() && (github.event_name == 'schedule'
+      || github.ref_type == 'tag'
+      || needs.pack-changes.outputs.pack == 'true') }}
+    runs-on: macos-26
+    continue-on-error: ${{ matrix.comfyui == 'master' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        comfyui: [pin, release, master]
+        exclude:
+          - comfyui: ${{ github.event_name == 'schedule' && 'none' || 'master' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: ComfyUI and its requirements
+        env:
+          PIN: 8d534945ebd53cff61e8def81757c6a6c1b9cf2d
+          REPO: https://github.com/comfyanonymous/ComfyUI
+        run: |
+          case "${{ matrix.comfyui }}" in
+            pin) ref=$PIN ;;
+            release)
+              if [ "${{ github.event_name }}" = schedule ]; then
+                ref=$(git ls-remote --tags --refs "$REPO" 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -1)
+              else
+                ref=v$(sed -n 's/^COMFYUI_TESTED = "\(.*\)"$/\1/p' gmlx/comfyui_pack/version.py)
+              fi ;;
+            master) ref=master ;;
+          esac
+          git init -q comfyui
+          git -C comfyui fetch -q --depth 1 "$REPO" "$ref"
+          git -C comfyui checkout -q FETCH_HEAD
+          echo "ComfyUI $ref at $(git -C comfyui rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          python -m venv comfyui/.venv
+          comfyui/.venv/bin/pip install -q -r comfyui/requirements.txt
+      - name: Install the pack with gmlx
+        # The comfyui verb imports none of gmlx's dependencies, so it runs
+        # from the checkout.
+        run: python -m gmlx comfyui install --comfyui-dir "$PWD/comfyui"
+      - name: Unit and headless suites
+        run: |
+          comfyui/.venv/bin/python tests/comfyui_pack/run_tests.py \
+            --comfy "$PWD/comfyui" --label "${{ matrix.comfyui }}" --out "$PWD/pack-results" \
+            --pack "$PWD/comfyui/custom_nodes/comfyui-gmlx"
+      - name: Report
+        if: always()
+        run: cat pack-results/*.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: comfyui-pack-${{ matrix.comfyui }}
+          path: pack-results
