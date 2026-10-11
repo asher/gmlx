@@ -189,7 +189,10 @@ class GmlxAPCManager(_apc.APCManager):
 
         from gmlx.serve.capacity import working_budget_bytes
         from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
-        from gmlx.gen.prefill_decay import untracked_weight_bytes
+        from gmlx.gen.prefill_decay import (
+            streamed_tracked_bytes,
+            untracked_weight_bytes,
+        )
 
         costs = kv_layer_costs(model)
         budget = working_budget_bytes()
@@ -201,7 +204,8 @@ class GmlxAPCManager(_apc.APCManager):
         # Stashed for stats: lets /metrics report committed pool bytes so
         # harnesses can separate evictable cache growth from real residue.
         self._pool_per_token_bytes = per_tok
-        weights = float(mx.get_active_memory()) + untracked_weight_bytes()
+        weights = (float(mx.get_active_memory()) + untracked_weight_bytes()
+                   - streamed_tracked_bytes())
         free = max(0.0, budget - weights)
         if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
             self._exact_budget_bytes = free * _EXACT_BUDGET_FRACTION

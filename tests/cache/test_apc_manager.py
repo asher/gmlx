@@ -212,9 +212,12 @@ def _full_manager(monkeypatch):
     the limit, so the free-RAM reading decides the headroom."""
     import mlx.core as mx
 
+    import gmlx.gen.prefill_decay as prefill_decay
+
     monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 * GB)
     monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
     monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(prefill_decay, "streamed_tracked_bytes", lambda: 0.0)
     m = GmlxAPCManager(num_blocks=64, block_size=16)
     k = mx.zeros((1, 2, 512, 16), mx.float16)
     m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
@@ -285,6 +288,60 @@ def test_only_a_make_room_cache_clear_rereads_the_cached_free_ram(
     assert not empty._make_room(8 * GB)
     assert cache[0] == 0
     assert len(reads) == 2
+
+
+def _streamed_registry(monkeypatch):
+    import gmlx.gen.prefill_decay as prefill_decay
+
+    for name in ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS",
+                 "_STREAMED_TRACKED", "_STREAMED_CAP", "_BUILD_CREDIT"):
+        monkeypatch.setattr(prefill_decay, name, {})
+    return prefill_decay
+
+
+@pytest.mark.parametrize("cls", ["vendored", "gmlx"])
+def test_make_room_credits_streamed_weight_bytes(monkeypatch, cls):
+    """A streamed model's mapped file sits in the active count. Its
+    streamed bytes are page cache, so the working-set term credits them,
+    and the free-RAM term still bounds the room."""
+    import mlx.core as mx
+
+    pd = _streamed_registry(monkeypatch)
+    free = [24 * GB]
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: free[0])
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 106 * GB)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    manager = apc.APCManager if cls == "vendored" else GmlxAPCManager
+    m = manager(num_blocks=64, block_size=16)
+    m._working_set_bytes = 112 * GB
+    m.memory_reserve_bytes = 11 * GB
+    assert not m._make_room()
+    pd.note_streamed_tracked_bytes(27 * GB, key=("/models/q4e.gguf",),
+                                   source="table")
+    assert m._memory_headroom() == 24 * GB
+    assert m._make_room()
+    free[0] = 4 * GB
+    assert not m._make_room()
+
+
+def test_autosize_credits_streamed_weight_bytes(monkeypatch):
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES"):
+        monkeypatch.delenv(k, raising=False)
+    import mlx.core as mx
+
+    pd = _streamed_registry(monkeypatch)
+    streamed = pd.streamed_tracked_bytes
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    monkeypatch.setattr(pd, "streamed_tracked_bytes", streamed)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 106 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    assert m.num_blocks == 2048 and m._exact_budget_bytes == 0
+    pd.note_streamed_tracked_bytes(27 * GB, key=("/models/q4e.gguf",),
+                                   source="table")
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    assert m.num_blocks > 2048 and m._exact_budget_bytes > 0
 
 
 def test_governor_eviction_drops_the_cached_free_ram(monkeypatch):
@@ -439,6 +496,7 @@ def _autosize_rig(monkeypatch, budget):
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
+    monkeypatch.setattr(prefill_decay, "streamed_tracked_bytes", lambda: 0.0)
     monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
 
 

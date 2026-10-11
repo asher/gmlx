@@ -3262,7 +3262,12 @@ class APCManager:
     def _memory_headroom(self) -> int:
         limits = []
         if self._working_set_bytes is not None:
-            limits.append(self._working_set_bytes - mx.get_active_memory())
+            # gmlx: streamed weight bytes sit in the active count but are
+            # page cache, so they count as room, as in headroom_bytes.
+            from gmlx.gen.prefill_decay import streamed_tracked_bytes
+
+            limits.append(self._working_set_bytes - mx.get_active_memory()
+                          + int(streamed_tracked_bytes()))
         available = _free_ram_bytes()
         if available is not None:
             # MLX's allocator cache can be released, unlike live model/cache state.
