@@ -1109,6 +1109,53 @@ def test_disk_restart_roundtrip(tmp_path):
         disk2.close()
 
 
+def _qsa_hybrid_cache(p, seed=0):
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    caches = []
+    for i, kind in enumerate(LAYOUT):
+        mx.random.seed(seed * 1000 + i)
+        if kind == "kv":
+            c = QSAKVCache(ratio=4)
+            c.update_and_fetch_qsa(mx.random.normal((1, H, p, D)),
+                                   mx.random.normal((1, H, p, D)),
+                                   mx.random.normal((1, p, D)))
+        else:
+            c = ArraysCache(size=2)
+            c.cache = [mx.random.normal((1, 3, D)),
+                       mx.random.normal((1, H, D, D))]
+        caches.append(c)
+    return caches
+
+
+@pytest.mark.parametrize("p", [33, 32])
+def test_qsa_disk_restart_roundtrip(tmp_path, p):
+    """A QSA skeleton restores at its own p after a restart. The restore
+    grows the key buffer past the stored tail, so the tail length cannot
+    come from the buffer width."""
+    from gmlx.cache.apc_qsa import install_qsa_apc_support
+
+    install_qsa_apc_support()
+    cache = _qsa_hybrid_cache(p, seed=4)
+    ids = list(range(7, 7 + p))
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids, cache, extra_hash=3)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = APCManager(num_blocks=64, block_size=16, disk=disk2)
+    try:
+        warm, got = ckpt_lookup(man2, ids + [77], extra_hash=3)
+        assert got == p
+        for w, o in zip(warm, cache):
+            if hasattr(o, "update_and_fetch_qsa"):
+                assert type(w) is type(o) and int(w.offset) == p
+                for a, b in zip(w.state, o.state):
+                    assert mx.array_equal(a, b).item()
+    finally:
+        disk2.close()
+
+
 class _HybridModel:
     def make_cache(self):
         return [KVCache(), ArraysCache(size=2)]

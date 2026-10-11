@@ -2048,10 +2048,15 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 qsa_c = _is_qsa(tag)
                 if qsa_c:
                     # QSA skeleton entries stamp offset=p and carry only
-                    # the unaligned tail in keys; the tail length is the
-                    # stored width, not the offset.
+                    # the unaligned tail, p - b_full rows, at the head of
+                    # keys. Neither the offset nor the width says so: the
+                    # restore grows the buffer for the next prefill.
                     ek = getattr(e, "keys", None)
-                    t_len = int(ek.shape[2]) if ek is not None else 0
+                    t_len = p - b_full if ek is not None else 0
+                    if ek is not None and int(ek.shape[2]) < t_len:
+                        _log.info("APC ckpt disk miss: qsa tail %d < %d",
+                                  int(ek.shape[2]), t_len)
+                        return None, 0
                 else:
                     has_tail = getattr(e, "keys", None) is not None
                     t_len = int(e.offset) if has_tail else 0

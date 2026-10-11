@@ -1442,11 +1442,13 @@ class QSAKVCache(KVCache):
 
     @property
     def state(self):
+        # An aligned prompt-cache skeleton holds no K/V rows (the block
+        # chain holds them), only ik.
         k, v, ik = self.keys, self.values, self.ik
         n = self.offset
-        if n != k.shape[2]:
+        if k is not None and n != k.shape[2]:
             k, v = k[..., :n, :], v[..., :n, :]
-        base = (k, v, ik[:, :n])
+        base = (k, v, None if ik is None else ik[:, :n])
         return base if self.pos is None else base + (self.pos[:, :, :n],)
 
     @state.setter
@@ -1456,7 +1458,8 @@ class QSAKVCache(KVCache):
         else:
             self.keys, self.values, self.ik = v
             self.pos = None
-        self.offset = self._kb.shape[2]
+        rows = self._kb if self._kb is not None else self._ib
+        self.offset = 0 if rows is None else int(rows.shape[-2])
         self.blocks, self._bt, self.n_blocks, self._nbb = None, None, 0, 0
 
     @classmethod
