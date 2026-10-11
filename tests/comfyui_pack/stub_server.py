@@ -6,6 +6,7 @@ wire format against an independent reader and writer.
 
 Usage: stub_server.py [--port 0] [--step-delay-ms 0] [--contract 1.0]
                       [--api-key KEY] [--cond-tokens 32] [--gmlx-version stub]
+                      [--no-contract-field]
 It prints one JSON line with its address, then serves until killed.
 Test routes outside the contract: GET /stub/log, POST /stub/log/reset,
 POST /stub/forget (drop every tensor, adapter and table held).
@@ -122,6 +123,7 @@ class State:
         self.contract = tuple(int(v) for v in a.contract.split("."))
         self.api_key = a.api_key
         self.gmlx_version = a.gmlx_version
+        self.no_contract_field = a.no_contract_field
         self.delay = a.step_delay_ms / 1000.0
         self.cond_tokens = a.cond_tokens
         self.manifests = load_manifests()
@@ -221,9 +223,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._gate(sub):
             return
         if sub == "/capabilities":
-            return self._json(200, {
+            # A server from before the contract names none.
+            contract = {} if st.no_contract_field else {
                 "contract": {"major": st.contract[0], "minor": st.contract[1]},
-                "min_client": {"major": st.contract[0], "minor": 0}, "gmlx_version": st.gmlx_version,
+                "min_client": {"major": st.contract[0], "minor": 0}}
+            return self._json(200, {
+                **contract, "gmlx_version": st.gmlx_version,
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae"],
@@ -506,6 +511,7 @@ def main():
     ap.add_argument("--contract", default="1.0")
     ap.add_argument("--api-key", default=None)
     ap.add_argument("--gmlx-version", default="stub")
+    ap.add_argument("--no-contract-field", action="store_true")
     ap.add_argument("--cond-tokens", type=int, default=32)
     serve(ap.parse_args())
 

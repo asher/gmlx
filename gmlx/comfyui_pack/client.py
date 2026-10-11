@@ -370,15 +370,20 @@ class StepClient:
         server = caps.get("gmlx_version") or "unknown"
         ours = f"{CONTRACT[0]}.{CONTRACT[1]}"
         if major != CONTRACT[0] or (int(mc.get("major", 0)), int(mc.get("minor", 0))) > CONTRACT:
-            what = (f"the server speaks step contract {major}.{minor}" if major != CONTRACT[0]
-                    else f"the server needs a client of step contract {mc.get('major')}."
-                         f"{mc.get('minor')} or newer")
+            if major < 0:
+                what = "the server names no step contract"
+            elif major != CONTRACT[0]:
+                what = f"the server speaks step contract {major}.{minor}"
+            else:
+                what = (f"the server needs a client of step contract {mc.get('major')}."
+                        f"{mc.get('minor')} or newer")
+            # A server with no contract field predates the contract: upgrade it.
             raise GmlxVersionError(
                 f"gmlx: {what}, and these gmlx nodes speak {ours}. The server runs gmlx "
                 f"{server} and the nodes are from gmlx {PACK_VERSION}. "
-                + (_restart_server() if 0 <= major < CONTRACT[0] else _restart_comfyui()))
+                + (_restart_server() if major < CONTRACT[0] else _restart_comfyui()))
         self.version_note = None
-        if server != PACK_VERSION and str(server)[:1].isdigit():
+        if server != PACK_VERSION and _released(server):
             self.version_note = (f"the server runs gmlx {server} and these nodes are from gmlx "
                                  f"{PACK_VERSION}. "
                                  + (_restart_server() if _newer(PACK_VERSION, server)
@@ -524,6 +529,14 @@ class StepClient:
         self.call_json("POST", "/interrupt", {"run": run}, what="the interrupt")
 
 
+def _released(version) -> bool:
+    """Whether a server's gmlx version is a release, so a skew with the nodes
+    means something: not a source tree's 0.0.0 or a version with a local
+    ``+`` part."""
+    v = str(version)
+    return v[:1].isdigit() and "+" not in v and _newer(v, "0.0.0")
+
+
 def _newer(a: str, b: str) -> bool:
     """Whether version ``a`` is newer than ``b``, by their leading numbers."""
     def nums(v):
@@ -553,7 +566,9 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
                start_timeout: float = 180.0) -> StepClient:
     """The shared client of a server, with the handshake done. When the
     server is down and ``start_server`` is set, runs ``gmlx serve``, which
-    starts detached, and waits for ``/health``."""
+    starts detached, and waits for ``/health``. The loader and status nodes
+    call it once per run, never per step, so the handshake runs each time:
+    the server at the address may have restarted as another gmlx."""
     url = resolve_base_url(base_url)
     key = resolve_api_key()
     doc = settings.load()
@@ -561,8 +576,6 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
         c = _CLIENTS.get((url, key))
         if c is None:
             c = _CLIENTS[(url, key)] = StepClient(url, key)
-    if c.capabilities is not None and c.health():
-        return c
     if not c.health():
         exe = settings.gmlx_command(doc)
         if exe is None:
@@ -573,8 +586,14 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
             raise GmlxError(f"gmlx: no server answers at {url}; run `gmlx serve`, or set the "
                             "loader's server_url or GMLX_BASE_URL")
         log.info("gmlx: starting `gmlx serve` for %s", url)
-        subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as e:
+            raise GmlxError(f"gmlx: no server answers at {url}, and "
+                            f"{settings.not_installed(doc, f'{exe} does not run ({e.strerror or e})')}"
+                            ) from None
         deadline = time.monotonic() + start_timeout
         while not c.health():
             if time.monotonic() > deadline:

@@ -16,6 +16,7 @@ import shlex
 import shutil
 
 INSTALL_URL = "https://asher.github.io/gmlx/installation.html"
+GUIDE_URL = "https://asher.github.io/gmlx/comfyui.html"
 FALLBACK_MODEL = "z-image-turbo"
 
 # The folder ComfyUI imported the pack through: the comfyui-gmlx link in its
@@ -43,7 +44,8 @@ def gmlx_command(doc: dict | None = None) -> str | None:
     shell PATH, so the recorded path comes first."""
     doc = load() if doc is None else doc
     rec = doc.get("gmlx_command")
-    if isinstance(rec, str) and os.path.isabs(rec) and os.access(rec, os.X_OK):
+    if isinstance(rec, str) and os.path.isabs(rec) and os.path.isfile(rec) \
+            and os.access(rec, os.X_OK):
         return rec
     return shutil.which("gmlx")
 
@@ -95,11 +97,14 @@ def leftovers(doc: dict | None = None) -> list:
     return out
 
 
-def not_installed(doc: dict | None = None) -> str:
-    """The message for a pack whose gmlx is gone."""
+def not_installed(doc: dict | None = None, cause: str | None = None) -> str:
+    """The message for a pack whose gmlx is gone, or whose gmlx command
+    does not run, as ``cause`` says."""
     doc = load() if doc is None else doc
-    rec = doc.get("gmlx_command")
-    gone = f"{rec} does not exist and " if isinstance(rec, str) and rec else ""
+    if cause is None:
+        rec = doc.get("gmlx_command")
+        gone = f"{rec} does not exist and " if isinstance(rec, str) and rec else ""
+        cause = f"{gone}no gmlx command is on PATH"
     paths = " and ".join(leftovers(doc))
-    return (f"gmlx is not installed: {gone}no gmlx command is on PATH. Install gmlx again "
-            f"({INSTALL_URL}), or remove the gmlx nodes by deleting {paths}")
+    return (f"gmlx is not installed: {cause}. Install gmlx again ({INSTALL_URL}), or remove "
+            f"the gmlx nodes by deleting {paths}")
