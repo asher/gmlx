@@ -644,6 +644,11 @@ def test_bench_via_steps_gives_the_latents_of_sample(env, capsys, guidance,
         return rec, x
 
     monkeypatch.setattr(cmd, "bench_run_steps", spy)
+    # A real encoder's template gives the empty negative prompt rows. With
+    # none, the guided velocity is NaN, and the CPU stream crashes on the
+    # mean.
+    monkeypatch.setattr(_OwnedEncoder, "token_ids",
+                        lambda self, prompt: [0] + [ord(c) for c in prompt])
     rc = umbrella_main(["image", "bench"] + env.base[2:] + [
         "--sizes", "48x32", "--steps", "3", "--runs", "2", "--warmup", "1",
         "--seed", "5", "--via-steps", "--json", *guidance])
@@ -660,9 +665,8 @@ def test_bench_via_steps_gives_the_latents_of_sample(env, capsys, guidance,
     kw = {"cfg": 3.0, "neg": api.encode_text(fresh, "")} if guidance else {}
     want = _direct(env.pipes[0], rec["settings"]["prompt"], 5, steps=3, **kw)
     assert len(latents) == 3
-    # The toy encoder gives the empty negative prompt no rows, so a guided
-    # velocity is NaN on both paths.
-    assert all(np.array_equal(x, want, equal_nan=True) for x in latents)
+    assert np.isfinite(want).all()
+    assert all(np.array_equal(x, want) for x in latents)
     assert "via the step routes: transport" in io.err
     # The bench's runs and routes end with it.
     from gmlx.serve.image_steps import STATE
