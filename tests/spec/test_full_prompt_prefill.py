@@ -155,16 +155,11 @@ def _build_text_prompt(tokenizer, n_tokens, start=0):
     return ids[:cut]
 
 
-def _last_logits(model, ids):
-    """Logits of the last position of an un-chunked forward of the bare
-    language model. A model that skips its head on request and returns its
-    final hidden states gets the head on the last row only: logits for every
-    position of a 16k prompt take 7.6 GiB. Any other model keeps the full
-    head."""
-    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
-    lm = model.language_model
-    cache = make_prompt_cache(lm)
-    input_ids = mx.array([ids], dtype=mx.int32)
+def _head_last(lm, input_ids, cache):
+    """Last-row logits of one forward. A model that skips its head on
+    request and returns its final hidden states gets the head on the last
+    row only: logits for every position of a 16k prompt take 7.6 GiB. Any
+    other model keeps the full head."""
     if hasattr(lm, "speculative_logits_from_hidden"):
         out = lm(input_ids, cache=cache, return_hidden=True, skip_logits=True)
         hidden = getattr(out, "hidden_states", None)
@@ -175,6 +170,26 @@ def _last_logits(model, ids):
         out = lm(input_ids, cache=cache)
     logits = out.logits if hasattr(out, "logits") else out
     return logits[0, -1]
+
+
+def _last_logits(model, ids, step=None, tail=1):
+    """Logits of the last position from the bare language model: one
+    un-chunked forward, or with ``step`` the engine's order, which runs
+    ``ids`` up to its last ``tail`` tokens in chunks of ``step`` and then
+    each of those tokens alone, as decode does."""
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
+    lm = model.language_model
+    cache = make_prompt_cache(lm)
+    if step is None:
+        chunks = [ids]
+    else:
+        body = list(ids[:-tail])
+        chunks = [body[i:i + step] for i in range(0, len(body), step)]
+        chunks += [[t] for t in ids[-tail:]]
+    for chunk in chunks:
+        row = _head_last(lm, mx.array([chunk], dtype=mx.int32), cache)
+        mx.eval(row)
+    return row
 
 
 def _ref_first_token(model, ids):
@@ -190,30 +205,52 @@ def _ref_first_token(model, ids):
 # below, a rounding fork lands within this band.
 _NEAR_TIE_LOGITS = 1.0
 
+# A model can move its logits by more than the band with the evaluation
+# order alone: on gemma-4-26B-A4B one forward and the engine's order differ
+# by several logits, and stock llama.cpp changes its own greedy token with
+# its batch size on the same file. There the bare model forks too: its two
+# orders disagree on which candidate wins.
+_ENGINE_STEP = 2048
 
-def _greedy_margin(model, ids, a, b):
+
+def _greedy_margin(model, ids, a, b, step=None, tail=1):
     """Bare-model logit gap logits[a] - logits[b] at the position after ids
-    (teacher-forced, fp16 KV)."""
-    row = _last_logits(model, ids).astype(mx.float32)
+    (teacher-forced, fp16 KV), in one forward or in the engine's order (see
+    _last_logits)."""
+    row = _last_logits(model, ids, step, tail).astype(mx.float32)
     return float(row[a] - row[b])
 
 
-def _assert_greedy_match(model, ids, ref, got, label):
+def _assert_greedy_match(model, ids, ref, got, label, step=_ENGINE_STEP):
     """``got`` reproduces ``ref`` token for token, except that the first
-    divergence is accepted at a near tie (see _NEAR_TIE_LOGITS); the two
-    streams have legitimately forked there, so nothing after it is
-    compared."""
+    divergence is accepted as a rounding fork: a near tie (see
+    _NEAR_TIE_LOGITS), or a position where the bare model's own two
+    evaluation orders pick different candidates. The two streams have
+    legitimately forked there, so nothing after it is compared. ``step`` is
+    the engine's prefill step."""
     n = min(len(ref), len(got))
     for i in range(n):
         if ref[i] == got[i]:
             continue
-        margin = _greedy_margin(model, list(ids) + list(ref[:i]), ref[i], got[i])
-        assert abs(margin) <= _NEAR_TIE_LOGITS, (
+        prefix = list(ids) + list(ref[:i])
+        margin = _greedy_margin(model, prefix, ref[i], got[i])
+        if abs(margin) <= _NEAR_TIE_LOGITS:
+            return
+        ordered = _greedy_margin(model, prefix, ref[i], got[i], step=step,
+                                 tail=i + 1)
+        assert (margin > 0) != (ordered > 0), (
             f"{label}: diverged at token {i}: {list(got[:i + 2])} vs "
-            f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits "
-            f"(a rounding fork is within {_NEAR_TIE_LOGITS})"
+            f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits in "
+            f"one forward, {ordered:+.3f} in the engine's order (a rounding "
+            f"fork is within {_NEAR_TIE_LOGITS}, or the two orders disagree)"
         )
         return
+
+
+def _assert_first_token(model, ids, ref, got, label, step=_ENGINE_STEP):
+    """``got``, the engine's first token, is the bare model's greedy first
+    token ``ref``, or a rounding fork from it (see _assert_greedy_match)."""
+    _assert_greedy_match(model, ids, [ref], [got], label, step=step)
 
 
 def _make_processor(tokenizer):
@@ -364,10 +401,8 @@ def test_long_prompt_first_token_parity(mtp_model):
     ref = _ref_first_token(model, ids)
     toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
     assert len(toks) > 0, "no tokens generated"
-    assert toks[0] == ref, (
-        f"first token diverged: mtp={toks[0]} ref={ref} -- "
-        f"hidden corruption in chunked prefill"
-    )
+    _assert_first_token(model, ids, ref, toks[0],
+                        "first token (hidden corruption in chunked prefill)")
 
 
 def test_short_prompt_first_token_parity(mtp_model):
@@ -379,9 +414,7 @@ def test_short_prompt_first_token_parity(mtp_model):
     ref = _ref_first_token(model, ids)
     toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
     assert len(toks) > 0, "no tokens generated"
-    assert toks[0] == ref, (
-        f"first token diverged: mtp={toks[0]} ref={ref}"
-    )
+    _assert_first_token(model, ids, ref, toks[0], "first token")
 
 
 def test_multi_length_first_token_parity(mtp_model):
@@ -410,9 +443,8 @@ def test_multi_length_first_token_parity(mtp_model):
         ids, ref = refs[length]
         toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
         assert len(toks) > 0, f"length={length}: no tokens generated"
-        assert toks[0] == ref, (
-            f"length={length}: first token diverged: mtp={toks[0]} ref={ref}"
-        )
+        _assert_first_token(model, ids, ref, toks[0],
+                            f"length={length}: first token")
 
 
 def test_prefill_step_env_override(monkeypatch):
@@ -473,7 +505,7 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
 
     monkeypatch.setattr(PromptProcessingBatch, "prompt_step", spy)
 
-    ids = _build_prompt(tokenizer, 300)
+    ids = _build_text_prompt(tokenizer, 300)
     ref = _ref_first_token(model, ids)
     processor = _make_processor(tokenizer)
     prompt_kwargs_list = _embed_prompts(model, [ids])
@@ -497,7 +529,7 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
     gen.close()
     assert steps == {97}, f"env step not used in chunked prefill: {steps}"
     assert len(toks) > 0, "no tokens generated"
-    assert toks[0] == ref, f"first token diverged: mtp={toks[0]} ref={ref}"
+    _assert_first_token(model, ids, ref, toks[0], "first token", step=97)
 
 
 def test_long_context_token_parity(mtp_model):
@@ -525,9 +557,8 @@ def test_long_context_token_parity(mtp_model):
             del model._spec_prefix_cache
         toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
         assert len(toks) > 0, f"length={length}: no tokens generated"
-        assert toks[0] == ref, (
-            f"length={length}: first token diverged: mtp={toks[0]} ref={ref}"
-        )
+        _assert_first_token(model, ids, ref, toks[0],
+                            f"length={length}: first token")
 
 
 # ---------------------------------------------------------------------------
@@ -1138,12 +1169,8 @@ def test_batch_b2_first_token_parity(mtp_model):
     batch_results = _run_mtp(model, drafter, tokenizer, [ids_a, ids_b], N_DECODE)
     assert len(batch_results[0]) > 0, "prompt A: no tokens"
     assert len(batch_results[1]) > 0, "prompt B: no tokens"
-    assert batch_results[0][0] == ref_a, (
-        f"prompt A: batch={batch_results[0][0]} ref={ref_a}"
-    )
-    assert batch_results[1][0] == ref_b, (
-        f"prompt B: batch={batch_results[1][0]} ref={ref_b}"
-    )
+    _assert_first_token(model, ids_a, ref_a, batch_results[0][0], "prompt A")
+    _assert_first_token(model, ids_b, ref_b, batch_results[1][0], "prompt B")
 
 
 def test_batch_b3_mixed_lengths(mtp_model):
@@ -1162,11 +1189,10 @@ def test_batch_b3_mixed_lengths(mtp_model):
     ref_c = _ref_first_token(model, ids_c)
 
     results = _run_mtp(model, drafter, tokenizer, [ids_a, ids_b, ids_c], N_DECODE)
-    for i, (toks, ref) in enumerate(zip(results, [ref_a, ref_b, ref_c])):
+    for i, (ids, toks, ref) in enumerate(
+            zip([ids_a, ids_b, ids_c], results, [ref_a, ref_b, ref_c])):
         assert len(toks) > 0, f"prompt {i}: no tokens"
-        assert toks[0] == ref, (
-            f"prompt {i}: batch={toks[0]} ref={ref}"
-        )
+        _assert_first_token(model, ids, ref, toks[0], f"prompt {i}")
 
 
 # ---------------------------------------------------------------------------
@@ -1233,14 +1259,10 @@ def test_continuous_batch_injection(mtp_model):
     toks_second = results[uids_second[0]]
     assert len(toks_first) > 0, "first request: no tokens"
     assert len(toks_second) > 0, "injected request: no tokens"
-    assert toks_first[0] == ref_first, (
-        f"first request first token {toks_first[0]} != ref {ref_first} -- "
-        f"corrupted before injection"
-    )
-    assert toks_second[0] == ref_second, (
-        f"injected request first token {toks_second[0]} != ref {ref_second} -- "
-        f"injection corrupted output"
-    )
+    _assert_first_token(model, ids_first, ref_first, toks_first[0],
+                        "first request (corrupted before injection)")
+    _assert_first_token(model, ids_second, ref_second, toks_second[0],
+                        "injected request (injection corrupted output)")
 
 
 def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
@@ -1538,12 +1560,9 @@ def test_apc_hit_on_injected_request(mtp_model):
     assert len(toks_first) > 0, "first request: no tokens"
     assert len(toks_second) > 0, "injected request: no tokens"
 
-    assert toks_first[0] == ref_first, (
-        f"request A first token {toks_first[0]} != ref {ref_first} -- "
-        f"corrupted before injection"
-    )
-    assert toks_second[0] == ref_second, (
-        f"injected APC-hit request B first token {toks_second[0]} != "
-        f"ref {ref_second} -- APC-restored cache offset misaligned "
-        f"after BatchKVCache.extend injection"
-    )
+    _assert_first_token(model, prefix_ids, ref_first, toks_first[0],
+                        "request A (corrupted before injection)")
+    _assert_first_token(
+        model, ids_second, ref_second, toks_second[0],
+        "injected APC-hit request B (APC-restored cache offset misaligned "
+        "after BatchKVCache.extend injection)")
