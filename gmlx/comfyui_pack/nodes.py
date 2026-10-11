@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The nodes of ComfyUI-gmlx.
+"""The gmlx nodes for ComfyUI.
 
 The loaders give a stock MODEL, CLIP and VAE whose work runs on a gmlx
 server, so stock sampler, LoRA, conditioning and image nodes compose with
@@ -9,22 +9,26 @@ for the custom sampler nodes.
 
 from __future__ import annotations
 
-import os
-
 import torch
 
 import comfy.samplers
 
+from . import settings
 from .client import GmlxError, GmlxRefusal, get_client
 from .clip import GmlxCLIP
 from .model import load_model
 from .vae import GmlxVAE
+from .version import __version__
 
 CATEGORY = "gmlx"
 
+MANAGED = (f"These gmlx nodes are from gmlx {__version__}. gmlx manages them and updates "
+           "them with itself, so ComfyUI-Manager and Comfy Desktop do not list or update "
+           "them.")
+
 
 def _default_model() -> str:
-    return os.environ.get("GMLX_DEFAULT_IMAGE_MODEL") or "z-image-turbo"
+    return settings.default_image_model()
 
 
 def _common():
@@ -138,12 +142,15 @@ class GmlxServerStatus:
     FUNCTION = "status"
     CATEGORY = CATEGORY
     OUTPUT_NODE = True
-    DESCRIPTION = "The gmlx server's view of an image model: residency and memory."
+    DESCRIPTION = ("The gmlx server's view of an image model: residency and memory. The "
+                   "gmlx nodes are managed by gmlx and update with it.")
 
     def status(self, model_name, server_url="", start_server=False):
+        note = None
         try:
             client = get_client(server_url, start_server=start_server)
             s = client.status(model_name.strip())
+            note = client.version_note
         except GmlxError as e:
             text = str(e)
         else:
@@ -151,6 +158,8 @@ class GmlxServerStatus:
             gib = {k: round(v / (1 << 30), 2) for k, v in mem.items() if isinstance(v, (int, float))}
             text = (f"{s.get('model')}: {s.get('family')} {s.get('variant') or ''}, "
                     f"resident {s.get('resident')}, memory GiB {gib}")
+        lines = [text] + ([f"gmlx: {note}"] if note else []) + [MANAGED]
+        text = "\n".join(lines)
         return {"ui": {"text": [text]}, "result": (text,)}
 
 

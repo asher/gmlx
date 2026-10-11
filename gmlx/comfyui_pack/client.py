@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import selectors
-import shutil
 import struct
 import subprocess
 import threading
@@ -33,6 +32,9 @@ import weakref
 
 import numpy as np
 import torch
+
+from . import settings
+from .version import __version__ as PACK_VERSION
 
 PREFIX = "/internal/image-steps/v1"
 CONTENT_TYPE = "application/vnd.gmlx.tensors+safetensors"
@@ -167,22 +169,12 @@ def _version(t) -> int | None:
 
 # Discovery.
 
-def settings_path() -> str:
-    return os.environ.get("GMLX_COMFY_SETTINGS") or os.path.expanduser(
-        "~/.config/gmlx/comfyui.json")
-
-
-def _settings() -> dict:
-    try:
-        with open(settings_path()) as f:
-            doc = json.load(f)
-        return doc if isinstance(doc, dict) else {}
-    except (OSError, ValueError):
-        return {}
+settings_path = settings.settings_path
+_settings = settings.load
 
 
 def _gmlx_status_url() -> str | None:
-    exe = shutil.which("gmlx")
+    exe = settings.gmlx_command()
     if exe is None:
         return None
     try:
@@ -245,6 +237,7 @@ class StepClient:
         self.known_tables: set = set()
         self._hash_memo: dict = {}
         self.capabilities: dict | None = None
+        self.version_note: str | None = None
         self.stats = {"tensor_uploads": 0, "adapter_uploads": 0, "table_puts": 0,
                       "steps": 0, "connections": 0, "missing_retries": 0}
 
@@ -374,16 +367,23 @@ class StepClient:
         c = caps.get("contract") or {}
         major, minor = int(c.get("major", -1)), int(c.get("minor", 0))
         mc = caps.get("min_client") or {"major": major, "minor": 0}
-        if major != CONTRACT[0]:
-            side = "the ComfyUI-gmlx node pack" if major > CONTRACT[0] else "the gmlx server"
+        server = caps.get("gmlx_version") or "unknown"
+        ours = f"{CONTRACT[0]}.{CONTRACT[1]}"
+        if major != CONTRACT[0] or (int(mc.get("major", 0)), int(mc.get("minor", 0))) > CONTRACT:
+            what = (f"the server speaks step contract {major}.{minor}" if major != CONTRACT[0]
+                    else f"the server needs a client of step contract {mc.get('major')}."
+                         f"{mc.get('minor')} or newer")
             raise GmlxVersionError(
-                f"gmlx: the server speaks step contract {major}.{minor} and this node "
-                f"pack speaks {CONTRACT[0]}.{CONTRACT[1]}. Upgrade {side}.")
-        if (int(mc.get("major", 0)), int(mc.get("minor", 0))) > CONTRACT:
-            raise GmlxVersionError(
-                f"gmlx: the server needs a client of step contract {mc.get('major')}."
-                f"{mc.get('minor')} or newer and this node pack speaks "
-                f"{CONTRACT[0]}.{CONTRACT[1]}. Upgrade the ComfyUI-gmlx node pack.")
+                f"gmlx: {what}, and these gmlx nodes speak {ours}. The server runs gmlx "
+                f"{server} and the nodes are from gmlx {PACK_VERSION}. "
+                + (_restart_server() if 0 <= major < CONTRACT[0] else _restart_comfyui()))
+        self.version_note = None
+        if server != PACK_VERSION and str(server)[:1].isdigit():
+            self.version_note = (f"the server runs gmlx {server} and these nodes are from gmlx "
+                                 f"{PACK_VERSION}. "
+                                 + (_restart_server() if _newer(PACK_VERSION, server)
+                                    else _restart_comfyui()))
+            log.warning("gmlx: %s", self.version_note)
         self.capabilities = caps
         return caps
 
@@ -524,6 +524,27 @@ class StepClient:
         self.call_json("POST", "/interrupt", {"run": run}, what="the interrupt")
 
 
+def _newer(a: str, b: str) -> bool:
+    """Whether version ``a`` is newer than ``b``, by their leading numbers."""
+    def nums(v):
+        out = []
+        for part in str(v).split(".")[:3]:
+            digits = "".join(ch for ch in part if ch.isdigit())
+            out.append(int(digits) if digits else 0)
+        return tuple(out)
+    return nums(a) > nums(b)
+
+
+def _restart_comfyui() -> str:
+    return ("Restart ComfyUI to load the nodes of the gmlx the server runs. If they stay "
+            "older, run `gmlx comfyui install`.")
+
+
+def _restart_server() -> str:
+    return (f"Restart the server with `gmlx restart`. If it stays older, "
+            f"{settings.upgrade_step()}.")
+
+
 _CLIENTS: dict = {}
 _CLIENTS_LOCK = threading.Lock()
 
@@ -535,6 +556,7 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
     starts detached, and waits for ``/health``."""
     url = resolve_base_url(base_url)
     key = resolve_api_key()
+    doc = settings.load()
     with _CLIENTS_LOCK:
         c = _CLIENTS.get((url, key))
         if c is None:
@@ -542,10 +564,13 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
     if c.capabilities is not None and c.health():
         return c
     if not c.health():
-        exe = shutil.which("gmlx")
-        if not start_server or exe is None:
-            hint = ("run `gmlx serve`" if exe else "install gmlx and run `gmlx serve`")
-            raise GmlxError(f"gmlx: no server answers at {url}; {hint}, or set the "
+        exe = settings.gmlx_command(doc)
+        if exe is None:
+            raise GmlxError(f"gmlx: no server answers at {url}, and "
+                            f"{settings.not_installed(doc)}. For a gmlx server elsewhere, set "
+                            "the loader's server_url or GMLX_BASE_URL")
+        if not start_server:
+            raise GmlxError(f"gmlx: no server answers at {url}; run `gmlx serve`, or set the "
                             "loader's server_url or GMLX_BASE_URL")
         log.info("gmlx: starting `gmlx serve` for %s", url)
         subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

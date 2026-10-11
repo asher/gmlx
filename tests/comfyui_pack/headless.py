@@ -315,7 +315,7 @@ class Cases:
         r = await self.s.run(wf)
         err = r.get("error") or {}
         self.check("error on the loader", r["status"] == "error" and str(err.get("node_id")) == "1", err)
-        self.check("names the side to upgrade", "Upgrade the ComfyUI-gmlx node pack"
+        self.check("says to restart ComfyUI", "Restart ComfyUI"
                    in str(err.get("exception_message")), err.get("exception_message"))
 
     async def qwen_edit(self):

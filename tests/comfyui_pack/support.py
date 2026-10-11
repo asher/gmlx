@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 import urllib.request
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -67,15 +68,14 @@ class Stub:
 
 
 def load_client():
-    """client.py alone, without ComfyUI."""
-    name = "gmlx_client_standalone"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, os.path.join(PACK, "client.py"))
-    m = importlib.util.module_from_spec(spec)
-    sys.modules[name] = m
-    spec.loader.exec_module(m)
-    return m
+    """client.py and the pack modules it imports, without ComfyUI: the pack
+    folder as a package whose __init__ does not run."""
+    name = "gmlx_pack_standalone"
+    if name not in sys.modules:
+        pkg = types.ModuleType(name)
+        pkg.__path__ = [PACK]
+        sys.modules[name] = pkg
+    return importlib.import_module(f"{name}.client")
 
 
 _COMFY = {}

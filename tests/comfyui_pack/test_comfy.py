@@ -8,9 +8,12 @@ Needs ``COMFYUI_DIR``. Run with ``python -m unittest`` from this folder."""
 from __future__ import annotations
 
 import gc
+import importlib
+import json
 import logging
 import os
 import statistics
+import sys
 import tempfile
 import threading
 import time
@@ -109,6 +112,62 @@ class Compat(unittest.TestCase):
             self.assertIn(P.compat.comfyui_version(), str(e.exception))
         finally:
             P.compat.NAMES = names
+
+
+class StandIns(unittest.TestCase):
+    """The nodes that load when the full import fails: the same names,
+    inputs and outputs, and an error that names the change and the upgrade."""
+
+    def setUp(self):
+        self.stub = importlib.import_module(f"{P.__name__}.stub")
+        self.env = os.environ.get("GMLX_COMFY_SETTINGS")
+        d = tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "comfyui.json")
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_install": "homebrew", "gmlx_command": sys.executable}, f)
+
+    def tearDown(self):
+        if self.env is None:
+            os.environ.pop("GMLX_COMFY_SETTINGS", None)
+        else:
+            os.environ["GMLX_COMFY_SETTINGS"] = self.env
+
+    def test_the_stand_ins_match_the_nodes(self):
+        fakes, names = self.stub.nodes(ImportError("probe"))
+        self.assertEqual(set(fakes), set(P.NODE_CLASS_MAPPINGS))
+        self.assertEqual(set(names), set(P.NODE_DISPLAY_NAME_MAPPINGS))
+        for name, real in P.NODE_CLASS_MAPPINGS.items():
+            fake = fakes[name]
+            self.assertEqual(fake.RETURN_TYPES, real.RETURN_TYPES, name)
+            self.assertEqual(getattr(fake, "RETURN_NAMES", None), getattr(real, "RETURN_NAMES", None))
+            self.assertEqual(bool(getattr(fake, "OUTPUT_NODE", False)),
+                             bool(getattr(real, "OUTPUT_NODE", False)), name)
+            ri, fi = real.INPUT_TYPES(), fake.INPUT_TYPES()
+            self.assertEqual({k: list(v) for k, v in ri.items()},
+                             {k: list(v) for k, v in fi.items()}, name)
+            for sect, inputs in ri.items():
+                for key, spec in inputs.items():
+                    other = fi[sect][key]
+                    self.assertEqual(spec[0], other[0], (name, key))
+                    if len(spec) > 1 and "default" in spec[1]:
+                        self.assertEqual(spec[1]["default"], other[1]["default"], (name, key))
+
+    def test_a_stand_in_names_the_internal_and_the_upgrade(self):
+        names = P.compat.NAMES
+        try:
+            P.compat.NAMES = names + (("comfy.model_patcher", "ModelPatcher.no_such_name"),)
+            fakes, _ = self.stub.nodes(ImportError("probe"))
+        finally:
+            P.compat.NAMES = names
+        with self.assertRaises(RuntimeError) as e:
+            fakes["GmlxModelLoader"]().run(model_name="z-image-turbo")
+        msg = str(e.exception)
+        for want in ("comfy.model_patcher.ModelPatcher.no_such_name", P.compat.comfyui_version(),
+                     P.version.COMFYUI_TESTED, "brew upgrade gmlx", "restart ComfyUI"):
+            self.assertIn(want, msg)
+        self.assertNotIn("not installed", msg)
+        shown = fakes["GmlxServerStatus"]().run(model_name="z-image-turbo")
+        self.assertEqual(shown["result"], (msg,))
 
 
 class Weightless(Base):

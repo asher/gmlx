@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import json
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -281,27 +283,59 @@ class KeepAlive(unittest.TestCase):
 
 
 class Versions(unittest.TestCase):
-    def test_a_newer_server_names_the_pack_to_upgrade(self):
-        stub = Stub("--contract", "2.0")
+    def setUp(self):
+        self.env = os.environ.get("GMLX_COMFY_SETTINGS")
+        self.dir = tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(self.dir, "comfyui.json")
+
+    def tearDown(self):
+        if self.env is None:
+            os.environ.pop("GMLX_COMFY_SETTINGS", None)
+        else:
+            os.environ["GMLX_COMFY_SETTINGS"] = self.env
+
+    def test_a_newer_server_says_to_restart_comfyui(self):
+        stub = Stub("--contract", "2.0", "--gmlx-version", "99.0.0")
         try:
             c = C.StepClient(stub.url)
             with self.assertRaises(C.GmlxVersionError) as e:
                 c.handshake()
-            self.assertIn("Upgrade the ComfyUI-gmlx node pack", str(e.exception))
+            self.assertIn("Restart ComfyUI", str(e.exception))
+            self.assertIn("gmlx 99.0.0", str(e.exception))
+            self.assertIn(f"gmlx {C.PACK_VERSION}", str(e.exception))
             with self.assertRaises(C.GmlxVersionError) as e:
                 c.models()
             self.assertIn("Upgrade the client", str(e.exception))
         finally:
             stub.close()
 
-    def test_an_older_server_names_the_server_to_upgrade(self):
+    def test_an_older_server_names_its_restart_and_the_upgrade_for_the_install(self):
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_install": "uv"}, f)
         stub = Stub("--contract", "0.9")
         try:
             with self.assertRaises(C.GmlxVersionError) as e:
                 C.StepClient(stub.url).handshake()
-            self.assertIn("Upgrade the gmlx server", str(e.exception))
+            self.assertIn("gmlx restart", str(e.exception))
+            self.assertIn("uv tool upgrade gmlx", str(e.exception))
         finally:
             stub.close()
+
+    def test_another_gmlx_version_on_the_same_contract_is_a_note(self):
+        cases = (("99.0.0", "Restart ComfyUI"), ("0.0.1", "gmlx restart"),
+                 (C.PACK_VERSION, None), ("stub", None))
+        for version, says in cases:
+            stub = Stub("--gmlx-version", version)
+            try:
+                c = C.StepClient(stub.url)
+                c.handshake()
+                if says is None:
+                    self.assertIsNone(c.version_note, version)
+                else:
+                    self.assertIn(says, c.version_note)
+                    self.assertIn(f"gmlx {version}", c.version_note)
+            finally:
+                stub.close()
 
 
 class ApiKey(unittest.TestCase):
@@ -329,8 +363,6 @@ class Discovery(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_order_is_widget_env_settings_status_default(self):
-        import json
-        import tempfile
         d = tempfile.mkdtemp()
         os.environ["PATH"] = d
         os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "none.json")
@@ -349,11 +381,46 @@ class Discovery(unittest.TestCase):
         self.assertEqual(C.resolve_base_url(""), "http://127.0.0.1:9125")
         self.assertEqual(C.resolve_base_url("http://h:1"), "http://h:1")
 
+    def _fake_gmlx(self, d):
+        exe = os.path.join(d, "gmlx")
+        with open(exe, "w") as f:
+            f.write("#!/bin/sh\necho '{}'\n")
+        os.chmod(exe, 0o755)
+        return exe
+
     def test_a_down_server_without_start_names_the_remedy(self):
-        os.environ["PATH"] = "/nonexistent"
+        d = tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "none.json")
+        os.environ["PATH"] = d
+        self._fake_gmlx(d)
         with self.assertRaises(C.GmlxError) as e:
             C.get_client("http://127.0.0.1:9", start_server=False)
-        self.assertIn("gmlx serve", str(e.exception))
+        self.assertIn("run `gmlx serve`", str(e.exception))
+
+    def test_the_recorded_gmlx_comes_first_then_path(self):
+        d, rec = tempfile.mkdtemp(), tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "comfyui.json")
+        os.environ["PATH"] = d
+        on_path = self._fake_gmlx(d)
+        recorded = self._fake_gmlx(rec)
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_command": recorded}, f)
+        self.assertEqual(C.settings.gmlx_command(), recorded)
+        os.remove(recorded)
+        self.assertEqual(C.settings.gmlx_command(), on_path)
+
+    def test_no_gmlx_at_all_names_the_two_paths_to_delete(self):
+        d = tempfile.mkdtemp()
+        os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "comfyui.json")
+        os.environ["PATH"] = "/nonexistent"
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_command": "/gone/bin/gmlx",
+                       "pack_dir": "/data/gmlx/comfyui/comfyui-gmlx"}, f)
+        with self.assertRaises(C.GmlxError) as e:
+            C.get_client("http://127.0.0.1:9", start_server=True)
+        msg = str(e.exception)
+        self.assertIn("gmlx is not installed: /gone/bin/gmlx does not exist", msg)
+        self.assertIn(f"deleting {C.settings.PACK_DIR} and /data/gmlx/comfyui", msg)
 
 
 if __name__ == "__main__":

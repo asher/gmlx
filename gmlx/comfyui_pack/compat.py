@@ -3,7 +3,8 @@
 
 A ComfyUI release can rename or drop an internal the pack touches. The
 probe names the first one missing together with the ComfyUI version, so the
-pack fails at load with a message instead of during a run.
+pack loads its stand-in nodes (stub.py), whose error says so, instead of
+failing during a run. This module imports no ComfyUI module at its top.
 """
 
 from __future__ import annotations
@@ -108,5 +109,5 @@ def check() -> None:
     """Raise ImportError naming the first missing internal and the version."""
     missing = first_missing()
     if missing is not None:
-        raise ImportError(f"ComfyUI-gmlx needs {missing}, which ComfyUI {comfyui_version()} "
-                          "does not have; update ComfyUI or the node pack")
+        raise ImportError(f"the gmlx nodes need {missing}, which ComfyUI {comfyui_version()} "
+                          "does not have")
