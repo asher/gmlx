@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import stat
+from pathlib import Path
 
 import pytest
 import yaml
@@ -568,6 +569,99 @@ def test_install_drops_a_recorded_folder_that_is_gone(home, tmp_path, capsys):
     assert cu.cmd_comfyui(["status"]) == 0
 
 
+@pytest.mark.parametrize("others, rc", [(0, 1), (2, 2)])
+def test_a_gone_only_folder_leaves_the_record_when_install_finds_no_other(
+        home, tmp_path, capsys, others, rc):
+    """The only recorded ComfyUI is gone, and install finds none, or several,
+    to use instead. It exits as before, but the record is clean, so status
+    and doctor stop naming the gone folder."""
+    b = make_comfy(tmp_path / "volume" / "ComfyUI")
+    assert _install_cli("--comfyui-dir", str(b)) == 0
+    shutil.rmtree(b)
+    for code in [home / "ComfyUI", home / "comfy" / "ComfyUI"][:others]:
+        make_comfy(code)
+    capsys.readouterr()
+    assert _install_cli() == rc
+    out, err = capsys.readouterr()
+    assert f"removed {b / 'custom_nodes'} from the record: the folder is gone" in out
+    assert ("no ComfyUI found" if rc == 1 else "found 2 ComfyUI installs") in err
+    assert cu.load_record()["installs"] == []
+    assert doctor.check_comfyui() is None
+    assert "folder missing" not in json.dumps(cu.status())
+
+
+def test_install_names_each_comfyui_it_finds_without_the_nodes(home, capsys):
+    """A ComfyUI added after the first install gets a note with the command
+    that adds the nodes to it, since a bare install refreshes the recorded
+    folders only."""
+    make_comfy(home / "ComfyUI")
+    assert _install_cli() == 0
+    code = make_comfy(home / "ComfyUI-Installs" / "s" / "ComfyUI", venv=None)
+    _installations(home, [{"sourceId": "standalone", "installPath": str(code.parent),
+                           "name": "Stable"}])
+    capsys.readouterr()
+    assert _install_cli() == 0
+    out = capsys.readouterr().out
+    assert not (code / "custom_nodes" / "comfyui-gmlx").exists()
+    cmd = "gmlx comfyui install --comfyui-dir ~/ComfyUI-Installs/s/ComfyUI"
+    assert ("note: ~/ComfyUI-Installs/s/ComfyUI (Comfy Desktop install 'Stable') has no "
+            f"gmlx nodes. To add them, run {cmd}") in out
+    assert cu.cmd_comfyui(cmd.split()[2:]) == 0
+    assert (code / "custom_nodes" / "comfyui-gmlx").is_symlink()
+    capsys.readouterr()
+    assert _install_cli() == 0
+    assert "note:" not in capsys.readouterr().out
+
+
+def test_a_folder_name_that_needs_quotes_is_quoted_in_the_note(home, tmp_path, capsys):
+    make_comfy(home / "ComfyUI")
+    assert _install_cli("--comfyui-dir", str(home / "ComfyUI")) == 0
+    code = make_comfy(home / "My Installs" / "ComfyUI", venv=None)
+    _installations(home, [{"sourceId": "standalone", "installPath": str(code.parent),
+                           "name": "x"}])
+    capsys.readouterr()
+    assert _install_cli() == 0
+    assert f"--comfyui-dir '{code}'" in capsys.readouterr().out
+
+
+def test_two_installs_at_once_both_stay_in_the_record(home, tmp_path):
+    """Two processes install into two folders while a third holds the lock.
+    Each reads the record once it has the lock, so neither loses the other's
+    entry."""
+    import subprocess
+    import sys
+    import time
+
+    a, b = make_comfy(tmp_path / "a"), make_comfy(tmp_path / "b")
+    child = ("import pathlib, sys\n"
+             "import gmlx.commands.comfyui as cu\n"
+             "pathlib.Path(sys.argv[2]).write_text('')\n"
+             "sys.exit(cu.cmd_comfyui(['install', '--comfyui-dir', sys.argv[1]]))\n")
+    tree = str(Path(cu.__file__).resolve().parents[2])
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([tree, os.environ.get("PYTHONPATH", "")]))
+    lock = cu.data_root() / ".lock"
+    lock.parent.mkdir(parents=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        procs = [subprocess.Popen([sys.executable, "-c", child, str(d), str(tmp_path / f"{d.name}.ready")],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                 for d in (a, b)]
+        deadline = time.monotonic() + 60
+        while not all((tmp_path / f"{d.name}.ready").exists() for d in (a, b)):
+            assert time.monotonic() < deadline and all(p.poll() is None for p in procs)
+            time.sleep(0.05)
+        # Long enough for each to reach the lock.
+        time.sleep(1.0)
+    finally:
+        os.close(fd)
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err
+    got = sorted(r["custom_nodes"] for r in cu.load_record()["installs"])
+    assert got == [str(a / "custom_nodes"), str(b / "custom_nodes")]
+
+
 def test_no_record_means_no_refresh(home):
     make_comfy(home / "ComfyUI")
     assert cu.refresh_for_serve() is None
@@ -859,7 +953,7 @@ def test_the_recorded_gmlx_is_the_running_one_never_a_path_lookup(monkeypatch, t
     monkeypatch.setattr(cu.sys, "prefix", str(venv))
     monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
     monkeypatch.setattr(cu.sys, "argv", [str(tmp_path / "src" / "gmlx" / "__main__.py")])
-    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [str(tmp_path / "no-scripts")])
+    monkeypatch.setattr(cu, "_scripts_dirs", lambda: [(str(tmp_path / "no-scripts"), False)])
     assert cu.gmlx_command() is None
     started = _fake_exe(tmp_path / "bin" / "gmlx")
     monkeypatch.setattr(cu.sys, "argv", [str(started), "comfyui", "install"])
@@ -899,22 +993,50 @@ def test_install_kind_is_read_from_where_gmlx_runs(monkeypatch, tmp_path):
     assert cu.gmlx_install() == "pip"
 
 
-def test_the_recorded_gmlx_may_come_from_pips_scripts_folders(monkeypatch, tmp_path):
-    """A pip install --user puts the console script in the user's scripts
-    folder, not beside the interpreter."""
+def _user_scripts(monkeypatch, tmp_path, *, venv: bool):
+    """A Python whose own scripts folder holds no gmlx, and the user's
+    scripts folder, ~/.local/bin as on uv's Pythons. Returns the user's
+    gmlx path and this interpreter."""
+    base = tmp_path / "python"
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    venv = tmp_path / "venv"
-    monkeypatch.setattr(cu.sys, "prefix", str(venv))
-    monkeypatch.setattr(cu.sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(cu.sys, "prefix", str(tmp_path / "venv") if venv else str(base))
+    monkeypatch.setattr(cu.sys, "base_prefix", str(base))
+    monkeypatch.setattr(cu.sys, "executable", str(base / "bin" / "python3.12"))
     monkeypatch.setattr(cu.sys, "argv", ["-m"])
-    user = _fake_exe(tmp_path / "Library" / "Python" / "3.12" / "bin" / "gmlx")
+    user = tmp_path / ".local" / "bin" / "gmlx"
 
     def get_path(name, scheme=None):
         assert name == "scripts"
-        return str(user.parent) if scheme else str(tmp_path / "venv-scripts")
+        return str(user.parent) if scheme else str(tmp_path / "scripts")
 
     monkeypatch.setattr(cu.sysconfig, "get_path", get_path)
+    return user, cu.sys.executable
+
+
+def test_the_recorded_gmlx_may_come_from_the_users_scripts_folder(monkeypatch, tmp_path):
+    """A pip install --user puts the console script in the user's scripts
+    folder, not beside the interpreter."""
+    user, python = _user_scripts(monkeypatch, tmp_path, venv=False)
+    _fake_exe(user).write_text(f"#!{python}\nimport gmlx\n")
     assert cu.gmlx_command() == str(user)
+
+
+def test_another_installs_gmlx_in_the_users_scripts_folder_is_not_recorded(monkeypatch,
+                                                                           tmp_path):
+    """uv tool and pipx put their gmlx in ~/.local/bin, which is also the
+    user's scripts folder of uv's Pythons. Its shebang names their own
+    interpreter, so it is not this install's."""
+    user, _python = _user_scripts(monkeypatch, tmp_path, venv=False)
+    tool = tmp_path / ".local" / "share" / "uv" / "tools" / "gmlx" / "bin" / "python"
+    _fake_exe(user).write_text(f"#!{tool}\nimport gmlx\n")
+    assert cu.gmlx_command() is None
+
+
+def test_a_venv_has_no_users_scripts_folder(monkeypatch, tmp_path):
+    user, python = _user_scripts(monkeypatch, tmp_path, venv=True)
+    _fake_exe(user).write_text(f"#!{python}\nimport gmlx\n")
+    assert cu.gmlx_command() is None
+    assert cu._scripts_dirs() == [(str(tmp_path / "scripts"), False)]
 
 
 def test_a_gmlx_on_path_is_recorded_only_when_it_runs_on_this_python(monkeypatch,
@@ -936,3 +1058,54 @@ def test_a_gmlx_on_path_is_recorded_only_when_it_runs_on_this_python(monkeypatch
     # another install.
     on_path.write_text(f"#!{other / 'bin' / 'python'}\nimport gmlx\n")
     assert cu.gmlx_command() is None
+
+
+_BARE = r'''
+import importlib.abc
+import runpy
+import sys
+
+tree, comfy = sys.argv[1:3]
+sys.path.insert(0, tree)
+allowed = set(sys.stdlib_module_names) | {"gmlx", "__main__"}
+tried = []
+
+
+class NoThirdParty(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        top = name.partition(".")[0]
+        if top in allowed or top.startswith("_sysconfigdata_"):
+            return None
+        tried.append(name)
+        raise ImportError(f"{name} is not installed here", name=name)
+
+
+sys.meta_path.insert(0, NoThirdParty())
+sys.argv = ["gmlx", "comfyui", "install", "--comfyui-dir", comfy]
+code = 0
+try:
+    runpy.run_module("gmlx", run_name="__main__", alter_sys=True)
+except SystemExit as e:
+    code = e.code
+print("tried:", sorted(set(tried)), file=sys.stderr)
+sys.exit(code)
+'''
+
+
+def test_python_m_gmlx_comfyui_install_runs_without_gmlxs_dependencies(home, tmp_path):
+    """CI installs the pack with ``python -m gmlx comfyui install`` on a
+    Python that has none of gmlx's dependencies. A child that refuses every
+    package outside the standard library and gmlx runs that path."""
+    import subprocess
+    import sys
+
+    code = make_comfy(tmp_path / "ComfyUI")
+    tree = str(Path(cu.__file__).resolve().parents[2])
+    r = subprocess.run([sys.executable, "-I", "-c", _BARE, tree, str(code)],
+                       env=dict(os.environ), capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert "installed the gmlx nodes in" in r.stdout
+    link = code / "custom_nodes" / cu.LINK_NAME
+    assert os.path.realpath(link) == os.path.realpath(cu.copy_dir())
+    assert [i["custom_nodes"] for i in cu.load_record()["installs"]] == [
+        str(code / "custom_nodes")]

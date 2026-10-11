@@ -245,6 +245,15 @@ def test_a_comfyui_older_than_the_floor_is_the_one_to_update(link, tmp_path):
     assert "brew upgrade gmlx" not in err
 
 
+def test_the_guide_link_ends_the_message_when_gmlx_is_gone_too(link, tmp_path):
+    _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
+    out = _load_in_a_comfyui(link, _fake_comfyui(tmp_path, version="0.30.0"),
+                             str(tmp_path / "empty"))
+    err = out["error"]
+    assert "Update ComfyUI, then restart it. gmlx is not installed: " in err
+    assert err.endswith(f". The ComfyUI guide: {gmlx.DOCS_URL}comfyui.html")
+
+
 def test_a_stand_in_with_gmlx_gone_names_the_two_paths(link, tmp_path):
     _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
     out = _load_in_a_comfyui(link, _fake_comfyui(tmp_path), str(tmp_path / "empty"))

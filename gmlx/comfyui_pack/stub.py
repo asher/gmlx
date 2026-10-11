@@ -37,10 +37,12 @@ def message(error: BaseException) -> str:
     version = compat.comfyui_version()
     head = (f"gmlx: the gmlx nodes of gmlx {__version__} do not load on ComfyUI "
             f"{version}: {cause}.")
+    guide = ""
     if _nums(version) and _nums(version) < _nums(COMFYUI_FLOOR):
         # An older ComfyUI than the nodes support: ComfyUI is what to update.
         text = (f"{head} They need ComfyUI {COMFYUI_FLOOR} or newer. Update ComfyUI, then "
-                f"restart it. The ComfyUI guide: {settings.GUIDE_URL}")
+                "restart it.")
+        guide = f" The ComfyUI guide: {settings.GUIDE_URL}"
     else:
         # The copy in ComfyUI changes only when a gmlx command refreshes it.
         text = (f"{head} This gmlx was tested on ComfyUI up to {COMFYUI_TESTED}. To fix it, "
@@ -48,7 +50,8 @@ def message(error: BaseException) -> str:
                 "releases, then run `gmlx comfyui install` and restart ComfyUI.")
     if settings.gmlx_command(doc) is None:
         text += " " + settings.not_installed(doc) + "."
-    return text
+    # The link ends the message, so no sentence runs on from it.
+    return text + guide
 
 
 def _loader():

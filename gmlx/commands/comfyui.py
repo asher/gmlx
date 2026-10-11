@@ -155,16 +155,23 @@ def _runnable(path) -> bool:
 
 
 def _scripts_dirs() -> list:
-    """Where pip put this interpreter's console scripts: the install's own
-    scripts folder, then the user's, for a ``pip install --user``."""
+    """Where pip put this interpreter's console scripts, as (folder, user)
+    pairs: the install's own scripts folder, then the user's, for a
+    ``pip install --user``. A venv has no user scripts folder of its own."""
     out = []
-    for scheme in (None, sysconfig.get_preferred_scheme("user")):
+    try:
+        d = sysconfig.get_path("scripts")
+    except KeyError:
+        d = None
+    if d:
+        out.append((d, False))
+    if sys.prefix == sys.base_prefix:
         try:
-            d = sysconfig.get_path("scripts", scheme) if scheme else sysconfig.get_path("scripts")
+            u = sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user"))
         except KeyError:
-            continue
-        if d and d not in out:
-            out.append(d)
+            u = None
+        if u and u != d:
+            out.append((u, True))
     return out
 
 
@@ -186,10 +193,13 @@ def _runs_on_this_python(path: str) -> bool:
 def gmlx_command() -> str | None:
     """The absolute path of the running gmlx's command, or None when none is
     found. For Homebrew it is the link in Homebrew's bin folder, whose path
-    stays across upgrades; else the console script beside the interpreter
-    or in pip's scripts folders; else the script this process started from;
-    else a gmlx on PATH whose shebang names this interpreter. Any other gmlx
-    on PATH is another install and is never recorded."""
+    stays across upgrades; else the console script beside the interpreter;
+    else the one in pip's scripts folder; else the one in the user's
+    scripts folder whose shebang names this interpreter; else the script
+    this process started from; else a gmlx on PATH whose shebang names this
+    interpreter. The user's scripts folder, such as ~/.local/bin, and PATH
+    can hold the gmlx of another install, such as one from uv tool or
+    pipx, which is never recorded."""
     script = Path(sys.executable).parent / "gmlx"
     if _runnable(script):
         parts = Path(sys.prefix).resolve().parts
@@ -198,9 +208,10 @@ def gmlx_command() -> str | None:
             if os.path.realpath(brew) == os.path.realpath(script):
                 return str(brew)
         return str(script)
-    for d in _scripts_dirs():
-        if _runnable(os.path.join(d, "gmlx")):
-            return os.path.join(d, "gmlx")
+    for d, user in _scripts_dirs():
+        cand = os.path.join(d, "gmlx")
+        if _runnable(cand) and (not user or _runs_on_this_python(cand)):
+            return cand
     argv0 = sys.argv[0] or ""
     if os.path.basename(argv0) == "gmlx" and _runnable(argv0):
         return os.path.realpath(argv0)
@@ -820,11 +831,13 @@ def install(targets: list, *, link_source: bool = False, model: str | None = Non
     the copy's sync and the recorded custom_nodes folders that are gone,
     which leave the record. Raises ComfyError on a refusal, before anything
     is written."""
-    doc = load_record()
+    load_record()
     meta = pack_meta()
     checked = [(t, *check_version(t, meta)) for t in targets]
     with locked():
-        return _install(doc, checked, link_source, model, remember)
+        # Read under the lock, so the folder an install that ran meanwhile
+        # recorded stays in the record.
+        return _install(load_record(), checked, link_source, model, remember)
 
 
 def _install(doc: dict, checked: list, link_source: bool, model: str | None,
@@ -850,6 +863,42 @@ def _install(doc: dict, checked: list, link_source: bool, model: str | None,
                 doc["comfyui_dir"] = str(t.code)
     save_record(doc)
     return done, sync, dropped
+
+
+def drop_gone_records() -> list:
+    """Remove the recorded ComfyUI folders that are gone from the record,
+    and return their custom_nodes paths. The record is written only when
+    one goes."""
+    def gone(doc):
+        return [r for r in install_records(doc) if not Path(r["custom_nodes"]).parent.is_dir()]
+
+    if not gone(load_record()):
+        return []
+    with locked():
+        doc = load_record()
+        out = gone(doc)
+        if out:
+            doc["installs"] = [r for r in install_records(doc) if r not in out]
+            save_record(doc)
+        return [r["custom_nodes"] for r in out]
+
+
+def _dir_arg(path: Path) -> str:
+    """``path`` as a shell argument, with ~ for the home folder when that
+    needs no quotes."""
+    short = _short(path)
+    if short.startswith("~/") and shlex.quote(short[2:]) == short[2:]:
+        return short
+    return shlex.quote(str(path))
+
+
+def unrecorded_lines(doc: dict) -> list:
+    """A note for each ComfyUI found on this Mac that the record does not
+    list, with the command that puts the gmlx nodes into it."""
+    keys = {os.path.realpath(r["custom_nodes"]) for r in install_records(doc)}
+    return [f"note: {_short(t.custom_nodes.parent)} ({t.describe()}) has no gmlx nodes. To "
+            f"add them, run gmlx comfyui install --comfyui-dir {_dir_arg(t.custom_nodes.parent)}"
+            for t in detect() if t.key() not in keys]
 
 
 def resolve_targets(comfyui_dir, doc: dict, verb: str = "gmlx comfyui install") -> list:
@@ -908,12 +957,16 @@ def _cmd_install(argv: list, prog: str) -> int:
                          "config's default image model).")
     a = ap.parse_args(argv)
     try:
+        # A recorded folder that is gone leaves the record first, so it
+        # stays out of it when no other ComfyUI is found.
+        for cn in drop_gone_records():
+            print(f"removed {_short(cn)} from the record: the folder is gone")
         targets = resolve_targets(a.comfyui_dir, load_record())
         done, sync, dropped = install(targets, link_source=a.link_source, model=a.model)
     except ComfyError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.code
-    for line in install_lines(done, sync, dropped):
+    for line in install_lines(done, sync, dropped) + unrecorded_lines(load_record()):
         print(line)
     print("Restart ComfyUI, or Comfy Desktop, if it is running, so it loads the nodes.")
     return 0
@@ -952,7 +1005,7 @@ def _cmd_uninstall(argv: list, prog: str) -> int:
         return e.code
     had_copy = data_root().exists()
     with locked():
-        return _uninstall(doc, chosen, had_copy)
+        return _uninstall(chosen, had_copy)
 
 
 def own_dests(doc: dict) -> list:
@@ -966,7 +1019,10 @@ def own_dests(doc: dict) -> list:
     return dests
 
 
-def _uninstall(doc: dict, chosen: list, had_copy: bool) -> int:
+def _uninstall(chosen: list, had_copy: bool) -> int:
+    # Read under the lock, so a folder that an install recorded meanwhile
+    # keeps its entry.
+    doc = load_record()
     dests = own_dests(doc)
     removed = [t for t in chosen if _remove_link(t.custom_nodes, dests)]
     for t in removed:
@@ -1107,13 +1163,19 @@ def refresh_for_serve() -> str | None:
         doc = load_record()
         if not recorded_targets(doc) or doc.get("pack_source"):
             return None
-        sync = sync_copy()
-        cmd = doc.get("gmlx_command")
-        if not (isinstance(cmd, str) and os.path.exists(cmd)):
-            new = gmlx_command()
-            if new and new != cmd:
-                doc["gmlx_command"] = new
-                save_record(doc)
+        # The copy and the record change under one lock, so an install that
+        # runs meanwhile keeps its entry.
+        with locked():
+            doc = load_record()
+            if not recorded_targets(doc) or doc.get("pack_source"):
+                return None
+            sync = sync_copy()
+            cmd = doc.get("gmlx_command")
+            if not (isinstance(cmd, str) and os.path.exists(cmd)):
+                new = gmlx_command()
+                if new and new != cmd:
+                    doc["gmlx_command"] = new
+                    save_record(doc)
     except Exception as e:  # noqa: BLE001 - the server starts whatever the pack's state
         return f"could not refresh the ComfyUI node pack: {e}"
     if sync.state == "current":
