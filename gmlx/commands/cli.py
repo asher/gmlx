@@ -2526,7 +2526,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 # Verbs route to the per-area entry points (run == this module's `main`; serve /
 # init / sync-models / launch / stop / restart / status / logs / service ==
 # server.main; validate / pull / list / ps / profiles == manage; chat == chat;
-# train == train; distill == distill; image == image; systemone == systemone).
+# train == train; distill == distill; image == image; comfyui == comfyui;
+# systemone == systemone).
 # The macOS menu bar is `gmlx launch menubar`, not a top-level verb.
 _VERBS = (
     "run",
@@ -2552,6 +2553,7 @@ _VERBS = (
     "train",
     "distill",
     "image",
+    "comfyui",
     "completion",
 )
 
@@ -2592,6 +2594,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
         "  image        generate images from GGUF diffusion models\n"
+        "  comfyui      put the gmlx node pack into ComfyUI (install, uninstall, status)\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
         f"first run:  {prog} init   (scaffold a config) ->  {prog} pull <hf:ref>   "
         f"(download a model)\n"
@@ -2704,11 +2707,13 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             # --help` keeps the action so the action's help prints, not the
             # umbrella's. `launch pi --help` keeps the client, which the help
             # describes.
-            keep = ([rest[0]] if verb in ("distill", "image", "launch") and rest
+            keep = ([rest[0]] if verb in ("distill", "image", "launch", "comfyui") and rest
                     and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
-    if verb != "doctor":  # doctor must run on a broken env to diagnose it
+    # doctor must run on a broken env to diagnose it, and comfyui uninstall
+    # must run there too; neither imports mlx.
+    if verb not in ("doctor", "comfyui"):
         from gmlx.upstream.versions import check_mlx_version
         try:
             check_mlx_version()
@@ -2752,6 +2757,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from .image import cmd_image
 
             return cmd_image(rest, prog=f"{prog} image")
+        if verb == "comfyui":
+            from .comfyui import cmd_comfyui
+
+            return cmd_comfyui(rest, prog=f"{prog} comfyui")
         if verb == "completion":
             from .completion import cmd_completion
 

@@ -375,6 +375,14 @@ def _isolated_xdg_data(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_comfyui_record(tmp_path_factory, monkeypatch):
+    # `gmlx serve` and `gmlx launch comfyui` read and write the ComfyUI
+    # install record; keep every test away from the user's real one.
+    monkeypatch.setenv("GMLX_COMFY_SETTINGS",
+                       str(tmp_path_factory.mktemp("comfyui") / "comfyui.json"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_share_history(monkeypatch):
     # Launch keeps its share history under ~/.local/share whatever
     # XDG_DATA_HOME says, and most tests keep the real home folder. Here it

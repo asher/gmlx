@@ -261,6 +261,32 @@ def check_image(cfg):
                   "encoder and VAE")
 
 
+def check_comfyui():
+    """The ComfyUI node pack: each folder `gmlx comfyui install` linked, the
+    pack copy's version and each ComfyUI's version against the range the
+    pack was tested on. None when the pack was never installed."""
+    from gmlx.commands import comfyui
+
+    try:
+        s = comfyui.status()
+    except (OSError, ValueError, SyntaxError) as e:
+        return _check("comfyui", "WARN", f"the ComfyUI node pack cannot be read: {e}")
+    if not s["installed"]:
+        return None
+    folders = "; ".join(
+        f"{comfyui._short(f['custom_nodes'])} (ComfyUI {f['comfyui_version'] or 'unknown'})"
+        for f in s["folders"])
+    problems = comfyui.status_problems(s)
+    notes = [f"{comfyui._short(f['custom_nodes'])}: ComfyUI {f['version_note']}"
+             for f in s["folders"] if f["version_note"] and "newer" in f["version_note"]]
+    if problems:
+        return _check("comfyui", "WARN", "; ".join(problems))
+    detail = f"gmlx nodes {s['pack_version']} in {folders}"
+    if notes:
+        return _check("comfyui", "WARN", f"{detail}. " + "; ".join(notes))
+    return _check("comfyui", "PASS", detail)
+
+
 def check_services(cfg):
     """One row over the configured service models (embeddings / rerank / stt /
     tts), or ``None`` when the config uses none. GGUF-backed services (and any
@@ -1010,7 +1036,7 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
               check_models(cfg, deep=deep), check_server()]
     for c in (check_agents(), check_login_start(), check_launcher(), check_container(),
               *check_homes(),
-              check_image(cfg),
+              check_image(cfg), check_comfyui(),
               check_services(cfg), check_extras(cfg, running), check_ffmpeg(cfg, running),
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:

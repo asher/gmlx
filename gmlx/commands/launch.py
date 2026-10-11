@@ -207,9 +207,10 @@ def _help_epilog(client: str | None, launch_cfg=None) -> str:
                 f"The custom agents page covers these settings:\n"
                 f"  {DOCS_URL}launch-agents.html\n\n{common}")
     if client == "comfyui":
-        return ("ComfyUI is a separate program, and the ComfyUI-gmlx node pack runs "
-                f"its image models on the gmlx server. --comfyui-dir names the ComfyUI "
-                f"folder ({_COMFYUI_HOME} by default), whose own Python runs it.\n"
+        return ("ComfyUI is a separate program, and the gmlx node pack runs its image "
+                "models on the gmlx server. The launch puts the pack into ComfyUI first. "
+                "--comfyui-dir names the ComfyUI folder (the one used last, else "
+                f"{_COMFYUI_HOME}), whose own Python runs it.\n"
                 f"The ComfyUI guide covers the pack:\n  {DOCS_URL}comfyui.html\n\n"
                 f"{common}")
     label = CLIENT_INSTALL[client][1]
@@ -246,7 +247,7 @@ def _find_binary(client: str, a):
     container mode the client runs in the image, so the bare name stands.
     ComfyUI runs on the interpreter of its own folder."""
     if client == "comfyui":
-        return _comfyui_python(a)
+        return _comfyui_prepare(a)[1]
     name, label = CLIENT_INSTALL[client][:2]
     if getattr(a, "container_mode", False):
         return name
@@ -1661,47 +1662,107 @@ def _launch_open_webui(a, *, exec_fn) -> int:
                    exec_fn=exec_fn)
 
 
-# ComfyUI, with the ComfyUI-gmlx node pack. ComfyUI is a folder with its
-# own Python environment, so the launch runs main.py on that interpreter and
-# never gmlx's. It runs on the Mac only, beside the server.
+# ComfyUI, with the gmlx node pack. ComfyUI is a folder with its own Python
+# environment, so the launch runs main.py on that interpreter and never
+# gmlx's. It runs on the Mac only, beside the server. Before the server
+# starts, the launch runs the install step of `gmlx comfyui install` on the
+# folder, which refuses a ComfyUI older than the pack needs, puts the current
+# pack into it and remembers the folder.
 _COMFYUI_HOME = "~/ComfyUI"
 _COMFYUI_PORT = 8188
-_COMFYUI_PACK = "comfyui-gmlx"
-_COMFYUI_PACK_URL = "https://github.com/asher/ComfyUI-gmlx"
 _COMFYUI_PYTHONS = (".venv/bin/python", "venv/bin/python", ".venv/bin/python3",
                     "venv/bin/python3")
 HOST_ONLY = frozenset({"comfyui"})
 
 
 def _comfyui_dir(a) -> Path:
-    return Path(os.path.expanduser(getattr(a, "comfyui_dir", None) or _COMFYUI_HOME))
+    """--comfyui-dir, else the folder that launch or install used last, else
+    ~/ComfyUI."""
+    given = getattr(a, "comfyui_dir", None)
+    if given:
+        return Path(os.path.abspath(os.path.expanduser(given)))
+    from .comfyui import remembered_dir
+
+    return remembered_dir() or Path(os.path.expanduser(_COMFYUI_HOME))
 
 
-def _comfyui_python(a) -> str:
-    """The interpreter of the ComfyUI folder: its .venv or venv."""
+def _comfyui_target(a):
+    """The ComfyUI the launch runs: the folder _comfyui_dir names when it
+    holds main.py, else, with no --comfyui-dir, the one ComfyUI found."""
+    from . import comfyui
+
     d = _comfyui_dir(a)
-    if not (d / "main.py").is_file():
-        raise LaunchError(f"{d} is not a ComfyUI folder (it has no main.py). Pass "
-                          "--comfyui-dir with the folder you cloned ComfyUI into.",
-                          EXIT_UNAVAILABLE)
+    given = getattr(a, "comfyui_dir", None)
+    try:
+        if (d / "main.py").is_file() or given:
+            return comfyui.target_for_dir(d)
+    except comfyui.ComfyError as e:
+        raise LaunchError(str(e), EXIT_FAILURE) from None
+    found = comfyui.detect()
+    runnable = [t for t in found if not t.kind.startswith("desktop")]
+    pick = runnable or found
+    if not pick:
+        raise LaunchError(comfyui.no_comfyui_help(), EXIT_FAILURE)
+    if len(pick) > 1:
+        raise LaunchError(comfyui.several_help(pick, "gmlx launch comfyui"), EXIT_USAGE)
+    return pick[0]
+
+
+def _comfyui_python(d: Path) -> str:
+    """The interpreter of the ComfyUI folder: its .venv or venv."""
     for rel in _COMFYUI_PYTHONS:
         p = d / rel
         if os.access(p, os.X_OK):
             return str(p)
+    q = shlex.quote(str(d))
     raise LaunchError(f"{d} has no Python environment of its own (.venv or venv). "
-                      "Create one there and install ComfyUI's requirements into it, "
-                      "as the ComfyUI install steps say.", EXIT_UNAVAILABLE)
+                      "Create one there and install ComfyUI's requirements into it:\n"
+                      f"  cd {q}\n  uv venv --python 3.12 .venv\n"
+                      "  uv pip install -r requirements.txt", EXIT_UNAVAILABLE)
 
 
-def comfyui_pack_installed(comfy: Path) -> bool:
-    """Whether ComfyUI's custom_nodes holds the gmlx node pack, as a folder or
-    a link to one."""
-    nodes = comfy / "custom_nodes"
+def _comfyui_prepare(a) -> tuple[Path, str]:
+    """The ComfyUI folder and its interpreter, once the install step has put
+    the current pack into it. Comfy Desktop runs its own ComfyUI, so for one
+    the launch installs the pack and stops with the step that remains."""
+    ready = getattr(a, "comfyui_ready", None)
+    if ready is not None:
+        return ready
+    from . import comfyui
+
+    target = _comfyui_target(a)
+    desktop = target.kind.startswith("desktop") or target.code is None \
+        or not (target.code / "main.py").is_file()
+    binary = None if desktop else _comfyui_python(target.code)
     try:
-        return any(p.name.lower() == _COMFYUI_PACK and p.is_dir()
-                   for p in nodes.iterdir())
-    except OSError:
-        return False
+        done, sync = comfyui.install([target])
+    except comfyui.ComfyError as e:
+        raise LaunchError(str(e), EXIT_FAILURE) from None
+    except OSError as e:
+        raise LaunchError(f"could not put the gmlx nodes into {target.custom_nodes}: {e}",
+                          EXIT_FAILURE) from None
+    changed = any(d.changed for d in done) or (sync is not None and sync.state != "current")
+    if desktop:
+        # The error printer puts [launch] before the first line only.
+        did = "\n".join(comfyui.install_lines(done, sync))
+        if target.kind.startswith("desktop"):
+            raise LaunchError(
+                f"{did}\n{target.describe()} runs its own ComfyUI, so launch does not start "
+                "it. Start the app, or restart it if it is running, to load the gmlx nodes.",
+                EXIT_UNAVAILABLE)
+        raise LaunchError(
+            f"{did}\n{comfyui._short(target.custom_nodes.parent)} has no main.py, so launch "
+            "cannot start ComfyUI from it. Start that ComfyUI the way you installed it, or "
+            "pass --comfyui-dir with a folder that holds main.py.", EXIT_UNAVAILABLE)
+    lines = comfyui.install_lines(done, sync, prefix="[launch] ")
+    if changed:
+        print("\n".join(lines))
+    else:
+        for line in lines:
+            if "note:" in line or "warning:" in line:
+                print(line)
+    a.comfyui_ready = (target.code, binary)
+    return a.comfyui_ready
 
 
 def build_comfyui_env(base_url: str, *, image_model: str | None = None,
@@ -1716,20 +1777,8 @@ def build_comfyui_env(base_url: str, *, image_model: str | None = None,
     return pairs
 
 
-def _check_comfyui_pack(comfy: Path) -> None:
-    """Refuse a ComfyUI folder without the node pack, with the command that
-    installs it."""
-    if not comfyui_pack_installed(comfy):
-        raise LaunchError(
-            f"the ComfyUI-gmlx node pack is not in {comfy / 'custom_nodes'}. Install it "
-            f"with:\n  git clone {_COMFYUI_PACK_URL} "
-            f"{shlex.quote(str(comfy / 'custom_nodes' / 'ComfyUI-gmlx'))}", EXIT_USAGE)
-
-
 def _launch_comfyui(a, *, exec_fn) -> int:
-    comfy = _comfyui_dir(a)
-    binary = _comfyui_python(a)
-    _check_comfyui_pack(comfy)
+    comfy, binary = _comfyui_prepare(a)
     base_url = a.base_url or _base_url(a.host, a.port)
     models = probe_models(base_url, a.api_key, "comfyui")
     image = default_image_model(models, a.model)
@@ -2427,7 +2476,7 @@ def _check_client_flags(a) -> None:
         _check_dsh_profile_name(_DSH_PROFILE if a.dsh_profile is None else a.dsh_profile,
                                 a.config_only)
     if a.harness == "comfyui":
-        _check_comfyui_pack(_comfyui_dir(a))
+        _comfyui_prepare(a)
 
 
 def _check_client(a, binary: str) -> None:

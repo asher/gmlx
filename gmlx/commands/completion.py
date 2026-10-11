@@ -45,6 +45,7 @@ _VERB_DESC = {
     "train": "finetune a LoRA adapter on a GGUF base",
     "distill": "offline distillation: gen, filter, cache, align, train, eval, census",
     "image": "generate images from GGUF diffusion models",
+    "comfyui": "put the gmlx node pack into ComfyUI",
     "completion": "print a shell completion script",
 }
 
@@ -55,6 +56,7 @@ _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _IMAGE_ACTIONS = ("generate", "bench", "pack-vae")
+_COMFYUI_ACTIONS = ("install", "uninstall", "status")
 
 
 # A candidate value is typed into the user's command line, and some come from
@@ -109,7 +111,7 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
     if verb == "service":
         verb = "serve"
     text = _capture_help(verb)
-    if verb.startswith(("distill ", "image ")) and not text.strip():
+    if verb.startswith(("distill ", "image ", "comfyui ")) and not text.strip():
         return ()
     out: list[list[str]] = []
     current: list[int] = []                  # out indices whose help is still wrapping
@@ -468,6 +470,8 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
         return [] if filled else [f"{a}\tdistill action" for a in _DISTILL_ACTIONS]
     if verb == "image":
         return [] if filled else [f"{a}\timage action" for a in _IMAGE_ACTIONS]
+    if verb == "comfyui":
+        return [] if filled else [f"{a}\tcomfyui action" for a in _COMFYUI_ACTIONS]
     if verb.startswith("image "):
         # generate and bench take a DiT GGUF, pack-vae a safetensors VAE
         return [] if filled else ["::files"]
@@ -502,6 +506,9 @@ def _complete(argv: list[str]) -> list[str]:
         pre = [verb, *pre[2:]]
     elif verb == "image" and len(pre) > 1 and pre[1] in _IMAGE_ACTIONS:
         verb = f"image {pre[1]}"
+        pre = [verb, *pre[2:]]
+    elif verb == "comfyui" and len(pre) > 1 and pre[1] in _COMFYUI_ACTIONS:
+        verb = f"comfyui {pre[1]}"
         pre = [verb, *pre[2:]]
 
     if cur.startswith("-"):                  # completing a flag

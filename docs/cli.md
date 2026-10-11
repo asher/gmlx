@@ -34,6 +34,7 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
 | [`gmlx distill`](#gmlx-distill) | Distill a teacher GGUF into a student adapter offline. |
 | [`gmlx image`](#gmlx-image) | Generate images from GGUF diffusion models. |
+| [`gmlx comfyui`](#gmlx-comfyui) | Put the gmlx node pack into ComfyUI, or remove it. |
 | [`gmlx doctor`](#gmlx-doctor) | Check the runtime, config, models and services. |
 | [`gmlx completion`](#gmlx-completion) | Print a shell completion script. |
 
@@ -583,7 +584,7 @@ gmlx launch claude-code -- --continue
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, as [dsh](launch.md#dsh) describes. |
-| `--comfyui-dir DIR` | `~/ComfyUI` | Run the ComfyUI in this folder, on its `.venv` or `venv`, as [ComfyUI](comfyui.md) describes. |
+| `--comfyui-dir DIR` | The folder used last, else `~/ComfyUI` | Run the ComfyUI in this folder, on its `.venv` or `venv`, as [ComfyUI](comfyui.md) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, beside the configured [mounts](config.md#launchcontainermounts). Repeatable. |
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
@@ -1106,6 +1107,33 @@ refused by name. So is a `--source-config` whose `temperal_downsample`,
 | `--force` | Off | Replace `--out` when it exists. |
 | `--json` | Off | Print a JSON record of the packed file. |
 
+## gmlx comfyui
+
+`gmlx comfyui` puts the gmlx node pack into ComfyUI, as
+[ComfyUI](comfyui.md) describes. Each action takes its own flags.
+
+```sh
+gmlx comfyui install
+gmlx comfyui install --comfyui-dir ~/src/ComfyUI
+gmlx comfyui status
+gmlx comfyui uninstall
+```
+
+`install` finds ComfyUI, refuses one older than the pack needs, copies the
+pack to a folder gmlx owns and links it into ComfyUI's `custom_nodes`. Run
+again, it refreshes the copy and the links it made before.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--comfyui-dir DIR` | The folders installed before, else the one ComfyUI found | Install into this ComfyUI: its folder, the folder above its `custom_nodes`, or a Comfy Desktop install folder. |
+| `--link-source` | Off | Link to the pack in the gmlx source tree instead of a copy, for work on the pack. |
+| `--model ID` | The config's default image model | The image model a new loader node starts on. |
+
+`uninstall` removes the links, the copy and the record. With
+`--comfyui-dir DIR` it removes the link from that ComfyUI only. `status`
+prints the copy, the gmlx command the nodes run and each ComfyUI with its
+version; `--json` prints the same as JSON.
+
 ## gmlx doctor
 
 `gmlx doctor` checks what a working setup needs and prints a PASS, WARN,
@@ -1114,7 +1142,9 @@ runtime, the config, each model and service, background servers, login
 items, container mode, optional extras, the Hugging Face token, RAM and
 disk space. Its `image` check reads the headers of each image model's DiT,
 text encoder, vision tower and VAE, and fails one whose parts are not of
-one family. No check uses the network.
+one family. Once `gmlx comfyui install` has run, its `comfyui` check reads
+each ComfyUI folder's link to the gmlx nodes and its version against the
+range the nodes were tested on. No check uses the network.
 
 ```sh
 gmlx doctor
@@ -1156,6 +1186,7 @@ These verbs also use other codes:
 | `serve` | 2 when a bare `serve` finds no config. |
 | `status` | 0 when a server is running, 3 when none is. |
 | `restart` | 1 when a file the server needs is gone or its config does not load. The old server keeps running. |
+| `comfyui` | 1 when `install` finds no ComfyUI or one too old, or `status` finds a problem. 2 when `install` finds several and no `--comfyui-dir`. |
 | `list` | 2 when no config was found or it failed to load. |
 | `run` | 1 when the model fails to load or to generate, 2 when a flag, id or file is wrong and nothing has loaded yet, 130 when interrupted. |
 | `validate` | 0 when the file will load or the quants are listed, 1 when it will not load, 2 when the reference cannot be read. |

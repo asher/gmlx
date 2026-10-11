@@ -592,6 +592,14 @@ def test_service_completes_actions():
         "install", "uninstall", "status"}
 
 
+def test_comfyui_completes_actions_then_their_flags():
+    assert _vals(completion._complete(["comfyui", ""])) == ["install", "uninstall", "status"]
+    assert completion._complete(["comfyui", "status", ""]) == []
+    flags = _vals(completion._complete(["comfyui", "install", "--"]))
+    assert {"--comfyui-dir", "--link-source", "--model"} <= set(flags)
+    assert "--json" in _vals(completion._complete(["comfyui", "status", "--"]))
+
+
 def test_validate_positional_defers_to_files():
     assert completion._complete(["validate", ""]) == ["::files"]
 

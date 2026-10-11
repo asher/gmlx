@@ -1678,6 +1678,17 @@ def _line_buffered_stdout() -> None:
         pass                    # a replaced or closed stream keeps its mode
 
 
+def _refresh_comfyui_pack() -> None:
+    """A gmlx upgrade reaches the ComfyUI node pack here: a server start is
+    the one gmlx step sure to come before the pack's next request. The
+    detached start does it too, so the line shows in the terminal."""
+    from gmlx.commands.comfyui import refresh_for_serve
+
+    line = refresh_for_serve()
+    if line:
+        print(f"[server] {line}")
+
+
 def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     _line_buffered_stdout()
     ap = argparse.ArgumentParser(
@@ -1758,6 +1769,7 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         except ConfigError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
+        _refresh_comfyui_pack()
         rc = lifecycle.start_background(
             serve_args, host=host, port=port, config_abspath=cfg_path,
             log=a.log, start_timeout=a.start_timeout, api_key=api_key,
@@ -1781,6 +1793,7 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    _refresh_comfyui_pack()
     return _serve(cfg, a, reload_fn)
 
 
