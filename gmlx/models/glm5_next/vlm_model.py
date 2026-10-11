@@ -96,14 +96,18 @@ class LanguageModel(Glm5NextSpecHooks, nn.Module):
         **kwargs,
     ):
         # The backbone builds its own KDA/MLA masks from the caches.
+        # skip_logits leaves out the head, as in Glm5NextSpecLM.
+        skip_logits = kwargs.pop("skip_logits", False)
         del mask, kwargs
         if return_hidden or return_shared_kv:
             normed, raw = self.model(
                 inputs, cache, return_raw_hidden=True,
                 input_embeddings=inputs_embeds)
-            return _SpecOutput(logits=self._head(normed), hidden_states=[raw])
+            logits = None if skip_logits else self._head(normed)
+            return _SpecOutput(logits=logits, hidden_states=[raw])
         h = self.model(inputs, cache=cache, input_embeddings=inputs_embeds)
-        return LanguageModelOutput(logits=self._head(h))
+        return LanguageModelOutput(
+            logits=None if skip_logits else self._head(h))
 
     @property
     def layers(self):

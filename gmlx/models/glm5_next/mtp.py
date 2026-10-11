@@ -172,7 +172,8 @@ class Glm5NextSpecLM(Glm5NextSpecHooks, glm5.Model):
         # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
         # keyword; the token ids are authoritative (a GGUF text target has
         # no vision features) and shared_kv is never used. skip_logits
-        # leaves out the head; speculative_logits_from_hidden projects raw.
+        # leaves out the head; speculative_logits_from_hidden projects the
+        # raw pre-norm hidden.
         skip_logits = kwargs.pop("skip_logits", False)
         del inputs_embeds, n_to_process, kwargs
         normed, raw = self.model(inputs, cache, return_raw_hidden=True)

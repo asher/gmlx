@@ -642,6 +642,26 @@ def test_cacheless_forward_matches_cached():
     assert mx.abs(got.astype(mx.float32) - ref.astype(mx.float32)).max().item() < 1e-5
 
 
+@pytest.mark.parametrize("capture", [None, (0,)])
+def test_skip_logits_leaves_out_the_head(capture):
+    # verify_forward(skip_logits=True) projects through
+    # speculative_logits_from_hidden, with or without the DSpark capture.
+    mx.random.seed(11)
+    cfg = _tiny_config()
+    _, lm = _build_target(cfg)
+    lm._dspark_capture = capture
+    prompt = mx.random.randint(0, cfg["vocab_size"], (1, 9)).astype(mx.int32)
+    full = lm(prompt, cache=lm.make_cache(), return_hidden=True)
+    bare = lm(prompt, cache=lm.make_cache(), return_hidden=True,
+              skip_logits=True)
+    assert bare.logits is None
+    (h,) = bare.hidden_states
+    assert mx.array_equal(h, full.hidden_states[0]).item()
+    got = lm.speculative_logits_from_hidden(h)
+    assert mx.abs(got - full.logits).max().item() < 1e-5
+    assert lm(prompt, cache=lm.make_cache(), skip_logits=True).logits is None
+
+
 def test_batch_pooling_cache_verify_sized_undo_armed():
     # Regression: the batch cache stashed its undo only for L <= 2, so a
     # block-4 verify write (L=4) cleared it and the first rejection past

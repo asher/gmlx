@@ -569,3 +569,15 @@ def test_return_hidden_yields_the_pre_norm_trunk_hidden():
     assert float(mx.abs(relogits - out.logits).max()) < 1e-5
     # raw is pre-norm: applying the final norm must change it.
     assert float(mx.abs(lm.model.norm(raw) - raw).max()) > 1e-4
+
+
+def test_skip_logits_leaves_out_the_head():
+    """verify_forward(skip_logits=True) projects the hidden itself."""
+    model = _tiny_model()
+    lm = model.language_model
+    ids = mx.array([[3, 9, 11, 5]])
+    full = lm(ids, cache=lm.make_cache(), return_hidden=True)
+    bare = lm(ids, cache=lm.make_cache(), return_hidden=True, skip_logits=True)
+    assert bare.logits is None
+    assert mx.array_equal(bare.hidden_states[0], full.hidden_states[0]).item()
+    assert lm(ids, cache=lm.make_cache(), skip_logits=True).logits is None

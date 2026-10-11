@@ -152,7 +152,9 @@ class DeepseekV4SpecHooks:
         # replace the token embedding (the VLM container's spliced image
         # features) and ``image_spans`` marks the image blocks. The backbone
         # builds its own window mask. shared_kv is never used (the drafter
-        # owns its KV).
+        # owns its KV). skip_logits leaves out the head;
+        # speculative_logits_from_hidden projects the returned hidden.
+        skip_logits = kwargs.pop("skip_logits", False)
         del n_to_process, mask, kwargs
         fwd = dict(input_embeddings=inputs_embeds, image_spans=image_spans)
         want_hidden = return_hidden or return_shared_kv
@@ -165,11 +167,11 @@ class DeepseekV4SpecHooks:
                 **fwd,
             )
             return _SpecOutput(
-                logits=self.lm_head(out),
+                logits=None if skip_logits else self.lm_head(out),
                 hidden_states=[self._dspark_pack(h_raw, caps)],
             )
         out, h_raw = self.model(inputs, cache, return_raw_hidden=True, **fwd)
-        logits = self.lm_head(out)
+        logits = None if skip_logits else self.lm_head(out)
         if not want_hidden:
             # mlx-vlm's AR engine calls model.language_model(...) directly
             # and reads ``outputs.logits`` (the plain-path A/B baseline in
