@@ -235,7 +235,8 @@ def every_module():
     for info in pkgutil.walk_packages(gmlx.__path__, "gmlx.",
                                       onerror=lambda name: None):
         name = info.name
-        if name.startswith("gmlx._vendor."):
+        # The ComfyUI node pack runs in ComfyUI's Python, never in gmlx's.
+        if name.startswith(("gmlx._vendor.", "gmlx.comfyui_pack")):
             continue
         try:
             # A __main__ module imports without running: its body waits on

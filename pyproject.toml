@@ -180,6 +180,9 @@ include = ["gmlx*"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt",
             "_vendor/mlx_vlm/LICENSE", "_vendor/mlx_lm/LICENSE"]
+# The ComfyUI node pack: its Apache-2.0 LICENSE, README and example
+# workflows. tests/test_comfyui_pack.py holds every pack file to these globs.
+"gmlx.comfyui_pack" = ["LICENSE", "README.md", "example_workflows/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -249,6 +252,8 @@ include = [
     "gmlx/upstream/gdn_patches.py",
     "scripts/structured_read_bench.py",
 ]
+# The ComfyUI node pack runs in ComfyUI's Python, against torch and ComfyUI.
+exclude = ["gmlx/comfyui_pack", "tests/comfyui_pack"]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
 pythonPlatform = "Darwin"
@@ -303,7 +308,10 @@ backlog = [
 # Vendored third-party code keeps its upstream style. For the copied
 # mlx-vlm and mlx-lm, `scripts/vendor_upstream.py lint` runs the E9, F821
 # and F811 rules against a baseline, so a broken edit there still fails.
-extend-exclude = ["gmlx/_vendor", "tests/cache/upstream", "tests/systemone/_openjev_helper_ref.py"]
+# The ComfyUI node pack and its suites run in ComfyUI's Python and keep
+# the pack's own style.
+extend-exclude = ["gmlx/_vendor", "tests/cache/upstream", "tests/systemone/_openjev_helper_ref.py",
+                  "gmlx/comfyui_pack", "tests/comfyui_pack"]
 
 [tool.ruff.lint]
 # S110: a silent try-except-pass needs a reason on its except line

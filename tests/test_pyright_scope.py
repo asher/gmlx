@@ -31,7 +31,7 @@ def _static_importers() -> set[str]:
     ).stdout.split()
     out = set()
     for rel in tracked:
-        if rel.startswith(("gmlx/_vendor/", "gmlx/models/")):
+        if rel.startswith(("gmlx/_vendor/", "gmlx/models/", "gmlx/comfyui_pack/")):
             continue
         if _STATIC.search((_ROOT / rel).read_text()):
             out.add(rel)

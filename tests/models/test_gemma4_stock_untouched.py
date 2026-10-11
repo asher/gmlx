@@ -76,7 +76,7 @@ _CHILD = textwrap.dedent('''
     # The CLI and the TUI: entry points, whose install functions install
     # packages or are called by the routes above. The copy: the routes
     # import what they run of it.
-    SKIP = ("gmlx.commands", "gmlx.tui", "gmlx._vendor")
+    SKIP = ("gmlx.commands", "gmlx.tui", "gmlx._vendor", "gmlx.comfyui_pack")
 
     def text_config(**kw):
         return {

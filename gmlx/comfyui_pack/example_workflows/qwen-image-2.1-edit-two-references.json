@@ -1,0 +1,524 @@
+{
+ "id": "5052d74c-07b9-54cb-94d3-c0adc2a542cd",
+ "revision": 0,
+ "last_node_id": 10,
+ "last_link_id": 11,
+ "nodes": [
+  {
+   "id": 10,
+   "type": "Note",
+   "pos": [
+    -440,
+    80
+   ],
+   "size": [
+    400,
+    330
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "title": "gmlx nodes: install",
+   "properties": {},
+   "widgets_values": [
+    "These gmlx nodes run the image model on a gmlx server on your Mac (Apple Silicon, M3 or newer).\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx pull qwen-image\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
+   ],
+   "color": "#432",
+   "bgcolor": "#653"
+  },
+  {
+   "id": 1,
+   "type": "GmlxModelLoader",
+   "pos": [
+    0,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      5
+     ]
+    }
+   ],
+   "title": "gmlx Model Loader",
+   "properties": {
+    "Node name for S&R": "GmlxModelLoader"
+   },
+   "widgets_values": [
+    "qwen-image",
+    "",
+    true
+   ]
+  },
+  {
+   "id": 2,
+   "type": "GmlxCLIPLoader",
+   "pos": [
+    0,
+    250
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      1
+     ]
+    }
+   ],
+   "title": "gmlx CLIP Loader",
+   "properties": {
+    "Node name for S&R": "GmlxCLIPLoader"
+   },
+   "widgets_values": [
+    "qwen-image",
+    "",
+    true
+   ]
+  },
+  {
+   "id": 3,
+   "type": "GmlxVAELoader",
+   "pos": [
+    0,
+    420
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      2,
+      10
+     ]
+    }
+   ],
+   "title": "gmlx VAE Loader",
+   "properties": {
+    "Node name for S&R": "GmlxVAELoader"
+   },
+   "widgets_values": [
+    "qwen-image",
+    "",
+    true
+   ]
+  },
+  {
+   "id": 4,
+   "type": "LoadImage",
+   "pos": [
+    340,
+    80
+   ],
+   "size": [
+    300,
+    320
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      3
+     ]
+    },
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": []
+    }
+   ],
+   "title": "Reference 1",
+   "properties": {
+    "Node name for S&R": "LoadImage"
+   },
+   "widgets_values": [
+    "reference-1.png",
+    "image"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "LoadImage",
+   "pos": [
+    340,
+    440
+   ],
+   "size": [
+    300,
+    320
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      4
+     ]
+    },
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": []
+    }
+   ],
+   "title": "Reference 2",
+   "properties": {
+    "Node name for S&R": "LoadImage"
+   },
+   "widgets_values": [
+    "reference-2.png",
+    "image"
+   ]
+  },
+  {
+   "id": 6,
+   "type": "TextEncodeQwenImage21",
+   "pos": [
+    680,
+    80
+   ],
+   "size": [
+    420,
+    330
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 1
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 2,
+     "shape": 7
+    },
+    {
+     "name": "images.image_1",
+     "type": "IMAGE",
+     "link": 3,
+     "label": "image_1",
+     "shape": 7
+    },
+    {
+     "name": "images.image_2",
+     "type": "IMAGE",
+     "link": 4,
+     "label": "image_2",
+     "shape": 7
+    },
+    {
+     "name": "images.image_3",
+     "type": "IMAGE",
+     "link": null,
+     "label": "image_3",
+     "shape": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "links": [
+      6
+     ]
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "links": [
+      7
+     ]
+    },
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "links": [
+      8
+     ]
+    }
+   ],
+   "title": "Text Encode Qwen Image 2.1",
+   "properties": {
+    "Node name for S&R": "TextEncodeQwenImage21"
+   },
+   "widgets_values": [
+    "Put the cat from the second image on the sofa in the first image",
+    "",
+    1024
+   ]
+  },
+  {
+   "id": 7,
+   "type": "KSampler",
+   "pos": [
+    1140,
+    80
+   ],
+   "size": [
+    300,
+    270
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 5
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 6
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 7
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 8
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      9
+     ]
+    }
+   ],
+   "title": "KSampler",
+   "properties": {
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    42,
+    "fixed",
+    30,
+    4.0,
+    "euler",
+    "simple",
+    1.0
+   ]
+  },
+  {
+   "id": 8,
+   "type": "VAEDecode",
+   "pos": [
+    1480,
+    80
+   ],
+   "size": [
+    210,
+    50
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 9
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 10
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      11
+     ]
+    }
+   ],
+   "title": "VAE Decode",
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 9,
+   "type": "SaveImage",
+   "pos": [
+    1480,
+    170
+   ],
+   "size": [
+    420,
+    470
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 11
+    }
+   ],
+   "outputs": [],
+   "title": "Save Image",
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "gmlx/qwen-image-2.1-edit"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   2,
+   0,
+   6,
+   0,
+   "CLIP"
+  ],
+  [
+   2,
+   3,
+   0,
+   6,
+   1,
+   "VAE"
+  ],
+  [
+   3,
+   4,
+   0,
+   6,
+   2,
+   "IMAGE"
+  ],
+  [
+   4,
+   5,
+   0,
+   6,
+   3,
+   "IMAGE"
+  ],
+  [
+   5,
+   1,
+   0,
+   7,
+   0,
+   "MODEL"
+  ],
+  [
+   6,
+   6,
+   0,
+   7,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   7,
+   6,
+   1,
+   7,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   8,
+   6,
+   2,
+   7,
+   3,
+   "LATENT"
+  ],
+  [
+   9,
+   7,
+   0,
+   8,
+   0,
+   "LATENT"
+  ],
+  [
+   10,
+   3,
+   0,
+   8,
+   1,
+   "VAE"
+  ],
+  [
+   11,
+   8,
+   0,
+   9,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.75,
+   "offset": [
+    480,
+    40
+   ]
+  }
+ },
+ "version": 0.4
+}

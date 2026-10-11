@@ -28,6 +28,8 @@ def _target_exists(base_dir: Path, dotted: str) -> bool:
 def test_relative_import_targets_exist():
     bad = []
     for py in sorted(_ROOT.rglob("*.py")):
+        if "comfyui_pack" in py.relative_to(_ROOT).parts:
+            continue                 # runs inside ComfyUI, never imported by gmlx
         pkg_dir = py.parent
         tree = ast.parse(py.read_text(), filename=str(py))
         for node in ast.walk(tree):

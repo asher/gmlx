@@ -3,8 +3,8 @@ docs-to-code direction: every backticked GMLX_* or MLX_VLM_* name either file
 documents must be read somewhere in gmlx/, so a renamed or removed variable
 cannot linger in the docs. A must-document set built from the code and from
 the names the docs carried when the file was created catches the reverse
-drift for the variables that matter. A name that only the ComfyUI node
-pack reads is exempt from the first check. CPU-only, no imports of gmlx
+drift for the variables that matter. The ComfyUI node pack lives in gmlx/,
+so the names it reads count as read. CPU-only, no imports of gmlx
 runtime."""
 from __future__ import annotations
 
@@ -64,12 +64,8 @@ def _read_in_code() -> set:
     return names
 
 
-# Names that the ComfyUI node pack reads and gmlx does not.
-_READ_BY_THE_PACK = {"GMLX_COMFY_SETTINGS"}
-
-
 def test_every_documented_name_is_read_by_the_code():
-    stale = _documented() - _read_in_code() - _READ_BY_THE_PACK
+    stale = _documented() - _read_in_code()
     assert not stale, f"documented but never read in gmlx/: {sorted(stale)}"
 
 

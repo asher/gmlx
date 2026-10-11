@@ -58,7 +58,8 @@ jobs:
         # wheel (via sdist, so a stale build/ dir can't leak deleted modules
         # into it) and require it to ship exactly the tracked package modules,
         # plus every tracked file matching the pyproject package-data globs
-        # (the vendored misaki data, the deepseek_v41 chat template).
+        # (the vendored misaki data, the deepseek_v41 chat template, the
+        # ComfyUI node pack's LICENSE and workflows).
         run: |
           python -m build
           python - <<'EOF'
@@ -91,6 +92,11 @@ jobs:
           missing_data = [d for d in data if d not in shipped]
           if missing_data:
               sys.exit(f"wheel is missing package-data files: {missing_data}")
+          # The ComfyUI node pack: every file, its workflows and LICENSE.
+          pack = [t for t in tracked_all if t.startswith("gmlx/comfyui_pack/")]
+          missing_pack = [p for p in pack if p not in shipped]
+          if not pack or missing_pack:
+              sys.exit(f"wheel is missing ComfyUI node pack files: {missing_pack}")
           print(f"wheel ships all {len(tracked)} tracked modules"
                 f" + {len(data)} package-data files, nothing else")
           EOF
