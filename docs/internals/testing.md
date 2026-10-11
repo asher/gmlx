@@ -310,15 +310,18 @@ collects none of them. `run_tests.py` runs the wire, client and in-process
 ComfyUI suites on the CPU, then a headless ComfyUI with the pack:
 
 ```sh
-gmlx comfyui install --comfyui-dir ~/ComfyUI
+python -m gmlx comfyui install --comfyui-dir ~/ComfyUI
 ~/ComfyUI/.venv/bin/python tests/comfyui_pack/run_tests.py --comfy ~/ComfyUI \
     --label main --out /tmp/pack --pack ~/ComfyUI/custom_nodes/comfyui-gmlx
 ```
 
-`--pack` tests the pack through the link that `install` made; without it
-the suites load the source in `gmlx/comfyui_pack`. The `comfyui-pack` job
-in CI runs the same on the schedule, on a release tag and when the pack or
-its tests change.
+`python -m gmlx` from the checkout copies this tree's pack, not the one of
+an installed gmlx. `--pack` tests the pack through the link that `install`
+made; without it the suites load the source in `gmlx/comfyui_pack`. The
+`comfyui-pack` job in CI runs the same on the schedule, on a release tag
+and when the pack, its tests or its install change. It runs on the pinned
+ComfyUI commit, the oldest ComfyUI release the pack supports and the
+newest one it was tested on.
 
 The CPU tier covers the rest without ComfyUI: `install` and its detection
 on fake folders, the copy and its refresh, and the stand-in nodes that load

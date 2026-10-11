@@ -372,6 +372,13 @@ kind of ComfyUI, such as `git -C ~/ComfyUI pull` for a clone. Update it,
 then run `gmlx comfyui install` again. The old ComfyUI desktop app cannot
 update that far, so install Comfy Desktop in its place.
 
+### `is older than ..., which the nodes need`
+
+`gmlx comfyui status` and `gmlx doctor` found a ComfyUI that has the gmlx
+nodes but is older than they need, such as after a gmlx upgrade raised the
+oldest ComfyUI they run on. The nodes may show as `(not loaded)` there.
+Update that ComfyUI as the entry above describes, then restart it.
+
 ### `the ComfyUI version in ... is unknown`
 
 The ComfyUI folder has no `comfyui_version.py`, so `install` cannot check
@@ -398,8 +405,9 @@ where ComfyUI skips it. Delete it when you no longer need it.
 
 ### `runs its own ComfyUI, so launch does not start it`
 
-The ComfyUI that `launch` found is a Comfy Desktop install. `launch` put
-the gmlx nodes into it. Start the app, or restart it, from the Dock.
+The ComfyUI that `launch` found is a Comfy Desktop install or the old
+desktop app. `launch` put the gmlx nodes into it. Start the app, or restart
+it, from the Dock.
 
 ### `has no main.py, so launch cannot start ComfyUI from it`
 
@@ -407,12 +415,23 @@ the gmlx nodes into it. Start the app, or restart it, from the Dock.
 start. Start that ComfyUI the way you installed it, or pass
 `--comfyui-dir` with the folder that holds `main.py`.
 
-### The gmlx nodes show `(not loaded)`
+### `do not load on ComfyUI`, and the gmlx nodes show `(not loaded)`
 
 A ComfyUI update changed a part of ComfyUI that this version of the nodes
-uses. Running one of them gives an error that names the change and the
-command that upgrades gmlx, such as `brew upgrade gmlx`. Upgrade, then
-start `gmlx serve` or run `gmlx comfyui install` and restart ComfyUI.
+uses. Running one of them gives this error, which names the change and the
+command that upgrades gmlx, such as `brew upgrade gmlx`. Upgrade, run
+`gmlx comfyui install` and restart ComfyUI. When the error says the nodes
+need a newer ComfyUI, update ComfyUI in its place and restart it. The
+terminal or log of ComfyUI holds the full error.
+
+### `the server speaks step contract`, `the server names no step contract` or `the server needs a client of step contract`
+
+The server and the gmlx nodes come from gmlx versions too far apart to
+work together. The message names the step to take. When the server is the
+older one, restart it with `gmlx restart`, and upgrade gmlx if it stays
+older. When the nodes are older, restart ComfyUI so it loads the nodes of
+the gmlx the server runs, and run `gmlx comfyui install` if they stay
+older.
 
 ### `the server runs gmlx ... and these nodes are from gmlx ...`
 
@@ -424,14 +443,40 @@ newer, restart ComfyUI so it loads the new nodes, and run
 ### `gmlx is not installed`
 
 The nodes found neither the `gmlx` command that `install` recorded nor one
-on `PATH`. Install gmlx again and run `gmlx comfyui install`, or remove the
+on `PATH`, or the one they found does not run. Install gmlx again and run `gmlx comfyui install`, or remove the
 nodes by deleting the two paths the message names: the `comfyui-gmlx` link
 in `custom_nodes` and `~/.local/share/gmlx/comfyui`.
 
 ### `the pack copy is missing` or `the pack copy is from gmlx`
 
 `gmlx comfyui status` and `gmlx doctor` found the copy of the nodes gone or
-older than the gmlx that runs. Run `gmlx comfyui install`.
+from another gmlx version than the one that runs. Run
+`gmlx comfyui install`.
+
+### `folder missing; run gmlx comfyui install`
+
+A ComfyUI that the record lists is gone: deleted, moved, or on a drive that
+is not mounted. A drive that comes back needs nothing, since its link
+points at the copy that gmlx keeps current. For a ComfyUI that is gone for
+good, run `gmlx comfyui install`, which removes it from the record and says
+so. If it comes back after that, run `gmlx comfyui install --comfyui-dir`
+with its folder to record it again.
+
+### `missing; run gmlx comfyui install`, `elsewhere; run gmlx comfyui install` or `folder; run gmlx comfyui install`
+
+The `comfyui-gmlx` entry in that ComfyUI's `custom_nodes` is gone
+(`missing`), links to something other than the gmlx copy (`elsewhere`), or
+is a real folder (`folder`), such as one a hand copy put there.
+`gmlx comfyui install` puts the link back and moves such a folder into
+`custom_nodes/.disabled`.
+
+### ComfyUI-Manager says `Not a git repository`
+
+ComfyUI-Manager lists the gmlx nodes as an unknown pack, and updating them
+there fails, since they are a link to the copy that gmlx keeps, not a git
+clone. They update with gmlx: upgrade gmlx, and the next `gmlx serve`,
+`gmlx launch comfyui` or `gmlx comfyui install` brings the new nodes.
+Restart ComfyUI after that.
 
 ### `could not refresh the ComfyUI node pack`
 
