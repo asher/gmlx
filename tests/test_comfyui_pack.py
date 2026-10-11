@@ -83,9 +83,21 @@ def test_the_wheel_ships_every_pack_file():
 
 
 def test_the_pack_keeps_its_apache_license():
+    """The pack is Apache-2.0 inside a BUSL repository: its own LICENSE, the
+    root LICENSE's exception for its folder, an SPDX line in each module and
+    its LICENSE among the wheel's license files."""
     text = (_PACK / "LICENSE").read_text()
     assert "Apache License" in text and "Version 2.0, January 2004" in text
-    assert "Apache-2.0" in _pyproject()["project"]["license"]
+    project = _pyproject()["project"]
+    assert "Apache-2.0" in project["license"]
+    assert "gmlx/comfyui_pack/LICENSE" in project["license-files"]
+    root = " ".join((_ROOT / "LICENSE").read_text().split())
+    assert ("Files in gmlx/comfyui_pack, the ComfyUI node pack, are licensed under the "
+            "Apache License, Version 2.0 (see the LICENSE file in that folder), not under "
+            "this License.") in root
+    missing = [p.name for p in sorted(_PACK.rglob("*.py"))
+               if p.read_text().splitlines()[0] != "# SPDX-License-Identifier: Apache-2.0"]
+    assert not missing, f"no Apache-2.0 SPDX line first in: {missing}"
 
 
 def test_gmlx_never_imports_the_pack():

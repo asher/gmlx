@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A ComfyUI VAE that encodes and decodes on the gmlx server.
 
 It sets the attributes stock nodes read and sends latents in raw VAE space,

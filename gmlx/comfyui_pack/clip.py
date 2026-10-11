@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A ComfyUI CLIP whose text encoder runs on the gmlx server.
 
 ``tokenize`` keeps the text and the options the stock text encode nodes

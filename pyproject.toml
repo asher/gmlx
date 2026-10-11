@@ -8,10 +8,12 @@ version = "0.4.20"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
-# MIT covers the files with an SPDX MIT header (LICENSE-MIT). MIT and
-# Apache-2.0 also cover the third-party files that licenses/ lists.
+# MIT covers the files with an SPDX MIT header (LICENSE-MIT). Apache-2.0
+# covers the ComfyUI node pack in gmlx/comfyui_pack (its own LICENSE). MIT
+# and Apache-2.0 also cover the third-party files that licenses/ lists.
 license = "BUSL-1.1 AND MIT AND Apache-2.0"
-license-files = ["LICENSE", "LICENSE-MIT", "licenses/*", "THIRD_PARTY_NOTICES.md"]
+license-files = ["LICENSE", "LICENSE-MIT", "gmlx/comfyui_pack/LICENSE", "licenses/*",
+                 "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
     "Development Status :: 4 - Beta",

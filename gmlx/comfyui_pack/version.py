@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The pack's version and the ComfyUI versions it supports.
 
 gmlx reads this file as text, never imports it, so it holds plain literals

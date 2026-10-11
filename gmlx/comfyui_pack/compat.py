@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The ComfyUI internals this pack depends on, probed at import.
 
 A ComfyUI release can rename or drop an internal the pack touches. The

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A stock ComfyUI MODEL whose DiT forward runs on the gmlx server.
 
 The loader fetches the model's manifest, builds a state dict of empty

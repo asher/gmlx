@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The client side of the gmlx image step contract.
 
 A body is a safetensors container: an 8 byte little-endian header length,

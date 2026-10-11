@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The ModelPatcher of a gmlx MODEL, whose weights live on the gmlx server.
 
 Its load and unload methods touch no weights, and both of its devices are

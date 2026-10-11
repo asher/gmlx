@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The nodes of ComfyUI-gmlx.
 
 The loaders give a stock MODEL, CLIP and VAE whose work runs on a gmlx

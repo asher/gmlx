@@ -203,6 +203,8 @@ weights have their own licenses.
 
 The files listed in
 [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT) are MIT
-licensed and have an SPDX header saying so. Vendored third-party code is
+licensed and have an SPDX header saying so. The ComfyUI node pack in
+`gmlx/comfyui_pack` is licensed under the Apache License 2.0, with its own
+LICENSE file. Vendored third-party code is
 documented in
 the [third-party notices](https://github.com/asher/gmlx/blob/main/THIRD_PARTY_NOTICES.md).

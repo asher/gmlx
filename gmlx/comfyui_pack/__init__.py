@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """ComfyUI-gmlx: image model steps on a local gmlx server."""
 
 from . import compat

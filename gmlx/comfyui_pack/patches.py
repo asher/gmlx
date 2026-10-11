@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Patch tables from the weight patches stock ComfyUI nodes add.
 
 ``LoraLoader`` and ``LoraLoaderModelOnly`` call ``add_patches`` on a clone of
