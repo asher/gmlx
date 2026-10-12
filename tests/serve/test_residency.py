@@ -1058,6 +1058,45 @@ def test_a_build_repriced_up_beside_a_busy_model_defers(monkeypatch):
     assert list(pool._entries) == [("b", None, "auto")]
 
 
+def test_a_build_repriced_up_releases_an_evicted_image_off_the_lock(
+        monkeypatch):
+    """The image entry was busy when acquire decided the worker
+    reservation and is idle at the refit. Its release runs on the image
+    worker, where a reservation taken since waits on the build lock, so
+    it runs after the build lock drops."""
+    from gmlx.serve.residency import IMAGE_KIND, _Entry
+
+    _table_only_header(monkeypatch, budget=110 * GB)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, _, _, _ = _table_only_pool(monkeypatch, model, evict=True)
+    key = ("img", None, IMAGE_KIND)
+    image = _Entry(cache_key=key, model_path="img", footprint=100 * GB,
+                   busy=1, kind=IMAGE_KIND, pipeline="P")
+    pool._entries[key] = image
+    stock_get = pool._stock_get
+
+    def stock_get_then_image_done(*a, **k):
+        stock_get(*a, **k)
+        image.busy = 0
+
+    pool._stock_get = stock_get_then_image_done
+    released = []
+
+    def release_on_worker(box):
+        # The worker runs it only once the build lock is free.
+        free = pool._build_lock.acquire(blocking=False)
+        if free:
+            pool._build_lock.release()
+        released.append((list(box), free))
+
+    pool._image_fns = (None, None, release_on_worker)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert released == [(["P"], True)]
+    assert list(pool._entries) == [("a", None, "auto")]
+
+
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
     """deepseek41's engram tables serve from disk like the experts; pricing
     them resident would evict every other model for room they never take."""

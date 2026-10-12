@@ -524,50 +524,59 @@ class _ResidencyPool:
                 and os.path.isfile(model_path)):
             from gmlx.load.preflight import preflight
             preflight(model_path)
-        with self._worker_for(model_kind == IMAGE_KIND), self._build_lock:
-            released: list = []
-            try:
+        # Image pipelines a post-build refit evicts. The worker reservation
+        # was decided before the build, which may have seen them busy, so
+        # they are released after the build lock drops: a reservation taken
+        # since waits on that lock, and a release would queue behind it.
+        late: list = []
+        try:
+            with self._worker_for(model_kind == IMAGE_KIND), self._build_lock:
+                released: list = []
+                try:
+                    with self._lock:
+                        entry = self._entries.get(cache_key)
+                        if entry is not None:
+                            if ttl is not None:
+                                entry.ttl = ttl
+                            self._touch(entry)
+                            entry.busy += 1
+                            return entry
+                        self._evict_for_room(
+                            incoming, model_path=model_path,
+                            streaming=getattr(build_spec, "stream", None) == "experts",
+                            released=released)
+                finally:
+                    self._release_images(released)
+                try:
+                    entry = self._build(cache_key, model_path, adapter_path,
+                                        model_kind, file_bytes, ttl=ttl, env=env,
+                                        build_spec=build_spec)
+                except BaseException:
+                    # Free the failed build before the lock drops: a waiting
+                    # acquire gates on live memory next.
+                    _collect_failed_build()
+                    raise
+                if entry.priced_up:
+                    self._fit_repriced(entry, model_path, late)
+                # The id that built the entry names it for the process lifetime
+                # (a metrics label wants a name fixed per entry; aliases sharing
+                # the signature reuse this entry and keep the first name).
+                entry.loaded_as = loaded_as
                 with self._lock:
-                    entry = self._entries.get(cache_key)
-                    if entry is not None:
-                        if ttl is not None:
-                            entry.ttl = ttl
-                        self._touch(entry)
-                        entry.busy += 1
-                        return entry
-                    self._evict_for_room(
-                        incoming, model_path=model_path,
-                        streaming=getattr(build_spec, "stream", None) == "experts",
-                        released=released)
-            finally:
-                self._release_images(released)
-            try:
-                entry = self._build(cache_key, model_path, adapter_path,
-                                    model_kind, file_bytes, ttl=ttl, env=env,
-                                    build_spec=build_spec)
-            except BaseException:
-                # Free the failed build before the lock drops: a waiting
-                # acquire gates on live memory next.
-                _collect_failed_build()
-                raise
-            if entry.priced_up:
-                self._fit_repriced(entry, model_path)
-            # The id that built the entry names it for the process lifetime
-            # (a metrics label wants a name fixed per entry; aliases sharing
-            # the signature reuse this entry and keep the first name).
-            entry.loaded_as = loaded_as
-            with self._lock:
-                self._entries[cache_key] = entry
-                self._touch(entry)
-                entry.busy += 1
-            return entry
+                    self._entries[cache_key] = entry
+                    self._touch(entry)
+                    entry.busy += 1
+                return entry
+        finally:
+            self._release_images(late)
 
-    def _fit_repriced(self, entry: _Entry, model_path) -> None:
+    def _fit_repriced(self, entry: _Entry, model_path, released) -> None:
         """The install streamed less than the header predicted, so the
         entry holds more than the budget admitted. Evict for the new price
         as for any build; when only pinned or busy models remain and it
-        cannot fit, unload the new model and defer the request."""
-        released: list = []
+        cannot fit, unload the new model and defer the request. Evicted
+        image pipelines go to ``released`` for the caller to release
+        outside the build lock."""
         try:
             with self._lock:
                 self._evict_for_room(entry.footprint, model_path=model_path,
@@ -580,8 +589,6 @@ class _ResidencyPool:
                              exc_info=True)
             _collect_failed_build()
             raise
-        finally:
-            self._release_images(released)
 
     def release(self, entry: _Entry) -> None:
         """Drop one in-flight reference taken by :meth:`acquire`. At zero the
