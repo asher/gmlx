@@ -82,6 +82,18 @@ def test_a_replacement_answers_for_the_metal_device(on_cpu, monkeypatch):
     assert metal_info() == {WS: 7}
 
 
+def test_a_metal_error_gives_no_stream_budget(monkeypatch):
+    """An install or a discovery scan falls back on a Metal init error
+    instead of aborting."""
+    from gmlx.device import stream_budget_bytes
+
+    def broken(*a):
+        raise RuntimeError("[metal::Device] Unable to load device")
+
+    monkeypatch.setattr(mx, "device_info", broken)
+    assert stream_budget_bytes() is None
+
+
 def _reads_device_info(node) -> bool:
     if isinstance(node, ast.ImportFrom):
         return ((node.module or "").startswith("mlx.core")

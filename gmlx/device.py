@@ -49,5 +49,5 @@ def stream_budget_bytes() -> int | None:
     a MoE over it ``stream: experts``. None without Metal."""
     try:
         return int(0.9 * metal_value("max_recommended_working_set_size"))
-    except (KeyError, TypeError, ValueError):
+    except Exception:  # a Metal init error must not abort an install or scan
         return None
