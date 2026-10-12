@@ -577,12 +577,15 @@ class _ResidencyPool:
                         self._touch(entry)
                         entry.busy += 1
                     return entry
+            # Without a byte budget, only the count cap evicts.
+            bound = (f"the {self._budget / 1e9:.1f} GB budget"
+                     if self._budget else "the model count cap")
             _defer(
                 f"model load deferred: {model_path} priced at "
-                f"{incoming / 1e9:.1f} GB resident does not fit the "
-                f"{self._budget / 1e9:.1f} GB budget unless an idle image "
-                "model is evicted, and the image worker could not be held "
-                "to release it. Retry when a slot frees.")
+                f"{incoming / 1e9:.1f} GB resident does not fit {bound} "
+                "unless an idle image model is evicted, and the image "
+                "worker could not be held to release it. Retry when a slot "
+                "frees.")
         finally:
             self._release_images(late)
 
