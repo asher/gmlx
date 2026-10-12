@@ -29,6 +29,9 @@ from gmlx.image.families.qwen_image21 import model as qm
 from gmlx.image.ops import kq_routes
 from gmlx.image.schedule import qwen21_sigmas
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 # The equivalence holds to this relative L2 in fp32, and a wrong model
 # must miss it by FAULT times at least.
 TOL = 1e-5

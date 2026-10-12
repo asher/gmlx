@@ -25,6 +25,9 @@ from gmlx.cache.kvarn_cache import (
 from test_ckpt_tier import D, H, make_hybrid_cache
 from kvarn_testlib import needs_kvarn_ops, tokens
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache

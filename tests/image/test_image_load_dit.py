@@ -17,6 +17,9 @@ from gmlx.image import registry
 from gmlx.image.fingerprint import Match
 from gmlx.image.registry import ConstantsRow, Family
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 
 class _T(nn.Module):
     def __init__(self):

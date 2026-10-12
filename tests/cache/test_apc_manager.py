@@ -16,6 +16,9 @@ import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.cache.apc_manager import GmlxAPCManager, build_apc_manager  # noqa: E402
 from gmlx.serve.residency import _RuntimeProxy, _ResidencyPool, _active_entry  # noqa: E402
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 GB = 1024**3
 
 

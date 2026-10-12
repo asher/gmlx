@@ -23,6 +23,9 @@ from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.families.qwen_image21.model import (QwenImage21Config,
                                                     QwenImage21DiT)
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 
 @pytest.fixture
 def tiny(monkeypatch):

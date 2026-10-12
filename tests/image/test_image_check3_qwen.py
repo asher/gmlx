@@ -43,6 +43,9 @@ from gmlx.image.families.qwen_image21 import model as qm
 from gmlx.image.lora import install
 from gmlx.image.ops import attention, kq_routes, norms
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 BLOCKS = "selftest_qwen_image21_tiny_ref2"
 TINY = {c: f"selftest_qwen_image21_tiny_{c}" for c in ("text", "ref1", "ref2")}
 

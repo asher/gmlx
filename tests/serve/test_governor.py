@@ -53,6 +53,11 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov, "_headroom_and_ws",
                         lambda margin: (box["head"] - margin * box["ws"],
                                         box["ws"]))
+    # The machine behind the scripted working set, so the ceiling reads it
+    # and not the host.
+    monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
+        "max_recommended_working_set_size": box["ws"],
+        "memory_size": box["ws"] / 0.875})
     monkeypatch.setattr(gov.mx, "get_active_memory",
                         lambda: box["active"])
     monkeypatch.setattr(gov.mx, "get_peak_memory", lambda: box["peak"])

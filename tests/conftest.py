@@ -43,11 +43,13 @@ stock_blocker.install()
 
 
 def pytest_configure(config):
-    # One fixed test box, so pricing does not depend on the host
-    # (host_box.py). Before anything reads the device.
+    # Every test sees the CI runner unless it declares a Mac with
+    # host_gb (host_box.py). Before anything reads the device.
     import host_box
 
     host_box.install()
+    config.addinivalue_line(
+        "markers", "host_gb(n): the test runs on a simulated Mac of n GiB")
 
     # Each directory's paths together, or pytest 9.1 hides a conftest's
     # fixtures from a directory named twice (arg_order.py).
@@ -262,6 +264,16 @@ def pytest_sessionfinish(session, exitstatus):
     if failure:
         print(f"\n{failure}", file=sys.stderr)
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(tryfirst=True, specname="pytest_runtest_setup")
+def pytest_runtest_setup_host(item):
+    # The machine a test declares with host_gb, else the CI runner. Set
+    # before any fixture, module-scoped ones included, reads the device.
+    import host_box
+
+    mark = item.get_closest_marker("host_gb")
+    host_box.use(*(host_box.mac(mark.args[0]) if mark else host_box.default()))
 
 
 @pytest.fixture

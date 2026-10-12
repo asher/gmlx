@@ -30,6 +30,9 @@ import pytest
 
 import process_state
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 _BEFORE: dict = {}
 # Set for each test by pytest and by the conftest's own fixtures.
 _PER_TEST = ("PYTEST_CURRENT_TEST", "XDG_DATA_HOME", "GMLX_COMFY_SETTINGS")

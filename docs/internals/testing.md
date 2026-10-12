@@ -37,26 +37,39 @@ link there.
 
 ## Tests that pass in CI
 
-CI runs the CPU tier on a small macOS runner, not on a developer's Mac. A
-test that passes on your machine can fail there for these reasons:
+CI runs the CPU tier on a small macOS runner, not on a developer's Mac. Every
+test sees that runner by default, a Mac VM of 7.5 GB with a virtual GPU, so a
+test that would fail in CI fails on your machine first.
+
+A test that needs more memory declares the Mac it assumes:
+
+```python
+pytestmark = pytest.mark.host_gb(16)  # a 16 GB Mac, as most users run
+```
+
+Derive expected numbers from that machine (`host_box.mac(16)`), never from a
+120 or 128 GB literal. A test that scripts every memory counter it reads,
+as the governor rig does, needs no machine at all.
 
 | CI differs in | So a test |
 |---------------|-----------|
-| About 7.5 GB of memory and a virtual GPU | Never reads the host's memory or chip. The suite pins one 128 GB M5 Max test machine (`tests/host_box.py`). |
+| About 7.5 GB of memory and a virtual GPU | Never reads this Mac's memory, chip or kernel counters. It declares a machine with `host_gb`. |
+| Python 3.11 to 3.14, files run serially | Passes on each version and does not depend on the order files are named in. |
+| A slower, shared machine | Bounds a time by its failure case with seconds to spare, never by a fraction of a second. |
 | Only the `all` extras, so no OpenCV | That needs an optional package skips without it, with `pytest.importorskip`. |
 | The newest release of every dependency | Handles a dependency's behavior change in gmlx code, and covers both versions. |
-| Files collected by folder, under `KQUANT_FORCE_CPU=1` | Does not depend on the order files are named in. |
 
 To run the suite as CI does, in a fresh venv:
 
 ```sh
 pip install -U -e ".[all]" pytest httpx pytest-xdist
-KQUANT_FORCE_CPU=1 GMLX_TEST_HOST_RAM_GB=7.5 pytest -n 8
+KQUANT_FORCE_CPU=1 pytest -n 8
 ```
 
-`GMLX_TEST_HOST_RAM_GB` makes the process report a runner of that size
-under the pinned test machine. Add `GMLX_TEST_REAL_HOST=1` to drop the
-pinned machine and see what a test does on that runner itself.
+`GMLX_TEST_HOST_RAM_GB` changes the size of the default runner.
+`GMLX_TEST_REAL_HOST=1` turns the simulation off, so a run sees the real
+host. A test that needs the real GPU checks it with
+`helpers._real_apple_gpu()`, which reads the real device.
 
 ## Process state between tests
 

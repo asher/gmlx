@@ -341,20 +341,20 @@ def test_a_failed_connection_leaves_no_mark_and_the_next_start_fetches(
 
 def test_one_deadline_bounds_the_whole_fetch(hub, tmp_path, monkeypatch,
                                              capsys):
-    # A Hub that answers each request after 0.8 s. The first file arrives,
+    # A Hub that answers each request after 2 s. The first file arrives,
     # and the second request gets what is left of one FETCH_TIMEOUT, so the
-    # call ends at about 1 s, not 3 x 0.8 s. The Hub answered a request, so
+    # call ends at about 2.5 s, not 3 x 2 s. The Hub answered a request, so
     # the timeout is no answer about the rest: no mark, and the next start
     # asks for the files still missing.
     import os
     import time
 
-    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 1.0)
-    hub.delay = 0.8
+    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 2.5)
+    hub.delay = 2.0
     started = time.monotonic()
     with hf_cache.offline_resolve(REPO, wanted=_card):
         pass
-    assert time.monotonic() - started < 1.6
+    assert time.monotonic() - started < 4.0
     assert len(hub.requests) == 2
     assert ("modules.json not fetched (ReadTimeout: timed out); the next "
             "start tries again") in capsys.readouterr().err

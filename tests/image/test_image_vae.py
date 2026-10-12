@@ -19,6 +19,9 @@ from mlx.utils import tree_flatten
 from gmlx.image.vae import flux1_ae, reader, tiling
 from gmlx.image.vae.group_norm import GroupNorm, group_norm
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 TINY = flux1_ae.Flux1AEConfig(
     in_channels=3, out_channels=3, latent_channels=16,
     block_out_channels=(32, 64), layers_per_block=1, norm_num_groups=32,

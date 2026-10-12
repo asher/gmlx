@@ -57,6 +57,9 @@ from gmlx.image import api, lora, registry
 from gmlx.image.families.qwen_image21 import model as qm
 from gmlx.image.lora import install, patch_table, plan, reader
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 TINY = {v: f"selftest_qwen_image21_tiny_lora_{v}"
         for v in qt.rule.LORA_VARIANTS}
 # The fixtures of the files that no dialect writer spells: one with its

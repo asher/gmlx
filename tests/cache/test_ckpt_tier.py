@@ -31,6 +31,9 @@ from gmlx.cache.snapshot import (
 )
 from helpers import pin_apc_arms
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 # Runtime-origin cache classes: the hybrid stacks these fixtures mimic are
 # built by the mlx-vlm generate stack (vlm-origin classes since 0.6.4).
 ArraysCache = _cache.ArraysCache

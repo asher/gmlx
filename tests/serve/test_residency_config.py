@@ -22,6 +22,9 @@ from gmlx.serve.residency import (  # noqa: E402
     _RuntimeProxy,
 )
 
+# A Mac of 64 GB: the pool juggles models of 10 to 22 GB.
+pytestmark = pytest.mark.host_gb(64)
+
 GB = 1024**3
 
 

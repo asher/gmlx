@@ -195,9 +195,9 @@ def test_gpu_arch_gen(on_cpu, monkeypatch):
     import gmlx.load.dtypes as dtypes
 
     monkeypatch.setattr(dtypes, "_arch_gen", None)
+    # A virtual GPU names no Apple generation: 0.
     match = dtypes._ARCH_RE.search(on_cpu["architecture"])
-    assert match, on_cpu["architecture"]
-    want = int(match.group(1))
+    want = int(match.group(1)) if match else 0
     assert dtypes.gpu_arch_gen() == want
 
 

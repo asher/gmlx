@@ -10,9 +10,9 @@ def _real_apple_gpu() -> bool:
     if os.environ.get("KQUANT_FORCE_CPU"):
         return False
     try:
-        import mlx.core as mx
+        import host_box
 
-        name = str(mx.device_info().get("device_name", ""))
+        name = str(host_box.real_device_info().get("device_name", ""))
     except Exception:
         return False
     return "Apple" in name and "Paravirtual" not in name

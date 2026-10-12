@@ -20,6 +20,9 @@ from gmlx.serve.residency import (  # noqa: E402
     _Scratch,
 )
 
+# A Mac of 64 GB: the pool juggles models of 10 to 22 GB.
+pytestmark = pytest.mark.host_gb(64)
+
 GB = 1024**3
 
 
@@ -248,6 +251,8 @@ def test_all_busy_exceeds_budget_with_warning(caplog):
     assert "pinned or busy" in caplog.text and "exceed" in caplog.text
 
 
+# A pool of 100 to 200 GB beside a 96 GB model: a server of 256 GB.
+@pytest.mark.host_gb(256)
 def test_streaming_incoming_defers_over_budget_beside_a_busy_resident():
     # Over the budget with only pinned or busy residents, a streaming load
     # is refused with the typed 503, not admitted. Its arena fills the
@@ -274,6 +279,8 @@ def test_streaming_incoming_defers_over_budget_beside_a_busy_resident():
     assert teardowns == ["A"] and resident(pool) == {"B"}
 
 
+# A pool of 100 to 200 GB beside a 96 GB model: a server of 256 GB.
+@pytest.mark.host_gb(256)
 def test_streaming_incoming_under_budget_loads_beside_a_busy_resident():
     proxy, pool, teardowns = make_pool(200, {"A": 16, "B": 60})
     pool.acquire("A", None, "auto")        # hold kept: in-flight
@@ -295,6 +302,8 @@ def test_streaming_incoming_defers_over_budget_beside_a_pinned_resident():
     assert teardowns == [] and resident(pool) == {"A"}
 
 
+# A pool of 100 to 200 GB beside a 96 GB model: a server of 256 GB.
+@pytest.mark.host_gb(256)
 def test_streaming_incoming_over_the_count_cap_keeps_the_admit_policy(caplog):
     # Only the byte budget defers a streaming load. Over the count cap with
     # room in bytes, the warn-and-admit policy stands.

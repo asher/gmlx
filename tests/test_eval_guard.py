@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import host_box
 from helpers import _real_apple_gpu
 
 import mlx.core as mx
@@ -36,7 +37,7 @@ def _trip():
     mx.contiguous is the materializer because scalar binary ops keep
     the broadcast strides and never reach the oversized malloc)."""
     n = 2048
-    limit = mx.device_info()["max_buffer_length"]
+    limit = host_box.real_device_info()["max_buffer_length"]
     rows = int(limit * 1.2) // (n * n * 4) + 1
     mid = mx.full((n,), 1.0) * 1.0001 + 1.0
     return mid, mx.contiguous(mx.broadcast_to(mid, (rows, n, n)))

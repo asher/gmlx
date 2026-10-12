@@ -30,6 +30,9 @@ from oracle_fixture import ORACLE, committed_fixture, fixture, fx
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 FAMILY = "krea2"
 NAME = "check5_krea2_vae"
 TINY = "selftest_krea2_vae_tiny"

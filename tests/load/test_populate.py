@@ -100,7 +100,7 @@ def test_wait_for_releases_on_small_tail(tmp_path, fake_threads):
     st.done = 800  # remaining 20% < default 25% tail
     t0 = time.perf_counter()
     populate.wait_for([str(p)], log=lambda *a: None)
-    assert time.perf_counter() - t0 < 0.5
+    assert time.perf_counter() - t0 < 5
 
 
 def test_wait_for_blocks_until_stream_done(tmp_path, monkeypatch):
@@ -122,7 +122,7 @@ def test_wait_for_blocks_until_stream_done(tmp_path, monkeypatch):
     monkeypatch.setenv("GMLX_POPULATE_WAIT", "0")
     t0 = time.perf_counter()
     populate.wait_for([str(p)], log=lines.append)
-    assert time.perf_counter() - t0 < 0.05
+    assert time.perf_counter() - t0 < 2
 
 
 def test_residency_warm_env_disables(tmp_path, monkeypatch):

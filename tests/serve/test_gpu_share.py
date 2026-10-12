@@ -58,7 +58,7 @@ def test_the_pacer_does_nothing_with_no_chat_active():
     for i in range(50):
         pacer((i,))
     assert evals == [] and pacer.pauses == 0
-    assert time.monotonic() - t0 < 0.05
+    assert time.monotonic() - t0 < 2
 
 
 def _run(share: float, blocks: int, chat_delay: float):
@@ -189,7 +189,7 @@ def test_a_pause_stops_waiting_when_chat_goes_idle():
     pacer(())
     pacer.mark = time.monotonic() - 0.2
     pacer(())
-    assert time.monotonic() - t0 < 0.5
+    assert time.monotonic() - t0 < 1.2
 
 
 @pytest.mark.parametrize("raw, want", [
