@@ -764,9 +764,31 @@ def _marked_stream_ids(path) -> list:
         ca = getattr(ent, "ca", None)
         item = ca.items.get("stream") if ca is not None else None
         tok = item[2] if item and len(item) > 2 else None
-        if tok is not None and discovery.STREAM_MARK_NOTE in str(tok.value):
+        if (tok is not None and discovery.STREAM_MARK_NOTE in str(tok.value)
+                and ent.get("stream") == "experts"):
             out.append(str(mid))
     return out
+
+
+def _drop_key_keep_trailing(ent, key) -> None:
+    """Delete ``key`` from a ruamel map. Its end-of-line comment token also
+    holds the lines after it (a blank line, the next entry's comment), so
+    those move onto the key before it."""
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    i = list(ent).index(key)
+    item = ent.ca.items.pop(key, None)
+    del ent[key]
+    tok = item[2] if item and len(item) > 2 else None
+    rest = tok.value.split("\n", 1)[1] if tok is not None and "\n" in tok.value else ""
+    if not rest or i == 0:
+        return
+    prev = ent.ca.items.setdefault(list(ent)[i - 1], [None, None, None, None])
+    if prev[2] is not None:
+        prev[2].value += rest
+    else:
+        prev[2] = CommentToken("\n" + rest, CommentMark(0), None)
 
 
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
@@ -809,12 +831,12 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
         pos = 0
         for mid, fresh in (restream or {}).items():
             ent = models.get(mid)
-            if not isinstance(ent, dict):
+            if not isinstance(ent, dict) or ent.get("stream") != "experts":
                 continue
-            ent.pop("stream", None)
             if (fresh["speculative"] and "speculative" not in ent
                     and not ent.get("draft_gguf")):
-                ent["speculative"] = True
+                ent.insert(list(ent).index("stream"), "speculative", True)
+            _drop_key_keep_trailing(ent, "stream")
         for mc in discovered:
             entry = CommentedMap(discovery.model_to_entry(mc, dirs))
             if "stream" in entry:

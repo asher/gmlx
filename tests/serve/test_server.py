@@ -1144,11 +1144,12 @@ def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys
     cfg_path, lib = _sync_config(
         tmp_path,
         "models:\n"
-        f"  big:\n    path: big.gguf\n    stream: experts  # {note}\n"
-        "    pin: true\n"
-        "  mine:\n    path: mine.gguf\n    stream: experts\n")
-    (lib / "big.gguf").write_bytes(b"x")
-    (lib / "mine.gguf").write_bytes(b"x")
+        f"  big:\n    path: big.gguf\n    pin: true\n    stream: experts  # {note}\n"
+        "\n  # mine: hand-tuned\n"
+        "  mine:\n    path: mine.gguf\n    stream: experts\n"
+        f"  cpu:\n    path: cpu.gguf\n    stream: cpu  # {note}\n")
+    for name in ("big", "mine", "cpu"):
+        (lib / f"{name}.gguf").write_bytes(b"x")
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [])
     seen = []
     fresh = {"stream": "experts", "speculative": False}
@@ -1168,7 +1169,10 @@ def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys
     assert cfg.models["big"].speculative is True  # as a fresh scan gives it
     assert cfg.models["big"].pin is True
     assert cfg.models["mine"].stream == "experts"
-    assert note not in cfg_path.read_text()
+    assert cfg.models["cpu"].stream == "cpu"      # only an experts mark drops
+    text = cfg_path.read_text()
+    assert "    pin: true\n    speculative: true\n\n  # mine: hand-tuned\n  mine:" in text
+    assert text.count(note) == 1
     # A model the scan adds over the budget carries the mark.
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [
         MC(id="huge", path=str(lib / "huge.gguf"), stream="experts")])
