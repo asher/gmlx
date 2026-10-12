@@ -268,6 +268,18 @@ def _valid_expert_ids(module, indices):
     return ids, mx.array(ids)
 
 
+def _release_unmapped_credit(model, freed: float) -> None:
+    """Take the freed bytes of unmapped expert stacks back out of the
+    experts' headroom credit. In the tracked regime the stacks were
+    credited while the tracker counted them; once unmapped it no longer
+    does, and a credit left in place would read them free twice."""
+    if freed > 0:
+        from gmlx.gen.prefill_decay import release_streamed_tracked_bytes
+
+        release_streamed_tracked_bytes(
+            freed, getattr(model, "_kq_weights_key", None), "experts")
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -360,6 +372,14 @@ def install_expert_streaming(
                 )
         else:
             table_offloaded, table_names = install_table_streaming(model)
+    # The weights' untracked registration before any deduct: the table and
+    # expert credits both split total into tracked and untracked from it.
+    # Read after the table deduct, a compose install sees the table as
+    # tracked and credits it a second time through the experts.
+    from gmlx.gen.prefill_decay import untracked_weight_bytes_for
+
+    untracked0 = untracked_weight_bytes_for(
+        getattr(model, "_kq_weights_key", None))
     if table_offloaded and compose:
         loadlog.info(
             f"[stream] compose: streamable table "
@@ -368,12 +388,9 @@ def install_expert_streaming(
             "AND experts streamed"
         )
         key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import (
-            note_streamed_tracked_bytes,
-            untracked_weight_bytes_for,
-        )
-        tracked = max(
-            0.0, total_bytes - untracked_weight_bytes_for(key))
+        from gmlx.gen.prefill_decay import note_streamed_tracked_bytes
+
+        tracked = max(0.0, total_bytes - untracked0)
         credit = min(float(table_offloaded), tracked)
         if credit > 0:
             note_streamed_tracked_bytes(
@@ -393,12 +410,9 @@ def install_expert_streaming(
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
         key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import (
-            note_streamed_tracked_bytes,
-            untracked_weight_bytes_for,
-        )
-        tracked = max(
-            0.0, total_bytes - untracked_weight_bytes_for(key))
+        from gmlx.gen.prefill_decay import note_streamed_tracked_bytes
+
+        tracked = max(0.0, total_bytes - untracked0)
         credit = min(float(table_offloaded), tracked)
         if credit > 0:
             note_streamed_tracked_bytes(
@@ -936,11 +950,9 @@ def install_expert_streaming(
         # the two regimes; the credit is clamped to the expert share.
         # Same 0.9 x working-set budget test as _warm_touch_pass.
         key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import (
-            note_streamed_tracked_bytes,
-            untracked_weight_bytes_for,
-        )
-        tracked = max(0.0, total_bytes - untracked_weight_bytes_for(key))
+        from gmlx.gen.prefill_decay import note_streamed_tracked_bytes
+
+        tracked = max(0.0, total_bytes - untracked0)
         credit = min(float(offloaded), tracked)
         if credit > 0:
             note_streamed_tracked_bytes(
@@ -1167,6 +1179,7 @@ def install_expert_streaming(
             li: e for li, e in feeder._layers.items() if dfeeder.covers(li)})
         if n_un:
             freed = active0 - mx.get_active_memory()
+            _release_unmapped_credit(model, freed)
             loadlog.info(
                 f"[stream] expert stacks unmapped from the GPU on {n_un} "
                 f"layers ({b_un / 1e9:.1f} GB, {freed / 1e9:.1f} GB of "

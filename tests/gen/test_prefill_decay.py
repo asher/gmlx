@@ -406,6 +406,26 @@ def test_streamed_credit_union_cap_clamps(monkeypatch):
     assert pd.streamed_tracked_bytes() == 100 * GB
 
 
+def test_release_takes_back_credit_and_cap(monkeypatch):
+    # Tracked regime: the stacks are credited, then unmapped, and the
+    # tracker stops counting them; a credit left in place reads them free
+    # twice.
+    _fresh_streamed(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table",
+                                   cap=170 * GB)
+    pd.note_streamed_tracked_bytes(109 * GB, key=key, source="experts",
+                                   cap=170 * GB)
+    pd.release_streamed_tracked_bytes(100 * GB, key, "experts")
+    assert pd.streamed_tracked_bytes() == 63 * GB
+    assert pd._STREAMED_CAP[key] == 70 * GB
+    pd.release_streamed_tracked_bytes(50 * GB, key, "experts")  # clamps
+    assert pd.streamed_tracked_bytes() == 54 * GB
+    pd.release_streamed_tracked_bytes(5 * GB, ("/models/other.gguf",))
+    pd.release_streamed_tracked_bytes(5 * GB, None)
+    assert pd.streamed_tracked_bytes() == 54 * GB
+
+
 def test_forget_drops_streamed_credit_with_owner(monkeypatch):
     # an evicted streaming model must stop crediting headroom, or the
     # phantom credit overstates free working set for its successors

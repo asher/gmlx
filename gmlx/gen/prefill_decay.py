@@ -479,6 +479,23 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
             _end_build_credit_locked(key)
 
 
+def release_streamed_tracked_bytes(nbytes: float, key: object,
+                                   source: str = "experts") -> None:
+    """Take back up to ``nbytes`` of ``source``'s credit for ``key``, and
+    as much of its cap: bytes the tracker stopped counting after the
+    credit, such as expert stacks unmapped once the feeders own them."""
+    if key is None or nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        sources = _STREAMED_TRACKED.get(key)
+        if not sources or source not in sources:
+            return
+        take = min(float(nbytes), sources[source])
+        sources[source] -= take
+        if key in _STREAMED_CAP:
+            _STREAMED_CAP[key] = max(0.0, _STREAMED_CAP[key] - take)
+
+
 # A streaming build's window: the walk wraps the routed experts as
 # tracked views (or the warm pass registers them untracked) long before
 # the install credits or deducts them at the first request. Until then the
