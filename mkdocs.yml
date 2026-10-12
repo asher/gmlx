@@ -13,18 +13,25 @@ theme:
   custom_dir: overrides
   logo: assets/logo.svg
   favicon: assets/favicon.png
+  # The custom colors are in docs/stylesheets/extra.css.
   palette:
     - media: "(prefers-color-scheme)"
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-auto
         name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Follow the system theme
@@ -42,8 +49,13 @@ theme:
 hooks:
   - scripts/mkdocs_hooks.py
 
+extra_css:
+  - stylesheets/extra.css
+
 exclude_docs: |
   assets/record-demo.sh
+  assets/render-social-card.sh
+  assets/social-card.html
 
 # The pages that have moved stay in docs/ as pointers for old links.
 not_in_nav: |

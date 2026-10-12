@@ -1,0 +1,47 @@
+<!doctype html>
+<!--
+  Source of docs/assets/social-card.png, the link preview image of the docs
+  site and the repository. docs/assets/render-social-card.sh renders it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gmlx</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&family=Geist+Mono:wght@500&display=block">
+<style>
+  html, body { margin: 0; }
+  body {
+    width: 1280px; height: 640px; box-sizing: border-box; padding: 72px;
+    display: flex; align-items: center; gap: 56px; overflow: hidden;
+    background: #121418; color: #f2f2f0;
+    font-family: "Geist", system-ui, sans-serif;
+  }
+  .pitch { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 44px; }
+  h1 { margin: 0; font-size: 52px; line-height: 1.12; font-weight: 600; letter-spacing: -0.01em; }
+  .accent { color: #ffb224; }
+  .commands {
+    flex: 0 0 600px; box-sizing: border-box; padding: 36px 40px; border-radius: 20px;
+    background: #1a1d23; border: 1px solid #2a2e36;
+    display: flex; flex-direction: column; gap: 22px;
+  }
+  .row { display: flex; align-items: baseline; gap: 24px; }
+  .verb { flex: 0 0 136px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 34px; font-weight: 500; color: #ffb224; }
+  .what { font-size: 24px; color: #9ba1ab; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="pitch">
+  <svg width="186" height="104" viewBox="-0.5 -0.5 75 42" role="img" aria-label="gmlx">
+    <path d="M17 13.5V33a6 6 0 0 1-6 6H5.5M2 21a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0-15 0Z M23 30V19a5.5 5.5 0 0 1 11 0v11M34 19a5.5 5.5 0 0 1 11 0v11M52 2v28M58 13.5l14 16.5M72 13.5l-14 16.5" fill="none" stroke="#f2f2f0" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <h1>The fastest way to run GGUF models on <span class="accent">Apple Silicon.</span></h1>
+</div>
+<div class="commands">
+  <div class="row"><span class="verb">serve</span><span class="what">OpenAI and Anthropic APIs</span></div>
+  <div class="row"><span class="verb">launch</span><span class="what">agents in microVM sandboxes</span></div>
+  <div class="row"><span class="verb">chat</span><span class="what">in your terminal</span></div>
+  <div class="row"><span class="verb">image</span><span class="what">images, with ComfyUI nodes</span></div>
+  <div class="row"><span class="verb">train</span><span class="what">LoRA fine-tuning</span></div>
+</div>
+</body>
+</html>
