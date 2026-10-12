@@ -5,7 +5,10 @@ virtual GPU, the smallest machine the suite meets. A local run therefore
 prices models as CI does, whatever Mac it runs on. A test that needs more
 memory declares the Mac it assumes with ``@pytest.mark.host_gb(N)`` and
 derives its expected numbers from that machine (``mac(N)``), never from a
-literal. GMLX_TEST_HOST_RAM_GB changes the default size.
+literal. When kernels run on the real GPU (no KQUANT_FORCE_CPU), only the
+memory is simulated: the chip name and architecture stay the real ones, so
+kernel routing matches the hardware that runs it.
+GMLX_TEST_HOST_RAM_GB changes the default size.
 GMLX_TEST_REAL_HOST=1 turns the simulation off, so a run sees the real host.
 docs/internals/testing.md has the rules this serves.
 """
@@ -23,6 +26,9 @@ GB = 1 << 30
 # Apple silicon Mac of 64 GB or more reports them.
 _WS_FRACTION = 0.875
 _BUFFER_FRACTION = 0.63
+
+# What a GPU run keeps from the real device.
+_CHIP_KEYS = ("device_name", "architecture")
 
 _real: dict = {}
 _current: dict = {}
@@ -96,7 +102,10 @@ def install() -> None:
     def device_info(*args, **kwargs):
         info = dict(real_info(*args, **kwargs))
         if "memory_size" in info:
-            info.update(_current["box"])
+            box = _current["box"]
+            if not os.environ.get("KQUANT_FORCE_CPU"):
+                box = {k: v for k, v in box.items() if k not in _CHIP_KEYS}
+            info.update(box)
         return info
 
     def sysconf(name):
