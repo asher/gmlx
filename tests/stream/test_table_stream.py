@@ -349,7 +349,7 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
 
     deducted = []
     monkeypatch.setattr(
-        "gmlx.stream.expert_streaming.deduct_untracked_weights",
+        "gmlx.gen.prefill_decay.deduct_untracked_weights",
         lambda n, key=None: deducted.append(n))
 
     n, offloaded = install_expert_streaming(model)
@@ -370,7 +370,7 @@ def test_the_stream_flag_keeps_the_ladder_over_budget(monkeypatch):
     model, glu = _moe_table_model()
     total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     _fake_budget(monkeypatch, total - ts.table_bytes(model) // 2)
-    monkeypatch.setattr("gmlx.stream.expert_streaming.deduct_untracked_weights",
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
                         lambda n, key=None: None)
     install_expert_streaming(model, explicit=True)
     assert ts.table_streaming_active(model)
@@ -383,7 +383,7 @@ def test_the_stream_flag_under_the_budget_streams_table_and_experts(monkeypatch)
     monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
     model, glu = _moe_table_model()
     _fake_budget(monkeypatch, 1 << 40)
-    monkeypatch.setattr("gmlx.stream.expert_streaming.deduct_untracked_weights",
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
                         lambda n, key=None: None)
     install_expert_streaming(model, explicit=True)
     assert ts.table_streaming_active(model)

@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 import gmlx.gen.prefill_decay as pd
 
 HEADS = 32
@@ -359,10 +361,11 @@ def test_build_credit_follows_active_growth_up_to_the_cap(monkeypatch):
 
 
 def test_build_credit_ends_at_the_install_credit_or_deduction(monkeypatch):
-    # The install credits tracked experts (or deducts untracked ones) at
-    # the first request, after the build. Either ends the build credit for
-    # the key's owners, so the two never overlap. A table credit, or
-    # another model's credit, does not end it.
+    # The install credits tracked streamed bytes (or deducts untracked
+    # ones) at the first request, after the build. Any of these ends the
+    # build credit for the key's owners, a table's included (a table-only
+    # install credits nothing else), so the two never overlap. Another
+    # model's credit does not end it.
     _fresh_streamed(monkeypatch)
     box = _active(monkeypatch)
     key = ("/models/moe.gguf",)
@@ -373,12 +376,11 @@ def test_build_credit_ends_at_the_install_credit_or_deduction(monkeypatch):
     finally:
         pd.set_untracked_weights_owner(None)
     box["active"] = 349 * GB
-    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table", cap=339 * GB)
-    assert pd.build_credit_bytes() == 330 * GB
     pd.note_streamed_tracked_bytes(2 * GB, key=("/models/other.gguf",), source="experts")
     assert pd.build_credit_bytes() == 330 * GB
-    pd.note_streamed_tracked_bytes(276 * GB, key=key, source="experts", cap=339 * GB)
+    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table", cap=339 * GB)
     assert pd.build_credit_bytes() == 0
+    pd.note_streamed_tracked_bytes(276 * GB, key=key, source="experts", cap=339 * GB)
     assert pd.headroom_bytes() == 120 * GB - 349 * GB + 332 * GB
     # Untracked regime: the warm pass registers the file, the install
     # deducts the streamed share.
@@ -419,11 +421,86 @@ def test_release_takes_back_credit_and_cap(monkeypatch):
     pd.release_streamed_tracked_bytes(100 * GB, key, "experts")
     assert pd.streamed_tracked_bytes() == 63 * GB
     assert pd._STREAMED_CAP[key] == 70 * GB
-    pd.release_streamed_tracked_bytes(50 * GB, key, "experts")  # clamps
-    assert pd.streamed_tracked_bytes() == 54 * GB
+    pd.release_streamed_tracked_bytes(50 * GB, key, "experts")
+    # The experts credit clamps at zero, and the cap falls by all 50 GB:
+    # the tracker stopped counting each freed byte.
+    assert pd.streamed_tracked_bytes() == 20 * GB
     pd.release_streamed_tracked_bytes(5 * GB, ("/models/other.gguf",))
     pd.release_streamed_tracked_bytes(5 * GB, None)
-    assert pd.streamed_tracked_bytes() == 54 * GB
+    assert pd.streamed_tracked_bytes() == 20 * GB
+
+
+# The accounting invariant. The weights are N (every-token), T (a
+# streamable table) and E (the routed experts); each part loads either
+# allocator-tracked (in get_active_memory) or zero-copy (in the untracked
+# registry). The arena and the KV are tracked allocations. At every stage
+# the free figure must be the real one, ws minus the resident weights,
+# the arena and the KV, and the install must end the serve build credit.
+_N, _T, _E, _ARENA, _KV, _WS = 20 * GB, 27 * GB, 100 * GB, 8 * GB, 4 * GB, 120 * GB
+_REGIMES = {                    # the parts that load allocator-tracked
+    "zero-copy": set(),
+    "tracked": {"N", "T", "E"},
+    "views-untracked": {"N"},   # casts and repacks tracked, views not
+    "experts-tracked": {"E"},
+}
+_INSTALLS = {                   # (model parts, streamed parts)
+    "compose": ({"N", "T", "E"}, {"T", "E"}),
+    "table-only": ({"N", "T", "E"}, {"T"}),
+    "experts-only": ({"N", "E"}, {"E"}),
+}
+_CASES = [(r, i, serve, unmap)
+          for r in _REGIMES for i in _INSTALLS
+          for serve in (False, True) for unmap in (False, True)
+          if not unmap or "E" in _INSTALLS[i][1]]
+
+
+@pytest.mark.parametrize("regime,install,serve,unmap", _CASES)
+def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
+                                              serve, unmap):
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch, ws_gb=_WS // GB)
+    size = {"N": _N, "T": _T, "E": _E}
+    parts, streamed = _INSTALLS[install]
+    tracked_parts = _REGIMES[regime] & parts
+    total = sum(size[p] for p in parts)
+    tracked = sum(size[p] for p in tracked_parts)
+    resident = total - sum(size[p] for p in streamed)
+    key = ("/models/moe.gguf",)
+
+    def real(extra=0.0):
+        return _WS - resident - extra
+
+    # The build: serve opens a window and credits the bytes it will
+    # stream (the experts and the tables) until the install accounts them.
+    box["active"] = 0.0
+    if serve:
+        pd.set_untracked_weights_owner("entry")
+        pd.note_build_credit("entry", sum(size[p] for p in parts - {"N"}))
+    box["active"] = float(tracked)
+    pd.note_untracked_weights(float(total - tracked), key=key)
+    pd.set_untracked_weights_owner(None)
+    if serve and install != "table-only":   # table-only: the ladder decides
+        assert pd.headroom_bytes() == real()
+
+    # The install, as install_expert_streaming accounts it.
+    untracked0 = pd.untracked_weight_bytes_for(key)
+    split = max(0.0, total - untracked0)
+    table_credit = 0.0
+    if "T" in streamed:
+        table_credit = pd.credit_streamed(key, _T, split, "table")
+    if "E" in streamed:
+        pd.credit_streamed(key, _E, split, "experts", prior=table_credit)
+    box["active"] = float(tracked + _ARENA + _KV)
+    assert pd.build_credit_bytes() == 0
+    assert pd.headroom_bytes() == real(_ARENA + _KV)
+
+    # The feeders take the stacks: their tracked bytes leave active memory.
+    if unmap:
+        freed = _E if "E" in tracked_parts else 0
+        box["active"] -= freed
+        if freed:
+            pd.release_streamed_tracked_bytes(freed, key, "experts")
+        assert pd.headroom_bytes() == real(_ARENA + _KV)
 
 
 def test_a_keyless_release_ends_the_open_build_credit(monkeypatch):

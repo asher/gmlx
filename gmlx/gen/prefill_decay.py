@@ -428,14 +428,16 @@ def forget_untracked_weights(owner: object) -> None:
 def deduct_untracked_weights(nbytes: float, key: object) -> None:
     """Shrink ``key``'s registration by ``nbytes``, floored at zero:
     streamed-out expert bytes are page cache, not wired weights, and never
-    belong in the estimate (see install_expert_streaming)."""
-    if key is None or nbytes <= 0:
+    belong in the estimate (see install_expert_streaming). Ends the key's
+    build credit even when nothing is left to deduct: the install has
+    accounted the streamed bytes by then."""
+    if key is None:
         return
     with _UNTRACKED_LOCK:
-        if key in _UNTRACKED_WEIGHTS:
+        _end_build_credit_locked(key)
+        if nbytes > 0 and key in _UNTRACKED_WEIGHTS:
             _UNTRACKED_WEIGHTS[key] = max(
                 0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
-        _end_build_credit_locked(key)
 
 
 def untracked_weight_bytes() -> float:
@@ -465,7 +467,8 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
     """Credit ``source``'s streamed bytes for ``key``. Idempotent per
     (key, source) so re-installs never double-credit; sources sum (compose
     streams table and experts), clamped at ``cap`` (the key's tracked
-    bytes) so the union can never credit more than was tracked."""
+    bytes) so the union can never credit more than was tracked. Any
+    source's credit ends the key's build credit."""
     if key is None or nbytes <= 0:
         return
     with _UNTRACKED_LOCK:
@@ -475,15 +478,30 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
             _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
         if _WEIGHTS_OWNER is not None:
             _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
-        if source == "experts":
-            _end_build_credit_locked(key)
+        _end_build_credit_locked(key)
+
+
+def credit_streamed(key: object, nbytes: float, tracked: float,
+                    source: str, prior: float = 0.0) -> float:
+    """Account ``nbytes`` of ``source`` streamed out of a load whose
+    allocator-tracked weight bytes are ``tracked``, of which ``prior`` an
+    earlier source already credited: credit the share the tracker counts,
+    deduct the rest from the untracked registration. Each byte is freed
+    once in every regime. Returns the credit."""
+    credit = min(float(nbytes), max(0.0, float(tracked) - prior))
+    if credit > 0:
+        note_streamed_tracked_bytes(credit, key, source=source, cap=tracked)
+    deduct_untracked_weights(float(nbytes) - credit, key)
+    return credit
 
 
 def release_streamed_tracked_bytes(nbytes: float, key: object,
                                    source: str = "experts") -> None:
     """Take back up to ``nbytes`` of ``source``'s credit for ``key``, and
-    as much of its cap: bytes the tracker stopped counting after the
-    credit, such as expert stacks unmapped once the feeders own them.
+    lower its cap by all ``nbytes``: bytes the tracker stopped counting
+    after the credit, such as expert stacks unmapped once the feeders own
+    them. The tracked total falls by every freed byte, whichever source's
+    credit covered it.
     Without a key nothing was credited; the build's credit for the open
     owner ends instead, or it would keep crediting the freed bytes."""
     if nbytes <= 0:
@@ -495,10 +513,9 @@ def release_streamed_tracked_bytes(nbytes: float, key: object,
         sources = _STREAMED_TRACKED.get(key)
         if not sources or source not in sources:
             return
-        take = min(float(nbytes), sources[source])
-        sources[source] -= take
+        sources[source] -= min(float(nbytes), sources[source])
         if key in _STREAMED_CAP:
-            _STREAMED_CAP[key] = max(0.0, _STREAMED_CAP[key] - take)
+            _STREAMED_CAP[key] = max(0.0, _STREAMED_CAP[key] - float(nbytes))
 
 
 # A streaming build's window: the walk wraps the routed experts as

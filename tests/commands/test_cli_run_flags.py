@@ -341,7 +341,7 @@ def test_a_forced_stream_under_the_budget_frees_the_expert_headroom(monkeypatch)
 
     model, glu = _small_moe(monkeypatch, 1 << 40)
     deducted, credited = [], []
-    monkeypatch.setattr("gmlx.stream.expert_streaming.deduct_untracked_weights",
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
                         lambda n, key=None: deducted.append(n))
     monkeypatch.setattr("gmlx.gen.prefill_decay.note_streamed_tracked_bytes",
                         lambda n, key=None, **kw: credited.append(n))
@@ -371,7 +371,7 @@ def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):
     monkeypatch.setattr(sbudget, "kv_room_bytes",
                         lambda p: types.SimpleNamespace(bytes=0))
     monkeypatch.setattr(decay, "note_streamed_tracked_bytes", lambda *a, **kw: None)
-    monkeypatch.setattr("gmlx.stream.expert_streaming.deduct_untracked_weights",
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
                         lambda n, key=None: None)
     seen = []
 

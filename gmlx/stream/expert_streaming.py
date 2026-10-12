@@ -12,7 +12,7 @@ from mlx.utils import tree_flatten
 
 from gmlx.device import metal_info, metal_value, stream_budget_bytes
 from gmlx.envflags import env_bool, env_int
-from gmlx.gen.prefill_decay import deduct_untracked_weights
+from gmlx.gen.prefill_decay import credit_streamed
 from gmlx.load import loadlog
 from gmlx.load.loader import (
     _PHASE,
@@ -391,15 +391,9 @@ def install_expert_streaming(
             f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
             "AND experts streamed"
         )
-        key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import note_streamed_tracked_bytes
-
-        tracked = max(0.0, total_bytes - untracked0)
-        table_credit = min(float(table_offloaded), tracked)
-        if table_credit > 0:
-            note_streamed_tracked_bytes(
-                table_credit, key, source="table", cap=tracked)
-        deduct_untracked_weights(table_offloaded - table_credit, key)
+        table_credit = credit_streamed(
+            getattr(model, "_kq_weights_key", None), table_offloaded,
+            max(0.0, total_bytes - untracked0), "table")
     elif table_offloaded:
         # The selection test admits the table only when the remainder
         # clears the budget (or streaming is forced on a fits model),
@@ -413,15 +407,9 @@ def install_expert_streaming(
             "the CPU stream; experts resident (post-deduction "
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
-        key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import note_streamed_tracked_bytes
-
-        tracked = max(0.0, total_bytes - untracked0)
-        table_credit = min(float(table_offloaded), tracked)
-        if table_credit > 0:
-            note_streamed_tracked_bytes(
-                table_credit, key, source="table", cap=tracked)
-        deduct_untracked_weights(table_offloaded - table_credit, key)
+        table_credit = credit_streamed(
+            getattr(model, "_kq_weights_key", None), table_offloaded,
+            max(0.0, total_bytes - untracked0), "table")
 
     streaming = force_stream or over_budget
     # the verdict itself: a CPU-only expert codec marks its modules the way
@@ -953,19 +941,15 @@ def install_expert_streaming(
         # needs the add-back credit. tracked = total - untracked splits
         # the two regimes; the credit is clamped to the expert share.
         # Same 0.9 x working-set budget test as _warm_touch_pass.
-        key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import note_streamed_tracked_bytes
-
-        tracked = max(0.0, total_bytes - untracked0)
-        credit = min(float(offloaded), max(0.0, tracked - table_credit))
+        credit = credit_streamed(
+            getattr(model, "_kq_weights_key", None), offloaded,
+            max(0.0, total_bytes - untracked0), "experts",
+            prior=table_credit)
         if credit > 0:
-            note_streamed_tracked_bytes(
-                credit, key, source="experts", cap=tracked)
             print(
                 f"[stream] headroom credits {credit / 1e9:.1f} GB of "
                 "allocator-tracked expert bytes as reclaimable page cache"
             )
-        deduct_untracked_weights(offloaded - credit, key)
     if n_cpu_only_codec:
         print(
             f"[stream] {n_cpu_only_codec} expert stacks use a CPU-only codec "
