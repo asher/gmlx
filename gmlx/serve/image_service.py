@@ -417,6 +417,14 @@ def reserved_worker():
         outer.result()
 
 
+def worker_reserved() -> bool:
+    """True when the calling thread holds the image worker (a
+    :func:`reserved_worker` block) or is the worker itself, so a release
+    from it runs at once instead of queueing."""
+    return (getattr(_reservation, "run", None) is not None
+            or threading.current_thread().name.startswith("image-worker"))
+
+
 def _on_worker(fn, *args):
     run = getattr(_reservation, "run", None)
     if run is not None:

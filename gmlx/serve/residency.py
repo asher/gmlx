@@ -530,43 +530,58 @@ class _ResidencyPool:
         # since waits on that lock, and a release would queue behind it.
         late: list = []
         try:
-            with self._worker_for(model_kind == IMAGE_KIND), self._build_lock:
-                released: list = []
-                try:
+            # An image entry busy when the worker reservation is decided can
+            # be idle at the eviction. Its release would queue on the worker
+            # behind a reservation that waits on the build lock, so the first
+            # attempt evicts nothing and the second takes the reservation.
+            for force in (False, True):
+                with self._worker_for(model_kind == IMAGE_KIND, force=force), \
+                        self._build_lock:
+                    released: list = []
+                    try:
+                        with self._lock:
+                            entry = self._entries.get(cache_key)
+                            if entry is not None:
+                                if ttl is not None:
+                                    entry.ttl = ttl
+                                self._touch(entry)
+                                entry.busy += 1
+                                return entry
+                            if (self._evicts_image(incoming)
+                                    and not _holds_image_worker()):
+                                continue
+                            self._evict_for_room(
+                                incoming, model_path=model_path,
+                                streaming=getattr(build_spec, "stream", None) == "experts",
+                                released=released)
+                    finally:
+                        self._release_images(released)
+                    try:
+                        entry = self._build(cache_key, model_path, adapter_path,
+                                            model_kind, file_bytes, ttl=ttl, env=env,
+                                            build_spec=build_spec)
+                    except BaseException:
+                        # Free the failed build before the lock drops: a waiting
+                        # acquire gates on live memory next.
+                        _collect_failed_build()
+                        raise
+                    if entry.priced_up:
+                        self._fit_repriced(entry, model_path, late)
+                    # The id that built the entry names it for the process lifetime
+                    # (a metrics label wants a name fixed per entry; aliases sharing
+                    # the signature reuse this entry and keep the first name).
+                    entry.loaded_as = loaded_as
                     with self._lock:
-                        entry = self._entries.get(cache_key)
-                        if entry is not None:
-                            if ttl is not None:
-                                entry.ttl = ttl
-                            self._touch(entry)
-                            entry.busy += 1
-                            return entry
-                        self._evict_for_room(
-                            incoming, model_path=model_path,
-                            streaming=getattr(build_spec, "stream", None) == "experts",
-                            released=released)
-                finally:
-                    self._release_images(released)
-                try:
-                    entry = self._build(cache_key, model_path, adapter_path,
-                                        model_kind, file_bytes, ttl=ttl, env=env,
-                                        build_spec=build_spec)
-                except BaseException:
-                    # Free the failed build before the lock drops: a waiting
-                    # acquire gates on live memory next.
-                    _collect_failed_build()
-                    raise
-                if entry.priced_up:
-                    self._fit_repriced(entry, model_path, late)
-                # The id that built the entry names it for the process lifetime
-                # (a metrics label wants a name fixed per entry; aliases sharing
-                # the signature reuse this entry and keep the first name).
-                entry.loaded_as = loaded_as
-                with self._lock:
-                    self._entries[cache_key] = entry
-                    self._touch(entry)
-                    entry.busy += 1
-                return entry
+                        self._entries[cache_key] = entry
+                        self._touch(entry)
+                        entry.busy += 1
+                    return entry
+            _defer(
+                f"model load deferred: {model_path} priced at "
+                f"{incoming / 1e9:.1f} GB resident does not fit the "
+                f"{self._budget / 1e9:.1f} GB budget unless an idle image "
+                "model is evicted, and the image worker could not be held "
+                "to release it. Retry when a slot frees.")
         finally:
             self._release_images(late)
 
@@ -889,13 +904,35 @@ class _ResidencyPool:
                 total += 2 * int(getattr(ring, "slot_bytes", 0) or 0)
         return total
 
-    def _over_capacity(self, incoming: int) -> bool:
+    def _over_capacity(self, incoming: int, held: int | None = None,
+                       count: int | None = None) -> bool:
         """True if admitting ``incoming`` more weight bytes would exceed the
-        byte budget or the optional count cap."""
-        if self._budget and self._resident_bytes() + incoming > self._budget:
+        byte budget or the optional count cap. ``held`` and ``count`` stand
+        for the resident bytes and entries when given."""
+        if held is None:
+            held = self._resident_bytes()
+        if count is None:
+            count = len(self._entries)
+        if self._budget and held + incoming > self._budget:
             return True
-        if self._max is not None and len(self._entries) >= self._max:
+        if self._max is not None and count >= self._max:
             return True
+        return False
+
+    def _evicts_image(self, incoming: int) -> bool:
+        """Whether :meth:`_evict_for_room` would evict an image entry to fit
+        ``incoming``, taking victims in its order. Evicts nothing."""
+        held = self._resident_bytes()
+        count = len(self._entries)
+        for e in sorted((e for e in self._entries.values()
+                         if not e.pinned and e.busy == 0),
+                        key=lambda e: e.seq):
+            if not self._over_capacity(incoming, held, count):
+                return False
+            if e.is_image:
+                return True
+            held -= e.footprint
+            count -= 1
         return False
 
     def _evict_for_room(self, incoming: int, *, model_path=None,
@@ -1259,18 +1296,18 @@ class _ResidencyPool:
             return
         self._teardown_chat(entry)
 
-    def _worker_for(self, image_build: bool):
+    def _worker_for(self, image_build: bool, *, force: bool = False):
         """Hold the image worker before the build lock for a build that
         loads an image pipeline, or that may release one: an image entry
-        with no job is resident. Then the lock is never held while the
-        worker runs an image job, and a chat cold load does not wait
-        behind one. Without either, nothing is held."""
+        with no job is resident, or ``force``. Then the lock is never held
+        while the worker runs an image job, and a chat cold load does not
+        wait behind one. Without any, nothing is held."""
         import contextlib
 
         with self._lock:
             idle_image = any(e.is_image and e.busy == 0
                              for e in self._entries.values())
-        if not (image_build or idle_image):
+        if not (image_build or idle_image or force):
             return contextlib.nullcontext()
         from . import image_service
 
@@ -1398,6 +1435,12 @@ class _ResidencyPool:
         gc.collect()
 
 
+
+
+def _holds_image_worker() -> bool:
+    from . import image_service
+
+    return image_service.worker_reserved()
 
 
 def _collect_failed_build() -> None:

@@ -1097,6 +1097,63 @@ def test_a_build_repriced_up_releases_an_evicted_image_off_the_lock(
     assert list(pool._entries) == [("a", None, "auto")]
 
 
+def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
+        monkeypatch):
+    """The image entry is busy when acquire decides the worker
+    reservation and idle at the eviction before the build. Its release
+    never runs under the build lock without the reservation: the first
+    attempt evicts nothing, the second holds the worker, and the build
+    completes."""
+    import contextlib
+
+    from gmlx.serve import image_service
+    from gmlx.serve.residency import IMAGE_KIND, _Entry
+
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, _, _, _ = _table_only_pool(monkeypatch, model, evict=True)
+    key = ("img", None, IMAGE_KIND)
+    image = _Entry(cache_key=key, model_path="img", footprint=100 * GB,
+                   busy=1, kind=IMAGE_KIND, pipeline="P")
+    pool._entries[key] = image
+
+    @contextlib.contextmanager
+    def reserved_worker():
+        image_service._reservation.run = lambda fn, *a: fn(*a)
+        try:
+            yield
+        finally:
+            image_service._reservation.run = None
+
+    monkeypatch.setattr(image_service, "reserved_worker", reserved_worker)
+    worker_for = pool._worker_for
+    forced = []
+
+    def worker_for_then_image_done(image_build, **k):
+        forced.append(k.get("force", False))
+        ctx = worker_for(image_build, **k)
+        image.busy = 0                  # the image job ends meanwhile
+        return ctx
+
+    monkeypatch.setattr(pool, "_worker_for", worker_for_then_image_done)
+    released = []
+
+    def release_on_worker(box):
+        free = pool._build_lock.acquire(blocking=False)
+        if free:
+            pool._build_lock.release()
+        held = getattr(image_service._reservation, "run", None) is not None
+        released.append((list(box), free or held))
+
+    pool._image_fns = (None, None, release_on_worker)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert released == [(["P"], True)]
+    assert forced == [False, True]
+    assert list(pool._entries) == [("a", None, "auto")]
+
+
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
     """deepseek41's engram tables serve from disk like the experts; pricing
     them resident would evict every other model for room they never take."""

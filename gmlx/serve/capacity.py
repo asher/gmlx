@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import NoReturn
 from types import SimpleNamespace
 
 _log = logging.getLogger(__name__)
@@ -626,7 +627,7 @@ _DEFER_WARN_S = 10.0
 _defer_warned_at = 0.0
 
 
-def _defer(msg: str) -> None:
+def _defer(msg: str) -> NoReturn:
     """Log and raise a LoadDeferred. The 503 body reaches only the client,
     so without this line a refusing gate leaves no server-side trace at
     all (2026-08-26: two bench arms deferred for their whole 240 s startup
