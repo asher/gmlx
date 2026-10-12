@@ -614,6 +614,17 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print("warning: the local Hugging Face cache is unreadable - hf: entries "
               "are kept unverified", file=sys.stderr)
 
+    # A `stream:` key discovery wrote holds only while the model is over the
+    # memory budget; the budget moves with iogpu.wired_limit_mb, so each
+    # sync judges it again.
+    restream = {}                                  # id -> {"stream", "speculative"}
+    path_of = {mc.id: rp for rp, mc in known_models.items()}
+    for mid in _marked_stream_ids(path):
+        rp = path_of.get(mid)
+        fresh = discovery.rescan_entry(rp) if rp else None
+        if fresh is not None and fresh["stream"] is None:
+            restream[mid] = fresh
+
     # Discover, skipping anything already configured (by id or by resolved path).
     # `draft_pairs`: sibling drafters that pair into an entry already configured.
     discovered, draft_pairs, images = [], {}, []
@@ -647,7 +658,11 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  add:     {im.id}  (image, {discovery._rel(im.path, dirs)})")
     for mid, dpath in draft_pairs.items():
         print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
-    if not removed and not discovered and not draft_pairs and not images:
+    for mid in restream:
+        print(f"  update:  {mid}  (stream: experts dropped, the model fits "
+              "the memory budget now)")
+    if (not removed and not discovered and not draft_pairs and not images
+            and not restream):
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -665,13 +680,15 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
                  if a.models_dir else [])
     try:
         _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
-                    draft_pairs=draft_pairs, images=images)
+                    draft_pairs=draft_pairs, images=images,
+                    restream=restream)
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     changed = (f"\nupdated {path} (+{len(discovered) + len(images)} / "
                f"-{len(removed)}"
-               + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
+               + (f" / ~{len(draft_pairs) + len(restream)}"
+                  if draft_pairs or restream else "") + ")")
     print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
@@ -730,8 +747,30 @@ def _hf_cache_readable() -> bool:
         return False
 
 
+def _marked_stream_ids(path) -> list:
+    """The ids of ``path``'s model entries whose ``stream:`` key carries
+    discovery's mark comment."""
+    from ruamel.yaml import YAML
+
+    try:
+        doc = YAML().load(Path(path).read_text())
+    except Exception:
+        return []
+    models = doc.get("models") if isinstance(doc, dict) else None
+    if not isinstance(models, dict):
+        return []
+    out = []
+    for mid, ent in models.items():
+        ca = getattr(ent, "ca", None)
+        item = ca.items.get("stream") if ca is not None else None
+        tok = item[2] if item and len(item) > 2 else None
+        if tok is not None and discovery.STREAM_MARK_NOTE in str(tok.value):
+            out.append(str(mid))
+    return out
+
+
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
-                draft_pairs=None, images=()) -> None:
+                draft_pairs=None, images=(), restream=None) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
@@ -739,7 +778,10 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
     ``server.model_dirs``; they're appended so the new entries resolve.
     ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
     to that entry; an entry that already has one keeps its value. ``images``
-    (paired :class:`ImageModelCfg`) go under ``image_models:``."""
+    (paired :class:`ImageModelCfg`) go under ``image_models:``. ``restream``
+    (id -> a fresh scan's ``stream`` and ``speculative``) drops the
+    ``stream:`` key discovery wrote, and turns speculative decoding back
+    on where the fresh scan would."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -765,8 +807,18 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
         if discovered:
             discovery.drop_no_models_comment(doc)
         pos = 0
+        for mid, fresh in (restream or {}).items():
+            ent = models.get(mid)
+            if not isinstance(ent, dict):
+                continue
+            ent.pop("stream", None)
+            if (fresh["speculative"] and "speculative" not in ent
+                    and not ent.get("draft_gguf")):
+                ent["speculative"] = True
         for mc in discovered:
-            entry = discovery.model_to_entry(mc, dirs)
+            entry = CommentedMap(discovery.model_to_entry(mc, dirs))
+            if "stream" in entry:
+                entry.yaml_add_eol_comment(discovery.STREAM_MARK_NOTE, "stream")
             if mc.id in models:
                 models[mc.id] = entry          # update keeps its position
             else:

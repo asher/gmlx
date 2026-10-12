@@ -963,7 +963,7 @@ def _stream_budget_bytes() -> int | None:
     try:
         from gmlx.device import stream_budget_bytes
         budget = stream_budget_bytes()
-    except ImportError:
+    except Exception:  # no mlx, or a Metal init error: the RAM fallback
         budget = None
     if budget is not None:
         return budget
@@ -996,14 +996,56 @@ def _gguf_set_bytes(path: str) -> int | None:
     return total or None
 
 
+_BLK_RE = re.compile(r"^blk\.(\d+)\.")
+
+
+def _text_tensor_bytes(path: str) -> int | None:
+    """Bytes of the tensors the text load keeps, from the header tensor
+    table: the split set without its metadata and without the NextN/MTP
+    blocks (each ``blk.N`` that carries a ``nextn.*`` tensor), which load
+    only into a drafter. The figure the streaming installer compares with
+    its budget. None when a shard cannot be scanned."""
+    from .headerscan import scan_gguf
+    from .preflight import find_split_shards
+
+    try:
+        tensors = [t for shard in find_split_shards(path)
+                   for t in scan_gguf(shard).tensors]
+    except Exception:
+        return None
+    mtp = {m.group(1) for t in tensors if ".nextn." in t.name
+           for m in [_BLK_RE.match(t.name)] if m}
+    total = 0
+    for t in tensors:
+        m = _BLK_RE.match(t.name)
+        if m and m.group(1) in mtp:
+            continue
+        total += int(t.nbytes)
+    return total or None
+
+
+def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
+    """``(text bytes, budget)`` when the model is over the stream budget,
+    else None. The file size bounds the text bytes, so only a file over
+    the budget pays for the tensor-table scan."""
+    total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()
+    if not total or not budget or total <= budget:
+        return None
+    text = _text_tensor_bytes(c.path)
+    if text is not None:
+        total = text
+    return (total, budget) if total > budget else None
+
+
 def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
     """Wire the over-RAM placement for a model whose weights can't sit resident:
     a MoE gets ``stream: experts`` (and loses ``speculative`` - MTP needs a plain
     fully-resident base); a dense over-RAM model just gets a stderr hint (whole-
     model CPU streaming is a big enough behavior change to leave opt-in)."""
-    total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()
-    if not total or not budget or total <= budget:
+    over = _over_budget(c)
+    if over is None:
         return
+    total, budget = over
     size = f"{total / 1e9:.0f} GB weights, {budget / 1e9:.0f} GB resident budget"
     if c.moe:
         mc.stream = "experts"
@@ -1016,6 +1058,24 @@ def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
     else:
         print(f"[discover] over-RAM model ({size}): consider `stream: cpu` "
               f"on its entry: {c.path}", file=sys.stderr)
+
+
+# The end-of-line comment on a ``stream:`` key that discovery wrote. Sync
+# re-evaluates the key it marks; a key without it is the user's.
+STREAM_MARK_NOTE = "set by discovery: over the memory budget"
+
+
+def rescan_entry(path: str) -> dict | None:
+    """The ``stream`` and ``speculative`` values a fresh scan gives the
+    model at ``path`` (as :func:`_emit_dir` does with the default spec),
+    or None when the file is not a readable chat model."""
+    c = classify_gguf(path)
+    if c is None or c.kind != "model" or not c.loadable:
+        return None
+    mc = ModelCfg(id="", path=c.path,
+                  speculative=bool(c.mtp) and _arch_table.mtp_wired(c.arch))
+    _fit_in_memory(mc, c)
+    return {"stream": mc.stream, "speculative": mc.speculative}
 
 
 def _emit_dir(classified, spec, used_ids, out, *, configured=None,
@@ -1463,7 +1523,7 @@ def _scaffold_models_block(models, dirs) -> list[str]:
         elif mc.speculative:
             lines.append("    speculative: true")
         if mc.stream:
-            lines.append(f"    stream: {mc.stream}")
+            lines.append(f"    stream: {mc.stream}  # {STREAM_MARK_NOTE}")
     lines.append("")
     return lines
 

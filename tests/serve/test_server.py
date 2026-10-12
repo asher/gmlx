@@ -1133,6 +1133,57 @@ def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
     assert mc.pin is True                         # the hand-edit survives
 
 
+def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys):
+    """A model marked over the memory budget by an earlier scan loses the
+    mark once it fits, as after raising iogpu.wired_limit_mb; a stream key
+    the user wrote stays."""
+    from gmlx.config import load_config
+    from gmlx.config import ModelCfg as MC
+
+    note = srv.discovery.STREAM_MARK_NOTE
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n"
+        f"  big:\n    path: big.gguf\n    stream: experts  # {note}\n"
+        "    pin: true\n"
+        "  mine:\n    path: mine.gguf\n    stream: experts\n")
+    (lib / "big.gguf").write_bytes(b"x")
+    (lib / "mine.gguf").write_bytes(b"x")
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [])
+    seen = []
+    fresh = {"stream": "experts", "speculative": False}
+
+    def rescan(p):
+        seen.append(os.path.basename(p))
+        return dict(fresh)
+
+    monkeypatch.setattr(srv.discovery, "rescan_entry", rescan)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    assert seen == ["big.gguf"]                   # only the marked entry
+    assert "already in sync" in capsys.readouterr().out
+    fresh.update(stream=None, speculative=True)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    cfg = load_config(cfg_path)
+    assert cfg.models["big"].stream is None
+    assert cfg.models["big"].speculative is True  # as a fresh scan gives it
+    assert cfg.models["big"].pin is True
+    assert cfg.models["mine"].stream == "experts"
+    assert note not in cfg_path.read_text()
+    # A model the scan adds over the budget carries the mark.
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [
+        MC(id="huge", path=str(lib / "huge.gguf"), stream="experts")])
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    assert srv._marked_stream_ids(cfg_path) == ["huge"]
+
+
+def test_the_scaffold_marks_the_stream_key_it_writes():
+    from gmlx.config import ModelCfg as MC
+
+    text = srv.discovery.scaffold_yaml(
+        [MC(id="hy3", path="/m/Hy3.gguf", stream="experts")], model_dirs=["/m"])
+    assert f"stream: experts  # {srv.discovery.STREAM_MARK_NOTE}" in text
+
+
 def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
                                                         capsys):
     from gmlx.config import load_config
