@@ -150,8 +150,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- `--stream-experts` and `stream: experts` loaded a model under 90% of the GPU
-  working set into memory instead of streaming it; they now always stream.
+- `--stream-experts` and `stream: experts` loaded a model that fits into
+  memory instead of streaming it; they now stream its experts and tables.
+- `gmlx sync-models` kept a `stream: experts` key from an earlier scan after
+  the model came to fit in memory; it now drops it.
+- Discovery wrote `stream: experts` for a model over the memory budget by file
+  size but under it by its weights; it now compares the weights the load keeps.
 - `gmlx serve` exited at startup when its config named a speech service whose
   extra is missing; it now warns and starts without that service.
 - `gmlx run` and `gmlx chat` kept every freed MLX buffer, so a deep prompt

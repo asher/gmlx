@@ -78,12 +78,14 @@ end of a run, gmlx prints how often a token found its experts there, on a
 `[stream] decode feeder arena hit rate:` line. `run` and `chat` print it
 with `-v`, and the server always logs it.
 
-`--stream-experts` and `stream: experts` always stream. A model that fits
-in memory decodes faster without them. On such a model, the decode arena
-holds at most half of the experts, so the rest stay on disk. A model
-larger than 90% of the GPU working set has to stream. When a large lookup
-table, such as a per-layer embedding table, alone brings it under that,
-the table streams from disk and the experts stay in memory.
+`--stream-experts` and `stream: experts` stream the experts of a model
+that fits in memory, and its lookup tables, such as a per-layer embedding
+table, stream with them. A model that fits decodes faster without the
+flag. On such a model, the decode arena holds at most half of the experts,
+so the rest stay on disk. A model larger than 90% of the GPU working set
+has to stream, and there a large lookup table streams first. When the
+table alone brings the model under that budget, the experts stay in
+memory.
 
 | Placement | What stays on the GPU | Use it for |
 |-----------|-----------------------|------------|

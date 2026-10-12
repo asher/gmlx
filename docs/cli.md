@@ -438,7 +438,7 @@ These flags run a model bigger than memory, as
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--stream-experts` | Off | Stream the routed experts from disk, whatever the model size. Attention and the KV cache stay on GPU. |
+| `--stream-experts` | Off | Stream the routed experts and lookup tables from disk, even on a model that fits. Over the memory budget, a table streams first. Attention and KV stay on GPU. |
 | `--stream-cpu` | Off | Run the whole model on the CPU device from the page cache. |
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the prefetch policy under `--stream-experts`. `auto` measures the drive at load. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
@@ -753,6 +753,11 @@ gmlx sync-models --dry-run
 | `--no-reload` | Off | Do not signal a running server to re-read the file. |
 
 An entry on an unmounted drive is kept and reported, not dropped.
+
+A scan writes `stream: experts` for a MoE model whose weights are larger
+than 90% of the GPU working set, with a comment that says so. Each sync
+checks that model again and drops the key once the model fits, such as
+after you raise the GPU wired limit. A `stream` key you wrote stays.
 
 ## gmlx ps
 
