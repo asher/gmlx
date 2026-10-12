@@ -1862,8 +1862,8 @@ def _make_reload_fn(path, a=None):
             try:
                 _resolve_service_models(cfg, a)
             except Exception:
-                for key in missing:
-                    routes.note_missing_service(key)
+                for key, extra in missing.items():
+                    routes.note_missing_service(key, extra=extra)
                 raise
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         if a is not None:
@@ -2138,25 +2138,44 @@ _SERVICE_KEYS = ("stt", "tts", "embeddings", "rerank")
 _LIVE_SERVICES: dict[str, str] = {}
 
 
+def _speech_service(key: str, flag, cfg, resolve, check_extra):
+    """The model of the speech service ``key``, or None when it is off. A
+    missing extra stops the start when ``--stt`` or ``--tts`` asked for the
+    service. When only the config names it, the server warns and starts
+    without it, and its routes answer 404 with the install command."""
+    value = flag or getattr(cfg, key, None)
+    if not value:
+        return None
+    model = resolve(value)
+    try:
+        check_extra()
+    except ImportError as e:
+        if flag:
+            raise
+        from gmlx.commands.extras import install_hint
+
+        from .patches.routes import note_missing_service
+        print(f"[server] server.{key} is off: {e}", file=sys.stderr)
+        note_missing_service(key, extra=install_hint(key))
+        return None
+    return model
+
+
 def _resolve_service_models(cfg, a) -> None:
     """Resolve the four service keys of ``cfg`` in place, where a ``--stt``,
     ``--tts``, ``--embeddings`` or ``--rerank`` flag overrides the config
-    value. A speech service whose extra is missing and a malformed value
-    raise, with install guidance or the config key. A missing embeddings or
-    rerank file turns that service off (see :func:`_resolve_service`)."""
-    stt_value = getattr(a, "stt", None) or getattr(cfg, "stt", None)
-    cfg.stt = None
-    if stt_value:
-        from . import stt as stt_mod
-        cfg.stt = stt_mod.resolve_stt_model(stt_value)
-        stt_mod.import_mlx_whisper()
+    value. A malformed value raises, naming the config key. A speech
+    service whose extra is missing raises for a flag and turns the service
+    off for a config value (see :func:`_speech_service`). A missing
+    embeddings or rerank file turns that service off (see
+    :func:`_resolve_service`)."""
+    from . import stt as stt_mod
+    from . import tts as tts_mod
 
-    tts_value = getattr(a, "tts", None) or getattr(cfg, "tts", None)
-    cfg.tts = None
-    if tts_value:
-        from . import tts as tts_mod
-        cfg.tts = tts_mod.resolve_tts_model(tts_value)
-        tts_mod.import_mlx_audio()
+    cfg.stt = _speech_service("stt", getattr(a, "stt", None), cfg,
+                              stt_mod.resolve_stt_model, stt_mod.import_mlx_whisper)
+    cfg.tts = _speech_service("tts", getattr(a, "tts", None), cfg,
+                              tts_mod.resolve_tts_model, tts_mod.import_mlx_audio)
 
     # Relative GGUF paths search server.model_dirs, as a models: entry does.
     model_dirs = getattr(cfg, "model_dirs", None) or []
@@ -2366,8 +2385,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         max_models=a.max_models if a.max_models is not None else cfg.max_models,
         pinned=pinned_paths or None,
     )
-    # The services resolve before the port binds, so a missing speech extra
-    # or a malformed value stops the start.
+    # The services resolve before the port binds, so a malformed value, or
+    # a missing speech extra that a flag asked for, stops the start.
     _resolve_service_models(cfg, a)
     _warm_service_models(cfg)
 

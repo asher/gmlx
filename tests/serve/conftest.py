@@ -200,6 +200,6 @@ def _restore_mlxvlm(request):
             delattr(fastapi_app.state, flag)
     media_sinks.uninstall()
     media_gate.set_media_root(None)
-    sp_routes._MISSING_SERVICES.clear()
+    sp_routes.clear_missing_services()
     srv._LIVE_SERVICES.clear()
     serving.clear_resolved_models()

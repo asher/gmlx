@@ -286,11 +286,13 @@ A request never makes the server download a model. The models you name in
 the config download at start, except GGUF models, which you pull, as
 [Hugging Face policy](api.md#hugging-face-policy) explains.
 
-A service that is not configured answers 404 with the key to set. A speech
-service whose extra is missing stops the server from starting, and fails a
-reload that turns it on. When an embeddings or rerank model file is
-missing, the server runs without that service. Pull the file, then reload
-the server or run `gmlx restart`.
+A service that is not configured answers 404 with the key to set. When the
+extra of a speech service in the config is missing, the server starts
+without that service and logs a warning, and its routes answer 404 with
+the command that installs the extra. With `--stt` or `--tts`, a missing
+extra stops the server from starting. When an embeddings or rerank model
+file is missing, the server runs without that service. Pull the file, then
+reload the server or run `gmlx restart`.
 
 The server finds ffmpeg on its `PATH` or in the Homebrew and system
 folders, so a server started by a login item finds it too. `gmlx doctor`

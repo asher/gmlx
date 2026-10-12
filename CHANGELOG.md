@@ -150,6 +150,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx serve` exited at startup when its config named a speech service whose
+  extra is missing; it now warns and starts without that service.
 - `gmlx run` and `gmlx chat` kept every freed MLX buffer, so a deep prompt
   grew memory use with depth; they now cap the buffer cache as `serve` does.
 - `gmlx run` and `gmlx chat` with MTP held the logits of the last prompt chunk,

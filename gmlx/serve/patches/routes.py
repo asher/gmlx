@@ -285,21 +285,29 @@ _SERVICE_ROUTES = {
 }
 _SETTINGS_PATHS = ("/v1/settings", "/settings")
 _UNCONFIGURED_FLAG = "_kq_gguf_unconfigured_answers"
-# The services whose key is set but whose model was missing at start.
+# The services whose key is set but whose model was missing at start, and
+# the install command of those whose optional extra was missing.
 _MISSING_SERVICES: set[str] = set()
+_MISSING_EXTRAS: dict[str, str] = {}
 
 
-def note_missing_service(key: str) -> None:
+def note_missing_service(key: str, extra: str | None = None) -> None:
     """Record that ``server.<key>`` is set, but the server runs without the
-    service because its model was missing."""
+    service because its model was missing, or, with ``extra``, the optional
+    extra that this install command adds."""
     _MISSING_SERVICES.add(key)
+    if extra:
+        _MISSING_EXTRAS[key] = extra
+    else:
+        _MISSING_EXTRAS.pop(key, None)
 
 
-def clear_missing_services() -> set[str]:
+def clear_missing_services() -> dict[str, str | None]:
     """Forget the missing services before a reload resolves them again, and
-    return the ones it forgot."""
-    missing = set(_MISSING_SERVICES)
+    return the ones it forgot, each with its install command or None."""
+    missing = {key: _MISSING_EXTRAS.get(key) for key in _MISSING_SERVICES}
     _MISSING_SERVICES.clear()
+    _MISSING_EXTRAS.clear()
     return missing
 
 
@@ -310,7 +318,11 @@ def unconfigured_answers(cfg) -> dict[str, str]:
     for key, (what, paths) in _SERVICE_ROUTES.items():
         if getattr(cfg, key, None):
             continue
-        if key in _MISSING_SERVICES:
+        if key in _MISSING_EXTRAS:
+            message = (f"{what} is off on this server, because its optional {key} "
+                       f"extra is not installed. To add it: {_MISSING_EXTRAS[key]}. "
+                       "Then run gmlx restart.")
+        elif key in _MISSING_SERVICES:
             message = (f"{what} is off on this server, because the model that "
                        f"server.{key} names was missing when the server started "
                        "or last reloaded. The server log names the model. Fetch "

@@ -2220,21 +2220,41 @@ def test_a_reload_turns_a_service_on_and_off(monkeypatch, tmp_path):
 
 
 def test_a_reload_whose_service_fails_changes_nothing(monkeypatch, tmp_path):
+    from gmlx.config import ConfigError
     from gmlx.serve import stt
     conf, reload_fn, calls, _model = _reloading_rerank(monkeypatch, tmp_path)
+
+    def bad(value):
+        raise ConfigError("server.stt: not a whisper model")
+    monkeypatch.setattr(stt, "resolve_stt_model", bad)
+    sp_routes.note_missing_service("rerank")
+    sp_routes.note_missing_service("tts", extra="pip install 'gmlx[tts]'")
+    client = _full_app()
+    conf.write_text("server:\n  stt: whisper-turbo\n  rerank: qwen3-rerank-0.6b\n"
+                    + _MODELS_BLOCK)
+    with pytest.raises(ConfigError, match="not a whisper model"):
+        reload_fn()
+    assert sp_routes._MISSING_SERVICES == {"rerank", "tts"}
+    assert "was missing" in client.post("/v1/rerank", json={}).text
+    assert "pip install 'gmlx[tts]'" in client.post("/v1/audio/speech", json={}).text
+    assert calls == []
+
+
+def test_a_reload_with_a_speech_extra_missing_turns_only_that_service_off(
+        monkeypatch, tmp_path):
+    from gmlx.serve import stt
+    conf, reload_fn, calls, model = _reloading_rerank(monkeypatch, tmp_path)
 
     def no_whisper():
         raise ImportError("speech-to-text requires the optional stt extra")
     monkeypatch.setattr(stt, "import_mlx_whisper", no_whisper)
-    sp_routes.note_missing_service("rerank")
     client = _full_app()
     conf.write_text("server:\n  stt: whisper-turbo\n  rerank: qwen3-rerank-0.6b\n"
                     + _MODELS_BLOCK)
-    with pytest.raises(ImportError, match="stt extra"):
-        reload_fn()
-    assert sp_routes._MISSING_SERVICES == {"rerank"}
-    assert "was missing" in client.post("/v1/rerank", json={}).text
-    assert calls == []
+    assert reload_fn() == {"models": 1}
+    r = client.post("/v1/audio/transcriptions")
+    assert r.status_code == 404 and "optional stt extra is not installed" in r.text
+    assert calls == [("prewarm", model)]
 
 
 def test_a_body_over_the_ceiling_is_refused_before_it_is_read(monkeypatch):

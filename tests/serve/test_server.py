@@ -2091,6 +2091,41 @@ def test_resolve_service_missing_file_degrades(capsys):
     assert "embeddings" in sp_routes._MISSING_SERVICES
 
 
+def _no_extra(monkeypatch, key):
+    """Make the speech extra of ``key`` missing, as on an install without it."""
+    from gmlx.serve import stt, tts
+    mod, fn = (stt, "import_mlx_whisper") if key == "stt" else (tts, "import_mlx_audio")
+
+    def gone():
+        raise ImportError(f"the optional {key} extra is missing")
+    monkeypatch.setattr(mod, fn, gone)
+
+
+@pytest.mark.parametrize("key, path", [("stt", "/v1/audio/transcriptions"),
+                                       ("tts", "/v1/audio/speech")])
+def test_a_configured_speech_service_without_its_extra_starts_off(monkeypatch, capsys,
+                                                                  key, path):
+    from gmlx.commands.extras import install_hint
+    from gmlx.serve.patches import routes as sp_routes
+    _no_extra(monkeypatch, key)
+    cfg = _one_model_cfg(**{key: "default"})
+    srv._resolve_service_models(cfg, _ns(tts=None))
+    assert getattr(cfg, key) is None
+    err = capsys.readouterr().err
+    assert f"server.{key} is off: the optional {key} extra is missing" in err
+    message = sp_routes.unconfigured_answers(cfg)[path]
+    assert f"optional {key} extra is not installed" in message
+    assert install_hint(key) in message and "gmlx restart" in message
+
+
+@pytest.mark.parametrize("key", ["stt", "tts"])
+def test_a_speech_flag_without_its_extra_stops_the_start(monkeypatch, key):
+    _no_extra(monkeypatch, key)
+    with pytest.raises(ImportError, match=f"optional {key} extra"):
+        srv._resolve_service_models(_one_model_cfg(),
+                                    _ns(**(dict(stt=None, tts=None) | {key: "default"})))
+
+
 def test_resolve_service_malformed_value_fails_fast_naming_key():
     from gmlx.config import ConfigError
 
