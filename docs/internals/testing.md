@@ -35,6 +35,29 @@ a doc. It also fails when a page directly under `docs/` is not linked from
 the [documentation home](../README.md), so a new top-level page needs a
 link there.
 
+## Tests that pass in CI
+
+CI runs the CPU tier on a small macOS runner, not on a developer's Mac. A
+test that passes on your machine can fail there for these reasons:
+
+| CI differs in | So a test |
+|---------------|-----------|
+| About 7.5 GB of memory and a virtual GPU | Never reads the host's memory or chip. The suite pins one 128 GB M5 Max test machine (`tests/host_box.py`). |
+| Only the `all` extras, so no OpenCV | That needs an optional package skips without it, with `pytest.importorskip`. |
+| The newest release of every dependency | Handles a dependency's behavior change in gmlx code, and covers both versions. |
+| Files collected by folder, under `KQUANT_FORCE_CPU=1` | Does not depend on the order files are named in. |
+
+To run the suite as CI does, in a fresh venv:
+
+```sh
+pip install -U -e ".[all]" pytest httpx pytest-xdist
+KQUANT_FORCE_CPU=1 GMLX_TEST_HOST_RAM_GB=7.5 pytest -n 8
+```
+
+`GMLX_TEST_HOST_RAM_GB` makes the process report a runner of that size
+under the pinned test machine. Add `GMLX_TEST_REAL_HOST=1` to drop the
+pinned machine and see what a test does on that runner itself.
+
 ## Process state between tests
 
 Each test hands the process back as it found it. `tests/process_state.py`
