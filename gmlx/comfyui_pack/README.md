@@ -52,8 +52,10 @@ Each loader has a `server_url` input, which a new node fills with the first of:
 3. the address `gmlx status --json` reports, the port in the gmlx config when no server runs;
 4. `http://127.0.0.1:8080`.
 
-An empty `server_url`, or a `127.0.0.1` or `localhost` address that does not answer, uses that address when the node runs.
-When `gmlx serve` fails to start, the run stops with what it printed, and Cancel stops the wait for a starting server.
+A typed address is used as it is, and the run stops when no gmlx server answers there.
+An empty `server_url`, or the default `http://127.0.0.1:8080` that the example workflows carry, uses the gmlx server found from 1 to 3 when the node runs, then the default.
+A server counts only when it answers the gmlx handshake, so another server on port 8080, such as llama-server, is not used.
+When `gmlx serve` fails to start, the run stops with what it printed and the end of the server's log, and Cancel stops the wait for a starting server.
 
 When the server has an API key, set `GMLX_API_KEY`, or `api_key` in the settings file.
 The pack and the server check that they speak the same step contract. On a mismatch, or when they come from two gmlx versions, the error or the `gmlx Server Status` node says whether to restart ComfyUI or the server.

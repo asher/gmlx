@@ -25,4 +25,9 @@ except Exception as error:  # noqa: BLE001: any failure gets the stand-in nodes
 
     NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS = stub.nodes(error)
 
+from . import discovery  # noqa: E402
+
+# The model list of the loaders is probed while ComfyUI starts.
+discovery.refresh()
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

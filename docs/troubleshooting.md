@@ -444,15 +444,25 @@ newer, restart ComfyUI so it loads the new nodes, and run
 
 The loader names a model that the server's config does not have, such as
 the model of an example workflow you have not pulled. Run the `gmlx pull`
-command that the message gives, then run the workflow again. To use a
-model you already have, pick it in the loader's `model_name` list.
+command that the message gives, then run the workflow again. When the
+message says the server has that model under another id, pick that id in
+the loader's `model_name` list. To use a model you already have, pick it
+in the list.
 
 ### `gmlx serve` failed (exit ...)
 
 The loader started `gmlx serve` because no server answered, and the server
 stopped before it was ready. The message ends with what `gmlx serve`
-printed, which names the cause. Fix that, then run the workflow again, or
-start the server yourself with `gmlx serve` to see the whole output.
+printed and the end of the server's log, which name the cause. A message
+that says the server stopped before it answered has the same cause. Fix
+that, then run the workflow again, or start the server yourself with
+`gmlx serve` to see the whole output.
+
+### `a server answers at ..., but it is not a gmlx image server`
+
+Another server, such as llama-server, listens at the address the loader
+uses and does not answer the gmlx handshake. Set the loader's `server_url`
+to the gmlx server's address, which `gmlx status` shows.
 
 ### `gmlx is not installed`
 

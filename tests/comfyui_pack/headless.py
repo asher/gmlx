@@ -44,24 +44,16 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-_DEAD = None
-
-
 def workflow(name: str) -> dict:
-    """An example workflow whose loaders name a 127.0.0.1 address nothing
-    answers, as one saved on another Mac does, so they reach the stub
-    through GMLX_BASE_URL."""
-    global _DEAD
+    """An example workflow, whose loaders keep the default address the
+    templates carry, so they reach the stub through GMLX_BASE_URL."""
     with open(os.path.join(WORKFLOWS, name)) as f:
         wf = json.load(f)
-    # One address for the session, so ComfyUI's cache keeps the loaders.
-    _DEAD = _DEAD or f"http://127.0.0.1:{free_port()}"
-    dead = _DEAD
     for node in wf.values():
         node.pop("_meta", None)
         if node["class_type"].startswith("Gmlx"):
+            assert node["inputs"]["server_url"] == "http://127.0.0.1:8080", name
             node["inputs"]["start_server"] = False
-            node["inputs"]["server_url"] = dead
     return wf
 
 

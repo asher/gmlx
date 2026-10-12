@@ -537,9 +537,30 @@ def _cancel_after(seconds: float):
     return check
 
 
+class _NotGmlx(http.server.BaseHTTPRequestHandler):
+    """A server that answers /health and nothing else, as llama-server does."""
+
+    def do_GET(self):
+        body = b'{"status": "ok"}' if self.path == "/health" else b'{"error": "File Not Found"}'
+        self.send_response(200 if self.path == "/health" else 404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def _not_gmlx():
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NotGmlx)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_port}"
+
+
 class StartAndCancel(unittest.TestCase):
     """A serve that fails names its error at once, Cancel stops every wait,
-    and a 127.0.0.1 address that does not answer gives way."""
+    and the server is the one a typed address names, or for the default
+    address the gmlx server found without it."""
 
     def setUp(self):
         self.env = {k: os.environ.get(k) for k in ("GMLX_BASE_URL", "GMLX_COMFY_SETTINGS", "PATH",
@@ -553,17 +574,20 @@ class StartAndCancel(unittest.TestCase):
 
     def tearDown(self):
         C.set_interrupt_check(None)
+        C.DEFAULT_URL = C.discovery.DEFAULT_URL
         for k, v in self.env.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
 
-    def gmlx(self, serve: str):
-        """A recorded gmlx whose `serve` runs the shell ``serve``."""
+    def gmlx(self, serve: str, status: dict | None = None):
+        """A recorded gmlx whose `serve` runs the shell ``serve`` and whose
+        `status --json` prints ``status``."""
         exe = os.path.join(self.dir, "gmlx")
         with open(exe, "w") as f:
-            f.write(f"#!/bin/sh\ncase \"$1\" in\n  serve) {serve} ;;\n  *) echo '{{}}' ;;\nesac\n")
+            f.write(f"#!/bin/sh\ncase \"$1\" in\n  serve) {serve} ;;\n"
+                    f"  *) echo '{json.dumps(status or {})}' ;;\nesac\n")
         os.chmod(exe, 0o755)
         with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
             json.dump({"gmlx_command": exe}, f)
@@ -578,8 +602,39 @@ class StartAndCancel(unittest.TestCase):
         self.assertIn("`gmlx serve` failed (exit 1)", msg)
         self.assertIn("error: speech-to-text requires the optional stt extra", msg)
 
+    def _port(self) -> int:
+        return int(os.environ["GMLX_BASE_URL"].rsplit(":", 1)[1])
+
+    def test_a_server_that_dies_after_serve_exits_0_raises_with_its_log(self):
+        """`gmlx serve` gave up waiting and exited 0, then the server died:
+        gmlx status says it is not running, and its log names why."""
+        logfile = os.path.join(self.dir, "server.log")
+        with open(logfile, "w") as f:
+            f.write("[server] loading\nMemoryError: the model does not fit\n")
+        self.gmlx("exit 0", {"running": False, "port": self._port(), "log": logfile})
+        t0 = time.monotonic()
+        with self.assertRaises(C.GmlxError) as e:
+            C.get_client(None, start_server=True, start_timeout=20)
+        self.assertLess(time.monotonic() - t0, 5.0)
+        msg = str(e.exception)
+        self.assertIn("stopped before it answered", msg)
+        self.assertIn("MemoryError: the model does not fit", msg)
+        self.assertIn(logfile, msg)
+
+    def test_a_second_serve_while_the_first_loads_keeps_the_wait(self):
+        """A server already holds the address and still loads: that launch
+        exits 1, and the wait goes on while gmlx status says it runs."""
+        url = os.environ["GMLX_BASE_URL"]
+        self.gmlx(f"echo 'error: a server already holds {url}' >&2; exit 1",
+                  {"running": True, "port": self._port()})
+        t0 = time.monotonic()
+        with self.assertRaises(C.GmlxError) as e:
+            C.get_client(None, start_server=True, start_timeout=2.5)
+        self.assertGreater(time.monotonic() - t0, 2.4)
+        self.assertIn("did not answer", str(e.exception))
+
     def test_a_serve_that_exits_0_is_waited_for(self):
-        self.gmlx("exit 0")
+        self.gmlx("exit 0", {"running": True, "port": self._port()})
         t0 = time.monotonic()
         with self.assertRaises(C.GmlxError) as e:
             C.get_client(None, start_server=True, start_timeout=1.5)
@@ -587,7 +642,7 @@ class StartAndCancel(unittest.TestCase):
         self.assertIn("did not answer", str(e.exception))
 
     def test_cancel_stops_the_wait_for_a_starting_server(self):
-        self.gmlx("exit 0")
+        self.gmlx("exit 0", {"running": True, "port": self._port()})
         C.set_interrupt_check(_cancel_after(0.5))
         t0 = time.monotonic()
         with self.assertRaises(_Cancelled):
@@ -615,17 +670,72 @@ class StartAndCancel(unittest.TestCase):
         finally:
             stub.close()
 
-    def test_a_loopback_address_that_does_not_answer_gives_way(self):
+    def test_a_typed_address_is_used_as_given(self):
         stub = Stub()
+        other, other_url = _not_gmlx()
         try:
             os.environ["GMLX_BASE_URL"] = stub.url
-            c = C.get_client(_dead_url(), start_server=False)
-            self.assertEqual(c.base_url, stub.url)
+            dead = _dead_url()
+            with self.assertRaises(C.GmlxError) as e:
+                C.get_client(dead, start_server=False)
+            self.assertIn(f"no server answers at {dead}", str(e.exception))
             with self.assertRaises(C.GmlxError) as e:
                 C.get_client("http://192.0.2.1:9", start_server=False)
             self.assertIn("192.0.2.1", str(e.exception))
+            # A server that answers /health but not the handshake is not used.
+            with self.assertRaises(C.GmlxError) as e:
+                C.get_client(other_url, start_server=True)
+            self.assertIn(f"a server answers at {other_url}, but it is not a gmlx image server",
+                          str(e.exception))
+            c = C.get_client(stub.url + "/", start_server=False)
+            self.assertEqual((c.base_url, c.redirect_note), (stub.url, None))
         finally:
             stub.close()
+            other.shutdown()
+            other.server_close()
+
+    def test_the_default_address_takes_the_gmlx_server_found_without_it(self):
+        """llama-server answers /health on the default port; the gmlx server
+        runs on another, which GMLX_BASE_URL names here."""
+        stub = Stub()
+        other, other_url = _not_gmlx()
+        try:
+            C.DEFAULT_URL = other_url
+            os.environ["GMLX_BASE_URL"] = stub.url
+            c = C.get_client(other_url, start_server=False)
+            self.assertEqual(c.base_url, stub.url)
+            self.assertIn(f"the loader's server_url is the default {other_url}, so the nodes "
+                          f"use the gmlx server at {stub.url}", c.redirect_note)
+            c = C.get_client("", start_server=False)
+            self.assertEqual((c.base_url, c.redirect_note), (stub.url, None))
+            # With no gmlx server found, the default is not used for one.
+            os.environ["GMLX_BASE_URL"] = other_url
+            with self.assertRaises(C.GmlxError) as e:
+                C.get_client(other_url, start_server=False)
+            self.assertIn("is not a gmlx image server", str(e.exception))
+            dead = _dead_url()
+            os.environ["GMLX_BASE_URL"] = dead
+            with self.assertRaises(C.GmlxError) as e:
+                C.get_client(other_url, start_server=False)
+            msg = str(e.exception)
+            self.assertIn(f"no server answers at {dead}", msg)
+            self.assertIn(f"Note: the loader's server_url is the default {other_url}", msg)
+        finally:
+            stub.close()
+            other.shutdown()
+            other.server_close()
+
+    def test_the_interrupt_waits_5_s_at_most(self):
+        self.assertEqual(C.INTERRUPT_TIMEOUT, 5.0)
+        got = {}
+
+        def request(method, path, body=None, headers=None, **kw):
+            got.update(path=path, timeout=kw.get("timeout"))
+            return 200, {}, b"{}"
+        c = C.StepClient("http://127.0.0.1:9")
+        c.request = request
+        c.interrupt("r1")
+        self.assertEqual(got, {"path": C.PREFIX + "/interrupt", "timeout": 5.0})
 
 
 if __name__ == "__main__":

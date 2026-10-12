@@ -40,21 +40,28 @@ through the loader's `server_url` input, then `GMLX_BASE_URL`, then
 server runs, then `http://127.0.0.1:8080`.
 
 A new loader's `server_url` shows the address found this way. The example
-workflows carry `http://127.0.0.1:8080`. When a `127.0.0.1` or `localhost`
-address does not answer, the loaders use the address found without it, so
-a workflow saved on a Mac whose server uses another port still runs. An
-empty `server_url` does the same. An address on another machine is used as
-it is.
+workflows carry `http://127.0.0.1:8080`, the default. With the default or
+an empty `server_url`, the loaders use the gmlx server found without it,
+then the default, and only a server that answers the gmlx handshake: a
+workflow saved on a Mac whose server uses another port still runs, and
+llama-server on port 8080 is not taken for gmlx. When the loaders leave
+the default for another address, `gmlx Server Status` and any error say
+which address they use. Any other address is used as it is, and the run
+stops when no gmlx server answers there.
 
 With their `start_server` input on, the default, the loaders start
-`gmlx serve` when no server answers. When `gmlx serve` fails, the run stops
-with what it printed. Cancel in ComfyUI stops the wait for the server.
+`gmlx serve` when no server answers. While the server loads, they wait.
+When it stops before it answers, the run stops with what `gmlx serve`
+printed and the end of the server's log. Cancel in ComfyUI stops the wait
+for the server.
 
 The `model_name` list holds the image models of the server at the address
 found, else those that `gmlx list --image` prints, with the default image
-model first. With none, it holds the models `gmlx pull` downloads. A
-loader whose model the server does not have stops with the `gmlx pull`
-command that adds it.
+model first. With none, it holds the models `gmlx pull` downloads. The nodes
+read the list in the background, so the list updates within a few seconds
+of a refresh. A loader whose model the server does not have stops with the
+`gmlx pull` command that adds it, or, when the server has that model under
+another id, with the id to pick.
 
 Desktop starts ComfyUI without your shell's `PATH`, so the nodes run the
 `gmlx` command whose path `gmlx comfyui install` recorded. After you

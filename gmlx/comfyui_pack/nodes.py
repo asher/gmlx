@@ -37,9 +37,11 @@ def connect(model_name, server_url="", start_server=True):
     the `gmlx pull` that adds it."""
     name = str(model_name).strip()
     client = get_client(server_url, start_server=start_server)
-    ids = [str(m.get("model")) for m in client.models() if isinstance(m, dict)]
-    if name not in ids:
-        raise GmlxRefusal(discovery.not_on_server(name, client.base_url, ids))
+    models = [m for m in client.models() if isinstance(m, dict)]
+    if name not in [str(m.get("model")) for m in models]:
+        msg = discovery.not_on_server(name, client.base_url, models)
+        note = client.redirect_note
+        raise GmlxRefusal(f"{msg}\nNote: {note}." if note else msg)
     return client, name
 
 
@@ -142,11 +144,12 @@ class GmlxServerStatus(_Loader):
                    "gmlx nodes are managed by gmlx and update with it.")
 
     def status(self, model_name, server_url="", start_server=False):
-        note = None
+        note = redirect = None
         try:
             client, name = connect(model_name, server_url, start_server)
             s = client.status(name)
             note = client.version_note
+            redirect = client.redirect_note
         except GmlxError as e:
             text = str(e)
         else:
@@ -154,7 +157,8 @@ class GmlxServerStatus(_Loader):
             gib = {k: round(v / (1 << 30), 2) for k, v in mem.items() if isinstance(v, (int, float))}
             text = (f"{s.get('model')}: {s.get('family')} {s.get('variant') or ''}, "
                     f"resident {s.get('resident')}, memory GiB {gib}")
-        lines = [text] + ([f"gmlx: {note}"] if note else []) + [MANAGED]
+        lines = ([text] + ([f"gmlx: {redirect}."] if redirect else [])
+                 + ([f"gmlx: {note}"] if note else []) + [MANAGED])
         text = "\n".join(lines)
         return {"ui": {"text": [text]}, "result": (text,)}
 

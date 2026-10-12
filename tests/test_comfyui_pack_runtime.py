@@ -338,13 +338,23 @@ def widgets(link, monkeypatch, tmp_path):
     monkeypatch.setenv("GMLX_BASE_URL", f"http://127.0.0.1:{_dead_port()}")
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     monkeypatch.delenv("GMLX_API_KEY", raising=False)
+    monkeypatch.delenv("GMLX_DEFAULT_IMAGE_MODEL", raising=False)
     _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
-    return d
+    yield d
+    d.forget()
+
+
+def _probed(d) -> dict:
+    """The loader inputs after a probe from now has answered."""
+    d.forget()
+    d.refresh().join(30)
+    return d.loader_inputs()["required"]
 
 
 def test_pull_names_are_the_catalog_recipes(widgets):
     from gmlx.image.catalog import RECIPES
     assert widgets.PULL_NAMES == {r.name: tuple(r.aliases) for r in RECIPES.values()}
+    assert widgets.PULL_KINDS == {r.name: (r.family, r.variant) for r in RECIPES.values()}
     assert list(widgets.PULL_NAMES) == _catalog()
     assert widgets.settings.FALLBACK_MODEL in widgets.PULL_NAMES
 
@@ -353,24 +363,24 @@ def test_the_model_list_is_the_configured_ids_default_first(widgets, tmp_path, m
     exe = _gmlx_script(tmp_path / "bin", _answers(
         _listing("krea-2-turbo", "my-qwen", "z-image-turbo", default="my-qwen")))
     _record(gmlx_command=str(exe), default_image_model="z-image-turbo")
-    req = widgets.loader_inputs()["required"]
-    names, opts = req["model_name"]
+    names, opts = _probed(widgets)["model_name"]
     assert names == ["my-qwen", "krea-2-turbo", "z-image-turbo"]
     assert opts["default"] == "my-qwen"
     assert widgets.widgets()["source"] == "config"
     # launch's --model comes first.
     monkeypatch.setenv("GMLX_DEFAULT_IMAGE_MODEL", "z-image-turbo")
-    widgets.forget()
-    assert widgets.loader_inputs()["required"]["model_name"][0][0] == "z-image-turbo"
+    assert _probed(widgets)["model_name"][0][0] == "z-image-turbo"
 
 
 class _Models(BaseHTTPRequestHandler):
     ids: list = []
+    default = None
 
     def do_GET(self):
         ok = (self.path == "/internal/image-steps/v1/models"
               and self.headers.get("X-Gmlx-Steps-Contract") == "1.0")
-        body = json.dumps({"models": [{"model": i} for i in self.ids]}).encode()
+        body = json.dumps({"models": [{"model": i} for i in self.ids],
+                           "default_model": self.default}).encode()
         self.send_response(200 if ok else 400)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -381,7 +391,7 @@ class _Models(BaseHTTPRequestHandler):
 
 
 def test_a_server_that_answers_gives_the_list(widgets, tmp_path, monkeypatch):
-    _Models.ids = ["qwen-image-2.1", "z-image-turbo"]
+    _Models.ids, _Models.default = ["qwen-image-2.1", "z-image-turbo", "krea-2-turbo"], None
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Models)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -389,10 +399,16 @@ def test_a_server_that_answers_gives_the_list(widgets, tmp_path, monkeypatch):
         monkeypatch.setenv("GMLX_BASE_URL", url)
         exe = _gmlx_script(tmp_path / "bin", _answers(_listing("other")))
         _record(gmlx_command=str(exe))
-        w = widgets.widgets()
+        req = _probed(widgets)
         # The recorded default (qwen-image) is not there; z-image-turbo is.
-        assert w == {"url": url, "models": ["z-image-turbo", "qwen-image-2.1"], "source": "server"}
-        assert widgets.loader_inputs()["required"]["server_url"][1]["default"] == url
+        assert widgets.widgets() == {
+            "url": url, "models": ["z-image-turbo", "qwen-image-2.1", "krea-2-turbo"],
+            "source": "server"}
+        assert req["server_url"][1]["default"] == url
+        # The server's default image model comes first.
+        _Models.default = "krea-2-turbo"
+        assert _probed(widgets)["model_name"][0] == [
+            "krea-2-turbo", "qwen-image-2.1", "z-image-turbo"]
     finally:
         srv.shutdown()
         srv.server_close()
@@ -400,54 +416,54 @@ def test_a_server_that_answers_gives_the_list(widgets, tmp_path, monkeypatch):
 
 def test_without_gmlx_or_models_the_list_is_what_pull_downloads(widgets, tmp_path):
     _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
+    _probed(widgets)
     w = widgets.widgets()
     assert w["source"] == "pull"
     assert w["models"] == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
     exe = _gmlx_script(tmp_path / "bin", _answers(_listing()))
     _record(gmlx_command=str(exe))
-    widgets.forget()
+    _probed(widgets)
     assert widgets.widgets()["source"] == "pull"
 
 
 def test_a_hung_gmlx_never_stalls_or_fails_the_widgets(widgets, tmp_path, monkeypatch):
-    exe = _gmlx_script(tmp_path / "bin", "exec sleep 30")
+    """The probe runs on a background thread, so the widgets answer at once
+    with the models `gmlx pull` downloads while gmlx hangs."""
+    exe = _gmlx_script(tmp_path / "bin", "exec /bin/sleep 30")
     _record(gmlx_command=str(exe))
     monkeypatch.delenv("GMLX_BASE_URL")
-    monkeypatch.setattr(widgets, "DEFAULT_URL", f"http://127.0.0.1:{_dead_port()}")
-    monkeypatch.setattr(widgets, "STATUS_TIMEOUT", 0.5)
-    monkeypatch.setattr(widgets, "LIST_TIMEOUT", 0.5)
     t0 = time.monotonic()
     req = widgets.loader_inputs()["required"]
-    assert time.monotonic() - t0 < 3.0
-    assert req["model_name"][0][0] == "qwen-image"
+    assert time.monotonic() - t0 < 1.0
+    assert req["model_name"][0] == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
     assert req["server_url"][1]["default"] == widgets.DEFAULT_URL
-    # The answer is kept: the next calls run no command.
+    # One probe at a time: the calls while it hangs start no other.
+    probe = widgets.refresh()
     t0 = time.monotonic()
     for _ in range(20):
         widgets.loader_inputs()
+        assert widgets.refresh() is probe
     assert time.monotonic() - t0 < 0.5
+    assert probe.is_alive()
 
 
 def test_a_probe_that_raises_still_gives_widgets(widgets, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("probe")
     monkeypatch.setattr(widgets, "resolve_base_url", boom)
-    req = widgets.loader_inputs()["required"]
+    req = _probed(widgets)
     assert req["model_name"][0][0] == "qwen-image"
-    assert req["server_url"][1]["default"] == widgets.DEFAULT_URL
+    assert req["server_url"][1]["default"] == os.environ["GMLX_BASE_URL"]
 
 
 def test_the_address_default_is_the_resolved_one(widgets, tmp_path, monkeypatch):
-    assert widgets.loader_inputs()["required"]["server_url"][1]["default"] == \
-        os.environ["GMLX_BASE_URL"]
+    assert _probed(widgets)["server_url"][1]["default"] == os.environ["GMLX_BASE_URL"]
     monkeypatch.delenv("GMLX_BASE_URL")
     # No server runs: gmlx status names the host and port of gmlx's config.
     exe = _gmlx_script(tmp_path / "bin", _answers(
         status={"running": False, "host": "0.0.0.0", "port": 9132, "answering": False}))
     _record(gmlx_command=str(exe))
-    widgets.forget()
-    assert widgets.loader_inputs()["required"]["server_url"][1]["default"] == \
-        "http://127.0.0.1:9132"
+    assert _probed(widgets)["server_url"][1]["default"] == "http://127.0.0.1:9132"
     assert widgets.resolve_base_url("") == "http://127.0.0.1:9132"
     _gmlx_script(tmp_path / "bin", _answers(
         status={"running": True, "url": "http://127.0.0.1:9133"}))
@@ -458,18 +474,42 @@ def test_the_address_default_is_the_resolved_one(widgets, tmp_path, monkeypatch)
     assert widgets.resolve_base_url("") == "http://127.0.0.1:9134"
 
 
+def test_the_server_state_is_the_runfile_of_the_port(widgets, tmp_path):
+    assert widgets.server_state("http://127.0.0.1:9132") == (None, None)
+    exe = _gmlx_script(tmp_path / "bin", _answers(status={
+        "running": True, "port": 9132, "log": "/x/9132.log"}))
+    _record(gmlx_command=str(exe))
+    assert widgets.server_state("http://127.0.0.1:9132") == (True, "/x/9132.log")
+    assert widgets.server_state("http://127.0.0.1:9133") == (False, None)
+    _gmlx_script(tmp_path / "bin", _answers(status={"servers": [
+        {"running": True, "port": 9134}, {"running": False, "port": 9135, "log": "/x/l"}]}))
+    assert widgets.server_state("http://127.0.0.1:9134") == (True, None)
+    assert widgets.server_state("http://127.0.0.1:9135") == (False, "/x/l")
+
+
+def _rows(*ids) -> list:
+    kinds = {"z-image-turbo": ("z_image", "turbo"), "qwen-image": ("qwen_image21", "base"),
+             "qwen-image-2.1": ("qwen_image21", "base")}
+    return [{"model": i, "family": kinds[i][0], "variant": kinds[i][1]} for i in ids]
+
+
 def test_an_unconfigured_model_is_refused_with_its_pull(widgets):
-    msg = widgets.not_on_server("qwen-image-2.1", "http://127.0.0.1:8080", ["z-image-turbo"])
-    assert "`gmlx pull qwen-image-2.1`" in msg and "z-image-turbo" in msg
+    msg = widgets.not_on_server("qwen-image-2.1", "http://127.0.0.1:8080", _rows("z-image-turbo"))
+    assert "`gmlx pull qwen-image`" in msg and "z-image-turbo" in msg
     assert "http://127.0.0.1:8080" in msg
+    assert widgets.pull_name("Qwen-Image-2.1") == "qwen-image"
     msg = widgets.not_on_server("flux", "http://h:1", [])
     assert "`gmlx pull z-image-turbo`" in msg and "(it has: none)" in msg
     assert widgets.validate("anything") is True
     assert widgets.validate(" ") == "model_name is empty"
 
 
-def test_loopback_addresses(widgets):
-    for url in ("http://127.0.0.1:8080", "http://localhost:1", "http://[::1]:2"):
-        assert widgets.is_loopback(url), url
-    for url in ("http://192.168.1.2:8080", "http://studio.local:8080", "not a url"):
-        assert not widgets.is_loopback(url), url
+@pytest.mark.parametrize("asked, has", [("qwen-image-2.1", "qwen-image"),
+                                        ("qwen-image", "qwen-image-2.1")])
+def test_a_model_the_server_has_under_another_id_is_named(widgets, asked, has):
+    """A workflow names the alias, and `gmlx pull` registered the model under
+    the recipe name, or the other way round: running the pull again would
+    not add the name, so the refusal names the id to pick."""
+    msg = widgets.not_on_server(asked, "http://127.0.0.1:8080", _rows("z-image-turbo", has))
+    assert f"It has that model as {has!r}: pick {has!r}" in msg
+    assert "gmlx pull" not in msg

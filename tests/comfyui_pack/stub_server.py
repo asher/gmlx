@@ -6,7 +6,7 @@ wire format against an independent reader and writer.
 
 Usage: stub_server.py [--port 0] [--step-delay-ms 0] [--contract 1.0]
                       [--api-key KEY] [--cond-tokens 32] [--gmlx-version stub]
-                      [--no-contract-field]
+                      [--no-contract-field] [--default-model ID]
 It prints one JSON line with its address, then serves until killed.
 Test routes outside the contract: GET /stub/log, POST /stub/log/reset,
 POST /stub/forget (drop every tensor, adapter and table held).
@@ -126,6 +126,7 @@ class State:
         self.no_contract_field = a.no_contract_field
         self.delay = a.step_delay_ms / 1000.0
         self.cond_tokens = a.cond_tokens
+        self.default_model = a.default_model
         self.manifests = load_manifests()
         self.tensors: dict = {}
         self.adapters: dict = {}
@@ -235,7 +236,8 @@ class Handler(BaseHTTPRequestHandler):
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
-                                               for m, (f, v, _s) in MODELS.items()]})
+                                               for m, (f, v, _s) in MODELS.items()],
+                                    "default_model": st.default_model})
         parts = sub.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "models":
             m = self._model(parts[1])
@@ -513,6 +515,7 @@ def main():
     ap.add_argument("--gmlx-version", default="stub")
     ap.add_argument("--no-contract-field", action="store_true")
     ap.add_argument("--cond-tokens", type=int, default=32)
+    ap.add_argument("--default-model", default=None)
     serve(ap.parse_args())
 
 

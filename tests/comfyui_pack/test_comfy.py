@@ -125,6 +125,9 @@ class StandIns(unittest.TestCase):
         os.environ["GMLX_COMFY_SETTINGS"] = os.path.join(d, "comfyui.json")
         with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
             json.dump({"gmlx_install": "homebrew", "gmlx_command": sys.executable}, f)
+        # The model list probes in the background: one answer for both sides.
+        P.discovery.forget()
+        P.discovery.refresh().join(30)
 
     def tearDown(self):
         if self.env is None:
@@ -723,7 +726,13 @@ class Widgets(unittest.TestCase):
         os.environ["GMLX_BASE_URL"] = self.stub.url
         os.environ["GMLX_DEFAULT_IMAGE_MODEL"] = QID
         os.environ["PATH"] = "/nonexistent"
+        self.probed()
+
+    @staticmethod
+    def probed():
+        """Drop the kept model list and wait for a probe from now."""
         P.discovery.forget()
+        P.discovery.refresh().join(30)
 
     def tearDown(self):
         mm.interrupt_current_processing(False)
@@ -747,25 +756,54 @@ class Widgets(unittest.TestCase):
             # A saved name the list lacks passes validation and reaches the node.
             self.assertIs(node.VALIDATE_INPUTS("qwen-image"), True)
 
+    def test_the_server_default_image_model_comes_first(self):
+        stub = support.Stub("--default-model", KID)
+        try:
+            os.environ["GMLX_BASE_URL"] = stub.url
+            os.environ.pop("GMLX_DEFAULT_IMAGE_MODEL")
+            self.probed()
+            names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
+            self.assertEqual(names, [KID, ZID, QID, QTID])
+            self.assertEqual(opts["default"], KID)
+        finally:
+            stub.close()
+
     def test_a_model_the_server_lacks_is_refused_with_its_pull(self):
         with self.assertRaises(C.GmlxRefusal) as e:
-            P.nodes.GmlxModelLoader().load("qwen-image", self.stub.url, False)
-        self.assertIn("`gmlx pull qwen-image`", str(e.exception))
+            P.nodes.GmlxModelLoader().load("flux", self.stub.url, False)
+        self.assertIn("`gmlx pull z-image-turbo`", str(e.exception))
         self.assertIn(ZID, str(e.exception))
-        out = P.nodes.GmlxServerStatus().status("qwen-image", server_url=self.stub.url)
-        self.assertIn("`gmlx pull qwen-image`", out["result"][0])
+        # The server has qwen-image as qwen-image-2.1: the refusal names that
+        # id, since `gmlx pull qwen-image` would add no qwen-image id.
+        text = P.nodes.GmlxServerStatus().status("qwen-image", server_url=self.stub.url)["result"][0]
+        self.assertIn(f"pick {QID!r}", text)
+        self.assertNotIn("gmlx pull", text)
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.nodes.GmlxModelLoader().load("qwen-image", self.stub.url, False)
+        self.assertIn(f"It has that model as {QID!r}", str(e.exception))
+
+    def test_the_status_node_says_when_the_default_address_gives_way(self):
+        out = P.nodes.GmlxServerStatus().status(ZID, server_url=C.DEFAULT_URL)
+        text = out["result"][0]
+        if self.stub.url != C.DEFAULT_URL:
+            self.assertIn(f"the loader's server_url is the default {C.DEFAULT_URL}, so the "
+                          f"nodes use the gmlx server at {self.stub.url}", text)
+        self.assertTrue(text.startswith(f"{ZID}: z_image turbo"), text)
 
     def test_cancel_stops_the_wait_for_a_starting_server(self):
-        exe = os.path.join(self.dir, "gmlx")
-        with open(exe, "w") as f:
-            f.write("#!/bin/sh\ncase \"$1\" in\n  serve) exit 0 ;;\n  *) echo '{}' ;;\nesac\n")
-        os.chmod(exe, 0o755)
-        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
-            json.dump({"gmlx_command": exe}, f)
         import socket
         with socket.socket() as sk:
             sk.bind(("127.0.0.1", 0))
-            os.environ["GMLX_BASE_URL"] = f"http://127.0.0.1:{sk.getsockname()[1]}"
+            port = sk.getsockname()[1]
+        os.environ["GMLX_BASE_URL"] = f"http://127.0.0.1:{port}"
+        # The server loads: gmlx status says it runs.
+        status = json.dumps({"running": True, "port": port})
+        exe = os.path.join(self.dir, "gmlx")
+        with open(exe, "w") as f:
+            f.write(f"#!/bin/sh\ncase \"$1\" in\n  serve) exit 0 ;;\n  *) echo '{status}' ;;\nesac\n")
+        os.chmod(exe, 0o755)
+        with open(os.environ["GMLX_COMFY_SETTINGS"], "w") as f:
+            json.dump({"gmlx_command": exe}, f)
         timer = threading.Timer(0.5, mm.interrupt_current_processing, (True,))
         timer.start()
         t0 = time.monotonic()
