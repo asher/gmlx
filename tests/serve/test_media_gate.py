@@ -32,9 +32,9 @@ def opened(monkeypatch):
             calls.append((name, a[:1]))
             raise AssertionError(f"{name} ran for a refused request")
         return record
-    import cv2
     import requests
     import gmlx._vendor.mlx_vlm.utils as mu
+    from gmlx.commands import extras
     real_open, open_file = Image.open, spy("Image.open")
 
     def image_open(fp, *a, **k):
@@ -46,7 +46,17 @@ def opened(monkeypatch):
     monkeypatch.setattr(Image, "open", image_open)
     monkeypatch.setattr(requests, "get", spy("requests.get"))
     monkeypatch.setattr(requests.Session, "request", spy("requests.Session.request"))
-    monkeypatch.setattr(cv2, "VideoCapture", spy("cv2.VideoCapture"))
+    # OpenCV is the video extra, so the default install has none and the
+    # gate is tested without it. Every gmlx reader takes cv2 through
+    # extras.opencv; the copy's binding is the one load_video uses.
+    monkeypatch.setattr(extras, "opencv", spy("opencv"))
+    monkeypatch.setattr(mu, "opencv", spy("opencv"))
+    try:
+        import cv2
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(cv2, "VideoCapture", spy("cv2.VideoCapture"))
     for name in ("load_image", "load_audio", "load_video"):
         monkeypatch.setattr(mu, name, spy(name))
     return calls

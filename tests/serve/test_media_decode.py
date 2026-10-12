@@ -485,7 +485,8 @@ def test_image_edits_count_their_reference_images(monkeypatch):
 # Video
 
 def _video(path, frames: int, size=(64, 48)) -> str:
-    import cv2
+    # OpenCV writes the clip and decodes it; it comes with the video extra.
+    cv2 = pytest.importorskip("cv2")
     w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, size)
     rng = np.random.default_rng(0)
     for _ in range(frames):
@@ -534,7 +535,7 @@ def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
         tmp_path, monkeypatch):
     """A frame sampler picks the count, and the count is charged before
     the first frame decodes."""
-    import cv2
+    cv2 = pytest.importorskip("cv2")
     path = _video(tmp_path / "v.avi", 40)
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 64 * 48)
     read = []
@@ -558,7 +559,7 @@ def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
 
 def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path,
                                                                        monkeypatch):
-    import cv2
+    cv2 = pytest.importorskip("cv2")
     path = _video(tmp_path / "v.avi", 40)
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 7 * 64 * 48)
     read = []
