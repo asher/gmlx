@@ -384,6 +384,24 @@ def test_the_stream_flag_under_the_budget_streams_table_and_experts(monkeypatch)
     assert getattr(glu, "_kq_cpu_only", False)
 
 
+def test_the_stream_plan_is_the_ladder(monkeypatch):
+    """One rule for the install and the serve build's header prediction."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
+    plan = ts.stream_plan
+    # Over the budget, the table alone brings it under: table-only.
+    assert plan(150, 30, 130, explicit=True, latched=True) == (True, False, False)
+    # Still over post-table: compose; no table: experts only.
+    assert plan(150, 10, 130, explicit=True, latched=True) == (True, True, False)
+    assert plan(150, 0, 130, explicit=True, latched=True) == (False, True, False)
+    # Under the budget the flag forces a stream: compose.
+    assert plan(100, 30, 130, explicit=True, latched=True) == (True, True, False)
+    # No flag under the budget: nothing streams.
+    assert plan(100, 30, 130) == (False, False, False)
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
+    assert plan(150, 10, 130, explicit=True, latched=True) == (False, True, True)
+
+
 def _fresh_accounting(monkeypatch):
     import gmlx.gen.prefill_decay as pd
 

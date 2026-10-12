@@ -905,6 +905,87 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     assert dense.footprint == 340 * GB
 
 
+def _table_only_header(monkeypatch):
+    """A header the install's ladder sends table-only: 150 GB of text
+    tensors over a 130 GB budget, a 30 GB table that alone brings it
+    under, 100 GB of routed experts."""
+    import gmlx.device as dev
+    import gmlx.load.discovery as disc
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: 150 * GB)
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: 130 * GB)
+    monkeypatch.setattr(ts, "table_streaming_active",
+                        lambda m: getattr(m, "tables", False))
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
+
+
+def _table_only_pool(monkeypatch, streamed_model):
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    for name in ("_STREAMED_TRACKED", "_STREAMED_CAP", "_UNTRACKED_OWNERS",
+                 "_UNTRACKED_WEIGHTS", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 0)
+    tables = []
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: tables.append(b))
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy = _RuntimeProxy(_FakeOriginal())
+    credits = []
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        credits.append(dict(pd._BUILD_CREDIT))
+        proxy.response_generator = SimpleNamespace(model=streamed_model)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(200 * GB), (),
+        footprint_fn=lambda p: int(150 * GB))
+    asked = []
+    monkeypatch.setattr(pool, "_evict_for_room",
+                        lambda incoming, **k: asked.append(incoming))
+    return pool, tables, credits, asked
+
+
+def test_a_table_only_stream_build_prices_the_resident_experts(monkeypatch):
+    """Over the budget, a table that alone brings the model under it
+    streams and the experts stay resident: admission, the entry, the boot
+    table and the build credit discount the table alone."""
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert asked == [120 * GB]                  # no arena or ring either
+    assert entry.footprint == 120 * GB
+    assert tables == [120 * GB]
+    assert [c[1] for c in credits[0].values()] == [30 * GB]
+
+
+def test_a_stream_build_reprices_what_the_install_streamed(monkeypatch, caplog):
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=True, tables=True)   # it composed
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("a", None, "auto",
+                             build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert entry.footprint == 20 * GB
+    assert tables == [120 * GB, 20 * GB]
+    assert "re-pricing" in caplog.text
+
+
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
     """deepseek41's engram tables serve from disk like the experts; pricing
     them resident would evict every other model for room they never take."""

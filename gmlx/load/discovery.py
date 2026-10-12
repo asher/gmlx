@@ -999,7 +999,7 @@ def _gguf_set_bytes(path: str) -> int | None:
 _BLK_RE = re.compile(r"^blk\.(\d+)\.")
 
 
-def _text_tensor_bytes(path: str) -> int | None:
+def text_tensor_bytes(path: str) -> int | None:
     """Bytes of the tensors the text load keeps, from the header tensor
     table: the split set without its metadata and without the NextN/MTP
     blocks (each ``blk.N`` that carries a ``nextn.*`` tensor), which load
@@ -1031,7 +1031,7 @@ def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
     total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()
     if not total or not budget or total <= budget:
         return None
-    text = _text_tensor_bytes(c.path)
+    text = text_tensor_bytes(c.path)
     if text is not None:
         total = text
     return (total, budget) if total > budget else None

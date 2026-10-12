@@ -1039,14 +1039,14 @@ def _moe_with_mtp_block(path, expert_floats=4096, mtp_floats=2048):
     return 4 * expert_floats
 
 
-def test_the_stream_mark_compares_the_text_tensor_bytes(tmp_path, monkeypatch):
+def test_the_stream_mark_compares_thetext_tensor_bytes(tmp_path, monkeypatch):
     """The installer compares the loaded text tower with its budget, so the
     mark leaves out the MTP block and the metadata the file carries."""
     monkeypatch.setattr(disc, "classify_gguf", _classify_as(
         "hy_v3", {"hy_v3.expert_count": 64}))
     path = tmp_path / "Hy3-IQ4_XS.gguf"
     text = _moe_with_mtp_block(path)
-    assert disc._text_tensor_bytes(str(path)) == text
+    assert disc.text_tensor_bytes(str(path)) == text
     assert os.path.getsize(path) > text + 16384      # MTP block + metadata
     monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: text + 1)
     assert _scan(tmp_path)[0].stream is None      # over by file, under by text

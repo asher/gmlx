@@ -208,12 +208,16 @@ def table_stream_selected(model, total_bytes: int, budget: int | None,
     over budget. When the tables alone bring it back under, the experts
     go resident (table-only); otherwise the experts stream too (compose;
     ``GMLX_STREAM_PLE_COMPOSE=0`` keeps the table resident instead)."""
+    return _selected(table_bytes(model), total_bytes, budget, force_stream)
+
+
+def _selected(tbytes: int, total_bytes: int, budget: int | None,
+              force_stream: bool) -> bool:
     from gmlx.envflags import env_bool
 
     env = stream_ple_env()
     if env == "0":
         return False
-    tbytes = table_bytes(model)
     if not tbytes:
         return False
     if env == "1" or force_stream or _FORCED:
@@ -223,6 +227,35 @@ def table_stream_selected(model, total_bytes: int, budget: int | None,
     if (total_bytes - tbytes) <= budget:
         return True
     return env_bool("GMLX_STREAM_PLE_COMPOSE", True)
+
+
+class StreamPlan(NamedTuple):
+    """What an install streams: the tables, the experts, and whether a
+    selected table stays resident under GMLX_STREAM_PLE_COMPOSE=0."""
+    tables: bool
+    experts: bool
+    table_kept: bool = False
+
+
+def stream_plan(total_bytes: int, tbytes: int, budget: int | None, *,
+                force_stream: bool = False, explicit: bool = False,
+                latched: bool = False) -> StreamPlan:
+    """The selection ladder, from byte counts alone: the installer runs it
+    on the loaded model, and a serve build on the GGUF header before the
+    load, so the build prices what the install will stream. ``explicit``
+    (``stream: experts``) forces a stream under the budget; ``latched``
+    stands for the :func:`force_table_stream` latch a build sets later."""
+    from gmlx.envflags import env_bool
+
+    over = budget is not None and total_bytes > budget
+    force = force_stream or (explicit and not over)
+    if not _selected(tbytes, total_bytes, budget, force or latched):
+        return StreamPlan(False, force or over)
+    if force or (budget is not None and total_bytes - tbytes > budget):
+        if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
+            return StreamPlan(True, True)
+        return StreamPlan(False, True, table_kept=True)
+    return StreamPlan(True, False)
 
 
 _TABLE_STREAM = None

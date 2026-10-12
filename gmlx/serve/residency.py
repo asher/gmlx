@@ -968,8 +968,8 @@ class _ResidencyPool:
         # gated before the box's biggest allocation starts.
         from .capacity import (
             install_boot_table,
+            predicted_stream_bytes,
             preload_gate_bytes,
-            streamed_off_disk_bytes,
         )
         # Before the load, as in the CLI: both stream placements stream
         # the tables and the experts, and the warm touch must not wire
@@ -980,15 +980,21 @@ class _ResidencyPool:
             getattr(build_spec, "stream", None) in ("cpu", "experts"))
         gate_bytes = footprint
         streamed = 0
+        shares = (0, 0)
         if getattr(build_spec, "stream", None) == "experts":
-            streamed = streamed_off_disk_bytes(str(model_path))
+            # What the install will stream, by its own ladder: over the
+            # budget, a table that alone brings the model under it streams
+            # and the experts stay resident.
+            shares = predicted_stream_bytes(str(model_path))
+            streamed = sum(shares)
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
             if streamed:
                 _log.info(
                     "preload gate: stream=experts discounts %.1f GB of "
-                    "off-disk bytes (routed experts and streamable tables; "
-                    "gating on %.1f GB resident)",
-                    streamed / 1e9, gate_bytes / 1e9)
+                    "off-disk bytes (streamable tables %.1f GB, routed "
+                    "experts %.1f GB; gating on %.1f GB resident)",
+                    streamed / 1e9, shares[0] / 1e9, shares[1] / 1e9,
+                    gate_bytes / 1e9)
         self._gate(gate_bytes, model_path,
                    streaming=getattr(build_spec, "stream", None) == "experts")
         # What the entry holds resident. A streaming build adds its decode
@@ -1101,6 +1107,23 @@ class _ResidencyPool:
                 except Exception:
                     _log.warning("APC pool autosize skipped", exc_info=True)
             _stamp_boot_kv_costs(rg, str(model_path))
+            # The install decided on the loaded model; price what it
+            # really streamed if the header prediction differed.
+            repriced = False
+            if getattr(build_spec, "stream", None) == "experts":
+                done = _streamed_shares(getattr(rg, "model", None), shares,
+                                        str(model_path))
+                if done is not None and sum(done) != streamed:
+                    _log.warning(
+                        "[capacity] %s streams %.1f GB (tables %.1f GB, "
+                        "experts %.1f GB), not the %.1f GB the header "
+                        "predicted; re-pricing the resident weights",
+                        model_path, sum(done) / 1e9, done[0] / 1e9,
+                        done[1] / 1e9, streamed / 1e9)
+                    gate_bytes = preload_gate_bytes(
+                        footprint, "experts", sum(done))
+                    resident_bytes = gate_bytes
+                    repriced = True
             # The decode arena is MLX-tracked and sized at install, after
             # the pre-load table priced the resident weights alone. Price
             # it in now so admission, /v1/estimate and the boot refusal
@@ -1117,6 +1140,9 @@ class _ResidencyPool:
                     _log.warning("[capacity] the decode arena leaves no "
                                  "context at width 1 (GMLX_DECODE_ARENA_GB "
                                  "lowers it): %s", e)
+            elif repriced:
+                install_boot_table(str(model_path), resident_bytes,
+                                   str(model_path), env=env)
         except BaseException as e:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.
@@ -1381,14 +1407,21 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     which the budget keeps for the process lifetime. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
-    they never take."""
-    from .capacity import preload_gate_bytes, streamed_off_disk_bytes
+    they never take. Over the budget, a table that alone brings the model
+    under it streams and the experts stay resident, with no arena or
+    ring: the build streams what :func:`capacity.predicted_stream_bytes`
+    predicts, and so the entry is priced on it."""
+    from .capacity import predicted_stream_bytes, preload_gate_bytes
 
+    experts_stream = True
     try:
-        every = preload_gate_bytes(
-            file_bytes, "experts", streamed_off_disk_bytes(str(model_path)))
+        shares = predicted_stream_bytes(str(model_path))
+        every = preload_gate_bytes(file_bytes, "experts", sum(shares))
+        experts_stream = bool(shares[1])
     except Exception:
         every = int(file_bytes)
+    if not experts_stream:
+        return every
     raw = ((env or {}).get("GMLX_DECODE_ARENA_GB")
            or os.environ.get("GMLX_DECODE_ARENA_GB"))
     arena = None
@@ -1424,6 +1457,24 @@ def _prefill_feeder_of(rg):
     if model is None:
         return None
     return getattr(_streaming_owner(model), "_kq_feeder", None)
+
+
+def _streamed_shares(model, predicted, gguf_path) -> tuple[int, int] | None:
+    """``(table bytes, expert bytes)`` the install really streamed, priced
+    at the header figures; None when no install verdict is found."""
+    from gmlx.stream.installs import wrapper_chain
+    from gmlx.stream.table_stream import table_streaming_active
+
+    from .capacity import streamed_expert_bytes, streamed_table_bytes
+
+    for cur in wrapper_chain(model):
+        if hasattr(cur, "_kq_streaming"):
+            table = (predicted[0] or streamed_table_bytes(gguf_path)
+                     if table_streaming_active(cur) else 0)
+            experts = (predicted[1] or streamed_expert_bytes(gguf_path)
+                       if cur._kq_streaming else 0)
+            return table, experts
+    return None
 
 
 def _prefill_ring_of(rg) -> int:

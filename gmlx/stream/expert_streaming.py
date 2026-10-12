@@ -347,31 +347,24 @@ def install_expert_streaming(
     table_offloaded = 0
     from gmlx.stream.table_stream import (
         install_table_streaming,
+        stream_plan,
         table_bytes,
-        table_stream_selected,
     )
 
-    compose = False
-    if table_stream_selected(model, total_bytes, budget, force_stream):
-        post = total_bytes - table_bytes(model)
-        # Step 2 default: over budget even post-table streams both
-        # (compose). --stream-cpu streams the experts unconditionally,
-        # so its tables always compose. GMLX_STREAM_PLE_COMPOSE=0
-        # keeps them resident; the selection test already honors it in
-        # auto mode, so that branch only fires under GMLX_STREAM_PLE=1
-        # or --stream-cpu.
-        if force_stream or (budget is not None and post > budget):
-            if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
-                compose = True
-                table_offloaded, table_names = (
-                    install_table_streaming(model))
-            else:
-                print(
-                    "[stream] table stays resident "
-                    "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
-                )
-        else:
-            table_offloaded, table_names = install_table_streaming(model)
+    # One rule with the serve build's header prediction (stream_plan):
+    # over budget even post-table streams both (compose); --stream-cpu and
+    # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
+    # table resident.
+    plan = stream_plan(total_bytes, table_bytes(model), budget,
+                       force_stream=force_stream)
+    compose = plan.tables and plan.experts
+    if plan.table_kept:
+        print(
+            "[stream] table stays resident "
+            "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
+        )
+    if plan.tables:
+        table_offloaded, table_names = install_table_streaming(model)
     # The weights' untracked registration before any deduct: the table and
     # expert credits both split total into tracked and untracked from it.
     # Read after the table deduct, a compose install sees the table as

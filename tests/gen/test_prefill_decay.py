@@ -471,17 +471,19 @@ def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
     def real(resident, extra=0.0):
         return _WS - resident - extra
 
-    # The build: serve opens a window and credits the bytes it will
-    # stream (the experts and the tables) until the install accounts them.
+    # The build: serve opens a window and credits the bytes the header
+    # predicts the install will stream (capacity.predicted_stream_bytes)
+    # until the install accounts them.
+    resident = total - sum(size[p] for p in streamed)
     box["active"] = 0.0
     if serve:
         pd.set_untracked_weights_owner("entry")
-        pd.note_build_credit("entry", sum(size[p] for p in parts - {"N"}))
+        pd.note_build_credit("entry", sum(size[p] for p in streamed))
     box["active"] = float(tracked)
     pd.note_untracked_weights(float(total - tracked), key=key)
     pd.set_untracked_weights_owner(None)
     if serve:
-        assert pd.headroom_bytes() == real(_N)
+        assert pd.headroom_bytes() == real(resident)
 
     # The install, in install_expert_streaming's order: the table share,
     # the walk over the experts, the experts share, the end of the credit.
@@ -499,7 +501,6 @@ def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
     if "E" in streamed:
         pd.credit_streamed(key, _E, split, "experts", prior=table_credit)
     pd.end_build_credit(key)
-    resident = total - sum(size[p] for p in streamed)
     box["active"] = float(tracked + _ARENA + _KV)
     assert pd.build_credit_bytes() == 0
     assert pd.headroom_bytes() == real(resident, _ARENA + _KV)
