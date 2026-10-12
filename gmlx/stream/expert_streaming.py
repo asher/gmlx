@@ -12,7 +12,7 @@ from mlx.utils import tree_flatten
 
 from gmlx.device import metal_info, metal_value, stream_budget_bytes
 from gmlx.envflags import env_bool, env_int
-from gmlx.gen.prefill_decay import credit_streamed
+from gmlx.gen.prefill_decay import credit_streamed, end_build_credit
 from gmlx.load import loadlog
 from gmlx.load.loader import (
     _PHASE,
@@ -410,6 +410,8 @@ def install_expert_streaming(
         table_credit = credit_streamed(
             getattr(model, "_kq_weights_key", None), table_offloaded,
             max(0.0, total_bytes - untracked0), "table")
+        # The experts stay resident, so this was the last streamed share.
+        end_build_credit(getattr(model, "_kq_weights_key", None))
 
     streaming = force_stream or over_budget
     # the verdict itself: a CPU-only expert codec marks its modules the way
@@ -950,6 +952,9 @@ def install_expert_streaming(
                 f"[stream] headroom credits {credit / 1e9:.1f} GB of "
                 "allocator-tracked expert bytes as reclaimable page cache"
             )
+    # The last accounting step: the build credit covered what the install
+    # had not accounted yet, the experts above all, and now ends.
+    end_build_credit(getattr(model, "_kq_weights_key", None))
     if n_cpu_only_codec:
         print(
             f"[stream] {n_cpu_only_codec} expert stacks use a CPU-only codec "

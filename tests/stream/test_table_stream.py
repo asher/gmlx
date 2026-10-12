@@ -347,17 +347,11 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
     # over budget; experts + rest fit once the table streams
     _fake_budget(monkeypatch, total - tbytes // 2)
 
-    deducted = []
-    monkeypatch.setattr(
-        "gmlx.gen.prefill_decay.deduct_untracked_weights",
-        lambda n, key=None: deducted.append(n))
-
     n, offloaded = install_expert_streaming(model)
     assert n == 1
     assert ts.table_streaming_active(model)
     # experts wrapped but NOT streaming (resident fast path)
     assert not getattr(glu, "_kq_cpu_only", False)
-    assert deducted == [0]      # nothing registered untracked: all credited
 
 
 def test_the_stream_flag_keeps_the_ladder_over_budget(monkeypatch):
@@ -465,6 +459,87 @@ def test_compose_frees_each_byte_once_in_a_mixed_regime(monkeypatch):
     assert getattr(glu, "_kq_cpu_only", False)
     assert pd.streamed_tracked_bytes() == tracked
     assert pd.untracked_weight_bytes() == total - table - experts
+
+
+def _serve_build(monkeypatch, tracked_parts, table_rows=8, ws=1 << 40):
+    """A table model through a serve build: the window credits the table
+    and the experts, the load adds ``tracked_parts`` to active memory and
+    registers the rest untracked. Returns the model, its part sizes, the
+    active-memory box and the accounting module."""
+    from mlx.utils import tree_flatten
+
+    pd = _fresh_accounting(monkeypatch)
+    model, glu = _moe_table_model()
+    model.model.ple_embed = _kquant_table(rows=table_rows)
+    rest = mx.zeros((4096,), dtype=mx.float32)
+    params = model.parameters
+    model.parameters = lambda: {**params(), "rest": rest}
+    model._kq_weights_key = ("/models/moe.gguf",)
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    size = {"T": ts.table_bytes(model),
+            "E": sum(a.nbytes for _, a in tree_flatten(glu.parameters()))}
+    size["N"] = total - size["T"] - size["E"]
+    box = {"active": 0.0}
+    monkeypatch.setattr(mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(mx, "device_info",
+                        lambda: {"max_recommended_working_set_size": ws})
+    pd.set_untracked_weights_owner("entry")
+    pd.note_build_credit("entry", float(size["T"] + size["E"]))
+    tracked = sum(size[p] for p in tracked_parts)
+    box["active"] = float(tracked)
+    pd.note_untracked_weights(float(total - tracked), key=model._kq_weights_key)
+    pd.set_untracked_weights_owner(None)
+    return model, glu, size, box, pd
+
+
+@pytest.mark.parametrize("tracked_parts,table_rows", [
+    (set(), 8), ({"N", "T", "E"}, 8), ({"E"}, 8),
+    ({"E"}, 1024),              # a table at least the experts' size
+])
+def test_a_compose_install_reads_the_real_free(monkeypatch, tracked_parts,
+                                               table_rows):
+    """The real installer and unmap release on each regime: free is ws
+    minus the resident weights across the walk, after the install and
+    after the stacks unmap, and the serve build credit is gone."""
+    from gmlx.stream.expert_streaming import _release_unmapped_credit
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    ws = 1 << 40
+    model, glu, size, box, pd = _serve_build(monkeypatch, tracked_parts,
+                                             table_rows, ws)
+    walk = []
+    monkeypatch.setattr("gmlx.stream.prefetch.maybe_make_prefetcher",
+                        lambda path: walk.append(pd.headroom_bytes()))
+    install_expert_streaming(model, explicit=True)
+    assert ts.table_streaming_active(model)
+    assert getattr(glu, "_kq_cpu_only", False)
+    assert walk == [ws - size["N"]]
+    assert pd.build_credit_bytes() == 0
+    assert pd.headroom_bytes() == ws - size["N"]
+    freed = size["E"] if "E" in tracked_parts else 0
+    box["active"] -= freed
+    _release_unmapped_credit(model, freed)
+    assert pd.headroom_bytes() == ws - size["N"]
+
+
+@pytest.mark.parametrize("tracked_parts", [set(), {"N", "T", "E"}, {"E"}])
+def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
+    from mlx.utils import tree_flatten
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    model, glu = _moe_table_model()
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters())) + 4 * 4096
+    table = ts.table_bytes(model)
+    ws = int((total - table // 2) / 0.9) + 1       # over, but not post-table
+    model, glu, size, box, pd = _serve_build(monkeypatch, tracked_parts, 8, ws)
+    install_expert_streaming(model, explicit=True)
+    assert ts.table_streaming_active(model)
+    assert not getattr(glu, "_kq_cpu_only", False)
+    assert pd.build_credit_bytes() == 0
+    assert pd.headroom_bytes() == ws - size["N"] - size["E"]
 
 
 def test_unmapped_stacks_give_back_their_credit(monkeypatch):

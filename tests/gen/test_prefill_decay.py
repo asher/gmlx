@@ -436,7 +436,8 @@ def test_release_takes_back_credit_and_cap(monkeypatch):
 # registry). The arena and the KV are tracked allocations. At every stage
 # the free figure must be the real one, ws minus the resident weights,
 # the arena and the KV, and the install must end the serve build credit.
-_N, _T, _E, _ARENA, _KV, _WS = 20 * GB, 27 * GB, 100 * GB, 8 * GB, 4 * GB, 120 * GB
+_N, _E, _ARENA, _KV, _WS = 20 * GB, 100 * GB, 8 * GB, 4 * GB, 120 * GB
+_TABLES = {"small-table": 27 * GB, "large-table": 130 * GB}   # T < E, T >= E
 _REGIMES = {                    # the parts that load allocator-tracked
     "zero-copy": set(),
     "tracked": {"N", "T", "E"},
@@ -448,26 +449,26 @@ _INSTALLS = {                   # (model parts, streamed parts)
     "table-only": ({"N", "T", "E"}, {"T"}),
     "experts-only": ({"N", "E"}, {"E"}),
 }
-_CASES = [(r, i, serve, unmap)
-          for r in _REGIMES for i in _INSTALLS
+_CASES = [(r, i, t, serve, unmap)
+          for r in _REGIMES for i in _INSTALLS for t in _TABLES
           for serve in (False, True) for unmap in (False, True)
-          if not unmap or "E" in _INSTALLS[i][1]]
+          if (not unmap or "E" in _INSTALLS[i][1])
+          and (i != "experts-only" or t == "small-table")]
 
 
-@pytest.mark.parametrize("regime,install,serve,unmap", _CASES)
+@pytest.mark.parametrize("regime,install,table,serve,unmap", _CASES)
 def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
-                                              serve, unmap):
+                                              table, serve, unmap):
     _fresh_streamed(monkeypatch)
     box = _active(monkeypatch, ws_gb=_WS // GB)
-    size = {"N": _N, "T": _T, "E": _E}
+    size = {"N": _N, "T": _TABLES[table], "E": _E}
     parts, streamed = _INSTALLS[install]
     tracked_parts = _REGIMES[regime] & parts
     total = sum(size[p] for p in parts)
     tracked = sum(size[p] for p in tracked_parts)
-    resident = total - sum(size[p] for p in streamed)
     key = ("/models/moe.gguf",)
 
-    def real(extra=0.0):
+    def real(resident, extra=0.0):
         return _WS - resident - extra
 
     # The build: serve opens a window and credits the bytes it will
@@ -479,20 +480,29 @@ def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
     box["active"] = float(tracked)
     pd.note_untracked_weights(float(total - tracked), key=key)
     pd.set_untracked_weights_owner(None)
-    if serve and install != "table-only":   # table-only: the ladder decides
-        assert pd.headroom_bytes() == real()
+    if serve:
+        assert pd.headroom_bytes() == real(_N)
 
-    # The install, as install_expert_streaming accounts it.
+    # The install, in install_expert_streaming's order: the table share,
+    # the walk over the experts, the experts share, the end of the credit.
     untracked0 = pd.untracked_weight_bytes_for(key)
     split = max(0.0, total - untracked0)
     table_credit = 0.0
     if "T" in streamed:
-        table_credit = pd.credit_streamed(key, _T, split, "table")
+        table_credit = pd.credit_streamed(key, size["T"], split, "table")
+        if "E" not in streamed:
+            pd.end_build_credit(key)
+        if serve or "E" not in streamed:
+            # Across the pin, the prefetcher and the wrap walk.
+            left = _N if "E" in streamed else _N + _E
+            assert pd.headroom_bytes() == real(left)
     if "E" in streamed:
         pd.credit_streamed(key, _E, split, "experts", prior=table_credit)
+    pd.end_build_credit(key)
+    resident = total - sum(size[p] for p in streamed)
     box["active"] = float(tracked + _ARENA + _KV)
     assert pd.build_credit_bytes() == 0
-    assert pd.headroom_bytes() == real(_ARENA + _KV)
+    assert pd.headroom_bytes() == real(resident, _ARENA + _KV)
 
     # The feeders take the stacks: their tracked bytes leave active memory.
     if unmap:
@@ -500,7 +510,7 @@ def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
         box["active"] -= freed
         if freed:
             pd.release_streamed_tracked_bytes(freed, key, "experts")
-        assert pd.headroom_bytes() == real(_ARENA + _KV)
+        assert pd.headroom_bytes() == real(resident, _ARENA + _KV)
 
 
 def test_a_keyless_release_ends_the_open_build_credit(monkeypatch):

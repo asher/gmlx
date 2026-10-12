@@ -339,18 +339,17 @@ def test_a_forced_stream_under_the_budget_frees_the_expert_headroom(monkeypatch)
 
     from gmlx.stream.expert_streaming import install_expert_streaming
 
+    import gmlx.gen.prefill_decay as pd
+
+    for name in ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS", "_STREAMED_TRACKED",
+                 "_STREAMED_CAP", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
     model, glu = _small_moe(monkeypatch, 1 << 40)
-    deducted, credited = [], []
-    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
-                        lambda n, key=None: deducted.append(n))
-    monkeypatch.setattr("gmlx.gen.prefill_decay.note_streamed_tracked_bytes",
-                        lambda n, key=None, **kw: credited.append(n))
-    monkeypatch.setattr("gmlx.gen.prefill_decay.untracked_weight_bytes_for",
-                        lambda key: 0.0)
+    model._kq_weights_key = ("/models/moe.gguf",)
+    pd.note_untracked_weights(0.0, key=model._kq_weights_key)   # all tracked
     _, offloaded = install_expert_streaming(model, explicit=True)
     assert offloaded == sum(a.nbytes for _, a in tree_flatten(glu.parameters()))
-    assert credited == [offloaded]
-    assert deducted == [0]      # all tracked: the credit covers every byte
+    assert pd.streamed_tracked_bytes() == offloaded
 
 
 def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):

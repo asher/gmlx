@@ -435,9 +435,13 @@ def deduct_untracked_weights(nbytes: float, key: object) -> None:
         return
     with _UNTRACKED_LOCK:
         _end_build_credit_locked(key)
-        if nbytes > 0 and key in _UNTRACKED_WEIGHTS:
-            _UNTRACKED_WEIGHTS[key] = max(
-                0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
+        _deduct_locked(nbytes, key)
+
+
+def _deduct_locked(nbytes: float, key: object) -> None:
+    if nbytes > 0 and key in _UNTRACKED_WEIGHTS:
+        _UNTRACKED_WEIGHTS[key] = max(
+            0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
 
 
 def untracked_weight_bytes() -> float:
@@ -472,13 +476,17 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
     if key is None or nbytes <= 0:
         return
     with _UNTRACKED_LOCK:
-        _STREAMED_TRACKED.setdefault(key, {}).setdefault(
-            source, float(nbytes))
-        if cap is not None:
-            _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
-        if _WEIGHTS_OWNER is not None:
-            _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
+        _note_streamed_locked(nbytes, key, source, cap)
         _end_build_credit_locked(key)
+
+
+def _note_streamed_locked(nbytes: float, key: object, source: str,
+                          cap: float | None) -> None:
+    _STREAMED_TRACKED.setdefault(key, {}).setdefault(source, float(nbytes))
+    if cap is not None:
+        _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
+    if _WEIGHTS_OWNER is not None:
+        _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
 
 
 def credit_streamed(key: object, nbytes: float, tracked: float,
@@ -487,12 +495,27 @@ def credit_streamed(key: object, nbytes: float, tracked: float,
     allocator-tracked weight bytes are ``tracked``, of which ``prior`` an
     earlier source already credited: credit the share the tracker counts,
     deduct the rest from the untracked registration. Each byte is freed
-    once in every regime. Returns the credit."""
+    once in every regime. The open build credit shrinks by ``nbytes``, so
+    the bytes not yet accounted stay covered until
+    :func:`end_build_credit` closes it after the install's last step.
+    Returns the credit."""
     credit = min(float(nbytes), max(0.0, float(tracked) - prior))
-    if credit > 0:
-        note_streamed_tracked_bytes(credit, key, source=source, cap=tracked)
-    deduct_untracked_weights(float(nbytes) - credit, key)
+    with _UNTRACKED_LOCK:
+        if key is not None:
+            if credit > 0:
+                _note_streamed_locked(credit, key, source, tracked)
+            _deduct_locked(float(nbytes) - credit, key)
+        for owner in _build_owners_locked(key):
+            active0, cap = _BUILD_CREDIT[owner]
+            _BUILD_CREDIT[owner] = (active0, max(0.0, cap - float(nbytes)))
     return credit
+
+
+def end_build_credit(key: object) -> None:
+    """End the build credit of ``key``'s owners and of the open owner: the
+    install has accounted every streamed byte."""
+    with _UNTRACKED_LOCK:
+        _end_build_credit_locked(key)
 
 
 def release_streamed_tracked_bytes(nbytes: float, key: object,
@@ -510,12 +533,13 @@ def release_streamed_tracked_bytes(nbytes: float, key: object,
         if key is None:
             _end_build_credit_locked(None)
             return
-        sources = _STREAMED_TRACKED.get(key)
-        if not sources or source not in sources:
-            return
-        sources[source] -= min(float(nbytes), sources[source])
+        # The cap first: a table credit can cover tracked expert bytes,
+        # leaving the experts no credit of their own to take back.
         if key in _STREAMED_CAP:
             _STREAMED_CAP[key] = max(0.0, _STREAMED_CAP[key] - float(nbytes))
+        sources = _STREAMED_TRACKED.get(key)
+        if sources and source in sources:
+            sources[source] -= min(float(nbytes), sources[source])
 
 
 # A streaming build's window: the walk wraps the routed experts as
@@ -523,8 +547,9 @@ def release_streamed_tracked_bytes(nbytes: float, key: object,
 # the install credits or deducts them at the first request. Until then the
 # estimate reads the whole file as live. owner -> (active bytes at the
 # build's start, streamed bytes). The credit is what the load has added so
-# far, up to the streamed bytes. The install's experts credit or untracked
-# deduction for the same key ends it, as does the owner's teardown.
+# far, up to the streamed bytes. Each streamed share the install accounts
+# shrinks it by that share, the end of the install ends it, and so does
+# the owner's teardown.
 _BUILD_CREDIT: dict[object, tuple[float, float]] = {}
 
 
@@ -539,11 +564,18 @@ def note_build_credit(owner: object, streamed_bytes: float) -> None:
         _BUILD_CREDIT[owner] = (active, float(streamed_bytes))
 
 
-def _end_build_credit_locked(key: object) -> None:
-    for owner in _UNTRACKED_OWNERS.get(key, ()):
-        _BUILD_CREDIT.pop(owner, None)
+def _build_owners_locked(key: object) -> list:
+    """The owners with an open build credit that ``key``'s install ends:
+    the key's owners and the open window's owner."""
+    owners: set[object] = set(_UNTRACKED_OWNERS.get(key, ()))
     if _WEIGHTS_OWNER is not None:
-        _BUILD_CREDIT.pop(_WEIGHTS_OWNER, None)
+        owners.add(_WEIGHTS_OWNER)
+    return [o for o in owners if o in _BUILD_CREDIT]
+
+
+def _end_build_credit_locked(key: object) -> None:
+    for owner in _build_owners_locked(key):
+        _BUILD_CREDIT.pop(owner, None)
 
 
 def _build_credit_locked(active: float) -> float:
