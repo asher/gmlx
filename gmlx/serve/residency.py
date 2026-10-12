@@ -225,6 +225,7 @@ class _Entry:
     kv_policy: Any = None       # ServeKvPolicy (None when kv-bits is off)
     kind: str = "chat"          # "chat", or IMAGE_KIND for an image model
     pipeline: Any = None        # an image entry's ImagePipeline
+    priced_up: bool = False     # the install streamed less than predicted
 
     def __post_init__(self):
         if self.model_cache is None:
@@ -549,6 +550,8 @@ class _ResidencyPool:
                 # acquire gates on live memory next.
                 _collect_failed_build()
                 raise
+            if entry.priced_up:
+                self._fit_repriced(entry, model_path)
             # The id that built the entry names it for the process lifetime
             # (a metrics label wants a name fixed per entry; aliases sharing
             # the signature reuse this entry and keep the first name).
@@ -558,6 +561,27 @@ class _ResidencyPool:
                 self._touch(entry)
                 entry.busy += 1
             return entry
+
+    def _fit_repriced(self, entry: _Entry, model_path) -> None:
+        """The install streamed less than the header predicted, so the
+        entry holds more than the budget admitted. Evict for the new price
+        as for any build; when only pinned or busy models remain and it
+        cannot fit, unload the new model and defer the request."""
+        released: list = []
+        try:
+            with self._lock:
+                self._evict_for_room(entry.footprint, model_path=model_path,
+                                     streaming=True, released=released)
+        except BaseException:
+            try:
+                self._teardown(entry)
+            except Exception:
+                _log.warning("repriced build teardown skipped",
+                             exc_info=True)
+            _collect_failed_build()
+            raise
+        finally:
+            self._release_images(released)
 
     def release(self, entry: _Entry) -> None:
         """Drop one in-flight reference taken by :meth:`acquire`. At zero the
@@ -985,7 +1009,7 @@ class _ResidencyPool:
             # What the install will stream, by its own ladder: over the
             # budget, a table that alone brings the model under it streams
             # and the experts stay resident.
-            shares = predicted_stream_bytes(str(model_path))
+            shares = predicted_stream_bytes(str(model_path), env)
             streamed = sum(shares)
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
             if streamed:
@@ -1109,7 +1133,7 @@ class _ResidencyPool:
             _stamp_boot_kv_costs(rg, str(model_path))
             # The install decided on the loaded model; price what it
             # really streamed if the header prediction differed.
-            repriced = False
+            repriced = priced_up = False
             if getattr(build_spec, "stream", None) == "experts":
                 done = _streamed_shares(getattr(rg, "model", None), shares,
                                         str(model_path))
@@ -1124,6 +1148,7 @@ class _ResidencyPool:
                         footprint, "experts", sum(done))
                     resident_bytes = gate_bytes
                     repriced = True
+                    priced_up = sum(done) < streamed
             # The decode arena is MLX-tracked and sized at install, after
             # the pre-load table priced the resident weights alone. Price
             # it in now so admission, /v1/estimate and the boot refusal
@@ -1168,6 +1193,7 @@ class _ResidencyPool:
             response_generator=scratch.response_generator,
             apc_manager=scratch.apc_manager,
             kv_policy=kv_policy,
+            priced_up=priced_up,
         )
 
     def _discard_failed_build(self, cache_key, model_path, scratch) -> None:
@@ -1415,7 +1441,7 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
 
     experts_stream = True
     try:
-        shares = predicted_stream_bytes(str(model_path))
+        shares = predicted_stream_bytes(str(model_path), env)
         every = preload_gate_bytes(file_bytes, "experts", sum(shares))
         experts_stream = bool(shares[1])
     except Exception:

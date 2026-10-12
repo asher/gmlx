@@ -521,12 +521,14 @@ def streamed_off_disk_bytes(gguf_path: str) -> int:
     return streamed_expert_bytes(gguf_path) + streamed_table_bytes(gguf_path)
 
 
-def predicted_stream_bytes(gguf_path: str) -> tuple[int, int]:
+def predicted_stream_bytes(gguf_path: str, env=None) -> tuple[int, int]:
     """``(table bytes, expert bytes)`` a ``stream: experts`` build will
     stream, from the header: the installer's ladder (``stream_plan``) on
     the text tensor bytes, the declared tables and the routed experts.
     Over the budget, a table that alone brings the model under it streams
-    and the experts stay resident. Without the text tensor bytes, both."""
+    and the experts stay resident. Without the text tensor bytes, both.
+    ``env`` is the model's env window (GMLX_STREAM_PLE and
+    GMLX_STREAM_PLE_COMPOSE), which the install reads."""
     from gmlx.device import stream_budget_bytes
     from gmlx.load.discovery import text_tensor_bytes
     from gmlx.stream.table_stream import stream_plan
@@ -538,7 +540,7 @@ def predicted_stream_bytes(gguf_path: str) -> tuple[int, int]:
         return table, experts
     # A stream: experts build latches the table stream before its load.
     plan = stream_plan(total, table, stream_budget_bytes(), explicit=True,
-                       latched=True)
+                       latched=True, env=env)
     return (table if plan.tables else 0), (experts if plan.experts else 0)
 
 

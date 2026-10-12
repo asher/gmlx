@@ -32,8 +32,16 @@ _BOOL_TRUE = frozenset(("1", "true", "yes", "on"))
 _BOOL_FALSE = frozenset(("0", "false", "no", "off", ""))
 
 
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
+def env_value(name: str, overlay=None) -> str | None:
+    """The variable's value, from a per-model ``overlay`` mapping first
+    (the env window a serve build applies), else from ``os.environ``."""
+    if overlay and name in overlay:
+        return str(overlay[name])
+    return os.environ.get(name)
+
+
+def env_bool(name: str, default: bool, overlay=None) -> bool:
+    raw = env_value(name, overlay)
     if raw is None:
         return default
     val = raw.strip().lower()

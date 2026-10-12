@@ -30,7 +30,6 @@ the tables resident and streams only the experts.
 """
 from __future__ import annotations
 
-import os
 import re
 from typing import Any, Callable, NamedTuple, Union
 
@@ -182,8 +181,10 @@ def streamed_table_bytes(model) -> int:
                if getattr(m, "_kq_table_streamed", False))
 
 
-def stream_ple_env() -> str:
-    return os.environ.get("GMLX_STREAM_PLE", "")
+def stream_ple_env(env=None) -> str:
+    from gmlx.envflags import env_value
+
+    return env_value("GMLX_STREAM_PLE", env) or ""
 
 
 _FORCED = False
@@ -212,21 +213,21 @@ def table_stream_selected(model, total_bytes: int, budget: int | None,
 
 
 def _selected(tbytes: int, total_bytes: int, budget: int | None,
-              force_stream: bool) -> bool:
+              force_stream: bool, env=None) -> bool:
     from gmlx.envflags import env_bool
 
-    env = stream_ple_env()
-    if env == "0":
+    ple = stream_ple_env(env)
+    if ple == "0":
         return False
     if not tbytes:
         return False
-    if env == "1" or force_stream or _FORCED:
+    if ple == "1" or force_stream or _FORCED:
         return True
     if budget is None or total_bytes <= budget:
         return False
     if (total_bytes - tbytes) <= budget:
         return True
-    return env_bool("GMLX_STREAM_PLE_COMPOSE", True)
+    return env_bool("GMLX_STREAM_PLE_COMPOSE", True, env)
 
 
 class StreamPlan(NamedTuple):
@@ -239,20 +240,22 @@ class StreamPlan(NamedTuple):
 
 def stream_plan(total_bytes: int, tbytes: int, budget: int | None, *,
                 force_stream: bool = False, explicit: bool = False,
-                latched: bool = False) -> StreamPlan:
+                latched: bool = False, env=None) -> StreamPlan:
     """The selection ladder, from byte counts alone: the installer runs it
     on the loaded model, and a serve build on the GGUF header before the
     load, so the build prices what the install will stream. ``explicit``
     (``stream: experts``) forces a stream under the budget; ``latched``
-    stands for the :func:`force_table_stream` latch a build sets later."""
+    stands for the :func:`force_table_stream` latch a build sets later.
+    ``env`` is a model's own env window, read over ``os.environ``: the
+    install runs inside it, and the header prediction before it."""
     from gmlx.envflags import env_bool
 
     over = budget is not None and total_bytes > budget
     force = force_stream or (explicit and not over)
-    if not _selected(tbytes, total_bytes, budget, force or latched):
+    if not _selected(tbytes, total_bytes, budget, force or latched, env):
         return StreamPlan(False, force or over)
     if force or (budget is not None and total_bytes - tbytes > budget):
-        if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
+        if env_bool("GMLX_STREAM_PLE_COMPOSE", True, env):
             return StreamPlan(True, True)
         return StreamPlan(False, True, table_kept=True)
     return StreamPlan(True, False)

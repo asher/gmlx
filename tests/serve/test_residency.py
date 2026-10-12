@@ -905,26 +905,30 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     assert dense.footprint == 340 * GB
 
 
-def _table_only_header(monkeypatch):
+def _table_only_header(monkeypatch, budget=130 * GB):
     """A header the install's ladder sends table-only: 150 GB of text
     tensors over a 130 GB budget, a 30 GB table that alone brings it
-    under, 100 GB of routed experts."""
+    under, 100 GB of routed experts. Under a 110 GB budget it composes.
+    No decode arena or prefill ring is priced."""
     import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.serve.capacity as cap
+    import gmlx.stream.plan as plan
     import gmlx.stream.table_stream as ts
 
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
     monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)
     monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: 150 * GB)
-    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: 130 * GB)
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: budget)
     monkeypatch.setattr(ts, "table_streaming_active",
                         lambda m: getattr(m, "tables", False))
-    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
-    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
+    monkeypatch.setattr(plan, "plan_path", lambda p: None)
+    for name in ("GMLX_STREAM_PLE", "GMLX_STREAM_PLE_COMPOSE",
+                 "GMLX_DECODE_ARENA_GB"):
+        monkeypatch.delenv(name, raising=False)
 
 
-def _table_only_pool(monkeypatch, streamed_model):
+def _table_only_pool(monkeypatch, streamed_model, evict=False):
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
 
@@ -952,8 +956,9 @@ def _table_only_pool(monkeypatch, streamed_model):
         proxy, fake_stock_get, lambda: True, int(200 * GB), (),
         footprint_fn=lambda p: int(150 * GB))
     asked = []
-    monkeypatch.setattr(pool, "_evict_for_room",
-                        lambda incoming, **k: asked.append(incoming))
+    if not evict:
+        monkeypatch.setattr(pool, "_evict_for_room",
+                            lambda incoming, **k: asked.append(incoming))
     return pool, tables, credits, asked
 
 
@@ -984,6 +989,73 @@ def test_a_stream_build_reprices_what_the_install_streamed(monkeypatch, caplog):
     assert entry.footprint == 20 * GB
     assert tables == [120 * GB, 20 * GB]
     assert "re-pricing" in caplog.text
+
+
+def test_a_model_env_window_steers_the_predicted_stream(monkeypatch):
+    """A per-model GMLX_STREAM_PLE or GMLX_STREAM_PLE_COMPOSE reaches the
+    install through the build's env window, so the prediction reads it
+    too: the entry is priced on the plan the install runs."""
+    import gmlx.serve.capacity as cap
+
+    _table_only_header(monkeypatch)
+    assert cap.predicted_stream_bytes("a") == (30 * GB, 0)
+    off = {"GMLX_STREAM_PLE": "0"}
+    assert cap.predicted_stream_bytes("a", off) == (0, 100 * GB)
+    model = SimpleNamespace(_kq_streaming=True, tables=False)
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    entry = pool.acquire("a", None, "auto", env=off,
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert asked == [50 * GB]
+    assert entry.footprint == 50 * GB
+    assert tables == [50 * GB]
+    assert not entry.priced_up
+
+    _table_only_header(monkeypatch, budget=110 * GB)
+    assert cap.predicted_stream_bytes("a") == (30 * GB, 100 * GB)
+    kept = {"GMLX_STREAM_PLE_COMPOSE": "0"}
+    assert cap.predicted_stream_bytes("a", kept) == (0, 100 * GB)
+
+
+def _repriced_up(monkeypatch, busy):
+    """Predicted compose at 20 GB resident, installed table-only at 120 GB,
+    in a 200 GB pool beside a 100 GB resident that fit the prediction."""
+    from gmlx.serve.residency import _Entry
+
+    _table_only_header(monkeypatch, budget=110 * GB)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, tables, _, _ = _table_only_pool(monkeypatch, model, evict=True)
+    key = ("b", None, "auto")
+    pool._entries[key] = _Entry(cache_key=key, model_path="b",
+                                footprint=100 * GB, busy=busy)
+    torn = []
+    monkeypatch.setattr(pool, "_teardown",
+                        lambda e, released=None: torn.append(e.model_path))
+    return pool, tables, torn
+
+
+def test_a_build_repriced_up_evicts_an_idle_model_for_room(monkeypatch):
+    pool, tables, torn = _repriced_up(monkeypatch, busy=0)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert tables == [20 * GB, 120 * GB]
+    assert entry.footprint == 120 * GB
+    assert torn == ["b"]
+    assert list(pool._entries) == [("a", None, "auto")]
+
+
+def test_a_build_repriced_up_beside_a_busy_model_defers(monkeypatch):
+    import pytest
+
+    from gmlx.serve.capacity import LoadDeferred
+
+    pool, tables, torn = _repriced_up(monkeypatch, busy=1)
+    with pytest.raises(LoadDeferred, match="does not fit the"):
+        pool.acquire("a", None, "auto",
+                     build_spec=SimpleNamespace(stream="experts"))
+    assert torn == ["a"]
+    assert list(pool._entries) == [("b", None, "auto")]
 
 
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
