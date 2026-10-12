@@ -2326,9 +2326,16 @@ def _ensure_stream_cb_caps(args) -> None:
     """Same lift for a placement that came from config, not argv. The env is
     latched by the time the overlay runs, so write the live device fields
     instead (what the serve engine flips). A config model id decoded 40%
-    slower than the identical bare path without this."""
-    if not (getattr(args, "stream_experts", False)
-            or getattr(args, "stream_cpu", False)):
+    slower than the identical bare path without this. Also latches the
+    stream flags before the load, for `run` and `chat` alike: the warm
+    touch reads the latch to leave the streamable tables and the expert
+    stacks untouched."""
+    from gmlx.stream.table_stream import force_table_stream
+
+    stream = bool(getattr(args, "stream_experts", False)
+                  or getattr(args, "stream_cpu", False))
+    force_table_stream(stream)
+    if not stream:
         return
     if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
         return                       # argv path already latched it, or the
@@ -2353,13 +2360,6 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     if rc is not None:
         return rc
     _ensure_stream_cb_caps(args)
-    if (getattr(args, "stream_cpu", False)
-            or getattr(args, "stream_experts", False)):
-        # Before the load: the warm touch reads this to leave the
-        # streamable tables and the expert stacks untouched.
-        from gmlx.stream.table_stream import force_table_stream
-
-        force_table_stream()
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
     # In-RAM placements: fine caps through each prefill, coarse from the

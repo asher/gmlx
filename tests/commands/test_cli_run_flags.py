@@ -387,3 +387,16 @@ def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):
         install_expert_streaming(model, gguf_path="m.gguf", explicit=True,
                                  feeder_prefill=False, feeder_decode=False)
     assert seen == [True]
+
+
+def test_both_stream_flags_latch_the_warm_touch_for_run_and_chat():
+    """`run` and `chat` both call _ensure_stream_cb_caps before the load."""
+    import types
+
+    import gmlx.stream.table_stream as ts
+
+    for flags in ({"stream_experts": True}, {"stream_cpu": True}):
+        cli._ensure_stream_cb_caps(types.SimpleNamespace(**flags))
+        assert ts._FORCED
+        cli._ensure_stream_cb_caps(types.SimpleNamespace())
+        assert not ts._FORCED

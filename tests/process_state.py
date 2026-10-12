@@ -171,6 +171,11 @@ def _prefill_decay():
     return sys.modules.get("gmlx.gen.prefill_decay")
 
 
+def _table_stream():
+    """gmlx.stream.table_stream, or None before it is imported."""
+    return sys.modules.get("gmlx.stream.table_stream")
+
+
 def capture() -> dict:
     _prior.clear()
     decay = _prefill_decay()
@@ -191,6 +196,7 @@ def capture() -> dict:
         "governor": {st: (st.saved_mem_limit, st.saved_cache_limit)
                      for st in _governor_states},
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
+        "table_stream_latch": getattr(_table_stream(), "_FORCED", False),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
@@ -281,6 +287,10 @@ def restore(state: dict) -> list:
     if mx.default_device() != state["device"]:
         changed.append("device")
         mx.set_default_device(state["device"])
+    tables = _table_stream()
+    if tables is not None and tables._FORCED != state["table_stream_latch"]:
+        changed.append("table stream latch")
+        tables._FORCED = state["table_stream_latch"]
     for d, stream in state["streams"].items():
         if mx.default_stream(d) != stream:
             changed.append(f"stream {getattr(d, 'name', d)}")
