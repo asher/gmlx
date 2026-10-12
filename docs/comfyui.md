@@ -8,6 +8,8 @@ that ships with gmlx, run the gmlx [image models](images.md) on the gmlx
 server, and ComfyUI's own nodes work with them. Like the rest of image
 generation, it needs a Mac with an M3 chip or newer.
 
+![The gmlx model, CLIP and VAE loaders feeding ComfyUI's KSampler in Comfy Desktop, with the image it made](assets/comfyui/z-image-turbo-workflow.png)
+
 With ComfyUI on your Mac, this command puts the gmlx nodes into it:
 
 ```sh
