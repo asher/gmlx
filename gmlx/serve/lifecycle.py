@@ -478,6 +478,23 @@ def rotate_log_if_large(path, max_bytes: int = 10 * 1024 * 1024) -> None:
         pass
 
 
+# The server logs this in the line for a configured speech service it
+# turned off because its extra is missing. The detached launcher repeats
+# those lines.
+SERVICE_OFF_MARK = " is off: its optional "
+
+
+def _services_off(path) -> list:
+    """The lines of the log at ``path`` for speech services the server
+    turned off because their extra is missing."""
+    try:
+        with open(path) as f:
+            return [ln.strip() for ln in f
+                    if ln.startswith("[server] server.") and SERVICE_OFF_MARK in ln]
+    except OSError:
+        return []
+
+
 def _log_tail(path, n: int = 40) -> str:
     try:
         with open(path) as f:
@@ -796,6 +813,8 @@ def launch_detached(child: list, *, host: str, port: int,
             run["status"] = "running"
             write_run(host, port, run)
             print(f"server up at http://{host}:{port}  (pid {proc.pid})")
+            for line in _services_off(lp):
+                print(f"  note: {line.removeprefix('[server] ')}", file=err)
             # An empty /v1/models means every request will 404: say so here
             # instead of suggesting `gmlx launch` at a server with nothing
             # to serve. None (probe failed / auth-gated) keeps the default.
@@ -1329,9 +1348,11 @@ def reload_config(config_abspath: str) -> list:
 def reload_over_http(config_abspath: str) -> tuple | None:
     """POST /v1/reload to the server at the address of the config at
     ``config_abspath``, for a server that keeps no runfile, such as one
-    started with ``--foreground``. Returns ``(host:port, None)`` when it
-    reloaded, ``(host:port, reason)`` when it answered but did not reload,
-    and None when no server answers there or the config does not load."""
+    started with ``--foreground``. Returns ``(host:port, None, off)`` when
+    it reloaded, where ``off`` maps each service the reload left off for a
+    missing extra to the command that adds it, ``(host:port, reason, {})``
+    when it answered but did not reload, and None when no server answers
+    there or the config does not load."""
     try:
         from gmlx.config import load_config
         cfg = load_config(config_abspath)
@@ -1349,17 +1370,18 @@ def reload_over_http(config_abspath: str) -> tuple | None:
         return None
     where = host_port(host, port)
     try:
-        post_json(f"http://{where}/v1/reload", api_key=cfg.api_key,
-                  timeout=120)
+        got = post_json(f"http://{where}/v1/reload", api_key=cfg.api_key,
+                        timeout=120)
     except urllib.error.HTTPError as e:
         try:
             why = json.loads(e.read()).get("message") or f"HTTP {e.code}"
         except Exception:  # noqa: BLE001 - not our JSON body
             why = f"HTTP {e.code}"
-        return where, why
+        return where, why, {}
     except (urllib.error.URLError, OSError, ValueError) as e:
-        return where, str(getattr(e, "reason", None) or e)
-    return where, None
+        return where, str(getattr(e, "reason", None) or e), {}
+    off = got.get("services_off") if isinstance(got, dict) else None
+    return where, None, (off if isinstance(off, dict) else {})
 
 
 def _configured_count(config_abspath: str | None) -> int:

@@ -288,9 +288,10 @@ the config download at start, except GGUF models, which you pull, as
 
 A service that is not configured answers 404 with the key to set. When the
 extra of a speech service in the config is missing, the server starts
-without that service and logs a warning, and its routes answer 404 with
-the command that installs the extra. With `--stt` or `--tts`, a missing
-extra stops the server from starting. When an embeddings or rerank model
+without that service and logs a warning, which `gmlx serve` repeats, and
+its routes answer 404 with the command that installs the extra. A reload of
+the config turns the service off the same way, and the server stays up.
+With `--stt` or `--tts`, a missing extra stops the server from starting. When an embeddings or rerank model
 file is missing, the server runs without that service. Pull the file, then
 reload the server or run `gmlx restart`.
 

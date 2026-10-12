@@ -302,6 +302,12 @@ def note_missing_service(key: str, extra: str | None = None) -> None:
         _MISSING_EXTRAS.pop(key, None)
 
 
+def missing_extras() -> dict[str, str]:
+    """The services that run off because their optional extra is missing,
+    each with the command that adds it."""
+    return dict(_MISSING_EXTRAS)
+
+
 def clear_missing_services() -> dict[str, str | None]:
     """Forget the missing services before a reload resolves them again, and
     return the ones it forgot, each with its install command or None."""
@@ -320,8 +326,8 @@ def unconfigured_answers(cfg) -> dict[str, str]:
             continue
         if key in _MISSING_EXTRAS:
             message = (f"{what} is off on this server, because its optional {key} "
-                       f"extra is not installed. To add it: {_MISSING_EXTRAS[key]}. "
-                       "Then run gmlx restart.")
+                       f"extra is not installed. To add it: {_MISSING_EXTRAS[key]}, "
+                       "then run gmlx restart.")
         elif key in _MISSING_SERVICES:
             message = (f"{what} is off on this server, because the model that "
                        f"server.{key} names was missing when the server started "

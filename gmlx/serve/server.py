@@ -173,10 +173,13 @@ def _reload_running(config_path, *, skip: bool) -> None:
         return
     if got is None:
         return
-    where, why = got
+    where, why, off = got
     if why is None:
         print(f"reloaded the running server at {where} to pick up the "
               "config change")
+        for key, hint in sorted(off.items()):
+            print(f"note: server.{key} is off, because its optional {key} extra "
+                  f"is not installed. To add it: {hint}", file=sys.stderr)
     else:
         print(f"note: the server at {where} did not reload ({why}); "
               "restart it to pick up the config change", file=sys.stderr)
@@ -1850,11 +1853,14 @@ def _make_reload_fn(path, a=None):
     """The reload of the config at ``path``. With the start flags ``a``, it
     keeps ``--no-family-defaults`` and the service flags, and turns each
     service on, off or to another model as the file now says. A service
-    that fails to resolve fails the reload and changes nothing."""
+    that fails to resolve fails the reload and changes nothing. The result
+    names, under ``services_off``, each configured speech service the reload
+    left off because its extra is missing, with the command that adds it."""
     def _reload():
         from .bridge_vlm import register_resolved_models
         from .patches import routes
         cfg = _load_with_discover(path)
+        off: dict = {}
         if a is not None:
             if getattr(a, "no_family_defaults", False):
                 cfg.family_defaults = False
@@ -1862,14 +1868,21 @@ def _make_reload_fn(path, a=None):
             try:
                 _resolve_service_models(cfg, a)
             except Exception:
+                # What the failed resolve noted goes; what was noted before
+                # comes back.
+                routes.clear_missing_services()
                 for key, extra in missing.items():
                     routes.note_missing_service(key, extra=extra)
                 raise
+            off = routes.missing_extras()
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         if a is not None:
             routes.install_service_routes(cfg)
             _warm_service_models(cfg)
-        return {"models": len(cfg.models)}
+        out: dict = {"models": len(cfg.models)}
+        if off:
+            out["services_off"] = off
+        return out
     return _reload
 
 
@@ -2138,11 +2151,30 @@ _SERVICE_KEYS = ("stt", "tts", "embeddings", "rerank")
 _LIVE_SERVICES: dict[str, str] = {}
 
 
+# The top-level modules of the packages each speech extra installs. Only a
+# missing one of these turns a configured service off.
+_EXTRA_MODULES = {
+    "stt": frozenset({"mlx_whisper", "multipart"}),
+    "tts": frozenset({"mlx_audio", "spacy", "num2words", "addict", "phonemizer",
+                      "espeakng_loader"}),
+}
+
+def _extra_missing(key: str, e: ImportError) -> bool:
+    """Whether ``e``, or the error it was raised from, is a module of the
+    ``key`` extra that is not installed."""
+    for err in (e, e.__cause__):
+        if isinstance(err, ModuleNotFoundError) and \
+                (err.name or "").split(".")[0] in _EXTRA_MODULES[key]:
+            return True
+    return False
+
+
 def _speech_service(key: str, flag, cfg, resolve, check_extra):
     """The model of the speech service ``key``, or None when it is off. A
     missing extra stops the start when ``--stt`` or ``--tts`` asked for the
     service. When only the config names it, the server warns and starts
-    without it, and its routes answer 404 with the install command."""
+    without it, and its routes answer 404 with the install command. Any
+    other import error stops the start."""
     value = flag or getattr(cfg, key, None)
     if not value:
         return None
@@ -2150,13 +2182,16 @@ def _speech_service(key: str, flag, cfg, resolve, check_extra):
     try:
         check_extra()
     except ImportError as e:
-        if flag:
+        if flag or not _extra_missing(key, e):
             raise
         from gmlx.commands.extras import install_hint
 
+        from .lifecycle import SERVICE_OFF_MARK
         from .patches.routes import note_missing_service
-        print(f"[server] server.{key} is off: {e}", file=sys.stderr)
-        note_missing_service(key, extra=install_hint(key))
+        hint = install_hint(key)
+        print(f"[server] server.{key}{SERVICE_OFF_MARK}{key} extra is not installed. "
+              f"To add it: {hint}", file=sys.stderr)
+        note_missing_service(key, extra=hint)
         return None
     return model
 

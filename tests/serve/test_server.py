@@ -1367,9 +1367,10 @@ def test_reload_running_no_servers_is_quiet(monkeypatch, capsys):
     assert capsys.readouterr().out == ""               # nothing running -> no note
 
 
-def _foreground(monkeypatch, tmp_path, *, answer):
+def _foreground(monkeypatch, tmp_path, *, answer, off=None):
     """A config at port 18431, a server that answers /health there with no
-    runfile, and a /v1/reload that answers ``answer``."""
+    runfile, and a /v1/reload that answers ``answer``, naming the services
+    ``off`` it left off for a missing extra."""
     import io
     import json
     import urllib.error
@@ -1389,7 +1390,7 @@ def _foreground(monkeypatch, tmp_path, *, answer):
             body = io.BytesIO(json.dumps({
                 "message": "reload requires a --config launch"}).encode())
             raise urllib.error.HTTPError(url, answer, "", {}, body)
-        return {"status": "success"}
+        return {"status": "success"} | ({"services_off": off} if off else {})
 
     monkeypatch.setattr(lc, "post_json", post)
     return str(cfg), posted
@@ -1402,6 +1403,17 @@ def test_a_server_with_no_runfile_reloads_over_http(monkeypatch, tmp_path,
     assert posted == [("http://127.0.0.1:18431/v1/reload", "k")]
     assert ("reloaded the running server at 127.0.0.1:18431 to pick up the "
             "config change") in capsys.readouterr().out
+
+
+def test_a_reload_names_the_services_a_missing_extra_left_off(monkeypatch, tmp_path,
+                                                             capsys):
+    hint = "pip install 'gmlx[stt]'"
+    cfg, _posted = _foreground(monkeypatch, tmp_path, answer=200, off={"stt": hint})
+    srv._reload_running(cfg, skip=False)
+    got = capsys.readouterr()
+    assert "reloaded the running server at 127.0.0.1:18431" in got.out
+    assert ("server.stt is off, because its optional stt extra is not installed. "
+            f"To add it: {hint}") in got.err
 
 
 def test_a_server_that_cannot_reload_is_named_with_why(monkeypatch, tmp_path,
@@ -2092,13 +2104,20 @@ def test_resolve_service_missing_file_degrades(capsys):
 
 
 def _no_extra(monkeypatch, key):
-    """Make the speech extra of ``key`` missing, as on an install without it."""
+    """Make the speech extra of ``key`` missing, as on an install without it:
+    importing its package raises ModuleNotFoundError."""
+    monkeypatch.setitem(sys.modules, "mlx_whisper" if key == "stt" else "mlx_audio", None)
+
+
+def _import_fails(monkeypatch, key, cause):
+    """Make the import of the speech extra of ``key`` fail with ``cause``,
+    the way its import helper wraps it."""
     from gmlx.serve import stt, tts
     mod, fn = (stt, "import_mlx_whisper") if key == "stt" else (tts, "import_mlx_audio")
 
-    def gone():
-        raise ImportError(f"the optional {key} extra is missing")
-    monkeypatch.setattr(mod, fn, gone)
+    def fails():
+        raise ImportError(f"{key} needs its extra") from cause
+    monkeypatch.setattr(mod, fn, fails)
 
 
 @pytest.mark.parametrize("key, path", [("stt", "/v1/audio/transcriptions"),
@@ -2112,10 +2131,33 @@ def test_a_configured_speech_service_without_its_extra_starts_off(monkeypatch, c
     srv._resolve_service_models(cfg, _ns(tts=None))
     assert getattr(cfg, key) is None
     err = capsys.readouterr().err
-    assert f"server.{key} is off: the optional {key} extra is missing" in err
+    assert (f"server.{key} is off: its optional {key} extra is not installed. "
+            f"To add it: {install_hint(key)}\n") in err
     message = sp_routes.unconfigured_answers(cfg)[path]
     assert f"optional {key} extra is not installed" in message
     assert install_hint(key) in message and "gmlx restart" in message
+    assert ".." not in message
+
+
+def test_a_missing_dependency_of_the_tts_extra_turns_it_off(monkeypatch):
+    """mlx-audio is there but a package it imports, from the same extra, is
+    not."""
+    _import_fails(monkeypatch, "tts", ModuleNotFoundError("no spacy", name="spacy"))
+    cfg = _one_model_cfg(tts="default")
+    srv._resolve_service_models(cfg, _ns(tts=None))
+    assert cfg.tts is None
+
+
+@pytest.mark.parametrize("key, cause", [
+    ("stt", ModuleNotFoundError("no numpy", name="numpy")),
+    ("tts", ImportError("cannot import name 'x' from 'mlx_audio'", name="mlx_audio")),
+])
+def test_a_speech_import_error_other_than_its_missing_extra_stops_the_start(
+        monkeypatch, key, cause):
+    _import_fails(monkeypatch, key, cause)
+    with pytest.raises(ImportError, match=f"{key} needs its extra") as got:
+        srv._resolve_service_models(_one_model_cfg(**{key: "default"}), _ns(tts=None))
+    assert got.value.__cause__ is cause
 
 
 @pytest.mark.parametrize("key", ["stt", "tts"])

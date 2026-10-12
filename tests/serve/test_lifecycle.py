@@ -482,6 +482,25 @@ def test_start_background_happy_path(monkeypatch):
     assert run["api_key_set"] is False
 
 
+def test_a_start_repeats_the_services_a_missing_extra_turned_off(monkeypatch, tmp_path,
+                                                                  capsys):
+    log = tmp_path / "server.log"
+
+    def fake_popen(argv, **kw):
+        log.write_text("[server] loading\n"
+                       "[server] server.stt is off: its optional stt extra is not "
+                       "installed. To add it: pip install 'gmlx[stt]'\n")
+        return _FakeProc(pid=4242)
+
+    monkeypatch.setattr(lc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(lc, "_ready", lambda h, p, k=None, expect_pid=None: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a: None)
+    assert lc.start_background(["--config", "/abs/c.yaml"], host="127.0.0.1",
+                               port=8080, log=str(log)) == 0
+    assert ("  note: server.stt is off: its optional stt extra is not installed. "
+            "To add it: pip install 'gmlx[stt]'\n") in capsys.readouterr().err
+
+
 # start_background: a child that dies before readiness fails fast and clears the runfile
 def test_start_background_child_death_fail_fast(monkeypatch):
     monkeypatch.setattr(lc.subprocess, "Popen",
