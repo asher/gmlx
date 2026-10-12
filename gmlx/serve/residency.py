@@ -34,6 +34,7 @@ with stock ``from_env`` pinned dead for the load's duration.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import threading
@@ -637,24 +638,21 @@ class _ResidencyPool:
         a later unload collects it once released. Returns whether anything was
         torn down. ``ignore_retained`` as in :meth:`evict`."""
         released: list = []
-        with self._worker_for(False), self._build_lock:
-            try:
-                with self._lock:
-                    cleared = False
-                    for key, entry in list(self._entries.items()):
-                        if self._live_count(entry, ignore_retained) > 0:
-                            loadlog.verbose_print(
-                                f"[residency] unload skipping busy model "
-                                f"{os.path.basename(str(entry.model_path))} "
-                                f"({entry.busy} in-flight)")
-                            continue
-                        self._teardown(entry, released)
-                        if self._proxy._last_entry is entry:
-                            self._proxy._last_entry = None
-                        del self._entries[key]
-                        cleared = True
-            finally:
-                self._release_images(released)
+        with self._teardown_window(released):
+            with self._lock:
+                cleared = False
+                for key, entry in list(self._entries.items()):
+                    if self._live_count(entry, ignore_retained) > 0:
+                        loadlog.verbose_print(
+                            f"[residency] unload skipping busy model "
+                            f"{os.path.basename(str(entry.model_path))} "
+                            f"({entry.busy} in-flight)")
+                        continue
+                    self._teardown(entry, released)
+                    if self._proxy._last_entry is entry:
+                        self._proxy._last_entry = None
+                    del self._entries[key]
+                    cleared = True
             return cleared
 
     def busy_paths(self) -> list:
@@ -740,25 +738,22 @@ class _ResidencyPool:
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
         released: list = []
-        with self._worker_for(False), self._build_lock:
-            try:
-                with self._lock:
-                    self._keep_paths.discard(model_path)
-                    keys = [k for k, e in self._entries.items()
-                            if e.model_path == model_path]
-                    in_flight = sum(
-                        self._live_count(self._entries[k], ignore_retained)
-                        for k in keys)
-                    if in_flight:
-                        raise ModelBusyError(model_path, in_flight)
-                    for k in keys:
-                        entry = self._entries[k]
-                        self._teardown(entry, released)
-                        if self._proxy._last_entry is entry:
-                            self._proxy._last_entry = None
-                        del self._entries[k]
-            finally:
-                self._release_images(released)
+        with self._teardown_window(released):
+            with self._lock:
+                self._keep_paths.discard(model_path)
+                keys = [k for k, e in self._entries.items()
+                        if e.model_path == model_path]
+                in_flight = sum(
+                    self._live_count(self._entries[k], ignore_retained)
+                    for k in keys)
+                if in_flight:
+                    raise ModelBusyError(model_path, in_flight)
+                for k in keys:
+                    entry = self._entries[k]
+                    self._teardown(entry, released)
+                    if self._proxy._last_entry is entry:
+                        self._proxy._last_entry = None
+                    del self._entries[k]
             return bool(keys)
 
     def set_keep(self, model_path, keep: bool) -> None:
@@ -836,28 +831,25 @@ class _ResidencyPool:
         now = self._time_fn()
         reaped = []
         released: list = []
-        with self._worker_for(False), self._build_lock:
-            try:
-                with self._lock:
-                    for entry in list(self._entries.values()):
-                        if (entry.pinned or entry.model_path in self._keep_paths
-                                or not entry.ttl or entry.ttl <= 0):
-                            continue
-                        if now - entry.last_access < entry.ttl:
-                            continue
-                        if entry.is_image and entry.busy > 0:
-                            # An image job is not in the server's in-flight
-                            # count; its hold is.
-                            continue
-                        _log.info("idle TTL unload (%.0fs): %s",
-                                  entry.ttl, entry.model_path)
-                        self._teardown(entry, released)
-                        del self._entries[entry.cache_key]
-                        if self._proxy._last_entry is entry:
-                            self._proxy._last_entry = None
-                        reaped.append(entry.model_path)
-            finally:
-                self._release_images(released)
+        with self._teardown_window(released):
+            with self._lock:
+                for entry in list(self._entries.values()):
+                    if (entry.pinned or entry.model_path in self._keep_paths
+                            or not entry.ttl or entry.ttl <= 0):
+                        continue
+                    if now - entry.last_access < entry.ttl:
+                        continue
+                    if entry.is_image and entry.busy > 0:
+                        # An image job is not in the server's in-flight
+                        # count; its hold is.
+                        continue
+                    _log.info("idle TTL unload (%.0fs): %s",
+                              entry.ttl, entry.model_path)
+                    self._teardown(entry, released)
+                    del self._entries[entry.cache_key]
+                    if self._proxy._last_entry is entry:
+                        self._proxy._last_entry = None
+                    reaped.append(entry.model_path)
         return reaped
 
     def _server_in_flight(self):
@@ -1296,14 +1288,29 @@ class _ResidencyPool:
             return
         self._teardown_chat(entry)
 
+    @contextlib.contextmanager
+    def _teardown_window(self, released: list):
+        """The worker reservation and the build lock for a teardown. An
+        image entry busy when the reservation was decided can be idle and
+        torn down under the lock: without the worker held, its pipeline is
+        released after the lock drops, as a release would queue on the
+        worker behind a reservation that waits on the lock."""
+        try:
+            with self._worker_for(False), self._build_lock:
+                try:
+                    yield
+                finally:
+                    if released and _holds_image_worker():
+                        self._release_images(released)
+        finally:
+            self._release_images(released)
+
     def _worker_for(self, image_build: bool, *, force: bool = False):
         """Hold the image worker before the build lock for a build that
         loads an image pipeline, or that may release one: an image entry
         with no job is resident, or ``force``. Then the lock is never held
         while the worker runs an image job, and a chat cold load does not
         wait behind one. Without any, nothing is held."""
-        import contextlib
-
         with self._lock:
             idle_image = any(e.is_image and e.busy == 0
                              for e in self._entries.values())

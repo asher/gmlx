@@ -7,6 +7,8 @@ from __future__ import annotations
 from contextvars import copy_context
 from types import SimpleNamespace
 
+import pytest
+
 from gmlx.serve.residency import (  # noqa: E402
     _BusyHold,
     _GenerationGuard,
@@ -1152,6 +1154,69 @@ def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
     assert released == [(["P"], True)]
     assert forced == [False, True]
     assert list(pool._entries) == [("a", None, "auto")]
+
+
+def _image_gone_idle(monkeypatch, pool):
+    """An image entry busy when the worker reservation is decided and
+    idle right after; a fake reservation, and a fake worker release that
+    records whether it could run: the build lock free, or the worker
+    held."""
+    import contextlib
+
+    from gmlx.serve import image_service
+    from gmlx.serve.residency import IMAGE_KIND, _Entry
+
+    key = ("img", None, IMAGE_KIND)
+    image = _Entry(cache_key=key, model_path="img", footprint=10 * GB,
+                   busy=1, ttl=1, last_access=0.0, kind=IMAGE_KIND,
+                   pipeline="P")
+    pool._entries[key] = image
+
+    @contextlib.contextmanager
+    def reserved_worker():
+        image_service._reservation.run = lambda fn, *a: fn(*a)
+        try:
+            yield
+        finally:
+            image_service._reservation.run = None
+
+    monkeypatch.setattr(image_service, "reserved_worker", reserved_worker)
+    worker_for = pool._worker_for
+
+    def worker_for_then_image_done(image_build, **k):
+        ctx = worker_for(image_build, **k)
+        image.busy = 0                  # the image job ends meanwhile
+        return ctx
+
+    monkeypatch.setattr(pool, "_worker_for", worker_for_then_image_done)
+    released = []
+
+    def release_on_worker(box):
+        free = pool._build_lock.acquire(blocking=False)
+        if free:
+            pool._build_lock.release()
+        held = getattr(image_service._reservation, "run", None) is not None
+        released.append((list(box), free or held))
+
+    pool._image_fns = (None, None, release_on_worker)
+    return released
+
+
+@pytest.mark.parametrize("path", ["evict", "clear", "reap_idle"])
+def test_a_teardown_releases_an_image_gone_idle_off_the_lock(
+        monkeypatch, path):
+    """unload, clear and the TTL reaper decide the worker reservation
+    before the build lock. An image entry idle by the teardown is released
+    once the lock drops, where its release cannot queue behind a
+    reservation that waits on the lock."""
+    proxy, pool, teardowns = make_pool(100, {})
+    released = _image_gone_idle(monkeypatch, pool)
+    pool._in_flight_fn = lambda: 0
+    pool._time_fn = lambda: 100.0
+    {"evict": lambda: pool.evict("img"), "clear": pool.clear,
+     "reap_idle": pool.reap_idle}[path]()
+    assert released == [(["P"], True)]
+    assert not pool._entries
 
 
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
