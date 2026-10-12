@@ -117,7 +117,8 @@ def test_the_two_ropes_agree_to_the_fp32_angle_at_depth(offset):
     # so of each other: the gap is rounding, not another base or pairing.
     x = _unit()
     rope, rot = _text_rope(), _vlm_rope()
-    bound = 2 * float(np.spacing(np.float32(offset + L - 1))) + 1e-6
+    # Four fp32 steps of the position: a GPU's sin and cos add some.
+    bound = 4 * float(np.spacing(np.float32(offset + L - 1))) + 1e-6
     ref = _reference(offset)
     text = rope(x, offset=offset)
     assert np.abs(np.array(text)[0, 0] - ref).max() < bound

@@ -14,13 +14,20 @@ import os
 HOST_RAM_ENV = "GMLX_TEST_HOST_RAM_GB"
 REAL_HOST_ENV = "GMLX_TEST_REAL_HOST"
 
-# An M5 Max with 128 GB, as Metal reports it.
+GB = 1 << 30
+
+# An idle M5 Max with 128 GB, as Metal and the kernel report it.
 TEST_BOX = {
     "device_name": "Apple M5 Max",
     "architecture": "applegpu_g17s",
     "memory_size": 137438953472,
     "max_recommended_working_set_size": 120259084288,
     "max_buffer_length": 86586540032,
+}
+TEST_BOX_VM = {
+    "free": 80 * GB, "inactive": 15 * GB, "purgeable": 1 * GB,
+    "speculative": 2 * GB, "filebacked": 20 * GB, "wired": 6 * GB,
+    "compressor": 0,
 }
 
 
@@ -39,11 +46,27 @@ def small_host(mem: int) -> dict:
             "max_recommended_working_set_size": ws, "max_buffer_length": ws}
 
 
-def install_host(box: dict) -> None:
-    """Report ``box`` from the lowest reads: MLX's ``device_info`` and
-    ``os.sysconf("SC_PHYS_PAGES")``. A later call wraps an earlier one."""
+def small_host_vm(mem: int) -> dict:
+    """A busy runner of ``mem`` bytes: little the kernel can hand back."""
+    return {"free": mem // 32, "inactive": mem // 8, "purgeable": 0,
+            "speculative": mem // 64, "filebacked": mem // 16,
+            "wired": mem // 4, "compressor": mem // 16}
+
+
+def install_host(box: dict, vm: dict) -> None:
+    """Report ``box`` and the kernel counters ``vm`` from the lowest reads:
+    MLX's ``device_info``, ``os.sysconf("SC_PHYS_PAGES")`` and
+    ``gmlx.serve.kernel_vm.snapshot``. A later call wraps an earlier one."""
     import mlx.core as mx
 
+    from gmlx.serve import kernel_vm
+
+    # A test turns the counters off with kernel_vm._disabled. The reported
+    # counters are consistent, so the sysctl cross-check passes; run
+    # against the real sysctl it would turn them off for the session.
+    kernel_vm.snapshot = lambda: (
+        None if kernel_vm._disabled is not None else dict(vm))
+    kernel_vm.selfcheck = lambda: kernel_vm._disabled
     real_info, real_sysconf = mx.device_info, os.sysconf
     mem = int(box["memory_size"])
 
@@ -68,6 +91,6 @@ def install_host(box: dict) -> None:
 def install() -> None:
     mem = small_host_bytes()
     if mem is not None:
-        install_host(small_host(mem))
+        install_host(small_host(mem), small_host_vm(mem))
     if os.environ.get(REAL_HOST_ENV, "") != "1":
-        install_host(TEST_BOX)
+        install_host(TEST_BOX, TEST_BOX_VM)

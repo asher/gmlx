@@ -176,6 +176,11 @@ def _table_stream():
     return sys.modules.get("gmlx.stream.table_stream")
 
 
+def _governor():
+    """gmlx.serve.governor, or None before it is imported."""
+    return sys.modules.get("gmlx.serve.governor")
+
+
 def capture() -> dict:
     _prior.clear()
     decay = _prefill_decay()
@@ -197,6 +202,7 @@ def capture() -> dict:
                      for st in _governor_states},
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
         "table_stream_latch": getattr(_table_stream(), "_FORCED", False),
+        "armed_floor": getattr(_governor(), "_ARMED_FLOOR", 0.0),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
@@ -279,6 +285,10 @@ def restore(state: dict) -> list:
             st.saved_mem_limit, st.saved_cache_limit = saved
     if governor:
         changed.append("governor saved limits")
+    gov = _governor()
+    if gov is not None and gov._ARMED_FLOOR != state["armed_floor"]:
+        changed.append("governor armed floor")
+        gov._ARMED_FLOOR = state["armed_floor"]
     decay = _prefill_decay()
     if decay is not None and \
             decay._NOTED_CACHE_LIMIT != state["noted_cache_limit"]:
