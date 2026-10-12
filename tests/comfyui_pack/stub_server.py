@@ -436,6 +436,7 @@ class Handler(BaseHTTPRequestHandler):
             st.event(kind="step_missing", run=rid, missing=len(set(missing)))
             return self._err(409, "not held", missing=sorted(set(missing)))
         gen = run.gen if run else 0
+        st.event(kind="step_begin", run=rid)
         deadline = time.perf_counter() + st.delay
         while time.perf_counter() < deadline:
             if run is not None and (run.gen != gen or run.ended):

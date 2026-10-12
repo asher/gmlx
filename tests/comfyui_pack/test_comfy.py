@@ -584,7 +584,8 @@ class Sampling(Base):
 class Interrupt(Base):
     """Interrupt in process: the flag reaches the server
     within one poll, and the run ends."""
-    stub_args = ("--step-delay-ms", "400")
+    DELAY_S = 1.0
+    stub_args = ("--step-delay-ms", str(int(DELAY_S * 1000)))
 
     def test_interrupt_reaches_the_server_and_stops_the_run(self):
         m = self.model()
@@ -592,14 +593,13 @@ class Interrupt(Base):
 
         def watch():
             while not done.is_set():
-                if len(self.stub.events("step")) >= 2:
-                    # A step event is logged as its step ends; interrupt
-                    # inside the next step's delay, not between steps,
-                    # where ComfyUI's own check stops the run first.
-                    time.sleep(0.15)
+                # Interrupt once the third step is under way on the server,
+                # not between steps, where ComfyUI's own check stops the
+                # run first.
+                if len(self.stub.events("step_begin")) >= 3:
                     mm.interrupt_current_processing(True)
                     return
-                time.sleep(0.05)
+                time.sleep(0.02)
         th = threading.Thread(target=watch, daemon=True)
         th.start()
         t0 = time.monotonic()
@@ -613,7 +613,7 @@ class Interrupt(Base):
         self.assertIn("run_end", kinds)
         self.assertLess(kinds.count("step"), 8)
         self.assertGreaterEqual(kinds.count("step_interrupted"), 1)
-        self.assertLess(took, 8 * 0.4)
+        self.assertLess(took, 8 * self.DELAY_S)
 
 
 class ClipAndVae(Base):
