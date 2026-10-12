@@ -43,6 +43,12 @@ stock_blocker.install()
 
 
 def pytest_configure(config):
+    # One fixed test box, so pricing does not depend on the host
+    # (host_box.py). Before anything reads the device.
+    import host_box
+
+    host_box.install()
+
     # Each directory's paths together, or pytest 9.1 hides a conftest's
     # fixtures from a directory named twice (arg_order.py).
     import arg_order

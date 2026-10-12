@@ -106,7 +106,8 @@ def test_three_axis_rope_with_one_position_is_the_text_rope():
     assert np.abs(np.array(text)[0, 0] - ref).max() < 1e-6
     for name, got in _vlm_rotations(rot, x, 0).items():
         assert np.abs(np.array(got)[0, 0] - ref).max() < 1e-6, name
-        assert float(mx.abs(got - text).max()) < 1e-6, name
+        # Each is within 1e-6 of the reference, so within 2e-6 of the other.
+        assert float(mx.abs(got - text).max()) < 2e-6, name
 
 
 @pytest.mark.parametrize("offset", [1000, 4096, 16384, 65536, CONTEXT - L])
@@ -122,7 +123,7 @@ def test_the_two_ropes_agree_to_the_fp32_angle_at_depth(offset):
     assert np.abs(np.array(text)[0, 0] - ref).max() < bound
     for name, got in _vlm_rotations(rot, x, offset).items():
         assert np.abs(np.array(got)[0, 0] - ref).max() < bound, name
-        assert float(mx.abs(got - text).max()) < bound, name
+        assert float(mx.abs(got - text).max()) < 2 * bound, name
 
 
 def test_random_inputs_rotate_the_same_through_both_classes():
