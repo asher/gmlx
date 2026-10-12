@@ -66,3 +66,27 @@ print(mx.addmm(mx.contiguous(c), a, b).reshape(-1))  # GPU: [3, 10, 17]
   `tests/image/test_image_oracle_harness.py` holds that list, in each committed manifest, to the
   BF16 vectors of the header inventory of the file. Without the guard no such fixture can be
   written.
+
+## pytest 9.1 hides a conftest's fixtures from a directory named twice
+
+- Dependency: pytest 9.1.1, which the test job resolves. 9.0.3 is not affected. gmlx does not
+  import pytest: only its test suite does.
+- Affected: a command line whose test paths name one directory, then another, then the first
+  again, as in `tests/serve/a.py tests/b.py tests/serve/c.py`.
+- What goes wrong: pytest collects the directory once for each run of consecutive paths in it,
+  and from 9.1 a conftest's fixtures are visible only below the directory node it was collected
+  for. The tests of the second node see no fixture of that conftest, its autouse fixtures
+  included, so a test that requests one errors with `fixture not found` and the tests that rely
+  on an autouse restore fail. A run of the whole suite names each directory once and passes.
+
+Smallest repro:
+
+```
+pytest tests/serve/test_admit_gate.py tests/test_envflags.py \
+  tests/serve/test_server_patches.py::test_the_seam_restore_lets_the_media_salt_install_again
+```
+
+- Guard: `pytest_configure` in `tests/conftest.py` orders the test paths with `grouped` in
+  `tests/arg_order.py`, so the paths of each directory are consecutive, in the order of first
+  appearance at every level.
+- Test: `tests/test_arg_order.py` runs the repro in a child pytest and checks the grouping.

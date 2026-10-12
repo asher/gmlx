@@ -43,6 +43,12 @@ stock_blocker.install()
 
 
 def pytest_configure(config):
+    # Each directory's paths together, or pytest 9.1 hides a conftest's
+    # fixtures from a directory named twice (arg_order.py).
+    import arg_order
+
+    config.args[:] = arg_order.grouped(config.args)
+
     # It lists the blocked imports and fails the run on any.
     config.pluginmanager.register(stock_blocker, "stock_blocker")
 
