@@ -274,9 +274,11 @@ def read_video(video_path: str, sampling=None, frame_sampler=None,
     read."""
     from dataclasses import fields
 
-    import cv2
     import numpy as np
     from gmlx._vendor.mlx_vlm.utils import DEFAULT_VIDEO_SAMPLING, VideoMetadata, VideoSampling
+    from gmlx.commands.extras import opencv
+
+    cv2 = opencv("video input")
 
     if sampling_kwargs:
         unknown = set(sampling_kwargs) - {f.name for f in fields(VideoSampling)}

@@ -655,3 +655,16 @@ def test_the_media_pass_wraps_a_binding_another_installer_wrapped_first(
             assert passes == [True], module.__name__
     finally:
         media_sinks.uninstall()
+
+
+def test_video_without_opencv_names_the_video_extra(monkeypatch):
+    """OpenCV comes with the video extra; a video read without it says
+    which extra to install, before it opens the file."""
+    import sys
+
+    from gmlx.commands import extras
+
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_PIP)
+    with pytest.raises(ImportError, match=r"needs OpenCV: .*gmlx\[video\]"):
+        md.read_video("/nonexistent.mp4")
