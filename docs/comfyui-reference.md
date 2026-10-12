@@ -58,7 +58,7 @@ for the server.
 
 The `model_name` list holds the image models of the server at the address
 found, else those that `gmlx list --image` prints, with the default image
-model first. With none, it holds the models `gmlx pull` downloads. The nodes
+model first. With none, it holds only the default model's name. The nodes
 read the list in the background, so the list updates within a few seconds
 of a refresh. A loader whose model the server does not have stops with the
 `gmlx pull` command that adds it, or, when the server has that model under

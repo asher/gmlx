@@ -147,8 +147,8 @@ The first workflow has these nodes, under the titles they show:
 | `Save Image` | Shows the image and saves it in `output`, named by `filename_prefix`. |
 
 The `model_name` list of each loader holds the image models in the gmlx
-server's config. Before you pull one, it holds the models `gmlx pull`
-downloads, and a run with one of them stops with its pull command. After a
+server's config. Before you pull one, it holds only the default model's
+name, and a run with it stops with its pull command. After a
 pull, press R in ComfyUI to refresh the list. The nodes read the list in
 the background, so if the model is not there yet, press R again a few
 seconds later. A new loader's `server_url` shows the address the nodes

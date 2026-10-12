@@ -7,8 +7,9 @@ server running, ``gmlx status`` gives the host and port of gmlx's config,
 where ``gmlx serve`` starts one.
 
 The model list: the image model ids of the server at that address, else
-those ``gmlx list --image --json`` prints, else the image models
-``gmlx pull`` downloads, the default model first. ComfyUI asks for the
+those ``gmlx list --image --json`` prints, the default model first. With
+none, it holds only the default model's name, and a run with it is
+refused with the ``gmlx pull`` that adds it. ComfyUI asks for the
 widgets at startup, on a refresh and for each queued prompt, so the probes
 run on a background thread and the widgets take the answer kept from the
 last one.
@@ -202,15 +203,16 @@ def _probe() -> dict:
         got, source = _configured(), "config"
     ids, default = got if got else ([], None)
     if not ids:
-        ids, source = list(PULL_NAMES), "pull"
+        return {"url": url, "models": [settings.default_image_model()], "source": "default"}
     return {"url": url, "models": _ordered(ids, default), "source": source}
 
 
 def _fallback() -> dict:
-    """The widgets before a probe answered, found without running gmlx."""
+    """The widgets before a probe answered, found without running gmlx:
+    only the default model's name, since nothing says it is pulled."""
     url = os.environ.get("GMLX_BASE_URL") or settings.load().get("base_url") or DEFAULT_URL
     return {"url": str(url).strip().rstrip("/") or DEFAULT_URL,
-            "models": _ordered(list(PULL_NAMES), None), "source": "pull"}
+            "models": [settings.default_image_model()], "source": "default"}
 
 
 _KEPT: dict = {}
@@ -254,9 +256,9 @@ def refresh() -> threading.Thread:
 def widgets() -> dict:
     """``{"url", "models", "source"}``: the address a new node shows, the
     ids the model list shows and where they came from (``server``,
-    ``config`` or ``pull``). Returns at once with the answer kept from the
-    last probe, or before the first probe answers with the models
-    ``gmlx pull`` downloads, and starts a probe when the answer is old.
+    ``config`` or ``default``). Returns at once with the answer kept from
+    the last probe, or before the first probe answers with the default
+    model's name alone, and starts a probe when the answer is old.
     Never raises."""
     with _LOCK:
         kept = _KEPT.get("w")
@@ -273,7 +275,7 @@ def loader_inputs() -> dict:
         "model_name": (models, {
             "default": models[0],
             "tooltip": "An image model of the gmlx server. With none in its config, the "
-                       "list shows the models `gmlx pull` downloads."}),
+                       "list holds the default model, which `gmlx pull` adds."}),
         "server_url": ("STRING", {
             "default": w["url"],
             "tooltip": "The gmlx server's address. Empty, or the default "

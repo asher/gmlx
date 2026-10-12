@@ -244,11 +244,10 @@ def test_a_failing_import_registers_stand_ins_that_name_the_fix(link, tmp_path, 
     out = _load_in_a_comfyui(link, _fake_comfyui(tmp_path), str(tmp_path / "empty"))
     assert out["names"] == _node_names()
     assert all(v.endswith("(not loaded)") for v in out["display"].values())
-    # gmlx answers with nothing, so the list is what `gmlx pull` downloads,
-    # the recorded default first, and any saved name still reaches run.
+    # gmlx answers with nothing, so the list holds only the recorded
+    # default, and any saved name still reaches run.
     names, opts = out["inputs"]["required"]["model_name"]
-    assert names[0] == opts["default"] == "qwen-image"
-    assert names == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
+    assert names == ["qwen-image"] and opts["default"] == "qwen-image"
     assert out["validate"] is True
     assert out["torch"] is False
     err = out["error"]
@@ -428,28 +427,33 @@ def test_a_server_that_answers_gives_the_list(widgets, tmp_path, monkeypatch):
         srv.server_close()
 
 
-def test_without_gmlx_or_models_the_list_is_what_pull_downloads(widgets, tmp_path):
+def test_without_gmlx_or_models_the_list_is_only_the_default(widgets, tmp_path, monkeypatch):
+    """No unpulled model is listed: the default name alone, which a run
+    refuses with its `gmlx pull`."""
     _record(gmlx_command=str(tmp_path / "gone" / "gmlx"))
     _probed(widgets)
-    w = widgets.widgets()
-    assert w["source"] == "pull"
-    assert w["models"] == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
+    assert widgets.widgets()["models"] == ["qwen-image"]
+    assert widgets.widgets()["source"] == "default"
     exe = _gmlx_script(tmp_path / "bin", _answers(_listing()))
     _record(gmlx_command=str(exe))
     _probed(widgets)
-    assert widgets.widgets()["source"] == "pull"
+    assert widgets.widgets()["models"] == ["qwen-image"]
+    monkeypatch.setenv("GMLX_DEFAULT_IMAGE_MODEL", "krea-2-turbo")
+    assert _probed(widgets)["model_name"][0] == ["krea-2-turbo"]
+    assert "`gmlx pull qwen-image`" in widgets.not_on_server(
+        "qwen-image", "http://127.0.0.1:8080", [])
 
 
 def test_a_hung_gmlx_never_stalls_or_fails_the_widgets(widgets, tmp_path, monkeypatch):
     """The probe runs on a background thread, so the widgets answer at once
-    with the models `gmlx pull` downloads while gmlx hangs."""
+    with the default model's name alone while gmlx hangs."""
     exe = _gmlx_script(tmp_path / "bin", "exec /bin/sleep 30")
     _record(gmlx_command=str(exe))
     monkeypatch.delenv("GMLX_BASE_URL")
     t0 = time.monotonic()
     req = widgets.loader_inputs()["required"]
     assert time.monotonic() - t0 < 1.0
-    assert req["model_name"][0] == ["qwen-image"] + [n for n in _catalog() if n != "qwen-image"]
+    assert req["model_name"][0] == ["qwen-image"]
     assert req["server_url"][1]["default"] == widgets.DEFAULT_URL
     # One probe at a time: the calls while it hangs start no other.
     probe = widgets.refresh()
