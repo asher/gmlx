@@ -1340,6 +1340,43 @@ def test_reload_running_signals_and_reports(monkeypatch, capsys):
     assert "reloaded the running server at 127.0.0.1:8080 (pid 42)" in out
 
 
+def test_a_sighup_reload_names_the_services_a_missing_extra_left_off(monkeypatch, capsys,
+                                                                     tmp_path):
+    import gmlx.serve.lifecycle as lc
+    log = tmp_path / "server.log"
+    log.write_text("[server] server.stt is off: its optional stt extra is not installed. "
+                   "To add it: old\n")
+    monkeypatch.setattr(lc, "log_offsets",
+                        lambda: {("127.0.0.1", 8080): (str(log), log.stat().st_size)})
+
+    def reload(p):
+        with open(log, "a") as f:
+            f.write("[server] server.tts is off: its optional tts extra is not installed. "
+                    "To add it: pip install 'gmlx[tts]'\n"
+                    "[server] SIGHUP config reload: {'models': 1}\n")
+        return [("127.0.0.1", 8080, 42)]
+
+    monkeypatch.setattr(lc, "reload_config", reload)
+    srv._reload_running("/some/cfg.yaml", skip=False)
+    err = capsys.readouterr().err
+    assert ("note: server.tts is off: its optional tts extra is not installed. "
+            "To add it: pip install 'gmlx[tts]'\n") in err
+    assert "To add it: old" not in err
+
+
+def test_the_services_off_wait_ends_at_its_timeout(tmp_path):
+    import time
+
+    import gmlx.serve.lifecycle as lc
+    log = tmp_path / "server.log"
+    log.write_text("[server] server.stt is off: its optional stt extra is not installed.\n")
+    t0 = time.monotonic()
+    assert lc.services_off_after(str(log), 0, timeout=0.3) == [
+        "[server] server.stt is off: its optional stt extra is not installed."]
+    assert 0.25 < time.monotonic() - t0 < 2.0
+    assert lc.services_off_after(str(tmp_path / "gone.log"), 0) == []
+
+
 def test_reload_running_skip_is_noop(monkeypatch):
     import gmlx.serve.lifecycle as lc
     called = {"reload": False}

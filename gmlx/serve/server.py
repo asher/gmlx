@@ -157,12 +157,16 @@ def _reload_running(config_path, *, skip: bool) -> None:
     try:
         from . import lifecycle
         target = os.path.abspath(os.path.expanduser(str(config_path)))
+        offsets = lifecycle.log_offsets()
         signalled = lifecycle.reload_config(target)
     except Exception:
         return
     for host, port, pid in signalled:
         print(f"reloaded the running server at {host}:{port} (pid {pid}) "
               f"to pick up the config change")
+        log, size = offsets.get((host, port), (None, 0))
+        for line in lifecycle.services_off_after(log, size) if log else []:
+            print(f"note: {line.removeprefix('[server] ')}", file=sys.stderr)
     if signalled:
         return
     # A server with no runfile, such as `gmlx serve --foreground`, reloads
@@ -2491,10 +2495,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if reload_fn is not None:
         def _on_sighup(_sig, _frame):
             try:
-                print(f"[server] SIGHUP config reload: {reload_fn() or {}}")
+                print(f"[server] SIGHUP config reload: {reload_fn() or {}}", flush=True)
             except Exception as exc:
                 print(f"[server] SIGHUP config reload failed: {exc}",
-                      file=sys.stderr)
+                      file=sys.stderr, flush=True)
 
         if hasattr(signal, "SIGHUP"):
             signal.signal(signal.SIGHUP, _on_sighup)

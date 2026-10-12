@@ -1345,6 +1345,43 @@ def reload_config(config_abspath: str) -> list:
     return signalled
 
 
+# The line the server logs once a SIGHUP reload is done or failed.
+RELOAD_DONE_MARK = "[server] SIGHUP config reload"
+
+
+def log_offsets() -> dict:
+    """``{(host, port): (log path, size)}`` of each runfile's log, taken
+    before a reload, so :func:`services_off_after` reads only what the
+    reload wrote."""
+    out = {}
+    for run in list_runs():
+        lp = run.get("log")
+        try:
+            out[(run.get("host"), run.get("port"))] = (lp, os.path.getsize(lp))
+        except (OSError, TypeError):
+            continue
+    return out
+
+
+def services_off_after(path, offset: int, timeout: float = 3.0) -> list:
+    """The speech services a SIGHUP reload turned off for a missing extra,
+    as the lines it wrote to the log at ``path`` after ``offset``. Waits up
+    to ``timeout`` seconds for the reload to log that it is done."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with open(path) as f:
+                f.seek(offset)
+                lines = f.read().splitlines()
+        except OSError:
+            return []
+        if any(ln.startswith(RELOAD_DONE_MARK) for ln in lines) or \
+                time.monotonic() >= deadline:
+            return [ln.strip() for ln in lines
+                    if ln.startswith("[server] server.") and SERVICE_OFF_MARK in ln]
+        time.sleep(0.1)
+
+
 def reload_over_http(config_abspath: str) -> tuple | None:
     """POST /v1/reload to the server at the address of the config at
     ``config_abspath``, for a server that keeps no runfile, such as one
