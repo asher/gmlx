@@ -349,8 +349,8 @@ def test_a_forced_stream_under_the_budget_frees_the_expert_headroom(monkeypatch)
                         lambda key: 0.0)
     _, offloaded = install_expert_streaming(model, explicit=True)
     assert offloaded == sum(a.nbytes for _, a in tree_flatten(glu.parameters()))
-    assert deducted == [offloaded]
     assert credited == [offloaded]
+    assert deducted == [0]      # all tracked: the credit covers every byte
 
 
 def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):

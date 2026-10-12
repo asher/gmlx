@@ -426,6 +426,24 @@ def test_release_takes_back_credit_and_cap(monkeypatch):
     assert pd.streamed_tracked_bytes() == 54 * GB
 
 
+def test_a_keyless_release_ends_the_open_build_credit(monkeypatch):
+    # No weights key: nothing was credited, so the release ends the open
+    # owner's build credit, which would keep crediting the freed stacks.
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch)
+    pd.set_untracked_weights_owner("owner")
+    try:
+        pd.note_build_credit("owner", 330 * GB)
+        box["active"] = 349 * GB
+        assert pd.build_credit_bytes() == 330 * GB
+        pd.release_streamed_tracked_bytes(0, None)     # nothing freed
+        assert pd.build_credit_bytes() == 330 * GB
+        pd.release_streamed_tracked_bytes(300 * GB, None)
+        assert pd.build_credit_bytes() == 0
+    finally:
+        pd.set_untracked_weights_owner(None)
+
+
 def test_forget_drops_streamed_credit_with_owner(monkeypatch):
     # an evicted streaming model must stop crediting headroom, or the
     # phantom credit overstates free working set for its successors

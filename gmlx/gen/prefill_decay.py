@@ -483,10 +483,15 @@ def release_streamed_tracked_bytes(nbytes: float, key: object,
                                    source: str = "experts") -> None:
     """Take back up to ``nbytes`` of ``source``'s credit for ``key``, and
     as much of its cap: bytes the tracker stopped counting after the
-    credit, such as expert stacks unmapped once the feeders own them."""
-    if key is None or nbytes <= 0:
+    credit, such as expert stacks unmapped once the feeders own them.
+    Without a key nothing was credited; the build's credit for the open
+    owner ends instead, or it would keep crediting the freed bytes."""
+    if nbytes <= 0:
         return
     with _UNTRACKED_LOCK:
+        if key is None:
+            _end_build_credit_locked(None)
+            return
         sources = _STREAMED_TRACKED.get(key)
         if not sources or source not in sources:
             return

@@ -357,7 +357,7 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
     assert ts.table_streaming_active(model)
     # experts wrapped but NOT streaming (resident fast path)
     assert not getattr(glu, "_kq_cpu_only", False)
-    assert deducted == [tbytes]
+    assert deducted == [0]      # nothing registered untracked: all credited
 
 
 def test_the_stream_flag_keeps_the_ladder_over_budget(monkeypatch):
@@ -437,6 +437,34 @@ def test_compose_credits_both_for_tracked_weights(monkeypatch):
     _fake_budget(monkeypatch, 1 << 40)
     install_expert_streaming(model, explicit=True)
     assert pd.streamed_tracked_bytes() == ts.table_bytes(model) + experts
+
+
+def test_compose_frees_each_byte_once_in_a_mixed_regime(monkeypatch):
+    """Part of the weights tracked (casts, repacks), the rest zero-copy: each
+    streamed share is credited out of the tracked bytes and deducted from
+    the untracked registration only for the rest."""
+    from mlx.utils import tree_flatten
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    pd = _fresh_accounting(monkeypatch)
+    model, glu = _moe_table_model()
+    rest = mx.zeros((1 << 18,), dtype=mx.float32)
+    params = model.parameters
+    model.parameters = lambda: {**params(), "rest": rest}
+    key = ("/models/moe.gguf",)
+    model._kq_weights_key = key
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    table = ts.table_bytes(model)
+    experts = sum(a.nbytes for _, a in tree_flatten(glu.parameters()))
+    tracked = table + experts // 2        # the table and half the experts
+    pd.note_untracked_weights(float(total - tracked), key=key)
+    _fake_budget(monkeypatch, 1 << 40)
+    install_expert_streaming(model, explicit=True)
+    assert getattr(glu, "_kq_cpu_only", False)
+    assert pd.streamed_tracked_bytes() == tracked
+    assert pd.untracked_weight_bytes() == total - table - experts
 
 
 def test_unmapped_stacks_give_back_their_credit(monkeypatch):
