@@ -54,7 +54,7 @@ as the governor rig does, needs no machine at all.
 | CI differs in | So a test |
 |---------------|-----------|
 | About 7.5 GB of memory and a virtual GPU | Never reads this Mac's memory, chip or kernel counters. It declares a machine with `host_gb`. |
-| Python 3.11 to 3.14, files run serially | Passes on each version and does not depend on the order files are named in. |
+| Python 3.11 to 3.14, tests spread over parallel workers | Passes on each version, alone or beside any other test, in any order. |
 | A slower, shared machine | Bounds a time by its failure case with seconds to spare, never by a fraction of a second. |
 | Only the `all` extras, so no OpenCV | That needs an optional package skips without it, with `pytest.importorskip`. |
 | The newest release of every dependency | Handles a dependency's behavior change in gmlx code, and covers both versions. |
@@ -63,7 +63,7 @@ To run the suite as CI does, in a fresh venv:
 
 ```sh
 pip install -U -e ".[all]" pytest httpx pytest-xdist
-KQUANT_FORCE_CPU=1 pytest -n 8
+KQUANT_FORCE_CPU=1 pytest -n auto
 ```
 
 `GMLX_TEST_HOST_RAM_GB` changes the size of the default runner.
