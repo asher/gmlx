@@ -10,7 +10,7 @@ layers to their window, and the cache enforces a total byte budget.
 
 import mlx.core as mx
 
-from mlx_lm.models.cache import KVCache, RotatingKVCache
+from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
 
 from gmlx.cache.prefix_cache import SpecPrefixCache, _snapshot_entry
 

@@ -1,7 +1,6 @@
 """Chat-completions behavior patches: chat_template_kwargs
 passthrough, the thinking-budget fix, stream thinking seed, ignore-eos,
-OpenAI stop sequences, exclude_none streaming chunks, and the single BOS
-on DiffusionGemma prompts."""
+OpenAI stop sequences, and exclude_none streaming chunks."""
 
 from __future__ import annotations
 
@@ -12,6 +11,8 @@ import os
 
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.upstream.patching import link, wrapped_with
+
 from ._common import (
     _CHAT_PATHS,
     _PATCH_FLAG,
@@ -95,7 +96,7 @@ def _template_call_keys() -> frozenset:
                   transformers.ProcessorMixin.apply_chat_template]
     except (ImportError, AttributeError):
         pass
-    prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+    prompt_utils = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     funcs += [prompt_utils.apply_chat_template, prompt_utils.get_chat_template]
     for fn in funcs:
         for p in inspect.signature(fn).parameters.values():
@@ -176,10 +177,10 @@ def install_chat_template_kwargs() -> None:
     install_template_default_thinking()
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen.GenerationArguments
     original = cls.to_template_kwargs
-    if getattr(original, _CTKW_FLAG, False):
+    if wrapped_with(original, _CTKW_FLAG):
         return
 
     def to_template_kwargs(self):
@@ -192,7 +193,7 @@ def install_chat_template_kwargs() -> None:
         return kw
 
     to_template_kwargs.__dict__[_CTKW_FLAG] = True
-    cls.to_template_kwargs = to_template_kwargs
+    cls.to_template_kwargs = link(to_template_kwargs, original)
 
 
 # OpenAI `developer` role for templates that do not handle it
@@ -202,6 +203,12 @@ def install_chat_template_kwargs() -> None:
 # rendering. Rewrite developer -> system only when the effective template
 # never mentions the role; a template that handles it gets the messages
 # verbatim.
+# mlx-vlm merges every system and developer message into one leading
+# system message before the model is known. On /v1/chat/completions that
+# merge leaves developer messages where the client sent them, so the rule
+# above still decides them at render; system messages merge as upstream
+# does. The Responses routes pass their ``instructions`` and keep the
+# stock merge.
 _ROLE_NORM_FLAG = "_kq_gguf_role_normalization"
 
 
@@ -219,27 +226,67 @@ def _normalize_developer_roles(prompt, template: str):
             for m in prompt]
 
 
+def roles_for_render(processor, prompt, kw: dict):
+    """``prompt`` as the role-normalization wrap hands it to the template.
+    ``kw`` holds the render call's keyword arguments, whose
+    ``chat_template`` overrides the model's."""
+    override = kw.get("chat_template")
+    template = override if isinstance(override, str) and override \
+        else _model_template_text(processor)
+    return _normalize_developer_roles(prompt, template)
+
+
+def _developer_in_place(merge):
+    """``merge`` (mlx-vlm's instruction merge) leaving `developer` messages
+    in place when called with the messages alone, as chat completions
+    calls it. The system messages go through ``merge`` unchanged."""
+    def _normalize_instruction_messages(chat_messages, *args, **kwargs):
+        if args or kwargs:
+            return merge(chat_messages, *args, **kwargs)
+        held = {}
+        masked = []
+        for m in chat_messages:
+            if isinstance(m, dict) and m.get("role") == "developer":
+                stub = {"role": None}
+                held[id(stub)] = (stub, m)
+                m = stub
+            masked.append(m)
+        if not held:
+            return merge(chat_messages)
+        out = merge(masked)
+        chat_messages[:] = [held[id(m)][1] if id(m) in held else m
+                            for m in masked]
+        return out
+    return _normalize_instruction_messages
+
+
 def install_role_normalization() -> None:
     """Rewrite the OpenAI `developer` role to `system` before render for
     models whose chat template does not handle it. Wraps every captured
     ``apply_chat_template`` binding; install last among the render wraps so
-    the retire capture memoizes the normalized messages. Idempotent."""
+    the retire capture memoizes the normalized messages. Also keeps
+    developer messages out of mlx-vlm's instruction merge on chat
+    completions. Idempotent."""
     from ._common import _render_target_modules
 
     def _wrap(fn):
         def apply_chat_template(processor, config, prompt, *a, **kw):
-            override = kw.get("chat_template")
-            template = override if isinstance(override, str) and override \
-                else _model_template_text(processor)
-            return fn(processor, config,
-                      _normalize_developer_roles(prompt, template), *a, **kw)
+            return fn(processor, config, roles_for_render(processor, prompt, kw),
+                      *a, **kw)
         apply_chat_template.__dict__[_ROLE_NORM_FLAG] = True
         return apply_chat_template
 
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, _ROLE_NORM_FLAG, False):
-            target.apply_chat_template = _wrap(fn)
+        if fn is not None and not wrapped_with(fn, _ROLE_NORM_FLAG):
+            setattr(target, "apply_chat_template", _wrap(fn))
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    merge = getattr(openai, "_normalize_instruction_messages", None)
+    if merge is not None and not wrapped_with(merge, _ROLE_NORM_FLAG):
+        wrapped = _developer_in_place(merge)
+        wrapped.__dict__[_ROLE_NORM_FLAG] = True
+        setattr(openai, "_normalize_instruction_messages", wrapped)
 
 
 # thinking_budget for models that generate <think> (not just pre-fill it)
@@ -262,7 +309,7 @@ def _armed_thinking_budget_criteria_cls():
     """Subclass of mlx-vlm's criteria that decouples 'armed' (counting + forced
     close, gated on enable_thinking) from 'starts inside a block' (in_thinking).
     Built lazily so importing this module never imports mlx-vlm."""
-    from mlx_vlm.utils import ThinkingBudgetCriteria
+    from gmlx._vendor.mlx_vlm.utils import ThinkingBudgetCriteria
 
     class _ArmedThinkingBudgetCriteria(ThinkingBudgetCriteria):
         def __init__(self, *args, prompt_open_thinking=False, **kw):
@@ -303,11 +350,11 @@ def install_thinking_budget_fix() -> None:
     """Make ``thinking_budget`` cap generate-<think> models too, by constructing
     the criteria armed (enable_thinking=True) with the in-thinking seed taken from
     the prompt. Idempotent. No-op if mlx-vlm's shape changed."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = getattr(gen, "ResponseGenerator", None)
     if cls is None or not hasattr(cls, "_make_thinking_budget_criteria"):
         return
-    if getattr(cls._make_thinking_budget_criteria, _TBUDGET_FLAG, False):
+    if wrapped_with(cls._make_thinking_budget_criteria, _TBUDGET_FLAG):
         return
     armed_cls = _armed_thinking_budget_criteria_cls()
 
@@ -423,11 +470,11 @@ def install_stream_thinking_seed() -> None:
     the 7e comment), and give the non-stream splitter the same prompt
     ground truth for replies truncated inside a think block. Idempotent;
     no-op if mlx-vlm's shape changed."""
-    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     cls = getattr(rs, "ThinkingStreamState", None)
     if cls is None:
         return
-    if not getattr(cls.__init__, _STREAM_SEED_FLAG, False):
+    if not wrapped_with(cls.__init__, _STREAM_SEED_FLAG):
         original_init = cls.__init__
 
         def __init__(self, *args, **kw):
@@ -449,7 +496,7 @@ def install_stream_thinking_seed() -> None:
         __init__.__dict__[_STREAM_SEED_FLAG] = True
         cls.__init__ = __init__
 
-    if not getattr(cls.feed, _STREAM_SEED_FLAG, False):
+    if not wrapped_with(cls.feed, _STREAM_SEED_FLAG):
         original_feed = cls.feed
         delta_cls = rs.ThinkingStreamDelta
 
@@ -480,11 +527,11 @@ def install_stream_thinking_seed() -> None:
         return apply_chat_template
 
     from ._common import _render_target_modules
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, _STREAM_SEED_FLAG, False):
-            target.apply_chat_template = _wrap(fn)
+        if fn is not None and not wrapped_with(fn, _STREAM_SEED_FLAG):
+            setattr(target, "apply_chat_template", _wrap(fn))
 
     # Non-stream twin: a reply that hits max_tokens inside a prompt-opened
     # think block carries no marker, so the stock splitter classifies the
@@ -493,7 +540,7 @@ def install_stream_thinking_seed() -> None:
     # the request contextvar.
     import gmlx.cache.retire_key as retire_key
     split = getattr(app, "_split_thinking_text", None)
-    if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
+    if split is not None and not wrapped_with(split, _STREAM_SEED_FLAG):
         def _split_thinking_text(text, thinking_start_token=None,
                                  thinking_end_token=None,
                                  starts_in_thinking=False, processor=None):
@@ -527,10 +574,10 @@ def install_stream_thinking_seed() -> None:
             return reasoning, content
 
         _split_thinking_text.__dict__[_STREAM_SEED_FLAG] = True
-        app._split_thinking_text = _split_thinking_text
+        setattr(app, "_split_thinking_text", _split_thinking_text)
         # The /v1/responses output builder calls the responses_state module
         # global directly; give it the same splitter.
-        rs._split_thinking = _split_thinking_text
+        setattr(rs, "_split_thinking", _split_thinking_text)
 
 
 # ignore-eos: forced-length decode (server-level)
@@ -549,12 +596,12 @@ def install_ignore_eos() -> None:
     mlx_vlm.utils.StoppingCriteria.__call__ to always return False. Server-global
     and idempotent; for benchmarking forced-length throughput. No-op if mlx-vlm's
     shape changed."""
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     cls = getattr(utils, "StoppingCriteria", None)
     if cls is None:
         return
     original = cls.__call__
-    if getattr(original, _IGNORE_EOS_FLAG, False):
+    if wrapped_with(original, _IGNORE_EOS_FLAG):
         return
 
     def __call__(self, input_ids):
@@ -732,7 +779,7 @@ def install_openai_stop_sequences() -> None:
     still parses the body into ChatRequest. Idempotent per route."""
     from starlette.responses import StreamingResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(request, http_request):
@@ -752,10 +799,9 @@ def install_openai_stop_sequences() -> None:
     # Anthropic dialect: upstream cuts at the stop sequence verbatim, but the
     # Messages API trims the whitespace run preceding a stop hit. Wrap the
     # module helper so a cut also rstrips; no-hit text passes through.
-    an = importlib.import_module("mlx_vlm.server.anthropic")
+    an = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     stock_apply = getattr(an, "_apply_stop_sequences", None)
-    if stock_apply is not None and not getattr(
-            stock_apply, _STOP_FLAG, False):
+    if stock_apply is not None and not wrapped_with(stock_apply, _STOP_FLAG):
         def _apply_stop_sequences(text, stop_sequences):
             out, seq = stock_apply(text, stop_sequences)
             if seq is not None:
@@ -763,7 +809,7 @@ def install_openai_stop_sequences() -> None:
             return out, seq
 
         _apply_stop_sequences.__dict__[_STOP_FLAG] = True
-        an._apply_stop_sequences = _apply_stop_sequences
+        setattr(an, "_apply_stop_sequences", _apply_stop_sequences)
 
 
 def install_vanilla_stream_chunks() -> None:
@@ -784,10 +830,10 @@ def install_vanilla_stream_chunks() -> None:
     ``usage``/``timings`` dicts, a set ``finish_reason``) are kept; ``choices: []``
     and ``content: ""`` are not ``None`` so they survive. The non-streaming
     ``ChatResponse`` is a different class and is untouched. Idempotent."""
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     chunk_cls = schemas.ChatStreamChunk
     original = chunk_cls.model_dump_json
-    if getattr(original, _PATCH_FLAG, False):
+    if wrapped_with(original, _PATCH_FLAG):
         return
 
     def model_dump_json(self, **kwargs):
@@ -795,15 +841,14 @@ def install_vanilla_stream_chunks() -> None:
         return original(self, **kwargs)
 
     model_dump_json.__dict__[_PATCH_FLAG] = True
-    chunk_cls.model_dump_json = model_dump_json
+    chunk_cls.model_dump_json = link(model_dump_json, original)
 
     # Non-stream twin (mlx-vlm >= 0.6.15): GenerationTimings grew optional
     # draft_* fields, so the ChatResponse body carries timings nulls unless
     # they are stripped. Scoped to timings: choices[].logprobs stays null
     # per the OpenAI wire.
     resp_cls = getattr(schemas, "ChatResponse", None)
-    if resp_cls is not None and not getattr(
-            resp_cls.model_dump, _PATCH_FLAG, False):
+    if resp_cls is not None and not wrapped_with(resp_cls.model_dump, _PATCH_FLAG):
         original_dump = resp_cls.model_dump
 
         def model_dump(self, **kwargs):
@@ -904,12 +949,12 @@ def install_stream_timings() -> None:
     count (MTP verify rounds included). Idempotent per route."""
     from starlette.responses import StreamingResponse
 
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     metrics_cls = generation.GenerationMetrics
-    if not getattr(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG, False):
+    if not wrapped_with(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG):
         metrics_cls.record_chunk = _count_record_chunk(metrics_cls.record_chunk)
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(request, http_request):

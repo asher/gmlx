@@ -16,7 +16,7 @@ markers, never a special-token stop.
 ``string="true"`` means the value is literal text; anything else is JSON,
 which is how the reference ``decode_dsml_to_arguments`` reads it back.
 
-Parser contract (mlx-vlm ``tool_parsers``): module attributes
+Parser contract (``mlx_vlm.tools.base.ToolParser``): module attributes
 ``tool_call_start`` / ``tool_call_end`` delimit the block in generated text,
 and ``parse_tool_call(text, tools)`` takes the inner text and returns
 ``{"name", "arguments"}`` or a list of them.
@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from typing import Any
+
+from gmlx.upstream.patching import link, wrapped_with
 
 _DSML = "｜DSML｜"
 
@@ -44,7 +47,7 @@ _PARAM_RE = re.compile(
 )
 
 # The spaced spelling is the V4.1 marker; V4's unspaced tags must not match.
-_TEMPLATE_MARKERS = [((tool_call_start,), "deepseek_v41")]
+_TEMPLATE_MARKERS = ((tool_call_start,),)
 
 
 def _decode(value: str, is_string: str) -> Any:
@@ -109,30 +112,21 @@ def install_message_normalizer(tokenizer) -> None:
     """Run ``normalize_messages`` ahead of every chat-template render on
     this tokenizer. Idempotent."""
     original = getattr(tokenizer, "apply_chat_template", None)
-    if original is None or getattr(original, "_ds41_normalized", False):
+    if original is None or wrapped_with(original, "_ds41_normalized"):
         return
 
     def apply_chat_template(conversation, *args, **kwargs):
         return original(normalize_messages(conversation), *args, **kwargs)
 
     apply_chat_template._ds41_normalized = True
-    tokenizer.apply_chat_template = apply_chat_template
+    tokenizer.apply_chat_template = link(apply_chat_template, original)
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tool_parsers.deepseek_v41`` resolve to this module
-    and teach the template-marker inference the V4.1 spelling."""
-    import importlib
+    """Register this module as the ``deepseek_v41`` tool parser, ahead of
+    any vendored parser of that name, and route templates carrying the V4.1
+    spelling to it. Idempotent."""
+    from gmlx.upstream.tool_parsers import register_tool_parser
 
-    from gmlx.models import owned
-
-    try:
-        registry = importlib.import_module("mlx_vlm.tool_parsers")
-    except ImportError:
-        return
-    owned.install("mlx_vlm.tool_parsers.deepseek_v41", __name__)
-    markers = getattr(registry, "_TEMPLATE_MARKERS", None)
-    if isinstance(markers, list):
-        for entry in _TEMPLATE_MARKERS:
-            if entry not in markers:
-                markers.insert(0, entry)
+    register_tool_parser("deepseek_v41", sys.modules[__name__],
+                         _TEMPLATE_MARKERS)

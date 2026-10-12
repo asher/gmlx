@@ -44,6 +44,9 @@ def env(fake_container, tmp_path, monkeypatch):
     proj.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(proj)
+    # A relative PYTHONPATH in the caller's shell adds a launch warning. A
+    # test that wants it sets PYTHONPATH itself.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     # The fake service runs, and a running service has its kernel.
     _install_kernel(home)
     entry = tmp_path / "gmlx-entry"
@@ -3176,7 +3179,8 @@ def _written_files(home: Path) -> list[Path]:
                   and not p.name.startswith(".gmlx-entry"))
 
 
-@pytest.mark.parametrize("client", sorted(set(launch._HARNESSES) - {"claude-code", "open-webui"}))
+@pytest.mark.parametrize("client", sorted(set(launch._HARNESSES) - {"claude-code", "open-webui"}
+                                           - launch.HOST_ONLY))
 def test_a_planted_link_never_reaches_a_mac_file(env, client, tmp_path, capsys):
     assert _run([client, "--container"]) == 0
     home = settings.private_home_path(client, _project(env, client))
@@ -3425,7 +3429,7 @@ def test_attach_defaults_match_the_parser(monkeypatch, tmp_path):
     rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough",
                                            "argv_given", "remove_home", "detach", "stop",
                                            "list", "mount_cwd", "dsh_profile",
-                                           "forget_share"}
+                                           "comfyui_dir", "forget_share"}
     assert rest == set(), rest
 
 

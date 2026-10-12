@@ -10,8 +10,9 @@ import mlx.core as mx
 import numpy as np
 from mlx.utils import tree_flatten
 
+from gmlx.device import metal_info, metal_value, stream_budget_bytes
 from gmlx.envflags import env_bool, env_int
-from gmlx.gen.prefill_decay import deduct_untracked_weights
+from gmlx.gen.prefill_decay import credit_streamed, end_build_credit
 from gmlx.load import loadlog
 from gmlx.load.loader import (
     _PHASE,
@@ -110,14 +111,14 @@ def configure_stream_cpu(
     run on the CPU stream whether or not the model fits the wired budget (a
     fits-in-RAM model is then served from the page cache rather than faulting
     from disk; for the faster all-GPU path on a model that fits, omit
-    ``--stream-cpu``). The GPU
-    working-set budget is still captured before switching the default device to
-    CPU so the over-/under-budget log line stays accurate (the CPU device would
-    otherwise report a budget that hides the condition). Returns
-    ``(n_wrapped, offloaded_bytes)``.
+    ``--stream-cpu``). gmlx reads the Metal device's budget through
+    ``gmlx.device`` whatever the default device is. ``mx.device_info()``
+    then answers with the Metal device's info too, for mlx-vlm's own reads
+    of it (the APC working set), which would otherwise see the CPU's.
+    Returns ``(n_wrapped, offloaded_bytes)``.
     """
     try:
-        gpu_info = dict(mx.device_info())
+        gpu_info = metal_info()
     except Exception:
         gpu_info = None
     configure_cpu_device()
@@ -200,7 +201,7 @@ def _install_gpu_residency(model, moe_modules, *,
 
 
 def _physical_ram() -> int:
-    ram = int(mx.device_info().get("memory_size", 0)) if mx.metal.is_available() else 0
+    ram = int((metal_info() or {}).get("memory_size", 0)) if mx.metal.is_available() else 0
     if not ram:
         ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     return ram
@@ -267,6 +268,18 @@ def _valid_expert_ids(module, indices):
     return ids, mx.array(ids)
 
 
+def _release_unmapped_credit(model, freed: float) -> None:
+    """Take the freed bytes of unmapped expert stacks back out of the
+    experts' headroom credit. In the tracked regime the stacks were
+    credited while the tracker counted them; once unmapped it no longer
+    does, and a credit left in place would read them free twice."""
+    if freed > 0:
+        from gmlx.gen.prefill_decay import release_streamed_tracked_bytes
+
+        release_streamed_tracked_bytes(
+            freed, getattr(model, "_kq_weights_key", None), "experts")
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -276,6 +289,7 @@ def install_expert_streaming(
     feeder_decode: bool | None = None,
     stats_verbose: bool | None = None,
     fast_disk: str | None = None,
+    explicit: bool = False,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -289,6 +303,10 @@ def install_expert_streaming(
     ``gguf_path`` (the loaded checkpoint) enables sequential expert prefetch
     for streaming-mode models - see ``gmlx.stream.prefetch``. Without it,
     over-budget prefill demand-faults expert bytes at random-read bandwidth.
+
+    ``explicit`` is ``--stream-experts`` or ``stream: experts``: a model
+    under the budget streams as with ``force_stream``, and one over it
+    takes the budget-keyed ladder (table first) as without the flag.
     """
     from gmlx.load.modules import switch_layer_types
 
@@ -300,21 +318,20 @@ def install_expert_streaming(
 
     # Streaming mode: neutralize the generation-time residency sweep (which
     # would otherwise wire the whole model - see _neutralize_wired_limit_sweep)
-    # and run every expert call on the CPU stream. Engaged when the model is
-    # over the wired budget (it must stream) or when force_stream is set:
-    # --stream-cpu (configure_stream_cpu) passes force_stream so the flag does
-    # what it says - experts on CPU regardless of model size; on a fits-in-RAM
-    # model the page cache then serves those bytes from RAM rather than faulting
-    # from disk. --stream-experts keeps the budget-keyed decision, so below the
-    # budget it still routes prefill-sized calls to the GPU stream
-    # (GMLX_STREAM_GPU_TOKENS) - the fast path in-RAM.
+    # and run every expert call on the CPU stream or the decode arena.
+    # Engaged when the model is over the wired budget (it must stream) or
+    # when streaming is forced: --stream-cpu passes force_stream, and
+    # --stream-experts and `stream: experts` pass explicit, which forces it
+    # under the budget, so the flag streams a model that fits too. Without
+    # either (the distill teacher's auto path, a direct call), a model under
+    # budget routes every expert call to the GPU stream
+    # (GMLX_STREAM_GPU_TOKENS), the fast path in-RAM.
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
-    try:
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
-        budget = None
+    budget = stream_budget_bytes()
     over_budget = budget is not None and total_bytes > budget
+    if explicit and not over_budget:
+        force_stream = True
 
     # Streamed lookup tables (docs/internals/streaming-measurements.md): archs with a
     # declared streamable lookup table (e.g. qwen4exp's 26.8 GiB PLE
@@ -330,31 +347,36 @@ def install_expert_streaming(
     table_offloaded = 0
     from gmlx.stream.table_stream import (
         install_table_streaming,
+        stream_plan,
         table_bytes,
-        table_stream_selected,
     )
 
-    compose = False
-    if table_stream_selected(model, total_bytes, budget, force_stream):
-        post = total_bytes - table_bytes(model)
-        # Step 2 default: over budget even post-table streams both
-        # (compose). --stream-cpu streams the experts unconditionally,
-        # so its tables always compose. GMLX_STREAM_PLE_COMPOSE=0
-        # keeps them resident; the selection test already honors it in
-        # auto mode, so that branch only fires under GMLX_STREAM_PLE=1
-        # or --stream-cpu.
-        if force_stream or (budget is not None and post > budget):
-            if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
-                compose = True
-                table_offloaded, table_names = (
-                    install_table_streaming(model))
-            else:
-                print(
-                    "[stream] table stays resident "
-                    "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
-                )
-        else:
-            table_offloaded, table_names = install_table_streaming(model)
+    # One rule with the serve build's header prediction (stream_plan):
+    # over budget even post-table streams both (compose); --stream-cpu and
+    # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
+    # table resident.
+    plan = stream_plan(total_bytes, table_bytes(model), budget,
+                       force_stream=force_stream)
+    compose = plan.tables and plan.experts
+    if plan.table_kept:
+        print(
+            "[stream] table stays resident "
+            "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
+        )
+    if plan.tables:
+        table_offloaded, table_names = install_table_streaming(model)
+    # The weights' untracked registration before any deduct: the table and
+    # expert credits both split total into tracked and untracked from it.
+    # Read after the table deduct, a compose install sees the table as
+    # tracked and credits it a second time through the experts.
+    from gmlx.gen.prefill_decay import untracked_weight_bytes_for
+
+    # Each streamed share is credited out of the tracked bytes and deducted
+    # from the untracked registration for the rest, so a mixed regime
+    # (casts or repacks tracked, views untracked) frees each byte once.
+    untracked0 = untracked_weight_bytes_for(
+        getattr(model, "_kq_weights_key", None))
+    table_credit = 0.0
     if table_offloaded and compose:
         loadlog.info(
             f"[stream] compose: streamable table "
@@ -362,18 +384,9 @@ def install_expert_streaming(
             f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
             "AND experts streamed"
         )
-        key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import (
-            note_streamed_tracked_bytes,
-            untracked_weight_bytes_for,
-        )
-        tracked = max(
-            0.0, total_bytes - untracked_weight_bytes_for(key))
-        credit = min(float(table_offloaded), tracked)
-        if credit > 0:
-            note_streamed_tracked_bytes(
-                credit, key, source="table", cap=tracked)
-        deduct_untracked_weights(table_offloaded, key)
+        table_credit = credit_streamed(
+            getattr(model, "_kq_weights_key", None), table_offloaded,
+            max(0.0, total_bytes - untracked0), "table")
     elif table_offloaded:
         # The selection test admits the table only when the remainder
         # clears the budget (or streaming is forced on a fits model),
@@ -387,18 +400,11 @@ def install_expert_streaming(
             "the CPU stream; experts resident (post-deduction "
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
-        key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import (
-            note_streamed_tracked_bytes,
-            untracked_weight_bytes_for,
-        )
-        tracked = max(
-            0.0, total_bytes - untracked_weight_bytes_for(key))
-        credit = min(float(table_offloaded), tracked)
-        if credit > 0:
-            note_streamed_tracked_bytes(
-                credit, key, source="table", cap=tracked)
-        deduct_untracked_weights(table_offloaded, key)
+        table_credit = credit_streamed(
+            getattr(model, "_kq_weights_key", None), table_offloaded,
+            max(0.0, total_bytes - untracked0), "table")
+        # The experts stay resident, so this was the last streamed share.
+        end_build_credit(getattr(model, "_kq_weights_key", None))
 
     streaming = force_stream or over_budget
     # the verdict itself: a CPU-only expert codec marks its modules the way
@@ -917,7 +923,9 @@ def install_expert_streaming(
                 m._kq_cpu_only = True
             offloaded += sum(a.nbytes for _, a in tree_flatten(m.parameters()))
             n_wrapped += 1
-    if over_budget and offloaded:
+    if streaming and offloaded:
+        # Keyed on streaming, not over_budget: a forced stream of a model
+        # that fits holds its experts in the arena and the page cache too.
         # Streamed expert bytes are page cache, never wired, and must not
         # tax headroom_bytes() or the admission gate and request preflight
         # starve every request. Which side of the accounting they sit on
@@ -928,21 +936,18 @@ def install_expert_streaming(
         # needs the add-back credit. tracked = total - untracked splits
         # the two regimes; the credit is clamped to the expert share.
         # Same 0.9 x working-set budget test as _warm_touch_pass.
-        key = getattr(model, "_kq_weights_key", None)
-        from gmlx.gen.prefill_decay import (
-            note_streamed_tracked_bytes,
-            untracked_weight_bytes_for,
-        )
-        tracked = max(0.0, total_bytes - untracked_weight_bytes_for(key))
-        credit = min(float(offloaded), tracked)
+        credit = credit_streamed(
+            getattr(model, "_kq_weights_key", None), offloaded,
+            max(0.0, total_bytes - untracked0), "experts",
+            prior=table_credit)
         if credit > 0:
-            note_streamed_tracked_bytes(
-                credit, key, source="experts", cap=tracked)
             print(
                 f"[stream] headroom credits {credit / 1e9:.1f} GB of "
                 "allocator-tracked expert bytes as reclaimable page cache"
             )
-        deduct_untracked_weights(offloaded, key)
+    # The last accounting step: the build credit covered what the install
+    # had not accounted yet, the experts above all, and now ends.
+    end_build_credit(getattr(model, "_kq_weights_key", None))
     if n_cpu_only_codec:
         print(
             f"[stream] {n_cpu_only_codec} expert stacks use a CPU-only codec "
@@ -982,7 +987,8 @@ def install_expert_streaming(
             room_bytes=room.bytes,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
-            cast_dead_bytes=cast_dead_bytes)
+            cast_dead_bytes=cast_dead_bytes,
+            forced=explicit and not over_budget)
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget, **arena_kw)
     ring = 0
@@ -1095,7 +1101,7 @@ def install_expert_streaming(
             # Always visible, like the pin line: the one line a memory
             # report needs.
             try:
-                floor = _ram_floor_bytes(int(mx.device_info()["memory_size"]))
+                floor = _ram_floor_bytes(int(metal_value("memory_size")))
             except Exception:
                 floor = _ram_floor_bytes(None)
             # Streamed tables are page-cache citizens like the experts, so
@@ -1159,6 +1165,7 @@ def install_expert_streaming(
             li: e for li, e in feeder._layers.items() if dfeeder.covers(li)})
         if n_un:
             freed = active0 - mx.get_active_memory()
+            _release_unmapped_credit(model, freed)
             loadlog.info(
                 f"[stream] expert stacks unmapped from the GPU on {n_un} "
                 f"layers ({b_un / 1e9:.1f} GB, {freed / 1e9:.1f} GB of "
@@ -1270,11 +1277,13 @@ def install_expert_streaming(
             loadlog.info(f"[stream] {'; '.join(fallback)}")
         if not over_budget:
             b = f"~{budget / 1e9:.0f} GB" if budget else "unknown"
+            flag = ("--stream-cpu (stream: cpu)" if base_dev == "CPU"
+                    else "--stream-experts (stream: experts)")
             print(
-                f"[stream] --stream-cpu streams experts even though the "
+                f"[stream] {flag} streams experts even though the "
                 f"{total_bytes / 1e9:.0f} GB model fits the wired budget "
-                f"({b}) - omit --stream-cpu for the faster all-GPU path on "
-                "a model that fits"
+                f"({b}); without it, a model that fits takes the faster "
+                "all-GPU path"
             )
     else:
         gpu_tokens = _stream_gpu_tokens(1)
@@ -1322,7 +1331,8 @@ def merge_prefill_tail(step: int | None, n_tokens: int) -> int | None:
     A streamed prefill stages every expert once per chunk, so a 33-token
     tail costs about what a 1000-token chunk does. Only a tail under
     ``step / 8`` merges, so no chunk grows past 9/8 of ``step``.
-    ``n_tokens`` is what the loop chunks: the prompt less its last token.
+    ``n_tokens`` is what the loop chunks: the prompt less its last token,
+    or the whole prompt when the last chunk takes the last token too.
     GMLX_STREAM_PREFILL_TAIL_MERGE=0 keeps the step."""
     if (not step or n_tokens <= step
             or not env_bool("GMLX_STREAM_PREFILL_TAIL_MERGE", True)):

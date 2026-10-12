@@ -16,7 +16,7 @@ import pytest
 
 import mlx.core as mx
 
-from mlx_lm.models.gated_delta import gated_delta_kernel
+from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_kernel
 
 from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb

@@ -11,7 +11,7 @@ Boundaries anchor to the prompt end on the chunk grid.
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.cache.snapshot as cs
 import gmlx.cache.retire_key as retire_key
@@ -367,9 +367,8 @@ def test_cursor_skeleton_policy(monkeypatch):
 def test_disk_lookup_failure_attempts_every_release(caplog):
     """A failing release in the disk-lookup failure handler must not
     skip the other block set: each release gets its own attempt."""
-    from gmlx.cache.compat import runtime_cache_module
+    from gmlx.cache.kv_cache import KVCache
 
-    KVCache = runtime_cache_module().KVCache
     releases = []
 
     class _Man:

@@ -1,82 +1,141 @@
-# Upgrading mlx-vlm, mlx-lm and mlx
+# Upstream releases
 
-gmlx is a patch layer over stock mlx-vlm and mlx-lm. It installs
-late-bound patches over private upstream symbols and deep-imports model
-internals. Each patch point and deep import is a seam, and everything
-between the seams stays stock. Upstream point
-releases move the symbols, so the patch layer is safe only under a
-qualified set of versions.
+gmlx carries mlx-vlm 0.7.3 and mlx-lm 0.31.3 whole, in
+`gmlx/_vendor/mlx_vlm` and `gmlx/_vendor/mlx_lm`, and imports those copies,
+never an installed mlx-vlm or mlx-lm. The copy is gmlx code. A new upstream
+release changes nothing in gmlx until a port takes one of its changes, by
+decision and with a test. mlx stays an installed dependency, held to a
+version floor.
 
-## How the versions are held
+## The copy
 
-The `SEAMS` table in `gmlx/upstream/seams.py` lists every seam.
-`python -m gmlx.upstream.seams` prints the seam count when every seam
-matches the installed upstream, and the drift report otherwise.
+Each copied file is upstream's, with only its module references rewritten
+from `mlx_vlm` and `mlx_lm` to `gmlx._vendor.mlx_vlm` and
+`gmlx._vendor.mlx_lm`. `scripts/vendor_upstream.py` made the copy and does
+the rewrite. `gmlx/_vendor/manifest.json` lists every file that upstream
+shipped, with its sha256 as shipped and a status:
 
-`pyproject.toml` pins mlx-vlm exactly, because mlx-vlm owns most seams.
-mlx-lm and mlx-kquant carry a floor and a ceiling below their next minor
-release. mlx has no version there, because mlx-kquant pins the exact mlx
-release that its kernels were built against, and CI installs that same
-mlx. Three checks keep an environment inside those bounds:
+| Status | Meaning |
+|--------|---------|
+| `verbatim` | The file is upstream's bytes. |
+| `codemod` | The file is upstream's bytes after the rewrite. |
+| `edited` | The file was changed by hand, with a `# gmlx:` comment at each change. |
+| `alias` | The file is replaced by a module that aliases an owned gmlx module. |
+| `excluded` | The file is left out of the tree. |
+| `license` | The file is the package's LICENSE, as upstream shipped it. |
+
+A bug in the copy is fixed in place, like any gmlx bug. The fix carries a
+`# gmlx:` comment and a test that fails without it, and
+`python scripts/vendor_upstream.py manifest` records the new file. Code
+that gmlx owns outright replaces its copy. The KV cache classes live in
+`gmlx/cache/kv_cache.py`, and the attention mask and SDPA helpers in
+`gmlx/cache/attention.py`. The copied mlx-vlm cache module is an alias of
+`gmlx/cache/kv_cache.py`. The copied mlx-lm cache module and both copied
+`models/base.py` files are edited to import the owned classes and helpers
+in place of their own. An owned model has a row in `gmlx/models/owned.py`,
+which the copied loaders read before their own model packages.
+
+A line that must name a stock module, such as a reader of the module names
+an earlier release recorded, keeps its names with a `# gmlx: stock-name`
+comment. Only the files that `STOCK_NAME_FILES` in the tool lists may carry
+it.
+
+## Checks
 
 | Check | Where | What it does |
 |-------|-------|--------------|
-| Seam contract | `tests/upstream/test_upstream_seams.py` | It pins every patched symbol to a source fingerprint. Drift fails CI and names the seam. |
-| Runtime gate | `check_upstream_versions`, at CLI entry | It refuses to run below a floor and warns once above the qualified set. `gmlx doctor` is exempt. |
-| Static imports | `pyright`, in the macOS CI job | It checks the files in `[tool.pyright].include` against the installed upstream source. |
+| Copy check | `vendor_upstream.py rewrite --check` and `verify` in the lint job, `tests/test_vendor_manifest.py` | Every module reference names the copy, and the tree matches the manifest. |
+| Copy lint | `vendor_upstream.py lint` in the lint job, `tests/test_vendor_upstream.py` | Ruff finds no undefined or twice-defined name in the copy beyond `scripts/vendor_ruff_baseline.json`, which is empty. |
+| Stock imports | `tests/stock_blocker.py`, `tests/test_no_stock_imports.py` | The tests refuse a stock import, and a child with poisoned stock packages runs gmlx without reaching one. |
+| Stock installs | The last step of the macOS CI job | gmlx with all its extras installs no mlx-vlm, mlx-lm or mlx-embeddings, and the copy's version files name the releases the manifest records. |
+| Claims | `gmlx/upstream/claims.py` and `tests/upstream/test_claims.py` | Each name an installer rebinds exists in the copy. After install, its wrap chain holds a wrapper from each module its row lists. |
+| mlx floor | `check_mlx_version`, at CLI entry, and `gmlx doctor` | Both refuse an mlx below the floor that the copied mlx-vlm declares. |
+| Static calls | `pyright`, in the macOS CI job | It type-checks the files in `[tool.pyright].include`, including their calls into the copy. |
 
-## Watching upstream releases
+The copy check also fails a copied file whose sha256 differs from the
+manifest, a file under the copy that the manifest does not list, and an
+edit without its marker. The copy lint leaves line numbers out of its
+findings, so an edit above one moves nothing. The poisoned child runs the
+CLI, loads, generates and serves. `python -m gmlx.upstream.claims
+--installed` runs the claims check, and `gmlx doctor` also prints the
+installed mlx and the copied versions.
 
-When mlx-vlm publishes a release, run `scripts/upstream_canary.sh`. It
-builds a disposable venv with this checkout, lifts only the mlx-vlm pin to
-the newest release and runs the seam check. A pass means the release is
-likely a safe bump, still to be qualified by the
-[bump procedure](#bump-procedure). A failure lists each changed symbol and
-the gmlx site that uses it.
+## Reading a new release
 
-## Bump procedure
+`scripts/upstream_canary.sh` downloads the wheels of the newest mlx-vlm and
+mlx-lm, or of the versions it is given, together with the copied releases,
+and runs `scripts/drift_report.py` on them. Nothing is installed. The
+weekly drift job in CI runs it and puts the report in the run summary, and
+it never fails the run.
 
-1. Build a scratch venv with the target versions, never the dev venv.
+```sh
+scripts/upstream_canary.sh                 # the newest releases
+scripts/upstream_canary.sh 0.7.4          # an mlx-vlm version, the newest mlx-lm
+```
 
-   ```sh
-   python3 -m venv /tmp/gmlx-bump && . /tmp/gmlx-bump/bin/activate
-   pip install -e /path/to/gmlx && pip install mlx-vlm==<target>
-   python -m gmlx.upstream.seams   # drift report
-   ```
+The report starts with a file summary for each package: the files that
+upstream changed, removed or added, and the files that both upstream and
+gmlx changed. The summary names every file that gmlx edits, aliases, takes
+units from or mirrors, however many other files changed. Unit rows follow
+for the files that gmlx edits or imports from, for owned code taken from
+an upstream file, and for gmlx code that mirrors upstream units beside the
+copy: the Qwen3.5 text models in `gmlx/models/qwen35`, the Kimi-K3 short
+convolution and the APC manager builder. A unit is a function, a method,
+the rest of a class or a module assignment. Each row says whether upstream
+changed the unit, gmlx did, or both did, from a three-way compare of the
+copy, the copied release and the new release. A unit that an edited file
+imports from an owned module keeps its row when upstream changes it, and
+the row names the owned file. The import rewrite is applied to both
+releases first, so it never shows as a change.
 
-2. Audit each drifted seam again. Diff the upstream source between the
-   pinned and target versions, which `pip download --no-deps` fetches. The
-   seam's `used_by` field names the gmlx site to verify again.
+`scripts/drift_report.py` also runs on its own. `--new mlx_vlm=DIR` and
+`--old mlx_vlm=DIR` take package directories, and `--json` writes the same
+data as JSON.
 
-3. Regenerate the fingerprints in a fresh interpreter of the scratch venv,
-   since the regeneration refuses to run once the installers have patched
-   the process. It also records the qualified versions for the runtime
-   gate.
+## Porting a change
 
-   ```sh
-   python -m gmlx.upstream.seams --regen
-   ```
+The report is a list to triage, not a gate. Each change goes through three
+steps:
 
-4. Run the full test suite and the tests marked `integration` in the
-   scratch venv, as [Testing](testing.md) describes.
+1. Decide. Port an upstream correctness fix when the bug applies to the
+   copy. List performance and structural changes for review, and leave the
+   rest.
+2. Port. Edit the copied file in place, or the owned module that replaced
+   it, with a `# gmlx:` comment at the change. Add a test that fails
+   without the port.
+3. Record. Run `python scripts/vendor_upstream.py manifest` and then
+   `verify`, and commit the port with its test and the manifest.
 
-5. Run live smoke tests with models on disk. Cover a served MTP model, a
+A port never moves the copy to a new release wholesale. The manifest keeps
+the sha256 of the release each file was copied from, so the next report
+still compares against it, and a ported unit that matches the new release
+drops out of the rows.
+
+## Upgrading mlx
+
+mlx is the one upstream package that gmlx installs. mlx-kquant pins the
+exact mlx release that its kernels were built against, so `pyproject.toml`
+gives mlx no version of its own. `MLX_FLOOR` in `gmlx/upstream/versions.py`
+is the floor that the copied mlx-vlm declares, and
+`tests/upstream/test_versions.py` holds the two equal. These steps move
+mlx:
+
+1. Take the mlx-kquant release built for the new mlx.
+2. Run the full test suite and the tests marked `integration` in a scratch
+   venv, as [Testing](testing.md) describes.
+3. Run live smoke tests with models on disk. Cover a served MTP model, a
    warm prompt-cache hit, an MXFP4 model, a DeepSeek-V4 model and one
    `gmlx talk` turn.
+4. Commit the version bump on its own.
 
-6. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`
-   together, as their own commit. An mlx-lm bump raises the mlx-lm ceiling
-   in `pyproject.toml` to the next minor release after the target.
+## Adding a rebind
 
-## Adding a new seam
-
-Any new patch or deep import of upstream internals gets a row in `SEAMS`
-in the same change, then a regeneration. A seam that correctness or a hard
-feature needs sets `critical=True`, and its installer raises when the
-seam is missing. An optional acceleration warns once and falls back.
-Either way, a patch is idempotent and never silently does nothing when the
-upstream surface it expects has changed.
-
-KV-cache classes come from both mlx-lm and mlx-vlm. The rules for
-isinstance checks and construction are in the docstring of
-`gmlx/cache/compat.py`.
+New behavior in the copy goes in as an in-place edit, marked `# gmlx:`,
+which needs no installer. An installer that rebinds a name in the copy
+gets a row in `CLAIMS` in `gmlx/upstream/claims.py` in the same change.
+The row names the copied module and attribute, the gmlx site that uses it,
+and how the name is claimed: as a wrap, an HTTP route, the app or a
+subclass. The check fails when the name is missing from the copy, or when
+the installers leave the copy's own object bound to it. An installer is
+idempotent, and it raises rather than doing nothing when the name it
+expects is missing.

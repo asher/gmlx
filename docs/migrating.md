@@ -19,7 +19,7 @@ Most flags have a direct equivalent:
 | `-n N` | `--max-tokens N` | Both generate until end-of-sequence by default. |
 | `--temp`, `--top-k`, `--top-p`, `--min-p` | The same names | The defaults come from the model's [family defaults](family-defaults.md). |
 | `-c N` | `--max-kv-size N` | The context length comes from the GGUF, and this flag limits it. On `run` and `chat`, the cache also becomes a rotating window. |
-| `--rope-scaling`, `--yarn-*` | None | gmlx reads the scaling from the GGUF, and there is no override. |
+| `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`, `--yarn-*` | The same [flags](cli.md#rope-scaling-flags) | On `run`, `chat` and a positional `serve`. In a config, the model's [`rope_scaling`](config.md#rope-scaling) block. |
 | `-ngl N` | None | Every layer runs on the GPU. A model larger than memory runs with `--stream-experts` or `--stream-cpu`. |
 | `--cache-type-k q8_0`, `--cache-type-v q8_0` | `--kv-bits 8` | `--kv-group-size` sets the group size. |
 | `--draft-model`, `--spec-draft-n-max M` | `--draft-gguf`, `--draft-block-size M+1` | The block also counts the token that the drafts extend. A model with an MTP head needs no drafter. |

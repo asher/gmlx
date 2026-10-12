@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_seed_rows"
@@ -55,10 +57,10 @@ def register_row_seed(sampler, uid, seed) -> None:
 
 def install_per_request_seed() -> None:
     """Bind each request's seed to its batch row. Idempotent."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
-    if getattr(_ar.BatchGenerator.insert, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator.insert, _INSTALLED_FLAG):
         return
 
     _orig_procs = ResponseGenerator._make_logits_processors
@@ -125,9 +127,9 @@ def install_per_request_seed() -> None:
     _step_with_rows.__dict__[_INSTALLED_FLAG] = True
     _generate_with_rows.__dict__[_INSTALLED_FLAG] = True
     _next_with_rows.__dict__[_INSTALLED_FLAG] = True
-    ResponseGenerator._make_logits_processors = _procs_with_seed
-    _ar.BatchGenerator.insert = _insert_with_seed
-    _ar.GenerationBatch._step = _step_with_rows
-    _ar.PromptProcessingBatch.generate = _generate_with_rows
-    _ar.SpeculativeGenerationBatch.next = _next_with_rows
+    ResponseGenerator._make_logits_processors = link(_procs_with_seed, _orig_procs)
+    _ar.BatchGenerator.insert = link(_insert_with_seed, _orig_insert)
+    _ar.GenerationBatch._step = link(_step_with_rows, _orig_step)
+    _ar.PromptProcessingBatch.generate = link(_generate_with_rows, _orig_generate)
+    _ar.SpeculativeGenerationBatch.next = link(_next_with_rows, _orig_next)
     _log.info("per-request seed installed")

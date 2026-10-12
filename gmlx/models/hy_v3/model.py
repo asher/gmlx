@@ -3,10 +3,9 @@
 #
 """Tencent Hy3 (hy_v3) backbone, vendored from mlx-lm PR #1485 (unmerged).
 
-gmlx owns this class. ``ensure_registered()`` installs it as
-``mlx_lm.models.hy_v3`` at load time, over any upstream module of that name,
-so ``mlx_lm.utils._get_classes`` and every downstream path resolve it (see
-:mod:`gmlx.models.owned`).
+mlx-lm (0.31.3) ships no `models/hy_v3.py`, so gmlx carries the class, and
+the vendored mlx-lm resolves the hy_v3 model type to this module through
+gmlx.models.owned.
 
 Source: https://github.com/ml-explore/mlx-lm/pull/1485 (which stacks on and
 supersedes #1211) - body kept close to the PR apart from this header, the
@@ -40,22 +39,16 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
-from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from gmlx._vendor.mlx_lm.models.activations import swiglu
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.pipeline import PipelineMixin
+from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+from gmlx.cache.attention import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.pipeline import PipelineMixin
-from mlx_lm.models.rope_utils import initialize_rope
-from mlx_lm.models.switch_layers import SwitchGLU
-
-from gmlx.models import owned
-
-
-def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.hy_v3`` resolve to this module."""
-    owned.install("mlx_lm.models.hy_v3", __name__)
 
 
 @dataclass

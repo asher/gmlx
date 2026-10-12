@@ -54,7 +54,7 @@ def install_cb_phase_flips() -> bool:
         return False
     if not _kq():
         return False
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     if getattr(ar.GenerationBatch._step, "_gmlx_cb_phase", False):
         return True
@@ -73,8 +73,8 @@ def install_cb_phase_flips() -> bool:
     _wrap(ar.GenerationBatch, "_step", "decode")
     _wrap(ar.SpeculativeGenerationBatch, "next", "decode")
     _wrap(ar.PromptProcessingBatch, "prompt_step", "prefill")
-    # Prompts short enough to skip chunked processing never reach
-    # prompt_step: generate() runs their whole prefill in one call.
+    # generate() runs the last prompt columns, and the whole prefill of a
+    # prompt that never reaches prompt_step.
     _wrap(ar.PromptProcessingBatch, "generate", "prefill")
     return True
 
@@ -114,9 +114,9 @@ def install_cb_phase_steps(streaming: bool = False) -> bool:
         return False
     import importlib
 
-    targets = [("mlx_lm.generate", "generate_step"),
-               ("mlx_lm.generate", "speculative_generate_step"),
-               ("mlx_vlm.generate.ar", "generate_step"),
+    targets = [("gmlx._vendor.mlx_lm.generate", "generate_step"),
+               ("gmlx._vendor.mlx_lm.generate", "speculative_generate_step"),
+               ("gmlx._vendor.mlx_vlm.generate.ar", "generate_step"),
                ("gmlx.spec.speculative", "stream_speculative")]
     for modname, name in targets:
         try:

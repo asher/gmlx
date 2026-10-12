@@ -25,7 +25,7 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
 
@@ -88,8 +88,8 @@ def _drive(model, processor, ids, manager, scheme=None):
     """One request through the stock engine, exactly as serve builds it."""
     import importlib
 
-    ar = importlib.import_module("mlx_vlm.generate.ar")
-    from mlx_vlm import apc as _apc
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     input_ids = mx.array([ids], dtype=mx.int32)
     emb = model.get_input_embeddings(input_ids=input_ids)
@@ -124,7 +124,7 @@ def _drive(model, processor, ids, manager, scheme=None):
 
 
 def test_family_tier_engages(family):
-    from mlx_vlm.apc import model_apc_mode
+    from gmlx._vendor.mlx_vlm.apc import model_apc_mode
 
     from gmlx.cache.apc_manager import GmlxAPCManager
     from gmlx.cache.snapshot import ckpt_supported

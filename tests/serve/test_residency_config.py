@@ -22,6 +22,9 @@ from gmlx.serve.residency import (  # noqa: E402
     _RuntimeProxy,
 )
 
+# A Mac of 64 GB: the pool juggles models of 10 to 22 GB.
+pytestmark = pytest.mark.host_gb(64)
+
 GB = 1024**3
 
 
@@ -259,16 +262,16 @@ def install_with_fakes(monkeypatch, env=None, **kwargs):
         monkeypatch.delenv(k, raising=False)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
-    pkg = types.ModuleType("mlx_vlm.server")
-    app = types.ModuleType("mlx_vlm.server.app")
-    rt = types.ModuleType("mlx_vlm.server.runtime")
+    pkg = types.ModuleType("gmlx._vendor.mlx_vlm.server")
+    app = types.ModuleType("gmlx._vendor.mlx_vlm.server.app")
+    rt = types.ModuleType("gmlx._vendor.mlx_vlm.server.runtime")
     rt.runtime = object()
     app._INHERIT_ADAPTER = object()
     app.get_cached_model = lambda *a, **k: None
     app.unload_model_sync = lambda: True
-    monkeypatch.setitem(sys.modules, "mlx_vlm.server", pkg)
-    monkeypatch.setitem(sys.modules, "mlx_vlm.server.app", app)
-    monkeypatch.setitem(sys.modules, "mlx_vlm.server.runtime", rt)
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.server", pkg)
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.server.app", app)
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.server.runtime", rt)
     threads = []
     fake_threading = types.SimpleNamespace(
         Thread=lambda **kw: threads.append(kw) or types.SimpleNamespace(
@@ -561,7 +564,7 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
     from gmlx.serve.patches import routes as sp_routes
 
     _proxy, pool, _env, _td = make_pool()
-    pkg = importlib.import_module("mlx_vlm.server")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     saved = getattr(pkg, "_kq_residency_pool", None)
     pkg._kq_residency_pool = pool
     try:
@@ -662,3 +665,184 @@ def test_a_single_model_server_serves_only_its_own_model(monkeypatch, request, t
     with pytest.raises(_Acquired):
         ctx.run(app_mod.get_cached_model, next(iter(cfg.models)))
     assert seen == [str(own)]
+
+
+# A chat route that names an image model, and the reverse, is a 400 that
+# names the route the id belongs to.
+_MIXED = {
+    "models": {"qwen": {"path": "/abs/qwen.gguf"}},
+    "aliases": {"q": "qwen"},
+    "image_models": {"zit": {"path": "/abs/zit.safetensors",
+                             "encoder": "/abs/enc.gguf",
+                             "vae": "/abs/vae.safetensors",
+                             "ttl_s": 60}},
+}
+
+
+@pytest.fixture
+def mixed_cfg(request):
+    from gmlx.config import build_config
+
+    cfg = build_config(_MIXED)
+    serving.register_resolved_models(cfg)
+    request.addfinalizer(serving.clear_resolved_models)
+    return cfg
+
+
+@pytest.mark.parametrize("kind", ["image_generation", "image_edit"])
+def test_pooled_get_refuses_the_stock_image_kinds(monkeypatch, kind):
+    from fastapi import HTTPException
+
+    pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    seen = _acquired(monkeypatch, pool)
+    with pytest.raises(HTTPException) as e:
+        app_mod.get_cached_model("anything", model_kind=kind)
+    assert e.value.status_code == 400 and seen == []
+
+
+def test_a_chat_route_naming_an_image_model_is_a_400(monkeypatch, mixed_cfg):
+    from fastapi import HTTPException
+
+    pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    seen = _acquired(monkeypatch, pool)
+    with pytest.raises(HTTPException) as e:
+        app_mod.get_cached_model("zit")
+    err = e.value.detail["error"]
+    assert e.value.status_code == 400 and seen == []
+    assert err["type"] == "wrong_model_kind"
+    assert "/v1/images/generations" in err["message"]
+    assert err["available_models"] == ["qwen"]
+
+
+@pytest.mark.parametrize("model", ["qwen", "q"])
+def test_an_image_route_naming_a_chat_model_is_a_400(monkeypatch, mixed_cfg,
+                                                     model):
+    from fastapi import HTTPException
+
+    proxy, pool, _env, _td = make_pool()
+    seen = _acquired(monkeypatch, pool)
+    with pytest.raises(HTTPException) as e:
+        residency.acquire_image_model(model, pool=pool)
+    err = e.value.detail["error"]
+    assert e.value.status_code == 400 and seen == []
+    assert err["type"] == "wrong_model_kind"
+    assert err["available_models"] == ["zit"]
+
+
+def test_an_image_route_naming_an_unknown_model_is_a_404(monkeypatch, mixed_cfg):
+    from fastapi import HTTPException
+
+    proxy, pool, _env, _td = make_pool()
+    with pytest.raises(HTTPException) as e:
+        residency.acquire_image_model("nope", pool=pool)
+    assert e.value.status_code == 404
+    assert e.value.detail["error"]["available_models"] == ["zit"]
+
+
+def test_acquire_image_model_builds_the_image_kind(monkeypatch, mixed_cfg):
+    from gmlx.serve import capacity as cap
+
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, seen_env, _td = make_pool()
+    specs = []
+    pool._image_fns = (lambda spec: 9 * GB,
+                       lambda spec: specs.append(spec) or "PIPE",
+                       lambda box: box.clear())
+    for field in ("zit", "", None):           # the sole image model is the default
+        hold = residency.acquire_image_model(field, pool=pool)
+        entry = hold._entry
+        hold.release()
+    assert seen_env == []                     # the chat loader never ran
+    assert [s.id for s in specs] == ["zit"]   # one build, then hits
+    assert entry.kind == residency.IMAGE_KIND and entry.pipeline == "PIPE"
+    assert entry.ttl == 60 and entry.loaded_as == "zit"
+    assert entry.cache_key[:3] == ("/abs/zit.safetensors", None,
+                                   residency.IMAGE_KIND)
+
+
+def test_resolve_pool_path_takes_either_kind(mixed_cfg):
+    assert serving.resolve_pool_path("zit") == "/abs/zit.safetensors"
+    assert serving.resolve_pool_path("q") == "/abs/qwen.gguf"
+    assert serving.image_ids_for_path("/abs/zit.safetensors") == ["zit"]
+    with pytest.raises(serving.ModelNotFound):
+        serving.resolve_pool_path("nope")
+
+
+def test_the_chat_warm_never_loads_an_image_model(monkeypatch, mixed_cfg):
+    """Every chat, Messages and Responses route warms its model through
+    _warm_and_release; an image id there loads nothing and evicts nothing,
+    and the route answers it 400. Keep and preload still load it."""
+    import importlib
+
+    from gmlx.serve.patches import routes as sp_routes
+
+    loads = []
+    monkeypatch.setattr(residency, "acquire_image_model",
+                        lambda *a, **k: loads.append(("image",) + a))
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    monkeypatch.setattr(app, "get_cached_model",
+                        lambda *a, **k: loads.append(("chat",) + a))
+    sp_routes._warm_and_release("zit", app._INHERIT_ADAPTER)
+    assert loads == []
+    sp_routes._spawn_keep_warm("zit").join(timeout=5)
+    assert loads == [("image", "zit")]
+
+
+def _image_pool(monkeypatch, footprint):
+    from gmlx.serve import capacity as cap
+
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, _seen, _td = make_pool()
+    pool._image_fns = (footprint, lambda spec: "PIPE", lambda box: box.clear())
+    return pool
+
+
+def test_an_image_model_whose_file_is_gone_is_a_typed_404(monkeypatch, mixed_cfg):
+    from fastapi import HTTPException
+
+    def gone(spec):
+        raise FileNotFoundError(2, "No such file", spec.path)
+
+    pool = _image_pool(monkeypatch, gone)
+    with pytest.raises(HTTPException) as e:
+        residency.acquire_image_model("zit", pool=pool)
+    assert e.value.status_code == 404
+    assert e.value.detail["error"]["type"] == "model_file_missing"
+
+
+def test_an_image_part_of_another_family_is_a_typed_400(monkeypatch, mixed_cfg):
+    from fastapi import HTTPException
+
+    from gmlx.image.vae import VAEError
+
+    def wrong_vae(spec):
+        raise VAEError("this VAE holds the qwen_image21 VAE")
+
+    pool = _image_pool(monkeypatch, wrong_vae)
+    with pytest.raises(HTTPException) as e:
+        residency.acquire_image_model("zit", pool=pool)
+    err = e.value.detail["error"]
+    assert e.value.status_code == 400 and err["type"] == "image_model_mismatch"
+    assert "qwen_image21" in err["message"] and err["model"] == "zit"
+
+
+def test_a_deferred_image_load_is_the_typed_503(monkeypatch, mixed_cfg):
+    from fastapi import HTTPException
+
+    from gmlx.serve import capacity as cap
+
+    pool = _image_pool(monkeypatch, lambda spec: 9 * GB)
+
+    def deferred(*a, **k):
+        raise cap.LoadDeferred("model load deferred: zit")
+
+    monkeypatch.setattr(cap, "preload_gate", deferred)
+    monkeypatch.setattr(
+        residency, "_http_from_load_deferred",
+        lambda mid, e: HTTPException(status_code=503, detail={"error": {
+            "type": "model_load_deferred", "model": mid}}))
+    with pytest.raises(HTTPException) as e:
+        residency.acquire_image_model("zit", pool=pool)
+    assert e.value.status_code == 503
+    assert e.value.detail["error"]["model"] == "zit"
+    assert not pool._entries

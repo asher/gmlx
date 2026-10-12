@@ -63,7 +63,7 @@ def test_chat_template_config_reaches_apply_chat_template():
     """A parsed --chat-template-config dict flows through generate() into the
     tokenizer's apply_chat_template - the generic passthrough forwards ANY key
     (e.g. preserve_thinking for Qwen3.6 / Gemma-4), not just enable_thinking."""
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     import gmlx.gen.generation as generation
 
     template_kwargs = chat.parse_template_config('{"preserve_thinking": true}')
@@ -322,7 +322,7 @@ def test_stream_reply_keyboard_interrupt_cancels(state, capsys):
 
 
 def test_vlm_message_pins_markers_per_turn():
-    pytest.importorskip("mlx_vlm")
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
     m_img = chat._vlm_message("gemma4", "what is this?", "user", n_images=1)
     m_txt = chat._vlm_message("gemma4", "and a follow-up", "user")
     assert m_img != m_txt

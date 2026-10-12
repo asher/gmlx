@@ -18,6 +18,7 @@ import os
 import gmlx.serve.bridge_vlm as serving
 from gmlx.systemone.extensions import GMLX_EXTENSIONS
 from gmlx.systemone.schema import JEV_EXTENSIONS
+from gmlx.upstream.patching import link, under, wrapped_with
 
 from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
@@ -70,11 +71,13 @@ _GMLX_CONSUMED = frozenset({
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
 # filter). ``tool_choice`` is consumed here: "none" is enforced below, other
 # values are documented as template-dependent. ``timings_per_token`` is the
-# per-chunk stream-timings switch (install_stream_timings).
+# per-chunk stream-timings switch (install_stream_timings). ``tool_parser``
+# is the parser override each of the three stock handlers passes to
+# ``_infer_tool_parser_from_processor``.
 CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
-    "resize_shape", "tools", "tool_choice", "top_logprobs", "stop",
-    "timings_per_token",
+    "resize_shape", "tools", "tool_choice", "tool_parser", "top_logprobs",
+    "stop", "timings_per_token",
     # OpenAI's chat spelling of the output cap (sampling.py alias transform)
     "max_completion_tokens",
 })
@@ -86,7 +89,7 @@ CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
 RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
     | frozenset({
         "model", "input", "instructions", "previous_response_id", "tools",
-        "tool_choice", "store", "stream", "adapter_path",
+        "tool_choice", "tool_parser", "store", "stream", "adapter_path",
     })
 
 # /v1/messages (anthropic.py). ``output_config`` is consumed (its
@@ -96,7 +99,8 @@ RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
 ANTHROPIC_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
     | frozenset({
         "model", "messages", "system", "stream", "stop_sequences", "tools",
-        "tool_choice", "thinking", "output_config", "adapter_path",
+        "tool_choice", "tool_parser", "thinking", "output_config",
+        "adapter_path",
     })
 
 # /v1/completions (gmlx's own route, server_patches/completions.py).
@@ -113,6 +117,22 @@ COMPLETIONS_CONSUMED = (
 SYSTEMONE_CONSUMED = frozenset({
     "model", "state", "questions", "seed", "images", "profile",
 }) | frozenset(JEV_EXTENSIONS) | frozenset(GMLX_EXTENSIONS)
+
+
+# The image routes (patches/images.py). The gmlx extensions follow the
+# OpenAI fields; ``image[]`` is how openai-python names several uploads.
+IMAGES_GENERATIONS_CONSUMED = frozenset({
+    "prompt", "model", "n", "size", "quality", "background",
+    "output_format", "output_compression", "response_format", "stream",
+    "partial_images", "negative_prompt", "steps", "seed", "guidance",
+    "sampler", "scheduler", "adapters",
+})
+IMAGES_EDITS_CONSUMED = IMAGES_GENERATIONS_CONSUMED | frozenset({
+    "image", "image[]", "images", "mask", "strength",
+})
+IMAGES_VARIATIONS_CONSUMED = IMAGES_GENERATIONS_CONSUMED | frozenset({
+    "image", "strength",
+})
 
 
 def warn_ignored_fields(path: str, ignored) -> None:
@@ -274,6 +294,18 @@ def _make_chat_endpoint(original):
     return endpoint
 
 
+def _warn_image_tool(path: str, body: dict) -> None:
+    """One warning line when a request carries the Responses
+    ``image_generation`` tool, which the server does not run: the tool
+    list drops it and the model never sees it."""
+    tools = body.get("tools")
+    if isinstance(tools, list) and any(
+            isinstance(t, dict) and t.get("type") == "image_generation"
+            for t in tools):
+        _log.warning("%s: the image_generation tool is not supported and is "
+                     "dropped; call /v1/images/generations instead", path)
+
+
 def _make_raw_endpoint(consumed, fallback_path):
     """Wrapper factory for the raw-``Request`` routes (responses/anthropic):
     the handler parses the JSON body itself, so warn/enforce on the cached
@@ -293,6 +325,7 @@ def _make_raw_endpoint(consumed, fallback_path):
                 if isinstance(body, dict):
                     tc = body.get("tool_choice")
                     warn_ignored_fields(path, set(body) - consumed)
+                    _warn_image_tool(path, body)
                     if _is_tool_choice_none(tc):
                         body.pop("tools", None)
                         body.pop("tool_choice", None)
@@ -306,7 +339,7 @@ def _make_raw_endpoint(consumed, fallback_path):
 def install_api_contract() -> None:
     """Wrap the three generation dialects with the unread-parameter warning
     and ``tool_choice: "none"`` enforcement. Idempotent per route."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _wrap_post_routes(app, _CHAT_PATHS, _API_CONTRACT_FLAG,
                       _make_chat_endpoint)
     _wrap_post_routes(app, _RESPONSES_PATHS, _API_CONTRACT_FLAG,
@@ -325,7 +358,7 @@ def install_api_contract() -> None:
 def _check_context_budget(prompt_tokens: int, max_tokens: int):
     from .sampling import UNTIL_EOS
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     limit = gen.get_configured_context_limit()
     # The until-EOS default takes whatever room is left, so only the prompt
     # must fit.
@@ -357,10 +390,9 @@ def model_context_limit(spec) -> int | None:
     """The context limit for a resolved model: its ``max_kv_size`` load
     key, else the process-wide limit. None when neither is set. A value
     of 0 turns the limit off for that model."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    process_limit = gen.get_configured_context_limit
-    if getattr(process_limit, _CONTEXT_LIMIT_FLAG, False):
-        process_limit = process_limit.__wrapped__
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    process_limit = under(gen.get_configured_context_limit,
+                          _CONTEXT_LIMIT_FLAG)
     return _spec_context_limit(spec, process_limit)
 
 
@@ -394,8 +426,7 @@ def _make_overflow_preflight(original):
                     and isinstance(detail, str):
                 raise _StreamOverflow(detail) from None
             raise
-    preflight.__dict__[_OVERFLOW_ROUTE_FLAG] = True
-    return preflight
+    return link(preflight, original, _OVERFLOW_ROUTE_FLAG)
 
 
 class _CarriedHTTPError(BaseException):
@@ -418,8 +449,7 @@ def _make_carried_lookup(original):
             return original(*args, **kwargs)
         except HTTPException as e:
             raise _CarriedHTTPError(e) from None
-    get_cached_model.__dict__[_OVERFLOW_ROUTE_FLAG] = True
-    return get_cached_model
+    return link(get_cached_model, original, _OVERFLOW_ROUTE_FLAG)
 
 
 def _make_messages_overflow_endpoint(original):
@@ -442,24 +472,24 @@ def install_context_overflow_wording() -> None:
     requested model, and answer a streaming ``/v1/messages`` overflow with
     400. The Messages routes also answer an unknown model with the 404 the
     other routes give, not a 500. Idempotent."""
-    app = importlib.import_module("mlx_vlm.server.app").app
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    pkg = importlib.import_module("mlx_vlm.server")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     # Callers look the names up at call time. The package re-exports them.
     gen._check_configured_context_budget = _check_context_budget
     pkg._check_configured_context_budget = _check_context_budget
     limit = gen.get_configured_context_limit
-    if not getattr(limit, _CONTEXT_LIMIT_FLAG, False):
+    if not wrapped_with(limit, _CONTEXT_LIMIT_FLAG):
         limit = _make_context_limit(limit)
         gen.get_configured_context_limit = limit
         pkg.get_configured_context_limit = limit
-    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     hook = anthropic._preflight_stream_context_budget
-    if hook is not None and not getattr(hook, _OVERFLOW_ROUTE_FLAG, False):
+    if hook is not None and not wrapped_with(hook, _OVERFLOW_ROUTE_FLAG):
         anthropic._preflight_stream_context_budget = \
             _make_overflow_preflight(hook)
     lookup = anthropic.get_cached_model
-    if lookup is not None and not getattr(lookup, _OVERFLOW_ROUTE_FLAG, False):
+    if lookup is not None and not wrapped_with(lookup, _OVERFLOW_ROUTE_FLAG):
         anthropic.get_cached_model = _make_carried_lookup(lookup)
     _wrap_post_routes(app, _MESSAGES_PATHS + _COUNT_TOKENS_PATHS, _OVERFLOW_ROUTE_FLAG,
                       _make_messages_overflow_endpoint)

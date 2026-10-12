@@ -19,7 +19,7 @@ import pytest
 import mlx.core as mx
 
 import gmlx.models.glm5_next.model as glm5_model
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 from gmlx.models.glm5_next.model import (
     Glm5NextIndexer,
     Glm5NextMLAAttention,
@@ -117,7 +117,7 @@ def test_forward_smoke_and_cache_shapes():
         else:
             assert c[0].offset == 5
             pool = c[1]
-            assert isinstance(pool, PoolingCache)
+            assert isinstance(pool, DS4PoolingCache)
             assert pool.lookback is False
             assert pool.quantizable is False
             assert pool._plen == 1 and pool.remainder == 1  # 5 = 4 + 1
@@ -127,7 +127,7 @@ def test_pool_bookkeeping_and_make_mask_convention():
     # make_mask pins the +1 pool-visibility form: query at absolute position
     # q sees pool p iff p < (q + 1) // ratio - the query's own just-completed
     # pool included at q % 4 == 3 (llama.cpp PR-27754 pool_visible).
-    pool = PoolingCache(4, lookback=False)
+    pool = DS4PoolingCache(4, lookback=False)
     k = mx.random.normal((1, 10, 8))
     g = mx.random.normal((1, 10, 8))
     rk, rg, _ = pool.accumulate_windows(k, g, 0)
@@ -462,9 +462,9 @@ def test_indexer_dense_bypass_thresholds():
 
     x = mx.random.normal((1, 20, args.hidden_size))
     qr = mx.random.normal((1, 20, args.q_lora_rank))
-    pool = PoolingCache(4, lookback=False)
+    pool = DS4PoolingCache(4, lookback=False)
     assert idx(x[:, :11], qr[:, :11], pool, 0, 11) is None  # at threshold
-    pool2 = PoolingCache(4, lookback=False)
+    pool2 = DS4PoolingCache(4, lookback=False)
     sel = idx(x, qr, pool2, 0, 20)
     assert sel is not None and sel.shape == (1, 20, idx.select_k)
 
@@ -485,7 +485,7 @@ def test_indexer_selection_matches_naive_reference():
     T = 20
     x = mx.random.normal((1, T, args.hidden_size)) * 0.5
     qr = mx.random.normal((1, T, args.q_lora_rank)) * 0.5
-    pool = PoolingCache(4, lookback=False)
+    pool = DS4PoolingCache(4, lookback=False)
     sel = np.array(idx(x, qr, pool, 0, T))[0]  # [T, select_k]
 
     xn = np.array(x, dtype=np.float64)[0]
@@ -625,7 +625,7 @@ def test_sparse_decode_indexed_matches_gather_loop(L, offset, topk):
     # selected latent rows) must match the per-query gather + sdpa loop
     # it replaces, including a spilled block (L=2 at offset 17: fewer
     # visible pools than select_k) and lists of unequal tail length.
-    from mlx_lm.models.base import scaled_dot_product_attention
+    from gmlx._vendor.mlx_lm.models.base import scaled_dot_product_attention
 
     if glm5_model._indexed_sdpa() is None:
         pytest.skip("mlx-kquant sdpa_fa_indexed unavailable here")
@@ -1025,7 +1025,7 @@ def test_indexer_decode_route_agrees_with_inline(monkeypatch, length):
     for arm in ("kq", "inline"):
         monkeypatch.setitem(glm5_model._INDEXER_DECODE_STATE, "ok",
                             arm == "kq")
-        pool = PoolingCache(4, lookback=False)
+        pool = DS4PoolingCache(4, lookback=False)
         assert idx(x, qr, pool, 0, T) is not None      # prefill, inline (L > 4)
         sel = idx(xs, qs, pool, T, T + length)
         mx.eval(sel)

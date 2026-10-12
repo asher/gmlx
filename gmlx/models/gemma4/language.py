@@ -1,0 +1,1050 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
+# Portions copyright (c) 2025 Prince Canuma (mlx-vlm, MIT)
+# Vendored from mlx-vlm 0.7.3, mlx_vlm/models/gemma4/language.py.
+# Source sha256: 1f6d82773bda18dcdeb233d509650b3e3c729e34409ebe1cadc689f6b16da54b
+"""mlx-vlm 0.7.3 Gemma 4 text model, owned by gmlx.
+
+All of ``mlx_vlm/models/gemma4/language.py``. Edits to the upstream file:
+imports are absolute, and the cache classes, the masks and the SDPA come
+from gmlx.cache. ``Experts`` builds mlx-lm's ``SwitchGLU``, which routes
+a block of positions with one gather per projection at every width. The
+exact speculative verifier is not vendored: ``speculative_verify`` is
+still taken from the call's keywords, and a config that sets
+``exact_speculative_verify`` is refused. The text model takes
+``keep_last`` and runs every layer after its last cache write on the kept
+columns. Comments are ASCII. Each gmlx change past the imports carries a
+comment where it sits.
+"""
+
+from functools import partial
+from typing import Any, List, Optional
+
+import mlx.core as mx
+import mlx.nn as nn
+from mlx.nn import RMSNorm
+
+from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
+from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
+from gmlx._vendor.mlx_vlm.models.rope_utils import initialize_rope
+
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import KVCache, RotatingKVCache, create_causal_mask
+
+# gmlx: the attention dispatch, whose claims run before the base.
+from .dispatch import scaled_dot_product_attention
+
+
+@partial(mx.compile, shapeless=True)
+def geglu(gate, x):
+    return nn.gelu_approx(gate) * x
+
+
+class RMSNormNoScale(nn.Module):
+    """RMSNorm without learnable scale (with_scale=False, scale_shift=0.0)."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.rms_norm(x, None, self.eps)
+
+
+class RMSNormZeroShift(nn.Module):
+    """Gemma4 RMSNorm with scale_shift=0.0 (weight used directly, no +1 offset)."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = mx.ones((dim,))
+        self.eps = eps
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.rms_norm(x, self.weight, self.eps)
+
+
+# gmlx: the softcap runs in float32 and returns float32 logits. At the
+# activation dtype each bfloat16 logit rounds by up to softcap * eps, enough
+# to flip a near tie.
+def logit_softcap(softcap, x):
+    return mx.tanh(x.astype(mx.float32) / softcap) * softcap
+
+
+class MLP(nn.Module):
+    def __init__(self, config: TextConfig, layer_idx: int = 0):
+        super().__init__()
+        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
+            config, "num_kv_shared_layers", 0
+        )
+        is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx > 0
+        use_double_wide = (
+            getattr(config, "use_double_wide_mlp", False) and is_kv_shared_layer
+        )
+        intermediate_size = config.intermediate_size * (2 if use_double_wide else 1)
+
+        self.gate_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, config.hidden_size, bias=False)
+        self.up_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.down_proj(geglu(self.gate_proj(x), self.up_proj(x)))
+
+
+class Router(nn.Module):
+    """Expert router: norm -> scale -> project -> top-k -> renormalize."""
+
+    def __init__(self, config: TextConfig):
+        super().__init__()
+        self.config = config
+        self.eps = config.rms_norm_eps
+        self.proj = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        self.scale = mx.ones((config.hidden_size,))
+        self.per_expert_scale = mx.ones((config.num_experts,))
+        self._root_size = config.hidden_size**-0.5
+
+    def __call__(self, x: mx.array):
+        x = mx.fast.rms_norm(x, self.scale * self._root_size, self.eps)
+
+        expert_scores = self.proj(x)
+
+        top_k_indices = mx.argpartition(
+            expert_scores, kth=-self.config.top_k_experts, axis=-1
+        )
+        top_k_indices = top_k_indices[..., -self.config.top_k_experts :]
+
+        top_k_weights = mx.take_along_axis(expert_scores, top_k_indices, axis=-1)
+        top_k_weights = mx.softmax(top_k_weights, axis=-1)
+        top_k_weights = top_k_weights * self.per_expert_scale[top_k_indices]
+
+        return top_k_indices, top_k_weights
+
+
+class GeGLU(nn.Module):
+    """GELU-gated linear unit activation for SwitchGLU."""
+
+    def __call__(self, x, gate):
+        return geglu(gate, x)
+
+
+class Experts(nn.Module):
+    """Sparse MoE using SwitchGLU with gather_mm."""
+
+    def __init__(self, config: TextConfig):
+        super().__init__()
+        # gmlx: mlx-lm's SwitchGLU takes a verify block in one gather.
+        from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+        self.switch_glu = SwitchGLU(
+            input_dims=config.hidden_size,
+            hidden_dims=config.moe_intermediate_size,
+            num_experts=config.num_experts,
+            activation=GeGLU(),
+            bias=False,
+        )
+
+    def __call__(
+        self, x: mx.array, top_k_indices: mx.array, top_k_weights: mx.array
+    ) -> mx.array:
+        w = mx.expand_dims(top_k_weights, -1)
+        y = self.switch_glu(x, top_k_indices)
+        return (w * y).sum(-2)
+
+
+class Attention(nn.Module):
+    def __init__(
+        self,
+        config: TextConfig,
+        layer_idx: int,
+        kv_shared_only: bool = False,
+    ):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.layer_type = config.layer_types[layer_idx]
+        self.is_sliding = self.layer_type == "sliding_attention"
+        self.kv_shared_only = kv_shared_only
+
+        self.head_dim = (
+            config.global_head_dim
+            if self.layer_type == "full_attention"
+            and hasattr(config, "global_head_dim")
+            and config.global_head_dim
+            else config.head_dim
+        )
+
+        dim = config.hidden_size
+        self.n_heads = config.num_attention_heads
+
+        # K-eq-V for full attention layers (26B/31B models)
+        self.use_k_eq_v = (
+            getattr(config, "attention_k_eq_v", False) and not self.is_sliding
+        )
+        if self.use_k_eq_v and config.num_global_key_value_heads is not None:
+            self.n_kv_heads = config.num_global_key_value_heads
+        else:
+            self.n_kv_heads = config.num_key_value_heads
+
+        self.scale = 1.0
+
+        self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
+        if not kv_shared_only:
+            self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
+            if not self.use_k_eq_v:
+                self.v_proj = nn.Linear(
+                    dim, self.n_kv_heads * self.head_dim, bias=False
+                )
+        self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
+
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        if not kv_shared_only:
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            self.v_norm = RMSNormNoScale(self.head_dim, eps=config.rms_norm_eps)
+
+        # RoPE (with partial rotation support)
+        layer_key = "sliding_attention" if self.is_sliding else "full_attention"
+        rope_params = config.rope_parameters.get(layer_key, {})
+        rope_theta = rope_params.get("rope_theta", 10000.0)
+
+        self.rope = initialize_rope(
+            dims=self.head_dim,
+            traditional=config.rope_traditional,
+            base=rope_theta,
+            scaling_config=rope_params,
+            max_position_embeddings=config.max_position_embeddings,
+        )
+
+        # KV sharing (2B/4B models)
+        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
+            config, "num_kv_shared_layers", 0
+        )
+        self.is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx > 0
+
+    def __call__(
+        self,
+        x: mx.array,
+        mask: Optional[mx.array] = None,
+        cache: Optional[Any] = None,
+        shared_kv: Optional[tuple] = None,
+        offset: Optional[Any] = None,
+        keep_last: Optional[int] = None,
+    ) -> mx.array:
+        B, L, _ = x.shape
+        # gmlx: keep_last runs the queries, and so the output, on the last
+        # keep_last columns. Keys and values still come from all L.
+        xq = x if keep_last is None else x[:, -keep_last:, :]
+        Lq = xq.shape[1]
+
+        queries = self.q_proj(xq).reshape(B, Lq, self.n_heads, self.head_dim)
+        queries = self.q_norm(queries)
+
+        if shared_kv is not None:
+            keys, values = shared_kv
+        else:
+            keys = self.k_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
+
+            # k_eq_v: values from raw k_proj (before k_norm)
+            if self.use_k_eq_v:
+                values = keys
+            else:
+                values = self.v_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
+
+            # gmlx: an int offset reaches rope as is, with no device upload.
+            # An array offset is copied, since update_and_fetch advances
+            # cache.offset in place between the key rope and the query rope.
+            offset = cache.offset if cache is not None else 0
+            if isinstance(offset, mx.array):
+                offset = mx.array(offset)
+
+            keys = self.k_norm(keys)
+            keys = keys.transpose(0, 2, 1, 3)
+            keys = self.rope(keys, offset=offset)
+
+            values = self.v_norm(values)
+            values = values.transpose(0, 2, 1, 3)
+
+            if cache is not None:
+                keys, values = cache.update_and_fetch(keys, values)
+
+        queries = queries.transpose(0, 2, 1, 3)
+        queries = self.rope(
+            queries, offset=offset if Lq == L else offset + (L - Lq)
+        )
+
+        output = scaled_dot_product_attention(
+            queries, keys, values, cache=cache, scale=self.scale, mask=mask
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(B, Lq, -1)
+
+        return self.o_proj(output), (keys, values), offset
+
+
+class DecoderLayer(nn.Module):
+    def __init__(
+        self,
+        config: TextConfig,
+        layer_idx: int,
+        kv_shared_only: bool = False,
+    ):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.layer_type = config.layer_types[layer_idx]
+        self.self_attn = Attention(config, layer_idx, kv_shared_only=kv_shared_only)
+        self.mlp = MLP(config, layer_idx)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.pre_feedforward_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+
+        # MoE (26B model)
+        self.enable_moe = getattr(config, "enable_moe_block", False)
+        if self.enable_moe:
+            self.router = Router(config)
+            self.experts = Experts(config)
+            self.post_feedforward_layernorm_1 = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.post_feedforward_layernorm_2 = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.pre_feedforward_layernorm_2 = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+
+        # Per-layer input gating (2B/4B models)
+        self.hidden_size_per_layer_input = getattr(
+            config, "hidden_size_per_layer_input", 0
+        )
+        if self.hidden_size_per_layer_input:
+            self.per_layer_input_gate = nn.Linear(
+                config.hidden_size, self.hidden_size_per_layer_input, bias=False
+            )
+            self.per_layer_projection = nn.Linear(
+                self.hidden_size_per_layer_input, config.hidden_size, bias=False
+            )
+            self.post_per_layer_input_norm = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+        else:
+            self.per_layer_input_gate = None
+            self.per_layer_projection = None
+            self.post_per_layer_input_norm = None
+
+        # Layer scalar (all text layers)
+        self.layer_scalar = mx.ones((1,))
+
+    def __call__(
+        self,
+        x: mx.array,
+        mask: Optional[mx.array] = None,
+        cache: Optional[Any] = None,
+        per_layer_input: Optional[mx.array] = None,
+        shared_kv: Optional[tuple] = None,
+        offset: Optional[Any] = None,
+        keep_last: Optional[int] = None,
+    ) -> mx.array:
+        # gmlx: keep_last writes the cache from all columns and runs the
+        # rest of the layer on the last keep_last.
+        if keep_last is None:
+            residual = x
+            kept = {}
+        else:
+            residual = x[:, -keep_last:, :]
+            kept = {"keep_last": keep_last}
+
+        h = self.input_layernorm(x)
+        h, shared_kv, offset = self.self_attn(
+            h, mask, cache, shared_kv=shared_kv, offset=offset, **kept
+        )
+        h = self.post_attention_layernorm(h)
+        h = residual + h
+
+        residual = h
+
+        if self.enable_moe:
+            h1 = self.pre_feedforward_layernorm(h)
+            h1 = self.mlp(h1)
+            h1 = self.post_feedforward_layernorm_1(h1)
+
+            top_k_indices, top_k_weights = self.router(h)
+            h2 = self.pre_feedforward_layernorm_2(h)
+            h2 = self.experts(h2, top_k_indices, top_k_weights)
+            h2 = self.post_feedforward_layernorm_2(h2)
+
+            h = h1 + h2
+        else:
+            h = self.pre_feedforward_layernorm(h)
+            h = self.mlp(h)
+
+        h = self.post_feedforward_layernorm(h)
+        h = residual + h
+
+        # Per-layer input gating
+        if (
+            self.per_layer_input_gate is not None
+            and self.per_layer_projection is not None
+            and self.post_per_layer_input_norm is not None
+            and per_layer_input is not None
+        ):
+            residual = h
+            gate = self.per_layer_input_gate(h)
+            gate = nn.gelu_approx(gate)
+            gate = mx.multiply(gate, per_layer_input)
+            gate = self.per_layer_projection(gate)
+            gate = self.post_per_layer_input_norm(gate)
+            h = residual + gate
+
+        if self.layer_scalar is not None:
+            h = h * self.layer_scalar
+
+        return h, shared_kv, offset
+
+
+# gmlx: the sliding mask probe without a host sync. An int offset is
+# compared on the host. An array offset is assumed to have a prefix, since
+# probing it syncs. The array mask is also right at offset 0.
+def _cache_has_prefix(c) -> bool:
+    off = getattr(c, "offset", 0)
+    if isinstance(off, mx.array):
+        return True
+    try:
+        return int(off) > 0
+    except (TypeError, ValueError):
+        return True
+
+
+# gmlx: the columns a cache has taken, counted on the host. int() of a
+# batch cache's array offset syncs at B=1 and raises at B>1, so a batch
+# cache gives its host count: _offset for BatchRotatingKVCache, whose _idx
+# is its buffer position, and _idx for BatchKVCache. Both count the left
+# padding, as the prompt's columns do.
+def _cache_columns(c) -> int:
+    if isinstance(c.offset, mx.array):
+        for name in ("_offset", "_idx"):
+            n = getattr(c, name, None)
+            if isinstance(n, int):
+                return n
+    return int(c.offset)
+
+
+# gmlx: the token types of an n-column chunk. A caller that passes the
+# whole prompt's types with every chunk (mlx-vlm's generate_step) gets them
+# sliced at the cache offset, and None when they cannot be aligned.
+def _chunk_token_types(token_types, n, cache):
+    if token_types is None or token_types.shape[1] == n:
+        return token_types
+    offset = next(
+        (c.offset for c in cache if c is not None and hasattr(c, "offset")), None
+    )
+    if isinstance(offset, int) and offset + n <= token_types.shape[1]:
+        return token_types[:, offset : offset + n]
+    return None
+
+
+class Gemma4TextModel(nn.Module):
+    def __init__(self, config: TextConfig, kv_shared_only: bool = False):
+        super().__init__()
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.window_size = config.sliding_window
+        self.sliding_window_pattern = config.sliding_window_pattern
+        self.num_hidden_layers = config.num_hidden_layers
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.embed_scale = config.hidden_size**0.5
+        num_kv_shared = getattr(config, "num_kv_shared_layers", 0)
+        first_kv_shared = config.num_hidden_layers - num_kv_shared
+        self.layers = [
+            DecoderLayer(
+                config,
+                layer_idx=i,
+                kv_shared_only=kv_shared_only
+                or (num_kv_shared > 0 and i >= first_kv_shared),
+            )
+            for i in range(config.num_hidden_layers)
+        ]
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.first_kv_shared_layer_idx = first_kv_shared
+        self.previous_kvs = list(range(len(self.layers)))
+        if num_kv_shared > 0:
+            N = len(self.layers)
+            M = N - num_kv_shared
+            kvs_by_type = {}
+            for i in range(M):
+                kvs_by_type[self.layers[i].layer_type] = i
+            for j in range(M, N):
+                self.previous_kvs[j] = kvs_by_type[self.layers[j].layer_type]
+
+        # Per-layer input embeddings (2B/4B models)
+        self.hidden_size_per_layer_input = config.hidden_size_per_layer_input
+        if self.hidden_size_per_layer_input:
+            self.embed_tokens_per_layer = nn.Embedding(
+                config.vocab_size_per_layer_input,
+                config.num_hidden_layers * config.hidden_size_per_layer_input,
+            )
+            self.embed_tokens_per_layer_scale = config.hidden_size_per_layer_input**0.5
+            self.per_layer_input_scale = 2.0**-0.5
+            self.per_layer_projection_scale = config.hidden_size**-0.5
+            self.per_layer_model_projection = nn.Linear(
+                config.hidden_size,
+                config.num_hidden_layers * config.hidden_size_per_layer_input,
+                bias=False,
+            )
+            self.per_layer_projection_norm = RMSNormZeroShift(
+                config.hidden_size_per_layer_input, eps=config.rms_norm_eps
+            )
+        else:
+            self.embed_tokens_per_layer = None
+            self.per_layer_input_scale = None
+            self.per_layer_projection_scale = None
+            self.per_layer_model_projection = None
+            self.per_layer_projection_norm = None
+
+    def get_per_layer_inputs(self, input_ids: mx.array) -> mx.array:
+        result = self.embed_tokens_per_layer(input_ids)
+        result = result * self.embed_tokens_per_layer_scale
+        return result.reshape(
+            *input_ids.shape,
+            self.config.num_hidden_layers,
+            self.hidden_size_per_layer_input,
+        )
+
+    def project_per_layer_inputs(
+        self,
+        inputs_embeds: mx.array,
+        per_layer_inputs: Optional[mx.array] = None,
+    ) -> mx.array:
+        per_layer_projection = self.per_layer_model_projection(inputs_embeds)
+        per_layer_projection = per_layer_projection * self.per_layer_projection_scale
+        per_layer_projection = per_layer_projection.reshape(
+            *inputs_embeds.shape[:-1],
+            self.config.num_hidden_layers,
+            self.hidden_size_per_layer_input,
+        )
+        per_layer_projection = self.per_layer_projection_norm(per_layer_projection)
+
+        if per_layer_inputs is None:
+            return per_layer_projection
+
+        return (per_layer_projection + per_layer_inputs) * self.per_layer_input_scale
+
+    def _block_sequence_ids_for_mask(self, mm_token_type_ids: mx.array) -> mx.array:
+        is_vision = (mm_token_type_ids == 1) | (mm_token_type_ids == 2)
+        prev = mx.concatenate(
+            [
+                mx.zeros_like(is_vision[:, :1]),
+                is_vision[:, :-1],
+            ],
+            axis=1,
+        )
+        starts = is_vision & ~prev
+        group_ids = mx.cumsum(starts.astype(mx.int32), axis=1) - 1
+        return mx.where(is_vision, group_ids, mx.zeros_like(group_ids) - 1)
+
+    def _apply_blockwise_bidirectional_overlay(
+        self,
+        base_mask: mx.array,
+        mm_token_type_ids: mx.array,
+    ) -> mx.array:
+        # gmlx: the sliding-layer overlay. base_mask is (..., n, cached + n)
+        # for an n-column chunk, and each block token sees the keys of its
+        # block among the trailing n columns inside the window: key k is
+        # visible from query q when k > q - window.
+        if mm_token_type_ids is None:
+            return base_mask
+        n = mm_token_type_ids.shape[1]
+        if base_mask.shape[-2] != n or base_mask.shape[-1] < n:
+            return base_mask
+
+        block_sequence_ids = self._block_sequence_ids_for_mask(mm_token_type_ids)
+        q_blocks = mx.expand_dims(block_sequence_ids, -1)
+        k_blocks = mx.expand_dims(block_sequence_ids, -2)
+        same_block = (q_blocks != -1) & (q_blocks == k_blocks)
+        pos = mx.arange(n)
+        same_block = same_block & (pos[None, :] > pos[:, None] - self.window_size)
+        cached = base_mask.shape[-1] - n
+        if cached:
+            same_block = mx.concatenate(
+                [mx.zeros((same_block.shape[0], n, cached), dtype=mx.bool_), same_block],
+                axis=-1,
+            )
+        return base_mask | mx.expand_dims(same_block, 1)
+
+    def _kept_from(self, h, cache, keep_last):
+        # gmlx: the first layer that runs only the kept columns, when the
+        # caller keeps fewer columns than the forward runs. That is the
+        # last KV-writing layer when its cache holds plain keys and
+        # values, else the first KV-shared layer.
+        if not keep_last or h.shape[1] <= keep_last:
+            return None
+        first_shared = self.first_kv_shared_layer_idx
+        c = cache[first_shared - 1] if first_shared > 0 else None
+        if (c is not None and not hasattr(c, "bits")
+                and getattr(c, "kv_quant_scheme", None) is None):
+            return first_shared - 1
+        if first_shared < len(self.layers):
+            return first_shared
+        return None
+
+    def _kept_masks(self, masks, trim, keep_last):
+        # gmlx: from the trim on, each layer takes the last keep_last rows
+        # of its mask. One sliced mask per mask object, so the layers of a
+        # type still share one. A string mask is end aligned and stands.
+        rows = {}
+        kept = []
+        for m in masks[trim:]:
+            if isinstance(m, mx.array):
+                m = rows.setdefault(id(m), m[..., -keep_last:, :])
+            kept.append(m)
+        return masks[:trim] + kept
+
+    def _make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = None):
+        """Create attention masks, deduplicated by layer type."""
+        mask = {}
+        masks = []
+        # gmlx: under bidirectional vision the block overlay goes on the
+        # sliding layers only, inside the window, and full attention stays
+        # causal, as in transformers and llama.cpp. The token types are the
+        # chunk's, and the visual token check syncs only for a chunk that
+        # carries them under bidirectional vision.
+        mm_token_type_ids = _chunk_token_types(mm_token_type_ids, h.shape[1], cache)
+        # Audio spans are sequential; keep mixed image+audio prompts causal to
+        # avoid the vision block overlay dominating quantized unified models.
+        use_bidirectional_vision = (
+            getattr(self.config, "use_bidirectional_attention", None) == "vision"
+            and mm_token_type_ids is not None
+            and h.shape[1] > 1
+            and int(mx.sum((mm_token_type_ids == 1) | (mm_token_type_ids == 2)).item())
+            > 0
+        )
+        for l, c in zip(self.layers, cache):
+            if l.layer_type not in mask:
+                if l.layer_type == "full_attention":
+                    # Full attention can use MLX's causal mask even when
+                    # prefilling against an existing KV prefix. Only materialize
+                    # a mask for batch left-padding.
+                    return_array = getattr(c, "left_padding", None) is not None
+                    mask["full_attention"] = create_attention_mask(
+                        h, c, return_array=return_array
+                    )
+                elif l.layer_type == "sliding_attention":
+                    # gmlx: no .item() on the cache offset.
+                    return_array = (
+                        h.shape[1] > 1 and c is not None and _cache_has_prefix(c)
+                    ) or use_bidirectional_vision
+                    mask["sliding_attention"] = create_attention_mask(
+                        h, c, window_size=self.window_size, return_array=return_array
+                    )
+                if (
+                    use_bidirectional_vision
+                    and l.layer_type == "sliding_attention"
+                    and isinstance(mask[l.layer_type], str)
+                    and mask[l.layer_type] == "causal"
+                ):
+                    mask[l.layer_type] = create_causal_mask(
+                        h.shape[1], window_size=self.window_size
+                    )
+                if (
+                    use_bidirectional_vision
+                    and l.layer_type == "sliding_attention"
+                    and isinstance(mask[l.layer_type], mx.array)
+                ):
+                    mask[l.layer_type] = self._apply_blockwise_bidirectional_overlay(
+                        mask[l.layer_type],
+                        mm_token_type_ids,
+                    )
+            masks.append(mask[l.layer_type])
+        return masks
+
+    def __call__(
+        self,
+        inputs: mx.array = None,
+        inputs_embeds: Optional[mx.array] = None,
+        mask: Optional[mx.array] = None,
+        cache=None,
+        per_layer_inputs: Optional[mx.array] = None,
+        mm_token_type_ids: Optional[mx.array] = None,
+        token_type_ids: Optional[mx.array] = None,
+        capture_layer_ids: Optional[List[int]] = None,
+        hidden_sink: Optional[list] = None,
+        shared_kv_sink: Optional[dict] = None,
+        logits_to_keep: Optional[int] = None,
+        keep_last: Optional[int] = None,
+        **kwargs,
+    ):
+        if inputs_embeds is None:
+            h = self.embed_tokens(inputs)
+            h = h * self.embed_scale
+        else:
+            h = inputs_embeds
+
+        # Per-layer inputs (2B/4B models)
+        if self.hidden_size_per_layer_input:
+            if inputs is not None and per_layer_inputs is None:
+                per_layer_inputs = self.get_per_layer_inputs(inputs)
+            elif per_layer_inputs is not None:
+                target_len = h.shape[1]
+                if per_layer_inputs.shape[1] != target_len:
+                    # gmlx: the column count, with no sync on a batch cache.
+                    cache_offset = next(
+                        (
+                            _cache_columns(c)
+                            for c in (cache or [])
+                            if c is not None and hasattr(c, "offset")
+                        ),
+                        0,
+                    )
+                    max_start = max(per_layer_inputs.shape[1] - target_len, 0)
+                    start = min(cache_offset, max_start)
+                    per_layer_inputs = per_layer_inputs[:, start : start + target_len]
+            if per_layer_inputs is not None or inputs is not None:
+                per_layer_inputs = self.project_per_layer_inputs(h, per_layer_inputs)
+
+        # Build cache + masks
+        if cache is None:
+            cache = [None] * len(self.layers)
+        else:
+            cache = cache + [None] * (len(self.layers) - len(cache))
+
+        if mask is None:
+            if mm_token_type_ids is None:
+                mm_token_type_ids = token_type_ids
+            masks = self._make_masks(h, cache, mm_token_type_ids)
+        else:
+            masks = [mask] * len(self.layers)
+
+        # Forward through layers
+        if per_layer_inputs is not None:
+            per_layer_inputs = [
+                per_layer_inputs[:, :, i, :] for i, _ in enumerate(self.layers)
+            ]
+        else:
+            per_layer_inputs = [None] * len(self.layers)
+
+        capture_set = set(capture_layer_ids) if capture_layer_ids else set()
+        keep = int(logits_to_keep) if logits_to_keep else 0
+        trim_before_layer = self.first_kv_shared_layer_idx
+        if hidden_sink is not None:
+            if capture_set:
+                trim_before_layer = max(trim_before_layer, max(capture_set) + 1)
+            else:
+                # return_hidden without explicit capture ids records the final
+                # decoder output, whose historical full-width shape is public.
+                trim_before_layer = len(self.layers)
+        trimmed_prefix = 0
+        # gmlx: a caller that reads only the last keep_last columns gets
+        # them from the layers after the cache is written. The last
+        # KV-writing layer writes from all columns and runs the rest on
+        # the kept ones, and the KV-shared layers write no cache, so they
+        # run the kept columns alone, on the rows of the full masks and
+        # at the kept columns' positions. A call that records hidden
+        # states keeps the logits_to_keep trim.
+        kept_from = None
+        if keep_last and hidden_sink is not None:
+            keep = keep or int(keep_last)
+        elif keep_last and not keep:
+            keep_last = int(keep_last)
+            kept_from = self._kept_from(h, cache, keep_last)
+        kept_shift = 0 if kept_from is None else h.shape[1] - keep_last
+        if kept_from is not None:
+            masks = self._kept_masks(masks, kept_from, keep_last)
+        intermediates = [(None, None)] * len(self.layers)
+        for idx, (layer, c, m, prev_idx, pli) in enumerate(
+            zip(
+                self.layers,
+                cache,
+                masks,
+                self.previous_kvs,
+                per_layer_inputs,
+            )
+        ):
+            if 0 < keep < h.shape[1] and idx == trim_before_layer:
+                trimmed_prefix = h.shape[1] - keep
+                h = h[:, -keep:, :]
+            kvs, offset = intermediates[prev_idx]
+            kept = {}
+            if kept_from is not None and idx >= kept_from:
+                if idx < self.first_kv_shared_layer_idx:
+                    kept = {"keep_last": keep_last}
+                else:
+                    if idx == kept_from:
+                        h = h[:, -keep_last:, :]
+                    offset = offset + kept_shift
+                if pli is not None:
+                    pli = pli[:, -keep_last:, :]
+            else:
+                if pli is not None and pli.shape[1] != h.shape[1]:
+                    pli = pli[:, -h.shape[1] :, :]
+                if isinstance(m, mx.array) and m.shape[-2] != h.shape[1]:
+                    m = m[..., -h.shape[1] :, :]
+            if trimmed_prefix:
+                offset = offset + trimmed_prefix
+            h, kvs, offset = layer(
+                h, m, c, per_layer_input=pli, shared_kv=kvs, offset=offset, **kept
+            )
+            intermediates[idx] = (kvs, offset)
+            if hidden_sink is not None and idx in capture_set:
+                hidden_sink.append(h)
+
+        if shared_kv_sink is not None:
+            for idx, layer in enumerate(self.layers):
+                kvs, _ = intermediates[idx]
+                if kvs is not None:
+                    shared_kv_sink[layer.layer_type] = kvs
+
+        # Match HF's `_can_record_outputs={"hidden_states": Gemma4TextDecoderLayer}`
+        # so the recorded value is the LAST decoder layer's output, captured
+        # BEFORE the final RMSNorm. Speculative verification can reuse this
+        # hidden for deferred logits; MTP drafters normalize it via
+        # LanguageModel.speculative_draft_hidden before consuming it.
+        if hidden_sink is not None and not capture_set:
+            hidden_sink.append(h)
+
+        if kwargs.pop("skip_final_norm", False):
+            return h
+
+        h = self.norm(h)
+
+        return h
+
+
+class LanguageModel(nn.Module):
+    requires_uniform_batch_acceptance = True
+
+    def __init__(self, config: TextConfig):
+        super().__init__()
+        # gmlx: the exact speculative verifier is not vendored.
+        if getattr(config, "exact_speculative_verify", False):
+            raise ValueError(
+                "gmlx does not run the exact speculative verifier; the "
+                "config sets exact_speculative_verify"
+            )
+        self.config = config
+        self.model_type = config.model_type
+        self.model = Gemma4TextModel(config)
+        self.final_logit_softcapping = getattr(config, "final_logit_softcapping", None)
+
+    def logits_from_hidden(self, hidden: mx.array) -> mx.array:
+        logits = self.model.embed_tokens.as_linear(hidden)
+        if self.final_logit_softcapping is not None:
+            logits = logit_softcap(self.final_logit_softcapping, logits)
+        return logits
+
+    def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
+        return self.logits_from_hidden(self.model.norm(hidden))
+
+    def speculative_draft_hidden(self, hidden: mx.array) -> mx.array:
+        return self.model.norm(hidden)
+
+    # gmlx: the argmax of every verify position in one op, so the greedy
+    # verify walk takes no host sync per draft position.
+    def speculative_argmax_from_hidden(self, hidden: mx.array) -> mx.array:
+        return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
+
+    def chunked_prefill_policy(
+        self,
+        *,
+        input_ids=None,
+        inputs_embeds=None,
+        prompt_cache=None,
+        draft_model=None,
+        draft_kind=None,
+        prefill_kwargs=None,
+    ) -> bool:
+        del input_ids, inputs_embeds, prompt_cache
+        prefill_kwargs = prefill_kwargs or {}
+        # gmlx: every prompt chunks, images included, and nothing here
+        # syncs. The prefill loops keep each image or video block inside
+        # one chunk, and _make_masks puts the block on the chunk's sliding
+        # mask. There is no no_chunked_prefill to read.
+
+        if draft_model is not None:
+            return (
+                draft_kind == "mtp"
+                and bool(prefill_kwargs.get("return_hidden", False))
+                and bool(prefill_kwargs.get("return_shared_kv", False))
+            )
+
+        return True
+
+    def __call__(
+        self,
+        inputs: mx.array = None,
+        inputs_embeds: Optional[mx.array] = None,
+        mask: Optional[mx.array] = None,
+        cache=None,
+        per_layer_inputs: Optional[mx.array] = None,
+        capture_layer_ids: Optional[List[int]] = None,
+        **kwargs,
+    ):
+        # gmlx: the exact speculative verifier is not vendored.
+        kwargs.pop("speculative_verify", False)
+
+        hidden_sink: Optional[list] = (
+            []
+            if capture_layer_ids is not None or kwargs.pop("return_hidden", False)
+            else None
+        )
+        shared_kv_sink: Optional[dict] = (
+            {} if kwargs.pop("return_shared_kv", False) else None
+        )
+        # Allow callers to pass pre-allocated sinks directly.
+        hidden_sink = kwargs.pop("hidden_sink", hidden_sink)
+        shared_kv_sink = kwargs.pop("shared_kv_sink", shared_kv_sink)
+        logits_to_keep = kwargs.pop("logits_to_keep", None)
+        # gmlx: skip_logits leaves out the head, as in the qwen3_5 forward.
+        # speculative_logits_from_hidden projects the captured hidden.
+        skip_logits = kwargs.pop("skip_logits", False)
+
+        out = self.model(
+            inputs,
+            inputs_embeds=inputs_embeds,
+            mask=mask,
+            cache=cache,
+            per_layer_inputs=per_layer_inputs,
+            capture_layer_ids=capture_layer_ids,
+            hidden_sink=hidden_sink,
+            shared_kv_sink=shared_kv_sink,
+            logits_to_keep=logits_to_keep,
+            **kwargs,
+        )
+        if logits_to_keep:
+            out = out[:, -int(logits_to_keep) :, :]
+        out = None if skip_logits else self.logits_from_hidden(out)
+        return LanguageModelOutput(
+            logits=out,
+            hidden_states=hidden_sink,
+            shared_kv_states=shared_kv_sink,
+        )
+
+    def rollback_speculative_cache(
+        self,
+        caches: List[Any],
+        gdn_states: Any,
+        accepted: Any,
+        block_size: int,
+    ) -> int:
+        """Rewind target KV caches after a speculative-decoding round.
+
+        Gemma 4 has only KV/RotatingKV caches (no SSM/GDN), so this is a
+        simple trim + per-row tail-zero. ``gdn_states`` is accepted (and
+        ignored) for API parity with qwen3_5's hook.
+        """
+        del gdn_states  # API-parity placeholder; Gemma 4 has no SSM/GDN state.
+        if isinstance(accepted, int):
+            accepted = mx.array([accepted])
+        if isinstance(accepted, (list, tuple)):
+            accepted = mx.array(accepted, dtype=mx.int32)
+
+        max_a = int(accepted.max().item())
+        n = max_a + 1
+        trim = block_size - n
+        is_batch = accepted.size > 1
+        valid_ends = accepted + 1
+
+        for c in caches:
+            if c is None:
+                continue
+
+            if trim > 0 and hasattr(c, "trim"):
+                c.trim(trim)
+            if is_batch and hasattr(c, "_idx") and c.keys is not None and max_a > 0:
+                kv_len = c._idx
+                ve = valid_ends.tolist()
+                verify_start = kv_len - n
+                if any(
+                    verify_start + int(ve[bi]) < kv_len
+                    for bi in range(accepted.shape[0])
+                ):
+                    raise RuntimeError(
+                        "Gemma 4 batched speculative rollback requires uniform "
+                        f"per-row acceptance; got ragged accepts {accepted.tolist()}. "
+                        "Zeroing a rejected row's KV tail leaves phantom keys "
+                        "attended (issue #1962); set "
+                        "requires_uniform_batch_acceptance on the drafter or target "
+                        "so accepts are clamped before rollback."
+                    )
+        return max_a
+
+    def sanitize(self, weights):
+        sanitized = {}
+        for k, v in weights.items():
+            if "self_attn.rotary_emb" in k:
+                continue
+            if self._is_unused_shared_kv_weight(k):
+                continue
+            if any(
+                s in k for s in ["input_max", "input_min", "output_max", "output_min"]
+            ):
+                if "vision_tower" not in k and "audio_tower" not in k:
+                    continue
+            sanitized[k] = v
+        return sanitized
+
+    def _is_unused_shared_kv_weight(self, key: str) -> bool:
+        prefix = "language_model.model.layers."
+        if not key.startswith(prefix):
+            return False
+
+        parts = key[len(prefix) :].split(".")
+        if len(parts) < 4 or parts[1] != "self_attn":
+            return False
+
+        try:
+            layer_idx = int(parts[0])
+        except ValueError:
+            return False
+        if layer_idx >= len(self.model.layers):
+            return False
+
+        attn = self.model.layers[layer_idx].self_attn
+        if not getattr(attn, "is_kv_shared_layer", False):
+            return False
+
+        return parts[2] in {"k_proj", "v_proj", "k_norm", "v_norm"}
+
+    @property
+    def layers(self):
+        return self.model.layers
+
+    @property
+    def head_dim(self):
+        return self.config.head_dim
+
+    @property
+    def n_kv_heads(self):
+        return self.config.num_key_value_heads
+
+    @property
+    def quant_predicate(self):
+        def predicate(path, m):
+            if not hasattr(m, "to_quantized"):
+                return False
+            if "router" in path:
+                return {"group_size": 64, "bits": 8}
+            return True
+
+        return predicate
+
+    def make_cache(self):
+        caches = []
+        for layer_type in self.config.layer_types[
+            : self.model.first_kv_shared_layer_idx
+        ]:
+            if layer_type == "full_attention":
+                caches.append(KVCache())
+            else:
+                caches.append(
+                    RotatingKVCache(
+                        max_size=self.config.sliding_window,
+                        keep=0,
+                    )
+                )
+        return caches

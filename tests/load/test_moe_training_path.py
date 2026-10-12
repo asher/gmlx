@@ -9,7 +9,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.load.modules as modules
 

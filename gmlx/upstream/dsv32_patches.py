@@ -45,7 +45,7 @@ def _dsv32_mask_decode_call(self, x, mask=None, cache=None):
     if not getattr(self, "_dsv32_mask_decode", False):
         return _MASK_DECODE_PATCH.stock(self, x, mask, cache)
 
-    from mlx_lm.models.base import scaled_dot_product_attention
+    from gmlx.cache.attention import scaled_dot_product_attention
 
     B, L, D = x.shape
 
@@ -121,7 +121,7 @@ def _patch_dsv32_mask_decode(model) -> None:
     GMLX_DSV32_MASK_DECODE=1."""
     if not env_bool("GMLX_DSV32_MASK_DECODE", False):
         return
-    from mlx_lm.models.deepseek_v32 import DeepseekV32Attention
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import DeepseekV32Attention
 
     _MASK_DECODE_PATCH.install(
         DeepseekV32Attention, "__call__", _dsv32_mask_decode_call)
@@ -160,8 +160,8 @@ def _patch_dsv32_indexer_rope(model) -> None:
     GMLX_DSV32_INDEXER_ROPE=0."""
     if not env_bool("GMLX_DSV32_INDEXER_ROPE", True):
         return
-    from mlx_lm.models.deepseek_v32 import DeepseekV32Attention, Indexer
-    from mlx_lm.models.rope_utils import initialize_rope
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import DeepseekV32Attention, Indexer
+    from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
 
     cfg = None
     for m in model.modules():
@@ -317,7 +317,7 @@ def _patch_dsv32_indexer_fp32(model) -> None:
     model's instances. Kill with GMLX_DSV32_INDEXER_FP32=0."""
     if not env_bool("GMLX_DSV32_INDEXER_FP32", True):
         return
-    from mlx_lm.models.deepseek_v32 import Indexer
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import Indexer
 
     _INDEXER_FP32_PATCH.install(Indexer, "__call__", _dsv32_indexer_fp32_call)
     # Force-keep budget for the sparse path: retain the attention-sink + a recent
@@ -360,7 +360,7 @@ def _dsv32_moe_gate_fp32_call(self, x):
     if not getattr(self, "_dsv32_gate_fp32", False):
         return _GATE_FP32_PATCH.stock(self, x)
 
-    from mlx_lm.models.deepseek_v32 import group_expert_select
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import group_expert_select
 
     return group_expert_select(
         x.astype(mx.float32) @ self.weight.T.astype(mx.float32),
@@ -380,7 +380,7 @@ def _patch_dsv32_moe_gate_fp32(model) -> None:
     instances. Kill with GMLX_DSV32_GATE_FP32=0."""
     if not env_bool("GMLX_DSV32_GATE_FP32", True):
         return
-    from mlx_lm.models.deepseek_v32 import MoEGate
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import MoEGate
 
     _GATE_FP32_PATCH.install(MoEGate, "__call__", _dsv32_moe_gate_fp32_call)
     n = 0
@@ -412,7 +412,7 @@ def _dsv32_moe_scores_call(self, x):
     if not getattr(self, "_dsv32_moe_scores", False):
         return _MOE_SCORES_PATCH.stock(self, x)
 
-    from mlx_lm.models.deepseek_v32 import sum_gradients
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import sum_gradients
 
     if self.sharding_group is not None:
         x = sum_gradients(self.sharding_group)(x)
@@ -442,7 +442,7 @@ def _patch_dsv32_moe_scores(model) -> None:
     flag) and flags this model's instances. Kill with GMLX_DSV32_MOE_MIX=0."""
     if not env_bool("GMLX_DSV32_MOE_MIX", True):
         return
-    from mlx_lm.models.deepseek_v32 import DeepseekV32MoE
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import DeepseekV32MoE
 
     _MOE_SCORES_PATCH.install(
         DeepseekV32MoE, "__call__", _dsv32_moe_scores_call)
@@ -478,7 +478,7 @@ def _patch_dsv32_dense_default(model) -> None:
             "remains). Dense (default, exact) - unset GMLX_DSV32_SPARSE to use it."
         )
         return
-    from mlx_lm.models.deepseek_v32 import Indexer
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import Indexer
 
     n = 0
     for m in model.modules():

@@ -59,7 +59,8 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     "gemma3n": "gemma3n",
     "gemma3": "gemma3_text",
     # EmbeddingGemma: gemma3 backbone run as a bidirectional encoder; built into
-    # the mlx-embeddings gemma3_text.Model by build_model's gemma_embedding branch.
+    # gmlx's own encoder (gmlx.models.embedders) by build_model's
+    # gemma_embedding branch.
     "gemma-embedding": "gemma_embedding",
     "qwen35": "qwen3_5",
     "qwen35moe": "qwen3_5_moe",
@@ -67,6 +68,12 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # attention + PLE n-gram embeddings; vendored gmlx.models.qwen4_exp.model.
     "qwen4exp": "qwen4_exp",
     "qwen3": "qwen3",
+    # Qwen3-VL dense text tower (run on Qwen3-VL-8B). The tensor layout is
+    # Qwen3 dense, and the rotary position has three axes. A text-only prompt
+    # puts the same position on every axis, which is the one-axis rope of the
+    # qwen3 class at the file's base, so it loads as qwen3. The vision tower
+    # (a separate mmproj) rides the VLM path as qwen3_vl.
+    "qwen3vl": "qwen3",
     "qwen3moe": "qwen3_moe",
     # Qwen3-VL / Qwen3-Omni text tower. Structurally a Qwen3-MoE (identical
     # tensor layout: qk-norm + stacked routed experts, no shared expert) plus
@@ -250,7 +257,8 @@ def _zero_count_guard(fn):
 
 
 @_zero_count_guard
-def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
+def synthesize_config(meta, tensor_shapes=None, *,
+                      rope_override=None) -> dict[str, Any]:
     """Build a config dict from GGUF metadata.
 
     Args:
@@ -262,6 +270,10 @@ def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
     Returns a dict shaped like a HuggingFace `config.json` for the relevant
     text-model class, ready to feed into mlx_lm's `_get_classes(config)` +
     `ModelArgs.from_dict(config)`.
+
+    ``rope_override`` (a ``RopeOverride``) defaults to the options of the
+    load in progress. The resolved rope scaling rides in the config
+    (``rope_scaling.from_config``) when it changes the rope.
     """
     if tensor_shapes is None:
         if not _is_reader(meta):
@@ -293,9 +305,27 @@ def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
 
     _add_universal_fields(meta, shapes, config, arch)
     synth(meta, shapes, config)
+    _add_rope_scaling(meta, config, arch, rope_override)
 
     _print_summary(config, arch)
     return config
+
+
+def _add_rope_scaling(meta, config: dict, arch: str, override) -> None:
+    from . import rope_scaling as rs
+
+    ov = override if override is not None else rs.active_override()
+    rs.require_wired(arch, ov)
+    trained = config.get("max_position_embeddings")
+    if trained is None and isinstance(config.get("text_config"), dict):
+        trained = config["text_config"].get("max_position_embeddings")
+    scaling = rs.resolve(meta, arch, ov, n_ctx_train=trained)
+    target = config.get("text_config") if (
+        "max_position_embeddings" not in config
+        and isinstance(config.get("text_config"), dict)) else config
+    rs.to_config(target, scaling)
+    if target is not config and scaling.active:
+        config[rs.CONFIG_KEY] = target[rs.CONFIG_KEY]
 
 
 # Universal field extraction
@@ -394,13 +424,25 @@ def _add_universal_fields(meta, shapes, config: dict, arch: str) -> None:
     # tied embeddings: present when the GGUF has no separate output.weight.
     config["tie_word_embeddings"] = not _has_tensor(shapes, "output.weight")
 
-    # vocab size
+    # vocab size: the token count. A header scan seeks past the token
+    # array, so the header-only synth takes the token_embd rows, which
+    # equal the token count.
     vocab_size = _array_len(meta, "tokenizer.ggml.tokens")
+    if vocab_size is None:
+        embd = shapes.get("token_embd.weight")
+        if embd is not None and len(embd) == 2:
+            vocab_size = int(embd[1])
     if vocab_size is not None:
         config["vocab_size"] = vocab_size
 
 
 # gemma4
+
+# The text synth sets no use_bidirectional_attention. A Gemma-4 VLM load sets
+# it from the mmproj's projector type and the text width (gmlx.load.vlm).
+# DiffusionGemma shares this synth and loads a TextConfig whose default is
+# "vision".
+
 
 def _synth_gemma4(meta, shapes, config: dict, arch: str = "gemma4") -> None:
     # `arch` is the GGUF metadata-key prefix. It is "gemma4" for a plain Gemma-4
@@ -737,11 +779,16 @@ def synthesize_gemma4_assistant_config(meta, tensor_shapes=None) -> dict[str, An
 
 # qwen3
 
-def _synth_qwen3(meta, shapes, config: dict) -> None:
+def _synth_qwen3(meta, shapes, config: dict, arch: str = "qwen3") -> None:
     """Synthesize a qwen3 config. Universal fields cover everything; this
     function handles rope_scaling passthrough so mlx_lm's initialize_rope
-    doesn't see unexpected keys."""
-    arch = "qwen3"
+    doesn't see unexpected keys.
+
+    ``arch`` selects the GGUF metadata key prefix: ``qwen3`` for Qwen3 dense,
+    or ``qwen3vl`` for the Qwen3-VL dense text tower. The text config carries
+    no ``rope.dimension_sections``: with one position on all three axes the
+    sections select the same angle for every frequency, so the qwen3 class's
+    one-axis rope is exact. The VLM config synth reads the sections."""
     rope_scaling_type = _read_string(meta, f"{arch}.rope.scaling.type")
     if rope_scaling_type is not None and rope_scaling_type != "none":
         rp: dict[str, Any] = {"type": rope_scaling_type, "rope_type": rope_scaling_type}
@@ -913,14 +960,25 @@ def _synth_gemma_embedding(meta, shapes, config: dict) -> None:
     'gemma-embedding' key prefix (same query scaling / sliding-window interleave /
     local rope). ``model_type`` stays 'gemma_embedding' (set by synthesize_config
     from GGUF_ARCH_TO_MODEL_TYPE) so build_model routes the encoder branch; the
-    backbone ModelArgs is mlx-lm gemma3_text's. The mlx-embeddings Model derives
-    its mean-pool + 2-layer dense head from hidden_size, so no head dims are
-    emitted here. ``pooling_type`` / ``attention.causal`` are surfaced for the
-    record (gemma3_text.ModelArgs ignores them); the encoder always mean-pools
-    under a full bidirectional mask.
+    backbone ModelArgs is mlx-lm gemma3_text's. ``dense_dims`` lists the output
+    widths of the dense head (``dense_2`` then ``dense_3``), from the tensor
+    shapes or the ``dense_*_feat_out`` keys; absent, the encoder defaults to the
+    EmbeddingGemma head (4 * hidden, hidden). ``pooling_type`` /
+    ``attention.causal`` are surfaced for the record (the encoder ignores them);
+    it always mean-pools under the bidirectional masks.
     """
     arch = "gemma-embedding"
     _synth_gemma3(meta, shapes, config, arch=arch)
+    dense_dims = []
+    for n in (2, 3):
+        shape = shapes.get(f"dense_{n}.weight")
+        out = (shape[1] if shape and len(shape) == 2
+               else _read_int(meta, f"{arch}.dense_{n}_feat_out"))
+        if out is None:
+            break
+        dense_dims.append(int(out))
+    if dense_dims:
+        config["dense_dims"] = dense_dims
     pooling = _read_int(meta, f"{arch}.pooling_type")
     if pooling is not None:
         config["pooling_type"] = pooling
@@ -1944,9 +2002,8 @@ def _synth_qwen3next(meta, shapes, config: dict) -> None:
     split in_proj_qkv/in_proj_z Linears and skip the runtime reorder (the
     split tensor is the mixed_qkv the stock forward rebuilds).
 
-    V heads stay HF-grouped on the wire - the loader's qwen3.5 tiled-V patch
-    is explicitly not applied (see ``_needs_tiled_v_patch``); the config
-    carries ``kv_head_layout="grouped"`` to document that.
+    V heads stay HF-grouped on the wire (see ``gguf_v_heads_tiled``); the
+    config carries ``kv_head_layout="grouped"``.
     """
     arch = "qwen3next"
 
@@ -2146,10 +2203,13 @@ def _synth_mistral3(meta, shapes, config: dict) -> None:
     # without the scaling KV the model is plain RoPE. The bag itself is
     # mandatory (ministral3 indexes rope_theta / llama_4_scaling_beta /
     # original_max_position_embeddings unconditionally).
+    # The type comes from the header key as llama.cpp reads it: a factor
+    # under a missing or linear type is linear scaling, not yarn.
     factor = _read_float(meta, f"{arch}.rope.scaling.factor")
-    if factor is not None:
-        rp: dict[str, Any] = {"rope_type": "yarn", "type": "yarn",
-                              "factor": factor}
+    scaling_type = _read_string(meta, f"{arch}.rope.scaling.type") or "linear"
+    if factor is not None and scaling_type in ("yarn", "linear"):
+        rp: dict[str, Any] = {"rope_type": scaling_type,
+                              "type": scaling_type, "factor": factor}
     else:
         rp = {"rope_type": "default", "type": "default"}
 
@@ -3656,6 +3716,7 @@ def _synth_qwen4exp(meta, shapes, config: dict) -> None:
 _SYNTH = {
     "gemma4": _synth_gemma4,
     "qwen3": _synth_qwen3,
+    "qwen3vl": lambda m, s, c: _synth_qwen3(m, s, c, "qwen3vl"),
     "qwen3moe": lambda m, s, c: _synth_qwen3moe(m, s, c, "qwen3moe"),
     "qwen3vlmoe": lambda m, s, c: _synth_qwen3moe(m, s, c, "qwen3vlmoe"),
     "qwen2": _synth_qwen2,

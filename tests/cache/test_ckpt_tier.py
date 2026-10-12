@@ -15,23 +15,27 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.apc import APCManager, DiskBlockStore
+from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import (
     _CKPT_SALT,
     _SIDECAR_SALT,
     ckpt_extra_hash,
+    ckpt_layout,
     ckpt_lookup,
     ckpt_store,
     ckpt_supported,
     retirement_store,
     sidecar_extra_hash,
 )
+from helpers import pin_apc_arms
+
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
 
 # Runtime-origin cache classes: the hybrid stacks these fixtures mimic are
 # built by the mlx-vlm generate stack (vlm-origin classes since 0.6.4).
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache
@@ -475,7 +479,7 @@ def test_buffered_rotating_declines_loudly():
     snapshots it silently wrong. The row clone itself now serves the
     buffer's canonical window (a linear temporal buffer has no ring
     phase) as a plain RotatingKVCache, which the exact tier stores."""
-    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BufferedRotatingKVCache
     from gmlx.cache.snapshot import _ckpt_stats, _clone_single_row
     man = APCManager(num_blocks=64, block_size=16)
     p = 48
@@ -862,8 +866,8 @@ def test_swa_disk_restart_roundtrip(tmp_path, p):
 def test_mlx_lm_class_caches_roundtrip():
     """gmlx text models carry mlx_lm cache classes; the tier must clone
     them (upstream's clone isinstance-gates on the mlx_vlm twins)."""
-    from mlx_lm.models.cache import ArraysCache as LmArrays
-    from mlx_lm.models.cache import KVCache as LmKV
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache as LmArrays
+    from gmlx._vendor.mlx_lm.models.cache import KVCache as LmKV
     man = APCManager(num_blocks=64, block_size=16)
     p = 33                                    # unaligned: tail clone too
     caches = []
@@ -996,12 +1000,14 @@ def test_window_chain_disk_follows_kind(tmp_path):
         cache = make_swa_cache(p, seed=5)
         ids = list(range(600, 600 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
+        disk.flush()  # disk_writes counts completed writes
         # boundary: 3 main blocks + the skeleton -- no window shards
         assert man.stats_snapshot()["disk_writes"] == 4
         assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
         cache2 = make_swa_cache(p, seed=6)
         ids2 = list(range(800, 800 + p))
         assert ckpt_store(man, ids2, cache2, extra_hash=0, kind="replay")
+        disk.flush()
         # replay: 3 main + 2 window blocks + the skeleton entry
         assert man.stats_snapshot()["disk_writes"] == 10
         assert man.stats_snapshot()["ckpt_skeleton_writes"] == 2
@@ -1106,6 +1112,99 @@ def test_disk_restart_roundtrip(tmp_path):
         assert_warm_matches(warm, cache, p)
     finally:
         disk2.close()
+
+
+def _qsa_hybrid_cache(p, seed=0):
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    caches = []
+    for i, kind in enumerate(LAYOUT):
+        mx.random.seed(seed * 1000 + i)
+        if kind == "kv":
+            c = QSAKVCache(ratio=4)
+            c.update_and_fetch_qsa(mx.random.normal((1, H, p, D)),
+                                   mx.random.normal((1, H, p, D)),
+                                   mx.random.normal((1, p, D)))
+        else:
+            c = ArraysCache(size=2)
+            c.cache = [mx.random.normal((1, 3, D)),
+                       mx.random.normal((1, H, D, D))]
+        caches.append(c)
+    return caches
+
+
+def _qsa_store(tmp_path, cache, ids, bs):
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=bs, disk=disk)
+    try:
+        assert ckpt_store(man, ids, cache, extra_hash=3)
+    finally:
+        disk.close()
+
+
+def _qsa_restart_lookup(tmp_path, cache, ids, bs):
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=bs, disk=disk)
+    try:
+        return ckpt_lookup(man, ids + [77], extra_hash=3,
+                           layout=ckpt_layout(cache, bs))
+    finally:
+        disk.close()
+
+
+def _qsa_disk_restart(tmp_path, monkeypatch, p, write_bs, read_bs):
+    from gmlx.cache.apc_qsa import install_qsa_apc_support
+
+    apc = pin_apc_arms(monkeypatch)
+    monkeypatch.setattr(apc, "_kq_qsa_apc", False, raising=False)
+    install_qsa_apc_support()
+    cache = _qsa_hybrid_cache(p, seed=4)
+    ids = list(range(7, 7 + p))
+    _qsa_store(tmp_path, cache, ids, write_bs)
+    warm, got = _qsa_restart_lookup(tmp_path, cache, ids, read_bs)
+    return cache, warm, got
+
+
+@pytest.mark.parametrize("p", [33, 32])
+def test_qsa_disk_restart_roundtrip(tmp_path, monkeypatch, p):
+    """A QSA skeleton restores at its own p after a restart. The restore
+    grows the key buffer past the stored tail, so the tail length cannot
+    come from the buffer width."""
+    cache, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, p, 16, 16)
+    assert got == p and len(warm) == len(cache)
+    for w, o in zip(warm, cache):
+        if hasattr(o, "update_and_fetch_qsa"):
+            assert type(w) is type(o) and int(w.offset) == p
+            for a, b in zip(w.state, o.state):
+                assert mx.array_equal(a, b).item()
+
+
+def test_qsa_disk_restart_each_block_size_restores_its_own(tmp_path,
+                                                           monkeypatch):
+    """The disk namespace does not key on block size, and the exact lookup
+    matches on tokens and salt. Skeletons for one prompt at two block
+    sizes each restore at their own, whichever the index lists first."""
+    cache, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, 33, 16, 64)
+    assert (warm, got) == (None, 0)
+    ids = list(range(7, 40))
+    _qsa_store(tmp_path, cache, ids, 64)
+    for bs in (16, 64):
+        warm, got = _qsa_restart_lookup(tmp_path, cache, ids, bs)
+        assert got == 33, bs
+
+
+def test_qsa_disk_restart_backstop_refuses_other_block_prefix(
+        tmp_path, monkeypatch, caplog):
+    """Without the block size in the salt, the sentinel's b_full still
+    refuses a skeleton whose tail starts elsewhere."""
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setattr(cs, "_skeleton_salt", lambda s, layout, bs: s)
+    with caplog.at_level("INFO", logger="gmlx.cache.snapshot"):
+        _, warm, got = _qsa_disk_restart(tmp_path, monkeypatch, 33, 16, 64)
+    assert (warm, got) == (None, 0)
+    assert any("qsa block prefix 32 != 0" in r.getMessage()
+               for r in caplog.records)
 
 
 class _HybridModel:
@@ -1388,7 +1487,7 @@ def test_buffered_clone_declines_a_non_linear_window():
     """The trailing-slice clone is the canonical window only under the
     buffer's linear-layout invariant (``start_position == offset - _idx``);
     a buffer that breaks it is declined loudly, never stored wrong."""
-    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BufferedRotatingKVCache
     from gmlx.cache.snapshot import _clone_single_row
     cache = make_swa_cache(48, seed=9)
     rot = next(c for c in cache if isinstance(c, RotatingKVCache))

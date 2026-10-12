@@ -33,6 +33,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_mem_preflight"
@@ -45,7 +47,7 @@ _ERR_CLS = None
 def _preflight_error_cls():
     global _ERR_CLS
     if _ERR_CLS is None:
-        from mlx_vlm.server.generation import PromptTooLongError
+        from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
         class MemoryPreflightError(PromptTooLongError):
             """Prompt-side KV cannot fit the drained working set."""
@@ -344,14 +346,13 @@ def available_drained_bytes():
     hold with the batch drained. The arena is MLX-tracked, sized at
     install and never drained. Other MLX-tracked weight allocations are
     not subtracted, which only admits more."""
-    import mlx.core as mx
-
+    from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import untracked_weight_bytes
     from gmlx.stream.installs import live_arena_bytes
     from .memory import admit_reserve_bytes
 
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         return None
     if ws <= 0:
@@ -392,7 +393,7 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
             if not pinned or _need_bytes(
                     model, costs, len(prompt), pinned) <= avail:
                 return
-        from mlx_vlm.server.generation import _count_prompt_tokens
+        from gmlx._vendor.mlx_vlm.server.generation import _count_prompt_tokens
         tokens = _count_prompt_tokens(rg._preprocess_request(prompt))
         if tokens <= 0:
             return
@@ -412,7 +413,7 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
             f"(prompt_tokens={tokens}). Reduce the prompt"
             + (" or max_tokens" if need_pinned > avail else "") + ".")
     except Exception as e:
-        from mlx_vlm.server.generation import PromptTooLongError
+        from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
         if isinstance(e, PromptTooLongError):
             raise
         _log.warning("memory preflight failed; admitting", exc_info=True)
@@ -425,7 +426,7 @@ def _pinned_max_tokens(args):
     if not isinstance(mt, int) or mt <= 0:
         return 0
     try:
-        from mlx_vlm.server.generation import get_server_max_tokens
+        from gmlx._vendor.mlx_vlm.server.generation import get_server_max_tokens
         if mt == get_server_max_tokens():
             return 0
     except Exception:
@@ -454,9 +455,9 @@ def install_memory_preflight() -> None:
     stream opens; ``generate`` covers non-streaming handlers and the
     gmlx completions route, which call it before any response starts.
     Idempotent."""
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
-    if getattr(ResponseGenerator.generate, _INSTALLED_FLAG, False):
+    if wrapped_with(ResponseGenerator.generate, _INSTALLED_FLAG):
         return
 
     _orig_generate = ResponseGenerator.generate
@@ -478,6 +479,6 @@ def install_memory_preflight() -> None:
 
     _generate.__dict__[_INSTALLED_FLAG] = True
     _validate.__dict__[_INSTALLED_FLAG] = True
-    ResponseGenerator.generate = _generate
-    ResponseGenerator.validate_context_budget = _validate
+    ResponseGenerator.generate = link(_generate, _orig_generate)
+    ResponseGenerator.validate_context_budget = link(_validate, _orig_validate)
     _log.info("memory preflight installed")

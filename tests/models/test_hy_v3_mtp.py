@@ -20,7 +20,7 @@ import mlx.core as mx
 import pytest
 
 from gmlx.load.config_synth import synthesize_config
-from gmlx.models.hy_v3.model import ModelArgs, ensure_registered
+from gmlx.models.hy_v3.model import ModelArgs
 from gmlx.models.hy_v3.mtp import HyV3MTPConfig, HyV3MTPDrafter, HyV3SpecLM
 
 from test_config_synth import _HY_V3_SHAPES, _hy_v3_meta
@@ -41,7 +41,6 @@ GREEDY_TIE_TOL = 1e-2
 
 
 def _tiny_config() -> dict:
-    ensure_registered()
     return synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
 
 

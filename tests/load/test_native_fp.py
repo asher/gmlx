@@ -144,7 +144,7 @@ def _kq_has_fp4() -> bool:
 
 def _tiny_switch_model(n_experts=4, out_dims=64, in_dims=128, bias=False):
     import mlx.nn as nn
-    from mlx_lm.models.switch_layers import SwitchLinear
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
 
     class Tiny(nn.Module):
         def __init__(self):
@@ -197,6 +197,8 @@ def test_lift_stream_cb_caps():
 
 
 def test_resolve_native_fp_wire_modes(monkeypatch):
+    import mlx.core as mx
+
     import gmlx.load.loader as loader
 
     meta = {"blk.0.ffn_gate_exps.weight": "mxfp4"}
@@ -226,11 +228,12 @@ def test_resolve_native_fp_wire_modes(monkeypatch):
 
     # auto: fits the wired budget -> packed kernels; over budget -> wire
     monkeypatch.setenv("GMLX_NATIVE_FP", "auto")
-    monkeypatch.setattr(loader, "mx", SimpleNamespace(
-        device_info=lambda: {"max_recommended_working_set_size": 10 ** 12}))
+    monkeypatch.setattr(
+        mx, "device_info",
+        lambda: {"max_recommended_working_set_size": 10 ** 12})
     assert not loader._resolve_native_fp_wire(weights, meta, log)
-    monkeypatch.setattr(loader, "mx", SimpleNamespace(
-        device_info=lambda: {"max_recommended_working_set_size": 50}))
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 50})
     assert loader._resolve_native_fp_wire(weights, meta, log)
 
     # auto on a build without the codecs degrades to packed

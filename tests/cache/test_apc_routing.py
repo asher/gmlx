@@ -10,14 +10,12 @@ family name instead of silently re-routing to a tier that stores nothing
 
 from types import SimpleNamespace
 
-from mlx_vlm.apc import model_apc_mode
+from gmlx._vendor.mlx_vlm.apc import model_apc_mode
 
 import pytest
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import ckpt_layout, ckpt_supported
-
-_cache = runtime_cache_module()
 
 
 def _dense():
@@ -140,7 +138,7 @@ def test_kvarn_family_routing_pinned(kvarn_apc_arms, family, factory, ckpt, tags
     # them at boot): the model_apc_mode wrap resolves kvarn stacks to
     # "exact"; bare upstream would say None.
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     model = SimpleNamespace(make_cache=factory)
     got_mode = apc.model_apc_mode(model)

@@ -37,28 +37,22 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
+
+from gmlx.cache.attention import (
     create_attention_mask,
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.cache import ArraysCache, KVCache
-from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
-
-from gmlx.models import owned
+from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.tune.gdn import training_gated_delta_ops
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_K3_MOE_MIX", "1") != "0"
 _ATTNRES = os.environ.get("GMLX_KIMI_ATTNRES", "1") != "0"
-
-
-def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.kimi_k3`` resolve to this module."""
-    owned.install("mlx_lm.models.kimi_k3", __name__)
 
 
 @dataclass

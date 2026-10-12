@@ -428,7 +428,7 @@ def think_tokenizer_for(processor):
     wrapped = tok
     if not getattr(tok, "think_end_tokens", None):
         try:
-            from mlx_lm.tokenizer_utils import TokenizerWrapper
+            from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
             wrapped = TokenizerWrapper(
                 tok, eos_token_ids=getattr(tok, "_gguf_eos_token_ids", None)

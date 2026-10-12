@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dual-origin switch-layer recognition. mlx-vlm 0.6.4 vendored mlx-lm's
+"""Dual-origin switch-layer recognition. mlx-vlm vendors mlx-lm's
 switch_layers module, so MoE models built from it instantiate functionally
 identical but distinct SwitchLinear/SwitchGLU classes; the leaf swap and the
 fused-GLU installer must accept either origin, and a codec'd leaf nobody
@@ -7,43 +7,20 @@ recognizes must fail loud instead of loading wire bytes into a stock float
 module (which surfaces later as an opaque gather_mm shape error)."""
 from __future__ import annotations
 
-import sys
-import types
-
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from mlx_lm.models import switch_layers as lm_sl
+from gmlx._vendor.mlx_lm.models import switch_layers as lm_sl
 
 import gmlx.load.modules as modules
 
 
 @pytest.fixture
 def vlm_switch_module(monkeypatch):
-    """The mlx_vlm switch_layers module: the real one when installed
-    (mlx-vlm >= 0.6.4), else a stand-in registered at its import path so the
-    dual-origin mechanism is exercised on 0.6.3 too."""
-    try:
-        from mlx_vlm.models import switch_layers as vlm_sl
-    except ImportError:
-        vlm_sl = types.ModuleType("mlx_vlm.models.switch_layers")
+    """The mlx_vlm switch_layers module."""
+    from gmlx._vendor.mlx_vlm.models import switch_layers as vlm_sl
 
-        class SwitchLinear(lm_sl.SwitchLinear):
-            pass
-
-        class SwitchGLU(lm_sl.SwitchGLU):
-            pass
-
-        SwitchLinear.__module__ = vlm_sl.__name__
-        SwitchGLU.__module__ = vlm_sl.__name__
-        vlm_sl.SwitchLinear = SwitchLinear
-        vlm_sl.SwitchGLU = SwitchGLU
-        monkeypatch.setitem(
-            sys.modules, "mlx_vlm.models.switch_layers", vlm_sl)
-        import mlx_vlm.models as vlm_models
-        monkeypatch.setattr(
-            vlm_models, "switch_layers", vlm_sl, raising=False)
     monkeypatch.setattr(modules, "_SWITCH_TYPES", None)
     yield vlm_sl
     modules._SWITCH_TYPES = None
@@ -76,9 +53,9 @@ def test_types_include_vlm_origin(vlm_switch_module):
     assert vlm_switch_module.SwitchGLU in glu
 
 
-@pytest.mark.parametrize("origin", ["mlx_lm", "mlx_vlm"])
+@pytest.mark.parametrize("origin", ["gmlx._vendor.mlx_lm", "gmlx._vendor.mlx_vlm"])
 def test_kquant_swap_recognizes_both_origins(origin, vlm_switch_module):
-    sl_mod = lm_sl if origin == "mlx_lm" else vlm_switch_module
+    sl_mod = lm_sl if origin == "gmlx._vendor.mlx_lm" else vlm_switch_module
     model = _Holder(_glu(sl_mod))
     n = modules.install_kquant_modules(model, _meta_for("experts"))
     assert n == 3
@@ -87,12 +64,12 @@ def test_kquant_swap_recognizes_both_origins(origin, vlm_switch_module):
         assert type(leaf).__name__ == "KQuantSwitchLinear", (origin, proj)
 
 
-@pytest.mark.parametrize("origin", ["mlx_lm", "mlx_vlm"])
+@pytest.mark.parametrize("origin", ["gmlx._vendor.mlx_lm", "gmlx._vendor.mlx_vlm"])
 def test_fused_glu_swaps_both_origins(origin, vlm_switch_module):
     import mlx_kquant as kq
     if not hasattr(kq, "moe_glu_gather_kq"):
         pytest.skip("mlx_kquant without fused MoE kernels")
-    sl_mod = lm_sl if origin == "mlx_lm" else vlm_switch_module
+    sl_mod = lm_sl if origin == "gmlx._vendor.mlx_lm" else vlm_switch_module
     # q8_0 geometry the fused path accepts: K % 256 == 0 (both matmuls,
     # so dim and hidden), N % 8 == 0.
     model = _Holder(_glu(sl_mod, dim=256, hidden=256))

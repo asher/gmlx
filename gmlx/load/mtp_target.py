@@ -8,10 +8,10 @@ The hook tables the mlx-vlm MTP engine probes on a target's
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import mlx.core as mx
 import mlx.nn as nn
-
-from gmlx.envflags import env_bool
 
 from . import loadlog
 
@@ -27,6 +27,7 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
     "gemma4_text": (
         "rollback_speculative_cache",
         "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
         "speculative_draft_hidden",
     ),
     # DeepseekV4SpecLM (vendored mlx-lm class, not mlx-vlm): no
@@ -101,7 +102,7 @@ class MTPTextTarget(nn.Module):
         returning an ``InputEmbeddingsFeatures`` whose ``inputs_embeds`` is the
         token embedding. Clears ``_position_ids`` so mrope falls back to the
         plain text positions."""
-        from mlx_vlm.models.base import InputEmbeddingsFeatures
+        from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
 
         self.language_model._position_ids = None
         embeds = self.language_model.model.embed_tokens(input_ids)
@@ -117,13 +118,15 @@ class MTPTextTarget(nn.Module):
         if isinstance(out, mx.array):
             # mlx-lm-style SpecLMs (deepseek_v4) return raw logits on the
             # plain path; mlx-vlm's AR engine expects ``outputs.logits``.
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=out)
         return out
 
 
-def _mtp_target_classes(model_type: str):
+def _mtp_target_classes(
+    model_type: str,
+) -> tuple[Any, Callable[[dict], nn.Module]]:
     """Capability-resolver row ``(arch, speculative) -> (LanguageModel, build)``.
 
     ``build(config_dict) -> language_model`` encapsulates the per-arch
@@ -140,21 +143,16 @@ def _mtp_target_classes(model_type: str):
 
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         sub = model_type
-        lang = importlib.import_module(f"mlx_vlm.models.{sub}.language")
-        cfg = importlib.import_module(f"mlx_vlm.models.{sub}.config")
+        # The model-level control flow (masks, left-padding walk,
+        # batched-padded prefill, capture) and the layers run from gmlx
+        # subclasses of gmlx.models.qwen35.language. The configs are the
+        # copy's.
+        import gmlx.models.qwen35.owned as qwen35_owned
 
-        # Owned model-level forward by default: the model-level control
-        # flow (masks, left-padding walk, batched-padded prefill, capture)
-        # runs from gmlx code on a subclass; layers stay stock so the
-        # fused-kernel seams keep engaging. GMLX_QWEN_OWNED=0 reverts to
-        # the stock class wholesale.
-        language_model_cls = lang.LanguageModel
-        if env_bool("GMLX_QWEN_OWNED", True):
-            import gmlx.models.qwen35.owned as qwen35_owned
+        cfg = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{sub}.config")
+        language_model_cls = qwen35_owned.language_model_class(sub)
 
-            language_model_cls = qwen35_owned.language_model_class(sub)
-
-        def build(config):
+        def build(config: dict) -> nn.Module:
             text_config = cfg.TextConfig.from_dict(config)
             model_config = cfg.ModelConfig.from_dict(
                 {
@@ -168,24 +166,14 @@ def _mtp_target_classes(model_type: str):
 
         return language_model_cls, build
     if model_type == "gemma4_text":
-        lang = importlib.import_module("mlx_vlm.models.gemma4.language")
-        cfg = importlib.import_module("mlx_vlm.models.gemma4.config")
+        # gmlx's own Gemma 4 language model, on the copied mlx-vlm config.
+        lang = importlib.import_module("gmlx.models.gemma4.language")
+        cfg = importlib.import_module("gmlx._vendor.mlx_vlm.models.gemma4.config")
 
-        # Owned mask builder + attention by default: the nosync offset
-        # semantics and the hd512 row-route dispatch run from gmlx
-        # subclasses; layers stay stock so the fused-MoE swap keeps
-        # engaging. GMLX_GEMMA_OWNED=0 reverts to the stock class (the
-        # patch regime still installs and covers it).
-        language_model_cls = lang.LanguageModel
-        if env_bool("GMLX_GEMMA_OWNED", True):
-            import gmlx.models.gemma4.owned as gemma4_owned
+        def build(config: dict) -> nn.Module:
+            return lang.LanguageModel(cfg.TextConfig.from_dict(config))
 
-            language_model_cls = gemma4_owned.OwnedGemma4LanguageModel
-
-        def build(config):
-            return language_model_cls(cfg.TextConfig.from_dict(config))
-
-        return language_model_cls, build
+        return lang.LanguageModel, build
     if model_type == "deepseek_v4":
         # Vendored mlx-lm-class target (no mlx-vlm counterpart): the SpecLM
         # subclass carries the speculative_* hooks + rotating-undo arming.
@@ -194,19 +182,18 @@ def _mtp_target_classes(model_type: str):
 
         ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return deepseek_v4_mtp.DeepseekV4SpecLM(ModelArgs.from_dict(config))
 
         return deepseek_v4_mtp.DeepseekV4SpecLM, build
     if model_type == "hy_v3":
         import gmlx.models.hy_v3.mtp as hy_v3_mtp
         import gmlx.models.hy_v3.tools as hy_v3_tools
-        from gmlx.models.hy_v3.model import ModelArgs, ensure_registered
+        from gmlx.models.hy_v3.model import ModelArgs
 
-        ensure_registered()
         hy_v3_tools.ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
@@ -216,19 +203,18 @@ def _mtp_target_classes(model_type: str):
 
         ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return qwen4_exp_mtp.Qwen4ExpSpecLM(ModelArgs.from_dict(config))
 
         return qwen4_exp_mtp.Qwen4ExpSpecLM, build
     if model_type == "muse_glimmer":
         import gmlx.models.muse_glimmer.mtp as muse_glimmer_mtp
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
-        from gmlx.models.muse_glimmer.model import ModelArgs, ensure_registered
+        from gmlx.models.muse_glimmer.model import ModelArgs
 
-        ensure_registered()
         muse_glimmer_tools.ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
 
         return muse_glimmer_mtp.MuseGlimmerSpecLM, build
@@ -238,15 +224,15 @@ def _mtp_target_classes(model_type: str):
 
         ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
 
         return glm5_next_mtp.Glm5NextSpecLM, build
     if model_type == "nemotron_h":
         import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
-        from mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return nemotron_h_mtp.NemotronHSpecLM(ModelArgs.from_dict(config))
 
         return nemotron_h_mtp.NemotronHSpecLM, build
@@ -283,11 +269,9 @@ def _vlm_spec_language_model(model_type: str):
     image turns stays correct - unlike ``_mtp_target_classes``'s text build,
     which passes an empty one). None means the built ``.language_model``
     already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
-    their mixins in their own vlm_model), or the arch has no spec support
-    (the per-arch hook check downstream fails loud). The env gates
-    (GMLX_QWEN_OWNED / GMLX_GEMMA_OWNED) are consulted at call time via
-    ``_mtp_target_classes``, so =0 resolves to the stock class and the swap
-    no-ops against the already-stock tree."""
+    their mixins in their own vlm_model, and the owned gemma4 containers
+    hold the owned language model), or the arch has no spec support
+    (the per-arch hook check downstream fails loud)."""
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         cls, _ = _mtp_target_classes(model_type)
 
@@ -295,33 +279,7 @@ def _vlm_spec_language_model(model_type: str):
             return cls(model_config.text_config, model_config)
 
         return cls, build
-    if model_type in ("gemma4", "gemma4_unified"):
-        cls, _ = _mtp_target_classes("gemma4_text")
-
-        def build(model_config):
-            return cls(model_config.text_config)
-
-        return cls, build
     return None
-
-
-def _ensure_argmax_hook(language_model) -> None:
-    """Batched greedy verify walk: under greedy the engine takes the
-    per-position deferred walk (one CPU<->GPU sync per draft position) unless
-    the target exposes speculative_argmax_from_hidden, which lets it argmax
-    all block+1 verify positions in a single op (zero per-position syncs ->
-    _speculative_walk). gemma4's LanguageModel ships only
-    speculative_logits_from_hidden, so synthesize the argmax wrapper from it -
-    lossless (same tokens), just fewer syncs (~+8% decode on a small target
-    whose round is sync-bound). Only ever fires for the gemma4 row; every
-    other type's hook table already lists speculative_argmax_from_hidden."""
-    if not hasattr(language_model, "speculative_argmax_from_hidden") and hasattr(
-        language_model, "speculative_logits_from_hidden"
-    ):
-        _lm = language_model
-        _lm.speculative_argmax_from_hidden = lambda hidden: mx.argmax(
-            _lm.speculative_logits_from_hidden(hidden), axis=-1
-        )
 
 
 def _build_mtp_target(config_dict: dict):
@@ -339,7 +297,6 @@ def _build_mtp_target(config_dict: dict):
             f"- version drift; pin mlx-vlm or update the hook set"
         )
     language_model = build(config)
-    _ensure_argmax_hook(language_model)
     wrapper = MTPTextTarget(language_model, config)
     loadlog.verbose_print(
         f"[build] {model_type} -> {type(language_model).__name__} (MTP target wrapper)"

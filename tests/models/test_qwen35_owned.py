@@ -16,33 +16,23 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
-from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
+from gmlx.models.qwen35 import language as _L
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 import gmlx.models.qwen35.owned as qwen35_owned
-from gmlx.upstream.gdn_patches import (
-    _patch_gated_delta_tiled_v,
-    _patch_mlxvlm_gated_delta_tiled_v,
-)
 from gmlx.load.mtp_target import _mtp_target_classes
 
 ATOL = 2e-3  # differing-route bound (shortcut removed / kernel path)
 TIGHT_ATOL = 1e-5  # same-ops bound
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _tiled_oracle():
-    # Every qwen3.5 GGUF load installs the mlx-lm tiled rebind (plus
-    # the vlm rebind on the stock fallback); the stock oracle arm must
-    # match. With both arms tiled and in eval mode (see _pair) the GDN
-    # scan runs the same mlx-lm kernel on both sides, so the same-ops
-    # routes stay bit-tight.
-    _patch_gated_delta_tiled_v()
-    _patch_mlxvlm_gated_delta_tiled_v()
+# Both arms take the tiled order of a GGUF from their config (see _cfg).
+# In eval mode (see _pair) the GDN scan runs kernels of one source on both
+# sides, so the same-ops routes stay bit-tight.
 
 # The qwen3_5 GDN forward dispatches Metal-only kernels.
 _NEEDS_GPU = pytest.mark.skipif(
@@ -79,6 +69,7 @@ def _cfg():
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
+        kv_head_layout="tiled",
     )
 
 
@@ -177,21 +168,17 @@ def _greedy_chain(lm, ids, cache, steps):
 # ---------------------------------------------------------------------------
 
 
-def test_loader_selects_owned_by_default(monkeypatch):
-    monkeypatch.delenv("GMLX_QWEN_OWNED", raising=False)
+def test_loader_selects_owned(monkeypatch):
+    cls, _build = _mtp_target_classes("qwen3_5")
+    assert cls is qwen35_owned.OwnedQwen3_5LanguageModel
+    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
     cls, _build = _mtp_target_classes("qwen3_5")
     assert cls is qwen35_owned.OwnedQwen3_5LanguageModel
 
 
-def test_loader_env_reverts_to_stock(monkeypatch):
-    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    cls, _build = _mtp_target_classes("qwen3_5")
-    assert cls is Q35LanguageModel
-
-
 def test_owned_moe_class_shape():
     cls = qwen35_owned.language_model_class("qwen3_5_moe")
-    from mlx_vlm.models.qwen3_5_moe.language import (
+    from gmlx.models.qwen35.moe_language import (
         LanguageModel as MoeLanguageModel,
     )
 

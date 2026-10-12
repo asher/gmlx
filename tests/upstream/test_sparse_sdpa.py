@@ -12,7 +12,7 @@ import importlib
 import mlx.core as mx
 import pytest
 
-from mlx_lm.models import llama as llama_mod
+from gmlx._vendor.mlx_lm.models import llama as llama_mod
 
 import gmlx.upstream.sparse_sdpa as sp
 
@@ -216,6 +216,10 @@ def test_means_memo_lifecycle():
 def test_install_patches_validated_archs_only(monkeypatch):
     import importlib
 
+    from gmlx.models.gemma4 import dispatch
+
+    for name in ("_SPARSE", "_CASCADE", "_BATCHED"):
+        monkeypatch.setattr(dispatch, name, False)
     sp._installed = False
     monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
     monkeypatch.delenv("GMLX_SPARSE_ARCHS", raising=False)
@@ -224,16 +228,22 @@ def test_install_patches_validated_archs_only(monkeypatch):
     assert sp.install_sparse_sdpa()
     assert getattr(llama_mod.scaled_dot_product_attention,
                    "_gmlx_sparse_route", False)
-    gt = importlib.import_module("mlx_lm.models.gemma4_text")
-    # gemma-4 failed its KLD gate (globals not top-k sparse): never patched
-    assert not getattr(gt.scaled_dot_product_attention,
-                       "_gmlx_sparse_route", False)
-    # explicit env extension patches it (for running a new arch's gate)
+    # gemma-4 failed its KLD gate (globals not top-k sparse): the owned
+    # dispatch keeps the route off
+    dispatch.configure()
+    assert not dispatch.gates()["sparse"]
+    # explicit env extension opens it (for running a new arch's gate), in
+    # the dispatch and never at a module-global seam
     sp._installed = False
     monkeypatch.setenv("GMLX_SPARSE_ARCHS", "gemma4_text")
     assert sp.install_sparse_sdpa()
-    assert getattr(gt.scaled_dot_product_attention,
-                   "_gmlx_sparse_route", False)
+    dispatch.configure()
+    assert dispatch.gates()["sparse"]
+    # The copied gemma4_text path is the owned module, which holds no SDPA
+    # name for a route to wrap.
+    gt = importlib.import_module("gmlx._vendor.mlx_lm.models.gemma4_text")
+    assert gt is importlib.import_module("gmlx.models.gemma4.text")
+    assert not hasattr(gt, "scaled_dot_product_attention")
 
 
 def test_install_opt_in_and_killable(monkeypatch):

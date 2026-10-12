@@ -2,9 +2,9 @@
 #
 # DeepSeek V4 (Flash) model class, VENDORED from unmerged mlx-lm PR #1192
 # (Blaizzy/mlx-lm branch pc/add-deepseekv4flash-model, head 5c10538) by way
-# of omlx's patches/deepseek_v4/deepseek_v4_model.py port. gmlx owns this
-# class: ensure_registered() below installs it as mlx_lm.models.deepseek_v4
-# at load time, over any upstream module of that name (gmlx.models.owned).
+# of omlx's patches/deepseek_v4/deepseek_v4_model.py port, pending upstream
+# merge. The vendored mlx-lm resolves the deepseek_v4 model type to this
+# module through gmlx.models.owned.
 #
 # Deviations from PR 1192:
 #  - omlx custom-kernel dispatch (glm_moe_dsa sparse-attention/indexer
@@ -35,21 +35,20 @@ import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 from mlx.utils import tree_flatten
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.pipeline import PipelineMixin
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+import gmlx.gen.prefill_decay as _prefill_decay
+from gmlx.cache.attention import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.pipeline import PipelineMixin
-from mlx_lm.models.switch_layers import SwitchGLU
-
-from gmlx.models import owned
-import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.models.deepseek_v4.cache import (
-    BatchPoolingCache,
+    DS4BatchPoolingCache,
     PackedPool,
-    PoolingCache,
+    DS4PoolingCache,
 )
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
@@ -159,8 +158,8 @@ _prefill_score_profile = _prefill_decay.build_score_profile(
         base_step=_v4_base_step()),
     kernels_armed=lambda: all(
         _dsa_probe(p) for p in ("window", "sparse", "indexer")),
-    require_cache=PoolingCache,
-    disarm_cache=BatchPoolingCache,
+    require_cache=DS4PoolingCache,
+    disarm_cache=DS4BatchPoolingCache,
     allow_quantized_pools=True,
 )
 
@@ -170,7 +169,7 @@ _prefill_decay.register_score_profile("deepseek_v4", _prefill_score_profile)
 
 def _cacheless_pool_mask(n_pooled: int, L: int, offset, ratio: int):
     """Causal pooled-visibility mask for the cache-less (training/eval)
-    forward, mirroring PoolingCache.make_mask: query at absolute position
+    forward, mirroring DS4PoolingCache.make_mask: query at absolute position
     offset + j sees pooled row i iff i < (offset + j) // ratio."""
     if n_pooled == 0 or L == 1 or not isinstance(offset, int):
         return None
@@ -286,20 +285,12 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.deepseek_v4`` resolve to this
-    module, and expose the pooling caches on ``mlx_lm.models.cache``
-    (name-based cache-class resolution and isinstance checks in shared
-    code paths look them up there; since mlx-vlm 0.6.4 vendored its own
-    models/cache.py, its shared paths resolve there instead, so register
-    on both when it is loaded)."""
-    import mlx_lm.models.cache as _mlx_cache
+    """Register the pooling caches (gmlx.cache.bind.register), which
+    ``CacheList.from_state`` and prompt-cache load resolve by name.
+    gmlx.cache.apc_pooling registers these classes with APC directly."""
+    from gmlx.cache import bind
 
-    vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (_mlx_cache, vlm_cache):
-        if mod is not None and not hasattr(mod, "PoolingCache"):  # upstream wins
-            mod.PoolingCache = PoolingCache
-            mod.BatchPoolingCache = BatchPoolingCache
-    owned.install("mlx_lm.models.deepseek_v4", __name__)
+    bind.register(DS4PoolingCache, DS4BatchPoolingCache)
 
 
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))
@@ -354,6 +345,9 @@ class ModelArgs(BaseModelArgs):
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
     rope_scaling: Optional[Dict] = None
+    # Resolved rope scaling (gmlx.load.rope_scaling), present only when it
+    # changes the rope.
+    gmlx_rope_scaling: Optional[Dict] = None
     attention_bias: bool = False
     attention_dropout: float = 0.0
     head_dim: int = 512
@@ -837,12 +831,38 @@ class LimitedSwiGLU(nn.Module):
         return _limited_swiglu(gate, x, self.limit)
 
 
+def _resolved_rope(config):
+    raw = getattr(config, "gmlx_rope_scaling", None)
+    if not raw:
+        return None
+    from gmlx.load import rope_scaling as rs
+
+    return rs.RopeScaling(**raw)
+
+
+def rope_scaling_for(config):
+    """The scaling of a compressed layer: the resolved one (llama.cpp's
+    rules) when the run options set it, else the config's own block, so a
+    run without options keeps the class table."""
+    s = _resolved_rope(config)
+    return s if s is not None and s.from_options else config.rope_scaling
+
+
+def plain_rope_base(config) -> float:
+    """The base of an uncompressed layer, which rotates with the run's base
+    and no scaling (llama.cpp deepseek4 graph, freq_base_l)."""
+    s = _resolved_rope(config)
+    if s is not None and s.freq_base_override and s.freq_base is not None:
+        return float(s.freq_base)
+    return config.rope_theta
+
+
 class DeepseekV4RoPE(nn.Module):
     def __init__(
         self,
         dims: int,
         base: float,
-        scaling_config: Optional[Dict] = None,
+        scaling_config: Any = None,
         max_position_embeddings: int = 1048576,
         freq_scale: int = 1,
     ):
@@ -852,14 +872,19 @@ class DeepseekV4RoPE(nn.Module):
 
         inv_freq = 1.0 / (base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims))
         rope_type = None
-        if scaling_config is not None:
+        if scaling_config is not None and not isinstance(scaling_config, dict):
+            # A resolved RopeScaling: llama.cpp's table. The magnitude stays
+            # 1, as dsv4_rope_attn_factor cancels it in llama.cpp.
+            from gmlx.load import rope_scaling as rs
+
+            inv_freq = mx.array(rs.inv_freq(dims, base, scaling_config))
+        elif scaling_config is not None:
             rope_type = scaling_config.get("type") or scaling_config.get("rope_type")
 
         if rope_type in ("yarn", "deepseek_yarn"):
-            factor = scaling_config["factor"]
-            original_max_position_embeddings = scaling_config[
-                "original_max_position_embeddings"
-            ]
+            factor = scaling_config.get("factor", 1.0)
+            original_max_position_embeddings = scaling_config.get(
+                "original_max_position_embeddings", max_position_embeddings)
             beta_fast = scaling_config.get("beta_fast", 32)
             beta_slow = scaling_config.get("beta_slow", 1)
 
@@ -1603,7 +1628,7 @@ def _kernel_window_attention(module, q, kv, pooled, sinks, offset, ratio):
     L x S quadratic work for a sliding_window-wide live band.
 
     With an identity top-k over the pooled rows, the kernel's causal clamp
-    (offset + pos + 1) // ratio reproduces PoolingCache.make_mask exactly,
+    (offset + pos + 1) // ratio reproduces DS4PoolingCache.make_mask exactly,
     so no mask is materialized. pooled=None serves window-only layers: one
     dummy pooled row that a 2**30 ratio keeps invisible at any reachable
     offset. The kernel has no backward, so a training step falls back.
@@ -1922,7 +1947,7 @@ class Compressor(nn.Module):
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
             config.compress_rope_theta,
-            config.rope_scaling,
+            rope_scaling_for(config),
             config.max_position_embeddings,
             freq_scale=compress_ratio,
         )
@@ -1940,7 +1965,7 @@ class Compressor(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        pool_cache: Optional[PoolingCache],
+        pool_cache: Optional[DS4PoolingCache],
         offset: Union[int, mx.array],
         fetch: bool = True,
     ) -> mx.array:
@@ -2020,7 +2045,7 @@ class Indexer(nn.Module):
         x: mx.array,
         q_residual: mx.array,
         position_rope: DeepseekV4RoPE,
-        pool_cache: Optional[PoolingCache],
+        pool_cache: Optional[DS4PoolingCache],
         offset: Union[int, mx.array],
     ):
         B, L, _ = x.shape
@@ -2263,7 +2288,7 @@ class LocalAttention(nn.Module):
 
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
-            config.rope_theta,
+            plain_rope_base(config),
             None,
             config.max_position_embeddings,
         )
@@ -2398,7 +2423,7 @@ class CompressedAttention(nn.Module):
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
             config.compress_rope_theta,
-            config.rope_scaling,
+            rope_scaling_for(config),
             config.max_position_embeddings,
         )
         self.compressor = Compressor(config, self.compress_ratio, self.head_dim)
@@ -2592,7 +2617,7 @@ class SparseCompressedAttention(nn.Module):
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim,
             config.compress_rope_theta,
-            config.rope_scaling,
+            rope_scaling_for(config),
             config.max_position_embeddings,
         )
         self.compressor = Compressor(config, self.compress_ratio, self.head_dim)
@@ -2961,12 +2986,11 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         if cache is None:
             cache = [None] * len(self.pipeline_layers)
 
-        from gmlx.cache.compat import cache_types
+        from gmlx.cache.kv_cache import CacheList
 
-        cache_list_types = cache_types("CacheList")
         first_cache = cache[0]
         mask_cache = (
-            first_cache[0] if isinstance(first_cache, cache_list_types)
+            first_cache[0] if isinstance(first_cache, CacheList)
             else first_cache
         )
 
@@ -3040,7 +3064,7 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         if pipeline_rank != 0:
             h = mx.distributed.send(h, (pipeline_rank - 1) % pipeline_size)
             cache_item = cache[-1]
-            if isinstance(cache_item, cache_list_types):
+            if isinstance(cache_item, CacheList):
                 cache_item = cache_item[0]
             if cache_item is not None:
                 cache_item.keys = mx.depends(cache_item.keys, h)
@@ -3098,38 +3122,33 @@ class Model(nn.Module):
         return predicate
 
     def make_cache(self):
-        # Plain caches take the consuming stack's class identities: under
-        # mlx-vlm serve its apc/batch machinery isinstance-gates on its own
-        # (vendored since 0.6.4) classes; under the pure mlx-lm CLI, on
-        # mlx-lm's.
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-        cmod = construction_cache_module()
         caches = []
         for layer in self.layers:
             ratio = layer.attn.compress_ratio
             if ratio == 0:
                 caches.append(
-                    cmod.RotatingKVCache(max_size=self.args.sliding_window))
+                    RotatingKVCache(max_size=self.args.sliding_window))
             elif isinstance(layer.attn, SparseCompressedAttention):
                 # local + compressor pool + indexer pool. The indexer pool
                 # opts out of --kv-bits packing: the score kernel reads it
-                # in full every step (see PoolingCache.quantizable).
-                idx_pool = PoolingCache(ratio)
+                # in full every step (see DS4PoolingCache.quantizable).
+                idx_pool = DS4PoolingCache(ratio)
                 idx_pool.quantizable = False
                 caches.append(
-                    cmod.CacheList(
-                        cmod.RotatingKVCache(max_size=self.args.sliding_window),
-                        PoolingCache(ratio),
+                    CacheList(
+                        RotatingKVCache(max_size=self.args.sliding_window),
+                        DS4PoolingCache(ratio),
                         idx_pool,
                     )
                 )
             else:
                 # local + compressor pool
                 caches.append(
-                    cmod.CacheList(
-                        cmod.RotatingKVCache(max_size=self.args.sliding_window),
-                        PoolingCache(ratio),
+                    CacheList(
+                        RotatingKVCache(max_size=self.args.sliding_window),
+                        DS4PoolingCache(ratio),
                     )
                 )
         return caches

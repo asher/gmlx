@@ -109,6 +109,17 @@ def test_logits_from_hidden_matches_forward():
                           mx.argmax(ref, axis=-1))
 
 
+def test_skip_logits_still_returns_the_streams():
+    args = _args()
+    lm = Qwen4ExpSpecLM(args)
+    _randomize(lm)
+    ids = mx.random.randint(0, args.vocab_size, (1, 5))
+    out = lm(ids, return_hidden=True, skip_logits=True)
+    assert out.logits is None
+    got = lm.speculative_logits_from_hidden(out.hidden_states[-1])
+    assert mx.abs(got - lm(ids).logits).max() < 1e-5
+
+
 def test_drafter_forward_and_seed_cycle():
     args = _args()
     target = Qwen4ExpSpecLM(args)

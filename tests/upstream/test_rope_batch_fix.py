@@ -40,7 +40,9 @@ ON_CPU = bool(os.environ.get("KQUANT_FORCE_CPU"))
 
 
 def _stock():
-    return getattr(mx.fast.rope, "_gmlx_orig_rope", mx.fast.rope)
+    from gmlx.upstream.patching import under
+
+    return under(mx.fast.rope, rbf._FLAG)
 
 
 def _rope(fn, x, offset, stream=None):
@@ -198,5 +200,25 @@ def test_install_idempotent_and_unwraps(installed):
     # a re-install after module state reset must not wrap the wrapper
     rbf._installed = False
     assert rbf.install_rope_batch_fix()
-    assert mx.fast.rope._gmlx_orig_rope is rbf._orig_rope
-    assert not hasattr(rbf._orig_rope, "_gmlx_orig_rope")
+    assert mx.fast.rope._gmlx_orig is rbf._orig_rope
+    assert not hasattr(rbf._orig_rope, "_gmlx_orig")
+
+
+def test_reinstall_under_another_wrap_keeps_it(installed):
+    """A reinstall after a module state reset, with another wrap on top of
+    the fix, took that wrap for the original: the fix called the wrap,
+    which called the fix again, without end."""
+    fixed = mx.fast.rope
+    calls = []
+
+    def other(*args, **kwargs):
+        calls.append(1)
+        return fixed(*args, **kwargs)
+
+    other.__dict__["_gmlx_orig"] = fixed
+    mx.fast.rope = other
+    rbf._installed = False
+    assert rbf.install_rope_batch_fix()
+    assert mx.fast.rope is other and rbf._orig_rope is _stock()
+    mx.eval(_rope(mx.fast.rope, _rand((2, 1, D)), 48))
+    assert calls == [1]

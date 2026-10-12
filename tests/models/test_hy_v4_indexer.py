@@ -234,7 +234,7 @@ def model_cache(model):
     """One entry per layer, in the shape Model.make_cache builds: a full
     layer carries the indexer slot, a shared layer carries the latent
     alone."""
-    from mlx_lm.models.cache import CacheList, KVCache
+    from gmlx._vendor.mlx_lm.models.cache import CacheList, KVCache
 
     from gmlx.models.hy_v4.model import HyV4KVCache
 

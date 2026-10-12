@@ -1,19 +1,21 @@
 # Serving architecture
 
 The gmlx server serves GGUF models with continuous batching over HTTP, as
-a layer of patches and policy over the mlx-vlm server. The config surface
+a layer of patches and policy over the mlx-vlm server that gmlx carries in
+`gmlx/_vendor`. The config surface
 is documented in [Configuration](../config.md) and the endpoints in
 [HTTP API](../api.md).
 
 ## Mechanism and policy
 
-Stock mlx-vlm supplies the mechanism and gmlx supplies the policy. Upstream
-owns the FastAPI app, the protocol handlers and SSE formatters, the
-engine's step loop and the fp16 `BatchKVCache` layout. gmlx owns the
-loader, the residency pool, the scheduling policy around the step loop and
-the verify round of speculative decoding. All of it installs through the
-patch layer that
-[Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md) describes.
+The copied mlx-vlm code supplies the mechanism and gmlx supplies the
+policy. The copy holds the FastAPI app, the protocol handlers and SSE
+formatters, the engine's step loop and the fp16 `BatchKVCache` layout.
+gmlx owns the loader, the residency pool, the scheduling policy around the
+step loop and the verify round of speculative decoding. The policy installs
+as patches over the copy, and
+[Upstream releases](upstream-upgrades.md) describes how the copy is
+checked and how it takes upstream changes.
 
 The loader reads GGUF bytes through mlx-kquant's C++ reader and swaps the
 model's leaves for K-quant kernels. The stock step loop then runs
@@ -39,7 +41,7 @@ the `ResolvedModel`, and binds the resolved spec for the request with
 already resident under the same parameters returns at once.
 
 For a cold build, the pool sets the model's load-parameter and prompt cache
-environment variables around mlx-vlm's stock `get_cached_model` load. That
+environment variables around mlx-vlm's own `get_cached_model` load. That
 load calls the patched `load_model_resources` on the engine's worker
 thread. The patched call runs `load_model`, `load_mtp_model` or
 `load_vlm_model`, which builds the model and swaps its leaves for `kq.*`

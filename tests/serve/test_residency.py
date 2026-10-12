@@ -7,6 +7,8 @@ from __future__ import annotations
 from contextvars import copy_context
 from types import SimpleNamespace
 
+import pytest
+
 from gmlx.serve.residency import (  # noqa: E402
     _BusyHold,
     _GenerationGuard,
@@ -17,6 +19,9 @@ from gmlx.serve.residency import (  # noqa: E402
     _build_scratch,
     _Scratch,
 )
+
+# A Mac of 64 GB: the pool juggles models of 10 to 22 GB.
+pytestmark = pytest.mark.host_gb(64)
 
 GB = 1024**3
 
@@ -246,6 +251,8 @@ def test_all_busy_exceeds_budget_with_warning(caplog):
     assert "pinned or busy" in caplog.text and "exceed" in caplog.text
 
 
+# A pool of 100 to 200 GB beside a 96 GB model: a server of 256 GB.
+@pytest.mark.host_gb(256)
 def test_streaming_incoming_defers_over_budget_beside_a_busy_resident():
     # Over the budget with only pinned or busy residents, a streaming load
     # is refused with the typed 503, not admitted. Its arena fills the
@@ -272,6 +279,8 @@ def test_streaming_incoming_defers_over_budget_beside_a_busy_resident():
     assert teardowns == ["A"] and resident(pool) == {"B"}
 
 
+# A pool of 100 to 200 GB beside a 96 GB model: a server of 256 GB.
+@pytest.mark.host_gb(256)
 def test_streaming_incoming_under_budget_loads_beside_a_busy_resident():
     proxy, pool, teardowns = make_pool(200, {"A": 16, "B": 60})
     pool.acquire("A", None, "auto")        # hold kept: in-flight
@@ -293,6 +302,8 @@ def test_streaming_incoming_defers_over_budget_beside_a_pinned_resident():
     assert teardowns == [] and resident(pool) == {"A"}
 
 
+# A pool of 100 to 200 GB beside a 96 GB model: a server of 256 GB.
+@pytest.mark.host_gb(256)
 def test_streaming_incoming_over_the_count_cap_keeps_the_admit_policy(caplog):
     # Only the byte budget defers a streaming load. Over the count cap with
     # room in bytes, the warn-and-admit policy stands.
@@ -905,6 +916,318 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     assert dense.footprint == 340 * GB
 
 
+def _table_only_header(monkeypatch, budget=130 * GB):
+    """A header the install's ladder sends table-only: 150 GB of text
+    tensors over a 130 GB budget, a 30 GB table that alone brings it
+    under, 100 GB of routed experts. Under a 110 GB budget it composes.
+    No decode arena or prefill ring is priced."""
+    import gmlx.device as dev
+    import gmlx.load.discovery as disc
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.plan as plan
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: 150 * GB)
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: budget)
+    monkeypatch.setattr(ts, "table_streaming_active",
+                        lambda m: getattr(m, "tables", False))
+    monkeypatch.setattr(plan, "plan_path", lambda p: None)
+    for name in ("GMLX_STREAM_PLE", "GMLX_STREAM_PLE_COMPOSE",
+                 "GMLX_DECODE_ARENA_GB"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _table_only_pool(monkeypatch, streamed_model, evict=False):
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    for name in ("_STREAMED_TRACKED", "_STREAMED_CAP", "_UNTRACKED_OWNERS",
+                 "_UNTRACKED_WEIGHTS", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 0)
+    tables = []
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: tables.append(b))
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy = _RuntimeProxy(_FakeOriginal())
+    credits = []
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        credits.append(dict(pd._BUILD_CREDIT))
+        proxy.response_generator = SimpleNamespace(model=streamed_model)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(200 * GB), (),
+        footprint_fn=lambda p: int(150 * GB))
+    asked = []
+    if not evict:
+        monkeypatch.setattr(pool, "_evict_for_room",
+                            lambda incoming, **k: asked.append(incoming))
+    return pool, tables, credits, asked
+
+
+def test_a_table_only_stream_build_prices_the_resident_experts(monkeypatch):
+    """Over the budget, a table that alone brings the model under it
+    streams and the experts stay resident: admission, the entry, the boot
+    table and the build credit discount the table alone."""
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert asked == [120 * GB]                  # no arena or ring either
+    assert entry.footprint == 120 * GB
+    assert tables == [120 * GB]
+    assert [c[1] for c in credits[0].values()] == [30 * GB]
+
+
+def test_a_stream_build_reprices_what_the_install_streamed(monkeypatch, caplog):
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=True, tables=True)   # it composed
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("a", None, "auto",
+                             build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert entry.footprint == 20 * GB
+    assert tables == [120 * GB, 20 * GB]
+    assert "re-pricing" in caplog.text
+
+
+def test_a_model_env_window_steers_the_predicted_stream(monkeypatch):
+    """A per-model GMLX_STREAM_PLE or GMLX_STREAM_PLE_COMPOSE reaches the
+    install through the build's env window, so the prediction reads it
+    too: the entry is priced on the plan the install runs."""
+    import gmlx.serve.capacity as cap
+
+    _table_only_header(monkeypatch)
+    assert cap.predicted_stream_bytes("a") == (30 * GB, 0)
+    off = {"GMLX_STREAM_PLE": "0"}
+    assert cap.predicted_stream_bytes("a", off) == (0, 100 * GB)
+    model = SimpleNamespace(_kq_streaming=True, tables=False)
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    entry = pool.acquire("a", None, "auto", env=off,
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert asked == [50 * GB]
+    assert entry.footprint == 50 * GB
+    assert tables == [50 * GB]
+    assert not entry.priced_up
+
+    _table_only_header(monkeypatch, budget=110 * GB)
+    assert cap.predicted_stream_bytes("a") == (30 * GB, 100 * GB)
+    kept = {"GMLX_STREAM_PLE_COMPOSE": "0"}
+    assert cap.predicted_stream_bytes("a", kept) == (0, 100 * GB)
+
+
+def _repriced_up(monkeypatch, busy):
+    """Predicted compose at 20 GB resident, installed table-only at 120 GB,
+    in a 200 GB pool beside a 100 GB resident that fit the prediction."""
+    from gmlx.serve.residency import _Entry
+
+    _table_only_header(monkeypatch, budget=110 * GB)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, tables, _, _ = _table_only_pool(monkeypatch, model, evict=True)
+    key = ("b", None, "auto")
+    pool._entries[key] = _Entry(cache_key=key, model_path="b",
+                                footprint=100 * GB, busy=busy)
+    torn = []
+    monkeypatch.setattr(pool, "_teardown",
+                        lambda e, released=None: torn.append(e.model_path))
+    return pool, tables, torn
+
+
+def test_a_build_repriced_up_evicts_an_idle_model_for_room(monkeypatch):
+    pool, tables, torn = _repriced_up(monkeypatch, busy=0)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert tables == [20 * GB, 120 * GB]
+    assert entry.footprint == 120 * GB
+    assert torn == ["b"]
+    assert list(pool._entries) == [("a", None, "auto")]
+
+
+def test_a_build_repriced_up_beside_a_busy_model_defers(monkeypatch):
+    import pytest
+
+    from gmlx.serve.capacity import LoadDeferred
+
+    pool, tables, torn = _repriced_up(monkeypatch, busy=1)
+    with pytest.raises(LoadDeferred, match="does not fit the"):
+        pool.acquire("a", None, "auto",
+                     build_spec=SimpleNamespace(stream="experts"))
+    assert torn == ["a"]
+    assert list(pool._entries) == [("b", None, "auto")]
+
+
+def test_a_build_repriced_up_releases_an_evicted_image_off_the_lock(
+        monkeypatch):
+    """The image entry was busy when acquire decided the worker
+    reservation and is idle at the refit. Its release runs on the image
+    worker, where a reservation taken since waits on the build lock, so
+    it runs after the build lock drops."""
+    from gmlx.serve.residency import IMAGE_KIND, _Entry
+
+    _table_only_header(monkeypatch, budget=110 * GB)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, _, _, _ = _table_only_pool(monkeypatch, model, evict=True)
+    key = ("img", None, IMAGE_KIND)
+    image = _Entry(cache_key=key, model_path="img", footprint=100 * GB,
+                   busy=1, kind=IMAGE_KIND, pipeline="P")
+    pool._entries[key] = image
+    stock_get = pool._stock_get
+
+    def stock_get_then_image_done(*a, **k):
+        stock_get(*a, **k)
+        image.busy = 0
+
+    pool._stock_get = stock_get_then_image_done
+    released = []
+
+    def release_on_worker(box):
+        # The worker runs it only once the build lock is free.
+        free = pool._build_lock.acquire(blocking=False)
+        if free:
+            pool._build_lock.release()
+        released.append((list(box), free))
+
+    pool._image_fns = (None, None, release_on_worker)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert released == [(["P"], True)]
+    assert list(pool._entries) == [("a", None, "auto")]
+
+
+def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
+        monkeypatch):
+    """The image entry is busy when acquire decides the worker
+    reservation and idle at the eviction before the build. Its release
+    never runs under the build lock without the reservation: the first
+    attempt evicts nothing, the second holds the worker, and the build
+    completes."""
+    import contextlib
+
+    from gmlx.serve import image_service
+    from gmlx.serve.residency import IMAGE_KIND, _Entry
+
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, _, _, _ = _table_only_pool(monkeypatch, model, evict=True)
+    key = ("img", None, IMAGE_KIND)
+    image = _Entry(cache_key=key, model_path="img", footprint=100 * GB,
+                   busy=1, kind=IMAGE_KIND, pipeline="P")
+    pool._entries[key] = image
+
+    @contextlib.contextmanager
+    def reserved_worker():
+        image_service._reservation.run = lambda fn, *a: fn(*a)
+        try:
+            yield
+        finally:
+            image_service._reservation.run = None
+
+    monkeypatch.setattr(image_service, "reserved_worker", reserved_worker)
+    worker_for = pool._worker_for
+    forced = []
+
+    def worker_for_then_image_done(image_build, **k):
+        forced.append(k.get("force", False))
+        ctx = worker_for(image_build, **k)
+        image.busy = 0                  # the image job ends meanwhile
+        return ctx
+
+    monkeypatch.setattr(pool, "_worker_for", worker_for_then_image_done)
+    released = []
+
+    def release_on_worker(box):
+        free = pool._build_lock.acquire(blocking=False)
+        if free:
+            pool._build_lock.release()
+        held = getattr(image_service._reservation, "run", None) is not None
+        released.append((list(box), free or held))
+
+    pool._image_fns = (None, None, release_on_worker)
+    entry = pool.acquire("a", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert released == [(["P"], True)]
+    assert forced == [False, True]
+    assert list(pool._entries) == [("a", None, "auto")]
+
+
+def _image_gone_idle(monkeypatch, pool):
+    """An image entry busy when the worker reservation is decided and
+    idle right after; a fake reservation, and a fake worker release that
+    records whether it could run: the build lock free, or the worker
+    held."""
+    import contextlib
+
+    from gmlx.serve import image_service
+    from gmlx.serve.residency import IMAGE_KIND, _Entry
+
+    key = ("img", None, IMAGE_KIND)
+    image = _Entry(cache_key=key, model_path="img", footprint=10 * GB,
+                   busy=1, ttl=1, last_access=0.0, kind=IMAGE_KIND,
+                   pipeline="P")
+    pool._entries[key] = image
+
+    @contextlib.contextmanager
+    def reserved_worker():
+        image_service._reservation.run = lambda fn, *a: fn(*a)
+        try:
+            yield
+        finally:
+            image_service._reservation.run = None
+
+    monkeypatch.setattr(image_service, "reserved_worker", reserved_worker)
+    worker_for = pool._worker_for
+
+    def worker_for_then_image_done(image_build, **k):
+        ctx = worker_for(image_build, **k)
+        image.busy = 0                  # the image job ends meanwhile
+        return ctx
+
+    monkeypatch.setattr(pool, "_worker_for", worker_for_then_image_done)
+    released = []
+
+    def release_on_worker(box):
+        free = pool._build_lock.acquire(blocking=False)
+        if free:
+            pool._build_lock.release()
+        held = getattr(image_service._reservation, "run", None) is not None
+        released.append((list(box), free or held))
+
+    pool._image_fns = (None, None, release_on_worker)
+    return released
+
+
+@pytest.mark.parametrize("path", ["evict", "clear", "reap_idle"])
+def test_a_teardown_releases_an_image_gone_idle_off_the_lock(
+        monkeypatch, path):
+    """unload, clear and the TTL reaper decide the worker reservation
+    before the build lock. An image entry idle by the teardown is released
+    once the lock drops, where its release cannot queue behind a
+    reservation that waits on the lock."""
+    proxy, pool, teardowns = make_pool(100, {})
+    released = _image_gone_idle(monkeypatch, pool)
+    pool._in_flight_fn = lambda: 0
+    pool._time_fn = lambda: 100.0
+    {"evict": lambda: pool.evict("img"), "clear": pool.clear,
+     "reap_idle": pool.reap_idle}[path]()
+    assert released == [(["P"], True)]
+    assert not pool._entries
+
+
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
     """deepseek41's engram tables serve from disk like the experts; pricing
     them resident would evict every other model for room they never take."""
@@ -955,3 +1278,406 @@ def test_failed_build_is_torn_down_before_the_lock_drops(monkeypatch):
         names.append(tb.tb_frame.f_code.co_name)
         tb = tb.tb_next
     assert "failing_stock_get" not in names
+
+
+def test_failed_build_of_a_registry_cache_is_torn_down(monkeypatch):
+    """Stock load turns the model cache into mlx-vlm's ModelCacheRegistry.
+    A build that fails after it still tears the model down."""
+    import pytest
+    from gmlx._vendor.mlx_vlm.server.runtime import ModelCacheRegistry
+
+    from gmlx.serve import residency as R
+
+    proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
+    stock_get = pool._stock_get
+
+    def failing_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        stock_get(model_path, adapter_path, model_kind=model_kind)
+        registry = ModelCacheRegistry()
+        registry.set("text_generation", proxy.model_cache)
+        proxy.model_cache = registry
+        raise RuntimeError("kv refused")
+
+    pool._stock_get = failing_stock_get
+    monkeypatch.setattr(R, "_collect_failed_build", lambda: None)
+    with pytest.raises(RuntimeError, match="kv refused"):
+        acquire(pool, "/m.gguf")
+    assert teardowns == ["/m.gguf"]
+    assert not pool._entries
+
+
+# Image models share the pool with chat models: their own build and
+# teardown, the same budget and LRU.
+def make_mixed_pool(budget_gb, footprints_gb, image_gb, monkeypatch=None):
+    """A pool whose chat builds take the fake stock loaders and whose image
+    builds take injected (footprint, load, release) functions sized from
+    ``image_gb``: image path -> GB."""
+    from gmlx.serve import capacity as cap
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, teardowns = make_pool(budget_gb, footprints_gb)
+    loads, releases = [], []
+
+    def footprint(spec):
+        return int(image_gb[spec.path] * GB)
+
+    def load(spec):
+        loads.append(spec.path)
+        return SimpleNamespace(pipe=f"PIPE:{spec.path}", spec=spec)
+
+    def release(box):
+        releases.append(box[0].spec.path)
+        box.clear()
+
+    pool._image_fns = (footprint, load, release)
+    return proxy, pool, teardowns, loads, releases
+
+
+def acquire_image(pool, path):
+    from gmlx.serve.residency import IMAGE_KIND
+
+    spec = SimpleNamespace(path=path, id=f"img:{path}")
+    entry = pool.acquire(path, None, IMAGE_KIND, build_spec=spec,
+                         cache_key_extra=(path,), loaded_as=spec.id)
+    pool.release(entry)
+    return entry
+
+
+def test_image_build_takes_its_own_load_never_the_stock_get(monkeypatch):
+    proxy, pool, teardowns, loads, _ = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+
+    def no_stock_get(*a, **k):
+        raise AssertionError("an image build reached the stock loader")
+
+    pool._stock_get = no_stock_get
+    entry = acquire_image(pool, "/dit.safetensors")
+    assert loads == ["/dit.safetensors"]
+    assert entry.is_image and entry.pipeline.pipe == "PIPE:/dit.safetensors"
+    assert entry.footprint == 9 * GB
+    assert entry.response_generator is None and entry.apc_manager is None
+    assert proxy._last_entry is None          # never the chat fallback
+    row = pool.stats()["resident"][0]
+    assert row["kind"] == "image" and row["loaded_as"] == "img:/dit.safetensors"
+
+
+def test_image_teardown_releases_on_its_own_path(monkeypatch):
+    _, pool, teardowns, _, releases = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+    entry = acquire_image(pool, "/dit.safetensors")
+    assert pool.evict("/dit.safetensors")
+    assert releases == ["/dit.safetensors"]
+    assert teardowns == []                    # the stock unload never ran
+    assert entry.pipeline is None and not pool._entries
+
+
+def test_image_load_evicts_a_chat_model(monkeypatch):
+    _, pool, teardowns, _, releases = make_mixed_pool(
+        25, {"A.gguf": 10, "B.gguf": 10}, {"/dit.safetensors": 9},
+        monkeypatch)
+    acquire(pool, "A.gguf")
+    acquire(pool, "B.gguf")
+    acquire_image(pool, "/dit.safetensors")   # 20 + 9 > 25: evict LRU A
+    assert teardowns == ["A.gguf"] and releases == []
+    assert resident(pool) == {"B.gguf", "/dit.safetensors"}
+    assert pool.stats()["resident_bytes"] == 19 * GB
+
+
+def test_chat_load_evicts_an_image_model(monkeypatch):
+    proxy, pool, teardowns, _, releases = make_mixed_pool(
+        25, {"A.gguf": 10, "B.gguf": 10}, {"/dit.safetensors": 9},
+        monkeypatch)
+    acquire_image(pool, "/dit.safetensors")
+    acquire(pool, "A.gguf")
+    acquire(pool, "B.gguf")                   # 19 + 10 > 25: evict LRU image
+    assert releases == ["/dit.safetensors"] and teardowns == []
+    assert resident(pool) == {"A.gguf", "B.gguf"}
+    kinds = {e["model_path"]: e["kind"] for e in pool.stats()["resident"]}
+    assert kinds == {"A.gguf": "chat", "B.gguf": "chat"}
+
+
+def test_busy_image_entry_is_not_evicted_for_a_chat_load(monkeypatch):
+    from gmlx.serve.residency import IMAGE_KIND
+
+    _, pool, _, _, releases = make_mixed_pool(
+        15, {"A.gguf": 10}, {"/dit.safetensors": 9}, monkeypatch)
+    spec = SimpleNamespace(path="/dit.safetensors", id="img")
+    pool.acquire("/dit.safetensors", None, IMAGE_KIND, build_spec=spec)
+    acquire(pool, "A.gguf")                   # over budget beside a live job
+    assert releases == []
+    assert resident(pool) == {"A.gguf", "/dit.safetensors"}
+
+
+def test_an_image_footprint_failure_evicts_nothing(monkeypatch):
+    import pytest
+
+    _, pool, teardowns, loads, _ = make_mixed_pool(
+        25, {"A.gguf": 10, "B.gguf": 10}, {}, monkeypatch)
+    acquire(pool, "A.gguf")
+    acquire(pool, "B.gguf")
+
+    def not_an_image_model(spec):
+        raise ValueError("no image model")
+
+    pool._image_fns = (not_an_image_model,) + pool._image_fns[1:]
+    with pytest.raises(ValueError, match="no image model"):
+        acquire_image(pool, "/x.safetensors")
+    assert teardowns == [] and loads == []
+
+
+def test_the_stock_image_kinds_are_refused():
+    import pytest
+
+    _, pool, _ = make_pool(100, {"/m": 1})
+    for kind in ("image_generation", "image_edit"):
+        with pytest.raises(ValueError, match="gmlx_image"):
+            pool.acquire("/m", None, kind)
+    assert not pool._entries
+
+
+def test_the_image_worker_is_one_named_thread():
+    from gmlx.serve import image_service
+
+    names = {image_service.WORKER.submit(
+        lambda: __import__("threading").current_thread().name).result()
+        for _ in range(3)}
+    assert len(names) == 1 and names.pop().startswith("image-worker")
+
+
+def test_no_gmlx_route_passes_a_stock_image_kind():
+    """mlx-vlm's ``image_generation`` and ``image_edit`` kinds load its own
+    pipelines from a request; only the copied mlx-vlm code names them."""
+    import pathlib
+    import re
+
+    import gmlx
+
+    root = pathlib.Path(gmlx.__file__).parent
+    pat = re.compile(r"model_kind\s*=\s*[\"'](image_generation|image_edit)")
+    hits = [str(p.relative_to(root)) for p in root.rglob("*.py")
+            if "_vendor" not in p.parts and pat.search(p.read_text())]
+    assert hits == []
+
+
+def _release_on_another_thread(releases):
+    """An image release that runs on another thread and collects there, as
+    the image worker does, and waits for it."""
+    import gc
+    import threading
+
+    def release(box):
+        done = threading.Event()
+
+        def run():
+            try:
+                releases.append(box[0].spec.path)
+                box.clear()
+                gc.collect()
+            finally:
+                done.set()
+
+        threading.Thread(target=run, name="image-worker-stub",
+                         daemon=True).start()
+        done.wait()
+    return release
+
+
+def test_image_eviction_with_a_cyclic_busy_hold_does_not_deadlock(monkeypatch):
+    """The image release waits on the worker, whose collection can finalize
+    a hold that takes the pool lock: the pool must not hold it then."""
+    import gc
+    import threading
+
+    _, pool, _, _, releases = make_mixed_pool(
+        100, {"A.gguf": 10}, {"/dit.safetensors": 9}, monkeypatch)
+    acquire_image(pool, "/dit.safetensors")
+    entry = pool.acquire("A.gguf", None, "auto")
+    pool._image_fns = pool._image_fns[:2] + (_release_on_another_thread(releases),)
+    gc.disable()
+    try:
+        cycle = [_BusyHold(pool, entry)]
+        cycle.append(cycle)
+        del cycle
+        t = threading.Thread(target=pool.evict, args=("/dit.safetensors",),
+                             daemon=True)
+        t.start()
+        t.join(5.0)
+        assert not t.is_alive(), "evict deadlocked against the image worker"
+    finally:
+        gc.enable()
+    assert releases == ["/dit.safetensors"] and entry.busy == 0
+
+
+def test_an_image_release_runs_without_the_pool_lock(monkeypatch):
+    """Every path that tears an image entry down releases it with the pool
+    lock free, so a chat acquire on another thread never waits on it."""
+    import threading
+
+    for how in ("evict", "clear", "reap", "room"):
+        _, pool, _, _, releases = make_mixed_pool(
+            10, {"A.gguf": 5}, {"/dit.safetensors": 9}, monkeypatch)
+        acquire_image(pool, "/dit.safetensors")
+        locked = []
+
+        def release(box, _pool=pool):
+            got = []
+
+            def probe():
+                ok = _pool._lock.acquire(timeout=1.0)
+                got.append(ok)
+                if ok:
+                    _pool._lock.release()
+
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+            locked.append(not got[0])
+            box.clear()
+
+        pool._image_fns = pool._image_fns[:2] + (release,)
+        if how == "evict":
+            pool.evict("/dit.safetensors")
+        elif how == "clear":
+            pool.clear()
+        elif how == "reap":
+            pool._in_flight_fn = lambda: 0
+            entry = next(iter(pool._entries.values()))
+            entry.ttl = 1
+            entry.last_access -= 10
+            pool.reap_idle()
+        else:
+            acquire(pool, "A.gguf")
+        assert locked == [False], how
+
+
+def test_reaper_skips_an_image_entry_with_a_job_running(monkeypatch):
+    """The server's in-flight count does not see an image job; its hold
+    does."""
+    from gmlx.serve.residency import IMAGE_KIND
+
+    clock = [1000.0]
+    _, pool, _, _, releases = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+    pool._time_fn = lambda: clock[0]
+    pool._in_flight_fn = lambda: 0
+    spec = SimpleNamespace(path="/dit.safetensors", id="img")
+    entry = pool.acquire("/dit.safetensors", None, IMAGE_KIND,
+                         build_spec=spec, ttl=30)
+    assert entry.busy == 1
+    clock[0] += 60
+    assert pool.reap_idle() == [] and releases == []
+    pool.release(entry)
+    assert pool.reap_idle() == ["/dit.safetensors"]
+
+
+def test_an_image_gguf_takes_no_chat_preflight(monkeypatch, tmp_path):
+    """The chat header preflight refuses a DiT GGUF; an image entry is
+    checked by its own footprint function."""
+    from gmlx.load import preflight as pf
+
+    dit = str(tmp_path / "dit.gguf")
+    open(dit, "wb").write(b"GGUF")
+
+    def chat_preflight(path):
+        raise AssertionError("the chat preflight ran for an image entry")
+
+    monkeypatch.setattr(pf, "preflight", chat_preflight)
+    _, pool, _, loads, _ = make_mixed_pool(100, {}, {dit: 9}, monkeypatch)
+    acquire_image(pool, dit)
+    assert loads == [dit]
+
+
+def test_an_image_build_takes_the_load_gate_as_an_image(monkeypatch):
+    from gmlx.serve import capacity as cap
+
+    _, pool, _, loads, _ = make_mixed_pool(
+        100, {}, {"/dit.safetensors": 9}, monkeypatch)
+    gated = []
+    monkeypatch.setattr(cap, "preload_gate",
+                        lambda b, m, **k: gated.append((b, m, k.get("image"))))
+    acquire_image(pool, "/dit.safetensors")
+    assert gated == [(9 * GB, "/dit.safetensors", True)]
+    assert loads == ["/dit.safetensors"]
+
+
+def test_the_load_gate_names_an_image_entry_by_what_it_books(monkeypatch):
+    import pytest
+
+    from gmlx.serve import capacity as cap
+
+    monkeypatch.setattr(cap, "overcommit", lambda: False)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 10 * GB)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: 12 * GB)
+    import gmlx.gen.prefill_decay as pd
+
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 50 * GB)
+    with pytest.raises(RuntimeError) as e:
+        cap.preload_gate(20 * GB, "zit", image=True)
+    msg = str(e.value)
+    assert "one image at its default size" in msg
+    assert "stream-experts" not in msg and " weights 21" not in msg
+
+
+def test_a_refused_chat_load_installs_no_boot_table(monkeypatch):
+    """The load gate runs before the capacity table of the incoming model
+    replaces the resident one's."""
+    import pytest
+
+    from gmlx.serve import capacity as cap
+
+    _, pool, _ = make_pool(100, {"A.gguf": 10})
+    order = []
+
+    def gate(*a, **k):
+        order.append("gate")
+        raise RuntimeError("model does not fit")
+
+    monkeypatch.setattr(cap, "preload_gate", gate)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda *a, **k: order.append("table"))
+    with pytest.raises(RuntimeError, match="does not fit"):
+        pool.acquire("A.gguf", None, "auto")
+    assert order == ["gate"]
+
+
+def test_a_chat_cold_load_completes_while_an_image_job_runs(monkeypatch):
+    """An image build waits for the image worker before it takes the build
+    lock, so a chat load never queues behind a running image job."""
+    import threading
+
+    from gmlx.serve import image_service
+
+    _, pool, _, loads, _ = make_mixed_pool(
+        100, {"A.gguf": 10}, {"/dit.safetensors": 9}, monkeypatch)
+    footprint, _load, release = pool._image_fns
+
+    def load(spec):
+        # As load_on_worker: the pipeline is built on the image worker.
+        return image_service._on_worker(_load, spec)
+
+    pool._image_fns = (footprint, load, release)
+    gate, running = threading.Event(), threading.Event()
+
+    def job():
+        running.set()
+        gate.wait(10)
+
+    busy = image_service.WORKER.submit(job)
+    assert running.wait(5)
+    try:
+        img = threading.Thread(target=acquire_image,
+                               args=(pool, "/dit.safetensors"), daemon=True)
+        img.start()
+        chat = threading.Thread(target=acquire, args=(pool, "A.gguf"),
+                                daemon=True)
+        chat.start()
+        chat.join(3.0)
+        assert not chat.is_alive(), "the chat load waited on the image job"
+        assert loads == []
+    finally:
+        gate.set()
+    busy.result(5)
+    img.join(5.0)
+    assert not img.is_alive() and loads == ["/dit.safetensors"]
+    assert resident(pool) == {"A.gguf", "/dit.safetensors"}

@@ -30,7 +30,6 @@ the tables resident and streams only the experts.
 """
 from __future__ import annotations
 
-import os
 import re
 from typing import Any, Callable, NamedTuple, Union
 
@@ -182,18 +181,21 @@ def streamed_table_bytes(model) -> int:
                if getattr(m, "_kq_table_streamed", False))
 
 
-def stream_ple_env() -> str:
-    return os.environ.get("GMLX_STREAM_PLE", "")
+def stream_ple_env(env=None) -> str:
+    from gmlx.envflags import env_value
+
+    return env_value("GMLX_STREAM_PLE", env) or ""
 
 
 _FORCED = False
 
 
 def force_table_stream(on: bool = True) -> None:
-    """Latch ``--stream-cpu`` before the weights load. The load-time warm
-    touch runs before ``install_expert_streaming``, so it cannot see the
-    flag the placement call carries; without the latch it would GPU-touch
-    a table the placement then streams."""
+    """Latch ``--stream-cpu`` or ``--stream-experts`` before the weights
+    load. The load-time warm touch runs before ``install_expert_streaming``,
+    so it cannot see the flag the placement call carries; without the latch
+    it would GPU-touch the tables and expert stacks the placement then
+    streams."""
     global _FORCED
     _FORCED = bool(on)
 
@@ -207,21 +209,56 @@ def table_stream_selected(model, total_bytes: int, budget: int | None,
     over budget. When the tables alone bring it back under, the experts
     go resident (table-only); otherwise the experts stream too (compose;
     ``GMLX_STREAM_PLE_COMPOSE=0`` keeps the table resident instead)."""
+    return _selected(table_bytes(model), total_bytes, budget, force_stream)
+
+
+def _selected(tbytes: int, total_bytes: int, budget: int | None,
+              force_stream: bool, env=None) -> bool:
     from gmlx.envflags import env_bool
 
-    env = stream_ple_env()
-    if env == "0":
+    ple = stream_ple_env(env)
+    if ple == "0":
         return False
-    tbytes = table_bytes(model)
     if not tbytes:
         return False
-    if env == "1" or force_stream or _FORCED:
+    if ple == "1" or force_stream or _FORCED:
         return True
     if budget is None or total_bytes <= budget:
         return False
     if (total_bytes - tbytes) <= budget:
         return True
-    return env_bool("GMLX_STREAM_PLE_COMPOSE", True)
+    return env_bool("GMLX_STREAM_PLE_COMPOSE", True, env)
+
+
+class StreamPlan(NamedTuple):
+    """What an install streams: the tables, the experts, and whether a
+    selected table stays resident under GMLX_STREAM_PLE_COMPOSE=0."""
+    tables: bool
+    experts: bool
+    table_kept: bool = False
+
+
+def stream_plan(total_bytes: int, tbytes: int, budget: int | None, *,
+                force_stream: bool = False, explicit: bool = False,
+                latched: bool = False, env=None) -> StreamPlan:
+    """The selection ladder, from byte counts alone: the installer runs it
+    on the loaded model, and a serve build on the GGUF header before the
+    load, so the build prices what the install will stream. ``explicit``
+    (``stream: experts``) forces a stream under the budget; ``latched``
+    stands for the :func:`force_table_stream` latch a build sets later.
+    ``env`` is a model's own env window, read over ``os.environ``: the
+    install runs inside it, and the header prediction before it."""
+    from gmlx.envflags import env_bool
+
+    over = budget is not None and total_bytes > budget
+    force = force_stream or (explicit and not over)
+    if not _selected(tbytes, total_bytes, budget, force or latched, env):
+        return StreamPlan(False, force or over)
+    if force or (budget is not None and total_bytes - tbytes > budget):
+        if env_bool("GMLX_STREAM_PLE_COMPOSE", True, env):
+            return StreamPlan(True, True)
+        return StreamPlan(False, True, table_kept=True)
+    return StreamPlan(True, False)
 
 
 _TABLE_STREAM = None
@@ -352,17 +389,27 @@ def streamed_table_array_ids(model) -> set[int]:
 def warm_touch_exclusions(model, total_bytes: int,
                           budget: int | None) -> set[int]:
     """``id()``s of arrays the load-time GPU warm touch must skip: the
-    declared tables, whenever the selection ladder will stream them. The
-    warm touch runs before ``install_expert_streaming``, so this re-runs
-    the same ladder test; without it, a fits-in-RAM load under
-    ``GMLX_STREAM_PLE=1`` or ``--stream-cpu`` would GPU-touch the table
-    and wire it before streaming ever installs."""
-    if not table_stream_selected(model, total_bytes, budget):
-        return set()
+    declared tables, whenever the selection ladder will stream them, and
+    the expert stacks under a stream flag latch. The warm touch runs
+    before ``install_expert_streaming``, so this re-runs the same ladder
+    test; without it, a fits-in-RAM load under ``GMLX_STREAM_PLE=1`` or a
+    stream flag would GPU-touch the table and the experts and wire them
+    before streaming ever installs."""
     out: set[int] = set()
-    for _, mod in streamable_tables_for(model):
-        for attr in ("weight", "scales"):
-            a = getattr(mod, attr, None)
-            if a is not None:
-                out.add(id(a))
+    if table_stream_selected(model, total_bytes, budget):
+        for _, mod in streamable_tables_for(model):
+            for attr in ("weight", "scales"):
+                a = getattr(mod, attr, None)
+                if a is not None:
+                    out.add(id(a))
+    modules = getattr(model, "modules", None)
+    if _FORCED and callable(modules):
+        from mlx.utils import tree_flatten
+
+        from gmlx.load.modules import switch_layer_types
+
+        _, glu_types = switch_layer_types()
+        for mod in modules():
+            if isinstance(mod, glu_types):
+                out.update(id(a) for _, a in tree_flatten(mod.parameters()))
     return out

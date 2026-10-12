@@ -1,16 +1,36 @@
 mlx-vlm - https://github.com/Blaizzy/mlx-vlm
 
-gmlx primarily uses mlx-vlm as an installed dependency, patched at runtime
-(see gmlx/upstream/seams.py), but three modules carry code copied or
-ported from it, with modifications:
+gmlx carries mlx-vlm 0.7.3 whole under gmlx/_vendor/mlx_vlm, with only
+its imports rewritten and a few marked edits (gmlx/_vendor/manifest.json
+lists every file). The modules below carry further code copied or ported
+from it, with modifications:
 
+- gmlx/models/qwen35/language.py, gated_delta.py, config.py,
+  moe_language.py and moe_config.py: the qwen3_5 and qwen3_5_moe text
+  models of mlx-vlm 0.6.15 (mlx_vlm/models/qwen3_5/language.py,
+  gated_delta.py, config.py and mlx_vlm/models/qwen3_5_moe/language.py,
+  config.py). Each file lists its edits in its docstring: absolute
+  imports, the text configs only, a gmlx cache class in make_cache, evals
+  under an except routed through gmlx.eval_guard, ASCII comments, a
+  video-grid bug fix from mlx-vlm 0.7.3, and mlx-lm's SwitchGLU in the
+  MoE block.
+- gmlx/cache/kv_cache.py: all of mlx_vlm/models/cache.py of mlx-vlm 0.7.3,
+  the KV cache classes and their module helpers, changed in place; each
+  change carries a comment where it sits. The copy's models/cache.py is an
+  alias of this module, so the classes keep their stock names, and
+  gmlx/cache/bind.py registers gmlx's own cache classes beside them.
+- gmlx/cache/attention.py: the mask and SDPA helpers of
+  mlx_vlm/models/base.py of mlx-vlm 0.7.3 (create_attention_mask,
+  create_ssm_mask, align_attention_mask_to_scores,
+  quantized_scaled_dot_product_attention, _turboquant_attention_applies
+  and scaled_dot_product_attention), with gmlx's routes added.
 - gmlx/cache/apc_manager.py: the store_kv_blocks override is a copy of
   mlx_vlm.apc.APCManager.store_kv_blocks with the per-block mx.eval
   hoisted into chunked batches and gmlx's checkpoint-store policy added.
+  build_apc_manager reads the environment variables mlx_vlm.apc.from_env
+  reads, with gmlx's gate and defaults.
 - gmlx/gen/thinking_budget.py: ported from mlx-vlm's ThinkingBudgetCriteria
   stopping-criteria callback, reworked as an mlx-lm logits processor.
-- gmlx/systemone/denoise.py: entropy_transfer_mask follows
-  mlx_vlm.generate.diffusion._diffusion_entropy_transfer_mask.
 
 mlx-vlm is distributed under the MIT License:
 

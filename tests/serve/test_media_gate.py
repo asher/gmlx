@@ -32,9 +32,9 @@ def opened(monkeypatch):
             calls.append((name, a[:1]))
             raise AssertionError(f"{name} ran for a refused request")
         return record
-    import cv2
     import requests
-    import mlx_vlm.utils as mu
+    import gmlx._vendor.mlx_vlm.utils as mu
+    from gmlx.commands import extras
     real_open, open_file = Image.open, spy("Image.open")
 
     def image_open(fp, *a, **k):
@@ -46,7 +46,17 @@ def opened(monkeypatch):
     monkeypatch.setattr(Image, "open", image_open)
     monkeypatch.setattr(requests, "get", spy("requests.get"))
     monkeypatch.setattr(requests.Session, "request", spy("requests.Session.request"))
-    monkeypatch.setattr(cv2, "VideoCapture", spy("cv2.VideoCapture"))
+    # OpenCV is the video extra, so the default install has none and the
+    # gate is tested without it. Every gmlx reader takes cv2 through
+    # extras.opencv; the copy's binding is the one load_video uses.
+    monkeypatch.setattr(extras, "opencv", spy("opencv"))
+    monkeypatch.setattr(mu, "opencv", spy("opencv"))
+    try:
+        import cv2
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(cv2, "VideoCapture", spy("cv2.VideoCapture"))
     for name in ("load_image", "load_audio", "load_video"):
         monkeypatch.setattr(mu, name, spy(name))
     return calls
@@ -221,7 +231,7 @@ def test_a_deeply_nested_body_is_walked_without_recursion():
 def test_the_generation_path_refuses_what_the_walk_missed(images, audio, videos):
     # The generation routes answer a PromptTooLongError with 400, and any
     # other error, an HTTPException among them, with 500.
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     from gmlx.serve import mem_preflight as mp
 
@@ -233,7 +243,7 @@ def test_the_generation_path_refuses_what_the_walk_missed(images, audio, videos)
 
 
 def test_the_generation_path_counts_the_media_before_it_decodes(monkeypatch):
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     from gmlx.serve import mem_preflight as mp
 
@@ -248,8 +258,8 @@ def test_the_generation_path_counts_the_media_before_it_decodes(monkeypatch):
 
 @pytest.mark.parametrize("method", ["generate", "validate_context_budget"])
 def test_the_installed_generation_wrappers_run_the_check(monkeypatch, method):
-    from mlx_vlm.server.generation import PromptTooLongError
-    from mlx_vlm.server.generation import ResponseGenerator as RG
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator as RG
 
     from gmlx.serve import mem_preflight as mp
 
@@ -373,7 +383,7 @@ def test_the_upload_text_fields_go_through_the_same_check(monkeypatch):
 def _Core(extra=None, image_paths=(), **size):
     # The request mlx-vlm's edit route builds, a dataclass like the
     # generation request.
-    from mlx_vlm.generate.edit_image import ImageEditRequest
+    from gmlx._vendor.mlx_vlm.generate.edit_image import ImageEditRequest
     return ImageEditRequest(prompt="p", image_paths=tuple(image_paths), extra=extra or {},
                             **size)
 
@@ -398,6 +408,13 @@ def _guarded():
     lambda o: o.generate_image("m", _Core(width=16384, height=16384)),
     lambda o: o.edit_image("m", _Core(image_paths=[PNG_URI], width=16384, height=8192)),
     lambda o: o.generate_image("m", _Core(width=-512, height=512)),
+    # mlx-vlm 0.7.3 sizes the references and the default edit output by
+    # output_resolution, an area of about its square.
+    lambda o: o.edit_image("m", _Core({"output_resolution": 16384},
+                                      image_paths=[PNG_URI])),
+    lambda o: o.edit_image("m", _Core({"output_resolution": 0}, image_paths=[PNG_URI])),
+    lambda o: o.edit_image("m", _Core({"output_resolution": "1024"},
+                                      image_paths=[PNG_URI])),
 ])
 def test_the_image_calls_refuse_writes_and_paths(opened, call):
     from fastapi import HTTPException
@@ -412,7 +429,9 @@ def test_the_image_calls_take_inline_images():
     assert openai.generate_image("m", _Core(), output_path=None) == "img"
     assert openai.edit_image("m", _Core(image_paths=[PNG_URI])) == "img"
     assert openai.generate_image("m", _Core(width=2048, height=2048)) == "img"
-    assert [c[0] for c in called] == ["gen", "edit", "gen"]
+    assert openai.edit_image("m", _Core({"output_resolution": 1024},
+                                        image_paths=[PNG_URI])) == "img"
+    assert [c[0] for c in called] == ["gen", "edit", "gen", "edit"]
     first = openai.generate_image
     mg._refuse_image_writes(openai)                 # installed once
     assert openai.generate_image is first

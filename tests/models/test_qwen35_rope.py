@@ -15,10 +15,10 @@ import textwrap
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.rope_utils")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.rope_utils")
 
-from mlx_vlm.models import rope_utils as _R
-from mlx_vlm.models.qwen3_5.language import Qwen3_5RotaryEmbedding
+from gmlx._vendor.mlx_vlm.models import rope_utils as _R
+from gmlx.models.qwen35.language import Qwen3_5RotaryEmbedding
 
 import gmlx.models.qwen35.rope as rp
 

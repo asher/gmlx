@@ -5,13 +5,12 @@ import os
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.generate.ar")
-q35l = pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
+q35l = pytest.importorskip("gmlx.models.qwen35.language")
 
-from mlx_lm.models.cache import KVCache, QuantizedKVCache  # noqa: E402
-from mlx_vlm.generate import ar  # noqa: E402
-from mlx_vlm.server import generation as gen  # noqa: E402
-from mlx_vlm.speculative import utils as su  # noqa: E402
+from gmlx._vendor.mlx_lm.models.cache import KVCache, QuantizedKVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm.generate import ar  # noqa: E402
+from gmlx._vendor.mlx_vlm.speculative import utils as su  # noqa: E402
 
 import gmlx.models.qwen35.verify_fold as qwen35_verify_fold  # noqa: E402
 import gmlx.spec.engine as engine  # noqa: E402
@@ -35,7 +34,7 @@ def restorable(monkeypatch):
     # Start from the stock function even when an earlier module installed
     # the wrap (it is once per process, with the boot env it saw), and
     # undo this test's install at teardown.
-    for mod in (su, ar, gen):
+    for mod in (su, ar):
         fn = mod.make_speculative_prompt_cache
         monkeypatch.setattr(mod, "make_speculative_prompt_cache",
                             getattr(fn, "_gmlx_orig", fn))
@@ -68,6 +67,17 @@ def test_b1_mtp_converts(restorable):
     wrapped = su.make_speculative_prompt_cache
     kv_quant.install_spec_kv_quant()
     assert su.make_speculative_prompt_cache is wrapped
+
+
+def test_b1_cache_install_under_the_kv_wrap_keeps_it(restorable):
+    # A later engine install must find its B=1 cache wrap under the kv
+    # wrap, not stack a second one that bypasses the conversion.
+    restorable.setenv("KV_BITS", "4")
+    kv_quant.install_spec_kv_quant()
+    wrapped = su.make_speculative_prompt_cache
+    engine.install_owned_b1_spec_cache()
+    assert su.make_speculative_prompt_cache is wrapped
+    assert isinstance(_mk()[0], QuantizedKVCache)
 
 
 def test_group_size_env(restorable):
@@ -143,7 +153,7 @@ def test_batch_forces_fp16(restorable):
     # B>1 MTP swaps stock quantized batch caches for BatchKVCache:
     # the stock rollback misfiles BatchQuantizedKVCache and never
     # trims rejected drafts.
-    from mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
 
     restorable.setenv("KV_BITS", "8")
     kv_quant.install_spec_kv_quant()
@@ -160,7 +170,7 @@ def test_batch_forces_fp16(restorable):
 def test_batch_forces_fp16_nested(restorable):
     # to_batch_cache's CacheList arm quantizes nested subcaches with the
     # default quantize=True, so the swap must walk into CacheList entries.
-    from mlx_vlm.models.cache import (BatchKVCache, BatchQuantizedKVCache,
+    from gmlx._vendor.mlx_vlm.models.cache import (BatchKVCache, BatchQuantizedKVCache,
                                       CacheList)
 
     restorable.setenv("KV_BITS", "8")
@@ -179,7 +189,7 @@ def test_batch_forces_fp16_nested(restorable):
 def test_dequantize_lift_cache():
     # B=1 quantized caches lift by dequantize, so the batch rebuild
     # proceeds instead of a drain-wait.
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     mx.random.seed(3)
     k = mx.random.normal((1, 2, 41, 64)).astype(mx.float16)
@@ -328,26 +338,11 @@ class _GdnConfigFakeLM(_FakeLM):
 
 
 @pytest.mark.parametrize("lm_cls", [_GdnFakeLM, _GdnConfigFakeLM])
-def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
-    # The stock fallback cannot verify on quantized KV tuples. The
-    # guard keys on model_type, direct or config fallback.
+def test_a_gdn_target_converts(restorable, lm_cls):
     restorable.setenv("KV_BITS", "4")
-    restorable.setenv("GMLX_QWEN_OWNED", "0")
     kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         lm_cls(), draft_kind="mtp", batch_size=1, left_padding=[0],
-        make_cache=lambda lm, lp: pytest.fail(
-            "B=1 mtp bypass must not call make_cache"),
-    )
-    assert not any(isinstance(c, QuantizedKVCache) for c in caches)
-
-
-def test_owned_on_gdn_still_converts(restorable):
-    restorable.setenv("KV_BITS", "4")
-    restorable.setenv("GMLX_QWEN_OWNED", "1")
-    kv_quant.install_spec_kv_quant()
-    caches = ar.make_speculative_prompt_cache(
-        _GdnFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail(
             "B=1 mtp bypass must not call make_cache"),
     )
@@ -392,7 +387,7 @@ class _OptOutKVCache(KVCache):
 
 
 def _cache_list(*inner):
-    from mlx_vlm.models.cache import CacheList
+    from gmlx._vendor.mlx_vlm.models.cache import CacheList
 
     return CacheList(*inner)
 
@@ -442,7 +437,7 @@ def test_b1_mtp_honors_kv_quant_unsupported(restorable):
 
 class _NestedWindowFakeLM:
     def make_cache(self):
-        from mlx_lm.models.cache import RotatingKVCache
+        from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
         return [_cache_list(RotatingKVCache(max_size=16), _SSMCache())
                 for _ in range(3)]
@@ -462,12 +457,12 @@ def test_b1_mtp_sees_a_window_nested_in_a_cache_list(restorable):
 
 
 class _Glm5ShapeFakeLM:
-    """glm5_next's real shape: CacheList(KVCache, PoolingCache) per layer."""
+    """glm5_next's real shape: CacheList(KVCache, DS4PoolingCache) per layer."""
 
     def make_cache(self):
-        from gmlx.models.deepseek_v4.cache import PoolingCache
+        from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
-        return [_cache_list(KVCache(), PoolingCache(4)) for _ in range(3)]
+        return [_cache_list(KVCache(), DS4PoolingCache(4)) for _ in range(3)]
 
 
 def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, caplog):
@@ -493,12 +488,12 @@ def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, caplog):
 
 
 class _PoolOnlyFakeLM:
-    """No growing KV at all: CacheList(state, PoolingCache) per layer."""
+    """No growing KV at all: CacheList(state, DS4PoolingCache) per layer."""
 
     def make_cache(self):
-        from gmlx.models.deepseek_v4.cache import PoolingCache
+        from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
-        return [_cache_list(_SSMCache(), PoolingCache(4)) for _ in range(2)]
+        return [_cache_list(_SSMCache(), DS4PoolingCache(4)) for _ in range(2)]
 
 
 def test_b1_mtp_notes_a_pool_only_engagement(restorable, caplog):
@@ -520,7 +515,7 @@ def test_b1_mtp_notes_a_pool_only_engagement(restorable, caplog):
 
 class _HybridFakeLM:
     def make_cache(self):
-        from mlx_lm.models.cache import RotatingKVCache
+        from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
         return [RotatingKVCache(max_size=16), KVCache(),
                 RotatingKVCache(max_size=16), KVCache()]
@@ -545,18 +540,12 @@ def test_b1_mtp_hybrid_stack_quantizes_full_attn_layers(restorable):
 
 def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
     """serve, run and chat resolve the same predicate. The CLI dropped
-    kv_bits under MTP while serve quantized the same stack; the two
-    stock verify walks are the only real declines."""
-    restorable.setenv("GMLX_QWEN_OWNED", "1")
+    kv_bits under MTP while serve quantized the same stack; the copy's
+    rounds are the only real decline."""
     assert kv_quant.mtp_kv_decline(_FakeLM()) is None
     assert kv_quant.mtp_kv_decline(_GdnFakeLM()) is None
+    assert kv_quant.mtp_kv_decline(_GdnConfigFakeLM()) is None
 
-    restorable.setenv("GMLX_QWEN_OWNED", "0")
-    assert "stock fallback" in kv_quant.mtp_kv_decline(_GdnFakeLM())
-    assert "stock fallback" in kv_quant.mtp_kv_decline(_GdnConfigFakeLM())
-    assert kv_quant.mtp_kv_decline(_FakeLM()) is None
-
-    restorable.setenv("GMLX_QWEN_OWNED", "1")
     reason = kv_quant.mtp_kv_decline(_FakeLM(), owned_round=False)
     assert "GMLX_OWNED_ROUND=0" in reason
 
@@ -565,7 +554,7 @@ def test_injected_quantized_row_lifts_to_fp16_batch():
     """A B=1 affine row admitted into a live MTP batch lifts by
     dequantize; QuantizedKVCache has no merge, so the class-merge lift
     raised on every concurrent admission under kv-bits."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
 

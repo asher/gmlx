@@ -62,6 +62,22 @@ def test_keyboard_interrupt_exits_130(routes, monkeypatch, capsys):
     assert "interrupted" in capsys.readouterr().err
 
 
+def _raises(exc):
+    def fn():
+        raise exc
+    return fn
+
+
+@pytest.mark.parametrize("fn,want", [
+    (lambda: 7, 7), (lambda: 0, 0), (lambda: None, 0), (lambda: True, 1),
+    (lambda: "boom", 1), (_raises(SystemExit(3)), 3),
+    (_raises(SystemExit(None)), 0), (_raises(SystemExit("bad input")), 1),
+    (_raises(KeyboardInterrupt()), 130),
+])
+def test_exit_code_coerces_the_entry_result(fn, want):
+    assert cli._exit_code(fn) == want
+
+
 def test_dispatch_error_is_one_line(routes, monkeypatch, capsys):
     def boom(argv, prog=None):
         raise OSError("connection refused")

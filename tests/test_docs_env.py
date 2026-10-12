@@ -3,7 +3,9 @@ docs-to-code direction: every backticked GMLX_* or MLX_VLM_* name either file
 documents must be read somewhere in gmlx/, so a renamed or removed variable
 cannot linger in the docs. A must-document set built from the code and from
 the names the docs carried when the file was created catches the reverse
-drift for the variables that matter. CPU-only, no imports of gmlx runtime."""
+drift for the variables that matter. The ComfyUI node pack lives in gmlx/,
+so the names it reads count as read. CPU-only, no imports of gmlx
+runtime."""
 from __future__ import annotations
 
 import re
@@ -34,9 +36,13 @@ _MUST_DOCUMENT = {
     "GMLX_DECODE_PAGECACHE_GB", "GMLX_CACHE_LIMIT_GB", "GMLX_NATIVE_FP",
     "GMLX_ROPE_FACTORS", "GMLX_CASCADE_SDPA", "GMLX_CASCADE_MIN_P",
     "GMLX_SPARSE_ATTN", "GMLX_SPARSE_K", "GMLX_SPARSE_MIN_S",
-    "GMLX_SPARSE_ARCHS", "GMLX_FUSED_GDN", "GMLX_QWEN_OWNED",
-    "GMLX_GEMMA_OWNED", "GMLX_NO_FAMILY_DEFAULTS", "GMLX_DRAFT_BLOCK_SIZE",
+    "GMLX_SPARSE_ARCHS", "GMLX_FUSED_GDN",
+    "GMLX_NO_FAMILY_DEFAULTS", "GMLX_DRAFT_BLOCK_SIZE",
     "GMLX_MTP_WIDTH_CAP", "GMLX_IGNORE_EOS", "GMLX_API_KEY",
+    "GMLX_IMAGE_ALLOW_FP16", "GMLX_IMAGE_LORA_PLACEMENT",
+    "GMLX_LORA_EPILOGUE", "GMLX_QWEN35_VISION_FP32",
+    "GMLX_IMAGE_KQ_ROUTES", "GMLX_IMAGE_CHAT_SHARE", "GMLX_BASE_URL",
+    "GMLX_DEFAULT_IMAGE_MODEL", "GMLX_COMFY_SETTINGS",
     "MLX_VLM_RESIDENT_BUDGET_GB", "MLX_VLM_MAX_RESIDENT_MODELS",
     "MLX_VLM_PINNED_MODELS", "MLX_VLM_RESIDENT_TTL_DISABLE",
     "MLX_VLM_RESIDENT_TTL_TICK", "MLX_VLM_TOKEN_QUEUE_TIMEOUT",

@@ -22,7 +22,7 @@ from typing import Optional, Sequence
 
 import mlx.core as mx
 
-from mlx_vlm.models.rope_utils import (  # sectioned-style branches only
+from gmlx._vendor.mlx_vlm.models.rope_utils import (  # sectioned-style branches only
     _maybe_fast_precomputed_rotary,
     _section_cos_sin,
 )
@@ -507,6 +507,12 @@ def rope_cos_sin(rotary_emb, x, position_ids):
     return cos, sin
 
 
+def scale_rotated_dims(x, dims, scale):
+    if x.shape[-1] == dims:
+        return x * scale
+    return mx.concatenate([x[..., :dims] * scale, x[..., dims:]], axis=-1)
+
+
 def fused_rope_active(rotary_emb) -> bool:
     """The fused apply is a Metal kernel; it runs only while the default
     device is the GPU. A CPU default device takes the cos/sin route."""
@@ -546,13 +552,19 @@ def rope_apply_rotary(
                 memo[position_ids.ndim] = compiled_apply
 
         if compiled_apply is not None:
-            return compiled_apply(
+            q, k = compiled_apply(
                 q,
                 k,
                 position_ids,
                 rotary_emb.inv_freq,
                 rotary_emb.position_selector,
             )
+            # The kernel rotates without the cos and sin magnitude
+            # (rope_cos_sin applies it), so the rotated dims take it here.
+            if rotary_emb.attention_scaling != 1.0:
+                q = scale_rotated_dims(q, rotary_emb.dim, rotary_emb.attention_scaling)
+                k = scale_rotated_dims(k, rotary_emb.dim, rotary_emb.attention_scaling)
+            return q, k
 
     cos, sin = rope_cos_sin(rotary_emb, k, position_ids)
     return apply_multimodal_rotary_pos_emb(

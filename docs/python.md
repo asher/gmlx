@@ -14,6 +14,7 @@ The stable API is the set of names in `gmlx.__all__`, plus `preflight` and
 does not import MLX, so tools that only read metadata can use it. MLX loads
 at the first call that needs it.
 
+- [Effect on mlx-lm and mlx-vlm](#effect-on-mlx-lm-and-mlx-vlm)
 - [Load a model](#load-a-model)
 - [Generate](#generate)
 - [Benchmark](#benchmark)
@@ -22,12 +23,33 @@ at the first call that needs it.
 - [mlx-lm server bridge](#mlx-lm-server-bridge)
 - [Quantized modules](#quantized-modules)
 
+## Effect on mlx-lm and mlx-vlm
+
+gmlx leaves an installed mlx-lm or mlx-vlm as it is. It owns the KV cache
+classes of both packages, and the attention mask and SDPA helpers of their
+`base` modules, in `gmlx.cache.kv_cache` and `gmlx.cache.attention`, and
+the copies of both packages inside gmlx use those. `import gmlx` binds no
+name in a stock package, so a stock mlx-lm or mlx-vlm in the same process
+keeps its own classes.
+
+To build a prompt cache for a model that gmlx loaded, call
+`make_prompt_cache(model, max_kv_size=None)` from the package root. It
+returns the model's own `make_cache()` when the model has one, and
+otherwise one gmlx `KVCache`, or `RotatingKVCache` with `max_kv_size`, per
+layer. Stock `mlx_lm.models.cache.make_prompt_cache` builds stock classes
+for a model without `make_cache`.
+
+The APC disk tier resolves the gmlx cache classes, and reads the
+checkpoints that earlier gmlx releases wrote.
+
 ## Load a model
 
 `load_model("model.gguf")` returns `(model, config, tokenizer)`. The model
-is a stock mlx-lm model, so `mlx_lm.generate`, `mlx_lm.stream_generate` and
-other mlx-lm code run it unchanged. The config and tokenizer come from the
-GGUF metadata. For a split file, named
+is an mlx-lm model, built from the mlx-lm code that gmlx carries, with its
+quantized leaves swapped for `KQuant*` modules. Run it with `generate` and
+`bench` from the package root, or serve it through the
+[mlx-lm server bridge](#mlx-lm-server-bridge). The config and tokenizer come
+from the GGUF metadata. For a split file, named
 `-00001-of-000NN.gguf`, pass the path of any shard.
 
 | Kwarg | Default | Meaning |
@@ -192,11 +214,16 @@ from gmlx import install_gguf_bridge
 install_gguf_bridge()
 ```
 
-`install_gguf_bridge` makes `mlx_lm.server` load any `*.gguf` path through
-`load_model`, and leaves other paths alone. Use it to add GGUF files to an
-existing `mlx_lm.server`. GGUF requests run one at a time, `--draft-model`
-is ignored for them, and `--adapter` raises. Use `gmlx serve` for
-everything else.
+`install_gguf_bridge` makes the mlx-lm server that gmlx carries load any
+`*.gguf` path through `load_model`, and leaves other paths alone, so one
+server process can mix GGUF files and MLX checkpoints. Their caches are the
+gmlx cache classes (see
+[Effect on mlx-lm and mlx-vlm](#effect-on-mlx-lm-and-mlx-vlm)).
+`python -m gmlx.serve.bridge_lm` installs the bridge and starts that
+server, and it takes the flags of `mlx_lm.server`. A stock `mlx_lm.server`
+started after `install_gguf_bridge()` loads no GGUF file. GGUF requests run
+one at a time, `--draft-model` is ignored for them, and `--adapter-path`
+raises. Use `gmlx serve` for everything else.
 
 ## Quantized modules
 

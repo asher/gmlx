@@ -166,8 +166,11 @@ def preflight(gguf_path: str, *, arch: str | None = None,
     scan0 = scan_gguf(shards[0])
     detected = arch or scan0.kv.get("general.architecture")
     if not detected:
+        from gmlx.image.preflight import file_hint
+
+        image = file_hint(shards[0])
         raise ValueError("GGUF missing 'general.architecture' KV field - "
-                         "can't detect arch")
+                         "can't detect arch" + (f". {image}" if image else ""))
 
     hist: dict[str, int] = {}
     unsupported: dict[str, int] = {}

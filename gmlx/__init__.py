@@ -7,8 +7,8 @@ into an mlx-lm-compatible ``class Model`` whose quantized leaves are
 ``KQuant*`` modules, gated only on gmlx recognizing the GGUF arch.
 
 The K-quant ops/kernels come from the companion ``mlx-kquant`` project (a
-runtime dependency). Vision-language loading adds the optional ``[vlm]``
-extra.
+runtime dependency). mlx-vlm and mlx-lm are part of gmlx, copied into
+``gmlx._vendor``.
 """
 
 from __future__ import annotations
@@ -39,6 +39,9 @@ _EXPORTS = {
     "KQuantMultiLinear": "load.modules",
     "install_kquant_modules": "load.modules",
     "install_gguf_bridge": "serve.bridge_lm",
+    # The prompt cache of a gmlx model, in the owned cache classes. Tools
+    # that score a gmlx model (mlx-kld) call it in place of mlx-lm's.
+    "make_prompt_cache": "cache.kv_cache",
     # Tokenizer-only entry points: synthesize the HF tokenizer from GGUF
     # metadata without paying the model load. Used by eval tooling (mlx-kld)
     # that needs tokenizer parity checks before deciding to load weights.
@@ -70,7 +73,7 @@ def __getattr__(name: str):
         module = importlib.import_module(f".{module_name}", __name__)
     except ImportError as exc:  # pragma: no cover - exercised without runtime deps
         raise ImportError(
-            "gmlx requires mlx, mlx-kquant, mlx-lm, transformers, "
+            "gmlx requires mlx, mlx-kquant, transformers, "
             "tokenizers, and gguf at runtime (Apple Silicon for the Metal "
             f"kernels). Importing gmlx.{module_name} failed - install "
             "with:  pip install gmlx"

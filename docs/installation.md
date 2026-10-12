@@ -1,7 +1,8 @@
 # Installation
 
 gmlx needs an Apple Silicon Mac with macOS 26.2 or newer. It does not run on
-Intel Macs or Linux. Install it with Homebrew:
+Intel Macs or Linux, and [image generation](images.md) needs an M3 chip or
+newer. Install it with Homebrew:
 
 ```sh
 brew install asher/gmlx/gmlx
@@ -65,7 +66,8 @@ runs the menu bar app. The extras add the rest:
 | `tts` | Text-to-speech on the server, with mlx-audio, for Kokoro, Qwen3-TTS and other speech models |
 | `talk` | The voice client [`gmlx talk`](talk.md), with `stt` and `tts` |
 | `assistant` | MCP tools for the built-in [assistant](assistant.md) |
-| `all` | Every extra above |
+| `video` | OpenCV, which video input and DeepSeek-VL image input need. A few other vision models, such as SAM 3, use it to resize or draw |
+| `all` | Every extra above except `video` |
 
 To add or remove extras with uv, install again and list every extra you
 want, because uv keeps only the ones you name:
@@ -120,8 +122,10 @@ newer release in the
 [changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md). They list
 what may need a change to your config or scripts.
 
-A running server keeps the old version until you run `gmlx restart`. Update
-ffmpeg with `brew upgrade ffmpeg`.
+A running server keeps the old version until you run `gmlx restart`. The
+next server start also updates the gmlx nodes in ComfyUI, and a running
+ComfyUI loads them when you restart it. Update ffmpeg with
+`brew upgrade ffmpeg`.
 
 ## Removing gmlx
 
@@ -129,11 +133,17 @@ ffmpeg with `brew upgrade ffmpeg`.
    as [Removing container data](launch-container.md#removing-container-data)
    describes. Do this first, because those steps run gmlx commands.
 2. If you installed the login item, run `gmlx service uninstall`.
-3. Uninstall the package: `brew uninstall gmlx`, `uv tool uninstall gmlx`,
+3. If you put the gmlx nodes into ComfyUI, run `gmlx comfyui uninstall`.
+4. Uninstall the package: `brew uninstall gmlx`, `uv tool uninstall gmlx`,
    or `pip uninstall gmlx mlx-kquant` in its environment.
-4. Delete the files that gmlx wrote, listed in
+5. Delete the files that gmlx wrote, listed in
    [Where files are on disk](troubleshooting.md#where-files-are-on-disk),
    and the models you downloaded.
 
-Steps 2 and 3 leave your configuration, caches and models in place, so a
+Steps 2 to 4 leave your configuration, caches and models in place, so a
 later install finds them again.
+
+If you uninstalled gmlx before step 3, the gmlx nodes in ComfyUI say that
+gmlx is not installed. Delete the two paths they name: the `comfyui-gmlx`
+link in the `custom_nodes` folder of each ComfyUI, and
+`~/.local/share/gmlx/comfyui`.

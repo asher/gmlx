@@ -119,16 +119,11 @@ def test_get_rope_index_borrowed_semantics():
     assert p[0][:2] == p[1][:2] == p[2][:2]
 
 
-def test_registered_module_and_owned_row():
-    import sys
-
+def test_mlx_vlm_loader_resolves_qwen4_exp_to_the_gmlx_module():
     import gmlx.models.qwen4_exp.vlm_model as vm
-    from gmlx.models.owned import OWNED_MODULES
+    from gmlx._vendor.mlx_vlm.utils import get_model_and_args
 
-    vm.ensure_registered()
-    assert sys.modules["mlx_vlm.models.qwen4_exp"] is vm
-    assert OWNED_MODULES["mlx_vlm.models.qwen4_exp"] == \
-        "gmlx.models.qwen4_exp.vlm_model"
+    assert get_model_and_args({"model_type": "qwen4_exp"})[0] is vm
 
 
 def test_language_model_carries_the_mtp_spec_hooks():
@@ -169,6 +164,18 @@ def test_return_hidden_yields_the_four_stream_hidden():
     (streams,) = spec.hidden_states
     assert streams.ndim == 4 and streams.shape[2] == lm.args.hc_count
     relogits = lm.speculative_logits_from_hidden(streams)
+    assert float(mx.abs(relogits - out.logits).max()) < 1e-5
+
+
+def test_skip_logits_leaves_out_the_head():
+    model = _tiny_vlm()
+    lm = model.language_model
+    ids = mx.random.randint(0, lm.args.vocab_size, (1, 6))
+    out = lm(ids, cache=lm.make_cache())
+    spec = lm(ids, cache=lm.make_cache(), return_hidden=True, skip_logits=True)
+    assert spec.logits is None
+    assert lm(ids, cache=lm.make_cache(), skip_logits=True).logits is None
+    relogits = lm.speculative_logits_from_hidden(spec.hidden_states[-1])
     assert float(mx.abs(relogits - out.logits).max()) < 1e-5
 
 

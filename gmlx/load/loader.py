@@ -17,6 +17,7 @@ from __future__ import annotations
 import gc
 import os
 import time
+from typing import Any, TypedDict, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -25,28 +26,26 @@ from mlx.utils import tree_flatten
 
 import mlx_kquant as kq
 
-from . import loadlog
-from .dtypes import activation_dtype, activation_dtype_name
+from . import loadlog, rope_scaling, rope_swap
+from .dtypes import activation_dtype, activation_dtype_name, dtype_name
+from gmlx.device import cpu_default_device, metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
 from gmlx.gen.prefill_tail import install_prefill_tail
 import gmlx.upstream.gpt_oss_prefill as gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .invariant_linear import install_batch_invariant_linears
-from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
+from .modules import (
+    install_fused_moe_glu,
+    install_hyv3_shexp_fold,
+    install_switch_glu_block_routing,
+)
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
 from gmlx.upstream.qkv_fuse import install_fused_qkv
-from gmlx.models.gemma4.batched_sdpa import install_gemma4_batched_sdpa
+from gmlx.models.gemma4 import dispatch as gemma4_dispatch
 from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
-from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
-from gmlx.models.gemma4.sync import install_gemma4_nosync
-from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
-from gmlx.upstream.quantized_cache_pack_fix import (
-    install_quantized_cache_pack_fix)
-from gmlx.upstream.quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
-from gmlx.upstream.rotating_cache_fix import install_rotating_cache_fix
 from .modules import (
     KQuantEmbedding,
     dequantize_unattachable_leaves,
@@ -67,11 +66,10 @@ from gmlx.upstream.dsv32_patches import (
     _patch_dsv32_moe_scores,
 )
 from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch,
     _patch_gated_delta_fused_decode,
-    _patch_gated_delta_tiled_v,
     _patch_qwen3next_split_gdn,
-    _tiled_v_patch_applied,
+    gguf_v_heads_tiled,
+    require_tiled_gdn,
 )
 from .gguf_meta import first_nonzero_int, read_int
 from .mtp_target import _build_mtp_target
@@ -85,21 +83,23 @@ from .wire import load_gguf_wire_bytes, remap_arrays, strip_nextn_trunk_overflow
 
 
 def build_model(config_dict: dict, *, mtp: bool = False):
-    """Instantiate the mlx_lm model class without running ``nn.quantize()``.
+    """Instantiate the text model class without running ``nn.quantize()``.
 
     The caller supplies a flat HF-shaped config dict with ``model_type`` set to
-    the canonical text-model class. The ``_UNWRAP_TO_TEXT`` shortcut builds the
+    the canonical text-model class. The copy's ``_get_classes`` resolves the
+    classes: the owned Gemma 4 text model for gemma4_text, whose path in the
+    copy is an alias of it, and mlx-lm's class otherwise. The
+    ``_UNWRAP_TO_TEXT`` shortcut builds the
     inner ``TextModel`` directly for wrapper models (e.g. qwen3_5_moe), avoiding
     a ``language_model.`` prefix mismatch.
 
-    When ``mtp=True`` the target is built on the mlx-vlm ``LanguageModel`` class
-    (which carries the ``speculative_*`` hooks) wrapped in ``MTPTextTarget``; the
-    stock mlx-lm text path is left byte-identical for every non-MTP load.
+    When ``mtp=True`` the target is built on the language model class that
+    carries the ``speculative_*`` hooks, wrapped in ``MTPTextTarget``.
     """
     if mtp:
         return _build_mtp_target(config_dict)
 
-    from mlx_lm.utils import _get_classes
+    from gmlx._vendor.mlx_lm.utils import _get_classes
 
     config = dict(config_dict)
     config.pop("quantization", None)
@@ -109,7 +109,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     if mt in _UNWRAP_TO_TEXT:
         import importlib
 
-        mod = importlib.import_module("mlx_lm.models.qwen3_5")
+        mod = importlib.import_module("gmlx._vendor.mlx_lm.models.qwen3_5")
         TextModel = mod.TextModel
         TextModelArgs = mod.TextModelArgs
         model_args = TextModelArgs.from_dict(config)
@@ -128,7 +128,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # make_cache, so no outer Model wrapper is needed.
         import importlib
 
-        mod = importlib.import_module("mlx_lm.models.gemma3n")
+        mod = importlib.import_module("gmlx._vendor.mlx_lm.models.gemma3n")
         text_config = mod.TextConfig.from_dict(config["text_config"])
         model = mod.LanguageModel(text_config)
         loadlog.verbose_print(f"[build] {mt} -> gemma3n.LanguageModel (text tower, no prefix)")
@@ -144,7 +144,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # expects, so no target prefix is applied.
         import importlib
 
-        dg = importlib.import_module("mlx_vlm.models.diffusion_gemma")
+        dg = importlib.import_module("gmlx._vendor.mlx_vlm.models.diffusion_gemma")
         model = dg.Model(dg.ModelConfig.from_dict(config))
         loadlog.verbose_print(
             f"[build] {mt} -> mlx-vlm diffusion_gemma.Model "
@@ -153,66 +153,56 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         return model, config
     if mt == "gemma_embedding":
         # EmbeddingGemma: a gemma3 text backbone run as a bidirectional sentence
-        # encoder. The model class lives in mlx-embeddings, not mlx-lm; its
-        # ModelArgs is mlx-lm gemma3_text's (reused). The remap already targets the
-        # encoder Model's tree (model.* backbone + dense.0/dense.1), so no prefix.
+        # encoder, gmlx's own class (mlx-lm gemma3_text blocks). The remap
+        # already targets its tree (model.* backbone + dense.0/dense.1), so no
+        # prefix. Imported by name like the mlx-vlm classes above, so the
+        # encoder's type stays out of the callers' model type.
         import importlib
 
-        ge = importlib.import_module("mlx_embeddings.models.gemma3_text")
+        ge = importlib.import_module("gmlx.models.embedders.gemma_embedding")
         model = ge.Model(ge.ModelArgs.from_dict(config))
         loadlog.verbose_print(
-            f"[build] {mt} -> mlx-embeddings gemma3_text.Model "
+            f"[build] {mt} -> gmlx embedders gemma_embedding.Model "
             "(bidirectional encoder)"
         )
         return model, config
-    # gmlx owns the model module for each model_type below. ensure_registered()
-    # installs it as mlx_lm.models.<model_type>, over any module of that name
-    # an mlx-lm release ships, so _get_classes builds the gmlx class
-    # (gmlx.models.owned).
+    # The vendored mlx-lm resolves the model types gmlx owns through
+    # gmlx.models.owned. Before the build, a model registers the cache
+    # classes that prompt-cache load and CacheList.from_state resolve by
+    # name, and its tool parser, so a later serve template inference finds
+    # it.
     if mt == "minimax_m3":
         import gmlx.models.minimax_m3 as minimax_m3_model
 
         minimax_m3_model.ensure_registered()
     if mt == "deepseek_v4":
-        # Also injects PoolingCache into mlx_lm.models.cache.
         import gmlx.models.deepseek_v4.model as deepseek_v4_model
 
         deepseek_v4_model.ensure_registered()
     if mt == "deepseek_v41":
-        # DeepSeek-V4.1-Flash (the llama.cpp convert patch arch): the V4 skeleton
-        # plus engram memory layers; registers deepseek_v4's companions too.
+        # The V4 skeleton plus engram memory layers; registers deepseek_v4's
+        # companions too.
         import gmlx.models.deepseek_v41.model as deepseek_v41_model
         import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
 
         deepseek_v41_model.ensure_registered()
         deepseek_v41_tools.ensure_registered()
     if mt == "hy_v3":
-        # The tool parser registers with the model so a later serve
-        # template-inference resolves it. Same for muse_glimmer and hy_v4.
-        import gmlx.models.hy_v3.model as hy_v3_model
         import gmlx.models.hy_v3.tools as hy_v3_tools
 
-        hy_v3_model.ensure_registered()
         hy_v3_tools.ensure_registered()
-    if mt == "kimi_k3":
-        import gmlx.models.kimi_k3 as kimi_k3_model
-
-        kimi_k3_model.ensure_registered()
     if mt == "glm5_next":
-        # Also injects the deepseek_v4 PoolingCache its hybrid cache uses.
+        # Its hybrid cache depends on the deepseek_v4 DS4PoolingCache.
         import gmlx.models.glm5_next.model as glm5_next_model
 
         glm5_next_model.ensure_registered()
     if mt == "qwen4_exp":
-        # Also injects QSAKVCache into the cache modules.
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
     if mt == "muse_glimmer":
-        import gmlx.models.muse_glimmer.model as muse_glimmer_model
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
 
-        muse_glimmer_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
     if mt == "hy_v4":
         import gmlx.models.hy_v4.model as hy_v4_model
@@ -220,6 +210,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         hy_v4_model.ensure_registered()
         hy_v4_tools.ensure_registered()
+    if mt == "gemma3_text":
+        # FunctionGemma is a gemma3 text model, and mlx-vlm 0.7.3 no longer
+        # ships its tool parser. The vendored one registers with the model
+        # so a later serve template-inference resolves it.
+        import gmlx.models.function_gemma as function_gemma_tools
+
+        function_gemma_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -240,7 +237,7 @@ def _patch_hunyuan_norm_topk(model) -> None:
     Per-instance ``__class__`` swap (no mlx-lm globals touched), forward
     byte-identical to stock apart from the one-line renormalization.
     """
-    from mlx_lm.models.hunyuan import MoeBlock
+    from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
     class _NormTopKMoE(MoeBlock):
         def __call__(self, x):
@@ -364,7 +361,7 @@ def _kq_expert_gpu_ok(module) -> bool:
 # First token after any non-decode call is skipped (prefill contamination);
 # its buckets still land in the sums, a <=1/N skew.
 _PHASE_KEYS = ("ev", "la", "stage_wait", "stage_book", "prestage", "build")
-_PHASE = (
+_PHASE: dict[str, Any] | None = (
     {k: 0.0 for k in _PHASE_KEYS}
     | {"tokens": 0, "wall": 0.0, "last": None, "first_li": None, "dirty": True}
     if env_bool("GMLX_DECODE_PHASE_STATS", False)
@@ -574,6 +571,8 @@ class _FactoredRoPE(nn.Module):
         self.dims = dims
         self.traditional = traditional
         self.scale = scale
+        self.base = base
+        self._factors = factors
         freqs = base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims)
         self._freqs = freqs * factors.astype(mx.float32)
 
@@ -709,7 +708,7 @@ def _warm_touch_threshold_bytes() -> int:
             pass
     cap = 32 << 30
     try:
-        wss = int(mx.device_info()["max_recommended_working_set_size"])
+        wss = int(metal_value("max_recommended_working_set_size"))
         return min(cap, wss // 3)
     except Exception:
         return cap
@@ -752,10 +751,11 @@ def _warm_mmap_residency(
     ``threshold_bytes`` the watchdog is not at risk and lazy wiring during
     the first forward is near-free (measured: an eager touch costs seconds,
     the lazy path nothing), so the GPU touch is skipped there too and only
-    the page-cache populate runs. GMLX_RESIDENCY_WARM=0 disables
-    everything, =1 forces the GPU touch regardless of size.
+    the page-cache populate runs. On the CPU default device nothing is
+    wired, so only the populate runs there as well. GMLX_RESIDENCY_WARM=0
+    disables everything, =1 forces the GPU touch regardless of size.
     """
-    pairs = tree_flatten(model.parameters())
+    pairs = cast(list[tuple[str, mx.array]], tree_flatten(model.parameters()))
     total = sum(a.nbytes for _, a in pairs)
     # Streamable-table exclusion: a table the selection ladder will stream
     # must not be GPU-touched here - the touch would wire the whole buffer
@@ -764,7 +764,7 @@ def _warm_mmap_residency(
     # below stays whole-model.
     try:
         _tbudget = int(
-            0.9 * mx.device_info()["max_recommended_working_set_size"])
+            0.9 * cast(int, metal_value("max_recommended_working_set_size")))
     except Exception:
         _tbudget = None
     from gmlx.stream.table_stream import warm_touch_exclusions
@@ -810,7 +810,8 @@ def _warm_touch_pass(
     if threshold_bytes is None:
         threshold_bytes = _warm_touch_threshold_bytes()
     try:
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
+        budget = int(
+            0.9 * cast(int, metal_value("max_recommended_working_set_size")))
     except Exception:
         budget = None
     if mode != "1" and budget is not None and total > budget:
@@ -819,6 +820,8 @@ def _warm_touch_pass(
         start_populate(paths, log=log)
     if mode != "1" and total < threshold_bytes:
         return
+    if cpu_default_device():
+        return  # nothing is wired on the CPU device
     t0 = time.time()
     pending, acc = [], 0
     for a in arrays:
@@ -903,6 +906,56 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 
+# Params cast to float32 at load, whatever float dtype the file stores them
+# in. The rows above act on F32 and F16 tensors only; this one also takes
+# BF16 tensors, which the activation cast never visits.
+_FP32_CAST_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    # qwen3_vl: the tower's residual stream reaches the thousands in its last
+    # blocks, and a 16-bit float drops the small values beside them. Against
+    # llama.cpp the main image features of a bfloat16 tower are 9 to 15
+    # percent off in relative L2 (worst image token cosine 0.69), and those
+    # of a float32 tower 0.3 to 3.7 percent. Float32 activations over the
+    # stored 16-bit weights give the same bits, but each matmul then pays a
+    # promotion (14 percent of the tower's time at 256 image tokens), so the
+    # weights are cast once here. A BF16 mmproj's tower is 1.06 GiB mapped
+    # from the file as stored and 2.13 GiB owned after this cast.
+    "qwen3_vl": ("vision_tower.",),
+}
+
+# The same cast behind an environment switch that is off by default: model
+# type -> (variable, substrings).
+_FP32_CAST_BY_SWITCH: dict[str, tuple[str, tuple[str, ...]]] = {
+    # qwen3_5, qwen3_5_moe (Qwen3.5 and Qwen3.6) carry the qwen3_vl tower.
+    # On Qwen3.6-35B-A3B the main image features of the bfloat16 tower are
+    # 5 to 6 percent from the float32 tower's in relative L2, and the worst
+    # image token has cosine 0.86. The float32 tower costs 19 percent of the
+    # tower's time and 12 percent of the time to the first token of a 1200
+    # token image request, so these shipped families keep bfloat16 unless
+    # the switch is set.
+    "qwen3_5": ("GMLX_QWEN35_VISION_FP32", ("vision_tower.",)),
+    "qwen3_5_moe": ("GMLX_QWEN35_VISION_FP32", ("vision_tower.",)),
+}
+
+
+class FloatDtypeRules(TypedDict):
+    fp32_keep: tuple[str, ...]
+    f16_keep: tuple[str, ...]
+    fp32_cast: tuple[str, ...]
+
+
+def float_dtype_rules(model_type: str) -> FloatDtypeRules:
+    """The float dtype rows of ``model_type`` as ``_install_and_load``
+    keywords. Reads the switch of a ``_FP32_CAST_BY_SWITCH`` row."""
+    fp32_cast = _FP32_CAST_BY_MODEL_TYPE.get(model_type, ())
+    switch = _FP32_CAST_BY_SWITCH.get(model_type)
+    if switch is not None and env_bool(switch[0], False):
+        fp32_cast = fp32_cast + switch[1]
+    return {
+        "fp32_keep": _FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        "f16_keep": _F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        "fp32_cast": fp32_cast,
+    }
+
 
 def preset_native_fp_wire_env(args) -> None:
     """Pre-set wire mode when a streaming placement is coming.
@@ -951,7 +1004,7 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     if not supported:
         return False
     total = sum(v.nbytes for v in hf_weights.values())
-    info = mx.device_info()
+    info = metal_info() or {}
     wss = int(info.get("max_recommended_working_set_size", 0))
     if wss and total > 0.9 * wss:
         log(
@@ -983,16 +1036,6 @@ def _native_fp_multilinear_keys(model, hf_kquant_meta) -> set[str]:
     return keys
 
 
-def _gemma4_target(model) -> bool:
-    """True when the loaded model runs the gemma4 classes the gemma-4
-    patches target. The installs themselves stay unconditional (they are
-    module-level and inert elsewhere); this only keeps the [install] log
-    lines from claiming gemma-4 levers on unrelated archs."""
-    lm = getattr(model, "language_model", model)
-    return ("gemma4" in type(model).__module__
-            or "gemma4" in type(lm).__module__)
-
-
 def _install_hadamard(model, targets: dict | None, log) -> None:
     """Swap the Hadamard-folded leaves after the kquant swap and record the
     count. No-op for a file with no fold."""
@@ -1009,6 +1052,97 @@ def _install_hadamard(model, targets: dict | None, log) -> None:
         log(f"[install] Hadamard rotation shared on {n_shared} attention/MLP blocks")
 
 
+class UnfilledParametersError(RuntimeError):
+    """The GGUF weights leave model parameters without a tensor."""
+
+
+class ParameterShapeError(UnfilledParametersError):
+    """A GGUF tensor has another shape than the parameter of its name."""
+
+
+def _names(names: list[str], n: int = 5) -> str:
+    more = f" (+{len(names) - n} more)" if len(names) > n else ""
+    return ", ".join(names[:n]) + more
+
+
+def _require_filled(model_params: dict, loadable: dict, hf_weights,
+                    hint: str = "") -> None:
+    """Refuse a load that leaves any model parameter without a tensor, or
+    gives one a tensor of another shape.
+
+    ``model_params`` maps each parameter name to its shape. GGUF tensors
+    with no parameter are dropped (they are logged as redundant). A
+    parameter with no tensor keeps its random initialization, and the model
+    would run on it. ``load_weights(strict=False)`` checks no shapes, so a
+    tensor of another shape would replace its parameter while the config
+    still describes the old one. No shape mismatch is allowed."""
+    missing = sorted(model_params.keys() - loadable.keys())
+    if missing:
+        unmatched = sorted(set(hf_weights) - loadable.keys())
+        msg = (
+            f"the GGUF weights fill {len(model_params) - len(missing)} of "
+            f"{len(model_params)} model parameters. Parameters without a "
+            f"tensor ({len(missing)}): {_names(missing)}. Tensors without a "
+            f"parameter ({len(unmatched)})"
+            + (f": {_names(unmatched)}" if unmatched else "")
+            + ". The model would run on random weights, so the load stops.")
+        raise UnfilledParametersError(msg + (f" {hint}" if hint else ""))
+    wrong = sorted(k for k, v in loadable.items()
+                   if tuple(v.shape) != tuple(model_params[k]))
+    if wrong:
+        pairs = [f"{k} (parameter {tuple(model_params[k])}, tensor "
+                 f"{tuple(loadable[k].shape)})" for k in wrong]
+        msg = (
+            f"{len(wrong)} of {len(model_params)} model parameters get a GGUF "
+            f"tensor of another shape: {_names(pairs)}. The config does not "
+            f"describe these weights, so the load stops.")
+        raise ParameterShapeError(msg + (f" {hint}" if hint else ""))
+
+
+def _install_text_patches(model, log) -> None:
+    """The text-model installs of a load: process-wide patches of
+    mlx-lm and mlx-vlm, and module swaps that walk the model tree."""
+    if install_hd512_sdpa():
+        log("[install] head_dim-512 fused SDPA active")
+    if install_rope_batch_fix():
+        log("[install] rope int-offset batch fix active")
+    # Inside the decay wrap (installed first): media blocks stay whole.
+    from gmlx.gen.media_spans import (
+        install_block_aware_generate_step,
+        install_span_aware_prompt_step,
+    )
+    install_span_aware_prompt_step()
+    install_block_aware_generate_step()
+    install_prefill_tail()
+    if install_prefill_decay():
+        log("[install] depth-decay prefill chunking active")
+    if install_cascade_sdpa() and install_cascade_stamp():
+        log("[install] shared-prefix cascade decode route active")
+    if install_sparse_sdpa():
+        log("[install] sparse top-k page decode route active (lossy, opt-in)")
+    # After the installs whose state it reads.
+    gemma4_dispatch.configure(model, log)
+    n_fused_moe = install_fused_moe_glu(model)
+    if n_fused_moe:
+        log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_routed = install_switch_glu_block_routing(model)
+    if n_routed:
+        log(f"[install] SwitchGLU block routing (one gather per verify block) on {n_routed} layers")
+    n_inv = install_batch_invariant_linears(model)
+    if n_inv:
+        log(f"[install] batch-invariant kernel on {n_inv} small float projections")
+    n_shexp = install_hyv3_shexp_fold(model)
+    if n_shexp:
+        log(f"[install] shared-expert fold on {n_shexp} MoE layers")
+    n_fused_qkv = install_fused_qkv(model)
+    if n_fused_qkv:
+        log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
+    n_occ = install_occupancy_fuse(model)
+    if n_occ:
+        log(f"[install] occupancy fusion (qkv + gate/up decode) on "
+            f"{n_occ} modules")
+
+
 def _install_and_load(
     model,
     hf_weights,
@@ -1019,10 +1153,13 @@ def _install_and_load(
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
     f16_keep: tuple[str, ...] = (),
+    fp32_cast: tuple[str, ...] = (),
     source_key: tuple | None = None,
     active_before: float | None = None,
     deferred_tables: dict | None = None,
     hadamard: dict | None = None,
+    act_dtype: mx.Dtype | None = None,
+    text_patches: bool = True,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -1043,6 +1180,8 @@ def _install_and_load(
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
     cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
     their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
+    ``fp32_cast``: substrings cast to float32 from F16, BF16 or F32 (see
+    ``_FP32_CAST_BY_MODEL_TYPE``).
 
     ``deferred_tables``: wire name -> file source for tables the wire load
     skipped (past the device buffer ceiling); attached after the kquant swap.
@@ -1055,6 +1194,11 @@ def _install_and_load(
     ``hadamard``: module path -> ``FoldTarget`` for a Hadamard-folded GGUF
     (``hadamard.hadamard_targets_for``); the named kquant leaves take their
     rotating subclass right after the kquant swap.
+
+    ``act_dtype``: the dtype the float cast targets, default
+    ``activation_dtype()``. ``text_patches=False`` skips the text-model
+    installs of ``_install_text_patches`` for a model that is not a text
+    model. The kquant swap still runs.
     """
     loadlog.stage("loading weights")
     if active_before is None:
@@ -1117,52 +1261,13 @@ def _install_and_load(
         log(f"[install] {len(attached)} table(s) read from the GGUF, "
              f"{gb:.1f} GB: {', '.join(attached)}")
 
-    if install_hd512_sdpa():
-        log("[install] head_dim-512 fused SDPA active")
-    if install_quantized_sdpa_mask_fix():
-        log("[install] quantized-KV SDPA batch-mask fix active")
-    if install_quantized_cache_pack_fix():
-        log("[install] quantized-KV pack-width fix active")
-    if install_rope_batch_fix():
-        log("[install] rope int-offset batch fix active")
-    # Inside the decay wrap (installed first): media blocks stay whole.
-    from gmlx.gen.media_spans import install_span_aware_prompt_step
-    install_span_aware_prompt_step()
-    install_prefill_tail()
-    if install_prefill_decay():
-        log("[install] depth-decay prefill chunking active")
-    if install_gemma4_nosync() and _gemma4_target(model):
-        log("[install] gemma-4 host-sync-free masks/rope offsets active")
-    if install_gemma4_batched_sdpa() and _gemma4_target(model):
-        log("[install] gemma-4 hd512 batched-decode row route active")
-    if install_gemma4_softcap_f32() and _gemma4_target(model):
-        log("[install] gemma-4 float32 logit softcap active")
-    if install_cascade_sdpa() and install_cascade_stamp():
-        log("[install] shared-prefix cascade decode route active")
-    if install_sparse_sdpa():
-        log("[install] sparse top-k page decode route active (lossy, opt-in)")
-    n_fused_moe = install_fused_moe_glu(model)
-    if n_fused_moe:
-        log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
-    n_inv = install_batch_invariant_linears(model)
-    if n_inv:
-        log(f"[install] batch-invariant kernel on {n_inv} small float projections")
-    n_shexp = install_hyv3_shexp_fold(model)
-    if n_shexp:
-        log(f"[install] shared-expert fold on {n_shexp} MoE layers")
-    n_fused_qkv = install_fused_qkv(model)
-    if n_fused_qkv:
-        log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
-    n_occ = install_occupancy_fuse(model)
-    if n_occ:
-        log(f"[install] occupancy fusion (qkv + gate/up decode) on "
-            f"{n_occ} modules")
-    install_rotating_cache_fix()
-    install_arrays_cache_fix()
+    if text_patches:
+        _install_text_patches(model, log)
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
-    model_params = {p for p, _ in tree_flatten(model.parameters())}
+    model_params = {p: v.shape for p, v in tree_flatten(model.parameters())
+                    if isinstance(v, mx.array)}
     loadable = {k: v for k, v in hf_weights.items() if k in model_params}
     redundant = sorted(set(hf_weights.keys()) - set(loadable.keys()))
     if redundant:
@@ -1170,12 +1275,22 @@ def _install_and_load(
             f"[load_weights] dropping {len(redundant)} redundant tensors "
             f"(no model slot): {redundant[:3]}..."
         )
+    _require_filled(model_params, loadable, hf_weights)
 
-    act_dtype = activation_dtype()
-    act_name = activation_dtype_name()
-    n_cast = 0
+    if act_dtype is None:
+        act_dtype = activation_dtype()
+    act_name = dtype_name(act_dtype)
+    n_cast = n_fp32 = 0
     for k in list(loadable):
         v = loadable[k]
+        if (fp32_cast and k not in hf_kquant_meta
+                and v.dtype in (mx.float32, mx.float16, mx.bfloat16)
+                and any(s in k for s in fp32_cast)):
+            if v.dtype != mx.float32:
+                # 2 bytes to 4: the result owns its buffer.
+                loadable[k] = v.astype(mx.float32)
+                n_fp32 += 1
+            continue
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
             if fp32_keep and any(s in k for s in fp32_keep):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
@@ -1195,17 +1310,13 @@ def _install_and_load(
             n_cast += 1
     if n_cast:
         log(f"[dtype] cast {n_cast} float params (norms etc.) to {act_name}")
+    if n_fp32:
+        log(f"[dtype] cast {n_fp32} 16-bit float params to float32")
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
     _warm_mmap_residency(model, log=log, active_before=active_before,
                          source_key=source_key)
-
-    missing = sorted(model_params - set(loadable.keys()))
-    if missing:
-        loadlog.warn(
-            f"WARNING: {len(missing)} model params not loaded: {missing[:5]}..."
-        )
 
     _verify_zero_copy_views(model, no_alias, log)
 
@@ -1307,6 +1418,7 @@ def _resolve_indexer_sidecar(
 
 
 @loadlog.seeds
+@rope_scaling.scoped
 def load_model(
     gguf_path: str,
     *,
@@ -1318,6 +1430,7 @@ def load_model(
     fail_on_unknown: bool = False,
     zero_copy: bool = True,
     verbose: bool = False,
+    rope_override: rope_scaling.RopeOverride | None = None,
 ):
     """Load a text-only GGUF K-quant file into an mlx-lm model.
 
@@ -1342,10 +1455,17 @@ def load_model(
         zero_copy: load tensors as no-copy mmap views (default) vs memcpy.
         verbose: print load diagnostics (default quiet; the CLI drives
             its own spinner/summary session instead).
+        rope_override: rope scaling options (``--rope-scaling`` and the
+            other llama.cpp rope flags) over the GGUF header keys.
     """
 
     _log = loadlog.verbose_print
     active_before = _active_now()
+    if hf_source is not None and not rope_scaling.active_override().is_empty():
+        # The supplied config skips the synthesizer, which applies them.
+        raise ValueError(
+            "the rope scaling options do not apply to a config from "
+            "hf_source (--hf-source); drop one of them")
 
     # 0. preflight - discover shards, classify codecs (IQ / unsupported types
     #    refuse here, naming the codec, before kq.load_gguf's cryptic
@@ -1464,7 +1584,8 @@ def load_model(
     # 3. build unquantized model from synthesized (or supplied) config.
     loadlog.stage("building model")
     if hf_source is not None:
-        config_dict = _load_config_from_source(hf_source)
+        config_dict = _vocab_from_token_embd(
+            _load_config_from_source(hf_source), tensor_shapes)
     else:
         from .config_synth import synthesize_config
 
@@ -1498,23 +1619,14 @@ def load_model(
     if rope_factors is not None and config.get("model_type") == "llama":
         _patch_rope_factors(model, rope_factors)
 
-    # 4b. GGUF V-head tiling fixup for asymmetric K/V heads.
-    if _needs_tiled_v_patch(config):
-        _patch_gated_delta_tiled_v()
-    elif config.get("model_type") == "qwen3_next" and _tiled_v_patch_applied():
-        # The tiled-V patch rewrites mlx_lm.models.gated_delta module globals,
-        # and qwen3_next's gated_delta_update goes through that same module -
-        # once a qwen3.5/3.6 hybrid has been loaded in this process, a
-        # subsequent qwen3_next load would silently run the wrong (tiled) K->V
-        # mapping. Fail loudly instead. (kimi_k3 also dispatches through
-        # gated_delta but needs no guard: its K/V heads are symmetric, and
-        # with Hk == Hv the tiled and grouped K->V mappings are identical.)
-        raise RuntimeError(
-            "cannot load a qwen3next GGUF after a qwen3.5/3.6 hybrid in the "
-            "same process: the qwen3.5 tiled-V runtime patch (already applied) "
-            "would corrupt qwen3_next's grouped gated-delta K->V mapping. "
-            "Load the qwen3next model in a fresh process."
-        )
+    # 4a'''. rope scaling: the resolved table replaces the class's rope on
+    #        the architectures the swap covers (gmlx.load.rope_swap).
+    rope_swap.apply(model, config)
+
+    # 4b. GGUF V-head order for asymmetric K/V heads: each gated-delta
+    #     layer took it from kv_head_layout in the config. Refuse a tree
+    #     that would pair its heads in the grouped order.
+    require_tiled_gdn(model, config)
 
     # 4c. DeepSeek-V3.2 / glm-dsa decode correctness. Fixes only visible past
     #     index_topk (~2048), so generation "starts strong then degrades at depth":
@@ -1597,7 +1709,8 @@ def load_model(
              + ", ".join(dequant[:3])
              + (f" (+{len(dequant) - 3} more)" if len(dequant) > 3 else ""))
     n_replaced = install_kquant_modules(
-        model, hf_kquant_meta, native_fp_wire=native_fp_wire)
+        model, hf_kquant_meta, native_fp_wire=native_fp_wire,
+        act_dtype=activation_dtype(config.get("model_type")))
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
     _install_hadamard(model, hadamard_targets, _log)
 
@@ -1612,31 +1725,30 @@ def load_model(
 
     if install_hd512_sdpa():
         _log("[install] head_dim-512 fused SDPA active")
-    if install_quantized_sdpa_mask_fix():
-        _log("[install] quantized-KV SDPA batch-mask fix active")
-    if install_quantized_cache_pack_fix():
-        _log("[install] quantized-KV pack-width fix active")
     if install_rope_batch_fix():
         _log("[install] rope int-offset batch fix active")
     # Inside the decay wrap (installed first): media blocks stay whole.
-    from gmlx.gen.media_spans import install_span_aware_prompt_step
+    from gmlx.gen.media_spans import (
+        install_block_aware_generate_step,
+        install_span_aware_prompt_step,
+    )
     install_span_aware_prompt_step()
+    install_block_aware_generate_step()
     install_prefill_tail()
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
-    if install_gemma4_nosync() and _gemma4_target(model):
-        _log("[install] gemma-4 host-sync-free masks/rope offsets active")
-    if install_gemma4_batched_sdpa() and _gemma4_target(model):
-        _log("[install] gemma-4 hd512 batched-decode row route active")
-    if install_gemma4_softcap_f32() and _gemma4_target(model):
-        _log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         _log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
         _log("[install] sparse top-k page decode route active (lossy, opt-in)")
+    # After the installs whose state it reads.
+    gemma4_dispatch.configure(model, _log)
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_routed = install_switch_glu_block_routing(model)
+    if n_routed:
+        _log(f"[install] SwitchGLU block routing (one gather per verify block) on {n_routed} layers")
     n_inv = install_batch_invariant_linears(model)
     if n_inv:
         _log(f"[install] batch-invariant kernel on {n_inv} small float projections")
@@ -1650,13 +1762,12 @@ def load_model(
     if n_occ:
         _log(f"[install] occupancy fusion (qkv + gate/up decode) on "
              f"{n_occ} modules")
-    install_rotating_cache_fix()
-    install_arrays_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")
     model.eval()
-    model_params = {p for p, _ in tree_flatten(model.parameters())}
+    model_params = {p: v.shape for p, v in tree_flatten(model.parameters())
+                    if isinstance(v, mx.array)}
     loadable = {k: v for k, v in hf_weights.items() if k in model_params}
     redundant = sorted(set(hf_weights.keys()) - set(loadable.keys()))
     if redundant:
@@ -1664,16 +1775,22 @@ def load_model(
             f"[load_weights] dropping {len(redundant)} redundant tensors "
             f"(no model slot): {redundant[:3]}..."
         )
+    _require_filled(
+        model_params, loadable, hf_weights,
+        hint=(f"hf_source {hf_source!r} builds model_type "
+              f"{config.get('model_type')!r}, whose parameters do not match "
+              f"this GGUF." if hf_source is not None else ""))
 
     # Cast non-quantized float params (norms, SSM weights, and the F16 matrix
     # weights some conversions ship - e.g. gemma-3n's AltUp/LAuReL/per-layer
     # projections) to the activation dtype so activations flow at one width,
     # avoiding float32 kernel promotion (and mixed-width dtype mismatches) in
     # quantized/regular matmul.
-    # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32.
-    fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type"), ())
-    act_dtype = activation_dtype()
-    act_name = activation_dtype_name()
+    # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32,
+    # and those in dtypes.NO_FLOAT16_MODEL_TYPES run float32 over float16.
+    fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type") or "", ())
+    act_dtype = activation_dtype(config.get("model_type"))
+    act_name = activation_dtype_name(config.get("model_type"))
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]
@@ -1706,12 +1823,6 @@ def load_model(
     # probability-weighted soft-embedding step; dequantize it post-load.
     if config.get("model_type") == "diffusion_gemma":
         _dequantize_diffusion_embedding(model, _log)
-
-    missing = sorted(model_params - set(loadable.keys()))
-    if missing:
-        loadlog.warn(
-            f"WARNING: {len(missing)} model params not loaded: {missing[:5]}..."
-        )
 
     _verify_zero_copy_views(model, owned_names, _log)
 
@@ -1758,7 +1869,7 @@ def load_model(
     # 8. tokenizer (synthesized from GGUF metadata), wrapped with the full EOS
     #    set so generation stops on turn-end tokens (e.g. gemma-4 <turn|>).
     loadlog.stage("building tokenizer")
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     from .tokenizer import bundled_chat_template, finish_gguf_tokenizer, load_tokenizer_from_gguf
 
@@ -1862,18 +1973,101 @@ def _resolve_chat_template(chat_template: str | None) -> str | None:
     return chat_template
 
 
+# A multimodal HF config nests its text model under text_config. Its
+# container class builds a language_model tree that the remapped GGUF names
+# do not reach, and the load reads model_type and the text fields from the
+# top level. Each row maps a container model_type to the model_type the
+# GGUF synth gives, the defaults the mlx_lm container gives its text
+# config, and the keys a text-only load leaves out. No row gives a
+# vocab_size: the load takes it from the GGUF (_vocab_from_token_embd).
+_TEXT_OF_CONTAINER: dict[str, tuple[str, dict, tuple[str, ...]]] = {
+    # use_bidirectional_attention only changes attention over image tokens,
+    # and the GGUF synth sets no key. A VLM load sets it from the projector
+    # type and the text width.
+    "gemma4": ("gemma4_text", {"num_attention_heads": 8,
+                               "num_key_value_heads": 1},
+               ("use_bidirectional_attention",)),
+    "gemma4_unified": ("gemma4_text", {"num_attention_heads": 8,
+                                       "num_key_value_heads": 1},
+                       ("use_bidirectional_attention",)),
+    "gemma3": ("gemma3_text", {"num_attention_heads": 8,
+                               "num_key_value_heads": 4}, ()),
+    # A mistral text config (Mistral-Small-3.1) builds llama, as in mlx_lm.
+    "mistral3": ("ministral3", {"tie_word_embeddings": False}, ()),
+    "qwen3_5": ("qwen3_5", {}, ()),
+    "qwen3_5_moe": ("qwen3_5_moe", {}, ()),
+    "qwen3_vl_moe": ("qwen3_moe", {}, ()),
+}
+
+
+def _text_config_from_container(cfg: dict) -> dict:
+    """The flat text config of an HF container config, or ``cfg`` itself.
+
+    The text config keys come first, then the container's own
+    ``vocab_size`` and ``tie_word_embeddings``, then the container
+    defaults."""
+    row = _TEXT_OF_CONTAINER.get(cfg.get("model_type") or "")
+    text = cfg.get("text_config")
+    if row is None or not isinstance(text, dict):
+        return cfg
+    model_type, defaults, drop = row
+    if cfg["model_type"] == "mistral3" and text.get("model_type") != "ministral3":
+        model_type = "llama"
+    top = {k: cfg[k] for k in ("vocab_size", "tie_word_embeddings") if k in cfg}
+    flat = {**defaults, **top, **text}
+    for key in drop:
+        flat.pop(key, None)
+    flat["model_type"] = model_type
+    loadlog.verbose_print(
+        f"[config] hf_source {cfg['model_type']} container -> {model_type} "
+        "text config")
+    return flat
+
+
+def _vocab_from_token_embd(config: dict, tensor_shapes: dict) -> dict:
+    """``config`` with the vocab_size of the GGUF's token_embd rows, the
+    value the GGUF synth gives.
+
+    An HF config can count rows the GGUF does not have: the Gemma-3 4B to
+    27B text config names none, the HF default is 262208, and llama.cpp
+    writes the 262144 token rows only. A config that nests its text model
+    under text_config gets the value there, and at the top level when it
+    names one there."""
+    embd = tensor_shapes.get("token_embd.weight")
+    if embd is None or len(embd) != 2:
+        return config
+    rows = int(embd[1])
+    text = config.get("text_config")
+    targets = [config]
+    if isinstance(text, dict):
+        targets = [text] + ([config] if "vocab_size" in config else [])
+    for target in targets:
+        if target.get("vocab_size") != rows:
+            loadlog.verbose_print(
+                f"[config] hf_source vocab_size {target.get('vocab_size')} "
+                f"-> {rows}, the token_embd rows")
+            target["vocab_size"] = rows
+    return config
+
+
 def _load_config_from_source(hf_source: str) -> dict:
-    """Load a ``config.json`` from a local dir or HF id (override path)."""
+    """Load a ``config.json`` from a local dir or HF id (override path).
+
+    A container config comes back as its flat text config, so the model
+    class resolves to the same text model as a load without hf_source. An
+    HF config names no gated-delta V-head order, and the GGUF it is paired
+    with stores asymmetric V heads tiled, so the config says so here."""
     import json
 
     cfg_path = os.path.join(hf_source, "config.json")
-    if os.path.isfile(cfg_path):
-        with open(cfg_path, "r") as f:
-            return json.load(f)
-    from huggingface_hub import hf_hub_download
+    if not os.path.isfile(cfg_path):
+        from huggingface_hub import hf_hub_download
 
-    from gmlx.serve.hf_cache import network_fetch_allowed
-    with network_fetch_allowed():
-        path = hf_hub_download(hf_source, "config.json")
-    with open(path, "r") as f:
-        return json.load(f)
+        from gmlx.serve.hf_cache import network_fetch_allowed
+        with network_fetch_allowed():
+            cfg_path = hf_hub_download(hf_source, "config.json")
+    with open(cfg_path, "r") as f:
+        cfg = _text_config_from_container(json.load(f))
+    if gguf_v_heads_tiled(cfg):
+        cfg["kv_head_layout"] = "tiled"
+    return cfg

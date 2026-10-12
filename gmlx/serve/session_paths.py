@@ -16,10 +16,11 @@ from pathlib import Path
 
 from gmlx.safe_path import canonical
 
-# The most connections the launch relay holds open to a session socket. The
-# session server answers 503 without reading a body once more connections
-# than this are open, so one container client cannot make the server hold
-# more request bodies.
+# The most connections the launch relay holds open to a session socket, so
+# one container client cannot make the server hold more request bodies. The
+# session server answers 503 without reading a body past twice this, which
+# leaves room for the relay's closed connections that it has not yet
+# dropped.
 SESSION_CONNECTIONS_MAX = 16
 # macOS holds 104 bytes for a socket path, the final NUL included.
 SOCKET_PATH_MAX = 103

@@ -5,11 +5,11 @@ import numpy as np
 
 import gmlx.models.deepseek_v4.model as dsv4
 import gmlx.models.deepseek_v41.model as dsv41
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
 
 def _cache(plen, ratio):
-    c = PoolingCache(ratio)
+    c = DS4PoolingCache(ratio)
     c._plen = plen
     return c
 

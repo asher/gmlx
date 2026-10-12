@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_lm")
+pytest.importorskip("gmlx._vendor.mlx_lm")
 
 import gmlx.serve.bridge_lm as server_bridge  # noqa: E402
 
@@ -32,7 +32,7 @@ class _Provider:
 def installed(monkeypatch):
     """Install the bridge over a sentinel original ``_load``; returns
     ``(patched_load, original_calls)``."""
-    from mlx_lm import server as _server
+    from gmlx._vendor.mlx_lm import server as _server
 
     original_calls = []
 
@@ -43,6 +43,7 @@ def installed(monkeypatch):
     monkeypatch.setattr(_server.ModelProvider, server_bridge._BRIDGE_FLAG,
                         False, raising=False)
     monkeypatch.setattr(_server.ModelProvider, "_load", sentinel)
+    monkeypatch.setattr(_server, "load", _server.load)
     server_bridge.install_gguf_bridge()
     return _server.ModelProvider._load, original_calls
 
@@ -114,7 +115,7 @@ def test_register_resolved_models_waits_for_build_lock():
     lock = threading.Lock()
     pool = types.SimpleNamespace(_build_lock=lock)
     import importlib
-    mod = importlib.import_module("mlx_vlm.server")
+    mod = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     saved = getattr(mod, "_kq_residency_pool", None)
     mod._kq_residency_pool = pool
     try:
@@ -130,3 +131,24 @@ def test_register_resolved_models_waits_for_build_lock():
         assert done.is_set()
     finally:
         mod._kq_residency_pool = saved
+
+
+def test_the_module_runs_the_copied_server_with_the_bridge(monkeypatch):
+    """``python -m gmlx.serve.bridge_lm``, the route docs/python.md names,
+    installs the bridge on the copied server and hands it the arguments."""
+    import sys
+
+    from gmlx._vendor.mlx_lm import server as _server
+
+    seen = {}
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    monkeypatch.setattr(_server.ModelProvider, server_bridge._BRIDGE_FLAG,
+                        False, raising=False)
+    monkeypatch.setattr(_server.ModelProvider, "_load",
+                        _server.ModelProvider._load)
+    monkeypatch.setattr(_server, "main", lambda: seen.update(
+        argv=list(sys.argv), installed=getattr(
+            _server.ModelProvider, server_bridge._BRIDGE_FLAG)))
+    assert server_bridge.main(["--model", "m.gguf"]) == 0
+    assert seen == {"argv": ["gmlx serve", "--model", "m.gguf"],
+                    "installed": True}

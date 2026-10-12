@@ -39,7 +39,6 @@ by compacting the oldest sealed groups away at update entry.
 from __future__ import annotations
 
 import logging
-import sys
 
 import mlx.core as mx
 
@@ -140,15 +139,6 @@ def kvarn_unsupported(model) -> str | None:
 
     if attention_sinks(model):
         return "attention sinks (the kvarn route has no sink term)"
-    from gmlx.models.gemma4.owned import is_owned_language_model
-
-    holders = (model, getattr(model, "language_model", None))
-    if any(is_owned_language_model(h) for h in holders if h is not None):
-        # The owned tree's attention calls an import-time sdpa alias the
-        # kvarn sweep never rebinds; unreachable today (the shared-KV
-        # drafter gate declines first), declined here so a future drafter
-        # change fails informatively at setup, not mid-forward.
-        return "gemma-4 owned (MTP) tree"
     return None
 
 
@@ -174,9 +164,9 @@ def kvarn_mtp_window_decline(caches) -> str | None:
     (no eligible SWA+MTP checkpoint exists to validate it on), so a
     sliding-window layer declines the whole stack. Serve, run and chat
     share the rule."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import BatchRotatingKVCache, RotatingKVCache
 
-    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
+    rotating = (RotatingKVCache, BatchRotatingKVCache)
     if any(isinstance(c, rotating) for c in caches):
         return "sliding-window cache stack cannot quantize"
     return None
@@ -264,7 +254,7 @@ class KVarNView:
 
 
 def _base_cache():
-    from mlx_lm.models.cache import _BaseCache
+    from gmlx.cache.kv_cache import _BaseCache
 
     return _BaseCache
 
@@ -592,7 +582,7 @@ class KVarNKVCache(_KVarNStorage):
         self.horizon_valid = True
 
     def make_mask(self, *args, **kwargs):
-        from mlx_lm.models.cache import create_attention_mask
+        from gmlx.cache.kv_cache import create_attention_mask
 
         return create_attention_mask(*args, offset=self.visible, **kwargs)
 
@@ -1855,13 +1845,13 @@ class BatchKVarNKVCache(_KVarNStorage):
         the pending update for the mask memo; the kvarn route itself reads
         the geometry off the cache."""
         del return_array
-        from mlx_vlm.models.cache import create_causal_mask
+        from gmlx.cache.kv_cache import create_causal_mask
 
         mask = create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
         if not any(v is not None for v in kwargs.values()):
-            from gmlx.upstream.quantized_sdpa_fix import _register_starts
+            from gmlx.cache.attention import _register_starts
 
             _register_starts(
                 mask, self.starts_mx, self._mirror(f"ends+{N}", [e + N for e in self.ends])
@@ -2006,21 +1996,11 @@ def kvarn_batch_row(batch, cache):
     return BatchKVarNKVCache.merge([row])
 
 def ensure_registered():
-    """Graft the kvarn cache classes onto both cache namespaces so snapshot
-    and prompt-cache restores resolve them by name. Upstream wins if the
-    names ever appear there."""
-    import mlx_lm.models.cache as lm_cache
+    """Register the kvarn cache classes (gmlx.cache.bind.register), so
+    snapshot and prompt-cache restores resolve them by name."""
+    from gmlx.cache import bind
 
-    vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (lm_cache, vlm_cache):
-        if mod is None:
-            continue
-        if not hasattr(mod, "KVarNKVCache"):
-            mod.KVarNKVCache = KVarNKVCache
-        if not hasattr(mod, "KVarNRotatingKVCache"):
-            mod.KVarNRotatingKVCache = KVarNRotatingKVCache
-        if not hasattr(mod, "BatchKVarNKVCache"):
-            mod.BatchKVarNKVCache = BatchKVarNKVCache
+    bind.register(KVarNKVCache, KVarNRotatingKVCache, BatchKVarNKVCache)
 
 
 def convertible_kv_types():
@@ -2028,6 +2008,6 @@ def convertible_kv_types():
     ChunkedKVCache is included deliberately: serve's batch build maps it
     to BatchKVCache and converts that, so converting it here keeps the
     CLI and serve paths agreeing on llama4-shaped stacks."""
-    from .compat import cache_types
+    from .kv_cache import ChunkedKVCache, KVCache
 
-    return cache_types("KVCache") + cache_types("ChunkedKVCache")
+    return (KVCache, ChunkedKVCache)

@@ -36,7 +36,7 @@ is already running does not see a variable you export later.
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk, in tokens, that the tick budget may halve a chunk down to. The default is `256`. |
 | `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when smaller. `0` restores the upstream 32. |
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
-| `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns. |
+| `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does. |
 | `GMLX_GOV_KERNEL_FLOOR_GB` | Reclaimable GB under which the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
 | `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server computes its memory limit. The default is the larger of `8` and 10% of RAM. |
@@ -49,8 +49,6 @@ is already running does not see a variable you export later.
 |----------|---------|
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
-| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes, without the gmlx performance patches and fixes. |
-| `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged. |
 | `GMLX_GDN_REPLAY=0` | Store the recurrent state after each verify position instead of records that the next step replays. Output is bit-identical. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_DRAFT_HEAD` | `q8` or `q4` drafts an MTP or DFlash 2 round through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |
@@ -135,7 +133,7 @@ fusions.
 | `GMLX_GLM5_KDA_CONV=0` | Keep the eager GLM-5.3-Flash KDA prefill chain instead of the mlx-kquant glue kernels. |
 | `GMLX_HC_M1_MAX_ROWS` | Run hyper-connected steps up to this many rows on the fused per-row kernels. Wider steps take the GEMM route. |
 | `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels, leaving every step on the GEMM route. |
-| `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of one mlx-kquant dispatch. Output is bit-identical. |
+| `GMLX_HC_FUSED_CYCLE=1` | Run each hyper-connection cycle of a decode or verify step as one mlx-kquant dispatch instead of two. Bit-identical and slower. |
 | `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 hyper-connection cycles op by op instead of on the fused kernels. |
 | `GMLX_DS41_QAT_FUSED=0` | Run DeepSeek-V4.1 quantization round trips as compiled op chains instead of one kernel each. Output is bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL=0` | Run DeepSeek-V4.1 decode attention as a gather and op chain instead of `sdpa_sparse_decode`. |
@@ -153,6 +151,44 @@ fusions.
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |
+| `GMLX_LORA_EPILOGUE` | Where a dense LoRA layer on a K-quant base adds its delta. `auto` picks the in-kernel path by GPU class, rank and row count. `always` and `never` force a path. |
+| `GMLX_IMAGE_LORA_PLACEMENT` | How image LoRA pairs for q, k or v run on a fused `qkv` weight: `block` (default) as one block-diagonal pair, `slice` per band, `split` with a split base. |
+| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image ops that have mlx-kquant kernels on stock ops. `glu,qk` keeps those two routes; the routes are in the table below. |
+
+The image routes are on when the installed mlx-kquant has the kernels, and
+`GMLX_IMAGE_KQ_ROUTES` is read once, when the image pipeline is imported.
+It takes `0`, `1`, or a comma list of the routes to keep; another value
+warns and keeps every route.
+
+| Route | What runs on an mlx-kquant kernel |
+|---|---|
+| `qk` | The q and k norm with RoPE |
+| `glu` | The gate and up products of a Z-Image feed-forward with their swiglu |
+| `lora` | A K-quant layer under a LoRA with its delta |
+| `resid` | The Qwen-Image 2.1 attention output and MLP output products with the gated residual add after each |
+| `conv` | The 3x3 convs of the VAE on the default `kq` conv path, in bfloat16 |
+
+An image at a fixed seed differs between the kernels and the stock ops.
+The difference is rounding, not an error. mlx-kquant's own switches
+(`KQ_GLU`, `KQ_GLU_MIN_ROWS`, `KQ_GLU_BK`) act below the route: when one
+makes the op compose its two products, gmlx still hands the pair to the op
+and its records name the kernel. `KQ_QMM_LORA` and `KQ_QMM_LORA_MIN_ROWS`
+do the same below the `lora` route, `KQ_QMM_RESID` below the `resid` route
+and `KQ_CONV_NAX` below the `conv` route.
+
+The `resid` route takes a layer with no bias in `Q4_K`, `Q5_K`, `Q6_K` or
+`Q8_0` on bfloat16 activations. The op rounds once over the rows of the
+whole batch, so with guidance above 1 the two rows of a step can differ in
+the last bit from one row run alone. With the `conv` route off, the `kq`
+conv path runs as the `exact` one.
+
+The `lora` route takes a K-quant layer under an adapter when its codec is
+`Q4_K`, `Q5_K` or `Q6_K`, its input is at most 4096 wide and its output at
+least 8192, the activations are bfloat16 with at least 1024 rows, and no
+output takes more than 256 ranks: the fused `qkv` weight and the `w1` and
+`w3` of Z-Image, and the fused gate and up weight of Qwen-Image 2.1. Every
+other layer adds its delta on stock ops.
+`GMLX_IMAGE_LORA_PLACEMENT=slice` or `split` keeps every layer there.
 
 ## Streaming
 

@@ -12,14 +12,25 @@ KL = 4096
 SCALE = D**-0.5
 
 
+@pytest.fixture(autouse=True)
+def _fresh_install(monkeypatch):
+    """Each test's install wraps the SDPA it finds. A flag left set by an
+    earlier test over a restored stock SDPA would skip the wrap, and the
+    route counters would never move."""
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention",
+                        mx.fast.scaled_dot_product_attention)
+    monkeypatch.setattr(attn_hd512, "_installed", False)
+    monkeypatch.setattr(attn_hd512, "_orig_sdpa", attn_hd512._orig_sdpa)
+
 
 def _stock_sdpa():
     """The stock kernel, even when an earlier test left the hd512 wrapper
     installed on mx.fast: pinning _orig_sdpa to the wrapper itself makes
     the fallback recurse into the wrapper (an exponential hang under the
     chunked-prefill tile loop)."""
-    fn = mx.fast.scaled_dot_product_attention
-    return getattr(fn, "_gmlx_orig_sdpa", fn)
+    from gmlx.upstream.patching import under
+
+    return under(mx.fast.scaled_dot_product_attention, attn_hd512._FLAG)
 
 def _rand(qL, kL=KL, hq=HQ, hkv=HKV, d=D):
     # keyed by the shape, so a draw does not depend on which tests ran first
@@ -641,8 +652,9 @@ def test_route_counts_and_stock_warning(capsys, monkeypatch):
 
 def _stock_sdpa():
     # unwrap a prior install's wrapper to the true stock function
-    fn = mx.fast.scaled_dot_product_attention
-    return getattr(fn, "_gmlx_orig_sdpa", fn)
+    from gmlx.upstream.patching import under
+
+    return under(mx.fast.scaled_dot_product_attention, attn_hd512._FLAG)
 
 
 @pytest.mark.parametrize("arr_mask", [False, True])
@@ -684,3 +696,28 @@ def test_wrapped_sdpa_prefill_route_forwards_sinks(monkeypatch):
     sinks = mx.zeros((HQ,), dtype=mx.bfloat16)
     attn_hd512._wrapped_sdpa(q, k, v, scale=SCALE, mask="causal", sinks=sinks)
     assert calls and all(c.get("sinks") is sinks for c in calls)
+
+
+def test_reinstall_under_another_wrap_keeps_it(monkeypatch):
+    """A reinstall after a module state reset, with another wrap on top of
+    the hd512 wrapper, took that wrap for the original: the stock route
+    called the wrap, which called the wrapper again, without end."""
+    attn_hd512.install_hd512_sdpa()
+    wrapped = mx.fast.scaled_dot_product_attention
+    calls = []
+
+    def other(*args, **kwargs):
+        calls.append(1)
+        return wrapped(*args, **kwargs)
+
+    other.__dict__["_gmlx_orig"] = wrapped
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", other)
+    monkeypatch.setattr(attn_hd512, "_installed", False)
+    monkeypatch.setattr(attn_hd512, "_orig_sdpa", attn_hd512._orig_sdpa)
+    assert attn_hd512.install_hd512_sdpa()
+    assert mx.fast.scaled_dot_product_attention is other
+    assert attn_hd512._orig_sdpa is _stock_sdpa()
+    q = mx.ones((1, 4, 1, 64), dtype=mx.float16)
+    k = mx.ones((1, 4, 8, 64), dtype=mx.float16)
+    mx.eval(mx.fast.scaled_dot_product_attention(q, k, k, scale=1.0))
+    assert calls == [1]

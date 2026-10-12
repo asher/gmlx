@@ -1,0 +1,139 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "qwen-image",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxModelLoader",
+    "_meta": {
+      "title": "gmlx Model Loader"
+    }
+  },
+  "2": {
+    "inputs": {
+      "model_name": "qwen-image",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxCLIPLoader",
+    "_meta": {
+      "title": "gmlx CLIP Loader"
+    }
+  },
+  "3": {
+    "inputs": {
+      "model_name": "qwen-image",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxVAELoader",
+    "_meta": {
+      "title": "gmlx VAE Loader"
+    }
+  },
+  "4": {
+    "inputs": {
+      "image": "reference-1.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Reference 1"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "reference-2.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Reference 2"
+    }
+  },
+  "6": {
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "images.image_1": [
+        "4",
+        0
+      ],
+      "images.image_2": [
+        "5",
+        0
+      ],
+      "prompt": "Put the cat from the second image on the sofa in the first image",
+      "negative_prompt": "",
+      "resolution": 1024
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1"
+    }
+  },
+  "7": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "6",
+        2
+      ],
+      "seed": 42,
+      "steps": 30,
+      "cfg": 4.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "9": {
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ],
+      "filename_prefix": "gmlx/qwen-image-2.1-edit"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 """KVarN SDPA route: fused decode + tail merge parity against an fp32
 reference over the exact segment values, prefill materialize parity, and
-dispatch hygiene (sweep install, passthrough, kill switch)."""
+dispatch hygiene (the owned SDPA's KVarN route, passthrough, kill
+switch)."""
 
 from __future__ import annotations
 
@@ -12,7 +13,8 @@ import pytest
 import mlx.core as mx
 
 from gmlx.cache.kvarn_cache import KVarNKVCache
-from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_attention
+from gmlx.cache.kvarn_cache import KVarNView
+from gmlx.cache.kvarn_sdpa import kvarn_attention
 from kvarn_testlib import D, H, filled, needs_kvarn_ops, tokens
 
 HQ = 8
@@ -145,48 +147,68 @@ def test_sinks_raise_loudly():
         kvarn_attention(q, cache, SCALE, None, sinks=mx.zeros((HQ,)))
 
 
-def test_install_sweeps_and_passes_through(monkeypatch):
-    import sys
+_MODEL_MODULES = ("gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base",
+                  "gmlx._vendor.mlx_lm.models.llama", "gmlx._vendor.mlx_lm.models.qwen3",
+                  "gmlx._vendor.mlx_lm.models.gemma3_text",
+                  "gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-    from gmlx.cache import kvarn_sdpa as ks
 
-    llama = importlib.import_module("mlx_lm.models.llama")
-    base = importlib.import_module("mlx_lm.models.base")
-    # Pin every module the sweep may rebind: the wrap must not outlive
-    # this test.
-    for name, mod in list(sys.modules.items()):
-        if mod is None or not (
-            name in ks._BASE_MODULES or name.startswith(ks._MODEL_PREFIXES)
-        ):
-            continue
-        fn = getattr(mod, "scaled_dot_product_attention", None)
-        if callable(fn):
-            monkeypatch.setattr(mod, "scaled_dot_product_attention", fn)
-    n = install_kvarn_sdpa()
-    assert n >= 2
-    for mod in (llama, base):
-        assert getattr(mod.scaled_dot_product_attention, "_gmlx_kvarn", False)
-    # Idempotent: a second sweep leaves the same wrappers in place.
-    fn = llama.scaled_dot_product_attention
-    install_kvarn_sdpa()
-    assert llama.scaled_dot_product_attention is fn
+@pytest.mark.parametrize("name", _MODEL_MODULES)
+def test_model_modules_reach_the_owned_kvarn_route(name):
+    """Model modules call SDPA through their module global, which leads
+    to the owned function under any per-arch wrap."""
+    from gmlx.cache import attention
+    from gmlx.upstream.patching import root
 
-    # Non-kvarn calls pass through to the original bit-for-bit.
-    from mlx_lm.models.cache import KVCache
+    mod = importlib.import_module(name)
+    assert root(mod.scaled_dot_product_attention) is (
+        attention.scaled_dot_product_attention)
 
+
+@pytest.mark.parametrize("name", ["gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base"])
+@pytest.mark.parametrize("by_keyword", [False, True])
+def test_the_owned_sdpa_sends_views_to_kvarn_attention(monkeypatch, name,
+                                                       by_keyword):
+    from gmlx.cache import kvarn_sdpa
+
+    calls = []
+    out = mx.zeros((1,))
+    monkeypatch.setattr(kvarn_sdpa, "kvarn_attention",
+                        lambda *a: calls.append(a) or out)
+    owner = object()
+    kv, vv = KVarNView(owner, "k"), KVarNView(owner, "v")
+    q = _make_q(1)
+    sdpa = importlib.import_module(name).scaled_dot_product_attention
+    if by_keyword:
+        got = sdpa(q, kv, vv, cache=None, scale=0.5, mask="causal",
+                   sinks=None)
+    else:
+        got = sdpa(q, kv, vv, None, 0.5, "causal")
+    assert got is out
+    assert len(calls) == 1
+    assert calls[0][0] is q and calls[0][1] is owner
+    assert calls[0][2:] == (0.5, "causal", None)
+
+
+def test_the_owned_sdpa_leaves_array_calls_alone(monkeypatch):
+    from gmlx.cache import attention, kvarn_sdpa
+    from gmlx.cache.kv_cache import KVCache
+
+    monkeypatch.setattr(kvarn_sdpa, "kvarn_attention",
+                        lambda *a: pytest.fail("array keys took the kvarn route"))
     rng = np.random.default_rng(3)
     q = mx.array(rng.standard_normal((1, 4, 1, 64)).astype(np.float16))
     k = mx.array(rng.standard_normal((1, 2, 8, 64)).astype(np.float16))
     v = mx.array(rng.standard_normal((1, 2, 8, 64)).astype(np.float16))
-    wrapped = fn(q, k, v, cache=KVCache(), scale=1.0, mask=None)
-    orig = fn._gmlx_orig(q, k, v, cache=KVCache(), scale=1.0, mask=None)
-    assert np.array_equal(np.array(wrapped), np.array(orig))
+    got = attention.scaled_dot_product_attention(
+        q, k, v, cache=KVCache(), scale=1.0, mask=None)
+    ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=1.0, mask=None)
+    assert np.array_equal(np.array(got), np.array(ref))
 
 
 @needs_kvarn_ops
-def test_installed_wrapper_routes_views():
-    install_kvarn_sdpa()
-    base = importlib.import_module("mlx_lm.models.base")
+def test_the_owned_sdpa_routes_views():
+    base = importlib.import_module("gmlx._vendor.mlx_lm.models.base")
     cache = filled(300)
     kv, vv = cache.update_and_fetch(
         mx.zeros((1, H, 1, D), mx.float16), mx.zeros((1, H, 1, D), mx.float16)

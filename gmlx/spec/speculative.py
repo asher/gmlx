@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator
 
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
+from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -730,18 +731,15 @@ def _process_rows(logits: mx.array, process: list) -> mx.array:
 
 def _uniform_batch_accept(drafter, lm) -> bool:
     """Whether batched rounds clamp every row to the smallest accept count.
-    The gemma4 rollback in mlx-vlm 0.6 zeroes a shorter row's rejected KV
-    tail instead of trimming it, so the zeroed keys stay attended and the
-    row's positions run ahead of its tokens. mlx-vlm 0.7 flags such targets
-    requires_uniform_batch_acceptance and clamps the same way. The hook is
-    read from the class, since harden_mtp_rollback wraps it per instance.
-    The reported acceptance and the adaptive block depth see the clamped
+    The gemma4 rollback zeroes a shorter row's rejected KV tail instead of
+    trimming it, so the zeroed keys stay attended and the row's positions
+    run ahead of its tokens. Such a target or drafter sets
+    requires_uniform_batch_acceptance, as the owned Gemma 4 language model
+    does, and batched rounds clamp the same way mlx-vlm 0.7 does. The
+    reported acceptance and the adaptive block depth see the clamped
     counts."""
-    if any(getattr(o, "requires_uniform_batch_acceptance", False)
-           for o in (drafter, lm)):
-        return True
-    hook = getattr(type(lm), "rollback_speculative_cache", None)
-    return getattr(hook, "__module__", None) == "mlx_vlm.models.gemma4.language"
+    return any(getattr(o, "requires_uniform_batch_acceptance", False)
+               for o in (drafter, lm))
 
 
 def _next_forced_chunk(hook, queue: list, block_total: int):
@@ -1361,6 +1359,19 @@ def _owned_decode_rounds(
         _walk_report()
 
 
+def _reserve_prompt_kv(caches, more: int) -> None:
+    """Give each cache room for ``more`` further tokens in one allocation.
+    Without it a KVCache regrows on every prefill chunk: the whole KV is
+    copied and the old buffer freed each time, and at depth the freed
+    buffers stay in the footprint until the driver reclaims them. Only the
+    plain classes: subclasses keep side arrays that grow on their own."""
+    from gmlx.cache.kv_cache import KVCache, QuantizedKVCache
+
+    for c in caches or ():
+        if type(c) in (KVCache, QuantizedKVCache) and isinstance(c.offset, int):
+            c.prefix_cache_reserve(c.offset + more)
+
+
 def stream_speculative(
     model,
     drafter,
@@ -1471,6 +1482,9 @@ def stream_speculative(
                 hiddens = [ch]
             i += take
             if not last:
+                if i == take:
+                    _reserve_prompt_kv(prompt_cache, n - i)
+                    _reserve_prompt_kv(seed_kv, n - i)
                 mx.eval([c.state for c in prompt_cache] + [ch]
                         + ([c.state for c in seed_kv] if streamed else []))
                 mx.clear_cache()
@@ -1502,6 +1516,9 @@ def stream_speculative(
     hidden = hiddens[0] if len(hiddens) == 1 else mx.concatenate(hiddens, axis=1)
     shared_kv = out.shared_kv_states
     b = int(first.item())
+    # out holds the last chunk's full logits and first_logits is a view of
+    # them. The decode rounds read neither, so release them here.
+    del out, first_logits
     if row_procs is not None:
         row_procs.start(b)
 
@@ -1566,7 +1583,7 @@ def owned_server_rounds(
     if retire_ctx is not None:
         sidecar_ctx = {
             "full_ids": retire_ctx["full_ids"],
-            "extra_hash": int(retire_ctx.get("extra_hash", 0)),
+            "extra_hash": as_salt(retire_ctx.get("extra_hash", 0)),
             "checkpoint_len": _sidecar_boundary(retire_ctx),
             "manager": getattr(model, "_kq_apc_manager", None),
             # Live reference: the ckpt sidecar key set is derived at
@@ -1688,7 +1705,7 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
                       "boundary landed")
             return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
-                            extra_hash=int(retire_ctx.get("extra_hash", 0)),
+                            extra_hash=as_salt(retire_ctx.get("extra_hash", 0)),
                             grid_truncate=True)
         if stored and meta is not None:
             meta.setdefault("ckpt_stored_boundaries", []).append(stored)
@@ -1747,7 +1764,7 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
         if manager is None:
             return
         from gmlx.cache.snapshot import drafter_sidecar_store
-        extra_hash = int(sidecar_ctx.get("extra_hash", 0))
+        extra_hash = as_salt(sidecar_ctx.get("extra_hash", 0))
         if sidecar_ctx.get("mode") == "ckpt":
             # One sidecar key per adoptable target record, derived from
             # the live meta (never recomputing a store decision): every
@@ -1936,7 +1953,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         from gmlx.cache.snapshot import retirement_store
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
-            row=0, extra_hash=int(retire.get("extra_hash", 0)),
+            row=0, extra_hash=as_salt(retire.get("extra_hash", 0)),
             max_len=max_len, decode_snaps=retire.get("snaps"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
@@ -1954,7 +1971,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             from gmlx.cache.snapshot import drafter_sidecar_store
             if drafter_sidecar_store(
                     manager, drafter, seq, len(seq),
-                    int(retire.get("extra_hash", 0))):
+                    as_salt(retire.get("extra_hash", 0))):
                 _log.info("APC sidecar store (retire): tokens=%d", len(seq))
     except Exception:
         _log.warning("APC retire failed; continuing", exc_info=True)
@@ -2055,7 +2072,7 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
         from gmlx.cache.snapshot import retirement_store
         ok = retirement_store(
             manager, "block", seq[:store_len], prompt_cache,
-            row=slot, extra_hash=int(retire.get("extra_hash", 0)))
+            row=slot, extra_hash=as_salt(retire.get("extra_hash", 0)))
         if ok:
             _log.info("APC retire store (row): tokens=%d", ok)
     except Exception:
@@ -2094,7 +2111,7 @@ def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
               retire.get("render_ctx") is not None, lcp, max_len)
     ok = retirement_store(
         manager, "exact", seq, prompt_cache, row=slot,
-        extra_hash=int(retire.get("extra_hash", 0)), max_len=max_len)
+        extra_hash=as_salt(retire.get("extra_hash", 0)), max_len=max_len)
     if ok:
         _log.info("APC retire store (row): tokens=%d", ok)
 
@@ -2138,7 +2155,7 @@ def _lift_injected_cache(cache, other):
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
             or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
             # classes without the batch API at all (DeepSeek V4's
-            # PoolingCache: no _idx, no rotated; its batch class
+            # DS4PoolingCache: no _idx, no rotated; its batch class
             # extend() read len() of a scalar remainder)
             or (_batch_capable(cache) and not _batch_capable(other)
                 and callable(getattr(type(other), "merge", None)))):
@@ -2212,9 +2229,9 @@ def _packed_single(cache) -> bool:
         return False
     if getattr(cache, "kv_quant_scheme", None) == "kvarn":
         return True
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
-    return isinstance(cache, cache_types("QuantizedKVCache"))
+    return isinstance(cache, QuantizedKVCache)
 
 
 def _batch_capable(cache) -> bool:
@@ -3238,12 +3255,12 @@ def owned_server_rounds_batch(
     model,
     drafter,
     prompt_cache: list,
-    hidden: mx.array,
+    hidden: mx.array | None,
     *,
     first_bonus: mx.array,
     max_tokens: int,
     sampler: Callable[[mx.array], mx.array] | None,
-    shared_kv_states: dict,
+    shared_kv_states: dict | None,
     prompt_tokens: mx.array | None,
     draft_block_size: int | None = None,
     greedy_sampling: bool = False,

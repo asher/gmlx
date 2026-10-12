@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.capacity as cap  # noqa: E402
 import gmlx.serve.estimate as est  # noqa: E402
@@ -21,9 +21,9 @@ from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import capacity_routes as cr  # noqa: E402
 from gmlx.serve.patches import routes as sp_routes  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_PKG = importlib.import_module("mlx_vlm.server")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 
 @pytest.fixture(autouse=True)
@@ -229,14 +229,14 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
     _PKG._kq_residency_pool = SimpleNamespace(resident_entry=lambda p: entry)
     monkeypatch.setattr(_PKG, "apply_chat_template",
                         lambda *a, **k: "<rendered prompt>", raising=False)
-    app_mod = importlib.import_module("mlx_vlm.server.app")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     monkeypatch.setattr(app_mod, "_build_gen_args", lambda req, processor=None, tenant_id=None:
                         SimpleNamespace(to_template_kwargs=lambda: {}, max_tokens=256))
     # deterministic memory: 1 KB per token, 10 KB drained, 4 KB now
     monkeypatch.setattr(mp, "_need_bytes", lambda m, c, t, g=0: 1024.0 * (t + g))
     monkeypatch.setattr(mp, "available_drained_bytes", lambda: 10 * 1024.0)
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 4 * 1024.0)
-    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+    gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     monkeypatch.setattr(gen_mod, "get_configured_context_limit", lambda: 8)
     monkeypatch.setattr(_RUNTIME, "metrics", SimpleNamespace(
         _recent=[{"prefill_tok_s": 100.0}], _requests_completed=0), raising=False)
@@ -285,6 +285,47 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
     st, out = est.estimate_request({"model": "q", "messages": [
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u"}}]}]})
     assert st == 200 and out["media"] is True and out["prompt_tokens"] is None
+
+
+def test_estimate_renders_the_chat_route_messages(monkeypatch):
+    """The estimate renders what the chat route renders: system messages
+    merged into one leading message, developer messages in place, and the
+    developer role kept only for a template that mentions it."""
+    import gmlx.serve.patches as sp
+
+    sp.install_role_normalization()
+    serving.register_resolved_models(build_config(
+        {"models": {"q": {"path": "/abs/q.gguf"}}}))
+    processor = SimpleNamespace(chat_template="{{ messages }}")
+    entry = SimpleNamespace(
+        response_generator=SimpleNamespace(), apc_manager=None,
+        model_cache={"model": None, "processor": processor, "config": {}})
+    _PKG._kq_residency_pool = SimpleNamespace(resident_entry=lambda p: entry)
+    rendered = []
+    monkeypatch.setattr(_PKG, "apply_chat_template",
+                        lambda p, c, msgs, **k: rendered.append(msgs) or "x",
+                        raising=False)
+    monkeypatch.setattr(_APP, "_build_gen_args",
+                        lambda req, processor=None, tenant_id=None:
+                        SimpleNamespace(to_template_kwargs=lambda: {},
+                                        max_tokens=0))
+    body = {"model": "q", "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "developer", "content": "D"},
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "go"}]}
+
+    st, _ = est.estimate_request(body)
+    assert st == 200
+    assert rendered[-1] == [{"role": "system", "content": "S"},
+                            {"role": "user", "content": "hi"},
+                            {"role": "system", "content": "D"},
+                            {"role": "user", "content": "go"}]
+
+    processor.chat_template = "{{ developer }}"
+    st, _ = est.estimate_request(body)
+    assert st == 200
+    assert rendered[-1][2] == {"role": "developer", "content": "D"}
 
 
 def test_estimate_route_and_chat_dry_run(monkeypatch):
@@ -558,7 +599,7 @@ def test_stamp_apc_mode_sets_generator_mode_once(monkeypatch):
     """The post-load APC wiring stamps rg.apc_mode (what mlx-vlm's own init
     does when the manager exists at construction) so the server precomputes
     the semantic salt instead of the engine hashing the embedding matrix."""
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     from gmlx.serve.residency import _stamp_apc_mode
 

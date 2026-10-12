@@ -14,7 +14,7 @@ builder promises.
 from types import SimpleNamespace
 
 import pytest
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.spec.ckpt as ckpt
 import gmlx.cache.retire_key as retire_key
@@ -44,10 +44,9 @@ def _make_from_tags(tags, p, seed=0):
     pure Python; the concrete-class tag rejects stubs)."""
     import mlx.core as mx
 
-    from gmlx.cache.compat import runtime_cache_module
+    from gmlx.cache import kv_cache as c
     from gmlx.cache.kvarn_cache import KVarNKVCache
 
-    c = runtime_cache_module()
     out = []
     for i, t in enumerate(tags):
         mx.random.seed(seed * 1000 + i)

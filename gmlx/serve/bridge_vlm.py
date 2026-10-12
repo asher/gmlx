@@ -19,7 +19,9 @@ that server by replacing only that load step:
   ``BatchGenerator``) runs stock.
 * :func:`install_gguf_server_bridge` patches ``load_model_resources`` so a
   ``*.gguf`` model path is loaded this way; every other path falls through to
-  mlx-vlm's original loader untouched. The mmproj for a VLM is supplied via
+  mlx-vlm's original loader, which builds the owned language model of a
+  Gemma 4 checkpoint, whose path in the copy is an alias of it, and every
+  other model as upstream ships it. The mmproj for a VLM is supplied via
   :func:`register_gguf_vlm` (or the ``MLX_VLM_GGUF_MMPROJ`` env fallback); a GGUF
   is served with MTP speculative decoding via :func:`register_gguf_mtp` (or the
   ``MLX_VLM_GGUF_SPECULATIVE`` env fallback).
@@ -52,11 +54,12 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
-from mlx_vlm import tokenizer_utils as _mlxvlm_tok
+from gmlx._vendor.mlx_vlm import tokenizer_utils as _mlxvlm_tok
 from gmlx.models.vlm_text_only import Model as TextOnlyModel
-from mlx_vlm.utils import StoppingCriteria
+from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
 from gmlx.spec.drafter_protocol import native_block_size
+from gmlx.load import rope_scaling
 from gmlx.load.loader import load_model
 
 _log = logging.getLogger(__name__)
@@ -441,11 +444,6 @@ def _load_serveable_mtp(
     # returned config.
     model.config = _AttrDict(model.config)
     _ensure_inner_config(model, model.config)
-    # Runtime-origin cache identities for the apc/ar isinstance gates; a
-    # vlm-native LanguageModel target makes this a no-op, an mlx-lm-style
-    # target (deepseek_v4 et al) needs it since mlx-vlm 0.6.4.
-    from gmlx.cache.compat import ensure_runtime_origin_make_cache
-    ensure_runtime_origin_make_cache(model.language_model)
     _MTP_DRAFTER_STASH[os.path.abspath(gguf_path)] = (drafter, "mtp")
     _log_drafter_source(gguf_path, drafter, draft_gguf_path)
     processor = _make_text_processor(tokenizer)
@@ -552,8 +550,10 @@ def _install_stream_placement(
             fast_disk=fast_disk)
     elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
         from gmlx.stream.expert_streaming import install_expert_streaming
+        # `stream: experts` streams a model that fits too; discovery
+        # writes it only for a model over the budget.
         install_expert_streaming(
-            text_model, gguf_path=gguf_path,
+            text_model, gguf_path=gguf_path, explicit=True,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
             fast_disk=fast_disk)
     if moe_experts is not None:
@@ -577,6 +577,7 @@ def _install_stream_placement(
         install_moe_layer_shed(text_model, moe_layer_shed)
 
 
+@rope_scaling.scoped
 def load_serveable_model(
     gguf_path: str,
     *,
@@ -595,6 +596,7 @@ def load_serveable_model(
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
     fast_disk: str | None = None,
+    rope_override=None,
 ) -> tuple[object, object, object]:
     """Load a GGUF model into the form mlx-vlm's server expects.
 
@@ -720,11 +722,6 @@ def load_serveable_model(
         feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
         **_levers)
     processor = _make_text_processor(tokenizer)
-    # mlx-lm-arch caches must carry the vlm runtime's class identities or
-    # apc/ar isinstance-gates (own classes since mlx-vlm 0.6.4) resolve
-    # model_apc_mode to None and APC silently disengages for this model.
-    from gmlx.cache.compat import ensure_runtime_origin_make_cache
-    ensure_runtime_origin_make_cache(raw_model)
     model = TextOnlyModel(raw_model, config=_as_dict(config))
     _ensure_inner_config(model, _AttrDict(_as_dict(config)))
     _ensure_text_embedding_probe(model, raw_model)
@@ -748,7 +745,7 @@ def _install_drafter_injection() -> None:
     leaves and dequantize them)."""
     import importlib
 
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     if getattr(drafters, _DRAFTER_PATCH_FLAG, False):
         return
 
@@ -863,7 +860,8 @@ def _degrade_failed_mtp(model_path: str, error: str) -> None:
         pass
 
 
-_FIRST_PARTY_ROOTS = ("gmlx", "mlx_vlm", "mlx_lm", "mlx_kquant")
+# gmlx carries mlx-vlm and mlx-lm under gmlx._vendor.
+_FIRST_PARTY_ROOTS = ("gmlx", "mlx_kquant")
 
 
 def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:
@@ -884,6 +882,12 @@ def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:
 _TEMPLATE_PROBE_TEXT = "gmlx-template-probe"
 
 
+def _model_type(config) -> str | None:
+    if isinstance(config, dict):
+        return config.get("model_type")
+    return getattr(config, "model_type", None)
+
+
 def _warn_if_template_drops_text(model_path: str, processor, config) -> None:
     """Warn when the chat template drops the text of a user message.
 
@@ -896,7 +900,7 @@ def _warn_if_template_drops_text(model_path: str, processor, config) -> None:
     import importlib
 
     try:
-        prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+        prompt_utils = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
         rendered = prompt_utils.apply_chat_template(
             processor, config,
             [{"role": "user", "content": _TEMPLATE_PROBE_TEXT}],
@@ -919,20 +923,17 @@ def install_gguf_server_bridge() -> None:
     Idempotent. Patches the single module-level loader
     ``server.generation.load_model_resources`` so a ``*.gguf`` model path is
     loaded via :func:`load_serveable_model` (text, VLM, or MTP per its
-    registration); every other path uses mlx-vlm's original loader untouched.
+    registration); every other path uses the copied loader unchanged. A
+    Gemma 4 checkpoint builds the owned language model there, because the
+    copied model package holds the owned module at its own path.
     Also installs :func:`_install_drafter_injection` so a speculative load's
     in-memory drafter reaches the engine. Must be called before a model is loaded.
     """
     import importlib
 
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     if getattr(generation, _BRIDGE_FLAG, False):
         return
-
-    # Engine threads must not exit while holding thread-local compile
-    # cache entries (mlx 0.32.1 TSD segfault; see _exitfix).
-    from gmlx._exitfix import install_engine_thread_guard
-    install_engine_thread_guard(generation)
 
     original = generation.load_model_resources
 
@@ -951,7 +952,10 @@ def install_gguf_server_bridge() -> None:
         # wired in by residency after the load returns. Applies to GGUF and
         # fall-through loads alike - any pooled model can enable the cache.
         from gmlx.cache.apc_manager import build_apc_manager
-        manager = build_apc_manager(model_namespace=model_path)
+        rope = getattr(get_build_spec(), "rope_scaling", None)
+        manager = build_apc_manager(
+            model_namespace=model_path,
+            **({"rope_override": rope} if rope is not None else {}))
         if manager is not None:
             publish_built_apc_manager(manager)
         if _is_gguf(model_path):
@@ -1000,6 +1004,10 @@ def install_gguf_server_bridge() -> None:
                 feeder_decode=getattr(spec, "decode_feeder", None),
                 fast_disk=getattr(spec, "stream_fast_disk", None),
             )
+            # The rope options (config `rope_scaling:` / the serve rope
+            # flags) act before the model is built.
+            if getattr(spec, "rope_scaling", None) is not None:
+                feeders["rope_override"] = spec.rope_scaling
             # Path registry + the per-build MLX_VLM_GGUF_SPECULATIVE env window
             # (set by residency) decide MTP vs plain - both process-global, so they
             # reach this bridge in the engine's generation worker thread, unlike the
@@ -1092,19 +1100,27 @@ def install_gguf_server_bridge() -> None:
         except ModuleNotFoundError as e:
             _raise_if_first_party_import(e)
             raise
-        if _is_gguf(model_path) and isinstance(loaded, tuple) and len(loaded) == 3:
-            _warn_if_template_drops_text(model_path, loaded[1], loaded[2])
+        if isinstance(loaded, tuple) and len(loaded) == 3:
+            # Every route enables the system text fix from the loaded
+            # config: the DiffusionGemma branch and the stock loader of an
+            # MLX-format model do not go through the VLM loader.
+            from gmlx.upstream.system_content_fix import (
+                enable_system_content_fix,
+            )
+            enable_system_content_fix(loaded[1], _model_type(loaded[2]))
+            if _is_gguf(model_path):
+                _warn_if_template_drops_text(model_path, loaded[1], loaded[2])
         return loaded
 
     setattr(generation, "load_model_resources", load_model_resources)
     setattr(generation, _BRIDGE_FLAG, True)
     # generation.py logs on the parent "mlx_vlm.server" logger.
-    engine_log = logging.getLogger("mlx_vlm.server")
+    engine_log = logging.getLogger("gmlx._vendor.mlx_vlm.server")
     if not any(isinstance(f, _DrafterSourceFilter) for f in engine_log.filters):
         engine_log.addFilter(_DrafterSourceFilter())
-    # Serve builds that bypass the MTP patch set (plain text with
-    # GMLX_QWEN_OWNED=0, plain qwen VLM) keep the stock ragged decode
-    # bound; on pre-M3 that means ungated 1024-thread launches.
+    # Serve builds that never build the owned MTP classes (plain qwen
+    # VLM) keep the base ragged decode bound; on pre-M3 that means
+    # ungated 1024-thread launches.
     from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
     install_pre_m3_ragged_guard()
     _install_drafter_injection()
@@ -1122,6 +1138,9 @@ def install_gguf_server_bridge() -> None:
 
 _RESOLVED_MODELS: dict[str, Any] = {}          # id -> ResolvedModel
 _PATH_TO_IDS: dict[str, list[str]] = {}        # abspath -> [id, ...]
+# Image models: their own tables, since no chat path may reach them.
+_IMAGE_MODELS: dict[str, Any] = {}             # id -> ResolvedImageModel
+_IMAGE_PATH_TO_IDS: dict[str, list[str]] = {}  # DiT abspath -> [id, ...]
 _SERVER_CFG = None                             # the live ServerCfg (for re-resolve)
 # The ResolvedModel for the request in flight - set at the residency seam, read at
 # the gen-args seam. A ContextVar so concurrent requests don't see each other's.
@@ -1168,6 +1187,23 @@ class ModelFileMissing(ValueError):
             f"to reconcile the config")
 
 
+class WrongModelKind(ModelNotFound):
+    """A chat route named an image model, or an image route a chat model.
+    A ``ModelNotFound`` to every caller that only asks whether the route
+    serves the id; the HTTP layer answers it with a 400 that names the
+    route the id belongs to."""
+
+    def __init__(self, model_id: str, kind: str, available):
+        super().__init__(model_id, available)
+        self.kind = kind
+        if kind == "image":
+            self.message = (f"{model_id!r} is an image model; send it to "
+                            "/v1/images/generations")
+        else:
+            self.message = (f"{model_id!r} is not an image model; the image "
+                            f"models are {self.available}")
+
+
 class UnknownProfile(ValueError):
     """A request named a profile that isn't defined (inline ``@profile`` or the
     ``profile`` field). Carries the valid profile names for a 400 body."""
@@ -1206,7 +1242,7 @@ def _residency_build_lock():
     in-flight model build: clearing _MTP_DRAFTER_STASH / the VLM/MTP
     registries mid-build strands the drafter the build is about to consume."""
     import contextlib
-    pool = getattr(sys.modules.get("mlx_vlm.server"), "_kq_residency_pool", None)
+    pool = getattr(sys.modules.get("gmlx._vendor.mlx_vlm.server"), "_kq_residency_pool", None)
     lock = getattr(pool, "_build_lock", None)
     return lock if lock is not None else contextlib.nullcontext()
 
@@ -1236,6 +1272,8 @@ def register_resolved_models(cfg) -> None:
 def _clear_registries() -> None:
     _RESOLVED_MODELS.clear()
     _PATH_TO_IDS.clear()
+    _IMAGE_MODELS.clear()
+    _IMAGE_PATH_TO_IDS.clear()
     _GGUF_VLM_REGISTRY.clear()
     _GGUF_MTP_REGISTRY.clear()
     _MTP_DRAFTER_STASH.clear()
@@ -1268,8 +1306,13 @@ def _fill_adapters(rm) -> None:
     rm.adapters = tuple(sorted(union))
 
 
+def _register_image(iid: str, rm) -> None:
+    _IMAGE_MODELS[iid] = rm
+    _IMAGE_PATH_TO_IDS.setdefault(rm.path, []).append(iid)
+
+
 def _register_resolved_models_locked(cfg) -> None:
-    from gmlx.config import MissingModelFile, resolve_model
+    from gmlx.config import MissingModelFile, resolve_image_model, resolve_model
 
     _clear_registries()
     for root in getattr(cfg, "model_dirs", None) or []:
@@ -1289,10 +1332,17 @@ def _register_resolved_models_locked(cfg) -> None:
         _register_one(mid, rm)
     for rm in _RESOLVED_MODELS.values():
         _fill_adapters(rm)
+    for iid in getattr(cfg, "image_models", {}):
+        try:
+            _register_image(iid, resolve_image_model(iid, cfg))
+        except MissingModelFile as e:
+            skipped.append((iid, e))
     for mid, e in skipped:
         print(f"[server] skipping model {mid!r}: {e}", file=sys.stderr)
     if skipped:
-        print(f"[server] {len(skipped)} of {len(cfg.models)} configured "
+        print(f"[server] {len(skipped)} of "
+              f"{len(cfg.models) + len(getattr(cfg, 'image_models', {}))} "
+              "configured "
               "model(s) missing on disk; run `gmlx sync-models` to reconcile "
               "the config (drops gone entries, registers new files)",
               file=sys.stderr)
@@ -1325,6 +1375,17 @@ def reregister_missing_models() -> bool:
     if healed:
         for rm in _RESOLVED_MODELS.values():
             _fill_adapters(rm)
+    from gmlx.config import resolve_image_model
+    for iid in getattr(cfg, "image_models", {}):
+        if iid in _IMAGE_MODELS:
+            continue
+        try:
+            _register_image(iid, resolve_image_model(iid, cfg))
+        except ConfigError:
+            continue
+        print(f"[server] image model {iid!r} is back on disk; re-registered",
+              file=sys.stderr)
+        healed = True
     return healed
 
 
@@ -1442,6 +1503,8 @@ def resolve_request_model(model_field: str | None, *,
 
     if request_profile is not None and request_profile not in known:
         raise UnknownProfile(request_profile, known)
+    if model_id not in cfg.models and model_id in getattr(cfg, "image_models", {}):
+        raise WrongModelKind(model_id, "image", cfg.models)
     if model_id not in cfg.models:
         # `<id|alias>@suffix` with a real head but an unknown suffix isn't split off
         # as a profile (last-@ rule keeps hf `org/model@rev` intact), so it lands
@@ -1458,6 +1521,77 @@ def resolve_request_model(model_field: str | None, *,
         raise ModelFileMissing(model_id, str(e)) from None
     _fill_adapters(rm)
     return rm.path, rm
+
+
+def image_models() -> dict:
+    """``{id: ResolvedImageModel}`` for every registered image model."""
+    return dict(_IMAGE_MODELS)
+
+
+def image_ids_for_path(path: str) -> list:
+    """The image model ids whose DiT is ``path``."""
+    return list(_IMAGE_PATH_TO_IDS.get(str(path), []))
+
+
+def default_image_model_id() -> str | None:
+    """``server.defaults.image_model``, else the only image model, else
+    None."""
+    cfg = _SERVER_CFG
+    if cfg is None:
+        return None
+    if getattr(cfg.defaults, "image_model", None):
+        return cfg.defaults.image_model
+    images = getattr(cfg, "image_models", {})
+    if len(images) == 1:
+        return next(iter(images))
+    return None
+
+
+def is_image_model(model_field: str | None) -> bool:
+    """Whether a request ``model`` field names a configured image model."""
+    cfg = _SERVER_CFG
+    raw = str(model_field or "").strip()
+    return (cfg is not None and bool(raw)
+            and raw in getattr(cfg, "image_models", {}))
+
+
+def resolve_image_request(model_field: str | None):
+    """Resolve an image route's ``model`` field to ``(DiT abspath,
+    ResolvedImageModel)``. An empty field takes the default image model.
+    A chat model id or alias raises :class:`WrongModelKind`, an unknown
+    name :class:`ModelNotFound`, a configured id whose file is gone
+    :class:`ModelFileMissing`, and an empty field with no default
+    :class:`NoModelSpecified`. Re-resolves, so an entry whose file comes
+    back serves again."""
+    from gmlx.config import MissingModelFile, resolve_image_model
+
+    cfg = _SERVER_CFG
+    if cfg is None:
+        raise RuntimeError(
+            "no config registered; call register_resolved_models() first")
+    raw = str(model_field or "").strip()
+    image_id = raw or default_image_model_id()
+    if image_id is None:
+        raise NoModelSpecified(cfg.image_models)
+    if image_id not in cfg.image_models:
+        head = split_profile_address(image_id)[0]
+        if head in cfg.models or head in cfg.aliases:
+            raise WrongModelKind(image_id, "chat", cfg.image_models)
+        raise ModelNotFound(image_id, cfg.image_models)
+    try:
+        rm = resolve_image_model(image_id, cfg)
+    except MissingModelFile as e:
+        raise ModelFileMissing(image_id, str(e)) from None
+    return rm.path, rm
+
+
+def resolve_pool_path(model_field: str | None) -> str:
+    """The resident-pool path of a chat or image model id, for the routes
+    that act on either kind (unload, keep). Raises as
+    :func:`resolve_request_model` does."""
+    if is_image_model(model_field):
+        return resolve_image_request(model_field)[0]
+    return resolve_request_model(model_field)[0]
 
 
 def set_active_spec(spec):

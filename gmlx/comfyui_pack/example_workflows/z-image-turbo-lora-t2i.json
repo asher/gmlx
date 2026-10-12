@@ -1,0 +1,529 @@
+{
+ "id": "3b6c259a-1843-5ef5-9fbb-45210206c48f",
+ "revision": 0,
+ "last_node_id": 11,
+ "last_link_id": 11,
+ "nodes": [
+  {
+   "id": 11,
+   "type": "Note",
+   "pos": [
+    -440,
+    80
+   ],
+   "size": [
+    400,
+    330
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "title": "gmlx nodes: install",
+   "properties": {},
+   "widgets_values": [
+    "These gmlx nodes run the image model on a gmlx server on your Mac (Apple Silicon, M3 or newer).\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx pull z-image-turbo\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
+   ],
+   "color": "#432",
+   "bgcolor": "#653"
+  },
+  {
+   "id": 1,
+   "type": "GmlxModelLoader",
+   "pos": [
+    0,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      1
+     ]
+    }
+   ],
+   "title": "gmlx Model Loader",
+   "properties": {
+    "Node name for S&R": "GmlxModelLoader"
+   },
+   "widgets_values": [
+    "z-image-turbo",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 2,
+   "type": "GmlxCLIPLoader",
+   "pos": [
+    0,
+    250
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      2
+     ]
+    }
+   ],
+   "title": "gmlx CLIP Loader",
+   "properties": {
+    "Node name for S&R": "GmlxCLIPLoader"
+   },
+   "widgets_values": [
+    "z-image-turbo",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 3,
+   "type": "GmlxVAELoader",
+   "pos": [
+    0,
+    420
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      10
+     ]
+    }
+   ],
+   "title": "gmlx VAE Loader",
+   "properties": {
+    "Node name for S&R": "GmlxVAELoader"
+   },
+   "widgets_values": [
+    "z-image-turbo",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 4,
+   "type": "LoraLoader",
+   "pos": [
+    340,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 1
+    },
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 2
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      5
+     ]
+    },
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      3,
+      4
+     ]
+    }
+   ],
+   "title": "Load LoRA",
+   "properties": {
+    "Node name for S&R": "LoraLoader"
+   },
+   "widgets_values": [
+    "z-image-turbo-style.safetensors",
+    0.8,
+    0.0
+   ]
+  },
+  {
+   "id": 5,
+   "type": "CLIPTextEncode",
+   "pos": [
+    680,
+    80
+   ],
+   "size": [
+    400,
+    160
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 3
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      6
+     ]
+    }
+   ],
+   "title": "Positive prompt",
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode"
+   },
+   "widgets_values": [
+    "A red bicycle leaning on a stone wall in the rain, evening light, photograph"
+   ]
+  },
+  {
+   "id": 6,
+   "type": "CLIPTextEncode",
+   "pos": [
+    680,
+    280
+   ],
+   "size": [
+    400,
+    110
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 4
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      7
+     ]
+    }
+   ],
+   "title": "Negative prompt",
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode"
+   },
+   "widgets_values": [
+    ""
+   ]
+  },
+  {
+   "id": 7,
+   "type": "EmptySD3LatentImage",
+   "pos": [
+    680,
+    430
+   ],
+   "size": [
+    300,
+    110
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      8
+     ]
+    }
+   ],
+   "title": "Empty latent",
+   "properties": {
+    "Node name for S&R": "EmptySD3LatentImage"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    1
+   ]
+  },
+  {
+   "id": 8,
+   "type": "KSampler",
+   "pos": [
+    1120,
+    80
+   ],
+   "size": [
+    300,
+    270
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 5
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 6
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 7
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 8
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      9
+     ]
+    }
+   ],
+   "title": "KSampler",
+   "properties": {
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    42,
+    "fixed",
+    8,
+    1.0,
+    "euler",
+    "simple",
+    1.0
+   ]
+  },
+  {
+   "id": 9,
+   "type": "VAEDecode",
+   "pos": [
+    1460,
+    80
+   ],
+   "size": [
+    210,
+    50
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 9
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 10
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      11
+     ]
+    }
+   ],
+   "title": "VAE Decode",
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 10,
+   "type": "SaveImage",
+   "pos": [
+    1460,
+    170
+   ],
+   "size": [
+    420,
+    470
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 11
+    }
+   ],
+   "outputs": [],
+   "title": "Save Image",
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "gmlx/z-image-turbo"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   4,
+   0,
+   "MODEL"
+  ],
+  [
+   2,
+   2,
+   0,
+   4,
+   1,
+   "CLIP"
+  ],
+  [
+   3,
+   4,
+   1,
+   5,
+   0,
+   "CLIP"
+  ],
+  [
+   4,
+   4,
+   1,
+   6,
+   0,
+   "CLIP"
+  ],
+  [
+   5,
+   4,
+   0,
+   8,
+   0,
+   "MODEL"
+  ],
+  [
+   6,
+   5,
+   0,
+   8,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   7,
+   6,
+   0,
+   8,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   8,
+   7,
+   0,
+   8,
+   3,
+   "LATENT"
+  ],
+  [
+   9,
+   8,
+   0,
+   9,
+   0,
+   "LATENT"
+  ],
+  [
+   10,
+   3,
+   0,
+   9,
+   1,
+   "VAE"
+  ],
+  [
+   11,
+   9,
+   0,
+   10,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.75,
+   "offset": [
+    480,
+    40
+   ]
+  }
+ },
+ "version": 0.4
+}

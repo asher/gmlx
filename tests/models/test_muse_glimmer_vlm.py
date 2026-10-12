@@ -1,12 +1,12 @@
-"""Muse Glimmer GGUF + mmproj: the loader builds the vendored VLM class.
+"""Muse Glimmer GGUF + mmproj: the loader builds the gmlx VLM class.
 
-mlx-vlm 0.6.15 ships its own ``mlx_vlm.models.muse_glimmer`` for the HF
-checkpoint. Its ``_encode_image`` raises without the ``image_grid_thw`` that
-only its own processor makes, and its language model has no speculative
-hooks. When that class won the registration, every image request failed and
-the DFlash drafter was dropped. These tests drive the loader's own resolution
-(``build_vlm_model``, which calls mlx-vlm's ``get_model_and_args``) on a tiny
-config. CPU-only, no GGUF.
+mlx-vlm ships its own ``muse_glimmer`` package for the HF checkpoint, and
+the copy leaves it out. Its ``_encode_image`` raises without the
+``image_grid_thw`` that only its own processor makes, and its language
+model has no speculative hooks, so an image request would fail and the
+DFlash drafter would be dropped. These tests drive the loader's own
+resolution (``build_vlm_model``, whose copied ``get_model_and_args`` reads
+``OWNED_VLM_MODELS``) on a tiny config. CPU-only, no GGUF.
 """
 
 from __future__ import annotations
@@ -69,8 +69,7 @@ def _config() -> dict:
 
 @pytest.fixture(scope="module")
 def model():
-    # The same two calls the GGUF VLM loader makes before build_vlm_model.
-    vm.ensure_registered()
+    # The GGUF VLM loader registers the tool parser before build_vlm_model.
     muse_tools.ensure_registered()
     mx.random.seed(0)
     built, _ = gvlm.build_vlm_model(_config())
@@ -114,20 +113,26 @@ def test_image_encodes_without_image_grid_thw(model):
 BOS = "<|begin_of_text|>"
 
 
-def _processor():
+EOS = "<|end_of_text|>"
+
+
+def _processor(adds_eos: bool = False):
     from tokenizers import Tokenizer, models, pre_tokenizers, processors
     from transformers import PreTrainedTokenizerFast
 
-    specials = [BOS, "<|patch|>", "<|image_start|>", "<|image_end|>"]
+    specials = [BOS, "<|patch|>", "<|image_start|>", "<|image_end|>", EOS]
     vocab = {"[UNK]": 0, "hi": 1, "there": 2,
              **{t: 3 + i for i, t in enumerate(specials)}}
     tok = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
     tok.pre_tokenizer = pre_tokenizers.Whitespace()
     tok.add_special_tokens(specials)
+    single, added = f"{BOS} $A", [(BOS, vocab[BOS])]
+    if adds_eos:
+        single, added = f"{single} {EOS}", added + [(EOS, vocab[EOS])]
     tok.post_processor = processors.TemplateProcessing(
-        single=f"{BOS} $A", special_tokens=[(BOS, vocab[BOS])])
+        single=single, special_tokens=added)
     fast = PreTrainedTokenizerFast(
-        tokenizer_object=tok, bos_token=BOS, unk_token="[UNK]")
+        tokenizer_object=tok, bos_token=BOS, eos_token=EOS, unk_token="[UNK]")
     mm_meta = {"clip.vision.patch_size": 14, "clip.vision.spatial_merge_size": 2}
     return gvlm._synthesize_muse_glimmer_processor(fast, mm_meta), vocab[BOS]
 
@@ -141,6 +146,14 @@ def test_processor_keeps_one_bos_on_a_text_prompt():
     assert _ids(proc(text=f"{BOS}hi there")) == [bos_id, 1, 2]
     # Without the template's BOS the tokenizer adds its own, once.
     assert _ids(proc(text="hi there")) == [bos_id, 1, 2]
+
+
+def test_processor_keeps_the_stock_encoding_when_the_tokenizer_adds_more_than_bos():
+    """A tokenizer that adds EOS too gives the stock encoding, as on every
+    other path that drops a duplicate BOS (single_bos_fix)."""
+    proc, bos_id = _processor(adds_eos=True)
+    eos_id = proc.tokenizer.convert_tokens_to_ids(EOS)
+    assert _ids(proc(text=f"{BOS}hi there")) == [bos_id, bos_id, 1, 2, eos_id]
 
 
 def test_processor_keeps_one_bos_on_an_image_prompt():

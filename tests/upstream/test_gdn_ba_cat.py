@@ -19,7 +19,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from mlx_lm.models.qwen3_5 import GatedDeltaNet
+from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
 patches = importlib.import_module("gmlx.upstream.gdn_patches")
 
@@ -143,7 +143,7 @@ def test_zba_merge_wins_over_cat(monkeypatch):
 
 
 def test_verify_patcher_cats_vlm_instances(monkeypatch):
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
     if patches._gdn_fused_verify_kernel is None:
         pytest.skip("fused gdn verify kernel unavailable")
@@ -209,7 +209,7 @@ def test_cat_matmul_fallback_parity():
 def _adapted_gdn(leaves, merge_zba=False):
     """A one-layer tree whose GatedDeltaNet was armed at load, then took a
     GGUF adapter on ``leaves``."""
-    from mlx_lm.models.qwen3_5 import TextModelArgs
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import TextModelArgs
 
     from gmlx.load.adapter import LoraAdapter, LoraModule
     from gmlx.load.modules import install_lora_adapter
@@ -259,7 +259,7 @@ def _adapted_gdn(leaves, merge_zba=False):
 def test_an_adapter_on_z_b_or_a_reaches_the_fused_decode(monkeypatch, merge_zba, leaves):
     """The cat and the merge are built at load. An adapter installed later
     on one of their members clears them, so decode calls the wrapper."""
-    from mlx_lm.models.cache import ArraysCache
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache
 
     gdn = _adapted_gdn(leaves, merge_zba=merge_zba)
     assert getattr(gdn, "_gdn_ba_weight", None) is None

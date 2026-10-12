@@ -1,21 +1,21 @@
 # Supported architectures
 
-gmlx maps 42 GGUF architectures to model types, and 41 of them load end-to-end
+gmlx maps 43 GGUF architectures to model types, and 42 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
-architecture table and the installed mlx-lm, so do not edit it by hand.
+architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
-A GGUF loads when gmlx maps its `general.architecture` to a model type, an
-installed backend package has a model class for that type, and a config
-synthesizer exists for the architecture. The backend is mlx-lm for most
-architectures and mlx-vlm or mlx-embeddings for a few. Without a synthesizer,
-pass `hf_source` to supply a config.json. The status column says which case
-applies:
+A GGUF loads when gmlx maps its `general.architecture` to a model type, the
+backend has a model class for that type, and a config synthesizer exists for
+the architecture. The backend is the mlx-lm that gmlx carries for most
+architectures, the mlx-vlm it carries for a few, and gmlx itself for the
+encoder embedders. Without a synthesizer, pass `hf_source` to supply a
+config.json. The status column says which case applies:
 
 | Status | Meaning |
 |--------|---------|
 | loadable | The model class and the synthesizer are both present. |
 | needs synth (hf_source) | The model class is present and no synthesizer exists, so pass `hf_source`. |
-| needs mlx-lm (or another backend) | The installed backend package has no model class for the architecture. |
+| needs mlx-lm (or another backend) | The backend has no model class for the architecture. |
 | disabled (no known-good GGUF) | The code is complete, but each available GGUF is broken at conversion, so the loader refuses the architecture. |
 
 The caveat column names the limit a user is most likely to hit, and an empty
@@ -31,7 +31,7 @@ family, backend, status and caveat:
 | `ernie4_5-moe` | ernie | mlx-lm | loadable |  |
 | `falcon-h1` | falcon | mlx-lm | loadable |  |
 | `gemma` | gemma | mlx-lm | loadable |  |
-| `gemma-embedding` | gemma | mlx-embeddings | loadable |  |
+| `gemma-embedding` | gemma | gmlx | loadable |  |
 | `gemma2` | gemma | mlx-lm | loadable | Pass hf_source for 27B. Output matches llama.cpp only up to 4096 tokens, the size of the model's sliding attention window. |
 | `gemma3` | gemma | mlx-lm | loadable | Pass hf_source for 27B. |
 | `gemma3n` | gemma | mlx-lm | disabled (no known-good GGUF) |  |
@@ -62,6 +62,7 @@ family, backend, status and caveat:
 | `qwen35moe` | qwen3 | mlx-lm | loadable |  |
 | `qwen3moe` | qwen3 | mlx-lm | loadable |  |
 | `qwen3next` | qwen | mlx-lm | loadable |  |
+| `qwen3vl` | qwen3 | mlx-lm | loadable |  |
 | `qwen3vlmoe` | qwen3 | mlx-lm | loadable |  |
 | `qwen4exp` | qwen3 | mlx-lm | loadable | Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`. |
 | `seed_oss` | seed_oss | mlx-lm | loadable |  |

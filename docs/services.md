@@ -151,9 +151,10 @@ vector, and the context is the most input tokens the model reads:
 
 `gmlx init` can pick another quant and write its full reference.
 
-The server also runs safetensors encoders through
-[mlx-embeddings](https://pypi.org/project/mlx-embeddings/), from an alias, a
-Hugging Face repository or a local folder. These download once when they
+The server also runs safetensors encoders, from an alias, a Hugging Face
+repository or a local folder. An MLX checkpoint, plain or quantized, runs on
+the encoders built into gmlx, which cover EmbeddingGemma, BERT,
+XLM-RoBERTa, ModernBERT and Qwen3-Embedding. These download once when they
 are not in the cache:
 
 | Alias | Repository | Dimension | Context | Notes |
@@ -164,6 +165,66 @@ are not in the cache:
 | `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | Multilingual, long inputs |
 
 Choose a GGUF model unless you want an encoder for its size or languages.
+
+The server checks the model at startup, from a safetensors encoder's
+`config.json` or from a GGUF's header, and a model that fails the check
+does not load. A safetensors encoder fails for another model type, and for
+a Gemma 3 or Qwen3 chat model, which shares its model type with
+EmbeddingGemma or Qwen3-Embedding. It also fails when its `config.json` or
+`modules.json` cannot be read or is not valid JSON. A GGUF is an embeddings
+model when it is of an encoder architecture, sets `<arch>.pooling_type` to 1
+or more, or has `embed` or `embedding` as a word of its file name, as the
+Qwen3-Embedding GGUFs do and a chat model does not. Any other GGUF fails.
+So does a reranker, by its file name or a pooling type of 4, a GGUF of a
+pooling type over 4, and a GGUF of an encoder architecture that gmlx cannot
+run, which is every encoder architecture but EmbeddingGemma's. A GGUF of
+EmbeddingGemma's architecture fails when it sets a pooling type other than
+1, since that encoder takes the mean. A GGUF that sets
+`<arch>.attention.causal` to false fails unless it is of the llama,
+mistral3, qwen2 or qwen3 architecture and has no sliding window. The server
+still starts, and the server log and every `/v1/embeddings` response give
+the reason with a 501 status.
+
+A Qwen3 checkpoint is Qwen3-Embedding when its `modules.json` lists a
+sentence-transformers Pooling module, or when its repository, folder name or
+model card names Qwen3-Embedding, as for a conversion without `modules.json`.
+
+An encoder pools its vectors as the sentence-transformers configuration in
+its folder says. When the folder has none, BGE-M3, Arctic-Embed, the English
+and Chinese BGE v1 and v1.5 models, mxbai-embed-large-v1 and
+mxbai-embed-2d-large-v1 use the first token, as their upstream
+configurations do. The server knows these models by the name in
+`config.json` or in the model card, or by the repository or folder name.
+Qwen3-Embedding uses the last token, and the other models use the mean over
+the tokens, as sentence-transformers does. The server log names the pooling
+it chose.
+
+A GGUF embedder that sets `<arch>.pooling_type` to 1 takes the mean over
+the tokens, one that sets 2 the first token, and one that sets 3 the last
+token. One that sets no pooling type, or sets 0, uses the last token and
+appends an EOS to an input that does not end in one, as Qwen3-Embedding
+does. One that sets `<arch>.attention.causal` to false, as Nemotron-3-Embed
+does, runs without the causal mask, so each token attends to the whole
+input.
+
+EmbeddingGemma never runs in float16, which its model card rules out. It
+runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
+gives float16.
+
+A cached encoder loads with no network access when its own files or its
+name settle how it pools. Otherwise the server fetches the model card and
+the sentence-transformers module files that the cached copy lacks, at the
+commit of the copy, so the copy stays the one in use. Each file gets one
+try, and the fetch stops after 5 seconds in all. Once the Hub has answered
+for each file, or the fetch has timed out before the Hub answered any
+request, the server leaves a mark in the cache,
+`models--<org>--<name>/.gmlx-fetched/<commit>`, and does not fetch for that
+copy again. To fetch again, delete the mark, which the log names when a
+file is not fetched, and restart the server. A fetch that finds no
+connection, or that times out after the Hub answered a request, as on a
+slow connection, leaves no mark. The files it fetched stay, and the next
+start asks for the others. With `HF_HUB_OFFLINE=1`, or in a cache the
+server cannot write, the server fetches nothing.
 
 ## Reranking
 
@@ -225,11 +286,14 @@ A request never makes the server download a model. The models you name in
 the config download at start, except GGUF models, which you pull, as
 [Hugging Face policy](api.md#hugging-face-policy) explains.
 
-A service that is not configured answers 404 with the key to set. A speech
-service whose extra is missing stops the server from starting, and fails a
-reload that turns it on. When an embeddings or rerank model file is
-missing, the server runs without that service. Pull the file, then reload
-the server or run `gmlx restart`.
+A service that is not configured answers 404 with the key to set. When the
+extra of a speech service in the config is missing, the server starts
+without that service and logs a warning, which `gmlx serve` repeats, and
+its routes answer 404 with the command that installs the extra. A reload of
+the config turns the service off the same way, and the server stays up.
+With `--stt` or `--tts`, a missing extra stops the server from starting. When an embeddings or rerank model
+file is missing, the server runs without that service. Pull the file, then
+reload the server or run `gmlx restart`.
 
 The server finds ffmpeg on its `PATH` or in the Homebrew and system
 folders, so a server started by a login item finds it too. `gmlx doctor`

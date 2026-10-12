@@ -1,9 +1,10 @@
 """Owned speculative-decoding engine seams for the serve path.
 
 Routes all MTP batch sizes through the owned engine: B=1 through the scalar
-single-stream round (``owned_server_rounds``), B>1 through the vectorized
-batched round (``owned_server_rounds_batch``). Non-MTP draft kinds delegate
-to stock ``run_speculative_server_rounds`` unchanged.
+single-stream round (``owned_server_rounds``) on single-stream prompt caches
+(``install_owned_b1_spec_cache``), B>1 through the vectorized batched round
+(``owned_server_rounds_batch``). Non-MTP draft kinds delegate to stock
+``run_speculative_server_rounds`` unchanged.
 
 Installation is a late-bound monkeypatch (same no-fork pattern as
 `server_patches` / `server_bridge_vlm`): `mlx_vlm.generate.ar` binds
@@ -21,6 +22,7 @@ import sys
 import mlx.core as mx
 
 from gmlx.envflags import env_int
+from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ def _bind_l1_view() -> None:
     """Graft BatchGenerator's APC helpers onto _L1View (idempotent)."""
     if _L1_BOUND[0]:
         return
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     try:
         for name in _L1_VIEW_METHODS:
@@ -115,26 +117,36 @@ def _bind_l1_view() -> None:
     _L1_BOUND[0] = True
 
 
+def _trim_prompt_columns(batch, n: int) -> None:
+    """Drop a prompt batch's first ``n`` columns from its ids, embeddings
+    and sequence-aligned prompt kwargs. mrope position ids are (3, B, L),
+    so the stock helper slices each kwarg on its own sequence axis."""
+    from gmlx._vendor.mlx_vlm.generate.ar import _slice_sequence_aligned_prompt_kwarg
+
+    batch._input_ids = batch._input_ids[:, n:]
+    batch._inputs_embeds = batch._inputs_embeds[:, n:]
+    for k in batch._prompt_length_aware_keys:
+        batch._prompt_kwargs[k] = _slice_sequence_aligned_prompt_kwarg(
+            k, batch._prompt_kwargs[k], start=n)
+
+
 _APC_STASH_FLAG = "_kq_gguf_apc_manager_stash"
 
 
 def _install_apc_manager_stash() -> None:
     """Stash the serve-time APCManager on the model object for the owned path.
 
-    Upstream ``BatchGenerator.__init__`` nulls its ``apc_manager`` whenever a
-    draft model is configured (the stock prefill APC machinery assumes the
-    non-speculative generate flow). The owned MTP engine integrates on its
-    own terms, so capture the manager before that gate: in the construction
-    call itself, where the true manager and the model are both in scope on
-    the generation worker thread (residency's build-scratch ContextVar does
-    not cross into that thread, so ``runtime.apc_manager`` cannot be read
-    reliably from here). Assigns on every construction -- including None --
-    so a BatchGenerator built without APC clears a stale stash instead of
+    The owned MTP engine reads the manager from the model. The construction
+    call is where the manager and the model are both in scope on the
+    generation worker thread: residency's build-scratch ContextVar does not
+    cross into that thread, so ``runtime.apc_manager`` cannot be read
+    reliably from here. Assigns on every construction, None included, so a
+    BatchGenerator built without APC clears a stale stash instead of
     inheriting one. Idempotent.
     """
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
-    if getattr(BatchGenerator.__init__, _APC_STASH_FLAG, False):
+    if wrapped_with(BatchGenerator.__init__, _APC_STASH_FLAG):
         return
     _orig_init = BatchGenerator.__init__
 
@@ -187,7 +199,7 @@ def _install_apc_manager_stash() -> None:
                 )
 
     _init_with_stash.__dict__[_APC_STASH_FLAG] = True
-    BatchGenerator.__init__ = _init_with_stash
+    BatchGenerator.__init__ = link(_init_with_stash, _orig_init)
 
 
 def _resolve_l1(model):
@@ -199,7 +211,7 @@ def _resolve_l1(model):
         return None, None
     mode = getattr(model, "_kq_apc_mode", _L1_MODE_UNSET)
     if mode is _L1_MODE_UNSET:
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
 
         # Probe the bare language model: model_apc_mode falls back to
         # "block" when make_cache is missing, which would misclassify a
@@ -366,8 +378,9 @@ def _live_kv_quant_config(model=None):
 
     The batched verdict stamped on the model rules the warm merge:
     a warm hit joins a batch, and under uniform MTP batches run fp16 KV.
-    No stamp means None. The only caller is the MTP prefill init, where fp16
-    is the only correct merge. Key/value split overrides stay None."""
+    No stamp means None. The callers are the two MTP warm paths, the
+    owned L1 merge and stock warm admission, which recover affine rows
+    to fp16 on None. Key/value split overrides stay None."""
     stamped = getattr(model, "_gmlx_kv_policy", None)
     if stamped is None:
         return None
@@ -375,17 +388,17 @@ def _live_kv_quant_config(model=None):
     if batched is None or batched.verdict not in ("full", "partial"):
         return None
     if getattr(batched, "scheme", "uniform") != "uniform":
-        # Only affine has a merge config upstream understands. kvarn
-        # serves warm prefixes from the fp16 exact tier, so a float merge
-        # is the correct one -- but say so rather than describing kvarn
-        # records with an affine config.
-        _log.debug("warm merge stays float: %s KV has no affine config",
+        # Only affine has a merge config upstream understands. A kvarn
+        # exact entry stays a kvarn record, and with no config the kvarn
+        # merge arm makes it a kvarn batch row, the class the batched
+        # kvarn arm runs.
+        _log.debug("warm merge takes no config: %s KV has no affine config",
                    batched.scheme)
         return None
     bits = float(batched.bits)
     group = int(batched.group_size or 64)
     try:
-        from mlx_vlm.kv_quant import from_legacy
+        from gmlx._vendor.mlx_vlm.kv_quant import from_legacy
         pol = from_legacy(bits, None, group)
         return pol.to_config() if pol is not None else None
     except Exception:
@@ -401,10 +414,10 @@ def install_owned_spec_engine() -> None:
     path (``owned_server_rounds``); B>1 routes through
     ``owned_server_rounds_batch``.
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     _orig = _ar.run_speculative_server_rounds
-    if getattr(_orig, _OWNED_MTP_ROUND_FLAG, False):
+    if wrapped_with(_orig, _OWNED_MTP_ROUND_FLAG):
         return
 
     from gmlx.spec.speculative import (
@@ -515,8 +528,42 @@ def install_owned_spec_engine() -> None:
         )
 
     _owned_server_rounds.__dict__[_OWNED_MTP_ROUND_FLAG] = True
-    _ar.run_speculative_server_rounds = _owned_server_rounds
-    from mlx_vlm.server import generation as _gen
-
-    _gen.run_speculative_server_rounds = _owned_server_rounds
+    # generate.ar is the only caller; the server module no longer binds it.
+    _ar.run_speculative_server_rounds = link(_owned_server_rounds, _orig)
     _debug_note("[mtp] serve round: owned engine installed (B=1 + B>1)")
+    install_owned_b1_spec_cache()
+
+
+_OWNED_B1_CACHE_FLAG = "_kq_gguf_owned_b1_spec_cache"
+
+
+def install_owned_b1_spec_cache() -> None:
+    """Build the B=1 MTP prompt cache as single-stream caches.
+
+    The owned B=1 round runs on ``make_prompt_cache`` caches (trim is an
+    offset move, and the KV quant arm converts them to ``QuantizedKVCache``
+    or ``KVarNKVCache``). Stock ``make_speculative_prompt_cache`` builds
+    batch caches through ``make_cache`` at every batch size, so this
+    restores the single-stream build for ``draft_kind == "mtp"`` at B=1.
+    Other draft kinds and B>1 take the stock builder. Idempotent.
+    """
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.speculative import utils as _su
+
+    from gmlx.cache import kv_cache
+
+    _orig = _su.make_speculative_prompt_cache
+    if wrapped_with(_orig, _OWNED_B1_CACHE_FLAG):
+        return
+
+    def _owned_spec_cache(lm, *, draft_kind, batch_size, left_padding,
+                          make_cache):
+        if draft_kind == "mtp" and batch_size == 1:
+            return kv_cache.make_prompt_cache(lm)
+        return _orig(lm, draft_kind=draft_kind, batch_size=batch_size,
+                     left_padding=left_padding, make_cache=make_cache)
+
+    _owned_spec_cache.__dict__[_OWNED_B1_CACHE_FLAG] = True
+    _owned_spec_cache.__dict__["_gmlx_orig"] = _orig
+    _su.make_speculative_prompt_cache = _owned_spec_cache
+    _ar.make_speculative_prompt_cache = _owned_spec_cache

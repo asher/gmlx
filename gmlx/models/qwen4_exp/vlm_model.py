@@ -3,15 +3,17 @@
 """Vendored mlx-vlm model for Qwen3.8-Flash-Next VLM (mmproj ``qwen3vl_merger``
 on LLM arch ``qwen4exp``).
 
-The vision half is the same Qwen3-VL ViT
-the qwen3.5/3.6 pair uses (mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF
-disables deepstack), so this module reuses it wholesale; the text half is the
-vendored :mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
+This module loads ahead of the qwen4_exp package mlx-vlm ships from 0.7.3.
+The vision half is the same Qwen3-VL ViT the qwen3.5/3.6 pair uses
+(mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF disables deepstack), so
+this module reuses it wholesale; the text half is the vendored
+:mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
 mlx-vlm's generate stack expects.
 
 Positions: text-only rows keep the scalar-offset fast rope; when images are
-present, ``get_rope_index`` (borrowed unbound from mlx-vlm's qwen3_5
-``LanguageModel``, identical interleaved-mrope semantics) produces the
+present, ``get_rope_index`` (borrowed unbound from the vendored qwen3.5
+``LanguageModel`` in :mod:`gmlx.models.qwen35.language`, identical
+interleaved-mrope semantics) produces the
 ``[3, B, L]`` t/h/w ids and the wrapper threads them into the vendored
 attention + QSA indexer (which cache per-token positions for block-key rope).
 Decode positions continue at ``cache_offset + rope_delta`` on all three
@@ -33,17 +35,16 @@ from typing import List, Optional, Union
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import (
+from gmlx._vendor.mlx_vlm.models.base import (
     BaseModelConfig,
     InputEmbeddingsFeatures,
     LanguageModelOutput,
 )
-from mlx_vlm.models.qwen3_5.config import VisionConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as _Q35LanguageModel
-from mlx_vlm.models.qwen3_5.vision import VisionModel
-from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import VisionConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.vision import VisionModel
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
-from gmlx.models import owned
+from gmlx.models.qwen35.language import LanguageModel as _Q35LanguageModel
 
 from . import model as q4
 from .model import ModelArgs as TextConfig
@@ -51,9 +52,8 @@ from .mtp import Qwen4ExpSpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module."""
+    """Register the text model's cache classes before a build."""
     q4.ensure_registered()
-    owned.install("mlx_vlm.models.qwen4_exp", __name__)
 
 
 @dataclass
@@ -151,6 +151,8 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
         return_shared_kv: bool = False,
         **kwargs,
     ):
+        # skip_logits leaves out the head, as in Qwen4ExpSpecLM.
+        skip_logits = kwargs.pop("skip_logits", False)
         del mask, kwargs  # the backbone builds masks from the caches
         positions = self._resolve_positions(
             inputs, cache, position_ids, rope_deltas)
@@ -158,10 +160,12 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
             out, streams = self.model(
                 inputs, cache, input_embeddings=inputs_embeds,
                 position_ids=positions, return_streams=True)
-            return _SpecOutput(logits=self._head(out), hidden_states=[streams])
+            logits = None if skip_logits else self._head(out)
+            return _SpecOutput(logits=logits, hidden_states=[streams])
         out = self.model(inputs, cache, input_embeddings=inputs_embeds,
                          position_ids=positions)
-        return LanguageModelOutput(logits=self._head(out))
+        return LanguageModelOutput(
+            logits=None if skip_logits else self._head(out))
 
     @property
     def layers(self):

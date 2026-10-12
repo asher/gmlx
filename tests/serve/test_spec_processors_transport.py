@@ -91,7 +91,7 @@ def _ppb_class(result):
 
 def _grammar_proc():
     import llguidance as llg
-    from mlx_vlm.structured import LLGuidanceLogitsProcessor
+    from gmlx._vendor.mlx_vlm.structured import LLGuidanceLogitsProcessor
     tok = types.SimpleNamespace(vocab_size=64)
     return LLGuidanceLogitsProcessor(llg.grammar_from("regex", "a"), tok)
 

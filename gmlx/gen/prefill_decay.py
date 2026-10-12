@@ -14,9 +14,12 @@ depth would push the transient past a cap:
 
 Shallow prefill keeps the full step; only the deep tail (where attention
 dominates the chunk anyway) pays the small-step tax. Applied to the serve
-prefill loop (prompt_step and needs_processing -- the loop hands its final
-<=step tail to generate(), which is exactly the cresting chunk), the MTP
-prefill override, and the MTP teacher-force head seed.
+prefill loop, the MTP prefill override, and the MTP teacher-force head
+seed. The loop runs prompt_step until one prompt column remains and hands
+that column to generate(). For a model that keeps only the last logits it
+stops once the columns left fit one step and hands those to generate().
+prompt_step and that test both read the decayed step, so the cresting
+forward never outgrows it.
 
 The dense [heads, step, S] model is the conservative default. Archs whose
 prefill attention runs fused/streaming kernels never materialize it; their
@@ -69,7 +72,9 @@ from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
 
+from gmlx.device import metal_value
 from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.upstream.patching import link
 
 _WS_CAP_BYTES: float | None = None
 _FLAG = "_gmlx_prefill_decay"
@@ -159,9 +164,7 @@ def build_score_profile(*, profile,
       unquantized. Any OTHER cache with a bits attr (quantized KV) -> None.
     - profile: the ScoreTransientProfile, or a callable returning one
       (callable form re-resolves live state such as arch base-step envs).
-
-    Pass dual-origin mlx-lm/vlm classes as cache_compat.cache_types(...)
-    tuples; gmlx-native classes are single-origin and safe directly."""
+    """
     def _provider(model, prompt_cache):
         matched = 0
         if kernels_armed is not None and not kernels_armed():
@@ -214,7 +217,7 @@ def _cap_bytes() -> float:
     global _WS_CAP_BYTES
     if _WS_CAP_BYTES is None:
         try:
-            ws = float(mx.device_info()["max_recommended_working_set_size"])
+            ws = float(metal_value("max_recommended_working_set_size"))
             _WS_CAP_BYTES = cap_bytes_for(ws)
         except Exception:
             _WS_CAP_BYTES = 4e9
@@ -381,6 +384,11 @@ def set_untracked_weights_owner(owner: object | None) -> None:
     _WEIGHTS_OWNER = owner
 
 
+def untracked_weights_owner() -> object | None:
+    """The owner of the open ownership window, or None when none is open."""
+    return _WEIGHTS_OWNER
+
+
 def note_untracked_weights(nbytes: float, key: object = None) -> None:
     """Loader hook: bytes wired at inference but invisible to
     mx.get_active_memory (zero-copy mmap weights). Same-key registrations
@@ -420,14 +428,20 @@ def forget_untracked_weights(owner: object) -> None:
 def deduct_untracked_weights(nbytes: float, key: object) -> None:
     """Shrink ``key``'s registration by ``nbytes``, floored at zero:
     streamed-out expert bytes are page cache, not wired weights, and never
-    belong in the estimate (see install_expert_streaming)."""
-    if key is None or nbytes <= 0:
+    belong in the estimate (see install_expert_streaming). Ends the key's
+    build credit even when nothing is left to deduct: the install has
+    accounted the streamed bytes by then."""
+    if key is None:
         return
     with _UNTRACKED_LOCK:
-        if key in _UNTRACKED_WEIGHTS:
-            _UNTRACKED_WEIGHTS[key] = max(
-                0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
         _end_build_credit_locked(key)
+        _deduct_locked(nbytes, key)
+
+
+def _deduct_locked(nbytes: float, key: object) -> None:
+    if nbytes > 0 and key in _UNTRACKED_WEIGHTS:
+        _UNTRACKED_WEIGHTS[key] = max(
+            0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
 
 
 def untracked_weight_bytes() -> float:
@@ -457,18 +471,75 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
     """Credit ``source``'s streamed bytes for ``key``. Idempotent per
     (key, source) so re-installs never double-credit; sources sum (compose
     streams table and experts), clamped at ``cap`` (the key's tracked
-    bytes) so the union can never credit more than was tracked."""
+    bytes) so the union can never credit more than was tracked. Any
+    source's credit ends the key's build credit."""
     if key is None or nbytes <= 0:
         return
     with _UNTRACKED_LOCK:
-        _STREAMED_TRACKED.setdefault(key, {}).setdefault(
-            source, float(nbytes))
-        if cap is not None:
-            _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
-        if _WEIGHTS_OWNER is not None:
-            _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
-        if source == "experts":
-            _end_build_credit_locked(key)
+        _note_streamed_locked(nbytes, key, source, cap)
+        _end_build_credit_locked(key)
+
+
+def _note_streamed_locked(nbytes: float, key: object, source: str,
+                          cap: float | None) -> None:
+    _STREAMED_TRACKED.setdefault(key, {}).setdefault(source, float(nbytes))
+    if cap is not None:
+        _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
+    if _WEIGHTS_OWNER is not None:
+        _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
+
+
+def credit_streamed(key: object, nbytes: float, tracked: float,
+                    source: str, prior: float = 0.0) -> float:
+    """Account ``nbytes`` of ``source`` streamed out of a load whose
+    allocator-tracked weight bytes are ``tracked``, of which ``prior`` an
+    earlier source already credited: credit the share the tracker counts,
+    deduct the rest from the untracked registration. Each byte is freed
+    once in every regime. The open build credit shrinks by ``nbytes``, so
+    the bytes not yet accounted stay covered until
+    :func:`end_build_credit` closes it after the install's last step.
+    Returns the credit."""
+    credit = min(float(nbytes), max(0.0, float(tracked) - prior))
+    with _UNTRACKED_LOCK:
+        if key is not None:
+            if credit > 0:
+                _note_streamed_locked(credit, key, source, tracked)
+            _deduct_locked(float(nbytes) - credit, key)
+        for owner in _build_owners_locked(key):
+            active0, cap = _BUILD_CREDIT[owner]
+            _BUILD_CREDIT[owner] = (active0, max(0.0, cap - float(nbytes)))
+    return credit
+
+
+def end_build_credit(key: object) -> None:
+    """End the build credit of ``key``'s owners and of the open owner: the
+    install has accounted every streamed byte."""
+    with _UNTRACKED_LOCK:
+        _end_build_credit_locked(key)
+
+
+def release_streamed_tracked_bytes(nbytes: float, key: object,
+                                   source: str = "experts") -> None:
+    """Take back up to ``nbytes`` of ``source``'s credit for ``key``, and
+    lower its cap by all ``nbytes``: bytes the tracker stopped counting
+    after the credit, such as expert stacks unmapped once the feeders own
+    them. The tracked total falls by every freed byte, whichever source's
+    credit covered it.
+    Without a key nothing was credited; the build's credit for the open
+    owner ends instead, or it would keep crediting the freed bytes."""
+    if nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        if key is None:
+            _end_build_credit_locked(None)
+            return
+        # The cap first: a table credit can cover tracked expert bytes,
+        # leaving the experts no credit of their own to take back.
+        if key in _STREAMED_CAP:
+            _STREAMED_CAP[key] = max(0.0, _STREAMED_CAP[key] - float(nbytes))
+        sources = _STREAMED_TRACKED.get(key)
+        if sources and source in sources:
+            sources[source] -= min(float(nbytes), sources[source])
 
 
 # A streaming build's window: the walk wraps the routed experts as
@@ -476,8 +547,9 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
 # the install credits or deducts them at the first request. Until then the
 # estimate reads the whole file as live. owner -> (active bytes at the
 # build's start, streamed bytes). The credit is what the load has added so
-# far, up to the streamed bytes. The install's experts credit or untracked
-# deduction for the same key ends it, as does the owner's teardown.
+# far, up to the streamed bytes. Each streamed share the install accounts
+# shrinks it by that share, the end of the install ends it, and so does
+# the owner's teardown.
 _BUILD_CREDIT: dict[object, tuple[float, float]] = {}
 
 
@@ -492,11 +564,18 @@ def note_build_credit(owner: object, streamed_bytes: float) -> None:
         _BUILD_CREDIT[owner] = (active, float(streamed_bytes))
 
 
-def _end_build_credit_locked(key: object) -> None:
-    for owner in _UNTRACKED_OWNERS.get(key, ()):
-        _BUILD_CREDIT.pop(owner, None)
+def _build_owners_locked(key: object) -> list:
+    """The owners with an open build credit that ``key``'s install ends:
+    the key's owners and the open window's owner."""
+    owners: set[object] = set(_UNTRACKED_OWNERS.get(key, ()))
     if _WEIGHTS_OWNER is not None:
-        _BUILD_CREDIT.pop(_WEIGHTS_OWNER, None)
+        owners.add(_WEIGHTS_OWNER)
+    return [o for o in owners if o in _BUILD_CREDIT]
+
+
+def _end_build_credit_locked(key: object) -> None:
+    for owner in _build_owners_locked(key):
+        _BUILD_CREDIT.pop(owner, None)
 
 
 def _build_credit_locked(active: float) -> float:
@@ -535,7 +614,7 @@ def headroom_bytes() -> float | None:
     fresh per call, never memoized. The one shared accounting: the prefill
     caps, the serve memory trace, and the admission gate all read this."""
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
         active = float(mx.get_active_memory())
     except Exception:
         return None
@@ -613,6 +692,15 @@ def decayed_seed_step(base: int, depth: int, heads: int,
 _STOCK_BASE = 2048
 
 
+def _folds(batch) -> bool:
+    """True when the batch runs its last chunk and its last prompt token in
+    one forward: no drafter, and a model that keeps only the last logits."""
+    from gmlx._vendor.mlx_vlm.generate.ar import _keeps_last_logits
+
+    return (getattr(batch, "draft_model", None) is None
+            and _keeps_last_logits(batch.model))
+
+
 def decayed_for_batch(batch) -> int | None:
     """Depth-decayed prefill step for a PromptProcessingBatch-shaped object
     (None passes through: caller falls back to one-shot)."""
@@ -645,8 +733,10 @@ def decayed_for_batch(batch) -> int | None:
         )
 
         if moe_streaming_active(batch.model):
-            # The loop leaves the last prompt token to generate().
-            step = merge_prefill_tail(step, embeds.shape[1] - 1)
+            # The loop chunks the prompt less its last token, or the whole
+            # prompt when the last chunk and the last token run as one.
+            step = merge_prefill_tail(
+                step, embeds.shape[1] - (0 if _folds(batch) else 1))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
@@ -664,13 +754,16 @@ def decayed_for_batch(batch) -> int | None:
 
 
 def install_prefill_decay() -> bool:
-    """Wrap PromptProcessingBatch.prompt_step and needs_processing so both
-    consult the depth-decayed step. Idempotent; composes with the MTP
+    """Wrap PromptProcessingBatch.prompt_step so each chunk is sized from
+    the depth-decayed step, and needs_processing so a batch whose model
+    keeps only the last logits hands generate() at most that step's
+    columns. Any other batch's needs_processing reads the step only to test
+    it for None, so it runs as it is. Idempotent; composes with the MTP
     prompt_step override in either install order (decay is idempotent, and
     the MTP body resolves its own step via decayed_for_batch)."""
     if not _enabled():
         return False
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     if getattr(PromptProcessingBatch, _FLAG, False):
         return True
@@ -693,9 +786,12 @@ def install_prefill_decay() -> bool:
         return _with_decayed_step(self, orig_step)
 
     def _decay_needs_processing(self):
+        if not _folds(self):
+            return orig_needs(self)
         return _with_decayed_step(self, orig_needs)
 
-    PromptProcessingBatch.prompt_step = _decay_prompt_step
-    PromptProcessingBatch.needs_processing = _decay_needs_processing
+    PromptProcessingBatch.prompt_step = link(_decay_prompt_step, orig_step)
+    PromptProcessingBatch.needs_processing = link(
+        _decay_needs_processing, orig_needs)
     setattr(PromptProcessingBatch, _FLAG, True)
     return True

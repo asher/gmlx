@@ -47,7 +47,7 @@ def test_degrade_clears_drafter_state(monkeypatch):
 
 def _record(msg, args):
     return logging.LogRecord(
-        "mlx_vlm.server", logging.INFO, __file__, 1, msg, args, None
+        "gmlx._vendor.mlx_vlm.server", logging.INFO, __file__, 1, msg, args, None
     )
 
 
@@ -70,7 +70,7 @@ def test_filter_drops_only_the_stash_keyed_line():
 def test_filter_target_string_still_in_upstream_source():
     # The filter keys on the engine's literal message prefix; an upstream
     # rename would silently stop the suppression, so pin it to the source.
-    generation = pytest.importorskip("mlx_vlm.server.generation")
+    generation = pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
     src = inspect.getsource(generation)
     assert "Loading speculative drafter" in src
 

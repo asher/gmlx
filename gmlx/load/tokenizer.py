@@ -887,6 +887,10 @@ def finish_gguf_tokenizer(raw, model_type: str | None) -> None:
     """The per-model transforms a synthesized tokenizer needs after its
     template is set. The model loader and the header-only readers both
     call it, so a tokenizer built either way renders the same text."""
+    if model_type == "deepseek_v4":
+        from gmlx.models.deepseek_v4.chat import install_string_content
+
+        install_string_content(raw)
     if model_type == "deepseek_v41":
         import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
 

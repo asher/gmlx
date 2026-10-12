@@ -19,7 +19,7 @@ Design (block_total = 2 -> 1 draft + bonus, zero speculative.py changes):
 - ``DeepseekV4SpecLM`` subclasses the vendored ``Model`` so the base remap's
   ``model.*`` / ``lm_head.*`` weight tree loads onto it unchanged, and adds
   the ``speculative_*`` hooks the owned engine probes. Its verify forward
-  arms the rotating-cache one-update undo log (deepseek_v4_cache) so a
+  arms the rotating-cache one-update undo log (gmlx.cache.kv_cache) so a
   rejected draft can be rolled back even after the sliding-window cache has
   rotated -- ``_buffer_mtp_target_cache`` isinstance-checks mlx-vlm cache
   classes and is a silent no-op for these mlx-lm caches.
@@ -32,7 +32,7 @@ Design (block_total = 2 -> 1 draft + bonus, zero speculative.py changes):
   at the window (``hidden_capture_limit``) -- context beyond it is
   mathematically invisible to the head.
 - v1 is B=1 only: ``reset(left_padding=...)`` raises; the target has no
-  batch caches for PoolingCache layers yet.
+  batch caches for DS4PoolingCache layers yet.
 
 Correctness is drafter-independent: the verify walk emits the target's own
 greedy/sampled tokens, so the drafter affects speed (acceptance), never
@@ -48,11 +48,10 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as v4
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import set_undo_armed
 from gmlx.spec.drafter_protocol import native_block_size
-from .cache import ensure_rollback_attached, set_undo_armed
 from .hyper_connection import HyperHead
 
 
@@ -110,8 +109,6 @@ class DeepseekV4SpecHooks:
     backbone, ``self.lm_head``, ``self._dspark_capture``)."""
 
     def _init_spec_hooks(self) -> None:
-        # The verify rollback path needs the rotating undo log on the class.
-        ensure_rollback_attached()
         # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
         # outputs the drafter consumes. When set, every engine-facing hidden
         # is PACKED 3D: [raw_4d.flatten(hc) | cap_l0 | cap_l1 | ...].
@@ -155,7 +152,9 @@ class DeepseekV4SpecHooks:
         # replace the token embedding (the VLM container's spliced image
         # features) and ``image_spans`` marks the image blocks. The backbone
         # builds its own window mask. shared_kv is never used (the drafter
-        # owns its KV).
+        # owns its KV). skip_logits leaves out the head;
+        # speculative_logits_from_hidden projects the returned hidden.
+        skip_logits = kwargs.pop("skip_logits", False)
         del n_to_process, mask, kwargs
         fwd = dict(input_embeddings=inputs_embeds, image_spans=image_spans)
         want_hidden = return_hidden or return_shared_kv
@@ -168,16 +167,16 @@ class DeepseekV4SpecHooks:
                 **fwd,
             )
             return _SpecOutput(
-                logits=self.lm_head(out),
+                logits=None if skip_logits else self.lm_head(out),
                 hidden_states=[self._dspark_pack(h_raw, caps)],
             )
         out, h_raw = self.model(inputs, cache, return_raw_hidden=True, **fwd)
-        logits = self.lm_head(out)
+        logits = None if skip_logits else self.lm_head(out)
         if not want_hidden:
             # mlx-vlm's AR engine calls model.language_model(...) directly
             # and reads ``outputs.logits`` (the plain-path A/B baseline in
             # bench_tg_depth drives it), so raw logits are not an option.
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[h_raw])
@@ -227,7 +226,7 @@ class DeepseekV4SpecHooks:
         if rejected <= 0:
             return
         leaves = _collect_cache_leaves(prompt_cache)
-        # PoolingCache exposes an n-aware probe (trim(2) can be refusable
+        # DS4PoolingCache exposes an n-aware probe (trim(2) can be refusable
         # while trim(1) is fine); other leaves keep the n-blind contract.
         refused = [
             type(leaf).__name__
@@ -359,18 +358,15 @@ class DeepseekV4MTPDrafter(nn.Module):
         return self
 
     def make_cache(self) -> List[Any]:
-        # Runtime-matching origin: the drafter KV sidecar hands these to the
-        # mlx-vlm apc clone path, which isinstance-gates on its own classes.
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import RotatingKVCache
 
-        return [construction_cache_module().RotatingKVCache(
-            max_size=self._sliding_window)]
+        return [RotatingKVCache(max_size=self._sliding_window)]
 
     def reset(self, target_model, left_padding: Optional[List[int]] = None) -> list:
         if left_padding is not None:
             raise NotImplementedError(
                 "DeepseekV4MTPDrafter is B=1 only (v1): batched rounds need "
-                "BatchRotatingKVCache/BatchPoolingCache wiring on the target"
+                "BatchRotatingKVCache/DS4BatchPoolingCache wiring on the target"
             )
         self.bind(target_model)
         self.accept_lens = []

@@ -205,7 +205,7 @@ def test_decode_step_gather_matches_fp64_reference():
     # L == 1 takes the other branch: it gathers the selected latent rows
     # instead of folding a mask, so the two selection paths need separate
     # checks. Run a prefill into the cache, then one decode step.
-    from mlx_lm.models.cache import CacheList, KVCache
+    from gmlx._vendor.mlx_lm.models.cache import CacheList, KVCache
 
     attn = _attention(seed=19)
     prefill, topk = 9, 4

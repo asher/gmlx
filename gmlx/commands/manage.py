@@ -214,6 +214,81 @@ def _stream_plan(scans: list | None) -> dict | None:
     return out
 
 
+def _image_role(report: remote.HeaderReport,
+                scans: list | None) -> tuple[str | None, str | None]:
+    """``("dit" | "vae", family)`` for an image GGUF, else ``(None,
+    None)``. A text arch answers at once, without the image tables."""
+    if report.gguf_type == "vae" or report.arch == "autoencoder":
+        fam = scans[0].kv.get("gmlx.vae.family") if scans else None
+        return "vae", (str(fam) if fam else None)
+    from gmlx.load.config_synth import supported_arches
+    if report.arch in supported_arches():
+        return None, None
+    from gmlx.image.catalog import image_arches
+    from gmlx.image.registry import families
+    if report.arch is not None and report.arch not in image_arches():
+        return None, None
+    if scans:
+        from gmlx.image.fingerprint import (Refusal, strip_prefix,
+                                            view_from_scans)
+        view = view_from_scans(scans)
+        for fam in families():
+            try:
+                hit = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
+            except ValueError:
+                continue
+            if hit is None:
+                continue
+            # The first family whose tensors answer decides, as in
+            # identify(): a refusal, or a label that family does not
+            # carry, is a file gmlx image refuses.
+            if isinstance(hit, Refusal) or (
+                    report.arch is not None and report.arch not in
+                    fam.arch_strings | fam.shared_arch_strings):
+                return None, None
+            return "dit", fam.name
+    named = [f.name for f in families() if report.arch in f.arch_strings
+             and report.arch is not None]
+    return ("dit", named[0]) if named else (None, None)
+
+
+def _image_refusal(report: remote.HeaderReport,
+                   scans: list | None) -> str | None:
+    """Why gmlx image refuses a file that _image_role names no family for,
+    when the file is an image GGUF: its label is one image DiTs carry, or
+    it has none and a family's tensors answer. None for any other file."""
+    from gmlx.image.catalog import image_arches
+    labeled = report.arch is not None and report.arch in image_arches()
+    if not (labeled or report.arch is None):
+        return None
+    word = "an image GGUF gmlx does not load"
+    if not scans:
+        return word if labeled else None
+    from gmlx.image.fingerprint import (ImageModelError, identify,
+                                        strip_prefix, view_from_scans)
+    from gmlx.image.registry import families
+    try:
+        view = view_from_scans(scans)
+        if not labeled and all(
+                f.fingerprint(strip_prefix(view, f.strip_prefixes)) is None
+                for f in families()):
+            return None
+        identify(view)
+    except (ImageModelError, ValueError) as e:
+        return f"{word}: {e}"
+    return word if labeled else None
+
+
+def _image_companion_bytes(family: str | None) -> int | None:
+    """Bytes of the default encoder (with its vision tower) and VAE of an
+    image family, for the combined figure."""
+    from gmlx.image.catalog import RECIPES
+    for r in RECIPES.values():
+        if r.family == family:
+            return r.encoder_bytes + r.vae_bytes
+    return None
+
+
 def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
              hf_source: str | None = None, n_shards: int = 1,
              size_bytes: int | None = None, scans: list | None = None) -> dict:
@@ -228,10 +303,35 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # rides a target model, so the standalone arch gate doesn't apply.
     from gmlx.load.discovery import is_drafter_arch
     drafter = not (mmproj or adapter) and is_drafter_arch(report.arch)
-    if mmproj or adapter or drafter:
+    # An image DiT or VAE loads through gmlx image, beside its companions,
+    # so the chat arch gate does not apply; a DiT's fit counts its text
+    # encoder and VAE too.
+    image, image_family = ((None, None) if mmproj or adapter or drafter
+                           else _image_role(report, scans))
+    # A DiT this chip does not run is refused like an unloadable file; its
+    # cast below then counts 0.
+    chip_error = None
+    if image == "dit" and image_family:
+        from gmlx.image.dtypes import chip_refusal
+        from gmlx.image.registry import get_family
+        chip_error = chip_refusal(image_family, get_family(image_family).title)
+    combined = None
+    if image == "dit" and size_bytes:
+        extra = _image_companion_bytes(image_family)
+        # The load gate counts the 16-bit tensors the DiT casts too.
+        cast = 0
+        if scans and image_family:
+            from gmlx.image.fingerprint import view_from_scans
+
+            from .image_preflight import cast_of
+            cast = cast_of(view_from_scans(scans), image_family)
+        combined = size_bytes + cast + extra if extra else None
+    if mmproj or adapter or drafter or image:
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
+        if not arch_ok:
+            arch_err = _image_refusal(report, scans) or arch_err
     from gmlx.load.preflight import hadamard_fold_error
     fold_err = hadamard_fold_error(report.arch, report.hadamard)
     runs = report.loadable_codecs and arch_ok and fold_err is None
@@ -245,8 +345,9 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # fits / tight / over vs this machine's RAM (None = size or RAM
         # unknown); companions (mmproj/adapter) ride a base model, so their
         # standalone fit is not judged.
-        "fit": (classify_fit(size_bytes, ram)
-                if size_bytes and not (mmproj or adapter or drafter)
+        "fit": (classify_fit(combined or size_bytes, ram)
+                if size_bytes and not (mmproj or adapter or drafter
+                                       or image == "vae")
                 else None),
         "arch": report.arch,
         "arch_supported": arch_ok,
@@ -254,6 +355,12 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "mmproj": mmproj,
         "adapter": adapter,
         "drafter": drafter,
+        # "dit" or "vae" for an image GGUF, with its image family, and for
+        # a DiT the bytes of the DiT, its text encoder and its VAE.
+        "image": image,
+        "image_family": image_family,
+        "combined_bytes": combined,
+        "chip_error": chip_error,
         "n_shards": n_shards,
         "n_tensors": report.n_tensors,
         "codecs": dict(sorted(report.histogram.items())),
@@ -265,14 +372,24 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # The streaming plan (every-token weights, experts, this Mac's
         # arena and verdict) for a MoE file; None for a dense one.
         "stream": (_stream_plan(scans)
-                   if not (mmproj or adapter or drafter) else None),
+                   if not (mmproj or adapter or drafter or image) else None),
         "loadable": runs,
         # loadable = runs standalone; usable also admits a healthy companion
         # (mmproj / LoRA adapter).
         "usable": runs
-                  or ((mmproj or adapter or drafter)
-                      and report.loadable_codecs),
+                  or (bool(mmproj or adapter or drafter or image)
+                      and report.loadable_codecs and chip_error is None),
     }
+
+
+def _image_fit_note(v: dict) -> str | None:
+    """The fit of an image DiT with its text encoder and VAE."""
+    from gmlx.load.memfit import fit_label
+    ram = v.get("ram_bytes")
+    if not v.get("fit") or not ram:
+        return None
+    return (f"{_human_gb(v['combined_bytes'])} with its text encoder and "
+            f"VAE, {fit_label(v['fit'])} on this Mac's {_human_gb(ram, 0)} RAM")
 
 
 def _print_report(v: dict) -> None:
@@ -285,6 +402,10 @@ def _print_report(v: dict) -> None:
         print(f"  architecture: {arch}  [LoRA adapter]")
     elif v.get("drafter"):
         print(f"  architecture: {arch}  [draft-model companion]")
+    elif v.get("image"):
+        what = "image DiT" if v["image"] == "dit" else "image VAE"
+        fam = f", {v['image_family']}" if v.get("image_family") else ""
+        print(f"  architecture: {arch}  [{what}{fam}]")
     elif v["arch_supported"]:
         print(f"  architecture: {arch}  [supported]")
     else:
@@ -297,8 +418,11 @@ def _print_report(v: dict) -> None:
         if v.get("n_shards", 1) > 1:
             sline += f"  ({v['n_shards']} shards)"
         from gmlx.load.memfit import fit_sentence
-        note = (fit_sentence(size, v.get("ram_bytes"))
-                if v.get("fit") is not None else None)
+        if v.get("combined_bytes"):
+            note = _image_fit_note(v)
+        else:
+            note = (fit_sentence(size, v.get("ram_bytes"))
+                    if v.get("fit") is not None else None)
         if note:
             sline += f"  - {note}"
         print(sline)
@@ -330,6 +454,13 @@ def _print_report(v: dict) -> None:
         print("  => adapter companion: a LoRA adapter, not a standalone model -")
         print("     attach it to its base GGUF: --adapter on run/chat/serve, or")
         print("     `adapter:` per model in the server config.")
+    elif v.get("image") == "dit" and v["codecs_loadable"] \
+            and not v.get("chip_error"):
+        print("  => image DiT: it runs with its text encoder and VAE. `gmlx pull`")
+        print("     with the model name fetches all three, and `image_models:` in")
+        print("     the server config serves them.")
+    elif v.get("image") == "vae" and v["codecs_loadable"]:
+        print("  => image VAE: `vae:` of an image_models entry, beside its DiT.")
     elif v.get("drafter") and v["codecs_loadable"]:
         print("  => draft-model companion: a speculative-decoding drafter, not a")
         print("     standalone model - place it in the same directory as its")
@@ -341,10 +472,13 @@ def _print_report(v: dict) -> None:
                             for k, n in v["unsupported_codecs"].items())
             reasons.append(f"unsupported codecs ({bad})")
         if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
-                                            or v.get("drafter")):
+                                            or v.get("drafter")
+                                            or v.get("image")):
             reasons.append("architecture not supported")
         if v.get("hadamard_error"):
             reasons.append("Hadamard fold not supported for this file")
+        if v.get("chip_error"):
+            reasons.append(v["chip_error"])
         print(f"  => not loadable: {'; '.join(reasons)}")
 
 
@@ -970,6 +1104,11 @@ model_dirs root, under <dir>/<org>__<repo>/. Pass several files to fetch them
 together (extra bare names resolve in the first ref's repo - e.g. an mmproj or
 a second quant). Files landing under a model_dirs root are registered in the
 config and served immediately. Refuses an unloadable GGUF unless --force.
+
+An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
+krea-2-turbo) pulls the DiT, its text encoder and its VAE, uses the
+parts your model folders already hold, and adds the model under
+image_models: in the config.
 """
 
 _PULL_EXAMPLES = """\
@@ -996,6 +1135,10 @@ examples (a ref names one file, a quant folder, or a whole repo):
 
   a direct URL (non-HF hosts too) - shard sets expand the same way
     gmlx pull https://example.com/models/model-00001-of-00003.gguf
+
+  an image model with its text encoder and VAE, at the quants for this Mac
+    gmlx pull z-image-turbo
+    gmlx pull qwen-image --quant Q8_0 --encoder-quant Q8_0
 """
 
 
@@ -1011,7 +1154,10 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "listing), or an http(s):// URL - a huggingface.co "
                          "/tree/ or /blob/ link resolves the same way. "
                          "Additional bare filenames are fetched from the first "
-                         "ref's repo. See the examples below.")
+                         "ref's repo. An image model name (z-image-turbo, "
+                         "qwen-image, qwen-image-turbo, krea-2-turbo) "
+                         "pulls the model with its text encoder and VAE. See "
+                         "the examples below.")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",
                     help="Download into DIR exactly (default: the server config's "
                          "first model_dirs root, nesting hf files under "
@@ -1021,8 +1167,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "destination (default: search the standard config "
                          "locations).")
     ap.add_argument("--force", action="store_true",
-                    help="Download even if the header check says it won't load "
-                         "or the disk-space check fails.")
+                    help="Download even if the header check says it won't load, "
+                         "the disk-space check fails, or this chip does not "
+                         "run the image model.")
     ap.add_argument("--hf-source", default=None,
                     help="Treat the arch as loadable with this config override.")
     ap.add_argument("--max-mb", type=int, default=None,
@@ -1032,7 +1179,33 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     ap.add_argument("--no-register", action="store_true",
                     help="Don't add the downloaded file(s) to the server "
                          "config's models.")
+    img = ap.add_argument_group("image models")
+    img.add_argument("--quant", default=None, metavar="QUANT",
+                     help="The DiT quant, such as Q4_K_M or Q8_0 (default: "
+                          "the one for this Mac's memory).")
+    img.add_argument("--encoder-quant", default=None, metavar="QUANT",
+                     help="The text encoder quant (default: the one for this "
+                          "Mac's memory). A matching encoder on disk is used "
+                          "at any quant unless this is given.")
+    img.add_argument("--only", default=None, metavar="PARTS",
+                     help="Pull only these parts, a comma list of dit, "
+                          "encoder and vae.")
+    img.add_argument("--keep-source", action="store_true",
+                     help="Keep the safetensors VAE after packing it to "
+                          "GGUF.")
     a = ap.parse_args(argv)
+
+    from gmlx.image import catalog
+    recipe = catalog.recipe(a.refs[0]) if len(a.refs) == 1 else None
+    if recipe is not None and not os.path.exists(
+            os.path.expanduser(a.refs[0])):
+        from gmlx.commands.image_pull import pull_recipe
+        return pull_recipe(a, recipe)
+    if a.quant or a.encoder_quant or a.only or a.keep_source:
+        names = ", ".join(catalog.RECIPES)
+        print(f"error: --quant, --encoder-quant, --only and --keep-source go "
+              f"with an image model name ({names})", file=sys.stderr)
+        return 2
 
     try:
         refs = _expand_refs(a.refs)
@@ -1082,7 +1255,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                 # Advisory only - the file may be destined for another machine
                 # or a streaming setup, so the pull itself proceeds.
                 from gmlx.load.memfit import fit_sentence
-                note = fit_sentence(v["size_bytes"], v.get("ram_bytes"))
+                note = (_image_fit_note(v) if v.get("combined_bytes")
+                        else fit_sentence(v["size_bytes"], v.get("ram_bytes")))
                 if note:
                     print(f"note: {note}", file=sys.stderr)
         if not v["usable"] and not a.force:
@@ -1091,8 +1265,16 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                 reasons.append(
                     "no kernel for codec(s): " + ", ".join(v["unsupported_codecs"]))
             if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
-                                                or v.get("drafter")):
+                                                or v.get("drafter")
+                                                or v.get("image")):
                 reasons.append(f"unsupported arch: {v['arch'] or '?'}")
+            if v.get("chip_error") and not reasons:
+                print(f"\nerror: {v['chip_error']}. Pass --force to download "
+                      "it anyway", file=sys.stderr)
+                all_ok = False
+                continue
+            if v.get("chip_error"):
+                reasons.append(v["chip_error"])
             why = f" - {'; '.join(reasons)}" if reasons else ""
             print(f"\nrefusing to download an unloadable GGUF{why}. Pass --force to "
                   "override, or pick a different quant.", file=sys.stderr)
@@ -1174,15 +1356,23 @@ def _rm_resolve_target(cfg, requested):
     return target, m, entry is not None, disc, notes
 
 
-def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes):
+def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
+                      images=()):
     """Files to delete (all shards + companions no other model references)
-    and their sizes; explanatory notes append to ``notes``."""
+    and their sizes; explanatory notes append to ``notes``. ``images`` are
+    the discovered image models."""
     # Paths any other model (configured or discovered) still resolves to.
     others = [mc for mid, mc in cfg.models.items() if mid != target]
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
     for mc in others:
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp:
+                ref_paths.add(os.path.abspath(rp))
+    # An image model that names this model's GGUF as its encoder keeps it.
+    for im in _all_images(cfg, images):
+        for p in (im.encoder, im.encoder_mmproj):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 ref_paths.add(os.path.abspath(rp))
@@ -1344,7 +1534,10 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         description="Delete a model's GGUF file(s) from disk and remove its "
                     "entry from the server config. All shards are included, "
                     "plus mmproj/draft/adapter companions no other model "
-                    "references. Never touches the Hugging Face cache.")
+                    "references. An image model takes its VAE, text encoder "
+                    "and vision tower with it unless another model uses "
+                    "them, and a chat model that is an image model's encoder "
+                    "is never removed. Never touches the Hugging Face cache.")
     ap.add_argument("id", metavar="ID",
                     help="Model id (or alias) from the config, or a discovered "
                          "model's id (see `gmlx list`).")
@@ -1380,13 +1573,32 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         return 2
 
     target, m, is_configured, disc, notes = _rm_resolve_target(cfg, a.id)
+    # The image models discovery pairs load files too, so rm keeps them.
+    images: list = []
+    if cfg.discover:
+        import gmlx.load.discovery as discovery
+        discovery.discovered_models(cfg, images=images)
     if m is None:
+        im = cfg.image_models.get(a.id) or next(
+            (i for i in images if i.id == a.id), None)
+        if im is not None:
+            return _rm_image(a, cfg, cfg_path, im, disc, images,
+                             configured=a.id in cfg.image_models)
         print(f"error: unknown model id {a.id!r} (see: gmlx list)",
               file=sys.stderr)
         return 2
+    users = sorted(im.id for im in _all_images(cfg, images)
+                   if im.encoder == target)
+    if users:
+        print(f"error: {target} is the text encoder of image model"
+              f"{plural_s(len(users))} {', '.join(users)}; remove "
+              f"{'it' if len(users) == 1 else 'them'} first, or point "
+              "`encoder:` at another model", file=sys.stderr)
+        return 2
 
     to_delete, sizes = _rm_deletion_plan(
-        cfg, target, m, disc, keep_files=a.keep_files, notes=notes)
+        cfg, target, m, disc, keep_files=a.keep_files, notes=notes,
+        images=images)
     aliases_to_drop = [name for name, tgt in cfg.aliases.items()
                        if tgt == target or tgt.startswith(target + "@")]
     default_model = cfg.defaults.model if cfg.defaults else None
@@ -1436,6 +1648,110 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         what = ([f"{len(deleted)} file{plural_s(len(deleted))}, "
                  f"{_human_gb(freed)}"] if deleted else [])
         if is_configured:
+            what.append("config entry")
+        print(f"removed {', '.join(what)}")
+    return rc
+
+
+def _all_images(cfg, images=()) -> list:
+    """The configured image entries, then the discovered ones."""
+    return list(cfg.image_models.values()) + [
+        i for i in images if i.id not in cfg.image_models]
+
+
+def _image_refs(cfg, disc, skip: str, images=()) -> set:
+    """Resolved paths every model but the image entry ``skip`` loads: chat
+    models (configured and discovered) and the other image entries,
+    configured and discovered (``images``)."""
+    refs: set = set()
+    for mc in list(cfg.models.values()) + list(disc):
+        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp:
+                refs.add(os.path.abspath(rp))
+    for im in _all_images(cfg, images):
+        if im.id == skip:
+            continue
+        for p in (im.path, im.vae, im.encoder, im.encoder_mmproj,
+                  *(a for a, _st in im.adapters)):
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp:
+                refs.add(os.path.abspath(rp))
+    return refs
+
+
+def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
+              configured: bool) -> int:
+    """``gmlx rm`` of an image model: its DiT, and its VAE, encoder and
+    vision tower unless another model loads them. A shared chat model
+    encoder always stays."""
+    import gmlx.config as cfgmod
+
+    notes: list[str] = []
+    refs = _image_refs(cfg, disc, im.id, images)
+    to_delete: list[str] = []
+    if not a.keep_files:
+        parts = [("model file", im.path), ("vae", im.vae),
+                 ("encoder", None if im.encoder in cfg.models else im.encoder),
+                 ("encoder_mmproj", im.encoder_mmproj)]
+        if im.encoder in cfg.models:
+            notes.append(f"encoder {im.encoder} is a chat model; it stays")
+        for label, p in parts:
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp is None:
+                continue
+            if os.path.abspath(rp) in refs:
+                notes.append(f"{label} kept: another model uses it")
+            else:
+                to_delete += _shard_files(rp)
+    to_delete = list(dict.fromkeys(to_delete))
+    sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
+    default_cleared = cfg.defaults.image_model == im.id
+    if configured or default_cleared:
+        try:
+            cfgmod.config_write_target(cfg_path)
+        except cfgmod.ConfigWriteError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    if not a.json:
+        _rm_print_plan(im.id, cfg_path, to_delete=to_delete, sizes=sizes,
+                       keep_files=a.keep_files, is_configured=configured,
+                       aliases_to_drop=[], default_cleared=False, notes=notes)
+        if default_cleared:
+            print(f"  note: clearing server.defaults.image_model ({im.id})")
+    if not a.yes:
+        bail = _rm_confirm()
+        if bail is not None:
+            return bail
+    deleted, rc = _rm_delete_files(to_delete)
+    if configured or default_cleared:
+        def mutate(doc):
+            block = doc.get("image_models")
+            if isinstance(block, dict) and im.id in block:
+                del block[im.id]
+            srv = doc.get("server")
+            d = srv.get("defaults") if isinstance(srv, dict) else None
+            if isinstance(d, dict) and d.get("image_model") == im.id:
+                del d["image_model"]
+        try:
+            cfgmod.edit_config_yaml(cfg_path, mutate)
+        except cfgmod.ConfigWriteError as e:
+            print(f"error: {e.reason} The config still names {im.id}. "
+                  f"Remove {im.id} from the config by hand.", file=sys.stderr)
+            return 1
+        from gmlx.serve.server import _reload_running
+        _reload_running(cfg_path, skip=a.no_reload)
+    freed = sum(sizes[p] for p in deleted if p in sizes)
+    if a.json:
+        print(json.dumps({
+            "id": im.id, "kind": "image", "config": cfg_path,
+            "files_deleted": deleted, "bytes_freed": freed,
+            "config_entry_removed": configured,
+            "default_cleared": default_cleared, "notes": notes}, indent=2))
+    elif deleted or configured:
+        what = ([f"{len(deleted)} file{plural_s(len(deleted))}, "
+                 f"{_human_gb(freed)}"] if deleted else [])
+        if configured:
             what.append("config entry")
         print(f"removed {', '.join(what)}")
     return rc
@@ -1500,6 +1816,18 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                     help="Emit the listing as JSON.")
     ap.add_argument("-v", "--paths", action="store_true", dest="paths",
                     help="Also show each model's GGUF path.")
+    img = ap.add_argument_group("image models")
+    img.add_argument("--image", action="store_true",
+                     help="List only the image models.")
+    img.add_argument("--family", default=None, metavar="NAME",
+                     help="List only the image models of this family, such "
+                          "as z-image or qwen-image-2.1.")
+    img.add_argument("--edit", action="store_true",
+                     help="List only the image models that edit from "
+                          "reference images.")
+    img.add_argument("--shared-encoder", action="store_true",
+                     help="List only the image models whose text encoder is "
+                          "a chat model they share.")
     a = ap.parse_args(argv)
 
     import gmlx.config as cfgmod
@@ -1515,26 +1843,46 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
         return 2
 
     default_model = cfg.defaults.model if cfg.defaults else None
+    default_image = cfg.defaults.image_model if cfg.defaults else None
     rows = []
     for mid, m in cfg.models.items():
-        rows.append({"id": mid, "path": m.path, "profile": m.profile,
-                     "source": "config", "default": mid == default_model,
+        rows.append({"id": mid, "kind": "chat", "path": m.path,
+                     "profile": m.profile, "source": "config",
+                     "default": mid == default_model,
                      "flags": _model_flags(m)})
+    images: list = []
     if cfg.discover:
         import gmlx.load.discovery as discovery
-        for m in discovery.discovered_models(cfg):
-            rows.append({"id": m.id, "path": m.path, "profile": m.profile,
-                         "source": "discovered", "default": m.id == default_model,
+        found = discovery.discovered_models(cfg, images=images)
+        for m in found:
+            rows.append({"id": m.id, "kind": "chat", "path": m.path,
+                         "profile": m.profile, "source": "discovered",
+                         "default": m.id == default_model,
                          "flags": _model_flags(m)})
+        cfg.models.update({m.id: m for m in found if m.id not in cfg.models})
+    for src, entries in (("config", cfg.image_models.values()),
+                         ("discovered", images)):
+        for im in entries:
+            rows.append(_image_row(cfg, im, src, default_image))
 
-    rows.sort(key=lambda r: r["id"])
+    images_only = a.image or a.family or a.edit or a.shared_encoder
+    if images_only:
+        want = _family_key(a.family) if a.family else None
+        rows = [r for r in rows if r["kind"] == "image"
+                and (want is None or _family_key(r["family"] or "") == want
+                     or _family_key(r["family_title"] or "") == want)
+                and (not a.edit or r["edit"])
+                and (not a.shared_encoder or r["shared_encoder"])]
+    rows.sort(key=lambda r: (r["kind"] != "chat", r["id"]))
     aliases = dict(cfg.aliases)
     for r in rows:
-        r["size_bytes"] = _model_size_bytes(r["path"], cfg.model_dirs)
+        if r["kind"] == "chat":
+            r["size_bytes"] = _model_size_bytes(r["path"], cfg.model_dirs)
 
     if a.json:
         print(json.dumps({"config": cfg_path, "models": rows, "aliases": aliases,
-                          "default_model": default_model}, indent=2))
+                          "default_model": default_model,
+                          "default_image_model": default_image}, indent=2))
         return 0
 
     n_disc = sum(1 for r in rows if r["source"] == "discovered")
@@ -1545,6 +1893,10 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
         summ += f", {len(aliases)} alias(es)"
     print(f"config: {cfg_path}   {summ}")
     if not rows:
+        if images_only:
+            print("\n  (no image models match) - `gmlx pull z-image-turbo` "
+                  "adds one.")
+            return 0
         print("\n  (no models) - add entries under `models:` or a `discover:` scan, "
               "then `gmlx sync-models`.")
         return 0
@@ -1555,14 +1907,14 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
         if r["source"] == "discovered":
             feats.append("discovered")
         mark = "*" if r["default"] else " "
-        return (f"{mark} {r['id']}", ", ".join(feats),
+        return (f"{mark} {r['id']}", r["kind"], ", ".join(feats),
                 f"@{r['profile']}" if r["profile"] else "",
                 _human_size(r["size_bytes"]))
 
     table = [_cells(r) for r in rows]
-    header = ("  NAME", "FEATURES", "PROFILE", "SIZE")
+    header = ("  NAME", "KIND", "FEATURES", "PROFILE", "SIZE")
     keep = [i for i in range(len(header))
-            if i in (0, 3) or any(t[i] for t in table)]
+            if i in (0, 1, 4) or any(t[i] for t in table)]
     widths = [max(len(header[i]), max(len(t[i]) for t in table)) for i in keep]
 
     def _line(cells):
@@ -1582,7 +1934,57 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
     if default_model:
         print(f"\ndefault model (when a request omits `model`): {default_model}  "
               "(* above)")
+    if default_image:
+        print(f"default image model: {default_image}  (* above)")
     return 0
+
+
+def _family_key(name: str) -> str:
+    """A family name or title folded for a match: z_image, Z-Image and
+    z-image are one key."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
+    """The ``gmlx list`` row of an image_models entry: its family (the
+    entry's, else its DiT's fingerprint), whether it edits, the chat model
+    it shares as its encoder, and the size of the files it loads."""
+    family, title, edit = im.family, None, False
+    path = _try_resolve(im.path, cfg.model_dirs)
+    try:
+        from gmlx.image import catalog
+        from gmlx.image.registry import get_family
+        if family is None and path:
+            got = catalog.dit_identity(path)
+            family = got[0] if got else None
+        if family:
+            fam = get_family(family)
+            family, title, edit = fam.name, fam.title, fam.edit is not None
+    except (ValueError, OSError):
+        pass
+    shared = im.encoder if im.encoder in cfg.models else None
+    # An edit runs the encoder's vision tower, the entry's own or that of
+    # the chat model it shares, as /v1/models says.
+    edit = edit and bool(im.encoder_mmproj
+                         or (shared and cfg.models[shared].mmproj))
+    files = [im.path, im.vae, im.encoder_mmproj]
+    if shared is None:
+        files.append(im.encoder)
+    sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files if p]
+    flags = [title or "image"]
+    if edit:
+        flags.append("edit")
+    if shared:
+        flags.append(f"encoder {shared}")
+    if im.pin:
+        flags.append("pinned")
+    return {"id": im.id, "kind": "image", "path": im.path, "profile": None,
+            "source": source, "default": im.id == default_image,
+            "flags": flags, "family": family, "family_title": title,
+            "edit": edit, "shared_encoder": shared, "encoder": im.encoder,
+            "vae": im.vae,
+            "size_bytes": (None if any(x is None for x in sizes)
+                           else sum(sizes))}
 
 
 # ps - the residency view of a running server
@@ -1604,6 +2006,8 @@ def cmd_ps(argv: list | None = None, prog: str = "gmlx ps") -> int:
                          "GMLX_API_KEY env var).")
     ap.add_argument("--json", action="store_true",
                     help="Emit the resident-model list as JSON.")
+    ap.add_argument("--image", action="store_true",
+                    help="Show only the resident image models.")
     a = ap.parse_args(argv)
 
     if a.url:
@@ -1646,24 +2050,30 @@ def cmd_ps(argv: list | None = None, prog: str = "gmlx ps") -> int:
     resident = srv.get("resident_models") or []
     resident = ([e for e in resident if isinstance(e, dict)]
                 if isinstance(resident, list) else [])
+    if a.image:
+        resident = [e for e in resident if e.get("kind") == "image"]
     if a.json:
         print(json.dumps(resident, indent=2))
         return 0
     if not resident:
-        print(f"server at {root} is up; no models resident")
+        what = "image models" if a.image else "models"
+        print(f"server at {root} is up; no {what} resident")
         return 0
     print(f"server at {root}:")
     names = [", ".join(e.get("ids") or [])
              or os.path.basename(e.get("model_path") or "?")
              for e in resident]
     wid = max(len(n) for n in names)
-    print(f"{'ID':<{wid}}  {'SIZE':>8}  {'IDLE':>7}  {'TTL':>6}  PINNED  KEPT")
+    print(f"{'ID':<{wid}}  {'KIND':<5}  {'SIZE':>8}  {'IDLE':>7}  {'TTL':>6}  "
+          "PINNED  KEPT")
     for name, e in zip(names, resident):
         ttl = e.get("ttl_s")
         ttl_str = "-" if not ttl else f"{int(ttl)}s"
         pin = "yes" if e.get("pinned") else "no"
         kept = "yes" if e.get("kept") else "no"
-        print(f"{name:<{wid}}  {_human_gb(e.get('footprint_bytes') or 0):>8}  "
+        kind = str(e.get("kind") or "chat")
+        print(f"{name:<{wid}}  {kind:<5}  "
+              f"{_human_gb(e.get('footprint_bytes') or 0):>8}  "
               f"{e.get('idle_s', 0):>6.0f}s  {ttl_str:>6}  {pin:>6}  {kept}")
         print(f"{'':<{wid}}  {e.get('model_path') or '?'}")
     return 0

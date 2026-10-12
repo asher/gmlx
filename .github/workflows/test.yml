@@ -3,10 +3,14 @@ name: tests
 on:
   push:
     branches: [main]
+    # A release tag runs only the comfyui-pack job.
+    tags: ["v*.*.*"]
   pull_request:
   schedule:
-    # Weekly run against the newest in-range mlx-lm / mlx-vlm releases, so a
-    # dependency release that breaks the seam patches surfaces without a push.
+    # Weekly: the drift report (the drift job), what the newest mlx-vlm and
+    # mlx-lm releases change in the copy under gmlx/_vendor, and the
+    # comfyui-pack job against ComfyUI's newest release and master. The test
+    # and lint jobs do not run on the schedule.
     - cron: "0 6 * * 1"
 
 concurrency:
@@ -15,6 +19,7 @@ concurrency:
 
 jobs:
   test:
+    if: github.event_name != 'schedule' && github.ref_type != 'tag'
     # macos-26, not older images: the published mlx-kquant wheels are tagged
     # macosx_26_0_arm64 (built with MACOSX_DEPLOYMENT_TARGET=26.2 for the
     # Xcode 26.5 SDK miscompile workaround) - an older runner can't install
@@ -40,15 +45,15 @@ jobs:
           cargo test --locked
       - name: Install
         run: |
-          pip install "mlx==0.32.1"
+          pip install "mlx==0.32.3"
           # Wheel, not sdist. Must satisfy the pyproject floor or the
           # editable install upgrades it; tests/test_ci_pins.py gates that.
-          pip install "mlx-kquant==0.4.18"
-          # `assistant` pulls the MCP SDK: without it the stdio tool-server
-          # tests (env isolation especially) importorskip themselves away.
-          pip install -e ".[vlm,chat,assistant]" pytest httpx build
+          pip install "mlx-kquant==0.5.0"
+          # `all` brings the chat, voice and assistant extras, so their tests
+          # run instead of skipping themselves away.
+          pip install -e ".[all]" pytest pytest-xdist httpx build
       - name: Import canary
-        # A broken package import must fail the build loudly — the test files
+        # A broken package import must fail the build loudly. The test files
         # importorskip only true optionals, never gmlx itself.
         run: python -c "import gmlx, gmlx.commands.cli, gmlx.serve.server, gmlx.serve.patches, gmlx.spec.engine, gmlx.spec.speculative"
       - name: Wheel completeness
@@ -56,7 +61,8 @@ jobs:
         # wheel (via sdist, so a stale build/ dir can't leak deleted modules
         # into it) and require it to ship exactly the tracked package modules,
         # plus every tracked file matching the pyproject package-data globs
-        # (upstream_seams.json, the vendored misaki data).
+        # (the vendored misaki data, the deepseek_v41 chat template, the
+        # ComfyUI node pack's LICENSE and workflows).
         run: |
           python -m build
           python - <<'EOF'
@@ -89,21 +95,23 @@ jobs:
           missing_data = [d for d in data if d not in shipped]
           if missing_data:
               sys.exit(f"wheel is missing package-data files: {missing_data}")
+          # The ComfyUI node pack: every file, its workflows and LICENSE.
+          pack = [t for t in tracked_all if t.startswith("gmlx/comfyui_pack/")]
+          missing_pack = [p for p in pack if p not in shipped]
+          if not pack or missing_pack:
+              sys.exit(f"wheel is missing ComfyUI node pack files: {missing_pack}")
           print(f"wheel ships all {len(tracked)} tracked modules"
                 f" + {len(data)} package-data files, nothing else")
           EOF
       - name: Arch coverage doc
-        # docs/arch-coverage.md is generated; a new arch (or an mlx-lm release
-        # renaming a model_type - the weekly cron catches those) must not leave
-        # the committed doc lying about what loads.
+        # docs/arch-coverage.md is generated; a new arch must not leave the
+        # committed doc lying about what loads.
         run: python scripts/check-coverage.py --check --strict
-      - name: Seam drift check (pyright)
-        # Pyright infers upstream signatures from the installed mlx-vlm /
-        # mlx-lm source, so it needs this job's environment, not the
-        # deps-free lint job. One interpreter is enough: the checked
-        # surface does not vary by Python version. On the weekly cron a
-        # new upstream release can fail this step with no repo change;
-        # that is the drift signal, handled per docs/internals/upstream-upgrades.md.
+      - name: Type check (pyright)
+        # pyright checks gmlx's calls into the copied mlx-vlm and mlx-lm, whose
+        # imports of mlx, transformers and the rest only this job installs, not
+        # the deps-free lint job. One interpreter is enough: the checked
+        # surface does not vary by Python version.
         if: matrix.python-version == '3.12'
         run: |
           pip install "pyright[nodejs]==1.1.414"
@@ -113,11 +121,41 @@ jobs:
           # Hosted runners have no dependable Metal device; the conftest flips
           # the default device to CPU when this is set.
           KQUANT_FORCE_CPU: "1"
-        run: pytest -q
+        # One worker per core, so a failure shows in minutes, not an hour.
+        run: pytest -q -rfE -n auto
+      - name: No stock mlx-vlm or mlx-lm
+        # No requirement of gmlx with all its extras installs mlx-vlm, mlx-lm
+        # or mlx-embeddings, which requires a stock mlx-vlm, and the copy's
+        # version files name the releases the manifest records.
+        run: |
+          python - <<'EOF'
+          import importlib.metadata as md, json, re, sys
+          found = []
+          for dist in ("mlx-vlm", "mlx-lm", "mlx-embeddings"):
+              try:
+                  found.append(f"{dist} {md.version(dist)}")
+              except md.PackageNotFoundError:
+                  pass
+          problems = [f"installed: {d}" for d in found]
+          manifest = json.load(open("gmlx/_vendor/manifest.json"))
+          files = {"mlx_vlm": "version.py", "mlx_lm": "_version.py"}
+          for pkg, info in manifest["packages"].items():
+              text = open(f"gmlx/_vendor/{pkg}/{files[pkg]}").read()
+              m = re.search(r"__version__\s*=\s*[\"']([^\"']+)", text)
+              if m is None or m.group(1) != info["version"]:
+                  problems.append(f"{pkg}: version file does not say "
+                                  f"{info['version']}")
+          if problems:
+              sys.exit("\n".join(problems))
+          print("no stock mlx-vlm, mlx-lm or mlx-embeddings; the copy holds",
+                ", ".join(f"{p} {i['version']}"
+                          for p, i in manifest["packages"].items()))
+          EOF
 
   guest-entry:
     # The static Linux binary `gmlx launch --container` ships, built the way
     # the release job builds it and tested as is, without a VM.
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
@@ -141,6 +179,7 @@ jobs:
           python scripts/check_guest_entry_dist.py
 
   lint:
+    if: github.event_name != 'schedule' && github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -150,6 +189,15 @@ jobs:
       # Pinned: a new ruff's new default rules shouldn't fail an untouched repo.
       - run: pip install ruff==0.15.20
       - run: ruff check .
+      - name: Copy check
+        # gmlx/_vendor holds mlx-vlm and mlx-lm as copied. Every reference to
+        # them must name the copy, every copied file must match its manifest
+        # entry, and ruff's E9, F821 and F811 rules must find only what the
+        # baseline records.
+        run: |
+          python scripts/vendor_upstream.py rewrite --check
+          python scripts/vendor_upstream.py verify
+          python scripts/vendor_upstream.py lint
       - run: python scripts/check-docs.py
       - name: Docs site build
         # The release workflow publishes this site. --strict fails on a link,
@@ -158,3 +206,119 @@ jobs:
           python -m pip install --upgrade pip
           pip install --group docs
           mkdocs build --strict
+
+  drift:
+    # What the newest mlx-vlm and mlx-lm releases change in the copy, as a
+    # Markdown report in the run summary. It informs a port and never fails
+    # the run; see docs/internals/upstream-upgrades.md.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Drift report
+        # pipefail: a failed report fails the step, not only tee.
+        run: |
+          set -o pipefail
+          scripts/upstream_canary.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+  pack-changes:
+    # Whether a push or pull request changes the ComfyUI node pack, its
+    # tests, the verb that installs it, the path python -m gmlx takes to that
+    # verb or this workflow, which the comfyui-pack job needs outside the
+    # schedule and tags.
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    outputs:
+      pack: ${{ steps.diff.outputs.pack }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # A new branch has no usable base, so its push runs the job.
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack \
+              gmlx/commands/comfyui.py gmlx/commands/cli.py gmlx/commands/__init__.py \
+              gmlx/__init__.py gmlx/__main__.py \
+              .github/workflows/test.yml)
+          else
+            changed=all
+          fi
+          echo "pack=$([ -n "$changed" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  comfyui-pack:
+    # The ComfyUI node pack against real ComfyUI and the stub server in
+    # tests/comfyui_pack, loaded through the link that `gmlx comfyui install`
+    # makes. Each run clones ComfyUI and installs torch, so the job runs on
+    # the weekly schedule, on a release tag, and when a push or pull request
+    # changes the pack or its tests. It checks the ComfyUI commit that the
+    # release tests pin, the oldest ComfyUI release the pack supports, as
+    # gmlx/comfyui_pack/version.py names it, and a newer release: on the
+    # schedule the newest tag, otherwise the version that version.py names
+    # as tested. On the schedule it also runs ComfyUI master, which only
+    # reports.
+    needs: [pack-changes]
+    if: >-
+      ${{ !cancelled() && (github.event_name == 'schedule'
+      || github.ref_type == 'tag'
+      || needs.pack-changes.outputs.pack == 'true') }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.comfyui == 'master' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        comfyui: [pin, floor, release, master]
+        exclude:
+          - comfyui: ${{ github.event_name == 'schedule' && 'none' || 'master' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: ComfyUI and its requirements
+        env:
+          PIN: 8d534945ebd53cff61e8def81757c6a6c1b9cf2d
+          REPO: https://github.com/comfyanonymous/ComfyUI
+        run: |
+          case "${{ matrix.comfyui }}" in
+            pin) ref=$PIN ;;
+            floor) ref=v$(sed -n 's/^COMFYUI_FLOOR = "\(.*\)"$/\1/p' gmlx/comfyui_pack/version.py) ;;
+            release)
+              if [ "${{ github.event_name }}" = schedule ]; then
+                ref=$(git ls-remote --tags --refs "$REPO" 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -1)
+              else
+                ref=v$(sed -n 's/^COMFYUI_TESTED = "\(.*\)"$/\1/p' gmlx/comfyui_pack/version.py)
+              fi ;;
+            master) ref=master ;;
+          esac
+          git init -q comfyui
+          git -C comfyui fetch -q --depth 1 "$REPO" "$ref"
+          git -C comfyui checkout -q FETCH_HEAD
+          echo "ComfyUI $ref at $(git -C comfyui rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          python -m venv comfyui/.venv
+          comfyui/.venv/bin/pip install -q -r comfyui/requirements.txt
+      - name: Install the pack with gmlx
+        # The comfyui verb imports none of gmlx's dependencies, so it runs
+        # from the checkout.
+        run: python -m gmlx comfyui install --comfyui-dir "$PWD/comfyui"
+      - name: Unit and headless suites
+        run: |
+          comfyui/.venv/bin/python tests/comfyui_pack/run_tests.py \
+            --comfy "$PWD/comfyui" --label "${{ matrix.comfyui }}" --out "$PWD/pack-results" \
+            --pack "$PWD/comfyui/custom_nodes/comfyui-gmlx"
+      - name: Report
+        if: always()
+        run: cat pack-results/*.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: comfyui-pack-${{ matrix.comfyui }}
+          path: pack-results

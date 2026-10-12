@@ -1,11 +1,8 @@
 """Real-weights coverage of the ``load_vlm_mtp_model`` build seam.
 
-Since the spec-target seam, the multimodal MTP target is built on the
-owned classes by default, exactly like ``load_mtp_model``; the
-``GMLX_QWEN_OWNED=0`` fallback keeps the stock tree with the full verify
-patch regime (unlike the text path's bare-stock fallback). The fixture
-parametrizes over both arms so one save/restore block covers them, at
-one full load per arm.
+The multimodal MTP target is built on the owned classes, exactly like
+``load_mtp_model``. The fixture restores the process-global patch state
+after its one full load.
 
 ``integration`` + ``slow``; needs ``KQUANT_TEST_GGUF_DIR`` to contain a
 qwen3.5/3.6 native-MTP model with a sibling mmproj GGUF that discovery
@@ -20,7 +17,7 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 pytestmark = pytest.mark.integration
 
@@ -40,29 +37,26 @@ def _qwen_mtp_pair(gguf_dir):
     paired = [m for m in scan_dirs([spec], [str(gguf_dir)]) if m.mmproj]
     for m in paired:
         kv = scan_gguf(m.path, include_tensors=False).kv
-        if str(kv.get("general.architecture", "")).startswith("qwen3"):
+        if str(kv.get("general.architecture", "")).startswith("qwen35"):
             return m
     pytest.skip(
-        "no qwen3.x model with a paired sibling mmproj under "
+        "no qwen3.5 or qwen3.6 model with a paired sibling mmproj under "
         "KQUANT_TEST_GGUF_DIR"
     )
 
 
-@pytest.fixture(scope="module", params=["1", "0"],
-                ids=["owned", "stock-fallback"])
-def vlm_mtp_load(request, gguf_dir):
-    """(model, drafter, owned_arm) loaded through load_vlm_mtp_model under
-    GMLX_QWEN_OWNED={1,0}, with the process-global patch state restored at
-    teardown so later tests in the same run see clean globals."""
-    from mlx_vlm.models.qwen3_5 import language as _L
+@pytest.fixture(scope="module")
+def vlm_mtp_load(gguf_dir):
+    """(model, drafter, tokenizer) loaded through load_vlm_mtp_model, with
+    the process-global patch state restored at teardown so later tests in
+    the same run see clean globals."""
+    from gmlx.models.qwen35 import language as _L
 
     import gmlx.upstream.gdn_patches as gp
     import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
     from gmlx.spec.mtp_load import load_vlm_mtp_model
 
     pair = _qwen_mtp_pair(gguf_dir)
-    saved_env = os.environ.get("GMLX_QWEN_OWNED")
-    os.environ["GMLX_QWEN_OWNED"] = request.param
     saved = {
         "tvl": _L._target_verify_linear,
         "tvlpa": _L._target_verify_left_padded_attention,
@@ -83,12 +77,7 @@ def vlm_mtp_load(request, gguf_dir):
         if "no native MTP head" in str(e):
             pytest.skip(f"paired qwen model has no native MTP head: {e}")
         raise
-    finally:
-        if saved_env is None:
-            os.environ.pop("GMLX_QWEN_OWNED", None)
-        else:
-            os.environ["GMLX_QWEN_OWNED"] = saved_env
-    yield model, drafter, tokenizer, request.param == "1"
+    yield model, drafter, tokenizer
     _L._target_verify_linear = saved["tvl"]
     _L._target_verify_left_padded_attention = saved["tvlpa"]
     _L.scaled_dot_product_attention = saved["sdpa"]
@@ -102,65 +91,34 @@ def vlm_mtp_load(request, gguf_dir):
 
 
 @_NEEDS_GPU
-def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
+def test_vlm_mtp_target_is_the_owned_tree_armed(vlm_mtp_load):
     import importlib
 
-    from mlx_lm.models import gated_delta as gd
-    from mlx_vlm.models.qwen3_5 import language as _L
+    from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
-    import gmlx.models.qwen35.attn as qwen35_attn
     import gmlx.models.qwen35.owned as qwen35_owned
 
-    model, drafter, _tok, owned_arm = vlm_mtp_load
+    model, drafter, _tok = vlm_mtp_load
     lm = model.language_model
 
-    # mlx-vlm tiled-V rebind reached in both arms: since the plain-load fix
-    # (vendored 0.6.15 gated_delta escapes the mlx-lm patch) every qwen3_5
-    # VLM load rebinds the vendored module, owned or stock. Not an identity
-    # check against gd: a later load can re-close the mlx-lm patch, leaving
-    # vgd on an older (equally tiled) instance.
-    vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
-    assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
-    assert "_tiled_gated_delta_ops" in gd.gated_delta_ops.__qualname__
+    # Each gated delta layer holds the tiled order of its GGUF, and both
+    # scan modules keep their own functions.
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
+    layers = [layer.linear_attn for layer in lm.model.layers if layer.is_linear]
+    assert layers and all(layer.gdn_kv_tiled for layer in layers)
+    assert lm.args.kv_head_layout == "tiled"
+    for module in (vgd, gd):
+        for name in ("gated_delta_ops", "gated_delta_kernel"):
+            assert getattr(module, name).__module__ == module.__name__
 
-    if owned_arm:
-        # Owned by default: same classes as the text MTP target, fused GDN
-        # armed in-tree, no stock verify patch needed on the vlm module.
-        assert qwen35_owned.is_owned_language_model(model)
-        armed = [
-            m for m in lm.modules()
-            if type(m).__name__ == "OwnedQwen3_5GatedDeltaNet"
-            and getattr(m, "_gdn_owned_fused", None) is not None
-        ]
-        assert armed, "prepare_gdn armed no owned gated-delta layers"
-    else:
-        # GMLX_QWEN_OWNED=0 fallback: stock tree, full stock verify patch
-        # regime on the module globals the stock forward reads (the vlm
-        # regime, unlike the bare text fallback).
-        assert not qwen35_owned.is_owned_language_model(model)
-        owned_leak = {
-            type(m).__name__
-            for m in lm.modules()
-            if type(m).__name__.startswith("Owned")
-        }
-        assert not owned_leak, f"owned classes on the stock path: {owned_leak}"
-        assert vgd._gated_delta_with_states_ops.__module__.startswith("gmlx")
-        assert vgd._gated_delta_with_states_kernel is None
-        assert _L._target_verify_linear.__module__.startswith("gmlx")
-        assert _L._target_verify_left_padded_attention.__module__.startswith(
-            "gmlx"
-        )
-        assert _L.scaled_dot_product_attention.__module__ == (
-            "gmlx.models.qwen35.verify_fold"
-        )
-        assert (
-            _L._qwen3_5_ragged_decode_attention
-            is qwen35_attn.ragged_decode_attention
-        )
-        assert _L.Qwen3_5GatedDeltaNet.__call__.__module__ == (
-            "gmlx.upstream.gdn_patches"
-        )
-
+    # Same classes as the text MTP target, fused GDN armed in-tree.
+    assert qwen35_owned.is_owned_language_model(model)
+    armed = [
+        m for m in lm.modules()
+        if type(m).__name__ == "OwnedQwen3_5GatedDeltaNet"
+        and getattr(m, "_gdn_owned_fused", None) is not None
+    ]
+    assert armed, "prepare_gdn armed no owned gated-delta layers"
     assert drafter is not None
 
 
@@ -170,7 +128,7 @@ def test_vlm_mtp_target_short_greedy_forward(vlm_mtp_load):
 
     import gmlx.models.qwen35.owned as qwen35_owned
 
-    model, _drafter, tokenizer, owned_arm = vlm_mtp_load
+    model, _drafter, tokenizer = vlm_mtp_load
     lm = model.language_model
     calls_before = qwen35_owned.owned_call_count()
     ids = mx.array([tokenizer.encode("The capital of France is")])
@@ -184,6 +142,5 @@ def test_vlm_mtp_target_short_greedy_forward(vlm_mtp_load):
         logits = lm(nxt[:, None], cache=cache).logits
     text = tokenizer.decode(toks)
     assert len(toks) == 4 and text.strip(), (toks, text)
-    # Engagement proof: the owned forward actually ran on the owned arm.
-    if owned_arm:
-        assert qwen35_owned.owned_call_count() > calls_before
+    # Engagement proof: the owned forward actually ran.
+    assert qwen35_owned.owned_call_count() > calls_before

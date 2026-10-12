@@ -1,10 +1,11 @@
 """Owned model-level forward for qwen3.5/3.6 MTP targets.
 
-Replaces mlx-vlm's ``Qwen3_5Model.__call__`` control flow with an owned
-subclass (no monkeypatch): the code that runs at the model level is the
-code in this file. The mirrored constructors build the owned layer
-classes directly (``qwen35_layers``), so ownership lands at
-construction and no post-load rebind walk is needed.
+Replaces the ``Qwen3_5Model.__call__`` control flow of the vendored
+mlx-vlm 0.6.15 text model (``language``) with an owned subclass (no
+monkeypatch): the code that runs at the model level is the code in this
+file. The mirrored constructors build the owned layer classes directly
+(``qwen35_layers``), so ownership lands at construction and no post-load
+rebind walk is needed. "Stock" below means the vendored upstream body.
 
 Differences from the stock forward, all deliberate:
 
@@ -32,9 +33,6 @@ Differences from the stock forward, all deliberate:
   originals is test-certified every run, and the memo attrs they write
   stay a shared protocol with the stock layer classes (the GDN layer
   advances them, attention reads them) until the layers are owned too.
-
-``GMLX_QWEN_OWNED=0`` falls back to the stock classes at build time
-(loader-level switch; see ``loader._mtp_target_classes``).
 """
 
 from typing import List, Optional
@@ -42,15 +40,15 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import create_attention_mask
-from mlx_vlm.models.cache import ArraysCache, KVCache
-from mlx_vlm.models.qwen3_5 import language as _L
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
 
 import gmlx.upstream.gdn_patches as _gp
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.spec.dflash_drafter import DFlashCaptureHooks
-from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
-from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
 
+from . import language as _L
 from .rope import fused_rope_active, rope_cos_sin
 
 _OWNED_CALLS = 0
@@ -67,13 +65,12 @@ def owned_call_count() -> int:
 
 
 # --------------------------------------------------------------------------
-# Owned copies of the model-level helpers. Bodies match the
-# pinned mlx-vlm release; tests certify parity against the upstream
-# originals every run, so a release upgrade that changes a body fails
-# loudly. The memo attrs written here (_qwen3_5_left_padding_info,
+# Owned copies of the model-level helpers. Bodies match the vendored
+# base (``language``); tests certify parity against it every run. The
+# memo attrs written here (_qwen3_5_left_padding_info,
 # _qwen3_5_lengths_info, _qwen3_5_left_padding_cache,
 # _qwen3_5_ssm_no_mask_batch_size, _qwen3_5_decode_left_padding) are a
-# shared protocol with the stock layer classes until those are owned.
+# shared protocol with the base layer classes.
 # --------------------------------------------------------------------------
 
 
@@ -474,8 +471,7 @@ class OwnedQwen3_5LanguageModel(GdnReplayRollback, DFlashCaptureHooks, _L.Langua
 
 
 def _moe_classes():
-    from mlx_vlm.models.qwen3_5_moe import language as _ML
-
+    from . import moe_language as _ML
     from .layers import moe_layer_classes
 
     _, OwnedQwen3_5MoeDecoderLayer = moe_layer_classes()
@@ -520,8 +516,7 @@ _MOE_CACHE = None
 
 def is_owned_language_model(model) -> bool:
     """Whether ``model`` (or its language_model) is an owned qwen3.5
-    class. Gates the stock-fallback patch installs: owned forwards never
-    read the patched module globals."""
+    class. The loader arms the fused routes of such a tree."""
     lm = getattr(model, "language_model", model)
     if isinstance(lm, OwnedQwen3_5LanguageModel):
         return True

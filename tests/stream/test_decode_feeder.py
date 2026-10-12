@@ -12,7 +12,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import mlx.core as mx
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.stream.budget
 import gmlx.serve.kernel_vm
@@ -171,6 +171,10 @@ def _pressure_setup(monkeypatch, level, *, cooldown=1000, regrow_polls=2):
     monkeypatch.setattr(dfm, "_PRESSURE_COOLDOWN_POLLS", cooldown)
     monkeypatch.setattr(dfm, "_REGROW_NORMAL_POLLS", regrow_polls)
     monkeypatch.setattr(dfm, "_pressure_level", lambda: level["v"])
+    # No governor headroom unless a test scripts one, not the host's.
+    import gmlx.stream.budget as budget
+
+    monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: None)
 
 
 def test_pressure_shrink_keeps_hot_experts(monkeypatch, tmp_path):

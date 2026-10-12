@@ -1,0 +1,371 @@
+{
+ "schema": 1,
+ "name": "selftest_qwen_image21_tiny_text",
+ "check": 3,
+ "family": "qwen_image21",
+ "script": "scripts/image_oracle/check3_qwen_image21.py",
+ "argv": [
+  "check3_qwen_image21.py",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "target_tokens": [
+   4,
+   6
+  ],
+  "latent_shape": [
+   1,
+   8,
+   4,
+   6
+  ],
+  "ref_shapes": [],
+  "image_slots": [],
+  "noise_seed": 0,
+  "steps": 8,
+  "step_a": 3,
+  "step_b": 5,
+  "sigmas": [
+   1.0,
+   0.875,
+   0.75,
+   0.625,
+   0.5,
+   0.375,
+   0.25,
+   0.125
+  ],
+  "sigma_a": 0.625,
+  "sigma_b": 0.375,
+  "blocks": false,
+  "config_revision": null,
+  "config": {
+   "patch_size": 1,
+   "in_channels": 8,
+   "out_channels": 8,
+   "num_layers": 2,
+   "attention_head_dim": 16,
+   "num_attention_heads": 2,
+   "context_in_dim": 24,
+   "mlp_ratio": 3,
+   "axes_dims_rope": [
+    4,
+    6,
+    6
+   ],
+   "eps": 1e-06,
+   "causal_condition": true
+  },
+  "weights": "qwen_image21_tiny.weights()",
+  "weights_sha256": {
+   "img_in.weight": "3d26930ef71a3da33cc41a02533ee2e37b2fb381ad91b87a71ecf7a1d8cfee8d",
+   "modulation.1.weight": "022a3341c4a89bc018cafd7606c12f4a50371ddfeb20aded8332de89310ce581",
+   "norm_out.linear.weight": "0cffa79c8e73384fddcb1cc82aec17abef31023d5834741789248fa69edafbb0",
+   "proj_out.weight": "7a9a1d1214243d84dc09a0751f5314f0ec896cde138e30157c5ed409c26a704c",
+   "time_text_embed.timestep_embedder.linear_1.weight": "f2d678f146ab3085eb7ba14f6eb743d3b3c0d8b632f7f4495d56555f90e5fc54",
+   "time_text_embed.timestep_embedder.linear_2.weight": "c31d41c2ba6e7a1b47acb0213d34330d86d8685be420daf47e5575d3a4596940",
+   "transformer_blocks.0.attn.norm_k.weight": "afce89c53dcd6fb61ea83b5267c1421b543905b1a7a27c9865d34d242789398a",
+   "transformer_blocks.0.attn.norm_q.weight": "fadb33e01ca2bea04aac9958ea42ed5ed09e0b12f69f06afe3d03bf83de88410",
+   "transformer_blocks.0.attn.to_k.weight": "cba74c6db5ece1d5a64e94251956ac633424f2a9c6a44236a4d6feb8b825967d",
+   "transformer_blocks.0.attn.to_out.0.weight": "604e0b128c7c2b2925a8749150eb18aca36c986122b70731b3c0153bb2934f95",
+   "transformer_blocks.0.attn.to_q.weight": "ed16b03d40d905e76f4e85eec7022868fb01ccae0e25cbbd0b7477acdf3ff489",
+   "transformer_blocks.0.attn.to_v.weight": "e9831b85f96822913fcd611e4c9853907e70eafcabdeb4751e2d3caf01509b0d",
+   "transformer_blocks.0.img_mlp.gate_up.weight": "1b8ea4c9b5d59a5e94a8897d1c34b78d125ca4e084e875915358746507eb132e",
+   "transformer_blocks.0.img_mlp.out.weight": "20af4f9135e17b8135eaef0470ed8a21b951084fd84afde9ff7288725efde1e2",
+   "transformer_blocks.1.attn.norm_k.weight": "0c7bd890e3d1de81cc46ca1383dbb0b1133cb78512cbbb98279eb68bed4c4498",
+   "transformer_blocks.1.attn.norm_q.weight": "26c8623f4fd6ea1b6ad574c55727f8d9bcc5a0f6cd0adfe9f4b570d2692321ea",
+   "transformer_blocks.1.attn.to_k.weight": "a8cab84e232761c7e2d2571b3ead9494242077de8c98761c11cab48019af0caf",
+   "transformer_blocks.1.attn.to_out.0.weight": "cb419dc0d456b331b1abbf9d004f6ee4c1ea7df6a16c85cf9e9a42cac7a583cb",
+   "transformer_blocks.1.attn.to_q.weight": "89f654cf3ea3ce6ef0c96468766c4c4f794b1dc7f9a510029b2e5f14bef920e2",
+   "transformer_blocks.1.attn.to_v.weight": "79081a61f6f79e1464efb611396fc0ea2595059979dad9545bb51607874232d0",
+   "transformer_blocks.1.img_mlp.gate_up.weight": "e62e11af3aeb1d25230b80a29a73bcb77c87d2b2f08435edbf50c2cfd2d797de",
+   "transformer_blocks.1.img_mlp.out.weight": "62f64c5388a63e8f81f7a59c0e1fd8414236597760f5379718974a431a52d083",
+   "txt_in.in_layer.weight": "e115113831a8fa33bb3ee6dfb8b60b39df6a62aa4689948773593e2e7f06817b",
+   "txt_in.out_layer.weight": "666dc0b510dc9316751dcc5a45da079e7b17bffed09a21c58b5faf8c1b4e4bda",
+   "txt_in.text_norm.weight": "a14f16703ad056763a6c1320eec13f9c2cb5cc1ca540627cd99749d0e908c78a"
+  },
+  "inputs": "qwen_image21_tiny features, ref_latents and latents",
+  "loaded": "from a GGUF in GGUF tensor names through from_single_file",
+  "case": "text"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 4,
+   "dequant": "exact",
+   "matmul": {
+    "fp32": "native",
+    "bf16": "bf16 operands, float32 GEMM, one bf16 rounding"
+   },
+   "bf16_timestep": "fp32",
+   "encoder_hidden_states_mask": null
+  },
+  "extract_against_joint_max_abs_fp32": 0.0,
+  "extract_against_joint_max_abs_bf16": 0.0,
+  "velocity_a_bf16_vs_fp32": {
+   "rel_l2": 0.010164521676282973,
+   "cosine": 0.999948444884401,
+   "max_abs": 0.031007766723632812
+  },
+  "velocity_b_bf16_vs_fp32": {
+   "rel_l2": 0.007292917958030829,
+   "cosine": 0.9999735867456476,
+   "max_abs": 0.02424454689025879
+  },
+  "seconds": {
+   "fp32_calls_s": 0.0,
+   "bf16_calls_s": 0.0
+  }
+ },
+ "tolerances": {
+  "velocity_a_rel_l2": 0.020329043352565947,
+  "velocity_a_cosine_min": 0.9997937795376042,
+  "velocity_b_rel_l2": 0.014585835916061657,
+  "velocity_b_cosine_min": 0.9998943469825905,
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of each call and for each velocity. A velocity's cosine floor is 1 - 4 x the oracle's own cosine distance. Each block also has two teacher-forced branch rows, the output of its attention and of its MLP. Their fp32 arrays serve a gate that runs the model in fp32, and 2 x the oracle's own gap on a branch row is recorded and is not a gate. A gate that runs the model in the oracle's fp32 arithmetic holds every row to a fixed bound instead",
+  "starting": {
+   "block_rel_l2": 0.005,
+   "velocity_rel_l2": 0.02
+  }
+ },
+ "notes": [
+  "The pipeline passes a prompt mask of ones for one unpadded prompt. These calls pass none, which gives the same values."
+ ],
+ "created": "2026-10-06T09:46:43Z",
+ "npz": "selftest_qwen_image21_tiny_text.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    7,
+    24
+   ],
+   "dtype": "float32",
+   "sha256": "53c7dbbc94173e68761e7bc125fe7003f9c81e21944cc0952336af75d62e6b31"
+  },
+  "image_ids": {
+   "shape": [
+    31
+   ],
+   "dtype": "int32",
+   "sha256": "1d9cc9584659d121313f454d49dfa6f24cfbc2b88d83bcdf9b7823e511c2a58d"
+  },
+  "image_pad_mask": {
+   "shape": [
+    31
+   ],
+   "dtype": "bool",
+   "sha256": "3180160b8afdc49c77d36f282f2528a2cf14cad243dfa99317233c01beafdbcf"
+  },
+  "img_mask": {
+   "shape": [
+    7
+   ],
+   "dtype": "bool",
+   "sha256": "837885c8f8091aeaeb9ec3c3f85a6ff470a415e610b8ba3e49f9b33c9cf9d619"
+  },
+  "joint_source": {
+   "shape": [
+    31
+   ],
+   "dtype": "int32",
+   "sha256": "1e767793061af18bb39b3d8d931b564ddcdbce13d47c4c542fe8cbbf32df9aff"
+  },
+  "latents_a": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "24f2ef33041d7370ca2b2dca9571d30e97b49ca49ee5244b41fbc8b4ab4e543d"
+  },
+  "latents_b": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "2fc6d2eff5a37a716a62f6e8c9e7980dd203505908330ea05a1173fb30c61306"
+  },
+  "modulation_a": {
+   "shape": [
+    2,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "64c4b802d030a9a4f4c2d3f345086c1481fb6de36a2cfee6d1962f9bb8c8b5ad"
+  },
+  "modulation_b": {
+   "shape": [
+    2,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "7ece8caf93b3b790109304dc9c7a14c63bbd0adc415f5b798817249d5a3dcf32"
+  },
+  "modulation_row": {
+   "shape": [
+    31
+   ],
+   "dtype": "int8",
+   "sha256": "7e90ac44b5436506cfe499b96d80422d83b74c3ab7d66864cd90bb7763e0d6e7"
+  },
+  "positions": {
+   "shape": [
+    31,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "107d66afd2c0db8b7391bbaae0676df08aad13a92407a63a08b82f58f02bc789"
+  },
+  "segments": {
+   "shape": [
+    1,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "1475616a15c646cf5c67d438e0ce5f90e4098965c224dc4f560140f17509da57"
+  },
+  "sigma_a": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "f3cdf0320e41c4ed5579a3c9f9f114692c01d392cde482d3ae802c5b25290f68"
+  },
+  "sigma_b": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "55b51bbfa89c63511da11a52068292b17b6644163afdaf734beee7bcaf33b6e3"
+  },
+  "t_embedded_a": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "b64b5ef7caac1f0ef226fc50e7d9e89fd76175fcae9edf27c93fb1362e87d8c6"
+  },
+  "t_embedded_b": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "8f557c9fe2610bdd82e832c8de87e8ea7eaae8f5834d8fea9e84846210609a45"
+  },
+  "t_passed_a": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "f3cdf0320e41c4ed5579a3c9f9f114692c01d392cde482d3ae802c5b25290f68"
+  },
+  "t_passed_b": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "55b51bbfa89c63511da11a52068292b17b6644163afdaf734beee7bcaf33b6e3"
+  },
+  "target_token_mask": {
+   "shape": [
+    31
+   ],
+   "dtype": "bool",
+   "sha256": "3180160b8afdc49c77d36f282f2528a2cf14cad243dfa99317233c01beafdbcf"
+  },
+  "temb_a": {
+   "shape": [
+    2,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "8a45d8ae683f8d8b49dcf8cdd2b0f8a7782787e2db9a4fa5540a4823a1aafc20"
+  },
+  "temb_b": {
+   "shape": [
+    2,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "c17ab725f4c351b51f018966feeedee805203852841d4bec0bcf74e4324eab45"
+  },
+  "velocity_a": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "33f015c96b66da9d084186ac9c1b396a6988477ef03a2c09c4fdb35f7463bd16"
+  },
+  "velocity_a_bf16": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "24a1ffb7dd15e8d6bea87f734e3d55c403bfd7972ec177d546893003f729241a"
+  },
+  "velocity_b": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "bf3f90df0994dd4d272d57353f259a2cff1c386b349026b57a0c2080e6c444e3"
+  },
+  "velocity_b_bf16": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "47f34edf98188ecef5cb388c2e2647e1387449177b5764c2c920bc672ea7570d"
+  }
+ }
+}

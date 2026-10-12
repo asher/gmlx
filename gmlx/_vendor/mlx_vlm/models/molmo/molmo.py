@@ -1,0 +1,116 @@
+from typing import Dict, List, Tuple, Union
+
+import mlx.core as mx
+import mlx.nn as nn
+import numpy as np
+
+from ..base import InputEmbeddingsFeatures
+from .config import ModelConfig
+from .language import LanguageModel
+from .vision import VisionModel
+
+
+class Model(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+        self.language_model = LanguageModel(config.text_config)
+        self.vision_tower = VisionModel(config.vision_config)
+
+    @property
+    def layers(self):
+        return self.language_model.model.layers
+
+    def get_input_embeddings(
+        self,
+        input_ids: mx.array,
+        pixel_values: mx.array = None,
+        **kwargs,
+    ):
+        """Get input embeddings with image features merged in."""
+        if input_ids.ndim == 1:
+            input_ids = input_ids[None, :]
+
+        batch_size, seq_len = input_ids.shape
+
+        image_input_idx = kwargs.get("image_input_idx", None)
+        image_masks = kwargs.get("image_masks", None)
+
+        if pixel_values is None:
+            inputs_embeds = self.language_model.model.wte(input_ids)
+            return InputEmbeddingsFeatures(inputs_embeds=inputs_embeds)
+
+        # Process images
+        dtype = self.vision_tower.image_vit.patch_embedding.weight.dtype
+        pixel_values = pixel_values.astype(dtype)
+
+        if pixel_values.ndim == 3:
+            pixel_values = mx.expand_dims(pixel_values, 0)
+            image_masks = (
+                mx.expand_dims(image_masks, 0) if image_masks is not None else None
+            )
+            image_input_idx = (
+                mx.expand_dims(image_input_idx, 0)
+                if image_input_idx is not None
+                else None
+            )
+
+        cached = kwargs.get("cached_image_features", None)
+        if cached is not None:
+            image_features = cached
+            cls_embed = None
+        else:
+            image_features, cls_embed = self.vision_tower(pixel_values, image_masks)
+
+        # Insert image features into the input embeddings
+        num_image, num_patch = image_features.shape[1:3]
+
+        # Reshape for merging
+        image_features = image_features.reshape(batch_size, num_image * num_patch, -1)
+        image_input_idx = image_input_idx.reshape(batch_size, num_image * num_patch)
+
+        # Scatter each valid patch feature into its token position. Padded slots
+        # (image_input_idx < 0) must be skipped: negative indices would wrap
+        # around and corrupt embeddings near the end of the sequence.
+        idx = np.asarray(image_input_idx)
+        batch_rows, patch_cols = np.nonzero(idx >= 0)
+        token_positions = idx[batch_rows, patch_cols]
+
+        input_embeddings = self.language_model.model.wte(input_ids)
+        input_embeddings[
+            mx.array(batch_rows), mx.array(token_positions)
+        ] += image_features[mx.array(batch_rows), mx.array(patch_cols)]
+
+        return InputEmbeddingsFeatures(inputs_embeds=input_embeddings)
+
+    def __call__(
+        self,
+        input_ids: mx.array,
+        pixel_values: mx.array,
+        mask: mx.array,
+        cache=None,
+        **kwargs,
+    ) -> Dict[str, Union[mx.array, List[Tuple[mx.array, mx.array]]]]:
+        # Get input embeddings with image features merged
+        embedding_output = self.get_input_embeddings(input_ids, pixel_values, **kwargs)
+        input_embeddings = embedding_output.inputs_embeds
+
+        # Forward pass through the language model
+        logits = self.language_model(
+            input_ids,
+            inputs_embeds=input_embeddings,
+            mask=mask,
+            cache=cache,
+        )
+
+        return logits
+
+    def sanitize(self, weights):
+        def transform_key(key):
+            if "model.transformer" in key:
+                key = key.replace("model.transformer", "language_model.model")
+            if "model.vision_backbone" in key:
+                key = key.replace("model.vision_backbone", "vision_tower")
+            return key
+
+        return {transform_key(k): v for k, v in weights.items()}

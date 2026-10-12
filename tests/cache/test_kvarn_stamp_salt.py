@@ -13,7 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.kvarn_apc import (
     _MODE_STAMP,
     apply_kvarn_salt,
@@ -24,7 +24,6 @@ from gmlx.cache.kvarn_apc import (
 from gmlx.cache.kvarn_cache import KVarNKVCache
 from kvarn_testlib import Args, FakeLM
 
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 CacheList = _cache.CacheList
 KVCache = _cache.KVCache
@@ -55,7 +54,7 @@ def _ds4():
 
 
 def _llama4():
-    from mlx_lm.models.cache import ChunkedKVCache
+    from gmlx._vendor.mlx_lm.models.cache import ChunkedKVCache
 
     return FakeLM(stack=[lambda: ChunkedKVCache(chunk_size=8192), KVCache])
 
@@ -79,8 +78,8 @@ def test_probe_stashes_on_model(kvarn_ops_ok):
 def test_policy_converts_chunked(kvarn_ops_ok):
     """ChunkedKVCache (llama4) is kvarn-convertible: serve maps it to
     BatchKVCache and converts that, so the CLI path must agree."""
-    from mlx_lm.models.cache import ChunkedKVCache as LmChunked
-    from mlx_vlm.models.cache import ChunkedKVCache as VlmChunked
+    from gmlx._vendor.mlx_lm.models.cache import ChunkedKVCache as LmChunked
+    from gmlx._vendor.mlx_vlm.models.cache import ChunkedKVCache as VlmChunked
 
     from gmlx.gen.generation import convert_kvarn_cache
 
@@ -95,20 +94,46 @@ def test_policy_converts_chunked(kvarn_ops_ok):
 
 
 def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok, kvarn_apc_arms):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     wrapper = SimpleNamespace(language_model=_hybrid())
     stamp_model(wrapper)
     assert getattr(wrapper, _MODE_STAMP, False)
     assert getattr(wrapper.language_model, _MODE_STAMP, False)
+    assert apc.model_apc_plan(wrapper).legacy_mode == "exact"
     assert apc.model_apc_mode(wrapper) == "exact"
     assert apc.model_apc_mode(wrapper.language_model) == "exact"
-    # Check-down: a wrapper whose language model carries the stamp still
-    # resolves exact when the wrapper itself is passed.
-    lm_only = SimpleNamespace(language_model=_hybrid())
+    # Check-down: the batch generator's coordinator plans from the
+    # top-level model, so a wrapper whose language model carries the
+    # stamp must still resolve exact. A dense stack resolves block
+    # unstamped, which makes the stamp the only way to exact.
+    lm_only = SimpleNamespace(language_model=FakeLM(stack=[KVCache, KVCache]))
+    assert apc.model_apc_plan(lm_only).legacy_mode == "block"
     stamp_model(lm_only.language_model)
     assert not getattr(lm_only, _MODE_STAMP, False)
+    assert apc.model_apc_plan(lm_only).legacy_mode == "exact"
     assert apc.model_apc_mode(lm_only) == "exact"
+
+
+def test_stamped_model_without_make_cache_resolves_exact(kvarn_ops_ok,
+                                                         kvarn_apc_arms):
+    """A dense model without make_cache converts, so serve stamps it. The
+    mode probes must then give what the generator's coordinator plans,
+    not the stock no-make_cache answer."""
+    from gmlx._vendor.mlx_vlm import apc
+
+    import gmlx.spec.engine as se
+
+    model = _DenseNoMakeCache()
+    assert kvarn_model_converts(model)
+    assert apc.model_apc_mode(model) == "block"
+    stamp_model(model)
+    assert apc.model_apc_plan(model).legacy_mode == "exact"
+    assert apc.model_apc_mode(model) == "exact"
+
+    se._bind_l1_view()
+    model._kq_apc_manager = SimpleNamespace(block_size=16)
+    assert se._resolve_l1(model)[1] == "exact"
 
 
 def test_salt_gated_on_conversion(kvarn_ops_ok):

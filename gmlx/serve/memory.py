@@ -339,8 +339,7 @@ def project_admission(gen, candidates):
     is measured.
     ``candidates`` are pending-queue tuples (uid, prompt, max_tokens, ...).
     """
-    import mlx.core as mx
-
+    from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import headroom_bytes, score_transient_bytes
 
     update_kv_rates(gen)
@@ -397,7 +396,7 @@ def project_admission(gen, candidates):
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
         max(cand_tokens))
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         ws = 0.0
     reserve = admit_reserve_bytes(ws, gen)
@@ -433,3 +432,24 @@ def apply_cache_limit(cfg) -> None:
 
     note_cache_limit(limit)
     print(f"[serve] MLX cache limit: {limit / GIB:.1f} GiB ({source})")
+
+
+def apply_local_cache_limit(model_paths, verbose: bool = False) -> None:
+    """The serve policy for the in-process verbs (run, chat), set before
+    the load: GMLX_CACHE_LIMIT_GB, else the auto policy. A later owner
+    (expert streaming's allocator) replaces it."""
+    import mlx.core as mx
+
+    from .capacity import working_set_bytes
+
+    ws = working_set_bytes() or 0.0
+    paths = [str(p) for p in model_paths if p]
+    limit, source = resolve_cache_limit(None, paths, ws)
+    if limit is None:
+        return
+    mx.set_cache_limit(limit)
+    from gmlx.gen.prefill_decay import note_cache_limit
+
+    note_cache_limit(limit)
+    if verbose:
+        print(f"[cache] MLX cache limit: {limit / GIB:.1f} GiB ({source})")

@@ -10,13 +10,13 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_GEN = importlib.import_module("mlx_vlm.server.generation")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 
 class _Tok:

@@ -3,7 +3,6 @@ adapter, or an MLX checkpoint, behind one interface the trainer and the
 evaluator share."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .format import read_json
@@ -23,7 +22,7 @@ class adapter_disabled:
         self.saved: list[tuple[Any, float]] = []
 
     def __enter__(self):
-        from mlx_lm.tuner.lora import LoRALinear
+        from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
         # a module reachable under two names is saved once, else the
         # second save records the zeroed scale and the exit restores that
         seen: set[int] = set()
@@ -84,10 +83,20 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
     return model, config, tokenizer
 
 
-def load_mlx_student(path: str, adapter_path: str | None = None):
-    from mlx_lm import load
-    model, tokenizer = load(path, adapter_path=adapter_path)[:2]
-    cfg = read_json(Path(path) / "config.json")
+def load_mlx_student(path: str, adapter_path: str | None = None,
+                     lazy: bool = False):
+    """(model, config, tokenizer) from an MLX checkpoint directory or a
+    Hugging Face repo id, as ``mlx_lm.load`` gives them. The load is
+    ``gmlx.load.mlx_checkpoint.load``: the copied loader plus a K-quant
+    route. A Gemma 4 checkpoint builds the owned model, which the copied
+    package holds at mlx-lm's path. ``lazy`` leaves the weights unread
+    until the caller evaluates them."""
+    from gmlx.load import mlx_checkpoint
+
+    model_path = mlx_checkpoint.resolve(path)
+    model, tokenizer = mlx_checkpoint.load(str(model_path),
+                                           adapter_path=adapter_path, lazy=lazy)
+    cfg = read_json(model_path / "config.json")
     return model, cfg, tokenizer
 
 

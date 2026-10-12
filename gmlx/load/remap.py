@@ -46,6 +46,10 @@ ARCH_ALIAS = {
     "qwen2": "QWEN2",
     "qwen2moe": "QWEN2MOE",
     "qwen3": "QWEN3",
+    # Qwen3-VL dense text tower: the Qwen3 dense tensor layout (qk-norm, no
+    # qk-permute), so it reuses the QWEN3 templates and override. The vision
+    # tower lives in a separate mmproj.
+    "qwen3vl": "QWEN3",
     "qwen3moe": "QWEN3MOE",
     # Qwen3-VL / Qwen3-Omni text tower: identical tensor layout to Qwen3-MoE
     # (qk-norm + stacked routed experts), so it reuses the QWEN3MOE templates +
@@ -187,9 +191,9 @@ ARCH_ALIAS = {
     # newer split attn_qkv/attn_gate resolve canonically onto qwen3.5's
     # in_proj_qkv/in_proj_z names, which gdn_patches._patch_qwen3next_split_gdn
     # creates on the model (flagged by _synth_qwen3next gdn_split_layout).
-    # V heads stay HF-GROUPED on the wire in both layouts (legacy is the raw
-    # HF tensor; the split converter's de-interleave preserves group order), so
-    # the qwen3.5 tiled-V patch must not fire - see _needs_tiled_v_patch.
+    # V heads stay grouped on the wire in both layouts (legacy is the raw HF
+    # tensor, and the split converter's de-interleave keeps the group order),
+    # so the qwen3.5 tiled V order does not apply. See gguf_v_heads_tiled.
     "qwen3next": "QWEN3NEXT",
     # Meta Muse Glimmer (llama.cpp 'muse-glimmer'): a dense sandwich-norm decoder
     # with an attention output gate and per-head qk-norm. Almost everything
@@ -219,8 +223,8 @@ ARCH_ALIAS = {
 # mlx_lm model re-adds 1 at runtime (rms_norm(x, 1.0 + weight)). The
 # `gemma_norm_minus_one` transform undoes the bake on load. gemma4 is excluded:
 # it shares the GEMMA3 remap alias but its mlx_lm RMSNorm uses the weight as-is.
-# gemma-embedding is included: its backbone is gemma3 and the mlx-embeddings
-# encoder builds the same mlx_lm gemma3_text RMSNorm (the +1 form).
+# gemma-embedding is included: its backbone is gemma3 and the gmlx encoder
+# builds the same mlx_lm gemma3_text RMSNorm (the +1 form).
 _GEMMA_NORM_BAKED_ARCHS = frozenset({"gemma", "gemma2", "gemma3", "gemma-embedding",
                                      # minimax-m3: llama.cpp's converter bakes
                                      # +1 into every *norm.weight (incl. the
@@ -377,7 +381,7 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.layer_scalar", "passthrough"),  # no .weight suffix in MLX
         # EmbeddingGemma dense head. gguf-py's GEMMA_EMBEDDING templates put
         # dense_2/dense_3 in the global reverse-map with no CANONICAL_HF target
-        # (they would skip), so claim them here onto the mlx-embeddings Model's
+        # (they would skip), so claim them here onto the gmlx encoder's
         # dense = [Linear(h, 4h), Linear(4h, h)]. Only gemma-embedding GGUFs carry
         # them, so this is inert for plain gemma3/gemma4.
         (re.compile(r"^dense_2\.weight$"), "dense.0.weight", "passthrough"),

@@ -10,14 +10,14 @@ block, one ``<atem:invoke>`` segment per call:
     </atem:invoke>
     </atem:function_calls>
 
-mlx-vlm's parser registry knows none of this, and its template-marker
-inference (``mlx_vlm.tool_parsers._TEMPLATE_MARKERS``) matches no ATEM tag.
-``ensure_registered()`` installs this module as
-``mlx_vlm.tool_parsers.muse_glimmer`` (:mod:`gmlx.models.owned`) and
-prepends the ATEM markers so
+mlx-vlm routes ATEM templates to its own ``atem`` parser, whose call block
+starts at a reasoning-envelope delimiter rather than the wrapper tag.
+``ensure_registered()`` registers this module as the ``muse_glimmer``
+tool parser (ahead of any vendored parser of that name, as ``hy_v3_tools``
+does) and registers the ATEM markers above the stock specs so
 ``_infer_tool_parser_from_processor`` resolves it from the template.
 
-Parser contract (see mlx-vlm's ``tool_parsers/__init__.py`` consumers): module
+Parser contract (see ``mlx_vlm.tools.base.ToolParser``): module
 attributes ``tool_call_start`` / ``tool_call_end`` delimit the call block in
 the generated text; ``parse_tool_call(text, tools)`` receives the inner text
 and returns ``{"name", "arguments"}`` or a list of them. The delimiters are
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from typing import Any
 
 tool_call_start = "<atem:function_calls>"
@@ -51,10 +52,7 @@ _PARAM_RE = re.compile(
 
 # The raw Jinja carries these literals verbatim (the tags are not built by
 # .format(), unlike Hy3's).
-_TEMPLATE_MARKERS = [
-    (("<atem:invoke name=",), "muse_glimmer"),
-    ((tool_call_start,), "muse_glimmer"),
-]
+_TEMPLATE_MARKERS = (("<atem:invoke name=",), (tool_call_start,))
 
 
 def _schema(tool_name: str, tools: list[Any] | None) -> dict:
@@ -114,19 +112,10 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tool_parsers.muse_glimmer`` resolve to this module and
-    teach the template-marker inference the ATEM spellings. Idempotent."""
-    import importlib
+    """Register this module as the ``muse_glimmer`` tool parser, ahead of
+    any vendored parser of that name, and route templates carrying the ATEM
+    spellings to it. Idempotent."""
+    from gmlx.upstream.tool_parsers import register_tool_parser
 
-    from gmlx.models import owned
-
-    try:
-        registry = importlib.import_module("mlx_vlm.tool_parsers")
-    except ImportError:
-        return
-    owned.install("mlx_vlm.tool_parsers.muse_glimmer", __name__)
-    markers = getattr(registry, "_TEMPLATE_MARKERS", None)
-    if isinstance(markers, list):
-        for entry in _TEMPLATE_MARKERS:
-            if entry not in markers:
-                markers.insert(0, entry)
+    register_tool_parser("muse_glimmer", sys.modules[__name__],
+                         _TEMPLATE_MARKERS)

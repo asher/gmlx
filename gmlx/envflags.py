@@ -6,6 +6,7 @@ default, not crash an import or a serve boot with a bare ValueError.
 from __future__ import annotations
 
 import os
+import warnings
 
 
 def env_int(name: str, default: int) -> int:
@@ -31,8 +32,16 @@ _BOOL_TRUE = frozenset(("1", "true", "yes", "on"))
 _BOOL_FALSE = frozenset(("0", "false", "no", "off", ""))
 
 
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
+def env_value(name: str, overlay=None) -> str | None:
+    """The variable's value, from a per-model ``overlay`` mapping first
+    (the env window a serve build applies), else from ``os.environ``."""
+    if overlay and name in overlay:
+        return str(overlay[name])
+    return os.environ.get(name)
+
+
+def env_bool(name: str, default: bool, overlay=None) -> bool:
+    raw = env_value(name, overlay)
     if raw is None:
         return default
     val = raw.strip().lower()
@@ -40,4 +49,23 @@ def env_bool(name: str, default: bool) -> bool:
         return True
     if val in _BOOL_FALSE:
         return False
+    return default
+
+
+def env_switch(name: str, choices: tuple[str, ...], default: str = "1") -> str:
+    """A switch that is on, off or one of ``choices``: ``"1"`` for a true
+    word, ``"0"`` for a false word, a choice as it is, and ``default`` when
+    the variable is not set. Any other value warns and gives ``default``."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in _BOOL_TRUE:
+        return "1"
+    if val in _BOOL_FALSE:
+        return "0"
+    if val in choices:
+        return val
+    warnings.warn(f"{name}={raw!r} is not 0, 1 or one of "
+                  f"{', '.join(choices)}; using {default}", stacklevel=2)
     return default

@@ -15,6 +15,7 @@ import types
 import pytest
 
 import gmlx.serve.server as srv  # noqa: E402
+from gmlx.serve.lifecycle import reload_over_http as _RELOAD_OVER_HTTP  # noqa: E402
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import observability as sp_obs  # noqa: E402
 from gmlx.config import ConfigError, ModelCfg, ServerCfg, ServerDefaults  # noqa: E402
@@ -326,9 +327,18 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
 def test_discovery_cfg_wraps_scan(monkeypatch):
     fake = [ModelCfg(id="qwen", path="/m/qwen.gguf"),
             ModelCfg(id="gemma", path="/m/gemma.gguf")]
-    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs: fake)
+    from gmlx.config import ImageModelCfg
+
+    def scan(specs, dirs, *, images):
+        # The image models the scan pairs are served too.
+        images.append(ImageModelCfg(id="z", path="/m/z.gguf",
+                                    encoder="qwen", vae="/m/v.gguf"))
+        return fake
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
     cfg = srv._discovery_cfg(["/m"], _ns(port=9000))
     assert set(cfg.models) == {"qwen", "gemma"}
+    assert set(cfg.image_models) == {"z"}
     assert cfg.model_dirs == ["/m"]
     assert cfg.port == 9000
 
@@ -1123,6 +1133,61 @@ def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
     assert mc.pin is True                         # the hand-edit survives
 
 
+def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys):
+    """A model marked over the memory budget by an earlier scan loses the
+    mark once it fits, as after raising iogpu.wired_limit_mb; a stream key
+    the user wrote stays."""
+    from gmlx.config import load_config
+    from gmlx.config import ModelCfg as MC
+
+    note = srv.discovery.STREAM_MARK_NOTE
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n"
+        f"  big:\n    path: big.gguf\n    pin: true\n    stream: experts  # {note}\n"
+        "\n  # mine: hand-tuned\n"
+        "  mine:\n    path: mine.gguf\n    stream: experts\n"
+        f"  cpu:\n    path: cpu.gguf\n    stream: cpu  # {note}\n")
+    for name in ("big", "mine", "cpu"):
+        (lib / f"{name}.gguf").write_bytes(b"x")
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [])
+    seen = []
+    fresh = {"stream": "experts", "speculative": False}
+
+    def rescan(p):
+        seen.append(os.path.basename(p))
+        return dict(fresh)
+
+    monkeypatch.setattr(srv.discovery, "rescan_entry", rescan)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    assert seen == ["big.gguf"]                   # only the marked entry
+    assert "already in sync" in capsys.readouterr().out
+    fresh.update(stream=None, speculative=True)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    cfg = load_config(cfg_path)
+    assert cfg.models["big"].stream is None
+    assert cfg.models["big"].speculative is True  # as a fresh scan gives it
+    assert cfg.models["big"].pin is True
+    assert cfg.models["mine"].stream == "experts"
+    assert cfg.models["cpu"].stream == "cpu"      # only an experts mark drops
+    text = cfg_path.read_text()
+    assert "    pin: true\n    speculative: true\n\n  # mine: hand-tuned\n  mine:" in text
+    assert text.count(note) == 1
+    # A model the scan adds over the budget carries the mark.
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [
+        MC(id="huge", path=str(lib / "huge.gguf"), stream="experts")])
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    assert srv._marked_stream_ids(cfg_path) == ["huge"]
+
+
+def test_the_scaffold_marks_the_stream_key_it_writes():
+    from gmlx.config import ModelCfg as MC
+
+    text = srv.discovery.scaffold_yaml(
+        [MC(id="hy3", path="/m/Hy3.gguf", stream="experts")], model_dirs=["/m"])
+    assert f"stream: experts  # {srv.discovery.STREAM_MARK_NOTE}" in text
+
+
 def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
                                                         capsys):
     from gmlx.config import load_config
@@ -1330,6 +1395,43 @@ def test_reload_running_signals_and_reports(monkeypatch, capsys):
     assert "reloaded the running server at 127.0.0.1:8080 (pid 42)" in out
 
 
+def test_a_sighup_reload_names_the_services_a_missing_extra_left_off(monkeypatch, capsys,
+                                                                     tmp_path):
+    import gmlx.serve.lifecycle as lc
+    log = tmp_path / "server.log"
+    log.write_text("[server] server.stt is off: its optional stt extra is not installed. "
+                   "To add it: old\n")
+    monkeypatch.setattr(lc, "log_offsets",
+                        lambda: {("127.0.0.1", 8080): (str(log), log.stat().st_size)})
+
+    def reload(p):
+        with open(log, "a") as f:
+            f.write("[server] server.tts is off: its optional tts extra is not installed. "
+                    "To add it: pip install 'gmlx[tts]'\n"
+                    "[server] SIGHUP config reload: {'models': 1}\n")
+        return [("127.0.0.1", 8080, 42)]
+
+    monkeypatch.setattr(lc, "reload_config", reload)
+    srv._reload_running("/some/cfg.yaml", skip=False)
+    err = capsys.readouterr().err
+    assert ("note: server.tts is off: its optional tts extra is not installed. "
+            "To add it: pip install 'gmlx[tts]'\n") in err
+    assert "To add it: old" not in err
+
+
+def test_the_services_off_wait_ends_at_its_timeout(tmp_path):
+    import time
+
+    import gmlx.serve.lifecycle as lc
+    log = tmp_path / "server.log"
+    log.write_text("[server] server.stt is off: its optional stt extra is not installed.\n")
+    t0 = time.monotonic()
+    assert lc.services_off_after(str(log), 0, timeout=0.3) == [
+        "[server] server.stt is off: its optional stt extra is not installed."]
+    assert 0.25 < time.monotonic() - t0 < 2.0
+    assert lc.services_off_after(str(tmp_path / "gone.log"), 0) == []
+
+
 def test_reload_running_skip_is_noop(monkeypatch):
     import gmlx.serve.lifecycle as lc
     called = {"reload": False}
@@ -1355,6 +1457,78 @@ def test_reload_running_no_servers_is_quiet(monkeypatch, capsys):
     monkeypatch.setattr(lc, "reload_config", lambda p: [])
     srv._reload_running("/some/cfg.yaml", skip=False)
     assert capsys.readouterr().out == ""               # nothing running -> no note
+
+
+def _foreground(monkeypatch, tmp_path, *, answer, off=None):
+    """A config at port 18431, a server that answers /health there with no
+    runfile, and a /v1/reload that answers ``answer``, naming the services
+    ``off`` it left off for a missing extra."""
+    import io
+    import json
+    import urllib.error
+
+    import gmlx.serve.lifecycle as lc
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("server:\n  port: 18431\n  api_key: k\n  model_dirs: []\n")
+    monkeypatch.setattr(lc, "reload_over_http", _RELOAD_OVER_HTTP)
+    monkeypatch.setattr(lc, "reload_config", lambda p: [])
+    monkeypatch.setattr(lc, "list_runs", lambda: [])
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: True)
+    posted = []
+
+    def post(url, payload=None, *, api_key=None, timeout=5.0):
+        posted.append((url, api_key))
+        if answer != 200:
+            body = io.BytesIO(json.dumps({
+                "message": "reload requires a --config launch"}).encode())
+            raise urllib.error.HTTPError(url, answer, "", {}, body)
+        return {"status": "success"} | ({"services_off": off} if off else {})
+
+    monkeypatch.setattr(lc, "post_json", post)
+    return str(cfg), posted
+
+
+def test_a_server_with_no_runfile_reloads_over_http(monkeypatch, tmp_path,
+                                                    capsys):
+    cfg, posted = _foreground(monkeypatch, tmp_path, answer=200)
+    srv._reload_running(cfg, skip=False)
+    assert posted == [("http://127.0.0.1:18431/v1/reload", "k")]
+    assert ("reloaded the running server at 127.0.0.1:18431 to pick up the "
+            "config change") in capsys.readouterr().out
+
+
+def test_a_reload_names_the_services_a_missing_extra_left_off(monkeypatch, tmp_path,
+                                                             capsys):
+    hint = "pip install 'gmlx[stt]'"
+    cfg, _posted = _foreground(monkeypatch, tmp_path, answer=200, off={"stt": hint})
+    srv._reload_running(cfg, skip=False)
+    got = capsys.readouterr()
+    assert "reloaded the running server at 127.0.0.1:18431" in got.out
+    assert ("server.stt is off, because its optional stt extra is not installed. "
+            f"To add it: {hint}") in got.err
+
+
+def test_a_server_that_cannot_reload_is_named_with_why(monkeypatch, tmp_path,
+                                                       capsys):
+    cfg, posted = _foreground(monkeypatch, tmp_path, answer=501)
+    srv._reload_running(cfg, skip=False)
+    assert posted
+    assert ("the server at 127.0.0.1:18431 did not reload (reload requires a "
+            "--config launch); restart it") in capsys.readouterr().err
+
+
+def test_no_http_reload_reaches_a_server_with_a_runfile_or_none(
+        monkeypatch, tmp_path, capsys):
+    import gmlx.serve.lifecycle as lc
+    cfg, posted = _foreground(monkeypatch, tmp_path, answer=200)
+    # A managed server of another config holds the port.
+    monkeypatch.setattr(lc, "list_runs", lambda: [{"port": 18431}])
+    monkeypatch.setattr(lc, "identity_ok", lambda r: True)
+    srv._reload_running(cfg, skip=False)
+    monkeypatch.setattr(lc, "list_runs", lambda: [])
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: False)
+    srv._reload_running(cfg, skip=False)
+    assert posted == [] and capsys.readouterr() == ("", "")
 
 
 def test_sync_reloads_running_server(monkeypatch, tmp_path):
@@ -1432,14 +1606,14 @@ def test_uvicorn_log_config_timestamps_and_filters():
 
 def test_uvicorn_log_config_level_reaches_app_loggers():
     """--log-level must govern the whole server, not just uvicorn's own
-    loggers: the level lands on the gmlx and mlx_vlm dictConfig entries
-    (trace maps to DEBUG - stdlib logging has no TRACE tier)."""
+    loggers: the level lands on the gmlx dictConfig entry, which also covers
+    the copied mlx-vlm and mlx-lm loggers under gmlx._vendor (trace maps to
+    DEBUG, since stdlib logging has no TRACE level)."""
     cfg = sp.uvicorn_log_config()
     assert cfg["loggers"]["gmlx"]["level"] == "INFO"
-    assert cfg["loggers"]["mlx_vlm"]["level"] == "INFO"
+    assert not [n for n in cfg["loggers"] if n.startswith("gmlx.")]
     cfg = sp.uvicorn_log_config("debug")
     assert cfg["loggers"]["gmlx"]["level"] == "DEBUG"
-    assert cfg["loggers"]["mlx_vlm"]["level"] == "DEBUG"
     cfg = sp.uvicorn_log_config("error")
     assert cfg["loggers"]["gmlx"]["level"] == "ERROR"
     cfg = sp.uvicorn_log_config("trace")
@@ -1485,7 +1659,7 @@ def _install_timing_on_fake(monkeypatch):
         def record_failure(self, *, endpoint, model, stream, error):
             self.fail.append((endpoint, model, error))
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     monkeypatch.setattr(gen, "ServerMetricsStore", FakeStore)
     sp.install_request_timing_log()
     return FakeStore
@@ -2021,6 +2195,71 @@ def test_resolve_service_missing_file_degrades(capsys):
     assert "embeddings" in sp_routes._MISSING_SERVICES
 
 
+def _no_extra(monkeypatch, key):
+    """Make the speech extra of ``key`` missing, as on an install without it:
+    importing its package raises ModuleNotFoundError."""
+    monkeypatch.setitem(sys.modules, "mlx_whisper" if key == "stt" else "mlx_audio", None)
+
+
+def _import_fails(monkeypatch, key, cause):
+    """Make the import of the speech extra of ``key`` fail with ``cause``,
+    the way its import helper wraps it."""
+    from gmlx.serve import stt, tts
+    mod, fn = (stt, "import_mlx_whisper") if key == "stt" else (tts, "import_mlx_audio")
+
+    def fails():
+        raise ImportError(f"{key} needs its extra") from cause
+    monkeypatch.setattr(mod, fn, fails)
+
+
+@pytest.mark.parametrize("key, path", [("stt", "/v1/audio/transcriptions"),
+                                       ("tts", "/v1/audio/speech")])
+def test_a_configured_speech_service_without_its_extra_starts_off(monkeypatch, capsys,
+                                                                  key, path):
+    from gmlx.commands.extras import install_hint
+    from gmlx.serve.patches import routes as sp_routes
+    _no_extra(monkeypatch, key)
+    cfg = _one_model_cfg(**{key: "default"})
+    srv._resolve_service_models(cfg, _ns(tts=None))
+    assert getattr(cfg, key) is None
+    err = capsys.readouterr().err
+    assert (f"server.{key} is off: its optional {key} extra is not installed. "
+            f"To add it: {install_hint(key)}\n") in err
+    message = sp_routes.unconfigured_answers(cfg)[path]
+    assert f"optional {key} extra is not installed" in message
+    assert install_hint(key) in message and "gmlx restart" in message
+    assert ".." not in message
+
+
+def test_a_missing_dependency_of_the_tts_extra_turns_it_off(monkeypatch):
+    """mlx-audio is there but a package it imports, from the same extra, is
+    not."""
+    _import_fails(monkeypatch, "tts", ModuleNotFoundError("no spacy", name="spacy"))
+    cfg = _one_model_cfg(tts="default")
+    srv._resolve_service_models(cfg, _ns(tts=None))
+    assert cfg.tts is None
+
+
+@pytest.mark.parametrize("key, cause", [
+    ("stt", ModuleNotFoundError("no numpy", name="numpy")),
+    ("tts", ImportError("cannot import name 'x' from 'mlx_audio'", name="mlx_audio")),
+])
+def test_a_speech_import_error_other_than_its_missing_extra_stops_the_start(
+        monkeypatch, key, cause):
+    _import_fails(monkeypatch, key, cause)
+    with pytest.raises(ImportError, match=f"{key} needs its extra") as got:
+        srv._resolve_service_models(_one_model_cfg(**{key: "default"}), _ns(tts=None))
+    assert got.value.__cause__ is cause
+
+
+@pytest.mark.parametrize("key", ["stt", "tts"])
+def test_a_speech_flag_without_its_extra_stops_the_start(monkeypatch, key):
+    _no_extra(monkeypatch, key)
+    with pytest.raises(ImportError, match=f"optional {key} extra"):
+        srv._resolve_service_models(_one_model_cfg(),
+                                    _ns(**(dict(stt=None, tts=None) | {key: "default"})))
+
+
 def test_resolve_service_malformed_value_fails_fast_naming_key():
     from gmlx.config import ConfigError
 
@@ -2056,6 +2295,42 @@ def test_resolve_service_uses_model_dirs(tmp_path):
     assert got_r == expected
 
 
+@pytest.mark.parametrize("bad", ["config", "modules", "unreadable"])
+def test_serve_starts_when_the_embeddings_folder_cannot_be_read(
+        monkeypatch, tmp_path, capsys, bad):
+    # A malformed or unreadable config.json or modules.json in the
+    # embeddings folder must not stop the server: serve starts, the log says
+    # why, and a request gets the 501.
+    import json
+    import os
+
+    import gmlx.serve.embeddings as emb
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    folder = tmp_path / "bge-m3"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({"model_type": "xlm-roberta"}))
+    if bad == "config":
+        (folder / "config.json").write_text("{")
+    elif bad == "modules":
+        (folder / "modules.json").write_text("[{")
+    else:
+        (folder / "config.json").chmod(0)
+        if os.access(folder / "config.json", os.R_OK):
+            pytest.skip("the file stays readable to this user")
+    calls = _stub_serving_stack(monkeypatch)
+    cfg = _one_model_cfg(embeddings=str(folder))
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert "uvicorn" in calls
+    assert cfg.embeddings == str(folder)
+    assert "[server] embeddings: the configured `server.embeddings` model " \
+           "cannot load: " in capsys.readouterr().err
+    with pytest.raises(emb.EmbeddingsModelError) as ei:
+        emb.run_embeddings("hi", configured_model=cfg.embeddings)
+    assert ei.value.status_code == 501
+
+
 # register_downloads: `gmlx pull` auto-register (a mini sync-models scoped
 # to the downloaded paths)
 def _reg_config(tmp_path, body="models:\n  old:\n    path: old.gguf\n"):
@@ -2065,6 +2340,54 @@ def _reg_config(tmp_path, body="models:\n  old:\n    path: old.gguf\n"):
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(f"server:\n  model_dirs:\n    - {lib}\n" + body)
     return cfg_path, lib
+
+
+def test_sync_writes_the_image_models_the_scan_pairs(monkeypatch, tmp_path,
+                                                     capsys):
+    cfg_path, lib = _sync_config(
+        tmp_path, "models:\n  enc:\n    path: enc.gguf\n")
+    (lib / "enc.gguf").write_bytes(b"x")
+    from gmlx.config import ImageModelCfg, load_config
+    seen = {}
+
+    def scan(specs, dirs, *, images, encoder_ids, **kw):
+        seen["encoder_ids"] = dict(encoder_ids)
+        images.append(ImageModelCfg(
+            id="z-image-turbo-q4", path=str(lib / "d" / "z.gguf"),
+            encoder="enc", vae=str(lib / "v" / "vae.gguf")))
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    # A configured chat model is offered as a shared encoder by its id.
+    assert list(seen["encoder_ids"].values()) == ["enc"]
+    m = load_config(cfg_path).image_models["z-image-turbo-q4"]
+    assert (m.path, m.encoder, m.vae) == ("d/z.gguf", "enc", "v/vae.gguf")
+    assert "add:     z-image-turbo-q4  (image, d/z.gguf)" in \
+        capsys.readouterr().out
+
+
+def test_register_downloads_adds_a_downloaded_image_dit(monkeypatch, tmp_path,
+                                                        capsys):
+    cfg_path, lib = _reg_config(tmp_path)
+    dit = lib / "z.gguf"
+    dit.write_bytes(b"x")
+    from gmlx.config import ImageModelCfg, load_config
+
+    def scan(specs, dirs, *, images, **kw):
+        images.append(ImageModelCfg(id="z", path=str(dit), encoder="old",
+                                    vae=str(lib / "v.gguf")))
+        images.append(ImageModelCfg(id="other", path=str(lib / "o.gguf"),
+                                    encoder="old", vae=str(lib / "v.gguf")))
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(dit)], str(cfg_path))
+    # Only the downloaded DiT registers; a neighbour stays unregistered.
+    assert set(load_config(cfg_path).image_models) == {"z"}
+    assert "registered z in" in capsys.readouterr().out
 
 
 def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys):

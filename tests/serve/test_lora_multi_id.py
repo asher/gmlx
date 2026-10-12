@@ -52,7 +52,7 @@ def test_union_signature_shares_entry_and_forks_on_change():
 
 
 def test_registry_fills_union_over_siblings(tmp_path):
-    pytest.importorskip("mlx_vlm")
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
     import gmlx.serve.bridge_vlm as serving
     from gmlx.config import build_config
     base = tmp_path / "base.gguf"
@@ -123,9 +123,9 @@ def test_lora_salt_is_stable_and_distinct():
 
 
 def test_insert_salts_apc_hash_for_adapted_rows_only():
-    pytest.importorskip("mlx_vlm")
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator as RG
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator as RG
     lora_rows.install_row_channel()
     lora_rows.ensure_rows(2)
 
@@ -202,7 +202,7 @@ def test_second_dense_adapter_installs_as_slot_and_rows_select_it():
 
 
 def test_second_expert_adapter_installs_as_slot():
-    from mlx_lm.models.switch_layers import SwitchGLU
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
     class _Holder(nn.Module):
         def __init__(self, glu):

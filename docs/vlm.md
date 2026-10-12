@@ -76,12 +76,13 @@ projector and architecture that it found. gmlx supports these families:
 |--------|----------------------------|----------|-------|
 | LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | It needs `--hf-source llava-hf/llava-1.5-7b-hf`, because the GGUF has no image processor. |
 | Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | Vision quality is poor, because the published companion files were converted with a defect. |
-| Qwen3.5 and Qwen3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
+| Qwen3-VL | `qwen3vl_merger` with `qwen3vl` | Qwen3-VL-8B-Instruct | Each image becomes 64 to 4096 tokens. The vision encoder runs in float32. |
+| Qwen3.5 and Qwen3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | `GMLX_QWEN35_VISION_FP32=1` runs the vision encoder in float32. |
 | Qwen3.8-Flash-Next | `qwen3vl_merger` with `qwen4exp` | Qwen3.8-Flash-Next | |
 | Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | It reads images and audio. |
 | gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | It reads images and audio. |
 | gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | It reads images, and audio when the companion has an audio encoder. |
-| GLM-5.3-Flash | `glm5next` | GLM-5.3-Flash | |
+| GLM-5.3-Flash | `glm5v` with `glm5-next` | GLM-5.3-Flash | The first uploads name both files `glm5next`, and those load too. |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
@@ -113,10 +114,9 @@ have limits:
 | `--adapter` | The command refuses it, because a LoRA adapter applies only to text models. |
 | `--stop`, `--xtc-probability`, `--xtc-threshold` | `run` ignores them with a warning. |
 
-Chat and the server place media differently in a conversation. Chat keeps
-each image with the turn that sent it, so a later question about an
-earlier image reads the right history. Once a conversation holds media,
-though, chat reads the whole conversation and encodes the media again on
-every turn. The server puts all of a conversation's images on its last
-user message, so a follow-up question after an image misses the prompt
-cache from the point where the images moved.
+Chat and the server keep each image with the user message that sent it,
+so a later question about an earlier image reads the right history. Once a
+conversation holds media, chat reads the whole conversation and encodes
+the media again on every turn. The server reuses the cached earlier turns
+when a turn adds an image, on Gemma-4 and on the qwen35 and qwen35moe
+architectures.

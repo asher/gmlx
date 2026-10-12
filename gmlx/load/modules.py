@@ -26,10 +26,10 @@ import mlx.nn as nn
 import numpy as np
 from mlx.utils import tree_map_with_path
 
-from mlx_lm.models.switch_layers import SwitchLinear
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
 
 try:  # absorbed-MLA module (deepseek_v3 family); absent on older mlx-lm.
-    from mlx_lm.models.mla import MultiLinear
+    from gmlx._vendor.mlx_lm.models.mla import MultiLinear
 except Exception:  # pragma: no cover - depends on installed mlx-lm version
     MultiLinear = None
 
@@ -42,8 +42,9 @@ from mlx_kquant.nn import (
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 import gmlx.lora_rows as lora_rows
+from gmlx import mlx_guards
 from .dtypes import activation_dtype
-from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -52,24 +53,32 @@ _SWITCH_TYPES = None
 def switch_layer_types() -> tuple[tuple[type, ...], tuple[type, ...]]:
     """(SwitchLinear origins, SwitchGLU origins) for identity checks.
 
-    mlx-vlm 0.6.4 vendored mlx-lm's switch_layers module, so models built
-    from mlx-vlm instantiate its copies of these classes - functionally
+    mlx-vlm vendors mlx-lm's switch_layers module, so models built from
+    mlx-vlm instantiate its copies of these classes - functionally
     identical but distinct types. Every isinstance/type check on MoE expert
     layers must accept either origin. Lazy: importing mlx_vlm here would pull
     the whole VLM stack into plain text-model loads.
     """
     global _SWITCH_TYPES
     if _SWITCH_TYPES is None:
-        from mlx_lm.models.switch_layers import SwitchGLU
-        lin, glu = (SwitchLinear,), (SwitchGLU,)
-        try:
-            from mlx_vlm.models import switch_layers as _vlm_sl
-            lin += (_vlm_sl.SwitchLinear,)
-            glu += (_vlm_sl.SwitchGLU,)
-        except ImportError:  # mlx-vlm <= 0.6.3 (uses mlx-lm's) or absent
-            pass
-        _SWITCH_TYPES = (lin, glu)
+        from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+        from gmlx._vendor.mlx_vlm.models import switch_layers as _vlm_sl
+
+        _SWITCH_TYPES = ((SwitchLinear, _vlm_sl.SwitchLinear),
+                         (SwitchGLU, _vlm_sl.SwitchGLU))
     return _SWITCH_TYPES
+
+
+def _glu_block_call(glu, x, indices):
+    """``SwitchGLU`` forward through the mlx-lm body, which is also the
+    mlx-vlm 0.6 body: a block of positions takes one gather per projection.
+    The mlx-vlm 0.7 body sends 1 < T <= 8 positions through a per-position
+    loop when its exact kernels decline, and they decline on every gmlx
+    switch linear. The fused subclasses fall back here, never to
+    ``super().__call__``."""
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+    return SwitchGLU.__call__(glu, x, indices)
 
 
 class NativeFPSwitchLinear(nn.Module):
@@ -441,7 +450,7 @@ def _make_fused_nativefp(base_cls, caps):
                 y = kq.gather_qmv_bias(
                     h, down.weight, down.scales, down.bias, idx)
                 return y.reshape(*indices.shape, y.shape[-1])
-            return super().__call__(x, indices)
+            return _glu_block_call(self, x, indices)
 
     _FusedNativeFPSwitchGLU.__name__ = "_FusedNativeFPSwitchGLU"
     return _FusedNativeFPSwitchGLU
@@ -735,7 +744,7 @@ def _make_fused_kquant(base_cls, caps):
                 if y is None:
                     y = self._kq_prefill_sorted(x, indices, scores)
                 if y is None:
-                    y = super().__call__(x, indices)
+                    y = _glu_block_call(self, x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
                 if getattr(self, "_kq_shexp_mod", None) is not None:
                     return y  # unmixed: caller mixes + adds its shexp
@@ -772,7 +781,7 @@ def _make_fused_kquant(base_cls, caps):
                 gu = _build_gateup_concat(self)
                 object.__setattr__(self, "_kq_gate_up", gu)
                 object.__setattr__(self, "_kq_gate_up_pending", False)
-            from mlx_lm.models.switch_layers import (
+            from gmlx._vendor.mlx_lm.models.switch_layers import (
                 _gather_sort, _scatter_unsort)
             x = mx.expand_dims(x, (-2, -3))
             x, idx, inv_order = _gather_sort(x, indices)
@@ -814,7 +823,7 @@ def _make_fused_kquant(base_cls, caps):
             off or does not fit. None when ineligible."""
             if not self._kq_mix_prefill_ok(indices, scores):
                 return None
-            from mlx_lm.models.switch_layers import _gather_sort
+            from gmlx._vendor.mlx_lm.models.switch_layers import _gather_sort
             x = mx.expand_dims(x, (-2, -3))
             x, idx, inv_order = _gather_sort(x, indices)
             x_up = self.up_proj(x, idx, sorted_indices=True)
@@ -1648,12 +1657,19 @@ def _make_fused_gemma_layer(base_cls, caps):
             return glue
 
         def __call__(self, x, mask=None, cache=None,
-                     per_layer_input=None, shared_kv=None, offset=None):
+                     per_layer_input=None, shared_kv=None, offset=None,
+                     keep_last=None):
             d = x.shape[-1]
             t = x.size // d
             # Popped on every call, so no later call can use a stale pair.
             ho = self.__dict__.pop("_kq_handoff", None)
             glue = getattr(self, "_kq_glue", None)
+            if keep_last is not None:
+                # A forward that keeps its last columns takes the stock
+                # body, which writes the cache from all of them.
+                return super().__call__(
+                    x, mask, cache, per_layer_input=per_layer_input,
+                    shared_kv=shared_kv, offset=offset, keep_last=keep_last)
             if (
                 glue is False
                 or not _FUSED_MOE_ENABLED
@@ -1856,6 +1872,49 @@ def install_fused_moe_glu(model) -> int:
     )
 
 
+_BLOCK_ROUTED_CLASSES: dict = {}
+
+
+def install_switch_glu_block_routing(model) -> int:
+    """Class-swap each mlx-vlm ``SwitchGLU`` whose gate or up projection is
+    not an mlx-vlm ``QuantizedSwitchLinear`` onto a subclass that runs
+    ``_glu_block_call``, then applies the mlx-vlm weight, shared-expert and
+    residual combine as the stock call does.
+
+    Those are the SwitchGLUs on which the mlx-vlm 0.7 exact kernels always
+    decline: every stack over gmlx's K-quant, native-fp or plain switch
+    linears. Their stock call runs 1 < T <= 8 positions (the MoE verify
+    block) one position at a time; the swap restores the mlx-vlm 0.6
+    routing, one gather over the block. Other widths route as before.
+
+    Call after ``install_fused_moe_glu``: the fused classes already fall
+    back to ``_glu_block_call``, and the fused eligibility checks match the
+    stock classes by exact type. No-op when mlx-vlm's switch_layers is not
+    loaded. Returns the number of instances swapped."""
+    import sys
+
+    vsl = sys.modules.get("gmlx._vendor.mlx_vlm.models.switch_layers")
+    if vsl is None:
+        return 0
+    base, qsl = vsl.SwitchGLU, vsl.QuantizedSwitchLinear
+    routed = _BLOCK_ROUTED_CLASSES.get(base)
+    if routed is None:
+        class _BlockRoutedSwitchGLU(base):
+            def __call__(self, x, indices, weights=None, shared=None,
+                         residual=None):
+                return self._combine(_glu_block_call(self, x, indices),
+                                     weights, shared, residual)
+
+        routed = _BLOCK_ROUTED_CLASSES[base] = _BlockRoutedSwitchGLU
+    n = 0
+    for _, m in model.named_modules():
+        if type(m) is base and not (isinstance(m.up_proj, qsl)
+                                    and isinstance(m.gate_proj, qsl)):
+            m.__class__ = routed
+            n += 1
+    return n
+
+
 class LoRAKQuantLinear(nn.Module):
     """A base Linear (kquant or float) with a LoRA delta applied live.
 
@@ -1934,12 +1993,11 @@ class LoRAKQuantLinear(nn.Module):
         for i, (_a, _b, _scale, slot) in enumerate(self._kq_extra):
             a_t, b_t = self._extra_tables(i, x.dtype)
             z = x @ a_t
-            f = lora_rows.row_factor(slot, z.dtype,
-                                     (z.shape[0],) + (1,) * (z.ndim - 1))
+            f = lora_rows.dense_row_factor(slot, z.shape[:-1], z.dtype)
             if f is not None:
                 z = z * f
             if y.dtype == b_t.dtype:
-                y = mx.addmm(y, z, b_t)
+                y = mlx_guards.addmm(y, z, b_t)
             else:
                 y = y + (z @ b_t).astype(y.dtype)
         return y
@@ -1950,11 +2008,14 @@ class LoRAKQuantLinear(nn.Module):
                 and isinstance(self.base, KQuantLinear)
                 # A folded base rotates x before its matmul; the delta
                 # multiplies the unrotated x, so it stays outside the op.
-                and getattr(self.base, "_hadamard", None) is None):
+                and getattr(self.base, "_hadamard", None) is None
+                # Past a few rows or ranks the stock ops are faster.
+                and lora_epilogue_wins(x.size // x.shape[-1],
+                                       self["lora_a"].shape[0])):
             # In-op epilogue: the delta rides the base matmul's primitive
             # (zero extra graph ops); the row factor goes in as f32 rows.
             a_t, b_t = self._tables(x.dtype)
-            rows = lora_rows.dense_rows(self.slot, x.size // x.shape[-1])
+            rows = lora_rows.dense_input_rows(self.slot, x.shape[:-1])
             y = self.base(x, lora=(a_t, b_t, rows))
             return self._add_extra(x, y) if self._kq_extra else y
         y = self.base(x, *args, **kwargs)
@@ -1962,13 +2023,13 @@ class LoRAKQuantLinear(nn.Module):
         z = x @ a_t                                   # (..., r)
         # The published row factor rides the rank-r intermediate, cast to
         # its dtype (an f32 factor would promote the delta to f32); the
-        # cast/reshaped vector is cached per publish.
-        f = lora_rows.row_factor(self.slot, z.dtype,
-                                 (z.shape[0],) + (1,) * (z.ndim - 1))
+        # cast/reshaped vector is cached per publish. A flat (rows, D)
+        # input gets one value per row, as the epilogue's rows do.
+        f = lora_rows.dense_row_factor(self.slot, z.shape[:-1], z.dtype)
         if f is not None:
             z = z * f
         if y.dtype == b_t.dtype:
-            y = mx.addmm(y, z, b_t)
+            y = mlx_guards.addmm(y, z, b_t)
         else:
             y = y + (z @ b_t).astype(y.dtype)
         return self._add_extra(x, y) if self._kq_extra else y
@@ -2019,7 +2080,49 @@ try:
     import mlx_kquant as _kq_mod
     _KQ_LORA_EPILOGUE = bool(getattr(_kq_mod, "HAS_LORA_EPILOGUE", False))
 except ImportError:                          # pragma: no cover
+    _kq_mod = None
     _KQ_LORA_EPILOGUE = False
+
+# GMLX_LORA_EPILOGUE: how a dense adapter layer picks between the in-op
+# epilogue and the stock-op delta. ``auto`` reads the table below, and
+# ``always`` and ``never`` force one path wherever the kernel takes it.
+_LORA_EPILOGUE_MODES = ("auto", "always", "never")
+_LORA_EPILOGUE_MODE = env_choice("GMLX_LORA_EPILOGUE", "auto",
+                                 _LORA_EPILOGUE_MODES)
+# NAX flag -> rows of (largest rank, largest activation rows). The epilogue
+# runs when the first row whose rank bound holds also holds for the rows,
+# and the stock ops run otherwise. A GPU class with no entry has no sweep,
+# and keeps the epilogue for every rank and row count. The NAX row is the
+# rule with the smallest worst loss over the three swept layer shapes
+# (3840 to 11520, 4096 to 4096, 10240 to 3840): the row bound that suits a
+# narrow output is higher than the one that suits a wide output, and one
+# bound per rank serves both.
+_LORA_EPILOGUE_GATE = {
+    True: ((8, 32), (16, 16), (32, 8)),
+}
+_NAX: bool | None = None
+
+
+def _nax() -> bool:
+    global _NAX
+    if _NAX is None:
+        _NAX = bool(getattr(_kq_mod, "nax_available", lambda: False)())
+    return _NAX
+
+
+def lora_epilogue_wins(rows: int, rank: int) -> bool:
+    """Whether a dense adapter layer of ``rank`` runs ``rows`` activation
+    rows through the in-op epilogue, by GMLX_LORA_EPILOGUE and the sweep
+    table of this GPU class."""
+    if _LORA_EPILOGUE_MODE != "auto":
+        return _LORA_EPILOGUE_MODE == "always"
+    table = _LORA_EPILOGUE_GATE.get(_nax())
+    if table is None:
+        return True
+    for max_rank, max_rows in table:
+        if rank <= max_rank:
+            return rows <= max_rows
+    return False
 
 
 def _lora_epilogue_kwargs(lo, idx, dtype):
@@ -2553,7 +2656,8 @@ def dequantize_unattachable_leaves(model: nn.Module,
 
 def install_kquant_modules(model: nn.Module,
                            hf_kquant_meta: dict[str, str],
-                           native_fp_wire: bool = False) -> int:
+                           native_fp_wire: bool = False,
+                           act_dtype: mx.Dtype | None = None) -> int:
     """Swap leaf modules for kquant equivalents.
 
     Walks ``model.leaf_modules()``; replaces each ``Linear`` / ``Embedding`` /
@@ -2564,6 +2668,9 @@ def install_kquant_modules(model: nn.Module,
     ``native_fp_wire`` routes mxfp4/nvfp4 experts to ``KQuantSwitchLinear``
     (zero-copy GGUF wire bytes, streamable) instead of ``NativeFPSwitchLinear``
     (MLX packed layout, needs the eager repack).
+
+    ``act_dtype`` is the embedding's output dtype, which seeds the graph.
+    None reads :func:`activation_dtype`.
 
     A codec'd leaf whose module class matches no branch raises: the packed
     wire bytes would otherwise be loaded into a stock float module and fail
@@ -2624,7 +2731,7 @@ def install_kquant_modules(model: nn.Module,
             # The embedding's output dtype seeds the whole graph: every
             # downstream kquant matmul returns its activation dtype.
             return KQuantEmbedding(
-                num_emb, dims, codec, out_dtype=activation_dtype()
+                num_emb, dims, codec, out_dtype=act_dtype or activation_dtype()
             )
         if isinstance(module, _switch_linear_types):
             n_experts, out_dims, in_dims = module.weight.shape

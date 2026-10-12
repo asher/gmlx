@@ -9,8 +9,8 @@ from __future__ import annotations
 
 
 import mlx.core as mx  # noqa: E402
-from mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
-from mlx_lm.utils import _get_classes  # noqa: E402
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
+from gmlx._vendor.mlx_lm.utils import _get_classes  # noqa: E402
 
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
 from gmlx.load.loader import moe_streaming_active  # noqa: E402
@@ -101,7 +101,7 @@ def test_offload_overram_streaming_mode(monkeypatch):
     )  # ~1 KB budget
     import importlib
 
-    mlg = importlib.import_module("mlx_lm.generate")
+    mlg = importlib.import_module("gmlx._vendor.mlx_lm.generate")
     real_set_wired = mx.set_wired_limit
     real_wired_ctx = mlg.wired_limit
     try:

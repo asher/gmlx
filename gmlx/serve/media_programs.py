@@ -145,13 +145,17 @@ def _limit_seconds(rate: int, channels: int) -> str:
     return str(math.ceil(mg.AUDIO_MAX_SAMPLES / (rate * channels)) + 1)
 
 
-def decode(source, field: str = "audio") -> tuple:
-    """Decode audio bytes or an audio file to 16-bit samples, and give the
-    sample rate and the channel count that ffprobe reads. It takes the
-    place of mlx-audio's ``_decode_ffmpeg`` and gives the same result.
-    Audio over :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples, or at
-    a sample rate over :data:`~.patches.media_gate.AUDIO_MAX_RATE`, is
-    refused, and the decode stops at that count."""
+def decode(source, field: str = "audio", sample_rate: int | None = None,
+           nchannels: int | None = None) -> tuple:
+    """Decode audio bytes or an audio file to 16-bit samples at
+    ``sample_rate`` with ``nchannels`` channels, each the one that ffprobe
+    reads when not given, and give the samples, the rate and the channel
+    count. It takes the place of mlx-audio's ``_decode_ffmpeg`` and gives
+    the same result. Audio over
+    :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples at the output
+    rate and channel count, or at a sample rate over
+    :data:`~.patches.media_gate.AUDIO_MAX_RATE`, is refused, and the decode
+    stops at that count."""
     import numpy as np
 
     from .patches import media_gate as mg
@@ -172,6 +176,9 @@ def decode(source, field: str = "audio") -> tuple:
         raise mg.audio_rate_refusal(field, rate)
     if channels <= 0:
         raise RuntimeError(f"ffprobe reads {channels} channels")
+    rate, channels = sample_rate or rate, nchannels or channels
+    if rate > mg.AUDIO_MAX_RATE:
+        raise mg.audio_rate_refusal(field, rate)
     # The duration in the header refuses a long clip before the decode. It
     # can be wrong, so the decode stops at the limit too.
     try:

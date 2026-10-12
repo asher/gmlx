@@ -97,9 +97,9 @@ def test_kv_env_prices_the_table(rig, monkeypatch):
     mtp = cap.derive_table(
         path, env={"KV_BITS": "8", "MLX_VLM_GGUF_SPECULATIVE": "1"})
     assert mtp["max_ctx"] == base["max_ctx"]
-    # upstream drops kv quantization for qat-marked ids
+    # a qat-marked id loads with its kv cache quantized
     qat = cap.derive_table(path + "-qat", env={"KV_BITS": "8"})
-    assert qat["max_ctx"] == base["max_ctx"]
+    assert qat["max_ctx"] == kv8["max_ctx"]
     # malformed widths keep fp16 pricing
     bad = cap.derive_table(path, env={"KV_BITS": "5"})
     assert bad["max_ctx"] == base["max_ctx"]
@@ -140,10 +140,12 @@ def test_unset_scheme_prices_what_auto_picks(kvarn_ops_ok):
         assert bpe[0] == packed_bytes_per_element(8, 64)
     bpe, regions, _ = cap._boot_pricing(hybrid, {"KV_BITS": "8"}, "m", CFG)
     assert regions is None and bpe[0] == packed_bytes_per_element(8, 64)
-    # Off and the qat drop stay fp16.
+    # Off stays fp16, and a qat-marked id prices as any other.
     assert cap._boot_pricing(hybrid, {}, "m", cfg) == (None, None, None)
-    assert cap._boot_pricing(hybrid, {"KV_BITS": "6"}, "m-qat",
-                             cfg) == (None, None, None)
+    assert (cap._boot_pricing(hybrid, {"KV_BITS": "6"}, "m-qat", cfg)
+            == cap._boot_pricing(hybrid, {"KV_BITS": "6"}, "m", cfg))
+    assert (cap._boot_pricing(dense, {"KV_BITS": "8"}, "m-qat", cfg)
+            == cap._boot_pricing(dense, {"KV_BITS": "8"}, "m", cfg))
 
 
 def test_attention_that_cannot_read_packed_kv_prices_fp16(kvarn_ops_ok):

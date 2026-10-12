@@ -1,7 +1,8 @@
 """Owned full-attention forward for qwen3.5/3.6 MTP targets.
 
-Subclasses mlx-vlm's ``Qwen3_5Attention``; the owned constructors
-build it directly (``rebind_attn`` arms stock-built trees in tests).
+Subclasses the vendored mlx-vlm 0.6.15 ``Qwen3_5Attention``
+(``language``); the owned constructors build it directly (``rebind_attn``
+arms base-built trees in tests).
 The owned ``__call__`` composes three formerly patch-installed routes:
 
 - ragged left-padded S=1 decode through the in-tree ragged SDPA
@@ -17,15 +18,13 @@ routes view-typed keys onto the kvarn SDPA path (fused decode with
 per-row starts, materialized prefill/verify).
 
 The ragged kernel sources, plan/block tables, and cached-array helpers
-are verbatim in-tree copies, equality-tested against the pinned
-mlx-vlm release. Projections go through ``qwen35_verify_linear``, the
+are verbatim in-tree copies, equality-tested against the vendored base. Projections go through ``qwen35_verify_linear``, the
 rotary apply through ``qwen35_rope``; the quantized-KV routing calls
 the base module symbol at call time so the batch-mask fix stays
 engaged under its own ledger pin.
 
-Owned loads never read the qwen3_5 module globals; the
-``GMLX_QWEN_OWNED=0`` fallback runs stock, and the patch modules stay
-in-tree as test oracles. ``GMLX_QWEN35_VERIFY_FOLD=0``,
+Owned loads never read the vendored module globals, and the patch
+modules stay in-tree as test oracles. ``GMLX_QWEN35_VERIFY_FOLD=0``,
 ``GMLX_VERIFY_RAGGED_MASK=0`` and ``GMLX_RAGGED_UNIFIED_PLAN=0``
 disable the corresponding routes, read per call.
 """
@@ -35,14 +34,16 @@ from typing import Any, Optional
 
 import mlx.core as mx
 
-from mlx_vlm.models import base as _B
-from mlx_vlm.models.qwen3_5 import language as _L
+from gmlx._vendor.mlx_vlm.models import base as _B
 
 import gmlx.load.loadlog as loadlog
+from gmlx.cache import attention as _attn
+from gmlx.device import metal_info
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.cache.kvarn_cache import KVarNView
 from gmlx.load.hadamard_modules import fold_of, glu_rotate
+from . import language as _L
 from .gdn import owned_gdn_active as owned_attn_active  # one switch
 from .owned import _qwen3_5_left_padding_info
 from .rope import apply_multimodal_rotary_pos_emb as _apply_mrope
@@ -298,7 +299,7 @@ _QWEN3_5_RAGGED_SDPA_TWO_PASS_2_SOURCE = r"""
 
 @lru_cache(maxsize=1)
 def _qwen3_5_device_arch_suffix() -> str:
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    info = metal_info() or {}
     return str(info.get("architecture", ""))[-1:]
 
 
@@ -526,9 +527,8 @@ def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
     Mirrors mlx-vlm's base dispatch minus the TurboQuant branches. gmlx
     never builds those caches, but both TurboQuant cache classes set
     ``bits``, so raise before the affine quantized branch misreads
-    their packing. The quantized branch resolves the base module symbol
-    at call time so the batch-mask fix patch stays engaged (pinned
-    under the quantized-SDPA ledger).
+    their packing. The quantized branch calls the owned quantized SDPA,
+    which carries the batch mask fix.
     """
     if isinstance(cache, (_B.TurboQuantKVCache, _B.BatchTurboQuantKVCache)):
         raise RuntimeError(
@@ -539,7 +539,7 @@ def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
     if hasattr(cache, "bits"):
         if sinks is not None:
             raise ValueError("Quantized SDPA does not support attention sinks.")
-        return _B.quantized_scaled_dot_product_attention(
+        return _attn.quantized_scaled_dot_product_attention(
             queries,
             keys,
             values,
@@ -757,11 +757,10 @@ def _kvarn_attention(queries, *, cache, scale, mask):
 def _verify_attention(queries, keys, values, *, cache, scale, mask):
     """Composed verify/left-padded-decode attention resolver.
 
-    Route order mirrors the patch chain the stock fallback installs:
-    the batched masked-SDPA claim first (padded L>1 single call,
-    unpadded L>1 "causal" call), then the B=1 fold, then the group
+    Route order: the batched masked-SDPA claim first (padded L>1 single
+    call, unpadded L>1 "causal" call), then the B=1 fold, then the group
     loop. Returns None for unpadded S=1 decode so the caller's general
-    path takes it, exactly like the stock helper contract.
+    path takes it, as upstream's helper does.
     """
     if hasattr(cache, "bits") or queries.ndim != 4 or keys.ndim != 4:
         return _folded_or_group_attention(

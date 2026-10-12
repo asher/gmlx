@@ -155,6 +155,9 @@ def prewarm(worker: SingleWorker, loader, label: str, *,
             print(f"[server] {label} model is missing on disk ({exc})"
                   + (f"; {missing_hint}" if missing_hint else ""),
                   file=sys.stderr)
+        except SubserviceRequestError as exc:
+            # The model cannot load; requests get this reason, not a retry.
+            print(f"[server] {label}: {exc}", file=sys.stderr)
         except Exception as exc:          # noqa: BLE001 - best-effort warm
             print(f"[server] {label} prewarm failed ({exc}); "
                   f"will load on first request", file=sys.stderr)

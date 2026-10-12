@@ -40,6 +40,7 @@ different place:
 | `elia` | A terminal chat app | `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME` |
 | `open-webui` | A chat app in the browser | `OPENAI_API_BASE_URL` and related variables |
 | `dsh` | DeepSeek Harness, an agent app in the browser | `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch` |
+| `comfyui` | ComfyUI, a node editor for image workflows | `GMLX_BASE_URL` and related variables, which the gmlx node pack reads |
 
 Where `launch` adds a provider to a tool's own file, it keeps everything
 else in the file. It refuses to change a file it cannot parse, and never
@@ -60,7 +61,8 @@ depends on the client:
 | `goose` | goose's `config.yaml` |
 | `elia` | The `XDG_CONFIG_HOME` folder |
 | `open-webui` | Open WebUI's data folder, in place of `~/.open-webui` |
-| `hermes` | Refused. Set `HERMES_HOME` to use another folder. |
+| `hermes` | Refused. Set `HERMES_HOME` to use another hermes folder. |
+| `comfyui` | Refused. `--comfyui-dir` names the ComfyUI folder. |
 | `claude-code` | Nothing, because Claude Code gets only environment variables |
 
 Container mode refuses `--config-path`, because the settings go into the
@@ -198,6 +200,13 @@ Open WebUI gets a feature for each service the gmlx server runs, as
 | `rerank` | Hybrid search with the server's reranker. |
 | `stt` | Speech input. |
 | `tts` | Spoken replies. |
+| An [image model](images.md) | Image generation with the server's default image model, at the `defaults.size` of its entry or else 1024x1024, and image edits when that model edits. |
+
+Open WebUI keeps a setting in its database once you save it in its admin
+panel, and from then on the saved value wins over the one `launch` passes.
+To have `launch` set them on every run, export `ENABLE_PERSISTENT_CONFIG=false`
+before you launch. Open WebUI then forgets at each restart the settings you
+change in its panel.
 
 ### dsh
 
@@ -230,3 +239,21 @@ command, with `--config-only`.
 dsh's `web_search` tool uses DeepSeek's search service and needs
 `DEEPSEEK_API_KEY`. Set `DSH_TELEMETRY_MODE=DISABLED` to stop dsh from
 sending feedback conversations to DeepSeek.
+
+### comfyui
+
+ComfyUI is a node editor for image workflows, and the gmlx node pack runs
+the server's image models in its graphs. `launch` runs ComfyUI from the
+folder `--comfyui-dir` names, else the folder it used last, else
+`~/ComfyUI`, else the ComfyUI it finds, on that folder's own Python
+environment, and passes it the server's address, API key and image model.
+Before the server starts, it puts the gmlx nodes into that ComfyUI as
+`gmlx comfyui install` does. With no ComfyUI on the Mac, it prints how to
+get one and exits with 69, as for any client that is not installed. A
+ComfyUI older than the gmlx nodes need exits with 1 and the steps that
+update it. With several ComfyUI installs and no `--comfyui-dir`, it lists
+them and exits with 2. ComfyUI runs on the Mac, where it uses the GPU, so
+`launch` refuses `--container` and the other container flags for it.
+[ComfyUI](comfyui.md) covers the install, Comfy Desktop and the graphs,
+and the [ComfyUI reference](comfyui-reference.md) the launch options and
+what the nodes refuse.

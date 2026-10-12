@@ -8,6 +8,9 @@ server uses.
 ``integration`` + ``slow``; skips unless ``KQUANT_TEST_MTP_GGUF`` points at a
 GGUF with MTP support. For assistant-model drafters (gemma-4), also set
 ``KQUANT_TEST_MTP_DRAFT_GGUF`` to the companion drafter GGUF.
+``KQUANT_TEST_MTP_STREAM=experts`` loads the target as ``--stream-experts``
+does, for a model over the GPU budget: a declared lookup table or the
+routed experts stream from the file.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import contextlib
 import logging
 import os
 import re
+import warnings
 
 import pytest
 
@@ -88,9 +92,17 @@ def mtp_draft_gguf():
 @pytest.fixture(scope="session")
 def mtp_model(mtp_gguf, mtp_draft_gguf):
     from gmlx.spec.mtp_load import load_mtp_model
-    return load_mtp_model(
-        mtp_gguf, draft_gguf_path=mtp_draft_gguf, verbose=False
+    stream = os.environ.get("KQUANT_TEST_MTP_STREAM") == "experts"
+    loaded = load_mtp_model(
+        mtp_gguf, draft_gguf_path=mtp_draft_gguf, verbose=False,
+        wire=not stream,
     )
+    if stream:
+        from gmlx.stream.expert_streaming import install_expert_streaming
+        model = loaded[0]
+        install_expert_streaming(getattr(model, "language_model", model),
+                                 gguf_path=mtp_gguf)
+    return loaded
 
 
 def _build_prompt(tokenizer, n_tokens, seed=_SEED):
@@ -155,15 +167,83 @@ def _build_text_prompt(tokenizer, n_tokens, start=0):
     return ids[:cut]
 
 
-def _ref_first_token(model, ids):
-    """Un-chunked greedy first token from the bare language model."""
-    from mlx_lm.models.cache import make_prompt_cache
+def _head_last(lm, input_ids, cache):
+    """Last-row logits of one forward. A model that skips its head on
+    request and returns its final hidden states gets the head on the last
+    row only: logits for every position of a 16k prompt take 7.6 GiB. Any
+    other model keeps the full head."""
+    if hasattr(lm, "speculative_logits_from_hidden"):
+        out = lm(input_ids, cache=cache, return_hidden=True, skip_logits=True)
+        hidden = getattr(out, "hidden_states", None)
+        if getattr(out, "logits", None) is None and hidden:
+            last = lm.speculative_logits_from_hidden(hidden[-1][:, -1:])
+            return last[0, -1]
+    else:
+        out = lm(input_ids, cache=cache)
+    logits = out.logits if hasattr(out, "logits") else out
+    return logits[0, -1]
+
+
+def _last_logits(model, ids, chunks=None, tail=1):
+    """Float32 logits of the last position from the bare language model:
+    one un-chunked forward, or with ``chunks`` the engine's order, which
+    runs ``ids`` up to its last ``tail`` tokens in prefill chunks of those
+    lengths and then each of those tokens alone, as decode does."""
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
+    mx.clear_cache()
     lm = model.language_model
     cache = make_prompt_cache(lm)
-    input_ids = mx.array([ids], dtype=mx.int32)
-    out = lm(input_ids, cache=cache)
-    logits = out.logits if hasattr(out, "logits") else out
-    return int(mx.argmax(logits[:, -1, :], axis=-1).item())
+    if chunks is None:
+        parts = [list(ids)]
+    else:
+        body, parts, pos = list(ids[:-tail]), [], 0
+        assert sum(chunks) == len(body), (chunks, len(body))
+        for n in chunks:
+            parts.append(body[pos:pos + n])
+            pos += n
+        parts += [[t] for t in ids[-tail:]]
+    for part in parts:
+        row = _head_last(lm, mx.array([part], dtype=mx.int32), cache)
+        mx.eval(row)
+    return row.astype(mx.float32)
+
+
+# The last few one-forward rows, so a divergence check does not run a 16k
+# reference twice.
+_ONE_FORWARD: dict = {}
+
+
+def _ref_first_token(model, ids):
+    """Un-chunked greedy first token from the bare language model."""
+    row = _last_logits(model, ids)
+    if len(_ONE_FORWARD) >= 4:
+        _ONE_FORWARD.pop(next(iter(_ONE_FORWARD)))
+    _ONE_FORWARD[tuple(ids)] = row
+    return int(mx.argmax(row).item())
+
+
+# _run_mtp's prefill step.
+_ENGINE_STEP = 2048
+
+# Prefill chunk lengths of the engine's B=1 runs, by prompt. The engine
+# folds short tails, decays the step with depth and takes an arch's own
+# base step, so its chunks are recorded rather than rebuilt.
+_ENGINE_CHUNKS: dict = {}
+
+
+def _engine_chunks(ids):
+    """Prefill chunk lengths of the engine's B=1 run on ``ids``. A prompt
+    with no such run (a batch row, an APC hit) gets chunks of _ENGINE_STEP
+    with a short tail folded in, which approximates the engine's order."""
+    rec = _ENGINE_CHUNKS.get(tuple(ids))
+    if rec is not None:
+        return rec
+    n = len(ids) - 1
+    chunks = [min(_ENGINE_STEP, n - i) for i in range(0, n, _ENGINE_STEP)]
+    if len(chunks) > 1 and chunks[-1] < int(
+            os.environ.get("GMLX_PREFILL_MIN_TAIL", "48")):
+        chunks[-2] += chunks.pop()
+    return chunks
 
 
 # Two engine paths compared under greedy agree token for token until the
@@ -175,34 +255,50 @@ def _ref_first_token(model, ids):
 _NEAR_TIE_LOGITS = 1.0
 
 
-def _greedy_margin(model, ids, a, b):
-    """Bare-model logit gap logits[a] - logits[b] at the position after ids
-    (teacher-forced, fp16 KV)."""
-    from mlx_lm.models.cache import make_prompt_cache
-    lm = model.language_model
-    cache = make_prompt_cache(lm)
-    out = lm(mx.array([ids], dtype=mx.int32), cache=cache)
-    logits = out.logits if hasattr(out, "logits") else out
-    row = logits[0, -1, :].astype(mx.float32)
-    return float(row[a] - row[b])
+def _near_top(row, t):
+    return float(mx.max(row) - row[t]) <= _NEAR_TIE_LOGITS
 
 
 def _assert_greedy_match(model, ids, ref, got, label):
     """``got`` reproduces ``ref`` token for token, except that the first
-    divergence is accepted at a near tie (see _NEAR_TIE_LOGITS); the two
-    streams have legitimately forked there, so nothing after it is
-    compared."""
+    divergence is accepted as a fork the bare model makes too: a near tie
+    (see _NEAR_TIE_LOGITS), or a position where the bare model's greedy pick
+    is one stream's token in one forward and the other's in the engine's
+    order. A model can move its logits by more than the band with the order
+    alone: gemma-4-26B-A4B does on a repeated paragraph, and stock llama.cpp
+    changes its own greedy token with its batch size there. Nothing after
+    the fork is compared, and an accepted order fork is reported as a
+    warning."""
     n = min(len(ref), len(got))
     for i in range(n):
         if ref[i] == got[i]:
             continue
-        margin = _greedy_margin(model, list(ids) + list(ref[:i]), ref[i], got[i])
-        assert abs(margin) <= _NEAR_TIE_LOGITS, (
-            f"{label}: diverged at token {i}: {list(got[:i + 2])} vs "
-            f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits "
-            f"(a rounding fork is within {_NEAR_TIE_LOGITS})"
-        )
+        a, b = ref[i], got[i]
+        prefix = list(ids) + list(ref[:i])
+        one = _ONE_FORWARD.get(tuple(prefix))
+        if one is None:
+            one = _last_logits(model, prefix)
+        margin = float(one[a] - one[b])
+        if abs(margin) <= _NEAR_TIE_LOGITS:
+            return
+        rep = _last_logits(model, prefix, _engine_chunks(ids), tail=i + 1)
+        forked = ((_near_top(one, a) and _near_top(rep, b))
+                  or (_near_top(one, b) and _near_top(rep, a)))
+        detail = (
+            f"diverged at token {i}: {list(got[:i + 2])} vs "
+            f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits in "
+            f"one forward (top {int(mx.argmax(one).item())}), "
+            f"{float(rep[a] - rep[b]):+.3f} in the engine's order "
+            f"(top {int(mx.argmax(rep).item())})")
+        assert forked, f"{label}: {detail}"
+        warnings.warn(f"{label}: accepted an evaluation-order fork: {detail}")
         return
+
+
+def _assert_first_token(model, ids, ref, got, label):
+    """``got``, the engine's first token, is the bare model's greedy first
+    token ``ref``, or a fork from it (see _assert_greedy_match)."""
+    _assert_greedy_match(model, ids, [ref], [got], label)
 
 
 def _make_processor(tokenizer):
@@ -236,7 +332,7 @@ def _install_patches():
     # kvarn records cannot enter the exact store. Unset, both are inert.
     install_spec_kv_quant()
     install_kvarn_apc()
-    # Serve installs the PoolingCache arms of the APC exact store; without
+    # Serve installs the DS4PoolingCache arms of the APC exact store; without
     # them the L1 tests on a pooling-stack model (GLM-5.3-Flash,
     # DeepSeek-V4) fall back cold at every lookup.
     install_pooling_apc_support()
@@ -253,7 +349,7 @@ def _snapshot_q35_seams():
     # AttributeError guard: a renamed upstream seam must not break collection
     # of this file (the tests themselves skip without the env var).
     try:
-        from mlx_vlm.models.qwen3_5 import language as q35
+        from gmlx.models.qwen35 import language as q35
         import gmlx.upstream.gdn_patches as gdn_patches
         import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
         return (
@@ -274,7 +370,7 @@ _q35_seams = _snapshot_q35_seams()
 def teardown_module(module):
     if _q35_seams is None:
         return
-    from mlx_vlm.models.qwen3_5 import language as q35
+    from gmlx.models.qwen35 import language as q35
     import gmlx.upstream.gdn_patches as gdn_patches
     import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
     (q35._target_verify_left_padded_attention,
@@ -285,19 +381,35 @@ def teardown_module(module):
     qwen35_verify_fold._installed = _q35_seams[5]
 
 
+def _server_apc_salt(model, processor):
+    """The APC salt the server computes for a text prompt on the request
+    thread and hands the engine as ``_apc_semantic_hash``. A row without
+    it salts on its own full-prompt ``inputs_embeds``, which no other
+    prompt shares, so every lookup misses."""
+    from gmlx._vendor.mlx_vlm import apc as _apc
+    return _apc.semantic_extra_hash(
+        tenant=None, image_hash=0, media={"audio": None, "video": None},
+        model=getattr(model, "language_model", model), processor=processor)
+
+
 def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
     """Run MTP decode through BatchGenerator. Single insert, drain to completion.
 
     ``apc_manager`` goes through the real construction seam: the stash
     wrapper captures it onto the model (or clears a stale stash when None),
-    exactly as the server's generation worker does.
+    exactly as the server's generation worker does, and each row carries
+    the salt the server computes for it.
     """
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator, PromptProcessingBatch
 
     _install_patches()
 
     processor = _make_processor(tokenizer)
     prompt_kwargs_list = _embed_prompts(model, ids_list)
+    if apc_manager is not None:
+        salt = _server_apc_salt(model, processor)
+        for kw in prompt_kwargs_list:
+            kw["_apc_semantic_hash"] = salt
     gen = BatchGenerator(
         model,
         processor,
@@ -306,20 +418,35 @@ def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
         draft_kind="mtp",
         greedy_sampling=True,
         max_tokens=n,
-        prefill_step_size=2048,
+        prefill_step_size=_ENGINE_STEP,
         apc_manager=apc_manager,
     )
-    uids = gen.insert(
-        ids_list, [n] * len(ids_list),
-        prompt_kwargs=prompt_kwargs_list,
-    )
-    results = {u: [] for u in uids}
-    while gen.has_work:
-        _prompt_responses, gen_responses = gen.next()
-        for r in gen_responses:
-            if r.finish_reason is None:
-                results[r.uid].append(int(r.token))
-    gen.close()
+    orig_step = PromptProcessingBatch.prompt_step
+    chunks = []
+
+    def record(self):
+        done = orig_step(self)
+        if done:
+            chunks.append(int(done))
+        return done
+
+    PromptProcessingBatch.prompt_step = record
+    try:
+        uids = gen.insert(
+            ids_list, [n] * len(ids_list),
+            prompt_kwargs=prompt_kwargs_list,
+        )
+        results = {u: [] for u in uids}
+        while gen.has_work:
+            _prompt_responses, gen_responses = gen.next()
+            for r in gen_responses:
+                if r.finish_reason is None:
+                    results[r.uid].append(int(r.token))
+        gen.close()
+    finally:
+        PromptProcessingBatch.prompt_step = orig_step
+    if len(ids_list) == 1 and sum(chunks) == len(ids_list[0]) - 1:
+        _ENGINE_CHUNKS[tuple(ids_list[0])] = chunks
     return [results[u] for u in uids]
 
 
@@ -337,10 +464,8 @@ def test_long_prompt_first_token_parity(mtp_model):
     ref = _ref_first_token(model, ids)
     toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
     assert len(toks) > 0, "no tokens generated"
-    assert toks[0] == ref, (
-        f"first token diverged: mtp={toks[0]} ref={ref} -- "
-        f"hidden corruption in chunked prefill"
-    )
+    _assert_first_token(model, ids, ref, toks[0],
+                        "first token (hidden corruption in chunked prefill)")
 
 
 def test_short_prompt_first_token_parity(mtp_model):
@@ -352,9 +477,7 @@ def test_short_prompt_first_token_parity(mtp_model):
     ref = _ref_first_token(model, ids)
     toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
     assert len(toks) > 0, "no tokens generated"
-    assert toks[0] == ref, (
-        f"first token diverged: mtp={toks[0]} ref={ref}"
-    )
+    _assert_first_token(model, ids, ref, toks[0], "first token")
 
 
 def test_multi_length_first_token_parity(mtp_model):
@@ -383,9 +506,8 @@ def test_multi_length_first_token_parity(mtp_model):
         ids, ref = refs[length]
         toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
         assert len(toks) > 0, f"length={length}: no tokens generated"
-        assert toks[0] == ref, (
-            f"length={length}: first token diverged: mtp={toks[0]} ref={ref}"
-        )
+        _assert_first_token(model, ids, ref, toks[0],
+                            f"length={length}: first token")
 
 
 def test_prefill_step_env_override(monkeypatch):
@@ -396,7 +518,7 @@ def test_prefill_step_env_override(monkeypatch):
     needs_processing gate."""
     import types
 
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     import gmlx.spec.mtp_prefill as mtp_prefill
 
@@ -428,7 +550,7 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
     """Serve-shaped construction (prefill_step_size=None, no APC): the init
     re-enable restores chunking at the env-provided step, and first-token
     parity holds across the chunked prefill."""
-    from mlx_vlm.generate.ar import BatchGenerator, PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator, PromptProcessingBatch
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -438,15 +560,18 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
 
     orig_step = PromptProcessingBatch.prompt_step
     steps = set()
+    chunks = []
 
     def spy(self):
         n = orig_step(self)
         steps.add(self.prefill_step_size)
+        if n:
+            chunks.append(int(n))
         return n
 
     monkeypatch.setattr(PromptProcessingBatch, "prompt_step", spy)
 
-    ids = _build_prompt(tokenizer, 300)
+    ids = _build_text_prompt(tokenizer, 300)
     ref = _ref_first_token(model, ids)
     processor = _make_processor(tokenizer)
     prompt_kwargs_list = _embed_prompts(model, [ids])
@@ -470,15 +595,19 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
     gen.close()
     assert steps == {97}, f"env step not used in chunked prefill: {steps}"
     assert len(toks) > 0, "no tokens generated"
-    assert toks[0] == ref, f"first token diverged: mtp={toks[0]} ref={ref}"
+    # The step-97 chunks hold for this test only; a later test with the same
+    # prompt runs at _ENGINE_STEP.
+    if sum(chunks) == len(ids) - 1:
+        monkeypatch.setitem(_ENGINE_CHUNKS, tuple(ids), chunks)
+    _assert_first_token(model, ids, ref, toks[0], "first token")
 
 
 def test_long_context_token_parity(mtp_model):
     """8192 and 16384 token prompts: chunked prefill produces the same greedy
     first token as the unchunked reference. At these lengths, batch-GEMM
-    numerics in the logit head cause a bounded logit diff (~1-1.5) between
-    unchunked (all positions in one matmul) and chunked (2048 per matmul), but
-    the argmax must be stable."""
+    numerics cause a bounded logit diff (~1-1.5) between the unchunked
+    reference and the chunked prefill (2048 per matmul), but the argmax must
+    be stable."""
     model, drafter, config, tokenizer = mtp_model
 
     cases = [
@@ -486,20 +615,20 @@ def test_long_context_token_parity(mtp_model):
         (16384, _SEED_E),
     ]
 
-    refs = {}
+    # Each length runs its reference and its engine pass before the next
+    # length starts, with the buffer cache cleared between them, so the
+    # transients of two lengths never stack.
     for length, seed in cases:
+        mx.clear_cache()
         ids = _build_prompt(tokenizer, length, seed=seed)
-        refs[length] = (ids, _ref_first_token(model, ids))
-
-    for length, seed in cases:
+        ref = _ref_first_token(model, ids)
+        mx.clear_cache()
         if hasattr(model, "_spec_prefix_cache"):
             del model._spec_prefix_cache
-        ids, ref = refs[length]
         toks = _run_mtp(model, drafter, tokenizer, [ids], N_DECODE)[0]
         assert len(toks) > 0, f"length={length}: no tokens generated"
-        assert toks[0] == ref, (
-            f"length={length}: first token diverged: mtp={toks[0]} ref={ref}"
-        )
+        _assert_first_token(model, ids, ref, toks[0],
+                            f"length={length}: first token")
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +672,10 @@ def test_apc_warm_start(mtp_model):
     suffix_ids = tokenizer.encode(suffix_text)
     turn2_ids = prefix_ids + suffix_ids
 
-    hit = spec_cache.lookup(mx.array([turn2_ids], dtype=mx.int32))
+    # The L0 salt of a text row with no APC manager, adapter or tenant
+    # (gmlx.spec.mtp_prefill._l0_salt).
+    hit = spec_cache.lookup(mx.array([turn2_ids], dtype=mx.int32),
+                            salt=(0, None, None))
     assert hit is not None, "turn-2 prompt did not hit the prefix cache"
     assert hit[0] == len(prefix_ids), (
         f"hit prefix_len {hit[0]} != stored prefix {len(prefix_ids)}"
@@ -559,7 +691,7 @@ def test_apc_restore_transparency(mtp_model):
     restore are bitwise-equal to running the suffix on the live cache the
     snapshot was taken from (identical chunk boundaries, so any difference
     is introduced by the snapshot/restore path itself)."""
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
 
     from gmlx.cache.prefix_cache import SpecPrefixCache
 
@@ -675,7 +807,7 @@ def test_l1_exact_warm_start(mtp_model):
     reference. Exercises the stash seam, the lookup ladder, and the
     suffix-only drafter seeding (correctness only; acceptance is a
     separate measurement)."""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -723,7 +855,7 @@ def test_l1_short_prompt_store_and_hit(mtp_model):
     """A short prompt (no chunked prefill, so prompt_step never runs) must
     still store to L1 via the generate-path init, and a follow-up prompt
     sharing it as a prefix must hit."""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -767,7 +899,7 @@ def test_l1_sidecar_warm_start(mtp_model):
     are the D-run's job; this certifies plumbing + correctness)."""
     import gmlx.spec.speculative as _spec
     import gmlx.spec.ckpt as _ckpt
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     if not getattr(drafter, "supports_kv_sidecar", False):
@@ -833,8 +965,8 @@ def test_l1_sidecar_warm_start(mtp_model):
 def _is_hybrid(model):
     # mlx-vlm language models build mlx-vlm's ArraysCache, a different
     # class from mlx-lm's; either marks a recurrent layer.
-    from mlx_lm.models.cache import ArraysCache as _LmArrays
-    from mlx_vlm.models.cache import ArraysCache as _VlmArrays
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache as _LmArrays
+    from gmlx._vendor.mlx_vlm.models.cache import ArraysCache as _VlmArrays
     lm = getattr(model, "language_model", None) or model
     try:
         return any(isinstance(c, (_LmArrays, _VlmArrays)) for c in lm.make_cache())
@@ -847,10 +979,13 @@ def test_ckpt_warm_start_and_fallback(mtp_model):
     checkpoint tier (attn-KV blocks + recurrent-state sidecar, tier=ckpt in
     the hit log) with first-token parity. With the kill switch thrown the
     tier is invisible both ways: a re-run of the cold turn stores stock
-    exact entries again, and the following warm turn hits tier=exact with
-    the same parity."""
+    exact entries again, and the following warm turn restores one with the
+    same parity. The stock admission pick finds that entry under the
+    server's salt and builds a warm suffix batch, which the owned prefill
+    leaves to the stock machinery, so the hit shows in the manager's
+    exact_hits and not in an owned tier=exact line."""
     import gmlx.spec.engine as _eng
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     if not _is_hybrid(model):
@@ -898,11 +1033,15 @@ def test_ckpt_warm_start_and_fallback(mtp_model):
                 "kill switch did not stop ckpt lookups"
             )
             _clear_l0(model)
+            exact_hits = manager.stats_snapshot()["exact_hits"]
             with _capture_spec_log() as messages:
                 toks_exact = _run_mtp(
                     model, drafter, tokenizer, [turn2_ids], N_DECODE,
                     apc_manager=manager)[0]
-            assert any("tier=exact" in m for m in messages), (
+            assert not any("tier=ckpt" in m for m in messages), (
+                "kill switch did not stop ckpt lookups"
+            )
+            assert manager.stats_snapshot()["exact_hits"] > exact_hits, (
                 "exact-tier fallback did not serve; log: "
                 + "; ".join(messages[-8:])
             )
@@ -921,7 +1060,7 @@ def test_l1_sidecar_retirement_multiturn(mtp_model):
     RETIREMENT entry and find the drafter sidecar stored at retirement.
     The other sidecar test extends the prompt only, so it lands on the
     post-prefill keys and never exercises the retirement store point."""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     if not getattr(drafter, "supports_kv_sidecar", False):
@@ -986,7 +1125,7 @@ def test_l1_disk_restart(mtp_model, tmp_path):
     """L1 entries persist on the SSD tier across a manager 'restart': a
     fresh manager over the same disk directory (empty memory tiers) must
     serve the shared prefix with first-token parity."""
-    from mlx_vlm.apc import APCManager, DiskBlockStore
+    from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -1041,7 +1180,7 @@ def test_l1_disk_restart(mtp_model, tmp_path):
 def test_l1_kill_switch(mtp_model, monkeypatch):
     """GMLX_SPEC_APC=0 must disable the L1 lookup even with a manager
     stashed. (The flag is read at import; patch the module constant.)"""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
     import gmlx.spec.ckpt as ckpt
     import gmlx.spec.engine as engine
     import gmlx.spec.mtp_prefill as mtp_prefill
@@ -1100,12 +1239,8 @@ def test_batch_b2_first_token_parity(mtp_model):
     batch_results = _run_mtp(model, drafter, tokenizer, [ids_a, ids_b], N_DECODE)
     assert len(batch_results[0]) > 0, "prompt A: no tokens"
     assert len(batch_results[1]) > 0, "prompt B: no tokens"
-    assert batch_results[0][0] == ref_a, (
-        f"prompt A: batch={batch_results[0][0]} ref={ref_a}"
-    )
-    assert batch_results[1][0] == ref_b, (
-        f"prompt B: batch={batch_results[1][0]} ref={ref_b}"
-    )
+    _assert_first_token(model, ids_a, ref_a, batch_results[0][0], "prompt A")
+    _assert_first_token(model, ids_b, ref_b, batch_results[1][0], "prompt B")
 
 
 def test_batch_b3_mixed_lengths(mtp_model):
@@ -1124,11 +1259,10 @@ def test_batch_b3_mixed_lengths(mtp_model):
     ref_c = _ref_first_token(model, ids_c)
 
     results = _run_mtp(model, drafter, tokenizer, [ids_a, ids_b, ids_c], N_DECODE)
-    for i, (toks, ref) in enumerate(zip(results, [ref_a, ref_b, ref_c])):
+    for i, (ids, toks, ref) in enumerate(
+            zip([ids_a, ids_b, ids_c], results, [ref_a, ref_b, ref_c])):
         assert len(toks) > 0, f"prompt {i}: no tokens"
-        assert toks[0] == ref, (
-            f"prompt {i}: batch={toks[0]} ref={ref}"
-        )
+        _assert_first_token(model, ids, ref, toks[0], f"prompt {i}")
 
 
 # ---------------------------------------------------------------------------
@@ -1139,7 +1273,7 @@ def test_continuous_batch_injection(mtp_model):
     """A second request injected mid-decode of the first. The injected
     request's first token must match its solo B=1 reference. The first
     request's first token (emitted before injection) must also match."""
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1162,7 +1296,7 @@ def test_continuous_batch_injection(mtp_model):
         draft_kind="mtp",
         greedy_sampling=True,
         max_tokens=N_DECODE,
-        prefill_step_size=2048,
+        prefill_step_size=_ENGINE_STEP,
     )
 
     kwargs_first = _embed_prompts(model, [ids_first])
@@ -1195,14 +1329,10 @@ def test_continuous_batch_injection(mtp_model):
     toks_second = results[uids_second[0]]
     assert len(toks_first) > 0, "first request: no tokens"
     assert len(toks_second) > 0, "injected request: no tokens"
-    assert toks_first[0] == ref_first, (
-        f"first request first token {toks_first[0]} != ref {ref_first} -- "
-        f"corrupted before injection"
-    )
-    assert toks_second[0] == ref_second, (
-        f"injected request first token {toks_second[0]} != ref {ref_second} -- "
-        f"injection corrupted output"
-    )
+    _assert_first_token(model, ids_first, ref_first, toks_first[0],
+                        "first request (corrupted before injection)")
+    _assert_first_token(model, ids_second, ref_second, toks_second[0],
+                        "injected request (injection corrupted output)")
 
 
 def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
@@ -1292,7 +1422,7 @@ def test_scalar_injection_defers_and_completes(mtp_model):
     model._generator_injections, so the injected stream was truncated after
     one token, its continuation re-dispatched from the finished row's cache,
     and the stale entry poisoned the next batch's first-round drain."""
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1308,7 +1438,7 @@ def test_scalar_injection_defers_and_completes(mtp_model):
     gen = BatchGenerator(
         model, processor, sampler=GREEDY, draft_model=drafter,
         draft_kind="mtp", greedy_sampling=True, max_tokens=N_DECODE,
-        prefill_step_size=2048)
+        prefill_step_size=_ENGINE_STEP)
     uids_a = gen.insert([ids_a], [N_DECODE],
                         prompt_kwargs=_embed_prompts(model, [ids_a]))
     results = {uids_a[0]: []}
@@ -1333,7 +1463,7 @@ def test_injection_when_all_rows_finish_same_round(mtp_model):
     finish must still be adopted. Previously the all(finished) break exited
     without draining model._generator_injections: the injected request
     stalled and the stale entry was adopted by an unrelated later batch."""
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1350,7 +1480,7 @@ def test_injection_when_all_rows_finish_same_round(mtp_model):
     gen = BatchGenerator(
         model, processor, sampler=GREEDY, draft_model=drafter,
         draft_kind="mtp", greedy_sampling=True, max_tokens=N_DECODE,
-        prefill_step_size=2048)
+        prefill_step_size=_ENGINE_STEP)
     # Tight budgets so the batch's final round comes fast; C lands either
     # mid-final-round (exit-path drain) or at a round top (loop drain) --
     # both must adopt it with correct content.
@@ -1398,7 +1528,7 @@ def test_apc_hit_on_injected_request(mtp_model):
     APC-hit assertion rather than producing a silent degradation.
     """
     import logging
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1437,7 +1567,7 @@ def test_apc_hit_on_injected_request(mtp_model):
         draft_kind="mtp",
         greedy_sampling=True,
         max_tokens=N_DECODE,
-        prefill_step_size=2048,
+        prefill_step_size=_ENGINE_STEP,
     )
 
     # Insert request A -- its prefill stores the APC entry.
@@ -1500,12 +1630,9 @@ def test_apc_hit_on_injected_request(mtp_model):
     assert len(toks_first) > 0, "first request: no tokens"
     assert len(toks_second) > 0, "injected request: no tokens"
 
-    assert toks_first[0] == ref_first, (
-        f"request A first token {toks_first[0]} != ref {ref_first} -- "
-        f"corrupted before injection"
-    )
-    assert toks_second[0] == ref_second, (
-        f"injected APC-hit request B first token {toks_second[0]} != "
-        f"ref {ref_second} -- APC-restored cache offset misaligned "
-        f"after BatchKVCache.extend injection"
-    )
+    _assert_first_token(model, prefix_ids, ref_first, toks_first[0],
+                        "request A (corrupted before injection)")
+    _assert_first_token(
+        model, ids_second, ref_second, toks_second[0],
+        "injected APC-hit request B (APC-restored cache offset misaligned "
+        "after BatchKVCache.extend injection)")

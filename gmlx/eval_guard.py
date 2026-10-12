@@ -80,6 +80,8 @@ import time
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_stream_registry"
@@ -128,7 +130,7 @@ def _harvest() -> None:
     except Exception:  # noqa: S110 - no Metal device (CI)
         pass
     try:
-        from mlx_lm.generate import generation_stream
+        from gmlx._vendor.mlx_lm.generate import generation_stream
         register_stream(generation_stream)
     except Exception:  # noqa: S110 - optional: mlx_lm's generation stream is harvested when present
         pass
@@ -140,7 +142,7 @@ def install_stream_registry() -> None:
     pre-existing streams happens lazily at first guard failure too."""
     if not _enabled():
         return
-    if getattr(mx.new_stream, _INSTALLED_FLAG, False):
+    if wrapped_with(mx.new_stream, _INSTALLED_FLAG):
         return
     _orig = mx.new_stream
 
@@ -150,7 +152,7 @@ def install_stream_registry() -> None:
         return s
 
     setattr(_recording_new_stream, _INSTALLED_FLAG, True)
-    mx.new_stream = _recording_new_stream
+    mx.new_stream = link(_recording_new_stream, _orig)
     _harvest()
     _log.info("stream registry installed")
 

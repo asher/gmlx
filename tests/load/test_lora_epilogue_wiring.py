@@ -12,7 +12,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx import lora_rows
 import gmlx.load.modules as modules

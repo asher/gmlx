@@ -83,12 +83,43 @@ def test_rows_mode_unpublished_raises():
         wrap(mx.zeros((1, 2, 4)))
 
 
-def test_rows_mode_row_count_mismatch_raises():
+@pytest.mark.parametrize("published, shape", [
+    ([1.0, 1.0, 1.0], (2, 1, 4)),
+    # An input with a batch dimension whose row total is a multiple of the
+    # published count is still a mismatch.
+    ([1.0, 0.0, 0.5], (2, 3, 4)),
+    ([1.0, 0.0], (4, 3, 4)),
+    ([1.0, 0.0], (1, 4, 4)),
+    # A flat input must hold a multiple of the published count.
+    ([1.0, 0.0], (3, 4)),
+])
+def test_rows_mode_row_count_mismatch_raises(published, shape):
     lora_rows.configure("rows", 1)
     wrap, _base, _a, _b = _wrap()
-    lora_rows.set_rows([1.0, 1.0, 1.0])
-    with pytest.raises(lora_rows.LoraRowsError):
-        wrap(mx.zeros((2, 1, 4)))
+    lora_rows.set_rows(published)
+    with pytest.raises(lora_rows.LoraRowsError,
+                       match=f"has {len(published)} rows, forward has"):
+        wrap(mx.zeros(shape))
+
+
+def test_flat_inputs_of_two_sizes_share_one_publish():
+    """One publish serves flat (B * tokens, D) inputs of any multiple of
+    its row count: each gets its own factor, one value per input row in
+    (B, tokens) order."""
+    lora_rows.configure("rows", 1)
+    wrap, base, a, b = _wrap()
+    lora_rows.set_rows([2.0, 0.0])
+    for tokens in (2, 3, 1, 2):
+        x = mx.random.normal((2 * tokens, 4))
+        y = wrap(x)
+        assert y.shape == (2 * tokens, 3)
+        on, off = x[:tokens], x[tokens:]
+        ref = base(on) + (0.5 * 2.0) * ((on @ a.T) @ b.T)
+        assert mx.allclose(y[:tokens], ref, rtol=1e-2, atol=1e-2), tokens
+        assert mx.allclose(y[tokens:], base(off), rtol=1e-2,
+                           atol=1e-2), tokens
+        delta = mx.abs((0.5 * 2.0) * ((off @ a.T) @ b.T)).max().item()
+        assert delta > 0.1, "the bare rows would show a delta"
 
 
 def test_published_clears_after_forward_in_rows_mode():
@@ -123,9 +154,9 @@ def test_request_scales_from_spec():
 
 @pytest.fixture
 def engine():
-    pytest.importorskip("mlx_vlm")
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
     lora_rows.install_row_channel()
     return _ar, ResponseGenerator
 

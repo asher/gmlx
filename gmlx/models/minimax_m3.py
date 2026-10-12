@@ -3,12 +3,10 @@
 #
 """MiniMax-M3 text backbone, vendored from mlx-lm PR #1401 (unmerged).
 
-gmlx owns this class. ``ensure_registered()`` installs it as
-``mlx_lm.models.minimax_m3`` at load time, over any upstream module of that
-name, so ``mlx_lm.utils._get_classes`` and every downstream path resolve it
-(see :mod:`gmlx.models.owned`). The MSA implementation below is a gmlx
-extension beyond the PR body, so an upstream class without it cannot replace
-this one.
+mlx-lm (0.31.3) ships no `models/minimax_m3.py`, so gmlx carries the
+class, and the vendored mlx-lm resolves the minimax_m3 model type to this
+module through gmlx.models.owned. NOTE: the MSA implementation below is a
+gmlx extension beyond the PR body; upstream adoption must carry it too.
 
 Source: https://github.com/ml-explore/mlx-lm/pull/1401 for the dense
 backbone; the MiniMax Sparse Attention (MSA) path follows llama.cpp
@@ -48,26 +46,23 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+from gmlx.cache import bind, refusals
+from gmlx.cache.attention import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models import cache as _lm_cache
-from mlx_lm.models.cache import KVCache
-from mlx_lm.models.switch_layers import SwitchGLU
-
-from gmlx.models import owned
+from gmlx.cache.kv_cache import KVCache
 from gmlx.load.dtypes import activation_dtype
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.minimax_m3`` resolve to this module."""
-    owned.install("mlx_lm.models.minimax_m3", __name__)
-    # Snapshot restore resolves cache classes by name inside mlx_lm.models.cache;
-    # graft the MSA cache alongside so saved M3 prompt caches round-trip.
-    if not hasattr(_lm_cache, "MSAKVCache"):
-        _lm_cache.MSAKVCache = MSAKVCache
+    """Register ``MSAKVCache`` (gmlx.cache.bind.register). Snapshot restore
+    resolves cache classes by name, so saved M3 prompt caches round-trip
+    once the MSA cache is registered."""
+    bind.register(MSAKVCache)
 
 
 @dataclass
@@ -173,6 +168,10 @@ class MSAKVCache(KVCache):
     """
 
     kv_quant_unsupported = True
+    # Kept out of batching and the stock KV quant arms (gmlx.cache.refusals).
+    to_batch = refusals.refuse_batch
+    preserve_auxiliary_kv_state = True
+    extract = refusals.no_extract
 
     def __init__(self):
         super().__init__()

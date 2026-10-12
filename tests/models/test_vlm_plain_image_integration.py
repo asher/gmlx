@@ -20,7 +20,7 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 pytestmark = pytest.mark.integration
 
@@ -40,10 +40,10 @@ def _qwen_vlm_pair(gguf_dir):
     paired = [m for m in scan_dirs([spec], [str(gguf_dir)]) if m.mmproj]
     for m in paired:
         kv = scan_gguf(m.path, include_tensors=False).kv
-        if str(kv.get("general.architecture", "")).startswith("qwen3"):
+        if str(kv.get("general.architecture", "")).startswith("qwen35"):
             return m
     pytest.skip(
-        "no qwen3.x model with a paired sibling mmproj under "
+        "no qwen3.5 or qwen3.6 model with a paired sibling mmproj under "
         "KQUANT_TEST_GGUF_DIR"
     )
 
@@ -58,22 +58,20 @@ def plain_vlm_load(gguf_dir):
 
 
 @_NEEDS_GPU
-def test_plain_load_arms_tiled_v_on_both_modules(plain_vlm_load):
-    """The vendored mlx-vlm gated_delta module is rebound by a plain load."""
+def test_plain_load_gives_the_model_the_tiled_head_order(plain_vlm_load):
+    """A plain load gives each gated delta layer the tiled order of its
+    GGUF, and the scan module the copied Qwen3.5 path shares keeps its own
+    functions."""
     import importlib
 
-    import gmlx.upstream.gdn_patches as gp
-
-    vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
-    assert gp._tiled_v_patch_applied()
-    # Qualname/module, not identity against gd: a later load can re-close
-    # the mlx-lm patch, leaving vgd on an older (equally tiled) instance.
-    # The kernel rebind points at mlx-lm's dispatch, which reads the
-    # patched (tiled) private kernels at call time.
-    assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
-    assert vgd.gated_delta_kernel.__module__ == "mlx_lm.models.gated_delta"
-    assert vgd._gated_delta_with_states_kernel is None
-    assert vgd._gated_delta_with_states_ops is gp._tiled_gd_with_states_ops
+    model = plain_vlm_load[0]
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
+    layers = [layer.linear_attn for layer in model.language_model.model.layers
+              if layer.is_linear]
+    assert layers and all(layer.gdn_kv_tiled for layer in layers)
+    assert model.language_model.args.kv_head_layout == "tiled"
+    for name in ("gated_delta_ops", "gated_delta_kernel"):
+        assert getattr(vgd, name).__module__ == vgd.__name__
 
 
 @_NEEDS_GPU
@@ -84,8 +82,8 @@ def test_plain_image_turn_greedy_does_not_collapse(plain_vlm_load):
     inside 64."""
     from PIL import Image
 
-    from mlx_vlm import generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from gmlx._vendor.mlx_vlm import generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
 
     model, config, processor = plain_vlm_load
 

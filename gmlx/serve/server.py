@@ -103,19 +103,19 @@ _SVC_DEFAULT = object()
 
 
 def _import_serving():
-    """Import the mlx-vlm-backed serving stack, lazily so ``init`` / ``launch`` /
-    ``--help`` never need it, and a missing mlx-vlm names the fix instead of a
-    bare ModuleNotFoundError."""
+    """Import the serving stack, lazily so ``init`` / ``launch`` / ``--help``
+    never need it, and a missing serving dependency names the fix instead of
+    a bare ModuleNotFoundError."""
     try:
         from . import residency  # noqa: F401
         from . import patches  # noqa: F401
         from . import bridge_vlm as server_bridge_vlm  # noqa: F401
     except ImportError as exc:
         root = (exc.name or "").split(".")[0]
-        if root in ("mlx_vlm", "fastapi", "uvicorn", "starlette"):
+        if root in ("fastapi", "uvicorn", "starlette"):
             raise ImportError(
-                "gmlx serve needs its serving dependencies (mlx-vlm, "
-                "FastAPI, uvicorn), which install with gmlx and are required "
+                "gmlx serve needs its serving dependencies (FastAPI, "
+                "uvicorn), which install with gmlx and are required "
                 "even for text-only serving. A missing one usually means a "
                 "broken install - reinstall gmlx.") from exc
         raise
@@ -157,12 +157,36 @@ def _reload_running(config_path, *, skip: bool) -> None:
     try:
         from . import lifecycle
         target = os.path.abspath(os.path.expanduser(str(config_path)))
+        offsets = lifecycle.log_offsets()
         signalled = lifecycle.reload_config(target)
     except Exception:
         return
     for host, port, pid in signalled:
         print(f"reloaded the running server at {host}:{port} (pid {pid}) "
               f"to pick up the config change")
+        log, size = offsets.get((host, port), (None, 0))
+        for line in lifecycle.services_off_after(log, size) if log else []:
+            print(f"note: {line.removeprefix('[server] ')}", file=sys.stderr)
+    if signalled:
+        return
+    # A server with no runfile, such as `gmlx serve --foreground`, reloads
+    # over HTTP at the config's address.
+    try:
+        got = lifecycle.reload_over_http(target)
+    except Exception:
+        return
+    if got is None:
+        return
+    where, why, off = got
+    if why is None:
+        print(f"reloaded the running server at {where} to pick up the "
+              "config change")
+        for key, hint in sorted(off.items()):
+            print(f"note: server.{key} is off, because its optional {key} extra "
+                  f"is not installed. To add it: {hint}", file=sys.stderr)
+    else:
+        print(f"note: the server at {where} did not reload ({why}); "
+              "restart it to pick up the config change", file=sys.stderr)
 
 
 # init - scaffold a starter config (guided wizard, or flag-driven)
@@ -357,16 +381,14 @@ def _resolve_duration(flag: str, value, ap):
                  f"(got {value!r})")
 
 
-def _install_for_services(stt_v, tts_v, emb_v) -> None:
-    from . import embeddings as _emb
+def _install_for_services(stt_v, tts_v) -> None:
+    # Embeddings and rerank need no extra: every backend is core.
     import gmlx.commands.extras as extras
     wanted = []
     if stt_v:
         wanted.append("stt")
     if tts_v:
         wanted.append("tts")
-    if emb_v and not _emb._is_gguf_ref(emb_v):     # GGUF embedder needs no extra
-        wanted.append("embeddings")
     for extra in wanted:
         if not extras.extra_installed(extra):
             extras.install_extra(extra)
@@ -430,7 +452,7 @@ def _init_scaffold(a, ap) -> int:
     rc = _finish_write(out, text, models, no_reload=a.no_reload,
                        skipped=scan_stats.get("skipped", 0))
     if a.install and rc == 0:
-        _install_for_services(stt_v, tts_v, emb_v)
+        _install_for_services(stt_v, tts_v)
     return rc
 
 
@@ -592,22 +614,36 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print("warning: the local Hugging Face cache is unreadable - hf: entries "
               "are kept unverified", file=sys.stderr)
 
+    # A `stream:` key discovery wrote holds only while the model is over the
+    # memory budget; the budget moves with iogpu.wired_limit_mb, so each
+    # sync judges it again.
+    restream = {}                                  # id -> {"stream", "speculative"}
+    path_of = {mc.id: rp for rp, mc in known_models.items()}
+    for mid in _marked_stream_ids(path):
+        rp = path_of.get(mid)
+        fresh = discovery.rescan_entry(rp) if rp else None
+        if fresh is not None and fresh["stream"] is None:
+            restream[mid] = fresh
+
     # Discover, skipping anything already configured (by id or by resolved path).
     # `draft_pairs`: sibling drafters that pair into an entry already configured.
-    discovered, draft_pairs = [], {}
+    discovered, draft_pairs, images = [], {}, []
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
         stats = {}
         discovered += discovery.scan_dirs(
             specs, dirs,
-            known_ids=set(cfg.models), known_paths=known_paths,
-            known_models=known_models, progress=True, stats=stats)
+            known_ids=set(cfg.models) | set(cfg.image_models),
+            known_paths=known_paths | _image_paths(cfg),
+            known_models=known_models, progress=True, stats=stats,
+            images=images, encoder_ids=_encoder_ids(known_models))
         draft_pairs = stats.get("draft_pairs") or {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
         discovered += discovery.scan_hf_cache(
-            known_ids=set(cfg.models) | {m.id for m in discovered},
+            known_ids=(set(cfg.models) | set(cfg.image_models)
+                       | {m.id for m in discovered}),
             known_refs=known_refs, progress=True)
 
     print(f"\nsync-models {path}:")
@@ -618,9 +654,15 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  remove:  {mid}  ({cfg.models[mid].path} - gone)")
     for m in discovered:
         print(f"  add:     {m.id}  ({discovery._rel(m.path, dirs)})")
+    for im in images:
+        print(f"  add:     {im.id}  (image, {discovery._rel(im.path, dirs)})")
     for mid, dpath in draft_pairs.items():
         print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
-    if not removed and not discovered and not draft_pairs:
+    for mid in restream:
+        print(f"  update:  {mid}  (stream: experts dropped, the model fits "
+              "the memory budget now)")
+    if (not removed and not discovered and not draft_pairs and not images
+            and not restream):
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -638,15 +680,61 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
                  if a.models_dir else [])
     try:
         _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
-                    draft_pairs=draft_pairs)
+                    draft_pairs=draft_pairs, images=images,
+                    restream=restream)
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    changed = (f"\nupdated {path} (+{len(discovered)} / -{len(removed)}"
-               + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
+    changed = (f"\nupdated {path} (+{len(discovered) + len(images)} / "
+               f"-{len(removed)}"
+               + (f" / ~{len(draft_pairs) + len(restream)}"
+                  if draft_pairs or restream else "") + ")")
     print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
+
+
+def _pinned_paths(resolved: dict, images: dict, cli_pins) -> tuple:
+    """The pool's pinned paths, from `pin: true` on chat and image models and
+    from --pin, and the pinned image models as {id: path}."""
+    paths = {rm.path for rm in resolved.values() if rm.pin}
+    image_pins = {iid: rm.path for iid, rm in images.items() if rm.pin}
+    paths |= set(image_pins.values())
+    for p in cli_pins:
+        rp = resolved.get(p)
+        paths.add(rp.path if rp is not None
+                  else os.path.abspath(os.path.expanduser(p)))
+    return paths, image_pins
+
+
+def _image_paths(cfg) -> set:
+    """The resolved DiT paths of the configured image models."""
+    out = set()
+    for m in cfg.image_models.values():
+        try:
+            rp = resolve_path(m.path, cfg.model_dirs)
+        except ConfigError:
+            continue
+        if rp:
+            out.add(rp)
+    return out
+
+
+def _encoder_ids(known_models: dict) -> dict:
+    """Resolved path -> id of the configured chat models an image entry
+    may share as its encoder: those without an adapter."""
+    return {p: mc.id for p, mc in known_models.items() if not mc.adapter}
+
+
+def _image_entry(im, dirs) -> dict:
+    """The ``image_models:`` entry of a paired image model."""
+    entry = {"path": discovery._rel(im.path, dirs),
+             "encoder": (im.encoder if not os.path.isabs(im.encoder)
+                         else discovery._rel(im.encoder, dirs))}
+    if im.encoder_mmproj:
+        entry["encoder_mmproj"] = discovery._rel(im.encoder_mmproj, dirs)
+    entry["vae"] = discovery._rel(im.vae, dirs)
+    return entry
 
 
 def _hf_cache_readable() -> bool:
@@ -659,15 +747,63 @@ def _hf_cache_readable() -> bool:
         return False
 
 
+def _marked_stream_ids(path) -> list:
+    """The ids of ``path``'s model entries whose ``stream:`` key carries
+    discovery's mark comment."""
+    from ruamel.yaml import YAML
+
+    try:
+        doc = YAML().load(Path(path).read_text())
+    except Exception:
+        return []
+    models = doc.get("models") if isinstance(doc, dict) else None
+    if not isinstance(models, dict):
+        return []
+    out = []
+    for mid, ent in models.items():
+        ca = getattr(ent, "ca", None)
+        item = ca.items.get("stream") if ca is not None else None
+        tok = item[2] if item and len(item) > 2 else None
+        if (tok is not None and discovery.STREAM_MARK_NOTE in str(tok.value)
+                and ent.get("stream") == "experts"):
+            out.append(str(mid))
+    return out
+
+
+def _drop_key_keep_trailing(ent, key) -> None:
+    """Delete ``key`` from a ruamel map. Its end-of-line comment token also
+    holds the lines after it (a blank line, the next entry's comment), so
+    those move onto the key before it."""
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    i = list(ent).index(key)
+    item = ent.ca.items.pop(key, None)
+    del ent[key]
+    tok = item[2] if item and len(item) > 2 else None
+    rest = tok.value.split("\n", 1)[1] if tok is not None and "\n" in tok.value else ""
+    if not rest or i == 0:
+        return
+    prev = ent.ca.items.setdefault(list(ent)[i - 1], [None, None, None, None])
+    if prev[2] is not None:
+        prev[2].value += rest
+    else:
+        prev[2] = CommentToken("\n" + rest, CommentMark(0), None)
+
+
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
-                draft_pairs=None) -> None:
+                draft_pairs=None, images=(), restream=None) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
     ``new_roots`` are --models-dir override roots absent from
     ``server.model_dirs``; they're appended so the new entries resolve.
     ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
-    to that entry; an entry that already has one keeps its value."""
+    to that entry; an entry that already has one keeps its value. ``images``
+    (paired :class:`ImageModelCfg`) go under ``image_models:``. ``restream``
+    (id -> a fresh scan's ``stream`` and ``speculative``) drops the
+    ``stream:`` key discovery wrote, and turns speculative decoding back
+    on where the fresh scan would."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -693,8 +829,18 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
         if discovered:
             discovery.drop_no_models_comment(doc)
         pos = 0
+        for mid, fresh in (restream or {}).items():
+            ent = models.get(mid)
+            if not isinstance(ent, dict) or ent.get("stream") != "experts":
+                continue
+            if (fresh["speculative"] and "speculative" not in ent
+                    and not ent.get("draft_gguf")):
+                ent.insert(list(ent).index("stream"), "speculative", True)
+            _drop_key_keep_trailing(ent, "stream")
         for mc in discovered:
-            entry = discovery.model_to_entry(mc, dirs)
+            entry = CommentedMap(discovery.model_to_entry(mc, dirs))
+            if "stream" in entry:
+                entry.yaml_add_eol_comment(discovery.STREAM_MARK_NOTE, "stream")
             if mc.id in models:
                 models[mc.id] = entry          # update keeps its position
             else:
@@ -712,6 +858,13 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             ent = models.get(mid)
             if isinstance(ent, dict) and not ent.get("draft_gguf"):
                 ent["draft_gguf"] = discovery._rel(dpath, dirs)
+        if images:
+            block = doc.get("image_models")
+            if not isinstance(block, dict):
+                block = CommentedMap()
+                doc["image_models"] = block
+            for im in images:
+                block[im.id] = CommentedMap(_image_entry(im, dirs))
         # Cache-resident entries need server.hf_cache to resolve from the cache.
         if any(str(mc.path).startswith("hf:") for mc in discovered):
             srv = doc.get("server")
@@ -766,18 +919,23 @@ def register_downloads(paths: list, config_path=None) -> None:
         parents = sorted({os.path.dirname(p) for p in wanted})
         specs = [DiscoverSpec(dir=d, recursive=False) for d in parents]
         stats = {}
+        images: list = []
         found = discovery.scan_dirs(specs, cfg.model_dirs,
-                                    known_ids=set(cfg.models),
-                                    known_paths=known_paths,
-                                    known_models=known_models, stats=stats)
+                                    known_ids=set(cfg.models) | set(cfg.image_models),
+                                    known_paths=known_paths | _image_paths(cfg),
+                                    known_models=known_models, stats=stats,
+                                    images=images,
+                                    encoder_ids=_encoder_ids(known_models))
         newly = [m for m in found if os.path.abspath(m.path) in wanted]
+        images = [im for im in images if os.path.abspath(im.path) in wanted]
         # Only a drafter from this download may change a configured entry: a
         # file the user left beside a model stays unregistered.
         pairs = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
                  if os.path.abspath(dp) in wanted}
-        if not newly and not pairs:
+        if not newly and not pairs and not images:
             return                     # already configured (a re-pull) - quiet
-        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs)
+        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs,
+                    images=images)
         for mid, dp in pairs.items():
             print(f"registered {os.path.basename(dp)} as the drafter of "
                   f"{mid} in {path}")
@@ -786,6 +944,8 @@ def register_downloads(paths: list, config_path=None) -> None:
                                       ("mtp", m.speculative)) if on]
             note = f"  ({', '.join(extras)})" if extras else ""
             print(f"registered {m.id} in {path}{note}")
+        for im in images:
+            print(f"registered {im.id} in {path}  (image)")
         _reload_running(path, skip=False)
     except ConfigWriteError as e:
         # sync-models would meet the same refusal, so the message gives its own step.
@@ -921,6 +1081,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "single positional model, passed through verbatim, "
                          "e.g. '{\"enable_thinking\": false}' (config mode: the "
                          "`chat_template_kwargs:` key).")
+    from gmlx.commands.cli import add_rope_args
+
+    add_rope_args(
+        ap, title="Rope scaling of a single positional model",
+        description="llama.cpp's rope flags, each over its GGUF header key. "
+        "In config mode they are the model's `rope_scaling:` block; see "
+        "docs/config.md.")
     kv = ap.add_argument_group(
         "KV cache of a single positional model",
         "Each flag is a `load:` key in config mode; see docs/config.md.")
@@ -1152,8 +1319,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     metavar="MODEL",
                     help="Serve POST /v1/embeddings from a GGUF decoder-LM "
                          "embedder (alias qwen3-embed-0.6b/-4b/-8b, *.gguf, or "
-                         "hf:<org>/<repo>/<file>.gguf; no extra) or an "
-                         "mlx-embeddings encoder (alias embeddinggemma/arctic-l/"
+                         "hf:<org>/<repo>/<file>.gguf; no extra) or a "
+                         "safetensors encoder (alias embeddinggemma/arctic-l/"
                          "nomic-embed/bge-m3, HF repo, or local dir; no extra "
                          "needed). Bare flag picks qwen3-embed-0.6b; "
                          "overrides config server.embeddings:.")
@@ -1184,6 +1351,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--start-timeout", type=float, default=40.0, metavar="S",
                     help="Seconds to wait for a background server to become ready "
                          "(default 40; a slow model load keeps starting past it).")
+
+
+def _rope_override(a):
+    """The positional model's rope options, or None."""
+    from gmlx.commands.cli import rope_override_from_args
+
+    return rope_override_from_args(a)
 
 
 def _bg_serve_args(a, cfg_path) -> list:
@@ -1262,6 +1436,11 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--moe-layer-shed", str(a.moe_layer_shed)]
     if getattr(a, "moe_prestage", None) is not None:
         out += ["--moe-prestage", str(a.moe_prestage)]
+    from gmlx.commands.cli import ROPE_FLAGS
+
+    for dest in ROPE_FLAGS:
+        if getattr(a, dest, None) is not None:
+            out += ["--" + dest.replace("_", "-"), str(getattr(a, dest))]
     if a.budget_gb is not None:
         out += ["--budget-gb", str(a.budget_gb)]
     if a.max_models is not None:
@@ -1580,6 +1759,17 @@ def _line_buffered_stdout() -> None:
         pass                    # a replaced or closed stream keeps its mode
 
 
+def _refresh_comfyui_pack() -> None:
+    """A gmlx upgrade reaches the ComfyUI node pack here: a server start is
+    the one gmlx step sure to come before the pack's next request. The
+    detached start does it too, so the line shows in the terminal."""
+    from gmlx.commands.comfyui import refresh_for_serve
+
+    line = refresh_for_serve()
+    if line:
+        print(f"[server] {line}")
+
+
 def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     _line_buffered_stdout()
     ap = argparse.ArgumentParser(
@@ -1660,6 +1850,7 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         except ConfigError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
+        _refresh_comfyui_pack()
         rc = lifecycle.start_background(
             serve_args, host=host, port=port, config_abspath=cfg_path,
             log=a.log, start_timeout=a.start_timeout, api_key=api_key,
@@ -1683,6 +1874,7 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    _refresh_comfyui_pack()
     return _serve(cfg, a, reload_fn)
 
 
@@ -1696,6 +1888,12 @@ def _resolve_cfg(a) -> tuple:
 
 
 def _resolve_mode_cfg(a) -> tuple:
+    if ((a.config or a.models_dir or not a.model)
+            and _rope_override(a) is not None):
+        # One set of rope options cannot fit every configured model.
+        raise ConfigError(
+            "the rope scaling flags apply to a single positional model; "
+            "set a model's rope_scaling block in the config instead")
     if a.config:
         path = a.config
         return _load_with_discover(path), _make_reload_fn(path, a)
@@ -1733,11 +1931,14 @@ def _make_reload_fn(path, a=None):
     """The reload of the config at ``path``. With the start flags ``a``, it
     keeps ``--no-family-defaults`` and the service flags, and turns each
     service on, off or to another model as the file now says. A service
-    that fails to resolve fails the reload and changes nothing."""
+    that fails to resolve fails the reload and changes nothing. The result
+    names, under ``services_off``, each configured speech service the reload
+    left off because its extra is missing, with the command that adds it."""
     def _reload():
         from .bridge_vlm import register_resolved_models
         from .patches import routes
         cfg = _load_with_discover(path)
+        off: dict = {}
         if a is not None:
             if getattr(a, "no_family_defaults", False):
                 cfg.family_defaults = False
@@ -1745,14 +1946,21 @@ def _make_reload_fn(path, a=None):
             try:
                 _resolve_service_models(cfg, a)
             except Exception:
-                for key in missing:
-                    routes.note_missing_service(key)
+                # What the failed resolve noted goes; what was noted before
+                # comes back.
+                routes.clear_missing_services()
+                for key, extra in missing.items():
+                    routes.note_missing_service(key, extra=extra)
                 raise
+            off = routes.missing_extras()
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         if a is not None:
             routes.install_service_routes(cfg)
             _warm_service_models(cfg)
-        return {"models": len(cfg.models)}
+        out: dict = {"models": len(cfg.models)}
+        if off:
+            out["services_off"] = off
+        return out
     return _reload
 
 
@@ -1851,17 +2059,27 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
                "rerank", "systemone",
-               "defaults", "cache", "assistants", "assistant_allow_remote")}
+               "defaults", "cache", "assistants", "assistant_allow_remote",
+               "image")}
     # Profile/model names double as dict keys; drop the redundant fields so the
     # entries match the file schema (which has no `name`/`id` keys).
     profiles = {n: {k: v for k, v in p.items() if k != "name"}
                 for n, p in d.pop("profiles").items()}
     models = {mid: {k: v for k, v in m.items() if k != "id"}
               for mid, m in d.pop("models").items()}
+    images = {}
+    for iid, m in d.pop("image_models").items():
+        m.pop("id")
+        m["adapters"] = [{"path": p, "strength": st} for p, st in m["adapters"]]
+        if m["ttl_s"] is None:
+            # An absent key inherits the server's; a written null never unloads.
+            m.pop("ttl_s")
+        images[iid] = m
     talk = d.pop("talk")
     talk.pop("assistant", None)     # attached shared object, not a talk: key
     doc = {"server": server, "profiles": profiles, "rules": d.pop("rules"),
            "models": models, "aliases": d.pop("aliases"),
+           "image_models": images,
            "discover": d.pop("discover"), "talk": talk,
            "launch": d.pop("launch"),
            "assistant": d.pop("assistant"),
@@ -1875,7 +2093,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
 
 def _discovery_cfg(dirs: list, a) -> ServerCfg:
     specs = [DiscoverSpec(dir=d, recursive=a.recursive) for d in dirs]
-    models = discovery.scan_dirs(specs, dirs)
+    images: list = []
+    models = discovery.scan_dirs(specs, dirs, images=images)
     return ServerCfg(
         host=a.host or "127.0.0.1",
         port=a.port or 8080,
@@ -1885,6 +2104,7 @@ def _discovery_cfg(dirs: list, a) -> ServerCfg:
         hf_cache=a.hf_cache,
         defaults=ServerDefaults(),
         models={m.id: m for m in models},
+        image_models={im.id: im for im in images},
     )
 
 
@@ -1942,6 +2162,7 @@ def _single_model_cfg(a) -> ServerCfg:
         prefill_feeder=getattr(a, "prefill_feeder", None),
         decode_feeder=getattr(a, "decode_feeder", None),
         stream_fast_disk=getattr(a, "stream_fast_disk", None),
+        rope_scaling=_rope_override(a),
         pin=True,                            # the single model is always pinned
     )
     models = {mid: model}
@@ -2008,25 +2229,66 @@ _SERVICE_KEYS = ("stt", "tts", "embeddings", "rerank")
 _LIVE_SERVICES: dict[str, str] = {}
 
 
+# The top-level modules of the packages each speech extra installs. Only a
+# missing one of these turns a configured service off.
+_EXTRA_MODULES = {
+    "stt": frozenset({"mlx_whisper", "multipart"}),
+    "tts": frozenset({"mlx_audio", "spacy", "num2words", "addict", "phonemizer",
+                      "espeakng_loader"}),
+}
+
+def _extra_missing(key: str, e: ImportError) -> bool:
+    """Whether ``e``, or the error it was raised from, is a module of the
+    ``key`` extra that is not installed."""
+    for err in (e, e.__cause__):
+        if isinstance(err, ModuleNotFoundError) and \
+                (err.name or "").split(".")[0] in _EXTRA_MODULES[key]:
+            return True
+    return False
+
+
+def _speech_service(key: str, flag, cfg, resolve, check_extra):
+    """The model of the speech service ``key``, or None when it is off. A
+    missing extra stops the start when ``--stt`` or ``--tts`` asked for the
+    service. When only the config names it, the server warns and starts
+    without it, and its routes answer 404 with the install command. Any
+    other import error stops the start."""
+    value = flag or getattr(cfg, key, None)
+    if not value:
+        return None
+    model = resolve(value)
+    try:
+        check_extra()
+    except ImportError as e:
+        if flag or not _extra_missing(key, e):
+            raise
+        from gmlx.commands.extras import install_hint
+
+        from .lifecycle import SERVICE_OFF_MARK
+        from .patches.routes import note_missing_service
+        hint = install_hint(key)
+        print(f"[server] server.{key}{SERVICE_OFF_MARK}{key} extra is not installed. "
+              f"To add it: {hint}", file=sys.stderr)
+        note_missing_service(key, extra=hint)
+        return None
+    return model
+
+
 def _resolve_service_models(cfg, a) -> None:
     """Resolve the four service keys of ``cfg`` in place, where a ``--stt``,
     ``--tts``, ``--embeddings`` or ``--rerank`` flag overrides the config
-    value. A speech service whose extra is missing and a malformed value
-    raise, with install guidance or the config key. A missing embeddings or
-    rerank file turns that service off (see :func:`_resolve_service`)."""
-    stt_value = getattr(a, "stt", None) or getattr(cfg, "stt", None)
-    cfg.stt = None
-    if stt_value:
-        from . import stt as stt_mod
-        cfg.stt = stt_mod.resolve_stt_model(stt_value)
-        stt_mod.import_mlx_whisper()
+    value. A malformed value raises, naming the config key. A speech
+    service whose extra is missing raises for a flag and turns the service
+    off for a config value (see :func:`_speech_service`). A missing
+    embeddings or rerank file turns that service off (see
+    :func:`_resolve_service`)."""
+    from . import stt as stt_mod
+    from . import tts as tts_mod
 
-    tts_value = getattr(a, "tts", None) or getattr(cfg, "tts", None)
-    cfg.tts = None
-    if tts_value:
-        from . import tts as tts_mod
-        cfg.tts = tts_mod.resolve_tts_model(tts_value)
-        tts_mod.import_mlx_audio()
+    cfg.stt = _speech_service("stt", getattr(a, "stt", None), cfg,
+                              stt_mod.resolve_stt_model, stt_mod.import_mlx_whisper)
+    cfg.tts = _speech_service("tts", getattr(a, "tts", None), cfg,
+                              tts_mod.resolve_tts_model, tts_mod.import_mlx_audio)
 
     # Relative GGUF paths search server.model_dirs, as a models: entry does.
     model_dirs = getattr(cfg, "model_dirs", None) or []
@@ -2037,8 +2299,6 @@ def _resolve_service_models(cfg, a) -> None:
         cfg.embeddings = _resolve_service(
             "server.embeddings", emb_mod.resolve_embeddings_model,
             emb_value, model_dirs)
-        if cfg.embeddings and not emb_mod._is_gguf_ref(cfg.embeddings):
-            emb_mod.import_mlx_embeddings()   # GGUF embedders use the runtime loader
 
     rerank_value = getattr(a, "rerank", None) or getattr(cfg, "rerank", None)
     cfg.rerank = None
@@ -2092,6 +2352,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         print("[server] command buffer caps: not installed "
               "(GMLX_CB_PHASE=0 or mlx-kquant lacks set_cb_caps); streamed "
               "models run uncapped")
+    from .gpu_share import install_chat_ticks
+    install_chat_ticks()
     # Single-model --hf-source override (niche): re-register the VLM with the
     # explicit processor source (ModelCfg carries no hf_source field).
     if a.model and a.hf_source and a.mmproj:
@@ -2145,10 +2407,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         os.environ["MLX_VLM_TOKEN_QUEUE_TIMEOUT"] = "1800"
         print("[server] token-queue timeout: 1800s (default)")
 
-    # Decode-loop housekeeping (mx.eval(cache) + mx.clear_cache) interval:
-    # mlx-vlm's default of every 50 steps costs ~2.5 ms per event (~0.05
-    # ms/tok amortized at B=1). 256 keeps the memory bound while cutting the
-    # amortized cost ~5x. An exported env wins.
+    # Decode-loop housekeeping interval (mx.async_eval of the cache states,
+    # then mx.clear_cache): mlx-vlm's default of every 50 steps costs ~2.5 ms
+    # per event (~0.05 ms/tok amortized at B=1). 256 keeps the memory bound
+    # while cutting the amortized cost ~5x. An exported env wins.
     os.environ.setdefault("MLX_VLM_BATCH_CACHE_EVAL_INTERVAL", "256")
 
     # Prefill chunk size: flag > config > exported env > upstream default
@@ -2216,11 +2478,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                       "per-model speculative_width_cap config key")
 
     resolved = serving.resolved_models()
-    pinned_paths = {rm.path for rm in resolved.values() if rm.pin}
-    for p in a.pin:
-        rp = resolved.get(p)
-        pinned_paths.add(rp.path if rp is not None
-                         else os.path.abspath(os.path.expanduser(p)))
+    pinned_paths, image_pins = _pinned_paths(resolved, serving.image_models(),
+                                             a.pin)
 
     # Only an explicit pin (`pin: true`, --pin, or the single-GGUF positional)
     # holds the preload for the process lifetime. A default or sole model
@@ -2239,8 +2498,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         max_models=a.max_models if a.max_models is not None else cfg.max_models,
         pinned=pinned_paths or None,
     )
-    # The services resolve before the port binds, so a missing speech extra
-    # or a malformed value stops the start.
+    # The services resolve before the port binds, so a malformed value, or
+    # a missing speech extra that a flag asked for, stops the start.
     _resolve_service_models(cfg, a)
     _warm_service_models(cfg)
 
@@ -2310,10 +2569,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if reload_fn is not None:
         def _on_sighup(_sig, _frame):
             try:
-                print(f"[server] SIGHUP config reload: {reload_fn() or {}}")
+                print(f"[server] SIGHUP config reload: {reload_fn() or {}}", flush=True)
             except Exception as exc:
                 print(f"[server] SIGHUP config reload failed: {exc}",
-                      file=sys.stderr)
+                      file=sys.stderr, flush=True)
 
         if hasattr(signal, "SIGHUP"):
             signal.signal(signal.SIGHUP, _on_sighup)
@@ -2366,6 +2625,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         if rm.path in pinned_paths and rm.path not in warm_paths:
             warm_paths.add(rm.path)
             pinned_ids.append(mid)
+    for iid, path in image_pins.items():
+        if path not in warm_paths:
+            warm_paths.add(path)
+            pinned_ids.append(iid)
     extras = []
     for m in pinned_ids + (list(cfg.models) if pre == "all" else list(pre or ())):
         if m != preload and m not in extras:
@@ -2401,7 +2664,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     prepare_session_sockets(host, port)
 
     loop = "uvloop" if _has_uvloop() else "auto"
-    uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,
+    uvicorn.run("gmlx._vendor.mlx_vlm.server:app", host=host, port=port, workers=1,
                 server_header=False, loop=loop,
                 # The host guard of a loopback bind reads the socket peer,
                 # which X-Forwarded-For from a local proxy must not replace.

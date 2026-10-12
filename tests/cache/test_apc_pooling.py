@@ -1,4 +1,4 @@
-"""APC participation for PoolingCache stacks + the rotating-safe KV
+"""APC participation for DS4PoolingCache stacks + the rotating-safe KV
 quantizer (serve KV_BITS).
 
 Gates the merge blockers: a deepseek4 row snapshot must clone (in-memory
@@ -16,7 +16,7 @@ from gmlx.cache.apc_pooling import (
     install_pooling_apc_support,
     install_safe_kv_quantization,
 )
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
 D = 64
 MODES = ["fp16", "q8", "fp4"]
@@ -45,7 +45,7 @@ def _mode_pool(mode, **kw):
 
 
 def _pool(quantized=False, rows=9, remainder=2, packed=False):
-    c = PoolingCache(4)
+    c = DS4PoolingCache(4)
     if quantized:
         c.quantize_storage(group_size=32, bits=8)
     if packed:
@@ -89,7 +89,7 @@ def _same_pool(a, b):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_clone_roundtrip(mode):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(2)
     src = _mode_pool(mode)
@@ -109,13 +109,12 @@ def test_clone_roundtrip(mode):
 
 
 def test_model_apc_mode_resolves_exact_for_pooling_stack():
-    # Gate ahead of every other arm: if the support predicate rejects
-    # PoolingCache, model_apc_mode is None and serve-side APC never engages.
-    from gmlx.cache.compat import construction_cache_module
-    _c = construction_cache_module()
-    CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
+    # Gate ahead of every other arm: if the prefix-cache plan finds no
+    # capability for DS4PoolingCache, model_apc_mode is None and serve-side
+    # APC never engages.
+    from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     stack = [CacheList(RotatingKVCache(max_size=8), _pool(rows=0, remainder=0),
                        _pool(rows=0, remainder=0))]
@@ -124,24 +123,20 @@ def test_model_apc_mode_resolves_exact_for_pooling_stack():
         def make_cache(self):
             return stack
 
-    assert apc._cache_entry_supports_exact_apc(stack[0])
+    assert apc.model_apc_plan(_LM()).restorable
     assert apc.model_apc_mode(_LM()) == "exact"
 
 
 def test_apc_engages_for_mlx_lm_origin_model():
     """The serve engagement gate: BatchGenerator drops the APC manager
     outright when model_apc_mode(model) is None. mlx-lm-arch text models
-    build mlx-lm-origin caches, which mlx-vlm >= 0.6.4's isinstance gates
-    reject - found live as gemma-4 serving with apc_enabled=true but zero
-    lookups/stores. ensure_runtime_origin_make_cache must keep the mode
-    resolving on every supported mlx-vlm version."""
-    from mlx_lm.models.cache import KVCache, RotatingKVCache
-    from mlx_vlm import apc
+    build their caches from the mlx_lm cache names, which are the owned
+    classes the mlx-vlm APC gates take, so the mode resolves with no
+    wrapper on make_cache."""
+    from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
+    from gmlx._vendor.mlx_vlm import apc
 
-    from gmlx.cache.compat import (
-        ensure_runtime_origin_make_cache,
-        runtime_cache_module,
-    )
+    from gmlx.cache import kv_cache
 
     class _GemmaLike:  # sliding-window + global attention mix
         def make_cache(self):
@@ -151,17 +146,9 @@ def test_apc_engages_for_mlx_lm_origin_model():
         def make_cache(self):
             return [KVCache(), KVCache()]
 
-    gemma = ensure_runtime_origin_make_cache(_GemmaLike())
-    dense = ensure_runtime_origin_make_cache(_DenseLike())
-    assert apc.model_apc_mode(gemma) == "exact"
-    assert apc.model_apc_mode(dense) == "block"
-    vlm = runtime_cache_module()
-    assert all(type(c) is vlm.KVCache for c in dense.make_cache())
-
-    # Idempotent: re-wrapping must not stack another layer.
-    wrapped = gemma.make_cache
-    ensure_runtime_origin_make_cache(gemma)
-    assert gemma.make_cache is wrapped
+    assert apc.model_apc_mode(_GemmaLike()) == "exact"
+    assert apc.model_apc_mode(_DenseLike()) == "block"
+    assert all(type(c) is kv_cache.KVCache for c in _DenseLike().make_cache())
 
 
 def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
@@ -176,7 +163,7 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
 
     import gmlx.spec.engine as engine
 
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     seen = {}
 
     class _ProbeBG:
@@ -207,34 +194,47 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
     assert seen["apc_manager"] is mgr
 
 
-def test_rebind_to_runtime_origin_recurses_and_skips_ours():
-    from mlx_lm.models.cache import CacheList, KVCache, RotatingKVCache
+def test_kv_bits_adds_no_apc_off_warning_at_boot(monkeypatch, caplog):
+    """mlx-vlm 0.7.3 keeps the APC manager when kv_bits is set. It drops the
+    manager only when no APC tier serves the cache stack, which _resolve_l1
+    reports on its own. The stash wrapper adds no KV quantization warning,
+    whether the constructor keeps the manager or drops it."""
+    import importlib
+    import logging
+    from types import SimpleNamespace
 
-    from gmlx.cache.compat import (
-        rebind_to_runtime_origin,
-        runtime_cache_module,
-    )
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    import gmlx.spec.engine as engine
 
-    vlm = runtime_cache_module()
-    pool = _pool(rows=0, remainder=0)
-    stack = [CacheList(RotatingKVCache(max_size=8), pool), KVCache()]
-    rebind_to_runtime_origin(stack)
-    assert type(stack[0]) is vlm.CacheList
-    assert type(stack[0].caches[0]) is vlm.RotatingKVCache
-    assert type(stack[0].caches[1]) is PoolingCache  # ours, untouched
-    assert type(stack[1]) is vlm.KVCache
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+
+    class _UpstreamLikeBG:
+        drop = False
+
+        def __init__(self, model, processor, **kwargs):
+            self.apc_manager = None if self.drop else kwargs.get("apc_manager")
+
+    monkeypatch.setattr(ar, "BatchGenerator", _UpstreamLikeBG)
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", False)
+    engine._install_apc_manager_stash()
+    mgr = object()
+
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):
+        for drop in (False, True):
+            _UpstreamLikeBG.drop = drop
+            ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr, kv_bits=8)
+            ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr,
+                              kv_bits=8, draft_model=object())
+    # The dead-stack probe may warn separately on these bare fakes.
+    assert not any("KV quantization" in r.message for r in caplog.records)
 
 
 def test_warm_batch_adoption_merges_pooling_stack():
     # After an exact hit the engine merges the restored row into batch
     # caches via _merge_exact_cache_entries; a None there silently falls
     # back to cold prefill, so the hit must survive the merge.
-    from gmlx.cache.compat import construction_cache_module
-    _c = construction_cache_module()
-    CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
+    from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(7)
     warm = [
@@ -261,9 +261,7 @@ def test_warm_batch_adoption_merges_pooling_stack():
 
 def test_row_snapshot_v4_stack():
     # The merge blocker: a deepseek4-shaped cache row must snapshot whole.
-    from gmlx.cache.compat import construction_cache_module
-    _c = construction_cache_module()
-    CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
+    from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
     from gmlx.cache.snapshot import row_snapshot
 
@@ -283,7 +281,7 @@ def test_row_snapshot_v4_stack():
 
 @pytest.mark.parametrize("mode", MODES)
 def test_disk_exact_roundtrip(tmp_path, mode):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(4)
     store = apc.DiskBlockStore(tmp_path, namespace="t")
@@ -314,11 +312,9 @@ def test_disk_roundtrip_zero_width_values(tmp_path):
     # deepseek4's DSA local caches store keys with zero-width values;
     # mx.save_safetensors rejects zero-size arrays, so the shard writer
     # spills them to metadata and the reader synthesizes zeros.
-    from gmlx.cache.compat import construction_cache_module
-    _c = construction_cache_module()
-    CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
+    from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(8)
     rot = RotatingKVCache(max_size=8)
@@ -354,10 +350,8 @@ def test_disk_roundtrip_zero_width_values(tmp_path):
 
 
 def test_safe_kv_quantization_packs_pools_and_skips_rotating():
-    from mlx_lm.generate import maybe_quantize_kv_cache
-    from gmlx.cache.compat import construction_cache_module
-    _c = construction_cache_module()
-    CacheList, KVCache, RotatingKVCache = _c.CacheList, _c.KVCache, _c.RotatingKVCache
+    from gmlx._vendor.mlx_lm.generate import maybe_quantize_kv_cache
+    from gmlx.cache.kv_cache import CacheList, KVCache, RotatingKVCache
 
     mx.random.seed(5)
     rot = RotatingKVCache(max_size=4)
@@ -385,9 +379,9 @@ def test_safe_kv_quantization_packs_pools_and_skips_rotating():
 def test_quantize_storage_converts_existing_rows():
     mx.random.seed(6)
     rows = mx.random.normal((1, 9, D)).astype(mx.float16)
-    ref = PoolingCache(4)
+    ref = DS4PoolingCache(4)
     ref.update_and_fetch(rows)
-    conv = PoolingCache(4)
+    conv = DS4PoolingCache(4)
     conv.update_and_fetch(rows)
     conv.quantize_storage(group_size=32, bits=8)
     assert conv.is_quantized and conv.size() == 9
@@ -418,7 +412,7 @@ class _V4ish:
 
 
 def _install_on_fake(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     class _FakePPB:
         def __init__(self, *a, **k):
@@ -519,7 +513,7 @@ DEFAULT_PREFILL_B = 8
 
 
 def _install_gate_on_fake(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     class _FakeBG:
         def __init__(self, model, processor, **kw):
@@ -579,25 +573,25 @@ def test_model_has_pools_memoizes(monkeypatch):
 
 def test_is_batched_cache_sees_through_cachelist():
     from gmlx.cache.apc_pooling import _is_batched_cache
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache
 
     scalar = SimpleNamespace(caches=[_pool(rows=0, remainder=0)])
-    batched = SimpleNamespace(caches=[BatchPoolingCache(4, [0, 0])])
+    batched = SimpleNamespace(caches=[DS4BatchPoolingCache(4, [0, 0])])
     assert not _is_batched_cache(scalar)
     assert _is_batched_cache(batched)
 
 
 def test_batched_pool_carries_left_padding():
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache
 
-    b = BatchPoolingCache(4, [0, 0, 0])
+    b = DS4BatchPoolingCache(4, [0, 0, 0])
     # The admission path lifts only caches missing this attribute.
     assert b.left_padding == [0, 0, 0]
     assert not hasattr(_pool(rows=0, remainder=0), "left_padding")
 
 
 def test_admission_does_not_remerge_batched_cachelist(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     calls = []
 

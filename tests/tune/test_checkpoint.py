@@ -7,8 +7,8 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from mlx_lm.models import llama
-from mlx_lm.models.llama import ModelArgs
+from gmlx._vendor.mlx_lm.models import llama
+from gmlx._vendor.mlx_lm.models.llama import ModelArgs
 
 from gmlx.tune.checkpoint import checkpoint_layers
 
@@ -79,7 +79,7 @@ def test_checkpointed_layers_replay_the_dropout_mask(monkeypatch):
     drawn once and replayed, and the gradient equals a plain backward whose
     layers draw the same masks."""
     import gmlx.tune.checkpoint as ck
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     def build():
         model = _model(3)
@@ -126,7 +126,7 @@ def test_checkpointed_layers_run_under_a_compiled_step():
     when the layer holds dropout."""
     from functools import partial
 
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     model = _model(5)
     for layer in model.layers:

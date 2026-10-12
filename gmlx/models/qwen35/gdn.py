@@ -1,16 +1,18 @@
 """Owned GatedDeltaNet forward for qwen3.5/3.6 MTP targets.
 
-Subclasses mlx-vlm's ``Qwen3_5GatedDeltaNet``; the owned constructors
-build it directly and ``prepare_gdn`` arms the fused routes after
-weights load (``rebind_gdn`` arms stock-built trees in tests). Three
-routes: fused decode (S=1, no sink), fused verify (sink set, S>1), and
-an owned unfused chain for the rest, which sends the scan through
-mlx-lm's gated_delta (tiled under the GGUF K->V fixup) and projections
-through ``qwen35_verify_linear``.
+Subclasses the vendored mlx-vlm 0.6.15 ``Qwen3_5GatedDeltaNet``
+(``language``); the owned constructors build it directly and
+``prepare_gdn`` arms the fused routes after weights load (``rebind_gdn``
+arms base-built trees in tests). Three routes: fused decode (S=1, no
+sink), fused verify (sink set, S>1), and an owned unfused chain for the
+rest, which sends the scan through mlx-lm's gated_delta in the layer's own
+head order (``gdn_kv_tiled``, from the config) and projections through
+``qwen35_verify_linear``.
 
-Owned loads never touch ``mlx_vlm.models.qwen3_5.gated_delta``; the
-rebind and class patches install only for the ``GMLX_QWEN_OWNED=0``
-fallback. ``GMLX_FUSED_GDN=0`` disables the fused routes.
+The owned forward calls no scan of ``.gated_delta`` but its
+state-capturing ops (the inherited rollback uses its state ops too); the
+class patches have no loader caller and stay in-tree as test oracles.
+``GMLX_FUSED_GDN=0`` disables the fused routes.
 """
 
 from typing import Any, Optional
@@ -18,13 +20,13 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.qwen3_5 import language as _L
-
 import gmlx.upstream.gdn_patches as _gp
 from gmlx.envflags import env_bool
 from gmlx.load.loadlog import verbose_print
 from gmlx.tune.gdn import training_gated_delta_update
 
+from . import gated_delta as _vgd
+from . import language as _L
 from .owned import (
     GdnReplayRollback,
     _qwen3_5_advance_left_padding_info,
@@ -37,24 +39,16 @@ _QWEN_GDN_FAMILY = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"
 
 
 def owned_gdn_active(model_type) -> bool:
-    """Whether this load takes the owned GatedDeltaNet (same switch as
-    the owned model-level forward)."""
-    return model_type in _QWEN_GDN_FAMILY and env_bool("GMLX_QWEN_OWNED", True)
+    """Whether this load takes the owned GatedDeltaNet, which every
+    model of the family does."""
+    return model_type in _QWEN_GDN_FAMILY
 
 
-def stock_gdn_fallback(model_type) -> bool:
-    """True when a GDN-family model runs the bare-stock text fallback
-    (GMLX_QWEN_OWNED=0). The fallback has no verify patches and must
-    not receive quantized KV tuples."""
-    return (model_type in _QWEN_GDN_FAMILY
-            and not env_bool("GMLX_QWEN_OWNED", True))
-
-
-def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
-    """Sink-shaped scan, calling the tiled state-capturing ops directly
-    (what upstream's ``gated_delta_update_with_states`` resolves to
-    after the rebind patch)."""
-    from mlx_lm.models.gated_delta import compute_g
+def _gdn_update_with_states(q, k, v, a, b, A_log, dt_bias, state, mask, tiled):
+    """Sink-shaped scan on the state-capturing ops, in the head order of
+    the layer: ``tiled`` pairs V head hv with K head hv % Hk, and without
+    it V head hv pairs with K head hv // (Hv / Hk)."""
+    from gmlx._vendor.mlx_lm.models.gated_delta import compute_g
 
     g = compute_g(A_log, a, dt_bias)
     beta = mx.sigmoid(b)
@@ -63,21 +57,23 @@ def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
         Hv, Dv = v.shape[-2:]
         Dk = q.shape[-1]
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
-    return _gp._tiled_gd_with_states_ops(q, k, v, g, beta, state, mask)
+    return _vgd._gated_delta_with_states_ops(
+        q, k, v, g, beta, state, mask, tiled=tiled
+    )
 
 
 def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):
     """The stock forward chain under owned control flow.
 
     Body mirrors upstream's ``Qwen3_5GatedDeltaNet.__call__`` with three
-    substitutions: the scan goes to mlx-lm's gated_delta (tiled under
-    the GGUF fixup) instead of the vlm module globals, the sink-shaped
-    scan goes to the tiled state-capturing ops, and the memo advance
+    substitutions: the scan goes to mlx-lm's gated_delta instead of the
+    vlm module's, the sink-shaped scan goes to the state-capturing ops,
+    both in the layer's own head order, and the memo advance
     uses the owned copies. A training forward with no cache takes the
     chunked checkpointed scan in ``gmlx.tune.gdn`` ahead of the plain
     dispatch.
     """
-    from mlx_lm.models import gated_delta as _gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as _gd
 
     B, S, _ = inputs.shape
 
@@ -145,12 +141,14 @@ def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):
 
     initial_state = state
     if gdn_sink is not None:
-        out, state, intermediate_states = _gdn_update_with_states_tiled(
-            q, k, v, a, b, self.A_log, self.dt_bias, state, mask
+        out, state, intermediate_states = _gdn_update_with_states(
+            q, k, v, a, b, self.A_log, self.dt_bias, state, mask,
+            self.gdn_kv_tiled,
         )
     elif self.training and cache is None:
         out, state = training_gated_delta_update(
-            q, k, v, a, b, self.A_log, self.dt_bias, state, mask
+            q, k, v, a, b, self.A_log, self.dt_bias, state, mask,
+            tiled=self.gdn_kv_tiled,
         )
         intermediate_states = None
     else:
@@ -165,6 +163,7 @@ def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):
             state,
             mask,
             use_kernel=not self.training,
+            tiled=self.gdn_kv_tiled,
         )
         intermediate_states = None
 

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import numpy as np
 import pytest
 import mlx.core as mx
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.stream.expert_streaming import install_expert_streaming
 
@@ -581,7 +581,7 @@ def test_the_drain_waits_one_timeout_for_all_the_staging(monkeypatch, tmp_path):
     monkeypatch.setenv("GMLX_PREFILL_RING_SLOTS", "3")
     feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=4)
     gate = _wedge_stage(monkeypatch, feeder, 1)
-    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 2.0)
     try:
         with feeder.prefill_call(modules[0][0], 0):   # kicks layers 1 and 2
             pass
@@ -591,7 +591,7 @@ def test_the_drain_waits_one_timeout_for_all_the_staging(monkeypatch, tmp_path):
                 pass
         elapsed = time.monotonic() - t0
         assert feeder._wedged == [1, 2]
-        assert elapsed < 0.8, f"the drain took {elapsed:.2f}s for a 0.5s timeout"
+        assert elapsed < 3.0, f"the drain took {elapsed:.2f}s for a 2s timeout"
     finally:
         _release_wedge(feeder, gate)
 

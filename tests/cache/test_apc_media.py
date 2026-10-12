@@ -1,17 +1,36 @@
 """Config-declared media ids reach mlx-vlm's APC media guard."""
 
 import importlib
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import mlx.core as mx
+import pytest
+from gmlx._vendor.mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm.generate import ar
 
-from gmlx.cache.apc_media import install_media_token_ids
+import gmlx.load.vlm as gvlm
+import gmlx.spec.engine as engine
+import gmlx.spec.mtp_prefill as mtp_prefill
+from gmlx.cache.apc_media import (
+    WholeMediaBlocks,
+    install_media_token_ids,
+    safe_prefix,
+)
+from gmlx.gen import media_spans
+from gmlx.load.config_synth import synthesize_config
+
+from test_config_synth import (
+    _GLM5NEXT_SHAPES,
+    _MUSE_GLIMMER_SHAPES,
+    _glm5next_meta,
+    _muse_glimmer_meta,
+)
 
 
 def test_media_token_ids_folded_into_reader():
     assert install_media_token_ids()
     assert install_media_token_ids()  # idempotent
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     cfg = SimpleNamespace(image_token_id=7, media_token_ids=[32, 33, 34])
     assert apc.multimodal_token_ids_from_config(cfg) == {7, 32, 33, 34}
     # dict configs (the stock reader ignores them) and configs without it
@@ -25,7 +44,7 @@ def test_guard_moves_prefix_past_expanded_block():
     """A prefix that ends inside an expanded block moves up past its last
     media id (the stock rule), so no restored prefix cuts a block."""
     install_media_token_ids()
-    from mlx_vlm.apc import media_safe_prefix_min
+    from gmlx._vendor.mlx_vlm.apc import media_safe_prefix_min
 
     vocab = 32
     block = [vocab + t for t in (1, 1, 0, 2, 2, 3, 1, 1, 4)]
@@ -49,5 +68,315 @@ def test_language_model_config_carries_media_ids():
     assert cfg.media_token_ids == [32, 33, 34, 35, 36]
     assert text.media_token_ids == [32, 33, 34, 35, 36]
     install_media_token_ids()
-    from mlx_vlm.apc import multimodal_token_ids_from_config
+    from gmlx._vendor.mlx_vlm.apc import multimodal_token_ids_from_config
     assert multimodal_token_ids_from_config(text) >= {32, 33, 34, 35, 36}
+
+
+_HIDDEN = 64
+
+
+def _gemma4_config(model_type: str, **text) -> dict:
+    """A tiny gemma-4 container config; the ids fall to the defaults."""
+    text_type = ("gemma4_unified_text" if model_type == "gemma4_unified"
+                 else "gemma4_text")
+    return {
+        "model_type": model_type,
+        "text_config": {
+            "model_type": text_type, "hidden_size": _HIDDEN,
+            "num_hidden_layers": 4, "intermediate_size": 128,
+            "num_attention_heads": 4, "head_dim": 16, "global_head_dim": 16,
+            "num_key_value_heads": 2, "num_global_key_value_heads": 2,
+            "num_kv_shared_layers": 0, "vocab_size": 128,
+            "vocab_size_per_layer_input": 128,
+            "hidden_size_per_layer_input": 0, "sliding_window": 64,
+            "sliding_window_pattern": 2, "attention_k_eq_v": False, **text},
+        "vision_config": {},
+    }
+
+
+def _synth_config(model_type: str) -> dict:
+    """The loader's config for a tiny glm5_next or muse_glimmer pair."""
+    meta, shapes = {"glm5_next": (_glm5next_meta(), _GLM5NEXT_SHAPES),
+                    "muse_glimmer": (_muse_glimmer_meta(),
+                                     _MUSE_GLIMMER_SHAPES)}[model_type]
+    hidden = synthesize_config(meta, shapes)["hidden_size"]
+    clip = {
+        "clip.vision.block_count": 1,
+        "clip.vision.embedding_length": 32,
+        "clip.vision.feed_forward_length": 64,
+        "clip.vision.attention.head_count": 2,
+        "clip.vision.patch_size": 14,
+        "clip.vision.image_size": 448,
+        "clip.vision.spatial_merge_size": 2,
+        "clip.vision.projection_dim": hidden,
+    }
+    return gvlm.synthesize_vlm_config(model_type, meta, shapes, clip)
+
+
+def _guard(lm):
+    """A stand-in for the batch engine the server builds on ``lm``, with
+    the stock media guard helpers."""
+    gen = SimpleNamespace(model=lm)
+    for name in ("_apc_media_token_ids", "_apc_safe_prefix_lookup_min",
+                 "_apc_suffix_is_text_only", "_apc_prefix_has_media_tokens"):
+        setattr(gen, name, MethodType(getattr(ar.BatchGenerator, name), gen))
+    return gen
+
+
+def _model(model_type: str, text: dict | None):
+    config = (_gemma4_config(model_type, **(text or {}))
+              if model_type.startswith("gemma4")
+              else _synth_config(model_type))
+    return gvlm.build_vlm_model(config)[0]
+
+
+@pytest.mark.parametrize("model_type,text,mirrored", [
+    ("gemma4", {"use_bidirectional_attention": "vision"}, True),
+    ("gemma4_unified", {}, True),
+    ("gemma4", {}, False),
+    ("gemma4_unified", {"use_bidirectional_attention": None}, False),
+    ("glm5_next", None, False),
+    ("muse_glimmer", None, False),
+])
+def test_language_model_guard_sees_the_container_ids_with_bidirectional_attention(
+        model_type, text, mirrored):
+    """These archs name their image id on the container config only, and
+    the server builds the batch engine on the language model. The loader
+    mirrors the ids onto the text config when that config turns on
+    bidirectional image attention. A gemma4 container holds the owned
+    language model, which is also the MTP path's spec target, so the spec
+    swap leaves it in place. Causal models keep a guard that sees no image
+    id."""
+    install_media_token_ids()
+    model = _model(model_type, text)
+    container = _apc.multimodal_token_ids_from_config(model.config)
+    image = int(model.config.image_token_id)
+    assert image in container
+    lm = model.language_model
+    if model_type.startswith("gemma4"):
+        gvlm._swap_spec_language_model(model, model_type, log=lambda _m: None)
+        assert model.language_model is lm
+    seen = _guard(lm)._apc_media_token_ids()
+    if mirrored:
+        assert seen >= container
+    else:
+        assert image not in seen
+
+
+class _Store:
+    """An APC store holding the prompt's first ``cached`` columns, as block
+    tier blocks or as an exact checkpoint."""
+
+    def __init__(self, tier: str, cached: int):
+        self.tier, self.cached = tier, cached
+
+    def lookup_prefix(self, ids_list, extra_hash):
+        return (["block"], self.cached) if self.tier == "block" else ([], 0)
+
+    def lookup_exact_cache(self, ids_list, extra_hash, min_prefix_tokens):
+        if self.tier == "exact" and self.cached >= min_prefix_tokens:
+            return "checkpoint", self.cached
+        return None, 0
+
+    def lookup_prefix_disk_cache(self, ids_list, **_kwargs):
+        return None, 0
+
+    def release(self, blocks):
+        pass
+
+
+def _restored_len(lm, ids, store) -> int:
+    """The prefix the stock lookup restores for ``ids`` from ``store``."""
+    gen = _guard(lm)
+    plan = _apc.apc_lookup_plan(
+        store, ids, extra_hash=0, apc_mode="block",
+        safe_lookup_min=gen._apc_safe_prefix_lookup_min(ids),
+        suffix_is_text_only=lambda n: gen._apc_suffix_is_text_only(ids, n),
+        prefix_has_media=lambda n: gen._apc_prefix_has_media_tokens(ids, n))
+    return 0 if plan is None else plan["prefix_len"]
+
+
+def _last_logits(lm, embeds, types, prefix: int, tier: str) -> mx.array:
+    """Last-column logits with the first ``prefix`` columns restored. Block
+    tier KV comes from a one-pass prefill of the whole prompt; an exact
+    checkpoint is the KV of a prefill that stopped at ``prefix``."""
+    def forward(cols, cache):
+        out = lm(None, inputs_embeds=embeds[:, cols], cache=cache,
+                 mm_token_type_ids=types[:, cols])
+        return out.logits[:, -1, :].astype(mx.float32)
+
+    cache = lm.make_cache()
+    if prefix and tier == "block":
+        forward(slice(None), cache)
+        for c in cache:
+            c.trim(embeds.shape[1] - prefix)
+    elif prefix:
+        forward(slice(0, prefix), cache)
+    return forward(slice(prefix, None), cache)
+
+
+@pytest.mark.parametrize("model_type,text", [
+    ("gemma4", {"use_bidirectional_attention": "vision"}),
+    ("gemma4_unified", {}),
+])
+@pytest.mark.parametrize("tier,cached", [("block", 16), ("exact", 32)])
+def test_restored_image_prompt_matches_a_cold_prefill(
+        model_type, text, tier, cached):
+    """With bidirectional image attention, a one-pass prefill lets every
+    image column see the whole image. A restore that ends inside the image
+    leaves the rest of it to a suffix pass, where it sees only earlier
+    columns, so the guard must decline it. A checkpoint past the image
+    still restores."""
+    install_media_token_ids()
+    model, _ = gvlm.build_vlm_model(_gemma4_config(model_type, **text))
+    lm = model.language_model
+    assert lm.config.use_bidirectional_attention == "vision"
+    mx.eval(lm.parameters())
+    image = int(model.config.image_token_id)
+    n, lo, hi = 40, 10, 26
+    ids = [image if lo <= i < hi else 1 + i for i in range(n)]
+    types = mx.array([[int(lo <= i < hi) for i in range(n)]])
+    embeds = mx.random.normal((1, n, _HIDDEN), key=mx.random.key(0)) * 0.5
+
+    cold = _last_logits(lm, embeds, types, 0, tier)
+    prefix = _restored_len(lm, ids, _Store(tier, cached))
+    served = _last_logits(lm, embeds, types, prefix, tier)
+    diff = mx.max(mx.abs(served - cold)).item()
+    assert diff <= 1e-4, (prefix, diff)
+    assert prefix == (cached if cached >= hi else 0)
+
+
+@pytest.mark.parametrize("model_type,text", [
+    ("gemma4", {}), ("glm5_next", None), ("muse_glimmer", None)])
+def test_causal_models_reuse_a_block_prefix_inside_an_image(model_type, text):
+    """With causal attention an image column sees only earlier columns in
+    a one-pass prefill too, so a block prefix that ends inside the image
+    restores, and on gemma-4 the logits match a cold prefill."""
+    install_media_token_ids()
+    model = _model(model_type, text)
+    lm = model.language_model
+    image = int(model.config.image_token_id)
+    n, lo, hi = 40, 10, 26
+    ids = [image if lo <= i < hi else 1 + i for i in range(n)]
+    assert _restored_len(lm, ids, _Store("block", 16)) == 16
+    if model_type == "gemma4":
+        mx.eval(lm.parameters())
+        types = mx.array([[int(lo <= i < hi) for i in range(n)]])
+        embeds = mx.random.normal((1, n, _HIDDEN), key=mx.random.key(0)) * 0.5
+        cold = _last_logits(lm, embeds, types, 0, "block")
+        served = _last_logits(lm, embeds, types, 16, "block")
+        assert mx.max(mx.abs(served - cold)).item() <= 1e-4
+
+
+def test_whole_block_guard_accepts_a_prefix_outside_every_image():
+    """A gemma-4 text config under bidirectional image attention gives the
+    guard whole-block ids: a prefix may end before, between or after the
+    images, and a column inside one moves to its end. The container
+    config, a causal text config and other models keep the stock rule."""
+    install_media_token_ids()
+    vision = SimpleNamespace(model_type="gemma4_text", image_token_id=7,
+                             use_bidirectional_attention="vision")
+    media = _apc.multimodal_token_ids_from_config(vision)
+    assert isinstance(media, WholeMediaBlocks) and media == {7}
+    for config in (SimpleNamespace(model_type="gemma4", image_token_id=7),
+                   SimpleNamespace(model_type="gemma4_text", image_token_id=7),
+                   SimpleNamespace(model_type="diffusion_gemma_text",
+                                   image_token_id=7,
+                                   use_bidirectional_attention="vision")):
+        assert not isinstance(
+            _apc.multimodal_token_ids_from_config(config), WholeMediaBlocks)
+    ids = [1] * 4 + [7] * 6 + [2] * 4 + [7] * 6 + [3] * 4
+    stock = {7}
+    assert _apc.media_safe_prefix_min(ids, media) == 0
+    assert _apc.media_safe_prefix_min(ids, stock) == 20
+    leaves = [p for p in range(len(ids))
+              if _apc.prefix_leaves_text_only_suffix(ids, p, media)]
+    assert leaves == [0, 1, 2, 3, 4, 10, 11, 12, 13, 14, 20, 21, 22, 23]
+    assert not _apc.prefix_leaves_text_only_suffix(ids, 12, stock)
+    adjust = _apc.adjust_prefix_to_text_suffix_boundary
+    assert adjust(ids, 12, media) == 12
+    assert adjust(ids, 6, media) == 10
+    assert adjust(ids, 16, media) == 20
+    assert adjust(ids, 16, media, max_prefix_tokens=18) == 0
+    assert adjust(ids, 0, media) == 0
+    assert adjust(ids, 6, stock) == 20
+    assert [p(4) for p in (safe_prefix(ids, media), safe_prefix(ids, stock))
+            ] == [True, False]
+
+
+@pytest.fixture
+def serve_chunks(monkeypatch):
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "8")
+    monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", True)
+    monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", True)
+    # The span wrapper goes outside the MTP body, as the loader installs it.
+    mtp_prefill.install_full_prompt_mtp_prefill()
+    assert media_spans.install_span_aware_prompt_step()
+
+
+def _served_after_restore(lm, ids, embeds, types, prefix: int, tier: str):
+    """The chunk widths and last logits of a served prompt whose first
+    ``prefix`` columns were restored, the KV built as ``_last_logits``
+    builds it."""
+    n = embeds.shape[1]
+    row = lm.make_cache()
+    cols = slice(None) if tier == "block" else slice(0, prefix)
+    lm(None, inputs_embeds=embeds[:, cols], cache=row,
+       mm_token_type_ids=types[:, cols])
+    if tier == "block":
+        for c in row:
+            c.trim(n - prefix)
+    mx.eval([c.state for c in row])
+    warm, _ = _apc.make_warm_batch_exact_cache_multi([row], [prefix])
+    batch = ar.PromptProcessingBatch(
+        model=lm, uids=[0], input_ids=[ids[prefix:]], max_tokens=[4],
+        inputs_embeds=embeds[:, prefix:],
+        prompt_kwargs={"mm_token_type_ids": types[:, prefix:]},
+        warm_cache=warm, prefill_step_size=8)
+    chunks = []
+    while batch.needs_processing():
+        k = batch.prompt_step()
+        if k <= 0:
+            break
+        chunks.append(k)
+    out = lm(None, inputs_embeds=batch._inputs_embeds, cache=batch.prompt_cache,
+             mm_token_type_ids=batch._prompt_kwargs["mm_token_type_ids"])
+    return chunks, out.logits[:, -1, :].astype(mx.float32)
+
+
+@pytest.mark.parametrize("model_type,text", [
+    ("gemma4", {"use_bidirectional_attention": "vision"}),
+    ("gemma4_unified", {}),
+])
+@pytest.mark.parametrize("tier,cached,chunks", [
+    ("block", 8, [2, 16, 8, 5]),
+    ("exact", 8, [2, 16, 8, 5]),
+    ("exact", 10, [16, 8, 5]),
+])
+def test_a_restore_cut_before_an_image_reuses_the_prefix(
+        model_type, text, tier, cached, chunks, serve_chunks):
+    """Under bidirectional image attention a prefix that ends before the
+    image restores. The server embeds the whole prompt, and the suffix
+    prefill keeps the image in one chunk, so the logits match a cold
+    prefill. A prefix that ends inside the image still does not restore."""
+    install_media_token_ids()
+    model, _ = gvlm.build_vlm_model(_gemma4_config(model_type, **text))
+    lm = model.language_model
+    mx.eval(lm.parameters())
+    image = int(model.config.image_token_id)
+    n, lo, hi = 40, 10, 26
+    ids = [image if lo <= i < hi else 1 + i for i in range(n)]
+    types = mx.array([[int(lo <= i < hi) for i in range(n)]])
+    embeds = mx.random.normal((1, n, _HIDDEN), key=mx.random.key(0)) * 0.5
+
+    assert _restored_len(lm, ids, _Store(tier, cached)) == cached
+    assert _restored_len(lm, ids, _Store(tier, 16)) == 0
+    with mx.stream(mx.cpu):
+        got, served = _served_after_restore(lm, ids, embeds, types, cached,
+                                            tier)
+        cold = _last_logits(lm, embeds, types, 0, tier)
+    assert got == chunks
+    assert mx.max(mx.abs(served - cold)).item() <= 1e-4

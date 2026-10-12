@@ -103,7 +103,7 @@ def install_chat_load_offload() -> None:
     behaviour only under concurrent pressure, never worse."""
     import asyncio
 
-    app_mod = importlib.import_module("mlx_vlm.server.app")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     app = app_mod.app
     inherit = app_mod._INHERIT_ADAPTER
 
@@ -260,7 +260,7 @@ def install_sse_keepalive() -> None:
 
     from gmlx.envflags import env_float
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(*args, **kwargs):
@@ -333,7 +333,7 @@ def install_optional_request_model() -> None:
     `model`", and the resolve seam already treats an empty field exactly that
     way - only the pydantic schema stood in the way, 422ing the omission
     before resolution could run. Idempotent."""
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     for name in ("VLMRequest", "GenerationRequest", "ChatRequest",
                  "AnthropicRequest", "OpenAIRequest"):
         cls = getattr(schemas, name, None)
@@ -351,7 +351,7 @@ def install_request_profile_capture() -> None:
     cache key) - not just the stop resolver. Also rewrites an empty/omitted
     request ``model`` to the resolved default id, so the response echoes the
     model that actually served it rather than ``""``. Idempotent per route."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(*args, **kwargs):

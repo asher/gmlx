@@ -10,7 +10,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
@@ -148,7 +148,8 @@ def test_vlm_stream_experts_places_on_the_text_tower(
     target, _args, kwargs = spy_placement["install_expert_streaming"]
     # The tower, not the VLM wrapper: the vision tower stays on the GPU.
     assert target is model.language_model
-    assert kwargs == {"gguf_path": "/m/llm.gguf",
+    # explicit: `stream: experts` streams a model under the budget too.
+    assert kwargs == {"gguf_path": "/m/llm.gguf", "explicit": True,
                       "feeder_prefill": True, "feeder_decode": False,
                       "fast_disk": None}
     assert "configure_stream_cpu" not in spy_placement
@@ -220,7 +221,7 @@ def installed_bridge(monkeypatch):
     serveable_calls)``."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     original_calls = []
     serveable_calls = []
 
@@ -282,10 +283,36 @@ def test_text_route_threads_build_spec_chat_template(installed_bridge):
     assert serveable_calls == [("/m/text.gguf", None, None, "{{ pirate }}")]
 
 
+@pytest.mark.parametrize("path,model_type", [
+    ("mlx-community/gemma-4-e4b-it-4bit", "gemma4"),
+    ("/m/diffusion.gguf", "diffusion_gemma"),
+], ids=["mlx-gemma4", "diffusion-gguf"])
+def test_every_load_enables_the_system_text_fix(monkeypatch, path, model_type):
+    """The stock loader of an MLX-format Gemma-4 and the DiffusionGemma
+    branch never reach the VLM loader, which was the only one to enable the
+    fix, so their system prompt reached the template as a list."""
+    import importlib
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    processor = types.SimpleNamespace()
+    loaded = ("MODEL", processor, types.SimpleNamespace(model_type=model_type))
+    monkeypatch.setattr(gen, serving._BRIDGE_FLAG, False, raising=False)
+    monkeypatch.setattr(gen, "load_model_resources",
+                        lambda model_path, adapter_path=None: loaded,
+                        raising=False)
+    monkeypatch.setattr(serving, "load_serveable_model",
+                        lambda *a, **k: loaded)
+    monkeypatch.setattr(serving, "_warn_if_template_drops_text",
+                        lambda *a: None)
+    serving.install_gguf_server_bridge()
+    assert gen.load_model_resources(path) is loaded
+    assert getattr(processor, "_gmlx_system_as_text", False) is True
+
+
 def test_install_is_idempotent():
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     serving.install_gguf_server_bridge()
     first = gen.load_model_resources
     serving.install_gguf_server_bridge()

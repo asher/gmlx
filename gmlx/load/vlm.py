@@ -19,27 +19,23 @@ only through :func:`load_vlm_model` (CLI ``--mmproj``).
 
 from __future__ import annotations
 
+import importlib
 import re
+from typing import Any, ClassVar
 
 import mlx.core as mx
 from transformers import BaseVideoProcessor as _BaseVideoProcessor
 from transformers.image_processing_utils import ImageProcessingMixin
 
-from . import loadlog
+from . import loadlog, rope_scaling, rope_swap
 from .config_synth import synthesize_config
-from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch,
-    _patch_gated_delta_tiled_v,
-    _patch_mlxvlm_gated_delta_tiled_v,
-    _tiled_v_patch_applied,
-)
+from gmlx.upstream.gdn_patches import require_tiled_gdn
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
-    _F16_KEEP_BY_MODEL_TYPE,
-    _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
     collect_after_load,
+    float_dtype_rules,
     materialize_module_arrays,
     weights_source_key,
 )
@@ -84,14 +80,17 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     if proj == "muse-glimmer":
         # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
         # adapter onto the muse-glimmer text tower. Both halves are vendored
-        # (gmlx.models.muse_glimmer.vlm_model) and installed over the
-        # muse_glimmer package that mlx-vlm ships for the HF checkpoint.
+        # (gmlx.models.muse_glimmer.vlm_model), which loads ahead of the
+        # muse_glimmer package mlx-vlm ships from 0.6.15.
         return "muse_glimmer"
-    if proj == "glm5next":
-        # GLM-5.3-Flash: the GLM-OCR ViT (qwen2vl-style dynamic patches, 2-D
-        # rope, per-head qk-norm, clamped-swiglu FFN) + a conv-downsample
-        # projector onto the glm5next hybrid text tower. Both halves are
-        # vendored (gmlx.models.glm5_next.vlm_model).
+    if proj in ("glm5v", "glm5next"):
+        # GLM-5.3-Flash ("glm5v" upstream; "glm5next", the name of the closed
+        # PR 27754, in the first mmproj uploads): the GLM-OCR ViT
+        # (qwen2vl-style dynamic patches, 2-D rope, per-head qk-norm,
+        # clamped-swiglu FFN) + a conv-downsample projector onto the
+        # glm5-next hybrid text tower. Both halves are
+        # vendored (gmlx.models.glm5_next.vlm_model), which loads ahead of the
+        # glm5_next package mlx-vlm ships from 0.7.3.
         return "glm5_next"
     if proj == "deepseek4v":
         # DeepSeek-V4-Flash-Vision-Exp: a native-resolution DeepSeek ViT
@@ -145,6 +144,11 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # and wrapper classes are vendored (gmlx.models.qwen4_exp.vlm_model).
         if llm_arch == "qwen4exp":
             return "qwen4_exp"
+        # Qwen3-VL (llama.cpp arch tag qwen3vl): the Qwen3 dense text tower
+        # with the Qwen3-VL vision tower and its deepstack mergers, whose
+        # features join the first decoder layers.
+        if llm_arch == "qwen3vl":
+            return "qwen3_vl"
         return "qwen3_5"
     if llm_arch == "gemma4":
         # gemma-4 ships two omni families: the E-series (E2B/E4B) with CLIP +
@@ -703,6 +707,30 @@ _QWEN35V_TOP_MAP = {
     "mm.2.bias": "vision_tower.merger.linear_fc2.bias",
 }
 
+# Qwen3-VL (qwen3_vl) adds the deepstack mergers to that tower. A merger takes
+# the hidden state after one vision block, moves the 2x2 merge unit onto the
+# feature axis, normalizes it there, and projects it to the text width. The
+# GGUF names each merger by its block (v.deepstack.<block>.*) and flags the
+# blocks in clip.vision.is_deepstack_layers; the tower holds the mergers as a
+# list in block order.
+_QWEN3VL_DEEPSTACK_RE = re.compile(
+    r"^v\.deepstack\.(\d+)\.(norm|fc1|fc2)\.(weight|bias)$")
+_QWEN3VL_DEEPSTACK_SUBMAP = {
+    "norm": "norm",
+    "fc1": "linear_fc1",
+    "fc2": "linear_fc2",
+}
+
+
+def _qwen3vl_deepstack_blocks(mm_meta: dict) -> list[int]:
+    """The vision blocks whose output feeds a deepstack merger, in order."""
+    flags = mm_meta.get("clip.vision.is_deepstack_layers")
+    if flags is None:
+        return []
+    if not isinstance(flags, (list, tuple)):
+        flags = [flags]
+    return [i for i, flag in enumerate(flags) if flag]
+
 
 # GLM-5.3-Flash (glm5next): the GLM-OCR ViT + conv-downsample projector,
 # mapped onto the vendored gmlx.models.glm5_next.vision tower. The patch
@@ -1045,7 +1073,11 @@ def remap_vision_arrays(
             out[f"{base}.{tgt}.{leaf}"] = arr
         return out, skipped, vis_kqmeta
 
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl"):
+        # Only the qwen3_vl container reads the deepstack features, so only
+        # it maps the mergers; the other containers leave them unused.
+        deepstack = (_qwen3vl_deepstack_blocks(mm_meta or {})
+                     if model_type == "qwen3_vl" else [])
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -1058,6 +1090,20 @@ def remap_vision_arrays(
             hit = _QWEN35V_TOP_MAP.get(name)
             if hit is not None:
                 out[hit] = arr
+                continue
+            m = _QWEN3VL_DEEPSTACK_RE.match(name) if deepstack else None
+            if m is not None:
+                block = int(m.group(1))
+                if block not in deepstack:
+                    raise ValueError(
+                        f"mmproj tensor {name!r} is a deepstack merger of "
+                        f"vision block {block}, which "
+                        "clip.vision.is_deepstack_layers does not flag "
+                        f"(flagged: {deepstack})")
+                out["vision_tower.deepstack_merger_list."
+                    f"{deepstack.index(block)}."
+                    f"{_QWEN3VL_DEEPSTACK_SUBMAP[m.group(2)]}."
+                    f"{m.group(3)}"] = arr
                 continue
             m = _VISION_BLK_RE.match(name)
             if m is None:
@@ -1187,10 +1233,14 @@ def _synthesize_qwen35_vision_config(mm_meta: dict, model_type: str) -> dict:
     ``num_position_embeddings`` is the learned position grid (one embedding per
     patch over a square ``image_size/patch_size`` side), and ``out_hidden_size``
     is the merger's projection width = the text hidden size. deepstack is forced
-    empty (qwen3.5 disables it; the GGUF's is_deepstack_layers are all zero)."""
+    empty (qwen3.5 disables it; the GGUF's is_deepstack_layers are all zero),
+    except for ``qwen3_vl``, whose container reads the deepstack features:
+    there the list is the blocks the mmproj flags."""
     patch = _mm_int(mm_meta, "clip.vision.patch_size")
     image_size = _mm_int(mm_meta, "clip.vision.image_size")
     grid = image_size // patch
+    deepstack = (_qwen3vl_deepstack_blocks(mm_meta)
+                 if model_type == "qwen3_vl" else [])
     return {
         "model_type": model_type,
         "depth": _mm_int(mm_meta, "clip.vision.block_count"),
@@ -1204,7 +1254,7 @@ def _synthesize_qwen35_vision_config(mm_meta: dict, model_type: str) -> dict:
         "num_position_embeddings": grid * grid,
         "in_channels": 3,
         "image_size": image_size,
-        "deepstack_visual_indexes": [],
+        "deepstack_visual_indexes": deepstack,
     }
 
 
@@ -1244,6 +1294,68 @@ def _synthesize_qwen35_vlm_config(
         "text_config": text_config,
         "vision_config": _synthesize_qwen35_vision_config(mm_meta, vision_mt),
         "vocab_size": int(text_config.get("vocab_size", 248320)),
+    }
+    for key, tok in (("image_token_id", "<|image_pad|>"),
+                     ("video_token_id", "<|video_pad|>"),
+                     ("vision_start_token_id", "<|vision_start|>"),
+                     ("vision_end_token_id", "<|vision_end|>")):
+        tid = _gguf_token_id(llm_meta, tok)
+        if tid is not None:
+            config[key] = tid
+    return config
+
+
+def _synthesize_qwen3vl_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict
+) -> dict:
+    """Qwen3-VL VLM config: the qwen3 text synth + the Qwen3-VL vision tower
+    with its deepstack mergers.
+
+    The text synth (read as ``qwen3vl`` -> qwen3) emits every field the
+    qwen3_vl ``TextConfig`` requires. The text rotary has three axes; the
+    per-axis widths are the first three entries of the LLM GGUF's
+    ``qwen3vl.rope.dimension_sections`` (``[24, 20, 20, 0]``, the fourth axis
+    unused) and must sum to half the head width. The LLM GGUF also counts the
+    deepstack features its first layers take (``qwen3vl.n_deepstack_layers``);
+    a pair whose mmproj flags another number of blocks is refused here, by
+    name, since the container would add features to the wrong layers. The
+    marker token ids come from the GGUF vocab."""
+    text_config = dict(text_config)
+    text_config["model_type"] = "qwen3_vl"
+
+    sections = llm_meta.get("qwen3vl.rope.dimension_sections")
+    if sections is None or len(sections) < 3:
+        raise ValueError(
+            "Qwen3-VL text GGUF is missing 'qwen3vl.rope.dimension_sections' "
+            "(the three rotary axis widths), which image positions need")
+    mrope = [int(s) for s in list(sections)[:3]]
+    head_dim = text_config.get("head_dim")
+    if head_dim is not None and sum(mrope) != int(head_dim) // 2:
+        raise ValueError(
+            f"Qwen3-VL text GGUF rotary axis widths {mrope} sum to "
+            f"{sum(mrope)}, not half the head width ({int(head_dim) // 2})")
+    text_config["rope_scaling"] = {"type": "default", "mrope_section": mrope}
+
+    vision_config = _synthesize_qwen35_vision_config(mm_meta, "qwen3_vl")
+    n_text = llm_meta.get("qwen3vl.n_deepstack_layers")
+    if n_text is None and mm_meta.get("clip.vision.is_deepstack_layers") is None:
+        raise UnsupportedVLMError(
+            "Qwen3-VL pair names no deepstack blocks: the text GGUF has no "
+            "'qwen3vl.n_deepstack_layers' and the mmproj has no "
+            "'clip.vision.is_deepstack_layers', so the load would drop the "
+            "deepstack features the model was trained with")
+    n_vision = len(vision_config["deepstack_visual_indexes"])
+    if n_text is not None and int(n_text) != n_vision:
+        raise UnsupportedVLMError(
+            f"Qwen3-VL text GGUF takes {int(n_text)} deepstack features, and "
+            f"the mmproj flags {n_vision} vision blocks in "
+            "clip.vision.is_deepstack_layers: the two files are not a pair")
+
+    config = {
+        "model_type": "qwen3_vl",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config.get("vocab_size", 151936)),
     }
     for key, tok in (("image_token_id", "<|image_pad|>"),
                      ("video_token_id", "<|video_pad|>"),
@@ -1536,7 +1648,10 @@ def _synthesize_glm5next_vlm_config(
     eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
     if eps is not None:
         vision_config["rms_norm_eps"] = float(eps)
-    limit = _mm(mm_meta, "clip.vision.swiglu_limit")
+    # glm5v writes the clamp as swiglu_clamp, PR 27754 as swiglu_limit.
+    limit = _mm(mm_meta, "clip.vision.swiglu_clamp")
+    if limit is None:
+        limit = _mm(mm_meta, "clip.vision.swiglu_limit")
     if limit is not None:
         vision_config["swiglu_limit"] = float(limit)
     up = (mm_shapes or {}).get("mm.up.weight")
@@ -1675,6 +1790,18 @@ def _synthesize_deepseek41v_vlm_config(
     return config
 
 
+def scale_text_rope(model, config: dict) -> int:
+    """Give the text tower of a built VLM the rope scaling its text config
+    carries (gmlx.load.rope_swap). Qwen3-Omni nests the tower and its config
+    under the thinker. Returns the number of rope modules changed."""
+    owner, cfg = model, config
+    thinker = config.get("thinker_config")
+    if isinstance(thinker, dict) and hasattr(model, "thinker"):
+        owner, cfg = model.thinker, thinker
+    return rope_swap.apply(getattr(owner, "language_model", owner),
+                           cfg.get("text_config", {}))
+
+
 def synthesize_vlm_config(
     model_type: str, llm_meta: dict, llm_shapes: dict, mm_meta: dict,
     *, mm_tensor_names: set[str] | None = None,
@@ -1717,6 +1844,8 @@ def synthesize_vlm_config(
     if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         return _synthesize_qwen35_vlm_config(
             text_config, mm_meta, model_type, llm_meta)
+    if model_type == "qwen3_vl":
+        return _synthesize_qwen3vl_vlm_config(text_config, mm_meta, llm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_config(text_config, mm_meta, llm_meta)
     if model_type == "pixtral":
@@ -1760,6 +1889,28 @@ def synthesize_vlm_config(
         "vision_feature_layer": -1,
         "vocab_size": int(text_config.get("vocab_size", 32000)),
     }
+
+
+# Whether Gemma-4 image tokens attend to the whole image, keyed as
+# llama.cpp's mtmd keys it: always under the gemma4uv projector (the 12B),
+# and under gemma4v unless the text width is 1536 (E2B) or 2560 (E4B). The
+# GGUFs carry no key for the setting, and the rule agrees with the HF
+# config of every published checkpoint. A text-only load has no image
+# tokens and gets no key.
+_GEMMA4_CAUSAL_IMAGE_WIDTHS = frozenset({1536, 2560})
+
+
+def _gemma4_image_attention(text_config: dict, mm_meta: dict) -> None:
+    """Set ``use_bidirectional_attention`` on a Gemma-4 text config from the
+    vision projector type and the text width."""
+    proj = (_mm(mm_meta, "clip.vision.projector_type")
+            or mm_meta.get("clip.projector_type"))
+    if proj == "gemma4uv":
+        text_config["use_bidirectional_attention"] = "vision"
+    elif proj == "gemma4v":
+        causal = text_config["hidden_size"] in _GEMMA4_CAUSAL_IMAGE_WIDTHS
+        text_config["use_bidirectional_attention"] = (
+            None if causal else "vision")
 
 
 def _synthesize_gemma4_vlm_config(
@@ -1816,6 +1967,7 @@ def _synthesize_gemma4_vlm_config(
             "output_proj_dims": 1536,
         }
 
+    _gemma4_image_attention(text_config, mm_meta)
     return {
         "model_type": "gemma4",
         "text_config": text_config,
@@ -1841,6 +1993,7 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
     its GGUF and match the unified TextConfig defaults)."""
     text_config = dict(text_config)
     text_config["model_type"] = "gemma4_unified_text"
+    _gemma4_image_attention(text_config, mm_meta)
 
     mm_embed = _mm_int(mm_meta, "clip.vision.embedding_length")
     proj_dim = _mm(mm_meta, "clip.vision.projection_dim")
@@ -1859,7 +2012,7 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
     # default - the GGUF's clip.audio.embedding_length is the *output* (text)
     # dim, not the projection input - so emit a minimal config and let the
     # default output_proj_dims=640 stand.
-    audio_config = None
+    audio_config: dict[str, Any] | None = None
     if mm_meta.get("clip.has_audio_encoder"):
         audio_config = {"model_type": "gemma4_unified_audio"}
         a_eps = _mm(mm_meta, "clip.audio.attention.layer_norm_epsilon")
@@ -1877,20 +2030,75 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
 
 # Build the mlx-vlm Model (bypassing mlx-vlm's nn.quantize)
 
+# VLM model types gmlx owns (gmlx.models.owned), with the modules whose
+# ensure_registered registers the cache classes and the tool parser the
+# model needs.
+_OWNED_VLM_REGISTRARS = {
+    "muse_glimmer": ("gmlx.models.muse_glimmer.tools",),
+    "qwen4_exp": ("gmlx.models.qwen4_exp.vlm_model",),
+    "glm5_next": ("gmlx.models.glm5_next.vlm_model",),
+    "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
+    "deepseek_v41_vl": ("gmlx.models.deepseek_v41.vlm_model",),
+}
+
+
+def register_owned_vlm_model(model_type: str) -> None:
+    """Register the cache classes and the tool parser of a VLM model type
+    gmlx owns, before its build. ``get_model_and_args`` resolves the type
+    to the gmlx module itself."""
+    for name in _OWNED_VLM_REGISTRARS.get(model_type, ()):
+        importlib.import_module(name).ensure_registered()
+
+
+# Gemma-4 VLMs name their image and video ids on the container config
+# only. The server builds the batch engine on the language model, so
+# mlx-vlm's APC media guard reads the text config, finds no media ids, and
+# can restore a cached prefix that ends inside an image. When the text
+# config sets use_bidirectional_attention to "vision", the rest of that
+# image then prefills against a causal mask, and the logits differ from a
+# cold prefill. With causal attention they match, so the guard stays blind
+# and such prefixes stay reusable, as on other causal VLMs.
+_GEMMA4_VLM_TYPES = frozenset({"gemma4", "gemma4_unified"})
+
+
+def _mirror_media_token_ids(model, model_type: str) -> None:
+    """Copy the container's media ids onto the text config as
+    ``media_token_ids``, which ``gmlx.cache.apc_media`` folds into the
+    guard, when the text config turns on bidirectional image attention.
+    The gemma-4 attention masks read that setting from the same config,
+    and the spec target swapped in later is built from it too."""
+    if model_type not in _GEMMA4_VLM_TYPES:
+        return
+    text = model.config.text_config
+    if getattr(text, "use_bidirectional_attention", None) != "vision":
+        return
+    from gmlx._vendor.mlx_vlm.apc import multimodal_token_ids_from_config
+
+    ids = sorted(multimodal_token_ids_from_config(model.config))
+    configs = {id(c): c for c in (text, model.language_model.config)}
+    for config in configs.values():
+        config.media_token_ids = list(ids)
+
+
 def build_vlm_model(config_dict: dict):
     """Instantiate the mlx-vlm ``Model`` for ``config_dict['model_type']``.
 
     Mirrors mlx-vlm's own ``utils.load_model`` (``get_model_and_args`` +
     ``ModelConfig.from_dict`` + ``update_module_configs``) but stops before its
-    ``nn.quantize`` - exactly as the text path bypasses mlx-lm's.
+    ``nn.quantize`` - exactly as the text path bypasses mlx-lm's. A model
+    type gmlx owns builds the gmlx class. The copied gemma4 and
+    gemma4_unified packages hold the owned language model and unified
+    container, which their language and container paths are aliases of.
     """
-    from mlx_vlm.utils import get_model_and_args, update_module_configs
+    from gmlx._vendor.mlx_vlm.utils import get_model_and_args, update_module_configs
 
+    register_owned_vlm_model(config_dict["model_type"])
     module, _model_type = get_model_and_args(config_dict)
     cfg = module.ModelConfig.from_dict(config_dict)
     cfg = update_module_configs(
         cfg, module, config_dict, ["text", "vision", "projector", "audio"])
     model = module.Model(cfg)
+    _mirror_media_token_ids(model, config_dict["model_type"])
     return model, config_dict
 
 
@@ -1912,10 +2120,10 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
             _synthesize_gemma4_unified_processor(tokenizer, mm_meta), tokenizer)
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
+    if model_type == "qwen3_vl":
+        return _synthesize_qwen35_processor(
+            tokenizer, mm_meta, min_image_tokens=_QWEN3VL_MIN_IMAGE_TOKENS)
     if model_type == "qwen4_exp":
-        import mlx_vlm.prompt_utils as _prompt_utils
-        _prompt_utils.MODEL_CONFIG.setdefault(
-            "qwen4_exp", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_processor(tokenizer, mm_meta)
@@ -1936,7 +2144,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
         raise UnsupportedVLMError(
             f"processor synth not implemented for model_type {model_type!r}")
 
-    from mlx_vlm.models.gemma4.processing_gemma4 import (
+    from gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4 import (
         Gemma4ImageProcessor, Gemma4Processor,
     )
 
@@ -1978,7 +2186,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     feature_extractor = None
     audio_seq_length = 750
     if mm_meta.get("clip.has_audio_encoder"):
-        from mlx_vlm.models.gemma4.audio_feature_extractor import (
+        from gmlx._vendor.mlx_vlm.models.gemma4.audio_feature_extractor import (
             Gemma4AudioFeatureExtractor,
         )
         feature_extractor = Gemma4AudioFeatureExtractor(
@@ -2001,8 +2209,8 @@ def _attach_streaming_helpers(processor, tokenizer):
     needs (mlx-vlm's ``load_processor`` adds these on the HF path). EOS ids -
     incl. the inferred turn-end - ride on the GGUF tokenizer;
     ``NaiveStreamingDetokenizer`` is mlx-vlm's universal default."""
-    from mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer
-    from mlx_vlm.utils import StoppingCriteria
+    from gmlx._vendor.mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer
+    from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
     eos_ids = getattr(tokenizer, "_gguf_eos_token_ids", None)
     if not eos_ids:
@@ -2038,7 +2246,7 @@ def _synthesize_gemma4_unified_processor(tokenizer, mm_meta: dict):
     the same embedder output to ~1e-6. We keep mean = std = 0.5 to stay faithful
     to the documented gemma-4 preprocessing; parity does not depend on it.
     """
-    from mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
         Gemma4UnifiedAudioFeatureExtractor, Gemma4UnifiedImageProcessor,
         Gemma4UnifiedProcessor,
     )
@@ -2075,7 +2283,13 @@ def _synthesize_gemma4_unified_processor(tokenizer, mm_meta: dict):
     )
 
 
-def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
+# The smallest image Qwen3-VL's own preprocessor_config.json allows, in image
+# tokens: shortest_edge 65536 pixels at 1024 pixels per token.
+_QWEN3VL_MIN_IMAGE_TOKENS = 64
+
+
+def _synthesize_qwen35_processor(tokenizer, mm_meta: dict, *,
+                                 min_image_tokens: int = 8):
     """Build the Qwen3.6 (qwen3_5 / qwen3_5_moe) processor from the GGUFs alone.
 
     Qwen3-VL preprocessing is dynamic-resolution: ``smart_resize`` rescales each
@@ -2091,8 +2305,15 @@ def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
     / 4194304 here. The marker token ids (``<|image_pad|>``/``<|vision_start|>``/
     ``<|vision_end|>``) are resolved by ``Qwen3VLProcessor`` itself via the
     tokenizer's ``convert_tokens_to_ids`` (they live in the GGUF vocab as control
-    tokens), so nothing extra rides on the tokenizer."""
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+    tokens), so nothing extra rides on the tokenizer.
+
+    ``min_image_tokens`` is the lower bound. Qwen3-VL passes the 64 tokens of
+    its own preprocessor_config.json, where llama.cpp resizes down to 8, so a
+    small image is resized as the model was trained to see it. That file also
+    allows 16384 tokens. The upper bound stays at 4096 for every model here:
+    the tower attends over four patches per image token, so 16384 tokens is
+    one attention over 65536 patches."""
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor, Qwen3VLProcessor,
     )
 
@@ -2105,7 +2326,7 @@ def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
     # dual-conv stack (constant 2), not GGUF metadata.
     temporal_patch_size = 2
     patch_area = (patch_size * merge_size) ** 2
-    min_pixels = 8 * patch_area
+    min_pixels = min_image_tokens * patch_area
     max_pixels = 4096 * patch_area
 
     image_processor = Qwen3VLImageProcessor(
@@ -2164,10 +2385,10 @@ def _synthesize_qwen3_omni_processor(tokenizer, mm_meta: dict):
     25 ms / 10 ms window/hop = n_fft 400 / hop 160) are Qwen3-Omni arch
     constants. Audio-preprocessing parity is pending GPU validation; the image
     path is the validated deliverable."""
-    from mlx_vlm.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
         Qwen3OmniMoeProcessor,
     )
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import Qwen3VLImageProcessor
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import Qwen3VLImageProcessor
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     merge_size = _mm_int(mm_meta, "clip.vision.spatial_merge_size")
@@ -2316,7 +2537,7 @@ def _synthesize_pixtral_processor(tokenizer, mm_meta: dict):
     arch constant (llama.cpp clip.cpp). ``spatial_merge_size`` is 1 - Pixtral
     emits one token per patch (no merge), so the grid math uses ``patch_size``
     alone. The marker token ids ride on the GGUF-synthesized tokenizer."""
-    from mlx_vlm.models.pixtral.processing_pixtral import PixtralProcessor
+    from gmlx._vendor.mlx_vlm.models.pixtral.processing_pixtral import PixtralProcessor
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     image_size = _mm_int(mm_meta, "clip.vision.image_size")
@@ -2353,7 +2574,7 @@ def _kimi_k25_image_processor(**params):
     preprocess in numpy, so they do not need this today, but mlx-vlm has many
     MLX-native processors: give a family like this the same wrapper.
     """
-    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+    from gmlx._vendor.mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
         KimiK25ImageProcessor,
     )
 
@@ -2377,7 +2598,7 @@ def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
     ``patch_limit_on_one_side`` is an arch constant, and the GGUF has no field
     for it. Its value is 512, the bound of MoonViT's 2-D RoPE table.
     """
-    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+    from gmlx._vendor.mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
         KimiK25Processor,
     )
 
@@ -2513,7 +2734,12 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
+
+    from gmlx.upstream.single_bos_fix import (
+        KWARGS_REACH_TOKENIZER,
+        drops_duplicate_bos,
+    )
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
@@ -2534,7 +2760,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
         image_start_token = "<|image_start|>"
         image_end_token = "<|image_end|>"
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -2551,8 +2780,7 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
             kwargs.pop("return_tensors", None)
             data = dict(image_inputs)
             if text is not None:
-                bos = getattr(self.tokenizer, "bos_token", None)
-                if bos and all(t.startswith(bos) for t in text):
+                if drops_duplicate_bos(self, text):
                     # The template already emits BOS; never add a second.
                     kwargs.setdefault("add_special_tokens", False)
                 data = {**self.tokenizer(text, **kwargs), **data}
@@ -2591,16 +2819,12 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
                 list(self.tokenizer.model_input_names)
                 + list(self.image_processor.model_input_names)))
 
+    # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+    setattr(MuseGlimmerProcessor, KWARGS_REACH_TOKENIZER, True)
     processor = MuseGlimmerProcessor(
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row
-    # ``chat._vlm_message`` degrades to a plain text dict and the image part
-    # never reaches the template.
-    import mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "muse_glimmer", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -2608,15 +2832,17 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
 class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
     """Torch-free GLM-5.3-Flash image preprocessing (numpy + PIL only).
 
-    Ports ``mtmd_image_preprocessor_glm5next`` (llama.cpp PR 27754,
-    ``tools/mtmd/mtmd-image.cpp``): align both edges UP to ``factor`` (28),
-    upscale a below-minimum image by the sqrt area ratio, binary-search the
-    tallest content height whose aligned canvas fits the token budget (the
-    reference divides in float64 before flooring - kept bit-identical), then
-    resize the content BICUBIC, composite it top-left on a black canvas, and
-    never upscale an image already spending the minimum budget to fill the
-    canvas. The 16/8000 token limits are clip.cpp arch constants
-    (``set_limit_image_tokens(16, 8000)``), not GGUF metadata.
+    Ports ``mtmd_image_preprocessor_glm5v`` (llama.cpp
+    ``tools/mtmd/mtmd-image.cpp``; ``glm5next`` in PR 27754): align both
+    edges UP to ``factor`` (28), upscale a below-minimum image by the sqrt
+    area ratio, binary-search the tallest content height whose aligned
+    canvas fits the pixel budget (the width in int64 division, which equals
+    the PR's float64 floor for every real image size), then resize the content
+    BICUBIC, composite it top-left on a black canvas, and never upscale an
+    image already spending the minimum budget to fill the canvas. A glm5v
+    mmproj carries the budget as ``clip.vision.image_min_pixels`` and
+    ``image_max_pixels``; a glm5next one has no keys and takes PR 27754's
+    clip.cpp constants, 16 and 8000 tokens.
 
     The canvas patchifies with the qwen2vl conventions: the still frame
     duplicates along the temporal axis and the h//2,2,w//2,2 shuffle makes
@@ -2628,7 +2854,8 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
 
     def __init__(self, image_mean, image_std, patch_size=14,
                  spatial_merge_size=2, temporal_patch_size=2,
-                 min_image_tokens=16, max_image_tokens=8000):
+                 min_image_tokens=16, max_image_tokens=8000,
+                 min_pixels=None, max_pixels=None):
         super().__init__()
         self.image_mean = list(image_mean)
         self.image_std = list(image_std)
@@ -2636,8 +2863,9 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
         self.spatial_merge_size = int(spatial_merge_size)
         self.temporal_patch_size = int(temporal_patch_size)
         self.factor = self.patch_size * self.spatial_merge_size
-        self.min_pixels = int(min_image_tokens) * self.factor * self.factor
-        self.max_pixels = int(max_image_tokens) * self.factor * self.factor
+        f2 = self.factor * self.factor
+        self.min_pixels = int(min_pixels or int(min_image_tokens) * f2)
+        self.max_pixels = int(max_pixels or int(max_image_tokens) * f2)
 
     def soft_tokens(self, grid) -> int:
         t, gh, gw = (int(v) for v in grid)
@@ -2661,7 +2889,7 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
             ah = aw = f
             while low <= high:
                 ch = (low + high) // 2
-                cw = max(1, math.floor(float(width) * ch / float(height)))
+                cw = max(1, width * ch // height)
                 cand_h, cand_w = align(ch), align(cw)
                 if cand_h * cand_w <= self.max_pixels:
                     ah, aw = cand_h, cand_w
@@ -2723,6 +2951,21 @@ class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
         }
 
 
+def _glm5next_image_processor(mm_meta: dict) -> _Glm5NextGgufImageProcessor:
+    """The GLM-5.3-Flash image processor from the mmproj's ``clip.vision.*``
+    keys, with the pixel budget from the glm5v keys when present."""
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    return _Glm5NextGgufImageProcessor(
+        image_mean=(_mm_floats(mm_meta, "clip.vision.image_mean")
+                    or [0.5, 0.5, 0.5]),
+        image_std=(_mm_floats(mm_meta, "clip.vision.image_std")
+                   or [0.5, 0.5, 0.5]),
+        patch_size=_mm_int(mm_meta, "clip.vision.patch_size"),
+        spatial_merge_size=int(merge) if merge is not None else 2,
+        min_pixels=_mm(mm_meta, "clip.vision.image_min_pixels"),
+        max_pixels=_mm(mm_meta, "clip.vision.image_max_pixels"))
+
+
 def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     """Build the GLM-5.3-Flash processor from the GGUFs alone.
 
@@ -2734,16 +2977,11 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
-    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
-    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
-    image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
-    image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
+    from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
 
-    image_processor = _Glm5NextGgufImageProcessor(
-        image_mean=image_mean, image_std=image_std, patch_size=patch_size,
-        spatial_merge_size=int(merge) if merge is not None else 2)
+    image_processor = _glm5next_image_processor(mm_meta)
 
     class Glm5NextProcessor(ProcessorMixin):
         attributes = ["image_processor", "tokenizer"]
@@ -2752,7 +2990,10 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
 
         image_token = "<|image|>"
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -2803,15 +3044,12 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
                 list(self.tokenizer.model_input_names)
                 + list(self.image_processor.model_input_names)))
 
+    # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+    setattr(Glm5NextProcessor, KWARGS_REACH_TOKENIZER, True)
     processor = Glm5NextProcessor(
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row the image
-    # part never reaches the template's emit_image() macro.
-    import mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "glm5_next", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -2909,8 +3147,9 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
+    from gmlx.models.deepseek_v4.chat import string_content
     from gmlx.models.deepseek_v4.image_block import build_image_block
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
@@ -2936,10 +3175,19 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
         tokenizer_class = "AutoTokenizer"
 
         image_token = DEEPSEEK4V_IMAGE_TOKEN
-        image_token_id = None       # set below
-        vocab_size = None
+        image_token_id: ClassVar[int]       # set below
+        vocab_size: ClassVar[int]
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # The template reads list content only on user turns (see
+        # gmlx.models.deepseek_v4.chat).
+        def apply_chat_template(self, conversation, *args, **kwargs):
+            return super().apply_chat_template(
+                string_content(conversation), *args, **kwargs)
+
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -3017,11 +3265,6 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row the image
-    # part never reaches the template's placeholder emission.
-    import mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "deepseek_v4_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -3114,8 +3357,9 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
+    from gmlx.models.deepseek_v4.chat import string_content
     from gmlx.models.deepseek_v41.image_block import build_image_block
 
     arch = "deepseek4-vision"
@@ -3137,10 +3381,19 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
         tokenizer_class = "AutoTokenizer"
 
         image_token = DEEPSEEK41V_IMAGE_TOKEN
-        image_token_id = None       # set below
-        vocab_size = None
+        image_token_id: ClassVar[int]       # set below
+        vocab_size: ClassVar[int]
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # The template reads list content only on user turns (see
+        # gmlx.models.deepseek_v4.chat).
+        def apply_chat_template(self, conversation, *args, **kwargs):
+            return super().apply_chat_template(
+                string_content(conversation), *args, **kwargs)
+
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -3213,11 +3466,6 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row the image
-    # part never reaches the template's placeholder emission.
-    import mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "deepseek_v41_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -3228,26 +3476,22 @@ def _swap_spec_language_model(model, model_type: str, *, log) -> None:
     VLM's REAL ModelConfig (real vision_config -> get_rope_index mrope stays
     correct on image turns). Must run before weight install: owned trees are
     parameter-identical to stock, so the fresh tree loads the same remapped
-    names. Vendored archs (muse_glimmer / glm5_next / qwen4_exp) carry their
-    hook mixins natively and have no row; GMLX_*_OWNED=0 resolves the row to
-    the stock class the tree already is, so the isinstance short-circuits."""
+    names. Vendored and owned archs (muse_glimmer / glm5_next / qwen4_exp /
+    gemma4) carry their hooks natively and have no row."""
     row = _vlm_spec_language_model(model_type)
     if row is None:
         return
     cls, build_lm = row
     if isinstance(model.language_model, cls):
         return
-    lm = build_lm(model.config)
-    if hasattr(model.language_model, "no_chunked_prefill"):
-        # gemma4_unified stamps this at construction.
-        lm.no_chunked_prefill = model.language_model.no_chunked_prefill
-    model.language_model = lm
+    model.language_model = build_lm(model.config)
     log(f"[vlm] spec target: language_model -> {cls.__name__}")
 
 
 # Public entry point
 
 @loadlog.seeds
+@rope_scaling.scoped
 def load_vlm_model(
     gguf_path: str,
     mmproj_path: str,
@@ -3258,6 +3502,7 @@ def load_vlm_model(
     verbose: bool = False,
     return_tokenizer: bool = False,
     spec_target: bool = False,
+    rope_override: rope_scaling.RopeOverride | None = None,
 ):
     """Load a K-quant LLM GGUF + a float mmproj GGUF into an mlx-vlm ``Model``.
 
@@ -3285,6 +3530,13 @@ def load_vlm_model(
     # mlx-vlm renders the prompt (chat and run paths both call in here).
     from gmlx.tui.reasoning import install_template_default_thinking
     install_template_default_thinking()
+    # A text-only system message reaches a Gemma-4 template as a string;
+    # the processor built below enables it.
+    from gmlx.upstream.system_content_fix import install_system_content_fix
+    install_system_content_fix()
+    # A prompt that opens with BOS is encoded without another.
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+    install_single_bos_fix()
 
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
     loadlog.stage("reading gguf metadata")
@@ -3313,43 +3565,15 @@ def load_vlm_model(
     mm_arrays, mm_codecs, _mm_arch, mm_meta, mm_shapes = load_gguf_wire_bytes(
         mmproj_path, zero_copy=zero_copy, expect_quant=False)
     model_type = resolve_vlm_model_type(llm_arch, mm_meta)
-    if model_type == "muse_glimmer":
-        # gmlx owns the module for each model_type below: ensure_registered()
-        # installs it as mlx_vlm.models.<model_type>, over any package of that
-        # name an mlx-vlm release ships, before get_model_and_args resolves
-        # the model_type (gmlx.models.owned). mlx-vlm 0.6.15 ships a
-        # muse_glimmer package whose class needs image_grid_thw and has no
-        # speculative hooks. The tool parser registers here too.
-        import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
-        import gmlx.models.muse_glimmer.vlm_model as muse_glimmer_vlm_model
-        muse_glimmer_vlm_model.ensure_registered()
-        muse_glimmer_tools.ensure_registered()
-    elif model_type == "qwen4_exp":
-        # Likewise vendored (text + wrapper; the vision tower is mlx-vlm's
-        # qwen3_5 Qwen3-VL class).
-        import gmlx.models.qwen4_exp.vlm_model as qwen4_exp_vlm_model
-        qwen4_exp_vlm_model.ensure_registered()
-    elif model_type == "glm5_next":
-        # Likewise vendored (text tower, ViT and wrapper all in-repo).
-        import gmlx.models.glm5_next.vlm_model as glm5_next_vlm_model
-        glm5_next_vlm_model.ensure_registered()
-    elif model_type == "deepseek_v4_vl":
-        # Likewise vendored; registers past mlx-vlm's text-only deepseek_v4.
-        import gmlx.models.deepseek_v4.vlm_model as deepseek_v4_vlm_model
-        deepseek_v4_vlm_model.ensure_registered()
-    elif model_type == "deepseek_v41_vl":
-        # Likewise vendored; registers past mlx-vlm's text-only deepseek_v4.
-        import gmlx.models.deepseek_v41.vlm_model as deepseek_v41_vlm_model
-        deepseek_v41_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
     if model_type in ("qwen3_5", "qwen3_5_moe"):
-        # Pre-M3 launch-ceiling guard for the stock ragged decode (ungated
-        # 1024-thread kernels) on batched mixed-depth streams. Unconditional:
-        # plain VLM builds and the spec_target stock fallback both run the
-        # stock kernels, the owned tree dispatches in-tree, and the installer
-        # is idempotent (identity check) - the call costs nothing where the
-        # MTP patch set later covers it.
+        # Pre-M3 launch-ceiling guard for the vendored base ragged decode
+        # (ungated 1024-thread kernels) on batched mixed-depth streams.
+        # Unconditional: plain VLM builds and the spec_target base fallback
+        # both run the base kernels, the owned tree dispatches in-tree, and
+        # the installer is idempotent (identity check) - the call costs
+        # nothing where the MTP patch set later covers it.
         from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
         install_pre_m3_ragged_guard()
 
@@ -3391,32 +3615,24 @@ def load_vlm_model(
     # 4a. spec-target seam: give the VLM the same hook-bearing language model
     #     the text MTP path builds. Runs before weight install, so the swap
     #     needs no weight transfer - and the discarded tower's random init
-    #     arrays are never evaluated.
+    #     arrays are never evaluated. The qwen3.5/3.6 container already
+    #     holds gmlx.models.qwen35.language's text model, which the spec
+    #     swap replaces with the owned classes.
     if spec_target:
         _swap_spec_language_model(model, model_type, log=_log)
 
-    # 3a. GGUF V-head tiling fixup for asymmetric linear-attention K/V heads
+    # 3a. GGUF V-head order for asymmetric linear-attention K/V heads
     #     (hybrid SSM+attn text towers, e.g. Qwen3.5/3.6). convert_hf_to_gguf
-    #     stores gated-delta V heads tiled, but the gated_delta kernels assume
-    #     grouped K->V indexing. Since mlx-vlm 0.6.15 the qwen3_5 text tower
-    #     runs its own vendored copies of the gated_delta functions (0.6.4
-    #     from-imported mlx-lm's, which the mlx-lm patch reached), so both
-    #     modules need the rebind. Without it the recurrent state is built
-    #     against the wrong K heads and decode degrades to repetitive garbage
-    #     even though the no-cache forward (and dense towers) look fine.
-    if _needs_tiled_v_patch(text_config):
-        _patch_gated_delta_tiled_v()
-        _patch_mlxvlm_gated_delta_tiled_v()
-    elif (text_config.get("model_type") == "qwen3_next"
-          and _tiled_v_patch_applied()):
-        # Same cross-load hazard the text loader guards: once a qwen3.5/3.6
-        # hybrid has patched mlx_lm.models.gated_delta in this process, a
-        # qwen3_next text tower would silently run the wrong K->V mapping.
-        raise RuntimeError(
-            "cannot load a qwen3next GGUF after a qwen3.5/3.6 hybrid in the "
-            "same process: the qwen3.5 tiled-V runtime patch (already applied) "
-            "would corrupt qwen3_next's grouped gated-delta K->V mapping. "
-            "Load the qwen3next model in a fresh process.")
+    #     stores gated-delta V heads tiled, and each layer takes that order
+    #     from kv_head_layout in the text config and passes it to its scan.
+    #     With the grouped order the recurrent state is built against the
+    #     wrong K heads and decode degrades to repetitive garbage even
+    #     though the no-cache forward (and dense towers) look fine, so a
+    #     tree that would run it is refused.
+    require_tiled_gdn(model, text_config)
+
+    # 4b. rope scaling on the text tower (gmlx.load.rope_swap).
+    scale_text_rope(model, config)
 
     # 5. swap kquant leaves + load all weights. install_kquant swaps every leaf
     #    whose <path>.weight carries a codec - the LLM text tower always, plus the
@@ -3431,8 +3647,7 @@ def load_vlm_model(
                       sanitize=(model_type in ("deepseek_v4_vl",
                                                  "deepseek_v41_vl")),
                       no_alias=owned_names,
-                      fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
-                      f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+                      **float_dtype_rules(model_type),
                       source_key=weights_source_key(*pf.shards, mmproj_path),
                       active_before=active_before,
                       deferred_tables=oversize_tables(pf.shards, llm_arch),
@@ -3451,24 +3666,19 @@ def load_vlm_model(
     #    template + marker tokens; the mmproj carries the vision preprocessing
     #    params). hf_source is an optional override only.
     loadlog.stage("building processor")
-    # mlx-vlm tokenizes this model's prompts; a template BOS gets no second one.
-    from gmlx.upstream.single_bos import install as install_single_bos
-    install_single_bos()
     if hf_source:
         _log(f"[vlm] processor: hf_source override {hf_source!r}")
         from pathlib import Path
 
-        from mlx_vlm.utils import load_processor
+        from gmlx._vendor.mlx_vlm.utils import load_processor
         # Resolve to a local dir of *config* files only - never the safetensors
         # weights (the GGUF supplies those), unlike mlx-vlm's get_model_path.
         src = Path(hf_source)
         if not src.exists():
-            from huggingface_hub import snapshot_download
-
-            from gmlx.serve.hf_cache import network_fetch_allowed
+            from gmlx.serve.hf_cache import cached_snapshot, network_fetch_allowed
             with network_fetch_allowed():
-                src = Path(snapshot_download(
-                    repo_id=hf_source,
+                src = Path(cached_snapshot(
+                    hf_source,
                     allow_patterns=["*.json", "*.txt", "*.model", "*.tiktoken",
                                     "*.jinja", "*.py"]))
         processor = load_processor(src)
@@ -3485,6 +3695,8 @@ def load_vlm_model(
             model_type, tokenizer, mm_meta, config=config)
         mtp_tokenizer = tokenizer
         _log("[vlm] processor: synthesized from GGUF (no download)")
+    from gmlx.upstream.system_content_fix import enable_system_content_fix
+    enable_system_content_fix(processor, model_type)
     collect_after_load()
     if return_tokenizer:
         return model, config, processor, mtp_tokenizer

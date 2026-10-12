@@ -6,8 +6,8 @@ Pairs the vendored V4 text tower (:mod:`gmlx.models.deepseek_v4.model`)
 with the DeepSeek ViT + aligner (:mod:`gmlx.models.deepseek_v4.vision`) in
 the ``language_model`` / ``vision_tower`` shape mlx-vlm's generate stack
 expects. The container registers under its own model_type
-(``deepseek_v4_vl``) because mlx-vlm's ``deepseek_v4`` package is the
-text-only model that its own loader builds.
+(``deepseek_v4_vl``), which leaves mlx-vlm's text-only ``deepseek_v4``
+package in place.
 
 Image turns (reference ``inference/model.py``): the processor expands each
 ``<|deepseek_image|>`` placeholder into a block of sentinel ids past the
@@ -23,16 +23,14 @@ decode tokens and text chunks run the unchanged text paths.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
 
-from gmlx.models import owned
 
 from .image_block import (
     IMAGE,
@@ -52,7 +50,6 @@ from .vision import DeepseekV4VisionModel, VisionConfig
 TextConfig = ModelArgs
 
 MODEL_TYPE = "deepseek_v4_vl"
-_log = logging.getLogger(__name__)
 
 __all__ = [
     "LanguageModel",
@@ -66,9 +63,8 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.deepseek_v4_vl`` resolve to this module."""
+    """Register the text model's cache classes before a build."""
     _text_ensure_registered()
-    owned.install(f"mlx_vlm.models.{MODEL_TYPE}", __name__)
 
 
 @dataclass
@@ -131,31 +127,6 @@ class LanguageModel(DeepseekV4SpecHooks, nn.Module):
         # cast, wo_a 2D->3D, MTP-block drop), on language_model-relative
         # names.
         return _TextModel.sanitize(self, weights)
-
-    def chunked_prefill_policy(self, **kwargs):
-        # mlx-vlm's run/chat prefill loop walks fixed-size chunks it never
-        # re-plans, so a boundary inside an image block is only avoidable
-        # by not chunking: one forward keeps every block whole (the
-        # attention transient is bounded by the span rows, not the chunk).
-        # Serve chunkers steer per chunk instead (gmlx.gen.media_spans).
-        from gmlx.gen.media_spans import (
-            chunk_boundaries_cut,
-            prefill_step_stamp,
-        )
-
-        spans = (kwargs.get("prefill_kwargs") or {}).get("image_spans")
-        step = prefill_step_stamp(self)
-        if spans and step:
-            embeds = kwargs.get("inputs_embeds")
-            ids = kwargs.get("input_ids")
-            length = (embeds.shape[1] if embeds is not None
-                      else ids.shape[-1] if ids is not None else 0)
-            if chunk_boundaries_cut(spans, step, length):
-                _log.info(
-                    "prefill step %d would cut an image block in a "
-                    "%d-token prompt: prefilling in one chunk", step, length)
-                return False
-        return super().chunked_prefill_policy(**kwargs)
 
 
 class Model(nn.Module):

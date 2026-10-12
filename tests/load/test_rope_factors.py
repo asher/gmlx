@@ -42,7 +42,7 @@ _DIMS, _BASE = 64, 500000.0
 
 
 def test_factored_rope_matches_llama3_reference():
-    from mlx_lm.models.rope_utils import Llama3RoPE
+    from gmlx._vendor.mlx_lm.models.rope_utils import Llama3RoPE
 
     ref = Llama3RoPE(_DIMS, traditional=False, base=_BASE,
                      scaling_config=dict(_CFG, rope_type="llama3"))

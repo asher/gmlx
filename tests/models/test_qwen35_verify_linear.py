@@ -16,9 +16,9 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.qwen3_5 import language as _L
+from gmlx.models.qwen35 import language as _L
 
 import gmlx.upstream.gdn_patches as gp
 import gmlx.models.qwen35.verify_linear as vl

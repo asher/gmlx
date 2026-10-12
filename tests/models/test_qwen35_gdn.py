@@ -14,12 +14,12 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
-from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
 import gmlx.upstream.gdn_patches as gdn_patches
 import gmlx.models.qwen35.gdn as qwen35_gdn
@@ -32,8 +32,9 @@ _NEEDS_GPU = pytest.mark.skipif(
 PROMPT = (3, 17, 42, 99, 7, 63, 5, 28)
 
 
-def _cfg():
-    return Q35TextConfig(
+def _cfg(**over):
+    return Q35TextConfig(**{
+        **dict(
         model_type="qwen3_5",
         hidden_size=64,
         intermediate_size=128,
@@ -57,7 +58,11 @@ def _cfg():
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
-    )
+        # Every gated delta layer of both arms reads its head order here.
+        kv_head_layout="tiled",
+        ),
+        **over,
+    })
 
 
 def _top():
@@ -73,8 +78,9 @@ def _lm():
     mx.random.seed(11)
     lm = Q35LanguageModel(_cfg(), _top())
     # Eval mode mirrors production loads and is required here: in
-    # training mode the stock prefill takes vlm's own chunked ops scan,
-    # which the tiled-V patch does not cover, so the arms diverge.
+    # training mode the two arms take different scans (the chunked ops
+    # scan of the base class, the gmlx.tune.gdn scan of the owned one),
+    # whose float error breaks the tolerance.
     lm.eval()
     mx.eval(lm.parameters())
     return lm
@@ -124,8 +130,6 @@ def _arms(monkeypatch=None, fused=True):
     if not fused:
         os.environ["GMLX_FUSED_GDN"] = "0"
     patched = _lm()
-    gdn_patches._patch_gated_delta_tiled_v()
-    gdn_patches._patch_mlxvlm_gated_delta_tiled_v()
     gdn_patches._patch_gated_delta_fused_verify(patched)
     owned = _lm()
     qwen35_gdn.rebind_gdn(owned)
@@ -154,14 +158,11 @@ def _saved_call(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_owned_gdn_active(monkeypatch):
-    monkeypatch.delenv("GMLX_QWEN_OWNED", raising=False)
+def test_owned_gdn_active():
     for mt in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
         assert qwen35_gdn.owned_gdn_active(mt)
     assert not qwen35_gdn.owned_gdn_active("gemma4")
     assert not qwen35_gdn.owned_gdn_active(None)
-    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    assert not qwen35_gdn.owned_gdn_active("qwen3_5")
 
 
 def test_rebind_engagement(monkeypatch):
@@ -240,3 +241,84 @@ def test_verify_sink_identity(_saved_call, fused):
                 assert _close(a, b, ATOL)
             else:
                 assert a == b
+
+
+# ---------------------------------------------------------------------------
+# K->V head pairing with fewer K heads than V heads
+# ---------------------------------------------------------------------------
+
+
+def _gdn_layer(hk, hv, tiled=False):
+    """The first GDN of a toy tree with ``hk`` K heads and ``hv`` V heads
+    in the given head order, on the owned class."""
+    mx.random.seed(11)
+    lm = Q35LanguageModel(
+        _cfg(linear_num_key_heads=hk, linear_num_value_heads=hv,
+             kv_head_layout="tiled" if tiled else "grouped"), _top())
+    lm.eval()
+    mx.eval(lm.parameters())
+    qwen35_gdn.rebind_gdn(lm)
+    return _gdns(lm)[0]
+
+
+def _paired_copy(gdn, heads):
+    """A copy of ``gdn`` with one K head per V head, K head j being
+    ``gdn``'s K head ``heads[j]``, and the conv channel index that maps
+    ``gdn``'s channels onto the copy's."""
+    ref = _gdn_layer(len(heads), len(heads))
+    dk, kd = gdn.head_k_dim, gdn.key_dim
+    qk = mx.concatenate([mx.arange(h * dk, (h + 1) * dk) for h in heads])
+    idx = mx.concatenate([qk, kd + qk, 2 * kd + mx.arange(gdn.value_dim)])
+    for name in ("in_proj_z", "in_proj_b", "in_proj_a", "out_proj", "norm"):
+        getattr(ref, name).weight = getattr(gdn, name).weight
+    ref.A_log, ref.dt_bias = gdn.A_log, gdn.dt_bias
+    ref.in_proj_qkv.weight = gdn.in_proj_qkv.weight[idx]
+    ref.conv1d.weight = gdn.conv1d.weight[idx]
+    ref._gdn_ba_weight = None
+    ref._gdn_owned_fused = False
+    return ref, idx
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("hk,hv", ((2, 6), (4, 8)), ids=("2k6v", "4k8v"))
+@pytest.mark.parametrize("tiled", (False, True), ids=("grouped", "tiled"))
+@pytest.mark.parametrize("route", ("fused_decode", "fused_verify",
+                                   "unfused_verify"))
+def test_fewer_k_heads_pair_as_the_scan_pairs_them(monkeypatch, tiled, route,
+                                                   hk, hv):
+    """V head hv reads the K head its layer's head order pairs it with:
+    hv % Hk in the tiled order of a GGUF, hv // (Hv / Hk) in the grouped
+    one. The reference is a copy with Hv K heads that holds that pairing in its
+    weights, so it has no pairing to choose. Neither shape has Hk equal to
+    Hv / Hk, so a pairing that swaps the two (hv // Hk, or hv % (Hv / Hk))
+    fails."""
+    calls = []
+    for name in ("_gdn_fused_decode_body", "_gdn_fused_verify_body"):
+        orig = getattr(gdn_patches, name)
+        monkeypatch.setattr(gdn_patches, name, lambda *a, _o=orig, _n=name,
+                            **k: calls.append(_n) or _o(*a, **k))
+    gdn = _gdn_layer(hk, hv, tiled)
+    gdn._gdn_owned_fused = route != "unfused_verify"
+    gdn._gdn_records = False
+    r = hv // hk
+    ref, idx = _paired_copy(
+        gdn, [h % hk if tiled else h // r for h in range(hv)])
+    S = 1 if route == "fused_decode" else 3
+    mx.random.seed(3)
+    x = mx.random.normal((1, S, 64)) * 0.5
+    conv = mx.random.normal((1, 3, gdn.conv_dim)) * 0.5
+    state = mx.random.normal((1, hv, 32, 32)) * 0.1
+    outs = []
+    for layer, c in ((gdn, conv), (ref, conv[..., idx])):
+        cache = ArraysCache(size=2, left_padding=[0])
+        cache[0], cache[1] = c, state
+        y = layer(x, cache=cache,
+                  gdn_sink=None if route == "fused_decode" else [])
+        mx.eval(y, cache[1])
+        outs.append((y, cache[1]))
+    assert calls == {"fused_decode": ["_gdn_fused_decode_body"],
+                     "fused_verify": ["_gdn_fused_verify_body"],
+                     "unfused_verify": []}[route]
+    (y, s), (y_ref, s_ref) = outs
+    assert mx.abs(y - y_ref).max().item() < 1e-2 * mx.abs(y_ref).max().item()
+    assert mx.abs(s - s_ref).max().item() < 1e-2 * mx.abs(s_ref).max().item()

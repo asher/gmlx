@@ -8,16 +8,16 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import sampling as sp_sampling  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_PKG = importlib.import_module("mlx_vlm.server")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 from test_server_patches import _FakeThinkTok, _spec  # noqa: E402
 
@@ -100,8 +100,8 @@ def _mtp_seams():
     """Force the owned-prefill class flag on (install-order precondition) and
     snapshot the three methods mtp_thinking wraps."""
     from gmlx.spec.engine import _FULL_PREFILL_FLAG
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     cls = gen.ResponseGenerator
     had_flag = getattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, False)
     setattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
@@ -131,8 +131,8 @@ def _budget_args(**kw):
 
 def test_mtp_thinking_install_refuses_without_owned_prefill():
     from gmlx.spec.engine import _FULL_PREFILL_FLAG
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     had_flag = getattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, False)
     if had_flag:
         delattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG)
@@ -417,7 +417,7 @@ def test_install_xtc_wraps_and_stacks_with_profile_injection():
 
 
 # 6b. max_completion_tokens on chat requests
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 
 
 def _chat(**kw):
@@ -558,7 +558,7 @@ def test_fast_sampler_call_shapes_and_determinism():
 def test_fast_sampler_install_lands():
     """Identity check on the REAL upstream class: an mlx-vlm rename of
     ResponseGenerator._make_sampler must fail here, not silently no-op."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen.ResponseGenerator
     original = cls._make_sampler
     try:

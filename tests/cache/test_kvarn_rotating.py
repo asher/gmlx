@@ -370,7 +370,7 @@ def test_meta_arity_fail_closed_both_directions():
 
 @needs_kvarn_ops
 def test_save_load_prompt_cache_file(tmp_path):
-    from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 
     from gmlx.cache.kvarn_cache import ensure_registered
 
@@ -387,14 +387,16 @@ def test_save_load_prompt_cache_file(tmp_path):
 
 
 @needs_kvarn_ops
-def test_clone_lm_twin():
-    from gmlx.cache.snapshot import _clone_lm_twin
+def test_clone_row_faithful():
+    from gmlx.cache.snapshot import _clone_row
 
     c = _rot()
     k, v = tokens(2000)
     _feed(c, k, v, 128)
     targets = []
-    r = _clone_lm_twin(c, targets)
+    r = _clone_row(c, rot_canonical=False, eval_targets=targets)
+    # The copied state waits in targets for the caller's eval.
+    assert len(targets) == len(c.state)
     mx.eval(*targets)
     assert type(r) is KVarNRotatingKVCache
     assert (r.max_size, r.evicted) == (c.max_size, c.evicted)
@@ -406,7 +408,7 @@ def test_clone_lm_twin():
 
 @needs_kvarn_ops
 def test_from_cache_pre_wrap():
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
     k, v = tokens(500)
     src = RotatingKVCache(max_size=WIN, keep=4)
@@ -419,7 +421,7 @@ def test_from_cache_pre_wrap():
 
 
 def test_from_cache_wrapped_refuses():
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
     src = RotatingKVCache(max_size=256, keep=4)
     k, v = tokens(300)
@@ -430,7 +432,7 @@ def test_from_cache_wrapped_refuses():
 
 @needs_kvarn_ops
 def test_policy_converts_the_rotating_arm(kvarn_ops_ok):
-    from mlx_lm.models.cache import KVCache, RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
 
     from gmlx.gen.generation import convert_kvarn_cache
 
@@ -500,7 +502,7 @@ def test_kv_bits_rotating_reason():
     """Affine's counterpart to the kvarn rotating path: --max-kv-size on a
     make_cache-less model builds an all-window stack the shared policy
     refuses, while the same model without it quantizes."""
-    from mlx_lm.models.cache import KVCache, RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
 
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
 

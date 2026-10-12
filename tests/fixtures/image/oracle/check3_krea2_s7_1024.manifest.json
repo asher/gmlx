@@ -1,0 +1,175 @@
+{
+ "schema": 1,
+ "name": "check3_krea2_s7_1024",
+ "check": 3,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check3_krea2.py",
+ "argv": [
+  "check3_krea2.py",
+  "--dit",
+  "Krea-2-Turbo-Q4_K_M.gguf",
+  "--sizes",
+  "1024",
+  "--rows",
+  "512",
+  "--features",
+  "check2_krea2_check8.npz",
+  "--features-key",
+  "features_check8",
+  "--features-source",
+  "check2_krea2_check8 fp32 features of check 8's prompt",
+  "--latents",
+  "check8_stock16_1024.npz",
+  "--step",
+  "7",
+  "--latents-source",
+  "check 8 stock16 x_i at 1024, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
+  "--name",
+  "check3_krea2_s7"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "Krea-2-Turbo-Q4_K_M.gguf",
+   "size": 7486289232,
+   "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07"
+  },
+  "features": {
+   "name": "check2_krea2_check8.npz",
+   "size": 4670672,
+   "sha256": "d9083d541e7c0b6bae6170a98b11cc05fa39ffa54e40d22829cb852692a0692c"
+  },
+  "latents": {
+   "name": "check8_stock16_1024.npz",
+   "size": 16778002,
+   "sha256": "63b69b595ed16dc31d6c57c17bcc8b151c3e0e6620cc4fb3171da1523c85739f"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "blocks": 28,
+  "sigma": 0.31090107560157776,
+  "latents": "check 8 stock16 x_i at 1024, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
+  "step": 7,
+  "features": "check2_krea2_check8 fp32 features of check 8's prompt",
+  "text_rows": 19,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "float32 in both modes",
+  "gguf_codecs": {
+   "F32": 167,
+   "F16": 1,
+   "Q5_K": 61,
+   "Q4_K": 201
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.014374416599670385,
+   "cosine": 0.9998967847060214,
+   "max_abs": 0.326312780380249
+  },
+  "times": {
+   "fp32_s": 66.7,
+   "bf16_s": 350.2
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.02874883319934077,
+   "cosine_min": 0.9995871388240856
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity"
+ },
+ "notes": [],
+ "created": "2026-10-10T09:58:02Z",
+ "npz": "check3_krea2_s7_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    19,
+    30720
+   ],
+   "dtype": "float32",
+   "sha256": "aed9293f823f338c5f30a12d990e83dfc302ff8412875d2959ec7b5a13431248"
+  },
+  "latents": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "61c62ecac41eabb0abe1d5ec64bbf2b427c9488f179994176f5e41d6fb7bfae8"
+  },
+  "position_ids": {
+   "shape": [
+    4115,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "f66cebbbc896a91ea3ee016bf3d9604831be7dd21325eab92ad803a8a507b2a9"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "13afcb595b3adcd1b8154e36d49ca0b0cfeac223d0c549cd2dfca8d917df9460"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "052a5eb677c186d096a95ce925e88d51e58c4332ced9c5c5582f076bc660ae2b"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "4b604bd09977a94dfe559d7e5e1c8f705bf424fbd07f2a1d4b7c75eb0c3f2a49"
+  }
+ }
+}

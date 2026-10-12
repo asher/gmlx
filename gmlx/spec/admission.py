@@ -12,6 +12,7 @@ import mlx.core as mx
 from gmlx.envflags import env_bool
 from gmlx.spec.engine import _debug_note
 from gmlx.spec.kv_quant import batch_liftable, lift_single_cache
+from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def install_continuous_batch_admission() -> None:
     The generator-side injection (extending caches + drafter mid-flight)
     happens in ``_owned_decode_rounds_batch`` via ``model._generator_injections``.
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     SpecBatch = _ar.SpeculativeGenerationBatch
     if getattr(SpecBatch, _CONTINUOUS_BATCH_FLAG, False):
@@ -252,7 +253,7 @@ def install_continuous_batch_admission() -> None:
         _orig_filter(self, keep)
         _release_if_finished(self)
 
-    SpecBatch.filter = _filter_with_release
+    SpecBatch.filter = link(_filter_with_release, _orig_filter)
 
     # 4. Process pending injections in next() before advancing the generator
     _orig_next = SpecBatch.next
@@ -356,8 +357,8 @@ def install_continuous_batch_admission() -> None:
         # boundaries. The scalar (B=1) generator never does, so a live
         # scalar host is preempted first: its generator closes at the round
         # boundary and the batch is rebuilt armless on the batch loop.
-        # `_all_uids` is an mlx-vlm generator internal (stable under the
-        # ==0.6.3 pin); re-verify this batch-vs-scalar signal on a pin lift.
+        # `_all_uids` is an mlx-vlm generator internal (checked at the
+        # ==0.7.3 pin); re-verify this batch-vs-scalar signal on a pin lift.
         preempted = False
         if pending and len(self._all_uids) == 1:
             preempted = _preempt_scalar(self)
@@ -428,7 +429,7 @@ def install_continuous_batch_admission() -> None:
         _release_if_finished(self)
         return responses
 
-    SpecBatch.next = _next_with_injection
+    SpecBatch.next = link(_next_with_injection, _orig_next)
     setattr(SpecBatch, _CONTINUOUS_BATCH_FLAG, True)
     _debug_note(
         "[mtp] continuous batch: admission gate removed, mid-flight injection enabled"

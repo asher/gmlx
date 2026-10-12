@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import uvicorn  # noqa: E402
 from fastapi import Request as _Request  # noqa: E402
@@ -39,8 +39,8 @@ from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.serve.patches import session_sockets as ss  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 _KEY = "sekrit-key"
 
 # Routes a session socket refuses, as the test app serves them on TCP.
@@ -906,9 +906,10 @@ def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypat
 
 
 def test_a_session_socket_serves_a_capped_number_of_connections(server, monkeypatch):
-    """The socket serves a request on each connection the relay can hold.
-    Once more connections are open, it answers 503 without reading a body,
-    so held connections cannot make the server hold more bodies."""
+    """The socket serves a request beside twice the relay's cap of held
+    connections, room for one full turnover of the relay. Once more are
+    open, it answers 503 without reading a body, so held connections cannot
+    make the server hold more bodies."""
     monkeypatch.setattr(ss, "SESSION_CONNECTIONS_MAX", 2)
     srv = server()
     session = srv.open_session([])
@@ -932,8 +933,9 @@ def test_a_session_socket_serves_a_capped_number_of_connections(server, monkeypa
             time.sleep(0.02)
 
     try:
-        hold()
-        # The second of the relay's two connections is served.
+        for _ in range(3):
+            hold()
+        # A request beside three held connections is the fourth: served.
         assert _unix(path, "GET", "/health").status == 200
         hold()
         health_until(503)

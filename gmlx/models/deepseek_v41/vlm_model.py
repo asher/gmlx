@@ -31,9 +31,8 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
 
-from gmlx.models import owned
 
 from ..deepseek_v4.vision import DeepseekV4VisionModel, VisionConfig
 from .image_block import (
@@ -63,9 +62,8 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.deepseek_v41_vl`` resolve to this module."""
+    """Register the text model's cache classes before a build."""
     _text_ensure_registered()
-    owned.install(f"mlx_vlm.models.{MODEL_TYPE}", __name__)
 
 
 @dataclass
@@ -121,7 +119,7 @@ class LanguageModel(nn.Module):
                          image_mask=image_mask)
         logits = (self.model.embed_tokens.as_linear(out)
                   if self.config.tie_word_embeddings else self.lm_head(out))
-        from mlx_vlm.models.base import LanguageModelOutput
+        from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
         return LanguageModelOutput(logits=logits)
 

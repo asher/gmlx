@@ -1,16 +1,17 @@
-"""LoRA finetuning on a K-quant GGUF base - the creation half of GGUF LoRA.
+"""LoRA finetuning on a K-quant GGUF base, the creation half of GGUF LoRA.
 
-mlx-lm's own tuner trains the adapter; the mlx-kquant patch makes the frozen GGUF
-``KQuantLinear`` leaves adaptable, and gradient flows through the quant matmul via
-the extension's ``vjp`` (only the adapter trains, the base carries no float copy /
-no optimizer state). The trained adapter is written as a llama.cpp GGUF
-(:func:`adapter.save_lora_adapter`) so it round-trips straight back into the
-inference / serving path - **GGUF in, GGUF out**, no safetensors, no merge.
+The vendored mlx-lm tuner trains the adapter. It wraps each frozen K-quant
+leaf through gmlx.tune.kquant_lora, and the gradient flows through the
+quantized matmul by the extension's ``vjp``, so only the adapter trains and
+the base carries no float copy and no optimizer state. The trained adapter
+is written as a llama.cpp GGUF (:func:`adapter.save_lora_adapter`), so it
+loads straight back into the inference and serving path: GGUF in, GGUF
+out, with no safetensors and no merge.
 
 Mirrors the ``mlx-kquant lora`` walkthrough, but the base is a GGUF (loaded
-in-memory by :func:`loader.load_model`, sidestepping mlx-lm's HF-dir tokenizer /
-config assumptions) and the output is a GGUF adapter. LoRA only - mlx-lm's DoRA
-dispatch does not consult ``to_lora`` on a kquant base.
+in-memory by :func:`loader.load_model`, which avoids mlx-lm's HF-dir
+tokenizer and config assumptions) and the output is a GGUF adapter. LoRA
+only: the tuner's DoRA path has no K-quant builder.
 """
 from __future__ import annotations
 
@@ -57,10 +58,8 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
         raise TrainRefused(CHECKPOINT_DROPOUT)
     import mlx.core as mx
     import mlx.optimizers as optim
-    from mlx_lm.tuner.datasets import CacheDataset, load_dataset
-    from mlx_lm.tuner.trainer import TrainingArgs, train
-
-    from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
+    from gmlx._vendor.mlx_lm.tuner.datasets import CacheDataset, load_dataset
+    from gmlx._vendor.mlx_lm.tuner.trainer import TrainingArgs, train
 
     import gmlx.load.loadlog as loadlog
     from gmlx.load.adapter import base_tensor_names, refusal_summary
@@ -73,7 +72,6 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     from gmlx.tune.kernels import install_training_switch_gemm
 
     mx.random.seed(seed)
-    patch_mlx_lm_lora()  # KQuantLinear.to_lora + rely on the extension's vjp
     base_arch = preflight(gguf_path, hf_source=hf_source).arch
     base_names = base_tensor_names(gguf_path)
     with loadlog.load_ui(False, gguf_path):

@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 # Module level, so FastAPI resolves the stringized annotation.
 from fastapi import Request  # noqa: E402
@@ -22,15 +22,15 @@ from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.serve.patches import media_gate  # noqa: E402
 from gmlx.serve.patches import routes as sp_routes  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _LISTED = "https://ui.example"
 
 
 @pytest.fixture(autouse=True)
 def _restore_app():
     app = _APP.app
-    openai = sys.modules.get("mlx_vlm.server.openai") \
-        or importlib.import_module("mlx_vlm.server.openai")
+    openai = sys.modules.get("gmlx._vendor.mlx_vlm.server.openai") \
+        or importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     saved = {
         "routes": sp_common._snapshot_routes(app),
         "middleware": list(app.user_middleware),

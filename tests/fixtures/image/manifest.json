@@ -1,0 +1,82 @@
+{
+  "z_image_turbo_q4_k_m.header.json": {
+    "repo": "unsloth/Z-Image-Turbo-GGUF",
+    "revision": "6c80814333b7b6a70a2e5b469a7c6437ce65de0f",
+    "file": "z-image-turbo-Q4_K_M.gguf",
+    "size": 5017613376,
+    "sha256": "e6494f87de6abaf6a561924f50317a5f271fc34bb4222aabbd801197df8f7daa"
+  },
+  "qwen_image21_q4_k_m.header.json": {
+    "repo": "unsloth/Qwen-Image-2.1-GGUF",
+    "revision": "2c31ccd392b367a6637841a143813320a02dff55",
+    "file": "qwen-image-2.1-Q4_K_M.gguf",
+    "size": 4199565024,
+    "sha256": "631d532e7ca71e8d90a87c71d3699761a812039d22e3370e87498d87754660fe"
+  },
+  "z_image_turbo_transformer_config.json": {
+    "repo": "Tongyi-MAI/Z-Image-Turbo",
+    "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+    "file": "transformer/config.json"
+  },
+  "qwen_image21_transformer_config.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "transformer/config.json"
+  },
+  "qwen_image21_vae.header.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "vae/diffusion_pytorch_model.safetensors",
+    "size": 1350989512,
+    "sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
+    "sha256_source": "The oid that the Hub lists for the file at this revision, and the sha256 of the downloaded file, which test_image_qwen_vae_real.py compares with the file under GMLX_TEST_IMAGE_DIR."
+  },
+  "qwen_image21_vae_config.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "vae/config.json",
+    "sha256": "9785d527b278cb8b210e9f48a8028d92a4190968ce7e24c8fc85d9d1b82f6ba2"
+  },
+  "z_image_turbo_chat_template.jinja": {
+    "repo": "Tongyi-MAI/Z-Image-Turbo",
+    "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+    "file": "tokenizer/tokenizer_config.json",
+    "key": "chat_template"
+  },
+  "qwen_image21_scheduler_config.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "scheduler/scheduler_config.json",
+    "size": 485,
+    "sha256": "5895f3a167c14a967fe9ac70c64924ae5acc79799e0679fd12907e594a713cd1"
+  },
+  "krea2_turbo_q4_k_m.header.json": {
+    "repo": "Abiray/Krea-2-Turbo-GGUF",
+    "revision": "ac1417a9e773b4244b683744b5264f5944d0ff0f",
+    "file": "Krea-2-Turbo-Q4_K_M.gguf",
+    "size": 7486289232,
+    "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07",
+    "kv_kept": "general.architecture and the comfy.gguf keys"
+  },
+  "krea2_raw_q4_k_m.header.json": {
+    "repo": "realrebelai/KREA-2_GGUFs",
+    "revision": "9721c3ec932c43dff6dbb5793a816d9ad105277f",
+    "file": "BASE/Krea-2-Base-Q4_K_M.gguf",
+    "size": 7259460832,
+    "sha256": "f52b99ec56380db4ea05614a2299b9420e04b1214fcfb5151059cc569bdf5b9e",
+    "kv_kept": "general.architecture and the comfy.gguf keys"
+  },
+  "krea2_transformer_config.json": {
+    "repo": "huggingface/diffusers",
+    "revision": "e0abab83b5df05de9e7abd788643c1a7c1e42e28",
+    "file": "src/diffusers/models/transformers/transformer_krea2.py",
+    "key": "Krea2Transformer2DModel.__init__ defaults"
+  },
+  "krea2_vae.header.json": {
+    "repo": "Comfy-Org/Krea-2",
+    "revision": "eb1eddd3983a54678545a9b2c178c5853b30f7be",
+    "file": "vae/qwen_image_vae.safetensors",
+    "size": 253806246,
+    "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+  }
+}

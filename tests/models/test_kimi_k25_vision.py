@@ -228,7 +228,7 @@ def test_image_processor_output_survives_a_thread_hop():
     graphs, and a different thread cannot evaluate them ("There is no
     Stream(gpu, N) in current thread"). The synthesized processor evaluates
     its outputs on the building thread."""
-    pytest.importorskip("mlx_vlm")
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
     import threading
 
     from PIL import Image

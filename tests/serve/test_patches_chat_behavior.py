@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
@@ -16,9 +16,9 @@ from gmlx.serve.patches import chat_behavior as sp_chat  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import ResolvedModel  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_PKG = importlib.import_module("mlx_vlm.server")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 from test_server_patches import _FakeThinkTok  # noqa: E402
 
@@ -80,7 +80,7 @@ def test_prompt_tail_opens_thinking_cases():
 
 
 def test_stream_thinking_seed_reseeds_from_prompt():
-    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     cls = rs.ThinkingStreamState
     original_init = cls.__init__
     try:
@@ -108,8 +108,8 @@ def test_stream_thinking_seed_reseeds_from_prompt():
 
 
 def test_stream_thinking_seed_wraps_render_binding():
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
-    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     original_fn = openai_mod.apply_chat_template
     original_init = rs.ThinkingStreamState.__init__
     try:
@@ -127,7 +127,7 @@ def test_stream_thinking_seed_wraps_render_binding():
 
 
 def test_nonstream_split_truncated_thinking_seeded_from_prompt():
-    app_mod = importlib.import_module("mlx_vlm.server.app")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     sp.install_stream_thinking_seed()
     split = app_mod._split_thinking_text
     assert getattr(split, sp_chat._STREAM_SEED_FLAG, False)
@@ -151,7 +151,7 @@ def test_nonstream_split_truncated_thinking_seeded_from_prompt():
 def test_nonstream_split_strips_xtml_section_markers():
     """Kimi-K3: the response/message closers and turn terminator must not
     leak into chat content; other think spellings stay untouched."""
-    app_mod = importlib.import_module("mlx_vlm.server.app")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     sp.install_stream_thinking_seed()
     split = app_mod._split_thinking_text
     tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
@@ -174,8 +174,8 @@ def test_nonstream_split_keeps_first_line_code_indent():
     """The stock splitter .strip()s content, which deletes the first line's
     leading indent from verbatim-code replies. The seeded splitter trims
     newlines only, for every marker branch and the no-marker fallthrough."""
-    app_mod = importlib.import_module("mlx_vlm.server.app")
-    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     sp.install_stream_thinking_seed()
     split = app_mod._split_thinking_text
     tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
@@ -207,7 +207,7 @@ def test_install_thinking_budget_fix_applies_and_idempotent():
     # Fail-loud guard: asserts the seam bound to the REAL mlx-vlm symbol, so a
     # rename of ResponseGenerator._make_thinking_budget_criteria turns into a CI
     # failure instead of a silent no-op.
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen.ResponseGenerator
     original = cls._make_thinking_budget_criteria
     try:
@@ -225,7 +225,7 @@ def test_make_criteria_honors_budget_when_enable_thinking_false():
     # A configured thinking_budget must arm even when enable_thinking is False:
     # a group/profile config may disable thinking, but the model can still emit
     # <think>, and an explicit budget must cap it. None budget still opts out.
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen.ResponseGenerator
     original = cls._make_thinking_budget_criteria
     try:
@@ -260,8 +260,8 @@ def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
     # itself: one call runs its construction and stashes no seed, and a
     # tbfix re-install sees its own flag and no-ops.
     import gmlx.serve.seed_rows as sr
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     cls = gen.ResponseGenerator
     saved = (cls._make_thinking_budget_criteria, cls._make_logits_processors,
              ar.BatchGenerator.insert, ar.GenerationBatch._step,
@@ -393,7 +393,7 @@ def test_a_refusal_from_the_arg_builder_reads_as_its_message():
     refusal's str() is its message, never "400: " and the message."""
     from fastapi import HTTPException
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
     def stub(request, processor=None, tenant_id=None):
         return gen.GenerationArguments()
@@ -414,7 +414,7 @@ def test_the_template_call_keys_cover_the_named_parameters_of_every_call():
     import inspect
 
     import transformers
-    from mlx_vlm import prompt_utils
+    from gmlx._vendor.mlx_vlm import prompt_utils
 
     for fn in (transformers.PreTrainedTokenizerBase.apply_chat_template,
                transformers.ProcessorMixin.apply_chat_template,
@@ -431,7 +431,7 @@ def test_the_template_call_keys_cover_the_named_parameters_of_every_call():
 def test_install_chat_template_kwargs_forwards_into_to_template_kwargs():
     """End-to-end seam: the gen-args wrapper stashes the merged dict and the
     patched to_template_kwargs folds it into what mlx-vlm hands the template."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
     def stub(request, processor=None, tenant_id=None):
         return gen.GenerationArguments()
@@ -474,7 +474,7 @@ def test_install_chat_template_kwargs_forwards_into_to_template_kwargs():
 
 def test_install_chat_template_kwargs_idempotent_and_noop_default():
     sp.install_chat_template_kwargs()
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     first = gen.GenerationArguments.to_template_kwargs
     sp.install_chat_template_kwargs()
     assert gen.GenerationArguments.to_template_kwargs is first
@@ -492,7 +492,7 @@ def test_request_thinking_off_maps_onto_kimi_bare_switch():
     """A plain --thinking value forwarded by the chat client (or any client's
     `thinking: "off"`) must reach the template as the model's own switch
     spelling - Kimi K2.x reads a bare `thinking` variable."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     proc = types.SimpleNamespace(chat_template=_KIMI_TAIL)
     req = types.SimpleNamespace(model_fields_set=set(),
                                 chat_template_kwargs=None, thinking="off")
@@ -509,7 +509,7 @@ def test_request_thinking_off_maps_onto_kimi_bare_switch():
 
 
 def test_request_reasoning_effort_field_maps_onto_template():
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     proc = types.SimpleNamespace(chat_template="reads reasoning_effort")
     req = types.SimpleNamespace(model_fields_set=set(),
                                 chat_template_kwargs=None,
@@ -528,7 +528,7 @@ def _build_with_server_thinking(monkeypatch, req, *, sampling=None,
     """Run the installed gen-args chain (profile injection, then the
     template-kwargs stash) with a server-side enable_thinking from the
     profile sampling block or MLX_VLM_ENABLE_THINKING."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     if env is None:
         monkeypatch.delenv("MLX_VLM_ENABLE_THINKING", raising=False)
     else:
@@ -614,10 +614,13 @@ def test_template_default_thinking_blocks_0615_false_injection():
     import jinja2
 
     import gmlx.tui.reasoning as reasoning
+    from gmlx.upstream.patching import wrapped_with
 
     sp.install_chat_template_kwargs()      # installs the render guard too
-    pu = importlib.import_module("mlx_vlm.prompt_utils")
-    assert getattr(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG, False)
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    # A model load and the server install their own render wraps above the
+    # guard, so the guard is looked up in the whole chain.
+    assert wrapped_with(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG)
 
     tok = _RecordingTok()
     msgs = [{"role": "user", "content": "hi"}]
@@ -669,7 +672,7 @@ def test_install_role_normalization_rewrites_before_render():
             return "rendered"
 
     sp.install_role_normalization()
-    openai = importlib.import_module("mlx_vlm.server.openai")
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     assert getattr(openai.apply_chat_template,
                    sp_chat._ROLE_NORM_FLAG, False)
 
@@ -686,6 +689,44 @@ def test_install_role_normalization_rewrites_before_render():
     fn = openai.apply_chat_template
     sp.install_role_normalization()
     assert openai.apply_chat_template is fn
+
+
+def test_instruction_merge_leaves_developer_messages_in_place():
+    """mlx-vlm merges system and developer messages into one leading system
+    message. Called with the messages alone (chat completions), the merge
+    leaves developer messages where they were; called with instructions
+    (Responses), it runs stock."""
+    sp.install_role_normalization()
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    merge = openai._normalize_instruction_messages
+    assert getattr(merge, sp_chat._ROLE_NORM_FLAG, False)
+
+    dev = {"role": "developer", "content": "D"}
+    msgs = [{"role": "system", "content": "S"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "yo"},
+            dev,
+            {"role": "system", "content": "S2"},
+            {"role": "user", "content": "go"}]
+    assert merge(msgs) == "S\n\nS2"
+    assert msgs == [{"role": "system", "content": "S\n\nS2"},
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "yo"},
+                    {"role": "developer", "content": "D"},
+                    {"role": "user", "content": "go"}]
+    assert msgs[3] is dev
+    only_dev = [dev, {"role": "user", "content": "hi"}]
+    assert merge(only_dev) is None and only_dev[0] is dev
+
+    resp = [{"role": "developer", "content": "D"},
+            {"role": "user", "content": "hi"}]
+    assert merge(resp, "I") == "I\n\nD"
+    assert resp == [{"role": "system", "content": "I\n\nD"},
+                    {"role": "user", "content": "hi"}]
+
+    # idempotent
+    sp.install_role_normalization()
+    assert openai._normalize_instruction_messages is merge
 
 
 def test_template_error_becomes_clean_400():
@@ -753,7 +794,7 @@ _HARMONY_REPLY = ('<|channel|>analysis<|message|>User greets; keep it short.'
 
 
 def test_nonstream_split_harmony_reply():
-    app_mod = importlib.import_module("mlx_vlm.server.app")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     sp.install_stream_thinking_seed()
     split = app_mod._split_thinking_text
     tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
@@ -775,7 +816,7 @@ def test_nonstream_split_harmony_reply():
 
 
 def test_stream_harmony_filter_routes_channels():
-    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     cls = rs.ThinkingStreamState
     original_init = cls.__init__
     original_feed = cls.feed

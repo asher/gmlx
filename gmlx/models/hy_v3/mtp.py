@@ -40,9 +40,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as hy
+from gmlx.cache.attention import create_attention_mask
 from gmlx.spec.drafter_protocol import native_block_size
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
@@ -94,13 +93,13 @@ class HyV3SpecLM(hy.Model):
         h = self.model(inputs, cache)
         logits = self._logits(h)
         if not (return_hidden or return_shared_kv):
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[h])
 
     def make_cache(self):
-        from mlx_lm.models.cache import KVCache
+        from gmlx.cache.kv_cache import KVCache
 
         return [KVCache() for _ in self.model.layers]
 

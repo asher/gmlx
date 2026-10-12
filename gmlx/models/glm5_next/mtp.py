@@ -23,7 +23,7 @@ feed (the DeepSeek-V3 pre-norm convention is unverified here - acceptance
 rate is the arbiter).
 
 Verify rollback is two-part (the qwen4_exp recurrent precedent): the MLA
-layers' KV + pool leaves trim (PoolingCache stashes a one-update undo for
+layers' KV + pool leaves trim (DS4PoolingCache stashes a one-update undo for
 L <= 6), and the KDA layers replay the accepted prefix from the recorded
 pre-verify conv tails + recurrent state (``model.rollback_verify_sink``).
 
@@ -40,9 +40,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as glm5
+from gmlx.cache.attention import create_attention_mask
 from gmlx.spec.drafter_protocol import native_block_size
 from gmlx.spec.mtp_drafter import _POSTNORM_FEED, QwenMTPDrafter
 
@@ -172,12 +171,15 @@ class Glm5NextSpecLM(Glm5NextSpecHooks, glm5.Model):
     ):
         # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
         # keyword; the token ids are authoritative (a GGUF text target has
-        # no vision features) and shared_kv is never used.
+        # no vision features) and shared_kv is never used. skip_logits
+        # leaves out the head; speculative_logits_from_hidden projects the
+        # raw pre-norm hidden.
+        skip_logits = kwargs.pop("skip_logits", False)
         del inputs_embeds, n_to_process, kwargs
         normed, raw = self.model(inputs, cache, return_raw_hidden=True)
-        logits = self._head(normed)
+        logits = None if skip_logits else self._head(normed)
         if not (return_hidden or return_shared_kv):
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[raw])
@@ -217,7 +219,7 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
     def __init__(self, config: Glm5NextMTPConfig):
         nn.Module.__init__(self)
         if int(config.block_size) != 2:
-            # The accept-path trim rewinds the drafter's own PoolingCache
+            # The accept-path trim rewinds the drafter's own DS4PoolingCache
             # through its one-update undo log; a deeper rollout appends one
             # update per draft and cannot rewind past the last one.
             raise ValueError(
@@ -256,18 +258,12 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
             raise NotImplementedError(
                 "Glm5NextMTPDrafter is B=1 only (v1): the pooled indexer "
                 "selection is single-sequence")
-        from mlx_lm.models.cache import CacheList as _CacheList
-        from mlx_lm.models.cache import KVCache as _KVCache
+        from gmlx.cache.kv_cache import CacheList, KVCache
+        from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
-        from gmlx.cache.compat import construction_cache_module
-        from gmlx.models.deepseek_v4.cache import PoolingCache
-
-        cmod = construction_cache_module()
-        kv_cls = getattr(cmod, "KVCache", _KVCache)
-        list_cls = getattr(cmod, "CacheList", _CacheList)
-        pool = PoolingCache(self._kpool, lookback=False)
+        pool = DS4PoolingCache(self._kpool, lookback=False)
         pool.quantizable = False
-        return [list_cls(kv_cls(), pool)]
+        return [CacheList(KVCache(), pool)]
 
     def inject_rows(self, *args, **kwargs) -> None:
         raise NotImplementedError(

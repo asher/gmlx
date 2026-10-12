@@ -68,7 +68,7 @@ def gguf_tokens(path: str, state: str) -> ChatTokens:
     raw = load_tokenizer_from_gguf(
         kv, arch, chat_template_override=bundled_chat_template_for_arch(arch))
     finish_gguf_tokenizer(raw, model_type)
-    wrapper_cls = importlib.import_module("mlx_lm.tokenizer_utils").TokenizerWrapper
+    wrapper_cls = importlib.import_module("gmlx._vendor.mlx_lm.tokenizer_utils").TokenizerWrapper
     wrapper = wrapper_cls(raw, eos_token_ids=getattr(raw, "_gguf_eos_token_ids", None))
     return ChatTokens(_make_text_processor(wrapper), state)
 

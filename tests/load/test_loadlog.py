@@ -312,7 +312,7 @@ def _wait_for(pred, timeout=2.0):
 
 
 def _prefill_ui():
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     import gmlx.gen.generation as generation
 
     stream = _FakeTty()
@@ -343,8 +343,8 @@ def test_prefill_spinner_lifecycle():
 
 
 def test_generate_wires_progress_callback_only_when_opted_in(monkeypatch):
-    pytest.importorskip("mlx_lm")
-    import mlx_lm
+    pytest.importorskip("gmlx._vendor.mlx_lm")
+    import gmlx._vendor.mlx_lm
 
     import gmlx.gen.generation as generation
 
@@ -354,11 +354,14 @@ def test_generate_wires_progress_callback_only_when_opted_in(monkeypatch):
         captured.append(kw)
         return "ok"
 
-    monkeypatch.setattr(mlx_lm, "generate", fake_generate)
+    monkeypatch.setattr(gmlx._vendor.mlx_lm, "generate", fake_generate)
 
     class _Tok:
         chat_template = None
         eos_token_ids = [0]
+
+        def encode(self, text, add_special_tokens=True):
+            return [1]
 
     def run(*, tty, **kw):
         monkeypatch.setattr(sys, "stderr", _FakeTty() if tty else io.StringIO())

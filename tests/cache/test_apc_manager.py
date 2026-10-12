@@ -10,11 +10,14 @@ from types import SimpleNamespace
 
 import pytest
 
-apc = pytest.importorskip("mlx_vlm.apc")
+apc = pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.cache.apc_manager import GmlxAPCManager, build_apc_manager  # noqa: E402
 from gmlx.serve.residency import _RuntimeProxy, _ResidencyPool, _active_entry  # noqa: E402
+
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
 
 GB = 1024**3
 
@@ -47,6 +50,9 @@ def test_disk_namespace_key_wins_over_the_model_path(monkeypatch, tmp_path):
         def __init__(self, path, *, namespace, **kw):
             seen["ns"] = namespace
 
+        def set_write_callbacks(self, success, failure):
+            pass
+
     monkeypatch.setattr(apc, "DiskBlockStore", FakeStore)
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
     monkeypatch.setenv("APC_DISK_PATH", str(tmp_path))
@@ -56,6 +62,38 @@ def test_disk_namespace_key_wins_over_the_model_path(monkeypatch, tmp_path):
     monkeypatch.delenv("APC_DISK_NAMESPACE")
     build_apc_manager(model_namespace="/m/a.gguf")
     assert seen["ns"] == "/m/a.gguf"
+
+
+def test_disk_namespace_folds_in_the_rope_options(monkeypatch, tmp_path):
+    """The disk tier outlives a model instance: KV made under one rope
+    scaling must never be read under another, and no options keep the
+    namespace as it was."""
+    from gmlx.load.rope_scaling import RopeOverride
+
+    seen = []
+
+    class FakeStore:
+        def __init__(self, path, *, namespace, **kw):
+            seen.append(namespace)
+
+        def set_write_callbacks(self, success, failure):
+            pass
+
+    monkeypatch.setattr(apc, "DiskBlockStore", FakeStore)
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    monkeypatch.setenv("APC_DISK_PATH", str(tmp_path))
+    monkeypatch.delenv("APC_DISK_NAMESPACE", raising=False)
+    four = RopeOverride(rope_scaling="yarn", rope_scale=4.0)
+    for ov in (None, RopeOverride(), four,
+               RopeOverride(rope_scaling="yarn", rope_scale=2.0), four):
+        build_apc_manager(model_namespace="/m/a.gguf", rope_override=ov)
+    assert seen[0] == seen[1] == "/m/a.gguf"
+    assert seen[2].startswith("/m/a.gguf#rope-")
+    assert len({seen[0], seen[2], seen[3]}) == 3
+    assert seen[2] == seen[4]
+    monkeypatch.setenv("APC_DISK_NAMESPACE", "shared")
+    build_apc_manager(model_namespace="/m/a.gguf", rope_override=four)
+    assert seen[-1] == "shared" + seen[2][len("/m/a.gguf"):]
 
 
 def test_build_defaults_match_stock(monkeypatch):
@@ -125,6 +163,208 @@ def test_the_free_ram_read_never_runs_vm_stat_from_path(monkeypatch, tmp_path):
     assert not (tmp_path / "ran").exists()
 
 
+def test_free_ram_read_without_mach_counters_runs_vm_stat_once_per_interval(
+        monkeypatch):
+    """mlx-vlm 0.7.3 also reads free RAM for the memory headroom in every
+    _make_room. Without the mach counters the rebound read runs
+    /usr/bin/vm_stat, so the build puts it behind a cache."""
+    from gmlx.cache import apc_manager
+    from gmlx.serve import kernel_vm
+
+    calls = []
+
+    def vm_stat_read():
+        calls.append(1)
+        return 40 * GB
+
+    monkeypatch.setattr(kernel_vm, "_disabled", "test")
+    monkeypatch.setattr(apc_manager, "_vm_stat_free_ram_bytes", vm_stat_read)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 0)
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):
+        monkeypatch.delenv(k, raising=False)
+    m = build_apc_manager()
+    m.prepare_prefill(0)
+    for _ in range(8):
+        m._make_room(2 << 20)
+    assert len(calls) == 1
+    assert apc._free_ram_bytes() == 40 * GB
+    bound = apc._free_ram_bytes
+    build_apc_manager()
+    assert apc._free_ram_bytes is bound
+
+
+def test_cached_free_ram_rereads_after_the_interval():
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    now = [100.0]
+    reads = []
+
+    def read():
+        reads.append(1)
+        return len(reads)
+
+    cached = _cached_free_ram(read, ttl=1.0, clock=lambda: now[0])
+    assert cached() == 1 and cached() == 1
+    now[0] += 1.0
+    assert cached() == 2
+
+
+def _full_manager(monkeypatch):
+    """A manager holding 32 idle blocks, with the working-set term never
+    the limit, so the free-RAM reading decides the headroom."""
+    import mlx.core as mx
+
+    import gmlx.gen.prefill_decay as prefill_decay
+
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 * GB)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(prefill_decay, "streamed_tracked_bytes", lambda: 0.0)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    k = mx.zeros((1, 2, 512, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
+    assert len(m.hash_table) == 32
+    block = next(b.resident_bytes() for b in m.pool if b.block_hash is not None)
+    m.memory_reserve_bytes = 0
+    m._working_set_bytes = 100 * GB
+    m.memory_max_bytes = 10 * GB
+    return m, block
+
+
+def test_make_room_rereads_the_cached_free_ram_after_it_evicts(monkeypatch):
+    """Each eviction hands its bytes back to the system once _make_room
+    clears the MLX cache. The cached reading predates that, so _make_room
+    reads again: one store evicts the two blocks it needs and reports room,
+    and the stores after it evict nothing."""
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    m, block = _full_manager(monkeypatch)
+    base = 4 * block
+
+    def live():
+        return base + m.stats.memory_evictions * block
+
+    read = _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0)
+    monkeypatch.setattr(apc, "_free_ram_bytes", read)
+    read()
+    results = [(m._make_room(6 * block), len(m.hash_table),
+                m.stats.memory_evictions) for _ in range(4)]
+    assert results == [(True, 30, 2)] * 4
+
+
+def test_only_a_make_room_cache_clear_rereads_the_cached_free_ram(
+        monkeypatch):
+    """A cache clear returns the MLX cache to the system. prompt_step
+    clears it after every chunk, and a reread after each of those would
+    read free RAM once per chunk, so a clear between two `_make_room`
+    calls keeps the cached reading. The clear `_make_room` runs itself
+    drops it, so its last headroom read sees the freed bytes."""
+    import mlx.core as mx
+
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    m, _ = _full_manager(monkeypatch)
+    reads = []
+
+    def live():
+        reads.append(1)
+        return 4 * GB
+
+    monkeypatch.setattr(apc, "_free_ram_bytes",
+                        _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0))
+    cache = [1 * GB]
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: cache[0])
+    monkeypatch.setattr(mx, "clear_cache", lambda: cache.__setitem__(0, 0))
+    assert m._make_room()
+    mx.clear_cache()
+    assert m._make_room()
+    assert len(reads) == 1
+
+    # Nothing to evict and too little headroom: `_make_room` clears the
+    # cache and reads free RAM again, once.
+    empty = GmlxAPCManager(num_blocks=64, block_size=16)
+    empty.memory_reserve_bytes = 0
+    empty._working_set_bytes = 100 * GB
+    empty.memory_max_bytes = 10 * GB
+    cache[0] = 1 * GB
+    assert not empty._make_room(8 * GB)
+    assert cache[0] == 0
+    assert len(reads) == 2
+
+
+def _streamed_registry(monkeypatch):
+    import gmlx.gen.prefill_decay as prefill_decay
+
+    for name in ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS",
+                 "_STREAMED_TRACKED", "_STREAMED_CAP", "_BUILD_CREDIT"):
+        monkeypatch.setattr(prefill_decay, name, {})
+    return prefill_decay
+
+
+@pytest.mark.parametrize("cls", ["vendored", "gmlx"])
+def test_make_room_credits_streamed_weight_bytes(monkeypatch, cls):
+    """A streamed model's mapped file sits in the active count. Its
+    streamed bytes are page cache, so the working-set term credits them,
+    and the free-RAM term still bounds the room."""
+    import mlx.core as mx
+
+    pd = _streamed_registry(monkeypatch)
+    free = [24 * GB]
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: free[0])
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 106 * GB)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    manager = apc.APCManager if cls == "vendored" else GmlxAPCManager
+    m = manager(num_blocks=64, block_size=16)
+    m._working_set_bytes = 112 * GB
+    m.memory_reserve_bytes = 11 * GB
+    assert not m._make_room()
+    pd.note_streamed_tracked_bytes(27 * GB, key=("/models/q4e.gguf",),
+                                   source="table")
+    assert m._memory_headroom() == 24 * GB
+    assert m._make_room()
+    free[0] = 4 * GB
+    assert not m._make_room()
+
+
+def test_autosize_credits_streamed_weight_bytes(monkeypatch):
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES"):
+        monkeypatch.delenv(k, raising=False)
+    import mlx.core as mx
+
+    pd = _streamed_registry(monkeypatch)
+    streamed = pd.streamed_tracked_bytes
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    monkeypatch.setattr(pd, "streamed_tracked_bytes", streamed)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 106 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    assert m.num_blocks == 2048 and m._exact_budget_bytes == 0
+    pd.note_streamed_tracked_bytes(27 * GB, key=("/models/q4e.gguf",),
+                                   source="table")
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    assert m.num_blocks > 2048 and m._exact_budget_bytes > 0
+
+
+def test_governor_eviction_drops_the_cached_free_ram(monkeypatch):
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    m, _ = _full_manager(monkeypatch)
+    reads = []
+
+    def live():
+        reads.append(1)
+        return 4 * GB
+
+    read = _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0)
+    monkeypatch.setattr(apc, "_free_ram_bytes", read)
+    read()
+    assert m.governor_evict(0.5) > 0
+    read()
+    assert len(reads) == 2
+
+
 def test_from_env_is_dead_under_the_pin(monkeypatch):
     monkeypatch.setenv("APC_ENABLED", "0")
     assert apc.from_env(model_namespace="/m/a.gguf") is None
@@ -140,9 +380,13 @@ def test_channel_pop_returns_and_clears():
 
 # -- residency wiring --
 
-def make_pool(*, enabled_windows=True, fail=False):
+def make_pool(*, enabled_windows=True, fail=False, registry=False):
     """Pool whose fake stock load plays the bridge's part: records the APC env
-    it sees and publishes a manager on the channel when the gmlx gate is on."""
+    it sees and publishes a manager on the channel when the gmlx gate is on.
+    ``registry`` leaves the model cache as the ModelCacheRegistry stock
+    load turns the dict into."""
+    from gmlx._vendor.mlx_vlm.server.runtime import ModelCacheRegistry
+
     proxy = _RuntimeProxy(SimpleNamespace(metrics=None))
     seen = []
     built = []
@@ -150,7 +394,13 @@ def make_pool(*, enabled_windows=True, fail=False):
     def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
         seen.append({k: os.environ.get(k)
                      for k in ("APC_ENABLED", "GMLX_APC_ENABLED")})
-        proxy.model_cache = {"model_path": model_path, "apc_manager": None}
+        cache = {"model_path": model_path, "apc_manager": None}
+        if registry:
+            reg = ModelCacheRegistry()
+            reg.set("text_generation", cache)
+            proxy.model_cache = reg
+        else:
+            proxy.model_cache = cache
         proxy.response_generator = SimpleNamespace(apc_manager=None)
         proxy.apc_manager = None                    # stock: from_env returned None
         if os.environ.get("GMLX_APC_ENABLED") == "1":
@@ -172,14 +422,15 @@ def _acq(pool, path, **kw):
     return e
 
 
-def test_manager_wired_into_entry_cache_and_rg(monkeypatch):
+@pytest.mark.parametrize("registry", [False, True], ids=["dict", "registry"])
+def test_manager_wired_into_entry_cache_and_rg(monkeypatch, registry):
     monkeypatch.delenv("APC_ENABLED", raising=False)
     monkeypatch.delenv("GMLX_APC_ENABLED", raising=False)
-    _proxy, pool, seen, built = make_pool()
+    _proxy, pool, seen, built = make_pool(registry=registry)
     e = _acq(pool, "/m/a.gguf", env={"APC_ENABLED": "1"})
     assert built == ["GMLX-APC:/m/a.gguf"]
     assert e.apc_manager == built[0]                       # proxy target
-    assert e.model_cache["apc_manager"] == built[0]        # unload/reuse dict
+    assert e.model_cache["apc_manager"] == built[0]        # unload/reuse cache
     assert e.response_generator.apc_manager == built[0]    # lazy BatchGenerator read
     assert serving.pop_built_apc_manager() is None         # channel drained
     assert os.environ.get("APC_ENABLED") is None           # window restored
@@ -248,6 +499,7 @@ def _autosize_rig(monkeypatch, budget):
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
+    monkeypatch.setattr(prefill_decay, "streamed_tracked_bytes", lambda: 0.0)
     monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
 
 
@@ -261,7 +513,7 @@ def test_autosize_extends_pool_to_budget_share(monkeypatch):
                450000 // (2 * 10))
     assert m.num_blocks == want > 2048
     assert len(m.pool) == want
-    assert m.pool[-1].block_id == want - 1
+    assert m._free_tail is m.pool[-1]  # new blocks join the free queue
 
 
 def test_autosize_env_and_floor_win(monkeypatch):
@@ -276,6 +528,92 @@ def test_autosize_env_and_floor_win(monkeypatch):
     assert m.num_blocks == 2048  # never shrinks
     m.autosize(None)
     assert m.num_blocks == 2048
+
+
+def test_autosize_byte_cap_follows_the_budgets(monkeypatch):
+    # The stock byte cap (at most 8 GiB) and reserve would evict the pool
+    # below its autosized share; both follow the gmlx working budget.
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES",
+              "APC_MEMORY_MAX_GB", "APC_MEMORY_RESERVE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    per_tok = 10 * 2 * 4 * 64 * 2.0
+    pool = m.num_blocks * 16 * per_tok
+    assert m.memory_max_bytes >= int(pool + m._exact_budget_bytes)
+    assert m.memory_reserve_bytes == 0
+    assert m._working_set_bytes == 100 * GB
+    monkeypatch.setenv("APC_MEMORY_MAX_GB", "2")
+    monkeypatch.setenv("APC_MEMORY_RESERVE_GB", "3")
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    assert m.memory_max_bytes == 2 * (1 << 30)
+    assert m.memory_reserve_bytes == 3 * (1 << 30)
+
+
+def _long_prompt_admission(monkeypatch):
+    """Autosize a manager holding 32 idle blocks, then admit a 100k-token
+    prompt whose predicted prefill (64 KB per token, twice) exceeds the
+    10 GB left under the 100 GB budget. Returns (manager, disk flushes)."""
+    import mlx.core as mx
+    from gmlx._vendor.mlx_vlm.models import cache as vc
+
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    m.autosize(_fake_model())
+    k = mx.zeros((1, 2, 512, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
+    assert len(m.hash_table) == 32
+    flushes = []
+    m.disk = SimpleNamespace(flush=lambda: flushes.append(1))
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 90 * GB)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 40 * GB)
+
+    class _LM:
+        def make_cache(self):
+            return [vc.KVCache(), vc.KVCache()]
+
+    kk = mx.zeros((1, 8, 1024, 128), mx.float16)
+    m.memory_plan.observe_kv([kk] * 16, [kk] * 16, live_bytes=0)
+    m.coordinator(_LM()).prepare_prefill([100_000], prefill_step_size=2048)
+    return m, flushes
+
+
+def test_autosize_drops_the_stock_prefill_reserve(monkeypatch):
+    # The stock prefill reserve evicts idle blocks and exact entries until
+    # the predicted prefill fits; autosize leaves pressure to the governor,
+    # so only APC_MEMORY_RESERVE_GB brings it back. The disk queue still
+    # flushes at every prepare.
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES",
+              "APC_MEMORY_MAX_GB", "APC_MEMORY_RESERVE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    m, flushes = _long_prompt_admission(monkeypatch)
+    assert len(m.hash_table) == 32
+    assert m.stats.memory_evictions == 0
+    assert m._prefill_reserve_bytes == 0
+    assert flushes == [1]
+
+    monkeypatch.setenv("APC_MEMORY_RESERVE_GB", "0")
+    m, flushes = _long_prompt_admission(monkeypatch)
+    assert m._prefill_reserve_bytes > 10 * GB
+    assert m.stats.memory_evictions == 32
+    assert len(m.hash_table) == 0
+    assert flushes == [1]
+
+
+def test_checkpoint_defaults_keep_the_guard_and_no_interval(monkeypatch):
+    for k in ("APC_CHECKPOINT_GUARD_TOKENS", "APC_EXACT_PREFIX_GUARD_TOKENS",
+              "APC_CHECKPOINT_INTERVAL_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    assert m.exact_cache_guard_tokens == 16
+    assert m.checkpoint_interval_tokens == 0
+    monkeypatch.setenv("APC_CHECKPOINT_GUARD_TOKENS", "1")
+    monkeypatch.setenv("APC_CHECKPOINT_INTERVAL_TOKENS", "2048")
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    assert m.exact_cache_guard_tokens == 1
+    assert m.checkpoint_interval_tokens == 2048
 
 
 def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
@@ -307,7 +645,7 @@ def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
 def test_exact_tier_byte_budget(monkeypatch):
     import mlx.core as mx
 
-    from mlx_vlm.apc import APCExactCacheEntry
+    from gmlx._vendor.mlx_vlm.apc import APCExactCacheEntry
 
     import gmlx.serve.capacity as capacity
     import gmlx.gen.prefill_decay as prefill_decay
@@ -329,7 +667,7 @@ def test_exact_tier_byte_budget(monkeypatch):
     for i in range(5):
         m._exact_cache[i] = APCExactCacheEntry(
             token_ids=(i,), extra_hash=0,
-            prompt_cache=[FakeKVClone()], last_used=float(i))
+            prompt_cache=[FakeKVClone()])
     m._trim_exact_to_budget()
     assert set(m._exact_cache) == {2, 3, 4}  # oldest two evicted
 
@@ -347,7 +685,7 @@ def test_exact_bytes_reaches_stats_snapshot():
     # dynamically-set attrs).
     import mlx.core as mx
 
-    from mlx_vlm.apc import APCExactCacheEntry
+    from gmlx._vendor.mlx_vlm.apc import APCExactCacheEntry
 
     class FakeKVClone:
         def __init__(self):
@@ -357,7 +695,7 @@ def test_exact_bytes_reaches_stats_snapshot():
     m._exact_budget_bytes = 10 * FakeKVClone().keys.nbytes
     m._exact_cache[1] = APCExactCacheEntry(
         token_ids=(1,), extra_hash=0,
-        prompt_cache=[FakeKVClone()], last_used=1.0)
+        prompt_cache=[FakeKVClone()])
     m._trim_exact_to_budget()
     snap = m.stats_snapshot()
     assert snap.get("exact_bytes") == FakeKVClone().keys.nbytes
@@ -370,7 +708,7 @@ def test_exact_bytes_counts_cachelist_wrapped_layers():
     # must unwrap one CacheList level and descend tuple-packed pools.
     import mlx.core as mx
 
-    from mlx_vlm.apc import APCExactCacheEntry
+    from gmlx._vendor.mlx_vlm.apc import APCExactCacheEntry
 
     class FakePool:
         def __init__(self):
@@ -385,7 +723,7 @@ def test_exact_bytes_counts_cachelist_wrapped_layers():
     m._exact_budget_bytes = 10 ** 9
     m._exact_cache[1] = APCExactCacheEntry(
         token_ids=(1,), extra_hash=0,
-        prompt_cache=[FakeList()], last_used=1.0)
+        prompt_cache=[FakeList()])
     m._trim_exact_to_budget()
     expect = sum(a.nbytes for a in FakePool()._pbuf)
     assert m.stats.exact_bytes == expect

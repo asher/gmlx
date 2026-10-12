@@ -7,20 +7,23 @@ which the stays band also reads.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 
 import mlx.core as mx
 
-import gmlx.cache.prefix_cache as prefix_cache
 import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
+from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
 from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
     _install_exact_anchor_pick,
     _install_plain_ckpt_decode,
+    _install_restored_prompt_progress,
     _l1_lookup_and_arm_store,
+    _media_safe,
     _plain_anchor_init,
     _plain_ckpt_init,
     _snap_fields,
@@ -36,63 +39,147 @@ from gmlx.spec.engine import (
     _debug_note,
     _get_spec_prefix_cache,
     _install_apc_manager_stash,
+    _live_kv_quant_config,
     _resolve_l1,
+    _trim_prompt_columns,
 )
+from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
 
-
-def _install_l0_row_salts() -> None:
-    """Note the L0 salt of each row at ``BatchGenerator.insert``, where the
-    row's APC keys are still in its prompt kwargs. The prompt batch merge
-    drops those keys, so the batch init takes the salts from the note.
-    Every row gets a note, a zero salt too, because a new generator uses
-    the same uids again. ``BatchGenerator.remove`` drops the note of a row
-    that leaves before its prompt batch. Installed with that init.
-
-    The salt holds the row's LoRA scales too, so an adapted row and a bare
-    row do not share an entry. The LoRA channel wraps insert before this
-    install, and its wrapper takes the scales, so this wrapper reads them
-    first."""
-    from mlx_vlm.generate import ar as _ar
-
-    _orig_insert = _ar.BatchGenerator.insert
-    _orig_remove = _ar.BatchGenerator.remove
-
-    def _insert_with_salts(self, prompts, *args, **kwargs):
-        kws = kwargs.get("prompt_kwargs", args[1] if len(args) >= 2 else None)
-        salts = [prefix_cache.row_salt(kw) for kw in kws] if kws else [0] * len(prompts)
-        scales = lora_rows.pending_scales()
-        if scales and any(scales):
-            lora = lora_rows.lora_salt(scales)
-            salts = [salt ^ lora for salt in salts]
-        uids = _orig_insert(self, prompts, *args, **kwargs)
-        prefix_cache.note_row_salts(getattr(self, "model", None), uids, salts)
-        return uids
-
-    def _remove_with_salts(self, uid):
-        removed = _orig_remove(self, uid)
-        prefix_cache.take_row_salts(getattr(self, "model", None), [uid])
-        return removed
-
-    _ar.BatchGenerator.insert = _insert_with_salts
-    _ar.BatchGenerator.remove = _remove_with_salts
+# Prompt kwargs that carry media payloads or their layout (the stock APC
+# salt hashes the first three). The server strips pixel_values, so on
+# archs whose language model config names no image id, the layout marks
+# an image turn: image_position_ids (gemma4 unified), image_sizes
+# (muse_glimmer).
+_MEDIA_PROMPT_KWARGS = ("pixel_values", "pixel_values_videos", "input_features",
+                        "image_grid_thw", "video_grid_thw",
+                        "image_position_ids", "image_sizes")
 
 
-def _l0_cache(batch):
-    """The L0 cache for ``batch``, or None. A batch whose salt is not known
-    gets None, because it could restore or store another tenant's entry."""
-    if getattr(batch, "_gmlx_l0_salt", None) is None:
+def _carries_media(batch) -> bool:
+    kwargs = batch._prompt_kwargs or {}
+    if any(kwargs.get(k) is not None for k in _MEDIA_PROMPT_KWARGS):
+        return True
+    # gemma4 token types: 0 text, 1 image, 2 video, 3 audio.
+    types = kwargs.get("mm_token_type_ids")
+    if types is not None and bool(mx.any(mx.array(types) != 0).item()):
+        return True
+    config = getattr(batch.model, "config", None)
+    if config is None:
+        return False
+    from gmlx._vendor.mlx_vlm import apc as _apc
+
+    # The stock reader names image and video placeholders only. Audio ids
+    # and a config's media_token_ids (expanded image blocks) are read here,
+    # so the check does not depend on the serve fold.
+    media_ids = _apc.multimodal_token_ids_from_config(config) | {
+        int(getattr(config, a)) for a in ("audio_token_id", "audio_token_index")
+        if getattr(config, a, None) is not None} | {
+        int(t) for t in getattr(config, "media_token_ids", None) or ()}
+    return bool(media_ids) and any(
+        int(t) in media_ids for t in batch._input_ids[0].tolist())
+
+
+def _l0_salt(batch):
+    """The L0 key salt for a B=1 MTP batch, or None when L0 must skip it.
+
+    Token ids do not identify a prompt's KV. The stock cold meta carries
+    the row's APC salt (`_apc_extra_hash`: the server's image hash, the
+    tenant and the gmlx LoRA salt). Without a cold meta the server hashed
+    no image, so a prompt that carries media skips L0. The row's adapter
+    scales and tenant join the key either way, since lora_rows salts and
+    the server hashes the tenant only when an APC manager is set. A row
+    its generator's tenant rows no longer hold skips L0.
+    """
+    meta = (getattr(batch, "_apc_meta", None) or [None])[0]
+    if isinstance(meta, dict) and "extra_hash" in meta:
+        stock = as_salt(meta["extra_hash"])
+    elif _carries_media(batch):
         return None
-    return _get_spec_prefix_cache(batch.model)
+    else:
+        stock = 0
+    uids = getattr(batch, "uids", None) or ()
+    scales = lora_rows.scales_for(uids[0]) if uids else None
+    rows = _step_tenants.get()
+    tenant = None
+    if rows is not None and uids:
+        if uids[0] not in rows:
+            return None
+        tenant = rows[uids[0]]
+    return (stock, tuple(scales) if scales and any(scales) else None, tenant)
+
+
+# Each row's tenant, for the L0 key. Without an APC manager the server
+# passes the tenant as the `_apc_tenant` prompt kwarg, and the batch merge
+# drops it before the prompt batch exists, so insert records every row's
+# tenant, None included, on its generator by uid. Uids count from 0 in each
+# generator. The prompt batch holds no reference to its generator, and
+# the generator builds it and runs its first prompt step inside `_next`,
+# so `_next` publishes the generator's rows for the length of the step.
+_TENANT_ROWS_FLAG = "_gmlx_l0_tenant_rows"
+_TENANT_STEP_FLAG = "_gmlx_l0_tenant_step"
+_TENANT_ROWS_ATTR = "_gmlx_row_tenants"
+_MAX_TENANT_ROWS = 4096
+_step_tenants: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "gmlx_step_tenants", default=None)
+
+
+def _install_l0_tenant_rows() -> None:
+    """Record each inserted row's `_apc_tenant` on its generator, and
+    publish the generator's rows while it steps. Idempotent."""
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+
+    from gmlx.upstream.patching import wrapped_with
+
+    if not wrapped_with(_ar.BatchGenerator.insert, _TENANT_ROWS_FLAG):
+        _orig = _ar.BatchGenerator.insert
+
+        def insert(self, prompts, *args, **kwargs):
+            uids = _orig(self, prompts, *args, **kwargs)
+            # Positional order: prompts, max_tokens, prompt_kwargs.
+            rows = kwargs.get("prompt_kwargs")
+            if rows is None and len(args) >= 2:
+                rows = args[1]
+            tenants = getattr(self, _TENANT_ROWS_ATTR, None)
+            if tenants is None:
+                tenants = {}
+                setattr(self, _TENANT_ROWS_ATTR, tenants)
+            for uid, kw in zip(uids, rows or [None] * len(uids)):
+                tenants[uid] = (kw or {}).get("_apc_tenant")
+            while len(tenants) > _MAX_TENANT_ROWS:
+                tenants.pop(next(iter(tenants)))
+            return uids
+
+        # Carry the wrapped method's flags, so an earlier installer's guard
+        # still sees its own flag through this wrap.
+        insert.__dict__.update(getattr(_orig, "__dict__", {}))
+        insert.__dict__[_TENANT_ROWS_FLAG] = True
+        insert.__dict__["_gmlx_orig"] = _orig
+        _ar.BatchGenerator.insert = insert
+
+    if not wrapped_with(_ar.BatchGenerator._next, _TENANT_STEP_FLAG):
+        _orig_next = _ar.BatchGenerator._next
+
+        def _next(self, **kwargs):
+            token = _step_tenants.set(getattr(self, _TENANT_ROWS_ATTR, None))
+            try:
+                return _orig_next(self, **kwargs)
+            finally:
+                _step_tenants.reset(token)
+
+        _next.__dict__.update(getattr(_orig_next, "__dict__", {}))
+        _next.__dict__[_TENANT_STEP_FLAG] = True
+        _next.__dict__["_gmlx_orig"] = _orig_next
+        _ar.BatchGenerator._next = _next
 
 
 def _mtp_prefill_init(batch) -> None:
     """One-time APC lookup + prefix trim for an MTP prompt batch.
 
-    Runs on the first ``prompt_step`` call, or directly from ``generate()``
-    when the prompt is short enough that chunked prefill never fires.
-    Lookup ladder: L0 (SpecPrefixCache: whole-prompt KV + full-prompt
+    Runs on the first ``prompt_step`` call. ``generate()`` also calls it for
+    a one-column prompt, which never enters prompt_step (stock prefill runs
+    prompt_step while more than one column remains). Lookup ladder: L0 (SpecPrefixCache: whole-prompt KV + full-prompt
     hidden, the only tier the drafter can teacher-force from without a cold
     start) then L1 (shared APCManager: exact / block / disk KV, no hidden).
     Also arms the stock post-prefill store whenever a manager is reachable,
@@ -103,37 +190,27 @@ def _mtp_prefill_init(batch) -> None:
     batch._mtp_full_input_ids = batch._input_ids
     batch._mtp_chunk_hiddens = []
     batch._mtp_l1_prefix_len = 0
+    # Before the L1 arm rewrites the cold meta.
+    batch._mtp_l0_salt = _l0_salt(batch)
 
     if batch._inputs_embeds is None:
-        _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
+        _log.debug("mtp_prefill_init: no inputs_embeds, owned lookup skipped")
         return
 
-    # Gated to B=1 because PromptProcessingBatch prefills one request at a
-    # time today. The restored single-row cache (with its offset) later
-    # merges into the live B>1 decode batch via BatchKVCache.extend during
-    # continuous-batch injection -- so APC absolutely works in a B>1
-    # serving context; the gate is about prefill granularity, not decode
-    # batch size. If mlx-vlm ever coalesces prefills into a multi-row
-    # PromptProcessingBatch, this guard silently disables APC for those
-    # rows. The warning below makes that visible.
+    # The owned lookup (L0, then L1) restores into a single-row prompt
+    # batch, whose cache later merges into the live decode batch. mlx-vlm
+    # coalesces prompts into multi-row batches too; those skip the owned
+    # lookup and keep whatever prefix the stock cache restored at
+    # admission, and each row retires at the batch decode's finish seam.
     b = int(batch._input_ids.shape[0])
     if b > 1:
         if not _SPEC_APC_DISABLED:
             _log.warning(
-                "APC skipped: prefill batch B=%d > 1 "
-                "(owned-path APC requires single-request prefill)",
+                "owned MTP prefix lookup skipped: prompt batch B=%d > 1 "
+                "(its rows keep any prefix the stock cache restored)",
                 b,
             )
         return
-
-    # Serve wraps make_cache so mlx-lm-origin entries carry the mlx-vlm
-    # runtime's class identities; embedded and test users reach this init
-    # without that wrapper, and the L1 exact tiers dispatch on the vlm
-    # classes (an mlx-lm ArraysCache misses every adapter rule). Rebind
-    # here so both paths see the same identities. No-op when the entries
-    # are already vlm-origin.
-    from gmlx.cache.compat import rebind_to_runtime_origin
-    rebind_to_runtime_origin(batch.prompt_cache)
 
     # Upstream admission already restored a prefix and built this batch
     # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
@@ -148,9 +225,13 @@ def _mtp_prefill_init(batch) -> None:
         return
 
     restored = 0
-    spec_cache = _l0_cache(batch)
-    if spec_cache is not None:
-        hit = spec_cache.lookup(batch._input_ids, batch._gmlx_l0_salt)
+    spec_cache = _get_spec_prefix_cache(batch.model)
+    if spec_cache is not None and batch._mtp_l0_salt is not None:
+        # The media guard the L1 tiers apply: a turn that adds an image
+        # finds the last turn's entry under its per-prefix salt.
+        hit = spec_cache.lookup(
+            batch._input_ids, salt=batch._mtp_l0_salt,
+            accept=_media_safe(batch, batch._input_ids[0].tolist()))
         if hit is not None:
             restored, entry = hit
             spec_cache.restore(entry, batch.prompt_cache)
@@ -186,7 +267,7 @@ def _mtp_prefill_init(batch) -> None:
         from gmlx.cache.retire_key import lookup_render_ctx
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
-            "extra_hash": int(meta.get("extra_hash", 0)),
+            "extra_hash": as_salt(meta.get("extra_hash", 0)),
             "mode": (
                 "ckpt"
                 if _ckpt_active(batch.model, mode, int(manager.block_size))
@@ -203,11 +284,8 @@ def _mtp_prefill_init(batch) -> None:
         }
 
     if restored > 0:
-        batch._input_ids = batch._input_ids[:, restored:]
-        batch._inputs_embeds = batch._inputs_embeds[:, restored:]
+        _trim_prompt_columns(batch, restored)
         batch._processed_prompt_columns = restored
-        for k in batch._prompt_length_aware_keys:
-            batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, restored:, ...]
         batch._mtp_apc_prefix_len = restored
 
 
@@ -245,7 +323,7 @@ def _mtp_seed_stream_init(batch) -> None:
     ):
         return
     lp = getattr(batch.prompt_cache[0], "left_padding", None)
-    if isinstance(lp, mx.array) and lp.size and int(lp.max().item()) > 0:
+    if isinstance(lp, mx.array) and lp.size and int(lp.max()) > 0:
         return
     try:
         drafter.bind(batch.model)
@@ -259,9 +337,11 @@ def _mtp_seed_stream_init(batch) -> None:
         "len": 0,
         "active": True,
         # Retain chunk hiddens alongside streaming whenever an L0 store can
-        # arm: the store needs full-prompt hidden. APC off => no retention
-        # while streaming (the capture-memory win lands in that config).
-        "retain": _l0_cache(batch) is not None,
+        # arm: the store needs full-prompt hidden. APC off, or a prompt L0
+        # skips => no retention while streaming (the capture-memory win
+        # lands there).
+        "retain": (_get_spec_prefix_cache(batch.model) is not None
+                   and getattr(batch, "_mtp_l0_salt", None) is not None),
         "retained_from": 0,
     }
     batch._mtp_seed_ctx = ctx
@@ -317,7 +397,7 @@ def install_full_prompt_mtp_prefill() -> None:
     Idempotent.  Only MTP batches (``self.draft_kind == "mtp"``) are affected;
     eagle3 / dflash keep the stock path.
     """
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     # L1 plumbing is idempotent on its own flags, so it installs (or
     # repairs) even when the prefill override is already in place.
@@ -332,6 +412,8 @@ def install_full_prompt_mtp_prefill() -> None:
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
     _install_exact_anchor_pick()
+    _install_restored_prompt_progress()
+    _install_l0_tenant_rows()
 
     if getattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, False):
         return
@@ -344,26 +426,31 @@ def install_full_prompt_mtp_prefill() -> None:
         # Honor the serve path's PREFILL_STEP_SIZE env override
         # (mlx_vlm.server.generation.get_prefill_step_size) so MTP prefill
         # can be chunked smaller to cap peak memory.
-        from mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
+        from gmlx._vendor.mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
 
         return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
     def _mtp_init(self, *args, **kwargs) -> None:
+        warm = kwargs.get("warm_cache")
+        if warm is not None and kwargs.get("draft_kind") == "mtp":
+            # Stock admission merges a warm hit to the generator's kv_bits
+            # layer types and keeps a packed exact entry packed. MTP
+            # batches run fp16 KV under uniform KV bits, so a packed row
+            # cannot join them. Recover it to float before the stock init
+            # prepares its padding, as the owned L1 merge does.
+            model = kwargs.get("model", args[0] if args else None)
+            if _live_kv_quant_config(model) is None:
+                from gmlx.spec.kv_quant import dequantize_exact_row
+                kwargs["warm_cache"] = dequantize_exact_row(warm)
         _orig_init(self, *args, **kwargs)
-        # Every batch takes the salts of its rows. The B=1 L0 lookup and
-        # store use the first one, and skip L0 when it is not known.
-        salts = prefix_cache.take_row_salts(self.model, getattr(self, "uids", ()))
-        self._gmlx_l0_salt = salts[0] if salts else None
         # Re-enable chunked prefill.  Stock mlx-vlm nulls prefill_step_size
         # for speculative models because intermediate chunks discard hidden;
         # our prompt_step captures it, so the gate no longer applies.
         # Restoring at construction (not first prompt_step) matters: the
         # scheduler consults needs_processing() first, and with a None step
         # an APC-less deep prompt would one-shot the whole prefill.
-        if (
-            getattr(self, "draft_kind", None) == "mtp"
-            and self.prefill_step_size is None
-        ):
+        if (getattr(self, "draft_kind", None) == "mtp"
+                and self.prefill_step_size is None):
             self.prefill_step_size = _resolve_mtp_prefill_step()
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
@@ -431,7 +518,7 @@ def install_full_prompt_mtp_prefill() -> None:
             for c in self.prompt_cache:
                 lp = getattr(c, "left_padding", None)
                 if isinstance(lp, mx.array) and lp.ndim > 0 and lp.size > 1:
-                    max_lp = int(lp.max().item())
+                    max_lp = int(lp.max())
                     if max_lp >= n:
                         n = min(max_lp + 1, self._inputs_embeds.shape[1] - 1)
                     break
@@ -439,10 +526,6 @@ def install_full_prompt_mtp_prefill() -> None:
         checkpoint_col = self._next_apc_checkpoint_column()
         if checkpoint_col is not None:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
-        # Media requests ride this body too: keep image blocks whole (a
-        # boundary inside a block moves to its edge, see media_spans).
-        from gmlx.gen.media_spans import span_aware_prompt_n
-        n = span_aware_prompt_n(self, n)
         # A final chunk under ~3 simdgroup tiles routes the projections
         # through the skinny-M kernels, whose accumulation order seeds fp
         # noise that stacked recurrent (GDN) layers amplify into
@@ -455,6 +538,20 @@ def install_full_prompt_mtp_prefill() -> None:
             tail = rem1 - n
             if 0 < tail < min_tail:
                 n = rem1        # absorb: overshoot bounded by min_tail-1
+        # A right-padded batch (APC warm and cold rows together) ends a
+        # chunk at each shorter row's last real column and keeps that row's
+        # logits, since later chunks feed it only pad (stock prompt_step).
+        start = self._processed_prompt_columns
+        if self._right_pad_per_row is not None:
+            ends = [e for e in self._suffix_lens if e > start]
+            if ends:
+                n = min(n, min(ends) - start)
+        # Media requests ride this body too: keep image blocks whole (a
+        # boundary inside a block moves to its edge, see media_spans). A
+        # block that extends the chunk past a row end keeps that row's
+        # logits at its own column.
+        from gmlx.gen.media_spans import span_aware_prompt_n
+        n = span_aware_prompt_n(self, n)
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
@@ -469,6 +566,14 @@ def install_full_prompt_mtp_prefill() -> None:
                 **prompt_kwargs,
             )
         chunk_hidden = out.hidden_states[-1]
+        finished = []
+        if self._right_pad_per_row is not None:
+            finished = [i for i, e in enumerate(self._suffix_lens)
+                        if start < e <= start + n]
+            logits = out.logits if hasattr(out, "logits") else out
+            for i in finished:
+                self._finished_prompt_logits[i] = mx.contiguous(
+                    mx.array(logits[i, self._suffix_lens[i] - start - 1]))
         # Seed streaming: teacher-force this chunk into the request-scoped
         # head KV at the head's running offset. The shifted span for
         # columns [c0, c0+n) is prompt[c0+1 : c0+n+1], always in range
@@ -526,15 +631,22 @@ def install_full_prompt_mtp_prefill() -> None:
         else:
             self._mtp_chunk_hiddens = [chunk_hidden]
         mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
+                + [self._finished_prompt_logits[i] for i in finished]
                 + ([c.state for c in seed_ctx["kv"]] if streamed else []))
         self._processed_prompt_columns += n
+        # Stock prompt_step reports the cache after each chunk to the APC
+        # memory plan, which evicts idle entries ahead of the growth.
+        coordinator = getattr(self, "_apc_coordinator", None)
+        if coordinator is not None:
+            coordinator.observe_cache(
+                self.prompt_cache,
+                max(self._cached_tokens_per_row)
+                + self._processed_prompt_columns,
+                batch_size=len(self.uids))
         # The ckpt cursor rides the wrapped stock store (see
         # _install_ckpt_checkpoint_store).
         self._store_apc_exact_checkpoints()
-        self._inputs_embeds = self._inputs_embeds[:, n:]
-        self._input_ids = self._input_ids[:, n:]
-        for k in self._prompt_length_aware_keys:
-            self._prompt_kwargs[k] = self._prompt_kwargs[k][:, n:, ...]
+        _trim_prompt_columns(self, n)
         mx.clear_cache()
         return n
 
@@ -542,8 +654,8 @@ def install_full_prompt_mtp_prefill() -> None:
         self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0
     ):
         if self.draft_kind == "mtp":
-            # Short prompts never enter prompt_step (chunked prefill is not
-            # needed), so the APC lookup/store arming runs here instead.
+            # A one-column prompt never enters prompt_step, so the APC
+            # lookup/store arming runs here instead. Idempotent otherwise.
             _mtp_prefill_init(self)
         result = _orig_generate(
             self,
@@ -552,7 +664,7 @@ def install_full_prompt_mtp_prefill() -> None:
             compute_logprobs=compute_logprobs,
             top_logprobs_k=top_logprobs_k,
         )
-        from mlx_vlm.generate.ar import SpeculativeGenerationBatch
+        from gmlx._vendor.mlx_vlm.generate.ar import SpeculativeGenerationBatch
 
         if self.draft_kind != "mtp" or not isinstance(
             result, SpeculativeGenerationBatch
@@ -579,7 +691,7 @@ def install_full_prompt_mtp_prefill() -> None:
                                       "landed")
                         elif ckpt_store(
                                 stash["manager"], stash["full_ids"], cache,
-                                extra_hash=int(stash.get("extra_hash", 0))):
+                                extra_hash=as_salt(stash.get("extra_hash", 0))):
                             if m is not None:
                                 m.setdefault(
                                     "ckpt_stored_boundaries", []
@@ -593,17 +705,14 @@ def install_full_prompt_mtp_prefill() -> None:
         full_ids = getattr(self, "_mtp_full_input_ids", None)
         l1_prefix = int(getattr(self, "_mtp_l1_prefix_len", 0) or 0)
         if not chunk_hiddens:
-            # No captured chunks: the whole (remaining) prompt went through
-            # the final generate forward, so stock prompt_tokens/hidden are
-            # already an aligned pair (suffix-only on an L1 hit) and
-            # result.hidden needs no rebuild; with seed streaming and no
-            # retention, result.hidden is already the residual unstreamed
-            # tail (retention accompanies an armed L0 store, so none can
-            # fire here). The L0 store below must still run for the
-            # single-shot case: arch prefill profiles can raise the step
-            # past typical prompt lengths (qwen4exp defaults to 8192), so
-            # sub-step prompts land here and still need their warm-start
-            # entry.
+            # No captured chunks: either prompt_step never ran (a one-column
+            # prompt, or a one-column suffix after an L1 hit) and stock
+            # prompt_tokens/hidden are already an aligned pair (suffix-only
+            # on an L1 hit), or seed streaming ran without retention and
+            # result.hidden is already the residual unstreamed tail
+            # (retention accompanies an armed L0 store, so none can fire
+            # then). result.hidden needs no rebuild. The L0 store below
+            # still runs for a one-column prompt.
             full_hidden = result.hidden
         else:
             parts = chunk_hiddens + [result.hidden]
@@ -654,20 +763,23 @@ def install_full_prompt_mtp_prefill() -> None:
         full_covers_prompt = seed_len == 0 or (
             bool(chunk_hiddens)
             and int(seed_ctx.get("retained_from") or 0) == 0)
+        l0_salt = getattr(self, "_mtp_l0_salt", None)
         spec_cache = (
-            _l0_cache(self)
+            _get_spec_prefix_cache(self.model)
             if b == 1 and l1_prefix == 0 and full_covers_prompt
+            and l0_salt is not None
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
-            # Window-limited heads only use the trailing capture window;
-            # chunked prefill already trimmed, single-shot must match (an
+            # Window-limited heads only use the trailing capture window.
+            # The chunk capture keeps only that window and the final
+            # generate column adds one past it, so trim to match (an
             # uncapped entry pins the whole prompt's hidden for nothing).
             limit = getattr(self.draft_model, "hidden_capture_limit", None)
             store_hidden = (full_hidden if not limit
                             else full_hidden[:, -int(limit):])
             spec_cache.store(full_ids, result.prompt_cache, store_hidden,
-                             self._gmlx_l0_salt)
+                             salt=l0_salt)
             _log.info(
                 "APC store: tokens=%d layers=%d",
                 int(full_ids.shape[1]),
@@ -684,10 +796,9 @@ def install_full_prompt_mtp_prefill() -> None:
 
         return result
 
-    _install_l0_row_salts()
-    PromptProcessingBatch.__init__ = _mtp_init
-    PromptProcessingBatch.prompt_step = _mtp_prompt_step
-    PromptProcessingBatch.generate = _mtp_generate
+    PromptProcessingBatch.__init__ = link(_mtp_init, _orig_init)
+    PromptProcessingBatch.prompt_step = link(_mtp_prompt_step, _orig_prompt_step)
+    PromptProcessingBatch.generate = link(_mtp_generate, _orig_generate)
     setattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
     if _SPEC_APC_DISABLED:
         apc_status = "off"

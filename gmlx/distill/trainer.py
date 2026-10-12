@@ -336,6 +336,8 @@ def run_train(opts: TrainOptions) -> int:
     import mlx.optimizers as optim
     from mlx.utils import tree_map
 
+    from gmlx.device import cpu_default_device, metal_value
+
     if not any(w > 0 for w in (opts.dk, opts.alm, opts.ce, opts.hs)):
         log("[train] refuse: every loss weight is 0 (--dk, --alm, --ce, --hs), nothing to train")
         return 2
@@ -520,9 +522,10 @@ def run_train(opts: TrainOptions) -> int:
     if head.V != view["V_S"]:
         log(f"[train] refuse: student head width {head.V} != view V_S {view['V_S']}")
         return 2
-    if not opts.no_wired_limit:
+    # A student on the CPU device has nothing to wire.
+    if not opts.no_wired_limit and not cpu_default_device():
         try:
-            mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
+            mx.set_wired_limit(int(metal_value("max_recommended_working_set_size")))
         except (KeyError, RuntimeError, ValueError) as e:
             log(f"[train] warn: wired limit not set: {e}")
     # the batch shapes vary every step, so freed buffers of many sizes would

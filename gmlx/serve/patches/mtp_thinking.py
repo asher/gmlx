@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import logging
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _DEFER_FLAG = "_kq_mtp_tb_defer"
@@ -77,7 +79,7 @@ def _build_hook(rg, args, input_ids):
 
 
 def _install_defer(cls) -> None:
-    if getattr(cls.generate, _DEFER_FLAG, False):
+    if wrapped_with(cls.generate, _DEFER_FLAG):
         return
     _orig = cls.generate
 
@@ -92,11 +94,11 @@ def _install_defer(cls) -> None:
 
     _generate.__dict__.update(_orig.__dict__)
     _generate.__dict__[_DEFER_FLAG] = True
-    cls.generate = _generate
+    cls.generate = link(_generate, _orig)
 
 
 def _install_criteria(cls) -> None:
-    if getattr(cls._make_thinking_budget_criteria, _CRITERIA_FLAG, False):
+    if wrapped_with(cls._make_thinking_budget_criteria, _CRITERIA_FLAG):
         return
     _orig = cls._make_thinking_budget_criteria
 
@@ -126,7 +128,7 @@ def _install_criteria(cls) -> None:
 
     _make.__dict__.update(_orig.__dict__)
     _make.__dict__[_CRITERIA_FLAG] = True
-    cls._make_thinking_budget_criteria = _make
+    cls._make_thinking_budget_criteria = link(_make, _orig)
 
 
 def _stash_hook(ppb, gen_batch) -> None:
@@ -149,7 +151,7 @@ def _stash_hook(ppb, gen_batch) -> None:
 
 
 def _install_transport(ppb_cls) -> None:
-    if getattr(ppb_cls.generate, _TRANSPORT_FLAG, False):
+    if wrapped_with(ppb_cls.generate, _TRANSPORT_FLAG):
         return
     _orig = ppb_cls.generate
 
@@ -163,7 +165,7 @@ def _install_transport(ppb_cls) -> None:
 
     _generate.__dict__.update(_orig.__dict__)
     _generate.__dict__[_TRANSPORT_FLAG] = True
-    ppb_cls.generate = _generate
+    ppb_cls.generate = link(_generate, _orig)
 
 
 def install_mtp_thinking_budget() -> None:
@@ -173,8 +175,8 @@ def install_mtp_thinking_budget() -> None:
     has to land outside ``_mtp_generate`` so the hook stash happens after
     the APC L0 store) and after the criteria-seam installer (the thinking
     budget fix) so the restore wrapper is outermost."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     from gmlx.spec.engine import _FULL_PREFILL_FLAG
 

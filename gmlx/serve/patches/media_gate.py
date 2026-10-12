@@ -95,12 +95,15 @@ _inline_only: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image"})
 _VIDEO_PART_TYPES = frozenset({"video", "video_url", "input_video"})
-_IMAGE_ROUTES = ("/images/generations", "/images/edits")
+_IMAGE_ROUTES = ("/images/generations", "/images/edits", "/images/variations")
 _SPEECH_ROUTE = "/audio/speech"
 # The routes that read a multipart form with a file part. Every other route
 # reads JSON, so a form body there is refused.
 _UPLOAD_ROUTES = ("/audio/transcriptions", "/audio/translations")
 _UPLOAD_PATHS = frozenset(p for r in _UPLOAD_ROUTES for p in (r, "/v1" + r))
+# The routes that also read a multipart form, with the body limit of a
+# JSON body: the image edits and variations take image files.
+_FORM_ROUTES = _UPLOAD_ROUTES + ("/images/edits", "/images/variations")
 # The routes that carry a conversation, whose body grows with its history.
 _CONVERSATION_ROUTES = ("/chat/completions", "/messages", "/messages/count_tokens",
                         "/responses", "/responses/input_tokens")
@@ -237,7 +240,7 @@ def route_refusal(error: MediaRefused) -> MediaRefused:
     call."""
     global _route_refusal_cls
     if _route_refusal_cls is None:
-        generation = importlib.import_module("mlx_vlm.server.generation")
+        generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
         class MediaRequestRefused(MediaRefused, generation.PromptTooLongError):
             """Request media that a loader refused, answered with 400."""
@@ -507,6 +510,14 @@ def check_body(body, path: str) -> None:
                 refs = body["image"]
                 for ref in refs if isinstance(refs, list) else [refs]:
                     check_image(ref, "image", tally)
+            if path.endswith("/images/edits"):
+                refs = body.get("images")
+                for ref in refs if isinstance(refs, list) else []:
+                    if isinstance(ref, dict) and isinstance(ref.get("image_url"),
+                                                            (str, dict)):
+                        url = ref["image_url"]
+                        check_image(url.get("url") if isinstance(url, dict)
+                                    else url, "images", tally)
         if path.endswith(_SPEECH_ROUTE):
             voice = body.get("voice")
             if voice not in (None, "") and not (isinstance(voice, str)
@@ -607,7 +618,7 @@ async def check_request(method: str, path: str, headers, raw: bytes, *,
     try:
         kind = form_type(headers.get("content-type"))
         if kind == _MULTIPART:
-            if not path.endswith(_UPLOAD_ROUTES):
+            if not path.endswith(_FORM_ROUTES):
                 raise MediaRefused("this route takes a JSON body, not a multipart form")
             try:
                 fields = await multipart_text_fields(headers, raw)
@@ -726,6 +737,19 @@ def _refuse_image_writes(openai) -> None:
         extra = {**(getattr(request, "extra", None) or {}), **kwargs}
         if extra.get("prompt_expansion_model") is not None:
             raise MediaRefused("prompt_expansion_model is not accepted by this server")
+        # An edit scales each reference image, and the output when the request
+        # gives no size, to an area of about output_resolution squared.
+        resolution = extra.get("output_resolution")
+        if resolution is not None:
+            if (isinstance(resolution, bool) or not isinstance(resolution, int)
+                    or resolution <= 0):
+                raise MediaRefused(f"output_resolution {resolution!r} is not a "
+                                   "positive whole number")
+            if resolution * resolution > MEDIA_MAX_PIXELS:
+                raise MediaRefused(
+                    f"output_resolution {resolution} makes images of about "
+                    f"{resolution}x{resolution} pixels, over the limit of "
+                    f"{MEDIA_MAX_PIXELS} pixels. Ask for a smaller resolution.")
         refs = [*(kwargs.get("image_paths") or ())]
         if edit:
             refs += [*(getattr(request, "image_paths", None) or ())]
@@ -802,6 +826,16 @@ def _is_upload(request) -> bool:
             and form_type(request.headers.get("content-type")) == _MULTIPART)
 
 
+def _is_step_tensors(request) -> bool:
+    """True for a safetensors body sent to the image step routes, which
+    read and check it themselves."""
+    from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX
+
+    ctype = (request.headers.get("content-type") or "").split(";", 1)[0]
+    return (request.url.path.startswith(PREFIX + "/")
+            and ctype.strip().lower() == CONTENT_TYPE)
+
+
 def body_limit(upload: bool, session: bool) -> int:
     """The largest body the server reads for a request of this kind."""
     if session:
@@ -860,9 +894,9 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
     _allow_urls = bool(allow_urls)
     stock = app is None
     if app is None:
-        app = importlib.import_module("mlx_vlm.server.app").app
+        app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if stock:
-        _refuse_image_writes(importlib.import_module("mlx_vlm.server.openai"))
+        _refuse_image_writes(importlib.import_module("gmlx._vendor.mlx_vlm.server.openai"))
         from gmlx.serve import media_sinks
         media_sinks.install()
     _drop_websocket_routes(app)
@@ -877,6 +911,17 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         session = request.scope.get(SESSION_SCOPE_KEY) is not None
         # Taken out of the scope, so that the route does not keep it.
         parsed = request.scope.pop(SESSION_BODY_KEY, None)
+        if _is_step_tensors(request):
+            # Tensors, not JSON: the step routes read the container and
+            # hold it to their own limit, and it names no media.
+            from gmlx.serve.image_wire import MAX_BODY_BYTES
+
+            limit = SESSION_UPLOAD_MAX_BYTES if session else MAX_BODY_BYTES
+            if await _read_body(request, limit) is None:
+                return _refusal(request.url.path, 413,
+                                f"the tensor body is larger than the "
+                                f"{limit >> 20} MiB limit")
+            return await call_next(request)
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return _refusal(request.url.path, 413,

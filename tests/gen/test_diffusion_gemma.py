@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-pytest.importorskip("mlx_vlm.models.diffusion_gemma")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.diffusion_gemma")
 
 from mlx.utils import tree_flatten  # noqa: E402
 
@@ -146,12 +146,12 @@ def test_build_model_instantiates_mlx_vlm_diffusion_class():
     model, returned = build_model(cfg)
     assert returned["model_type"] == "diffusion_gemma"
 
-    import mlx_vlm.models.diffusion_gemma as dg
+    import gmlx._vendor.mlx_vlm.models.diffusion_gemma as dg
 
     assert isinstance(model, dg.Model)
     # canvas_length on the live config is what mlx-vlm's generate dispatch keys
     # on to route into the denoiser instead of the autoregressive loop.
-    from mlx_vlm.generate.diffusion import is_diffusion_model
+    from gmlx._vendor.mlx_vlm.generate.diffusion import is_diffusion_model
 
     assert is_diffusion_model(model) is True
 
@@ -160,7 +160,7 @@ def test_remap_targets_match_the_model_parameter_tree():
     """Every GGUF tensor a real conversion writes maps to a live model param -
     nothing unmapped, nothing mis-homed to a non-existent slot - and an unknown
     tensor fails closed (no silent fall-through to the gemma-4 canonical map)."""
-    import mlx_vlm.models.diffusion_gemma as dg
+    import gmlx._vendor.mlx_vlm.models.diffusion_gemma as dg
 
     text = dict(
         model_type="diffusion_gemma_text", vocab_size=VOCAB, hidden_size=32,

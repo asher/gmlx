@@ -15,9 +15,9 @@ import time
 from typing import Any, Callable, Optional
 
 import mlx.core as mx
-from mlx_vlm.generate.common import generation_stream
-from mlx_vlm.generate.diffusion import stream_diffusion_generate
-from mlx_vlm.models.diffusion_gemma.language import _cache_state
+from gmlx._vendor.mlx_vlm.generate.common import generation_stream
+from gmlx._vendor.mlx_vlm.generate.diffusion import stream_diffusion_generate
+from gmlx._vendor.mlx_vlm.models.diffusion_gemma.language import _cache_state
 
 from gmlx.gen.generation import encode_prompt
 
@@ -313,7 +313,7 @@ def engine_scope(model, seed: int):
     mx.random.seed(int(seed) & 0xFFFFFFFFFFFFFFFF)
     wired: Any = contextlib.nullcontext()
     if mx.default_device() == mx.gpu and mx.metal.is_available():
-        wired_limit = importlib.import_module("mlx_lm.generate").wired_limit
+        wired_limit = importlib.import_module("gmlx._vendor.mlx_lm.generate").wired_limit
         wired = wired_limit(model, [generation_stream])
     try:
         with wired, mx.stream(generation_stream):

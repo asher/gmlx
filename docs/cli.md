@@ -33,6 +33,8 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx talk`](#gmlx-talk) | Voice chat with a served model. |
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
 | [`gmlx distill`](#gmlx-distill) | Distill a teacher GGUF into a student adapter offline. |
+| [`gmlx image`](#gmlx-image) | Generate images from GGUF diffusion models. |
+| [`gmlx comfyui`](#gmlx-comfyui) | Put the gmlx node pack into ComfyUI, or remove it. |
 | [`gmlx doctor`](#gmlx-doctor) | Check the runtime, config, models and services. |
 | [`gmlx completion`](#gmlx-completion) | Print a shell completion script. |
 
@@ -189,6 +191,13 @@ and `--moe-prestage` stream a positional model bigger than memory. They
 work as under [run](#streaming-flags), and `--gpu-keepwarm` applies to the
 whole server.
 
+`--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`,
+`--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`,
+`--yarn-beta-slow` and `--yarn-beta-fast` work as under
+[run](#rope-scaling-flags) for a positional model. In config mode they are
+the model's [`rope_scaling`](config.md#rope-scaling) block, and serve
+refuses them on the command line.
+
 These flags enable the services in
 [Speech, embeddings and rerank](services.md). Each is also a `server` key:
 
@@ -289,13 +298,25 @@ For the menu bar side, read [Menu bar app](menubar.md).
 ## gmlx list
 
 `gmlx list` lists the model ids a request can address. Discovered models
-are tagged, aliases follow, and the default model is marked with `*`.
+are tagged, aliases follow, and the default model is marked with `*`. The
+KIND column reads `chat` or `image`. An image model's size counts its DiT,
+VAE and vision tower, and its text encoder unless it shares a chat model's,
+which that model's row counts.
+
+```sh
+gmlx list
+gmlx list --image --edit
+```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--config FILE` | The first default location | Read this config. |
 | `-v`, `--paths` | Off | Also show each model's GGUF path. |
 | `--json` | Off | Emit JSON. |
+| `--image` | Off | List only the [image models](images.md). |
+| `--family NAME` | All | List only the image models of this family, such as `z-image` or `qwen-image-2.1`. |
+| `--edit` | Off | List only the image models that edit from reference images: a family that takes them, with the encoder's vision tower. |
+| `--shared-encoder` | Off | List only the image models whose text encoder is a chat model they share. |
 
 ## gmlx run
 
@@ -417,7 +438,7 @@ These flags run a model bigger than memory, as
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--stream-experts` | Off | Stream the routed experts from disk. Attention and the KV cache stay on GPU. |
+| `--stream-experts` | Off | Stream the routed experts and lookup tables from disk, even on a model that fits. Over the memory budget, a table streams first. Attention and KV stay on GPU. |
 | `--stream-cpu` | Off | Run the whole model on the CPU device from the page cache. |
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the prefetch policy under `--stream-experts`. `auto` measures the drive at load. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
@@ -429,6 +450,35 @@ These flags run a model bigger than memory, as
 | `--moe-miss-shed P` | Off | Drop experts that would miss the arena down to share P, which is lossy. |
 | `--moe-layer-shed P` | Off | Skip a streamed layer's experts with probability P, which is lossy. |
 | `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy, so it needs `--moe-miss-shed`. |
+
+### Rope scaling flags
+
+These flags run a model past its trained context. They take llama.cpp's
+names and meanings, so a llama.cpp command line ports unchanged, and each
+one wins over its key in the GGUF header:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--rope-scaling {none,linear,yarn}` | The header's, else `linear` | Pick the rope frequency scaling method. `none` turns the header's scaling off. |
+| `--rope-scale N` | The header's, else 1 | Expand the context by a factor of N. |
+| `--rope-freq-scale N` | The header's, else 1 | Expand the context by a factor of 1/N, the same value as `--rope-scale` spelled the other way. |
+| `--rope-freq-base N` | The header's | Set the rope base frequency. |
+| `--yarn-orig-ctx N` | The header's, else the trained context | Set the context the model was trained at. |
+| `--yarn-ext-factor N` | 1 under yarn, else 0 | Set the extrapolation mix. `0` is full interpolation. |
+| `--yarn-attn-factor N` | 1 | Scale the attention magnitude when `--yarn-ext-factor` is 0. |
+| `--yarn-beta-fast N` | A mistral3 header's, else 32 | Set the low correction dimension. |
+| `--yarn-beta-slow N` | A mistral3 header's, else 1 | Set the high correction dimension. |
+
+```sh
+gmlx run model.gguf --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 262144
+```
+
+A YaRN factor from these flags extends the reported context to the original
+context times the factor. A linear factor does not: requests still stop at
+the trained context. A constant factor can cost quality on short prompts,
+so pick the smallest factor that fits your context. A model whose rope gmlx
+cannot scale yet refuses the flags at load, and so does a load with
+`--hf-source`, whose config does not take them.
 
 ## gmlx chat
 
@@ -490,9 +540,12 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk` |
 | Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
+| Rope scaling | `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale` |
+| YaRN | `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-slow`, `--yarn-beta-fast` |
 
 A server client refuses `--adapter`, `--mmproj`, `--chat-template`,
-`--no-chat-template` and `--chat-template-config`, and ignores the other
+`--no-chat-template`, `--chat-template-config` and the rope scaling flags,
+and ignores the other
 loading, memory, speculation and streaming flags. A base model with no
 chat template needs `--chat-template` or `--no-chat-template`.
 
@@ -519,7 +572,7 @@ gmlx launch claude-code -- --continue
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh`, `menubar` or a [custom agent](launch-agents.md). |
+| `client`, positional | None | Launch a [client](launch.md#the-clients), such as `opencode`, `open-webui` or `comfyui`, `menubar`, or a [custom agent](launch-agents.md). |
 | `--model ID[@profile]` | An agent's `model`, else the server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
@@ -531,6 +584,7 @@ gmlx launch claude-code -- --continue
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, as [dsh](launch.md#dsh) describes. |
+| `--comfyui-dir DIR` | The folder used last, else `~/ComfyUI`, else the ComfyUI found | Put the gmlx nodes into the ComfyUI in this folder and run it on its `.venv` or `venv`, as [ComfyUI](comfyui.md) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, beside the configured [mounts](config.md#launchcontainermounts). Repeatable. |
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
@@ -572,24 +626,46 @@ background `serve` starts it automatically. What it shows is in
 
 `gmlx pull` checks a remote GGUF's header and, when it will load, downloads
 all its shards into your model directory. A file saved under a
-`model_dirs` root is added to the config, and a running server reloads it.
+`model_dirs` root is added to the config, and a running server reloads it:
+one started from that config, or one in the foreground at the config's
+address.
 
 ```sh
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
 gmlx pull hf:org/repo/model.gguf --to ~/models
 gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
+gmlx pull z-image-turbo
+gmlx pull qwen-image --quant Q5_K_M
 ```
+
+An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo` or
+`krea-2-turbo`, pulls its DiT, text encoder and VAE, checks the VAE
+against its published sha256, packs it to GGUF, and adds an `image_models`
+entry. The quants default to
+the ones for this Mac's memory, and an encoder or VAE already on disk is
+used again when its weights match.
+[Models and quants](images.md#models-and-quants) has the quants for each Mac.
+
+Of several encoders on disk, `pull` takes the quant for this Mac first,
+then a chat model, then the file nearest the DiT. A chat model taken as
+the encoder is shared by its id, so the server holds its weights once. For
+Qwen-Image 2.1 that chat model needs its `mmproj`. Without one, the entry
+names the encoder file and the vision tower that `pull` adds.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs. Later bare filenames resolve in the first ref's repo. |
-| `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. |
+| `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs, or one image model name. Later bare filenames resolve in the first ref's repo. |
+| `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. A file outside every `model_dirs` root is not added to the config. |
 | `--config FILE` | The first default location | Read `model_dirs` from this config. |
-| `--force` | Off | Download even when the header check or the disk-space check fails. |
+| `--force` | Off | Download even when the header check, the disk-space check or the chip check of an image model fails. |
 | `--no-register` | Off | Do not add the file to the config. |
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |
 | `--json` | Off | Emit each verdict as JSON before downloading. |
+| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. |
+| `--encoder-quant QUANT` | The one for this Mac's memory | Image models: download the text encoder at this quant. Without it, a matching encoder on disk is used at any quant. |
+| `--only PARTS` | All three | Image models: pull only these parts, a comma list of `dit`, `encoder` and `vae`. |
+| `--keep-source` | Off | Image models: keep the safetensors VAE after packing it. |
 
 Inside a `model_dirs` root, downloads go under `<org>__<repo>/`. An
 interrupted `pull` resumes on the next run. A gated or private repo needs a
@@ -634,6 +710,10 @@ and removes its entry, aliases and default from the config. A file another
 model still uses is kept. `rm` prints the plan and asks before it deletes
 anything.
 
+An image model id removes its DiT, VAE, text encoder and vision tower. A text encoder
+that is a chat model, or that another image model uses, is kept, and `rm`
+refuses a chat model that an image model uses as its encoder.
+
 ```sh
 gmlx rm old-model
 gmlx rm old-model --yes
@@ -654,7 +734,8 @@ gmlx rm old-model --keep-files
 `gmlx sync-models` rescans the model directories and updates the `models`
 block to match disk. Existing entries keep their comments and edits,
 entries whose file is gone are dropped, and new files are added. Run it
-after adding files by hand or pulling with `--no-register`.
+after adding files by hand or pulling with `--no-register`. An image DiT
+found with its text encoder and VAE is added to `image_models`.
 
 ```sh
 gmlx sync-models
@@ -673,10 +754,16 @@ gmlx sync-models --dry-run
 
 An entry on an unmounted drive is kept and reported, not dropped.
 
+A scan writes `stream: experts` for a MoE model whose weights are larger
+than 90% of the GPU working set, with a comment that says so. Each sync
+checks that model again and drops the key once the model fits, such as
+after you raise the GPU wired limit. A `stream` key you wrote stays.
+
 ## gmlx ps
 
 `gmlx ps` shows the models resident in a running server, with the id,
-size, idle time, TTL, pinned and kept state, and path of each.
+kind (`chat` or `image`), size, idle time, TTL, pinned and kept state,
+and path of each.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -684,6 +771,7 @@ size, idle time, TTL, pinned and kept state, and path of each.
 | `--host H`, `--port P` | The managed server | Select the server. |
 | `--api-key KEY` | The `GMLX_API_KEY` variable | Send this key to a keyed server. |
 | `--json` | Off | Emit JSON. |
+| `--image` | Off | Show only the resident image models. |
 
 ## gmlx systemone
 
@@ -818,13 +906,250 @@ outputs. [Distillation](distill.md) is the guide,
 and every action's flags are in the
 [Distillation reference](distill-reference.md).
 
+## gmlx image
+
+`gmlx image` generates images from GGUF diffusion models, which
+[Image generation](images.md) introduces. Its actions follow.
+
+- `generate` samples images from a DiT GGUF with its text encoder and VAE.
+- `bench` times whole images and their phases, with a JSON record.
+- `pack-vae` writes a lossless VAE GGUF from a safetensors VAE.
+
+```sh
+gmlx image generate z-image-turbo --prompt "a red bicycle" --seed 1 --output bicycle.png
+gmlx image generate z-image-turbo --prompt "a red bicycle" --init-image sketch.png --strength 0.6
+gmlx image generate qwen-image-turbo --prompt "make it a watercolor" --ref photo.jpg
+gmlx image pack-vae vae/diffusion_pytorch_model.safetensors --out z-image-vae-BF16.gguf
+gmlx image generate z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
+    --vae z-image-vae-BF16.gguf --prompt "a red bicycle" --seed 1 --output bicycle.png
+gmlx image bench z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
+    --vae z-image-vae-BF16.gguf --sizes 1024x1024,2048x2048 --runs 3 --json
+```
+
+Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
+a usage error and 130 on an interrupt.
+
+### image generate
+
+`generate` loads the DiT, the text encoder and the VAE, encodes the prompt
+once and samples each image in turn, at the seed plus the image's index.
+Before anything loads, it checks from the file headers that the request
+fits in memory. When it does not, `generate` refuses with
+[`image request does not fit`](troubleshooting.md#image-request-does-not-fit).
+
+To fit, `generate` runs the two halves of a guided step one at a time,
+releases the text encoder after encoding and decodes in tiles. Last, it
+loads the text encoder alone, encodes every prompt and reference, and
+releases it before the DiT loads, which gives the same image.
+
+The variant of the DiT sets the steps, guidance and size that the flags
+leave out, and a Z-Image DiT of an unknown variant needs `--steps` and
+`--guidance`. The latents equal those of the Python `sample` call with the
+noise of the same seed.
+
+Each family takes the text encoder its DiT was trained with and its own
+VAE. A file of another model in either place is refused by name before
+the weights load.
+
+| Family | `--encoder` | `--vae` | Defaults |
+|--------|-------------|---------|----------|
+| Z-Image | Qwen3-4B | The FLUX.1 autoencoder | The variant's steps and guidance. |
+| Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
+| Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
+
+Qwen-Image 2.1 Turbo shares the base model's architecture, encoder and VAE.
+gmlx tells the two apart by their weights. Turbo samples on the eight sigmas
+it was distilled to, and refuses any other step count, on the command
+line, in a request and in a config's `defaults.steps`. A Qwen-Image 2.1 file
+that matches neither, such as a fine-tune, samples as the base model, and
+the load line names its variant as unknown.
+
+Qwen-Image 2.1 encodes the prompt in the template of its reference
+pipeline, so a prompt gives the same conditioning as it does there.
+
+A guidance other than 1 runs the DiT twice in each step, on the prompt and on
+the negative prompt. With no `--negative-prompt` it guides against the
+empty prompt, which is encoded like any other prompt.
+
+`--ref` gives Qwen-Image 2.1 a reference image to edit from. Repeat the
+flag for several, up to 10, and the prompt can name them in that order, as
+the first picture and the second. Each reference is resized to about
+`--ref-size` pixels on a side at its own aspect ratio, with each side a
+multiple of 32, and a reference keeps its alpha channel. The text encoder
+reads the references through its vision tower, which `--encoder-mmproj`
+loads from the encoder's mmproj GGUF, and the VAE encodes them. `--size`
+sets the size of the output, which defaults to the entry's `defaults.size`
+or the variant's, and not to a reference's. The fit check counts the references, and a request that does
+not fit is refused before any model loads. Z-Image and Krea 2 take no
+reference images, and `--ref` exits 2 on them.
+
+`--adapter` applies a LoRA safetensors file to the DiT, live beside the
+quantized weights, so the file is read once and nothing is merged. The
+kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
+follows the path after a colon and defaults to 1, and it may be negative.
+Repeat the flag to stack adapters, whose deltas add. A LoHa, LoKr, DoRA,
+full-weight or Tucker LoCon file is refused by name from its header, before
+any model loads. So is a file for another model family or one with keys
+that match no module of the DiT, which its GGUF header names. An adapter's
+text encoder pairs are applied to the text encoder at the same strength.
+
+A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
+sampler, scheduler, guidance, adapters, file names and gmlx version, unless
+`--no-metadata` is set. Each adapter is recorded with its file name, its
+strength, the `sha256` of the file, and `rows_sha256`, a digest of the
+LoRA pairs gmlx applied and the layers it applied them to. Each reference
+is recorded with its file name, the size it ran at and the `sha256` of the
+file.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Sample with this DiT GGUF, or with the `image_models` entry of this id, which supplies the encoder, mmproj, VAE and adapters. |
+| `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | From the weights, or the entry's `variant` | Run the DiT as this variant, such as `turbo`, when its weights match no known variant. A Krea 2 file of unknown weights needs `--variant turbo`. |
+| `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
+| `--encoder-mmproj GGUF` | None | Read the `--ref` images with this mmproj GGUF of the text encoder. It is required with `--ref` and is not loaded without it. |
+| `--vae PATH` | Required with a DiT GGUF | Decode with this VAE, a GGUF or safetensors file. |
+| `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
+| `--prompt-file FILE` | None | Read the prompt from this file. |
+| `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
+| `--size WxH` | The init image's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 16 on Z-Image and Krea 2 and of 32 on Qwen-Image 2.1. Another size exits 2 and names the multiple. |
+| `--steps N` | The variant's | Sample for N steps. |
+| `--seed N` | Random, and printed | Seed the first image. |
+| `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
+| `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
+| `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
+| `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
+| `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
+| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1. Repeat the flag for up to 10 images, in the order the prompt names them. |
+| `--ref-size N` | `1024` | Resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
+| `--count N` | `1` | Generate N images. |
+| `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
+| `--format png/jpeg/webp` | From `--output`, else `png` | Encode the images in this format. |
+| `--quality N` | `90` | Set the jpeg and webp quality, from 1 to 100. |
+| `--no-metadata` | Off | Leave out the PNG text chunk. |
+| `--background opaque/transparent` | `opaque` | `transparent` writes the alpha channel that Qwen-Image 2.1 decodes, as a png or a webp. It exits 2 with jpeg, and on a model that decodes no alpha channel. |
+| `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
+| `--adapter PATH[:STRENGTH]` | None | Apply this LoRA safetensors file at this strength, 1 when left out. Repeat the flag to stack adapters. |
+| `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
+| `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
+
+With several images, a `--output` file gains `-<seed>` before its
+extension.
+
+Under a `--ref-size` of 320, a reference that is not square can come out
+under the 256 x 256 pixels the text encoder takes. The command then exits 2
+and names the `--ref-size` that image needs.
+
+### image bench
+
+`bench` loads the model once and, for each size, runs `--warmup` images
+untimed and then `--runs` timed ones. Each run starts with empty
+conditioning caches and times the prompt encoding, every step, the decode
+and the whole image, with the peak of MLX memory. The summary gives the
+load time of each part, the first step apart from the median and mean of
+the rest, and the medians of the other phases.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Time this DiT GGUF, or the `image_models` entry of this id. |
+| `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | From the weights, or the entry's `variant` | Run the DiT as this variant, such as `turbo`, when its weights match no known variant. A Krea 2 file of unknown weights needs `--variant turbo`. |
+| `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
+| `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
+| `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
+| `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
+| `--sizes LIST` | The entry's `defaults.size`, else the variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
+| `--steps N` | The variant's | Sample for N steps. |
+| `--guidance CFG` | The variant's | Set classifier-free guidance. |
+| `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
+| `--runs N` | `2` | Time N runs per size. |
+| `--warmup N` | `1` | Run N untimed images per size first. |
+| `--seed N` | `0` | Seed every run. |
+| `--label TEXT` | None | Record this label with the results. |
+| `--via-steps` | Off | Run each step through the [image step routes](internals/image-steps.md) on a loopback port of this process. Not with `--adapter`. |
+| `--json` | Off | Print one JSON record per size on stdout, and the summaries on stderr. |
+| `--json-out FILE` | None | Write one JSON record per size to this file. |
+
+A record has schema `gmlx.image.bench/1`. It holds the gmlx and MLX
+versions, the machine's chip, memory and OS, the model's files with their
+sizes, the settings, every run, the summary, and the transport, which is
+`direct` for a run in the same process.
+
+With `--via-steps` the transport is `steps`, and the record holds the
+fields that [Timing the step routes](internals/image-steps.md#timing-the-step-routes)
+describes.
+
+### image pack-vae
+
+`pack-vae` copies the tensors of a safetensors VAE into a GGUF under their
+official names, in torch layout and their source dtype, so the file is
+lossless and other GGUF readers can use it. It then reads the GGUF back
+and compares every tensor bit for bit before the file replaces `--out`.
+
+It packs the VAE of each image family: the FLUX.1 autoencoder for
+`z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
+official file is F32 and stays F32, and the Qwen-Image autoencoder for
+`krea2`, whose file is BF16. The family follows from the tensor names and
+shapes. A file that fills none of them is refused with what it holds, for
+example another family's VAE under `--family`, or a video VAE of the same
+layout.
+
+A Qwen-Image 2.1 file may leave out its `time_conv` tensors, which one
+image never reads. The places where the video layout halves time come
+from the official config, so a `time_conv` tensor anywhere else is
+refused by name. So is a `--source-config` whose `temperal_downsample`,
+`latents_mean` or `latents_std` differs from the official one.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `SRC`, positional | Required | Pack this safetensors VAE. |
+| `--out FILE.gguf` | Required | Write the GGUF here. |
+| `--dtype f32/f16/bf16` | The source dtype | Store every tensor in this dtype. A narrower dtype is not lossless, and the file records that. |
+| `--family NAME` | The family the file fills | Pack the VAE of this image family. |
+| `--source-repo ID` | `unknown` | Record this repository as the source. |
+| `--source-revision REV` | `unknown` | Record this revision of the source repository. |
+| `--source-config FILE` | `config.json` beside `SRC` | Record this VAE config. |
+| `--force` | Off | Replace `--out` when it exists. |
+| `--json` | Off | Print a JSON record of the packed file. |
+
+## gmlx comfyui
+
+`gmlx comfyui` puts the gmlx node pack into ComfyUI, as
+[ComfyUI](comfyui.md) describes. Each action takes its own flags.
+
+```sh
+gmlx comfyui install
+gmlx comfyui install --comfyui-dir ~/src/ComfyUI
+gmlx comfyui status
+gmlx comfyui uninstall
+```
+
+`install` finds ComfyUI, refuses one older than the pack needs, copies the
+pack to a folder gmlx owns and links it into ComfyUI's `custom_nodes`. Run
+again, it refreshes the copy and the links it made before.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--comfyui-dir DIR` | The folders installed before, else the ComfyUI found | Install into this ComfyUI: its folder, the folder above its `custom_nodes`, or a Comfy Desktop install folder. |
+| `--link-source` | Off | Link to the pack in the gmlx source tree instead of a copy, for work on the pack. |
+| `--model ID` | The config's default image model | The image model a new loader node starts on. |
+
+`uninstall` removes the links, the copy and the record. With
+`--comfyui-dir DIR` it removes the link from that ComfyUI only. `status`
+prints the copy, the gmlx command the nodes run and each ComfyUI with its
+version; `--json` prints the same as JSON.
+
 ## gmlx doctor
 
 `gmlx doctor` checks what a working setup needs and prints a PASS, WARN,
 FAIL or SKIP line for each check, with the fix named. It covers the
 runtime, the config, each model and service, background servers, login
 items, container mode, optional extras, the Hugging Face token, RAM and
-disk space. No check uses the network.
+disk space. Its `image` check reads the headers of each image model's DiT,
+text encoder, vision tower and VAE, and fails one whose parts are not of
+one family. Once `gmlx comfyui install` has run, its `comfyui` check reads
+each ComfyUI folder's link to the gmlx nodes and its version against the
+range the nodes were tested on. No check uses the network.
 
 ```sh
 gmlx doctor
@@ -834,14 +1159,15 @@ gmlx doctor --deep
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--config FILE` | The first default location | Read this config. |
-| `--deep` | Off | Also read each configured model's header. |
+| `--deep` | Off | Also read each configured chat model's header. The `image` check reads the image models' headers on every run. |
 | `--json` | Off | Emit JSON. |
 
 ## gmlx completion
 
 `gmlx completion` prints a completion script for zsh, bash or fish. It
-completes verbs, flags, model ids from your config, client names for
-`launch`, and the host, port and URL of your background servers.
+completes verbs and their actions, flags, model ids from your config,
+client names for `launch`, and the host, port and URL of your background
+servers.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
@@ -866,6 +1192,7 @@ These verbs also use other codes:
 | `serve` | 2 when a bare `serve` finds no config. |
 | `status` | 0 when a server is running, 3 when none is. |
 | `restart` | 1 when a file the server needs is gone or its config does not load. The old server keeps running. |
+| `comfyui` | 1 for no ComfyUI, a `--comfyui-dir` that is not one, one too old, a `status` problem or no install, or a settings file that is not a JSON object. 2 for several. |
 | `list` | 2 when no config was found or it failed to load. |
 | `run` | 1 when the model fails to load or to generate, 2 when a flag, id or file is wrong and nothing has loaded yet, 130 when interrupted. |
 | `validate` | 0 when the file will load or the quants are listed, 1 when it will not load, 2 when the reference cannot be read. |
@@ -885,9 +1212,9 @@ message that names the cause and the next step. A script can retry after
 | Code | Meaning |
 |------|---------|
 | 0 | `--config-only`, `--remove-home`, `--stop`, `--list` or `--forget-share` finished, or `--detach` started the session. |
-| 1 | Launch refused, such as a folder it will not share or a flag that does not fit this launch. |
-| 2 | A flag is unknown, abbreviated or refused, or the command names a client it should not, or none where it needs one. |
-| 69 | Something launch needs is missing or does not answer: Apple container, its kernel, the client, the server or a model. |
+| 1 | Launch refused, such as a folder it will not share, a flag that does not fit this launch or a ComfyUI too old for the gmlx nodes. |
+| 2 | A flag is unknown, abbreviated or refused, the command names a client it should not or none where it needs one, or several ComfyUI installs fit. |
+| 69 | Something launch needs is missing or does not answer: Apple container, its kernel, the client or ComfyUI's environment, the server or a model. |
 | 75 | Something is busy: a project another launch uses, a volume or port in use, or a server that is starting or full. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
 | 125 | The container could not open its connections to the Mac, such as when the image already uses a port that launch forwards. |

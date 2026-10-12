@@ -8,15 +8,15 @@ import pytest
 
 import mlx.core as mx
 
-pytest.importorskip("mlx_vlm.generate.ar")
+pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
 
-from mlx_vlm.generate import ar  # noqa: E402
-from mlx_vlm.models.cache import (  # noqa: E402
+from gmlx._vendor.mlx_vlm.generate import ar  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.cache import (  # noqa: E402
     BatchKVCache,
     BatchQuantizedKVCache,
     KVCache,
 )
-from mlx_vlm.server import generation as gen  # noqa: E402
+from gmlx._vendor.mlx_vlm.server import generation as gen  # noqa: E402
 
 from gmlx.cache import kvarn_serve  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache  # noqa: E402
@@ -178,7 +178,7 @@ def test_spec_build_suspends_kvarn(restorable, kvarn_ops_ok):
 
 
 def test_apc_gate(restorable, kvarn_ops_ok):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     from gmlx.cache import kvarn_apc
 
@@ -222,8 +222,8 @@ def test_safe_quant_kvarn_arm(restorable, kvarn_ops_ok):
 
     # importlib, not `import mlx_vlm.generate as ...`: the package exports
     # a `generate` function that shadows the submodule attribute.
-    vlm_generate = importlib.import_module("mlx_vlm.generate")
-    vlm_common = importlib.import_module("mlx_vlm.generate.common")
+    vlm_generate = importlib.import_module("gmlx._vendor.mlx_vlm.generate")
+    vlm_common = importlib.import_module("gmlx._vendor.mlx_vlm.generate.common")
 
     restorable.setattr(
         vlm_generate, "maybe_quantize_kv_cache", vlm_generate.maybe_quantize_kv_cache
@@ -271,7 +271,7 @@ def test_scalar_kvarn_promotes_on_generation_batch_extend(kvarn_ops_ok):
     from gmlx.cache.kvarn_cache import KVarNKVCache
 
     install_batched_cachelist_admission()
-    _ar = importlib.import_module("mlx_vlm.generate.ar")
+    _ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
     def _filled(rows):
         c = KVarNKVCache(k_bits=6, v_bits=6, tail_tokens=256)

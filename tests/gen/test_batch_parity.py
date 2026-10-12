@@ -108,8 +108,8 @@ def _encode(tok, text):
 
 def _single_stream(model, ids, n):
     """Greedy single-stream decode; return (token_ids, per-step logprob vectors)."""
-    from mlx_lm.generate import generate_step
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.generate import generate_step
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
 
     cache = make_prompt_cache(model)
     toks, logprobs = [], []
@@ -122,7 +122,7 @@ def _single_stream(model, ids, n):
 
 def _batched(model, ids_list, n):
     """Greedy batched decode; return per-input token-id lists (input order)."""
-    from mlx_lm.generate import BatchGenerator
+    from gmlx._vendor.mlx_lm.generate import BatchGenerator
 
     gen = BatchGenerator(model, sampler=GREEDY)  # greedy, no stop tokens
     uids = gen.insert(ids_list, [n] * len(ids_list))

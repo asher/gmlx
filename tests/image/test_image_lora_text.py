@@ -1,0 +1,493 @@
+"""The text encoder halves of an image adapter: applied through the
+image side's own wrap on an owned encoder, refused by name on a borrowed
+one. CPU."""
+from __future__ import annotations
+
+import re
+
+import mlx.core as mx
+import numpy as np
+import pytest
+
+from gmlx.image import api, lora
+from gmlx.image import text_encoder as te
+from gmlx.image.registry import get_family
+from image_fixtures import tiny_z_model
+from lora_fixtures import (dialect_keys, make_pair, rel_l2, tiny_z_adapter,
+                           write_keys)
+from test_image_text_encoder import _CharTokenizer, _spec, _tiny_qwen3
+
+TEXT_TOL = 2e-5
+Q = "model.layers.0.self_attn.q_proj"          # 64 -> 64
+K = "model.layers.2.self_attn.k_proj"          # 64 -> 32
+UP = "model.layers.3.mlp.up_proj"              # 64 -> 96
+O1 = "model.layers.1.self_attn.o_proj"         # 64 -> 64
+
+
+@pytest.fixture(autouse=True)
+def _cpu_stream():
+    # The CPU stream keeps fp32 matmuls exact. On the GPU they run at TF32,
+    # whose 1e-3 error is above the gap to the merged weights.
+    with mx.stream(mx.cpu):
+        yield
+
+
+def _text_pairs(seed: int, alpha=None) -> dict:
+    rng = np.random.default_rng(seed)
+    return {Q: make_pair(rng, 64, 64, 4, alpha),
+            K: make_pair(rng, 32, 64, 2, alpha),
+            UP: make_pair(rng, 96, 64, 2, alpha)}
+
+
+def _write(path, text: dict, dit: dict | None = None) -> str:
+    """A kohya file with ComfyUI's spelling of the text encoder keys."""
+    keys = dialect_keys("kohya", dit or {})
+    for module, (down, up, alpha) in text.items():
+        stem = f"text_encoders.qwen3_4b.transformer.{module}"
+        keys[stem + ".lora_down.weight"] = down
+        keys[stem + ".lora_up.weight"] = up
+        if alpha is not None:
+            keys[stem + ".alpha"] = np.asarray(alpha, np.float32)
+    return write_keys(path, keys)
+
+
+def _pipe(owned: bool = True) -> api.ImagePipeline:
+    m, cfg = _tiny_qwen3()
+    spec = _spec()
+    enc = (te.EncoderHandle(m, _CharTokenizer(), spec, owned=True,
+                            source_key="tiny")
+           if owned else te.borrow_encoder(m, _CharTokenizer(), cfg, spec))
+    dit, _ = tiny_z_model()
+    return api.ImagePipeline(dit=dit, family=get_family("z_image"),
+                             variant="turbo", encoder=enc)
+
+
+def _merged_hidden(stack, prompt: str = "ab") -> np.ndarray:
+    """The tap of the tiny encoder with (pairs, strength) rows merged into
+    its weights in float64."""
+    from mlx.utils import tree_flatten
+
+    m, _ = _tiny_qwen3()
+    params = dict(tree_flatten(m.parameters()))
+    upd = {}
+    for pairs, strength in stack:
+        for module, (down, up, alpha) in pairs.items():
+            name = f"{module}.weight"
+            w = upd.get(name, np.array(params[name], np.float64))
+            f = strength * (1.0 if alpha is None else alpha / down.shape[0])
+            upd[name] = w + f * (up.astype(np.float64)
+                                 @ down.astype(np.float64))
+    m.load_weights([(k, mx.array(v.astype(np.float32)))
+                    for k, v in upd.items()], strict=False)
+    enc = te.EncoderHandle(m, _CharTokenizer(), _spec(), owned=True)
+    return np.array(enc.encode(prompt).hidden[0], np.float64)
+
+
+def _wrapped(model) -> list:
+    return sorted(p for p, m in model.named_modules()
+                  if isinstance(m, lora.EncoderLoRALinear))
+
+
+def test_text_halves_apply_on_an_owned_encoder(tmp_path):
+    one, two = _text_pairs(1, 6.0), _text_pairs(2)
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one,
+                                        tiny_z_adapter(1, 4.0)))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    assert len(a1.dit) == 8 and sorted(p for p, _ in a1.text) == [Q, K, UP]
+    assert a2.dit == () and lora.table_entries([(a2, 1.0)]) == []
+    base = np.array(enc.encode("ab").hidden[0], np.float64)
+    before = api.encode_text(pipe, "ab")
+    assert enc.adapters == "" and _wrapped(enc.model) == []
+
+    rows = [(a1, 0.8), (a2, -0.5)]
+    assert lora.apply_text_adapters(pipe, rows) == 2
+    assert _wrapped(enc.model) == [Q, K, UP]
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    want = _merged_hidden([(one, 0.8), (two, -0.5)])
+    assert rel_l2(got, want) <= TEXT_TOL
+    assert rel_l2(base, want) > 1e-2
+    # The conditioning key carries the adapter state.
+    assert enc.adapters == lora.text_state(rows) and len(enc.adapters) == 64
+    after = api.encode_text(pipe, "ab")
+    assert after.key != before.key and after is not before
+    assert rel_l2(np.array(after.features, np.float64), want[0]) <= TEXT_TOL
+    # The same state again is a no-op.
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert lora.text_state([(a1, 0.8)]) != lora.text_state(rows)
+
+
+def _unloaded(pipe, change=None) -> api.ImagePipeline:
+    """``pipe`` as a staged load holds it before its DiT loads: no DiT,
+    and the DiT's header, whose shapes are in the GGUF's order."""
+    from types import SimpleNamespace
+
+    from image_fixtures import TINY_Z_CONFIG
+    from mlx.utils import tree_flatten
+
+    names = {k: SimpleNamespace(shape=tuple(reversed(v.shape)), codec="F32")
+             for k, v in tree_flatten(pipe.dit.parameters())}
+    if change is not None:
+        change(names)
+    pipe.dit = None
+    pipe.identified = SimpleNamespace(config=dict(TINY_Z_CONFIG),
+                                      view=SimpleNamespace(tensors=names))
+    return pipe
+
+
+def test_a_staged_pipeline_places_an_adapter_by_the_dit_header(tmp_path):
+    """Before a staged load reads its DiT, an adapter is placed by the
+    DiT's header: the rows and the hash it has on the loaded DiT, with
+    the text halves on for the encode. The table is defined once the DiT
+    is there."""
+    one = _text_pairs(1, 6.0)
+    path = _write(tmp_path / "one.safetensors", one, tiny_z_adapter(1, 4.0))
+    whole = _pipe()
+    want = lora.load_adapter(whole, path)
+    pipe = _pipe()
+    dit = pipe.dit
+    got = lora.load_adapter(_unloaded(pipe), path)
+    assert (got.sha256, got.dit, got.text) == (want.sha256, want.dit,
+                                               want.text)
+    assert len(got.dit) == 8 and len(got.text) == 3
+    assert lora.apply_text_adapters(pipe, [(got, 0.8)]) == 1
+    hidden = np.array(pipe.encoder.encode("ab").hidden[0], np.float64)
+    assert rel_l2(hidden, _merged_hidden([(one, 0.8)])) <= TEXT_TOL
+    assert pipe.encoder.adapters == lora.text_state([(want, 0.8)])
+    pipe.dit = dit
+    tid = api.define_patch_table(pipe, lora.table_entries([(got, 0.8)]))
+    assert tid == api.define_patch_table(
+        whole, lora.table_entries([(want, 0.8)]))
+    # The key map of the loaded DiT is made from the DiT, not kept from
+    # the header.
+    from gmlx.image.lora.patch_table import key_map
+
+    assert key_map(pipe) is key_map(pipe)
+    # A pair that does not fit the header, or names a layer it lacks, is
+    # refused as on a loaded DiT.
+    module = want.dit[0][0]
+
+    def wider(names):
+        t = names[module + ".weight"]
+        t.shape = (t.shape[0] + 1, t.shape[1])
+
+    with pytest.raises(lora.AdapterError,
+                       match=rf"does not fit {re.escape(module)} of this "
+                             "Z-Image DiT"):
+        lora.load_adapter(_unloaded(_pipe(), wider), path)
+    with pytest.raises(lora.AdapterError,
+                       match=rf"targets {re.escape(module)}, which this "
+                             "DiT does not have"):
+        lora.load_adapter(
+            _unloaded(_pipe(), lambda n: n.pop(module + ".weight")), path)
+
+
+def test_text_halves_come_off_and_change(tmp_path):
+    """An empty list, a strength of 0 and a new list each set the encoder
+    to exactly that state, with the conditioning key following."""
+    one, two = _text_pairs(1, 6.0), _text_pairs(2)
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    base = np.array(enc.encode("ab").hidden[0])
+    before = api.encode_text(pipe, "ab")
+
+    def bare() -> None:
+        assert _wrapped(enc.model) == [] and enc.adapters == ""
+        assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+        assert api.encode_text(pipe, "ab") is before
+
+    for off in ([], [(a1, 0.0)], [(a1, 0.0), (a2, 0.0)]):
+        assert lora.apply_text_adapters(pipe, [(a1, 0.8)]) == 1
+        adapted = api.encode_text(pipe, "ab")
+        assert adapted.key != before.key and enc.adapters
+        assert lora.apply_text_adapters(pipe, off) == 0
+        bare()
+    # Another list replaces the one in place, with no trace of it.
+    assert lora.apply_text_adapters(pipe, [(a1, 0.8)]) == 1
+    first = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, [(a1, 0.5), (a2, -0.5)]) == 2
+    assert enc.adapters == lora.text_state([(a1, 0.5), (a2, -0.5)])
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, _merged_hidden([(one, 0.5), (two, -0.5)])) <= TEXT_TOL
+    second = api.encode_text(pipe, "ab")
+    assert len({before.key, first.key, second.key}) == 3
+    # A list that does not fit changes nothing.
+    rng = np.random.default_rng(0)
+    bad = lora.load_adapter(pipe, _write(
+        tmp_path / "bad.safetensors", {Q: make_pair(rng, 2560, 2560, 2)}))
+    with pytest.raises(lora.AdapterError, match="bad.safetensors"):
+        lora.apply_text_adapters(pipe, [(a1, 0.5), (bad, 1.0)])
+    assert enc.adapters == lora.text_state([(a1, 0.5), (a2, -0.5)])
+    assert rel_l2(np.array(enc.encode("ab").hidden[0], np.float64),
+                  _merged_hidden([(one, 0.5), (two, -0.5)])) <= TEXT_TOL
+    assert lora.apply_text_adapters(pipe, []) == 0
+    bare()
+    # A caller's own encoder object that keeps no adapter state has
+    # nothing to take off.
+    from types import SimpleNamespace
+
+    pipe.encoder = SimpleNamespace(owned=True, released=False)
+    assert lora.apply_text_adapters(pipe, []) == 0
+    assert lora.apply_text_adapters(pipe, [(a1, 0.0)]) == 0
+
+
+def test_a_list_goes_on_over_one_with_other_layers(tmp_path, monkeypatch):
+    """A new list over the one in place: a layer that only the old list
+    wrapped is bare again. A new install that fails part way leaves the
+    encoder bare with an empty state, not the state of the old list."""
+    from gmlx.image.lora import install
+
+    rng = np.random.default_rng(3)
+    one = _text_pairs(1, 6.0)
+    two = {Q: make_pair(rng, 64, 64, 2), O1: make_pair(rng, 64, 64, 2)}
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    base = np.array(enc.encode("ab").hidden[0])
+    before = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, [(a1, 0.8)]) == 1
+    assert _wrapped(enc.model) == sorted([Q, K, UP])
+    assert lora.apply_text_adapters(pipe, [(a2, 0.6)]) == 1
+    assert _wrapped(enc.model) == sorted([Q, O1])
+    assert enc.adapters == lora.text_state([(a2, 0.6)])
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, _merged_hidden([(two, 0.6)])) <= TEXT_TOL
+    assert rel_l2(got, _merged_hidden([(one, 0.8), (two, 0.6)])) > 1e-3
+    # The first list again, and its install raises at the second layer.
+    real, wraps = install._set, []
+
+    def flaky(root, path, new):
+        if isinstance(new, lora.EncoderLoRALinear):
+            wraps.append(path)
+            if len(wraps) == 2:
+                raise RuntimeError("no room")
+        return real(root, path, new)
+
+    monkeypatch.setattr(install, "_set", flaky)
+    with pytest.raises(RuntimeError, match="no room"):
+        lora.apply_text_adapters(pipe, [(a1, 0.8)])
+    monkeypatch.setattr(install, "_set", real)
+    assert len(wraps) == 2
+    assert _wrapped(enc.model) == [] and enc.adapters == ""
+    assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+    assert api.encode_text(pipe, "ab") is before
+
+
+@pytest.mark.parametrize("change", ["strength", "adapter"])
+def test_a_change_of_strength_or_adapter_alone_changes_the_conditioning(
+        tmp_path, change):
+    """Two lists that differ in one strength alone, or in the adapter
+    alone, are two states. The second one is installed, and its
+    conditioning is not the first one's from the cache."""
+    one, two = _text_pairs(1, 6.0), _text_pairs(2, 6.0)
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    first = [(a1, 0.8)]
+    then, stack = ([(a1, 0.5)], [(one, 0.5)]) if change == "strength" \
+        else ([(a2, 0.8)], [(two, 0.8)])
+    assert lora.text_state(first) != lora.text_state(then)
+    assert lora.apply_text_adapters(pipe, first) == 1
+    old = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, then) == 1
+    assert enc.adapters == lora.text_state(then)
+    new = api.encode_text(pipe, "ab")
+    assert new is not old and new.key != old.key
+    want = _merged_hidden(stack)
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, want) <= TEXT_TOL
+    assert rel_l2(np.array(new.features, np.float64), want[0]) <= TEXT_TOL
+    assert rel_l2(np.array(old.features, np.float64), want[0]) > 1e-3
+
+
+def test_a_borrowed_encoder_refuses_text_halves_by_name(tmp_path):
+    pipe = _pipe(owned=False)
+    enc = pipe.encoder
+    base = np.array(enc.encode("ab").hidden[0])
+    ad = lora.load_adapter(pipe, _write(tmp_path / "style.safetensors",
+                                        _text_pairs(1),
+                                        tiny_z_adapter(1, 4.0)))
+    with pytest.raises(lora.AdapterError,
+                       match="style.safetensors: 3 text encoder pairs are "
+                             "refused, because the text encoder is a "
+                             "resident chat model") as e:
+        lora.apply_text_adapters(pipe, [(ad, 1.0)])
+    assert "text strength of 0" in str(e.value)
+    # A text strength of zero applies the image half alone.
+    assert lora.apply_text_adapters(pipe, [(ad, 0.0)]) == 0
+    assert enc.adapters == "" and _wrapped(enc.model) == []
+    assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+    tid = api.define_patch_table(pipe, lora.table_entries([(ad, 1.0)]))
+    assert tid != api.EMPTY_TABLE
+    # An adapter with no text half asks nothing of the encoder.
+    dit_only = lora.load_adapter(pipe, _write(
+        tmp_path / "dit.safetensors", {}, tiny_z_adapter(2, 4.0)))
+    assert lora.apply_text_adapters(pipe, [(dit_only, 1.0)]) == 0
+
+
+def test_text_halves_need_an_encoder_and_a_fit(tmp_path):
+    pipe = _pipe()
+    rng = np.random.default_rng(0)
+    bad = lora.load_adapter(pipe, _write(
+        tmp_path / "bad.safetensors", {Q: make_pair(rng, 2560, 2560, 2)}))
+    with pytest.raises(lora.AdapterError,
+                       match="bad.safetensors: the text encoder pair on "
+                             f"{Q} does not fit the tiny encoder: the pair "
+                             "is 2560x2560"):
+        lora.apply_text_adapters(pipe, [(bad, 1.0)])
+    deep = lora.load_adapter(pipe, _write(
+        tmp_path / "deep.safetensors",
+        {"model.layers.30.mlp.up_proj": make_pair(rng, 96, 64, 2)}))
+    with pytest.raises(lora.AdapterError, match="no such linear layer"):
+        lora.apply_text_adapters(pipe, [(deep, 1.0)])
+    assert _wrapped(pipe.encoder.model) == [] and pipe.encoder.adapters == ""
+    good = lora.load_adapter(pipe, _write(tmp_path / "good.safetensors",
+                                          _text_pairs(1)))
+    pipe.encoder.release()
+    with pytest.raises(lora.AdapterError, match="need a loaded text encoder"):
+        lora.apply_text_adapters(pipe, [(good, 1.0)])
+    pipe.encoder = None
+    with pytest.raises(lora.AdapterError, match="need a loaded text encoder"):
+        lora.apply_text_adapters(pipe, [(good, 1.0)])
+
+
+@pytest.mark.parametrize("off", ["empty list", "strength 0"])
+def test_a_removal_clears_the_text_state_of_a_released_encoder(tmp_path,
+                                                                off):
+    """A released encoder has no layers to unwrap. An empty list, and a
+    list at strength 0, still clear its adapter state, so the cache gives
+    the bare conditioning and not the adapted one."""
+    pipe = _pipe()
+    enc = pipe.encoder
+    ad = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors",
+                                        _text_pairs(1, 6.0)))
+    bare = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, [(ad, 0.8)]) == 1
+    adapted = api.encode_text(pipe, "ab")
+    assert adapted.key != bare.key and adapted is not bare
+    assert enc.release() and enc.released
+    assert api.encode_text(pipe, "ab") is adapted
+    rows = [] if off == "empty list" else [(ad, 0.0)]
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert enc.adapters == ""
+    assert api.encode_text(pipe, "ab") is bare
+    # A second removal has nothing to do.
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert api.encode_text(pipe, "ab") is bare
+
+
+def test_the_rows_in_place_are_a_no_op_on_a_released_encoder(tmp_path):
+    """The state is compared before the released check: the rows in place
+    return 0 and their cached conditioning is read. Any other rows need
+    the layers and are refused, and the state stays."""
+    pipe = _pipe()
+    enc = pipe.encoder
+    one = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors",
+                                         _text_pairs(1, 6.0)))
+    two = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors",
+                                         _text_pairs(2)))
+    rows = [(one, 0.8), (two, -0.5)]
+    assert lora.apply_text_adapters(pipe, rows) == 2
+    state = enc.adapters
+    adapted = api.encode_text(pipe, "ab")
+    assert enc.release() and enc.released
+    assert lora.apply_text_adapters(pipe, rows) == 0
+    assert lora.apply_text_adapters(pipe, rows + [(one, 0.0)]) == 0
+    assert enc.adapters == state == lora.text_state(rows)
+    assert api.encode_text(pipe, "ab") is adapted
+    for other in ([(one, 0.8)], [(one, 0.5), (two, -0.5)],
+                  [(two, -0.5), (one, 0.8)]):
+        with pytest.raises(lora.AdapterError,
+                           match="need a loaded text encoder"):
+            lora.apply_text_adapters(pipe, other)
+        assert enc.adapters == state
+    assert api.encode_text(pipe, "ab") is adapted
+
+
+def test_a_failed_text_install_leaves_the_encoder_bare(tmp_path,
+                                                       monkeypatch):
+    """A row that does not fit, or an install that fails part way, leaves
+    no wrap and no adapter state, and the same call works afterwards."""
+    from gmlx.image.lora import install
+
+    pipe = _pipe()
+    enc = pipe.encoder
+    rng = np.random.default_rng(0)
+    one, two = _text_pairs(1), _text_pairs(2)
+    good = lora.load_adapter(pipe, _write(tmp_path / "good.safetensors",
+                                          one))
+    also = lora.load_adapter(pipe, _write(tmp_path / "also.safetensors",
+                                          two))
+    bad = lora.load_adapter(pipe, _write(
+        tmp_path / "bad.safetensors", {Q: make_pair(rng, 2560, 2560, 2)}))
+    base = np.array(enc.encode("ab").hidden[0])
+    before = api.encode_text(pipe, "ab")
+
+    def bare() -> None:
+        assert _wrapped(enc.model) == [] and enc.adapters == ""
+        assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+        assert api.encode_text(pipe, "ab") is before
+
+    with pytest.raises(lora.AdapterError, match="bad.safetensors"):
+        lora.apply_text_adapters(pipe, [(good, 1.0), (bad, 1.0)])
+    bare()
+    # An install that raises at the second layer takes the first off.
+    real, calls = install._set, []
+
+    def flaky(root, path, new):
+        calls.append(path)
+        if len(calls) == 2:
+            raise RuntimeError("no room")
+        return real(root, path, new)
+
+    monkeypatch.setattr(install, "_set", flaky)
+    with pytest.raises(RuntimeError, match="no room"):
+        lora.apply_text_adapters(pipe, [(good, 1.0), (also, 1.0)])
+    assert len(calls) == 3 and calls[2] == calls[0]
+    bare()
+    monkeypatch.setattr(install, "_set", real)
+    assert lora.apply_text_adapters(pipe, [(good, 1.0), (also, 1.0)]) == 2
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, _merged_hidden([(one, 1.0), (two, 1.0)])) <= TEXT_TOL
+
+
+def test_the_owned_encoder_reads_nothing_from_the_text_row_channel(
+        tmp_path, monkeypatch):
+    """A serve process in rows mode: nothing published, a bare text row
+    published, and a batch of three rows published. The encoder forward
+    with a text half is the merged one each time."""
+    from gmlx import lora_rows
+    from gmlx.load.modules import LoRAKQuantLinear
+
+    assert not issubclass(lora.EncoderLoRALinear, LoRAKQuantLinear)
+    one = _text_pairs(1, 6.0)
+    pipe = _pipe()
+    enc = pipe.encoder
+    ad = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    want = _merged_hidden([(one, 0.8)])
+    lora_rows.configure("rows", 1)
+    try:
+        assert lora.apply_text_adapters(pipe, [(ad, 0.8)]) == 1
+        for published in (None, [0.0], [1.0, 0.0, 0.5]):
+            lora_rows.set_rows(published)
+            got = np.array(enc.encode("ab").hidden[0], np.float64)
+            assert rel_l2(got, want) <= TEXT_TOL, published
+    finally:
+        lora_rows.set_rows(None)
+        lora_rows.configure("static", 1)
+    # No reader of the channel is reached at all.
+
+    def boom(*a, **k):
+        raise AssertionError("the image encoder read gmlx.lora_rows")
+
+    for name in ("row_scales", "row_factor", "dense_row_factor",
+                 "dense_rows", "flat_rows", "flat_row_factor"):
+        monkeypatch.setattr(lora_rows, name, boom)
+    monkeypatch.setattr(lora_rows, "_mode", "rows")
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, want) <= TEXT_TOL

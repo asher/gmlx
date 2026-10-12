@@ -30,17 +30,20 @@ from dataclasses import dataclass, field
 import mlx.core as mx
 import numpy as np
 
+from gmlx.device import metal_value
+
 from .feeder_common import read_range_aligned
 
 
 def max_buffer_bytes() -> int | None:
-    """The largest tensor this device can hold in one array, or None when
-    the limit is unknown (no Metal device: a CPU-only build)."""
+    """The largest tensor the Metal device can hold in one array, whatever
+    the default device is, or None when the limit is unknown (no Metal
+    device: a CPU-only build)."""
     env = os.environ.get("GMLX_TABLE_MAX_BUFFER", "")
     if env:
         return int(env)
     try:
-        return int(mx.device_info()["max_buffer_length"])
+        return int(metal_value("max_buffer_length"))
     except Exception:
         return None
 

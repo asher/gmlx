@@ -9,7 +9,7 @@ unconverted. _lift_injected_cache adds the `rotated` discriminator and
 lifts via the class's own merge (which temporal-orders rotated content)."""
 
 import mlx.core as mx
-from mlx_vlm.models.cache import (
+from gmlx._vendor.mlx_vlm.models.cache import (
     BatchKVCache,
     BatchRotatingKVCache,
     BufferedRotatingKVCache,
@@ -92,7 +92,7 @@ def test_already_batch_class_untouched():
 
 
 def test_live_cache_list_members_are_lifted_before_extend():
-    from mlx_vlm.models.cache import CacheList
+    from gmlx._vendor.mlx_vlm.models.cache import CacheList
 
     live = CacheList(_fill(KVCache(), 4),
                      _fill(BufferedRotatingKVCache(max_size=8, buffer_size=4), 4))
@@ -124,7 +124,7 @@ def test_live_batch_classes_untouched():
 
 
 def test_injected_single_without_batch_api_is_lifted_by_merge():
-    """DeepSeek V4's PoolingCache has neither _idx nor rotated; the batch
+    """DeepSeek V4's DS4PoolingCache has neither _idx nor rotated; the batch
     class's extend() then read len() of the single row's scalar state."""
     class Batch:
         n = 1

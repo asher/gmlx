@@ -212,6 +212,71 @@ def test_rope_scaling_passes_through():
     assert config.rope_scaling == {"type": "yarn", "rope_type": "yarn", "factor": 4.0}
 
 
+def test_rope_scaling_reads_the_whole_header():
+    """The Kimi K3 DSpark drafter carries factor 32 and original context
+    32768; reading type and factor only built the table for 4096."""
+    import math
+
+    import numpy as np
+
+    from gmlx.load import rope_scaling as rs
+    from gmlx.load.rope_swap import ScaledRoPE
+
+    arrays, _ = _skeleton()
+    meta = _meta(**{"dflash.rope.scaling.type": "yarn",
+                    "dflash.rope.scaling.factor": 32.0,
+                    "dflash.rope.scaling.original_context_length": 32768})
+    config, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(),
+                                         "dflash2", arrays=arrays)
+    s = rs.RopeScaling(**config.gmlx_rope_scaling)
+    assert s.factor == 32.0 and s.original_context == 32768
+    rope = DFlash2Drafter(config).rope
+    assert isinstance(rope, ScaledRoPE)
+    assert rope.mscale == pytest.approx(1 + 0.1 * math.log(32.0), rel=1e-6)
+    np.testing.assert_allclose(
+        1.0 / np.asarray(rope._freqs), rs.inv_freq(16, 10000.0, s), rtol=1e-6)
+    # Without the key the original context is the drafter's trained one.
+    config, _ = _dflash_config_from_meta(
+        "d.gguf", _meta(**{"dflash.rope.scaling.type": "yarn",
+                           "dflash.rope.scaling.factor": 4.0,
+                           "dflash.context_length": 8192}),
+        _target_dict(), "dflash2", arrays=arrays)
+    assert rs.RopeScaling(**config.gmlx_rope_scaling).original_context == 8192
+    # No scaling keeps the class rope.
+    config, _ = _dflash_config_from_meta("d.gguf", _meta(), _target_dict(),
+                                         "dflash2", arrays=arrays)
+    assert config.gmlx_rope_scaling is None
+    assert not isinstance(DFlash2Drafter(config).rope, ScaledRoPE)
+
+
+def test_rope_options_reach_the_drafter():
+    """llama.cpp copies the rope flags into the draft context: the run
+    options apply over the drafter header, and the YaRN ramp sits at the
+    drafter's trained context, not at the target's extended one."""
+    from gmlx.load import rope_scaling as rs
+
+    arrays, _ = _skeleton()
+    yarn4 = rs.RopeOverride(rope_scaling="yarn", rope_scale=4.0)
+    with rs.override_scope(yarn4):
+        config, _ = _dflash_config_from_meta(
+            "d.gguf", _meta(**{"dflash.context_length": 8192}),
+            _target_dict(max_position_embeddings=32768), "dflash2",
+            arrays=arrays)
+    s = rs.RopeScaling(**config.gmlx_rope_scaling)
+    assert s.type == "yarn" and s.factor == 4.0
+    assert s.original_context == 8192
+    # A header without a context length falls back to the target's trained
+    # context, which the target config keeps beside the extended one.
+    with rs.override_scope(yarn4):
+        config, _ = _dflash_config_from_meta(
+            "d.gguf", _meta(**{"dflash.context_length": None}),
+            _target_dict(max_position_embeddings=8192,
+                         **{rs.TRAINED_CONTEXT_KEY: 2048}),
+            "dflash2", arrays=arrays)
+    assert rs.RopeScaling(**config.gmlx_rope_scaling).original_context == 2048
+    assert config.max_position_embeddings == 2048
+
+
 @pytest.mark.parametrize("container,gguf_block,want", [
     ("dflash2", 8, (8, 8)),
     ("dflash2", 16, (16, 16)),

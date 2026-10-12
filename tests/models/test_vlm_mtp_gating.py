@@ -1,12 +1,12 @@
 """Install gating for qwen MTP targets on the vlm MTP path.
 
-Since the spec-target seam, ``load_vlm_mtp_model``'s target is built on
-the owned classes by default; a ``GMLX_QWEN_OWNED=0`` fallback stays
-stock. The install sites therefore gate on the built tree
+``load_vlm_mtp_model``'s target is built on the owned classes. The
+install sites gate on the built tree
 (``qwen35_owned.is_owned_language_model``), never on the config's
-model_type. A stock tree takes the full patched regime (the vlm
-regime); an owned tree arms ``prepare_gdn``, which raises on a tree
-with no owned GatedDeltaNet.
+model_type. An owned tree arms ``prepare_gdn``, which raises on a tree
+with no owned GatedDeltaNet. The verify patch set for a tree built on the
+base classes has no loader caller and stays as a test oracle, which the
+test here installs by hand.
 """
 
 from types import SimpleNamespace
@@ -14,19 +14,24 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35 import language as _L
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 import gmlx.upstream.gdn_patches as gp
 import gmlx.models.qwen35.attn as qwen35_attn
 import gmlx.models.qwen35.gdn as qwen35_gdn
 import gmlx.models.qwen35.owned as qwen35_owned
 import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
-from gmlx.spec.mtp_load import _install_stock_qwen35_verify_patches
 from gmlx.spec.ragged_decode import install_unified_ragged_plan
+
+
+def _gmlx_impl(fn) -> bool:
+    """A gmlx implementation, not the copied upstream one under _vendor."""
+    mod = fn.__module__
+    return mod.startswith("gmlx.") and not mod.startswith("gmlx._vendor.")
 
 
 def _cfg():
@@ -124,13 +129,15 @@ def test_is_owned_language_model_reads_the_tree():
 def test_stock_tree_gets_full_patch_regime(_patch_state):
     stock = _stock()
     assert not qwen35_owned.is_owned_language_model(stock)
-    _install_stock_qwen35_verify_patches(stock)
+    gp._patch_gated_delta_fused_verify(stock)
+    gp._patch_batched_verify_sdpa()
+    qwen35_verify_fold.install_qwen35_verify_fold()
+    install_unified_ragged_plan()
+    gp._patch_bf16_verify_linear()
 
     # Every global a stock forward reads is now the gmlx implementation.
-    assert _L._target_verify_linear.__module__.startswith("gmlx")
-    assert _L._target_verify_left_padded_attention.__module__.startswith(
-        "gmlx"
-    )
+    assert _gmlx_impl(_L._target_verify_linear)
+    assert _gmlx_impl(_L._target_verify_left_padded_attention)
     assert _L.scaled_dot_product_attention.__module__ == (
         "gmlx.models.qwen35.verify_fold"
     )

@@ -53,6 +53,11 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov, "_headroom_and_ws",
                         lambda margin: (box["head"] - margin * box["ws"],
                                         box["ws"]))
+    # The machine behind the scripted working set, so the ceiling reads it
+    # and not the host.
+    monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
+        "max_recommended_working_set_size": box["ws"],
+        "memory_size": box["ws"] / 0.875})
     monkeypatch.setattr(gov.mx, "get_active_memory",
                         lambda: box["active"])
     monkeypatch.setattr(gov.mx, "get_peak_memory", lambda: box["peak"])
@@ -423,7 +428,7 @@ def test_kill_switch(monkeypatch):
 
 
 def test_row_failed_bridge_delivers_and_closes(monkeypatch):
-    from mlx_vlm.server import generation as gen_mod
+    from gmlx._vendor.mlx_vlm.server import generation as gen_mod
 
     from gmlx.serve.patches.row_failed import install_row_failed_bridge
 
@@ -522,7 +527,7 @@ def test_keepalive_sse_other_errors_still_raise():
 
 
 def test_apc_governor_bytes_and_evict():
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     from gmlx.cache.apc_manager import GmlxAPCManager
 
@@ -539,8 +544,7 @@ def test_apc_governor_bytes_and_evict():
     per_block = 2 * 4 * 8 * 4  # K+V float32
     entry_cache = types.SimpleNamespace(nbytes=64)
     mgr._exact_cache[1] = _apc.APCExactCacheEntry(
-        token_ids=(1,), extra_hash=0, prompt_cache=[entry_cache],
-        last_used=0.0)
+        token_ids=(1,), extra_hash=0, prompt_cache=[entry_cache])
     assert mgr.governor_bytes() == 2 * per_block + 64
 
     freed = mgr.governor_evict(1.0)

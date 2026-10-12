@@ -40,6 +40,8 @@ import logging
 import os
 import weakref
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _CAP_FLAG = "_kq_gguf_queue_cap"
@@ -80,7 +82,7 @@ def note_engine(rg, gen) -> None:
 def _all_engines() -> list | None:
     """Every resident engine, or None without a residency pool."""
     try:
-        pkg = importlib.import_module("mlx_vlm.server")
+        pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
         pool = getattr(pkg, "_kq_residency_pool", None)
         if pool is None or not hasattr(pool, "response_generators"):
             return None
@@ -94,7 +96,7 @@ def _waiting_depth_all() -> int:
     runtime's current engine without a pool. 0 with no engine at all."""
     rgs = _all_engines()
     if rgs is None:
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         rg = getattr(runtime, "response_generator", None)
         return _waiting_depth(rg) if rg is not None else 0
     return sum(_waiting_depth(rg) for rg in rgs)
@@ -110,7 +112,7 @@ def queue_cap_stats() -> dict:
            "last_reject_reason": _LAST_REJECT or None,
            "waiting": None, "cap": _cap(), "eta_s": None}
     try:
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         # No engine yet (nothing loaded): nothing can be waiting.
         depth = _waiting_depth_all()
         out["waiting"] = depth
@@ -130,7 +132,7 @@ def concurrency_stats() -> dict:
     out = {"decode_batch": _decode_concurrency(), "queue_cap": _cap(),
            "in_flight": None, "waiting": None}
     try:
-        pkg = importlib.import_module("mlx_vlm.server")
+        pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
         pool = getattr(pkg, "_kq_residency_pool", None)
         if pool is not None:
             # in_flight excludes process-lifetime holds (the primary
@@ -212,7 +214,7 @@ def check_queue_depth():
         cap = _cap()
         if cap <= 0:
             return None
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         # Pool-wide census (every resident engine), the same figure
         # /v1/metrics and readiness report; without a pool, the runtime's
         # engine. No engine at all: nothing can be waiting.
@@ -246,9 +248,9 @@ def _install_census() -> None:
 
     Pure passthrough wrapper; the engine swaps generators across idle
     gaps, so the ref re-publishes whenever the instance changes."""
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _PUB_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _PUB_FLAG):
         return
     _orig_next = _ar.BatchGenerator._next
 
@@ -260,7 +262,7 @@ def _install_census() -> None:
         return _orig_next(self, **kwargs)
 
     setattr(_published_next, _PUB_FLAG, True)
-    _ar.BatchGenerator._next = _published_next
+    _ar.BatchGenerator._next = link(_published_next, _orig_next)
 
 
 def install_queue_depth_cap() -> None:
@@ -275,7 +277,7 @@ def install_queue_depth_cap() -> None:
     _install_census()
     from gmlx.serve.patches._common import _CHAT_PATHS, _wrap_post_routes
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     paths = _CHAT_PATHS + ("/responses", "/v1/responses",
                            "/messages", "/v1/messages",
                            "/completions", "/v1/completions",

@@ -6,23 +6,23 @@ appears in [Supported architectures](../arch-coverage.md).
 
 ## Where the model class comes from
 
-Each GGUF architecture needs a model class for its `model_type`. The set
-of classes that mlx-lm and mlx-vlm ship changes with every release, so
-check the installed packages first. When one of them has the class, gmlx
-supplies only the tensor map and the config, and the architecture-table
-row's `backend` field names the package.
+Each GGUF architecture needs a model class for its `model_type`. Check
+the copies of mlx-lm and mlx-vlm in `gmlx/_vendor` first. When one of them
+has the class, gmlx supplies only the tensor map and the config, and the
+architecture-table row's `backend` field names the package.
 
-When neither package has the class, vendor the model into `gmlx/models/`
-and add its upstream import name to `OWNED_MODULES` in
-`gmlx/models/owned.py`. The same table holds multimodal models and tool
-parsers that mlx-vlm resolves by name. The module's `ensure_registered()`
-calls `owned.install`, which binds the name to the gmlx module even when an
-installed mlx-lm or mlx-vlm release ships a module of the same name. An
-upstream class built for the Hugging Face checkpoint does not match the
-GGUF tensor map and has no speculative hooks, so the gmlx module must always
-win. `tests/models/test_owned_modules.py` resolves every row through the
-upstream loader and fails when a name returns another module. A vendored
-model must match llama.cpp numerically, the same as any other.
+When neither package has the class, add the model to `gmlx/models/` and
+give its `model_type` a row in `gmlx/models/owned.py`: `OWNED_LM_MODELS`
+for a text model, `OWNED_VLM_MODELS` for a multimodal one. The vendored
+loaders look the type up there before their own model packages, so the
+gmlx class is the one that loads. An upstream class built for the Hugging
+Face checkpoint does not match the GGUF tensor map and has no speculative
+hooks, so the gmlx class must always win.
+`tests/load/test_owned_model_routing.py` resolves every row through the
+vendored loaders and fails when a type returns another class. A tool parser
+registers with `register_tool_parser` in `gmlx/upstream/tool_parsers.py`
+when its model loads. An owned model must match llama.cpp numerically, the
+same as any other.
 
 ## What the work involves
 
@@ -90,6 +90,28 @@ An architecture is done when all of the following pass.
 
 The config-synth fixture and the parity run are the required deliverables
 of a new-architecture pull request, beside the code.
+
+## KV cache copies at decode depth
+
+Serve builds decode step t+1 before step t has finished. Step t+1 appends
+to each layer's K and V while the attention of step t may still read them.
+When a command buffer that has not run yet still holds a layer's buffer,
+the slice update copies the whole buffer instead of writing in place. The
+output stays correct, but decode slows as the context grows.
+
+A deep model splits each step into many command buffers and does not hit
+this. A step that fits in a few command buffers does: a drafter or MTP
+head with a few layers and its own cache, a model of fewer than about 8
+layers, or an architecture whose step is a few large fused kernels.
+`qwen4exp` is such an architecture.
+
+To check, decode at 16k and at 128k tokens twice: once evaluating each
+step before building the next, and once pipelined as serve runs it.
+Compare `mx.get_peak_memory()` of the two. When the pipelined peak is
+higher by about one layer's K and V buffer, the appends copy. The fix is
+to store the cache in two segments, a base and a small tail that takes the
+decode appends, as `QSAKVCache` in `gmlx/models/qwen4_exp/model.py` does.
+Where it costs less, evaluate each step instead.
 
 ## Smoke commands
 

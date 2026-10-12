@@ -18,7 +18,7 @@ import pytest
 
 import mlx.core as mx  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
-from mlx_lm.utils import _get_classes  # noqa: E402
+from gmlx._vendor.mlx_lm.utils import _get_classes  # noqa: E402
 
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
 
@@ -69,8 +69,8 @@ def _meta_for(arch: str) -> dict:
 
 
 # model_type each arch must resolve to, for the instantiation sweep.
-DENSE_ARCHES = ["qwen2", "qwen3", "gemma", "gemma2", "gemma3", "phi3", "glm4",
-                "llama", "seed_oss", "smollm3", "granite"]
+DENSE_ARCHES = ["qwen2", "qwen3", "qwen3vl", "gemma", "gemma2", "gemma3", "phi3",
+                "glm4", "llama", "seed_oss", "smollm3", "granite"]
 
 
 @pytest.mark.parametrize("arch", DENSE_ARCHES)
@@ -104,6 +104,22 @@ def test_untied_when_output_weight_present():
     c = synthesize_config(_meta_for("qwen2"),
                           tensor_shapes={"output.weight": [64, VOCAB]})
     assert c["tie_word_embeddings"] is False
+
+
+def test_header_scan_vocab_is_the_token_count(tmp_path):
+    # A header scan seeks past a token array over its limit. The header-only
+    # synth (tool preflight, APC block size, serve capacity) then takes the
+    # token_embd rows.
+    from test_loader_api import _TOKENS, _mint_tiny_llama
+
+    from gmlx.commands.tool_preflight import synth_config_from_scans
+    from gmlx.load.headerscan import scan_gguf
+
+    p = str(tmp_path / "tiny-llama.gguf")
+    _mint_tiny_llama(p)
+    scan = scan_gguf(p, include_tensors=True, array_limit=8)
+    assert scan.skipped["tokenizer.ggml.tokens"] == len(_TOKENS)
+    assert synth_config_from_scans([scan])["vocab_size"] == len(_TOKENS)
 
 
 def test_seed_oss_head_dim_from_key_length():
@@ -272,20 +288,115 @@ def test_gemma_embedding_synth_omits_absent_encoder_fields():
     assert "attention_causal" not in c
 
 
-def test_gemma_embedding_synth_builds_mlx_embeddings_encoder():
-    # The strongest guard: the synthesized config must instantiate the
-    # mlx-embeddings encoder and run a tiny forward (dims mutually consistent),
-    # mirroring the loader's build_model gemma_embedding branch.
-    import importlib
+def test_gemma_embedding_synth_builds_the_gmlx_encoder():
+    # The strongest guard: the synthesized config must instantiate the gmlx
+    # encoder and run a tiny forward (dims mutually consistent), mirroring
+    # the loader's build_model gemma_embedding branch.
+    from gmlx.models.embedders import gemma_embedding as ge
 
     c = synthesize_config(_meta_gemma_embedding(), tensor_shapes={})
-    ge = importlib.import_module("mlx_embeddings.models.gemma3_text")
     model = ge.Model(ge.ModelArgs.from_dict(c))
     mx.eval(model.parameters())
     out = model(mx.array([[1, 2, 3]]), attention_mask=mx.ones((1, 3)))
     mx.eval(out.text_embeds)
     assert out.text_embeds.shape == (1, c["hidden_size"])
     assert len(model.dense) == 2                    # the 2-layer projection head
+
+
+def test_gemma_embedding_synth_dense_dims_from_shapes_or_keys():
+    # GGUF shapes are [in, out]: dense_2 widens the pooled vector to 4x,
+    # dense_3 narrows it back. The feat_out keys give the same widths when
+    # the shapes are absent.
+    shapes = {"dense_2.weight": (64, 256), "dense_3.weight": (256, 64)}
+    c = synthesize_config(_meta_gemma_embedding(), tensor_shapes=shapes)
+    assert c["dense_dims"] == [256, 64]
+    m = _meta_gemma_embedding()
+    m["gemma-embedding.dense_2_feat_out"] = 128
+    m["gemma-embedding.dense_3_feat_out"] = 32
+    c = synthesize_config(m, tensor_shapes={})
+    assert c["dense_dims"] == [128, 32]
+    assert "dense_dims" not in synthesize_config(
+        _meta_gemma_embedding(), tensor_shapes={})
+
+
+def _meta_gemma4_size(arch: str, *, layers, hidden, experts) -> dict:
+    """Gemma-4 metadata at a published checkpoint's layer count, width and
+    expert count, over tiny attention dims. Layer 5 is the first full one."""
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = layers
+    m[f"{arch}.embedding_length"] = hidden
+    m[f"{arch}.attention.key_length_swa"] = 16
+    m[f"{arch}.attention.shared_kv_layers"] = 0
+    m[f"{arch}.attention.sliding_window"] = 512
+    m[f"{arch}.attention.sliding_window_pattern"] = [
+        i % 6 != 5 for i in range(layers)]
+    if experts is not None:
+        m[f"{arch}.expert_count"] = experts
+        m[f"{arch}.expert_used_count"] = 8
+        m[f"{arch}.expert_feed_forward_length"] = 64
+    return m
+
+
+_GEMMA4_SIZES = [
+    # projector, layers, width, experts, HF use_bidirectional_attention
+    ("gemma4v", 30, 2816, 128, "vision"),    # 26B-A4B
+    ("gemma4v", 60, 5376, None, "vision"),   # 31B
+    ("gemma4v", 35, 1536, None, None),       # E2B
+    ("gemma4v", 42, 2560, None, None),       # E4B
+    ("gemma4uv", 48, 3840, None, "vision"),  # 12B
+    ("gemma4v", 30, 2048, None, "vision"),   # a gemma4v model at a new width
+]
+
+
+@pytest.mark.parametrize("proj, layers, hidden, experts, want", _GEMMA4_SIZES)
+def test_gemma4_image_attention_follows_the_projector_and_width(
+        proj, layers, hidden, experts, want):
+    # The VLM load sets use_bidirectional_attention as llama.cpp's mtmd
+    # does, which matches each published checkpoint's HF config.json.
+    from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig as Gemma4Text
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import TextConfig as UnifiedText
+
+    from gmlx.load.vlm import resolve_vlm_model_type, synthesize_vlm_config
+
+    m = _meta_gemma4_size("gemma4", layers=layers, hidden=hidden,
+                          experts=experts)
+    clip = {
+        "clip.vision.projector_type": proj,
+        "clip.vision.block_count": 1,
+        "clip.vision.embedding_length": 32,
+        "clip.vision.feed_forward_length": 64,
+        "clip.vision.attention.head_count": 2,
+        "clip.vision.patch_size": 16,
+        "clip.vision.image_size": 224,
+    }
+    model_type = resolve_vlm_model_type("gemma4", clip)
+    cfg = synthesize_vlm_config(model_type, m,
+                                {"blk.5.attn_v.weight": [16, 64]}, clip)
+    text = {"gemma4": Gemma4Text, "gemma4_unified": UnifiedText}[model_type]
+    built = text.from_dict(cfg["text_config"])
+    assert built.use_bidirectional_attention == want
+
+
+@pytest.mark.parametrize("proj, layers, hidden, experts, want", _GEMMA4_SIZES)
+def test_gemma4_text_only_load_sets_no_image_attention(
+        proj, layers, hidden, experts, want):
+    m = _meta_gemma4_size("gemma4", layers=layers, hidden=hidden,
+                          experts=experts)
+    c = synthesize_config(m, tensor_shapes={"blk.5.attn_v.weight": [16, 64]})
+    assert "use_bidirectional_attention" not in c
+
+
+def test_diffusion_gemma_image_attention_is_its_text_config_default():
+    # DiffusionGemma shares the Gemma-4 synth, which sets no key. The
+    # TextConfig it loads defaults to "vision".
+    from gmlx._vendor.mlx_vlm.models.diffusion_gemma.config import TextConfig
+
+    m = _meta_gemma4_size("diffusion-gemma", layers=30, hidden=2816,
+                          experts=128)
+    c = synthesize_config(m, tensor_shapes={"blk.5.attn_v.weight": [16, 64]})
+    assert "use_bidirectional_attention" not in c["text_config"]
+    built = TextConfig.from_dict(c["text_config"])
+    assert built.use_bidirectional_attention == "vision"
 
 
 def test_glm4_partial_rotary_and_attention_bias():
@@ -635,10 +746,8 @@ _HY_V3_SHAPES = {
 def test_hy_v3_synth_instantiates():
     # Sigmoid-gated MoE + selection-only expert bias + ungated shared expert
     # behind one leading dense layer; NextN block excluded from the trunk.
-    # The model class is the gmlx-vendored mlx-lm PR #1485 module,
-    # registered into mlx_lm.models exactly as the loader does it.
-    import gmlx.models.hy_v3.model as hy_v3_model
-    hy_v3_model.ensure_registered()
+    # The model class is the gmlx-vendored mlx-lm PR #1485 module, which
+    # the vendored loader resolves through gmlx.models.owned.
 
     c = synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
     assert c["model_type"] == "hy_v3"
@@ -673,8 +782,6 @@ def test_hy_v3_synth_instantiates():
 
 
 def test_hy_v3_sanitize_strips_nextn_block():
-    import gmlx.models.hy_v3.model as hy_v3_model
-    hy_v3_model.ensure_registered()
     c = synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
     Model, ModelArgs = _get_classes(c)
     model = Model(ModelArgs.from_dict(c))
@@ -1420,18 +1527,19 @@ def test_qwen3next_recurrent_layers_array_mismatch_rejected():
     assert c["full_attention_interval"] == 4
 
 
-def test_qwen3next_tiled_v_patch_excluded():
-    # qwen3next has asymmetric linear K/V heads (the tiled-V predicate's
-    # trigger) but its wire V order is HF-grouped - the qwen3.5 tiled fixup
-    # must NOT engage for it.
-    from gmlx.upstream.gdn_patches import _needs_tiled_v_patch
+def test_qwen3next_v_heads_are_not_tiled():
+    # qwen3next has asymmetric linear K/V heads, which the tiled-V predicate
+    # looks for, but its wire V order is grouped. The qwen3.5 tiled order
+    # must not apply to it.
+    from gmlx.upstream.gdn_patches import gguf_v_heads_tiled
     c = synthesize_config(_qwen3next_meta(), tensor_shapes={})
     assert c["linear_num_key_heads"] != c["linear_num_value_heads"]
-    assert _needs_tiled_v_patch(c) is False
-    # The qwen3.5 shape of the same config still triggers it.
-    assert _needs_tiled_v_patch({"model_type": "qwen3_5_moe",
-                                 "linear_num_key_heads": 2,
-                                 "linear_num_value_heads": 4}) is True
+    assert gguf_v_heads_tiled(c) is False
+    assert c["kv_head_layout"] == "grouped"
+    # The qwen3.5 shape of the same config is tiled.
+    assert gguf_v_heads_tiled({"model_type": "qwen3_5_moe",
+                               "linear_num_key_heads": 2,
+                               "linear_num_value_heads": 4}) is True
 
 
 def test_qwen3next_split_gdn_patch_forward_parity():
@@ -1984,7 +2092,44 @@ _QWEN4EXP_SHAPES = {
 }
 
 
-def test_qwen4exp_synth_instantiates():
+def _qwen4exp_trace(monkeypatch, m) -> dict:
+    """Record the last position of each decoder layer's output, each MoE
+    router's gates, and each QSA indexer's block scores and selection."""
+    rec: dict = {"layer": [], "gates": [], "qsa": []}
+    layer_call, moe_call, select = (m.DecoderLayer.__call__,
+                                    m.SparseMoeBlock.__call__,
+                                    m.QSAIndexer.select)
+
+    def layer(self, h, *a, **k):
+        y = layer_call(self, h, *a, **k)
+        rec["layer"].append(y[0, -1])
+        return y
+
+    def moe(self, x):
+        rec["gates"].append(
+            mx.softmax(self.gate(x), axis=-1, precise=True)[0, -1])
+        return moe_call(self, x)
+
+    def sel(self, x, ik_all, cache, offset, **k):
+        r = select(self, x, ik_all, cache, offset, **k)
+        if r is not None:
+            # A cached call passes the stream length and no raw keys.
+            key_len = k.get("key_len")
+            n = (ik_all.shape[1] if key_len is None else key_len) // self.ratio
+            blocks = (cache.finished_blocks(n, self.finish_blocks)
+                      if cache is not None
+                      else self.finish_blocks(ik_all[:, :n * self.ratio], 0))
+            rec["qsa"].append((self.scores(x, blocks, offset)[0, -1],
+                               r[0][0, -1]))
+        return r
+
+    monkeypatch.setattr(m.DecoderLayer, "__call__", layer)
+    monkeypatch.setattr(m.SparseMoeBlock, "__call__", moe)
+    monkeypatch.setattr(m.QSAIndexer, "select", sel)
+    return rec
+
+
+def test_qwen4exp_synth_instantiates(monkeypatch):
     # Qwen3.8-Flash-Next: qwen35 GDN hybrid + hyper-connections + QSA sparse
     # attention + PLE n-gram hash embeddings. A tiny prefill + decode through
     # all four mechanisms (the 12-token prefill crosses the 2-block sparse
@@ -1992,6 +2137,14 @@ def test_qwen4exp_synth_instantiates():
     # full recompute.
     import gmlx.models.qwen4_exp.model as qwen4_exp_model
     qwen4_exp_model.ensure_registered()
+    # On M5 the full forward's f32 GEMMs run at TF32 and the step's GEMVs
+    # are exact, so a router gate differs ~5e-5 between the two forwards.
+    # Random weights put two experts that close at the top-k edge for about
+    # one seed in 40. The step then routes to the other expert and the
+    # logits drift ~3e-2. This seed routes every layer by over 1e-2 and
+    # scores the QSA blocks apart. The test asserts both margins before it
+    # compares the paths.
+    mx.random.seed(17)
 
     c = synthesize_config(_qwen4exp_meta(), tensor_shapes=_QWEN4EXP_SHAPES)
     assert c["model_type"] == "qwen4_exp"
@@ -2025,14 +2178,29 @@ def test_qwen4exp_synth_instantiates():
     out = model(ids, cache=cache)
     mx.eval(out)
     assert out.shape == (1, 12, VOCAB)
+    trace = _qwen4exp_trace(monkeypatch, qwen4_exp_model)
     step = mx.array([[13]])
     out = model(step, cache=cache)
     mx.eval(out)
+    at_step = {k: list(v) for k, v in trace.items()}
+    for v in trace.values():
+        v.clear()
     full = model(mx.concatenate([ids, step], axis=1))
     mx.eval(full)
-    # Not 1e-4: on M5 the GPU arm's f32 GEMMs run at TF32 precision while
-    # the decode-step GEMVs are exact, so full-vs-step drifts ~5e-4 across
-    # the 4 layers (CPU passes 1e-4).
+    k = c["num_experts_per_tok"]
+    for g_step, g_full in zip(at_step["gates"], trace["gates"], strict=True):
+        top = mx.sort(g_step)[::-1]
+        assert (top[k - 1] - top[k]).item() > 1e-3, "near-tie router"
+        assert (sorted(mx.argsort(-g_step)[:k].tolist())
+                == sorted(mx.argsort(-g_full)[:k].tolist()))
+    (s_step, sel_step), (_s, sel_full) = at_step["qsa"] + trace["qsa"]
+    top = sorted(s_step.tolist(), reverse=True)
+    assert top[1] - top[2] > 0.05, "near-tie QSA blocks"
+    assert sorted(sel_step.tolist()) == sorted(sel_full.tolist())
+    # Not 1e-4: the TF32 full forward against the exact step drifts ~5e-4
+    # across the 4 layers (CPU passes 1e-4).
+    for h_step, h_full in zip(at_step["layer"], trace["layer"], strict=True):
+        assert mx.abs(h_full - h_step).max().item() < 2e-3
     assert mx.abs(full[0, -1] - out[0, -1]).max().item() < 2e-3
     assert cache[3].offset == 13 and cache[3].n_blocks == 3
 
@@ -2357,7 +2525,7 @@ def test_hunyuan_norm_topk_patch():
     # the first token, so pin the patch's exact semantics: stock output with
     # scores renormalized to sum to 1 over the selected top-k.
     from gmlx.load.loader import _patch_hunyuan_norm_topk
-    from mlx_lm.models.hunyuan import MoeBlock
+    from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
     c = synthesize_config(_hunyuan_meta(), tensor_shapes=_HUNYUAN_SHAPES)
     Model, ModelArgs = _get_classes(c)
@@ -2420,6 +2588,7 @@ def test_mistral3_without_yarn_factor_is_plain_rope():
 
 def test_mistral3_with_yarn_factor_keeps_yarn():
     m = _base_meta("mistral3")
+    m["mistral3.rope.scaling.type"] = "yarn"
     m["mistral3.rope.scaling.factor"] = 4.0
     m["mistral3.rope.scaling.original_context_length"] = 256
     c = synthesize_config(m, tensor_shapes={})
@@ -2428,10 +2597,93 @@ def test_mistral3_with_yarn_factor_keeps_yarn():
     assert rp["original_max_position_embeddings"] == 256
 
 
+@pytest.mark.parametrize("scaling_type", [None, "linear"])
+def test_mistral3_factor_under_a_linear_type_is_linear(scaling_type):
+    """llama.cpp reads a missing type as linear; a factor alone is not yarn."""
+    m = _base_meta("mistral3")
+    if scaling_type:
+        m["mistral3.rope.scaling.type"] = scaling_type
+    m["mistral3.rope.scaling.factor"] = 4.0
+    c = synthesize_config(m, tensor_shapes={})
+    rp = c["rope_parameters"]
+    assert rp["type"] == "linear" and rp["factor"] == 4.0
+
+
 def test_qwen3_rope_scaling_none_omitted():
     m = _base_meta("qwen3")
     m["qwen3.rope.scaling.type"] = "none"
     c = synthesize_config(m, tensor_shapes={})
+    assert "rope_scaling" not in c
+
+
+def _qwen3vl_meta() -> dict:
+    """A Qwen3-VL text header, shrunk: the qwen3vl key prefix, a rope base
+    that is not the qwen3 one, the four rotary axis widths, the deepstack
+    count, and no rope.dimension_count key."""
+    m = _base_meta("qwen3vl")
+    m["qwen3vl.rope.freq_base"] = 5000000.0
+    m["qwen3vl.rope.dimension_sections"] = [4, 2, 2, 0]
+    m["qwen3vl.n_deepstack_layers"] = 3
+    return m
+
+
+# Untied head and per-head qk-norms, as the Qwen3 dense layout has them.
+_QWEN3VL_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_q_norm.weight": [16],
+    "blk.0.attn_k_norm.weight": [16],
+}
+
+
+def test_qwen3vl_text_synth_reads_its_own_prefix():
+    c = synthesize_config(_qwen3vl_meta(), tensor_shapes=_QWEN3VL_SHAPES)
+    assert c["model_type"] == "qwen3"
+    assert c["hidden_size"] == 64
+    assert c["num_hidden_layers"] == 2
+    assert c["num_attention_heads"] == 4
+    assert c["num_key_value_heads"] == 2
+    assert c["intermediate_size"] == 128
+    assert c["head_dim"] == 16
+    assert c["max_position_embeddings"] == 1024
+    assert c["rms_norm_eps"] == 1e-6
+    assert c["vocab_size"] == VOCAB
+    assert c["tie_word_embeddings"] is False
+    # the base is the file's, not the qwen3 class default.
+    assert c["rope_theta"] == 5000000.0
+    # the text class has one rotary axis: the sections stay out of its
+    # config, and so does the deepstack count.
+    assert "rope_scaling" not in c
+    assert "mrope_section" not in c
+    assert "n_deepstack_layers" not in c
+
+
+def test_qwen3vl_text_synth_builds_the_qwen3_class():
+    from gmlx._vendor.mlx_lm.models import qwen3
+
+    config = synthesize_config(_qwen3vl_meta(), tensor_shapes=_QWEN3VL_SHAPES)
+    Model, ModelArgs = _get_classes(config)
+    assert Model is qwen3.Model
+    model = Model(ModelArgs.from_dict(config))
+    names = {k for k, _ in tree_flatten(model.parameters())}
+    assert "lm_head.weight" in names
+    assert "model.layers.0.self_attn.q_norm.weight" in names
+    out = model(mx.array([[1, 2, 3]]))
+    mx.eval(out)
+    assert out.shape == (1, 3, VOCAB)
+
+
+def test_qwen3vl_text_synth_does_not_read_the_qwen3_prefix():
+    # A header that carries its fields under qwen3.* is not a qwen3vl header.
+    m = {k.replace("qwen3vl.", "qwen3."): v for k, v in _qwen3vl_meta().items()}
+    m["general.architecture"] = "qwen3vl"
+    with pytest.raises(ValueError, match="qwen3vl.embedding_length"):
+        synthesize_config(m, tensor_shapes=_QWEN3VL_SHAPES)
+
+
+def test_qwen3vl_rope_scaling_none_omitted():
+    m = _qwen3vl_meta()
+    m["qwen3vl.rope.scaling.type"] = "none"
+    c = synthesize_config(m, tensor_shapes=_QWEN3VL_SHAPES)
     assert "rope_scaling" not in c
 
 
@@ -2457,9 +2709,6 @@ _MUSE_GLIMMER_SHAPES = {
 
 
 def test_muse_glimmer_synth_instantiates():
-    import gmlx.models.muse_glimmer.model as muse_glimmer_model
-    muse_glimmer_model.ensure_registered()
-
     c = synthesize_config(_muse_glimmer_meta(), tensor_shapes=_MUSE_GLIMMER_SHAPES)
     assert c["model_type"] == "muse_glimmer"
     assert c["num_hidden_layers"] == 4

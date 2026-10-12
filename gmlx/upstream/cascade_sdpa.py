@@ -20,17 +20,19 @@ Two pieces, both in this module:
   ``_gmlx_cascade`` with the per-row token bytes. The invariant is
   "keys[b, :, L_b : L_b + P] is interchangeable across rows", with L_b
   read live from cache.left_padding -- filter()'s uniform left-shift
-  preserves it, so retirement keeps the stamp. extend() (admission into a
-  live batch) re-derives the stamp from both sides' tokens: same-prefix
-  admission keeps cascading, a diverging row clears it; the _extend_cache
-  merge lift carries stamps across B=1-to-batch conversion. No APC mode
-  is required, so hybrid models (exact-snapshot APC) and APC-off serving
-  cascade too. B=1 batches are stamped -- inert until rows join.
+  preserves it. The owned BatchKVCache and BatchQuantizedKVCache carry
+  the stamp: filter() keeps the surviving rows' entries, so retirement
+  keeps the stamp, and extend() (admission into a live batch) re-derives
+  it from both sides' tokens: same-prefix admission keeps cascading, a
+  diverging row clears it. The _extend_cache merge lift carries stamps
+  across B=1-to-batch conversion. No APC mode is required, so hybrid
+  models (exact-snapshot APC) and APC-off serving cascade too. B=1
+  batches are stamped -- inert until rows join.
 
-* A decode route. Module-global scaled_dot_product_attention seams (the
-  gemma4_batched_sdpa pattern) claim stamped B>1 calls at decode width
-  (qL 1) and speculative-verify width (qL 2..8, end-aligned causal on the
-  private slab) and issue the fused op on zero-copy views of the live
+* A decode route. Module-global scaled_dot_product_attention seams, and
+  the owned Gemma 4 attention dispatch, claim stamped B>1 calls at decode
+  width (qL 1) and speculative-verify width (qL 2..8, end-aligned causal on
+  the private slab) and issue the fused op on zero-copy views of the live
   cache buffer: k_shared is row 0's prefix copy, the private slab starts
   at C0 = min_b(L_b + P), and starts[b] = L_b + P - C0 masks each row's
   own prefix bytes inside the slab. Anything else falls through to the
@@ -45,10 +47,13 @@ fp16/bf16 only today.
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import mlx.core as mx
 
+from gmlx.cache.kv_cache import _cascade_lcp, _cascade_merge
 from gmlx.envflags import env_bool, env_int
+from gmlx.upstream.patching import wrapped_with
 
 _installed_route = False
 _installed_stamp = False
@@ -59,12 +64,10 @@ _STAMPS = [0]
 _SEEN_B = set()
 
 _MODULES = (
-    ("mlx_lm.models", "llama"),
-    ("mlx_lm.models", "gemma4_text"),
-    ("mlx_vlm.models.gemma4", "language"),
+    ("gmlx._vendor.mlx_lm.models", "llama"),
     # text qwen3.5/3.6 (dense + MoE): the attention call site lives in
     # qwen3_next; qwen3_5/qwen3_5_moe import its Attention class
-    ("mlx_lm.models", "qwen3_next"),
+    ("gmlx._vendor.mlx_lm.models", "qwen3_next"),
 )
 
 _HD_OK = (64, 128, 256, 512)
@@ -89,9 +92,8 @@ def _pads(cache):
     cached = getattr(cache, "_gmlx_casc_pads", None)
     if cached is not None and cached[0] is lp:
         return cached[1]
-    pads = [int(x) for x in lp.tolist()] if isinstance(lp, mx.array) else [
-        int(x) for x in lp
-    ]
+    pads = ([int(x) for x in cast(list, lp.tolist())]
+            if isinstance(lp, mx.array) else [int(x) for x in lp])
     cache._gmlx_casc_pads = (lp, pads)
     return pads
 
@@ -144,6 +146,12 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         # address; the kvarn SDPA route owns these calls.
         _debug_decline("kvarn", cache=type(cache).__name__)
         return None
+    if hasattr(cache, "max_size"):
+        # Sliding-window caches trim and rotate the prefix out of the buffer
+        # and move left_padding in place, which the slab geometry and the
+        # identity-keyed pad memo cannot follow.
+        _debug_decline("rotating", cache=type(cache).__name__)
+        return None
     info = getattr(cache, "_gmlx_cascade", None)
     if info is None:
         _debug_decline("no-stamp", B=queries.shape[0],
@@ -169,8 +177,8 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         _debug_decline("quant-config", bits=getattr(cache, "bits", None),
                        gs=getattr(cache, "group_size", None), hd=hd)
         return None
-    ka = keys[0] if quant else keys
-    va = values[0] if quant else values
+    ka = cast(mx.array, keys[0] if quant else keys)
+    va = cast(mx.array, values[0] if quant else values)
     kv_last = hd // 4 if quant else hd
     dt_ok = (
         (ka.dtype == mx.uint32 and keys[1].dtype == queries.dtype)
@@ -248,10 +256,10 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         else:
             out = sdpa_decode_gqa_cascade(
                 queries,
-                keys[0:1, :, l0:l0 + P],
-                values[0:1, :, l0:l0 + P],
-                keys[:, :, c0:],
-                values[:, :, c0:],
+                ka[0:1, :, l0:l0 + P],
+                va[0:1, :, l0:l0 + P],
+                ka[:, :, c0:],
+                va[:, :, c0:],
                 scale,
                 starts=starts,
             )
@@ -278,8 +286,8 @@ def _make_route(orig):
         return orig(queries, keys, values, cache=cache, scale=scale,
                     mask=mask, sinks=sinks)
 
-    _cascade_sdpa._gmlx_orig = orig
-    _cascade_sdpa._gmlx_cascade_route = True
+    setattr(_cascade_sdpa, "_gmlx_orig", orig)
+    setattr(_cascade_sdpa, "_gmlx_cascade_route", True)
     return _cascade_sdpa
 
 
@@ -303,10 +311,10 @@ def install_cascade_sdpa() -> bool:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None:
             continue
-        if getattr(cur, "_gmlx_cascade_route", False):
+        if wrapped_with(cur, "_gmlx_cascade_route"):
             patched += 1
             continue
-        mod.scaled_dot_product_attention = _make_route(cur)
+        setattr(mod, "scaled_dot_product_attention", _make_route(cur))
         patched += 1
     if not patched:
         return False
@@ -336,73 +344,6 @@ def _row_bytes(ids):
     return array.array("i", [int(t) for t in ids]).tobytes()
 
 
-def _lcp_rows(rows):
-    """Common-prefix token count across packed rows (memcmp-speed)."""
-    import os
-
-    if not rows or any(not r for r in rows):
-        return 0
-    return len(os.path.commonprefix(list(rows))) // 4
-
-
-def _merge_stamps(a, b):
-    """Stamp for a batch formed by extend(): self rows then other rows
-    (BatchKVCache.extend row order). None when nothing survives."""
-    if a is None or b is None:
-        return None
-    P = _lcp_rows([a["tok"][0][: 4 * a["P"]], b["tok"][0][: 4 * b["P"]]])
-    if P <= 0:
-        return None
-    return {"P": P, "tok": a["tok"] + b["tok"]}
-
-
-def _merge_stamp_on_extend(cache):
-    """Instance-level extend wrapper: admission re-derives the stamp from
-    both sides' token bytes (an unstamped side clears it)."""
-    fn = getattr(cache, "extend", None)
-    if fn is None or getattr(fn, "_gmlx_cascade_merge", False):
-        return
-    orig = fn
-
-    def _extend(other, _c=cache, _orig=orig):
-        merged = _merge_stamps(
-            _c.__dict__.get("_gmlx_cascade"),
-            getattr(other, "_gmlx_cascade", None))
-        out = _orig(other)
-        if merged is None:
-            _c.__dict__.pop("_gmlx_cascade", None)
-        else:
-            _c._gmlx_cascade = merged
-        return out
-
-    _extend._gmlx_cascade_merge = True
-    cache.extend = _extend
-
-
-def _mask_stamp_on_filter(cache):
-    """Instance-level filter wrapper: retired rows leave the stamp; the
-    shared prefix stays valid for every surviving row."""
-    fn = getattr(cache, "filter", None)
-    if fn is None or getattr(fn, "_gmlx_cascade_filter", False):
-        return
-    orig = fn
-
-    def _filter(keep, *a, _c=cache, _orig=orig, **kw):
-        info = _c.__dict__.get("_gmlx_cascade")
-        out = _orig(keep, *a, **kw)
-        if info is not None:
-            ks = keep.tolist() if hasattr(keep, "tolist") else list(keep)
-            tok = tuple(t for t, k in zip(info["tok"], ks) if k)
-            if tok:
-                _c._gmlx_cascade = {"P": info["P"], "tok": tok}
-            else:
-                _c.__dict__.pop("_gmlx_cascade", None)
-        return out
-
-    _filter._gmlx_cascade_filter = True
-    cache.filter = _filter
-
-
 def carry_stamp(src, dst):
     """Copy a live cascade stamp from one cache object to another.
 
@@ -413,8 +354,6 @@ def carry_stamp(src, dst):
     if st is None or dst is None:
         return
     dst._gmlx_cascade = st
-    _merge_stamp_on_extend(dst)
-    _mask_stamp_on_filter(dst)
 
 
 _KVARN_STAMP_NOTED = [False]
@@ -429,14 +368,12 @@ def _stamp_caches(caches, rows):
             _KVARN_STAMP_NOTED[0] = True
             _log.info("cascade decode inactive under kvarn KV")
         return False
-    P = _lcp_rows(rows)
+    P = _cascade_lcp(rows)
     if P <= 0:
         return False
     tok = tuple(rows)
     for c in caches:
         c._gmlx_cascade = {"P": P, "tok": tok}
-        _merge_stamp_on_extend(c)
-        _mask_stamp_on_filter(c)
     if _STAMPS[0] == 0:
         import sys
 
@@ -502,8 +439,8 @@ def _make_stamped_ppb_init(orig):
 
                 traceback.print_exc()
 
-    _init._gmlx_orig = orig
-    _init._gmlx_cascade_stamp = True
+    setattr(_init, "_gmlx_orig", orig)
+    setattr(_init, "_gmlx_cascade_stamp", True)
     return _init
 
 
@@ -519,17 +456,15 @@ def _make_stamped_extend_cache(orig):
         ]
         out = orig(a, b)
         for oc, (sa, sb) in zip(out, stamps):
-            merged = _merge_stamps(sa, sb)
+            merged = _cascade_merge(sa, sb)
             if merged is None:
                 oc.__dict__.pop("_gmlx_cascade", None)
             else:
                 oc._gmlx_cascade = merged
-                _merge_stamp_on_extend(oc)
-                _mask_stamp_on_filter(oc)
         return out
 
-    _extend_cache._gmlx_orig = orig
-    _extend_cache._gmlx_cascade_stamp = True
+    setattr(_extend_cache, "_gmlx_orig", orig)
+    setattr(_extend_cache, "_gmlx_cascade_stamp", True)
     return _extend_cache
 
 
@@ -545,16 +480,16 @@ def install_cascade_stamp() -> bool:
     if _installed_stamp:
         return True
     try:
-        from mlx_vlm.generate import ar
+        from gmlx._vendor.mlx_vlm.generate import ar
     except ImportError:
         return False
     ppb = getattr(ar, "PromptProcessingBatch", None)
     ext = getattr(ar, "_extend_cache", None)
     if ppb is None or ext is None:
         return False
-    if not getattr(ppb.__init__, "_gmlx_cascade_stamp", False):
+    if not wrapped_with(ppb.__init__, "_gmlx_cascade_stamp"):
         ppb.__init__ = _make_stamped_ppb_init(ppb.__init__)
-    if not getattr(ext, "_gmlx_cascade_stamp", False):
+    if not wrapped_with(ext, "_gmlx_cascade_stamp"):
         ar._extend_cache = _make_stamped_extend_cache(ext)
     _installed_stamp = True
     return True

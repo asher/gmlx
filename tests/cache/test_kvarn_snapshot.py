@@ -1,5 +1,5 @@
 """kvarn arms in prefix_cache snapshots and cache_snapshot clones: tag
-round trip, no-alias pins, clone-twin equality, ckpt-tier decline."""
+round trip, no-alias pins, faithful clone equality, ckpt-tier decline."""
 
 from __future__ import annotations
 
@@ -56,15 +56,16 @@ def test_prefix_restore_does_not_alias_stored_entry():
 
 
 @needs_kvarn_ops
-def test_clone_lm_twin_arm():
-    from gmlx.cache.snapshot import _clone_lm_twin
+def test_clone_row_faithful_arm():
+    from gmlx.cache.snapshot import _clone_row
 
     live = filled(300, tail=256)
     targets = []
-    twin = _clone_lm_twin(live, targets)
-    assert type(twin) is KVarNKVCache
-    assert targets
+    twin = _clone_row(live, rot_canonical=False, eval_targets=targets)
+    # The copied state waits in targets for the caller's eval.
+    assert len(targets) == len(live.state)
     mx.eval(targets)
+    assert type(twin) is KVarNKVCache
     live.update_and_fetch(*tokens(50, seed=9))
     _assert_same_content(twin, filled(300, tail=256))
 
@@ -73,7 +74,7 @@ def test_clone_lm_twin_arm():
 def test_ckpt_layout_tags_filled_kvarn():
     from gmlx.cache.snapshot import ckpt_layout
 
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
     assert ckpt_layout([filled(140, tail=256), RotatingKVCache(max_size=64)]) == \
         ["kvarn:6:6:256", "rot:64:0"]

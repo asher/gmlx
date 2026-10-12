@@ -18,8 +18,8 @@ import mlx.core as mx
 import pytest
 
 import gmlx.upstream.dsv32_patches as dsv32_patches
-from mlx_lm.models.deepseek_v32 import DeepseekV32Attention
-from mlx_lm.models.glm_moe_dsa import Model, ModelArgs
+from gmlx._vendor.mlx_lm.models.deepseek_v32 import DeepseekV32Attention
+from gmlx._vendor.mlx_lm.models.glm_moe_dsa import Model, ModelArgs
 
 
 @pytest.fixture(autouse=True)

@@ -35,9 +35,10 @@ import threading
 from typing import Any, Callable, Optional
 
 import mlx.core as mx
-from mlx_vlm.server import generation as _generation
+from gmlx._vendor.mlx_vlm.server import generation as _generation
 
 from gmlx.systemone.reads import Cancelled
+from gmlx.upstream.patching import wrapped_with
 
 _JOB_KEY = "_kq_engine_job"
 _STEP_JOB_KEY = "_kq_engine_step_job"
@@ -120,15 +121,15 @@ def install_engine_jobs() -> None:
 def _install_diffusion_jobs() -> None:
     cls = _generation.ResponseGenerator
     original = cls._generate_diffusion
-    if getattr(original, _INSTALLED_FLAG, False):
+    if wrapped_with(original, _INSTALLED_FLAG):
         return
 
     def _generate_diffusion(self, uid, rqueue, raw_inputs, args, cancelled,
-                            log_state=None):
+                            log_state=None, apc_semantic_hash=None):
         entry = raw_inputs.get(_JOB_KEY) if isinstance(raw_inputs, dict) else None
         if entry is None:
             return original(self, uid, rqueue, raw_inputs, args, cancelled,
-                            log_state)
+                            log_state, apc_semantic_hash=apc_semantic_hash)
         job, stop = entry
 
         def should_stop() -> bool:
@@ -198,7 +199,7 @@ def _step_scope(model):
     cb_phase.flip("prefill")
     wired: Any = contextlib.nullcontext()
     if model is not None and mx.default_device() == mx.gpu and mx.metal.is_available():
-        wired = importlib.import_module("mlx_lm.generate").wired_limit(model)
+        wired = importlib.import_module("gmlx._vendor.mlx_lm.generate").wired_limit(model)
     try:
         with wired:
             yield
@@ -248,7 +249,7 @@ def _advance(rg, run: _StepJob) -> bool:
 def _install_step_jobs() -> None:
     cls = _generation.ResponseGenerator
     original = cls._collect_pending_requests
-    if getattr(original, _INSTALLED_FLAG, False):
+    if wrapped_with(original, _INSTALLED_FLAG):
         return
     from gmlx.gen.diffusion import is_diffusion_model
 

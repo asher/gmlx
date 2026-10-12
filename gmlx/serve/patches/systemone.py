@@ -149,7 +149,7 @@ def _prefixes(engine_rg, reader, scales, tenant: str | None = None):
 def _tenant(http_request: Request) -> str | None:
     """The APC tenant of a request, read as the chat routes read it. A
     launch session socket sets it, so a session's prefixes stay its own."""
-    return importlib.import_module("mlx_vlm.server.app")._read_tenant_id(http_request)
+    return importlib.import_module("gmlx._vendor.mlx_vlm.server.app")._read_tenant_id(http_request)
 
 
 def _rows_scope(scales):
@@ -218,7 +218,7 @@ def _carried_canvases(schema, resolver) -> int:
 def _admit(rg, rt, tokens, schema) -> int:
     """Check the largest prompt the decision can build against the memory
     and context budgets. Returns its token count."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     from gmlx.serve.mem_preflight import preflight_prompt_memory
 
     resolver = rt.resolver
@@ -240,7 +240,7 @@ def _admit_letters(rg, tokens, texts: list[str], extra: int) -> int:
     """Tokenize ``texts`` and check the longest against the memory and
     context budgets, with ``extra`` tokens of room past it. Returns its
     token count."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     from gmlx.serve.mem_preflight import preflight_prompt_memory
 
     longest = max(texts, key=lambda t: len(tokens.ids(t)))
@@ -256,7 +256,7 @@ def _resolve_engine(field, profile, cfg, runtime):
     model_str)``. The caller releases ``hold``."""
     from gmlx.serve.residency import _http_from_resolver_error
 
-    app_mod = importlib.import_module("mlx_vlm.server.app")
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     # The residency seam resolves the model string with the body profile
     # from this context variable.
     token = serving.set_request_profile(profile)
@@ -306,7 +306,7 @@ def make_systemone_endpoint(installed):
         cfg = _settings(installed)
         limits = Limits(max_questions=cfg.max_questions,
                         max_samples=cfg.max_samples)
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         shown = {"model": ""}
         runtime.metrics.begin_request(endpoint=_ENDPOINT, model="", stream=False)
 
@@ -401,7 +401,7 @@ def make_systemone_endpoint(installed):
             from gmlx.gen.diffusion import is_diffusion_model
             from gmlx.serve.engine_jobs import run_on_engine
 
-            gen = importlib.import_module("mlx_vlm.server.generation")
+            gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             rg, hold, spec, model_str = _resolve_engine(
                 body.get("model"), profile, cfg, runtime)
             try:
@@ -435,7 +435,7 @@ def make_systemone_endpoint(installed):
         except Exception as e:  # noqa: BLE001 - mapped to a status below
             from gmlx.serve.engine_jobs import JobCancelled, JobTimeout
 
-            gen = importlib.import_module("mlx_vlm.server.generation")
+            gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             if isinstance(e, JobCancelled):
                 _record_failure(runtime, shown["model"], "client disconnected")
                 return Response(status_code=499)
@@ -464,7 +464,7 @@ def make_systemone_endpoint(installed):
         _log.info("systemone: %s reads=%d %.0fms%s", log_labels(result["answers"]),
                   diagnostics["timing"]["reads"], diagnostics["timing"]["total_ms"],
                   " thought=auto" if auto.get("thought") else "")
-        gen = importlib.import_module("mlx_vlm.server.generation")
+        gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
         try:
             runtime.metrics.record_success(gen._build_metrics_envelope(
                 endpoint=_ENDPOINT, model=resolved, stream=False,
@@ -489,7 +489,7 @@ def make_prewarm_endpoint(installed):
     async def prewarm_endpoint(http_request: Request):
         started = time.perf_counter()
         cfg = _settings(installed)
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
         def fail(status: int, err_type: str, message: str) -> JSONResponse:
             return JSONResponse(status_code=status, content=_error_content(
@@ -516,7 +516,7 @@ def make_prewarm_endpoint(installed):
             from gmlx.gen.diffusion import is_diffusion_model
             from gmlx.serve.engine_jobs import run_on_engine
 
-            gen = importlib.import_module("mlx_vlm.server.generation")
+            gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             rg, hold, spec, model_str = _resolve_engine(
                 body.get("model"), profile, cfg, runtime)
             try:
@@ -554,7 +554,7 @@ def make_prewarm_endpoint(installed):
         except Exception as e:  # noqa: BLE001 - mapped to a status below
             from gmlx.serve.engine_jobs import JobCancelled, JobTimeout
 
-            gen = importlib.import_module("mlx_vlm.server.generation")
+            gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             if isinstance(e, JobCancelled):
                 return Response(status_code=499)
             if isinstance(e, JobTimeout):
@@ -588,7 +588,7 @@ def install_systemone_route(cfg) -> None:
     """Register ``POST /v1/systemone`` and ``POST /v1/prewarm`` (and the
     paths without ``/v1``). Install before the load-offload,
     profile-capture and queue-cap wrappers so they wrap them."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, *SYSTEMONE_PATHS, *PREWARM_PATHS)
     for paths, endpoint in ((SYSTEMONE_PATHS, make_systemone_endpoint(cfg)),
                             (PREWARM_PATHS, make_prewarm_endpoint(cfg))):

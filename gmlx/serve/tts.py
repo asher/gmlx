@@ -248,15 +248,15 @@ def _prompt_voices(repo: str) -> list[str]:
     model's code holds."""
     import huggingface_hub as hf
 
-    from .hf_cache import network_fetch_allowed
+    from .hf_cache import cached_snapshot, network_fetch_allowed
 
     try:
         with network_fetch_allowed():
-            folder = hf.snapshot_download(repo, allow_patterns=["prompts/*"])
+            folder = cached_snapshot(repo, hf=hf, allow_patterns=["prompts/*"])
     except Exception:
         try:
-            folder = hf.snapshot_download(repo, allow_patterns=["prompts/*"],
-                                          local_files_only=True)
+            folder = cached_snapshot(repo, hf=hf, allow_patterns=["prompts/*"],
+                                     local_files_only=True)
         except Exception:
             return []
     prompts = os.path.join(folder, "prompts")
@@ -347,8 +347,8 @@ def available_voices(model_path: str) -> list:
     local = model_path if os.path.isdir(model_path) else None
     if local is None:
         try:
-            from huggingface_hub import snapshot_download
-            local = snapshot_download(model_path, local_files_only=True)
+            from .hf_cache import cached_snapshot
+            local = cached_snapshot(model_path, local_files_only=True)
         except Exception:                 # noqa: BLE001 - not cached / no hub
             local = None
     if local:

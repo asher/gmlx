@@ -13,9 +13,12 @@ import pytest
 
 from gguf import quants
 from gguf.constants import GGMLQuantizationType as GT
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.load.modules as modules
+
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
 
 DIM, HID, E = 256, 256, 8
 

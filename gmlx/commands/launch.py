@@ -206,6 +206,13 @@ def _help_epilog(client: str | None, launch_cfg=None) -> str:
                 f"container.\n  Image: {source}\n  Command: {command}\n"
                 f"The custom agents page covers these settings:\n"
                 f"  {DOCS_URL}launch-agents.html\n\n{common}")
+    if client == "comfyui":
+        return ("ComfyUI is a separate program, and the gmlx node pack runs its image "
+                "models on the gmlx server. The launch puts the pack into ComfyUI first. "
+                "--comfyui-dir names the ComfyUI folder (the one used last, else "
+                f"{_COMFYUI_HOME}, else the ComfyUI found), whose own Python runs it.\n"
+                f"The ComfyUI guide covers the pack:\n  {DOCS_URL}comfyui.html\n\n"
+                f"{common}")
     label = CLIENT_INSTALL[client][1]
     return (f"{label} is a separate program. {install_advice(client)}\n"
             f"The launch guide covers {label}:\n"
@@ -237,7 +244,10 @@ def _named_client(ap: argparse.ArgumentParser, argv: list, agents=()) -> str | N
 def _find_binary(client: str, a):
     """``shutil.which`` + the standard not-on-PATH refusal shared by every
     client (skipped under --config-only, which only writes the config). In
-    container mode the client runs in the image, so the bare name stands."""
+    container mode the client runs in the image, so the bare name stands.
+    ComfyUI runs on the interpreter of its own folder."""
+    if client == "comfyui":
+        return _comfyui_prepare(a)[1]
     name, label = CLIENT_INSTALL[client][:2]
     if getattr(a, "container_mode", False):
         return name
@@ -494,13 +504,36 @@ def _pick_default(models: list, requested: str | None,
             raise LaunchError(f"{origin} {requested} is not a model the server offers. "
                               f"It offers {', '.join(sorted(ids))}.")
         return requested
-    for m in models:
+    for m in chat_models(models):
         if m.get("default"):
             return m["id"]
     return None
 
 
-_SERVICE_MARKERS = ("stt", "tts", "embeddings", "rerank")
+# /v1/models entries that answer a route of their own and not chat: the
+# audio, embedding and rerank services, and the image models.
+_SERVICE_MARKERS = ("stt", "tts", "embeddings", "rerank", "image")
+
+
+def image_models(models: list) -> list:
+    """The ``/v1/models`` entries of image models."""
+    return [m for m in models if m.get("image")]
+
+
+def default_image_model(models: list, requested: str | None = None) -> str | None:
+    """The image model a client gets: ``--model`` when it names one, else the
+    one the server marks as its image default, else the only one served."""
+    images = image_models(models)
+    if requested:
+        if requested not in {m["id"] for m in images}:
+            raise LaunchError(f"--model {requested} is not an image model the server "
+                              "offers. It offers "
+                              f"{', '.join(sorted(m['id'] for m in images)) or 'none'}.")
+        return requested
+    marked = [m["id"] for m in images if m.get("default")]
+    if marked:
+        return marked[0]
+    return images[0]["id"] if len(images) == 1 else None
 
 
 def chat_models(models: list) -> list:
@@ -1253,6 +1286,30 @@ def _launch_served(a) -> tuple[str | None, dict] | None:
     return _served_config(a.host, a.port)
 
 
+def _image_size(a, image: str | None) -> str:
+    """The ``defaults.size`` of the image model ``image`` in the config of
+    the server the launch uses, else in the first default config, else
+    1024x1024."""
+    import gmlx.config as config
+
+    size = None
+    if image:
+        served = _launch_served(a)
+        if served is not None and served[0] is not None:
+            entry = (served[1].get("image_models") or {}).get(image)
+            if isinstance(entry, dict) and isinstance(entry.get("defaults"),
+                                                      dict):
+                size = entry["defaults"].get("size")
+        else:
+            cfg, _ = _discover_config()
+            if cfg is not None and image in cfg.image_models:
+                size = cfg.image_models[image].defaults.get("size")
+    try:
+        return config._image_size("size", size) if size else "1024x1024"
+    except config.ConfigError:
+        return "1024x1024"
+
+
 def _launch_claude_code(a, *, exec_fn) -> int:
     binary = _find_binary("claude-code", a)
     base_url, models, default_model = _probe_target(a)
@@ -1441,7 +1498,10 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
                          api_key: str | None = None,
                          port: int = _OPEN_WEBUI_PORT, data_dir: str,
                          stt: bool = False, tts: bool = False,
-                         rerank: bool = False, origins: str | None = None) -> dict:
+                         rerank: bool = False, origins: str | None = None,
+                         image_model: str | None = None,
+                         image_edit: bool = False,
+                         image_size: str = "1024x1024") -> dict:
     """Open WebUI backend settings as env-var pairs (it has no config file). Points its
     single OpenAI endpoint at the gmlx server, disables the Ollama probe, pins its
     own port + an on-disk DATA_DIR, preselects the default model when known, and routes
@@ -1449,7 +1509,10 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
     engines at the server's ``/v1/audio/*``, and ``rerank`` routes its RAG reranker at
     the server's ``/v1/rerank`` - set each only when the server actually advertises that
     capability (see :func:`_launch_open_webui`), so a chat-only server doesn't break
-    Open WebUI's built-in browser TTS / local reranker. ``origins`` lists the
+    Open WebUI's built-in browser TTS / local reranker. ``image_model`` turns on
+    image generation through the server's ``/v1/images/generations`` with that
+    model at ``image_size``, and ``image_edit`` image edits through
+    ``/v1/images/edits``, for a model whose ``/v1/models`` entry says ``edit``. ``origins`` lists the
     addresses of Open WebUI's own pages, split by ``;``. Without that list, Open
     WebUI lets every other page read its answers with the sign-in cookie and
     send it JSON calls, such as one that makes a Function, which runs Python.
@@ -1501,6 +1564,23 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
             "RAG_RERANKING_MODEL": "reranker",
             "ENABLE_RAG_HYBRID_SEARCH": "true",
         })
+    if image_model:
+        pairs.update({
+            "ENABLE_IMAGE_GENERATION": "true",       # the image button in chat
+            "IMAGE_GENERATION_ENGINE": "openai",     # -> /v1/images/generations
+            "IMAGES_OPENAI_API_BASE_URL": base_url,
+            "IMAGES_OPENAI_API_KEY": key,
+            "IMAGE_GENERATION_MODEL": image_model,
+            "IMAGE_SIZE": image_size,
+        })
+        if image_edit:
+            pairs.update({
+                "ENABLE_IMAGE_EDIT": "true",         # edit an image in chat
+                "IMAGE_EDIT_ENGINE": "openai",       # -> /v1/images/edits
+                "IMAGES_EDIT_OPENAI_API_BASE_URL": base_url,
+                "IMAGES_EDIT_OPENAI_API_KEY": key,
+                "IMAGE_EDIT_MODEL": image_model,
+            })
     if default_model:
         pairs["DEFAULT_MODELS"] = default_model
     if origins:
@@ -1517,6 +1597,7 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     stt = any(m.get("stt") for m in models)
     tts = any(m.get("tts") for m in models)
     rerank = any(m.get("rerank") for m in models)
+    image = default_image_model(models)
 
     # In container mode, the session took the Mac port of the project.
     webui_port = (a.container_web_port if getattr(a, "container_mode", False)
@@ -1535,7 +1616,11 @@ def _launch_open_webui(a, *, exec_fn) -> int:
                    or f"http://localhost:{webui_port};http://127.0.0.1:{webui_port}")
     pairs = build_open_webui_env(base_url, default_model=default_model,
                                  api_key=_client_key(a), port=webui_port, data_dir=data_dir,
-                                 stt=stt, tts=tts, rerank=rerank, origins=origins)
+                                 stt=stt, tts=tts, rerank=rerank, origins=origins,
+                                 image_model=image,
+                                 image_edit=any(m.get("edit") for m in models
+                                                if m.get("id") == image),
+                                 image_size=_image_size(a, image))
     if tts and os.environ.get("AUDIO_TTS_VOICE"):
         # A voice the user exported wins over the Kokoro default.
         pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]
@@ -1543,7 +1628,8 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     audio = [name for name, on in (("STT", stt), ("TTS", tts)) if on]
     summary = _summary("open-webui", base_url, models, default_model,
                        extra=((f", audio {'+'.join(audio)}" if audio else "")
-                              + (", rerank" if rerank else "")))
+                              + (", rerank" if rerank else "")
+                              + (f", images {image}" if image else "")))
     # A login can be turned off only before the first account exists, which
     # a new data folder promises.
     fresh = not _exists(Path(data_dir))
@@ -1574,6 +1660,142 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     return _finish(a, binary, argv, pairs,
                    drop=("OPENAI_API_BASE_URLS", "OPENAI_API_KEYS"),
                    exec_fn=exec_fn)
+
+
+# ComfyUI, with the gmlx node pack. ComfyUI is a folder with its own Python
+# environment, so the launch runs main.py on that interpreter and never
+# gmlx's. It runs on the Mac only, beside the server. Before the server
+# starts, the launch runs the install step of `gmlx comfyui install` on the
+# folder, which refuses a ComfyUI older than the pack needs, puts the current
+# pack into it and remembers the folder.
+_COMFYUI_HOME = "~/ComfyUI"
+_COMFYUI_PORT = 8188
+_COMFYUI_PYTHONS = (".venv/bin/python", "venv/bin/python", ".venv/bin/python3",
+                    "venv/bin/python3")
+HOST_ONLY = frozenset({"comfyui"})
+
+
+def _comfyui_dir(a) -> Path:
+    """--comfyui-dir, else the folder that launch or install used last, else
+    ~/ComfyUI."""
+    given = getattr(a, "comfyui_dir", None)
+    if given:
+        return Path(os.path.abspath(os.path.expanduser(given)))
+    from .comfyui import remembered_dir
+
+    return remembered_dir() or Path(os.path.expanduser(_COMFYUI_HOME))
+
+
+def _comfyui_target(a):
+    """The ComfyUI the launch runs: the folder _comfyui_dir names when it
+    holds main.py, else, with no --comfyui-dir, the one ComfyUI found. No
+    ComfyUI, or a folder that is not one, is a client that is not there."""
+    from . import comfyui
+
+    d = _comfyui_dir(a)
+    given = getattr(a, "comfyui_dir", None)
+    try:
+        if (d / "main.py").is_file() or given:
+            return comfyui.target_for_dir(d)
+    except comfyui.ComfyError as e:
+        raise LaunchError(str(e), EXIT_UNAVAILABLE) from None
+    found = comfyui.detect()
+    runnable = [t for t in found if not t.kind.startswith("desktop")]
+    pick = runnable or found
+    if not pick:
+        raise LaunchError(comfyui.no_comfyui_help(), EXIT_UNAVAILABLE)
+    if len(pick) > 1:
+        raise LaunchError(comfyui.several_help(pick, "gmlx launch comfyui"), EXIT_USAGE)
+    return pick[0]
+
+
+def _comfyui_python(d: Path) -> str:
+    """The interpreter of the ComfyUI folder: its .venv or venv."""
+    for rel in _COMFYUI_PYTHONS:
+        p = d / rel
+        if os.access(p, os.X_OK):
+            return str(p)
+    q = shlex.quote(str(d))
+    raise LaunchError(f"{d} has no Python environment of its own (.venv or venv). "
+                      "Create one there and install ComfyUI's requirements into it:\n"
+                      f"  cd {q}\n  uv venv --python 3.12 .venv\n"
+                      "  uv pip install -r requirements.txt", EXIT_UNAVAILABLE)
+
+
+def _comfyui_prepare(a) -> tuple[Path, str]:
+    """The ComfyUI folder and its interpreter, once the install step has put
+    the current pack into it. Comfy Desktop runs its own ComfyUI, so for one
+    the launch installs the pack and stops with the step that remains."""
+    ready = getattr(a, "comfyui_ready", None)
+    if ready is not None:
+        return ready
+    from . import comfyui
+
+    target = _comfyui_target(a)
+    desktop = target.kind.startswith("desktop") or target.code is None \
+        or not (target.code / "main.py").is_file()
+    binary = None if desktop else _comfyui_python(target.code)
+    try:
+        done, sync, dropped = comfyui.install([target])
+    except comfyui.ComfyError as e:
+        raise LaunchError(str(e), EXIT_FAILURE) from None
+    except OSError as e:
+        raise LaunchError(f"could not put the gmlx nodes into {target.custom_nodes}: {e}",
+                          EXIT_FAILURE) from None
+    changed = any(d.changed for d in done) or bool(dropped) \
+        or (sync is not None and sync.state != "current")
+    if desktop:
+        # The error printer puts [launch] before the first line only.
+        did = "\n".join(comfyui.install_lines(done, sync, dropped))
+        if target.kind.startswith("desktop"):
+            raise LaunchError(
+                f"{did}\n{target.describe()} runs its own ComfyUI, so launch does not start "
+                "it. Start the app, or restart it if it is running, to load the gmlx nodes.",
+                EXIT_UNAVAILABLE)
+        raise LaunchError(
+            f"{did}\n{comfyui._short(target.custom_nodes.parent)} has no main.py, so launch "
+            "cannot start ComfyUI from it. Start that ComfyUI the way you installed it, or "
+            "pass --comfyui-dir with a folder that holds main.py.", EXIT_UNAVAILABLE)
+    lines = comfyui.install_lines(done, sync, dropped, prefix="[launch] ")
+    if changed:
+        print("\n".join(lines))
+    else:
+        for line in lines:
+            if "note:" in line or "warning:" in line:
+                print(line)
+    a.comfyui_ready = (target.code, binary)
+    return a.comfyui_ready
+
+
+def build_comfyui_env(base_url: str, *, image_model: str | None = None,
+                      api_key: str | None = None) -> dict:
+    """The node pack's settings as env-var pairs: the server root, its API key,
+    and the image model a new loader node starts on. Pure - no IO."""
+    pairs = {"GMLX_BASE_URL": _server_root(base_url)}
+    if api_key:
+        pairs["GMLX_API_KEY"] = api_key
+    if image_model:
+        pairs["GMLX_DEFAULT_IMAGE_MODEL"] = image_model
+    return pairs
+
+
+def _launch_comfyui(a, *, exec_fn) -> int:
+    comfy, binary = _comfyui_prepare(a)
+    base_url = a.base_url or _base_url(a.host, a.port)
+    models = probe_models(base_url, a.api_key, "comfyui")
+    image = default_image_model(models, a.model)
+    if not image_models(models):
+        raise LaunchError("the server offers no image model. Add one with gmlx pull "
+                          "z-image-turbo, which adds it to the running server.",
+                          EXIT_UNAVAILABLE)
+    pairs = build_comfyui_env(base_url, image_model=image, api_key=_client_key(a))
+    port = _COMFYUI_PORT + 1 if int(a.port or _DEFAULT_PORT) == _COMFYUI_PORT \
+        else _COMFYUI_PORT
+    print(_summary("comfyui", base_url, image_models(models), image)
+          + f"\n[launch] ComfyUI runs at http://localhost:{port}, which you open in "
+            f"a browser, from {comfy}.")
+    argv = [binary, str(comfy / "main.py"), "--listen", "127.0.0.1", "--port", str(port)]
+    return _finish(a, binary, argv, pairs, exec_fn=exec_fn)
 
 
 # dsh  (DeepSeek Harness - https://github.com/deepseek-ai/deepseek-harness)
@@ -1908,12 +2130,16 @@ _HARNESSES = {
     "elia": _launch_elia,
     "open-webui": _launch_open_webui,
     "dsh": _launch_dsh,
+    "comfyui": _launch_comfyui,
 }
 
 
 def _default_exec(binary: str, argv: list, env: dict) -> int:
     """Replace this process with the harness (so signals/TTY are the harness's).
     Seam: tests pass a recording fake instead."""
+    # exec drops what the streams still buffer, as the summary to a pipe.
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execvpe(binary, argv, env)        # never returns on success
     return 127                           # unreachable; satisfies the type
 
@@ -2251,6 +2477,8 @@ def _check_client_flags(a) -> None:
     if a.harness == "dsh":
         _check_dsh_profile_name(_DSH_PROFILE if a.dsh_profile is None else a.dsh_profile,
                                 a.config_only)
+    if a.harness == "comfyui":
+        _comfyui_prepare(a)
 
 
 def _check_client(a, binary: str) -> None:
@@ -2446,7 +2674,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     )
     ap.add_argument("harness", nargs="?", metavar="client",
                     help="The client to configure and run: a coding agent, a chat "
-                         "TUI (aichat, elia) or a web app (open-webui, dsh), or the name "
+                         "TUI (aichat, elia), a web app (open-webui, dsh), ComfyUI with "
+                         "the gmlx node pack (comfyui), or the name "
                          "of a custom agent from launch.agents, which runs in a container. "
                          "Without it, launch prints this help.")
     ap.add_argument("--model", default=None,
@@ -2492,6 +2721,10 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     ap.add_argument("--no-keep", action="store_true",
                     help="Let --model, or an agent's model setting, unload while idle. "
                          "By default launch asks the server to keep it loaded.")
+    ap.add_argument("--comfyui-dir", default=None, metavar="DIR",
+                    help=f"The ComfyUI folder for comfyui (default: the folder used last, "
+                         f"else {_COMFYUI_HOME}, else the ComfyUI found). Its .venv or venv "
+                         "runs ComfyUI.")
     ap.add_argument("--dsh-profile", default=None, metavar="NAME",
                     help=f"dsh only: boot this dsh profile with the gmlx overlay "
                          f"instead of the {_DSH_PROFILE} profile, for example "
@@ -2643,6 +2876,19 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                              agents)
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
+    if a.comfyui_dir is not None and a.harness != "comfyui":
+        ap.error("--comfyui-dir applies only to comfyui")
+    if a.harness in HOST_ONLY:
+        from .launch_container import CONTAINER_FLAGS, _flag_set
+        boxed = ["--container"] if a.container else []
+        boxed += [CONTAINER_FLAGS[d] for d in CONTAINER_FLAGS if _flag_set(a, d)]
+        if boxed:
+            ap.error(f"{a.harness} runs on the Mac, where it uses the GPU, so "
+                     f"{boxed[0]} does not apply")
+        if a.config_path:
+            ap.error(f"--config-path does not apply to {a.harness}; --comfyui-dir names "
+                     "its folder")
+        a.container = False
     if "--container" in argv and "--no-container" in argv:
         ap.error("--container and --no-container cannot go together")
     from .launch_container import container_mode, run_container
@@ -2663,7 +2909,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         a.agent_command = launch_cfg.for_target(a.harness).command
         return run_container(a, launch_cfg, exec_fn=exec_fn)
     try:
-        in_container, launch_cfg = container_mode(a, ap)
+        in_container = False
+        if a.harness not in HOST_ONLY:
+            in_container, launch_cfg = container_mode(a, ap)
     except ConfigError as e:
         sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
@@ -2678,7 +2926,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         rc = _ensure_server(a)
         if rc is not None:
             return rc
-        if a.model and not a.no_keep and not a.config_only:
+        if (a.model and not a.no_keep and not a.config_only
+                and a.harness not in HOST_ONLY):
             # Validate --model before keeping: an unknown id must produce the
             # single refusal (raised again inside the harness fn), never a
             # keep line followed by that refusal.

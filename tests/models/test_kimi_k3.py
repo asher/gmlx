@@ -150,7 +150,7 @@ def test_batched_matches_single():
 def test_kda_kernel_matches_ops_with_k3_decay():
     # The vec metal kernel and the ops reference must agree on the K3 decay
     # form (per-key-channel g in (exp(lb), 1)).
-    from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
+    from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 
     B, T, H, D = 2, 7, 2, 32
     mx.random.seed(1)
@@ -294,11 +294,10 @@ def test_moe_selection_matches_reference():
 
 def test_synth_config_instantiates_model():
     # The _synth_kimi_k3 output must build this module 1:1 via ModelArgs
-    # (the same path loader.build_model takes after ensure_registered).
+    # (the same path loader.build_model takes).
     from gmlx.load.config_synth import synthesize_config
     from test_config_synth import _KIMI_K3_SHAPES, _kimi_k3_meta
 
-    kimi_k3_model.ensure_registered()
     c = synthesize_config(_kimi_k3_meta(), tensor_shapes=_KIMI_K3_SHAPES)
     args = ModelArgs.from_dict(c)
     assert args.layer_types == ["linear_attention", "full_attention",

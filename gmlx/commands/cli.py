@@ -291,6 +291,57 @@ def add_config_profile_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
+ROPE_FLAGS = ("rope_scaling", "rope_scale", "rope_freq_base",
+              "rope_freq_scale", "yarn_orig_ctx", "yarn_ext_factor",
+              "yarn_attn_factor", "yarn_beta_slow", "yarn_beta_fast")
+
+
+def add_rope_args(ap: argparse.ArgumentParser, *, title: str = "rope scaling",
+                  description: str = "Run past the trained context. Each "
+                  "flag wins over its GGUF header key, as in llama.cpp."
+                  ) -> None:
+    """The rope scaling flags, with llama.cpp's names and meanings. Shared
+    by ``run``, ``chat`` and ``serve``."""
+    g = ap.add_argument_group(title, description)
+    g.add_argument("--rope-scaling", choices=("none", "linear", "yarn"),
+                   default=None,
+                   help="Rope frequency scaling method (default: the GGUF "
+                   "header's, else linear with factor 1).")
+    g.add_argument("--rope-scale", type=float, default=None, metavar="N",
+                   help="Rope context scaling factor: expands the context "
+                   "by a factor of N.")
+    g.add_argument("--rope-freq-base", type=float, default=None, metavar="N",
+                   help="Rope base frequency (default: from the GGUF).")
+    g.add_argument("--rope-freq-scale", type=float, default=None, metavar="N",
+                   help="Rope frequency scaling factor: expands the context "
+                   "by a factor of 1/N.")
+    g.add_argument("--yarn-orig-ctx", type=int, default=None, metavar="N",
+                   help="YaRN: original context size of the model (default: "
+                   "the GGUF's, else its trained context).")
+    g.add_argument("--yarn-ext-factor", type=float, default=None, metavar="N",
+                   help="YaRN: extrapolation mix factor (default: 1 for "
+                   "yarn, 0 otherwise; 0 is full interpolation).")
+    g.add_argument("--yarn-attn-factor", type=float, default=None,
+                   metavar="N",
+                   help="YaRN: attention magnitude scale (default: 1).")
+    g.add_argument("--yarn-beta-slow", type=float, default=None, metavar="N",
+                   help="YaRN: high correction dim or alpha (default: 1).")
+    g.add_argument("--yarn-beta-fast", type=float, default=None, metavar="N",
+                   help="YaRN: low correction dim or beta (default: 32).")
+
+
+def rope_override_from_args(args):
+    """The rope options of a parsed command line, or None when none was
+    given. Raises ``SystemExit`` with the reason on an invalid set."""
+    from gmlx.load.rope_scaling import RopeOverride
+
+    try:
+        ov = RopeOverride.from_args(args)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from None
+    return None if ov.is_empty() else ov
+
+
 def add_load_args(ap: argparse.ArgumentParser) -> None:
     """Add the loader/template flags. Shared by ``run`` and ``chat``."""
     ap.add_argument(
@@ -346,6 +397,7 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         "arithmetic (M1, M2), and bfloat16 on all other devices. Also "
         "settable as GMLX_ACTIVATION_DTYPE, which serve reads too.",
     )
+    add_rope_args(ap)
 
 
 def add_sampling_args(parser: argparse.ArgumentParser) -> None:
@@ -554,7 +606,8 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "routed-expert stacks (~90%% of MoE bytes) stay file-backed, "
         "with decode served from a wired popularity-managed GPU "
         "expert arena (misses read from the GGUF) and the CPU "
-        "stream as fallback.",
+        "stream as fallback. A model that fits streams too, but decodes "
+        "faster without it.",
     )
     placement.add_argument(
         "--stream-cpu",
@@ -1215,6 +1268,7 @@ def _run_bench(args) -> int:
             chat_template=args.chat_template,
             no_remap=args.no_remap,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     print_family_note(args)
@@ -1297,6 +1351,7 @@ def _run_bench_depths(args) -> int:
                 draft_gguf_path=args.draft_gguf,
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not getattr(args, "stream_experts", False),
             )
@@ -1309,6 +1364,7 @@ def _run_bench_depths(args) -> int:
                 chat_template=args.chat_template,
                 no_remap=args.no_remap,
                 zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
             )
     _apply_cli_adapter(args, model, _config)
@@ -1461,8 +1517,9 @@ def _apply_placement(args, model) -> None:
     else:
         from gmlx.stream.expert_streaming import install_expert_streaming
 
+        # The flag streams a model that fits too.
         n, _ = install_expert_streaming(
-            model, gguf_path=gguf_path,
+            model, gguf_path=gguf_path, explicit=True,
             stats_verbose=bool(getattr(args, "verbose", False)),
             feeder_prefill=prefill, feeder_decode=decode)
         if n == 0:
@@ -1556,6 +1613,7 @@ def _run_generate(args) -> int:
                 draft_gguf_path=args.draft_gguf,
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not args.stream_experts,
             )
@@ -1620,6 +1678,7 @@ def _run_generate(args) -> int:
             chat_template=args.chat_template,
             no_remap=args.no_remap,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     print_family_note(args)
@@ -1716,6 +1775,7 @@ def _run_vlm(args) -> int:
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     # The streaming placement applies only to the text tower. The vision
@@ -1723,16 +1783,11 @@ def _run_vlm(args) -> int:
     # its experts.
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
-    # mlx-vlm's fixed-step prefill loop cannot be steered per chunk; the
-    # language model's chunked_prefill_policy reads the step from here to
-    # keep media token blocks whole (see gmlx.gen.media_spans).
-    from gmlx.gen.media_spans import stamp_prefill_step
-    stamp_prefill_step(model, args.prefill_step_size)
 
     from typing import Any, cast
 
-    from mlx_vlm import generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from gmlx._vendor.mlx_vlm import generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
 
     prompt = args.prompt
     if not args.no_chat_template:
@@ -1876,6 +1931,7 @@ def _run_vlm_mtp(args) -> int:
             draft_gguf_path=args.draft_gguf,
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     _apply_placement(args, getattr(model, "language_model", model))
@@ -2044,6 +2100,15 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
+    rope = getattr(rm, "rope_scaling", None)
+    if rope is not None:
+        # The config's rope_scaling block, one flag at a time, so an explicit
+        # flag wins over its key.
+        scale_given = {"rope_scale", "rope_freq_scale"} & explicit
+        for dest in ROPE_FLAGS:
+            if scale_given and dest in ("rope_scale", "rope_freq_scale"):
+                continue  # two spellings of one value: the flag wins
+            _set(dest, getattr(rope, dest), dest.replace("_", "-"))
     if hasattr(args, "speculative") and "speculative" not in explicit:
         # Config is authoritative for a configured model id: write the resolved bool
         # (True or False) so the native-head auto never second-guesses a config
@@ -2261,9 +2326,16 @@ def _ensure_stream_cb_caps(args) -> None:
     """Same lift for a placement that came from config, not argv. The env is
     latched by the time the overlay runs, so write the live device fields
     instead (what the serve engine flips). A config model id decoded 40%
-    slower than the identical bare path without this."""
-    if not (getattr(args, "stream_experts", False)
-            or getattr(args, "stream_cpu", False)):
+    slower than the identical bare path without this. Also latches the
+    stream flags before the load, for `run` and `chat` alike: the warm
+    touch reads the latch to leave the streamable tables and the expert
+    stacks untouched."""
+    from gmlx.stream.table_stream import force_table_stream
+
+    stream = bool(getattr(args, "stream_experts", False)
+                  or getattr(args, "stream_cpu", False))
+    force_table_stream(stream)
+    if not stream:
         return
     if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
         return                       # argv path already latched it, or the
@@ -2288,12 +2360,6 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     if rc is not None:
         return rc
     _ensure_stream_cb_caps(args)
-    if getattr(args, "stream_cpu", False):
-        # Before the load: the warm touch reads this to leave a streamable
-        # table untouched.
-        from gmlx.stream.table_stream import force_table_stream
-
-        force_table_stream()
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
     # In-RAM placements: fine caps through each prefill, coarse from the
@@ -2409,6 +2475,12 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     try:
         if args.report_only:
             return _report_only(args)
+        # Unbounded, MLX caches freed prefill buffers up to 1.5x the
+        # working set; serve's policy bounds them here too.
+        from gmlx.serve.memory import apply_local_cache_limit
+
+        apply_local_cache_limit((args.gguf, args.mmproj, args.draft_gguf),
+                                verbose=args.verbose)
         if args.mmproj:
             # A loaded VLM serves text-only requests in place: route a text-only
             # request through the MTP path when a drafter is available
@@ -2457,7 +2529,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 # Verbs route to the per-area entry points (run == this module's `main`; serve /
 # init / sync-models / launch / stop / restart / status / logs / service ==
 # server.main; validate / pull / list / ps / profiles == manage; chat == chat;
-# train == train; distill == distill; systemone == systemone).
+# train == train; distill == distill; image == image; comfyui == comfyui;
+# systemone == systemone).
 # The macOS menu bar is `gmlx launch menubar`, not a top-level verb.
 _VERBS = (
     "run",
@@ -2482,6 +2555,8 @@ _VERBS = (
     "doctor",
     "train",
     "distill",
+    "image",
+    "comfyui",
     "completion",
 )
 
@@ -2521,6 +2596,8 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  doctor       check the runtime, config, models, and services in one pass\n"
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
+        "  image        generate images from GGUF diffusion models\n"
+        "  comfyui      put the gmlx node pack into ComfyUI (install, uninstall, status)\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
         f"first run:  {prog} init   (scaffold a config) ->  {prog} pull <hf:ref>   "
         f"(download a model)\n"
@@ -2534,8 +2611,25 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
 
 def umbrella_main(argv: list[str] | None = None) -> int:
     """Dispatch ``gmlx <verb> ...`` to the matching entry point."""
-    from gmlx._exitfix import guarded
-    return guarded(_umbrella_impl, argv)
+    return _exit_code(_umbrella_impl, argv)
+
+
+def _exit_code(fn, *args) -> int:
+    """Run an entry point and return its process exit code. A SystemExit
+    gives its code (a message is printed and gives 1), Ctrl-C gives 130,
+    None gives 0, and a bool or any other value that is not an int gives 1."""
+    try:
+        rc = fn(*args)
+    except SystemExit as e:
+        rc = e.code
+        if rc is not None and not isinstance(rc, int):
+            print(rc, file=sys.stderr)
+            rc = 1
+    except KeyboardInterrupt:
+        rc = 130
+    if isinstance(rc, bool) or not isinstance(rc, int):
+        return 0 if rc is None else 1
+    return rc
 
 
 def _umbrella_impl(argv: list[str] | None = None) -> int:
@@ -2612,17 +2706,20 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             break
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
-            # distill's actions own their parsers: `distill cache --help`
-            # keeps the action so the action's help prints, not the umbrella's.
-            # `launch pi --help` keeps the client, which the help describes.
-            keep = ([rest[0]] if verb in ("distill", "launch") and rest
+            # distill's and image's actions own their parsers: `distill cache
+            # --help` keeps the action so the action's help prints, not the
+            # umbrella's. `launch pi --help` keeps the client, which the help
+            # describes.
+            keep = ([rest[0]] if verb in ("distill", "image", "launch", "comfyui") and rest
                     and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
-    if verb != "doctor":  # doctor must run on a broken env to diagnose it
-        from gmlx.upstream.seams import check_upstream_versions
+    # doctor must run on a broken env to diagnose it, and comfyui uninstall
+    # must run there too; neither imports mlx.
+    if verb not in ("doctor", "comfyui"):
+        from gmlx.upstream.versions import check_mlx_version
         try:
-            check_upstream_versions()
+            check_mlx_version()
         except RuntimeError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
@@ -2659,6 +2756,14 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from .distill import cmd_distill
 
             return cmd_distill(rest, prog=f"{prog} distill")
+        if verb == "image":
+            from .image import cmd_image
+
+            return cmd_image(rest, prog=f"{prog} image")
+        if verb == "comfyui":
+            from .comfyui import cmd_comfyui
+
+            return cmd_comfyui(rest, prog=f"{prog} comfyui")
         if verb == "completion":
             from .completion import cmd_completion
 
@@ -2714,5 +2819,4 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    from gmlx._exitfix import guarded
-    sys.exit(guarded(main))
+    sys.exit(_exit_code(main))

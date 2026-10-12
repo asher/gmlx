@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import NoReturn
 from types import SimpleNamespace
 
 _log = logging.getLogger(__name__)
@@ -68,10 +69,10 @@ def margin() -> float:
 
 
 def working_set_bytes() -> float | None:
-    import mlx.core as mx
+    from gmlx.device import metal_value
 
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         return None
     return ws if ws > 0 else None
@@ -94,11 +95,11 @@ def ceiling_bytes(ws: float, m: float | None = None) -> float:
     reserve. Metal's recommendation assumes the GPU owns the box; a
     serve process sharing it with the kernel and the user does not
     (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked)."""
-    import mlx.core as mx
+    from gmlx.device import metal_value
 
     cap = ws * (1.0 - (margin() if m is None else m))
     try:
-        mem = float(mx.device_info()["memory_size"])
+        mem = float(metal_value("memory_size"))
     except Exception:
         return cap
     return min(cap, mem - reserve_bytes(mem))
@@ -160,8 +161,7 @@ def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
     from types import SimpleNamespace
 
     try:
-        from mlx_vlm.models.cache import should_quantize_kv_layer
-
+        from gmlx.cache.kv_cache import should_quantize_kv_layer
         from gmlx.cache.kv_policy import (FP16_BPE, kvarn_bytes_per_element,
                                           kvarn_fixed_tokens,
                                           kvarn_step_tokens)
@@ -207,9 +207,8 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
     carve-out request admission prices with (growing KV entries pack
     except the last of a deep stack; windows and state stay fp16). All
     None means uniform fp16: kv quantization off or declined (MTP
-    batched, max_kv_size, a qat-marked id under affine, an attention
-    that cannot read a packed cache, malformed values, a shape kvarn
-    cannot take)."""
+    batched, max_kv_size, an attention that cannot read a packed cache,
+    malformed values, a shape kvarn cannot take)."""
     e = {**os.environ, **(env or {})}
     if e.get("MAX_KV_SIZE"):
         return None, None, None
@@ -220,8 +219,7 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
         scheme = _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id)
     if scheme == "kvarn":
         return _kvarn_boot_pricing(geometry, e, raw, cfg, mtp) or (None,) * 3
-    if (mtp or not raw or "qat" in str(model_id)
-            or _header_attention_decline(cfg)):
+    if mtp or not raw or _header_attention_decline(cfg):
         return None, None, None
     return _affine_bpe_vector(geometry, e, raw), None, None
 
@@ -245,7 +243,7 @@ def _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id):
     """What auto picks from the header alone, as the load will. Checks
     that need the built model (a spec target that reads K/V back) are
     left to the load; its policy prices admission from then on."""
-    if not raw or "qat" in str(model_id):
+    if not raw:
         return "uniform"
     from types import SimpleNamespace
 
@@ -281,8 +279,7 @@ def _affine_bpe_vector(geometry, e, raw):
     try:
         fb = float(raw)
         group = int(e.get("KV_GROUP_SIZE") or 64)
-        from mlx_vlm.models.cache import should_quantize_kv_layer
-
+        from gmlx.cache.kv_cache import should_quantize_kv_layer
         from gmlx.cache.kv_policy import (FP16_BPE, VALID_BITS, VALID_GROUPS,
                                           packed_bytes_per_element)
     except Exception:
@@ -302,7 +299,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     when the header or the device cannot be read (callers keep stock
     behavior then). ``env`` is the model's residency env window; its kv
     params reprice the quantized layers."""
-    import mlx.core as mx
+    from gmlx.device import metal_info
 
     from .mem_preflight import prompt_kv_bytes, span_tokens
     from .memory import admit_reserve_bytes
@@ -317,7 +314,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         if not (priced and ws):
             return None
         cfg, costs, heads = priced
-        info = mx.device_info()
+        info = metal_info() or {}
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
     except Exception:
@@ -525,6 +522,29 @@ def streamed_off_disk_bytes(gguf_path: str) -> int:
     return streamed_expert_bytes(gguf_path) + streamed_table_bytes(gguf_path)
 
 
+def predicted_stream_bytes(gguf_path: str, env=None) -> tuple[int, int]:
+    """``(table bytes, expert bytes)`` a ``stream: experts`` build will
+    stream, from the header: the installer's ladder (``stream_plan``) on
+    the text tensor bytes, the declared tables and the routed experts.
+    Over the budget, a table that alone brings the model under it streams
+    and the experts stay resident. Without the text tensor bytes, both.
+    ``env`` is the model's env window (GMLX_STREAM_PLE and
+    GMLX_STREAM_PLE_COMPOSE), which the install reads."""
+    from gmlx.device import stream_budget_bytes
+    from gmlx.load.discovery import text_tensor_bytes
+    from gmlx.stream.table_stream import stream_plan
+
+    experts = streamed_expert_bytes(gguf_path)
+    table = streamed_table_bytes(gguf_path)
+    total = text_tensor_bytes(gguf_path)
+    if total is None:
+        return table, experts
+    # A stream: experts build latches the table stream before its load.
+    plan = stream_plan(total, table, stream_budget_bytes(), explicit=True,
+                       latched=True, env=env)
+    return (table if plan.tables else 0), (experts if plan.experts else 0)
+
+
 def preload_gate_bytes(footprint: int, stream, expert_bytes: int) -> int:
     """Resident bytes the preload gate should judge. ``stream: experts``
     never wires the routed-expert stacks (they decode through the disk
@@ -544,7 +564,8 @@ class LoadDeferred(RuntimeError):
 
 
 def preload_gate(weight_bytes: float, model_id: str, *,
-                 streaming: bool = False, reserved_bytes: float = 0.0) -> None:
+                 streaming: bool = False, image: bool = False,
+                 reserved_bytes: float = 0.0) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
@@ -553,14 +574,22 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     experts are already discounted, so a smaller quant of the rest is
     the fix, not streaming. ``reserved_bytes`` is room a resident
     streamed model keeps but has not filled (its prefill ring, its KV
-    room); the measure reads it as free, the load may not take it."""
+    room); the measure reads it as free, the load may not take it.
+    ``image`` names the bytes as an image model's weights and the memory
+    of one image at its default size."""
     if overcommit() or weight_bytes <= 0:
         return
-    what = "every-token weights" if streaming else "weights"
-    fix = ("The routed experts already stream from disk; pick a quant "
-           "with smaller every-token tensors (docs/streaming.md)."
-           if streaming else
-           "for MoE models --stream-experts serves the experts from disk.")
+    if image:
+        what = "weights and one image at its default size"
+        fix = ("set a smaller defaults.size or encoder_release: always, "
+               "or pick a smaller quant of the DiT.")
+    elif streaming:
+        what = "every-token weights"
+        fix = ("The routed experts already stream from disk; pick a quant "
+               "with smaller every-token tensors (docs/streaming.md).")
+    else:
+        what = "weights"
+        fix = "for MoE models --stream-experts serves the experts from disk."
     from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
@@ -598,7 +627,7 @@ _DEFER_WARN_S = 10.0
 _defer_warned_at = 0.0
 
 
-def _defer(msg: str) -> None:
+def _defer(msg: str) -> NoReturn:
     """Log and raise a LoadDeferred. The 503 body reaches only the client,
     so without this line a refusing gate leaves no server-side trace at
     all (2026-08-26: two bench arms deferred for their whole 240 s startup
@@ -779,6 +808,39 @@ def trained_context_length(gguf_path) -> int | None:
     except Exception:
         _log.debug("context_length scan failed for %s", gguf_path, exc_info=True)
     _CTX_CACHE[gguf_path] = (mtime, value)
+    return value
+
+
+def effective_context_length(gguf_path, rope_override=None) -> int | None:
+    """The context the model runs at: the trained context, or with rope
+    options (a RopeOverride) the context they extend it to
+    (``rope_scaling.effective_context``). Cached by path, options and
+    mtime."""
+    if rope_override is None:
+        return trained_context_length(gguf_path)
+    try:
+        mtime = os.path.getmtime(gguf_path)
+    except OSError:
+        return None
+    key = (gguf_path, rope_override)
+    hit = _CTX_CACHE.get(key)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    trained = trained_context_length(gguf_path)
+    value = trained
+    try:
+        from gmlx.load import rope_scaling
+        from gmlx.load.headerscan import scan_gguf
+
+        kv = scan_gguf(gguf_path, include_tensors=False).kv
+        arch = kv.get("general.architecture")
+        if arch and trained:
+            scaling = rope_scaling.resolve(kv, arch, rope_override,
+                                           n_ctx_train=trained)
+            value = rope_scaling.effective_context(trained, scaling)
+    except Exception:
+        _log.debug("rope scaling read failed for %s", gguf_path, exc_info=True)
+    _CTX_CACHE[key] = (mtime, value)
     return value
 
 

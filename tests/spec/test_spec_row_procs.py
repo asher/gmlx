@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_lm.sample_utils import apply_xtc, make_logits_processors
-from mlx_vlm.structured import ThinkingAwareLogitsProcessor
+from gmlx._vendor.mlx_lm.sample_utils import apply_xtc, make_logits_processors
+from gmlx._vendor.mlx_vlm.structured import ThinkingAwareLogitsProcessor
 
 import gmlx.spec.speculative as spec
 from gmlx.spec.row_procs import SpecRowProcessors, supported

@@ -418,9 +418,12 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
     and leading bytes (its path may be spelled another way), its
     vocabulary and, when rows are framed, its chat template (a directory
     checkpoint keeps both outside the hashed files), the config source,
-    the hidden sketch, the render kwargs and the version of the row
-    sidecar format. Any difference refuses the resume. A key this build
-    added compares as None against a record that predates it."""
+    the hidden sketch, the render kwargs, the rope scaling the teacher's
+    header resolves to and the version of the row sidecar format. Any
+    difference refuses the resume. A key this build added compares as None
+    against a record that predates it."""
+    from gmlx.load import rope_scaling as _rope
+
     template = _frames.template_text(tokenizer) if tokenizer is not None else ""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens, "source": source,
             "generator_id": generator_id,
@@ -436,6 +439,8 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "per_turn": bool(opts.per_turn),
             "close_final_windows": bool(opts.close_final_windows),
             "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None,
+            # None for a plain rope, as in a record that predates the key
+            "rope": _rope.cache_key(_rope.resolve_file(opts.teacher)) or None,
             # 1: rows carry doc_sha, which train pairs across caches by;
             # 2: content_start is the answer after an inline think block
             "row_format": ROW_FORMAT}
@@ -445,14 +450,18 @@ def teacher_over_budget(model, budget: int | None = None) -> tuple[bool, int, in
     """(over, parameter bytes, budget): whether the model's parameters
     exceed the wired budget, nine tenths of the recommended working set
     as the expert streaming installer reads it. Never over when no
-    device reports one."""
-    import mlx.core as mx
+    device reports one, or on the CPU default device (``--cpu``), where
+    nothing is wired and the teacher loads resident."""
     from mlx.utils import tree_flatten
+
+    from gmlx.device import cpu_default_device, metal_value
     flat: Any = tree_flatten(model.parameters())
     total = sum(int(a.nbytes) for _k, a in flat)
     if budget is None:
+        if cpu_default_device():
+            return False, total, 0
         try:
-            budget = int(0.9 * int(mx.device_info()["max_recommended_working_set_size"]))
+            budget = int(0.9 * int(metal_value("max_recommended_working_set_size")))
         except Exception:  # noqa: BLE001
             return False, total, 0
     return total > budget, total, budget
@@ -493,7 +502,9 @@ def load_teacher(opts: CacheOptions):
     loads through gmlx; one over the wired budget streams its experts
     from disk (and runs the prefill feeder), and ``stream_experts``
     forces that on a MoE teacher that would otherwise sit resident. A
-    directory is loaded as an MLX checkpoint."""
+    directory is loaded as an MLX checkpoint, which has no experts to
+    stream: one over the wired budget is refused before its weights are
+    read."""
     teacher_is_gguf = Path(opts.teacher).is_file() and opts.teacher.endswith(".gguf")
     offloaded = 0
     if teacher_is_gguf:
@@ -521,7 +532,14 @@ def load_teacher(opts: CacheOptions):
                 _n, offloaded = stream_over_budget(model, opts.teacher, total, budget)
         streaming = experts_streaming(model)
     else:
-        model, config, _tok = _student.load_mlx_student(opts.teacher)
+        import mlx.core as mx
+        model, config, _tok = _student.load_mlx_student(opts.teacher, lazy=True)
+        over, total, budget = teacher_over_budget(model)
+        if over:
+            raise ValueError(f"the teacher is {total / GB:.1f} GB against a wired budget of {budget / GB:.1f} GB, "
+                             "and an MLX checkpoint teacher cannot stream its experts; use a smaller "
+                             "quantization or a GGUF teacher")
+        mx.eval(model.parameters())
         arch = config.get("model_type", "mlx")
         streaming = False
     model.eval()
@@ -535,6 +553,8 @@ def run_cache(opts: CacheOptions) -> int:
     memory probe fails twice or the recorded routes do not match the
     chunk, 4 when the validator finds a problem in what was written."""
     import mlx.core as mx
+
+    from gmlx.device import cpu_default_device, metal_value
 
     out = Path(opts.out).expanduser()
     t0 = time.perf_counter()
@@ -731,9 +751,10 @@ def run_cache(opts: CacheOptions) -> int:
         if feeder is None and opts.require_feeder:
             log("[cache] refuse: streaming teacher requested and no prefill feeder is installed")
             return 2
-    if not streaming and not opts.no_wired_limit:
+    # A teacher on the CPU device has nothing to wire.
+    if not streaming and not opts.no_wired_limit and not cpu_default_device():
         try:
-            mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
+            mx.set_wired_limit(int(metal_value("max_recommended_working_set_size")))
         except Exception as e:  # noqa: BLE001
             log(f"[cache] warn: wired limit not set: {e}")
     # shard rows pad to a per-shard length, so freed buffers of many sizes

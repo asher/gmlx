@@ -32,8 +32,12 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import Any
 
 import mlx.core as mx
+
+from gmlx.cache.media_salt import as_salt
+from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
 
@@ -143,6 +147,30 @@ def row_factor(slot: int, dtype, shape) -> mx.array | None:
     return arr
 
 
+def dense_row_factor(slot: int, lead: tuple, dtype) -> mx.array | None:
+    """The factor for a dense target's rank-r intermediate whose leading
+    dimensions are ``lead``, cast to ``dtype``. An input with a batch
+    dimension, two or more leading dimensions, carries the batch first: it
+    gets ``row_factor`` at ``(B, 1, ...)``, and a first dimension that is
+    not the published row count raises. A flat ``(B * tokens,)`` layout has
+    no batch dimension and gets one value per input row in ``(B, tokens)``
+    order, as ``dense_rows`` gives the in-op epilogue. ``None`` when
+    nothing is published."""
+    rows = row_scales(slot)
+    if rows is None:
+        return None
+    lead = tuple(int(n) for n in lead)
+    first = lead[0] if lead else 1
+    if len(lead) >= 2 or lead == (rows.shape[0],):
+        return row_factor(slot, dtype, (first,) + (1,) * len(lead))
+    flat = dense_rows(slot, first)
+    key = ("dense", int(slot), dtype, lead)
+    arr = _derived.get(key)
+    if arr is None:
+        arr = _derived[key] = flat.astype(dtype).reshape(lead + (1,))
+    return arr
+
+
 def flat_row_factor(slot: int, tokens: int, k: int, dtype, order=None):
     """Per-flat-row factor for ``tokens * k`` rows of ``B`` batch rows in
     ``(B, tokens // B, k)`` order, cast to ``dtype`` and shaped ``(R, 1, 1)``
@@ -177,6 +205,19 @@ def dense_rows(slot: int, rows: int):
     the in-op LoRA epilogue's ``lora_rows``. ``None`` when nothing is
     published."""
     return _flat_rows(slot, rows, 1, (rows,))
+
+
+def dense_input_rows(slot: int, lead: tuple):
+    """``dense_rows`` for a dense target's input whose leading dimensions
+    are ``lead``, under the layout rule of ``dense_row_factor``: with a
+    batch dimension the first one must be the published row count, and a
+    flat layout must hold a multiple of it."""
+    total = 1
+    for n in lead:
+        total *= int(n)
+    if len(lead) >= 2:
+        check_rows(int(lead[0]))
+    return dense_rows(slot, total)
 
 
 def flat_rows(slot: int, tokens: int, k: int):
@@ -319,12 +360,6 @@ def _stash_pending(scales) -> None:
     _pending.scales = scales
 
 
-def pending_scales():
-    """The scale tuple that the next insert on this thread takes, or None.
-    The tuple stays for that insert."""
-    return getattr(_pending, "scales", None)
-
-
 def _pop_pending():
     scales = getattr(_pending, "scales", None)
     _pending.scales = None
@@ -335,8 +370,8 @@ def install_row_channel() -> None:
     """Wire the serve engine: request tuple -> uid registry -> per-forward
     publish on the stock batch paths. Idempotent. The gmlx-owned MTP paths
     (``spec_engine``, ``speculative``) publish directly."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     # Process-wide flag, not a marker on the visible function: a patch that
     # wraps insert after this install (seed rows) hides the marker, and a
@@ -370,7 +405,7 @@ def install_row_channel() -> None:
             # a prefix (same tokens, different logits). Salt the row's
             # semantic hash with its scale tuple, computing the base hash
             # the way the engine would when the request carried none.
-            kws = kwargs.get("prompt_kwargs")
+            kws: Any = kwargs.get("prompt_kwargs")
             if kws is None and len(args) >= 2:
                 kws = args[1]
             if kws is None:
@@ -386,7 +421,7 @@ def install_row_channel() -> None:
                 base = kw.get("_apc_semantic_hash")
                 if base is None:
                     base = self._apc_extra_hash(kw)
-                kw["_apc_semantic_hash"] = int(base) ^ salt
+                kw["_apc_semantic_hash"] = as_salt(base) ^ salt
         uids = _orig_insert(self, prompts, *args, **kwargs)
         for uid in uids:
             register_uid(uid, scales if scales else None)
@@ -413,11 +448,12 @@ def install_row_channel() -> None:
     for fn in (_procs_with_lora, _insert_with_lora, _step_with_rows,
                _generate_with_rows, _prompt_step_with_rows):
         fn.__dict__[_INSTALLED_FLAG] = True
-    ResponseGenerator._make_logits_processors = _procs_with_lora
-    _ar.BatchGenerator.insert = _insert_with_lora
-    _ar.GenerationBatch._step = _step_with_rows
-    _ar.PromptProcessingBatch.generate = _generate_with_rows
-    _ar.PromptProcessingBatch.prompt_step = _prompt_step_with_rows
+    ResponseGenerator._make_logits_processors = link(_procs_with_lora, _orig_procs)
+    _ar.BatchGenerator.insert = link(_insert_with_lora, _orig_insert)
+    _ar.GenerationBatch._step = link(_step_with_rows, _orig_step)
+    _ar.PromptProcessingBatch.generate = link(_generate_with_rows, _orig_generate)
+    _ar.PromptProcessingBatch.prompt_step = link(_prompt_step_with_rows,
+                                                 _orig_prompt_step)
     _log.info("lora row channel installed (mode=%s, slots=%d)", _mode, _n_slots)
 
 

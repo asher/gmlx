@@ -249,7 +249,7 @@ def test_unregistered_mask_falls_back():
     pads = [0, 150, 296]
     c, _ = _decode_setup(600, pads)
     q = _make_q()
-    from mlx_vlm.models.cache import create_causal_mask
+    from gmlx._vendor.mlx_vlm.models.cache import create_causal_mask
 
     mask = create_causal_mask(1, offset=c._idx - 1, left_padding=c.left_padding)
     out = kvarn_attention(q, c, SCALE, mask)
@@ -257,8 +257,7 @@ def test_unregistered_mask_falls_back():
 
 
 def test_make_mask_registers_starts():
-    from gmlx.upstream.quantized_sdpa_fix import (_registered_geometry,
-                                                  _registered_starts)
+    from gmlx.cache.attention import _registered_geometry, _registered_starts
 
     c = BatchKVarNKVCache([0, 5, 9])
     mask = c.make_mask(1, window_size=None)
@@ -305,7 +304,7 @@ def test_qwen35_arm_uses_cache_pads(d):
     # The qwen3.5 decode protocol strips the mask to None and carries the
     # pads on the cache; the arm must recover per-row starts from it.
     # d=256 is the shape every real qwen3.5/3.6 checkpoint dispatches.
-    pytest.importorskip("mlx_vlm.models.qwen3_5")
+    pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5")
     from gmlx.models.qwen35.attn import _kvarn_attention
 
     pads = [0, 150, 296]
@@ -334,7 +333,7 @@ def test_filter_compacts_shared_padding_like_batch_kv_cache():
     """The stack shares one mask. BatchKVCache.filter shifts left by the
     minimum padding, so a kvarn layer that kept it would leave the mask
     wider than an fp16 layer's keys."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     pads = [0, 64, 128]
     c = _filled(300, pads)
@@ -744,7 +743,7 @@ def test_qwen35_arm_routes_fused_at_verify_width(d, monkeypatch):
     own geometry to the kernel route; the sliced stack mask it carries
     is not consulted. The failure mode is a throughput cliff with correct
     output, so the route is asserted, not just the values."""
-    pytest.importorskip("mlx_vlm.models.qwen3_5")
+    pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5")
     from gmlx.cache import kvarn_sdpa
     from gmlx.models.qwen35.attn import _kvarn_attention
 

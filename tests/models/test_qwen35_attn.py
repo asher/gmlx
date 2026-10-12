@@ -17,13 +17,13 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
-from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
-from mlx_vlm.models.qwen3_5 import language as _L
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
+from gmlx.models.qwen35 import language as _L
 
 import gmlx.upstream.gdn_patches as gdn_patches
 import gmlx.models.qwen35.attn as qwen35_attn
@@ -64,6 +64,8 @@ def _cfg():
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
+        # Every gated delta layer of both arms reads its head order here.
+        kv_head_layout="tiled",
     )
 
 
@@ -131,8 +133,6 @@ def _arms(dtype=None):
     _restore_patches fixture.
     """
     patched = _lm(dtype)
-    gdn_patches._patch_gated_delta_tiled_v()
-    gdn_patches._patch_mlxvlm_gated_delta_tiled_v()
     gdn_patches._patch_gated_delta_fused_verify(patched)
     qwen35_verify_fold.install_qwen35_verify_fold()
     gdn_patches._patch_batched_verify_sdpa()

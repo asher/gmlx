@@ -1,0 +1,506 @@
+{
+ "schema": 1,
+ "name": "selftest_z_image_tiny_48",
+ "check": 3,
+ "family": "z_image",
+ "script": "scripts/image_oracle/check3_z_image.py",
+ "argv": [
+  "check3_z_image.py",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "size": [
+   48,
+   48
+  ],
+  "latent_shape": [
+   1,
+   4,
+   6,
+   6
+  ],
+  "noise_seed": 0,
+  "noise": "numpy default_rng(seed) standard_normal float32, NCHW",
+  "prompt": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+  "caption": "random",
+  "length": 5,
+  "steps": 8,
+  "step": 3,
+  "sigmas": [
+   1.0,
+   0.875,
+   0.75,
+   0.625,
+   0.5,
+   0.375,
+   0.25,
+   0.125
+  ],
+  "timesteps": [
+   1000.0,
+   875.0,
+   750.0,
+   625.0,
+   500.0,
+   375.0,
+   250.0,
+   125.0
+  ],
+  "sigma": 0.625,
+  "t_model": 0.375,
+  "config_revision": null,
+  "rows": [
+   "t_embedder",
+   "x_embed",
+   "cap_embed",
+   "noise_refiner.0",
+   "context_refiner.0",
+   "layers.0",
+   "layers.1",
+   "final_layer"
+  ],
+  "free_rows": [
+   "noise_refiner.0",
+   "context_refiner.0",
+   "layers.0",
+   "layers.1",
+   "final_layer"
+  ],
+  "branches": [
+   "noise_refiner.0.attention",
+   "noise_refiner.0.feed_forward",
+   "context_refiner.0.attention",
+   "context_refiner.0.feed_forward",
+   "layers.0.attention",
+   "layers.0.feed_forward",
+   "layers.1.attention",
+   "layers.1.feed_forward"
+  ]
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 12,
+   "dequant": "stock",
+   "matmul": {
+    "fp32": "native",
+    "bf16": "bf16 operands, float32 GEMM, one bf16 rounding"
+   }
+  },
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.015147956436495212,
+   "cosine": 0.9998858895279003,
+   "max_abs": 0.7133164405822754
+  },
+  "rows_bf16_vs_fp32_teacher_forced": {
+   "t_embedder": {
+    "rel_l2": 0.003975902706952249,
+    "cosine": 0.9999921931347119,
+    "max_abs": 0.10321998596191406
+   },
+   "x_embed": {
+    "rel_l2": 0.0027897286539566107,
+    "cosine": 0.9999961658052611,
+    "max_abs": 0.012933969497680664
+   },
+   "cap_embed": {
+    "rel_l2": 0.002198862032178978,
+    "cosine": 0.9999975847127289,
+    "max_abs": 0.0036163926124572754
+   },
+   "noise_refiner.0": {
+    "rel_l2": 0.004773876163505959,
+    "cosine": 0.9999886141110441,
+    "max_abs": 0.016256093978881836
+   },
+   "context_refiner.0": {
+    "rel_l2": 0.008048439598706077,
+    "cosine": 0.9999676207446356,
+    "max_abs": 0.015320956707000732
+   },
+   "layers.0": {
+    "rel_l2": 0.006006070979335721,
+    "cosine": 0.9999819922580421,
+    "max_abs": 0.015230178833007812
+   },
+   "layers.1": {
+    "rel_l2": 0.006476450362361769,
+    "cosine": 0.9999790346612359,
+    "max_abs": 0.02566206455230713
+   },
+   "final_layer": {
+    "rel_l2": 0.004192547224764648,
+    "cosine": 0.9999912379679892,
+    "max_abs": 0.2264404296875
+   }
+  },
+  "branches_bf16_vs_fp32_teacher_forced": {
+   "noise_refiner.0.attention": {
+    "rel_l2": 0.006064778545396979,
+    "cosine": 0.9999832719383394,
+    "max_abs": 0.6744899749755859
+   },
+   "noise_refiner.0.feed_forward": {
+    "rel_l2": 0.01085006634536518,
+    "cosine": 0.9999488972236156,
+    "max_abs": 44.515625
+   },
+   "context_refiner.0.attention": {
+    "rel_l2": 0.004659905904177064,
+    "cosine": 0.9999894737039705,
+    "max_abs": 0.035408973693847656
+   },
+   "context_refiner.0.feed_forward": {
+    "rel_l2": 0.009732216902704417,
+    "cosine": 0.9999561176116886,
+    "max_abs": 0.17700672149658203
+   },
+   "layers.0.attention": {
+    "rel_l2": 0.005485280486584084,
+    "cosine": 0.9999913973188039,
+    "max_abs": 0.3541908264160156
+   },
+   "layers.0.feed_forward": {
+    "rel_l2": 0.011409265343780653,
+    "cosine": 0.9999398621442811,
+    "max_abs": 52.0325927734375
+   },
+   "layers.1.attention": {
+    "rel_l2": 0.005255172896545561,
+    "cosine": 0.9999883635871467,
+    "max_abs": 0.4699287414550781
+   },
+   "layers.1.feed_forward": {
+    "rel_l2": 0.009622899452598484,
+    "cosine": 0.9999537340102767,
+    "max_abs": 46.286376953125
+   }
+  },
+  "blocks_bf16_vs_fp32_free": {
+   "noise_refiner.0": {
+    "rel_l2": 0.007770551737089463,
+    "cosine": 0.9999703671149123,
+    "max_abs": 0.02404630184173584
+   },
+   "context_refiner.0": {
+    "rel_l2": 0.007969576096221072,
+    "cosine": 0.9999682796530958,
+    "max_abs": 0.015320956707000732
+   },
+   "layers.0": {
+    "rel_l2": 0.01750710879742016,
+    "cosine": 0.9998468719132924,
+    "max_abs": 0.06439566612243652
+   },
+   "layers.1": {
+    "rel_l2": 0.03441039845331909,
+    "cosine": 0.9994082628712256,
+    "max_abs": 0.10597683489322662
+   },
+   "final_layer": {
+    "rel_l2": 0.03476527192901278,
+    "cosine": 0.9993978184305888,
+    "max_abs": 1.7604126930236816
+   }
+  },
+  "seconds": {
+   "fp32_step_s": 0.0,
+   "bf16_step_s": 0.0,
+   "bf16_teacher_forced_s": 0.0
+  }
+ },
+ "tolerances": {
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of the free-running pass and for the velocity. The velocity cosine floor is 1 - 2 x the oracle's own cosine distance. Cosine distance grows with the square of the angle, so the floor bounds the angle to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle. Each block also has two teacher-forced branch rows, the output of its attention module and of its feed-forward module, at 2 x the oracle's own gap on each, since a late block adds a few percent to its output and an update row would inherit the residual stream's bf16 rounding",
+  "starting": {
+   "block_rel_l2": 0.005,
+   "velocity_rel_l2": 0.02
+  },
+  "velocity_rel_l2": 0.030295912872990424,
+  "velocity_cosine_min": 0.9997717790558005,
+  "rows_rel_l2": {
+   "t_embedder": 0.007951805413904499,
+   "x_embed": 0.005579457307913221,
+   "cap_embed": 0.004397724064357956,
+   "noise_refiner.0": 0.009547752327011917,
+   "context_refiner.0": 0.016096879197412154,
+   "layers.0": 0.012012141958671441,
+   "layers.1": 0.012952900724723538,
+   "final_layer": 0.008385094449529297
+  },
+  "free_rel_l2": {
+   "noise_refiner.0": 0.015541103474178926,
+   "context_refiner.0": 0.015939152192442144,
+   "layers.0": 0.03501421759484032,
+   "layers.1": 0.06882079690663818,
+   "final_layer": 0.06953054385802555
+  },
+  "branch_rel_l2": {
+   "noise_refiner.0.attention": 0.012129557090793958,
+   "noise_refiner.0.feed_forward": 0.02170013269073036,
+   "context_refiner.0.attention": 0.009319811808354127,
+   "context_refiner.0.feed_forward": 0.019464433805408833,
+   "layers.0.attention": 0.010970560973168168,
+   "layers.0.feed_forward": 0.022818530687561307,
+   "layers.1.attention": 0.010510345793091121,
+   "layers.1.feed_forward": 0.019245798905196967
+  }
+ },
+ "notes": [],
+ "created": "2026-10-03T13:26:49Z",
+ "npz": "selftest_z_image_tiny_48.npz",
+ "tensors": {
+  "cap_feats": {
+   "shape": [
+    5,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "0d203635259a1e14a658e226b1a947beeb0884f2543bb20366b9ec305a798799"
+  },
+  "context_refiner.0.attention.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "257f0028b190a1f8abcb6b7df6002cec69e4c4f98d7b7cbe78d9189e5a19864f"
+  },
+  "context_refiner.0.feed_forward.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "912391ca9daa2ac19f665b136020ffe8ec52d238d98c6abb920b954591d16a7d"
+  },
+  "context_refiner.0.in": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "ef71d1f693d22c3ee9e5e5a9c10c9b457743c86d3c73caef03280d5f8ae84b30"
+  },
+  "context_refiner.0.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "96dbf376f2603eb4ced395d0cb8e7a9a3dae8a80cb562b98a438908c0008aaf1"
+  },
+  "final_layer.out": {
+   "shape": [
+    1,
+    64,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "f1fa033f467ca5949cab573af37d61cce21c73a360cc681959b23d7ec6c8a017"
+  },
+  "latents": {
+   "shape": [
+    1,
+    4,
+    6,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "0bc5997b2475d1ef7907286f9829dd4db8a305e04bf2ea32fc64a5e2930180ac"
+  },
+  "layers.0.attention.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c875526850223e07b72f98fc55d3bf6206dc8afd1d505cbdb0626fe56ccbceb4"
+  },
+  "layers.0.feed_forward.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c8d535a9e9d9546192319d19abf7ad9cc3e37b64d3ec808eaa8016350ba22675"
+  },
+  "layers.0.in": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "49c1cff5552145505881d3a696820d16eab797e5b38de85e214f6cc7efba7db1"
+  },
+  "layers.0.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "27cce384f3575f7a5c405c407b68ea50bf0e4c60e30246315b53d2381c2ed65f"
+  },
+  "layers.1.attention.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "e96059eb4d2c14a745dfec6ba2f6503de50ac4d25d28e34d8730ebe7ee651dbd"
+  },
+  "layers.1.feed_forward.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "e8e301a5a3606dbbd0551a0a13f99541122e62d443f9beed5334ca5d6273a499"
+  },
+  "layers.1.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "566fe44f91fffca9d4624c8e63e009027dbc79e123abf882470209479a7759be"
+  },
+  "noise_refiner.0.attention.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "010186b9bf428057a7fd5a8491ccc190188146fc351a2ab5349603fad0bacdf6"
+  },
+  "noise_refiner.0.feed_forward.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c2a0ee370fe1e31734d5ef54cf23a047318ed505bc5a41cd2f4491d240cae3de"
+  },
+  "noise_refiner.0.in": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "2f7dfb7f10d933f35e0d34ae07dcbc361a809f5a4c89c5600c4c9a27658892c3"
+  },
+  "noise_refiner.0.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "a0f84ce9129c9b3e5f6e5192f4a20f662b49b63209b3a20f179f766391c136ac"
+  },
+  "prompt_ids": {
+   "shape": [
+    0
+   ],
+   "dtype": "int64",
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "f3cdf0320e41c4ed5579a3c9f9f114692c01d392cde482d3ae802c5b25290f68"
+  },
+  "t_embedder.in": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "8f557c9fe2610bdd82e832c8de87e8ea7eaae8f5834d8fea9e84846210609a45"
+  },
+  "t_embedder.out": {
+   "shape": [
+    1,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "66d83e18be2a5876ef6540413cce556c0e091ff4d509806229f1c21d9cb544d5"
+  },
+  "t_model": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "55b51bbfa89c63511da11a52068292b17b6644163afdaf734beee7bcaf33b6e3"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    4,
+    6,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "d328ded1d721e8009a97403000509c037669d7e34921ed9c8f820f93c27bf862"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    4,
+    6,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "093c47bbaeae2bb8a0231d095c74d6ccb2a4e50ee698ebb4c186d81617a8e7b9"
+  }
+ }
+}

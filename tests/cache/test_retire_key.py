@@ -2,7 +2,7 @@
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.models.cache import KVCache, RotatingKVCache
+from gmlx._vendor.mlx_vlm.models.cache import KVCache, RotatingKVCache
 
 import gmlx.cache.snapshot as cs
 import gmlx.cache.retire_key as rk
@@ -157,6 +157,33 @@ def test_build_assistant_message_thinking_split():
     assert "plan" in (msg.get("reasoning_content") or "")
 
 
+def test_build_assistant_message_uses_the_request_tool_parser():
+    # The template infers gemma4, which does not read a JSON tool call;
+    # the request's tool_parser override does, as it did on the server.
+    ctx = _fake_ctx([1])
+    ctx["processor"].tokenizer.chat_template = "... <|tool_call> ..."
+    ctx["kw"] = {"tools": [{"type": "function", "function": {
+        "name": "f", "parameters": {"type": "object"}}}]}
+    text = '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
+    assert "tool_calls" not in rk.build_assistant_message(ctx, text)
+    ctx["tool_parser"] = "json_tools"
+    msg = rk.build_assistant_message(ctx, text)
+    assert [c["function"] for c in msg["tool_calls"]] == [
+        {"name": "f", "arguments": {"a": 1}}]
+    assert msg["content"] == ""
+
+
+def test_build_assistant_message_parses_no_tool_call_without_tools():
+    # The handlers load no tool parser when the request declares no tools,
+    # so a reply holding tool markup keeps it as content.
+    ctx = _fake_ctx([1])
+    ctx["tool_parser"] = "json_tools"
+    text = '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
+    msg = rk.build_assistant_message(ctx, text)
+    assert "tool_calls" not in msg
+    assert msg["content"] == text
+
+
 def test_truncated_thinking_predicate():
     pairs = (("<think>", "</think>"),)
     f = rk.truncated_thinking
@@ -241,7 +268,7 @@ def test_block_store_truncates_ids(monkeypatch):
         seen["ids"] = list(ids)
         return ["b"]
 
-    import mlx_vlm.apc as apc
+    import gmlx._vendor.mlx_vlm.apc as apc
     monkeypatch.setattr(apc, "harvest_blocks_from_batch_cache", harvest)
     ok = cs.retirement_store(_Manager(), "block", [1, 2, 3, 4, 5], [_kv(5)],
                              max_len=3)

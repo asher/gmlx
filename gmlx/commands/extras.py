@@ -24,13 +24,13 @@ import subprocess
 import sys
 
 # Mirrors pyproject [project.optional-dependencies]. Keep in sync when those move.
-# `vlm` and `embeddings` are core dependencies now (the serve engine and the
-# encoder-embedding backends hard-require mlx-vlm / mlx-embeddings); their entries
-# are empty - matching pyproject's back-compat empty extras - so `install_extra` is
-# a no-op for them (the presence probe still uses find_spec and reports the real
-# installed state).
+# `vlm` and `embeddings` are empty back-compat extras: vision is part of gmlx,
+# and the embedding encoders are gmlx's own code. `install_extra` is a no-op
+# for them; the presence probe still uses find_spec and reports the real
+# installed state.
 EXTRA_PACKAGES = {
     "vlm": [],
+    "video": ["opencv-python>=4.12.0.88"],
     "chat": ["prompt_toolkit", "rich"],
     "stt": ["mlx-whisper", "python-multipart"],
     # Kokoro's misaki G2P is vendored (gmlx/_vendor); these are its
@@ -59,14 +59,18 @@ EXTRA_PACKAGES = {
 # venv that kept sounddevice but lost sherpa-onnx would report `talk` as
 # installed while wake-word mode silently degrades to an open mic.
 _PROBE_MODULES = {
-    "vlm": ("mlx_vlm",),
+    # Vision support is part of gmlx (gmlx._vendor.mlx_vlm): nothing to probe.
+    "vlm": (),
+    "video": ("cv2",),
     "chat": ("prompt_toolkit",),
     "stt": ("mlx_whisper",),
     # spacy as well as mlx_audio: it backs the vendored misaki G2P that Kokoro
     # phonemizes through, so a stack missing it synthesizes nothing - probing
     # mlx_audio alone reported such an install as complete.
     "tts": ("mlx_audio", "spacy"),
-    "embeddings": ("mlx_embeddings",),
+    # Nothing to probe: the encoders are gmlx's own code on core packages, and
+    # the empty extra only keeps `gmlx[embeddings]` resolvable.
+    "embeddings": (),
     "talk": ("sounddevice", "sherpa_onnx", "mlx_whisper", "mlx_audio", "spacy"),
     "assistant": ("mcp",),
     "all": ("prompt_toolkit", "sounddevice", "sherpa_onnx", "mlx_whisper",
@@ -121,7 +125,8 @@ def ffmpeg_present() -> bool:
 # anything pip-installed into pipx's is dropped by the next upgrade. Both drop
 # a receipt file at the environment root - the only reliable marker, since
 # their directory layouts move with UV_TOOL_DIR / PIPX_HOME. A Homebrew keg
-# ships every extra and must not be changed with pip, so it gets no command.
+# ships every extra (the formula installs `all` and `video`) and must not be
+# changed with pip, so it gets no command.
 DIST_NAME = "gmlx"
 BREW_FORMULA = "asher/gmlx/gmlx"
 _UV_RECEIPT = "uv-receipt.toml"
@@ -251,9 +256,22 @@ def install_hint(extra: str) -> str:
     return shlex.join(cmd)
 
 
+def opencv(use: str):
+    """The cv2 module for ``use``, or ImportError naming the video extra,
+    which ships OpenCV. The copied mlx-vlm takes cv2 through this where it
+    needs it, so importing a module never needs OpenCV."""
+    try:
+        import cv2
+    except ImportError as e:
+        raise ImportError(
+            f"{use} needs OpenCV: {install_hint('video')}") from e
+    return cv2
+
+
 def repair_hint(package: str) -> str:
     """The command that restores ``package`` when a core dependency is
-    missing, which means the install itself is damaged."""
+    missing or below its floor, which means the install itself is damaged.
+    ``package`` is what follows ``pip install`` on the pip route."""
     route = install_route()
     if route == ROUTE_BREW:
         return f"brew reinstall {BREW_FORMULA}"

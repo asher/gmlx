@@ -101,14 +101,14 @@ from .hardening import (
     install_json_content_type_tolerance,
     install_loopback_host_guard,
 )
+from .messages_route import install_messages_route
 from .mtp_thinking import install_mtp_thinking_budget
 from .spec_processors import install_mtp_logits_processors
 from .observability import (
-    install_decode_progress_rate,
     install_request_timing_log,
     uvicorn_log_config,
 )
-from .render import install_faithful_history
+from .render import install_chat_image_placement, install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
     install_optional_request_model,
@@ -156,11 +156,11 @@ __all__ = [
     "install_audio_translation_route",
     "install_audio_voices_route",
     "install_auto_docs_removal",
+    "install_chat_image_placement",
     "install_chat_load_offload",
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_context_overflow_wording",
-    "install_decode_progress_rate",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -175,6 +175,7 @@ __all__ = [
     "install_keep_route",
     "install_loopback_host_guard",
     "install_max_completion_tokens",
+    "install_messages_route",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_mtp_logits_processors",
@@ -274,6 +275,12 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Media guard reads config-declared media ids (expanded image blocks).
     from gmlx.cache.apc_media import install_media_token_ids
     install_media_token_ids()
+    # APC keys a prefix by the images inside it.
+    from gmlx.cache.media_salt import install_media_salt
+    install_media_salt()
+    # Qwen3.5 restores a prefix whose suffix holds images.
+    from gmlx.cache.apc_media import install_causal_serve_media
+    install_causal_serve_media()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()
@@ -298,9 +305,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
-    # One BOS on prompts mlx-vlm tokenizes (also installed at load).
-    from gmlx.upstream.single_bos import install as install_single_bos
-    install_single_bos()
+    from gmlx.upstream.system_content_fix import install_system_content_fix
+    install_system_content_fix()
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+    install_single_bos_fix(count_routes=True)
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
@@ -345,6 +353,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # must exclude the stash so off-request predictions never write the
     # request contextvar the thinking splitters read.
     install_faithful_history()
+    # Chat completions and Messages render each image in the message
+    # that sent it.
+    install_chat_image_placement()
+    install_messages_route()
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_stream_thinking_seed()
@@ -358,8 +370,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_service_routes(cfg)
     install_resolver_error_handlers()
     install_request_timing_log()
-    # Before the live-requests install, which wraps the progress hook.
-    install_decode_progress_rate()
     from ..queue_cap import install_queue_depth_cap
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight
@@ -408,5 +418,5 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # True last: the keepalive body wrapper must be outermost on every
     # streaming route, including the assistant-re-registered chat routes.
     install_sse_keepalive()
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     setattr(app, _PATCH_FLAG, True)

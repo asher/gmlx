@@ -10,6 +10,8 @@ agent or chat app that does not connect, read its entry under
 - [Starting the server](#starting-the-server)
 - [Requests](#requests)
 - [Memory](#memory)
+- [Image generation](#image-generation)
+- [ComfyUI](#comfyui)
 - [Container mode](#container-mode)
 - [Custom agents](#custom-agents)
 - [Voice](#voice)
@@ -214,6 +216,322 @@ The weights plus the KV cache need more memory than the GPU may use.
 
 To try anyway on `run` and `chat`, set
 [`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#commands).
+
+## Image generation
+
+### `image request does not fit`
+
+The image at this size needs more memory than gmlx may use, and the message
+names the largest part. Try these in order:
+
+- A smaller image, such as `--size 768x768` on `gmlx image generate`, or
+  `"size": "768x768"` in a request.
+- A smaller DiT quant. `gmlx pull z-image-turbo --quant Q3_K_M` downloads
+  it and adds it as a new model, `z-image-turbo-q3-k-m`.
+- A smaller text encoder as well, with `--encoder-quant Q4_K_M` on that
+  pull.
+
+`GMLX_OVERCOMMIT=1` skips the check. The run then takes more memory than
+macOS can give it, so the Mac swaps and slows down. On a 16 GB Mac it can
+stop responding until it restarts.
+
+### `VAE decode of ... needs ... GiB, and ... GiB is free`
+
+The last step, which turns the result into pixels, does not fit in the
+memory that is free at this size. A `VAE encode` message is the same check
+for the image an edit starts from. Make a smaller image, or quit apps that
+hold a lot of memory. `GMLX_OVERCOMMIT=1` overrides it, with the risk the
+entry above describes.
+
+### `The ... weights of ... GiB exceed the working budget of ... GiB`
+
+The model's files alone are larger than the memory gmlx may use, which
+happens with a quant meant for a Mac with more memory. Pull the model
+without `--quant` to get the quant for this Mac, or a smaller one, as
+[`image request does not fit`](#image-request-does-not-fit) shows.
+
+### `size WxH does not fit in memory beside the models now loaded`
+
+The server answers 400 when an image of that size does not fit beside the
+chat models it has loaded. The message names the largest size of the same
+shape that fits. Send that size, leave out `size` to get the model's
+default, or unload chat models with [`POST /unload`](api.md#endpoints).
+
+### `needs an M3 or newer`
+
+`gmlx pull` refuses an image model on an M1 or M2 Mac before it downloads
+anything, and `--force` downloads the files anyway. The models run in
+bfloat16, which M1 and M2 chips lack. On those Macs `gmlx image generate`
+and the server refuse Qwen-Image 2.1 and Krea 2 with `needs bfloat16, which
+the M1 chip lacks`. Z-Image-Turbo can run in float16, as the next entry
+describes.
+
+### `runs in float16 on the M1 chip, which misses the reference checks`
+
+Z-Image-Turbo can run in float16 on an M1 or M2, where the other image
+models cannot. Its images then differ from those of an M3 or newer, because
+float16 misses the reference checks. With
+[`GMLX_IMAGE_ALLOW_FP16=1`](env-vars.md#runtime) set, `gmlx pull`,
+`gmlx image generate` and the server run it that way.
+
+### `no such file, and no image model of that id`
+
+`gmlx image generate` takes the id of an image model in your configuration,
+or the path of a DiT file. The message lists the ids the configuration has,
+and `gmlx list --image` lists them too. `gmlx pull z-image-turbo` adds one.
+
+### `--encoder and --vae are required with a DiT path`
+
+Given the path of a DiT file, `generate` also needs the text encoder and VAE
+files. Use the id that `gmlx pull` added instead, which brings both.
+
+### `no image model is configured on this server`
+
+The server has no image model, and answers 404 `model_not_found`.
+`gmlx pull z-image-turbo` downloads one and adds it to the running server.
+
+### `is not an image model` or `is an image model`
+
+The request sent a chat model to an image route, or an image model to a
+chat route, and got 400 `wrong_model_kind`. The message lists the image
+models, or names the route the model takes.
+
+### 400 `image_model_mismatch`
+
+The text encoder, VAE or mmproj of an image model's entry belongs to
+another model, and the message names the part. Set the entry's `encoder`,
+`vae` or `encoder_mmproj` to the file made for this model, or pull the
+model by name, which takes the parts that match.
+
+### `is not the ... VAE, and a download would land on it`
+
+`gmlx pull` found another file where it would save one of the model's parts.
+Move or delete that file, and pull again.
+
+### `has sha256 ..., and the ... VAE at ... has ...`
+
+The VAE that `gmlx pull` downloaded is not the published file. Delete the
+file that the message names, and pull again.
+
+### `gmlx image does not apply` or `is not a ... adapter`
+
+The LoRA is of a kind gmlx does not apply, or it was made for another
+model. [Use a LoRA](images.md#use-a-lora) says which LoRAs work.
+
+### `has text encoder layers; set it on the image model's adapters instead`
+
+A LoRA in a request applies to the DiT only, so the server refuses one that
+also trains the text encoder. List it in the image model's
+[`adapters`](config.md#image_modelsadapters), where both halves apply.
+
+### `never an absolute path` or `is not a configured adapter or a file in a model folder`
+
+A LoRA in a request is named by a path inside one of your model folders,
+such as `loras/watercolor.safetensors`, or by the file name of one in the
+entry's `adapters`. Move the file into a model folder and use its path
+there.
+
+## ComfyUI
+
+### `no ComfyUI found`
+
+`gmlx comfyui install` and `gmlx launch comfyui` found no ComfyUI in the
+places that [Put the gmlx nodes into ComfyUI](comfyui.md#put-the-gmlx-nodes-into-comfyui)
+lists. Get ComfyUI as [Get ComfyUI](comfyui.md#get-comfyui) shows, or pass
+`--comfyui-dir` with the folder that holds it.
+
+### `found ... ComfyUI installs`
+
+More than one ComfyUI is on this Mac. Run the command again with
+`--comfyui-dir` and one of the folders it lists, once for each ComfyUI that
+should have the gmlx nodes.
+
+### `is not a ComfyUI folder`
+
+The folder that `--comfyui-dir` names has neither ComfyUI's `main.py` nor a
+`custom_nodes` folder. Pass the folder you cloned ComfyUI into, or a Comfy
+Desktop install folder.
+
+### `comfyui.json is not a JSON object`
+
+The settings file that the gmlx nodes read, `~/.config/gmlx/comfyui.json`
+or the file that `GMLX_COMFY_SETTINGS` names, does not parse, often after
+a hand edit left a trailing comma. It may hold your own `base_url` and
+`api_key`, so `gmlx comfyui` leaves it as it is. Fix the file, or move it
+aside, and run the command again.
+
+### `has no Python environment of its own`
+
+`gmlx launch comfyui` runs ComfyUI on the Python of a `.venv` or `venv`
+folder inside it. Create one with the commands the message prints.
+
+### `is older than ..., the oldest the gmlx nodes run on`
+
+The gmlx nodes need a newer ComfyUI. The message gives the steps for that
+kind of ComfyUI, such as `git -C ~/ComfyUI pull` for a clone. Update it,
+then run `gmlx comfyui install` again. The old ComfyUI desktop app cannot
+update that far, so install Comfy Desktop in its place.
+
+### `is older than ..., which the nodes need`
+
+`gmlx comfyui status` and `gmlx doctor` found a ComfyUI that has the gmlx
+nodes but is older than they need, such as after a gmlx upgrade raised the
+oldest ComfyUI they run on. The nodes may show as `(not loaded)` there.
+Update that ComfyUI as the entry above describes, then restart it.
+
+### `the ComfyUI version in ... is unknown`
+
+The ComfyUI folder has no `comfyui_version.py`, so `install` cannot check
+the version. The nodes are installed, and they load on ComfyUI 0.37 or
+newer.
+
+### `is newer than ..., the newest this gmlx was tested on`
+
+The nodes are installed and usually work. When a change in that ComfyUI
+breaks them, they show as `(not loaded)`, as the entry below describes.
+
+### `carries a signed policy`
+
+A Comfy Desktop build with a signed policy can refuse custom nodes that the
+policy does not list. If the gmlx nodes do not show in ComfyUI, ask whoever
+manages the build to allow them, or use a Comfy Desktop install without a
+policy.
+
+### `the folder that was there moved to`
+
+`custom_nodes` held a folder named `comfyui-gmlx`, such as a clone of the
+old ComfyUI-gmlx repository. `install` moved it into `custom_nodes/.disabled`,
+where ComfyUI skips it. Delete it when you no longer need it.
+
+### `runs its own ComfyUI, so launch does not start it`
+
+The ComfyUI that `launch` found is a Comfy Desktop install or the old
+desktop app. `launch` put the gmlx nodes into it. Start the app, or restart
+it, from the Dock.
+
+### `has no main.py, so launch cannot start ComfyUI from it`
+
+`launch` put the gmlx nodes into that folder, but it holds no ComfyUI to
+start. Start that ComfyUI the way you installed it, or pass
+`--comfyui-dir` with the folder that holds `main.py`.
+
+### `do not load on ComfyUI`, and the gmlx nodes show `(not loaded)`
+
+A ComfyUI update changed a part of ComfyUI that this version of the nodes
+uses. Running one of them gives this error, which names the change and the
+command that upgrades gmlx, such as `brew upgrade gmlx`. Upgrade, run
+`gmlx comfyui install` and restart ComfyUI. When the error says the nodes
+need a newer ComfyUI, update ComfyUI in its place and restart it. The
+terminal or log of ComfyUI holds the full error.
+
+### `the server speaks step contract`, `the server names no step contract` or `the server needs a client of step contract`
+
+The server and the gmlx nodes come from gmlx versions too far apart to
+work together. The message names the step to take. When the server is the
+older one, restart it with `gmlx restart`, and upgrade gmlx if it stays
+older. When the nodes are older, restart ComfyUI so it loads the nodes of
+the gmlx the server runs, and run `gmlx comfyui install` if they stay
+older.
+
+### `the server runs gmlx ... and these nodes are from gmlx ...`
+
+The server and the nodes come from two gmlx versions. When the server is
+newer, restart ComfyUI so it loads the new nodes, and run
+`gmlx comfyui install` if they stay old. When the nodes are newer, run
+`gmlx restart`.
+
+### `the gmlx server at ... has no image model`
+
+The loader names a model that the server's config does not have, such as
+the model of an example workflow you have not pulled. Run the `gmlx pull`
+command that the message gives, then run the workflow again. When the
+message says the server has that model under another id, pick that id in
+the loader's `model_name` list. To use a model you already have, pick it
+in the list.
+
+### `gmlx serve` failed (exit ...)
+
+The loader started `gmlx serve` because no server answered, and the server
+stopped before it was ready. The message ends with what `gmlx serve`
+printed and the end of the server's log, which name the cause. A message
+that says the server stopped before it answered has the same cause. Fix
+that, then run the workflow again, or start the server yourself with
+`gmlx serve` to see the whole output.
+
+### `a server answers at ..., but it is not a gmlx image server`
+
+Another server, such as llama-server, listens at the address the loader
+uses and has no gmlx image step routes, or its answer to the handshake is
+not a gmlx one. Set the loader's `server_url` to the gmlx server's
+address, which `gmlx status` shows. When the address is a gmlx server,
+its `server.image.steps_api` is off: turn it on and run `gmlx restart`.
+
+### `the capabilities handshake was refused (401)` or `(403)`
+
+A gmlx server answered and refused the nodes. With 401, the server has an
+API key: set `GMLX_API_KEY`, or `api_key` in the nodes' settings file.
+With 403, the server takes step requests from its own Mac only: run
+ComfyUI there, or set `server.image.steps_remote` in the server's config.
+
+### `gmlx is not installed`
+
+The nodes found neither the `gmlx` command that `install` recorded nor one
+on `PATH`, or the one they found does not run. Install gmlx again and run
+`gmlx comfyui install`, or remove the nodes by deleting the two paths the
+message names: the `comfyui-gmlx` link in `custom_nodes` and
+`~/.local/share/gmlx/comfyui`.
+
+### `the pack copy is missing` or `the pack copy is from gmlx`
+
+`gmlx comfyui status` and `gmlx doctor` found the copy of the nodes gone or
+from another gmlx version than the one that runs. Run
+`gmlx comfyui install`.
+
+### `folder missing; run gmlx comfyui install`
+
+A ComfyUI that the record lists is gone: deleted, moved, or on a drive that
+is not mounted. A drive that comes back needs nothing, since its link
+points at the copy that gmlx keeps current. For a ComfyUI that is gone for
+good, run `gmlx comfyui install`. It removes the folder from the record and
+says so, then installs into the other ComfyUI folders it has or finds.
+When it finds no other ComfyUI, it stops with `no ComfyUI found`, and when
+it finds several, it lists them. The record is clean either way, so status
+and `gmlx doctor` stop naming the folder. Running
+`gmlx comfyui uninstall --comfyui-dir DIR` with its path removes it from
+the record without installing anything. If the folder comes back, run
+`gmlx comfyui install --comfyui-dir DIR` to record it again.
+
+### `missing; run gmlx comfyui install`, `elsewhere; run gmlx comfyui install` or `folder; run gmlx comfyui install`
+
+The `comfyui-gmlx` entry in that ComfyUI's `custom_nodes` is gone
+(`missing`), links to something other than the gmlx copy (`elsewhere`), or
+is a real folder (`folder`), such as one a hand copy put there.
+`gmlx comfyui install` puts the link back and moves such a folder into
+`custom_nodes/.disabled`.
+
+### ComfyUI-Manager says `Not a git repository`
+
+ComfyUI-Manager lists the gmlx nodes as an unknown pack, and updating them
+there fails, since they are a link to the copy that gmlx keeps, not a git
+clone. They update with gmlx: upgrade gmlx, and the next `gmlx serve`,
+`gmlx launch comfyui` or `gmlx comfyui install` brings the new nodes.
+Restart ComfyUI after that.
+
+### `could not refresh the ComfyUI node pack`
+
+The server could not replace the copy of the nodes, and it started anyway.
+The message names the cause, such as a full disk. Fix it, then run
+`gmlx comfyui install`.
+
+### `replaced the gmlx nodes from gmlx ... with those of the older gmlx`
+
+An older gmlx ran `install` or a server start after a newer one, so the
+nodes are now the older version. Run the newer gmlx, or upgrade.
+
+### `the server offers no image model`
+
+`gmlx launch comfyui` found a server with no image model.
+`gmlx pull z-image-turbo` downloads one and adds it to the running server.
 
 ## Container mode
 
@@ -484,10 +802,13 @@ Paths under `~/.cache` and `~/.local/share` follow `XDG_CACHE_HOME` and
 |------|----------|
 | `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | The config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
 | `~/.config/gmlx/` | Client configs that `gmlx launch` writes. |
+| `~/.config/gmlx/comfyui.json` | The ComfyUI settings and what `gmlx comfyui install` recorded. |
+| `~/.local/share/gmlx/comfyui/` | The copy of the gmlx nodes that each ComfyUI's `custom_nodes/comfyui-gmlx` links to. |
 | `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml`, `~/.hermes/config.yaml` | Client files that `gmlx launch` adds its settings to. Delete those settings to remove gmlx. |
 | `~/.cache/gmlx/` | Server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache, when the disk tier is on and has no `path` of its own. |
 | `~/.cache/gmlx/media/` | Media files that requests name, as [Media in requests](api.md#media-in-requests) describes. |
+| `~/.cache/gmlx/images/` | The images behind `url` answers of the [image routes](images.md), a folder per server port. They expire after `server.image.url_ttl_s`. |
 | `~/.cache/gmlx/talk/` | The wake-word and voice-activity models of `gmlx talk`. |
 | `~/.cache/huggingface/` | The files that `hf:` references resolve from. |
 | `~/.local/share/gmlx/chats/` | Saved chat sessions. |

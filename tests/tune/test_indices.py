@@ -38,21 +38,21 @@ def _input_grad(fn, x):
 def _stock(name):
     a = _args()
     if name == "qwen3_moe":
-        from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+        from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
         return Qwen3MoeSparseMoeBlock(a)
     if name == "qwen3_next":
-        from mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
+        from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
         return Qwen3NextSparseMoeBlock(a)
     if name == "qwen3_5_moe":
-        from mlx_vlm.models.qwen3_5_moe.language import Qwen3_5MoeSparseMoeBlock
+        from gmlx.models.qwen35.moe_language import Qwen3_5MoeSparseMoeBlock
         return Qwen3_5MoeSparseMoeBlock(a)
     if name == "minimax":
-        from mlx_lm.models.minimax import MiniMaxSparseMoeBlock
+        from gmlx._vendor.mlx_lm.models.minimax import MiniMaxSparseMoeBlock
         return MiniMaxSparseMoeBlock(a)
     if name == "gpt_oss":
-        from mlx_lm.models.gpt_oss import MLPBlock
+        from gmlx._vendor.mlx_lm.models.gpt_oss import MLPBlock
         return MLPBlock(a)
-    from mlx_lm.models.deepseek_v3 import DeepseekV3MoE
+    from gmlx._vendor.mlx_lm.models.deepseek_v3 import DeepseekV3MoE
     return DeepseekV3MoE(a)
 
 
@@ -125,10 +125,10 @@ def test_stock_moe_blocks_train_under_the_wrapper(name):
 def test_owned_routers_detach_their_ids_without_the_wrapper():
     """gmlx's eager MoE forwards and its model routers detach their ids
     themselves, so their backward is defined outside a training run too."""
-    from mlx_lm.models.gpt_oss import MLPBlock
-    from mlx_lm.models.minimax import MiniMaxSparseMoeBlock
-    from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
-    from mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.gpt_oss import MLPBlock
+    from gmlx._vendor.mlx_lm.models.minimax import MiniMaxSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     import gmlx.stream.moe_experts as me
     from gmlx.models.minimax_m3 import MiniMaxM3SparseMoeBlock

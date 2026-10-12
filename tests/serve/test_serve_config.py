@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("yaml")
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
@@ -428,3 +428,35 @@ def test_reregister_heals_listing_when_file_returns(tmp_path, capsys):
     assert set(serving.resolved_models()) == {"real", "ghost"}
     assert "re-registered" in capsys.readouterr().err
     assert serving.reregister_missing_models() is False   # idempotent
+
+
+def test_reregister_heals_an_image_model_when_its_file_returns(tmp_path, capsys):
+    for name in ("enc.gguf", "vae.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF")
+    cfg = build_config({
+        "server": {"model_dirs": [str(tmp_path)]},
+        "image_models": {"zit": {"path": "dit.gguf", "encoder": "enc.gguf",
+                                 "vae": "vae.gguf"}}})
+    serving.register_resolved_models(cfg)
+    try:
+        assert serving.image_models() == {}
+        assert serving.reregister_missing_models() is False
+        (tmp_path / "dit.gguf").write_bytes(b"GGUF")
+        assert serving.reregister_missing_models() is True
+        assert set(serving.image_models()) == {"zit"}
+        assert "re-registered" in capsys.readouterr().err
+    finally:
+        serving.clear_resolved_models()
+
+
+def test_an_image_pin_pins_its_path():
+    from types import SimpleNamespace
+
+    from gmlx.serve import server
+
+    resolved = {"chat": SimpleNamespace(path="/m/chat.gguf", pin=False)}
+    images = {"zit": SimpleNamespace(path="/m/z.gguf", pin=True),
+              "qi": SimpleNamespace(path="/m/q.gguf", pin=False)}
+    paths, image_pins = server._pinned_paths(resolved, images, ["chat"])
+    assert paths == {"/m/chat.gguf", "/m/z.gguf"}
+    assert image_pins == {"zit": "/m/z.gguf"}

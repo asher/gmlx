@@ -7,8 +7,8 @@ import types
 
 from gmlx.gen.generation import generate
 
-mlx_lm_pkg = importlib.import_module("mlx_lm")
-mlg = importlib.import_module("mlx_lm.generate")
+mlx_lm_pkg = importlib.import_module("gmlx._vendor.mlx_lm")
+mlg = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 
 
 class _Tok:
@@ -71,7 +71,8 @@ def test_closed_prompt_delegates_untouched(monkeypatch, capsys):
         apply_chat_template=False, verbose=True,
     )
     assert out == "plain"
-    assert calls == ["<|assistant|>\n"]
+    # The prompt, encoded as the server encodes it.
+    assert calls == [_Tok().encode("<|assistant|>\n")]
     assert "<think>" not in capsys.readouterr().out
 
 

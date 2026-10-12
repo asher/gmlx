@@ -9,10 +9,10 @@ counters that show whether reuse works. The user guide is
 The cache routes each model by its cache stack's shape once, at the first
 probe, and logs the result as `APC tier:`, or as
 `APC OFF for this model` when no tier serves it. That log line is the
-source of truth for a model. `model_apc_mode` in `mlx_vlm.apc` picks the
-block or exact tier, and `_ckpt_active` in `gmlx/spec/engine.py` moves an
-exact-mode stack with gated-delta or sliding-window layers to the
-checkpoint tier.
+source of truth for a model. `model_apc_mode` in mlx-vlm's `apc` module
+(`gmlx/_vendor/mlx_vlm/apc.py`) picks the block or exact tier, and
+`_ckpt_active` in `gmlx/spec/engine.py` moves an exact-mode stack with
+gated-delta or sliding-window layers to the checkpoint tier.
 
 | Cache shape | Example | Tier |
 |-------------|---------|------|

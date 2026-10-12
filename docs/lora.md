@@ -12,6 +12,8 @@ gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/mo
 
 gmlx trains on the quantized GGUF as it is and keeps no full-precision
 copy, so you can fine-tune a model that fits in memory only when quantized.
+This page covers chat models. Image models take LoRAs too, as
+[Use a LoRA](images.md#use-a-lora) describes.
 
 - [Training data](#training-data)
 - [Train an adapter](#train-an-adapter)

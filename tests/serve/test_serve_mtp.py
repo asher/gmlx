@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
@@ -299,7 +299,7 @@ def installed_drafter_patch(monkeypatch):
     ``(patched_load_drafter, original_calls)``."""
     import importlib
 
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     original_calls = []
 
     def sentinel(path_or_repo, kind=None, **kwargs):
@@ -349,7 +349,7 @@ def test_draft_block_size_override_noop_without_env(installed_drafter_patch):
 def test_drafter_patch_is_idempotent():
     import importlib
 
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     serving._install_drafter_injection()
     first = drafters.load_drafter
     serving._install_drafter_injection()
@@ -365,7 +365,7 @@ def installed_bridge(monkeypatch):
     (harmless - only the stash drives it)."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     original_calls = []
     serveable_calls = []
 
@@ -486,7 +486,7 @@ def test_stale_drafter_env_never_reaches_a_non_gguf_load(monkeypatch):
     pops both vars before branch dispatch, so the stock loader runs clean."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     env_at_original = []
 
     def sentinel(model_path, adapter_path=None):
@@ -716,8 +716,6 @@ def test_serveable_mtp_applies_adapter_to_language_model(monkeypatch):
         lambda r, cfg, ad, base_gguf_path=None:
         applied.append((r, ad, base_gguf_path)))
     monkeypatch.setattr(serving, "_ensure_inner_config", lambda m, c: None)
-    monkeypatch.setattr("gmlx.cache.compat.ensure_runtime_origin_make_cache",
-                        lambda m: None)
     monkeypatch.setattr(serving, "_make_text_processor", lambda tok: "PROC")
     serving._load_serveable_mtp("/m/t.gguf", adapter_gguf="/m/ad.lora.gguf")
     assert applied == [(target.language_model, "/m/ad.lora.gguf", "/m/t.gguf")]
@@ -727,7 +725,7 @@ def test_prompt_step_caps_mtp_hidden_capture():
     """Chunked MTP prefill must retain only the trailing hidden_capture_limit
     positions for window-limited drafters, not pin the whole prompt's hidden."""
     import mlx.core as mx
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
 
@@ -757,6 +755,7 @@ def test_prompt_step_caps_mtp_hidden_capture():
             self._inputs_embeds = mx.zeros((1, TOTAL, D))
             self._mtp_chunk_hiddens = []
             self._processed_prompt_columns = 0
+            self._right_pad_per_row = None
             self._prompt_kwargs = {}
             self._prompt_length_aware_keys = []
 
@@ -800,6 +799,7 @@ def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
     class _LM:
         # The full gemma4_text hook row: the check is per-arch now.
         speculative_logits_from_hidden = object()
+        speculative_argmax_from_hidden = object()
         rollback_speculative_cache = object()
         speculative_draft_hidden = object()
 

@@ -2674,8 +2674,11 @@ def test_a_named_pipe_at_the_local_config_never_blocks(tmp_path, monkeypatch, ca
 
 
 def test_launch_clients_match_the_launch_handlers():
-    from gmlx.commands.launch import _HARNESSES
-    assert set(_HARNESSES) == set(cfgmod.LAUNCH_CLIENTS)
+    # The container settings name every client but those that run on the
+    # Mac only.
+    from gmlx.commands.launch import _HARNESSES, HOST_ONLY
+    assert set(_HARNESSES) - HOST_ONLY == set(cfgmod.LAUNCH_CLIENTS)
+    assert HOST_ONLY <= set(_HARNESSES)
 
 
 @pytest.mark.parametrize("block, want", [
@@ -3160,3 +3163,232 @@ def test_a_relative_share_in_the_config_is_refused(spec):
         _parse_launch({"container": {"mounts": ["~nouser-x7/src"]}})
     assert _launch({"mounts": ["~/a:ro", "/b:/c", "~:/h:ro"]}).mounts == [
         "~/a:ro", "/b:/c", "~:/h:ro"]
+
+
+# --- image_models: a sibling block with its own keys and one id namespace ---
+
+def _image_doc(**entry):
+    base = {"path": "/m/z.gguf", "encoder": "/m/qwen3-4b.gguf",
+            "vae": "/m/z-vae.gguf"}
+    base.update(entry)
+    return {"models": {"chat": {"path": "/m/chat.gguf"}},
+            "image_models": {"zit": base}}
+
+
+def test_image_models_parse_with_defaults():
+    cfg = build_config(_image_doc())
+    m = cfg.image_models["zit"]
+    assert (m.path, m.encoder, m.vae) == ("/m/z.gguf", "/m/qwen3-4b.gguf",
+                                          "/m/z-vae.gguf")
+    assert m.family is None and m.encoder_mmproj is None
+    assert m.variant is None
+    assert m.adapters == () and m.defaults == {}
+    assert m.encoder_release == "auto" and m.pin is False and m.ttl_s is None
+    assert cfg.image == cfgmod.ImageServerCfg()
+    assert cfg.image.url_ttl_s == 3600.0 and cfg.image.max_queue == 4
+    assert cfg.defaults.image_model is None
+    # An image entry never reaches the chat tables.
+    assert "zit" not in cfg.models
+
+
+def test_image_model_keys_are_strict():
+    with pytest.raises(ConfigError, match="pinned"):
+        build_config(_image_doc(pinned=True))
+    with pytest.raises(ConfigError, match="needs `vae`"):
+        build_config({"image_models": {"zit": {"path": "/m/z.gguf",
+                                               "encoder": "/m/e.gguf"}}})
+    with pytest.raises(ConfigError, match="encoder_release"):
+        build_config(_image_doc(encoder_release="sometimes"))
+    with pytest.raises(ConfigError, match="sampler"):
+        build_config(_image_doc(defaults={"sampler": "dpmpp"}))
+    with pytest.raises(ConfigError, match="scheduler"):
+        build_config(_image_doc(defaults={"scheduler": "karras"}))
+    with pytest.raises(ConfigError, match="size"):
+        build_config(_image_doc(defaults={"size": "big"}))
+    with pytest.raises(ConfigError, match="strength"):
+        build_config(_image_doc(adapters=[{"path": "/a", "strength": "x"}]))
+    with pytest.raises(ConfigError, match="variant: expected a string"):
+        build_config(_image_doc(variant=1))
+
+
+def test_image_model_defaults_and_adapters_normalize():
+    cfg = build_config(_image_doc(
+        defaults={"size": "768X1024", "steps": "8", "guidance": 1,
+                  "sampler": "uni_pc_bh2", "negative_prompt": "blur"},
+        adapters=["/a.safetensors", {"path": "/b.safetensors",
+                                     "strength": 0.5}],
+        ttl_s=None, pin=True))
+    m = cfg.image_models["zit"]
+    assert m.defaults == {"size": "768x1024", "steps": 8, "guidance": 1.0,
+                          "sampler": "uni_pc_bh2", "negative_prompt": "blur"}
+    assert m.adapters == (("/a.safetensors", 1.0), ("/b.safetensors", 0.5))
+    assert m.ttl_s == 0.0 and m.pin is True
+
+
+@pytest.mark.parametrize("where", ["models", "aliases", "assistants"])
+def test_image_id_collision_is_a_config_error(where):
+    doc = _image_doc()
+    if where == "models":
+        doc["models"]["zit"] = {"path": "/m/other.gguf"}
+    elif where == "aliases":
+        doc["aliases"] = {"zit": "chat"}
+    else:
+        doc["server"] = {"assistants": {"zit": {"model": "chat"}}}
+    with pytest.raises(ConfigError, match="collides"):
+        build_config(doc)
+
+
+def test_image_id_with_at_is_refused():
+    doc = _image_doc()
+    doc["image_models"]["z@t"] = doc["image_models"].pop("zit")
+    with pytest.raises(ConfigError, match="must not contain"):
+        build_config(doc)
+
+
+def test_shared_encoder_rules():
+    doc = _image_doc(encoder="chat")
+    cfg = build_config(doc)
+    rm = cfgmod.resolve_image_model("zit", cfg)
+    assert rm.encoder is None and rm.encoder_model == "chat"
+    doc["models"]["chat"]["adapter"] = "/m/a.gguf"
+    with pytest.raises(ConfigError, match="adapter"):
+        build_config(doc)
+    doc = _image_doc(encoder="chat", encoder_mmproj="/m/mm.gguf")
+    with pytest.raises(ConfigError, match="encoder_mmproj"):
+        build_config(doc)
+
+
+def test_shared_encoder_brings_its_mmproj():
+    doc = _image_doc(encoder="chat")
+    doc["models"]["chat"]["mmproj"] = "/m/chat-mmproj.gguf"
+    rm = cfgmod.resolve_image_model("zit", build_config(doc))
+    assert rm.encoder_mmproj == "/m/chat-mmproj.gguf"
+
+
+def test_resolve_image_model_and_signature(tmp_path):
+    for name in ("z.gguf", "e.gguf", "v.gguf", "lora.safetensors"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {"server": {"model_dirs": [str(tmp_path)],
+                      "defaults": {"ttl_s": 120}},
+           "image_models": {"zit": {"path": "z.gguf", "encoder": "e.gguf",
+                                    "vae": "v.gguf",
+                                    "adapters": ["lora.safetensors"]}}}
+    cfg = build_config(doc)
+    rm = cfgmod.resolve_image_model("zit", cfg)
+    assert rm.path == str(tmp_path / "z.gguf")
+    assert rm.encoder == str(tmp_path / "e.gguf")
+    assert rm.adapters == ((str(tmp_path / "lora.safetensors"), 1.0),)
+    assert rm.ttl_s == 120
+    sig = rm.load_signature()
+    assert rm.path in sig and rm.vae in sig and rm.adapters in sig
+    doc["image_models"]["zit"]["defaults"] = {"steps": 4}
+    assert cfgmod.resolve_image_model(
+        "zit", build_config(doc)).load_signature() == sig
+    doc["image_models"]["zit"]["variant"] = "turbo"
+    rv = cfgmod.resolve_image_model("zit", build_config(doc))
+    assert rv.variant == "turbo" and rv.load_signature() != sig
+    del doc["image_models"]["zit"]["variant"]
+    doc["image_models"]["zit"]["adapters"] = []
+    assert cfgmod.resolve_image_model(
+        "zit", build_config(doc)).load_signature() != sig
+    doc["image_models"]["zit"]["vae"] = "missing.gguf"
+    with pytest.raises(cfgmod.MissingModelFile):
+        cfgmod.resolve_image_model("zit", build_config(doc))
+
+
+def test_server_image_block():
+    cfg = build_config({"server": {"image": {
+        "url_ttl_s": 60, "url_max_bytes": "2G", "max_queue": 0,
+        "embed_metadata": True}}})
+    assert cfg.image == cfgmod.ImageServerCfg(
+        url_ttl_s=60.0, url_max_bytes=2 << 30, max_queue=0,
+        embed_metadata=True)
+    cfg = build_config({"server": {"image": {"steps_api": False,
+                                             "steps_remote": True}}})
+    assert (cfg.image.steps_api, cfg.image.steps_remote) == (False, True)
+    base = build_config({}).image
+    assert (base.steps_api, base.steps_remote) == (True, False)
+    for bad in ({"steps_api": "yes"}, {"steps_remote": 1}):
+        with pytest.raises(ConfigError, match=next(iter(bad))):
+            build_config({"server": {"image": bad}})
+    with pytest.raises(ConfigError, match="steps_api_x"):
+        build_config({"server": {"image": {"steps_api_x": True}}})
+    cfg = build_config({"server": {"image": {"tensor_cache_mb": 32,
+                                             "adapter_cache_mb": 128}}})
+    assert (cfg.image.tensor_cache_mb, cfg.image.adapter_cache_mb) == (32, 128)
+    base = build_config({}).image
+    assert (base.tensor_cache_mb, base.adapter_cache_mb) == (64, 256)
+    for bad in ({"tensor_cache_mb": 0}, {"adapter_cache_mb": -5},
+                {"tensor_cache_mb": "lots"}):
+        with pytest.raises(ConfigError, match=next(iter(bad))):
+            build_config({"server": {"image": bad}})
+    with pytest.raises(ConfigError, match="url_max_bytes"):
+        build_config({"server": {"image": {"url_max_bytes": "lots"}}})
+    with pytest.raises(ConfigError, match="max_queue"):
+        build_config({"server": {"image": {"max_queue": -1}}})
+
+
+def test_default_image_model_must_be_an_image_model():
+    doc = _image_doc()
+    doc["server"] = {"defaults": {"image_model": "zit"}}
+    assert build_config(doc).defaults.image_model == "zit"
+    doc["server"] = {"defaults": {"image_model": "chat"}}
+    with pytest.raises(ConfigError, match="image_model"):
+        build_config(doc)
+
+
+def test_image_models_round_trip_through_print_config():
+    import yaml
+
+    from gmlx.serve import server as srv
+    doc = _image_doc(adapters=[{"path": "/a.safetensors", "strength": 0.5}],
+                     defaults={"steps": 8})
+    doc["server"] = {"image": {"max_queue": 2},
+                     "defaults": {"image_model": "zit"}}
+    cfg = build_config(doc)
+    again = build_config(yaml.safe_load(srv._dump_cfg_yaml(cfg)))
+    assert again.image_models == cfg.image_models
+    assert again.image == cfg.image
+    assert again.defaults.image_model == "zit"
+
+
+def test_image_signature_carries_the_priced_defaults(tmp_path):
+    """The entry books one image at its default size and guidance, so two
+    ids that differ there are two entries with their own price."""
+    for name in ("z.gguf", "e.gguf", "v.gguf"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "image_models": {
+               "small": {"path": "z.gguf", "encoder": "e.gguf", "vae": "v.gguf",
+                         "defaults": {"size": "512x512"}},
+               "big": {"path": "z.gguf", "encoder": "e.gguf", "vae": "v.gguf",
+                       "defaults": {"size": "1024x1024"}},
+               "guided": {"path": "z.gguf", "encoder": "e.gguf",
+                          "vae": "v.gguf",
+                          "defaults": {"size": "1024x1024", "guidance": 4}}}}
+    cfg = build_config(doc)
+    sigs = {i: cfgmod.resolve_image_model(i, cfg).load_signature()
+            for i in ("small", "big", "guided")}
+    assert len(set(sigs.values())) == 3
+
+
+def test_defaults_preload_takes_an_image_id():
+    doc = _image_doc()
+    doc["server"] = {"defaults": {"preload": ["chat", "zit"]}}
+    assert build_config(doc).defaults.preload == ["chat", "zit"]
+
+
+def test_discovery_never_takes_an_image_id(monkeypatch):
+    from gmlx.load import discovery
+
+    seen = {}
+
+    def scan(specs, dirs, *, known_ids, **kw):
+        seen["ids"] = set(known_ids)
+        return []
+
+    monkeypatch.setattr(discovery, "scan_dirs", scan)
+    doc = _image_doc()
+    doc["discover"] = [{"dir": "/m"}]
+    discovery.discovered_models(build_config(doc))
+    assert {"chat", "zit"} <= seen["ids"]

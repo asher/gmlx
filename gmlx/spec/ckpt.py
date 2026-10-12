@@ -6,20 +6,27 @@ probes, and env flags these helpers read.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
+from collections.abc import Callable
+from typing import Any
 
+from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
 from gmlx.spec.engine import (
     _L1View,
     _SPEC_APC_DISABLED,
     _SPEC_APC_RETIRE_DISABLED,
     _SPEC_APC_SIDECAR_DISABLED,
+    _bind_l1_view,
     _ckpt_active,
     _ckpt_layout_for,
     _ckpt_layout_live,
     _live_kv_quant_config,
+    _trim_prompt_columns,
 )
+from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -69,10 +76,21 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     restored prefix blocks, but ``store_kv_blocks`` dedups by hash chain
     (acquire+release of existing blocks, no data copies).
     """
-    view = _L1View(batch.model, manager, mode)
+    # The lookup helpers are grafted onto _L1View at bind time.
+    view: Any = _L1View(batch.model, manager, mode)
     ids_list = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
     prompt_kwargs = batch._prompt_kwargs or {}
-    extra_hash = view._apc_extra_hash(prompt_kwargs)
+    cold = (getattr(batch, "_apc_meta", None) or [None])[0]
+    if isinstance(cold, dict) and "extra_hash" in cold:
+        # The stock merge drops `_apc_semantic_hash` from the batch kwargs
+        # and the server never forwards pixel_values, so a salt computed
+        # from them misses the image, tenant and LoRA salt. The cold meta
+        # holds the row's salt; the stock helpers read it back from
+        # `_apc_semantic_hash`.
+        extra_hash = as_salt(cold["extra_hash"])
+        prompt_kwargs = {**prompt_kwargs, "_apc_semantic_hash": extra_hash}
+    else:
+        extra_hash = view._apc_extra_hash(prompt_kwargs)
     ckpt = _ckpt_active(batch.model, mode, int(manager.block_size))
     # A ckpt model whose live cache the tier cannot store caches nothing:
     # its exact-tier stores stay off, as on every ckpt model.
@@ -82,7 +100,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     l1_prefix = 0
     if l0_prefix == 0 and len(ids_list) >= 2:
         warm = None
-        blocks = []
+        blocks: list[Any] = []
         prefix_len = 0
         tier = "exact"
         pick = view._apc_pick_for((0, ids_list, 0, prompt_kwargs, None, None))
@@ -97,9 +115,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             warm = pick.get("warm_cache")
             blocks = list(pick.get("matched_blocks") or ())
             prefix_len = int(pick.get("prefix_len") or 0)
-            extra_hash = int(pick.get("extra_hash", extra_hash))
+            extra_hash = as_salt(pick.get("extra_hash", extra_hash))
             if warm is None and blocks:
-                from mlx_vlm import apc as _apc
+                from gmlx._vendor.mlx_vlm import apc as _apc
 
                 warm = _apc.make_warm_kv_cache(
                     blocks, min_capacity_tokens=len(ids_list) + 1
@@ -150,14 +168,19 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # exact/anchor clones carry single-row leaves (left_padding
             # None, scalar offsets) and crash the batch cache classes'
             # update path (mx.depends on a None) when the suffix forwards.
-            # kv_quant_config re-quantizes the float snapshot to the live
-            # _make_cache layer types under serve kv_bits (stored exact
-            # entries stay float; a float row joining a quantized batch
-            # breaks the update path).
-            from mlx_vlm import apc as _apc
+            # The merged row must also carry the live batch layer types, or
+            # it cannot join a batch. The merge keeps a packed row packed,
+            # and kv_quant_config converts a float row to the live packed
+            # types. With no live config (MTP batches run float KV under
+            # uniform KV_BITS), packed rows from the B=1 round recover to
+            # float first.
+            from gmlx._vendor.mlx_vlm import apc as _apc
+            cfg = _live_kv_quant_config(batch.model)
+            if cfg is None:
+                from gmlx.spec.kv_quant import dequantize_exact_row
+                warm = dequantize_exact_row(warm)
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
-                [warm], prefix_lens=[prefix_len],
-                kv_quant_config=_live_kv_quant_config(batch.model))
+                [warm], prefix_lens=[prefix_len], kv_quant_config=cfg)
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -228,6 +251,20 @@ def _gcd(a: int, b: int) -> int:
     while b:
         a, b = b, a % b
     return a
+
+
+def _media_safe(batch, ids) -> Callable[[int], bool]:
+    """Whether a store or cut at a position passes the APC media guard:
+    at or past the end of the prompt's last media span, or, for ids the
+    guard reads as whole blocks, outside every span
+    (``gmlx.cache.apc_media``). Any other position leaves a suffix no L1
+    lookup restores.
+    """
+    from gmlx.cache.apc_media import safe_prefix
+
+    _bind_l1_view()
+    view: Any = _L1View(getattr(batch, "model", None), None, None)
+    return safe_prefix(ids, view._apc_media_token_ids())
 
 
 def _ckpt_unit(batch, block_size: int) -> int:
@@ -393,7 +430,8 @@ def _exact_anchor_boundary(batch, meta, guard: int,
     """Anchor position for an exact-tier (non-ckpt) model: the sibling
     divergence point, ungridded (exact clones restore at any position).
     Clamped to the stock guard column, so the prefill pauses at most
-    twice: once for the anchor, once for the stock guard store.
+    twice: once for the anchor, once for the stock guard store. None
+    where the media guard refuses a store (``_media_safe``).
     GMLX_APC_CKPT_SYS=0 disables (one switch for both tiers);
     GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor shared
     prefix re-prefills in milliseconds and is not worth a clone).
@@ -416,17 +454,21 @@ def _exact_anchor_boundary(batch, meta, guard: int,
         pos = min(pos, guard)
     if pos < floor_min or pos <= max(0, restored):
         return None
+    if not _media_safe(batch, ids)(pos):
+        return None
     return pos
 
 
 def _exact_anchor_arm(batch, meta, guard: int, restored: int) -> None:
     """Schedule the anchor pause by mirroring its position into
-    ``checkpoint_len`` (the key the stock column truncation reads).
+    ``checkpoint_len`` (the key the stock column truncation reads once
+    the stock ``checkpoint_lengths`` schedule is dropped).
     ``_exact_anchor_store`` hands the column back to the stock guard
     after firing, so the stock store still runs exactly as unarmed."""
     pos = _exact_anchor_boundary(batch, meta, guard, restored)
     if pos is None:
         return
+    meta.pop("checkpoint_lengths", None)
     meta["anchor_len"] = pos
     meta["anchor_guard"] = guard
     if pos != guard:
@@ -461,7 +503,7 @@ def _exact_anchor_store(batch) -> None:
         return
     from gmlx.cache.snapshot import anchor_exact_store
     anchor_exact_store(manager, meta["full_input_ids"][:pos], cache,
-                       extra_hash=int(meta.get("extra_hash", 0)))
+                       extra_hash=as_salt(meta.get("extra_hash", 0)))
 
 
 def _sched_insert(bounds: list, pos: int, kind: str, *,
@@ -489,8 +531,9 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
                        block_size: int) -> None:
     """Publish the boundary schedule into the request meta. The head
     mirrors into ``checkpoint_len`` (an int) because the stock
-    checkpoint-column truncation and store reads exactly that key.
-    ``ckpt_stored_boundaries`` collects every boundary whose store
+    checkpoint-column truncation and store read exactly that key once
+    the stock ``checkpoint_lengths`` schedule is dropped (it takes
+    precedence when present). ``ckpt_stored_boundaries`` collects every boundary whose store
     landed (record verified in the index) -- the settled variable the
     post-prefill p=N decision and the sidecar key set both read;
     ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop."""
@@ -507,7 +550,16 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
         # Colliding with the anchor keeps the anchor (default no-upgrade):
         # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
+    # No boundary the media guard refuses, the terminal included: a
+    # prompt whose only grid point falls inside an image stores no
+    # terminal record.
+    safe = _media_safe(batch, meta.get("full_input_ids") or ())
+    bounds = [b for b in bounds if safe(b[0])]
+    turn = [p for p in turn if safe(p)]
+    if sysb is not None and not safe(sysb):
+        meta.pop("ckpt_sys_bound", None)
     meta["ckpt_boundaries"] = bounds
+    meta.pop("checkpoint_lengths", None)
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
     meta["ckpt_terminal"] = terminal
     meta["ckpt_interval"] = interval
@@ -559,7 +611,7 @@ def _ckpt_mid_prefill_store(batch) -> None:
 
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
-            batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
+            batch.prompt_cache, extra_hash=as_salt(meta.get("extra_hash", 0)),
             skeleton_disk=skel, kind=kind):
         meta["ckpt_last_stored"] = checkpoint_len
         meta.setdefault("ckpt_stored_boundaries", []).append(checkpoint_len)
@@ -580,11 +632,10 @@ def _install_ckpt_checkpoint_store() -> None:
     suppresses the stock store -- wrapping makes that ordering
     structural. Exact-tier anchor batches ride the same wrap with their
     own single-stop hook. Idempotent."""
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
-    if getattr(
-        PromptProcessingBatch._store_apc_exact_checkpoints, _CKPT_STORE_FLAG, False
-    ):
+    if wrapped_with(PromptProcessingBatch._store_apc_exact_checkpoints,
+                    _CKPT_STORE_FLAG):
         return
     _orig = PromptProcessingBatch._store_apc_exact_checkpoints
 
@@ -596,7 +647,8 @@ def _install_ckpt_checkpoint_store() -> None:
         _orig(self)
 
     _store_with_ckpt_cursor.__dict__[_CKPT_STORE_FLAG] = True
-    PromptProcessingBatch._store_apc_exact_checkpoints = _store_with_ckpt_cursor
+    PromptProcessingBatch._store_apc_exact_checkpoints = link(
+        _store_with_ckpt_cursor, _orig)
 
 
 def _snap_fields(batch, manager) -> dict:
@@ -668,8 +720,8 @@ def _plain_ckpt_init(batch) -> None:
     ids_list = [int(t) for t in meta["full_input_ids"]]
     if len(ids_list) < 2:
         return
-    extra_hash = int(meta.get("extra_hash", 0))
-    view = _L1View(batch.model, manager, mode)
+    extra_hash = as_salt(meta.get("extra_hash", 0))
+    view: Any = _L1View(batch.model, manager, mode)
     restored = 0
     from gmlx.cache.snapshot import ckpt_lookup
     warm, cp = ckpt_lookup(
@@ -685,11 +737,8 @@ def _plain_ckpt_init(batch) -> None:
         and view._apc_suffix_is_text_only(ids_list, cp)
     ):
         batch.prompt_cache = warm
-        batch._input_ids = batch._input_ids[:, cp:]
-        batch._inputs_embeds = batch._inputs_embeds[:, cp:]
+        _trim_prompt_columns(batch, cp)
         batch._processed_prompt_columns = cp
-        for k in batch._prompt_length_aware_keys:
-            batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, cp:, ...]
         restored = cp
         batch._kq_apc_restored = (int(cp), "ckpt")     # live request view
         _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",
@@ -751,12 +800,52 @@ def _plain_anchor_init(batch) -> None:
         ids_list = [int(t) for t in meta["full_input_ids"]]
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
-            "extra_hash": int(meta.get("extra_hash", 0)),
+            "extra_hash": as_salt(meta.get("extra_hash", 0)),
             "mode": "exact",
             "manager": manager,
             "render_ctx": lookup_render_ctx(ids_list),
             "gen": [],
         }
+
+
+_RESTORED_PROGRESS_FLAG = "_kq_restored_prompt_progress"
+
+
+def _owned_restore_len(batch) -> int:
+    """Tokens a gmlx-owned tier (the checkpoint tier, the MTP L0 or L1
+    ladder) restored into a single-row prompt batch. These trim the
+    prompt in place and leave stock's per-row cached count at 0. The
+    stock ``generate`` empties ``uids`` before the server reads the
+    progress, so the rows come from ``_prompt_uids``."""
+    rows = getattr(batch, "_prompt_uids", None)
+    if rows is None:
+        rows = getattr(batch, "uids", None)
+    if len(rows or ()) != 1:
+        return 0
+    rec = getattr(batch, "_kq_apc_restored", None)
+    n = int(rec[0]) if rec else 0
+    return max(n, int(getattr(batch, "_mtp_apc_prefix_len", 0) or 0))
+
+
+def _install_restored_prompt_progress() -> None:
+    """Report a gmlx-owned restore as the row's cached tokens, which the
+    server's usage and its "Prefill completed" log line read. Idempotent.
+    """
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
+
+    orig = PromptProcessingBatch.prompt_progress
+    if wrapped_with(orig, _RESTORED_PROGRESS_FLAG):
+        return
+
+    def prompt_progress(self):
+        out = orig(self)
+        n = _owned_restore_len(self)
+        if n and len(out) == 1 and n > int(out[0].cached_tokens or 0):
+            out = [dataclasses.replace(out[0], cached_tokens=n)]
+        return out
+
+    prompt_progress.__dict__[_RESTORED_PROGRESS_FLAG] = True
+    PromptProcessingBatch.prompt_progress = link(prompt_progress, orig)
 
 
 _ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"
@@ -771,8 +860,8 @@ def _install_exact_anchor_pick() -> None:
     one. The anchor wins only when strictly longer than the stock pick,
     so it never shortens a restore. Idempotent.
     """
-    from mlx_vlm.generate.ar import BatchGenerator
-    if getattr(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG, False):
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
+    if wrapped_with(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG):
         return
     _orig = BatchGenerator._apc_pick_for
 
@@ -826,7 +915,7 @@ def _install_exact_anchor_pick() -> None:
             return pick
 
     _pick_with_anchor.__dict__[_ANCHOR_PICK_FLAG] = True
-    BatchGenerator._apc_pick_for = _pick_with_anchor
+    BatchGenerator._apc_pick_for = link(_pick_with_anchor, _orig)
 
 
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
@@ -940,7 +1029,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
         ok = retirement_store(
             manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,
-            extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
+            extra_hash=as_salt(stash.get("extra_hash", 0)), max_len=max_len,
             decode_snaps=stash.get("snaps"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
@@ -961,9 +1050,9 @@ def _install_plain_ckpt_decode() -> None:
     cache objects at continuous-batch injection).
     GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
     Idempotent."""
-    from mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
-    if getattr(GenerationBatch._step, _PLAIN_DECODE_FLAG, False):
+    if wrapped_with(GenerationBatch._step, _PLAIN_DECODE_FLAG):
         return
     _orig_step = GenerationBatch._step
     _orig_filter = GenerationBatch.filter
@@ -1019,6 +1108,6 @@ def _install_plain_ckpt_decode() -> None:
     _step_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     _filter_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     _extend_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
-    GenerationBatch._step = _step_with_ckpt
-    GenerationBatch.filter = _filter_with_ckpt
-    GenerationBatch.extend = _extend_with_ckpt
+    GenerationBatch._step = link(_step_with_ckpt, _orig_step)
+    GenerationBatch.filter = link(_filter_with_ckpt, _orig_filter)
+    GenerationBatch.extend = link(_extend_with_ckpt, _orig_extend)

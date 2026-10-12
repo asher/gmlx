@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.decode_batch as db  # noqa: E402
 
@@ -22,7 +22,7 @@ def test_env_override(monkeypatch):
 
 
 def test_zero_restores_upstream(monkeypatch):
-    from mlx_vlm.generate.ar import DEFAULT_COMPLETION_BATCH_SIZE
+    from gmlx._vendor.mlx_vlm.generate.ar import DEFAULT_COMPLETION_BATCH_SIZE
 
     monkeypatch.setenv("GMLX_DECODE_BATCH", "0")
     assert db.decode_batch() == int(DEFAULT_COMPLETION_BATCH_SIZE)
@@ -36,7 +36,7 @@ def test_garbage_falls_back(monkeypatch):
 
 
 def test_stash_wrapper_injects(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     import gmlx.spec.engine as engine
 
@@ -63,7 +63,7 @@ def test_stash_wrapper_clamps_full_width_prefill_group(monkeypatch):
     # prompt batch; a prefill group >= the width freezes insertion
     # while any row decodes (8/8 served FIFO). The wrapper clamps the
     # group to 1 only in that regime.
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     import gmlx.spec.engine as engine
 

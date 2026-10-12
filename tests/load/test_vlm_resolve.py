@@ -23,9 +23,24 @@ from gmlx.load.vlm import UnsupportedVLMError, resolve_vlm_model_type
      "muse_glimmer"),
     ("deepseek2", {"clip.projector_type": "kimik25"}, "kimi_k25"),
     ("deepseek4", {"clip.projector_type": "deepseek4v"}, "deepseek_v4_vl"),
+    ("qwen3vl", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
+    ("qwen3vl", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
+    ("qwen35", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_5"),
+    ("qwen35moe", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_5_moe"),
+    ("qwen4exp", {"clip.projector_type": "qwen3vl_merger"}, "qwen4_exp"),
 ])
 def test_supported_families_resolve(llm_arch, mm_meta, expected):
     assert resolve_vlm_model_type(llm_arch, mm_meta) == expected
+
+
+def test_one_projector_resolves_by_the_text_arch():
+    """Qwen3-VL and Qwen3.6 mmprojs name the same projector. The text arch
+    picks the container: only qwen3vl gets the one that reads the deepstack
+    features, and a Qwen3.6 pair resolves as it did before that row."""
+    mm = {"clip.projector_type": "qwen3vl_merger"}
+    assert resolve_vlm_model_type("qwen3vl", mm) == "qwen3_vl"
+    assert resolve_vlm_model_type("qwen35", mm) == "qwen3_5"
+    assert resolve_vlm_model_type("qwen35moe", mm) == "qwen3_5_moe"
 
 
 def test_kimik25_on_a_foreign_text_arch_is_refused():
@@ -53,3 +68,13 @@ def test_deepseek4v_on_a_foreign_text_arch_is_refused():
     and routes them with its own bias; only the deepseek4 arch has that."""
     with pytest.raises(UnsupportedVLMError, match="deepseek4v.*deepseek2"):
         resolve_vlm_model_type("deepseek2", {"clip.projector_type": "deepseek4v"})
+
+
+def test_the_qwen3vl_container_takes_only_the_qwen3vl_text_arch():
+    """A plain qwen3 text file beside this projector does not get the
+    container that reads the deepstack features: its header has no rotary
+    axis widths and no deepstack count. It resolves as it did before the
+    qwen3vl row."""
+    mm = {"clip.projector_type": "qwen3vl_merger"}
+    assert resolve_vlm_model_type("qwen3", mm) == "qwen3_5"
+    assert resolve_vlm_model_type("qwen3moe", mm) == "qwen3_5"

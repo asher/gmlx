@@ -2,15 +2,13 @@
 # Copyright (c) 2026 Asher Feldman
 """Vendored mlx-vlm model for Meta Muse Glimmer (mmproj projector ``muse-glimmer``).
 
-This module supplies the vision half of the GGUF pair: a 50-layer ViT, the
-pixel-shuffle downsample, and the adapter MLP that lands in the text tower's
-residual width. The text half is the same vendored class the text-only path
-uses (:mod:`gmlx.models.muse_glimmer.model`), wrapped here in the
-``language_model`` shape mlx-vlm's generate stack expects. mlx-vlm ships its
-own muse_glimmer package, but its class needs the ``image_grid_thw`` that only
-its own processor makes and has no speculative hooks, so
-``ensure_registered()`` installs this module in its place
-(:mod:`gmlx.models.owned`).
+mlx-vlm's own muse_glimmer package has a different parameter tree from the
+one the mmproj remap targets, so this module supplies the vision half of the
+pair and registers ahead of it: a 50-layer ViT, the pixel-shuffle
+downsample, and the adapter MLP that lands in the text tower's residual
+width. The text half is the same vendored
+class the text-only path uses (:mod:`gmlx.models.muse_glimmer.model`), wrapped here in
+the ``language_model`` shape mlx-vlm's generate stack expects.
 
 The tower is ported from llama.cpp's ``clip_graph_muse_glimmer::build`` plus the
 host-side index math in ``clip.cpp`` (``PROJECTOR_TYPE_MUSE_GLIMMER`` set_input).
@@ -39,19 +37,13 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, LanguageModelOutput
-from mlx_vlm.models.cache import KVCache, RotatingKVCache
-from mlx_vlm.models.interpolate import bilinear_interpolate
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, LanguageModelOutput
+from gmlx._vendor.mlx_vlm.models.interpolate import bilinear_interpolate
 
-from gmlx.models import owned
+from gmlx.cache.kv_cache import KVCache, RotatingKVCache
 
 from .model import MuseGlimmerModel
 from .mtp import SpecHooks, _SpecOutput
-
-
-def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.muse_glimmer`` resolve to this module."""
-    owned.install("mlx_vlm.models.muse_glimmer", __name__)
 
 
 @dataclass

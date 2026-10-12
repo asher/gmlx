@@ -24,6 +24,8 @@ These pages are the starting points:
   features, upgrading and removal.
 - [Quickstart](quickstart.md): A first model, the server, a request and a
   connected client.
+- [Image generation](images.md): Choosing an image model, a first image on
+  the command line, the API, and LoRAs.
 - [Migrating from other tools](migrating.md): What carries over from
   llama.cpp, Ollama and LM Studio.
 
@@ -35,6 +37,10 @@ These pages are the starting points:
   bar.
 - [Speech, embeddings and rerank](services.md): The services a server can host
   beside chat models.
+- [Image API](image-api.md): The OpenAI image routes, their request fields
+  and their errors.
+- [ComfyUI](comfyui.md): The gmlx node pack, which runs the server's image
+  models in ComfyUI graphs.
 - [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.
 - [Structured decisions](decisions.md): A probability for each answer to a
   fixed set of questions.
@@ -75,6 +81,8 @@ These pages are the starting points:
 - [Vision and audio](vlm.md): Multimodal models and their `mmproj` files.
 - [Models larger than memory](streaming.md): Mixture-of-experts models that
   stream their experts from disk.
+- [Long context](long-context.md): Running a model past its trained
+  context with rope scaling.
 - [LoRA adapters](lora.md): Training an adapter and serving several on one
   base model.
 - [Distillation](distill.md): Teaching a small model a document or a larger
@@ -120,6 +128,8 @@ These pages are the starting points:
   decision request and response.
 - [Distillation reference](distill-reference.md): The flags of every
   `gmlx distill` action.
+- [ComfyUI reference](comfyui-reference.md): The launch options of
+  ComfyUI, how the gmlx nodes find the server and what they refuse.
 - [Environment variables](env-vars.md): The variables a user can set.
 - [Python API](python.md): Using gmlx from Python.
 
@@ -128,6 +138,8 @@ These pages are the starting points:
 - [Internals](internals/README.md): How gmlx works inside.
 - [Adding a GGUF architecture](internals/adding-architectures.md): What
   supporting a new model family involves.
+- [Upstream defects](upstream-defects.md): Defects of stock dependencies that
+  gmlx guards against, each with its repro and its test.
 - [Contributing](../CONTRIBUTING.md): Development setup, tests and commit
   style.
 - [Changelog](../CHANGELOG.md): What changed in each release.

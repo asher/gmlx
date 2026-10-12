@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PoolingCache + BatchPoolingCache for DeepSeek V4 (vendored).
+"""DS4PoolingCache + DS4BatchPoolingCache for DeepSeek V4 (vendored).
 
 Copied 1:1 from mlx-lm PR 1192
 https://github.com/Blaizzy/mlx-lm/blob/5c10538136b9038b9626c134612b08afc18d697a/mlx_lm/models/cache.py
 (lines 903-1447), by way of omlx's ``patches/deepseek_v4/cache_extras.py``
-port. ``deepseek_v4_model.ensure_registered()`` injects both classes into
-the ``mlx_lm.models.cache`` namespace (upstream wins if it already ships
-them) so cache-type resolution by module attribute keeps working.
+port, where the classes are PoolingCache and BatchPoolingCache. They carry
+the DS4 prefix because gmlx.cache.kv_cache holds mlx-vlm's own PoolingCache
+under that name. ``deepseek_v4_model.ensure_registered()`` injects both
+classes into the cache module namespaces so cache-type resolution by name
+keeps working.
 
 Delete this file once installed mlx-lm ships PoolingCache natively.
 
 The one-update undo log (``trim(n)``, n <= 2, after verify writes that may
 complete pool windows) is what makes MTP draft rejection correct - see
-gmlx/models/deepseek_v4/mtp.py. The rotating-cache undo wrap at the bottom of
-this file is the matching piece for ``RotatingKVCache`` (port of omlx
+gmlx/models/deepseek_v4/mtp.py. The rotating cache classes in
+gmlx.cache.kv_cache carry the matching undo log (port of omlx
 patches/mlx_lm_mtp/cache_rollback.py, extended to 3-wide verifies for S=3
 rounds).
 """
-import sys
-import threading
 from typing import List
 
 import mlx.core as mx
 
-from mlx_lm.models.cache import _BaseCache
+from gmlx.cache.kv_cache import _BaseCache
 
 
 class PackedPool:
@@ -67,7 +67,7 @@ def pool_arrays(pooled):
     return pooled
 
 
-class PoolingCache(_BaseCache):
+class DS4PoolingCache(_BaseCache):
     """Cache for pooled (compressed) KV tokens with a remainder buffer.
 
     Stores two things:
@@ -656,10 +656,10 @@ class PoolingCache(_BaseCache):
 
     @classmethod
     def merge(cls, caches):
-        return BatchPoolingCache.merge(caches)
+        return DS4BatchPoolingCache.merge(caches)
 
 
-class BatchPoolingCache(_BaseCache):
+class DS4BatchPoolingCache(_BaseCache):
     """Batched pooling cache with per-element variable-length tracking."""
 
     def __init__(self, ratio: int, left_padding: List[int],
@@ -668,7 +668,7 @@ class BatchPoolingCache(_BaseCache):
         self.lookback = bool(lookback) and ratio == 4
 
         if not all(p == 0 for p in left_padding):
-            raise RuntimeError("BatchPoolingCache does not support left padding")
+            raise RuntimeError("DS4BatchPoolingCache does not support left padding")
 
         batch_size = len(left_padding)
 
@@ -686,7 +686,7 @@ class BatchPoolingCache(_BaseCache):
         self._undo = None
 
         # Per-row lookback window for the ratio-4 overlap compressor (see
-        # PoolingCache). Rows that have not completed a window yet hold
+        # DS4PoolingCache). Rows that have not completed a window yet hold
         # zero kv with -inf gate (the first-window masking).
         self._prev_kv = None
         self._prev_gate = None
@@ -706,7 +706,7 @@ class BatchPoolingCache(_BaseCache):
 
     def prepare(self, *, lengths=None, right_padding=None, left_padding=None):
         if left_padding is not None:
-            raise RuntimeError("BatchPoolingCache does not support left padding")
+            raise RuntimeError("DS4BatchPoolingCache does not support left padding")
         if lengths is not None:
             self._lengths = [p + n for p, n in zip(self._processed, lengths)]
 
@@ -728,7 +728,7 @@ class BatchPoolingCache(_BaseCache):
             self.buf_kv = mx.zeros((B, ratio, D1), dtype=kv.dtype)
             self.buf_gate = mx.zeros((B, ratio, D2), dtype=gate.dtype)
 
-        # One-update undo log for MTP draft rejection (see PoolingCache).
+        # One-update undo log for MTP draft rejection (see DS4PoolingCache).
         # The buffer references are only consulted when a window completed,
         # in which case this method rebinds self.buf_* to fresh arrays and
         # the stashed objects keep the pre-update contents. The pooled
@@ -1181,7 +1181,7 @@ class BatchPoolingCache(_BaseCache):
         self._processed = self._processed + other._processed
 
     def extract(self, idx):
-        cache = PoolingCache(self.ratio, lookback=self.lookback)
+        cache = DS4PoolingCache(self.ratio, lookback=self.lookback)
         pl = self._pool_lengths[idx]
         r = self.remainder[idx]
 
@@ -1203,11 +1203,11 @@ class BatchPoolingCache(_BaseCache):
 
     @classmethod
     def merge(cls, caches):
-        """Merge a list of PoolingCache instances into a BatchPoolingCache."""
+        """Merge a list of DS4PoolingCache instances into a DS4BatchPoolingCache."""
         B = len(caches)
         if not all(c.ratio == caches[0].ratio for c in caches):
             raise ValueError(
-                "BatchPoolingCache can only merge caches with the same ratio"
+                "DS4BatchPoolingCache can only merge caches with the same ratio"
             )
         ratio = caches[0].ratio
         batch_cache = cls(ratio, [0] * B,
@@ -1269,116 +1269,3 @@ class BatchPoolingCache(_BaseCache):
 
         return batch_cache
 
-
-# MTP rotating-cache undo log (port of omlx patches/mlx_lm_mtp/
-# cache_rollback.py, verbatim semantics).
-#
-# A rotated RotatingKVCache is not trimmable (the evicted token's slot has
-# been overwritten), so an MTP draft rejection could not roll back the
-# verify write and the rejected token(s) would stay in the cache as
-# phantoms, progressively corrupting output (hit on DeepSeek-V4-Flash,
-# sliding_window=128). Verify-width (2- or 3-token; S<=3 rounds) updates
-# always take the ``_update_concat`` path, which only rebinds
-# ``keys``/``values`` (no in-place setitem), so stashing the pre-update
-# attribute references plus the update's inputs gives an exact undo;
-# ``trim(n)`` then replays the confirmed prefix as a normal update.
-# Stashing is armed ONLY around the V4 MTP verify forward
-# (DeepseekV4SpecLM.speculative_verify_hidden) so non-MTP flows keep stock
-# trim semantics (protects prefix-cache trim paths from phantom
-# trimmability).
-
-# Thread-local so concurrent engine steps of other models never see the
-# flag armed by an MTP verify forward running on a different thread.
-_UNDO_ARMED = threading.local()
-
-
-def set_undo_armed(flag: bool) -> None:
-    """Arm/disarm the rotating-cache undo stash (MTP verify forwards only)."""
-    _UNDO_ARMED.value = bool(flag)
-
-
-def _is_undo_armed() -> bool:
-    # Resolve the flag through sys.modules: the wrapped methods live on
-    # foreign (mlx-lm) classes and outlive this module object if it is ever
-    # re-imported (e.g. tests that patch.dict sys.modules), so a closure
-    # over this instance's _UNDO_ARMED could go stale.
-    mod = sys.modules.get(__name__)
-    armed = getattr(mod, "_UNDO_ARMED", None) if mod is not None else None
-    if armed is None:
-        armed = _UNDO_ARMED
-    return getattr(armed, "value", False)
-
-
-def _wrap_rotating(cls, fields) -> None:
-    """Wrap update_and_fetch / is_trimmable / trim with the MTP undo log."""
-    if getattr(cls, "_gmlx_mtp_undo_attached", False):
-        return
-
-    orig_update = cls.update_and_fetch
-    orig_is_trimmable = cls.is_trimmable
-    orig_trim = cls.trim
-
-    def update_and_fetch(self, keys, values):
-        # Only armed verify-sized updates (qL 2-6: legacy nextn verifies up
-        # to 4, dspark up to 6) are undoable: S == 1 uses the in-place ring
-        # write (setitem mutates the wrapper, which would invalidate
-        # reference snapshots) and prompt chunks have no rollback consumer.
-        # S >= 2 always routes through the concat path, which REBINDS
-        # keys/values to fresh wrappers, so plain references keep the
-        # pre-update value -- no detach copy (a full-ring copy per field
-        # per layer, ~200 MB/round across 43 caches).
-        if 2 <= keys.shape[2] <= 6 and _is_undo_armed():
-            self._mtp_undo = ({f: getattr(self, f) for f in fields}, keys, values)
-        else:
-            self._mtp_undo = None
-        return orig_update(self, keys, values)
-
-    def is_trimmable(self):
-        if orig_is_trimmable(self):
-            return True
-        return getattr(self, "_mtp_undo", None) is not None
-
-    def trim(self, n):
-        if orig_is_trimmable(self):
-            self._mtp_undo = None
-            return orig_trim(self, n)
-        undo = getattr(self, "_mtp_undo", None)
-        self._mtp_undo = None
-        if undo is None:
-            return 0
-        snap, keys, values = undo
-        k = keys.shape[2] - n
-        if k < 0:
-            return 0
-        for f, v in snap.items():
-            setattr(self, f, v)
-        if k > 0:
-            # Replay the confirmed prefix as a normal decode-sized update.
-            orig_update(self, keys[..., :k, :], values[..., :k, :])
-            self._mtp_undo = None
-        return n
-
-    cls.update_and_fetch = update_and_fetch
-    cls.is_trimmable = is_trimmable
-    cls.trim = trim
-    cls._mtp_undo = None
-    cls._gmlx_mtp_undo_attached = True
-
-
-def ensure_rollback_attached() -> None:
-    """Attach the MTP undo log to every loaded origin's rotating caches
-    (idempotent per class; mlx-vlm vendored its own since 0.6.4)."""
-    from gmlx.cache.compat import cache_types
-
-    for cls in cache_types("RotatingKVCache"):
-        _wrap_rotating(cls, ("keys", "values", "offset", "_idx"))
-    try:
-        batch_classes = cache_types("BatchRotatingKVCache")
-    except AttributeError:
-        return
-    for cls in batch_classes:
-        _wrap_rotating(
-            cls,
-            ("keys", "values", "offset", "_offset", "_idx", "rotated",
-             "left_padding"),
-        )

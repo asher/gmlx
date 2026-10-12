@@ -8,16 +8,16 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import routes as sp_routes  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_PKG = importlib.import_module("mlx_vlm.server")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 from test_server_patches import _FakeKeepPool, _register  # noqa: E402
 
@@ -65,7 +65,7 @@ def test_models_payload_lists_aliases_as_pickable_entries():
 
 
 def test_models_payload_caps_context_length_at_max_kv_size(monkeypatch):
-    import mlx_vlm.server.generation as gen
+    import gmlx._vendor.mlx_vlm.server.generation as gen
 
     from gmlx.serve import capacity as cap
 
@@ -402,3 +402,199 @@ def test_release_preload_holds_keeps_hold_on_release_failure(caplog):
         assert any("keeping it tracked" in r.message for r in caplog.records)
     finally:
         sp_routes._PRELOAD_HOLDS.clear()
+
+
+_IMAGE_DOC = {"models": {"qwen": {"path": "/abs/qwen.gguf"}},
+              "image_models": {"zit": {"path": "/abs/zit.safetensors",
+                                       "encoder": "/abs/enc.gguf",
+                                       "vae": "/abs/vae.safetensors"}}}
+
+
+def test_snapshot_names_the_kind_of_each_resident_model():
+    _APP._server_runtime_snapshot = lambda: {}
+
+    row = {"pinned": False, "busy": 0, "footprint_bytes": 1, "idle_s": 0.0,
+           "ttl_s": None}
+
+    class _FakePool:
+        def stats(self):
+            return {"resident": [
+                dict(row, model_path="/abs/qwen.gguf", kind="chat"),
+                dict(row, model_path="/abs/zit.safetensors", kind="image")]}
+
+    _register(_IMAGE_DOC)
+    _PKG._kq_residency_pool = _FakePool()
+    try:
+        sp.install_runtime_snapshot_enrichment()
+        rows = _APP._server_runtime_snapshot()["resident_models"]
+    finally:
+        serving.clear_resolved_models()
+    assert [(r["ids"], r["kind"]) for r in rows] == [
+        (["qwen"], "chat"), (["zit"], "image")]
+
+
+def test_models_payload_lists_image_models_with_their_markers(
+        monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from gmlx.image import loader
+
+    files = {n: tmp_path / n for n in ("zit.gguf", "qi.gguf", "enc.gguf",
+                                         "mm.gguf", "vae.gguf")}
+    for f in files.values():
+        f.write_bytes(b"x")
+    edit = SimpleNamespace(name="qwen_image21", edit=object())
+    plain = SimpleNamespace(name="z_image", edit=None)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
+        family=edit if path.endswith("qi.gguf") else plain,
+        variant="turbo"))
+    sp_routes._IMAGE_IDENTITY.clear()
+    _register({
+        "server": {"defaults": {"image_model": "qi"}},
+        "models": {"qwen": {"path": "/abs/qwen.gguf"}},
+        "image_models": {
+            "zit": {"path": str(files["zit.gguf"]),
+                    "encoder": str(files["enc.gguf"]),
+                    "vae": str(files["vae.gguf"]), "pin": True},
+            "qi": {"path": str(files["qi.gguf"]),
+                   "encoder": str(files["enc.gguf"]),
+                   "encoder_mmproj": str(files["mm.gguf"]),
+                   "vae": str(files["vae.gguf"])}}})
+
+    class _FakePool:
+        def stats(self):
+            return {"resident": [{"model_path": str(files["qi.gguf"]),
+                                  "pinned": False, "kind": "image",
+                                  "footprint_bytes": 1, "idle_s": 0.0}]}
+
+    _PKG._kq_residency_pool = _FakePool()
+    try:
+        by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        _PKG._kq_residency_pool = None
+        serving.clear_resolved_models()
+    assert by_id["qwen"].get("image") is None
+    zit, qi = by_id["zit"], by_id["qi"]
+    assert zit["image"] is True and qi["image"] is True
+    assert (zit["family"], zit["variant"], zit["edit"]) == ("z_image", "turbo",
+                                                           False)
+    assert (qi["family"], qi["edit"]) == ("qwen_image21", True)
+    assert (zit["resident"], zit["pinned"], zit["default"]) == (False, True,
+                                                                False)
+    assert (qi["resident"], qi["pinned"], qi["default"]) == (True, False, True)
+    assert "context_length" not in zit
+    assert set(by_id["qwen"]) - {"context_length", "max_context_at_width_1"} \
+        <= set(zit)
+
+
+def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+
+    from gmlx.image import fingerprint, loader
+
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "image"
+    views = {}
+    for variant in ("turbo", "raw"):
+        d = json.loads((fixtures / f"krea2_{variant}_q4_k_m.header.json")
+                       .read_text())
+        views[f"k2{variant[0]}.gguf"] = fingerprint.HeaderView(
+            kv=dict(d["kv"]), tensors={n: fingerprint.Tensor(tuple(sh), c)
+                                       for n, sh, c in d["tensors"]})
+    for n in (*views, "enc.gguf", "mm.gguf", "vae.gguf"):
+        (tmp_path / n).write_bytes(b"x")
+    # A header names the family; the variant comes from the weight hash,
+    # which a header fixture does not carry.
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: replace(
+        fingerprint.identify(views[Path(path).name]),
+        variant={"k2t": "turbo", "k2r": "unknown"}[Path(path).stem]))
+    sp_routes._IMAGE_IDENTITY.clear()
+    entry = {"encoder": str(tmp_path / "enc.gguf"),
+             "vae": str(tmp_path / "vae.gguf")}
+    _register({"image_models": {
+        "k2t": {"path": str(tmp_path / "k2t.gguf"), **entry},
+        # A vision tower does not make a family that takes no reference
+        # images an editing one.
+        "k2r": {"path": str(tmp_path / "k2r.gguf"), **entry,
+                "encoder_mmproj": str(tmp_path / "mm.gguf")}}})
+    _PKG._kq_residency_pool = None
+    try:
+        by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        serving.clear_resolved_models()
+    assert [(by_id[i]["image"], by_id[i]["family"], by_id[i]["variant"],
+             by_id[i]["edit"]) for i in ("k2t", "k2r")] == [
+        (True, "krea2", "turbo", False), (True, "krea2", "unknown", False)]
+
+
+def test_snapshot_carries_the_image_section_with_image_models():
+    from gmlx.serve.patches import images
+
+    _APP._server_runtime_snapshot = lambda: {}
+    _PKG._kq_residency_pool = None
+    sp.install_runtime_snapshot_enrichment()
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"}}})
+    try:
+        assert "images" not in _APP._server_runtime_snapshot()
+        _register(_IMAGE_DOC)
+        snap = _APP._server_runtime_snapshot()
+    finally:
+        serving.clear_resolved_models()
+    assert snap["images"] == images.STATE.metrics()
+
+
+def test_keep_and_unload_take_an_image_model(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(sp_routes, "_spawn_keep_warm", lambda model_id: None)
+    _register(_IMAGE_DOC)
+    pool = _FakeKeepPool()
+    evicted = []
+    pool.evict = lambda path, **k: evicted.append(path) or True
+    _PKG._kq_residency_pool = pool
+    try:
+        sp.install_keep_route()
+        sp.install_pool_aware_unload()
+        client = TestClient(_APP.app)
+        r = client.post("/v1/keep", json={"model": "zit", "warm": False})
+        assert r.status_code == 200, r.text
+        assert pool.kept == [("/abs/zit.safetensors", True)]
+        r = client.post("/unload", json={"model": "zit"})
+        assert r.status_code == 200, r.text
+        assert evicted == ["/abs/zit.safetensors"]
+    finally:
+        serving.clear_resolved_models()
+
+
+@pytest.mark.parametrize("tower,edit", [(None, False), ("/mm.gguf", True)])
+def test_a_models_entry_edits_only_with_the_vision_tower(monkeypatch, tower,
+                                                         edit):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(sp_routes, "_image_identity",
+                        lambda path, variant=None: ("qwen_image21", "base",
+                                                    True))
+    rm = SimpleNamespace(path="/qi.gguf", family=None, pin=False,
+                         encoder_mmproj=tower)
+    entry = sp_routes._image_entry("qi", rm, resident=False, pinned=False,
+                                   default=False)
+    assert entry["edit"] is edit
+
+
+def test_image_identity_reads_the_entry_variant(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from gmlx.image import loader
+
+    p = tmp_path / "d.gguf"
+    p.write_bytes(b"x")
+    asked = []
+    fam = SimpleNamespace(name="krea2", edit=None)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
+        asked.append(variant)
+        or SimpleNamespace(family=fam, variant=variant or "unknown")))
+    sp_routes._IMAGE_IDENTITY.clear()
+    assert sp_routes._image_identity(str(p))[1] == "unknown"
+    assert sp_routes._image_identity(str(p), "turbo")[1] == "turbo"
+    assert asked == [None, "turbo"]

@@ -1,14 +1,15 @@
-"""DiffusionGemma prompts carry one BOS on the run path: the GGUF template
-opens with BOS and the tokenizer adds one by default. The serve path is
-covered by tests/upstream/test_single_bos.py."""
+"""DiffusionGemma prompts carry one BOS on the run and serve paths: the
+GGUF template opens with BOS and the tokenizer adds one by default. On the
+serve path the rule holds for every model type."""
 
 from __future__ import annotations
 
 import importlib
+import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 BOS = "<bos>"
 
@@ -17,6 +18,7 @@ class _Tok:
     """A tokenizer whose default encode prepends BOS (id 2)."""
 
     bos_token = BOS
+    bos_token_id = 2
 
     def encode(self, text, add_special_tokens=True):
         ids = [2 if w == BOS else 10 + len(w) for w in text.replace(BOS, f" {BOS} ").split()]
@@ -28,7 +30,7 @@ def test_run_path_encodes_a_rendered_prompt_with_one_bos(monkeypatch):
 
     # mlx_vlm.generate is also a function name on the package, so the
     # submodule is reached through importlib.
-    upstream = importlib.import_module("mlx_vlm.generate.diffusion")
+    upstream = importlib.import_module("gmlx._vendor.mlx_vlm.generate.diffusion")
 
     seen = {}
 
@@ -40,3 +42,42 @@ def test_run_path_encodes_a_rendered_prompt_with_one_bos(monkeypatch):
     monkeypatch.setattr(upstream, "stream_diffusion_generate", fake_generate)
     list(diffusion.stream(object(), _Tok(), BOS + " system hi"))
     assert seen["ids"].count(2) == 1 and seen["ids"][0] == 2
+
+
+def _fake_rg(model_type):
+    config = types.SimpleNamespace(model_type=model_type, image_token_index=None)
+    return types.SimpleNamespace(
+        model=types.SimpleNamespace(config=config),
+        processor=types.SimpleNamespace(tokenizer=_Tok(), chat_template="t"))
+
+
+@pytest.mark.parametrize("model_type,prompt,special", [
+    ("diffusion_gemma", BOS + "hi", False),
+    ("diffusion_gemma", "hi", True),
+    ("gemma4", BOS + "hi", False),
+    ("gemma4_text", BOS + "hi", False),
+    ("llama", BOS + "hi", False),
+    ("llama", "hi", True),
+])
+def test_serve_path_adds_special_tokens_only_without_a_leading_bos(
+        monkeypatch, model_type, prompt, special):
+    generation = pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
+
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+
+    cls = generation.ResponseGenerator
+    dispatch = importlib.import_module("gmlx._vendor.mlx_vlm.generate.dispatch")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    monkeypatch.setattr(dispatch, "prepare_inputs", dispatch.prepare_inputs)
+    monkeypatch.setattr(utils, "process_inputs", utils.process_inputs)
+    seen = {}
+
+    def fake_prepare(processor, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(generation, "prepare_inputs", fake_prepare)
+    install_single_bos_fix()
+    install_single_bos_fix()
+    cls._cpu_preprocess(_fake_rg(model_type), prompt)
+    assert seen["add_special_tokens"] is special

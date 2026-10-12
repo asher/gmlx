@@ -40,16 +40,20 @@ def install_api_key_auth(api_key: str | None) -> None:
 
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if getattr(app.state, _AUTH_FLAG, False):
         return
     key_bytes = api_key.encode()         # bytes: str compare_digest rejects non-ASCII
+    from .images import is_file_path
 
     async def _auth_middleware(request, call_next):
         # OPTIONS = CORS preflight, which browsers send credential-less by spec
         # (CORSMiddleware answers it); the actual request still authenticates.
+        # A URL-response image is read by its token alone, since an img tag
+        # sends no key.
         if request.method == "OPTIONS" or request.url.path == "/health" \
-                or request.scope.get(SESSION_SCOPE_KEY) is not None:
+                or request.scope.get(SESSION_SCOPE_KEY) is not None \
+                or is_file_path(request.url.path, request.method):
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         provided = (auth[7:] if auth[:7].lower() == "bearer "
@@ -83,7 +87,7 @@ def install_json_content_type_tolerance(app=None) -> None:
     (audio transcription) pass through untouched. ``app`` defaults to
     mlx-vlm's. Idempotent."""
     if app is None:
-        app = importlib.import_module("mlx_vlm.server.app").app
+        app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if getattr(app.state, _JSON_CT_FLAG, False):
         return
 
@@ -160,7 +164,7 @@ def install_loopback_host_guard(bind_host: str) -> None:
 
     from gmlx.config import LOOPBACK_HOSTS
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if getattr(app.state, _HOST_GUARD_FLAG, False):
         return
     allowed = {h.lower() for h in LOOPBACK_HOSTS} | {bind_host.lower()}
@@ -209,7 +213,7 @@ def disable_credentialed_cors() -> None:
     :func:`install_origin_guard` replaces the wildcard origin list."""
     from fastapi.middleware.cors import CORSMiddleware
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     for m in app.user_middleware:
         kwargs = getattr(m, "kwargs", None)
         if getattr(m, "cls", None) is CORSMiddleware \
@@ -450,7 +454,7 @@ def install_origin_guard(allowed_origins=()) -> None:
     from gmlx.config import normalize_cors_entry
 
     _allowed_origins = frozenset(normalize_cors_entry(o) for o in allowed_origins)
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _restrict_cors(app)
     # Found by the dispatch function rather than an app.state flag, so a
     # test that restores the middleware list also restores the guard.
@@ -484,7 +488,7 @@ def install_health_liveness_override() -> None:
     readable by any unauthenticated caller (or, on a loopback bind, any local
     webpage). The full detail (``resident_models[]``, context limits) stays on
     the authed ``/v1/metrics`` via the runtime snapshot."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def health_endpoint():
         # pid lets the CLI verify it is talking to the process it manages (a

@@ -1,0 +1,236 @@
+{
+ "schema": 1,
+ "name": "check5_krea2_vae",
+ "check": 5,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check5_krea2_vae.py",
+ "argv": [
+  "check5_krea2_vae.py",
+  "--vae",
+  "qwen_image_vae.safetensors",
+  "--sizes",
+  "512"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "qwen_image_vae.safetensors",
+   "size": 253806246,
+   "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+  }
+ },
+ "inputs": {
+  "sizes": [
+   [
+    512,
+    512
+   ]
+  ],
+  "seed": 5,
+  "image": "synthetic_image(height, width, seed) of check5_qwen_image21_vae.py, RGB, NCHW in [-1, 1]",
+  "latents_mean": [
+   -0.7571,
+   -0.7089,
+   -0.9113,
+   0.1075,
+   -0.1745,
+   0.9653,
+   -0.1517,
+   1.5508,
+   0.4134,
+   -0.0715,
+   0.5517,
+   -0.3632,
+   -0.1922,
+   -0.9497,
+   0.2503,
+   -0.2921
+  ],
+  "latents_std": [
+   2.8184,
+   1.4541,
+   2.3275,
+   2.6558,
+   1.2196,
+   1.7708,
+   2.6052,
+   2.0743,
+   3.2687,
+   2.1526,
+   2.8652,
+   1.5579,
+   1.6382,
+   1.1253,
+   2.8251,
+   1.916
+  ],
+  "latents": "(encoder mean - latents_mean) / latents_std, from the fp32 VAE",
+  "decode_input": "latents * latents_std + latents_mean in float32, cast to the VAE dtype",
+  "decoded": "RGB, NCHW, clamped to [-1, 1] by the VAE",
+  "psnr": "on x / 2 + 0.5 clamped to [0, 1], peak 1",
+  "source_dtypes": [
+   "torch.bfloat16"
+  ],
+  "load": "convert_wan_vae_to_diffusers, then AutoencoderKLQwenImage() strict, in float32"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_products": "bf16 operands, float32 conv, one bf16 rounding"
+  },
+  "sizes": {
+   "512x512": {
+    "decode_bf16_vs_fp32": {
+     "rel_l2": 0.01831609809635056,
+     "cosine": 0.99983226602191,
+     "max_abs": 0.40412241499871016,
+     "psnr_db": 45.419872448309526
+    },
+    "encode_bf16_vs_fp32": {
+     "rel_l2": 0.005297353170130485,
+     "cosine": 0.9999860291628286,
+     "max_abs": 0.09489655494689941
+    },
+    "encode_fp32_vs_fp64": {
+     "rel_l2": 8.378333619377222e-07,
+     "cosine": 0.9999999999996507,
+     "max_abs": 8.781816777325702e-06
+    },
+    "decode_fp32_vs_fp64": {
+     "rel_l2": 4.6492820369863234e-06,
+     "cosine": 0.9999999999891923,
+     "max_abs": 0.00012481135225990078
+    },
+    "decode_clamped_share": 0.028101603190104168,
+    "round_trip_fp32_psnr_db": 27.221883257465798,
+    "latents_std": 0.7762048840522766,
+    "peak_rss_gib": {
+     "encode": 14.68,
+     "decode": 19.15
+    },
+    "seconds": {
+     "fp32_encode_s": 2.1,
+     "bf16_encode_s": 2.1,
+     "fp32_decode_s": 3.2,
+     "bf16_decode_s": 3.5,
+     "float64_decode_s": 10.8
+    }
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "fp32 decode max abs at twice the oracle's own fp32 against float64 max abs; fp32 encode max abs at 1e-3, or at twice the oracle's own fp32 against float64 max abs where that is larger; bf16 decode PSNR at twice the oracle's own bf16 against fp32 RMS error, its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice the oracle's own",
+  "fp32_max_abs": 0.001,
+  "sizes": {
+   "512x512": {
+    "decode_fp32_max_abs": 0.00024962270451980156,
+    "decode_bf16_psnr_db": 39.3992725350299,
+    "encode_fp32_max_abs": 0.001,
+    "encode_bf16_rel_l2": 0.01059470634026097
+   }
+  }
+ },
+ "notes": [
+  "The file holds bfloat16 weights. The fp32 VAE holds them exactly in float32, and the bf16 VAE is a bfloat16 copy, which is the file's own values."
+ ],
+ "created": "2026-10-10T07:11:25Z",
+ "npz": "check5_krea2_vae.npz",
+ "tensors": {
+  "decoded_512x512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "67b7f683c6300043c308846462a1c3ab6edf657a876723c443da407d31289d5c"
+  },
+  "decoded_bf16_512x512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "ba9cfd7ddfc4623038b664717a245f08335116bfb7fc1c205629f24ca1ab351c"
+  },
+  "encode_mean_512x512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "2f555b0c1ce32a7d858c9b7de96c3172e5ea9346906c4807405d18a60ec2c74c"
+  },
+  "encode_mean_bf16_512x512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "6d5c8c3df5520b8ae65a7f6fc945f699aa371389f70f46bd4c18c6a118a6a8bf"
+  },
+  "image_512x512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "4020c0997410077532d908bbecca27898c4c7b7cfb2d7ba29333177c2c44ee5e"
+  },
+  "latents_512x512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "da53b8e5db37500761add2354811678689c32e54a53ccd95552903af9842909a"
+  }
+ }
+}

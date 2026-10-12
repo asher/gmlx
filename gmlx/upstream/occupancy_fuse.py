@@ -294,7 +294,7 @@ def _make_fused_qwen35_attention(base_cls):
 
 
 def _make_fused_mlp(base_cls):
-    from mlx_lm.models.activations import swiglu
+    from gmlx._vendor.mlx_lm.models.activations import swiglu
 
     class _FusedMLP(base_cls):
         def __call__(self, x):

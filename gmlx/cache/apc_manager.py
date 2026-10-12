@@ -3,34 +3,61 @@
 Ownership posture: gmlx behavior lands as subclass overrides here, never as
 method assignments on the upstream class. The server's manager is constructed
 by the load bridge (``server_bridge_vlm.load_model_resources``) from the same
-env vars ``apc.from_env`` reads; ``from_env`` itself stays unpatched and
-unused for gmlx-served loads - the residency build window pins
+env vars ``apc.from_env`` reads. ``from_env`` itself stays unpatched and
+unused for gmlx-served loads. The residency build window pins
 ``APC_ENABLED=0`` around the stock load (after capturing the effective value
 into ``GMLX_APC_ENABLED``), so the stock call returns ``None`` and never
 builds a manager to discard.
 
 Override rule: an override may wrap, pre/post-process, or replace an
-inherited method outright, but does not duplicate an inherited body to edit
-part of it; when a change would need a copied body, vendor instead.
-``store_kv_blocks`` is the one standing copied body (the chunked eval is
-mid-loop, unwrappable) - carried from the retired
-``install_apc_batched_store_eval`` method patch, not repeated. It now also
-carries the ckpt-store policy (``_ckpt_disk``: suppress layer-major,
-optionally memory-only), a second in-body divergence - one more divergence
-in this body is the agreed trigger to vendor the upstream file instead.
+inherited method outright. Three overrides mirror a stock body instead:
+
+* ``_store_kv_blocks_copy`` mirrors the stock store, because the chunked
+  eval sits mid-loop where no wrapper reaches it. It came from the retired
+  ``install_apc_batched_store_eval`` method patch. It also carries the
+  ckpt-store policy (``_ckpt_disk``: suppress layer-major, optionally
+  memory-only) and hashes each block under the image salt at its end
+  (``block_chain``).
+* ``lookup_prefix`` mirrors the stock memory walk and
+  ``lookup_prefix_disk_cache`` the stock disk restore. A prompt with
+  images takes them, and they walk ``block_chain`` as the store does.
+
+A mirrored body would call for vendoring the upstream file. APC moves into
+owned code with the generate loop and spec decode in the engine step after
+0.5, so nothing is vendored now. Until then the seam pins on the stock
+store and both lookups report any upstream change to the bodies they
+mirror.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
-from mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm import apc as _apc
 
 from gmlx.envflags import env_int
+from gmlx.upstream.patching import wrapped_with
+
+from .media_salt import MediaSalt, salt_at, salt_windows
 
 _log = logging.getLogger(__name__)
+
+
+def block_chain(token_ids, extra_hash, n_blocks: int, block_size: int):
+    """``(chunk, hash)`` of each of the first ``n_blocks`` blocks of
+    ``token_ids`` in the stock hash chain. Block ``i`` hashes under the
+    salt of the prefix that ends at its end (``salt_at``), so it keys on
+    the images that start before that end and on no later image. A plain
+    salt keys every block alike, as the stock chain does."""
+    parent = _apc.SEED_PARENT_HASH
+    for i in range(n_blocks):
+        end = (i + 1) * block_size
+        chunk = tuple(int(t) for t in token_ids[end - block_size:end])
+        parent = _apc._hash_tokens(parent, chunk, salt_at(extra_hash, end))
+        yield chunk, parent
 
 # Private upstream helpers the store override needs, resolved once. None means
 # the pinned mlx-vlm drifted: the override falls back to the stock store (the
@@ -52,13 +79,13 @@ def _store_helpers():
             "hash_tokens": _apc._hash_tokens,
             "disk_block_cls": _apc._DiskLayerMajorBlock,
             "copy_arr": _apc._copy_mlx_array,
-            "time": _apc.time,
+            "nbytes": _apc._cache_nbytes,
         }
     except AttributeError as e:
         _HELPERS_FAILED = True
         print(f"[apc] prompt-cache fast path not installed ({e}); the cache "
-              "still works, slower - reinstall the pinned mlx-vlm "
-              "(pip install mlx-vlm==0.6.4)")
+              "still works, slower. Reinstall the pinned mlx-vlm "
+              "(pip install mlx-vlm==0.7.3)")
     return _HELPERS
 
 
@@ -66,20 +93,81 @@ class GmlxAPCManager(_apc.APCManager):
     """APCManager with the per-block store eval batched into chunks.
 
     The stock store loop deep-copies each 16-token block's K/V slices and
-    evaluates them one block at a time - ~0.4-0.5 ms of dispatch/sync per
+    evaluates them one block at a time: ~0.4-0.5 ms of dispatch/sync per
     block regardless of data size, which compounds to ~1 s of synchronous
     prefill-thread stall for a 32k-token store on a 27B model. The copies
     are pure materialization (nothing in the loop consumes their values), so
     they can be evaluated in chunks: same data volume, ~30x fewer syncs.
 
-    ``store_kv_blocks`` is a verbatim copy of the stock method with the eval
-    hoisted into ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32;
-    <=0 means a single eval before return). All evals still complete before
-    the method returns, preserving the stock guarantee that block tensors
-    are decoupled from the caller's cache before ``mx.clear_cache`` can
-    release it. If the private helpers it references drift upstream, the
-    override defers to the stock store instead.
+    ``_store_kv_blocks_copy`` mirrors the stock store with the eval hoisted
+    into ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32; <=0 means
+    a single eval before return), plus the ckpt-store policy and the
+    per-block image salt the module docstring lists. All evals still
+    complete before the method returns, preserving the stock guarantee that
+    block tensors are decoupled from the caller's cache before
+    ``mx.clear_cache`` can release it. If the private helpers it references
+    drift upstream, the override defers to the stock store instead.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The stock checkpoint defaults changed to a 1-token guard plus a
+        # checkpoint every 2048 tokens. gmlx keeps the 16-token guard and
+        # schedules intermediate checkpoints in its own ckpt tier, so
+        # both stay at their prior values unless set explicitly.
+        if not (os.environ.get("APC_CHECKPOINT_GUARD_TOKENS")
+                or os.environ.get("APC_EXACT_PREFIX_GUARD_TOKENS")):
+            self.exact_cache_guard_tokens = 16
+        if not os.environ.get("APC_CHECKPOINT_INTERVAL_TOKENS"):
+            self.checkpoint_interval_tokens = 0
+
+    # The stock manager sizes a reserve for the prefill in flight at every
+    # prepare, observe, lookup and store, and `_make_room` evicts idle
+    # blocks and exact entries until the reserve fits the headroom. After
+    # autosize the governor owns memory pressure, so the reserve reads 0
+    # unless APC_MEMORY_RESERVE_GB asks for the stock reserves. The disk
+    # flush in `prepare_prefill` is unaffected.
+    @property
+    def _prefill_reserve_bytes(self) -> int:
+        return self.__dict__.get("_gmlx_prefill_reserve", 0)
+
+    @_prefill_reserve_bytes.setter
+    def _prefill_reserve_bytes(self, value: int) -> None:
+        self.__dict__["_gmlx_prefill_reserve"] = (
+            0 if self.__dict__.get("_gmlx_no_prefill_reserve") else int(value))
+
+    # Evictions and MLX cache size at the last headroom read inside the
+    # running `_make_room`.
+    _gmlx_headroom_mark: tuple[int, int] | None = None
+    _gmlx_making_room = False
+
+    def _make_room(self, allocation_bytes: int = 0, *,
+                   retain_bytes: int = 0) -> bool:
+        """Stock `_make_room`, with the headroom marks scoped to the call.
+        prompt_step clears the MLX cache after every chunk, so only this
+        call's own eviction or cache clear drops the cached free-RAM
+        reading."""
+        self._gmlx_making_room, self._gmlx_headroom_mark = True, None
+        try:
+            return super()._make_room(allocation_bytes,
+                                      retain_bytes=retain_bytes)
+        finally:
+            self._gmlx_making_room, self._gmlx_headroom_mark = False, None
+
+    def _memory_headroom(self) -> int:
+        """Stock headroom, with a cached free-RAM reading dropped once
+        memory went back to the system since the last read in the same
+        `_make_room`: it evicts, clears the MLX cache, then reads the
+        headroom again."""
+        if self._gmlx_making_room:
+            import mlx.core as mx
+
+            mark = (self.stats.memory_evictions, mx.get_cache_memory())
+            last, self._gmlx_headroom_mark = self._gmlx_headroom_mark, mark
+            if last is not None and (mark[0] != last[0]
+                                     or mark[1] < last[1]):
+                _invalidate_free_ram()
+        return super()._memory_headroom()
 
     def autosize(self, model, budget_fraction: float | None = None) -> None:
         """Size the caches to the box post-load. Pool: raise the block
@@ -88,7 +176,11 @@ class GmlxAPCManager(_apc.APCManager):
         committed; never shrinks, committed blocks would dangle).
         Exact tier: when APC_EXACT_CACHE_ENTRIES is unset, replace the
         2-entry count cap with a byte budget (entries are full KV
-        snapshots; counting them says nothing about their cost)."""
+        snapshots; counting them says nothing about their cost).
+        Byte cap: the stock manager evicts to its own memory cap and
+        reserves, sized from the Metal working set; the cap follows the
+        gmlx working budget instead and both reserves read 0, since the
+        governor owns pressure."""
         if model is None:
             return
         if budget_fraction is None:
@@ -97,7 +189,10 @@ class GmlxAPCManager(_apc.APCManager):
 
         from gmlx.serve.capacity import working_budget_bytes
         from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
-        from gmlx.gen.prefill_decay import untracked_weight_bytes
+        from gmlx.gen.prefill_decay import (
+            streamed_tracked_bytes,
+            untracked_weight_bytes,
+        )
 
         costs = kv_layer_costs(model)
         budget = working_budget_bytes()
@@ -109,28 +204,40 @@ class GmlxAPCManager(_apc.APCManager):
         # Stashed for stats: lets /metrics report committed pool bytes so
         # harnesses can separate evictable cache growth from real residue.
         self._pool_per_token_bytes = per_tok
-        weights = float(mx.get_active_memory()) + untracked_weight_bytes()
+        weights = (float(mx.get_active_memory()) + untracked_weight_bytes()
+                   - streamed_tracked_bytes())
         free = max(0.0, budget - weights)
         if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
             self._exact_budget_bytes = free * _EXACT_BUDGET_FRACTION
             self._exact_cache_max = 64
             _log.info("APC exact tier budget: %.1f GB (count cap 64)",
                       self._exact_budget_bytes / 1e9)
-        if os.environ.get("APC_NUM_BLOCKS"):
-            return
-        target = int(free * budget_fraction
-                     // (self.block_size * per_tok))
+        if not os.environ.get("APC_NUM_BLOCKS"):
+            self._grow_pool(free * budget_fraction, per_tok, len(costs))
+        self._working_set_bytes = int(budget)
+        if not os.environ.get("APC_MEMORY_MAX_GB"):
+            cap = (self.num_blocks * self.block_size * per_tok
+                   + (getattr(self, "_exact_budget_bytes", None) or 0))
+            self.memory_max_bytes = max(self.memory_max_bytes, int(cap))
+        if not os.environ.get("APC_MEMORY_RESERVE_GB"):
+            self.memory_reserve_bytes = 0
+            self._gmlx_no_prefill_reserve = True
+            self._prefill_reserve_bytes = 0
+
+    def _grow_pool(self, pool_bytes: float, per_tok: float,
+                   n_layers: int) -> None:
+        target = int(pool_bytes // (self.block_size * per_tok))
         # A committed block holds K+V arrays per layer; the pool competes
         # with everything else against the Metal resource limit, which is
         # what APC_MAX_POOL_TENSORS guards.
-        tensors_per_block = 2 * len(costs)
+        tensors_per_block = 2 * n_layers
         max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
         target = min(target, max_tensors // max(1, tensors_per_block))
         if target <= self.num_blocks:
             return
         with self.lock:
-            for i in range(len(self.pool), target):
-                b = _apc.APCBlock(block_id=i)
+            for _ in range(len(self.pool), target):
+                b = _apc.APCBlock()
                 self.pool.append(b)
                 self._free_push(b)
             self.num_blocks = target
@@ -171,8 +278,8 @@ class GmlxAPCManager(_apc.APCManager):
 
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
-        wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
-        model with zeroed ckpt_* keys is broken, not idle."""
+        wrap: super() + merge). Visible at /v1/cache/stats. A ckpt model
+        with zeroed ckpt_* keys is broken, not idle."""
         from .snapshot import ckpt_stats_snapshot
         from .prefix_cache import spec_prefix_stats
         snap = super().stats_snapshot()
@@ -274,32 +381,145 @@ class GmlxAPCManager(_apc.APCManager):
                 if had_slabs:
                     freed += nb
                     evicted += 1
+        if freed:
+            _invalidate_free_ram()
         return freed
 
     # Exact-tier entry salt: nonzero only for kvarn boots, where it keys
     # entries to the wire config (scheme/widths/tail/layout version) so a
-    # scheme change never warm-adopts a stale-format entry -- the disk
+    # scheme change never warm-adopts a stale-format entry. The disk
     # namespace is the model path and carries no scheme.
     _exact_extra_salt = 0
+
+    # A prompt with images salts each prefix by the images inside it
+    # (``MediaSalt``). An exact entry keys on the salt at its length, and
+    # the exact lookup runs the stock body once per window of prefix
+    # lengths that share a salt, longest first. A block keys on the salt
+    # at its end (``block_chain``), so two turns that share a prefix share
+    # its blocks. Stock ``apc_lookup_plan`` drops a memory hit whose prefix
+    # holds a media id, so a prefix with an image restores its blocks from
+    # the disk tier, and from memory only where the model's media guard
+    # sees no media ids.
 
     def lookup_exact_cache(self, token_ids, extra_hash=0,
                            max_prefix_tokens=None, min_prefix_tokens=0):
         self._trim_exact_to_budget()
-        return super().lookup_exact_cache(
-            token_ids, extra_hash ^ self._exact_extra_salt,
-            max_prefix_tokens=max_prefix_tokens,
-            min_prefix_tokens=min_prefix_tokens)
+        extra = extra_hash ^ self._exact_extra_salt
+        for salt, lo, hi in salt_windows(extra, min_prefix_tokens,
+                                         max_prefix_tokens):
+            got = super().lookup_exact_cache(
+                token_ids, salt, max_prefix_tokens=hi, min_prefix_tokens=lo)
+            if got[0] is not None:
+                return got
+        return None, 0
 
     def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
         out = super().store_exact_cache(
             token_ids, prompt_cache,
-            extra_hash=extra_hash ^ self._exact_extra_salt)
+            extra_hash=(salt_at(extra_hash, len(token_ids))
+                        ^ self._exact_extra_salt))
         self._trim_exact_to_budget()
         return out
 
+    def lookup_prefix(self, token_ids, extra_hash=0):
+        """The stock walk. A prompt with images walks ``block_chain``."""
+        if not isinstance(extra_hash, MediaSalt):
+            return super().lookup_prefix(token_ids, extra_hash=extra_hash)
+        bs = int(self.block_size)
+        with self.lock:
+            matched = []
+            for chunk, h in block_chain(token_ids, extra_hash,
+                                        len(token_ids) // bs, bs):
+                b = self.hash_table.get(h)
+                if b is None or b.token_ids != chunk:
+                    break
+                matched.append(self._acquire_existing(b))
+            n = len(matched) * bs
+            if n > 0:
+                self.stats.hits += 1
+                self.stats.matched_tokens += n
+            else:
+                self.stats.misses += 1
+            return matched, n
+
+    def lookup_prefix_disk_cache(self, token_ids, extra_hash=0,
+                                 max_prefix_tokens=None, min_prefix_tokens=0,
+                                 allow_memory_overlap=False):
+        """The stock disk restore. A prompt with images walks
+        ``block_chain`` and checks each shard block's salt against the
+        salt at its end."""
+        if not isinstance(extra_hash, MediaSalt):
+            return super().lookup_prefix_disk_cache(
+                token_ids, extra_hash=extra_hash,
+                max_prefix_tokens=max_prefix_tokens,
+                min_prefix_tokens=min_prefix_tokens,
+                allow_memory_overlap=allow_memory_overlap)
+        disk = self.disk
+        if disk is None:
+            return None, 0
+        bs = int(self.block_size)
+        with self.lock:
+            if self._disk_min_free_ram_bytes > 0:
+                free_now = _apc._free_ram_bytes()
+                if (free_now is not None
+                        and free_now < self._disk_min_free_ram_bytes):
+                    _apc.logger.info(
+                        "APC: skipping disk prompt-cache restore "
+                        "(free RAM %.1f GB < %.1f GB)",
+                        free_now / (1 << 30),
+                        self._disk_min_free_ram_bytes / (1 << 30),
+                    )
+                    return None, 0
+            n_full = len(token_ids) // bs
+            if max_prefix_tokens is not None and max_prefix_tokens > 0:
+                n_full = min(n_full, int(max_prefix_tokens) // bs)
+            hashes, chunks = [], []
+            for chunk, h in block_chain(token_ids, extra_hash, n_full, bs):
+                # A prefix the pool holds restores from the pool.
+                b = self.hash_table.get(h)
+                if (not allow_memory_overlap and b is not None
+                        and b.token_ids == chunk):
+                    return None, 0
+                if not disk.has(h):
+                    break
+                hashes.append(h)
+                chunks.append(chunk)
+            matched = len(hashes) * bs
+            if not hashes or matched <= min_prefix_tokens:
+                return None, 0
+        if not self._make_room(2 * disk.prefix_cache_bytes(hashes)):
+            with self.lock:
+                self.stats.memory_skips += 1
+            return None, 0
+        loaded = disk.load_layer_major_prefix(hashes)
+        if loaded is None:
+            return None, 0
+        keys, values, metadatas = loaded
+        if len(metadatas) != len(chunks):
+            return None, 0
+        for i, (chunk, meta) in enumerate(zip(chunks, metadatas)):
+            try:
+                stored = tuple(int(x) for x in
+                               meta.get("token_ids", "").split(",") if x)
+                stored_extra = int(meta.get("extra_hash", "0"))
+            except (TypeError, ValueError):
+                return None, 0
+            if (stored != chunk
+                    or stored_extra != int(salt_at(extra_hash,
+                                                   (i + 1) * bs))):
+                return None, 0
+        warm = _apc.make_warm_kv_cache_from_layers(keys, values, matched)
+        self._prefill_reserve_bytes = self.memory_plan.observe_cache(
+            warm, matched)
+        with self.lock:
+            self.stats.disk_hits += len(hashes)
+            self.stats.hits += 1
+            self.stats.matched_tokens += matched
+        return warm, matched
+
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
-        """Block store for checkpoint chains: always per-block -- the
+        """Block store for checkpoint chains, always per-block. The
         layer-major branch would return no blocks (an unpinnable record)
         and clone the whole prefix into the 2-slot exact LRU. disk=False
         keeps a chain memory-only (the window chain's position salt makes
@@ -328,13 +548,48 @@ class GmlxAPCManager(_apc.APCManager):
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,
                         _ckpt_disk=None):
+        """The block store, with each block of a prompt with images keyed
+        on the salt at its end (``block_chain``). A warm turn may have
+        restored its prefix from another tier, or from blocks evicted
+        since. The chain then lacks the blocks it skips, so the store
+        covers the whole prompt."""
+        if isinstance(extra_hash, MediaSalt):
+            if skip_first_n_tokens and not self._chain_held(
+                    token_ids, extra_hash, skip_first_n_tokens):
+                skip_first_n_tokens = 0
+        return self._store_kv_blocks_copy(
+            token_ids, layer_keys, layer_values, extra_hash=extra_hash,
+            skip_first_n_tokens=skip_first_n_tokens, _ckpt_disk=_ckpt_disk)
+
+    def _chain_held(self, token_ids, extra_hash, n_tokens: int) -> bool:
+        """Whether ``block_chain`` holds every block of the first
+        ``n_tokens``, in the pool or on disk."""
+        if _store_helpers() is None:
+            return False
+        bs = int(self.block_size)
+        with self.lock:
+            for chunk, h in block_chain(token_ids, extra_hash,
+                                        n_tokens // bs, bs):
+                b = self.hash_table.get(h)
+                if ((b is None or b.token_ids != chunk)
+                        and not (self.disk is not None
+                                 and self.disk.has(h))):
+                    return False
+        return True
+
+    def _store_kv_blocks_copy(self, token_ids, layer_keys, layer_values,
+                              *, extra_hash=0, skip_first_n_tokens=0,
+                              _ckpt_disk=None):
         import mlx.core as mx
 
         h = _store_helpers()
         if h is None:
+            # The stock store keys every block on the whole prompt's salt,
+            # which the per-block lookups never read: a miss, not a wrong
+            # restore.
             out = super().store_kv_blocks(
                 token_ids, layer_keys, layer_values,
-                extra_hash=extra_hash,
+                extra_hash=int(extra_hash),
                 skip_first_n_tokens=skip_first_n_tokens)
             # The upstream base store has the same inline exact branch.
             self._trim_exact_to_budget()
@@ -349,10 +604,42 @@ class GmlxAPCManager(_apc.APCManager):
         _hash_tokens = h["hash_tokens"]
         _disk_block_cls = h["disk_block_cls"]
         _copy_arr = h["copy_arr"]
-        _time = h["time"]
+        _nbytes = h["nbytes"]
         eval_chunk_blocks = env_int("GMLX_APC_STORE_EVAL_CHUNK", 32)
 
+        size = _nbytes(layer_keys + layer_values)
+        self._prefill_reserve_bytes = self.memory_plan.observe_kv(
+            layer_keys, layer_values, live_bytes=size)
+        # Reserve no more than the pool can retain. Larger requests
+        # continue directly to disk once the byte budget is exhausted.
+        per_token_bytes = (size / max(1, layer_keys[0].shape[2])
+                           if layer_keys else 0)
+        block_bytes = int(per_token_bytes * self.block_size)
+        compact_tokens = (
+            max(0, (len(token_ids) - self.exact_cache_guard_tokens)
+                // self.block_size) * self.block_size)
+        compact_size = int(compact_tokens * per_token_bytes)
+        # A ckpt store never takes the layer-major branch below, so its
+        # admission is the per-block pool share.
+        want_compact = (
+            not is_ckpt
+            and self._layer_major_memory_min_tokens > 0
+            and self._exact_cache_max > 0
+            and compact_tokens >= self._layer_major_memory_min_tokens
+        )
+        admission = min(
+            self.memory_max_bytes,
+            compact_size if want_compact
+            else min(size, self.num_blocks * block_bytes),
+        )
+        can_store_memory = self.memory_max_bytes > 0 and self._make_room(
+            admission, retain_bytes=admission)
+
         with self.lock:
+            memory_slots = (
+                max(0, self.memory_max_bytes - self._resident_bytes_locked())
+                // max(1, block_bytes)
+                if can_store_memory else 0)
             n_full = len(token_ids) // self.block_size
             skip_full = skip_first_n_tokens // self.block_size
             full_prefix_tokens = n_full * self.block_size
@@ -373,6 +660,8 @@ class GmlxAPCManager(_apc.APCManager):
                 not is_ckpt
                 and self._layer_major_memory_min_tokens > 0
                 and self._exact_cache_max > 0
+                and can_store_memory
+                and compact_size <= admission
                 and layer_major_prefix_tokens
                 >= self._layer_major_memory_min_tokens
             ):
@@ -382,12 +671,15 @@ class GmlxAPCManager(_apc.APCManager):
                     layer_major_prefix_tokens,
                 )
                 if copied is not None:
-                    key = _seq_hash(token_tuple, extra_hash, self.block_size)
+                    # The entry keys on the salt at its length, as
+                    # store_exact_cache keys one.
+                    entry_salt = int(salt_at(extra_hash,
+                                             layer_major_prefix_tokens))
+                    key = _seq_hash(token_tuple, entry_salt, self.block_size)
                     self._exact_cache[key] = _entry_cls(
                         token_ids=token_tuple,
-                        extra_hash=int(extra_hash),
+                        extra_hash=entry_salt,
                         prompt_cache=copied,
-                        last_used=_time.time(),
                     )
                     self._exact_cache.move_to_end(key)
                     while len(self._exact_cache) > self._exact_cache_max:
@@ -398,6 +690,7 @@ class GmlxAPCManager(_apc.APCManager):
                     # too, not just in store_exact_cache (lock is an
                     # RLock, safe to re-enter).
                     self._trim_exact_to_budget()
+            # Each block hashes under the salt at its end (block_chain).
             parent = _seed_parent
             for i in range(skip_full):
                 chunk = tuple(
@@ -405,7 +698,9 @@ class GmlxAPCManager(_apc.APCManager):
                     for t in token_ids[
                         i * self.block_size:(i + 1) * self.block_size]
                 )
-                parent = _hash_tokens(parent, chunk, extra_hash)
+                parent = _hash_tokens(
+                    parent, chunk,
+                    salt_at(extra_hash, (i + 1) * self.block_size))
 
             # Deferred-eval accumulator (the only change vs stock).
             pending = []
@@ -424,13 +719,14 @@ class GmlxAPCManager(_apc.APCManager):
                     for t in token_ids[
                         i * self.block_size:(i + 1) * self.block_size]
                 )
-                h2 = _hash_tokens(parent, chunk, extra_hash)
+                block_salt = salt_at(extra_hash, (i + 1) * self.block_size)
+                h2 = _hash_tokens(parent, chunk, block_salt)
                 if allow_disk and not self.disk.has(h2):
                     disk_blocks.append(
                         _disk_block_cls(
                             block_hash=int(h2),
                             parent_hash=int(parent),
-                            extra_hash=int(extra_hash),
+                            extra_hash=int(block_salt),
                             token_ids=chunk,
                             source_block_idx=i,
                         )
@@ -442,6 +738,9 @@ class GmlxAPCManager(_apc.APCManager):
                 if existing is not None and existing.token_ids == chunk:
                     acquired = self._acquire_existing(existing)
                     new_blocks.append(acquired)
+                    parent = h2
+                    continue
+                if memory_slots <= 0:
                     parent = h2
                     continue
                 if (
@@ -495,15 +794,14 @@ class GmlxAPCManager(_apc.APCManager):
                 pending.extend(v_slabs)
                 _flush_pending()
                 b.block_hash = h2
-                b.parent_hash = parent
                 b.token_ids = chunk
-                b.extra_hash = extra_hash
                 b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h2] = b
+                memory_slots -= 1
                 new_blocks.append(b)
                 self.stats.stores += 1
-                self.stats.served_tokens += self.block_size
+                self.stats.stored_tokens += self.block_size
                 parent = h2
             _flush_pending(force=True)
             if allow_disk and disk_blocks:
@@ -513,13 +811,13 @@ class GmlxAPCManager(_apc.APCManager):
                     # copies leave these lazy). Owned survivors: the slices
                     # are the live generation's KV, retained by the prompt
                     # cache; the guard drains before this handler continues.
+                    # The writer counts disk_writes through its callbacks.
                     from gmlx.eval_guard import guard
                     guard.eval(*(list(layer_keys) + list(layer_values)),
                                site="apc-disk-save", owner="owned")
                     self.disk.save_layer_major_blocks(
                         disk_blocks, layer_keys, layer_values, self.block_size
                     )
-                    self.stats.disk_writes += len(disk_blocks)
                 except Exception as e:
                     _apc.logger.warning(
                         "APC disk save scheduling failed: %s", e)
@@ -577,6 +875,37 @@ def _auto_block_size(model_path):
         return None
 
 
+# Seconds a cached ``vm_stat`` free-RAM read stays valid when the mach read
+# is unavailable.
+_FREE_RAM_TTL_S = 1.0
+
+
+def _cached_free_ram(read, ttl=_FREE_RAM_TTL_S, clock=time.monotonic):
+    """``read`` called at most once per ``ttl`` seconds; the value in
+    between is the last reading. ``invalidate()`` drops the reading."""
+    last: list = [None, None]
+
+    def free_ram_bytes():
+        now = clock()
+        if last[0] is None or now - last[0] >= ttl:
+            last[0], last[1] = now, read()
+        return last[1]
+
+    def invalidate():
+        last[0] = None
+
+    free_ram_bytes.__dict__["_gmlx_cached"] = True
+    free_ram_bytes.__dict__["invalidate"] = invalidate
+    return free_ram_bytes
+
+
+def _invalidate_free_ram() -> None:
+    """Drop the cached free-RAM reading, if the bound read is cached."""
+    invalidate = getattr(_apc._free_ram_bytes, "invalidate", None)
+    if callable(invalidate):
+        invalidate()
+
+
 def _vm_stat_free_ram_bytes() -> int | None:
     """free + inactive from ``/usr/bin/vm_stat``, as stock parses it, or
     None. The absolute path keeps the program on PATH out, and
@@ -609,27 +938,39 @@ def _free_ram_bytes() -> int | None:
 
 
 def _install_fork_free_free_ram() -> None:
-    """Rebind ``apc._free_ram_bytes`` (the exact disk-restore gate) to
-    :func:`_free_ram_bytes`, which reads the mach counters in process.
-    Stock shells out to ``vm_stat`` without psutil, and a fork beside a
-    Metal-mapped decode arena copies the arena before the exec. Stock also
-    runs the ``vm_stat`` that it finds on PATH, which can be a program that
-    a container client wrote."""
-    if not hasattr(_apc, "_free_ram_bytes"):
+    """Rebind ``apc._free_ram_bytes`` to :func:`_free_ram_bytes`, which
+    reads the mach counters in process. Stock reads it at the exact
+    disk-restore gates and for the memory headroom in every ``_make_room``,
+    and shells out to ``vm_stat`` without psutil: a fork beside a
+    Metal-mapped decode arena copies the arena before the exec, and the
+    ``vm_stat`` it runs is the one on PATH, which can be a program that a
+    container client wrote. Without the mach counters the rebound read runs
+    ``/usr/bin/vm_stat`` behind a cache, at most once per
+    ``_FREE_RAM_TTL_S``. The stock read never stays bound."""
+    from gmlx.serve import kernel_vm
+
+    stock = getattr(_apc, "_free_ram_bytes", None)
+    if (stock is None or stock is _free_ram_bytes
+            or wrapped_with(stock, "_gmlx_cached")):
         return
-    _apc._free_ram_bytes = _free_ram_bytes
+    if kernel_vm.snapshot() is not None:
+        _apc._free_ram_bytes = _free_ram_bytes
+    else:
+        _apc._free_ram_bytes = _cached_free_ram(_vm_stat_free_ram_bytes)
 
 
-def build_apc_manager(model_namespace=None):
+def build_apc_manager(model_namespace=None, rope_override=None):
     """Build the gmlx APC manager from the env vars ``from_env`` reads.
 
     Gated on ``GMLX_APC_ENABLED``, which the residency build window sets to
     the effective ``APC_ENABLED`` value (config-over-ambient) before pinning
     the stock var to ``0``. Absent gate (a non-pooled embedding of the
-    bridge) builds nothing - stock wiring applies there untouched. The knob
+    bridge) builds nothing, and stock wiring applies there untouched. The knob
     vars keep their stock names and parsing: ``APC_BLOCK_SIZE``,
     ``APC_NUM_BLOCKS``, and the ``APC_DISK_*`` family. The disk namespace
-    is ``APC_DISK_NAMESPACE`` when set, else the model path.
+    is ``APC_DISK_NAMESPACE`` when set, else the model path, with the rope
+    scaling the model path's header and the options resolve
+    (``rope_scaling.cache_suffix``) folded in.
     """
     if os.environ.get("GMLX_APC_ENABLED") != "1":
         return None
@@ -642,8 +983,11 @@ def build_apc_manager(model_namespace=None):
     disk = None
     disk_path = os.environ.get("APC_DISK_PATH")
     if disk_path:
+        from gmlx.load.rope_scaling import cache_suffix
+
         ns = (os.environ.get("APC_DISK_NAMESPACE") or model_namespace
-              or "default")
+              or "default") + cache_suffix(model_namespace or "",
+                                           rope_override)
         max_gb = float(os.environ.get("APC_DISK_MAX_GB", 0))
         max_bytes = int(max_gb * (1 << 30)) if max_gb > 0 else None
         workers = int(os.environ.get("APC_DISK_WORKERS", "1"))
@@ -655,10 +999,8 @@ def build_apc_manager(model_namespace=None):
                 max_bytes=max_bytes,
             )
             cap_str = f"{max_gb:.1f} GB" if max_bytes else "unbounded"
-            _log.info(
-                "APC disk tier at %s (ns=%s, cap=%s, read_mode=%s)",
-                disk.dir, ns, cap_str, disk._read_mode,
-            )
+            _log.info("APC disk tier at %s (ns=%s, cap=%s)",
+                      disk.dir, ns, cap_str)
         except Exception as e:
             _log.warning("APC disk tier disabled (init failed): %s", e)
 

@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -34,12 +34,12 @@ from gmlx.serve.patches import media_gate  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 from gmlx.serve.residency import _http_from_resolver_error  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_PKG = importlib.import_module("mlx_vlm.server")
-_GEN = importlib.import_module("mlx_vlm.server.generation")
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+_GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 MODEL_ID = "stub"
 MODEL_PATH = "/abs/wire-stub.gguf"  # absolute path: resolver skips the stat
@@ -134,9 +134,9 @@ def _fake_get_cached_model(model_path, adapter_path=None, *, model_kind="auto"):
     entry = {"model_path": load_path, "processor": _PROCESSOR,
              "config": _CONFIG}
     mc = _RUNTIME.model_cache
-    if hasattr(mc, "ensure_kind"):  # ModelCacheRegistry (mlx-vlm >= 0.6.4)
+    if hasattr(mc, "ensure_kind"):  # ModelCacheRegistry
         mc.ensure_kind().update(entry)
-    else:  # plain dict (<= 0.6.3)
+    else:  # the fixture's plain dict, before stock converts it on first read
         mc.update(entry)
     return object(), _PROCESSOR, _CONFIG
 
@@ -160,9 +160,9 @@ _CONFIG = _WireConfig()
 @pytest.fixture(scope="module")
 def wire_app():
     fastapi_app = _APP.app
-    apc = importlib.import_module("mlx_vlm.apc")
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
-    anthropic_mod = importlib.import_module("mlx_vlm.server.anthropic")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     deps = getattr(_APP, "_protocol_deps", None)
     saved = {
         "build_gen_args": _APP._build_gen_args,
@@ -190,7 +190,7 @@ def wire_app():
         "metrics_success": _GEN.ServerMetricsStore.record_success,
         "metrics_failure": _GEN.ServerMetricsStore.record_failure,
         "tss_init": importlib.import_module(
-            "mlx_vlm.server.responses_state").ThinkingStreamState.__init__,
+            "gmlx._vendor.mlx_vlm.server.responses_state").ThinkingStreamState.__init__,
         "stream_chunk_dump": _SCHEMAS.ChatStreamChunk.model_dump_json,
         "apc_harvest": apc.harvest_blocks_from_batch_cache,
         "apc_lone_flag": getattr(apc, "_kq_lone_harvest", False),
@@ -266,7 +266,7 @@ def wire_app():
     _GEN.ServerMetricsStore.record_success = saved["metrics_success"]
     _GEN.ServerMetricsStore.record_failure = saved["metrics_failure"]
     importlib.import_module(
-        "mlx_vlm.server.responses_state").ThinkingStreamState.__init__ = \
+        "gmlx._vendor.mlx_vlm.server.responses_state").ThinkingStreamState.__init__ = \
         saved["tss_init"]
     _SCHEMAS.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     apc.harvest_blocks_from_batch_cache = saved["apc_harvest"]
@@ -513,6 +513,70 @@ def test_anthropic_tool_choice_none_drops_tools_end_to_end(wire):
     r = wire.client.post("/v1/messages", json=body)
     assert r.status_code == 200, r.text
     assert wire.gen.calls[-1]["args"].skip_special_tokens is False
+
+
+# 4c. developer messages (chat_behavior.install_role_normalization): mlx-vlm
+#     merges system and developer messages into one leading system message.
+#     On the chat route developer messages stay in place, and the template
+#     decides their role; the Responses route keeps the stock merge.
+def _rendered_messages(wire):
+    return [(m["role"], m["content"]) for m in
+            json.loads(wire.gen.calls[-1]["prompt"][len("user: "):])]
+
+
+def test_chat_developer_messages_stay_in_place(wire, monkeypatch):
+    msgs = [{"role": "system", "content": "S"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "yo"},
+            {"role": "developer", "content": "D"},
+            {"role": "system", "content": "S2"},
+            {"role": "user", "content": "go"}]
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(messages=msgs))
+    assert r.status_code == 200, r.text
+    # the stub template never mentions the role: system, in place
+    assert _rendered_messages(wire) == [
+        ("system", "S\n\nS2"), ("user", "hi"), ("assistant", "yo"),
+        ("system", "D"), ("user", "go")]
+
+    monkeypatch.setattr(_WireTokenizer, "chat_template",
+                        _WireTokenizer.chat_template + " developer")
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(messages=msgs))
+    assert r.status_code == 200, r.text
+    assert _rendered_messages(wire)[3] == ("developer", "D")
+
+    r = wire.client.post("/v1/responses", json={
+        "model": MODEL_ID, "instructions": "I",
+        "input": [{"role": "developer", "content": "D"},
+                  {"role": "user", "content": "hi"}]})
+    assert r.status_code == 200, r.text
+    assert _rendered_messages(wire) == [("system", "I\n\nD"), ("user", "hi")]
+
+
+# 4d. the retirement render capture (apc.install_retire_render_capture)
+#     records each request's tool_parser override beside its render.
+def test_retire_capture_records_the_tool_parser_override(wire):
+    import gmlx.cache.retire_key as rk
+
+    tools = [{"type": "function", "function": {
+        "name": "t", "parameters": {"type": "object"}}}]
+
+    def _captured():
+        with rk._LOCK:
+            return rk._TEXT_MEMO[wire.gen.calls[-1]["prompt"]]
+
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        tools=tools, tool_parser="json_tools"))
+    assert r.status_code == 200, r.text
+    assert _captured()["tool_parser"] == "json_tools"
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(tools=tools))
+    assert r.status_code == 200, r.text
+    assert _captured()["tool_parser"] is None
+    r = wire.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 8, "tool_parser": "json_tools",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"name": "t", "input_schema": {"type": "object"}}]})
+    assert r.status_code == 200, r.text
+    assert _captured()["tool_parser"] == "json_tools"
 
 
 # 5. /v1/responses (README / getting-started promise the Responses API)
@@ -856,10 +920,10 @@ def test_profile_sampling_reaches_generation_over_wire(wire):
     assert r.status_code == 400, r.text
 
 
-# 13. runtime.model_cache shape contract. mlx-vlm >= 0.6.4 replaces the
-#     runtime's model_cache dict with a ModelCacheRegistry; residency reads
-#     pooled entries duck-typed (entry.model_cache["model"], .get(...)), and
-#     upstream's _model_cache_registry() converts a plain dict in place. Pin
+# 13. runtime.model_cache shape contract. mlx-vlm keeps the runtime's
+#     model_cache in a ModelCacheRegistry; residency reads pooled entries
+#     duck-typed (entry.model_cache["model"], .get(...)), and upstream's
+#     _model_cache_registry() converts a plain dict in place. Pin
 #     the two operations residency performs against the registry so an
 #     upstream reshape of the registry names itself here rather than as a
 #     500 deep inside a pooled request (found live: this file's fake loader
@@ -874,10 +938,8 @@ def test_systemone_over_the_full_patch_set_checks_a_text_model_body_for_letters(
 
 
 def test_model_cache_registry_supports_residency_reads():
-    runtime_mod = importlib.import_module("mlx_vlm.server.runtime")
-    registry_cls = getattr(runtime_mod, "ModelCacheRegistry", None)
-    if registry_cls is None:
-        pytest.skip("mlx-vlm <= 0.6.3: runtime.model_cache is a plain dict")
+    runtime_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
+    registry_cls = runtime_mod.ModelCacheRegistry
     model, proc, cfg = object(), object(), object()
     reg = registry_cls()
     # empty registry reads like an empty cache (the scratch-load contract)
@@ -901,8 +963,8 @@ def test_a_client_chat_template_is_refused_on_every_alias_route(wire, monkeypatc
         rendered.append(kwargs)
         return _fake_apply_chat_template(processor, config, messages, **kwargs)
 
-    for mod in (_PKG, importlib.import_module("mlx_vlm.server.openai"),
-                importlib.import_module("mlx_vlm.server.anthropic"),
+    for mod in (_PKG, importlib.import_module("gmlx._vendor.mlx_vlm.server.openai"),
+                importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic"),
                 getattr(_APP, "_protocol_deps", None)):
         if mod is not None and hasattr(mod, "apply_chat_template"):
             monkeypatch.setattr(mod, "apply_chat_template", spy)
@@ -979,7 +1041,7 @@ def test_the_real_image_route_refuses_a_file_write_without_the_gate(wire, monkey
     from fastapi import HTTPException
     from starlette.requests import Request
 
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     monkeypatch.setattr(openai_mod, "get_cached_model",
                         lambda *a, **k: (object(), None, None))
     raw = json.dumps({"model": MODEL_ID, "prompt": "p",
@@ -994,17 +1056,22 @@ def test_the_real_image_route_refuses_a_file_write_without_the_gate(wire, monkey
     assert e.value.status_code == 400 and "output_path" in str(e.value.detail)
 
 
-def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypatch):
+def test_the_copy_edit_handler_hands_an_inline_image_over_as_a_file(wire, monkeypatch):
     """The edit loaders open a reference image by file name, so the wrapped
-    edit_image passes a private temporary file and removes it afterwards."""
+    edit_image passes a private temporary file and removes it afterwards.
+    The route serves gmlx's handler, so the copy's is called directly."""
+    import asyncio
     import base64
     import io
+    import json
     import os
     import types
 
+    from fastapi import HTTPException
     from PIL import Image
+    from starlette.requests import Request
 
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     seen = []
 
     def edit_image(model, request, **kw):
@@ -1022,11 +1089,47 @@ def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypa
     png = io.BytesIO()
     Image.new("RGB", (2, 2)).save(png, format="PNG")
     uri = "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()
-    r = wire.client.post("/v1/images/edits",
-                         json={"model": MODEL_ID, "prompt": "p", "image": uri})
-    assert r.status_code == 200, r.text
+
+    def call(image):
+        raw = json.dumps({"model": MODEL_ID, "prompt": "p", "image": image}).encode()
+
+        async def receive():
+            return {"type": "http.request", "body": raw, "more_body": False}
+        scope = {"type": "http", "method": "POST", "path": "/v1/images/edits",
+                 "headers": [(b"content-type", b"application/json")],
+                 "query_string": b""}
+        return asyncio.run(openai_mod.images_edits_endpoint(Request(scope, receive)))
+
+    call(uri)
     assert [size for _, size in seen] == [(2, 2)]
     assert not os.path.exists(os.path.dirname(seen[0][0]))
-    r = wire.client.post("/v1/images/edits",
-                         json={"model": MODEL_ID, "prompt": "p", "image": "/Users/me/a.png"})
-    assert r.status_code == 400 and len(seen) == 1
+    with pytest.raises(HTTPException) as e:
+        call("/Users/me/a.png")
+    assert e.value.status_code == 400 and len(seen) == 1
+
+
+def test_the_stock_image_handlers_are_unreachable(wire, monkeypatch):
+    """Every route list, at either FastAPI layout, holds only gmlx's image
+    handlers, and a request never reaches the copy's image calls."""
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    stock = {openai_mod.images_generations_endpoint,
+             openai_mod.images_edits_endpoint}
+    seen = {}
+    for routes in sp_common._iter_route_lists(_APP.app):
+        for r in routes:
+            path = getattr(r, "path", "")
+            if "/images/" in path:
+                assert getattr(r, "endpoint", None) not in stock, path
+                seen[path] = r.endpoint.__module__
+    for route in ("generations", "edits", "variations"):
+        for path in (f"/v1/images/{route}", f"/images/{route}"):
+            assert seen.get(path) == "gmlx.serve.patches.images", path
+
+    def never(*a, **k):
+        raise AssertionError("the copy's image call ran")
+
+    monkeypatch.setattr(openai_mod, "generate_image", never)
+    monkeypatch.setattr(openai_mod, "edit_image", never)
+    for path in ("/v1/images/generations", "/images/edits"):
+        r = wire.client.post(path, json={"prompt": "x", "model": "/tmp/m"})
+        assert r.status_code in (400, 404), r.text

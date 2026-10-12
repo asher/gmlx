@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 import time
 import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
@@ -25,9 +26,9 @@ from gmlx.serve.patches import sampling as sp_sampling  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import ResolvedModel, build_config  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_PKG = importlib.import_module("mlx_vlm.server")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 
 
@@ -83,8 +84,8 @@ def test_gen_arg_keys_exist_upstream():
     field and every request-field alias a declared field on some mlx-vlm request
     schema - a rename upstream turns a silent injection no-op into a red X."""
     import dataclasses
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     ga_fields = {f.name for f in dataclasses.fields(gen.GenerationArguments)}
     request_fields = set()
     for cls in (schemas.ChatRequest, schemas.AnthropicRequest,
@@ -102,8 +103,8 @@ def test_inject_profile_sampling_on_real_gen_args():
     """End-to-end over the REAL seam: a real ChatRequest through the real
     _build_gen_args, with the injection installed - profile values land on the
     real GenerationArguments and a client-set field still wins."""
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     sp.install_gen_args_profile_injection()
     spec = _spec(temperature=0.15, top_p=0.8, top_k=40, min_p=0.05,
                  max_tokens=777)
@@ -142,7 +143,7 @@ class _FakeKeepPool:
 
 # 7. vanilla streaming chunks (exclude_none) - the Open WebUI blank-render fix
 def _stream_schemas():
-    s = importlib.import_module("mlx_vlm.server.schemas")
+    s = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     return s.ChatStreamChunk, s.ChatStreamChoice, s.ChatMessage, s.UsageStats, s.GenerationTimings
 
 
@@ -292,13 +293,19 @@ def _route_endpoints(path):
             if getattr(r, "path", None) == path]
 
 
+def _gmlx_owned(fn) -> bool:
+    """gmlx code, not the copy's: the copy's modules start with gmlx too."""
+    return (fn.__module__.startswith("gmlx.")
+            and not fn.__module__.startswith("gmlx._vendor."))
+
+
 def test_speech_route_owns_both_aliases_with_tts():
     """With cfg.tts set, gmlx's endpoint serves both speech paths, so a
     client configured without /v1 works, and upstream's per-request-loaded
     route survives at neither."""
     sp.install_audio_speech_route("mlx-community/Kokoro-82M-bf16")
     ours = _route_endpoints("/v1/audio/speech")
-    assert len(ours) == 1 and ours[0].__module__.startswith("gmlx.")
+    assert len(ours) == 1 and _gmlx_owned(ours[0])
     assert _route_endpoints("/audio/speech") == ours
 
 
@@ -311,7 +318,7 @@ def test_speech_route_owns_both_aliases_with_tts():
 def test_each_configured_service_serves_both_paths(install, value, path):
     getattr(sp, install)(value)
     ours = _route_endpoints(path)
-    assert len(ours) == 1 and ours[0].__module__.startswith("gmlx.")
+    assert len(ours) == 1 and _gmlx_owned(ours[0])
     assert _route_endpoints(path.removeprefix("/v1")) == ours
 
 
@@ -449,6 +456,59 @@ def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
     assert "input" in r.json()["error"]["message"]
 
 
+def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path,
+                                                        capsys):
+    # A configured model gmlx cannot run: every request gets the reason and
+    # the supported models, without the local path, and writes a [req] line.
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.embeddings as emb
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    p = tmp_path / "lfm2-embedder"
+    p.mkdir()
+    (p / "config.json").write_text(json.dumps({"model_type": "lfm2"}))
+    sp.install_embeddings_route(str(p))
+    client = TestClient(_APP.app)
+    for _ in range(2):
+        capsys.readouterr()
+        r = client.post("/v1/embeddings", json={"input": "hi"})
+        assert r.status_code == 501
+        err = r.json()["error"]
+        assert err["type"] == "model_unsupported"
+        assert err["message"] == (
+            "the configured `server.embeddings` model cannot load: model_type "
+            "'lfm2' is not a supported embeddings model. Supported: "
+            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+        lines = [ln for ln in capsys.readouterr().out.splitlines()
+                 if ln.startswith("[req] ")]
+        assert len(lines) == 1
+        assert f"/v1/embeddings {p} failed" in lines[0]
+        assert "error=EmbeddingsModelError" in lines[0]
+
+
+def test_embeddings_route_malformed_config_is_typed_501(monkeypatch, tmp_path):
+    # A config.json that is not valid JSON gives the same 501, not a 500.
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.embeddings as emb
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    p = tmp_path / "bge-m3"
+    p.mkdir()
+    (p / "config.json").write_text("{")
+    sp.install_embeddings_route(str(p))
+    r = TestClient(_APP.app).post("/v1/embeddings", json={"input": "hi"})
+    assert r.status_code == 501
+    assert r.json()["error"]["message"].startswith(
+        "the configured `server.embeddings` model cannot load: config.json "
+        "is not valid JSON (")
+
+
 def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
     # A deleted embeddings GGUF is disk state, not a server error: the endpoint
     # must answer with a typed 404 naming the config key and the fix - never a
@@ -486,6 +546,38 @@ def test_models_endpoint_delists_missing_gguf_service(monkeypatch, tmp_path):
     gone.unlink()
     ids = [m["id"] for m in asyncio.run(route.endpoint())["data"]]
     assert "text-embedding-3-small" not in ids
+
+
+def test_models_endpoint_never_scans_a_request_model_dir(monkeypatch,
+                                                        tmp_path):
+    # Stock mlx-vlm 0.7.3 lists any model folder a client names in
+    # ?model_dir=. The override must replace both stock routes and ignore
+    # the query.
+    import json
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    folder = tmp_path / "secret-model"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (folder / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.delenv("MLX_VLM_MODEL_PATHS", raising=False)
+    monkeypatch.setattr(sys.modules["gmlx._vendor.mlx_vlm.server"], "scan_cache_dir",
+                        lambda: types.SimpleNamespace(repos=[]),
+                        raising=False)
+    # The fixture is a folder the stock endpoint lists.
+    stock = _APP.models_endpoint(model_dir=[str(tmp_path)])
+    assert str(folder.resolve()) in [m["id"] for m in stock["data"]]
+
+    sp.install_models_endpoint_override()
+    for path in ("/v1/models", "/models"):
+        endpoints = [r.endpoint for r in _APP.app.router.routes
+                     if getattr(r, "path", None) == path]
+        assert endpoints and _APP.models_endpoint not in endpoints
+        r = TestClient(_APP.app).get(path, params={"model_dir": str(tmp_path)})
+        assert r.status_code == 200
+        assert str(tmp_path) not in r.text and "secret-model" not in r.text
 
 
 def test_rerank_route_reranks(monkeypatch):
@@ -560,6 +652,45 @@ def test_install_server_patches_wires_every_aux_route():
     paths = {getattr(r, "path", None) for r in _APP.app.router.routes}
     assert {"/v1/embeddings", "/v1/rerank",
             "/v1/audio/transcriptions", "/v1/audio/translations"} <= paths
+
+
+def _media_salt_layers() -> list:
+    """For each seam the media salt wraps, whether its layer is in the
+    seam's wrap chain. Other installers wrap over it (install_server_patches
+    puts the retire capture over its ``_preprocess_request``), so the layer
+    need not be the outermost function."""
+    from gmlx.upstream.patching import _walk
+
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    seams = (gen.ResponseGenerator.generate,
+             gen.ResponseGenerator._preprocess_request,
+             ar.BatchGenerator._apc_extra_hash,
+             apc.hash_image_payload, apc.semantic_extra_hash)
+    return [any(getattr(f, "__qualname__", "").startswith("install_media_salt.")
+                for f in _walk(seam)) for seam in seams]
+
+
+def test_the_seam_restore_lets_the_media_salt_install_again(engine_seams):
+    """The restore after each test here puts the engine classes back. The
+    media salt wraps three of their methods and two apc functions and keeps
+    its install flag on the apc module, so the restore puts the flag and the
+    apc functions back too: the flag is set exactly when every layer is
+    there, and the next install wraps the classes again. Without it, the
+    cache tests that install the salt after this module get the stock salt
+    (an int). The salt may already be installed when this test starts."""
+    from gmlx.cache import media_salt
+
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    saved = engine_seams.snapshot()
+    assert media_salt.install_media_salt()
+    assert all(_media_salt_layers())
+    engine_seams.restore(saved)
+    flag = bool(getattr(apc, media_salt._INSTALLED_FLAG, False))
+    assert _media_salt_layers() == [flag] * 5
+    assert media_salt.install_media_salt()
+    assert all(_media_salt_layers())
 
 
 def test_models_payload_advertises_embeddings_when_configured():
@@ -893,7 +1024,7 @@ def test_timings_sse_stamps_content_chunks_only():
 
 def test_install_stream_timings_wraps_routes_idempotent():
     sp.install_stream_timings()
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     assert getattr(generation.GenerationMetrics.record_chunk,
                    sp_chat._STREAM_TIMINGS_FLAG, False)
     routes = {getattr(r, "path", None): r for r in _APP.app.router.routes}
@@ -914,7 +1045,7 @@ def test_openai_stop_endpoint_e2e_with_stub():
 
     from fastapi import Request as _Request
 
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 
     async def stub(request, http_request):
         return schemas.ChatResponse(choices=[schemas.ChatChoice(
@@ -1195,7 +1326,7 @@ def test_lone_harvest_stores_plain_kvcache():
     """After install, a plain KVCache (offset, no _idx) harvests its
     [0, offset) row (batch_idx omitted = lone request)."""
     import mlx.core as mx
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
 
     keys = mx.zeros((1, 2, 40, 8))
     values = mx.zeros((1, 2, 40, 8))
@@ -1214,7 +1345,7 @@ def test_lone_harvest_preserves_batched_path():
     """The patch must not change behaviour for a real batched cache (_idx present):
     it still slices [left_padding, _idx) for the requested row."""
     import mlx.core as mx
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
 
     keys = mx.zeros((2, 2, 48, 8))
@@ -1232,7 +1363,7 @@ def test_lone_harvest_skips_unsupported_cache():
     """A cache with neither _idx nor offset, or with tuple keys and no
     dequantize_for_apc, is declined, not crashed."""
     import mlx.core as mx
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
     mgr = _RecordingAPC()
 
@@ -1252,7 +1383,7 @@ def test_lone_harvest_matches_stock_signature():
     batch_idx keyword-only. A drift here turns every harvest into a
     warned-and-skipped TypeError, so the signature is pinned."""
     import inspect
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
     params = inspect.signature(apc.harvest_blocks_from_batch_cache).parameters
     kinds = {n: p.kind for n, p in params.items()}
@@ -1265,7 +1396,7 @@ def test_lone_harvest_matches_stock_signature():
 
 
 def test_lone_harvest_install_idempotent():
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
     first = apc.harvest_blocks_from_batch_cache
     sp.install_apc_lone_harvest()
@@ -1603,7 +1734,7 @@ def test_optional_request_model_defaults_blank():
     # Three surfaces promise "fallback model when a request omits `model`";
     # the schemas must therefore accept the omission (the resolver already
     # treats "" as the default).
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     sp.install_optional_request_model()
     req = schemas.ChatRequest(messages=[{"role": "user", "content": "hi"}])
     assert req.model == ""
@@ -1944,7 +2075,7 @@ def _full_app(**server):
 @pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
 def test_the_messages_routes_answer_an_unknown_model_with_404(monkeypatch, path):
     """The model lookup's 404 must not reach the route's catch-all 500."""
-    import mlx_vlm.server as pkg
+    import gmlx._vendor.mlx_vlm.server as pkg
 
     from gmlx.serve import bridge_vlm as serving
     from gmlx.serve.residency import _http_from_resolver_error
@@ -1994,12 +2125,12 @@ def test_a_websocket_route_added_later_is_still_refused():
 def test_the_full_install_puts_the_checks_in_every_sink():
     from gmlx.serve import media_sinks as ms
     _full_app()
-    utils = importlib.import_module("mlx_vlm.utils")
-    generation = importlib.import_module("mlx_vlm.server.generation")
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
-    apc = importlib.import_module("mlx_vlm.apc")
-    reranking = importlib.import_module("mlx_vlm.server.reranking")
-    embeddings = importlib.import_module("mlx_vlm.server.embeddings")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    reranking = importlib.import_module("gmlx._vendor.mlx_vlm.server.reranking")
+    embeddings = importlib.import_module("gmlx._vendor.mlx_vlm.server.embeddings")
     checked = [utils.load_image, utils.load_audio, utils.load_video, utils.load,
                generation.load, drafters.load_drafter, apc.DiskBlockStore.__init__,
                reranking.load_image, reranking.load_video, embeddings.load_image]
@@ -2090,20 +2221,57 @@ def test_a_reload_turns_a_service_on_and_off(monkeypatch, tmp_path):
 
 
 def test_a_reload_whose_service_fails_changes_nothing(monkeypatch, tmp_path):
+    from gmlx.config import ConfigError
     from gmlx.serve import stt
     conf, reload_fn, calls, _model = _reloading_rerank(monkeypatch, tmp_path)
 
-    def no_whisper():
-        raise ImportError("speech-to-text requires the optional stt extra")
-    monkeypatch.setattr(stt, "import_mlx_whisper", no_whisper)
+    def bad(value):
+        raise ConfigError("server.stt: not a whisper model")
+    monkeypatch.setattr(stt, "resolve_stt_model", bad)
     sp_routes.note_missing_service("rerank")
+    sp_routes.note_missing_service("tts", extra="pip install 'gmlx[tts]'")
     client = _full_app()
     conf.write_text("server:\n  stt: whisper-turbo\n  rerank: qwen3-rerank-0.6b\n"
                     + _MODELS_BLOCK)
-    with pytest.raises(ImportError, match="stt extra"):
+    with pytest.raises(ConfigError, match="not a whisper model"):
+        reload_fn()
+    assert sp_routes._MISSING_SERVICES == {"rerank", "tts"}
+    assert "was missing" in client.post("/v1/rerank", json={}).text
+    assert "pip install 'gmlx[tts]'" in client.post("/v1/audio/speech", json={}).text
+    assert calls == []
+
+
+def test_a_reload_with_a_speech_extra_missing_turns_only_that_service_off(
+        monkeypatch, tmp_path):
+    from gmlx.commands.extras import install_hint
+    conf, reload_fn, calls, model = _reloading_rerank(monkeypatch, tmp_path)
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)
+    client = _full_app()
+    conf.write_text("server:\n  stt: whisper-turbo\n  rerank: qwen3-rerank-0.6b\n"
+                    + _MODELS_BLOCK)
+    assert reload_fn() == {"models": 1, "services_off": {"stt": install_hint("stt")}}
+    r = client.post("/v1/audio/transcriptions")
+    assert r.status_code == 404 and "optional stt extra is not installed" in r.text
+    assert calls == [("prewarm", model)]
+
+
+def test_a_failed_reload_drops_what_it_turned_off(monkeypatch, tmp_path):
+    """The stt extra is missing and the tts model does not resolve: the
+    reload fails, and stt keeps the state it had before it."""
+    from gmlx.config import ConfigError
+    from gmlx.serve import tts
+    conf, reload_fn, calls, _model = _reloading_rerank(monkeypatch, tmp_path)
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)
+
+    def bad(value):
+        raise ConfigError("server.tts: not a voice model")
+    monkeypatch.setattr(tts, "resolve_tts_model", bad)
+    sp_routes.note_missing_service("rerank")
+    conf.write_text("server:\n  stt: whisper-turbo\n  tts: kokoro\n" + _MODELS_BLOCK)
+    with pytest.raises(ConfigError, match="not a voice model"):
         reload_fn()
     assert sp_routes._MISSING_SERVICES == {"rerank"}
-    assert "was missing" in client.post("/v1/rerank", json={}).text
+    assert sp_routes.missing_extras() == {}
     assert calls == []
 
 

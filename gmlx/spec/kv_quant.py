@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import mlx.core as mx
 
-from gmlx.spec.engine import _debug_note
+from gmlx.spec.engine import _debug_note, install_owned_b1_spec_cache
+from gmlx.upstream.patching import wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -23,22 +25,80 @@ def dequantize_lift_cache(c):
     swap does, at preemption or injection time, as a one-off O(depth)
     copy. Without this every kv-bits MTP preemption declined into a
     drain-wait and queued rows stalled behind the live generation."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache.kv_cache import BatchKVCache
 
     lifted = BatchKVCache([0])
-    L = c.offset
-    if L:
-        keys = mx.dequantize(
-            *(mx.contiguous(t[..., :L, :]) for t in c.keys),
-            group_size=c.group_size, bits=c.bits)
-        values = mx.dequantize(
-            *(mx.contiguous(t[..., :L, :]) for t in c.values),
-            group_size=c.group_size, bits=c.bits)
-        lifted.update_and_fetch(keys, values)
+    if c.offset:
+        lifted.update_and_fetch(*_dequantized_kv(c))
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
-        lifted._gmlx_cascade = stamp
+        setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
+
+
+def _dequantized_kv(c, length=None):
+    """Float keys and values of a non-empty affine cache: a B=1
+    QuantizedKVCache up to its offset, or a batch one up to ``length``."""
+    L = c.offset if length is None else length
+    keys = mx.dequantize(
+        *(mx.contiguous(t[..., :L, :]) for t in c.keys),
+        group_size=c.group_size, bits=c.bits)
+    values = mx.dequantize(
+        *(mx.contiguous(t[..., :L, :]) for t in c.values),
+        group_size=c.group_size, bits=c.bits)
+    return keys, values
+
+
+def _dequantized_batch(c):
+    """A BatchQuantizedKVCache as a BatchKVCache with the same rows,
+    padding and write index."""
+    from gmlx.cache.kv_cache import BatchKVCache
+
+    out = BatchKVCache([0] * int(c.left_padding.shape[0]))
+    out.left_padding = c.left_padding
+    out.offset = c.offset
+    out._right_padding = getattr(c, "_right_padding", None)
+    if c.keys is not None and c._idx:
+        out.keys, out.values = _dequantized_kv(c, c._idx)
+        out._idx = c._idx
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        setattr(out, "_gmlx_cascade", stamp)
+    return out
+
+
+def dequantize_exact_row(row):
+    """A warm cache stack with its affine layers as float caches.
+
+    A single-row exact entry recovers QuantizedKVCache to KVCache, and a
+    merged warm batch recovers BatchQuantizedKVCache to BatchKVCache.
+    CacheList members recover too, and other layers, kvarn ones
+    included, pass through. The stock warm merge keeps a packed row
+    packed, and stock admission packs to the generator's kv_bits, so
+    both MTP warm paths run this when live batches keep float KV (MTP
+    under uniform KV_BITS), whose B=1 round stores packed rows."""
+    from gmlx.cache.kv_cache import (
+        BatchQuantizedKVCache,
+        CacheList,
+        KVCache,
+        QuantizedKVCache,
+    )
+
+    def recover(c):
+        if isinstance(c, QuantizedKVCache):
+            out = KVCache()
+            if c.offset:
+                out.update_and_fetch(*_dequantized_kv(c))
+            return out
+        if isinstance(c, BatchQuantizedKVCache):
+            return _dequantized_batch(c)
+        if isinstance(c, CacheList):
+            members = tuple(recover(m) for m in c.caches)
+            if any(m is not o for m, o in zip(members, c.caches)):
+                return type(c)(*members)
+        return c
+
+    return [recover(c) for c in row]
 
 
 def kvarn_lift_cache(c):
@@ -50,7 +110,7 @@ def kvarn_lift_cache(c):
     rotated-domain K/V, which stock SDPA would attend with an un-rotated
     query -- no crash, just wrong logits on every preempted row.
     _raw_single is the original-domain accessor."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache.kv_cache import BatchKVCache
 
     lifted = BatchKVCache([0])
     if c.offset:
@@ -58,7 +118,7 @@ def kvarn_lift_cache(c):
         lifted.update_and_fetch(keys, values)
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
-        lifted._gmlx_cascade = stamp
+        setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
 
 
@@ -79,19 +139,6 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
         return reason
     if not owned_round:
         return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
-    from gmlx.models.qwen35.gdn import stock_gdn_fallback
-
-    mt = None
-    for h in _spec_target_holders(lm):
-        cfg = getattr(h, "config", None)
-        mt = (getattr(h, "model_type", None)
-              or (cfg.get("model_type") if isinstance(cfg, dict)
-                  else getattr(cfg, "model_type", None)))
-        if mt:
-            break
-    if stock_gdn_fallback(mt):
-        return ("the GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
-                "quantized KV cache")
     return None
 
 
@@ -104,9 +151,9 @@ def lift_single_cache(c):
     otherwise. Everything else lifts through its class's merge. The
     cascade stamp rides along. One lift for the preempted host row and
     the injected rows, so the two cannot drift."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
-    if isinstance(c, cache_types("QuantizedKVCache")):
+    if isinstance(c, QuantizedKVCache):
         return dequantize_lift_cache(c)
     if getattr(c, "kv_quant_scheme", None) == "kvarn" and batch_liftable(c):
         from gmlx.cache.kvarn_sdpa import kvarn_row_ends_ok
@@ -118,12 +165,12 @@ def lift_single_cache(c):
         lifted = BatchKVarNKVCache.merge([c])
         stamp = getattr(c, "_gmlx_cascade", None)
         if stamp is not None:
-            lifted._gmlx_cascade = stamp
+            setattr(lifted, "_gmlx_cascade", stamp)
         return lifted
     lifted = type(c).merge([c])
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
-        lifted._gmlx_cascade = stamp
+        setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
 
 
@@ -142,16 +189,15 @@ def batch_liftable(c) -> bool:
         # The rotating subclass counts evicted tokens in offset that its
         # buffers no longer hold: kvarn_lift_cache would misplace rows.
         return not isinstance(c, KVarNRotatingKVCache)
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
-    return (isinstance(c, cache_types("QuantizedKVCache"))
-            or hasattr(type(c), "merge"))
+    return isinstance(c, QuantizedKVCache) or hasattr(type(c), "merge")
 
 _SPEC_KV_QUANT_FLAG = "_kq_gguf_spec_kv_quant"
 _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 
 
-def _spec_kv_quant_params():
+def _spec_kv_quant_params() -> dict[str, Any] | None:
     """resolve_kv_quant_policy kwargs for the KV quantization serve's env
     asks the trimmable B=1 single-stream cache to honor, else None.
     Fractional widths and unknown schemes have no such cache; kvarn
@@ -202,7 +248,7 @@ def _spec_kv_quant_params():
                 kv_group_size=int(os.environ.get("KV_GROUP_SIZE", "64")))
 
 
-def _stamped_spec_params(lm):
+def _stamped_spec_params(lm) -> dict[str, Any] | None:
     """resolve_kv_quant_policy kwargs from the KV policy residency stamped
     on this model at load, None when nothing is stamped. Per-model env
     windows are closed by request time, so the stamp rules the boot env;
@@ -318,10 +364,10 @@ def _kvarn_batch_spec_cache(lm, caches, left_padding, params):
 def install_spec_kv_quant() -> None:
     """Honor KV_BITS on the B=1 MTP serve path.
 
-    Stock ``make_speculative_prompt_cache`` returns plain fp16 caches for
-    ``draft_kind == "mtp", batch_size == 1``, discarding the engine's
-    kv_bits: ``BatchQuantizedKVCache`` cannot trim, and MTP rollback must
-    trim the target. The single-stream ``QuantizedKVCache`` can trim --
+    The owned B=1 MTP prompt cache (``install_owned_b1_spec_cache``) is
+    plain fp16 single-stream caches for ``draft_kind == "mtp",
+    batch_size == 1``, with no kv_bits: ``BatchQuantizedKVCache`` cannot
+    trim, and MTP rollback must trim the target. The single-stream ``QuantizedKVCache`` can trim --
     packing is per-token along head_dim, so trim is an offset move -- and
     the model rollback already goes through ``is_trimmable()``/``trim()``.
     The shared KV policy picks the layers: growing KV converts at
@@ -338,23 +384,23 @@ def install_spec_kv_quant() -> None:
     widths come from the policy stamped on the model at load; the boot
     env is the fallback for unstamped models. Kill switch:
     GMLX_SPEC_KV_QUANT=0."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server import generation as _gen
-    from mlx_vlm.speculative import utils as _su
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.speculative import utils as _su
 
-    if getattr(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG, False):
+    if wrapped_with(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG):
         return
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return
+    # The conversion wraps the owned single-stream build, whatever the
+    # caller installed first.
+    install_owned_b1_spec_cache()
     boot_params = _spec_kv_quant_params()
-
-    from gmlx.cache.compat import cache_types
 
     from gmlx.cache.kv_policy import note_once
 
     _orig = _su.make_speculative_prompt_cache
 
-    def _decline_kvarn(lm, reason: str):
+    def _decline_kvarn(lm, reason: str | None):
         if note_once(lm, "spec-kv-kvarn"):
             _log.warning(
                 "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
@@ -389,12 +435,10 @@ def install_spec_kv_quant() -> None:
             # rejected drafts.
             # to_batch_cache also quantizes nested subcaches. Walk
             # into CacheList entries.
-            from mlx_vlm.models.cache import BatchKVCache
-
-            batch_quant = cache_types("BatchQuantizedKVCache")
+            from gmlx.cache.kv_cache import BatchKVCache, BatchQuantizedKVCache
 
             def _swap(c):
-                if isinstance(c, batch_quant):
+                if isinstance(c, BatchQuantizedKVCache):
                     return BatchKVCache(left_padding), 1
                 inner = getattr(c, "caches", None)
                 if inner is None:
@@ -461,5 +505,4 @@ def install_spec_kv_quant() -> None:
     _quantizing_spec_cache.__dict__["_gmlx_orig"] = _orig
     _su.make_speculative_prompt_cache = _quantizing_spec_cache
     _ar.make_speculative_prompt_cache = _quantizing_spec_cache
-    _gen.make_speculative_prompt_cache = _quantizing_spec_cache
     _debug_note(f"[mtp] spec cache wrap armed (B=1); boot env {boot_params}")

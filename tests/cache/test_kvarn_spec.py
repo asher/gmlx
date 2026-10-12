@@ -12,12 +12,11 @@ import pytest
 
 import mlx.core as mx
 
-pytest.importorskip("mlx_vlm.generate.ar")
+pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
 
-from mlx_lm.models.cache import KVCache, RotatingKVCache  # noqa: E402
-from mlx_vlm.generate import ar  # noqa: E402
-from mlx_vlm.server import generation as gen  # noqa: E402
-from mlx_vlm.speculative import utils as su  # noqa: E402
+from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm.generate import ar  # noqa: E402
+from gmlx._vendor.mlx_vlm.speculative import utils as su  # noqa: E402
 
 import mlx_kquant as kq  # noqa: E402
 
@@ -58,7 +57,7 @@ def restorable(monkeypatch):
     # Start from the stock function even when an earlier module installed
     # the wrap (once per process, with the boot env it saw), and undo this
     # test's install at teardown.
-    for mod in (su, ar, gen):
+    for mod in (su, ar):
         fn = mod.make_speculative_prompt_cache
         monkeypatch.setattr(
             mod, "make_speculative_prompt_cache", getattr(fn, "_gmlx_orig", fn)
@@ -151,9 +150,9 @@ def test_stamped_params_rule_the_boot_env(restorable):
 
 
 def test_stamped_params_keep_a_declined_stamp_fp16():
-    # A dropped stamp still carries its requested width (a qat id under
-    # affine, an MLA model under kvarn); the B=1 spec cache must not
-    # re-arm what the load declined.
+    # A dropped stamp still carries its requested width (an attention
+    # that cannot read a packed cache, an MLA model under kvarn); the B=1
+    # spec cache must not re-arm what the load declined.
     for scheme in ("uniform", "kvarn"):
         dropped = _stamp(_FakeLM(), verdict="dropped", scheme=scheme, bits=8,
                          group_size=64, value_bits=None, tail_tokens=None)
@@ -237,7 +236,7 @@ def test_qwen35_arch_converts(restorable, kvarn_ops_ok):
 
 
 def _batch_stack(lm, lp):
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     return [BatchKVCache(lp), _SSMCache(), BatchKVCache(lp)]
 
@@ -257,7 +256,7 @@ def test_batch_converts_to_kvarn_rows(restorable, kvarn_ops_ok, caplog):
     carve-out (last layer fp16) and the recurrent slot are untouched."""
     import logging
 
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.cache.kvarn_cache import BatchKVarNKVCache
 
@@ -332,8 +331,7 @@ def test_spec_probes_read_through_the_serve_wrapper(monkeypatch):
     kv_quant._harden_spec_target(wrapper)
     assert getattr(inner.rollback_speculative_cache, "_gmlx_kvarn_guard",
                    False)
-    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    assert "stock fallback" in kv_quant.mtp_kv_decline(wrapper)
+    assert kv_quant.mtp_kv_decline(wrapper) is None
 
 
 # -- shared-KV readback guard ------------------------------------------------
@@ -547,7 +545,7 @@ def test_kvarn_lift_cache_recovers_original_domain():
     materialize() returns rotated K/V; feeding that to stock SDPA attends
     rotated keys with an un-rotated query -- no crash, just wrong logits.
     The lift must use the original-domain accessor."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     k, v = tokens(300, seed=7)
     c = KVarNKVCache(tail_tokens=256)
@@ -598,7 +596,7 @@ def test_preemption_gate_admits_what_the_lift_handles():
     """The gate and the lift must agree. A kvarn cache the lift knows how
     to promote but the gate refuses makes MTP preemption dead code: the
     queued request waits for the live generation instead of joining it."""
-    from mlx_vlm.models.cache import KVCache, QuantizedKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache, QuantizedKVCache
 
     from gmlx.cache.kvarn_cache import KVarNRotatingKVCache
 
@@ -619,7 +617,7 @@ def test_injected_kvarn_row_lifts_to_fp16_batch():
     """A B=1 kvarn row admitted into a live MTP batch lifts through the
     original-domain recovery, not the class merge KVarNKVCache lacks
     (27B speculative stress: every concurrent admission raised)."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.spec.speculative import _lift_injected_cache
 
@@ -643,7 +641,7 @@ def test_live_kvarn_cache_lifts_by_kernel_support(monkeypatch):
     """A preempted B=1 kvarn cache becomes a one-row kvarn batch (buffers
     and horizon adopted, cascade stamp carried) when the installed
     mlx-kquant takes per-row ends, and recovers to fp16 rows otherwise."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.cache import kvarn_sdpa
     from gmlx.cache.kvarn_cache import BatchKVarNKVCache
@@ -668,7 +666,7 @@ def test_injected_rows_join_a_kvarn_batch(monkeypatch):
     """A kvarn batch host admits a B=1 kvarn row bit-exactly, an fp16 row
     (a warm hit from the exact tier, batch or single) by ingesting it,
     and a kvarn batch row as it is."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.cache import kvarn_sdpa
     from gmlx.cache.kvarn_cache import BatchKVarNKVCache
@@ -701,7 +699,7 @@ def test_rollback_guard_applies_the_ragged_step():
     then each row's right padding) and hands upstream the stack with
     those slots None, so upstream trims the fp16 rows and zips its
     recurrent state by position as before."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.cache.kvarn_cache import BatchKVarNKVCache
     from gmlx.gen.generation import harden_mtp_rollback

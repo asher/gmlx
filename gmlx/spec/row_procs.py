@@ -56,7 +56,7 @@ class RoundPlan:
 
 def supported(processors) -> bool:
     """Whether every processor can run per verify position."""
-    from mlx_vlm.structured import (
+    from gmlx._vendor.mlx_vlm.structured import (
         LLGuidanceLogitsProcessor,
         ThinkingAwareLogitsProcessor,
     )
@@ -85,7 +85,7 @@ class SpecRowProcessors:
     def from_processors(cls, processors, context) -> SpecRowProcessors | None:
         """The chain in a row's stock processors, or None when it is empty.
         ``context`` is the row's prompt tokens."""
-        from mlx_vlm.structured import (
+        from gmlx._vendor.mlx_vlm.structured import (
             LLGuidanceLogitsProcessor,
             ThinkingAwareLogitsProcessor,
         )

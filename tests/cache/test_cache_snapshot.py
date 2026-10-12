@@ -11,16 +11,14 @@ Model-free; run with KQUANT_FORCE_CPU=1 to stay off the GPU.
 import mlx.core as mx
 import pytest
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import (
     retirement_store,
     row_snapshot,
 )
 
 # Runtime-origin cache classes: these fixtures stand in for caches the
-# mlx-vlm generate stack builds, which since 0.6.4 are vlm-origin (on 0.6.3
-# the vlm module re-exports mlx-lm's, so the classes are the same there).
-_cache = runtime_cache_module()
+# mlx-vlm generate stack builds, which are vlm-origin.
 ArraysCache = _cache.ArraysCache
 BatchKVCache = _cache.BatchKVCache
 BatchRotatingKVCache = _cache.BatchRotatingKVCache
@@ -225,7 +223,7 @@ def test_row_snapshot_buffered_rotating_clones_the_window():
 # --------------------------------------------------------------------------
 
 def _manager():
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
     m = APCManager(num_blocks=256, block_size=16)
     # 0.6.15 declines exact stores under APC_EXACT_MIN_TOKENS (default 16);
     # these tests use short sequences on purpose.
@@ -487,7 +485,7 @@ def test_retire_batch_row_exact_mode_stores_the_row(monkeypatch):
 
 
 def test_row_kv_len_reads_per_row_offsets():
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
     from gmlx.cache.snapshot import row_kv_len
     batch = BatchKVCache.merge([_kv_row(5, 0), _kv_row(3, 1)])
     assert row_kv_len([batch], 0) == 5
@@ -667,7 +665,7 @@ def test_sidecar_disk_restart(tmp_path):
     # Sidecars persist on the salted disk tier: a fresh manager over the same
     # directory (empty memory index) must serve the sidecar, and the loaded
     # entry must not satisfy an unsalted real-entry probe.
-    from mlx_vlm.apc import APCManager, DiskBlockStore
+    from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
 
     ids = list(range(1, 25))
     drafter = _FakeDrafter([_kv_row(24, 0)])

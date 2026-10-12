@@ -3,9 +3,9 @@
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
-from mlx_vlm.models.cache import KVCache
-from mlx_vlm.models.qwen3_5 import language as q35
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
+from gmlx._vendor.mlx_vlm.models.cache import KVCache
+from gmlx.models.qwen35 import language as q35
 
 import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
 
@@ -82,6 +82,90 @@ def test_install_idempotent_and_killable(monkeypatch):
     monkeypatch.setenv("GMLX_QWEN35_VERIFY_FOLD", "0")
     monkeypatch.setattr(qwen35_verify_fold, "_installed", False)
     assert not qwen35_verify_fold.install_qwen35_verify_fold()
+
+
+_GLOBALS = ("scaled_dot_product_attention", "_target_verify_left_padded_attention")
+
+
+def _fresh_fold(monkeypatch):
+    """Module globals without any linked wrap, and the install flag reset.
+    Both are restored after the test."""
+    for name in _GLOBALS:
+        fn = getattr(q35, name)
+        while getattr(fn, "_gmlx_orig", None) is not None:
+            fn = fn._gmlx_orig
+        monkeypatch.setattr(q35, name, fn)
+    monkeypatch.setattr(qwen35_verify_fold, "_installed", False)
+
+
+def _fold_layers(fn):
+    n = 0
+    while fn is not None:
+        n += bool(getattr(fn, qwen35_verify_fold._FLAG, False))
+        fn = getattr(fn, "_gmlx_orig", None)
+    return n
+
+
+def test_the_batch_fold_passes_a_kvarn_view_to_the_owned_sdpa(monkeypatch):
+    """The fold sits over the owned SDPA, whose KVarN route takes the
+    view: the fold must hand it down untouched."""
+    from gmlx.cache import kvarn_sdpa as ks
+    from gmlx.cache.kvarn_cache import KVarNView
+
+    _fresh_fold(monkeypatch)
+    assert qwen35_verify_fold.install_qwen35_verify_fold()
+    sdpa = q35.scaled_dot_product_attention
+    assert _fold_layers(sdpa) == 1
+    claimed = []
+    monkeypatch.setattr(ks, "kvarn_attention",
+                        lambda q, cache, *a: claimed.append(cache) or q)
+    view = KVarNView(object(), "k")
+    q = mx.zeros((2, 8, 4, 64), dtype=mx.bfloat16)
+    assert sdpa(q, view, view, cache=None, scale=1.0, mask=None) is q
+    assert claimed == [view.cache]
+
+
+def test_the_verify_fold_passes_a_kvarn_view_through(monkeypatch):
+    """The verify fold reads keys.ndim on array keys. A KVarN view goes to
+    the function under the fold as it came."""
+    from gmlx.cache.kvarn_cache import KVarNView
+
+    seen = []
+    out = mx.zeros((1,))
+
+    def under(queries, keys, values, *, cache, scale, mask):
+        seen.append((keys, values, cache, scale, mask))
+        return out
+
+    fold = qwen35_verify_fold._fold_verify(q35, under, None)
+    kv, vv = KVarNView(object(), "k"), KVarNView(object(), "v")
+    q = mx.zeros((1, 8, 4, 64), dtype=mx.bfloat16)
+    assert fold(q, kv, vv, cache=None, scale=0.5, mask="causal") is out
+    assert len(seen) == 1 and seen[0][0] is kv and seen[0][1] is vv
+    assert seen[0][2:] == (None, 0.5, "causal")
+
+
+def test_reinstall_under_a_later_wrap_keeps_one_fold(monkeypatch):
+    """A test or a reload resets the install flag after another installer
+    wrapped the fold. The install took that wrap's original for its own,
+    stacked a second fold on it and dropped the wrap."""
+    _fresh_fold(monkeypatch)
+    assert qwen35_verify_fold.install_qwen35_verify_fold()
+    tops = {}
+    for name in _GLOBALS:
+        cur = getattr(q35, name)
+
+        def later(*args, _cur=cur, **kwargs):
+            return _cur(*args, **kwargs)
+
+        later.__dict__["_gmlx_orig"] = cur
+        setattr(q35, name, later)
+        tops[name] = later
+    monkeypatch.setattr(qwen35_verify_fold, "_installed", False)
+    assert qwen35_verify_fold.install_qwen35_verify_fold()
+    for name, top in tops.items():
+        assert getattr(q35, name) is top, name
+        assert _fold_layers(top) == 1, name
 
 
 class _BatchCache:

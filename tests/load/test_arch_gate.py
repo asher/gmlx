@@ -30,13 +30,14 @@ def test_every_synth_arch_gates_without_hf_source():
         assert e.model_type == config_synth.GGUF_ARCH_TO_MODEL_TYPE[arch]
 
 
-def test_gemma_embedding_gates_via_mlx_embeddings_backend():
-    # EmbeddingGemma is built from mlx-embeddings (not mlx-lm), reusing the
-    # gemma3 backbone remap; the gate must accept it on the external-class path.
+def test_gemma_embedding_gates_via_the_gmlx_encoder():
+    # EmbeddingGemma is built from gmlx's own encoder (not mlx-lm), reusing
+    # the gemma3 backbone remap; the gate must accept it on that class.
     e = gate("gemma-embedding")
     assert e.model_type == "gemma_embedding"
     assert e.remap_alias == "GEMMA3"
-    assert e.backend == "mlx-embeddings"
+    assert e.backend == "gmlx"
+    assert arch_table.gmlx_has_model("gemma-embedding")
 
 
 def test_unknown_arch_refused_mode_a():
@@ -76,7 +77,7 @@ def test_missing_mlx_lm_model_refused_mode_b(monkeypatch):
 
 def test_load_config_from_source_local_dir(tmp_path):
     # A local dir with a config.json is used directly - no network.
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     from gmlx.load.loader import _load_config_from_source
 
     (tmp_path / "config.json").write_text(
@@ -88,7 +89,7 @@ def test_load_config_from_source_local_dir(tmp_path):
 def test_load_config_from_source_hf_id(tmp_path, monkeypatch):
     # A non-dir source is treated as an HF repo id: config.json is fetched
     # via hf_hub_download (stubbed here - the test stays offline).
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     import huggingface_hub
 
     from gmlx.load.loader import _load_config_from_source

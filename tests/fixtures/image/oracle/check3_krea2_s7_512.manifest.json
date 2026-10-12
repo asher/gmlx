@@ -1,0 +1,963 @@
+{
+ "schema": 1,
+ "name": "check3_krea2_s7_512",
+ "check": 3,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check3_krea2.py",
+ "argv": [
+  "check3_krea2.py",
+  "--dit",
+  "Krea-2-Turbo-Q4_K_M.gguf",
+  "--sizes",
+  "512",
+  "--rows",
+  "512",
+  "--features",
+  "check2_krea2_check8.npz",
+  "--features-key",
+  "features_check8",
+  "--features-source",
+  "check2_krea2_check8 fp32 features of check 8's prompt",
+  "--latents",
+  "check8_stock16_512.npz",
+  "--step",
+  "7",
+  "--latents-source",
+  "check 8 stock16 x_i at 512, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
+  "--name",
+  "check3_krea2_s7"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "Krea-2-Turbo-Q4_K_M.gguf",
+   "size": 7486289232,
+   "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07"
+  },
+  "features": {
+   "name": "check2_krea2_check8.npz",
+   "size": 4670672,
+   "sha256": "d9083d541e7c0b6bae6170a98b11cc05fa39ffa54e40d22829cb852692a0692c"
+  },
+  "latents": {
+   "name": "check8_stock16_512.npz",
+   "size": 4195090,
+   "sha256": "d4201e608c0f90dc6a10e9053fd0a48836958641b05b4d38fbf99253337a4097"
+  }
+ },
+ "inputs": {
+  "size": 512,
+  "blocks": 28,
+  "sigma": 0.31090107560157776,
+  "latents": "check 8 stock16 x_i at 512, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
+  "step": 7,
+  "features": "check2_krea2_check8 fp32 features of check 8's prompt",
+  "text_rows": 19,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "float32 in both modes",
+  "gguf_codecs": {
+   "F32": 167,
+   "F16": 1,
+   "Q5_K": 61,
+   "Q4_K": 201
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.011728748753545182,
+   "cosine": 0.9999315702582072,
+   "max_abs": 0.1397249698638916
+  },
+  "rows_bf16_vs_fp32": {
+   "tmlp": {
+    "rel_l2": 0.0022668891222185996,
+    "cosine": 0.9999975467225063,
+    "max_abs": 0.002902388572692871,
+    "teacher_forced": false
+   },
+   "tproj": {
+    "rel_l2": 0.0019601316090849816,
+    "cosine": 0.999998139252498,
+    "max_abs": 0.011755943298339844,
+    "teacher_forced": false
+   },
+   "txtfusion.layerwise_blocks.0": {
+    "rel_l2": 0.0027823673263124753,
+    "cosine": 0.9999961350819628,
+    "max_abs": 8.7421875,
+    "teacher_forced": false
+   },
+   "txtfusion.layerwise_blocks.1": {
+    "rel_l2": 0.00345652259148133,
+    "cosine": 0.9999940418015202,
+    "max_abs": 10.1319580078125,
+    "teacher_forced": false
+   },
+   "txtfusion.projector": {
+    "rel_l2": 0.0031582637352600028,
+    "cosine": 0.9999952747200498,
+    "max_abs": 9.2955322265625,
+    "teacher_forced": false
+   },
+   "txtfusion.refiner_blocks.0": {
+    "rel_l2": 0.004003303907233732,
+    "cosine": 0.9999919872971197,
+    "max_abs": 12.9970703125,
+    "teacher_forced": false
+   },
+   "txtfusion.refiner_blocks.1": {
+    "rel_l2": 0.0033702463205944233,
+    "cosine": 0.9999945389677368,
+    "max_abs": 17.43408203125,
+    "teacher_forced": false
+   },
+   "txtmlp": {
+    "rel_l2": 0.0043156833525873645,
+    "cosine": 0.9999911891930661,
+    "max_abs": 0.4328041076660156,
+    "teacher_forced": false
+   },
+   "first": {
+    "rel_l2": 0.0019649412770052386,
+    "cosine": 0.9999980695911678,
+    "max_abs": 0.020265579223632812,
+    "teacher_forced": false
+   },
+   "blocks.0": {
+    "rel_l2": 0.005955853484398793,
+    "cosine": 0.9999823887520197,
+    "max_abs": 12.729736328125,
+    "teacher_forced": true
+   },
+   "blocks.1": {
+    "rel_l2": 0.0029039197169948663,
+    "cosine": 0.999995833286611,
+    "max_abs": 13.818359375,
+    "teacher_forced": true
+   },
+   "blocks.2": {
+    "rel_l2": 0.0025893750396425398,
+    "cosine": 0.9999966555367107,
+    "max_abs": 10.711669921875,
+    "teacher_forced": true
+   },
+   "blocks.3": {
+    "rel_l2": 0.0023470686790763536,
+    "cosine": 0.9999972603022601,
+    "max_abs": 19.646728515625,
+    "teacher_forced": true
+   },
+   "blocks.4": {
+    "rel_l2": 0.002221929252227872,
+    "cosine": 0.9999975521628507,
+    "max_abs": 17.468505859375,
+    "teacher_forced": true
+   },
+   "blocks.5": {
+    "rel_l2": 0.0021047048609081527,
+    "cosine": 0.9999977954827381,
+    "max_abs": 8.824462890625,
+    "teacher_forced": true
+   },
+   "blocks.6": {
+    "rel_l2": 0.002244219165213649,
+    "cosine": 0.9999975076398266,
+    "max_abs": 12.28955078125,
+    "teacher_forced": true
+   },
+   "blocks.7": {
+    "rel_l2": 0.0026089506310755387,
+    "cosine": 0.9999969186069808,
+    "max_abs": 8.7020263671875,
+    "teacher_forced": true
+   },
+   "blocks.8": {
+    "rel_l2": 0.0029084638007280668,
+    "cosine": 0.9999966381303771,
+    "max_abs": 10.583984375,
+    "teacher_forced": true
+   },
+   "blocks.9": {
+    "rel_l2": 0.0027794604945691067,
+    "cosine": 0.9999965875249796,
+    "max_abs": 10.348876953125,
+    "teacher_forced": true
+   },
+   "blocks.10": {
+    "rel_l2": 0.0025644715184682094,
+    "cosine": 0.9999969023312753,
+    "max_abs": 20.04150390625,
+    "teacher_forced": true
+   },
+   "blocks.11": {
+    "rel_l2": 0.0023221767230187816,
+    "cosine": 0.9999975806324701,
+    "max_abs": 21.623046875,
+    "teacher_forced": true
+   },
+   "blocks.12": {
+    "rel_l2": 0.002310654280802417,
+    "cosine": 0.9999974098622353,
+    "max_abs": 29.4248046875,
+    "teacher_forced": true
+   },
+   "blocks.13": {
+    "rel_l2": 0.0022126253772854314,
+    "cosine": 0.9999975527114319,
+    "max_abs": 18.0166015625,
+    "teacher_forced": true
+   },
+   "blocks.14": {
+    "rel_l2": 0.002369153832784224,
+    "cosine": 0.9999972206336407,
+    "max_abs": 43.921875,
+    "teacher_forced": true
+   },
+   "blocks.15": {
+    "rel_l2": 0.002402931140619539,
+    "cosine": 0.9999972853438155,
+    "max_abs": 31.0166015625,
+    "teacher_forced": true
+   },
+   "blocks.16": {
+    "rel_l2": 0.0026221319667906547,
+    "cosine": 0.9999965653115481,
+    "max_abs": 39.296875,
+    "teacher_forced": true
+   },
+   "blocks.17": {
+    "rel_l2": 0.0027240224909684933,
+    "cosine": 0.9999963271142464,
+    "max_abs": 36.2705078125,
+    "teacher_forced": true
+   },
+   "blocks.18": {
+    "rel_l2": 0.002928540990345,
+    "cosine": 0.9999957700255289,
+    "max_abs": 33.927734375,
+    "teacher_forced": true
+   },
+   "blocks.19": {
+    "rel_l2": 0.003519076406780312,
+    "cosine": 0.9999938420250892,
+    "max_abs": 35.216064453125,
+    "teacher_forced": true
+   },
+   "blocks.20": {
+    "rel_l2": 0.0033310083607584946,
+    "cosine": 0.9999944672379871,
+    "max_abs": 42.100341796875,
+    "teacher_forced": true
+   },
+   "blocks.21": {
+    "rel_l2": 0.004196727781034861,
+    "cosine": 0.9999911942721381,
+    "max_abs": 39.93212890625,
+    "teacher_forced": true
+   },
+   "blocks.22": {
+    "rel_l2": 0.004213898680749265,
+    "cosine": 0.9999911221623629,
+    "max_abs": 30.22607421875,
+    "teacher_forced": true
+   },
+   "blocks.23": {
+    "rel_l2": 0.003987379730612397,
+    "cosine": 0.9999920504077531,
+    "max_abs": 44.00244140625,
+    "teacher_forced": true
+   },
+   "blocks.24": {
+    "rel_l2": 0.004196267848389862,
+    "cosine": 0.9999911970309051,
+    "max_abs": 43.47705078125,
+    "teacher_forced": true
+   },
+   "blocks.25": {
+    "rel_l2": 0.00443326361023061,
+    "cosine": 0.999990174060192,
+    "max_abs": 41.2373046875,
+    "teacher_forced": true
+   },
+   "blocks.26": {
+    "rel_l2": 0.0038400393747397782,
+    "cosine": 0.9999928837072307,
+    "max_abs": 69.46875,
+    "teacher_forced": true
+   },
+   "blocks.27": {
+    "rel_l2": 0.003469365607923467,
+    "cosine": 0.9999939903289213,
+    "max_abs": 89.330078125,
+    "teacher_forced": true
+   },
+   "last": {
+    "rel_l2": 0.0027446829299846687,
+    "cosine": 0.9999962348749535,
+    "max_abs": 0.015360832214355469,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "blocks.0": 0.006064388810726148,
+   "blocks.1": 0.007409211483579855,
+   "blocks.2": 0.00722205608388943,
+   "blocks.3": 0.007426407214019463,
+   "blocks.4": 0.0074050398251693655,
+   "blocks.5": 0.007253027478701926,
+   "blocks.6": 0.007172457468260766,
+   "blocks.7": 0.007330333058012216,
+   "blocks.8": 0.007911171845232889,
+   "blocks.9": 0.008182652571840868,
+   "blocks.10": 0.006002006999100095,
+   "blocks.11": 0.00644448659443691,
+   "blocks.12": 0.0073538493227881,
+   "blocks.13": 0.007815820824022041,
+   "blocks.14": 0.009503159016247223,
+   "blocks.15": 0.011036528685253377,
+   "blocks.16": 0.012353289347059888,
+   "blocks.17": 0.014431607531166084,
+   "blocks.18": 0.017866813382503257,
+   "blocks.19": 0.022890318392289714,
+   "blocks.20": 0.02433301212994559,
+   "blocks.21": 0.033737348906788235,
+   "blocks.22": 0.03433041483829667,
+   "blocks.23": 0.03487970794786126,
+   "blocks.24": 0.03495094254197441,
+   "blocks.25": 0.03400262274741586,
+   "blocks.26": 0.030379812685789483,
+   "blocks.27": 0.023779183585207878
+  },
+  "times": {
+   "fp32_s": 17.9,
+   "bf16_s": 37.1,
+   "bf16_teacher_forced_s": 38.0
+  },
+  "exact_free_floor": {
+   "rel_l2": 0.0002422353326609694,
+   "row": "free blocks.22",
+   "measured": "gmlx's exact step on the GPU against the same step on the CPU stream, worst free row; tests/image/krea2_gates.py exact_free_floor on krea2-gates-wip, Apple M5 Max"
+  },
+  "exact_velocity_floor": {
+   "rel_l2": 3.186480557379043e-05,
+   "measured": "gmlx's exact step on the GPU against the same step on the CPU stream, velocity; tests/image/krea2_gates.py exact_free_floor on krea2-gates-wip, Apple M5 Max"
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.023457497507090364,
+   "cosine_min": 0.9997262810328289
+  },
+  "tmlp": {
+   "rel_l2": 0.004533778244437199,
+   "teacher_forced": false
+  },
+  "tproj": {
+   "rel_l2": 0.003920263218169963,
+   "teacher_forced": false
+  },
+  "txtfusion.layerwise_blocks.0": {
+   "rel_l2": 0.005564734652624951,
+   "teacher_forced": false
+  },
+  "txtfusion.layerwise_blocks.1": {
+   "rel_l2": 0.00691304518296266,
+   "teacher_forced": false
+  },
+  "txtfusion.projector": {
+   "rel_l2": 0.0063165274705200055,
+   "teacher_forced": false
+  },
+  "txtfusion.refiner_blocks.0": {
+   "rel_l2": 0.008006607814467465,
+   "teacher_forced": false
+  },
+  "txtfusion.refiner_blocks.1": {
+   "rel_l2": 0.006740492641188847,
+   "teacher_forced": false
+  },
+  "txtmlp": {
+   "rel_l2": 0.008631366705174729,
+   "teacher_forced": false
+  },
+  "first": {
+   "rel_l2": 0.003929882554010477,
+   "teacher_forced": false
+  },
+  "blocks.0": {
+   "rel_l2": 0.011911706968797587,
+   "teacher_forced": true
+  },
+  "blocks.1": {
+   "rel_l2": 0.005807839433989733,
+   "teacher_forced": true
+  },
+  "blocks.2": {
+   "rel_l2": 0.0051787500792850796,
+   "teacher_forced": true
+  },
+  "blocks.3": {
+   "rel_l2": 0.004694137358152707,
+   "teacher_forced": true
+  },
+  "blocks.4": {
+   "rel_l2": 0.004443858504455744,
+   "teacher_forced": true
+  },
+  "blocks.5": {
+   "rel_l2": 0.004209409721816305,
+   "teacher_forced": true
+  },
+  "blocks.6": {
+   "rel_l2": 0.004488438330427298,
+   "teacher_forced": true
+  },
+  "blocks.7": {
+   "rel_l2": 0.005217901262151077,
+   "teacher_forced": true
+  },
+  "blocks.8": {
+   "rel_l2": 0.0058169276014561335,
+   "teacher_forced": true
+  },
+  "blocks.9": {
+   "rel_l2": 0.005558920989138213,
+   "teacher_forced": true
+  },
+  "blocks.10": {
+   "rel_l2": 0.005128943036936419,
+   "teacher_forced": true
+  },
+  "blocks.11": {
+   "rel_l2": 0.004644353446037563,
+   "teacher_forced": true
+  },
+  "blocks.12": {
+   "rel_l2": 0.004621308561604834,
+   "teacher_forced": true
+  },
+  "blocks.13": {
+   "rel_l2": 0.004425250754570863,
+   "teacher_forced": true
+  },
+  "blocks.14": {
+   "rel_l2": 0.004738307665568448,
+   "teacher_forced": true
+  },
+  "blocks.15": {
+   "rel_l2": 0.004805862281239078,
+   "teacher_forced": true
+  },
+  "blocks.16": {
+   "rel_l2": 0.005244263933581309,
+   "teacher_forced": true
+  },
+  "blocks.17": {
+   "rel_l2": 0.0054480449819369866,
+   "teacher_forced": true
+  },
+  "blocks.18": {
+   "rel_l2": 0.00585708198069,
+   "teacher_forced": true
+  },
+  "blocks.19": {
+   "rel_l2": 0.007038152813560624,
+   "teacher_forced": true
+  },
+  "blocks.20": {
+   "rel_l2": 0.006662016721516989,
+   "teacher_forced": true
+  },
+  "blocks.21": {
+   "rel_l2": 0.008393455562069722,
+   "teacher_forced": true
+  },
+  "blocks.22": {
+   "rel_l2": 0.00842779736149853,
+   "teacher_forced": true
+  },
+  "blocks.23": {
+   "rel_l2": 0.007974759461224794,
+   "teacher_forced": true
+  },
+  "blocks.24": {
+   "rel_l2": 0.008392535696779724,
+   "teacher_forced": true
+  },
+  "blocks.25": {
+   "rel_l2": 0.00886652722046122,
+   "teacher_forced": true
+  },
+  "blocks.26": {
+   "rel_l2": 0.0076800787494795564,
+   "teacher_forced": true
+  },
+  "blocks.27": {
+   "rel_l2": 0.006938731215846934,
+   "teacher_forced": true
+  },
+  "last": {
+   "rel_l2": 0.0054893658599693375,
+   "teacher_forced": true
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the rows before the first block and for the velocity",
+  "exact_free": {
+   "rel_l2": 0.0004844706653219388
+  },
+  "exact_velocity": {
+   "rel_l2": 6.372961114758087e-05
+  }
+ },
+ "notes": [],
+ "created": "2026-10-10T09:44:07Z",
+ "npz": "check3_krea2_s7_512.npz",
+ "tensors": {
+  "blocks.0": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "6365fbc10e51d10a032fa5a2aeda45d156a6bb87e7a3b2f078ef34089ec2c573"
+  },
+  "blocks.1": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "c7ccfac2ec695085690b010451cb44e89c88a866bcbbd4db458ad9198c1eba0c"
+  },
+  "blocks.10": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "e55bfe907567904d89d75f0850701963aa3b5b5f511ef7c9a13e534c545ca3f3"
+  },
+  "blocks.11": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "0c22abc736d2b067152b179f4e4fe7ab77b94aab61f595a480f327c885b87eba"
+  },
+  "blocks.12": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "f4e390479103df0c0ed692202f06582d6ec7fd27ea21f20e6dd2bb3a899c226a"
+  },
+  "blocks.13": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "d25b03d5038b2ffa8bbea88322131fe9aa7c35da9084e12a2bb01e91bf03e9a2"
+  },
+  "blocks.14": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "dbb475d6a75d2b281f107edc6197ac3bba5dd3127dea65da01f37dfe6fbe5749"
+  },
+  "blocks.15": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "a72dfc05091b8fdf7bb9da20c0cdf57d6a0293a3f45068b12e3149807a252f1b"
+  },
+  "blocks.16": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "650ce04a298cd46d84dc9d4dc96e0668df8ca9c95f1ce250bcad22ab72c56cf5"
+  },
+  "blocks.17": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "0a13c264ee7cc42ef4e8f72f9473e07903ee3548b791894849fc03882c817997"
+  },
+  "blocks.18": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "f8ba045ea61a1e675a93cd9e1018876a143da92ca3e7ec5b23cd8ac4377ad115"
+  },
+  "blocks.19": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "c1fffc2d01d3de539ab3eee3460167b7a4b1356b25685c466282027045e92843"
+  },
+  "blocks.2": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "db2b0f6d2ec16f5387c2ba3907846251a9f90ea8c8b8be39ce00e309c152f517"
+  },
+  "blocks.20": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "4a742cde159ec627d3d980f337bdcfb58924e19f060ca68c68eee64f92fc31d2"
+  },
+  "blocks.21": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "43681b4ebe8d67ad68248821d4cb8bdb54567a4f14bc251151b4486a239c2538"
+  },
+  "blocks.22": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "316dbb7f0dee0ae46fff6705fecc930834c89805bb026aeb7ef7945133edb59e"
+  },
+  "blocks.23": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "3b5bfeeddbbd792c90d52ae93375815894460ecb634da9eaddcea2259e647dc7"
+  },
+  "blocks.24": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "d2936db2f44e82dd8c3c79b7daada6f90d491044efd587229db119f53ec92307"
+  },
+  "blocks.25": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "e0c269947d5e49862d14973816f85a4f21c49026caca900fe3b492bf2822fdd1"
+  },
+  "blocks.26": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "a36b07f45c1b73c87a3ffe7c78b9a9ef52d611fd051a2aa87191e69d530487de"
+  },
+  "blocks.27": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "de05deefdc5f2c4a324b04257bd0e488a27babdfe21c89eca1c1a394ded6aef3"
+  },
+  "blocks.3": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "d8571f9946e8a273e42c1cc5b4544a47817ce004b99c71af4757b2ab2d9ce04e"
+  },
+  "blocks.4": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "5b2502491dfb408c56affa8d47d365d669af806ed5a33609df4838c5cfd684f9"
+  },
+  "blocks.5": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "54a4126a175cfbb1cadd2b2bea5a52c1bfcc2e3b93c33852ae4a2161ae423969"
+  },
+  "blocks.6": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "3902804c59868caf9c4c17e3cc1cc2f2fd263a0c69d9bde50e6823525221dadb"
+  },
+  "blocks.7": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "89068382b563b0be49eaa11c0d2b070e88f03072da1599900ecb266612daa667"
+  },
+  "blocks.8": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "89783ad91228f7f4d69fe242a6ce361538c2ffc2b48b4e327e2136f9568b33a2"
+  },
+  "blocks.9": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "528f68c673743cf0abbbfd5ee0190697c1201dbb151a201f1956e602eb8e7de8"
+  },
+  "features": {
+   "shape": [
+    19,
+    30720
+   ],
+   "dtype": "float32",
+   "sha256": "aed9293f823f338c5f30a12d990e83dfc302ff8412875d2959ec7b5a13431248"
+  },
+  "first": {
+   "shape": [
+    1,
+    1024,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "300e33ec5c867e43d09f9aa7497671cdc7f4a1c2a9cb0a8a56a87bd152b055cb"
+  },
+  "in.blocks.0": {
+   "shape": [
+    1,
+    1043,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "697a3a2887b6d40f4d14e4e5a5513648fe955fb2c2e3c96e4617089a9660ae9f"
+  },
+  "in.last": {
+   "shape": [
+    1,
+    1024,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "b2084e36a852544288902047968df9fb0207a1b197015181062b43ee7f829502"
+  },
+  "last": {
+   "shape": [
+    1,
+    1024,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "4beb537c601c3c4bd22d3b794a9314899c12cd67cc2e004667025a09327d0df5"
+  },
+  "latents": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "3e0ca92bde4a8d13237bcad6926d84c6b0abfadfde083d6801ed337a94e7acec"
+  },
+  "position_ids": {
+   "shape": [
+    1043,
+    3
+   ],
+   "dtype": "int32",
+   "sha256": "9b62f6b471715670f97a24c35abf3d0676ea23704197721d2204c40d229a2e34"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "13afcb595b3adcd1b8154e36d49ca0b0cfeac223d0c549cd2dfca8d917df9460"
+  },
+  "tmlp": {
+   "shape": [
+    1,
+    1,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "780f818a357a3d4573892ad702fd39fe7f17586fa68d14d42fd84b6f8b754403"
+  },
+  "tproj": {
+   "shape": [
+    1,
+    1,
+    36864
+   ],
+   "dtype": "float32",
+   "sha256": "3a0cf6336a99a0ed7cffff8dd37555e2695800d6e2a9819920652cdc59d02994"
+  },
+  "txtfusion.layerwise_blocks.0": {
+   "shape": [
+    19,
+    12,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "781bf972727531b40905cc4a0c58a048fc9c8f7f498f0aa8b4fd8d77a5340073"
+  },
+  "txtfusion.layerwise_blocks.1": {
+   "shape": [
+    19,
+    12,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "30533bc86c29a4f46b0034c1c534ff08368da98ff275fc4e8e4e55e916dd77b4"
+  },
+  "txtfusion.projector": {
+   "shape": [
+    1,
+    19,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "d806fc20c988d0c7e868d2bce7e9e7007c389063440ce19739fc3cdff56ce069"
+  },
+  "txtfusion.refiner_blocks.0": {
+   "shape": [
+    1,
+    19,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "8858824f8acf8953b8ead08cba591319c4f1a8a4b7a63071bd1f3bbbae493b47"
+  },
+  "txtfusion.refiner_blocks.1": {
+   "shape": [
+    1,
+    19,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "44eeba1dd87761ac858e545afc2e94820fe2e374a0cb502a4b4c7536ea3671b6"
+  },
+  "txtmlp": {
+   "shape": [
+    1,
+    19,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "5cd8335087fdd2586a6e79225b9871a6dba1d36f7d0804dcfa911a14a4b36a7d"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "11cb66d2a205e0aef38df71ee08f759be8979c357e5f1c0fed824bf0f63b571f"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "6ffb517009be74bbdeeef2ea8e1023001b38ae8b157c3a4f90c9a15a4a3a9910"
+  }
+ }
+}

@@ -10,12 +10,12 @@ import types
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-from mlx_vlm.models.cache import RotatingKVCache  # noqa: E402
-from mlx_vlm.models.diffusion_gemma.language import _cache_state  # noqa: E402
-from mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer  # noqa: E402
-from mlx_vlm.utils import StoppingCriteria  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.cache import RotatingKVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.diffusion_gemma.language import _cache_state  # noqa: E402
+from gmlx._vendor.mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer  # noqa: E402
+from gmlx._vendor.mlx_vlm.utils import StoppingCriteria  # noqa: E402
 from test_diffusion_gemma import ARCH, _tiny_meta  # noqa: E402
 
 import gmlx.systemone.denoise as denoise  # noqa: E402
@@ -101,6 +101,16 @@ def _assert_reads_close(a, b, atol=1e-5):
             assert x.top.keys() == y.top.keys()
             for t in x.top:
                 assert math.isclose(x.top[t], y.top[t], abs_tol=atol), (t, x.top[t], y.top[t])
+
+
+def test_the_denoiser_accepts_by_the_copy_entropy_rule():
+    from gmlx._vendor.mlx_vlm.generate import diffusion
+
+    assert denoise.entropy_transfer_mask is \
+        diffusion._diffusion_entropy_transfer_mask
+    ent = mx.array([[0.5, 0.1, 0.3, 0.2]])
+    assert denoise.entropy_transfer_mask(ent, 0.35).tolist() == \
+        [[False, True, True, True]]
 
 
 def test_read_views_leave_the_decoder_no_masks(model):
@@ -457,6 +467,7 @@ class _Lock:
 
 class _Wrapper:
     bos_token = "<bos>"
+    bos_token_id = 2
 
     def __init__(self, lock):
         self.lock = lock
@@ -497,7 +508,8 @@ def test_chat_tokens_render_encode_and_lock():
     ids = tokens.chat_ids("S", False)
     assert renders[-1][1]["enable_thinking"] is False
     assert ids.count(2) == 1 and ids[0] == 2
-    assert wrapper.calls == [False, False]
+    # enc, then the rendered prompt without special tokens.
+    assert wrapper.calls[0] is False and wrapper.calls[-1] is False
     assert lock.entries == 5 and not lock.held
 
 

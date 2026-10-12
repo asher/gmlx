@@ -11,7 +11,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, rope_scaling, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -38,6 +38,7 @@ import errno
 import fnmatch
 import functools
 import io
+import math
 import os
 import re
 import secrets
@@ -129,8 +130,8 @@ CACHE_DISK_ENV = {
 # leaves a model unpinned) - so we warn loudly instead. Structural breakage (missing
 # path, unknown profile reference, extends cycle) is what *raises*; see _validate.
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
-                       "discover", "talk", "assistant", "theme", "themes",
-                       "launch"})
+                       "image_models", "discover", "talk", "assistant",
+                       "theme", "themes", "launch"})
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "cors_origins", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
@@ -139,8 +140,25 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "dtype",
                           "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
-                          "gpu_keepwarm", "assistants", "assistant_allow_remote"})
-_DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
+                          "gpu_keepwarm", "assistants", "assistant_allow_remote",
+                          "image"})
+_DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload",
+                            "image_model"})
+# An image model entry: the DiT and its companions, never merged with the
+# chat layers (profiles, sampling, cache), so a sibling block of its own.
+_IMAGE_MODEL_KEYS = frozenset({"path", "family", "variant", "encoder",
+                               "encoder_mmproj", "vae", "adapters",
+                               "defaults", "encoder_release", "pin",
+                               "ttl_s"})
+_IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
+                                  "negative_prompt"})
+_IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
+_SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
+                                "embed_metadata", "tensor_cache_mb",
+                                "adapter_cache_mb", "steps_api",
+                                "steps_remote"})
+IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
+IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
                              "max_samples", "think", "think_threshold",
                              "think_budget"})
@@ -169,7 +187,7 @@ _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
                          "prefill_feeder", "decode_feeder",
                          "stream_fast_disk", "speculative",
-                         "speculative_width_cap",
+                         "speculative_width_cap", "rope_scaling",
                          "overrides", "pin", "ttl_s"})
 _RULE_KEYS = frozenset({"match", "profile"})
 _DISCOVER_KEYS = frozenset({"dir", "recursive", "pair_mmproj", "speculative"})
@@ -564,6 +582,9 @@ class ModelCfg:
     # loaded). None = the drafter family's measured default; 0 = uncapped;
     # N = cap. Clamped by a per-drafter hard limit (B=1-only drafters).
     speculative_width_cap: int | None = None
+    # Rope scaling options (a RopeOverride): llama.cpp's rope flags, keyed
+    # as in the `rope_scaling:` block. None = the GGUF header's scaling.
+    rope_scaling: Any = None
     overrides: dict = field(default_factory=dict)   # {sampling, load, cache, system}
     pin: bool = False
     ttl_s: float | None = None      # None => server default; 0 => never
@@ -583,6 +604,41 @@ class ServerDefaults:
     ttl_s: float | None = 900.0  # idle auto-unload (15 min); None/0 => never
     model: str | None = None     # used when a request omits/empties `model`
     preload: object = None          # model ids to warm at startup; "all" | list
+    image_model: str | None = None  # the image routes' model when none is named
+
+
+@dataclass
+class ImageModelCfg:
+    """One ``image_models:`` entry: a DiT GGUF with its text encoder and
+    VAE. ``encoder`` is a chat model id, which the entry then shares, or
+    a GGUF path. ``adapters`` holds ``(path, strength)`` pairs applied to
+    every request, and ``defaults`` the request defaults the entry sets
+    over its family's."""
+    id: str
+    path: str
+    encoder: str
+    vae: str
+    family: str | None = None
+    encoder_mmproj: str | None = None
+    adapters: tuple = ()
+    defaults: dict = field(default_factory=dict)
+    encoder_release: str = "auto"
+    pin: bool = False
+    ttl_s: float | None = None      # None => server default; 0 => never
+    variant: str | None = None      # None => from the weights
+
+
+@dataclass(frozen=True)
+class ImageServerCfg:
+    """``server.image``: the serve settings of the image routes."""
+    url_ttl_s: float = 3600.0        # life of a file behind a url response
+    url_max_bytes: int = 1 << 30     # the url file store, oldest out first
+    max_queue: int = 4               # image jobs waiting before a 429
+    embed_metadata: bool = False     # API outputs carry the PNG text chunk
+    tensor_cache_mb: int = 64        # each cache of conditionings, latents
+    adapter_cache_mb: int = 256      # each cache of request adapters, tables
+    steps_api: bool = True           # serve the image step contract
+    steps_remote: bool = False       # step clients beyond loopback
 
 
 @dataclass(frozen=True)
@@ -916,12 +972,12 @@ class ServerCfg:
     # model dir, or `true` for the default alias - resolved by
     # tts.resolve_tts_model at serve time.
     tts: str | None = None
-    # Optional text-embeddings model (POST /v1/embeddings). A GGUF decoder-LM
-    # embedder (alias `qwen3-embed-0.6b`, a *.gguf path, or
-    # hf:<org>/<repo>/<file>.gguf, loaded by the runtime), or an
-    # mlx-embeddings safetensors encoder (alias `embeddinggemma`/`bge-m3`, an HF
-    # MLX-embeddings repo, a local dir, or `true` for the default alias) -
-    # resolved by embeddings.resolve_embeddings_model at serve time.
+    # Optional text-embeddings model (POST /v1/embeddings). A GGUF embedder
+    # (alias `qwen3-embed-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf,
+    # loaded by the runtime), or a safetensors encoder (alias `embeddinggemma`
+    # or `bge-m3`, an HF MLX repo, or a local dir). `true` means the default
+    # alias, the GGUF `qwen3-embed-0.6b`. Neither needs an extra.
+    # embeddings.resolve_embeddings_model resolves it at serve time.
     embeddings: str | None = None
     # Optional reranker model (POST /v1/rerank; Cohere/Jina shape). A Qwen3-Reranker
     # GGUF (alias `qwen3-rerank-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf)
@@ -1000,6 +1056,9 @@ class ServerCfg:
     rules: list[Rule] = field(default_factory=list)
     models: dict[str, ModelCfg] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)   # name -> id | id@profile
+    # Image models: their own block, one id namespace with `models`.
+    image_models: dict[str, ImageModelCfg] = field(default_factory=dict)
+    image: ImageServerCfg = field(default_factory=ImageServerCfg)
     discover: list[DiscoverSpec] = field(default_factory=list)
     talk: TalkCfg = field(default_factory=TalkCfg)
     launch: LaunchCfg = field(default_factory=LaunchCfg)
@@ -1074,6 +1133,10 @@ class ResolvedModel:
     # N = speculate only while the live decode batch is <= N wide.
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
+    # Rope scaling options (a RopeOverride, None = the header's). Load-
+    # affecting: the rope tables are built at load, and KV made under one
+    # scaling is wrong under another.
+    rope_scaling: Any = None
 
     def effective_adapters(self) -> tuple:
         """The adapters the resident entry serving this id carries: the
@@ -1137,7 +1200,40 @@ class ResolvedModel:
             *levers,
             tuple(sorted((k, str(v)) for k, v in self.load.items())),
             tuple(sorted((k, str(v)) for k, v in _flatten_cache(self.cache).items())),
+            *((self.rope_scaling,) if self.rope_scaling is not None else ()),
         )
+
+
+@dataclass
+class ResolvedImageModel:
+    """An ``image_models:`` entry with its files resolved. ``encoder`` is
+    the encoder GGUF, or None when ``encoder_model`` names the chat model
+    the entry shares; ``encoder_mmproj`` is the vision tower that comes
+    with either."""
+    id: str
+    path: str
+    vae: str
+    encoder: str | None
+    encoder_model: str | None
+    encoder_mmproj: str | None
+    family: str | None
+    adapters: tuple                 # ((abspath, strength), ...)
+    defaults: dict
+    encoder_release: str
+    pin: bool
+    ttl_s: float | None
+    variant: str | None = None
+
+    def load_signature(self) -> tuple:
+        """What makes two loads of the entry the same: every file, the
+        adapter list, and the defaults its booked memory is priced at,
+        the size and the guidance. The other request defaults change no
+        loaded weight and no price."""
+        d = self.defaults or {}
+        return (self.path, self.family, self.variant, self.encoder,
+                self.encoder_model, self.encoder_mmproj, self.vae,
+                tuple(self.adapters), self.encoder_release, d.get("size"),
+                d.get("guidance"))
 
 
 # Path resolution
@@ -1896,6 +1992,7 @@ def resolve_model(
         prefill_feeder=model.prefill_feeder,
         decode_feeder=model.decode_feeder,
         stream_fast_disk=model.stream_fast_disk,
+        rope_scaling=model.rope_scaling,
         pin=bool(model.pin),
         ttl_s=ttl_s,
         profile_name=effective,
@@ -1949,6 +2046,33 @@ def resolve_cli_model(name: str, cfg: ServerCfg,
         raise ConfigError(
             f"unknown profile {effective!r}; available: {sorted(known)}")
     return resolve_model(head, cfg, request_profile=effective)
+
+
+def resolve_image_model(image_id: str, cfg: ServerCfg) -> ResolvedImageModel:
+    """The ``image_models:`` entry ``image_id`` with its files resolved
+    as a model ``path`` is. An ``encoder`` that names a chat model id is
+    shared, and that model's ``mmproj`` is the vision tower. Raises
+    :class:`KeyError` for an unknown id and :class:`MissingModelFile` for
+    a file that is not there."""
+    m = cfg.image_models[image_id]
+    dirs = cfg.model_dirs
+    encoder = encoder_model = None
+    mmproj = resolve_path(m.encoder_mmproj, dirs)
+    if m.encoder in cfg.models:
+        encoder_model = m.encoder
+        mmproj = resolve_path(cfg.models[m.encoder].mmproj, dirs)
+    else:
+        encoder = resolve_path(m.encoder, dirs)
+    ttl_s = m.ttl_s if m.ttl_s is not None else cfg.defaults.ttl_s
+    return ResolvedImageModel(
+        id=image_id, path=resolve_path(m.path, dirs),
+        vae=resolve_path(m.vae, dirs), encoder=encoder,
+        encoder_model=encoder_model, encoder_mmproj=mmproj,
+        family=m.family,
+        adapters=tuple((resolve_path(a, dirs), float(st))
+                       for a, st in m.adapters),
+        defaults=dict(m.defaults), encoder_release=m.encoder_release,
+        pin=bool(m.pin), ttl_s=ttl_s, variant=m.variant)
 
 
 def env_for(resolved: ResolvedModel) -> dict[str, str]:
@@ -2182,6 +2306,21 @@ def _normalize_moe_layer_shed(value, where: str = "model"):
             f"{where}.moe_layer_shed: expected a probability in (0, 1), "
             f"got {value!r}")
     return p
+
+
+def _normalize_rope_scaling(value, where: str = "model"):
+    """Validate a ``rope_scaling`` block into a RopeOverride, or None when
+    absent or empty."""
+    from gmlx.load.rope_scaling import RopeOverride
+
+    if value is None:
+        return None
+    try:
+        ov = RopeOverride.from_config(value)
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"{where}.{e}" if str(e).startswith("rope_scaling")
+                          else f"{where}.rope_scaling: {e}") from None
+    return None if ov.is_empty() else ov
 
 
 def _normalize_moe_prestage(value, where: str = "model"):
@@ -2498,6 +2637,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         speculative=bool(raw.get("speculative", False)),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
+        rope_scaling=_normalize_rope_scaling(
+            raw.get("rope_scaling"), f"model {model_id!r}"),
         overrides=dict(ov),
         pin=bool(raw.get("pin", False)),
         # An explicit `ttl_s: null` means never unload, as it does in
@@ -2506,6 +2647,144 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
                else _coerce_num("ttl_s", raw.get("ttl_s"), float,
                                 where=f"model {model_id!r}")),
     )
+
+
+def _image_size(where: str, v) -> str:
+    w, sep, h = str(v).lower().partition("x")
+    if sep and w.isdigit() and h.isdigit() and int(w) > 0 and int(h) > 0:
+        return f"{int(w)}x{int(h)}"
+    raise ConfigError(f"{where}: expected a size such as 1024x1024, got {v!r}")
+
+
+def _parse_image_defaults(where: str, raw) -> dict:
+    raw = _section_mapping(where, raw)
+    _warn_unknown_keys(where, raw, _IMAGE_DEFAULTS_KEYS, strict=True)
+    out: dict = {}
+    if raw.get("size") is not None:
+        out["size"] = _image_size(f"{where}.size", raw["size"])
+    steps = _coerce_num("steps", raw.get("steps"), int, where=where)
+    if steps is not None:
+        if steps <= 0:
+            raise ConfigError(f"{where}.steps: expected a positive int, "
+                              f"got {steps!r}")
+        out["steps"] = steps
+    guidance = _coerce_num("guidance", raw.get("guidance"), float,
+                           where=where)
+    if guidance is not None:
+        out["guidance"] = guidance
+    sampler = raw.get("sampler")
+    if sampler is not None:
+        if sampler not in IMAGE_SAMPLERS:
+            raise ConfigError(f"{where}.sampler: expected one of "
+                              f"{', '.join(IMAGE_SAMPLERS)}, got {sampler!r}")
+        out["sampler"] = sampler
+    if raw.get("negative_prompt") is not None:
+        out["negative_prompt"] = str(raw["negative_prompt"])
+    return out
+
+
+def _parse_image_adapters(where: str, raw) -> tuple:
+    """``adapters:`` as ``(path, strength)`` pairs. An entry is a path, or
+    a mapping of ``path`` and an optional ``strength`` (default 1)."""
+    out = []
+    for i, entry in enumerate(_section_list(where, raw)):
+        here = f"{where}[{i}]"
+        if isinstance(entry, str):
+            entry = {"path": entry}
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"),
+                                                         str):
+            raise ConfigError(f"{here}: expected a path or a mapping with "
+                              f"`path`, got {entry!r}")
+        _warn_unknown_keys(here, entry, _IMAGE_ADAPTER_KEYS, strict=True)
+        strength = _coerce_num("strength", entry.get("strength", 1.0), float,
+                               where=here)
+        if strength is None or not math.isfinite(strength):
+            raise ConfigError(f"{here}.strength: expected a finite number, "
+                              f"got {entry.get('strength')!r}")
+        out.append((entry["path"], strength))
+    return tuple(out)
+
+
+def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
+    where = f"image model {image_id!r}"
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{where} must be a mapping with `path`, `encoder` and `vae` "
+            f"(got {type(raw).__name__}: {raw!r})")
+    _warn_unknown_keys(where, raw, _IMAGE_MODEL_KEYS, strict=True)
+    for key in ("path", "encoder", "vae"):
+        if not isinstance(raw.get(key), str) or not raw[key]:
+            raise ConfigError(f"{where} needs `{key}` (keys present: "
+                              f"{sorted(raw)})")
+    for key in ("family", "variant", "encoder_mmproj"):
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            raise ConfigError(f"{where}.{key}: expected a string, got "
+                              f"{raw[key]!r}")
+    release = raw.get("encoder_release", "auto")
+    if release not in IMAGE_ENCODER_RELEASE:
+        raise ConfigError(f"{where}.encoder_release: expected one of "
+                          f"{', '.join(IMAGE_ENCODER_RELEASE)}, got "
+                          f"{release!r}")
+    return ImageModelCfg(
+        id=image_id, path=raw["path"], encoder=raw["encoder"],
+        vae=raw["vae"], family=raw.get("family"),
+        variant=raw.get("variant"),
+        encoder_mmproj=raw.get("encoder_mmproj"),
+        adapters=_parse_image_adapters(f"{where}.adapters",
+                                       raw.get("adapters")),
+        defaults=_parse_image_defaults(f"{where}.defaults",
+                                       raw.get("defaults")),
+        encoder_release=release, pin=bool(raw.get("pin", False)),
+        # As in `models`: an explicit null never unloads.
+        ttl_s=(0.0 if "ttl_s" in raw and raw["ttl_s"] is None
+               else _coerce_num("ttl_s", raw.get("ttl_s"), float,
+                                where=where)))
+
+
+def _parse_server_image(raw) -> ImageServerCfg:
+    where = "server.image"
+    raw = _section_mapping(where, raw)
+    _warn_unknown_keys(where, raw, _SERVER_IMAGE_KEYS, strict=True)
+    base = ImageServerCfg()
+    ttl = _coerce_num("url_ttl_s", raw.get("url_ttl_s"), float, where=where)
+    if ttl is not None and ttl <= 0:
+        raise ConfigError(f"{where}.url_ttl_s: expected a positive number "
+                          f"of seconds, got {ttl!r}")
+    cap = raw.get("url_max_bytes")
+    if isinstance(cap, str):
+        size = parse_size_bytes(cap)
+        if size is None:
+            raise ConfigError(f"{where}.url_max_bytes: expected bytes or a "
+                              f"size such as 2G, got {cap!r}")
+        cap = size
+    cap = _coerce_num("url_max_bytes", cap, int, where=where)
+    if cap is not None and cap <= 0:
+        raise ConfigError(f"{where}.url_max_bytes: expected a positive size, "
+                          f"got {cap!r}")
+    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
+    if queue is not None and queue < 0:
+        raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
+                          f"{queue!r}")
+    caches = {}
+    for key in ("tensor_cache_mb", "adapter_cache_mb"):
+        mb = _coerce_num(key, raw.get(key), int, where=where)
+        if mb is not None and mb <= 0:
+            raise ConfigError(f"{where}.{key}: expected a positive number "
+                              f"of MB, got {mb!r}")
+        caches[key] = getattr(base, key) if mb is None else mb
+    flags = {}
+    for key in ("steps_api", "steps_remote"):
+        v = raw.get(key, getattr(base, key))
+        if not isinstance(v, bool):
+            raise ConfigError(f"{where}.{key}: expected true or false, got "
+                              f"{v!r}")
+        flags[key] = v
+    return ImageServerCfg(
+        url_ttl_s=base.url_ttl_s if ttl is None else ttl,
+        url_max_bytes=base.url_max_bytes if cap is None else cap,
+        max_queue=base.max_queue if queue is None else queue,
+        embed_metadata=bool(raw.get("embed_metadata", base.embed_metadata)),
+        **caches, **flags)
 
 
 def _parse_rule(raw: dict) -> Rule:
@@ -3221,6 +3500,8 @@ def build_config(doc: dict) -> ServerCfg:
             ttl_s=_coerce_num("defaults.ttl_s", dft.get("ttl_s", 900.0), float),
             model=dft.get("model"),
             preload=_parse_preload(dft.get("preload")),
+            image_model=(None if dft.get("image_model") is None
+                         else str(dft["image_model"])),
         ),
         profiles={n: _parse_profile(n, r) for n, r in
                   _section_mapping("profiles", doc.get("profiles")).items()},
@@ -3229,6 +3510,10 @@ def build_config(doc: dict) -> ServerCfg:
                 _section_mapping("models", doc.get("models")).items()},
         aliases={str(k): str(v) for k, v in
                  _section_mapping("aliases", doc.get("aliases")).items()},
+        image_models={str(iid): _parse_image_model(str(iid), r) for iid, r in
+                      _section_mapping("image_models",
+                                       doc.get("image_models")).items()},
+        image=_parse_server_image(srv.get("image")),
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
         talk=_parse_talk(doc.get("talk")),
@@ -3242,6 +3527,39 @@ def build_config(doc: dict) -> ServerCfg:
     cfg.talk.assistant = cfg.assistant   # one shared settings object
     _validate(cfg)
     return cfg
+
+
+def _validate_image_models(cfg: ServerCfg) -> None:
+    """Image ids share one namespace with model ids, aliases and served
+    assistants, so a name never means two things. An encoder shared with
+    a chat model takes that model's files as they are, so the chat entry
+    must carry no adapter and the image entry no second tower."""
+    for iid, m in cfg.image_models.items():
+        if "@" in iid:
+            raise ConfigError(f"image model id {iid!r} must not contain '@'")
+        for what, names in (("a model id", cfg.models),
+                            ("an alias name", cfg.aliases),
+                            ("a served assistant", cfg.assistants)):
+            if iid in names:
+                raise ConfigError(f"image model {iid!r} collides with "
+                                  f"{what}; rename one")
+        shared = cfg.models.get(m.encoder)
+        if shared is not None:
+            if shared.adapter:
+                raise ConfigError(
+                    f"image model {iid!r} shares the encoder {m.encoder!r}, "
+                    "which has an adapter; name its GGUF as `encoder` "
+                    "instead")
+            if m.encoder_mmproj:
+                raise ConfigError(
+                    f"image model {iid!r}: `encoder_mmproj` goes with an "
+                    f"encoder path; the shared model {m.encoder!r} brings "
+                    "its own `mmproj`")
+    name = cfg.defaults.image_model
+    if name and name not in cfg.image_models:
+        raise ConfigError(
+            f"server.defaults.image_model {name!r} is not a configured image "
+            f"model; known: {sorted(cfg.image_models)}")
 
 
 def load_config(path) -> ServerCfg:
@@ -3340,6 +3658,8 @@ def _validate(cfg: ServerCfg) -> None:
             f"server.defaults.model {cfg.defaults.model!r} is not a configured "
             f"model; known: {sorted(cfg.models)}")
 
+    _validate_image_models(cfg)
+
     # The systemone fallback model, if named, must be a model id or an alias,
     # with an optional known profile, so the fallback can always resolve.
     so_model = cfg.systemone.model
@@ -3354,13 +3674,13 @@ def _validate(cfg: ServerCfg) -> None:
                 f"server.systemone.model {so_model!r} names unknown profile "
                 f"{prof!r}; known: {sorted(known)}")
 
-    # Preload ids must be configured models.
+    # Preload ids must be configured models or image models.
     if isinstance(cfg.defaults.preload, list):
         for mid in cfg.defaults.preload:
-            if mid not in cfg.models:
+            if mid not in cfg.models and mid not in cfg.image_models:
                 raise ConfigError(
                     f"server.defaults.preload names unknown model {mid!r}; "
-                    f"known: {sorted(cfg.models)}")
+                    f"known: {sorted(cfg.models) + sorted(cfg.image_models)}")
 
     # Assistant aliases: served pseudo-model ids. Each id must be addressable
     # and unambiguous against models and aliases (the request wrapper must be

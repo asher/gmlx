@@ -35,8 +35,39 @@ for _sub in sorted(_TESTS_DIR.iterdir()):
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
+# gmlx carries mlx-vlm and mlx-lm under gmlx._vendor. Hide any installed
+# stock copy, so a stray import fails here as it does without one.
+import stock_blocker  # noqa: E402
+
+stock_blocker.install()
+
 
 def pytest_configure(config):
+    # Every test sees the CI runner unless it declares a Mac with
+    # host_gb (host_box.py). Before anything reads the device.
+    import host_box
+
+    host_box.install()
+    config.addinivalue_line(
+        "markers", "host_gb(n): the test runs on a simulated Mac of n GiB")
+
+    # Each directory's paths together, or pytest 9.1 hides a conftest's
+    # fixtures from a directory named twice (arg_order.py).
+    import arg_order
+
+    config.args[:] = arg_order.grouped(config.args)
+
+    # It lists the blocked imports and fails the run on any.
+    config.pluginmanager.register(stock_blocker, "stock_blocker")
+
+    # No test writes to the user's Hugging Face cache (hf_cache_guard.py).
+    import hf_cache_guard
+
+    hf_cache_guard.install(os.environ)
+
+    # gmlx first, as the console entry point does. The import loads no MLX.
+    import gmlx  # noqa: F401
+
     # The logic tests touch only small mx array ops (transforms,
     # config-synth instantiation) and never dispatch a kquant kernel, so they
     # can run on the CPU device. Set KQUANT_FORCE_CPU=1 in environments without
@@ -46,14 +77,10 @@ def pytest_configure(config):
 
         mx.set_default_device(mx.cpu)
 
-    # mlx 0.32.1 segfaults at interpreter exit when a compiled wrapper is
-    # still referenced at shutdown (see gmlx/_exitfix.py), turning a green
-    # suite into rc 139. Arm here so the guard's atexit registration
-    # precedes any hook a test registers; sessionfinish records the real
-    # exit code and the guard preserves it by skipping finalization.
-    from gmlx._exitfix import arm
+    # Every test hands the process back as it found it (process_state.py).
+    import process_state
 
-    arm()
+    process_state.start_session()
 
     # Track every daemon read pool so the autouse fixture below can shut
     # down the ones a test leaks. Leaked pools park their workers in
@@ -74,6 +101,192 @@ def pytest_configure(config):
 _read_pools: list = []
 
 
+# Every test hands the process back as it found it (process_state.py).
+# pytest sets up a test's fixtures in scope order, the wider scopes first.
+# The capture runs as the first function-scoped fixture sets up, whatever
+# the fixture names, and the restore runs as an item finalizer registered
+# then: after the teardown of every function-scoped fixture, and before
+# the teardown of any wider one. Restore covers the test and its
+# function-scoped fixtures. Class-, module- and session-scoped fixtures
+# set up outside the capture, so what they change stays for the tests
+# that share them, and what their own teardown does not undo persists
+# until the end-of-run check.
+_awaiting_capture = None
+
+
+_CAPTURED = pytest.StashKey[dict]()
+# (test node id, fields restore changed), kept under GMLX_TEST_STATE_REPORT=1.
+_restored: list = []
+
+
+def _hand_back_process_state(item) -> None:
+    import process_state
+
+    state = item.stash[_CAPTURED] = process_state.capture()
+
+    def restore():
+        process_state.note_kq_env(state, item.nodeid)
+        changed = process_state.restore(state)
+        if changed and _state_report():
+            _restored.append((item.nodeid, changed))
+
+    item.addfinalizer(restore)
+
+
+def _state_report() -> bool:
+    import process_state
+
+    return process_state.SESSION["env"].get("GMLX_TEST_STATE_REPORT") == "1"
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _state_report():
+        return
+    terminalreporter.section("process state restored")
+    if not _restored:
+        terminalreporter.write_line("no test changed the process state")
+    for nodeid, changed in _restored:
+        terminalreporter.write_line(f"{nodeid}: {', '.join(changed)}")
+
+
+# Its own name, so the plain hook that skips the kvarn tests stays a plain
+# hook: a skip raised there runs inside every plugin's setup wrapper, whose
+# teardown then finds what its setup left.
+@pytest.hookimpl(wrapper=True, tryfirst=True, specname="pytest_runtest_setup")
+def pytest_runtest_setup_capture(item):
+    global _awaiting_capture
+    _awaiting_capture = item
+    try:
+        result = yield
+    except BaseException:
+        # Setup stopped. A capture it made still restores at teardown.
+        _awaiting_capture = None
+        raise
+    if _awaiting_capture is item:
+        # A test with no function-scoped fixture.
+        _awaiting_capture = None
+        _hand_back_process_state(item)
+    return result
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_fixture_setup(fixturedef, request):
+    global _awaiting_capture
+    item = _awaiting_capture
+    if item is not None and fixturedef.scope == "function":
+        _awaiting_capture = None
+        _hand_back_process_state(item)
+    if fixturedef.scope == "function":
+        return (yield)
+    # A wider fixture sets up and tears down outside the capture of every
+    # test, so its KQ_* keys are recorded under its own name, around its
+    # setup here and around its teardown below.
+    import process_state
+
+    before = {"env": dict(os.environ)}
+    try:
+        return (yield)
+    finally:
+        process_state.note_kq_env(before, _fixture_name(fixturedef))
+        # Added after the fixture's own teardown, so it runs first.
+        fixturedef.addfinalizer(
+            lambda: _before_teardown.__setitem__(
+                fixturedef, {"env": dict(os.environ)}))
+
+
+# The environment as each wider fixture's teardown starts.
+_before_teardown: dict = {}
+
+
+def _fixture_name(fixturedef) -> str:
+    where = f"{fixturedef.baseid}::" if fixturedef.baseid else ""
+    return f"{where}{fixturedef.argname} ({fixturedef.scope} fixture)"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_fixture_post_finalizer(fixturedef, request):
+    before = _before_teardown.pop(fixturedef, None)
+    if before is not None:
+        import process_state
+
+        process_state.note_kq_env(before, _fixture_name(fixturedef))
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_call(item):
+    # A KQ_* key set by a fixture shows before the call, and one the test
+    # sets through monkeypatch until its teardown.
+    import process_state
+
+    state = item.stash.get(_CAPTURED, None)
+    if state is not None:
+        process_state.note_kq_env(state, item.nodeid)
+    try:
+        return (yield)
+    finally:
+        if state is not None:
+            process_state.note_kq_env(state, item.nodeid)
+
+
+_END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_finish(session):
+    # The production-numerics check reads the state the whole run left, so
+    # it runs last. The --ff, --nf and --lf reorders are wrappers around
+    # pytest_collection_modifyitems that run after every plain hook, a
+    # trylast one included, so the move waits until that hook returns.
+    items = session.items
+    last = [i for i in items if i.nodeid.endswith(_END_OF_RUN)]
+    if last:
+        items[:] = [i for i in items if i not in last] + last
+
+
+@pytest.fixture(autouse=True)
+def _no_hf_cache_writes():
+    # The guard refuses each write; this fails the test that tried one,
+    # even when its code caught the error.
+    import hf_cache_guard
+
+    start = len(hf_cache_guard.WRITES)
+    yield
+    failure = hf_cache_guard.failure(hf_cache_guard.take(start))
+    if failure:
+        pytest.fail(failure, pytrace=False)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # A write outside any test, as by a wider fixture, fails the run.
+    import hf_cache_guard
+
+    failure = hf_cache_guard.failure(hf_cache_guard.take(0))
+    if failure:
+        print(f"\n{failure}", file=sys.stderr)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(tryfirst=True, specname="pytest_runtest_setup")
+def pytest_runtest_setup_host(item):
+    # The machine a test declares with host_gb, else the CI runner. Set
+    # before any fixture, module-scoped ones included, reads the device.
+    import host_box
+
+    mark = item.get_closest_marker("host_gb")
+    host_box.use(*(host_box.mac(mark.args[0]) if mark else host_box.default()))
+
+
+@pytest.fixture
+def empty_hf_cache(monkeypatch, tmp_path):
+    """An empty scratch Hugging Face cache, so a repo id is not cached,
+    whatever the cache of the user running the suite holds."""
+    from huggingface_hub import constants
+
+    cache = str(tmp_path / "hf")
+    monkeypatch.setenv("HF_HUB_CACHE", cache)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", cache)
+
+
 @pytest.fixture(autouse=True)
 def _shutdown_read_pools():
     n = len(_read_pools)
@@ -85,12 +298,6 @@ def _shutdown_read_pools():
     # takes its poison pill; joining it would hang the suite.
     while len(_read_pools) > n:
         _read_pools.pop().shutdown(wait=False)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    from gmlx._exitfix import set_code
-
-    set_code(int(exitstatus))
 
 
 @pytest.fixture(scope="session")
@@ -192,6 +399,14 @@ def _isolated_xdg_data(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_comfyui_record(tmp_path_factory, monkeypatch):
+    # `gmlx serve` and `gmlx launch comfyui` read and write the ComfyUI
+    # install record; keep every test away from the user's real one.
+    monkeypatch.setenv("GMLX_COMFY_SETTINGS",
+                       str(tmp_path_factory.mktemp("comfyui") / "comfyui.json"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_share_history(monkeypatch):
     # Launch keeps its share history under ~/.local/share whatever
     # XDG_DATA_HOME says, and most tests keep the real home folder. Here it
@@ -217,6 +432,10 @@ def _no_live_server(monkeypatch):
     import gmlx.commands.launch as _launch
     monkeypatch.setattr(_launch, "_server_ready",
                         lambda base_url, api_key=None: False)
+    # A config write never reloads a server on the dev machine; tests of the
+    # HTTP reload take the function at import and patch it back.
+    import gmlx.serve.lifecycle as _lifecycle
+    monkeypatch.setattr(_lifecycle, "reload_over_http", lambda path: None)
 
 
 @pytest.fixture(autouse=True)
@@ -256,17 +475,11 @@ def kvarn_ops_ok(monkeypatch):
 
 @pytest.fixture
 def kvarn_apc_arms(monkeypatch):
-    """install_kvarn_apc for one test: the mlx_vlm.apc arms it rebinds are
-    pinned first, so the wrap does not outlive the test."""
-    apc = pytest.importorskip("mlx_vlm.apc")
+    """install_kvarn_apc for one test: the APC arms it rebinds are pinned
+    first, so the wrap does not outlive the test."""
     from gmlx.cache import kvarn_apc
+    from helpers import pin_apc_arms
 
-    for name in ("_cache_entry_supports_exact_apc", "_merge_exact_cache_entries",
-                 "_clone_cache_entry_for_apc", "_safetensors_dtype_info",
-                 "model_apc_mode"):
-        monkeypatch.setattr(apc, name, getattr(apc, name))
-    for name in ("_snapshot_exact_cache_entry", "_load_exact_cache_entry"):
-        monkeypatch.setattr(apc.DiskBlockStore, name,
-                            getattr(apc.DiskBlockStore, name))
+    apc = pin_apc_arms(monkeypatch)
     monkeypatch.setattr(apc, kvarn_apc._FLAG, False, raising=False)
     kvarn_apc.install_kvarn_apc()

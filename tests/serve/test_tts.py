@@ -152,7 +152,7 @@ def test_run_synthesis_field_validation(monkeypatch):
                           response_format="pcm", speed="9")
 
 
-def test_run_synthesis_wraps_backend_errors(monkeypatch):
+def test_run_synthesis_wraps_backend_errors(monkeypatch, empty_hf_cache):
     monkeypatch.setattr(tts, "import_mlx_audio", lambda: None)
     monkeypatch.setattr(tts._TTSModelHolder, "get",
                         classmethod(lambda cls, p: object()))
@@ -304,7 +304,7 @@ def test_load_tts_model_warms_holder(monkeypatch):
     assert seen["path"] == KOKORO
 
 
-def test_synthesis_runs_on_dedicated_worker(monkeypatch):
+def test_synthesis_runs_on_dedicated_worker(monkeypatch, empty_hf_cache):
     """Load + synthesis must share one persistent thread, distinct from the
     caller: mlx-audio binds a model's Metal work to its loading thread, so
     generating on Starlette's rotating threadpool raises 'no Stream(gpu, N)'."""

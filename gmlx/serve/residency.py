@@ -34,6 +34,7 @@ with stock ``from_env`` pinned dead for the load's duration.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import threading
@@ -41,6 +42,7 @@ import time
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any, Callable
 
 
 import gmlx.load.loadlog as loadlog
@@ -110,12 +112,12 @@ _DEFAULT_BUDGET_FRACTION = 0.8
 _FALLBACK_WORKING_SET = 32 * 1024**3
 
 _RUNTIME_MODULES = (
-    "mlx_vlm.server.runtime",
-    "mlx_vlm.server.app",
-    "mlx_vlm.server.anthropic",
-    "mlx_vlm.server.generation",
-    "mlx_vlm.server.openai",
-    "mlx_vlm.server",
+    "gmlx._vendor.mlx_vlm.server.runtime",
+    "gmlx._vendor.mlx_vlm.server.app",
+    "gmlx._vendor.mlx_vlm.server.anthropic",
+    "gmlx._vendor.mlx_vlm.server.generation",
+    "gmlx._vendor.mlx_vlm.server.openai",
+    "gmlx._vendor.mlx_vlm.server",
 )
 
 
@@ -149,9 +151,10 @@ class _Scratch:
     __slots__ = ("response_generator", "model_cache", "apc_manager")
 
     def __init__(self):
-        self.response_generator = None
-        self.model_cache = {}
-        self.apc_manager = None
+        self.response_generator: Any = None
+        # A dict, or the ModelCacheRegistry stock load turns it into.
+        self.model_cache: Any = {}
+        self.apc_manager: Any = None
 
 
 class ModelBusyError(RuntimeError):
@@ -196,13 +199,21 @@ def profile_label(cache_key: tuple) -> str:
     return "+".join(parts) or "default"
 
 
+# The cache-key kind of an image model entry. mlx-vlm's own
+# ``get_cached_model`` kinds ``image_generation`` and ``image_edit`` load
+# its safetensors pipelines; no gmlx route passes either one.
+IMAGE_KIND = "gmlx_image"
+_STOCK_IMAGE_KINDS = frozenset({"image_generation", "image_edit"})
+
+
 @dataclass
 class _Entry:
     cache_key: tuple
     model_path: str
-    model_cache: dict
-    response_generator: object
-    apc_manager: object
+    # A chat entry's stock load state; an image entry has none of the three.
+    model_cache: Any = None     # dict or ModelCacheRegistry (see _Scratch)
+    response_generator: Any = None
+    apc_manager: Any = None
     pinned: bool = False
     seq: int = 0
     footprint: int = 0          # resident weight bytes (file size; a streaming
@@ -212,7 +223,18 @@ class _Entry:
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
     retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
     loaded_as: str | None = None  # the configured ``id[@profile]`` whose request built it
-    kv_policy: object = None    # ServeKvPolicy (None when kv-bits is off)
+    kv_policy: Any = None       # ServeKvPolicy (None when kv-bits is off)
+    kind: str = "chat"          # "chat", or IMAGE_KIND for an image model
+    pipeline: Any = None        # an image entry's ImagePipeline
+    priced_up: bool = False     # the install streamed less than predicted
+
+    def __post_init__(self):
+        if self.model_cache is None:
+            self.model_cache = {}
+
+    @property
+    def is_image(self) -> bool:
+        return self.kind == IMAGE_KIND
 
 
 class _BusyHold:
@@ -402,7 +424,7 @@ def _stamp_apc_mode(rg) -> None:
     mode = getattr(model, "_kq_apc_mode", None)
     if mode is None:
         try:
-            from mlx_vlm import apc as _apc
+            from gmlx._vendor.mlx_vlm import apc as _apc
             lm = getattr(model, "language_model", None) or model
             mode = _apc.model_apc_mode(lm)
         except Exception:
@@ -431,10 +453,15 @@ class _ResidencyPool:
         footprint_fn=_gguf_footprint_bytes,
         time_fn=None,
         in_flight_fn=None,
+        image_fns=None,
     ):
         self._proxy = proxy
         self._stock_get = stock_get
         self._stock_unload = stock_unload
+        # (footprint, load, release) of an image entry, each taking what
+        # the pool holds: the spec, the spec, a one-item list with the
+        # pipeline. Injectable so eviction across kinds tests on the CPU.
+        self._image_fns = image_fns
         # Primary bound: total resident weight bytes. Secondary (optional) bound:
         # model count. ``max_models=None`` means bytes alone govern.
         self._budget = max(0, int(budget_bytes))
@@ -474,9 +501,17 @@ class _ResidencyPool:
                 self._touch(entry)
                 entry.busy += 1
                 return entry
+        if model_kind in _STOCK_IMAGE_KINDS:
+            raise ValueError(f"model kind {model_kind!r} loads mlx-vlm's own "
+                             f"image pipelines; gmlx loads {IMAGE_KIND!r}")
         # Cold path: one build at a time (bounds peak memory).
-        file_bytes = self._footprint_fn(model_path)
-        incoming = file_bytes
+        if model_kind == IMAGE_KIND:
+            # Weights and the activation reserve, from the headers: a file
+            # that is no image model is refused here, before any eviction.
+            file_bytes = incoming = int(self._image_fn(0)(build_spec))
+        else:
+            file_bytes = self._footprint_fn(model_path)
+            incoming = file_bytes
         if getattr(build_spec, "stream", None) == "experts":
             incoming = _streaming_footprint(model_path, file_bytes, env)
             _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
@@ -485,40 +520,94 @@ class _ResidencyPool:
         # room - a corrupt/unsupported file would otherwise cost every LRU
         # victim a full cold reload for a build that was never going to work.
         # Header-only, so the cost is milliseconds; the loader re-validates.
-        if (isinstance(model_path, str) and model_path.endswith(".gguf")
+        if (model_kind != IMAGE_KIND and isinstance(model_path, str)
+                and model_path.endswith(".gguf")
                 and os.path.isfile(model_path)):
             from gmlx.load.preflight import preflight
             preflight(model_path)
-        with self._build_lock:
-            with self._lock:
-                entry = self._entries.get(cache_key)
-                if entry is not None:
-                    if ttl is not None:
-                        entry.ttl = ttl
-                    self._touch(entry)
-                    entry.busy += 1
+        # Image pipelines a post-build refit evicts. The worker reservation
+        # was decided before the build, which may have seen them busy, so
+        # they are released after the build lock drops: a reservation taken
+        # since waits on that lock, and a release would queue behind it.
+        late: list = []
+        try:
+            # An image entry busy when the worker reservation is decided can
+            # be idle at the eviction. Its release would queue on the worker
+            # behind a reservation that waits on the build lock, so the first
+            # attempt evicts nothing and the second takes the reservation.
+            for force in (False, True):
+                with self._worker_for(model_kind == IMAGE_KIND, force=force), \
+                        self._build_lock:
+                    released: list = []
+                    try:
+                        with self._lock:
+                            entry = self._entries.get(cache_key)
+                            if entry is not None:
+                                if ttl is not None:
+                                    entry.ttl = ttl
+                                self._touch(entry)
+                                entry.busy += 1
+                                return entry
+                            if (self._evicts_image(incoming)
+                                    and not _holds_image_worker()):
+                                continue
+                            self._evict_for_room(
+                                incoming, model_path=model_path,
+                                streaming=getattr(build_spec, "stream", None) == "experts",
+                                released=released)
+                    finally:
+                        self._release_images(released)
+                    try:
+                        entry = self._build(cache_key, model_path, adapter_path,
+                                            model_kind, file_bytes, ttl=ttl, env=env,
+                                            build_spec=build_spec)
+                    except BaseException:
+                        # Free the failed build before the lock drops: a waiting
+                        # acquire gates on live memory next.
+                        _collect_failed_build()
+                        raise
+                    if entry.priced_up:
+                        self._fit_repriced(entry, model_path, late)
+                    # The id that built the entry names it for the process lifetime
+                    # (a metrics label wants a name fixed per entry; aliases sharing
+                    # the signature reuse this entry and keep the first name).
+                    entry.loaded_as = loaded_as
+                    with self._lock:
+                        self._entries[cache_key] = entry
+                        self._touch(entry)
+                        entry.busy += 1
                     return entry
-                self._evict_for_room(
-                    incoming, model_path=model_path,
-                    streaming=getattr(build_spec, "stream", None) == "experts")
-            try:
-                entry = self._build(cache_key, model_path, adapter_path,
-                                    model_kind, file_bytes, ttl=ttl, env=env,
-                                    build_spec=build_spec)
-            except BaseException:
-                # Free the failed build before the lock drops: a waiting
-                # acquire gates on live memory next.
-                _collect_failed_build()
-                raise
-            # The id that built the entry names it for the process lifetime
-            # (a metrics label wants a name fixed per entry; aliases sharing
-            # the signature reuse this entry and keep the first name).
-            entry.loaded_as = loaded_as
+            # Without a byte budget, only the count cap evicts.
+            bound = (f"the {self._budget / 1e9:.1f} GB budget"
+                     if self._budget else "the model count cap")
+            _defer(
+                f"model load deferred: {model_path} priced at "
+                f"{incoming / 1e9:.1f} GB resident does not fit {bound} "
+                "unless an idle image model is evicted, and the image "
+                "worker could not be held to release it. Retry when a slot "
+                "frees.")
+        finally:
+            self._release_images(late)
+
+    def _fit_repriced(self, entry: _Entry, model_path, released) -> None:
+        """The install streamed less than the header predicted, so the
+        entry holds more than the budget admitted. Evict for the new price
+        as for any build; when only pinned or busy models remain and it
+        cannot fit, unload the new model and defer the request. Evicted
+        image pipelines go to ``released`` for the caller to release
+        outside the build lock."""
+        try:
             with self._lock:
-                self._entries[cache_key] = entry
-                self._touch(entry)
-                entry.busy += 1
-            return entry
+                self._evict_for_room(entry.footprint, model_path=model_path,
+                                     streaming=True, released=released)
+        except BaseException:
+            try:
+                self._teardown(entry)
+            except Exception:
+                _log.warning("repriced build teardown skipped",
+                             exc_info=True)
+            _collect_failed_build()
+            raise
 
     def release(self, entry: _Entry) -> None:
         """Drop one in-flight reference taken by :meth:`acquire`. At zero the
@@ -551,20 +640,22 @@ class _ResidencyPool:
         it down would kill that client's running generation; the TTL reaper or
         a later unload collects it once released. Returns whether anything was
         torn down. ``ignore_retained`` as in :meth:`evict`."""
-        with self._build_lock, self._lock:
-            cleared = False
-            for key, entry in list(self._entries.items()):
-                if self._live_count(entry, ignore_retained) > 0:
-                    loadlog.verbose_print(
-                        f"[residency] unload skipping busy model "
-                        f"{os.path.basename(str(entry.model_path))} "
-                        f"({entry.busy} in-flight)")
-                    continue
-                self._teardown(entry)
-                if self._proxy._last_entry is entry:
-                    self._proxy._last_entry = None
-                del self._entries[key]
-                cleared = True
+        released: list = []
+        with self._teardown_window(released):
+            with self._lock:
+                cleared = False
+                for key, entry in list(self._entries.items()):
+                    if self._live_count(entry, ignore_retained) > 0:
+                        loadlog.verbose_print(
+                            f"[residency] unload skipping busy model "
+                            f"{os.path.basename(str(entry.model_path))} "
+                            f"({entry.busy} in-flight)")
+                        continue
+                    self._teardown(entry, released)
+                    if self._proxy._last_entry is entry:
+                        self._proxy._last_entry = None
+                    del self._entries[key]
+                    cleared = True
             return cleared
 
     def busy_paths(self) -> list:
@@ -649,20 +740,23 @@ class _ResidencyPool:
 
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
-        with self._build_lock, self._lock:
-            self._keep_paths.discard(model_path)
-            keys = [k for k, e in self._entries.items()
-                    if e.model_path == model_path]
-            in_flight = sum(self._live_count(self._entries[k], ignore_retained)
-                            for k in keys)
-            if in_flight:
-                raise ModelBusyError(model_path, in_flight)
-            for k in keys:
-                entry = self._entries[k]
-                self._teardown(entry)
-                if self._proxy._last_entry is entry:
-                    self._proxy._last_entry = None
-                del self._entries[k]
+        released: list = []
+        with self._teardown_window(released):
+            with self._lock:
+                self._keep_paths.discard(model_path)
+                keys = [k for k, e in self._entries.items()
+                        if e.model_path == model_path]
+                in_flight = sum(
+                    self._live_count(self._entries[k], ignore_retained)
+                    for k in keys)
+                if in_flight:
+                    raise ModelBusyError(model_path, in_flight)
+                for k in keys:
+                    entry = self._entries[k]
+                    self._teardown(entry, released)
+                    if self._proxy._last_entry is entry:
+                        self._proxy._last_entry = None
+                    del self._entries[k]
             return bool(keys)
 
     def set_keep(self, model_path, keep: bool) -> None:
@@ -709,6 +803,7 @@ class _ResidencyPool:
                 "resident": [
                     {
                         "model_path": e.model_path,
+                        "kind": "image" if e.is_image else "chat",
                         "loaded_as": e.loaded_as,
                         "profile": profile_label(e.cache_key),
                         "pinned": e.pinned,
@@ -738,20 +833,26 @@ class _ResidencyPool:
             return []                    # busy or unknown -> skip this tick
         now = self._time_fn()
         reaped = []
-        with self._build_lock, self._lock:
-            for entry in list(self._entries.values()):
-                if (entry.pinned or entry.model_path in self._keep_paths
-                        or not entry.ttl or entry.ttl <= 0):
-                    continue
-                if now - entry.last_access < entry.ttl:
-                    continue
-                _log.info("idle TTL unload (%.0fs): %s",
-                          entry.ttl, entry.model_path)
-                self._teardown(entry)
-                del self._entries[entry.cache_key]
-                if self._proxy._last_entry is entry:
-                    self._proxy._last_entry = None
-                reaped.append(entry.model_path)
+        released: list = []
+        with self._teardown_window(released):
+            with self._lock:
+                for entry in list(self._entries.values()):
+                    if (entry.pinned or entry.model_path in self._keep_paths
+                            or not entry.ttl or entry.ttl <= 0):
+                        continue
+                    if now - entry.last_access < entry.ttl:
+                        continue
+                    if entry.is_image and entry.busy > 0:
+                        # An image job is not in the server's in-flight
+                        # count; its hold is.
+                        continue
+                    _log.info("idle TTL unload (%.0fs): %s",
+                              entry.ttl, entry.model_path)
+                    self._teardown(entry, released)
+                    del self._entries[entry.cache_key]
+                    if self._proxy._last_entry is entry:
+                        self._proxy._last_entry = None
+                    reaped.append(entry.model_path)
         return reaped
 
     def _server_in_flight(self):
@@ -773,7 +874,10 @@ class _ResidencyPool:
         if entry.model_path in self._pinned_paths:
             entry.pinned = True
         self._entries.move_to_end(entry.cache_key)
-        self._proxy._last_entry = entry
+        if not entry.is_image:
+            # The proxy's fallback outside a request is the last chat
+            # entry; an image entry has no stock state to read.
+            self._proxy._last_entry = entry
 
     def _resident_bytes(self) -> int:
         return sum(e.footprint for e in self._entries.values())
@@ -795,17 +899,39 @@ class _ResidencyPool:
                 total += 2 * int(getattr(ring, "slot_bytes", 0) or 0)
         return total
 
-    def _over_capacity(self, incoming: int) -> bool:
+    def _over_capacity(self, incoming: int, held: int | None = None,
+                       count: int | None = None) -> bool:
         """True if admitting ``incoming`` more weight bytes would exceed the
-        byte budget or the optional count cap."""
-        if self._budget and self._resident_bytes() + incoming > self._budget:
+        byte budget or the optional count cap. ``held`` and ``count`` stand
+        for the resident bytes and entries when given."""
+        if held is None:
+            held = self._resident_bytes()
+        if count is None:
+            count = len(self._entries)
+        if self._budget and held + incoming > self._budget:
             return True
-        if self._max is not None and len(self._entries) >= self._max:
+        if self._max is not None and count >= self._max:
             return True
         return False
 
+    def _evicts_image(self, incoming: int) -> bool:
+        """Whether :meth:`_evict_for_room` would evict an image entry to fit
+        ``incoming``, taking victims in its order. Evicts nothing."""
+        held = self._resident_bytes()
+        count = len(self._entries)
+        for e in sorted((e for e in self._entries.values()
+                         if not e.pinned and e.busy == 0),
+                        key=lambda e: e.seq):
+            if not self._over_capacity(incoming, held, count):
+                return False
+            if e.is_image:
+                return True
+            held -= e.footprint
+            count -= 1
+        return False
+
     def _evict_for_room(self, incoming: int, *, model_path=None,
-                        streaming: bool = False):
+                        streaming: bool = False, released=None):
         # Evict LRU-unpinned models until the incoming one fits the budget (and
         # the optional count cap). Never evict a pinned or busy (in-flight
         # generation) model; if only those remain, exceed the budget rather than
@@ -842,46 +968,98 @@ class _ResidencyPool:
                 "evicting LRU model (%.1f GB) to fit %.1f GB: %s",
                 victim.footprint / 1e9, incoming / 1e9, victim.model_path,
             )
-            self._teardown(victim)
+            self._teardown(victim, released)
             del self._entries[victim.cache_key]
             if self._proxy._last_entry is victim:
                 self._proxy._last_entry = None
 
+    def _image_fn(self, i: int) -> Callable[..., Any]:
+        if self._image_fns is None:
+            from . import image_service
+
+            self._image_fns = (image_service.entry_footprint,
+                               image_service.load_on_worker,
+                               image_service.release_on_worker)
+        return self._image_fns[i]
+
     def _build(self, cache_key, model_path, adapter_path, model_kind, footprint,
                *, ttl=None, env=None, build_spec=None) -> _Entry:
+        """Build one entry of ``model_kind``: the shared gate and
+        bookkeeping, around the build of its kind."""
+        if model_kind == IMAGE_KIND:
+            return self._build_image(cache_key, model_path, footprint,
+                                     ttl=ttl, build_spec=build_spec)
+        return self._build_chat(cache_key, model_path, adapter_path,
+                                model_kind, footprint, ttl=ttl, env=env,
+                                build_spec=build_spec)
+
+    def _gate(self, gate_bytes, model_path, *, streaming: bool = False,
+              image: bool = False) -> None:
+        """U4: a model load and swap take the same headroom check a
+        request takes, beside the room the resident streamed models keep.
+        Raises with the numbers; GMLX_OVERCOMMIT=1 skips."""
+        from .capacity import preload_gate
+
+        extra = {"image": True} if image else {}
+        preload_gate(gate_bytes, str(model_path), streaming=streaming,
+                     reserved_bytes=self._reserved_room_bytes(), **extra)
+
+    def _new_entry(self, cache_key, model_path, footprint, ttl,
+                   **fields) -> _Entry:
+        return _Entry(cache_key=cache_key, model_path=model_path,
+                      pinned=model_path in self._pinned_paths,
+                      footprint=footprint, ttl=ttl,
+                      last_access=self._time_fn(), **fields)
+
+    def _build_image(self, cache_key, model_path, footprint, *, ttl=None,
+                     build_spec=None) -> _Entry:
+        """An image entry: the image ``load`` on the image worker, gated on
+        the weights and the activation reserve together. Never reaches the
+        stock loader."""
+        self._gate(footprint, model_path, image=True)
+        pipe = self._image_fn(1)(build_spec)
+        return self._new_entry(cache_key, model_path, footprint, ttl,
+                               kind=IMAGE_KIND, pipeline=pipe)
+
+    def _build_chat(self, cache_key, model_path, adapter_path, model_kind,
+                    footprint, *, ttl=None, env=None,
+                    build_spec=None) -> _Entry:
         from . import bridge_vlm as _serving
 
         _warn_if_batch_unsafe(model_path)
-        # U4: model load and swap take the same headroom check a request
-        # takes, and the capacity table is derived (header-based, no
-        # load needed) and gated before the box's biggest allocation
-        # starts. Both raise with the numbers; GMLX_OVERCOMMIT=1 skips.
+        # The capacity table is derived (header-based, no load needed) and
+        # gated before the box's biggest allocation starts.
         from .capacity import (
             install_boot_table,
-            preload_gate,
+            predicted_stream_bytes,
             preload_gate_bytes,
-            streamed_off_disk_bytes,
         )
-        if getattr(build_spec, "stream", None) == "cpu":
-            # Before the load, as in the CLI: --stream-cpu forces table
-            # streaming, and the warm touch must not wire the table first.
-            from gmlx.stream.table_stream import force_table_stream
+        # Before the load, as in the CLI: both stream placements stream
+        # the tables and the experts, and the warm touch must not wire
+        # them first. Set per build, so a later resident model is touched.
+        from gmlx.stream.table_stream import force_table_stream
 
-            force_table_stream()
+        force_table_stream(
+            getattr(build_spec, "stream", None) in ("cpu", "experts"))
         gate_bytes = footprint
         streamed = 0
+        shares = (0, 0)
         if getattr(build_spec, "stream", None) == "experts":
-            streamed = streamed_off_disk_bytes(str(model_path))
+            # What the install will stream, by its own ladder: over the
+            # budget, a table that alone brings the model under it streams
+            # and the experts stay resident.
+            shares = predicted_stream_bytes(str(model_path), env)
+            streamed = sum(shares)
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
             if streamed:
                 _log.info(
                     "preload gate: stream=experts discounts %.1f GB of "
-                    "off-disk bytes (routed experts and streamable tables; "
-                    "gating on %.1f GB resident)",
-                    streamed / 1e9, gate_bytes / 1e9)
-        preload_gate(gate_bytes, str(model_path),
-                     streaming=getattr(build_spec, "stream", None) == "experts",
-                     reserved_bytes=self._reserved_room_bytes())
+                    "off-disk bytes (streamable tables %.1f GB, routed "
+                    "experts %.1f GB; gating on %.1f GB resident)",
+                    streamed / 1e9, shares[0] / 1e9, shares[1] / 1e9,
+                    gate_bytes / 1e9)
+        self._gate(gate_bytes, model_path,
+                   streaming=getattr(build_spec, "stream", None) == "experts")
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
         resident_bytes = gate_bytes
@@ -979,8 +1157,11 @@ class _ResidencyPool:
                     model = mc.get("model") if hasattr(mc, "get") else None
                 apply_kvarn_salt(manager, model)
                 scratch.apc_manager = manager
-                if isinstance(scratch.model_cache, dict):
-                    scratch.model_cache["apc_manager"] = manager
+                mc = scratch.model_cache
+                if hasattr(mc, "ensure_kind"):
+                    mc.ensure_kind()["apc_manager"] = manager
+                elif isinstance(mc, dict):
+                    mc["apc_manager"] = manager
                 if rg is not None:
                     rg.apc_manager = manager
                     _stamp_apc_mode(rg)
@@ -989,6 +1170,24 @@ class _ResidencyPool:
                 except Exception:
                     _log.warning("APC pool autosize skipped", exc_info=True)
             _stamp_boot_kv_costs(rg, str(model_path))
+            # The install decided on the loaded model; price what it
+            # really streamed if the header prediction differed.
+            repriced = priced_up = False
+            if getattr(build_spec, "stream", None) == "experts":
+                done = _streamed_shares(getattr(rg, "model", None), shares,
+                                        str(model_path))
+                if done is not None and sum(done) != streamed:
+                    _log.warning(
+                        "[capacity] %s streams %.1f GB (tables %.1f GB, "
+                        "experts %.1f GB), not the %.1f GB the header "
+                        "predicted; re-pricing the resident weights",
+                        model_path, sum(done) / 1e9, done[0] / 1e9,
+                        done[1] / 1e9, streamed / 1e9)
+                    gate_bytes = preload_gate_bytes(
+                        footprint, "experts", sum(done))
+                    resident_bytes = gate_bytes
+                    repriced = True
+                    priced_up = sum(done) < streamed
             # The decode arena is MLX-tracked and sized at install, after
             # the pre-load table priced the resident weights alone. Price
             # it in now so admission, /v1/estimate and the boot refusal
@@ -1005,6 +1204,9 @@ class _ResidencyPool:
                     _log.warning("[capacity] the decode arena leaves no "
                                  "context at width 1 (GMLX_DECODE_ARENA_GB "
                                  "lowers it): %s", e)
+            elif repriced:
+                install_boot_table(str(model_path), resident_bytes,
+                                   str(model_path), env=env)
         except BaseException as e:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.
@@ -1024,17 +1226,13 @@ class _ResidencyPool:
             self._restore_env(apc_saved)
             self._restore_env(saved_env)
             _build_scratch.reset(token)
-        return _Entry(
-            cache_key=cache_key,
-            model_path=model_path,
+        return self._new_entry(
+            cache_key, model_path, resident_bytes, ttl,
             model_cache=scratch.model_cache,
             response_generator=scratch.response_generator,
             apc_manager=scratch.apc_manager,
-            pinned=model_path in self._pinned_paths,
-            footprint=resident_bytes,
-            ttl=ttl,
-            last_access=self._time_fn(),
             kv_policy=kv_policy,
+            priced_up=priced_up,
         )
 
     def _discard_failed_build(self, cache_key, model_path, scratch) -> None:
@@ -1043,7 +1241,7 @@ class _ResidencyPool:
         stock load (a kv policy refusal) otherwise leaves a whole model
         resident behind the exception. Best-effort."""
         mc = scratch.model_cache
-        if not isinstance(mc, dict) or mc.get("model") is None:
+        if not hasattr(mc, "get") or mc.get("model") is None:
             return
         entry = _Entry(cache_key=cache_key, model_path=model_path,
                        model_cache=scratch.model_cache,
@@ -1078,7 +1276,71 @@ class _ResidencyPool:
             else:
                 os.environ[k] = old
 
-    def _teardown(self, entry: _Entry):
+    def _teardown(self, entry: _Entry, released=None):
+        """Tear ``entry`` down. An image entry's pipeline goes to
+        ``released``, which the caller hands to :meth:`_release_images`
+        once it drops ``_lock``: the release waits on the image worker, and
+        a collection there can finalize a hold whose release takes
+        ``_lock``."""
+        if entry.is_image:
+            pipe, entry.pipeline = entry.pipeline, None
+            if released is None:
+                self._release_images([pipe])
+            else:
+                released.append(pipe)
+            return
+        self._teardown_chat(entry)
+
+    @contextlib.contextmanager
+    def _teardown_window(self, released: list):
+        """The worker reservation and the build lock for a teardown. An
+        image entry busy when the reservation was decided can be idle and
+        torn down under the lock: without the worker held, its pipeline is
+        released after the lock drops, as a release would queue on the
+        worker behind a reservation that waits on the lock."""
+        try:
+            with self._worker_for(False), self._build_lock:
+                try:
+                    yield
+                finally:
+                    if released and _holds_image_worker():
+                        self._release_images(released)
+        finally:
+            self._release_images(released)
+
+    def _worker_for(self, image_build: bool, *, force: bool = False):
+        """Hold the image worker before the build lock for a build that
+        loads an image pipeline, or that may release one: an image entry
+        with no job is resident, or ``force``. Then the lock is never held
+        while the worker runs an image job, and a chat cold load does not
+        wait behind one. Without any, nothing is held."""
+        with self._lock:
+            idle_image = any(e.is_image and e.busy == 0
+                             for e in self._entries.values())
+        if not (image_build or idle_image or force):
+            return contextlib.nullcontext()
+        from . import image_service
+
+        return image_service.reserved_worker()
+
+    def _release_images(self, pipelines: list) -> None:
+        """Release image pipelines on the image worker, where their arrays
+        were made, and wait for each, so the next gate measures the memory
+        back. Call without ``_lock``."""
+        while pipelines:
+            box = [pipelines.pop()]
+            if box[0] is None:
+                continue
+            try:
+                self._image_fn(2)(box)
+            except Exception:
+                _log.warning("teardown: image pipeline release failed",
+                             exc_info=True)
+            box.clear()
+            import gc
+            gc.collect()
+
+    def _teardown_chat(self, entry: _Entry):
         from . import bridge_vlm as _serving
 
         # Drop any stashed in-memory MTP drafter for this path, or its weights
@@ -1185,6 +1447,12 @@ class _ResidencyPool:
 
 
 
+def _holds_image_worker() -> bool:
+    from . import image_service
+
+    return image_service.worker_reserved()
+
+
 def _collect_failed_build() -> None:
     import gc
 
@@ -1225,14 +1493,21 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     which the budget keeps for the process lifetime. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
-    they never take."""
-    from .capacity import preload_gate_bytes, streamed_off_disk_bytes
+    they never take. Over the budget, a table that alone brings the model
+    under it streams and the experts stay resident, with no arena or
+    ring: the build streams what :func:`capacity.predicted_stream_bytes`
+    predicts, and so the entry is priced on it."""
+    from .capacity import predicted_stream_bytes, preload_gate_bytes
 
+    experts_stream = True
     try:
-        every = preload_gate_bytes(
-            file_bytes, "experts", streamed_off_disk_bytes(str(model_path)))
+        shares = predicted_stream_bytes(str(model_path), env)
+        every = preload_gate_bytes(file_bytes, "experts", sum(shares))
+        experts_stream = bool(shares[1])
     except Exception:
         every = int(file_bytes)
+    if not experts_stream:
+        return every
     raw = ((env or {}).get("GMLX_DECODE_ARENA_GB")
            or os.environ.get("GMLX_DECODE_ARENA_GB"))
     arena = None
@@ -1245,12 +1520,17 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     try:
         from gmlx.stream.plan import plan_path
 
-        model, box = plan_path(str(model_path))
-        if box is not None:
-            if arena is None:
-                arena = int(box.arena_bytes)
-            if box.ring_fits:
-                ring = int(model.ring_bytes)
+        plan = plan_path(str(model_path))
+        if plan is None:
+            _log.warning("streaming footprint: no plan for %s; arena and "
+                         "ring priced at zero", model_path)
+        else:
+            model, box = plan
+            if box is not None:
+                if arena is None:
+                    arena = int(box.arena_bytes)
+                if box.ring_fits:
+                    ring = int(model.ring_bytes)
     except Exception:
         _log.warning("streaming footprint: plan for %s failed; arena and "
                      "ring priced at zero", model_path, exc_info=True)
@@ -1263,6 +1543,24 @@ def _prefill_feeder_of(rg):
     if model is None:
         return None
     return getattr(_streaming_owner(model), "_kq_feeder", None)
+
+
+def _streamed_shares(model, predicted, gguf_path) -> tuple[int, int] | None:
+    """``(table bytes, expert bytes)`` the install really streamed, priced
+    at the header figures; None when no install verdict is found."""
+    from gmlx.stream.installs import wrapper_chain
+    from gmlx.stream.table_stream import table_streaming_active
+
+    from .capacity import streamed_expert_bytes, streamed_table_bytes
+
+    for cur in wrapper_chain(model):
+        if hasattr(cur, "_kq_streaming"):
+            table = (predicted[0] or streamed_table_bytes(gguf_path)
+                     if table_streaming_active(cur) else 0)
+            experts = (predicted[1] or streamed_expert_bytes(gguf_path)
+                       if cur._kq_streaming else 0)
+            return table, experts
+    return None
 
 
 def _prefill_ring_of(rg) -> int:
@@ -1321,6 +1619,10 @@ def _http_from_resolver_error(exc):
     from fastapi import HTTPException
 
     from . import bridge_vlm as _serving
+    if isinstance(exc, _serving.WrongModelKind):
+        return HTTPException(status_code=400, detail={"error": {
+            "type": "wrong_model_kind", "message": str(exc),
+            "available_models": exc.available}})
     if isinstance(exc, _serving.ModelNotFound):
         return HTTPException(status_code=404, detail={"error": {
             "type": "model_not_found", "message": str(exc),
@@ -1339,6 +1641,55 @@ def _http_from_resolver_error(exc):
     return None
 
 
+def _installed_pool():
+    import sys
+
+    pkg = sys.modules.get("gmlx._vendor.mlx_vlm.server")
+    return getattr(pkg, "_kq_residency_pool", None) if pkg else None
+
+
+def acquire_image_model(model_field, *, pool=None) -> "_BusyHold":
+    """Resolve an image route's ``model`` field and acquire its entry,
+    loading it on a miss. Returns the busy hold the caller releases when
+    its job ends; ``hold._entry.pipeline`` is the ``ServedImage``.
+    Resolver errors and a deferred load raise the ``HTTPException`` the
+    chat routes raise: a chat model id is a 400, as an image id is on a
+    chat route."""
+    from fastapi import HTTPException
+
+    from . import bridge_vlm as _serving
+
+    pool = pool or _installed_pool()
+    if pool is None or _serving.server_config() is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "type": "server_error", "message": "no residency pool"}})
+    try:
+        path, spec = _serving.resolve_image_request(model_field)
+    except (_serving.ModelNotFound, _serving.ModelFileMissing,
+            _serving.NoModelSpecified) as e:
+        raise (_http_from_resolver_error(e) or e) from e
+    from gmlx.image.fingerprint import ImageModelError
+
+    try:
+        entry = pool.acquire(path, None, IMAGE_KIND, ttl=spec.ttl_s,
+                             cache_key_extra=spec.load_signature(),
+                             build_spec=spec, loaded_as=spec.id)
+    except LoadDeferred as e:
+        raise _http_from_load_deferred(str(model_field or spec.id), e) from e
+    except FileNotFoundError as e:
+        # An absolute path is not checked at resolve; a file that is gone
+        # surfaces here, at load, with the 404 a chat model gets.
+        miss = _serving.ModelFileMissing(spec.id, str(e))
+        raise (_http_from_resolver_error(miss) or miss) from e
+    except ImageModelError as e:
+        # A part of the entry that is not of its family: the config names
+        # the wrong file, which no retry fixes.
+        raise HTTPException(status_code=400, detail={"error": {
+            "type": "image_model_mismatch", "code": "image_model_mismatch",
+            "message": str(e), "model": spec.id}}) from e
+    return _BusyHold(pool, entry)
+
+
 def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None) -> None:
     """Replace mlx-vlm's single-model slot with a pinned + LRU residency pool.
 
@@ -1354,8 +1705,8 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
     import importlib
     import sys
 
-    package = importlib.import_module("mlx_vlm.server")
-    app = importlib.import_module("mlx_vlm.server.app")
+    package = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if getattr(package, _INSTALL_FLAG, False):
         return
 
@@ -1369,7 +1720,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
         os.environ.get("MLX_VLM_PRELOAD_MODEL")
     )
 
-    original_runtime = sys.modules["mlx_vlm.server.runtime"].runtime
+    original_runtime = sys.modules["gmlx._vendor.mlx_vlm.server.runtime"].runtime
     proxy = _RuntimeProxy(original_runtime)
     pool = _ResidencyPool(
         proxy,
@@ -1393,6 +1744,14 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
     from . import bridge_vlm as _serving
 
     def pooled_get_cached_model(model_path, adapter_path=inherit, *, model_kind="auto"):
+        if model_kind in _STOCK_IMAGE_KINDS:
+            # mlx-vlm's image handlers would load its own safetensors
+            # pipelines from a request; gmlx serves images itself.
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail={"error": {
+                "type": "invalid_request_error",
+                "message": f"model kind {model_kind!r} is not served; image "
+                           "models load through gmlx's image routes"}})
         # The incoming ``model_path`` is a friendly id (maybe ``id@profile``):
         # resolve it to a concrete GGUF abspath + merged spec, bind the spec for
         # this request (read at the gen-args seam), fold the load_signature into
@@ -1402,7 +1761,8 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
         # path or a hub id: a client holding the key could otherwise make the
         # Mac load any file.
         if _serving.server_config() is None:
-            raise _http_from_resolver_error(_serving.ModelNotFound(str(model_path), {}))
+            miss = _serving.ModelNotFound(str(model_path), {})
+            raise _http_from_resolver_error(miss) or miss
         try:
             # The body `profile` field rides a request-scoped ContextVar
             # (install_request_profile_capture) - this seam only receives
@@ -1412,7 +1772,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
                 profile_field=_serving.get_request_profile())
         except (_serving.ModelNotFound, _serving.ModelFileMissing,
                 _serving.UnknownProfile, _serving.NoModelSpecified) as e:
-            raise _http_from_resolver_error(e) from e
+            raise (_http_from_resolver_error(e) or e) from e
         _serving.set_active_spec(spec)
         ttl = spec.ttl_s
         cache_key_extra = spec.load_signature()
@@ -1438,7 +1798,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
             # relative/hf shapes get instead of a raw 500 errno.
             if _serving.server_config() is not None:
                 miss = _serving.ModelFileMissing(str(model_path), str(e))
-                raise _http_from_resolver_error(miss) from e
+                raise (_http_from_resolver_error(miss) or miss) from e
             raise
         _active_entry.set(entry)
         # The acquire's in-flight hold: the generate seam (_GenerationGuard)

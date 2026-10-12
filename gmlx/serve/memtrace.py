@@ -40,6 +40,8 @@ import time
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_serve_memtrace"
@@ -209,9 +211,9 @@ def install_serve_memtrace() -> bool:
     path = os.environ.get("GMLX_SERVE_MEMSTATS", "")
     if not path:
         return False
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return True
     try:
         _writer = open(os.path.expanduser(path), "a", buffering=1)
@@ -235,6 +237,6 @@ def install_serve_memtrace() -> bool:
                 _log.warning("serve memtrace sample failed", exc_info=True)
 
     setattr(_traced_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _traced_next
+    _ar.BatchGenerator._next = link(_traced_next, _orig_next)
     _log.info("serve memtrace -> %s", path)
     return True

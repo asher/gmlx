@@ -1,8 +1,9 @@
 """Runtime patches for the gated-delta (Qwen3-Next / Qwen3.5) family.
 
 Split-GDN module fixup, the fused decode/verify Metal kernels, the qwen3.5
-MTP-verify guards, and the tiled V-head K mapping rewrite. Each installer is
-install-once and kill-switchable via its GMLX_* env flag.
+MTP-verify guards, and the check that a GGUF's gated-delta layers carry
+the tiled V-head order. Each installer is install-once and kill-switchable
+via its GMLX_* env flag.
 """
 
 from __future__ import annotations
@@ -14,12 +15,17 @@ import mlx.nn as nn
 import atexit
 import sys
 from functools import lru_cache
-from typing import NamedTuple
+from typing import Callable, NamedTuple, cast
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
 from gmlx.load.hadamard_modules import is_folded, shared_linears
-from .patching import ClassPatch
+from .patching import ClassPatch, link
+
+
+def _metal_kernel(**kwargs) -> Callable[..., list[mx.array]]:
+    """``mx.fast.metal_kernel``, typed: the mlx stub returns ``object``."""
+    return cast(Callable[..., list[mx.array]], mx.fast.metal_kernel(**kwargs))
 
 
 def gpu_active() -> bool:
@@ -121,9 +127,9 @@ def _describe_blocking_mask_once(which, S, B, mask):
         return
     _mask_described.add(key)
     if mask.dtype == mx.bool_:
-        blocked = int((~mask).sum().item())
+        blocked = int((~mask).sum())
     else:
-        blocked = int((mask < 0).sum().item())
+        blocked = int((mask < 0).sum())
     print(f"[gdn] blocking mask {which}: S={S} B={B} shape={tuple(mask.shape)} "
           f"dtype={mask.dtype} excluded_entries={blocked} of {mask.size} "
           f"({'NO-OP -> fused path lost for nothing' if blocked == 0 else 'real'})",
@@ -152,34 +158,61 @@ def _dump_gdn_route_counts():
               f"{_route_counts[key]} calls", file=sys.stderr, flush=True)
 
 
-# GGUF V-head tiling fixup (runtime patch)
+# GGUF V-head order
 
 
-def _needs_tiled_v_patch(config: dict) -> bool:
-    """Check for asymmetric linear-attention K/V heads.
+def gguf_v_heads_tiled(config: dict) -> bool:
+    """Whether a GGUF of this config stores its gated-delta V heads tiled.
 
     convert_hf_to_gguf reorders V heads from grouped to tiled when
-    ``linear_num_key_heads != linear_num_value_heads``. mlx-lm's gated_delta
-    assumes grouped layout, so we must patch the K->V mapping.
+    ``linear_num_key_heads != linear_num_value_heads``:
+        grouped (HF): [G0_v0 G0_v1 G0_v2 G1_v0 G1_v1 G1_v2 ...]
+        tiled (GGUF): [G0_v0 G1_v0 ... GN_v0 G0_v1 G1_v1 ... GN_v1 ...]
+    V head hv then reads K head hv % Hk, not hv // (Hv / Hk). The
+    synthesized config carries ``kv_head_layout="tiled"``, each gated-delta
+    layer reads it into ``gdn_kv_tiled`` and passes it to its scan, so the
+    order belongs to the model and a process holds models of both orders.
 
-    Note: the synthesized config also carries ``kv_head_layout="tiled"`` for
-    forward-compat, but the *installed* mlx-lm has no consumer for that field -
-    this monkey-patch is the only mechanism today.
-
-    qwen3_next is EXCLUDED despite its asymmetric heads (16 k / 32 v): its
+    qwen3_next is excluded despite its asymmetric heads (16 k / 32 v): its
     GGUFs keep V heads in HF grouped order (the legacy fused ssm_in layout is
     the raw HF tensor, and the newer split converter's de-interleave preserves
-    group order), and mlx-lm's qwen3_next consumes grouped directly - the
-    tiled fixup would corrupt its K->V mapping.
+    group order). qwen4_exp is excluded too: its V heads are tiled on the
+    wire, and its GatedDeltaNet tiles q/k itself before the scan.
     """
     if config.get("model_type") in ("qwen3_next", "qwen4_exp"):
-        # qwen4_exp: V heads ARE tiled on the wire, but the vendored
-        # GatedDeltaNet tiles q/k explicitly before the scan, so it needs no
-        # module-global fixup (and must not inherit the cross-load hazard).
         return False
     k = config.get("linear_num_key_heads", 0)
     v = config.get("linear_num_value_heads", 0)
     return k > 0 and v > 0 and k != v
+
+
+def require_tiled_gdn(model, config: dict) -> None:
+    """Refuse a GGUF load whose gated-delta layers would pair their heads
+    in the grouped order. Such a load gives wrong text with no error: the
+    no-cache forward looks fine and decode degrades to repetition. It
+    happens when the config lost ``kv_head_layout`` on its way to the model
+    classes, or a layer class does not read it. A container config holds
+    the head counts under ``text_config``."""
+    if "linear_num_key_heads" not in config:
+        text = config.get("text_config")
+        if isinstance(text, dict):
+            config = text
+    if not gguf_v_heads_tiled(config):
+        return
+    grouped = sorted({
+        f"{type(m).__module__}.{type(m).__name__}"
+        for m in model.modules()
+        if hasattr(m, "num_k_heads") and hasattr(m, "num_v_heads")
+        and m.num_k_heads != m.num_v_heads
+        and not getattr(m, "gdn_kv_tiled", False)})
+    if grouped:
+        raise RuntimeError(
+            "this GGUF stores its gated-delta V heads tiled "
+            f"({config.get('linear_num_key_heads')} K heads, "
+            f"{config.get('linear_num_value_heads')} V heads), and "
+            f"{', '.join(grouped)} would pair them in the grouped order: "
+            "kv_head_layout did not reach the layer from the config "
+            f"(the config has {config.get('kv_head_layout')!r})")
 
 
 def _patch_qwen3next_split_gdn(model) -> None:
@@ -197,13 +230,13 @@ def _patch_qwen3next_split_gdn(model) -> None:
     ``in_proj_ba`` stays fused on both sides and keeps its stock split.
 
     Per-instance and structural: ``__class__`` is swapped to a subclass of the
-    stock GDN; no mlx-lm module globals are touched (unlike the tiled-V
-    patch), so it cannot leak into qwen3.5/mlx-vlm loads in the same process.
+    stock GDN; no mlx-lm module globals are touched, so it cannot leak into
+    qwen3.5/mlx-vlm loads in the same process.
     Must run before sanitize/leaf-swap so the remapped weights land on the
     new modules and the fused module leaves no unfilled params.
     """
-    from mlx_lm.models.gated_delta import gated_delta_update
-    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_update
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
 
     class _SplitGDN(Qwen3NextGatedDeltaNet):
         def __call__(self, inputs, mask=None, cache=None):
@@ -418,7 +451,7 @@ _GDN_FUSED_DECODE_REPLAY_SRC = _GDN_FUSED_DECODE_TEMPLATE.replace(
     "/*REPLAY*/\n", _GDN_DECODE_REPLAY)
 
 _gdn_fused_decode_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_fused_decode",
         input_names=[
             "conv_input",
@@ -439,7 +472,7 @@ _gdn_fused_decode_kernel = (
 )
 
 _gdn_fused_decode_replay_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_fused_decode_replay",
         input_names=[
             "conv_input",
@@ -477,6 +510,15 @@ def _live_cat(gdn, slot, members):
         if type(getattr(gdn, name, None)) is not nn.Linear:
             return None
     return w
+
+
+def _kv_heads_tiled(gdn) -> int:
+    """1 when V head hv reads K head hv % Hk (the GGUF tiled order), 0 when
+    it reads K head hv // (Hv / Hk). A module sets ``gdn_kv_tiled`` from
+    its own config."""
+    if gdn.num_k_heads == gdn.num_v_heads:
+        return 0
+    return int(bool(getattr(gdn, "gdn_kv_tiled", False)))
 
 
 def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
@@ -556,7 +598,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     if pend is not None:
         state, records, steps = pend
         kernel, replay = _gdn_fused_decode_replay_kernel, [*records, steps]
-    tiled = int(self.num_k_heads != self.num_v_heads)
+    tiled = _kv_heads_tiled(self)
     y, state = kernel(
         inputs=[
             conv_input,
@@ -640,7 +682,7 @@ def _patch_gated_delta_fused_decode(model) -> None:
     ``model``. Installs the class-level dispatch once (a no-op for any instance
     without the per-instance ``_gdn_fused`` flag, so unrelated/dense loads in the
     same process are untouched) and flags this model's instances."""
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     if (
         _gdn_fused_decode_kernel is None
@@ -965,7 +1007,7 @@ _GDN_VERIFY_GATE_SRC = r"""
 """
 
 _gdn_fused_verify_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_verify_scan",
         input_names=[
             "conv_input",
@@ -984,7 +1026,7 @@ _gdn_fused_verify_kernel = (
 )
 
 _gdn_verify_rec_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_verify_scan_rec",
         input_names=[
             "conv_input",
@@ -1007,7 +1049,7 @@ _gdn_verify_rec_kernel = (
 )
 
 _gdn_replay_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_replay",
         input_names=["state_in", "rd", "rk", "rg", "R"],
         output_names=["state_out"],
@@ -1018,7 +1060,7 @@ _gdn_replay_kernel = (
 )
 
 _gdn_verify_gate_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_verify_gate",
         input_names=["pre", "z", "norm_weight", "nrows"],
         output_names=["y"],
@@ -1097,7 +1139,7 @@ def take_gdn_replay(cache):
 # weight read -- holds ~95% of peak flat across M=2..8, like the quantized
 # mv_ext the K-quant linears use. GMLX_F16_HEAD_KERNEL=0 falls back to matmul.
 _F16_HEAD_GEMV = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_f16_head_gemv_ext",
         input_names=["x", "w"],
         output_names=["y"],
@@ -1274,7 +1316,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             and wb.dtype == wa.dtype
         )
         wba = None
-        if fuse_ok:
+        if fuse_ok and wb is not None and wa is not None:
             wba = mx.concatenate([wb, wa], axis=0)
             mx.eval(wba)
         cba = (ba_key, wba)
@@ -1325,7 +1367,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
 
     SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
     Hv, Dk = self.num_v_heads, self.head_k_dim
-    tiled = int(self.num_k_heads != self.num_v_heads)
+    tiled = _kv_heads_tiled(self)
     template = [
         ("InT", conv_input.dtype),
         ("StT", state.dtype),
@@ -1473,7 +1515,7 @@ def _patch_batched_verify_sdpa() -> None:
 
     import os
 
-    import mlx_vlm.models.qwen3_5.language as _L
+    import gmlx.models.qwen35.language as _L
 
     _orig_left_padded = _L._target_verify_left_padded_attention
     _STOCK_VERIFY_LEFT_PADDED = _orig_left_padded
@@ -1495,7 +1537,9 @@ def _patch_batched_verify_sdpa() -> None:
                 queries, keys, values, cache=cache, scale=scale, mask=mask
             )
         pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
-        padded = pads is not None and len(pads) > 0 and max(pads) > 0
+        if pads is None:
+            pads = []
+        padded = len(pads) > 0 and max(pads) > 0
         L = queries.shape[-2]
         if padded and (
             L <= 1
@@ -1525,7 +1569,8 @@ def _patch_batched_verify_sdpa() -> None:
             queries, keys, values, scale=scale, mask=sdpa_mask
         )
 
-    _L._target_verify_left_padded_attention = _batched_verify_attention
+    _L._target_verify_left_padded_attention = link(_batched_verify_attention,
+                                                   _orig_left_padded)
     _BATCHED_VERIFY_SDPA_PATCHED = True
 
 
@@ -1538,12 +1583,13 @@ def _patch_bf16_verify_linear() -> None:
     MLX's bf16 matmul at small M (2..8) dispatches through a general GEMM path
     that runs at ~65-70% of peak BW. The GEMV-ext kernel (same weight read,
     M register accumulators) holds ~95% flat across M=2..8. This patches
-    _target_verify_linear in mlx-vlm so every bf16 projection at verify width
-    (MLP gate/up/down, attention q/k/v/o in UD-protected layers) benefits."""
+    _target_verify_linear in the vendored qwen3.5 base so every bf16
+    projection at verify width (MLP gate/up/down, attention q/k/v/o in
+    UD-protected layers) benefits."""
     global _BF16_VERIFY_LINEAR_PATCHED
     if _BF16_VERIFY_LINEAR_PATCHED or _F16_HEAD_GEMV is None:
         return
-    import mlx_vlm.models.qwen3_5.language as _L
+    import gmlx.models.qwen35.language as _L
 
     _stock_tvl = _L._target_verify_linear
 
@@ -1574,7 +1620,7 @@ def _patch_qwen35_empty_sequence_guard() -> None:
     global _S0_MODEL_GUARD_INSTALLED
     if _S0_MODEL_GUARD_INSTALLED:
         return
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5Model
+    from gmlx.models.qwen35.language import Qwen3_5Model
 
     _orig_model_call = Qwen3_5Model.__call__
 
@@ -1583,7 +1629,7 @@ def _patch_qwen35_empty_sequence_guard() -> None:
             return self.norm(inputs_embeds)
         return _orig_model_call(self, inputs, inputs_embeds=inputs_embeds, **kw)
 
-    Qwen3_5Model.__call__ = _s0_guarded_call
+    Qwen3_5Model.__call__ = link(_s0_guarded_call, _orig_model_call)  # pyright: ignore[reportAttributeAccessIssue]
     _S0_MODEL_GUARD_INSTALLED = True
 
 
@@ -1592,7 +1638,7 @@ def _patch_gated_delta_fused_verify(model) -> None:
     the MTP target. Installs the class-level dispatch once (a no-op for instances
     without the per-instance ``_gdn_fused_verify`` flag) and flags this model's
     instances."""
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
     _patch_qwen35_empty_sequence_guard()
 
@@ -1647,7 +1693,7 @@ def _patch_dense_head_verify(model) -> None:
     if getattr(type(head), "_f16_gemv_kernel", False):
         return  # already subclassed in this process
 
-    base = type(head)
+    base = cast(type[nn.Module], type(head))
 
     class _HeadWithGemvVerify(base):
         _f16_gemv_kernel = True
@@ -1662,448 +1708,3 @@ def _patch_dense_head_verify(model) -> None:
     head.__class__ = _HeadWithGemvVerify
     loadlog.verbose_print(f"[patch] dense head: M-stationary GEMV-ext verify kernel "
           f"(vocab={w.shape[0]}, dtype={w.dtype})")
-
-
-def _tiled_v_patch_applied() -> bool:
-    """True once ``_patch_gated_delta_tiled_v`` has rewritten mlx-lm's
-    gated_delta module globals in this process (marker set by the patch)."""
-    import sys
-
-    gd = sys.modules.get("mlx_lm.models.gated_delta")
-    return bool(getattr(gd, "_gmlx_tiled_v_patched", False))
-
-
-def _patch_gated_delta_tiled_v():
-    """Monkey-patch gated_delta to use tiled V-head K mapping.
-
-    GGUF stores V heads in tiled order for ggml broadcast:
-        grouped (HF): [G0_v0 G0_v1 G0_v2 G1_v0 G1_v1 G1_v2 ...]
-        tiled (GGUF):  [G0_v0 G1_v0 ... GN_v0 G0_v1 G1_v1 ... GN_v1 ...]
-
-    The only difference is K->V head indexing:
-        grouped: K[hv // (Hv/Hk)]
-        tiled:   K[hv %  Hk]
-    """
-    from mlx_lm.models import gated_delta as gd
-
-    gd._gmlx_tiled_v_patched = True  # read back by _tiled_v_patch_applied
-
-    # Metal kernels: hv_idx / (Hv / Hk)  ->  hv_idx % Hk
-    def _make_tiled_kernel(has_mask=False, vectorized=False):
-        if not mx.metal.is_available():
-            return None
-        mask_source = "mask[b_idx * T + t]" if has_mask else "true"
-        if vectorized:
-            g_comment = "// g: [B, T, Hv, Dk]"
-            g_setup = "auto g_ = g + (b_idx * T * Hv + hv_idx) * Dk;"
-            g_access = "g_[s_idx]"
-            g_advance = "g_ += Hv * Dk;"
-        else:
-            g_comment = "// g: [B, T, Hv]"
-            g_setup = "auto g_ = g + b_idx * T * Hv;"
-            g_access = "g_[hv_idx]"
-            g_advance = "g_ += Hv;"
-
-        source = f"""
-            auto n = thread_position_in_grid.z;
-            auto b_idx = n / Hv;
-            auto hv_idx = n % Hv;
-            auto hk_idx = hv_idx % Hk;
-            constexpr int n_per_t = Dk / 32;
-
-            auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;
-            auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;
-
-            auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
-            y += b_idx * T * Hv * Dv + hv_idx * Dv;
-
-            auto dk_idx = thread_position_in_threadgroup.x;
-            auto dv_idx = thread_position_in_grid.y;
-
-            auto i_state = state_in + (n * Dv + dv_idx) * Dk;
-            auto o_state = state_out + (n * Dv + dv_idx) * Dk;
-
-            float state[n_per_t];
-            for (int i = 0; i < n_per_t; ++i) {{
-              auto s_idx = n_per_t * dk_idx + i;
-              state[i] = static_cast<float>(i_state[s_idx]);
-            }}
-
-            {g_comment}
-            {g_setup}
-            auto beta_ = beta + b_idx * T * Hv;
-
-            for (int t = 0; t < T; ++t) {{
-              if ({mask_source}) {{
-                float kv_mem = 0.0f;
-                for (int i = 0; i < n_per_t; ++i) {{
-                  auto s_idx = n_per_t * dk_idx + i;
-                  state[i] = state[i] * {g_access};
-                  kv_mem += state[i] * k_[s_idx];
-                }}
-                kv_mem = simd_sum(kv_mem);
-
-                auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
-
-                float out = 0.0f;
-                for (int i = 0; i < n_per_t; ++i) {{
-                  auto s_idx = n_per_t * dk_idx + i;
-                  state[i] = state[i] + k_[s_idx] * delta;
-                  out += state[i] * q_[s_idx];
-                }}
-                out = simd_sum(out);
-                if (thread_index_in_simdgroup == 0) {{
-                  y[dv_idx] = static_cast<InT>(out);
-                }}
-              }} else {{
-                y[dv_idx] = static_cast<InT>(0);
-              }}
-              q_ += Hk * Dk;
-              k_ += Hk * Dk;
-              v_ += Hv * Dv;
-              y += Hv * Dv;
-              {g_advance}
-              beta_ += Hv;
-            }}
-            for (int i = 0; i < n_per_t; ++i) {{
-              auto s_idx = n_per_t * dk_idx + i;
-              // Implicit narrowing to o_state's element type: naming it would
-              // need an StT template arg, which mlx-lm's caller (which owns the
-              // template list) only supplies from 0.31 on.
-              o_state[s_idx] = state[i];
-            }}
-        """
-        inputs = ["q", "k", "v", "g", "beta", "state_in", "T"]
-        if has_mask:
-            inputs.append("mask")
-        suffix = ""
-        if vectorized:
-            suffix += "_vec"
-        if has_mask:
-            suffix += "_mask"
-        return mx.fast.metal_kernel(
-            name=f"gated_delta_step_tiled{suffix}",
-            input_names=inputs,
-            output_names=["y", "state_out"],
-            source=source,
-        )
-
-    gd._gated_delta_kernel = _make_tiled_kernel(False, False)
-    gd._gated_delta_kernel_masked = _make_tiled_kernel(True, False)
-    gd._gated_delta_kernel_vec = _make_tiled_kernel(False, True)
-    gd._gated_delta_kernel_vec_masked = _make_tiled_kernel(True, True)
-
-    # Ops fallback: mx.repeat -> mx.tile
-    _orig_step = gd._gated_delta_step_ops
-
-    def _tiled_gated_delta_ops(q, k, v, g, beta, state=None, mask=None):
-        B, T, Hk, Dk = q.shape
-        Hv, Dv = v.shape[-2:]
-        if state is None:
-            state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
-        if (r := Hv // Hk) > 1:
-            q = mx.tile(q, [1, 1, r, 1])
-            k = mx.tile(k, [1, 1, r, 1])
-        ys = []
-        for t in range(T):
-            y, state = _orig_step(
-                q[:, t],
-                k[:, t],
-                v[:, t],
-                g[:, t],
-                beta[:, t],
-                state,
-                None if mask is None else mask[:, t],
-            )
-            ys.append(y)
-        return mx.stack(ys, axis=1), state
-
-    gd.gated_delta_ops = _tiled_gated_delta_ops
-    loadlog.verbose_print("[patch] gated_delta: K->V head mapping set to tiled (GGUF layout)")
-
-
-# - mlx-vlm's own gated_delta (MTP target uses these; seam 3)
-
-
-def _tiled_gd_with_states_ops(q, k, v, g, beta, state, mask=None):
-    """Tiled-V copy of mlx-vlm's ``_gated_delta_with_states_ops``.
-
-    Identical to the upstream op except the grouped K/V expand (``mx.repeat``)
-    becomes the tiled one (``mx.tile``) - GGUF stores V heads in tiled order, so
-    V head ``hv`` reads K head ``hv % Hk`` rather than ``hv // (Hv/Hk)``.
-    """
-    B, T, Hk, _Dk = q.shape
-    Hv = v.shape[-2]
-    if (r := Hv // Hk) > 1:
-        q = mx.tile(q, [1, 1, r, 1])
-        k = mx.tile(k, [1, 1, r, 1])
-    ys, states = [], []
-    for t in range(T):
-        old_state = state
-        decay = g[:, t, :, None, None]
-        state = state * decay
-        kv_mem = (state * k[:, t, :, None, :]).sum(axis=-1)
-        delta = (v[:, t] - kv_mem) * beta[:, t, :, None]
-        state = state + k[:, t, :, None, :] * delta[..., None]
-        y = (state * q[:, t, :, None, :]).sum(axis=-1)
-        if mask is not None:
-            valid = mask[:, t]
-            state = mx.where(valid[:, None, None, None], state, old_state)
-            y = mx.where(valid[:, None, None], y, 0)
-        ys.append(y.astype(q.dtype))
-        states.append(state)
-    return mx.stack(ys, axis=1), state, mx.stack(states, axis=1)
-
-
-def _tiled_gd_state_ops(k, v, g, beta, state, steps, mask=None):
-    """Tiled-V copy of mlx-vlm's ``_gated_delta_state_ops`` (repeat -> tile)."""
-    _B, T, Hk, _Dk = k.shape
-    Hv = v.shape[-2]
-    if (r := Hv // Hk) > 1:
-        k = mx.tile(k, [1, 1, r, 1])
-    for t in range(T):
-        old_state = state
-        decay = g[:, t, :, None, None]
-        state = state * decay
-        kv_mem = (state * k[:, t, :, None, :]).sum(axis=-1)
-        delta = (v[:, t] - kv_mem) * beta[:, t, :, None]
-        state = state + k[:, t, :, None, :] * delta[..., None]
-        valid = steps > t
-        if mask is not None:
-            valid = valid & mask[:, t]
-        state = mx.where(valid[:, None, None, None], state, old_state)
-    return state
-
-
-def _patch_mlxvlm_gated_delta_tiled_v() -> None:
-    """Extend the tiled-V fixup to mlx-vlm's qwen3_5 gated_delta (seam 3).
-
-    mlx-vlm's ``models/qwen3_5/gated_delta.py`` has its own grouped K->V mapping
-    that ``_patch_gated_delta_tiled_v`` (which only touches mlx-lm) never reaches:
-
-    * the regular prefill path (``gated_delta_update``) calls the names it
-      ``from``-imported from mlx-lm at module load - so the patched mlx-lm
-      attribute is shadowed for the *ops* fallback (the *kernel* function reads
-      its module global at call time and is already tiled). Rebind both copies.
-    * the MTP state-capturing paths (``gated_delta_update_with_states`` /
-      ``gated_delta_state_update``) ship their own grouped Metal kernels + ops.
-      They run only over the tiny draft block (small T), so we route them to the
-      tiled ops and disable the grouped kernels rather than duplicate ~150 lines
-      of Metal that we cannot validate without GPU.
-
-    Must run after ``_patch_gated_delta_tiled_v`` (depends on its tiled mlx-lm
-    ``gated_delta_ops`` / ``_gated_delta_kernel``).
-    """
-    import importlib
-    from mlx_lm.models import gated_delta as gd
-
-    try:
-        vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
-    except ImportError:
-        return
-
-    # The rebind is blind assignment; verify the seams still exist first so
-    # an upstream rename fails here, not as unvalidated grouped-kernel output.
-    for _name in ("gated_delta_ops", "gated_delta_kernel",
-                  "_gated_delta_with_states_ops", "_gated_delta_state_ops"):
-        if not hasattr(vgd, _name):
-            raise RuntimeError(
-                f"mlx-vlm gated_delta seam {_name!r} is gone - re-audit "
-                f"against the pinned seams (gmlx.upstream.seams)")
-
-    # Regular prefill: rebind the import-time copies to the tiled mlx-lm ones.
-    vgd.gated_delta_ops = gd.gated_delta_ops
-    vgd.gated_delta_kernel = gd.gated_delta_kernel
-
-    # MTP state-capture paths: tiled ops + disable the grouped kernels so the
-    # `if kernel is None: return <ops>` fallback fires (small-T, cheap).
-    vgd._gated_delta_with_states_ops = _tiled_gd_with_states_ops
-    vgd._gated_delta_state_ops = _tiled_gd_state_ops
-    vgd._gated_delta_with_states_kernel = None
-    vgd._gated_delta_with_states_kernel_masked = None
-    vgd._gated_delta_state_kernel = None
-    vgd._gated_delta_state_kernel_masked = None
-    loadlog.verbose_print("[patch] mlx-vlm gated_delta: K->V mapping set to tiled (MTP target)")
-
-
-# Fused blocked-sequential gated-delta prefill scan
-#
-# The stock mlx-lm prefill scan kernel walks T steps with every simdgroup
-# reading its q/k/v/g/beta operands from device memory at each step (one
-# simdgroup per (head, dv) row, so the same q/k row is re-read Dv times per
-# step). This variant blocks the walk: a threadgroup covering SGS dv rows
-# cooperatively stages the next TB timesteps of q, k, v, g, beta (and mask)
-# in threadgroup memory, then runs the same per-step recurrence out of the
-# staged tiles. It also takes q/k untiled (TILED indexing, hk = hv % Hk)
-# so the caller can skip the 3x mx.tile materialisation.
-#
-# The per-step arithmetic matches the stock kernel op for op (fp32 state,
-# same accumulation order, simd_sum reductions), so outputs are bit-exact
-# vs the stock kernel path for the same inputs.
-
-_GDN_PREFILL_TB = 32
-_GDN_PREFILL_SGS = 8
-
-
-def _make_gdn_prefill_kernel(has_mask):
-    if not mx.metal.is_available():
-        return None
-    mask_stage = (
-        "if (flat < (uint)TB) ms[flat] = (t0 + (int)flat < T)"
-        " ? (int)mask[(size_t)b_idx * T + t0 + flat] : 0;"
-        if has_mask else ""
-    )
-    mask_read = "ms[tt]" if has_mask else "true"
-    source = f"""
-        constexpr int n_per_t = Dk / 32;
-        uint lane = thread_position_in_threadgroup.x;
-        uint sg   = thread_position_in_threadgroup.y;
-        uint dv_idx = thread_position_in_grid.y;
-        uint n = thread_position_in_grid.z;
-        uint b_idx = n / Hv;
-        uint hv_idx = n % Hv;
-        uint hk_idx = TILED ? (hv_idx % Hk) : (hv_idx / (Hv / Hk));
-        uint flat = sg * 32 + lane;
-
-        // q, k: [B, T, Hk, Dk] (untiled); v, y: [B, T, Hv, Dv]
-        auto q_ = q + (size_t)b_idx * T * Hk * Dk + hk_idx * Dk;
-        auto k_ = k + (size_t)b_idx * T * Hk * Dk + hk_idx * Dk;
-        auto v_ = v + (size_t)b_idx * T * Hv * Dv + hv_idx * Dv;
-        y += (size_t)b_idx * T * Hv * Dv + hv_idx * Dv + dv_idx;
-        auto g_ = g + (size_t)b_idx * T * Hv + hv_idx;
-        auto beta_ = beta + (size_t)b_idx * T * Hv + hv_idx;
-
-        // state_in, state_out: [B, Hv, Dv, Dk]
-        auto i_state = state_in + ((size_t)n * Dv + dv_idx) * Dk;
-        auto o_state = state_out + ((size_t)n * Dv + dv_idx) * Dk;
-        float state[n_per_t];
-        for (int i = 0; i < n_per_t; ++i)
-          state[i] = static_cast<float>(i_state[n_per_t * lane + i]);
-
-        threadgroup InT qs[TB * Dk];
-        threadgroup InT ks[TB * Dk];
-        threadgroup float vs[TB * SGS];
-        threadgroup float gs[TB];
-        threadgroup float bs[TB];
-        {"threadgroup int ms[TB];" if has_mask else ""}
-        const uint tg0 = dv_idx - sg;  // first dv row of this threadgroup
-
-        for (int t0 = 0; t0 < T; t0 += TB) {{
-          threadgroup_barrier(mem_flags::mem_threadgroup);
-          for (uint e = flat; e < (uint)(TB * Dk); e += SGS * 32) {{
-            int tt = e / Dk, dd = e % Dk;
-            bool live = t0 + tt < T;
-            qs[e] = live ? q_[(size_t)(t0 + tt) * Hk * Dk + dd] : (InT)0;
-            ks[e] = live ? k_[(size_t)(t0 + tt) * Hk * Dk + dd] : (InT)0;
-          }}
-          for (uint e = flat; e < (uint)(TB * SGS); e += SGS * 32) {{
-            int tt = e / SGS, j = e % SGS;
-            vs[e] = (t0 + tt < T)
-              ? (float)v_[(size_t)(t0 + tt) * Hv * Dv + tg0 + j] : 0.0f;
-          }}
-          if (flat < (uint)TB) {{
-            bool live = t0 + (int)flat < T;
-            gs[flat] = live ? g_[(size_t)(t0 + flat) * Hv] : 0.0f;
-            bs[flat] = live ? beta_[(size_t)(t0 + flat) * Hv] : 0.0f;
-          }}
-          {mask_stage}
-          threadgroup_barrier(mem_flags::mem_threadgroup);
-
-          const int tb_end = min(TB, T - t0);
-          for (int tt = 0; tt < tb_end; ++tt) {{
-            if ({mask_read}) {{
-              float g_t = gs[tt];
-              float kv_mem = 0.0f;
-              for (int i = 0; i < n_per_t; ++i) {{
-                int s_idx = n_per_t * lane + i;
-                state[i] = state[i] * g_t;
-                kv_mem += state[i] * (float)ks[tt * Dk + s_idx];
-              }}
-              kv_mem = simd_sum(kv_mem);
-              float delta = (vs[tt * SGS + sg] - kv_mem) * bs[tt];
-              float out = 0.0f;
-              for (int i = 0; i < n_per_t; ++i) {{
-                int s_idx = n_per_t * lane + i;
-                state[i] = state[i] + (float)ks[tt * Dk + s_idx] * delta;
-                out += state[i] * (float)qs[tt * Dk + s_idx];
-              }}
-              out = simd_sum(out);
-              if (lane == 0)
-                y[(size_t)(t0 + tt) * Hv * Dv] = static_cast<InT>(out);
-            }} else if (lane == 0) {{
-              y[(size_t)(t0 + tt) * Hv * Dv] = static_cast<InT>(0);
-            }}
-          }}
-        }}
-        for (int i = 0; i < n_per_t; ++i)
-          o_state[n_per_t * lane + i] = static_cast<StT>(state[i]);
-    """
-    inputs = ["q", "k", "v", "g", "beta", "state_in", "T"]
-    if has_mask:
-        inputs.append("mask")
-    return mx.fast.metal_kernel(
-        name="gmlx_gated_delta_prefill" + ("_mask" if has_mask else ""),
-        input_names=inputs,
-        output_names=["y", "state_out"],
-        source=source,
-    )
-
-
-_gdn_prefill_kernel = _make_gdn_prefill_kernel(False)
-_gdn_prefill_kernel_masked = _make_gdn_prefill_kernel(True)
-
-
-def _gdn_prefill_eligible(self, B, S, q_dtype, mask, state):
-    """Route check for the blocked prefill scan: sequential-width call on
-    the GPU with kernel-tileable head dims and a plain (or absent) [B, T]
-    ssm mask. state may be None (fresh prompt) or the fp32 recurrent
-    cache."""
-    return (
-        _gdn_prefill_kernel is not None
-        and getattr(self, "_gdn_prefill", True)
-        and env_bool("GMLX_GDN_PREFILL_KERNEL", True)
-        and S > 1
-        and q_dtype in (mx.float16, mx.bfloat16)
-        and self.head_k_dim % 32 == 0
-        and self.head_v_dim % _GDN_PREFILL_SGS == 0
-        and (self.num_v_heads % self.num_k_heads) == 0
-        and (mask is None or (isinstance(mask, mx.array) and mask.ndim == 2))
-        and mx.default_device() == mx.Device(mx.gpu)
-    )
-
-
-def _gdn_prefill_update(q, k, v, a, b, A_log, dt_bias, state, mask, tiled):
-    """Blocked-scan counterpart of mlx-lm ``gated_delta_update`` taking
-    UNTILED q/k ([B, T, Hk, Dk]); ``tiled`` picks the GGUF hv % Hk pairing
-    (vs the upstream hv // (Hv/Hk) grouping). beta/g match upstream."""
-    from mlx_lm.models.gated_delta import compute_g
-
-    beta = mx.sigmoid(b)
-    g = compute_g(A_log, a, dt_bias)
-    B, T, Hk, Dk = q.shape
-    Hv, Dv = v.shape[-2:]
-    if state is None:
-        state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
-    kern = _gdn_prefill_kernel_masked if mask is not None else _gdn_prefill_kernel
-    inputs = [q, k, v, g, beta, state, T]
-    if mask is not None:
-        inputs.append(mask)
-    y, state_out = kern(
-        inputs=inputs,
-        template=[
-            ("InT", q.dtype),
-            ("StT", state.dtype),
-            ("Dk", Dk),
-            ("Dv", Dv),
-            ("Hk", Hk),
-            ("Hv", Hv),
-            ("TILED", int(tiled)),
-            ("TB", _GDN_PREFILL_TB),
-            ("SGS", _GDN_PREFILL_SGS),
-        ],
-        grid=(32, Dv, B * Hv),
-        threadgroup=(32, _GDN_PREFILL_SGS, 1),
-        output_shapes=[(B, T, Hv, Dv), state.shape],
-        output_dtypes=[q.dtype, state.dtype],
-    )
-    return y, state_out

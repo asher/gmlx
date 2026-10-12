@@ -98,6 +98,10 @@ The recording runs at true speed, with a 27B model in a local server.
 - Embeddings, rerank, speech-to-text and text-to-speech on the same server,
   for a local RAG and voice stack. See
   [Speech, embeddings and rerank](https://asher.github.io/gmlx/services.html).
+- Image generation from Z-Image, Qwen-Image 2.1 and Krea 2 Turbo GGUFs, on
+  the command line, on the OpenAI image routes and in ComfyUI. It needs an
+  M3 chip or newer. See
+  [Image generation](https://asher.github.io/gmlx/images.html).
 - A decision API at `/v1/systemone` that returns a probability for each
   answer to yes-or-no, choice and score questions about a text. See
   [Structured decisions](https://asher.github.io/gmlx/decisions.html).
@@ -180,7 +184,8 @@ gmlx builds on [llama.cpp and ggml](https://github.com/ggml-org/llama.cpp)
 for the GGUF format and the K-quant reference implementations,
 [MLX and mlx-lm](https://github.com/ml-explore/mlx-lm) for the runtime and
 model implementations, and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) for
-the server app, generation step loop and vision towers. Speech uses
+the server app, generation step loop and vision towers. gmlx carries
+mlx-lm and mlx-vlm in its package, under their licenses. Speech uses
 [mlx-whisper](https://pypi.org/project/mlx-whisper/) for speech-to-text and
 [mlx-audio](https://pypi.org/project/mlx-audio/) for text-to-speech.
 
@@ -198,6 +203,8 @@ weights have their own licenses.
 
 The files listed in
 [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT) are MIT
-licensed and have an SPDX header saying so. Vendored third-party code is
+licensed and have an SPDX header saying so. The ComfyUI node pack in
+`gmlx/comfyui_pack` is licensed under the Apache License 2.0, with its own
+LICENSE file. Vendored third-party code is
 documented in
 the [third-party notices](https://github.com/asher/gmlx/blob/main/THIRD_PARTY_NOTICES.md).

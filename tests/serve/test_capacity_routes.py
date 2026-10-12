@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.queue_cap as qc  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
@@ -18,9 +18,9 @@ from gmlx.serve.patches import capacity_routes as cr  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.serve.patches import media_gate  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_PKG = importlib.import_module("mlx_vlm.server")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 
 @pytest.fixture(autouse=True)

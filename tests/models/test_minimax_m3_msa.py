@@ -17,7 +17,7 @@ from mlx.utils import tree_flatten, tree_unflatten
 
 from gmlx.models.minimax_m3 import MSAKVCache, ModelArgs, Model
 from gmlx.load.remap import parse_gguf_name, RemapDecision
-from mlx_lm.models.cache import KVCache
+from gmlx._vendor.mlx_lm.models.cache import KVCache
 
 MAP = RemapDecision.KIND_MAP
 

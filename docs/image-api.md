@@ -1,0 +1,135 @@
+# Image API
+
+`gmlx serve` answers the OpenAI image routes with the image models of its
+configuration. This page lists the routes, the fields a request takes and
+the errors it can get. [Call it from an app](images.md#call-it-from-an-app)
+shows a first request:
+
+```sh
+curl -s localhost:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "z-image-turbo", "prompt": "a lighthouse at dusk", "seed": 1}' \
+  | jq -r '.data[0].b64_json' | base64 -d > lighthouse.png
+```
+
+- [Routes](#routes)
+- [Request fields](#request-fields)
+- [Edits and variations](#edits-and-variations)
+- [URL responses](#url-responses)
+- [Streaming](#streaming)
+- [Errors](#errors)
+
+## Routes
+
+| Route | Body | Makes |
+|-------|------|-------|
+| `POST /v1/images/generations` | JSON | Images from a prompt |
+| `POST /v1/images/edits` | Multipart form or JSON | Images from a prompt and one or more images |
+| `POST /v1/images/variations` | Multipart form | Images like the one given |
+| `GET /v1/images/files/{name}` | None | An image that a request with `response_format: url` wrote |
+
+Each route also answers without the `/v1` prefix. In `/v1/models` an image
+model has `"image": true`, its `family` and `variant`, and `edit: true` when
+it edits from reference images with its encoder's vision tower. It carries
+`resident`, `pinned` and `default`, where `default` marks the default image
+model, and no context figures.
+
+## Request fields
+
+| Field | Meaning |
+|-------|---------|
+| `prompt` | What to make. Required on generations and edits. |
+| `model` | An image model id. `default`, no model, and a name that starts with `gpt-image-`, `dall-e-` or `chatgpt-image` take the default image model. |
+| `n` | Images to make, 1 to 10, at seeds `seed`, `seed` plus 1 and so on. |
+| `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. |
+| `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. |
+| `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
+| `seed` | The seed of the first image, random without it. |
+| `guidance` | [Guidance](glossary.md#guidance), 1 to 30. 1 turns it off. |
+| `negative_prompt` | What to steer away from, read when `guidance` is above 1. |
+| `sampler` | [Sampler](glossary.md#sampler), `euler` or `uni_pc_bh2`. |
+| `scheduler` | `default` only, the model's own schedule. |
+| `strength` | How far an edit or a variation departs from its image, from 0.01 to 1. |
+| `adapters` | LoRAs for this request, as a list of `{"id", "strength"}`, as [Use a LoRA](images.md#use-a-lora) describes. |
+| `background` | `transparent`, `opaque` or `auto`. Transparency needs Qwen-Image 2.1 and png or webp. |
+| `output_format` | `png`, the default, `jpeg` or `webp`. |
+| `output_compression` | The jpeg and webp quality, 0 to 100, 100 by default. A png ignores it. |
+| `response_format` | `b64_json`, the default, or `url`. |
+| `stream` | Send the result as server-sent events. Takes `n` of 1. |
+| `partial_images` | 0 to 3 images of the work in progress before the final one, in a stream. |
+| `image`, `image[]`, `images` | The images of an edit or a variation. |
+| `mask` | An image with an alpha channel. An edit changes the pixels whose alpha is below 128. |
+
+The default image model is the one that
+[`server.defaults.image_model`](config.md#serverdefaultsimage_model) names,
+or the only one. Another name that is no image model gets 404. A `quality`
+of `high` runs the model's own steps, and `auto` the steps of the entry's
+`defaults`, or else the model's own.
+
+`moderation`, `style`, `input_fidelity` and `user` are accepted and
+ignored, and the log names them in a warning. The server writes no file
+that a request names, so `output_path`, `output_dir` and `response_format:
+"path"` get 400.
+
+## Edits and variations
+
+An edit takes its images as files of a multipart form, `image` for one and
+`image[]` for several, which is how the `openai` package sends them. A JSON
+body takes `images` as a list of `{"image_url": "data:image/..."}`, or of
+base64 image data. The server never reads a local path or fetches a URL
+from a JSON body, and a `file_id` gets 400. Images are PNG, JPEG, WebP or
+GIF.
+
+| Model | Edits | Variations |
+|-------|-------|------------|
+| Z-Image, Krea 2 | One image, which the result starts from at `strength`, 0.6 by default. More images get 400. | The image with an empty prompt, at the default `strength` |
+| Qwen-Image 2.1 | Up to 10 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
+
+Without `size`, the result takes the size of the first image, cut down to
+the model's size step and the size limits. With a `mask`, the edit starts
+from the first image at `strength` 1 and changes only the masked region.
+
+## URL responses
+
+With `response_format: url` each image is written to a file under the
+server's cache folder, and the answer links to
+`/v1/images/files/{token}.{ext}` on the host the request was sent to. The
+file route needs no API key, so that an `img` tag can show the image. The
+token is 32 random bytes, and only a client that has the link can read the
+file. Files expire after [`image.url_ttl_s`](config.md#image-requests), and
+past [`image.url_max_bytes`](config.md#image-requests) the oldest go first.
+
+## Streaming
+
+With `stream: true` the answer is server-sent events. A generation sends
+`image_generation.partial_image` events, then one
+`image_generation.completed` event. An edit sends `image_edit.partial_image`
+and `image_edit.completed`. Each partial image shows the whole image as the
+model sees it at that step, and costs one VAE decode. An error during the
+stream arrives as a data object with an `error` key, which the `openai`
+package raises:
+
+```python
+stream = client.images.generate(model="z-image-turbo", prompt="a lighthouse at dusk",
+                                stream=True, partial_images=2)
+for event in stream:
+    print(event.type)
+```
+
+## Errors
+
+| Condition | Response |
+|-----------|----------|
+| No image model in the configuration | 404 `model_not_found` |
+| A chat model id on an image route | 400 `wrong_model_kind` |
+| The model's file is gone | 404 `model_file_missing` |
+| The entry's VAE, encoder or mmproj is of another model | 400 `image_model_mismatch` |
+| A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
+| More reference images than fit in memory | 400 naming the count and the reference size that fit |
+| More requests waiting than [`image.max_queue`](config.md#image-requests) | 429 with `Retry-After` |
+| The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |
+| The job waits for its turn, or for one step, longer than [`token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) | 504, and the log marks the request `timeout` |
+
+[Troubleshooting](troubleshooting.md#image-generation) has the fix for
+each message. The Responses route does not run the `image_generation`
+tool: it drops the tool and logs a warning.

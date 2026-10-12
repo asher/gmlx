@@ -78,10 +78,10 @@ def synth_config_from_scans(scans) -> dict | None:
 
 
 def working_set_bytes() -> float | None:
-    import mlx.core as mx
+    from gmlx.device import metal_value
 
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         return None
     return ws if ws > 0 else None

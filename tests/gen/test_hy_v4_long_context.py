@@ -55,7 +55,7 @@ pytestmark = pytest.mark.integration
 
 
 def _greedy_text(model, tok, ids, n):
-    from mlx_lm.generate import stream_generate
+    from gmlx._vendor.mlx_lm.generate import stream_generate
 
     out = [int(r.token) for r in
            stream_generate(model, tok, mx.array(ids), max_tokens=n)]

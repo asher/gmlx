@@ -4,9 +4,10 @@ Step 1 of the forward-ownership plan: record the hook behavior an owned
 forward must reproduce, as executable checks against tiny random models
 rather than against reading. Every pin is an internal-consistency claim
 (hook A equals a composition of hook B and the forward; a rollback replay
-matches a sequential decode), so the pins hold both against stock mlx-vlm
-and against numerics-preserving gmlx seam patches that may already be
-installed by earlier test files in the same process.
+matches a sequential decode), so the pins hold on the owned models, which
+the copied qwen3_5 and gemma4 language paths are aliases of, with or
+without the numerics-preserving gmlx seam patches that earlier test files
+in the same process may have installed.
 
 Per-arch surface pinned here (the plan's hook table):
   qwen3_5: output holder, skip_logits, capture_layer_ids/hidden_sink/
@@ -15,7 +16,7 @@ Per-arch surface pinned here (the plan's hook table):
            rollback_speculative_cache (KV trim + GDN state restore),
            chunked_prefill_policy, _rope_deltas text zeroing.
   gemma4:  output holder (pre-final-norm hidden capture), skip_final_norm,
-           capture_layer_ids, caller-supplied sinks, shared_kv_sink,
+           skip_logits, capture_layer_ids, caller-supplied sinks, shared_kv_sink,
            speculative_draft_hidden / speculative_logits_from_hidden,
            rollback_speculative_cache, chunked_prefill_policy.
 
@@ -30,13 +31,13 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
-pytest.importorskip("mlx_vlm.models.gemma4.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
 
-from mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
-from mlx_vlm.models.gemma4.language import LanguageModel as G4LanguageModel
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
+from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
+from gmlx.models.gemma4.language import LanguageModel as G4LanguageModel
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 ATOL = 2e-3  # f32 path-divergence floor (block SDPA / chunked GDN vs step)
 
@@ -292,6 +293,16 @@ def test_g4_skip_final_norm_matches_prenorm_capture():
     assert _close(lm.model.norm(h_skip), lm.model(ids), atol=1e-6)
 
 
+def test_g4_skip_logits_still_captures_hidden():
+    lm = _g4_lm()
+    ids = _ids(*PROMPT)
+    out = lm(ids, return_hidden=True, skip_logits=True)
+    assert out.logits is None
+    assert out.hidden_states is not None and len(out.hidden_states) == 1
+    head = lm.speculative_logits_from_hidden(out.hidden_states[-1])
+    assert _close(head, lm(ids).logits)
+
+
 def test_g4_capture_layer_ids_and_caller_sink():
     lm = _g4_lm()
     ids = _ids(*PROMPT)
@@ -350,5 +361,7 @@ def test_g4_chunked_prefill_policy_table():
     assert lm.chunked_prefill_policy(
         draft_model=draft, draft_kind="dflash",
         prefill_kwargs={"capture_layer_ids": [1]}) is False
+    # The owned model reads no no_chunked_prefill: every prompt chunks
+    # (test_gemma4_owned_chunking.py).
     lm.no_chunked_prefill = True
-    assert lm.chunked_prefill_policy(draft_model=None, prefill_kwargs={}) is False
+    assert lm.chunked_prefill_policy(draft_model=None, prefill_kwargs={}) is True

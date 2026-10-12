@@ -12,14 +12,16 @@ KV+GDN sub-caches).
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import threading
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
 import mlx.core as mx
+
+from .kv_cache import ArraysCache, CacheList, RotatingKVCache
+from .media_salt import salt_at
 
 _log = logging.getLogger(__name__)
 
@@ -30,53 +32,6 @@ _HITS = 0
 _HIT_TOKENS = 0
 _STORES = 0
 _LIVE_CACHES: "weakref.WeakSet[SpecPrefixCache]" = weakref.WeakSet()
-# The salt of each inserted row until its prompt batch takes it, keyed by
-# (id(model), uid). Every row has a note, a zero salt too: a new batch
-# generator numbers its rows from 0 again, so the note of a row at a reused
-# uid must replace the note of the earlier row. A removed row loses its
-# note. Other rows that never reach a prompt batch leave in note order past
-# _ROW_SALTS_MAX. A row with no note has an unknown salt, so its prompt
-# batch neither reads nor writes L0.
-_ROW_SALTS: "OrderedDict[tuple[int, int], int]" = OrderedDict()
-_ROW_SALTS_MAX = 256
-_ROW_SALTS_LOCK = threading.Lock()
-
-
-def row_salt(prompt_kwargs) -> int:
-    """The salt of a row's entries: its APC semantic hash, which holds the
-    tenant, else a hash of its APC tenant, else 0. A row then hits only
-    entries that a row with the same salt stored."""
-    if not prompt_kwargs:
-        return 0
-    semantic = prompt_kwargs.get("_apc_semantic_hash")
-    if semantic is not None:
-        return int(semantic)
-    tenant = prompt_kwargs.get("_apc_tenant")
-    if not tenant:
-        return 0
-    return int.from_bytes(hashlib.blake2b(
-        repr(("gmlx-tenant", str(tenant))).encode(), digest_size=8).digest(), "little")
-
-
-def note_row_salts(model, uids, salts) -> None:
-    """Keep the salt of each inserted row for :func:`take_row_salts`. A note
-    replaces the note of an earlier row at the same uid."""
-    with _ROW_SALTS_LOCK:
-        for uid, salt in zip(uids, salts):
-            key = (id(model), int(uid))
-            _ROW_SALTS[key] = int(salt)
-            _ROW_SALTS.move_to_end(key)
-        while len(_ROW_SALTS) > _ROW_SALTS_MAX:
-            _ROW_SALTS.popitem(last=False)
-
-
-def take_row_salts(model, uids) -> list[int | None]:
-    """Remove and return the salt of each row, None for a row with no note.
-    A row that reaches a prompt batch without a note did not come through
-    insert, such as a row that the tick guard queues again, or its note was
-    dropped. Its salt is not known, so the caller must not use L0 for it."""
-    with _ROW_SALTS_LOCK:
-        return [_ROW_SALTS.pop((id(model), int(uid)), None) for uid in uids]
 
 
 def spec_prefix_stats() -> dict:
@@ -162,16 +117,15 @@ def _owned_pair(keys: mx.array, values: mx.array):
 
 def _snapshot_entry(c: Any) -> Any:
     """Snapshot one prompt_cache entry, preserving offset for all cache types."""
-    from .compat import cache_types
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
-    if isinstance(c, cache_types("CacheList")):
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
+    if isinstance(c, CacheList):
         return (_CACHELIST_TAG, [_snapshot_entry(sub) for sub in c.caches])
-    if isinstance(c, (PoolingCache, BatchPoolingCache)):
+    if isinstance(c, (DS4PoolingCache, DS4BatchPoolingCache)):
         # DeepSeek-V4 pooled-KV cache: no keys/values attrs, so the generic
         # branch would silently corrupt it on restore. state slices are lazy
         # views over the pre-mutation buffer node; _eval_snapshot pins them.
         return (_POOLING_TAG, c.state, c.meta_state)
-    if isinstance(c, cache_types("ArraysCache")):
+    if isinstance(c, ArraysCache):
         return (_ARRAYS_TAG, list(c.cache), c.left_padding, c.lengths)
     from .kvarn_cache import KVarNKVCache
     if isinstance(c, KVarNKVCache):
@@ -199,7 +153,7 @@ def _snapshot_entry(c: Any) -> Any:
     if offset is None:
         offset = state[0].shape[2]
     _idx = getattr(c, "_idx", 0)
-    if isinstance(c, cache_types("RotatingKVCache")):
+    if isinstance(c, RotatingKVCache):
         # When no trim/reorder applies, the returned arrays are the live ring
         # buffers, which decode mutates in place; _owned_pair decouples them.
         keys, values = _owned_pair(*_trim_rotating_state(c, state[0], state[1]))
@@ -211,9 +165,8 @@ def _snapshot_entry(c: Any) -> Any:
 
 def _restore_entry(c: Any, snap: Any) -> None:
     """Restore one prompt_cache entry from a snapshot."""
-    from .compat import cache_types
     if isinstance(snap, tuple) and snap[0] == _CACHELIST_TAG:
-        if isinstance(c, cache_types("CacheList")):
+        if isinstance(c, CacheList):
             # Member counts vary per layer on the mixed stacks (deepseek_v41
             # gives only its source layers a pool), so a zip would restore a
             # prefix and leave the rest stale.
@@ -315,28 +268,48 @@ def _entry_nbytes(kv_snaps: list[Any], hidden: mx.array) -> int:
     return total
 
 
+def _ids_tuple(token_ids: mx.array) -> tuple[int, ...]:
+    row = token_ids[0] if token_ids.ndim == 2 else token_ids
+    return tuple(int(x) for x in row.tolist())
+
+
+def _salt_at(salt: Any, n: int) -> Any:
+    """An L0 salt at prefix length ``n``: a tuple resolves each part."""
+    if isinstance(salt, tuple):
+        return tuple(salt_at(part, n) for part in salt)
+    return salt_at(salt, n)
+
+
 class _PrefixEntry:
-    __slots__ = ("token_ids", "salt", "kv_snaps", "hidden", "nbytes")
+    __slots__ = ("salt", "token_ids", "kv_snaps", "hidden", "nbytes")
 
     def __init__(
         self,
+        salt: Any,
         token_ids: tuple[int, ...],
         kv_snaps: list[Any],
         hidden: mx.array,
-        salt: int = 0,
     ):
-        self.token_ids = token_ids
         self.salt = salt
+        self.token_ids = token_ids
         self.kv_snaps = kv_snaps
         self.hidden = hidden
         self.nbytes = _entry_nbytes(kv_snaps, hidden)
 
+    @property
+    def key(self) -> tuple[Any, tuple[int, ...]]:
+        return (self.salt, self.token_ids)
+
 
 class SpecPrefixCache:
-    """LRU cache of target KV + hidden snapshots keyed by token prefix.
+    """LRU cache of target KV + hidden snapshots keyed by salt and token
+    prefix.
 
     Designed for the chat use case where each turn shares system_prompt +
-    conversation_history as a token prefix with the previous turn.
+    conversation_history as a token prefix with the previous turn. The
+    salt covers what the ids do not show (an image's pixels, a LoRA
+    adapter): an entry matches only a lookup whose salt at the entry's
+    length is equal (``_salt_at``).
 
     Parameters
     ----------
@@ -358,8 +331,8 @@ class SpecPrefixCache:
 
     def __init__(self, max_entries: int = 4, min_prefix: int = 32,
                  max_bytes: int = 8 << 30):
-        # Keyed by (salt, token ids): see row_salt.
-        self._entries: OrderedDict[tuple[int, tuple[int, ...]], _PrefixEntry] = OrderedDict()
+        self._entries: OrderedDict[tuple[Any, tuple[int, ...]], _PrefixEntry] = (
+            OrderedDict())
         self._max = max_entries
         self._min_prefix = min_prefix
         self._max_bytes = max_bytes
@@ -367,33 +340,32 @@ class SpecPrefixCache:
         _LIVE_CACHES.add(self)
 
     def lookup(
-        self, token_ids: mx.array, salt: int = 0
+        self, token_ids: mx.array, salt: Any = 0,
+        accept: Callable[[int], bool] | None = None,
     ) -> tuple[int, _PrefixEntry] | None:
-        """Find the longest cached prefix matching token_ids among the
-        entries stored with ``salt``.
+        """Find the longest cached prefix matching token_ids under ``salt``.
 
         Returns (prefix_len, entry) on hit, None on miss.  Requires at least
         one suffix token (``prefix_len < len(query)``) so the caller always
         has tokens to forward through the model for logits + shared_kv.
+        ``accept`` refuses a prefix length, as the APC media guard does.
         Moves the matched entry to the head of the LRU on access.
         """
-        if token_ids.ndim == 2:
-            ids = tuple(int(x) for x in token_ids[0].tolist())
-        else:
-            ids = tuple(int(x) for x in token_ids.tolist())
+        ids = _ids_tuple(token_ids)
 
         best: tuple[int, _PrefixEntry] | None = None
         best_len = 0
-        for (entry_salt, key), entry in self._entries.items():
-            n = len(key)
-            if entry_salt != salt or n >= len(ids) or n <= best_len:
+        for entry in self._entries.values():
+            n = len(entry.token_ids)
+            if n >= len(ids) or n <= best_len or entry.salt != _salt_at(
+                    salt, n):
                 continue
-            if ids[:n] == key:
+            if ids[:n] == entry.token_ids and (accept is None or accept(n)):
                 best = (n, entry)
                 best_len = n
 
         if best is not None and best_len >= self._min_prefix:
-            self._entries.move_to_end((salt, best[1].token_ids))
+            self._entries.move_to_end(best[1].key)
             global _HITS, _HIT_TOKENS
             _HITS += 1
             _HIT_TOKENS += best_len
@@ -405,26 +377,24 @@ class SpecPrefixCache:
         token_ids: mx.array,
         prompt_cache: list,
         hidden: mx.array,
-        salt: int = 0,
+        salt: Any = 0,
     ) -> None:
-        """Cache target KV state + hidden for this token sequence, for
-        lookups with the same ``salt``.
+        """Cache target KV state + hidden for this token sequence under
+        ``salt``.
 
         Snapshots every cache entry in prompt_cache (architecture-agnostic:
         handles KVCache, RotatingKVCache, ArraysCache, CacheList) and the
         target hidden. Arrays are evaluated/materialized so they survive
         subsequent in-place cache mutation during decode.
         """
-        if token_ids.ndim == 2:
-            ids = tuple(int(x) for x in token_ids[0].tolist())
-        else:
-            ids = tuple(int(x) for x in token_ids.tolist())
+        ids = _ids_tuple(token_ids)
 
         if len(ids) < self._min_prefix:
             return
 
         kv_snaps = [_snapshot_entry(c) for c in prompt_cache]
-        entry = _PrefixEntry(ids, kv_snaps, hidden, salt)
+        entry = _PrefixEntry(_salt_at(salt, len(ids)), ids, kv_snaps, hidden)
+        key = entry.key
 
         # Budget check before materializing: nbytes needs only shapes, and
         # skipping the eval avoids a doomed multi-GB copy of deep-context KV.
@@ -439,7 +409,6 @@ class SpecPrefixCache:
         _eval_snapshot(kv_snaps)
         mx.eval(hidden)
 
-        key = (salt, ids)
         if key in self._entries:
             old = self._entries.pop(key)
             self._total_bytes -= old.nbytes

@@ -5,10 +5,11 @@ cursor riding the wrapped stock checkpoint store, and B=1 retirement at
 generation-batch row exit.
 """
 
+import logging
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.cache.retire_key as retire_key
 import gmlx.spec.ckpt as ckpt
@@ -84,6 +85,86 @@ def test_plain_init_restores_and_trims():
     assert b._apc_meta[0]["checkpoint_len"] > 32
 
 
+def test_plain_init_trims_mrope_position_ids_on_their_sequence_axis():
+    """An image turn carries (3, B, L) position ids. The restore trims
+    them on the last axis, as the stock trims do."""
+    engine._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(500, 596))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=7))
+    pos = mx.stack([mx.arange(96) + 1000 * k for k in (1, 2, 3)])[:, None]
+    mask = mx.ones((1, 96), dtype=mx.int32)
+    b = _plain_batch(man, ids)
+    b._prompt_kwargs = {"position_ids": pos, "attention_mask": mask}
+    b._prompt_length_aware_keys = ["position_ids", "attention_mask"]
+    ckpt._plain_ckpt_init(b)
+    assert b._processed_prompt_columns == 32
+    assert b._prompt_kwargs["position_ids"].tolist() == pos[:, :, 32:].tolist()
+    assert b._prompt_kwargs["attention_mask"].shape == (1, 64)
+
+
+def _progress_batch(b, prompt_tokens):
+    """The fields the stock ``prompt_progress`` reads, as the stock init
+    and the prefill timer set them, and the row ids emptied as the stock
+    ``generate`` leaves them before the server reads the progress."""
+    b._prompt_uids = list(b.uids)
+    b._prompt_tokens_per_row = [prompt_tokens] * len(b.uids)
+    b._cached_tokens_per_row = [0] * len(b.uids)
+    b._prompt_time_s = 0.5
+    b.uids = []
+    return b
+
+
+def _prefill_line(caplog, progress):
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="gmlx._vendor.mlx_vlm.server"):
+        ResponseGenerator._log_prefill_completed(
+            progress.uid, {"request_id": "r"}, progress)
+    return [m for m in caplog.messages if "Prefill completed" in m][0]
+
+
+def test_prefill_line_counts_the_checkpoint_restore(caplog):
+    """A checkpoint restore keeps stock's per-row cached count at 0 (the
+    prompt is trimmed in place), and the usage and the "Prefill
+    completed" line report the restored tokens."""
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
+
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
+
+    install_full_prompt_mtp_prefill()
+    engine._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(700, 796))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=11))
+    b = _plain_batch(man, ids)
+    ckpt._plain_ckpt_init(b)
+    assert b._processed_prompt_columns == 32
+    (progress,) = PromptProcessingBatch.prompt_progress(_progress_batch(b, 96))
+    assert progress.cached_tokens == 32
+    assert "prompt_tokens=96 cached_tokens=32 " in _prefill_line(caplog, progress)
+
+
+def test_prefill_line_counts_the_mtp_prefix_restore(caplog):
+    """The owned MTP ladder records its L0 or L1 restore the same way. A
+    batch of two rows keeps the stock counts."""
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
+
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
+
+    install_full_prompt_mtp_prefill()
+    b = _progress_batch(SimpleNamespace(uids=[4], _mtp_apc_prefix_len=40), 64)
+    (progress,) = PromptProcessingBatch.prompt_progress(b)
+    assert "prompt_tokens=64 cached_tokens=40 " in _prefill_line(caplog, progress)
+    two = _progress_batch(SimpleNamespace(
+        uids=[4, 5], _mtp_apc_prefix_len=40,
+        _kq_apc_restored=(40, "ckpt")), 64)
+    two._cached_tokens_per_row = [16, 0]
+    rows = PromptProcessingBatch.prompt_progress(two)
+    assert [r.cached_tokens for r in rows] == [16, 0]
+
+
 def test_plain_init_leaves_batched_rows_stock():
     engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)
@@ -101,7 +182,7 @@ def test_plain_init_skips_a_quantized_live_cache(caplog):
     logged once per model, not the zero-stores tripwire."""
     import logging
 
-    from mlx_vlm.models.cache import QuantizedKVCache
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
     engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)
@@ -122,7 +203,7 @@ def test_plain_init_skips_a_quantized_live_cache(caplog):
 
 
 def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     ckpt._install_ckpt_checkpoint_store()
     man = APCManager(num_blocks=64, block_size=16)
@@ -139,6 +220,9 @@ def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
         _kq_ckpt_armed = True
         prompt_cache = make_hybrid_cache(32, seed=8)
 
+        _apc_uses_checkpoints = PromptProcessingBatch._apc_uses_checkpoints
+        _apc_pending_checkpoint = PromptProcessingBatch._apc_pending_checkpoint
+
         def _row_real_tokens_processed(self, i):
             return 32
 
@@ -153,7 +237,7 @@ def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
 
 
 def test_gen_batch_filter_retires_lone_row(monkeypatch):
-    from mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
@@ -176,7 +260,7 @@ def test_gen_batch_filter_retires_lone_row(monkeypatch):
 
 
 def test_gen_batch_retire_uses_decode_snap_on_divergence(monkeypatch):
-    from mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
@@ -206,7 +290,7 @@ def test_gen_batch_retire_uses_decode_snap_on_divergence(monkeypatch):
 def _batched_hybrid_cache(lens, total):
     """LAYOUT-shaped B=len(lens) batch caches: BatchKVCache rows merged
     from different lengths (left-padded), row-dim ArraysCache states."""
-    from mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
 
     H, D = 2, 8
     caches = []
@@ -230,7 +314,7 @@ def _batched_hybrid_cache(lens, total):
 
 
 def test_gen_batch_filter_retires_leaving_row_batched():
-    from mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
@@ -253,7 +337,7 @@ def test_gen_batch_filter_retires_leaving_row_batched():
 
 
 def test_gen_batch_extend_carries_stash():
-    from mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     ckpt._install_plain_ckpt_decode()
     stash = {"full_ids": [1, 2], "mode": "ckpt", "gen": []}
@@ -281,8 +365,8 @@ def test_exact_anchor_init_arms_retire_stash():
 
 
 def test_gen_batch_filter_retires_exact_row():
-    from mlx_vlm.generate.ar import GenerationBatch
-    from mlx_vlm.models.cache import KVCache
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
     ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)

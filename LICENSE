@@ -29,6 +29,8 @@ File-level exception: files that carry an "SPDX-License-Identifier: MIT"
 header, such as the mlx-lm-style model modules, are licensed under the MIT
 license (see LICENSE-MIT), not under this License.
 
+Files in gmlx/comfyui_pack, the ComfyUI node pack, are licensed under the Apache License, Version 2.0 (see the LICENSE file in that folder), not under this License.
+
 Notice
 
 Business Source License 1.1

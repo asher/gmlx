@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.eval_guard as eg
 import gmlx.serve.tick_guard as tg

@@ -15,7 +15,6 @@ import pytest
 import gmlx.spec.speculative as sp
 import gmlx.upstream.gdn_patches as gp
 from gmlx.models.qwen35.gdn import OwnedQwen3_5GatedDeltaNet, prepare_gdn
-from gmlx.upstream.gdn_patches import _patch_gated_delta_tiled_v
 
 from test_dflash2_drafter import BLOCK, N_GEN, _drafter, _engine_walk, _target
 
@@ -29,12 +28,6 @@ pytestmark = [
 
 PROMPT = [[1, 2, 3, 4, 5]]
 BLOCK_IDS = [[11, 22, 33, 44]]
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _tiled_v():
-    # Every qwen3.5 GGUF load tiles mlx-lm's K->V map; the prefill takes it.
-    _patch_gated_delta_tiled_v()
 
 
 def _armed(records):

@@ -4,8 +4,9 @@ Drop-in replacement for mlx-vlm's ``Qwen3_5MTPDraftModel`` in the owned
 speculative engine. Same weight tree (``fc`` / ``pre_fc_norm_embedding`` /
 ``pre_fc_norm_hidden`` / ``layers.{i}`` / ``norm``) so the GGUF MTP-block remap
 (loader ``remap_mtp_arrays`` + ``_install_and_load(..., sanitize=False)``) loads
-onto it unchanged, and the transformer block itself is reused from mlx-vlm -- we
-own the *draft algorithm*, not the numerics.
+onto it unchanged, and the transformer block itself is the vendored mlx-vlm
+0.6.15 decoder layer (``gmlx.models.qwen35.language``) -- we own the *draft
+algorithm*, not the numerics.
 
 Why own it: a place to own the draft algorithm (the rollout feed, the block
 schedule, the batched round for M2) without forking mlx-vlm's transformer
@@ -44,14 +45,13 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import create_attention_mask
-from mlx_vlm.models.cache import BatchKVCache, KVCache
-
 import gmlx.gen.prefill_decay as prefill_decay
 from .drafter_protocol import native_block_size
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import BatchKVCache, KVCache
 from gmlx.envflags import env_bool, env_int
-from mlx_vlm.models.qwen3_5.language import Qwen3_5DecoderLayer
-from mlx_vlm.models.qwen3_5_moe.language import Qwen3_5MoeDecoderLayer
+from gmlx.models.qwen35.language import Qwen3_5DecoderLayer
+from gmlx.models.qwen35.moe_language import Qwen3_5MoeDecoderLayer
 
 # The rollout has no target hidden for a drafted token, so it feeds the MTP head's
 # own previous-step output as the next "hidden". The head's pre_fc_norm_hidden
@@ -383,6 +383,10 @@ class QwenMTPDrafter(nn.Module):
             tokens.append(tok)
             self._seed_token = None
             self._seed_hidden = None
+            # The engine async-evaluates the seed with the head's cache state.
+            # Wait for it: a step built while it runs cannot write the head's
+            # KV in place, and its first append copies all of the K and V.
+            mx.eval(tok, h_prev)
 
         while len(tokens) < block_size - 1:
             h = self._forward(tok, h_prev)

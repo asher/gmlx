@@ -43,8 +43,8 @@ def test_install_disabled_by_env(monkeypatch, fake_kq):
 
 
 def test_install_wraps_engine_once(monkeypatch, fake_kq):
-    pytest.importorskip("mlx_vlm")
-    from mlx_vlm.generate import ar
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     import gmlx.serve.cb_phase as cb_phase
 
@@ -72,8 +72,8 @@ def test_phase_invariant_across_request_sequences(monkeypatch, fake_kq):
     orders the scheduler actually produces. The short-prompt case is the
     regression: a prompt at or under the chunk size skips prompt_step, so
     generate() is its entire prefill and must flip fine itself."""
-    pytest.importorskip("mlx_vlm")
-    from mlx_vlm.generate import ar
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     import gmlx.serve.cb_phase as cb_phase
 
@@ -151,7 +151,7 @@ def test_phased_steps_close_closes_wrapped_generator(fake_kq):
 
 
 def test_install_steps_wraps_generate_step_once(monkeypatch, fake_kq):
-    lmgen = importlib.import_module("mlx_lm.generate")
+    lmgen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
     spec = importlib.import_module("gmlx.spec.speculative")
 
     import gmlx.serve.cb_phase as cb_phase
@@ -176,7 +176,7 @@ def test_install_steps_wraps_generate_step_once(monkeypatch, fake_kq):
 
 
 def test_install_steps_skips_streaming_and_env(monkeypatch, fake_kq):
-    lmgen = importlib.import_module("mlx_lm.generate")
+    lmgen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 
     import gmlx.serve.cb_phase as cb_phase
 

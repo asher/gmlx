@@ -28,7 +28,6 @@ from .tiny_train_archs import (
     eval_logits,
     logits_of,
     num_layers,
-    process_patches,
     rel,
     text_root,
     vocab_size,
@@ -111,7 +110,7 @@ def _one_step(model, batch, lengths):
 
 @pytest.mark.parametrize("arch", list(CASES))
 def test_one_step_trains_exports_and_serves(arch, tmp_path):
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     from gmlx.load.adapter import apply_gguf_adapter
     from gmlx.tune.attention import install_training_attention
@@ -125,50 +124,49 @@ def test_one_step_trains_exports_and_serves(arch, tmp_path):
         save_trained_adapter,
     )
 
-    with process_patches():
-        model, config, case = build(arch)
-        adapted = prepare_lora_student(model, rank=4, scale=SCALE, num_layers=None)
-        assert adapted > 0
-        names = base_names(text_root(model), case.gguf_arch, num_layers(config))
-        assert adapter_refusals(model, base_arch=case.gguf_arch, base_names=names) == {}
+    model, config, case = build(arch)
+    adapted = prepare_lora_student(model, rank=4, scale=SCALE, num_layers=None)
+    assert adapted > 0
+    names = base_names(text_root(model), case.gguf_arch, num_layers(config))
+    assert adapter_refusals(model, base_arch=case.gguf_arch, base_names=names) == {}
 
-        # 2 x 64 input tokens, 512 routed rows at top-4
-        vocab = vocab_size(config)
-        batch, lengths = _batch(vocab, 65, [65, 50], seed=1)
-        restores = [install_training_attention(model), install_index_stop_gradient(),
-                    install_training_switch_gemm()]
-        install_training_gdn(model)
-        try:
-            loss, grad = _one_step(model, batch, lengths)
-        finally:
-            for restore in reversed(restores):
-                restore()
-        assert math.isfinite(loss)
-        zero = set()
-        for k, g in tree_flatten(grad):
-            if k.endswith(".lora_b"):
-                g = g.astype(mx.float32)
-                assert mx.all(mx.isfinite(g)).item(), k
-                if mx.abs(g).max().item() == 0.0:
-                    zero.add(k[: -len(".lora_b")])
-        assert zero == ZERO_GRAD.get(arch, set())
+    # 2 x 64 input tokens, 512 routed rows at top-4
+    vocab = vocab_size(config)
+    batch, lengths = _batch(vocab, 65, [65, 50], seed=1)
+    restores = [install_training_attention(model), install_index_stop_gradient(),
+                install_training_switch_gemm()]
+    install_training_gdn(model)
+    try:
+        loss, grad = _one_step(model, batch, lengths)
+    finally:
+        for restore in reversed(restores):
+            restore()
+    assert math.isfinite(loss)
+    zero = set()
+    for k, g in tree_flatten(grad):
+        if k.endswith(".lora_b"):
+            g = g.astype(mx.float32)
+            assert mx.all(mx.isfinite(g)).item(), k
+            if mx.abs(g).max().item() == 0.0:
+                zero.add(k[: -len(".lora_b")])
+    assert zero == ZERO_GRAD.get(arch, set())
 
-        tokens = _batch(vocab, 24, [24, 24], seed=3)[0]
-        sel = Selections()
-        with sel:
-            trained = eval_logits(model, tokens, sel, "record")
-        path = str(tmp_path / "adapter.gguf")
-        assert save_trained_adapter(model, config, base_arch=case.gguf_arch, out_path=path,
-                                    scale=SCALE, base_names=names) == adapted
-        wrapped = [(p, m) for p, m in model.named_modules() if isinstance(m, LoRALinear)]
-        assert len(wrapped) == adapted
-        for p, m in wrapped:
-            _set_module(model, p, m.linear)
-        base = eval_logits(model, tokens)
-        assert apply_gguf_adapter(model, config, path, base_arch=case.gguf_arch) == adapted
-        with sel:
-            served = eval_logits(model, tokens, sel, "replay")
-        assert sel.mismatch == 0 and sel.aligned()
+    tokens = _batch(vocab, 24, [24, 24], seed=3)[0]
+    sel = Selections()
+    with sel:
+        trained = eval_logits(model, tokens, sel, "record")
+    path = str(tmp_path / "adapter.gguf")
+    assert save_trained_adapter(model, config, base_arch=case.gguf_arch, out_path=path,
+                                scale=SCALE, base_names=names) == adapted
+    wrapped = [(p, m) for p, m in model.named_modules() if isinstance(m, LoRALinear)]
+    assert len(wrapped) == adapted
+    for p, m in wrapped:
+        _set_module(model, p, m.linear)
+    base = eval_logits(model, tokens)
+    assert apply_gguf_adapter(model, config, path, base_arch=case.gguf_arch) == adapted
+    with sel:
+        served = eval_logits(model, tokens, sel, "replay")
+    assert sel.mismatch == 0 and sel.aligned()
 
     tol = PARITY_TOL[arch]
     for form, t, s, b in zip(("full", "decode"), trained, served, base):
@@ -193,21 +191,20 @@ def test_a_folded_gated_product_trains_where_its_projection_is_unadapted(monkeyp
     fused = kq.glu_hadamard
     monkeypatch.setattr(kq, "glu_hadamard",
                         lambda *a, **k: calls.append(1) or fused(*a, **k))
-    with process_patches():
-        model, config, _ = build("qwen3_5_hadamard")
-        keys = ("self_attn.q_proj", "mlp.gate_proj", "mlp.up_proj")
-        assert prepare_lora_student(model, rank=4, scale=SCALE, num_layers=None, keys=keys) > 0
-        batch, lengths = _batch(vocab_size(config), 65, [65, 50], seed=1)
-        restore = install_training_attention(model)
-        install_training_gdn(model)
-        try:
-            loss, grad = _one_step(model, batch, lengths)
-        finally:
-            restore()
-        assert math.isfinite(loss) and not calls
-        for k, g in tree_flatten(grad):
-            if k.endswith(".lora_b"):
-                assert mx.abs(g.astype(mx.float32)).max().item() > 0.0, k
-        eval_logits(model, _batch(vocab_size(config), 24, [24, 24], seed=3)[0])
+    model, config, _ = build("qwen3_5_hadamard")
+    keys = ("self_attn.q_proj", "mlp.gate_proj", "mlp.up_proj")
+    assert prepare_lora_student(model, rank=4, scale=SCALE, num_layers=None, keys=keys) > 0
+    batch, lengths = _batch(vocab_size(config), 65, [65, 50], seed=1)
+    restore = install_training_attention(model)
+    install_training_gdn(model)
+    try:
+        loss, grad = _one_step(model, batch, lengths)
+    finally:
+        restore()
+    assert math.isfinite(loss) and not calls
+    for k, g in tree_flatten(grad):
+        if k.endswith(".lora_b"):
+            assert mx.abs(g.astype(mx.float32)).max().item() > 0.0, k
+    eval_logits(model, _batch(vocab_size(config), 24, [24, 24], seed=3)[0])
     # serve fuses at the same sites
     assert calls

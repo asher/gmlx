@@ -1,0 +1,1432 @@
+import math
+from functools import partial
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import mlx.core as mx
+import mlx.nn as nn
+from mlx.nn.layers.distributed import shard_inplace, shard_linear
+from mlx.utils import tree_flatten
+
+from ..base import (
+    LanguageModelOutput,
+    create_attention_mask,
+    scaled_dot_product_attention,
+)
+from ..cache import CacheList, PoolingCache, RotatingKVCache
+from ..linear import DECODE_BLOCK_SIZE, linear, tokenwise
+from ..mla import MultiLinear
+from ..pipeline import PipelineMixin
+from ..switch_layers import MoE, SwitchGLU
+from .config import ModelConfig
+from .hisa_kernel import hisa_select
+from .hyper_connection import HyperConnection, HyperHead
+
+
+def make_quantization_config(model):
+    mxfp4 = {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+    mxfp8 = {"group_size": 32, "bits": 8, "mode": "mxfp8"}
+
+    flat_modules = tree_flatten(model.leaf_modules(), is_leaf=nn.Module.is_module)
+    experts = {
+        k: mxfp4
+        for k, _ in flat_modules
+        if ".ffn.switch_mlp." in k and k.endswith("_proj")
+    }
+    shared_experts = {k: mxfp8 for k, _ in flat_modules if ".ffn.shared_experts." in k}
+    attn = {
+        k: mxfp8 for k, _ in flat_modules if ".attn.w" in k or ".attn.indexer.wq" in k
+    }
+
+    return {
+        "group_size": 64,
+        "bits": 8,
+        "mode": "affine",
+        **experts,
+        **shared_experts,
+        **attn,
+    }
+
+
+def normalize_checkpoint_key(key: str) -> str:
+    """Normalize official-inference and Transformers DeepSeek-V4 namespaces."""
+    if key.startswith("model."):
+        key = key[len("model.") :]
+        if key == "embed_tokens.weight":
+            key = "embed.weight"
+
+    key = key.replace(".self_attn.", ".attn.")
+    key = key.replace(".mlp.", ".ffn.")
+    key = key.replace(".weight_scale_inv", ".scale")
+
+    if ".ffn.experts." in key:
+        for projection, checkpoint_name in (
+            ("gate_proj", "w1"),
+            ("down_proj", "w2"),
+            ("up_proj", "w3"),
+        ):
+            key = key.replace(f".{projection}.", f".{checkpoint_name}.")
+    return key
+
+
+def _score_func(scores: mx.array, func: str) -> mx.array:
+    if func == "softmax":
+        return mx.softmax(scores, axis=-1, precise=True)
+    if func == "sigmoid":
+        return mx.sigmoid(scores)
+    if func == "sqrtsoftplus":
+        return mx.sqrt(nn.softplus(scores))
+    raise ValueError(f"Unsupported DeepSeek-V4 scoring function: {func}")
+
+
+def get_image_visible(
+    input_ids: mx.array,
+    vocab_size: int,
+    max_image_tokens: int,
+) -> Tuple[mx.array, mx.array]:
+    """Return the number of visible image tokens to each side of every token."""
+    sequence_length = input_ids.shape[1]
+    positions = mx.arange(sequence_length, dtype=mx.int32)[None]
+    is_start = input_ids == vocab_size
+    is_end = input_ids == vocab_size + 4
+    valid = (mx.cumsum(is_start, axis=1) > mx.cumsum(is_end, axis=1)) | is_end
+
+    starts = mx.cummax(mx.where(is_start, positions, 0), axis=1)
+    left = (positions - starts) * valid
+    ends = mx.where(is_end, positions, sequence_length)
+    ends = mx.cummin(ends[:, ::-1], axis=1)[:, ::-1]
+    right = (ends - positions) * valid
+    return (
+        mx.minimum(left, max_image_tokens - 1),
+        mx.minimum(right, max_image_tokens),
+    )
+
+
+def create_image_attention_mask(
+    input_ids: mx.array,
+    vocab_size: int,
+    window_size: int,
+    max_image_tokens: int,
+) -> mx.array:
+    """Build the reference local mask with bidirectional image visibility."""
+    sequence_length = input_ids.shape[1]
+    positions = mx.arange(sequence_length, dtype=mx.int32)[None]
+    left, right = get_image_visible(input_ids, vocab_size, max_image_tokens)
+    left_extension = mx.maximum(left - (window_size - 1), 0)
+    starts = mx.maximum(positions - (window_size - 1) - left_extension, 0)
+    ends = positions + right
+    keys = mx.arange(sequence_length, dtype=mx.int32)[None, None]
+    return ((keys >= starts[..., None]) & (keys <= ends[..., None]))[:, None]
+
+
+def combine_image_attention_mask(
+    base_mask: Optional[mx.array],
+    image_mask: mx.array,
+    image_rows: mx.array,
+) -> mx.array:
+    """Apply image visibility only to rows containing image sentinels."""
+    if base_mask is None:
+        return image_mask
+    if base_mask.ndim == 2:
+        base_mask = base_mask[None, None]
+    elif base_mask.ndim == 3:
+        base_mask = base_mask[:, None]
+
+    prefix_length = base_mask.shape[-1] - image_mask.shape[-1]
+    if prefix_length < 0:
+        raise ValueError("DeepSeek-V4 image mask exceeds the attention key length")
+    if prefix_length:
+        # Image-bearing rows are cold-prefilled, but a merged batch can contain
+        # physical left-padding for unrelated warm rows. Reuse the ordinary
+        # cache mask for those prefix columns so padding never becomes visible.
+        image_mask = mx.concatenate(
+            [base_mask[..., :prefix_length], image_mask], axis=-1
+        )
+    return mx.where(image_rows[:, None, None, None], image_mask, base_mask)
+
+
+@mx.compile
+def _expert_select(
+    logits: mx.array,
+    e_score_correction_bias: mx.array,
+    top_k: int,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    scoring_func: str,
+) -> Tuple[mx.array, mx.array]:
+    logits = logits.astype(mx.float32)
+    scores = _score_func(logits, scoring_func)
+    biased = scores + e_score_correction_bias
+    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k].astype(
+        mx.int32
+    )
+    weights = mx.take_along_axis(scores, inds, axis=-1)
+    if scoring_func != "softmax" and norm_topk_prob:
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    weights = weights * routed_scaling_factor
+    return inds, weights
+
+
+@mx.compile
+def _vision_expert_select(
+    logits: mx.array,
+    e_score_correction_bias: mx.array,
+    bias_vl: mx.array,
+    image_mask: mx.array,
+    top_k: int,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    scoring_func: str,
+) -> Tuple[mx.array, mx.array]:
+    logits = logits.astype(mx.float32)
+    scores = _score_func(logits, scoring_func)
+    correction = mx.where(image_mask[..., None], bias_vl, e_score_correction_bias)
+    inds = mx.argpartition(-(scores + correction), kth=top_k - 1, axis=-1)[
+        ..., :top_k
+    ].astype(mx.int32)
+    weights = mx.take_along_axis(scores, inds, axis=-1)
+    if scoring_func != "softmax" and norm_topk_prob:
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    weights = weights * routed_scaling_factor
+    return inds, weights
+
+
+@mx.compile
+def _hash_expert_select(
+    input_ids: mx.array,
+    logits: mx.array,
+    tid2eid: mx.array,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    scoring_func: str,
+) -> Tuple[mx.array, mx.array]:
+    logits = logits.astype(mx.float32)
+    scores = _score_func(logits, scoring_func)
+    inds = tid2eid[input_ids].astype(mx.int32)
+    weights = mx.take_along_axis(scores, inds, axis=-1)
+    if scoring_func != "softmax" and norm_topk_prob:
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    weights = weights * routed_scaling_factor
+    return inds, weights
+
+
+@mx.compile
+def _vision_hash_expert_select(
+    input_ids: mx.array,
+    logits: mx.array,
+    tid2eid: mx.array,
+    bias_vl: mx.array,
+    vocab_size: int,
+    top_k: int,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    scoring_func: str,
+) -> Tuple[mx.array, mx.array]:
+    logits = logits.astype(mx.float32)
+    scores = _score_func(logits, scoring_func)
+    image_mask = input_ids >= vocab_size
+    safe_ids = mx.where(image_mask, 0, input_ids)
+    inds = tid2eid[safe_ids].astype(mx.int32)
+    vision_inds = mx.argpartition(-(scores + bias_vl), kth=top_k - 1, axis=-1)[
+        ..., :top_k
+    ].astype(mx.int32)
+    inds = mx.where(image_mask[..., None], vision_inds, inds)
+    weights = mx.take_along_axis(scores, inds, axis=-1)
+    if scoring_func != "softmax" and norm_topk_prob:
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    weights = weights * routed_scaling_factor
+    return inds, weights
+
+
+@mx.compile
+def _limited_swiglu(gate: mx.array, up: mx.array, limit: float) -> mx.array:
+    if limit and limit > 0:
+        gate = mx.minimum(gate, limit)
+        up = mx.clip(up, -limit, limit)
+    return nn.silu(gate) * up
+
+
+class LimitedSwiGLU(nn.Module):
+    def __init__(self, limit: float):
+        super().__init__()
+        self.limit = limit
+
+    def __call__(self, x, gate):
+        return _limited_swiglu(gate, x, self.limit)
+
+
+class DeepseekV4RoPE(nn.Module):
+    def __init__(
+        self,
+        dims: int,
+        base: float,
+        scaling_config: Optional[Dict] = None,
+        max_position_embeddings: int = 1048576,
+        freq_scale: int = 1,
+    ):
+        super().__init__()
+        self.dims = dims
+        self.freq_scale = freq_scale
+
+        inv_freq = 1.0 / (base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims))
+        rope_type = None
+        if scaling_config is not None:
+            rope_type = scaling_config.get("type") or scaling_config.get("rope_type")
+
+        if rope_type in ("yarn", "deepseek_yarn"):
+            factor = scaling_config["factor"]
+            original_max_position_embeddings = scaling_config[
+                "original_max_position_embeddings"
+            ]
+            beta_fast = scaling_config.get("beta_fast", 32)
+            beta_slow = scaling_config.get("beta_slow", 1)
+
+            def correction_dim(num_rotations):
+                return (
+                    dims
+                    * math.log(
+                        original_max_position_embeddings / (num_rotations * 2 * math.pi)
+                    )
+                    / (2 * math.log(base))
+                )
+
+            low = max(math.floor(correction_dim(beta_fast)), 0)
+            high = min(math.ceil(correction_dim(beta_slow)), dims - 1)
+            if low == high:
+                high += 0.001
+
+            ramp = (mx.arange(dims // 2, dtype=mx.float32) - low) / (high - low)
+            smooth = 1 - mx.clip(ramp, 0, 1)
+            inv_freq = inv_freq / factor * (1 - smooth) + inv_freq * smooth
+
+        elif rope_type not in (None, "default"):
+            raise ValueError(f"Unsupported DeepSeek-V4 RoPE type: {rope_type}")
+
+        self._freqs = 1.0 / inv_freq
+        self._freqs_cache = {}
+
+    def _get_freqs(self, head_dim: int, inverse: bool):
+        key = (head_dim, inverse)
+        if key not in self._freqs_cache:
+            f = self._freqs
+            if self.freq_scale != 1:
+                f = f / self.freq_scale
+            if inverse:
+                f = -f
+            nope_pairs = (head_dim - self.dims) // 2
+            if nope_pairs > 0:
+                f = mx.concatenate([mx.full((nope_pairs,), mx.inf), f])
+            self._freqs_cache[key] = f
+        return self._freqs_cache[key]
+
+    def __call__(
+        self,
+        x: mx.array,
+        offset: Any = 0,
+        inverse: bool = False,
+    ) -> mx.array:
+        head_dim = x.shape[-1]
+        freqs = self._get_freqs(head_dim, inverse)
+        offset = offset // self.freq_scale if self.freq_scale != 1 else offset
+        return mx.fast.rope(
+            x,
+            head_dim,
+            traditional=True,
+            base=None,
+            scale=1.0,
+            offset=offset,
+            freqs=freqs,
+        )
+
+
+def _apply_score_mask(scores: mx.array, mask: Optional[mx.array]) -> mx.array:
+    if mask is None:
+        return scores
+    if mask.dtype == mx.bool_:
+        return mx.where(mask, scores, mx.finfo(scores.dtype).min)
+    return scores + mask.astype(scores.dtype)
+
+
+def _extend_mask(mask: Optional[mx.array], pool_mask: Optional[mx.array], N: int):
+    if mask is None:
+        return None
+
+    if mask.ndim == 2:
+        mask = mask[None, None]
+    elif mask.ndim == 3:
+        mask = mask[:, None]
+    B, H, L, S = mask.shape
+
+    if pool_mask is None:
+        pool_mask = mx.ones((B, H, L, N - S), dtype=mx.bool_)
+    elif pool_mask.ndim == 2:
+        pool_mask = mx.broadcast_to(pool_mask, (B, H, L, N - S))
+    elif pool_mask.ndim == 3:
+        pool_mask = mx.broadcast_to(pool_mask[:, None], (B, H, L, N - S))
+
+    full_mask = mx.concatenate([mask, pool_mask], axis=-1)
+
+    return full_mask
+
+
+def _align_local_mask(mask: Optional[mx.array], local_len: int):
+    if mask is None:
+        return None
+
+    current_len = mask.shape[-1]
+    if current_len == local_len:
+        return mask
+    if current_len > local_len:
+        return mask[..., -local_len:]
+
+    pad_shape = (*mask.shape[:-1], local_len - current_len)
+    if mask.dtype == mx.bool_:
+        pad = mx.ones(pad_shape, dtype=mask.dtype)
+    else:
+        pad = mx.zeros(pad_shape, dtype=mask.dtype)
+    return mx.concatenate([pad, mask], axis=-1)
+
+
+@partial(mx.compile, shapeless=True)
+def _simple_compress_kv(kv, gate, ape, head_dim):
+    weights = mx.softmax(gate.astype(mx.float32) + ape, axis=-2)
+    weights = weights.astype(kv.dtype)
+    return (kv * weights).sum(axis=-2)
+
+
+@mx.compile
+def _overlap_compress_kv(kv, gate, ape, head_dim):
+    B, L, R, D = kv.shape
+
+    gate = gate + ape.astype(gate.dtype)
+
+    kv_0 = mx.zeros((B, 1, R, D // 2), dtype=kv.dtype)
+    kv_a, kv_b = mx.split(kv, 2, axis=-1)
+    kv_a = mx.concatenate([kv_0, kv_a[:, :-1]], axis=1)
+    kv = mx.concatenate([kv_a, kv_b], axis=2)
+
+    gate_0 = mx.full((B, 1, R, D // 2), -mx.inf, dtype=kv.dtype)
+    gate_a, gate_b = mx.split(gate, 2, axis=-1)
+    gate_a = mx.concatenate([gate_0, gate_a[:, :-1]], axis=1)
+    gate = mx.concatenate([gate_a, gate_b], axis=2)
+
+    weights = mx.softmax(gate, axis=-2, precise=True)
+    return (kv * weights).sum(axis=-2)
+
+
+@partial(mx.compile, shapeless=True)
+def _split_softmax(log_normalizer, logits_a, logits_b, sinks=None):
+    if sinks is not None:
+        log_normalizer = mx.logaddexp(log_normalizer, sinks)
+    weights_a = mx.exp(logits_a - log_normalizer)
+    weights_b = mx.exp(logits_b - log_normalizer)
+    return weights_a, weights_b
+
+
+def _sparse_pooled_attention(
+    q: mx.array,
+    local_kv: mx.array,
+    pooled: mx.array,
+    topk: mx.array,
+    local_mask: Optional[mx.array],
+    pooled_mask: Optional[mx.array],
+    scale: float,
+    sinks: Optional[mx.array],
+) -> mx.array:
+    B, H, L, D = q.shape
+    idx = topk[:, None, :, :, None]
+    pooled = mx.take_along_axis(
+        mx.broadcast_to(pooled[:, None, None], (B, 1, L, pooled.shape[1], D)),
+        mx.broadcast_to(idx, idx.shape[:-1] + (D,)),
+        axis=3,
+    )
+
+    q_scaled = q * scale
+    local_scores = q_scaled @ local_kv.swapaxes(-1, -2)
+    local_scores = _apply_score_mask(local_scores, local_mask)
+    normalizer = mx.logsumexp(local_scores, -1, keepdims=True)
+
+    pooled_sq = pooled.squeeze(1)
+    q_bl = q_scaled.transpose(0, 2, 1, 3)
+    pooled_scores = q_bl @ pooled_sq.swapaxes(-1, -2)
+    pooled_scores = pooled_scores.transpose(0, 2, 1, 3)
+    pooled_scores = _apply_score_mask(pooled_scores, pooled_mask)
+    normalizer = mx.logaddexp(
+        normalizer, mx.logsumexp(pooled_scores, -1, keepdims=True)
+    )
+
+    local_weights, pooled_weights = _split_softmax(
+        normalizer,
+        local_scores,
+        pooled_scores,
+        sinks[None, :, None, None] if sinks is not None else None,
+    )
+
+    out = local_weights @ local_kv
+    pw_bl = pooled_weights.transpose(0, 2, 1, 3)
+    out = out + (pw_bl @ pooled_sq).transpose(0, 2, 1, 3)
+    return out.astype(q.dtype)
+
+
+class MoEGate(nn.Module):
+    def __init__(self, config: ModelConfig, layer_idx: int):
+        super().__init__()
+        self.top_k = config.num_experts_per_tok
+        self.num_experts = config.n_routed_experts
+        self.hidden_dim = config.hidden_size
+        self.hash = layer_idx < config.num_hash_layers
+        self.scoring_func = config.scoring_func
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.norm_topk_prob = config.norm_topk_prob
+        self.vocab_size = config.vocab_size
+        self.vision = config.vision_n_layers > 0
+        self.weight = mx.zeros((self.num_experts, self.hidden_dim))
+        if self.hash:
+            self.tid2eid = mx.zeros((config.vocab_size, self.top_k), dtype=mx.int32)
+        if not self.hash or self.vision:
+            self.e_score_correction_bias = mx.zeros(
+                (self.num_experts,), dtype=mx.float32
+            )
+        if self.vision:
+            self.bias_vl = mx.zeros((self.num_experts,), dtype=mx.float32)
+
+    def __call__(self, x: mx.array, input_ids: Optional[mx.array] = None):
+        if 1 < x.shape[1] <= DECODE_BLOCK_SIZE and not self.training:
+            args = () if input_ids is None else (input_ids,)
+            return tokenwise(self, x, *args)
+        logits = x @ self.weight.T
+
+        if self.hash:
+            if input_ids is None:
+                raise ValueError("DeepSeek-V4 hash routing requires input_ids.")
+            if self.vision:
+                inds, weights = _vision_hash_expert_select(
+                    input_ids,
+                    logits,
+                    self.tid2eid,
+                    self.bias_vl,
+                    self.vocab_size,
+                    self.top_k,
+                    self.routed_scaling_factor,
+                    self.norm_topk_prob,
+                    self.scoring_func,
+                )
+            else:
+                inds, weights = _hash_expert_select(
+                    input_ids,
+                    logits,
+                    self.tid2eid,
+                    self.routed_scaling_factor,
+                    self.norm_topk_prob,
+                    self.scoring_func,
+                )
+        else:
+            if self.vision:
+                if input_ids is None:
+                    raise ValueError("DeepSeek-V4 vision routing requires input_ids.")
+                inds, weights = _vision_expert_select(
+                    logits,
+                    self.e_score_correction_bias,
+                    self.bias_vl,
+                    input_ids >= self.vocab_size,
+                    self.top_k,
+                    self.routed_scaling_factor,
+                    self.norm_topk_prob,
+                    self.scoring_func,
+                )
+            else:
+                inds, weights = _expert_select(
+                    logits,
+                    self.e_score_correction_bias,
+                    self.top_k,
+                    self.routed_scaling_factor,
+                    self.norm_topk_prob,
+                    self.scoring_func,
+                )
+
+        return inds, weights
+
+
+class DeepseekV4MLP(nn.Module):
+    def __init__(
+        self,
+        config: ModelConfig,
+        intermediate_size: Optional[int] = None,
+        swiglu_limit: float = 0.0,
+    ):
+        super().__init__()
+        hidden_size = config.hidden_size
+        intermediate_size = intermediate_size or config.intermediate_size
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.swiglu_limit = swiglu_limit
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return linear(
+            self.down_proj,
+            _limited_swiglu(
+                linear(self.gate_proj, x), linear(self.up_proj, x), self.swiglu_limit
+            ),
+        )
+
+
+class DeepseekV4MoE(MoE):
+    def __init__(self, config: ModelConfig, layer_idx: int):
+        super().__init__()
+        self.config = config
+        self.gate = MoEGate(config, layer_idx)
+        self.switch_mlp = SwitchGLU(
+            config.hidden_size,
+            config.moe_intermediate_size,
+            config.n_routed_experts,
+            activation=LimitedSwiGLU(config.swiglu_limit),
+        )
+        self.shared_experts = DeepseekV4MLP(
+            config,
+            intermediate_size=config.moe_intermediate_size * config.n_shared_experts,
+            swiglu_limit=config.swiglu_limit,
+        )
+        self.sharding_group = None
+
+
+class Compressor(nn.Module):
+    def __init__(self, config: ModelConfig, compress_ratio: int, head_dim: int):
+        super().__init__()
+        self.compress_ratio = compress_ratio
+        self.head_dim = head_dim
+        self.rope_head_dim = config.qk_rope_head_dim
+        self.overlap = compress_ratio == 4
+        self.out_dim = head_dim * (2 if self.overlap else 1)
+        self.wkv = nn.Linear(config.hidden_size, self.out_dim, bias=False)
+        self.wgate = nn.Linear(config.hidden_size, self.out_dim, bias=False)
+        self.ape = mx.zeros((compress_ratio, self.out_dim), dtype=mx.float32)
+        self.norm = nn.RMSNorm(head_dim, eps=config.rms_norm_eps)
+        self.rope = DeepseekV4RoPE(
+            config.qk_rope_head_dim,
+            config.compress_rope_theta,
+            config.rope_scaling,
+            config.max_position_embeddings,
+            freq_scale=compress_ratio,
+        )
+
+    def __call__(
+        self,
+        x: mx.array,
+        pool_cache: Optional[PoolingCache],
+        offset: Union[int, mx.array],
+    ) -> mx.array:
+        B, _, _ = x.shape
+        kv = self.wkv(x)
+        gate = self.wgate(x)
+        if pool_cache is None:
+            usable = (kv.shape[1] // self.compress_ratio) * self.compress_ratio
+            ready_kv, ready_gate = kv[:, :usable], gate[:, :usable]
+            pool_base = offset
+        else:
+            ready_kv, ready_gate, pool_base = pool_cache.accumulate_windows(
+                kv, gate, offset
+            )
+
+        if ready_kv.size == 0:
+            new_pooled = mx.zeros((B, 0, self.head_dim), dtype=x.dtype)
+        else:
+            compress_func = (
+                _overlap_compress_kv if self.overlap else _simple_compress_kv
+            )
+            kv = mx.unflatten(ready_kv, 1, (-1, self.compress_ratio))
+            gate = mx.unflatten(ready_gate, 1, (-1, self.compress_ratio))
+            new_pooled = compress_func(kv, gate, self.ape, self.head_dim)
+            new_pooled = self.norm(new_pooled)
+            new_pooled = self.rope(
+                new_pooled[:, None],
+                offset=pool_base,
+            ).squeeze(1)
+
+        if pool_cache is not None:
+            new_pooled = pool_cache.update_and_fetch(new_pooled)
+
+        return new_pooled
+
+
+class Indexer(nn.Module):
+    def __init__(self, config: ModelConfig, compress_ratio: int):
+        super().__init__()
+        self.n_heads = config.index_n_heads
+        self.head_dim = config.index_head_dim
+        self.index_topk = config.index_topk
+        self.wq_b = nn.Linear(
+            config.q_lora_rank, self.n_heads * self.head_dim, bias=False
+        )
+        self.weights_proj = nn.Linear(config.hidden_size, self.n_heads, bias=False)
+        self.compressor = Compressor(config, compress_ratio, self.head_dim)
+        self.scale = self.head_dim**-0.5
+        self.index_block = getattr(config, "index_block", 0)
+        self.index_keep = getattr(config, "index_keep", 0)
+
+    def _hisa_select(self, q: mx.array, pooled: mx.array, x: mx.array, k: int):
+        """HISA hierarchical decode selection: coarse block filter -> fine top-k.
+
+        q: (B, n_heads, 1, head_dim); pooled: (B, Np, head_dim). Returns (B, 1, k)
+        indices into the prefix, matching the flat path's output. Scans n_blocks
+        coarse reps + index_keep*index_block fine candidates instead of all Np.
+
+        paper: https://arxiv.org/abs/2603.28458
+        """
+
+        B, Np, hd = pooled.shape
+        b = self.index_block
+        nb = Np // b
+        usable = nb * b
+        w = self.weights_proj(x).astype(mx.float32) * (
+            self.n_heads**-0.5
+        )  # (B,1,n_heads)
+        wq = w.swapaxes(-1, -2)[..., None]  # (B,n_heads,1,1)
+
+        # coarse: score block-mean representatives
+        rep = pooled[:, :usable].reshape(B, nb, b, hd).mean(axis=2)  # (B,nb,hd)
+        cs = mx.maximum(
+            q.astype(mx.float32) @ rep[:, None].swapaxes(-1, -2).astype(mx.float32), 0
+        )
+        cscore = (cs * self.scale * wq).sum(axis=1)  # (B,1,nb)
+        Kb = min(self.index_keep, nb)
+        top_blk = mx.argpartition(-cscore, kth=Kb - 1, axis=-1)[..., :Kb]  # (B,1,Kb)
+
+        # fine: score only positions inside the retained blocks
+        pos = (top_blk[..., None] * b + mx.arange(b)).reshape(B, 1, Kb * b)
+        idx = mx.broadcast_to(pos.reshape(B, Kb * b)[..., None], (B, Kb * b, hd))
+        cand = mx.take_along_axis(pooled, idx, axis=1)  # (B,Kb*b,hd)
+        fs = mx.maximum(
+            q.astype(mx.float32) @ cand[:, None].swapaxes(-1, -2).astype(mx.float32), 0
+        )
+        fscore = (fs * self.scale * wq).sum(axis=1)  # (B,1,Kb*b)
+        sel = mx.argpartition(-fscore, kth=k - 1, axis=-1)[..., :k]  # (B,1,k)
+        return mx.take_along_axis(pos, sel, axis=-1)
+
+    def __call__(
+        self,
+        x: mx.array,
+        q_residual: mx.array,
+        position_rope: DeepseekV4RoPE,
+        pool_cache: Optional[PoolingCache],
+        offset: Union[int, mx.array],
+    ):
+        B, L, _ = x.shape
+        pooled = self.compressor(x, pool_cache, offset)
+        if pooled.shape[1] == 0:
+            return None
+
+        q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
+        q = q.transpose(0, 2, 1, 3)
+        q = position_rope(q, offset)
+
+        Np = pooled.shape[1]
+        k = min(self.index_topk, Np)
+        pmask = pool_cache.make_mask(L, offset) if pool_cache is not None else None
+
+        # HISA hierarchical decode fast-path happends only when there is no mask to honor
+        # (single-token decode within the pool window => pmask is None), the
+        # prefix is long enough to block, and there are enough fine candidates.
+
+        if (
+            L == 1
+            and pmask is None
+            and pool_cache is not None
+            and self.index_block > 0
+            and Np >= self.index_block * self.index_keep
+            and self.index_keep * self.index_block >= k
+        ):
+            return self._hisa_select(q, pooled, x, k)
+
+        # HISA batched path for L > 1 (prefill / speculative decode). Honors the
+        # causal mask via valid_len = #visible pooled positions per query (the
+        # pool mask is contiguous-causal, so the count is the visibility cutoff).
+        if (
+            L > 1
+            and self.index_block > 0
+            and Np >= self.index_block * self.index_keep
+            and self.index_keep * self.index_block >= k
+        ):
+            if pmask is None:
+                valid_len = mx.full((B, L), Np, dtype=mx.int32)
+            else:
+                pm = pmask if pmask.ndim == 3 else pmask[None]
+                valid_len = mx.broadcast_to(pm, (B, L, pm.shape[-1])).sum(-1)
+            weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads**-0.5)
+            return hisa_select(
+                q,
+                pooled,
+                weights,
+                self.scale,
+                k,
+                self.index_block,
+                self.index_keep,
+                valid_len,
+            )
+
+        scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(
+            mx.float32
+        )
+        scores = mx.maximum(scores, 0) * self.scale
+        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads**-0.5)
+        scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
+        if pmask is not None:
+            scores = mx.where(
+                pmask if pmask.ndim == 3 else pmask[None],
+                scores,
+                mx.finfo(scores.dtype).min,
+            )
+        return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+
+
+class LocalAttention(nn.Module):
+    """DeepSeek V4 attention with no KV compression."""
+
+    def __init__(self, config: ModelConfig, layer_idx: int):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.compress_ratio = 0
+        self.hidden_size = config.hidden_size
+        self.n_heads = config.num_attention_heads
+        self.head_dim = config.head_dim
+        self.o_groups = config.o_groups
+        self.o_lora_rank = config.o_lora_rank
+        self.scale = self.head_dim**-0.5
+
+        self.wq_a = nn.Linear(config.hidden_size, config.q_lora_rank, bias=False)
+        self.q_norm = nn.RMSNorm(config.q_lora_rank, eps=config.rms_norm_eps)
+        self.wq_b = nn.Linear(
+            config.q_lora_rank, self.n_heads * self.head_dim, bias=False
+        )
+        self.wkv = nn.Linear(config.hidden_size, self.head_dim, bias=False)
+        self.kv_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.wo_a = MultiLinear(
+            self.n_heads * self.head_dim // config.o_groups,
+            config.o_lora_rank,
+            config.o_groups,
+        )
+        self.wo_b = nn.Linear(
+            config.o_groups * config.o_lora_rank,
+            config.hidden_size,
+            bias=config.attention_bias,
+        )
+        self.attn_sink = mx.zeros((self.n_heads,), dtype=mx.float32)
+
+        self.rope = DeepseekV4RoPE(
+            config.qk_rope_head_dim,
+            config.rope_theta,
+            None,
+            config.max_position_embeddings,
+        )
+
+        self.sharding_group = None
+
+    def __call__(
+        self,
+        x: mx.array,
+        mask: Optional[mx.array] = None,
+        cache: Optional[Any] = None,
+        position_offset: Optional[Union[int, mx.array]] = None,
+        causal: bool = False,
+    ) -> mx.array:
+        B, L, _ = x.shape
+        local_cache = cache[0] if self.compress_ratio and cache is not None else cache
+        offset = (
+            position_offset
+            if position_offset is not None
+            else (local_cache.offset if local_cache is not None else 0)
+        )
+        offset = mx.array(offset) if isinstance(offset, mx.array) else offset
+
+        q_residual = self.q_norm(linear(self.wq_a, x))
+        q = linear(self.wq_b, q_residual).reshape(B, L, self.n_heads, self.head_dim)
+        q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
+        q = self.rope(q.transpose(0, 2, 1, 3), offset)
+        kv = self.kv_norm(linear(self.wkv, x)).reshape(B, 1, L, self.head_dim)
+        kv = self.rope(kv, offset)
+        if (
+            causal
+            and cache is not None
+            and 1 < L <= DECODE_BLOCK_SIZE
+            and not self.training
+        ):
+            outputs = []
+            for index in range(L):
+                part = mx.contiguous(x[:, index : index + 1])
+                part_mask = create_attention_mask(
+                    part,
+                    local_cache,
+                    window_size=self.config.sliding_window,
+                    return_array=True,
+                )
+                output = self._attend(
+                    part,
+                    mx.contiguous(q[:, :, index : index + 1]),
+                    mx.contiguous(kv[:, :, index : index + 1]),
+                    mx.contiguous(q_residual[:, index : index + 1]),
+                    part_mask,
+                    cache,
+                    offset + index,
+                )
+                mx.async_eval(output)
+                outputs.append(output)
+            out = mx.concatenate(outputs, axis=2)
+        else:
+            out = self._attend(x, q, kv, q_residual, mask, cache, offset)
+        out = self.rope(out, offset, inverse=True)
+
+        out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
+        out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        out = (
+            tokenwise(self.wo_a, out, axis=2)
+            if 1 < L <= DECODE_BLOCK_SIZE and not self.training
+            else self.wo_a(out)
+        )
+        out = out.transpose(0, 2, 1, 3).flatten(-2)
+        out = linear(self.wo_b, out)
+
+        if self.sharding_group is not None:
+            out = mx.distributed.all_sum(out, group=self.sharding_group)
+
+        return out
+
+    def _attend(self, x, q, kv, q_residual, mask, cache, offset):
+        B, L = x.shape[:2]
+        if cache is not None:
+            kv, _ = cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
+        mask = _align_local_mask(mask, kv.shape[2])
+
+        out = scaled_dot_product_attention(
+            q,
+            kv,
+            kv,
+            cache=cache,
+            scale=self.scale,
+            mask=mask,
+            sinks=self.attn_sink.astype(q.dtype),
+        )
+        return out
+
+
+class CompressedAttention(LocalAttention):
+    """DeepSeek V4 attention with pooled KV compression."""
+
+    def __init__(self, config: ModelConfig, layer_idx: int):
+        super().__init__(config, layer_idx)
+        self.compress_ratio = config.compress_ratios[layer_idx]
+        self.rope = DeepseekV4RoPE(
+            config.qk_rope_head_dim,
+            config.compress_rope_theta,
+            config.rope_scaling,
+            config.max_position_embeddings,
+        )
+        self.compressor = Compressor(config, self.compress_ratio, self.head_dim)
+
+    def _attend(self, x, q, kv, q_residual, mask, cache, offset):
+        B, L = x.shape[:2]
+        local_cache = cache[0] if cache is not None else None
+        pool_cache = cache[1] if cache is not None else None
+        if local_cache is not None:
+            kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
+        mask = _align_local_mask(mask, kv.shape[2])
+
+        # Pool tokens into compressed KV and concatenate with local KV
+        pooled = self.compressor(x, pool_cache, offset)
+        pooled_mask = None
+        if pooled.shape[1] > 0:
+            pooled_mask = (
+                pool_cache.make_mask(L, offset) if pool_cache is not None else None
+            )
+            kv = mx.concatenate([kv, pooled[:, None]], axis=2)
+
+        mask = _extend_mask(mask, pooled_mask, kv.shape[2])
+
+        out = scaled_dot_product_attention(
+            q,
+            kv,
+            kv,
+            cache=local_cache,
+            scale=self.scale,
+            mask=mask,
+            sinks=self.attn_sink.astype(q.dtype),
+        )
+        return out
+
+
+class SparseCompressedAttention(CompressedAttention):
+    """DeepSeek V4 attention with sparse indexed pooled KV compression."""
+
+    def __init__(self, config: ModelConfig, layer_idx: int):
+        super().__init__(config, layer_idx)
+        self.indexer = Indexer(config, self.compress_ratio)
+
+    def _attend(self, x, q, kv, q_residual, mask, cache, offset):
+        B, L = x.shape[:2]
+        local_cache = cache[0] if cache is not None else None
+        comp_cache = cache[1] if cache is not None else None
+        idx_cache = cache[2] if cache is not None else None
+        if local_cache is not None:
+            kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
+        mask = _align_local_mask(mask, kv.shape[2])
+
+        pooled = self.compressor(x, comp_cache, offset)
+        pmask = comp_cache.make_mask(L, offset) if comp_cache is not None else None
+        topk = self.indexer(x, q_residual, self.rope, idx_cache, offset)
+        sinks = self.attn_sink.astype(q.dtype)
+
+        # Local attention
+        if pooled.shape[1] == 0:
+            out = scaled_dot_product_attention(
+                q,
+                kv,
+                kv,
+                cache=local_cache,
+                scale=self.scale,
+                mask=mask,
+                sinks=sinks,
+            )
+
+        # Compressed attention
+        elif pooled.shape[1] <= self.indexer.index_topk:
+            full_kv = mx.concatenate([kv, pooled[:, None]], axis=2)
+            mask = _extend_mask(mask, pmask, full_kv.shape[2])
+            out = scaled_dot_product_attention(
+                q,
+                full_kv,
+                full_kv,
+                cache=local_cache,
+                scale=self.scale,
+                mask=mask,
+                sinks=sinks,
+            )
+
+        # Sparse compressed attention
+        else:
+            sparse_mask = None
+            if pmask is not None:
+                sparse_mask = mx.take_along_axis(
+                    pmask[None] if pmask.ndim == 2 else pmask,
+                    topk,
+                    axis=2,
+                )[:, None]
+            out = _sparse_pooled_attention(
+                q,
+                kv,
+                pooled,
+                topk,
+                mask,
+                sparse_mask,
+                self.scale,
+                sinks,
+            )
+
+        return out
+
+
+def v4_attention_factory(config: ModelConfig, layer_idx: int) -> nn.Module:
+    """Instantiate the appropriate attention module for a given layer."""
+    ratio = config.compress_ratios[layer_idx]
+    if ratio == 0:
+        return LocalAttention(config, layer_idx)
+    if ratio == 128:
+        return CompressedAttention(config, layer_idx)
+    return SparseCompressedAttention(config, layer_idx)
+
+
+class DeepseekV4Block(nn.Module):
+    def __init__(self, config: ModelConfig, layer_idx: int):
+        super().__init__()
+        self.attn = v4_attention_factory(config, layer_idx)
+        self.ffn = DeepseekV4MoE(config, layer_idx)
+        self.attn_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.ffn_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attn_hc = HyperConnection(config)
+        self.ffn_hc = HyperConnection(config)
+
+    def __call__(
+        self,
+        h: mx.array,
+        mask: Optional[mx.array],
+        cache: Optional[Any],
+        input_ids: mx.array,
+        position_offset: Optional[Union[int, mx.array]] = None,
+        causal: bool = False,
+    ) -> mx.array:
+        h = self.attn_hc.apply_branch(
+            h,
+            self.attn_norm,
+            self.attn,
+            mask=mask,
+            cache=cache,
+            position_offset=position_offset,
+            causal=causal,
+        )
+        return self.ffn_hc.apply_branch(h, self.ffn_norm, self.ffn, input_ids)
+
+
+class DeepseekV4Model(PipelineMixin, nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.args = config
+        self.vocab_size = config.vocab_size
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = [
+            DeepseekV4Block(config, idx) for idx in range(config.num_hidden_layers)
+        ]
+        self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hc_head = HyperHead(config)
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache: Optional[Any] = None,
+        inputs_embeds: Optional[mx.array] = None,
+        hidden_sink: Optional[list] = None,
+        skip_final_norm: bool = False,
+        capture_layer_ids: Optional[List[int]] = None,
+        capture_sink: Optional[list] = None,
+    ) -> mx.array:
+        h = self.embed_tokens(inputs) if inputs_embeds is None else inputs_embeds
+        h = mx.broadcast_to(
+            h[:, :, None, :],
+            (h.shape[0], h.shape[1], self.args.hc_mult, h.shape[2]),
+        )
+        h = mx.contiguous(h)
+
+        pipeline_rank = self.pipeline_rank
+        pipeline_size = self.pipeline_size
+
+        if cache is None:
+            cache = [None] * len(self.pipeline_layers)
+
+        first_cache = cache[0]
+        mask_cache = (
+            first_cache[0] if isinstance(first_cache, CacheList) else first_cache
+        )
+        image_rows = mx.any(inputs >= self.vocab_size, axis=1)
+        has_image_tokens = self.args.vision_n_layers > 0 and bool(
+            mx.any(image_rows).item()
+        )
+        base_mask = create_attention_mask(
+            h[:, :, 0, :],
+            mask_cache,
+            window_size=self.args.sliding_window,
+            return_array=True,
+        )
+        if has_image_tokens:
+            cache_offsets = mx.array(getattr(mask_cache, "offset", 0))
+            if cache_offsets.ndim == 0:
+                cache_offsets = mx.broadcast_to(cache_offsets, image_rows.shape)
+            if bool(mx.any(image_rows & (cache_offsets > 0)).item()):
+                raise ValueError(
+                    "DeepSeek-V4 image sentinels must be supplied in one prefill."
+                )
+            image_mask = create_image_attention_mask(
+                inputs,
+                self.vocab_size,
+                self.args.sliding_window,
+                self.args.vision_max_n_token,
+            )
+            mask = combine_image_attention_mask(base_mask, image_mask, image_rows)
+        else:
+            mask = base_mask
+
+        if pipeline_rank < pipeline_size - 1:
+            h = mx.distributed.recv_like(h, (pipeline_rank + 1))
+
+        capture_set = set(capture_layer_ids) if capture_layer_ids else None
+        for local_idx, (layer, layer_cache) in enumerate(
+            zip(self.pipeline_layers, cache)
+        ):
+            h = layer(h, mask, layer_cache, inputs, causal=not has_image_tokens)
+            if capture_set is not None and (self.start_idx + local_idx) in capture_set:
+                # DSpark taps the mean over the hyper-connection copies.
+                capture_sink.append(h.mean(axis=2))
+
+        if pipeline_rank != 0:
+            h = mx.distributed.send(h, (pipeline_rank - 1) % pipeline_size)
+            cache_item = cache[-1]
+            if isinstance(cache_item, CacheList):
+                cache_item = cache_item[0]
+            if cache_item is not None:
+                cache_item.keys = mx.depends(cache_item.keys, h)
+
+        if pipeline_size > 1:
+            h = mx.distributed.all_gather(h)[: h.shape[0]]
+
+        if hidden_sink is not None:
+            hidden_sink.append(h)
+
+        if skip_final_norm:
+            return h
+
+        return self.norm(self.hc_head(h))
+
+
+class LanguageModel(nn.Module):
+    requires_uniform_batch_acceptance = True
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.args = config
+        self.config = config
+        self.model_type = config.model_type
+        self.model = DeepseekV4Model(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+    def chunked_prefill_policy(
+        self,
+        *,
+        input_ids=None,
+        inputs_embeds=None,
+        prompt_cache=None,
+        draft_model=None,
+        draft_kind=None,
+        prefill_kwargs=None,
+    ) -> bool:
+        del inputs_embeds, prompt_cache, draft_model, draft_kind, prefill_kwargs
+        if input_ids is None or self.args.vision_n_layers == 0:
+            return True
+        return not bool(mx.any(input_ids >= self.args.vocab_size).item())
+
+    def __call__(
+        self,
+        inputs: Optional[mx.array] = None,
+        cache: Optional[Any] = None,
+        inputs_embeds: Optional[mx.array] = None,
+        **kwargs,
+    ) -> LanguageModelOutput:
+        return_hidden = kwargs.pop("return_hidden", False)
+        return_shared_kv = kwargs.pop("return_shared_kv", False)
+        skip_logits = kwargs.pop("skip_logits", False)
+        skip_final_norm = kwargs.pop("skip_final_norm", False)
+        hidden_sink = kwargs.pop("hidden_sink", None)
+        capture_layer_ids = kwargs.pop("capture_layer_ids", None)
+        if return_hidden and hidden_sink is None:
+            hidden_sink = []
+        capture_sink = [] if capture_layer_ids else None
+
+        out = self.model(
+            inputs,
+            cache=cache,
+            inputs_embeds=inputs_embeds,
+            hidden_sink=hidden_sink,
+            skip_final_norm=skip_final_norm,
+            capture_layer_ids=capture_layer_ids,
+            capture_sink=capture_sink,
+        )
+        logits = None if skip_logits else linear(self.lm_head, out)
+        return LanguageModelOutput(
+            logits=logits,
+            hidden_states=capture_sink if capture_sink is not None else hidden_sink,
+            shared_kv_states={} if return_shared_kv else None,
+        )
+
+    def logits_from_hidden(self, hidden: mx.array) -> mx.array:
+        """Project captured hyperconnection states through the ordinary readout."""
+        if (
+            hidden.ndim == 3
+            and hidden.shape[-1] == self.args.hc_mult * self.args.hidden_size
+        ):
+            hidden = hidden.reshape(*hidden.shape[:-1], self.args.hc_mult, -1)
+        if hidden.ndim != 4:
+            raise ValueError(
+                "DeepSeek-V4 hidden states must have shape "
+                "[batch, tokens, hc_mult, hidden_size]."
+            )
+        return linear(self.lm_head, self.model.norm(self.model.hc_head(hidden)))
+
+    @property
+    def layers(self):
+        return self.model.pipeline_layers
+
+    @property
+    def cast_predicate(self):
+        def predicate(k):
+            return not (
+                "attn_sink" in k
+                or "e_score_correction_bias" in k
+                or "bias_vl" in k
+                or ".attn_hc." in k
+                or ".ffn_hc." in k
+                or ".hc_head." in k
+            )
+
+        return predicate
+
+    @property
+    def quant_predicate(self):
+        quantization_config = make_quantization_config(self)
+
+        def predicate(path, _):
+            path = path.removeprefix("language_model.")
+            return quantization_config.get(path, True)
+
+        return predicate
+
+    def make_cache(self):
+        caches = []
+        for layer in self.layers:
+            ratio = layer.attn.compress_ratio
+            if ratio == 0:
+                caches.append(RotatingKVCache(max_size=self.args.sliding_window))
+            elif isinstance(layer.attn, SparseCompressedAttention):
+                caches.append(
+                    CacheList(
+                        RotatingKVCache(max_size=self.args.sliding_window),
+                        PoolingCache(ratio),
+                        PoolingCache(ratio),
+                    )
+                )
+            else:
+                caches.append(
+                    CacheList(
+                        RotatingKVCache(max_size=self.args.sliding_window),
+                        PoolingCache(ratio),
+                    )
+                )
+        return caches
+
+    def sanitize(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+        n_layers = self.args.num_hidden_layers
+
+        weights = {normalize_checkpoint_key(k): v for k, v in weights.items()}
+
+        new_weights = {}
+        for k, v in weights.items():
+            if k.startswith("mtp."):
+                continue
+            parts = k.split(".")
+            if len(parts) >= 2 and parts[0] == "layers":
+                try:
+                    if int(parts[1]) >= n_layers:
+                        continue
+                except ValueError:
+                    pass
+            new_weights[k] = v
+        weights = new_weights
+
+        new_weights = {}
+        for k, v in weights.items():
+            if "tid2eid" in k:
+                new_weights[k] = v.astype(mx.int32)
+
+            if not k.endswith(".scale"):
+                if k not in new_weights:
+                    new_weights[k] = v
+                continue
+
+            wk = k[: -len(".scale")] + ".weight"
+            weight = weights.get(wk)
+            if weight is None:
+                new_weights[k] = v
+                continue
+            if (
+                ".ffn.experts." in wk
+                and ".shared_experts." not in wk
+                and weight.dtype in (mx.int8, mx.uint8)
+                and v.shape[-1] * 16 == weight.shape[-1]
+            ):
+                new_weights[k + "s"] = v
+                new_weights[wk] = weight.view(mx.uint32)
+            elif weight.dtype == mx.uint8:
+                new_weights[k + "s"] = mx.repeat(mx.repeat(v, 4, -1), 128, 0)
+                new_weights[wk] = weight.view(mx.uint32)
+            else:
+                new_weights[k] = v
+        weights = new_weights
+
+        top_remap = {
+            "embed.weight": "model.embed_tokens.weight",
+            "norm.weight": "model.norm.weight",
+            "head.weight": "lm_head.weight",
+            "hc_head_fn": "model.hc_head.fn",
+            "hc_head_base": "model.hc_head.base",
+            "hc_head_scale": "model.hc_head.scale",
+            # `normalize_checkpoint_key` drops the leading `model.` from every
+            # key and only restores it for the embedding weight, so a
+            # checkpoint already written in the Transformers namespace arrives
+            # here with these five stripped and nothing puts them back.
+            "embed.scales": "model.embed_tokens.scales",
+            "embed.biases": "model.embed_tokens.biases",
+            "embed_tokens.scales": "model.embed_tokens.scales",
+            "embed_tokens.biases": "model.embed_tokens.biases",
+            "hc_head.fn": "model.hc_head.fn",
+            "hc_head.base": "model.hc_head.base",
+            "hc_head.scale": "model.hc_head.scale",
+        }
+        for old, new in top_remap.items():
+            if old in weights:
+                weights[new] = weights.pop(old)
+
+        remapped = {}
+        w_remap = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
+        for k, v in weights.items():
+            nk = "model." + k if k.startswith("layers.") else k
+            if nk.endswith(".ffn.gate.bias"):
+                nk = nk[: -len(".ffn.gate.bias")] + ".ffn.gate.e_score_correction_bias"
+            for sub in ("attn", "ffn"):
+                for param in ("fn", "base", "scale"):
+                    nk = nk.replace(f".hc_{sub}_{param}", f".{sub}_hc.{param}")
+            for old, new in w_remap.items():
+                nk = nk.replace(f".shared_experts.{old}.", f".shared_experts.{new}.")
+            remapped[nk] = v
+        weights = remapped
+
+        for layer_idx in range(n_layers):
+            prefix = f"model.layers.{layer_idx}.ffn.experts"
+            for src, dst in (
+                ("w1", "gate_proj"),
+                ("w2", "down_proj"),
+                ("w3", "up_proj"),
+            ):
+                for suffix in ("weight", "scales"):
+                    key0 = f"{prefix}.0.{src}.{suffix}"
+                    if key0 in weights:
+                        stacked = [
+                            weights.pop(f"{prefix}.{e}.{src}.{suffix}")
+                            for e in range(self.args.n_routed_experts)
+                        ]
+                        weights[
+                            f"model.layers.{layer_idx}.ffn.switch_mlp.{dst}.{suffix}"
+                        ] = mx.stack(stacked)
+
+        for layer_idx in range(n_layers):
+            prefix = f"model.layers.{layer_idx}.attn.wo_a"
+            for key in (f"{prefix}.weight", f"{prefix}.scales", f"{prefix}.biases"):
+                if key in weights and weights[key].ndim == 2:
+                    weights[key] = weights[key].reshape(
+                        self.args.o_groups, self.args.o_lora_rank, -1
+                    )
+
+        return weights
+
+    def shard(self, group: Optional[mx.distributed.Group] = None):
+        group = group or mx.distributed.init()
+        N = group.size()
+        rank = group.rank()
+        for layer in self.model.layers:
+            layer.attn.sharding_group = group
+            layer.attn.wq_b = shard_linear(
+                layer.attn.wq_b,
+                "all-to-sharded",
+                segments=self.args.o_groups,
+                group=group,
+            )
+            shard_inplace(layer.attn.wo_a, "sharded-to-all", group=group)
+            layer.attn.attn_sink = mx.split(layer.attn.attn_sink, N)[rank]
+            layer.attn.n_heads //= N
+
+            layer.ffn.sharding_group = group
+            shard_inplace(
+                layer.ffn.shared_experts.gate_proj, "all-to-sharded", group=group
+            )
+            shard_inplace(
+                layer.ffn.shared_experts.down_proj, "sharded-to-all", group=group
+            )
+            shard_inplace(
+                layer.ffn.shared_experts.up_proj, "all-to-sharded", group=group
+            )
+            shard_inplace(layer.ffn.switch_mlp.gate_proj, "all-to-sharded", group=group)
+            shard_inplace(layer.ffn.switch_mlp.down_proj, "sharded-to-all", group=group)
+            shard_inplace(layer.ffn.switch_mlp.up_proj, "all-to-sharded", group=group)

@@ -173,6 +173,15 @@ def test_logits_from_hidden_matches_forward():
         mx.argmax(ref, axis=-1))
 
 
+def test_skip_logits_still_returns_the_raw_hidden():
+    lm = _build_lm()
+    ids = mx.random.randint(0, lm.args.vocab_size, (1, 5))
+    out = lm(ids, return_hidden=True, skip_logits=True)
+    assert out.logits is None
+    got = lm.speculative_logits_from_hidden(out.hidden_states[-1])
+    assert float(mx.abs(got - lm(ids).logits).max()) < 1e-5
+
+
 def _wrap_target(lm):
     from gmlx.load.mtp_target import MTPTextTarget
 
@@ -331,7 +340,7 @@ def test_drafter_validates_and_rejects_batch():
 
 
 def test_drafter_cache_is_latent_pool_pair():
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     drafter = _build_drafter(_tiny_args())
     (cache,) = drafter.make_cache()
@@ -340,7 +349,7 @@ def test_drafter_cache_is_latent_pool_pair():
     assert type(cache).__name__ == "CacheList"
     assert type(cache[0]).__name__ == "KVCache"
     # The pool cache IS identity-checked: every APC seam keys on this class.
-    assert isinstance(cache[1], PoolingCache)
+    assert isinstance(cache[1], DS4PoolingCache)
     assert cache[1].ratio == 4
     assert cache[1].quantizable is False
 

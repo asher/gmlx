@@ -73,7 +73,7 @@ def _drain_heavy_attrs_assert_released(batch, closed):
 
 
 def test_finished_batch_releases_heavy_state(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
     closed = []
@@ -106,7 +106,7 @@ def test_finished_batch_releases_heavy_state(monkeypatch):
 
 
 def test_aborted_batch_releases_via_filter(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
     closed = []
@@ -134,7 +134,7 @@ def test_abort_inside_round_defers_then_releases(monkeypatch):
     # An abort that lands while the rounds generator is executing (filter
     # re-entered from within a round step) cannot close it there; the
     # release must defer, not crash, and complete once the round yields.
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
     closed = []
@@ -160,7 +160,7 @@ def test_abort_inside_round_defers_then_releases(monkeypatch):
 
 
 def test_promotion_clears_release_flag(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
 
@@ -185,8 +185,7 @@ def test_owned_round_wrapper_frame_pins_nothing(monkeypatch):
     # The delegation wrapper installed by install_owned_spec_engine stays
     # suspended at its yield-from for the life of the abandoned generator;
     # its argument bindings must not re-pin what the inner loop released.
-    from mlx_vlm.generate import ar
-    from mlx_vlm.server import generation as gen_mod
+    from gmlx._vendor.mlx_vlm.generate import ar
     import gmlx.spec.speculative as spec
 
     def fake_inner(model, drafter, prompt_cache, hidden, **kw):
@@ -199,7 +198,6 @@ def test_owned_round_wrapper_frame_pins_nothing(monkeypatch):
 
     monkeypatch.setattr(spec, "owned_server_rounds", fake_inner)
     monkeypatch.setattr(ar, "run_speculative_server_rounds", stock)
-    monkeypatch.setattr(gen_mod, "run_speculative_server_rounds", stock)
     install_owned_spec_engine()
     wrapper = ar.run_speculative_server_rounds
     assert wrapper.__dict__.get(_OWNED_MTP_ROUND_FLAG)
@@ -261,7 +259,7 @@ def test_live_filter_sheds_snapshot_rows(monkeypatch):
     # A row removed while the rounds generator runs keeps the upstream
     # mark-finished contract (the generator sheds its KV at the round
     # boundary) but the batch-held start-time snapshots must slice now.
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
 
@@ -290,7 +288,7 @@ def test_live_filter_sheds_snapshot_rows(monkeypatch):
 
 
 def test_natural_finish_sheds_snapshot_rows(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
 
@@ -314,7 +312,7 @@ def test_natural_finish_sheds_snapshot_rows(monkeypatch):
 def test_first_token_finish_defers_shed_until_rounds_start(monkeypatch):
     # Pre-start, _start_rounds still needs snapshots row-aligned with
     # the caches; the shed must wait for the generator to own the state.
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
 
@@ -334,7 +332,7 @@ def test_first_token_finish_defers_shed_until_rounds_start(monkeypatch):
 
 
 def test_prestart_filter_compacts_rows(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
     cache = _FilterCache()
@@ -358,7 +356,7 @@ def test_prestart_filter_compacts_rows(monkeypatch):
 
 
 def test_prestart_abort_releases_fully(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
     batch = _make_dict_batch(ar, uids=(0, 1), max_tokens=(9, 9))
@@ -372,7 +370,7 @@ def test_prestart_abort_releases_fully(monkeypatch):
 
 
 def test_promotion_drops_stale_attr_rows(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     install_continuous_batch_admission()
 

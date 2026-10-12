@@ -21,6 +21,10 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
   rotation, and where gmlx undoes it.
 - [Distillation internals](distill.md): How the teacher pass and the
   training head bound their memory, and the costs of the worked run.
+- [Image serving](image-serving.md): How image jobs share the GPU with chat
+  replies, and how the server plans their memory.
+- [Image step routes](image-steps.md): The contract that lets a sampler in
+  another program, such as ComfyUI, run an image model one step at a time.
 
 ## Working on gmlx
 
@@ -28,8 +32,8 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
   model family involves, and its acceptance gate.
 - [Testing](testing.md): The test tiers, GGUF-gated runs and the end-to-end
   harnesses.
-- [Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md): Moving the pinned
-  upstream versions.
+- [Upstream releases](upstream-upgrades.md): The copy of mlx-vlm and
+  mlx-lm that gmlx carries, how it takes upstream changes, and moving mlx.
 - [Debug switches](debug-switches.md): Environment variables for isolating
   defects, including the prompt cache switches.
 

@@ -37,7 +37,9 @@ sets up the server is in [Configuration](config.md).
 A field in the request, such as `temperature`, overrides the profile. An
 empty `model` uses the server's default model, or its only model. An unknown id gets a 404 of
 type `model_not_found` that lists the served ids, and an unknown profile
-gets a 400 of type `unknown_profile`.
+gets a 400 of type `unknown_profile`. A chat route that names one of the
+[image models](config.md#image-models) gets a 400 of type
+`wrong_model_kind`, and so does an image route that names a chat model.
 
 ## Endpoints
 
@@ -54,13 +56,14 @@ gets a 400 of type `unknown_profile`.
 | `GET /v1/capacity/plan` | Whether `width` streams of `depth` tokens fit, and can start now |
 | `GET /v1/cache/stats` | Prompt cache statistics, or `{"enabled": false}` |
 | `POST /v1/cache/reset` | Clear the prompt cache, for every model or for `{"model": "<id>"}` |
-| `POST /unload` | Unload `{"model": "<id>"}`, or every idle model with no body. 409 while that model streams. |
-| `POST /v1/keep` | Load and warm `{"model": "<id>"}`, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
+| `POST /unload` | Unload `{"model": "<id>"}`, a chat or an image model, or every idle model with no body. 409 while that model streams. |
+| `POST /v1/keep` | Load and warm `{"model": "<id>"}`, a chat or an image model, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
 | `POST /v1/reload` | Re-read the config file and keep models whose load settings did not change |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech to text, with `stt` set up as in [Speech, embeddings and rerank](services.md) |
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
+| `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as the [Image API](image-api.md) shows |
 | `POST /v1/systemone` | Probabilities for a fixed set of questions, as [Structured decisions](decisions.md) shows |
 | `POST /v1/prewarm` | Read a decision state ahead of its questions, as [Repeated states](decisions-reference.md#repeated-states) shows |
 
@@ -71,14 +74,19 @@ and `/v1/capacity/plan`.
 the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
 `speculative`, `vlm`, `profile` and `default`.
 
+Each [image model](config.md#image-models) is listed too, with the fields
+that [Routes](image-api.md#routes) describes.
+
 `/v1/keep` answers `{"status": "kept", "model": "<id>", "warming": true}`
 and loads the model in the background. A kept model is not pinned, so the
 server can still unload it to make room, as
 [Keep, pin and idle](glossary.md#keep-pin-and-idle) describes.
 
-Every route except `/health` needs the API key when the server has one. Most
-routes also answer without the `/v1` prefix. Every route takes a JSON body,
-except the two audio upload routes, which take a form.
+Every route except `/health` and the image files of
+[URL responses](image-api.md#url-responses) needs the API key when the server
+has one. Most routes also answer without the `/v1` prefix. Every route takes
+a JSON body, except the two audio upload routes and image variations, which
+take a form, and image edits, which take a form or a JSON body.
 
 `/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
 `stream_options` and `profile`. It refuses list prompts, `n` above 1,
@@ -92,7 +100,8 @@ choice carries `"logprobs": null`.
 `/v1/chat/completions` takes OpenAI `tools` and answers with `tool_calls`.
 `/v1/messages` takes Anthropic `tools` and answers with `tool_use` blocks.
 The server reads the call syntax from the model's chat template, so there
-is nothing to set up. The client runs the tools and sends the results back.
+is nothing to set up. A request can name the parser with `tool_parser`
+instead. The client runs the tools and sends the results back.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -132,6 +141,7 @@ tool calls to make. The other fields differ by route:
 |-----------|------------------------|-----------------|----------------|-------|
 | `max_completion_tokens` | Honored | Ignored | Ignored | Wins over `max_tokens` and a profile value |
 | `tool_choice` | None/auto enforced | None/auto enforced | None/auto enforced | Other values depend on the template, as [Tool calling](#tool-calling) says |
+| `tool_parser` | Honored | Honored | Honored | Names the tool-call parser in place of template inference. An unknown name fails the request. |
 | `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format, mapped onto structured output |
 | `logit_bias` | Honored | Honored | Honored | Keyed by token id |
 | `seed` | Honored | Honored | Honored | Sampling seed for one request |

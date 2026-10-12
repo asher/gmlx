@@ -1,13 +1,19 @@
-"""GGUF K-quant bridge into ``mlx_lm.server`` - the sequential (non-batched) path.
+"""GGUF K-quant bridge into the mlx-lm server that gmlx carries
+(``gmlx._vendor.mlx_lm.server``), on its sequential, non-batched path.
 
-Installs a monkeypatch on ``mlx_lm.server.ModelProvider._load`` so that any
+Installs a monkeypatch on that server's ``ModelProvider._load`` so that any
 ``--model *.gguf`` (or a request whose resolved model path ends in ``.gguf``)
-is loaded through :func:`gmlx.load_model` instead of
-``mlx_lm.utils.load``. Everything else - routing, OpenAI surface, tool calls,
-structured output, prompt cache - is stock ``mlx_lm.server``.
+is loaded through :func:`gmlx.load_model` instead of the copy's
+``mlx_lm.utils.load``. Routing, the OpenAI surface, tool calls, structured
+output and the prompt cache stay the copied server's. An installed stock
+``mlx_lm.server`` is never patched. ``python -m gmlx.serve.bridge_lm`` runs
+the patched server.
 
-Non-``.gguf`` paths fall through to the original loader untouched, so a single
-process can mix GGUF K-quant and ordinary MLX checkpoints.
+Non-``.gguf`` paths fall through to the original loader, so a single process
+can mix GGUF K-quant and ordinary MLX checkpoints. That loader loads with
+:func:`gmlx.load.mlx_checkpoint.load` in place of ``mlx_lm.utils.load``, so a
+Gemma 4 checkpoint builds the owned model and every other architecture
+builds mlx-lm's.
 
 Batching note
 -------------
@@ -16,6 +22,8 @@ The GGUF route sets ``is_batchable = False``, which pins every request to
 ``BatchGenerator`` path has not been validated against the ``KQuant*`` modules'
 ``gather_qmm`` / merged-cache behavior, so it is deliberately not enabled here.
 Speculative decoding (``--draft-model``) is likewise ignored for GGUF models.
+A K-quant MLX checkpoint holds the same modules, so its fallthrough load
+sets ``is_batchable = False`` too.
 ``--adapter`` on a GGUF model raises (adapter apply is only wired in
 ``gmlx serve``).
 """
@@ -24,8 +32,7 @@ from __future__ import annotations
 
 import sys
 
-from mlx_lm.models.cache import make_prompt_cache
-
+from gmlx.cache.kv_cache import make_prompt_cache
 from gmlx.load.loader import load_model
 
 _BRIDGE_FLAG = "_kq_gguf_bridge_installed"
@@ -35,18 +42,43 @@ def _is_gguf(path) -> bool:
     return isinstance(path, str) and path.endswith(".gguf")
 
 
+def _has_kquant_modules(model) -> bool:
+    import mlx.nn as nn
+    from mlx_kquant.nn import (
+        KQuantEmbedding,
+        KQuantLinear,
+        KQuantMultiLinear,
+        KQuantSwitchLinear,
+    )
+
+    if not isinstance(model, nn.Module):
+        return False
+    kinds = (KQuantEmbedding, KQuantLinear, KQuantMultiLinear, KQuantSwitchLinear)
+    return any(isinstance(m, kinds) for _, m in model.named_modules())
+
+
 def install_gguf_bridge() -> None:
-    """Idempotently patch ``ModelProvider._load`` to handle ``*.gguf`` models."""
-    from mlx_lm import server as _server
+    """Idempotently patch ``ModelProvider._load`` to handle ``*.gguf`` models,
+    and load MLX checkpoints with gmlx's model classes."""
+    from gmlx._vendor.mlx_lm import server as _server
+
+    from gmlx.load import mlx_checkpoint
 
     if getattr(_server.ModelProvider, _BRIDGE_FLAG, False):
         return
+
+    # The fallthrough below, the copy's _load, loads the model and any draft
+    # model through the server module's ``load``.
+    setattr(_server, "load", mlx_checkpoint.load)
 
     _orig_load = _server.ModelProvider._load
 
     def _load(self, model_path, adapter_path=None, draft_model_path=None):
         if not _is_gguf(model_path):
-            return _orig_load(self, model_path, adapter_path, draft_model_path)
+            out = _orig_load(self, model_path, adapter_path, draft_model_path)
+            if _has_kquant_modules(self.model):
+                self.is_batchable = False
+            return out
 
         if self.is_distributed:
             raise ValueError(
@@ -55,14 +87,14 @@ def install_gguf_bridge() -> None:
             # Adapter apply is not wired on this route; raising beats silently
             # serving the bare base under the user's --adapter.
             raise ValueError(
-                "adapter_path is not supported on the mlx_lm.server bridge "
+                "adapter_path is not supported on the mlx-lm server bridge "
                 "route - use `gmlx serve`")
         if draft_model_path is not None:
             # Speculative decoding against a GGUF target is unvalidated on this
             # route; warn instead of silently dropping it (the user asked for it).
             print(
                 "warning: --draft-model is ignored for GGUF models on the "
-                "mlx_lm.server route (speculative decoding is unvalidated here) "
+                "mlx-lm server route (speculative decoding is unvalidated here) "
                 "- use `gmlx serve` for MTP",
                 file=sys.stderr)
 
@@ -100,7 +132,7 @@ def install_gguf_bridge() -> None:
 def main(argv: list[str] | None = None) -> int:
     """Install the GGUF bridge, then hand off to ``mlx_lm.server.main``."""
     install_gguf_bridge()
-    from mlx_lm import server as _server
+    from gmlx._vendor.mlx_lm import server as _server
 
     if argv is not None:
         sys.argv = ["gmlx serve", *argv]

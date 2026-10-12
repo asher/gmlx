@@ -42,7 +42,7 @@ BF16_ULP = 0.008
 
 
 def _lang():
-    return pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+    return pytest.importorskip("gmlx.models.qwen35.language")
 
 
 def _reference(q, k, v, pads, scale):

@@ -2171,6 +2171,18 @@ def _opens_thinking(prompt) -> bool:
     return prompt_opens_thinking(prompt)
 
 
+def _encode_turn(tok, prompt_text, starts_cache: bool) -> list:
+    """The ids of one turn's render. A render that starts the cache is a
+    whole prompt and encodes as ``gmlx run`` encodes one
+    (``encode_prompt``). A later turn continues the cached sequence, so its
+    render adds no special tokens."""
+    if starts_cache:
+        from gmlx.gen.generation import encode_prompt
+
+        return encode_prompt(tok, prompt_text)
+    return tok.encode(prompt_text, add_special_tokens=False)
+
+
 def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
     """:func:`_opens_thinking` with the session's configured markers applied
     (the seed for the MTP path's ^T finish-thinking hook)."""
@@ -2210,7 +2222,7 @@ def _vlm_message(
     *last* user message of a conversation, which breaks multi-turn re-prefill
     (an image sent three turns ago would migrate to the newest message);
     rendering per-turn pins each marker to its own turn."""
-    from mlx_vlm.prompt_utils import MODEL_CONFIG, get_message_json
+    from gmlx._vendor.mlx_vlm.prompt_utils import MODEL_CONFIG, get_message_json
 
     if model_type not in MODEL_CONFIG:
         return {"role": role, "content": content}
@@ -2251,6 +2263,15 @@ _ASSISTANT_REJECT = (
     ("chat_template", "--chat-template"),
     ("no_chat_template", "--no-chat-template"),
     ("chat_template_config", "--chat-template-config"),
+    ("rope_scaling", "--rope-scaling"),
+    ("rope_scale", "--rope-scale"),
+    ("rope_freq_base", "--rope-freq-base"),
+    ("rope_freq_scale", "--rope-freq-scale"),
+    ("yarn_orig_ctx", "--yarn-orig-ctx"),
+    ("yarn_ext_factor", "--yarn-ext-factor"),
+    ("yarn_attn_factor", "--yarn-attn-factor"),
+    ("yarn_beta_slow", "--yarn-beta-slow"),
+    ("yarn_beta_fast", "--yarn-beta-fast"),
 )
 
 # (attr, flag, is-set) triples the server owns; each passed one gets a note.
@@ -2818,13 +2839,18 @@ def _require_chat_template(tok, *, verbatim_hint: bool = False) -> None:
     raise _ChatExit(1)
 
 
+def rope_override_from_args(args):
+    from gmlx.commands.cli import rope_override_from_args as from_args
+
+    return from_args(args)
+
+
 def _backend_vlm_mtp(args) -> _ChatBackend:
     # VLM loaded on mlx-vlm classes + an assistant drafter: text-only turns
     # run through the MTP engine over a persistent text KV cache
     # (model.language_model), while image/audio turns use the plain VLM
     # stream.
-    from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.spec.mtp_load import load_vlm_mtp_model
 
@@ -2837,6 +2863,7 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
             draft_gguf_path=args.draft_gguf,
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     b.model_type = _model_type(b.config)
@@ -2857,6 +2884,7 @@ def _backend_vlm(args) -> _ChatBackend:
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
     b.model_type = _model_type(b.config)
@@ -2868,8 +2896,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # a drafter (native-head for qwen3.5/3.6, or a --draft-gguf assistant).
     # Each reply runs through mlx-vlm's MTP engine; the cache is reused
     # across turns exactly like the plain text path.
-    from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.commands.cli import _apply_placement
     from gmlx.load.loader import preset_native_fp_wire_env
@@ -2884,6 +2911,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             draft_gguf_path=args.draft_gguf,
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
             wire=not getattr(args, "stream_experts", False),
         )
@@ -2970,8 +2998,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
 
 
 def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
-    from mlx_lm.models.cache import make_prompt_cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.envflags import env_bool
     from gmlx.load.loader import load_model, preset_native_fp_wire_env
@@ -2990,6 +3017,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             chat_template=args.chat_template,
             no_remap=args.no_remap,
             zero_copy=not args.no_zero_copy,
+            rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
 
@@ -3173,6 +3201,11 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
 
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False))
+    from gmlx.serve.memory import apply_local_cache_limit
+
+    apply_local_cache_limit(
+        (args.gguf, args.mmproj, getattr(args, "draft_gguf", None)),
+        verbose=getattr(args, "verbose", False))
     if vlm_mtp:
         return _backend_vlm_mtp(args)
     if args.mmproj is not None:
@@ -3243,7 +3276,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if logit_bias:
             assistant_extra["logit_bias"] = logit_bias
         template_kwargs = {}
-        resize_shape = None
+        # A 1- or 2-int list, which mlx-vlm's normalize_resize_shape takes.
+        resize_shape: Any = None
         speculative = False
         vlm_mtp = False
     else:
@@ -3904,6 +3938,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 from gmlx.gen.generation import stream_generate_speculative
 
                 messages = list(state.take("replay_messages") or [])
+                starts_cache = first_turn or bool(messages)
                 if first_turn and state.system_prompt:
                     sys_msg = {"role": "system", "content": state.system_prompt}
                     messages.append(sys_msg)
@@ -3916,7 +3951,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     messages, tokenize=False, add_generation_prompt=True,
                     **template_kwargs,
                 )
-                prompt = tok.encode(prompt_text, add_special_tokens=False)
+                prompt = _encode_turn(tok, prompt_text, starts_cache)
                 reply, _canceled = _stream_reply(
                     stream_generate_speculative(
                         model,
@@ -3951,8 +3986,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     vlm_msgs.append(_vlm_message(model_type, reply, "assistant"))
                 _end_turn(state, reply, _canceled, cache=cache)
                 continue
-            from mlx_vlm.generate import stream_generate as vlm_stream
-            from mlx_vlm.prompt_utils import get_chat_template
+            from gmlx._vendor.mlx_vlm.generate import stream_generate as vlm_stream
+            from gmlx._vendor.mlx_vlm.prompt_utils import get_chat_template
 
             imgs = state.take_list("staged_images")
             auds = state.take_list("staged_audio")
@@ -4000,10 +4035,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 end_token=state.thinking_end_token,
             )
             set_finish_key_target(tbp)
-            # The fixed-step prefill loop reads its step from this stamp
-            # through chunked_prefill_policy (media blocks stay whole).
-            from gmlx.gen.media_spans import stamp_prefill_step
-            stamp_prefill_step(model, kv_kwargs.get("prefill_step_size"))
             try:
                 reply, _canceled = _stream_reply(
                     vlm_stream(
@@ -4050,6 +4081,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             from gmlx.gen.generation import stream_generate_speculative
 
             messages = list(state.take("replay_messages") or [])
+            starts_cache = first_turn or bool(messages)
             if first_turn and state.system_prompt:
                 messages.append({"role": "system", "content": state.system_prompt})
             messages.append(
@@ -4059,7 +4091,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            prompt = tok.encode(prompt_text, add_special_tokens=False)
+            prompt = _encode_turn(tok, prompt_text, starts_cache)
             first_turn = False
             reply, canceled = _stream_reply(
                 stream_generate_speculative(
@@ -4104,6 +4136,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             from gmlx.gen.diffusion import stream as diffusion_stream
 
             messages = list(state.take("replay_messages") or [])
+            starts_cache = first_turn or bool(messages)
             if first_turn and state.system_prompt:
                 messages.append({"role": "system", "content": state.system_prompt})
             messages.append(
@@ -4113,7 +4146,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            prompt = tok.encode(prompt_text, add_special_tokens=False)
+            prompt = _encode_turn(tok, prompt_text, starts_cache)
             first_turn = False
             reply, canceled = _stream_reply(
                 # Bounded canvas fallback shared with `gmlx run` - the
@@ -4130,10 +4163,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _end_turn(state, reply, canceled)
             continue
 
-        from mlx_lm.generate import stream_generate
-        from mlx_lm.sample_utils import make_logits_processors, make_sampler
+        from gmlx._vendor.mlx_lm.generate import stream_generate
+        from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors, make_sampler
 
         messages = list(state.take("replay_messages") or [])
+        starts_cache = first_turn or bool(messages)
         if first_turn and state.system_prompt:
             messages.append({"role": "system", "content": state.system_prompt})
         messages.append({"role": "user", "content": _compose_user_content(state, line)})
@@ -4144,15 +4178,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             )
             prompt_text = prompt
         else:
-            # Render once, encode the render: token-identical to a tokenize=True
-            # template call (which is render + encode(add_special_tokens=False)
-            # internally), and the string is reused for thinking-budget seeding
-            # + reasoning detection.
+            # Render once, encode the render (``_encode_turn``); the string is
+            # reused for thinking-budget seeding + reasoning detection.
             prompt_text = tok.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            prompt = tok.encode(prompt_text, add_special_tokens=False)
+            prompt = _encode_turn(tok, prompt_text, starts_cache)
 
         xtc_kwargs = {}
         if s["xtc_probability"] > 0:

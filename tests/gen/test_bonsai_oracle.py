@@ -75,7 +75,7 @@ def _logprobs(logits):
 
 @pytest.mark.parametrize("name", sorted(_runs()))
 def test_logprobs_match_the_fork(bonsai_model, name):
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
 
     run = _runs()[name]
     model, _, tok = bonsai_model(run["file"])

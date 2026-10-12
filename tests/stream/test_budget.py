@@ -159,3 +159,22 @@ def test_available_ram_reads_the_mach_counters_without_a_spawn(monkeypatch):
     monkeypatch.setattr(subprocess, "run", boom)
     loose, strict = _available_ram_bytes(), _available_ram_bytes(include_inactive=False)
     assert loose > 0 and strict > 0 and loose >= strict
+
+
+def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
+    """--stream-experts on a model that fits: an arena of every expert would
+    wire them all, which is the resident load the flag asks to avoid."""
+    import mlx.core as mx
+
+    import gmlx.stream.budget as budget
+
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    monkeypatch.delenv("GMLX_DECODE_ARENA_RAM_FRAC", raising=False)
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 128 << 30})
+    experts = 20 << 30
+    kw = dict(total_bytes=30 << 30, offsets={0: [(0, 0, experts)]},
+              budget=100 << 30, room_bytes=4 << 30)
+    assert budget._decode_arena_bytes(**kw) == experts
+    assert budget._decode_arena_bytes(**kw, forced=True) == experts // 2

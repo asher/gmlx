@@ -40,15 +40,14 @@ from __future__ import annotations
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+from gmlx.upstream.patching import wrapped_with
 
 _installed = False
 _CLAIMS = [0]
 _SEEN_B = set()
 
 _MODULES = (
-    ("mlx_lm.models", "llama"),
-    ("mlx_lm.models", "gemma4_text"),
-    ("mlx_vlm.models.gemma4", "language"),
+    ("gmlx._vendor.mlx_lm.models", "llama"),
 )
 
 # Only architectures with a PASSED KLD gate are patched. gemma-4 is
@@ -65,6 +64,18 @@ _TILE_C = {64: 32, 128: 32, 256: 16, 512: 8}
 def claims() -> int:
     """Decode calls claimed by the sparse route since import."""
     return _CLAIMS[0]
+
+
+def arch_enabled(name: str) -> bool:
+    """True when the architecture ``name`` may take the route: a validated
+    one, or one named in GMLX_SPARSE_ARCHS."""
+    import os
+
+    extra = tuple(
+        x.strip() for x in os.environ.get("GMLX_SPARSE_ARCHS", "").split(",")
+        if x.strip()
+    )
+    return name in _VALIDATED + extra
 
 
 def _block_means(cache, keys, bl):
@@ -235,16 +246,10 @@ def install_sparse_sdpa() -> bool:
     if _installed:
         return True
     import importlib
-    import os
 
-    extra = tuple(
-        x.strip() for x in os.environ.get("GMLX_SPARSE_ARCHS", "").split(",")
-        if x.strip()
-    )
-    allowed = _VALIDATED + extra
     patched = 0
     for pkg, name in _MODULES:
-        if name not in allowed:
+        if not arch_enabled(name):
             continue
         try:
             mod = importlib.import_module(f"{pkg}.{name}")
@@ -253,7 +258,7 @@ def install_sparse_sdpa() -> bool:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None:
             continue
-        if getattr(cur, "_gmlx_sparse_route", False):
+        if wrapped_with(cur, "_gmlx_sparse_route"):
             patched += 1
             continue
         mod.scaled_dot_product_attention = _make_route(cur)

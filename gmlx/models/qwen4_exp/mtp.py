@@ -48,9 +48,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as q4
+from gmlx.cache.attention import create_attention_mask
 from gmlx.envflags import env_bool, env_int
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
@@ -169,13 +168,16 @@ class Qwen4ExpSpecLM(Qwen4ExpSpecHooks, q4.Model):
     ):
         # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
         # keyword; shared_kv is never used (the drafter owns its KV).
+        # skip_logits leaves out the head; speculative_logits_from_hidden
+        # projects the returned streams.
+        skip_logits = kwargs.pop("skip_logits", False)
         del n_to_process, kwargs
         want_hidden = return_hidden or return_shared_kv
         out, streams = self.model(
             inputs, cache, input_embeddings=inputs_embeds, return_streams=True)
-        logits = self._head(out)
+        logits = None if skip_logits else self._head(out)
         if not want_hidden:
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[streams])

@@ -630,7 +630,7 @@ def _glu_inputs(rng, width):
 
 
 def _plain_glu(x, g, activation):
-    from mlx_lm.models.activations import swiglu
+    from gmlx._vendor.mlx_lm.models.activations import swiglu
 
     return swiglu(g, x) if activation == "silu" else x * mx.sigmoid(g)
 

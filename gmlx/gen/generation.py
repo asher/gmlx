@@ -17,6 +17,7 @@ from typing import Any
 import mlx.core as mx
 
 import gmlx.stream.expert_streaming as expert_streaming
+from gmlx.upstream.patching import link, wrapped_with
 
 
 # Tokens per target prefill forward on the speculative path only. mlx-vlm forces
@@ -186,7 +187,7 @@ def setup_kvarn_cache(
     if make_cache is not None:
         prompt_cache = make_cache()
     else:
-        from mlx_lm.models.cache import make_prompt_cache as _mpc
+        from gmlx.cache.kv_cache import make_prompt_cache as _mpc
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     policy = convert_kvarn_cache(
@@ -225,13 +226,12 @@ def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=No
             file=out,
         )
         return None
-    from mlx_vlm.models import cache as _cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache
     from gmlx.cache.kvarn_cache import kvarn_mtp_window_decline
     from gmlx.spec.helpers import _resolve_block_total
 
     lm = model.language_model if hasattr(model, "language_model") else model
-    built = _cache.make_prompt_cache(lm)
+    built = make_prompt_cache(lm)
     decline = kvarn_mtp_window_decline(built)
     if decline is not None:
         print(f"warning: --kv-quant-scheme kvarn dropped: {decline}", file=out)
@@ -270,7 +270,7 @@ def harden_mtp_rollback(obj) -> None:
     from the survivors, so its positional zip with gdn_states holds.
     Idempotent."""
     fn = getattr(obj, "rollback_speculative_cache", None)
-    if fn is None or getattr(fn, "_gmlx_kvarn_guard", False):
+    if fn is None or wrapped_with(fn, "_gmlx_kvarn_guard"):
         return
 
     def _guarded(caches, gdn_states, accepted, block_size):
@@ -312,8 +312,7 @@ def harden_mtp_rollback(obj) -> None:
         rest = [None if getattr(c, "ragged_trim", False) else c for c in caches]
         return fn(rest, gdn_states, accepted, block_size)
 
-    setattr(_guarded, "_gmlx_kvarn_guard", True)
-    obj.rollback_speculative_cache = _guarded
+    obj.rollback_speculative_cache = link(_guarded, fn, "_gmlx_kvarn_guard")
 
 
 def generate(
@@ -387,8 +386,8 @@ def generate(
     always raw.
     ``over_generation``/``inject_critique`` route to an experimental
     two-phase over-generation probe (see overgen.py)."""
-    import mlx_lm
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+    import gmlx._vendor.mlx_lm
+    from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     xtc_kwargs = {}
     if xtc_probability > 0:
@@ -468,6 +467,10 @@ def generate(
             model, tokenizer, prompt, max_tokens=max_tokens, verbose=verbose
         )
 
+    # mlx-lm encodes a string prompt by its own rule, which drops every
+    # special token of a prompt that opens with BOS.
+    prompt_ids = (encode_prompt(tokenizer, prompt) if isinstance(prompt, str)
+                  else prompt)
     prompt_cache = None
     if kv_quant_scheme in (None, "auto") and kv_bits is not None:
         from gmlx.cache.kv_policy import pick_scheme
@@ -500,8 +503,7 @@ def generate(
     elif kv_bits is not None:
         # Resolve on the constructed stack. A bare make_cache probe
         # misses what max_kv_size builds.
-        from mlx_lm.models.cache import make_prompt_cache as _mpc
-
+        from gmlx.cache.kv_cache import make_prompt_cache as _mpc
         from gmlx.cache.kv_policy import (arm_stack, attention_kv_decline,
                                           resolve_and_report)
 
@@ -522,7 +524,7 @@ def generate(
 
     if prompt_cache is None and prefill_tail.tail_model(model):
         # The tail arms on a cache gmlx owns; mlx-lm would build this one.
-        from mlx_lm.models.cache import make_prompt_cache as _mpc
+        from gmlx.cache.kv_cache import make_prompt_cache as _mpc
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     gen_kwargs = {
@@ -537,11 +539,7 @@ def generate(
     if prompt_cache is not None:
         gen_kwargs["prompt_cache"] = prompt_cache
         if prefill_tail.tail_model(model):
-            prefill_tail.arm_prefill_tail(
-                prompt_cache,
-                len(encode_prompt(tokenizer, prompt))
-                if isinstance(prompt, str) else len(prompt),
-            )
+            prefill_tail.arm_prefill_tail(prompt_cache, len(prompt_ids))
     # Module-attribute lookup so the monkeypatch seam
     # gmlx.stream.expert_streaming._resolve_prefill_step stays live for this path.
     step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
@@ -551,8 +549,7 @@ def generate(
             "(--prefill-step-size overrides)"
         )
     if step is not None and expert_streaming.moe_streaming_active(model):
-        n_prompt = (len(encode_prompt(tokenizer, prompt))
-                    if isinstance(prompt, str) else len(prompt))
+        n_prompt = len(prompt_ids)
         merged = expert_streaming.merge_prefill_tail(step, n_prompt - 1)
         if merged != step and verbose:
             print(f"[prefill] chunk widened to {merged} to fold in the "
@@ -602,7 +599,7 @@ def generate(
             if tbp is not None:
                 over_logits_processors = list(logits_processors) + [tbp]
         return _generate_over(
-            model, tokenizer, prompt,
+            model, tokenizer, prompt, prompt_ids=prompt_ids,
             main_sampler=sampler, over_sampler=over_sampler,
             logits_processors=logits_processors,
             over_logits_processors=over_logits_processors,
@@ -635,12 +632,12 @@ def generate(
                 # thinking block (the raw stream alone shows a bare close tag,
                 # and mlx_lm.generate has no seam between its separator and
                 # the first token).
-                from mlx_lm.generate import stream_generate
+                from gmlx._vendor.mlx_lm.generate import stream_generate
 
                 print("=" * 10)
                 emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
                 text, last = "", None
-                for last in stream_generate(model, tokenizer, prompt,
+                for last in stream_generate(model, tokenizer, prompt_ids,
                                             **gen_kwargs):
                     emit(last.text)
                     text += last.text
@@ -660,20 +657,20 @@ def generate(
                     )
                     print(f"Peak memory: {last.peak_memory:.3f} GB")
                 return text
-            return mlx_lm.generate(
-                model, tokenizer, prompt, verbose=verbose, **gen_kwargs)
+            return gmlx._vendor.mlx_lm.generate(
+                model, tokenizer, prompt_ids, verbose=verbose, **gen_kwargs)
 
         # Stop sequences need the streamed text: scan with a held-back tail so
         # a stop string split across segments still matches, then end the
         # stream. The scanner sees the raw text; the emitter only displays.
-        from mlx_lm.generate import stream_generate
+        from gmlx._vendor.mlx_lm.generate import stream_generate
 
         emit = close_emit = None
         if verbose:
             emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
         scanner = StopScanner(stop)
         pieces, last = [], None
-        for r in stream_generate(model, tokenizer, prompt, **gen_kwargs):
+        for r in stream_generate(model, tokenizer, prompt_ids, **gen_kwargs):
             out, hit = scanner.feed(r.text)
             if out:
                 pieces.append(out)
@@ -733,6 +730,7 @@ def _generate_over(
     orig_prompt=None,
     label=None,
     reasoning=None,
+    prompt_ids=None,
 ):
     """Over-generation probe (experimental). Phase 1 generates to the natural
     stop (the seam); phase 2 continues from phase 1's KV cache, either forcing
@@ -741,10 +739,11 @@ def _generate_over(
     ``window`` are set, ``window`` caps the injected reply. Returns the full
     text and appends a JSONL record to ``log_path`` when set. See overgen.py.
     ``reasoning`` styles phase 1's verbose stream like :func:`generate`'s;
-    phase 2 prints raw (the forced continuation is the thing being probed)."""
-    from mlx_lm.generate import stream_generate
-    from mlx_lm.models.cache import make_prompt_cache
+    phase 2 prints raw (the forced continuation is the thing being probed).
+    ``prompt_ids`` is the encoded ``prompt`` phase 1 prefills."""
+    from gmlx._vendor.mlx_lm.generate import stream_generate
 
+    from gmlx.cache.kv_cache import make_prompt_cache
     from gmlx.spec.overgen import (
         append_log,
         build_critique_bridge,
@@ -770,7 +769,8 @@ def _generate_over(
         emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     with suppressed_eos(tokenizer):
         for r in stream_generate(
-            model, tokenizer, prompt, max_tokens=max_tokens,
+            model, tokenizer, prompt if prompt_ids is None else prompt_ids,
+            max_tokens=max_tokens,
             sampler=main_sampler, logits_processors=logits_processors,
             prompt_cache=cache, **base_kwargs,
         ):
@@ -902,12 +902,12 @@ def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
     from gmlx.serve.cb_phase import flip
 
     flip("prefill")
-    from mlx_vlm.models import cache as _cache
+    from gmlx.cache.kv_cache import make_prompt_cache
 
     for attr in ("_position_ids", "_rope_deltas"):
         if hasattr(lm, attr):
             setattr(lm, attr, None)
-    c = cache if cache is not None else _cache.make_prompt_cache(lm)
+    c = cache if cache is not None else make_prompt_cache(lm)
     n_total = input_ids.shape[1]
     i = 0
     while i < n_total - 1:
@@ -922,18 +922,30 @@ _MTP_FINISH_WHY = "on the stock MTP engine (run with --no-mtp to use it)"
 
 
 def encode_prompt(tokenizer, prompt: str) -> list:
-    """Encode a prompt, adding specials only when it does not already open
-    with the BOS string.
+    """Encode a generation prompt with one BOS and no trailing EOS.
 
-    mlx_lm.stream_generate's single-BOS rule. A chat template that emits
-    its own BOS, on a GGUF whose ``add_bos_token`` is true, would
-    otherwise get a second one from the tokenizer's post-processor. The
-    ds4 DeepSeek-V4.1 conversion sets that flag where the llama.cpp one
-    does not, and both ship the same template.
+    The prompt is encoded without special tokens, and the ids the
+    tokenizer adds in front of a sequence (its BOS) go before it unless it
+    already opens with them. A chat template that emits its own BOS, on a
+    GGUF whose ``add_bos_token`` is true, would otherwise get a second one
+    from the tokenizer's post-processor, and one whose ``add_eos_token``
+    is true would end the prompt in EOS. The ds4 DeepSeek-V4.1 conversion
+    sets ``add_bos_token`` where the llama.cpp one does not, and both ship
+    the same template. For a tokenizer that adds only BOS the result is the
+    server's (``single_bos_fix``), which it also keeps for a tokenizer
+    whose encoding the probe cannot split.
     """
-    bos = getattr(tokenizer, "bos_token", None)
-    return tokenizer.encode(
-        prompt, add_special_tokens=bos is None or not prompt.startswith(bos))
+    from gmlx.upstream.single_bos_fix import drops_duplicate_bos, leading_ids
+
+    lead = leading_ids(tokenizer)
+    if lead is None:
+        return tokenizer.encode(
+            prompt,
+            add_special_tokens=not drops_duplicate_bos(tokenizer, prompt))
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+    if not lead or list(ids[:len(lead)]) == lead:
+        return ids
+    return lead + list(ids)
 
 
 def _with_mtp_finish_key_notice(fn, *args, **kwargs):
@@ -970,7 +982,7 @@ def make_spec_sampler(*, temp, top_p, top_k, min_p, xtc_probability=0.0,
     greedy. make_sampler's XTC takes one draw and one threshold over all
     rows, so with XTC on the chain runs row by row: each verify position
     gets its own draw, as each plain decode step does."""
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
 
     from gmlx.spec.speculative import annotate_sampling_params
 
@@ -1002,7 +1014,7 @@ def spec_sampling(tokenizer, *, temp, top_p, top_k, min_p,
                   presence_penalty=0.0, frequency_penalty=0.0):
     """The sampler and logits processors for the MTP rounds, from the
     settings plain decode takes (see generate)."""
-    from mlx_lm.sample_utils import make_logits_processors
+    from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors
 
     from gmlx.load.tokenizer import merge_suppressed_tokens
 
@@ -1139,9 +1151,9 @@ def _generate_speculative(
             file=sys.stderr,
         )
 
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
-    from mlx_vlm.generate.ar import generate_step
+    from gmlx._vendor.mlx_vlm.generate.ar import generate_step
 
     if (
         isinstance(prompt, str)
@@ -1295,9 +1307,9 @@ def generate_speculative_owned(
     stream_speculative engine (engine/speculative.py) instead of mlx-vlm's
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
-    from gmlx.spec.helpers import _resolve_block_total
-    from mlx_vlm.models import cache as _cache
 
+    from gmlx.cache.kv_cache import make_prompt_cache
+    from gmlx.spec.helpers import _resolve_block_total
     from gmlx.spec.speculative import stream_speculative
 
     from .thinking_budget import (
@@ -1355,7 +1367,7 @@ def generate_speculative_owned(
         # a silent fall-through to the pooled packing.
         kv_bits = None
     if prompt_cache is None:
-        prompt_cache = _cache.make_prompt_cache(lm)
+        prompt_cache = make_prompt_cache(lm)
     if kv_bits is not None:
         # Owned rounds take the layers serve takes; the stock walks
         # decline. No later converter runs here, so convert now.
@@ -1664,7 +1676,7 @@ def _stream_generate_speculative(
     times an MTP reply exactly like the plain text path.
 
     ``prompt`` is the already chat-templated new turn; its tokens append to
-    ``prompt_cache`` (created once with mlx-vlm's ``make_prompt_cache`` and reused
+    ``prompt_cache`` (created once with ``make_prompt_cache`` and reused
     across turns - for single-stream ``draft_kind="mtp"`` that cache is a plain
     target KV cache the native drafter reads back, so cross-turn reuse is identical
     to the text path). Greedy output matches the non-speculative path token-for-token.
@@ -1709,9 +1721,9 @@ def _stream_generate_speculative(
             file=sys.stderr,
         )
 
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
-    from mlx_vlm.generate.ar import generate_step
+    from gmlx._vendor.mlx_vlm.generate.ar import generate_step
 
     if isinstance(prompt, str):
         prompt_ids = encode_prompt(tokenizer, prompt)

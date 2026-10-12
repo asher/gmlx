@@ -1,10 +1,8 @@
-# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Ported from vllm/model_executor/models/diffusion_gemma.py (the unembedding,
 # the slot log-probabilities and the multi-step structured-read loop) at
 # ab3de6edf2 and modified for gmlx (Apache-2.0; see licenses/vllm-LICENSE).
-# entropy_transfer_mask follows mlx-vlm's _diffusion_entropy_transfer_mask
-# (MIT; see licenses/mlx-vlm-LICENSE).
 """The read rules taken from vLLM: the unembedding, the log-probabilities a
 slot reports, and the denoise loop a read runs past one step.
 
@@ -22,6 +20,12 @@ from typing import Any, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
+
+# Accepts the lowest-entropy positions while their summed entropy, less the
+# largest of them, stays within the bound.
+from gmlx._vendor.mlx_vlm.generate.diffusion import (
+    _diffusion_entropy_transfer_mask as entropy_transfer_mask,
+)
 
 from .reads import Cancelled, SampleRead, SlotRead, pinned_positions
 
@@ -69,17 +73,6 @@ class DenoiseConfig:
         n = float(self.max_denoising_steps)
         remaining = max(n - step, 1.0)
         return self.t_min + (self.t_max - self.t_min) * (remaining / n)
-
-
-def entropy_transfer_mask(entropy: mx.array, entropy_bound: float) -> mx.array:
-    """Accept the lowest-entropy positions while their summed entropy, less
-    the largest of them, stays within the bound."""
-    order = mx.argsort(entropy, axis=-1)
-    sorted_entropy = mx.take_along_axis(entropy, order, axis=-1)
-    cumulative = mx.cumsum(sorted_entropy, axis=-1)
-    cumulative_max = mx.cummax(sorted_entropy, axis=-1)
-    sorted_mask = (cumulative - cumulative_max) <= entropy_bound
-    return mx.put_along_axis(mx.zeros_like(sorted_mask), order, sorted_mask, axis=-1)
 
 
 def _seed_key(seed: int) -> mx.array:

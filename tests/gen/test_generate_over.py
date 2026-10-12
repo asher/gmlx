@@ -8,8 +8,8 @@ from gmlx.gen.generation import _generate_over
 
 # mlx_lm re-exports the `generate` function over the submodule name, so attribute
 # access returns the function; import the real modules explicitly.
-mlg = importlib.import_module("mlx_lm.generate")
-mlc = importlib.import_module("mlx_lm.models.cache")
+mlg = importlib.import_module("gmlx._vendor.mlx_lm.generate")
+kvc = importlib.import_module("gmlx.cache.kv_cache")
 
 
 def _resp(token, text, n):
@@ -38,19 +38,21 @@ class _Tok:
 
 
 def _patch_stream(monkeypatch, phase1, phase2):
-    """phase1/phase2 are [(token_id, text)]; phase is chosen by prompt type
-    (str = phase 1 templated prompt, list = phase 2 bridge)."""
+    """phase1/phase2 are [(token_id, text)]: the first call streams phase 1
+    (the prompt), a later one phase 2 (the bridge)."""
+    calls = []
 
     def fake(model, tokenizer, prompt, *, max_tokens, sampler,
              logits_processors, prompt_cache, **base):
-        seq = phase1 if isinstance(prompt, str) else phase2
+        seq = phase2 if calls else phase1
+        calls.append(prompt)
         for i, (tid, txt) in enumerate(seq):
             if i >= max_tokens:
                 break
             yield _resp(tid, txt, i + 1)
 
     monkeypatch.setattr(mlg, "stream_generate", fake)
-    monkeypatch.setattr(mlc, "make_prompt_cache", lambda model, max_kv_size=None: [])
+    monkeypatch.setattr(kvc, "make_prompt_cache", lambda model, max_kv_size=None: [])
 
 
 def _call(**kw):
@@ -205,8 +207,6 @@ def test_seam_text_filled_from_decode_when_blank(monkeypatch, tmp_path):
 def test_over_generation_with_prompt_cache_kwarg(monkeypatch):
     """--kv-bits puts the policy-armed prompt_cache into gen_kwargs.
     The over-generation branch must not re-pass it to stream_generate."""
-    import mlx_lm.models.cache as mlx_cache
-
     import gmlx.gen.generation as generation
 
     _patch_stream(
@@ -216,8 +216,8 @@ def test_over_generation_with_prompt_cache_kwarg(monkeypatch):
     )
     # Hand generate() a one-layer plain-KV stack so the real resolver
     # quantizes without a model. A shallow stack has no carve-out.
-    monkeypatch.setattr(mlx_cache, "make_prompt_cache",
-                        lambda model, max_kv_size=None: [mlx_cache.KVCache()])
+    monkeypatch.setattr(kvc, "make_prompt_cache",
+                        lambda model, max_kv_size=None: [kvc.KVCache()])
     text = generation.generate(
         object(), _Tok(), "PROMPT", kv_bits=8, over_generation=2,
         apply_chat_template=False,

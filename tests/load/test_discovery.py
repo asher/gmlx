@@ -202,8 +202,9 @@ def test_adapter_type_key_alone_is_adapter_kind():
 
 
 def test_gemma_embedding_arch_classified_as_embedding():
-    # EmbeddingGemma classifies as an embedder by arch alone (no pooling_type, a
-    # filename without an *embed* token) -- it's in _ENCODER_ARCHES.
+    # EmbeddingGemma classifies as an embedder by arch alone, with no
+    # pooling_type and no embed token in its file name, as it is in
+    # ENCODER_ARCHES.
     c = _classify({"general.architecture": "gemma-embedding"}, "model-Q8_0.gguf")
     assert c.kind == "embedding"
 
@@ -983,7 +984,7 @@ def test_scan_overram_moe_streams_experts_and_drops_mtp(
         tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(disc, "classify_gguf", _classify_as(
         "hy_v3", {"hy_v3.nextn_predict_layers": 1, "hy_v3.expert_count": 64}))
-    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 128 * 10**9)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: 100 * 10**9)
     monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 200 * 10**9)
     root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
     m = _scan(root)[0]
@@ -993,9 +994,69 @@ def test_scan_overram_moe_streams_experts_and_drops_mtp(
     assert "over-RAM MoE" in err and "speculative off" in err
 
 
+def test_the_stream_mark_is_keyed_on_the_resident_budget(tmp_path, monkeypatch):
+    """The mark forces streaming, so a MoE under the installer's budget gets
+    none, even when it is over 0.8 x RAM; without Metal, 0.8 x RAM stands in."""
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.expert_count": 64}))
+    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 128 * 10**9)
+    import gmlx.device as dev
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: 108 * 10**9)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 105 * 10**9)
+    root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
+    assert _scan(root)[0].stream is None          # over 0.8 x RAM, under budget
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 110 * 10**9)
+    assert _scan(root)[0].stream == "experts"
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: None)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 105 * 10**9)
+    assert _scan(root)[0].stream == "experts"     # no Metal: 0.8 x 128 GB
+
+    def broken():
+        raise RuntimeError("[metal::Device] Unable to load device")
+
+    monkeypatch.setattr(dev, "stream_budget_bytes", broken)
+    assert _scan(root)[0].stream == "experts"     # a Metal error: the same
+
+
+def _moe_with_mtp_block(path, expert_floats=4096, mtp_floats=2048):
+    """A GGUF with one trunk expert stack and one NextN/MTP block."""
+    import numpy as np
+    from gguf import GGUFWriter
+
+    w = GGUFWriter(str(path), "hy_v3")
+    w.add_uint32("hy_v3.block_count", 2)
+    w.add_uint32("hy_v3.nextn_predict_layers", 1)
+    w.add_uint32("hy_v3.expert_count", 4)
+    w.add_tensor("blk.0.ffn_gate_exps.weight",
+                 np.zeros(expert_floats, dtype=np.float32))
+    w.add_tensor("blk.1.attn_q.weight", np.zeros(mtp_floats, dtype=np.float32))
+    w.add_tensor("blk.1.nextn.eh_proj.weight",
+                 np.zeros(mtp_floats, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return 4 * expert_floats
+
+
+def test_the_stream_mark_compares_thetext_tensor_bytes(tmp_path, monkeypatch):
+    """The installer compares the loaded text tower with its budget, so the
+    mark leaves out the MTP block and the metadata the file carries."""
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.expert_count": 64}))
+    path = tmp_path / "Hy3-IQ4_XS.gguf"
+    text = _moe_with_mtp_block(path)
+    assert disc.text_tensor_bytes(str(path)) == text
+    assert os.path.getsize(path) > text + 16384      # MTP block + metadata
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: text + 1)
+    assert _scan(tmp_path)[0].stream is None      # over by file, under by text
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: text - 1)
+    assert _scan(tmp_path)[0].stream == "experts"
+
+
 def test_scan_overram_dense_gets_hint_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(disc, "classify_gguf", _classify_as("llama"))
-    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 64 * 10**9)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: 50 * 10**9)
     monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 100 * 10**9)
     root = _write(tmp_path, "Big-Dense-Q8_0.gguf")
     m = _scan(root)[0]

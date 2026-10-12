@@ -36,6 +36,9 @@ import os
 import time
 
 from gmlx.serve.batch_rows import batch_rows
+from gmlx.upstream.patching import link, wrapped_with
+
+from .media_salt import salt_at
 
 _log = logging.getLogger(__name__)
 
@@ -89,31 +92,31 @@ def _covered_len(manager, ids, extra_hash: int) -> int:
     exact entries, anchor LRU) without acquiring blocks, cloning, or
     touching hit counters, so a peek never distorts stats or LRU order.
     """
-    from mlx_vlm import apc as _apc
+    from .apc_manager import block_chain
 
     tt = tuple(int(t) for t in ids)
     best = 0
     with manager.lock:
         bs = int(getattr(manager, "block_size", 0) or 0)
         table = getattr(manager, "hash_table", None)
+        # Each block keys on the salt at its end, as the manager's lookup
+        # reads it.
         if bs > 0 and table:
-            parent = _apc.SEED_PARENT_HASH
-            for i in range(len(tt) // bs):
-                chunk = tt[i * bs:(i + 1) * bs]
-                h = _apc._hash_tokens(parent, tokens=chunk, extra=extra_hash)
+            for chunk, h in block_chain(tt, extra_hash, len(tt) // bs, bs):
                 blk = table.get(h)
                 if blk is None or blk.token_ids != chunk:
                     break
-                parent = h
-                best = (i + 1) * bs
+                best += bs
         for entry in (getattr(manager, "_exact_cache", None) or {}).values():
             p = len(entry.token_ids)
-            if (entry.extra_hash == extra_hash and best < p < len(tt)
+            if (entry.extra_hash == salt_at(extra_hash, p)
+                    and best < p < len(tt)
                     and tt[:p] == tuple(entry.token_ids)):
                 best = p
         for kids, kh in (getattr(manager, "_kq_anchor_cache", None) or {}):
             p = len(kids)
-            if kh == extra_hash and best < p < len(tt) and tt[:p] == kids:
+            if (kh == salt_at(extra_hash, p) and best < p < len(tt)
+                    and tt[:p] == kids):
                 best = p
     return best
 
@@ -199,9 +202,9 @@ def install_fresh_admission_gate() -> None:
     gate so a truncated tick still projects memory for the rows it
     admits.
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return
     if _wait_ms() <= 0:
         return
@@ -233,5 +236,5 @@ def install_fresh_admission_gate() -> None:
             self._unprocessed_sequences = leftover + tail + arrivals
 
     setattr(_gated_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _gated_next
+    _ar.BatchGenerator._next = link(_gated_next, _orig_next)
     _log.info("freshness admission gate installed")

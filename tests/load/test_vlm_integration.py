@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 pytestmark = pytest.mark.integration
 
@@ -106,8 +106,8 @@ def test_vlm_image_turn(vlm_pair):
         config.get("model_type") if isinstance(config, dict) else ""
     )
 
-    from mlx_vlm.generate import stream_generate
-    from mlx_vlm.prompt_utils import get_chat_template
+    from gmlx._vendor.mlx_vlm.generate import stream_generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import get_chat_template
 
     msgs = [_vlm_message(model_type, "What animals are in this picture?",
                          "user", n_images=1)]
@@ -156,8 +156,8 @@ def test_vlm_audio_turn(audio_pair):
         config.get("model_type") if isinstance(config, dict) else ""
     )
 
-    from mlx_vlm.generate import stream_generate
-    from mlx_vlm.prompt_utils import get_chat_template
+    from gmlx._vendor.mlx_vlm.generate import stream_generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import get_chat_template
 
     msgs = [_vlm_message(model_type, "What is said in this recording?",
                          "user", n_audios=1)]

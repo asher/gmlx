@@ -91,6 +91,7 @@ Every block is optional. A server needs models, from `models` or from a
 |-------|--------------|
 | [`models`](#models) | The models gmlx can run, each with its GGUF file and settings |
 | [`aliases`](#aliases) | Extra model names, such as `coder` for `qwen3.8-27b-ud-q6@coding` |
+| [`image_models`](#image-models) | Image generation models, each with its DiT, text encoder and VAE files |
 | [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use |
 | [`rules`](#rules) | A profile for every model whose id matches a pattern |
 | [`discover`](#model-discovery) | Folders scanned at each start for GGUFs that have no entry |
@@ -174,6 +175,40 @@ placement and how to size the `moe_*` keys, which all change the output.
 | <a id="modelsdecode_feeder"></a>`decode_feeder` | `true` with `stream: experts` | Decoding keeps the most used experts in a wired arena |
 | <a id="modelsstream_fast_disk"></a>`stream_fast_disk` | `auto` | Read-ahead for streamed decoding. `auto` tests the drive, `on` and `off` force the choice. |
 
+### Rope scaling
+
+`rope_scaling` runs a model past its trained context. Its keys are the
+[rope scaling flags](cli.md#rope-scaling-flags) of `gmlx run`, and each one
+wins over its key in the GGUF header:
+
+```yaml
+models:
+  qwen3.8-flash-next-512k:
+    path: Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
+    rope_scaling:
+      type: yarn
+      factor: 2.0
+      original_context: 262144
+```
+
+| Key | Flag | Meaning |
+|-----|------|---------|
+| <a id="modelsrope_scaling"></a>`type` | `--rope-scaling` | `none`, `linear` or `yarn` |
+| `factor` | `--rope-scale` | Expand the context by this factor |
+| `freq_scale` | `--rope-freq-scale` | The same value as `factor`, spelled as its inverse |
+| `freq_base` | `--rope-freq-base` | Rope base frequency |
+| `original_context` | `--yarn-orig-ctx` | The context the model was trained at |
+| `ext_factor` | `--yarn-ext-factor` | Extrapolation mix, 1 under yarn and 0 otherwise by default |
+| `attn_factor` | `--yarn-attn-factor` | Attention magnitude scale |
+| `beta_fast` | `--yarn-beta-fast` | Low correction dimension, 32 by default, or a mistral3 header's |
+| `beta_slow` | `--yarn-beta-slow` | High correction dimension, 1 by default, or a mistral3 header's |
+
+Two ids on one GGUF with different `rope_scaling` load as separate models,
+and the prompt cache on disk keeps their KV apart. A YaRN factor extends
+the context that `/v1/models` reports to `original_context` times the
+factor. A linear factor leaves it at the trained context. A constant factor can cost quality on short prompts, so pick the
+smallest factor that fits.
+
 ## Aliases
 
 An alias gives a model a second name, and can fix a profile to it. The
@@ -187,6 +222,62 @@ aliases:
 ```
 
 An alias cannot contain `@` or match a model id.
+
+## Image models
+
+Each entry under `image_models` is one image generation model: a DiT GGUF
+with its text encoder and VAE. [`gmlx pull`](images.md#make-your-first-image) writes
+one for a model it downloads, and [model discovery](#model-discovery) adds
+one for a DiT it finds with its parts. The entry's key is its id, which a request
+to the image routes puts in its `model` field. Image ids, model ids,
+aliases and served assistants share one set of names, so an image id
+cannot repeat any of them, and it cannot contain `@`.
+
+```yaml
+# doctest: build
+models:
+  qwen3-4b:
+    path: Qwen3-4B-Q4_K_M.gguf
+image_models:
+  z-image-turbo:
+    path: z-image-turbo-Q4_K_M.gguf
+    encoder: qwen3-4b
+    vae: z-image-vae-BF16.gguf
+  qwen-image:
+    path: qwen-image-2.1-Q4_K_M.gguf
+    encoder: Qwen3-VL-8B-Instruct-Q4_K_M.gguf
+    encoder_mmproj: mmproj-Qwen3-VL-8B-Instruct-BF16.gguf
+    vae: qwen-image-2.1-vae-F32.gguf
+    defaults: {size: 1024x1024, steps: 30}
+server:
+  defaults:
+    image_model: z-image-turbo
+```
+
+Image models load into the same memory budget as chat models, and unload
+the same way: by `ttl_s`, by [`POST /unload`](api.md#endpoints), or to
+make room for another model. The memory an entry counts is its weights
+and what one image at its default size needs while it runs, so two ids
+with the same files and another default `size` or `guidance` load as two
+entries.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="image_modelspath"></a>`path` | required | The DiT GGUF, found as a model [`path`](#modelspath) is |
+| <a id="image_modelsencoder"></a>`encoder` | required | The text encoder: the id of an entry under `models`, whose loaded copy it shares, or a GGUF path |
+| <a id="image_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF, which edits from reference images need. A shared encoder brings its model's `mmproj` instead. |
+| <a id="image_modelsvae"></a>`vae` | required | The VAE, a GGUF or a safetensors file |
+| <a id="image_modelsfamily"></a>`family` | detected | The image family, such as `z-image` or `qwen-image-2.1`. A file of another family is refused at load. |
+| <a id="image_modelsvariant"></a>`variant` | detected | The DiT's variant, such as `turbo`, for a file whose weights match no known variant. A Krea 2 file of unknown weights needs `variant: turbo` to load. |
+| <a id="image_modelsadapters"></a>`adapters` | none | LoRA files applied to every request, each a path or `{path, strength}` with strength 1 by default |
+| <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`) and `negative_prompt` |
+| <a id="image_modelsencoder_release"></a>`encoder_release` | `auto` | Release the text encoder after each encode: `always`, `never`, or `auto`, which keeps it while the whole model fits in 80 percent of the working budget |
+| <a id="image_modelspin"></a>`pin` | `false` | Load at start and stay loaded, as a model's [`pin`](#modelspin) |
+| <a id="image_modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |
+
+A shared encoder must be a model without an `adapter`. A quantized chat
+GGUF used as the encoder gives slightly different images than a full
+precision encoder file.
 
 ## Profiles
 
@@ -412,7 +503,8 @@ markers such as `mmproj`, `assistant`, `draft` and `mtp`, and imatrix tags,
 and adds the short quantization: `Qwen3-8B-Q4_K_M.gguf` becomes
 `qwen3-8b-q4`. When two files would get the same name, both get the full
 quantization, such as `qwen3-8b-q4-k-m` and `qwen3-8b-q4-k-s`, and a clash
-that remains gets a number. `gmlx list` shows the names.
+that remains gets a number, as does a name that a model or an image model
+already has. `gmlx list` shows the names.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -430,6 +522,14 @@ A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
 
 A drafter whose header names its base model pairs with that model in any
 scanned folder. A model with `stream` set gets no drafter.
+
+An image DiT becomes an [image model](#image-models) when the scan also
+finds its family's text encoder and VAE. Files are matched by their
+weights, not their names, and the nearest match to the DiT wins. A text
+encoder that is also a chat model, scanned or configured without an
+`adapter`, is shared by its id; for the Qwen-Image models the chat model
+must also have its `mmproj`. A DiT without its encoder or VAE is
+reported with the `gmlx pull` command that fetches them.
 
 ## Server
 
@@ -489,7 +589,7 @@ accepts.
 |-----|---------|---------|
 | <a id="serverstt"></a>`stt` | none | Speech-to-text model: an alias such as `whisper-turbo`, a Hugging Face repo id or a folder |
 | <a id="servertts"></a>`tts` | none | Text-to-speech model: an alias such as `kokoro`, a Hugging Face repo id or a folder |
-| <a id="serverembeddings"></a>`embeddings` | none | Embeddings model: a GGUF path, an `hf:` reference, an alias, or an mlx-embeddings repo id or folder |
+| <a id="serverembeddings"></a>`embeddings` | none | Embeddings model: a GGUF path, an `hf:` reference, an alias, or the repo id or folder of an MLX encoder checkpoint |
 | <a id="serverrerank"></a>`rerank` | none | Reranker: a Qwen3-Reranker GGUF path, an `hf:` reference or an alias |
 
 ### Memory and residency
@@ -506,8 +606,9 @@ share one loaded copy.
 | <a id="servercache_limit_gb"></a>`cache_limit_gb` | 4 to 12 GiB, set at start | Limit of the MLX buffer cache, in GiB. `0` turns the cache off, a negative value removes the limit. |
 | <a id="serverdefaultsmodel"></a>`defaults.model` | the only model, else none | Model for requests that name none, and the first one loaded when no model is pinned |
 | <a id="serverdefaultsttl_s"></a>`defaults.ttl_s` | `900` | Seconds without a request before a model that is not pinned unloads. `null` or `0` turns off the timeout. |
-| <a id="serverdefaultspreload"></a>`defaults.preload` | none | Models loaded at start, one at a time, after the pinned models. `all` loads every model. |
+| <a id="serverdefaultspreload"></a>`defaults.preload` | none | Models and image models loaded at start, one at a time, after the pinned models. `all` loads every chat model. |
 | <a id="serverdefaultsprofile"></a>`defaults.profile` | none | Profile for every model, below rules and the model's own profile |
+| <a id="serverdefaultsimage_model"></a>`defaults.image_model` | the only image model, else none | Image model for image requests that name none |
 
 [The MLX buffer cache](memory.md#the-mlx-buffer-cache) says when to change
 `cache_limit_gb`.
@@ -542,6 +643,26 @@ its GPU time. `0` runs one chunk per generation step.
 
 [Stochastic acceptance](speculative-decoding.md#stochastic-acceptance)
 describes `stochastic_mtp`.
+
+### Image requests
+
+These keys set how the server answers the image routes for the models
+under [`image_models`](#image-models).
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="serverimageurl_ttl_s"></a>`image.url_ttl_s` | `3600` | Seconds a file behind a `url` response stays available |
+| <a id="serverimageurl_max_bytes"></a>`image.url_max_bytes` | `1G` | Most bytes of such files kept at once, as bytes or a size such as `2G`. The oldest go first. |
+| <a id="serverimagemax_queue"></a>`image.max_queue` | `4` | Image requests that may wait behind the one running. One more gets 429 with `Retry-After`. |
+| <a id="serverimageembed_metadata"></a>`image.embed_metadata` | `false` | Write the prompt and settings into each PNG the routes return |
+| <a id="serverimagetensor_cache_mb"></a>`image.tensor_cache_mb` | `64` | MB each image model keeps of encoded prompts, and again of reference image latents. The step routes keep as much of uploaded tensors. |
+| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | `256` | MB each image model keeps of request LoRA weights, and again of their merged patches. The step routes keep as much of uploads. Raise it for a larger LoRA. |
+| <a id="serverimagesteps_api"></a>`image.steps_api` | `true` | Serve the [image step routes](internals/image-steps.md) that the ComfyUI node pack and `gmlx image bench --via-steps` call. |
+| <a id="serverimagesteps_remote"></a>`image.steps_remote` | `false` | Take step route requests from clients beyond loopback. The routes take uploads of any bytes, so they answer loopback clients alone by default. |
+
+The memory gmlx counts for an image model includes both caches at their
+full size, twice each. At the defaults, one model of any family still fits
+on a 16 GB Mac at its default quant and size.
 
 ### Structured decisions
 

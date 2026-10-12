@@ -22,7 +22,7 @@ import pytest
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as engine
 from gmlx.cache.apc_manager import GmlxAPCManager
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache
 from gmlx.cache.kvarn_serve import _ppb_rebuild_declined, ensure_ppb_kvarn
@@ -30,7 +30,6 @@ from gmlx.cache.kvarn_serve import _ppb_rebuild_declined, ensure_ppb_kvarn
 from test_ckpt_kvarn import KVARN_TAG, _arr, _hollow_kvarn
 from kvarn_testlib import Args
 
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache
@@ -246,7 +245,7 @@ def test_plain_init_stock_batch_refuses_kvarn_record():
 
 
 def test_production_wrap_chain_order():
-    pytest.importorskip("mlx_vlm.generate.ar")
+    pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
     # Install order restated from install_server_patches (spec engine
     # first, kvarn second): the kvarn wraps must be outermost with the
     # spec engine's inits directly inside, on all three chains.
@@ -254,7 +253,7 @@ def test_production_wrap_chain_order():
 import importlib
 # importlib, not `import mlx_vlm.generate.ar as ...`: the package exports
 # a `generate` function that shadows the submodule attribute.
-ar = importlib.import_module("mlx_vlm.generate.ar")
+ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache import kvarn_serve as ks
 mtp_prefill.install_full_prompt_mtp_prefill()
@@ -289,10 +288,10 @@ def test_production_disk_arm_chain_order():
     order restated from install_server_patches: pooling, then QSA, then
     kvarn. kvarn must be outermost and a non-kvarn record must still reach
     the QSA arm underneath it."""
-    pytest.importorskip("mlx_vlm.apc")
+    pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
     script = r"""
 import importlib
-apc = importlib.import_module("mlx_vlm.apc")
+apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
 from gmlx.cache.apc_pooling import install_pooling_apc_support
 from gmlx.cache.apc_qsa import install_qsa_apc_support
 from gmlx.cache.kvarn_apc import install_kvarn_apc

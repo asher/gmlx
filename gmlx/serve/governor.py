@@ -114,6 +114,9 @@ import weakref
 
 import mlx.core as mx
 
+from gmlx.device import metal_value
+from gmlx.upstream.patching import link, wrapped_with
+
 from .batch_rows import batch_rows
 
 _log = logging.getLogger(__name__)
@@ -344,7 +347,7 @@ def _kernel_floor_bytes() -> float:
     if raw not in (None, ""):
         return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 4.0) * 1e9
     try:
-        mem = float(mx.device_info()["memory_size"])
+        mem = float(metal_value("memory_size"))
     except Exception:
         return 4e9
     return min(4e9, 0.10 * mem)
@@ -980,9 +983,9 @@ def install_governor() -> bool:
     any memory error a governor action itself trips. Idempotent."""
     if not governor_enabled():
         return False
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return True
     _orig = _ar.BatchGenerator._next
     harvest_warned = [False]
@@ -1004,7 +1007,7 @@ def install_governor() -> bool:
         return out
 
     setattr(_governed_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _governed_next
+    _ar.BatchGenerator._next = link(_governed_next, _orig)
     floor = _kernel_floor_bytes()
     floor_note = "off"
     if floor > 0:
@@ -1021,7 +1024,7 @@ def install_governor() -> bool:
     _ARMED_FLOOR = 0.0 if floor_note.startswith("off") else floor
     try:
         margin = _env_f("GMLX_GOV_MARGIN", 0.05)
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
         ceiling = f"{_ceiling_bytes(ws, margin) / 1e9:.1f} GB"
     except Exception:
         ceiling = "unknown"

@@ -20,7 +20,7 @@ from gmlx.systemone import ar_reader, letters
 from gmlx.systemone.ar_reader import LetterReader, plan_buckets, run_to_end
 from gmlx.systemone.prefixes import Prefixes
 
-qwen3_5 = pytest.importorskip("mlx_lm.models.qwen3_5")
+qwen3_5 = pytest.importorskip("gmlx._vendor.mlx_lm.models.qwen3_5")
 
 _NEEDS_GPU = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")),
@@ -114,7 +114,7 @@ def test_a_logit_transform_falls_back_to_full_logits():
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("wrapped", [False, True], ids=["mlx_lm", "server_wrapper"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["gmlx._vendor.mlx_lm", "server_wrapper"])
 def test_batched_tails_match_full_forwards(wrapped):
     model = _model()
     served = vlm_text_only.Model(model) if wrapped else model
@@ -251,7 +251,7 @@ def test_a_replaced_head_is_checked_again():
 
 
 def _kv_model():
-    from mlx_lm.models import qwen3
+    from gmlx._vendor.mlx_lm.models import qwen3
 
     mx.random.seed(11)
     model = qwen3.Model(qwen3.ModelArgs(
@@ -267,7 +267,7 @@ def _kv_model():
 @_NEEDS_GPU
 @pytest.mark.parametrize("hybrid", [True, False], ids=["ckpt", "exact"])
 def test_a_prefix_kept_by_the_apc_manager_equals_a_cold_one(hybrid):
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     from gmlx.systemone.prefixes import ApcPrefixes, prefix_salt
 
@@ -312,7 +312,7 @@ def test_buckets_group_similar_lengths_within_the_budget():
 
 
 def test_view_kinds_decline_other_caches():
-    from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
     assert ar_reader._view_kinds([KVCache(), ArraysCache(2)]) == ["kv", "arr"]
     assert ar_reader._view_kinds([KVCache(), RotatingKVCache(max_size=8)]) is None

@@ -25,7 +25,7 @@ from gmlx.serve import media_programs, media_sinks, stt
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
-_UTILS = importlib.import_module("mlx_vlm.utils")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
 _AUDIO_IO = importlib.import_module("mlx_audio.audio_io")
 
 
@@ -138,7 +138,7 @@ def test_flac_silence_is_refused_before_a_large_decode(installed, monkeypatch,
 
 
 def test_chat_audio_refusal_is_a_400_of_the_generation_routes(installed, monkeypatch):
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
 
@@ -155,11 +155,84 @@ def test_the_reader_gives_what_mlx_audio_gives(installed):
     rng = np.random.default_rng(0)
     stereo = wav(rng.integers(-3000, 3000, 2000), 8000, channels=2)
     for data in (stereo, flac_silence(2), wav(np.arange(500), 16000)):
-        for kwargs in ({}, {"dtype": "float32"}, {"dtype": "int16", "always_2d": True}):
+        for kwargs in ({}, {"dtype": "float32"}, {"dtype": "int16", "always_2d": True},
+                       {"sample_rate": 4000}, {"sample_rate": 4000, "dtype": "int16"},
+                       {"sample_rate": 24000, "dtype": "float32"},
+                       {"nchannels": 1}, {"nchannels": 2, "dtype": "int16"},
+                       {"sample_rate": 4000, "nchannels": 1, "dtype": "float32"}):
             got, rate = md.read_audio(io.BytesIO(data), **kwargs)
             want, want_rate = stock(io.BytesIO(data), **kwargs)
-            assert rate == want_rate and got.dtype == want.dtype
-            assert np.array_equal(got, want)
+            assert rate == want_rate and got.dtype == want.dtype, kwargs
+            assert got.shape == want.shape and np.array_equal(got, want), kwargs
+
+
+def test_the_installed_reader_takes_the_target_rate_and_channels(installed):
+    """mlx-audio 0.5.6 callers pass sample_rate and nchannels to
+    audio_io.read, which the installed reader takes."""
+    clip = wav(np.arange(-800, 800, dtype=np.int64) * 3, 8000, channels=2)
+    got, rate = _AUDIO_IO.read(io.BytesIO(clip), dtype="float32",
+                               sample_rate=4000, nchannels=1)
+    assert rate == 4000 and got.ndim == 1 and len(got) == 400
+    for bad in ({"sample_rate": 0}, {"nchannels": -1}):
+        with pytest.raises(ValueError, match="must be positive"):
+            _AUDIO_IO.read(io.BytesIO(clip), **bad)
+
+
+@pytest.mark.parametrize("name", ["a.m4a", "a.m4b", "a.mp4", "a.aac", "a.ogg",
+                                  "a.opus", "a.webm", "a.caf"])
+def test_the_container_files_mlx_audio_hands_ffmpeg_go_to_ffmpeg(tmp_path,
+                                                                monkeypatch, name):
+    seen = []
+
+    def decode(source, field="audio", sample_rate=None, nchannels=None):
+        seen.append((source, sample_rate, nchannels))
+        return np.zeros(4, dtype=np.int16), sample_rate or 8000, nchannels or 1
+    monkeypatch.setattr(media_programs, "decode", decode)
+    path = tmp_path / name
+    path.write_bytes(b"\0" * 16)
+    md.read_audio(str(path), sample_rate=8000, nchannels=1)
+    assert seen == [(str(path), 8000, 1)]
+
+
+@pytest.mark.parametrize("head", [b"\0\0\0\x18ftypM4A ", b"OggS", b"\x1a\x45\xdf\xa3",
+                                  b"caff"])
+def test_the_container_bytes_mlx_audio_hands_ffmpeg_go_to_ffmpeg(monkeypatch, head):
+    seen = []
+
+    def decode(source, field="audio", sample_rate=None, nchannels=None):
+        seen.append(source)
+        return np.zeros(4, dtype=np.int16), 8000, 1
+    monkeypatch.setattr(media_programs, "decode", decode)
+    data = head + b"\0" * 16
+    md.read_audio(io.BytesIO(data))
+    assert seen == [data]
+
+
+def test_ffmpeg_decodes_to_the_target_rate_and_channels(monkeypatch):
+    """The target rate and channel count reach ffmpeg, and the limits count
+    the samples at the target."""
+    seen = []
+
+    def run(argv, data, limit):
+        seen.append(argv)
+        return 0, bytearray(b"\0\0" * 8), b""
+    monkeypatch.setattr(media_programs, "_run_bounded", run)
+    monkeypatch.setattr(media_programs, "program", lambda name: name)
+    probe = b'{"streams": [{"sample_rate": "48000", "channels": 2, "duration": "50"}]}'
+    monkeypatch.setattr(media_programs, "_run", lambda argv, data: type(
+        "P", (), {"returncode": 0, "stderr": b"", "stdout": probe})())
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 16000 * 60)
+    samples, rate, channels = media_programs.decode(b"x", sample_rate=16000,
+                                                    nchannels=1)
+    assert (rate, channels, len(samples)) == (16000, 1, 8)
+    argv, = seen
+    assert argv[argv.index("-ar") + 1] == "16000"
+    assert argv[argv.index("-ac") + 1] == "1"
+    assert argv[argv.index("-t") + 1] == "61"
+    # 50 seconds at 48 kHz stereo is past the limit, and at the target it
+    # is not; at 48 kHz mono it is past it again.
+    with pytest.raises(MediaRefused, match="at 48,000 Hz with 1 channel"):
+        media_programs.decode(b"x", nchannels=1)
 
 
 def test_resampling_past_the_limit_is_refused_before_the_resample(installed,
@@ -303,7 +376,7 @@ def stock_loads(installed):
 
 def test_many_large_one_color_pngs_are_refused_before_they_decode(stock_loads,
                                                                   monkeypatch):
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     side = 2048
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 4 * side * side)
@@ -412,7 +485,8 @@ def test_image_edits_count_their_reference_images(monkeypatch):
 # Video
 
 def _video(path, frames: int, size=(64, 48)) -> str:
-    import cv2
+    # OpenCV writes the clip and decodes it; it comes with the video extra.
+    cv2 = pytest.importorskip("cv2")
     w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, size)
     rng = np.random.default_rng(0)
     for _ in range(frames):
@@ -421,19 +495,71 @@ def _video(path, frames: int, size=(64, 48)) -> str:
     return str(path)
 
 
+def _stock_load_video():
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    stock = utils.load_video
+    return utils, getattr(stock, "__wrapped__", stock)
+
+
 def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path):
+    """The frames and the VideoMetadata of mlx-vlm's load_video, for loose
+    sampling keywords, a VideoSampling and a processor's frame sampler."""
     path = _video(tmp_path / "v.avi", 40)
-    stock = importlib.import_module("mlx_vlm.utils").load_video
-    stock = getattr(stock, "__wrapped__", stock)
-    for kwargs in ({}, {"fps": 5.0, "max_frames": 8}, {"nframes": 6}):
-        got, fps = md.read_video(path, **kwargs)
-        want, want_fps = stock(path, **kwargs)
-        assert fps == want_fps and np.array_equal(got, want)
+    utils, stock = _stock_load_video()
+
+    def every_fifth(meta, fps=None, max_frames=None):
+        return list(range(0, meta.total_num_frames, 5))
+
+    calls = (((), {}), ((), {"fps": 5.0, "max_frames": 8}),
+             ((), {"nframes": 6}),
+             ((utils.VideoSampling(fps=4.0, max_frames=10),), {}),
+             ((utils.VideoSampling(nframes=4),), {"fps": 1.0}),
+             ((None,), {"frame_sampler": every_fifth}))
+    for args, kwargs in calls:
+        got, meta = md.read_video(path, *args, **kwargs)
+        want, want_meta = stock(path, *args, **kwargs)
+        assert isinstance(meta, utils.VideoMetadata)
+        assert meta == want_meta and np.array_equal(got, want), (args, kwargs)
+
+
+def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path):
+    path = _video(tmp_path / "v.avi", 8)
+    _, stock = _stock_load_video()
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        stock(path, frames=4)
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        md.read_video(path, frames=4)
+
+
+def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
+        tmp_path, monkeypatch):
+    """A frame sampler picks the count, and the count is charged before
+    the first frame decodes."""
+    cv2 = pytest.importorskip("cv2")
+    path = _video(tmp_path / "v.avi", 40)
+    monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 64 * 48)
+    read = []
+    capture = cv2.VideoCapture
+
+    class Capture:
+        def __init__(self, p):
+            self.cap = capture(p)
+
+        def __getattr__(self, name):
+            return getattr(self.cap, name)
+
+        def read(self):
+            read.append(1)
+            return self.cap.read()
+    monkeypatch.setattr(cv2, "VideoCapture", Capture)
+    with pytest.raises(MediaRefused, match="video of 10 frames of 64x48 pixels brings"):
+        md.read_video(path, frame_sampler=lambda meta, **k: list(range(0, 40, 4)))
+    assert read == []
 
 
 def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path,
                                                                        monkeypatch):
-    import cv2
+    cv2 = pytest.importorskip("cv2")
     path = _video(tmp_path / "v.avi", 40)
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 7 * 64 * 48)
     read = []
@@ -455,8 +581,20 @@ def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path
     assert read == []
 
 
+def test_mlx_vlm_samples_the_frames_of_an_inline_video(installed, tmp_path):
+    """mlx-vlm 0.7.3 hands the loader a VideoSampling and reads frames and
+    VideoMetadata back, through the installed loader and the gmlx reader."""
+    with open(_video(tmp_path / "v.avi", 20), "rb") as f:
+        data = f.read()
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
+    frames, fps = video.sample_video_frames([_uri(data, "video/x-msvideo")],
+                                            fps=2.0)
+    assert len(frames) == 4 and frames[0].size == (64, 48)
+    assert fps == pytest.approx(2.0)
+
+
 def test_a_refused_video_in_the_frame_fallback_is_a_400(installed, monkeypatch):
-    video = importlib.import_module("mlx_vlm.generate.video")
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
 
     def read_video(*args, **kwargs):
         raise mg.too_many_request_pixels("video of 600 frames of 1920x1080 pixels", 1)
@@ -481,3 +619,53 @@ def test_a_stereo_clip_is_mixed_down_then_resampled(installed):
     stock = media_sinks._originals[(_UTILS, "load_audio")]
     one = wav(left, 48000)
     assert np.array_equal(_UTILS.load_audio(one, sr=16000), stock(io.BytesIO(one), 16000))
+
+
+def test_the_media_pass_wraps_a_binding_another_installer_wrapped_first(
+        monkeypatch):
+    """single_bos_fix wraps the server's and generate's prepare_inputs
+    bindings. When it runs before the media checks install, those bindings
+    still decode the request's media inside one decode pass."""
+    import sys
+    import types
+
+    from gmlx.upstream import single_bos_fix
+
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    passes = []
+
+    def stock(processor, images=None, audio=None, videos=None, *args, **kwargs):
+        passes.append(getattr(md._local, "current", None) is not None)
+        return "inputs"
+
+    monkeypatch.setattr(utils, "process_inputs", utils.process_inputs)
+    monkeypatch.setattr(utils, "prepare_inputs", stock)
+    names = single_bos_fix._BINDINGS + single_bos_fix._COUNT_BINDINGS
+    bound = [sys.modules[n] for n in names if sys.modules.get(n) is not None]
+    for module in bound:
+        monkeypatch.setattr(module, "prepare_inputs", stock)
+    monkeypatch.setattr(mg, "_allow_urls", False)
+    single_bos_fix.install_single_bos_fix()
+    media_sinks.install()
+    try:
+        processor = types.SimpleNamespace()
+        for module in bound:
+            passes.clear()
+            assert module.prepare_inputs(processor, images=["x"]) == "inputs"
+            assert passes == [True], module.__name__
+    finally:
+        media_sinks.uninstall()
+
+
+def test_video_without_opencv_names_the_video_extra(monkeypatch):
+    """OpenCV comes with the video extra; a video read without it says
+    which extra to install, before it opens the file."""
+    import sys
+
+    from gmlx.commands import extras
+
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_PIP)
+    with pytest.raises(ImportError, match=r"needs OpenCV: .*gmlx\[video\]"):
+        md.read_video("/nonexistent.mp4")

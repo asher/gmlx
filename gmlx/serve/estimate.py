@@ -79,7 +79,7 @@ def rates_view() -> dict:
     except Exception:  # noqa: S110 - advisory rate fields stay at their defaults
         pass
     try:
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         metrics = getattr(runtime, "metrics", None)
         recent = _recent_rates(metrics)
         out["prefill_tok_s_recent"] = recent["prefill_tok_s"]
@@ -195,7 +195,7 @@ def _normalize_messages(messages) -> tuple:
     """The chat handler's message normalization, text only: returns
     ``(messages, media_count)``. Media (images / audio / video) is counted
     and skipped - the preflight does not price it either."""
-    from mlx_vlm.prompt_utils import extract_text_from_content
+    from gmlx._vendor.mlx_vlm.prompt_utils import extract_text_from_content
 
     out, media = [], 0
     for m in messages or []:
@@ -357,7 +357,7 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
     except Exception:  # noqa: S110 - advisory fields stay None
         pass
 
-    pkg = importlib.import_module("mlx_vlm.server")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     pool = getattr(pkg, "_kq_residency_pool", None)
     entry = pool.resident_entry(path) if pool is not None else None
     if entry is None or entry.response_generator is None:
@@ -401,17 +401,23 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
     """The resident half of :func:`estimate_request`, run with the request
     spec bound to the serving seam (the caller resets it)."""
     try:
-        from mlx_vlm.server import openai as _oa
-        from mlx_vlm.server.app import _build_gen_args
-        from mlx_vlm.server.schemas import ChatRequest
+        from gmlx._vendor.mlx_vlm.server import openai as _oa
+        from gmlx._vendor.mlx_vlm.server.app import _build_gen_args
+        from gmlx._vendor.mlx_vlm.server.schemas import ChatRequest
+
+        from gmlx.serve.patches.chat_behavior import roles_for_render
 
         req = ChatRequest(**body)
+        # The chat route's order: the instruction merge (developer messages
+        # stay in place), tool_choice, then the developer-role rule at render.
+        _oa._normalize_instruction_messages(msgs)
         msgs, tools, tool_choice = _oa._prepare_chat_tool_choice(
             msgs, body.get("tools"), body.get("tool_choice"))
         gen_args = _build_gen_args(req, processor, tenant_id=tenant_id)
         template_kwargs = gen_args.to_template_kwargs()
         if tool_choice is not None:
             template_kwargs["tool_choice"] = tool_choice
+        msgs = roles_for_render(processor, msgs, template_kwargs)
         prompt = pkg.apply_chat_template(processor, config, msgs, num_images=0,
                                          tools=tools or None, **template_kwargs)
         from gmlx.serve.patches.sampling import client_max_tokens
@@ -438,7 +444,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
         return 200, out
 
     try:
-        from mlx_vlm.server.generation import _count_prompt_tokens
+        from gmlx._vendor.mlx_vlm.server.generation import _count_prompt_tokens
 
         raw = rg._preprocess_request(prompt)
         tokens = int(_count_prompt_tokens(raw))
@@ -451,7 +457,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
 
     # configured context limit (the same check the real request runs)
     try:
-        from mlx_vlm.server.generation import (PromptTooLongError,
+        from gmlx._vendor.mlx_vlm.server.generation import (PromptTooLongError,
                                                _check_configured_context_budget,
                                                get_configured_context_limit)
 
@@ -469,7 +475,10 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
             # for), and say which limit the verdict used
             from . import capacity as _capacity
 
-            trained = _capacity.trained_context_length(path)
+            from .bridge_vlm import get_active_spec
+
+            trained = _capacity.effective_context_length(
+                path, getattr(get_active_spec(), "rope_scaling", None))
             if trained:
                 out["context_limit"], out["context_limit_source"] = int(trained), "trained"
                 out["context_ok"] = bool(tokens + max(0, pinned) <= int(trained))
@@ -480,7 +489,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
     try:
         extra_hash = 0
         if getattr(rg, "apc_mode", None) is not None:
-            from mlx_vlm import apc as _apc
+            from gmlx._vendor.mlx_vlm import apc as _apc
 
             extra_hash = _apc.semantic_extra_hash(
                 tenant=tenant_id, image_hash=0, media={},
@@ -516,7 +525,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
 
     # ETA: queue drain + cold-suffix prefill at the recent prefill rate
     try:
-        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         metrics = getattr(runtime, "metrics", None)
         pre = _recent_rates(metrics)["prefill_tok_s"]
         if tokens > 0 and pre:

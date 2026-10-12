@@ -16,6 +16,8 @@ from starlette.concurrency import run_in_threadpool
 from .. import capacity as _capacity
 from ..subservice import service_display
 import gmlx.serve.bridge_vlm as serving
+from gmlx.upstream.patching import link, wrapped_with
+
 from ._common import (
     _error_content,
     _PATCH_FLAG,
@@ -36,7 +38,8 @@ def _mtime(path) -> int:
 
 def _context_length(spec) -> int | None:
     """The GGUF's trained context, capped by the model's context limit."""
-    trained = _capacity.trained_context_length(spec.path)
+    trained = _capacity.effective_context_length(
+        spec.path, getattr(spec, "rope_scaling", None))
     limit = model_context_limit(spec)
     if trained and limit:
         return min(trained, limit)
@@ -120,7 +123,59 @@ def _models_payload() -> dict:
             data.append(_entry(name, rm, alias_of=target_id,
                                profile=profile or rm.profile_name,
                                spec=_alias_spec(name, rm)))
+    default_image = serving.default_image_model_id()
+    for iid, rm in serving.image_models().items():
+        data.append(_image_entry(iid, rm, resident=rm.path in resident,
+                                 pinned=rm.path in pinned,
+                                 default=iid == default_image))
     return {"object": "list", "data": data}
+
+
+_IMAGE_IDENTITY: dict = {}
+
+
+def _image_identity(path: str, variant: str | None = None) -> tuple:
+    """``(family, variant, edits)`` of a DiT from its header, under the
+    entry's ``variant`` when it names one, cached on the file's size and
+    mtime; ``(None, None, False)`` for a file that does not identify."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None, False
+    key = (path, variant, st.st_size, st.st_mtime_ns)
+    hit = _IMAGE_IDENTITY.get(key)
+    if hit is None:
+        from gmlx.image.loader import identify_dit
+
+        try:
+            ident = identify_dit(path, variant=variant)
+            hit = (ident.family.name, ident.variant,
+                   ident.family.edit is not None)
+        except Exception:  # noqa: BLE001 - a bad file is listed without them
+            hit = (None, None, False)
+        if len(_IMAGE_IDENTITY) > 64:
+            _IMAGE_IDENTITY.clear()
+        _IMAGE_IDENTITY[key] = hit
+    return hit
+
+
+def _image_entry(iid: str, rm, *, resident: bool, pinned: bool,
+                 default: bool) -> dict:
+    """An image model in ``/v1/models``: the keys of a chat entry without
+    the context figures, plus ``image``, the family, the variant and
+    ``edit``, which is true when the family takes reference images and
+    the entry has its vision tower."""
+    family, variant, edits = _image_identity(rm.path,
+                                             getattr(rm, "variant", None))
+    return {
+        "id": iid, "object": "model", "created": _mtime(rm.path),
+        "owned_by": "gmlx", "resident": resident, "kv_quant": None,
+        "pinned": bool(rm.pin) or pinned, "speculative": False,
+        "vlm": False, "profile": None,
+        "family": family or rm.family, "default": default,
+        "image": True, "variant": variant,
+        "edit": bool(edits and rm.encoder_mmproj),
+    }
 
 
 def _service_entry(sid: str, marker: str, value) -> dict:
@@ -177,7 +232,7 @@ def install_models_endpoint_override(stt_model: str | None = None,
     configured model without leaking local paths. A GGUF-backed service whose
     file is missing on disk is de-listed (checked per request; it re-appears
     the moment the file is back, like a chat entry)."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _list_services(stt_model, tts_model, embeddings_model, rerank_model,
                    model_dirs)
 
@@ -215,7 +270,7 @@ def install_runtime_settings_removal() -> None:
     include the APC disk folder and the drafter path, which the next model
     build would create and load, and gmlx takes its settings from its
     config file. :func:`install_unconfigured_answers` answers the paths."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, "/v1/settings", "/settings")
 
 
@@ -230,21 +285,35 @@ _SERVICE_ROUTES = {
 }
 _SETTINGS_PATHS = ("/v1/settings", "/settings")
 _UNCONFIGURED_FLAG = "_kq_gguf_unconfigured_answers"
-# The services whose key is set but whose model was missing at start.
+# The services whose key is set but whose model was missing at start, and
+# the install command of those whose optional extra was missing.
 _MISSING_SERVICES: set[str] = set()
+_MISSING_EXTRAS: dict[str, str] = {}
 
 
-def note_missing_service(key: str) -> None:
+def note_missing_service(key: str, extra: str | None = None) -> None:
     """Record that ``server.<key>`` is set, but the server runs without the
-    service because its model was missing."""
+    service because its model was missing, or, with ``extra``, the optional
+    extra that this install command adds."""
     _MISSING_SERVICES.add(key)
+    if extra:
+        _MISSING_EXTRAS[key] = extra
+    else:
+        _MISSING_EXTRAS.pop(key, None)
 
 
-def clear_missing_services() -> set[str]:
+def missing_extras() -> dict[str, str]:
+    """The services that run off because their optional extra is missing,
+    each with the command that adds it."""
+    return dict(_MISSING_EXTRAS)
+
+
+def clear_missing_services() -> dict[str, str | None]:
     """Forget the missing services before a reload resolves them again, and
-    return the ones it forgot."""
-    missing = set(_MISSING_SERVICES)
+    return the ones it forgot, each with its install command or None."""
+    missing = {key: _MISSING_EXTRAS.get(key) for key in _MISSING_SERVICES}
     _MISSING_SERVICES.clear()
+    _MISSING_EXTRAS.clear()
     return missing
 
 
@@ -255,7 +324,11 @@ def unconfigured_answers(cfg) -> dict[str, str]:
     for key, (what, paths) in _SERVICE_ROUTES.items():
         if getattr(cfg, key, None):
             continue
-        if key in _MISSING_SERVICES:
+        if key in _MISSING_EXTRAS:
+            message = (f"{what} is off on this server, because its optional {key} "
+                       f"extra is not installed. To add it: {_MISSING_EXTRAS[key]}, "
+                       "then run gmlx restart.")
+        elif key in _MISSING_SERVICES:
             message = (f"{what} is off on this server, because the model that "
                        f"server.{key} names was missing when the server started "
                        "or last reloaded. The server log names the model. Fetch "
@@ -290,7 +363,7 @@ def install_unconfigured_answers(cfg) -> None:
     call only replaces the answers."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _refresh_unconfigured_answers(cfg)
     if getattr(app.state, _UNCONFIGURED_FLAG, False):
         return
@@ -321,7 +394,7 @@ def install_auto_docs_removal() -> None:
     schema is mlx-vlm's, not this server's: after the route surgery here it
     describes endpoints that don't exist and misses the ones that do. A 404 is
     honest; the real surface is documented in docs/api.md."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, "/openapi.json", "/docs", "/docs/oauth2-redirect",
                    "/redoc")
 
@@ -348,11 +421,11 @@ def install_hf_download_gate(hf_cache: bool) -> None:
     """Wrap ``utils.get_model_path`` to refuse a network download. With ``hf_cache``
     on, force local-cache-only resolution (``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE``)
     so a named hf id resolves from the cache but never the network. Idempotent."""
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     if hf_cache:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    if getattr(utils.get_model_path, _PATCH_FLAG, False):
+    if wrapped_with(utils.get_model_path, _PATCH_FLAG):
         return
     original = utils.get_model_path
 
@@ -360,7 +433,7 @@ def install_hf_download_gate(hf_cache: bool) -> None:
         return _gate_model_path(path_or_hf_repo, hf_cache, original, *args, **kwargs)
 
     get_model_path.__dict__[_PATCH_FLAG] = True
-    utils.get_model_path = get_model_path
+    utils.get_model_path = link(get_model_path, original)
 
 
 # Runtime-snapshot enrichment (lifts /health + /v1/metrics)
@@ -373,8 +446,12 @@ def _resident_models_view() -> list:
     path_to_ids = getattr(serving, "_PATH_TO_IDS", {})
     out = []
     for e in pool.stats()["resident"]:
+        kind = e.get("kind", "chat")
+        ids = (serving.image_ids_for_path(e["model_path"]) if kind == "image"
+               else path_to_ids.get(e["model_path"], []))
         out.append({
-            "ids": path_to_ids.get(e["model_path"], []),
+            "ids": ids,
+            "kind": kind,
             "model_path": e["model_path"],
             "loaded_as": e.get("loaded_as"),
             "profile": e.get("profile"),
@@ -394,8 +471,8 @@ def install_runtime_snapshot_enrichment() -> None:
     """Add ``resident_models[]`` to ``_server_runtime_snapshot`` so both ``/health``
     and ``/v1/metrics`` report the full pool (the handlers call it by name).
     Idempotent."""
-    app = importlib.import_module("mlx_vlm.server.app")
-    if getattr(app._server_runtime_snapshot, _PATCH_FLAG, False):
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    if wrapped_with(app._server_runtime_snapshot, _PATCH_FLAG):
         return
     original = app._server_runtime_snapshot
 
@@ -491,6 +568,13 @@ def install_runtime_snapshot_enrichment() -> None:
         except Exception:
             _log.debug("metrics snapshot: rates unavailable", exc_info=True)
         try:
+            if serving.image_models():
+                from .images import STATE as _images
+
+                base["images"] = _images.metrics()
+        except Exception:
+            _log.debug("metrics snapshot: images unavailable", exc_info=True)
+        try:
             from ..live_requests import live_requests_view
 
             base["requests"] = live_requests_view()
@@ -499,7 +583,7 @@ def install_runtime_snapshot_enrichment() -> None:
         return base
 
     snapshot.__dict__[_PATCH_FLAG] = True
-    app._server_runtime_snapshot = snapshot
+    app._server_runtime_snapshot = link(snapshot, original)
 
 
 # Pool-aware /unload + /v1/reload
@@ -514,7 +598,7 @@ def install_pool_aware_unload() -> None:
     required query param - every POST then 422s before the body is ever read."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def unload_endpoint(request: Request):
         pool = _get_pool()
@@ -530,7 +614,7 @@ def install_pool_aware_unload() -> None:
                 return JSONResponse(status_code=503, content={
                     "status": "error", "message": "no residency pool"})
             try:
-                path, _spec = serving.resolve_request_model(model_id)
+                path = serving.resolve_pool_path(model_id)
             except (KeyError, serving.ModelFileMissing):
                 # 404, matching /v1/keep: a typo'd unload must not read as
                 # success (clients check the status code).
@@ -651,7 +735,7 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
     The route answers at ``path`` and at the same path without ``/v1``, and
     with no ``stt_model`` mlx-vlm's own routes at both are removed, since
     they decode the upload with ffmpeg before any model check."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if not stt_model:
         _remove_routes(app, *_both_paths(path))
         return
@@ -731,7 +815,7 @@ def install_audio_speech_route(tts_model: str | None) -> None:
         # mlx-vlm >= 0.6.4 registers its own speech routes (per-request model
         # loading) at app build; drop them so the cfg.tts contract holds --
         # clients feature-detect TTS by probing this route for 404.
-        app = importlib.import_module("mlx_vlm.server.app").app
+        app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
         _remove_routes(app, "/v1/audio/speech", "/audio/speech")
         return
     from fastapi.responses import Response
@@ -739,7 +823,7 @@ def install_audio_speech_route(tts_model: str | None) -> None:
 
     from .. import tts
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def speech_endpoint(request: Request):
         started = time.monotonic()
@@ -777,7 +861,7 @@ def install_audio_voices_route(tts_model: str | None) -> None:
     names (Kokoro's presets / qwen3-tts speakers) so clients can offer a
     picker - the OpenAI API has no voice-listing endpoint to mirror. None =>
     no route (404), which clients treat as "no listing"."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if not tts_model:
         _remove_routes(app, *_both_paths("/v1/audio/voices"))
         return
@@ -800,11 +884,10 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
 
 def install_embeddings_route(embeddings_model: str | None) -> None:
-    """Add OpenAI-compatible ``POST /v1/embeddings``, backed by a GGUF
-    embedder on the runtime's loader or an mlx-embeddings encoder.
-    ``embeddings_model`` is the resolved model (GGUF path, repo id or local
-    dir) from ``ServerCfg.embeddings``; None => no route (404). This is what
-    ``gmlx launch open-webui`` points RAG at.
+    """Add OpenAI-compatible ``POST /v1/embeddings`` backed by
+    :mod:`gmlx.serve.embeddings`. ``embeddings_model`` is the resolved model
+    (a GGUF path, repo id or local dir) from ``ServerCfg.embeddings``; None =>
+    no route (404). This is what ``gmlx launch open-webui`` points RAG at.
 
     The JSON parse stays on the event loop; the embedding pass (the model's Metal
     work) dispatches from Starlette's threadpool to the service's single worker
@@ -813,7 +896,7 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
     if not embeddings_model:
         # mlx-vlm >= 0.6.15 ships a stock /v1/embeddings route; the no-config
         # contract is a 404, so drop it rather than let it hub-load a model.
-        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+        _remove_routes(importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app,
                        "/embeddings", "/v1/embeddings")
         return
     from fastapi.responses import JSONResponse
@@ -821,7 +904,7 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
 
     from .. import embeddings as embeddings_mod
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def embeddings_endpoint(request: Request):
         started = time.monotonic()
@@ -835,8 +918,16 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
                 model=str(body.get("model") or ""),
                 encoding_format=str(body.get("encoding_format") or ""),
             )
+        except embeddings_mod.EmbeddingsModelError as exc:
+            # The configured model cannot load: a server-side 501, logged
+            # like the route's other server-side errors.
+            _log_aux_request("/v1/embeddings", embeddings_model, started,
+                             status="failed", error=type(exc).__name__,
+                             detail=exc)
+            return _aux_error(exc.status_code, str(exc), err_type=exc.err_type)
         except embeddings_mod.EmbeddingsRequestError as exc:
-            return _aux_error(exc.status_code, str(exc))
+            return _aux_error(exc.status_code, str(exc), err_type=getattr(
+                exc, "err_type", "invalid_request_error"))
         except FileNotFoundError as exc:
             return _aux_model_file_missing("/v1/embeddings", "server.embeddings",
                                            embeddings_model, started, exc)
@@ -872,7 +963,7 @@ def install_rerank_route(rerank_model: str | None) -> None:
     mlx-vlm's own routes are removed, since they load media from any path a
     document names."""
     if not rerank_model:
-        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+        _remove_routes(importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app,
                        *_both_paths("/v1/rerank"))
         return
     from fastapi.responses import JSONResponse
@@ -880,7 +971,7 @@ def install_rerank_route(rerank_model: str | None) -> None:
 
     from .. import rerank as rerank_mod
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def rerank_endpoint(request: Request):
         started = time.monotonic()
@@ -931,6 +1022,10 @@ def install_service_routes(cfg) -> None:
     install_audio_voices_route(tts)
     install_embeddings_route(embeddings)
     install_rerank_route(rerank)
+    from .images import install_image_routes
+    install_image_routes(cfg)
+    from .image_steps import install_image_step_routes
+    install_image_step_routes(cfg)
     _list_services(stt, tts, embeddings, rerank,
                    getattr(cfg, "model_dirs", ()) or ())
     _refresh_unconfigured_answers(cfg)
@@ -939,7 +1034,7 @@ def install_service_routes(cfg) -> None:
 def install_reload_route(reload_fn) -> None:
     """Add ``POST /v1/reload`` running ``reload_fn()`` (re-read config + re-register
     models, keeping warm entries). A no-op 501 when ``reload_fn`` is None."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     from fastapi.responses import JSONResponse
 
@@ -1040,15 +1135,24 @@ def _release_preload_holds(pool, path, *, only_evicted: bool = False) -> int:
     return released
 
 
-def _load_resident(model_id, adapter=_WARM_DEFAULT):
+def _load_resident(model_id, adapter=_WARM_DEFAULT, *, images: bool = False):
     """Load ``model_id`` resident through the pooled resolver and return the busy
     hold it took (or None). Must run off the event loop (a worker/daemon thread):
     the pooled ``get_cached_model`` does the multi-second build synchronously, and
     the whole point is to keep that off the loop. The caller decides the hold's
     fate - release it (a transient warm; the entry stays LRU/TTL-managed) or retain
-    it (a preload kept resident for the server's lifetime)."""
+    it (a preload kept resident for the server's lifetime).
+
+    An image id loads only with ``images`` (keep and preload). The chat
+    routes' warm passes none: it returns None without a load, and the
+    route answers the image id 400."""
     from .. import residency
-    app = importlib.import_module("mlx_vlm.server.app")
+    if serving.is_image_model(model_id):
+        if not images:
+            return None
+        # An image model loads through its own kind, never the chat seam.
+        return residency.acquire_image_model(model_id)
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if adapter is _WARM_DEFAULT:
         app.get_cached_model(model_id)            # pooled: resolve -> acquire
     else:
@@ -1056,11 +1160,13 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT):
     return residency._active_hold.get()
 
 
-def _warm_and_release(model_id, adapter=_WARM_DEFAULT) -> None:
+def _warm_and_release(model_id, adapter=_WARM_DEFAULT, *,
+                      images: bool = False) -> None:
     """Load ``model_id`` resident, then drop the in-flight hold so it stays
     LRU/TTL-managed. The transient warm used by the keep route and the chat
-    load-offload (a later request re-acquires the now-resident entry)."""
-    hold = _load_resident(model_id, adapter)
+    load-offload (a later request re-acquires the now-resident entry).
+    ``images`` as in :func:`_load_resident`."""
+    hold = _load_resident(model_id, adapter, images=images)
     if hold is not None:
         hold.release()
 
@@ -1075,7 +1181,7 @@ def _spawn_keep_warm(model_id: str):
 
     def _run():
         try:
-            _warm_and_release(model_id)
+            _warm_and_release(model_id, images=True)
         except Exception:  # noqa: S110 - a load failure surfaces on the first real request
             pass
 
@@ -1095,9 +1201,9 @@ def _preload_extra_over_budget(model_id: str) -> bool:
 
         path = serving.resolved_models()[model_id].path
         total = sum(os.path.getsize(p) for p in find_split_shards(path))
-        import mlx.core as mx
+        from gmlx.device import metal_value
 
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
+        budget = int(0.9 * metal_value("max_recommended_working_set_size"))
         return total > budget
     except Exception:
         return False
@@ -1109,7 +1215,8 @@ def _warm_context_lengths() -> None:
     the header scans on the request path. Best-effort."""
     try:
         for rm in serving.resolved_models().values():
-            _capacity.trained_context_length(rm.path)
+            _capacity.effective_context_length(
+                rm.path, getattr(rm, "rope_scaling", None))
     except Exception:  # noqa: S110 - warm only; the request path scans on demand
         pass
 
@@ -1144,7 +1251,7 @@ def spawn_preload_warm(model_id: str | None, extras=(), *, retain: bool = True):
             attempt = 0
             while True:
                 try:
-                    hold = _load_resident(model_id)
+                    hold = _load_resident(model_id, images=True)
                     if hold is not None and not retain:
                         hold.release()
                     elif hold is not None:
@@ -1174,7 +1281,7 @@ def spawn_preload_warm(model_id: str | None, extras=(), *, retain: bool = True):
                       "budget (streams from disk; loads on first request)")
                 continue
             try:
-                _warm_and_release(mid)
+                _warm_and_release(mid, images=True)
             except Exception as exc:
                 print(f"[server] preload: {mid} failed, loads lazily on "
                       f"first request ({type(exc).__name__}: {exc})")
@@ -1194,7 +1301,7 @@ def install_keep_route() -> None:
     both releases and evicts.
 
     Module-level ``Request`` import is required (see ``install_pool_aware_unload``)."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def keep_endpoint(request: Request):
         from fastapi.responses import JSONResponse
@@ -1213,7 +1320,7 @@ def install_keep_route() -> None:
             return JSONResponse(status_code=400, content={
                 "status": "error", "message": "missing 'model'"})
         try:
-            path, _spec = serving.resolve_request_model(model_id)
+            path = serving.resolve_pool_path(model_id)
         except (serving.ModelNotFound, serving.ModelFileMissing):
             # 404, not 200: a typo'd keep must not read as success (the
             # `launch` client checks the status code and this exact body shape).
@@ -1256,7 +1363,7 @@ def install_resolver_error_handlers() -> None:
 
     from ._common import _error_content
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _resolver_response(request, status, err_type, exc, **extra):
         return JSONResponse(status_code=status, content=_error_content(
@@ -1265,6 +1372,11 @@ def install_resolver_error_handlers() -> None:
     @app.exception_handler(serving.ModelNotFound)
     async def _model_not_found(request, exc):
         return _resolver_response(request, 404, "model_not_found", exc,
+                                  available_models=exc.available)
+
+    @app.exception_handler(serving.WrongModelKind)
+    async def _wrong_model_kind(request, exc):
+        return _resolver_response(request, 400, "wrong_model_kind", exc,
                                   available_models=exc.available)
 
     @app.exception_handler(serving.ModelFileMissing)

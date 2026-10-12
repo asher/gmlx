@@ -3,10 +3,8 @@
 # Portions copyright (c) 2024 Apple Inc. (mlx-lm afmoe skeleton, MIT)
 """Vendored mlx-lm-style model for Meta Muse Glimmer (GGUF arch ``muse-glimmer``).
 
-This module is the runtime for llama.cpp's ``LLM_ARCH_MUSE_GLIMMER``
-conversions, and ``ensure_registered()`` installs it over the muse_glimmer
-module that mlx-lm 0.32 and later ship (:mod:`gmlx.models.owned`). It is
-built from the mlx-lm 0.31.3
+mlx-lm has no muse_glimmer class; this module is the runtime for llama.cpp's
+``LLM_ARCH_MUSE_GLIMMER`` conversions, built from the pinned mlx-lm 0.31.3
 ``afmoe`` skeleton - which already has the attention output gate, per-head
 QK-norm, sandwich norms and the sliding/full ``layer_types`` split - with the
 MoE stripped and the Glimmer-only mechanics added:
@@ -37,21 +35,15 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from gmlx._vendor.mlx_lm.models.activations import swiglu
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
+
+from gmlx.cache.attention import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
-from mlx_lm.models.rope_utils import initialize_rope
-
-from gmlx.models import owned
-
-
-def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.muse_glimmer`` resolve to this module."""
-    owned.install("mlx_lm.models.muse_glimmer", __name__)
+from gmlx.cache.kv_cache import KVCache, RotatingKVCache
 
 
 @dataclass

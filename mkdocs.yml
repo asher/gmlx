@@ -89,11 +89,14 @@ nav:
       - Getting started:
           - installation.md
           - quickstart.md
+          - images.md
           - migrating.md
       - Serving:
           - config.md
           - menubar.md
           - services.md
+          - image-api.md
+          - comfyui.md
           - rag.md
           - decisions.md
       - Agents and containers:
@@ -114,6 +117,7 @@ nav:
           - arch-coverage.md
           - vlm.md
           - streaming.md
+          - long-context.md
           - lora.md
           - distill.md
           - distill-walkthrough.md
@@ -132,6 +136,7 @@ nav:
   - Reference:
       - cli.md
       - distill-reference.md
+      - comfyui-reference.md
       - family-defaults.md
       - api.md
       - decisions-reference.md
@@ -146,6 +151,7 @@ nav:
       - internals/adding-architectures.md
       - internals/testing.md
       - internals/upstream-upgrades.md
+      - upstream-defects.md
       - internals/streaming-measurements.md
       - internals/structured-reads.md
       - internals/letter-readout.md
@@ -153,4 +159,6 @@ nav:
       - internals/hadamard-fold.md
       - internals/debug-switches.md
       - internals/distill.md
+      - internals/image-serving.md
+      - internals/image-steps.md
       - Contributing: https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md

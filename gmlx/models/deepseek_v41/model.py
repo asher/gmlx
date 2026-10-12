@@ -28,20 +28,20 @@ from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    create_causal_mask,
-    scaled_dot_product_attention,
-)
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.pipeline import PipelineMixin
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.pipeline import PipelineMixin
 
 import gmlx.gen.prefill_decay as _prefill_decay
+from gmlx.cache.attention import (
+    create_attention_mask,
+    scaled_dot_product_attention,
+)
+from gmlx.cache.kv_cache import create_causal_mask
 from gmlx.models.deepseek_v4 import model as _v4
 from gmlx.models.deepseek_v4.cache import (
-    BatchPoolingCache,
-    PoolingCache,
+    DS4BatchPoolingCache,
+    DS4PoolingCache,
     pool_arrays,
     pool_rows,
 )
@@ -102,6 +102,9 @@ class ModelArgs(BaseModelArgs):
     rms_norm_eps: float = 1e-20
     rope_theta: float = 10000.0
     rope_scaling: Optional[Dict] = None
+    # Resolved rope scaling (gmlx.load.rope_scaling), present only when it
+    # changes the rope.
+    gmlx_rope_scaling: Optional[Dict] = None
     attention_bias: bool = False
     head_dim: int = 512
     scoring_func: str = "sqrtsoftplus"
@@ -389,7 +392,7 @@ class Compressor(nn.Module):
             self.wgate = nn.Linear(config.hidden_size, config.head_dim, bias=False)
         self.norm = nn.RMSNorm(config.head_dim, eps=config.rms_norm_eps)
 
-    def __call__(self, x: mx.array, pool_cache: Optional[PoolingCache], offset):
+    def __call__(self, x: mx.array, pool_cache: Optional[DS4PoolingCache], offset):
         B = x.shape[0]
         kv = self.wkv(x)
         # Ratio 1 has no gate; kv stands in for it so the cache keeps the
@@ -551,7 +554,7 @@ class Indexer(nn.Module):
 class _PoolMask:
     """Pooled-row visibility for one sequence as a rule, not a tensor: query
     row j at absolute position offset + j sees pooled row i iff
-    i < (offset + j + 1) // ratio, the PoolingCache.make_mask predicate.
+    i < (offset + j + 1) // ratio, the DS4PoolingCache.make_mask predicate.
     The indexer asks for one query block at a time, so no [L, P] mask is
     ever held for a whole chunk."""
 
@@ -599,7 +602,7 @@ def _pool_mask(src, plen: int, L: int, offset, ratio: int):
         if plen == 0 or L == 1 or not isinstance(offset, int):
             return None
         return _PoolMask(plen, L, offset, ratio)
-    if isinstance(offset, int) and isinstance(src, PoolingCache):
+    if isinstance(offset, int) and isinstance(src, DS4PoolingCache):
         if src._plen == 0 or L == 1:
             return None
         return _PoolMask(src._plen, L, offset, src.ratio)
@@ -988,8 +991,8 @@ _score_profile_composed = _prefill_decay.build_score_profile(
         rows=4 * _v4._prefill_block()),
     kernels_armed=lambda: (_v4._dsa_probe("indexer")
                            and _v4._sparse_kernel_ok()),
-    require_cache=PoolingCache,
-    disarm_cache=BatchPoolingCache,
+    require_cache=DS4PoolingCache,
+    disarm_cache=DS4BatchPoolingCache,
     allow_quantized_pools=True,
 )
 
@@ -1051,8 +1054,9 @@ class DeepseekV41Attention(nn.Module):
         # One frequency table per layer, shared by q, the window KV, the
         # latent and the indexer. A ratio-0 layer keeps the plain theta and
         # drops YaRN.
-        theta = config.compress_rope_theta if self.compress_ratio else config.rope_theta
-        scaling = config.rope_scaling if self.compress_ratio else None
+        theta = (config.compress_rope_theta if self.compress_ratio
+                 else _v4.plain_rope_base(config))
+        scaling = _v4.rope_scaling_for(config) if self.compress_ratio else None
         self.rope = DeepseekV4RoPE(
             config.qk_rope_head_dim, theta, scaling, config.max_position_embeddings
         )
@@ -1693,12 +1697,11 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         input_embeddings: Optional[mx.array] = None,
         image_mask: Optional[mx.array] = None,
     ) -> mx.array:
-        from gmlx.cache.compat import cache_types
+        from gmlx.cache.kv_cache import CacheList
 
-        cache_list_types = cache_types("CacheList")
         if cache is None:
             cache = [None] * len(self.layers)
-        mask_cache, _, _ = self._split_cache(0, cache[0], cache_list_types)
+        mask_cache, _, _ = self._split_cache(0, cache[0], CacheList)
         offset = mask_cache.offset if mask_cache is not None else 0
 
         # Image tokens take no part in an n-gram and get no engram write.
@@ -1710,7 +1713,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             inputs = mx.where(image_mask, mx.zeros_like(inputs), inputs)
         row_ids = None
         if self.engram_hash is not None:
-            slot = self._history_slot(cache, cache_list_types)
+            slot = self._history_slot(cache, CacheList)
             history = slot[0] if slot is not None else None
             row_ids, new_history = self.engram_hash(inputs, history, engram_mask)
             if slot is not None:
@@ -1769,7 +1772,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
                 )
                 if prof:
                     _prof_mark("engram", idx, h, t0)
-            caches = self._split_cache(idx, cache[idx], cache_list_types)
+            caches = self._split_cache(idx, cache[idx], CacheList)
             if tail is not None and idx >= tail[1]:
                 end, _, hist = tail
                 if h.shape[1]:
@@ -1827,29 +1830,28 @@ class Model(nn.Module):
         return self.model.layers
 
     def make_cache(self):
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import ArraysCache, CacheList, RotatingKVCache
 
-        cmod = construction_cache_module()
         args = self.args
         first_engram = args.engram_layer_ids[:1]
         caches = []
         for idx in range(args.num_hidden_layers):
-            slots = [cmod.RotatingKVCache(max_size=args.sliding_window)]
+            slots = [RotatingKVCache(max_size=args.sliding_window)]
             if idx in args.kv_source_layers:
                 ratio = args.compress_ratios[idx]
                 # The index pool opts out of --kv-bits packing: the score
                 # path reads it in full every step. The latent pool rests
                 # in the FP4 form the QAT lands its rows on when the sparse
                 # kernels read it directly (exact, ~3.6x smaller).
-                pool = PoolingCache(ratio)
+                pool = DS4PoolingCache(ratio)
                 if _qat_enabled() and _v4._pool_fp4_ok():
                     pool.pack_fp4()
-                idx_pool = PoolingCache(ratio)
+                idx_pool = DS4PoolingCache(ratio)
                 idx_pool.quantizable = False
                 slots += [pool, idx_pool]
             if idx in first_engram:
-                slots.append(cmod.ArraysCache(1))
-            caches.append(slots[0] if len(slots) == 1 else cmod.CacheList(*slots))
+                slots.append(ArraysCache(1))
+            caches.append(slots[0] if len(slots) == 1 else CacheList(*slots))
         return caches
 
     def sanitize(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
@@ -1888,9 +1890,5 @@ class Model(nn.Module):
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.deepseek_v41`` resolve to this module,
-    and register deepseek_v4's companions too."""
-    from gmlx.models import owned
-
+    """Register deepseek_v4's companions, which this model's caches use."""
     _v4.ensure_registered()
-    owned.install("mlx_lm.models.deepseek_v41", __name__)

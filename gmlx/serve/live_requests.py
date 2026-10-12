@@ -33,14 +33,7 @@ gmlx's drafters (DFlash, MTP, DeepSeek) run inside the batch generator
 continuous-batching loop), so their rows come from the same tick; the
 acceptance numbers fall back to the drafter's per-generation
 ``accept_lens`` / ``draft_lens`` when stock's lifetime counters have not
-moved. Stock mlx-vlm's non-MTP drafters instead take
-``ResponseGenerator._run_speculative``, which prefills a static batch and
-runs the round loop without ever calling ``_step``; for that path the
-rows come from the per-request logging hooks the loop does call -
-``_log_prefill_started`` (one per admitted request) and
-``_log_decode_progress`` (one per emitted token, with the finish reason)
-- tracked per engine thread, with the batch's speculative stats and no
-cache tier.
+moved.
 
 One snapshot per engine (keyed by the ``ResponseGenerator`` identity):
 several resident models tick concurrently, and a shared snapshot would
@@ -59,6 +52,9 @@ import os
 import threading
 import time
 import weakref
+from typing import cast
+
+from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -71,11 +67,7 @@ _LOCK = threading.Lock()
 _SNAPS: dict = {}
 _TIER: dict = {}          # (id(rg), uid) -> cache tier, captured during prefill
 _WARM: dict = {}          # (id(rg), uid) -> prefix tokens a gmlx-owned tier restored
-# Speculative engines: id(rg) -> {"ref", "snap", "rows": {uid: row state}}
-_SPEC: dict = {}
-_THREAD_RG: dict = {}     # engine thread ident -> id(rg) of its speculative loop
 _MODEL_ID: dict = {}      # id(rg) -> (weakref | None, model id): fixed per engine
-_SPEC_FLAG = "_kq_gguf_live_requests_spec"
 
 
 def _snap_key(rg) -> int:
@@ -109,7 +101,7 @@ def _resolve_model_id(rg) -> str | None:
     try:
         import importlib
 
-        pkg = importlib.import_module("mlx_vlm.server")
+        pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
         pool = getattr(pkg, "_kq_residency_pool", None)
         if pool is None:
             return None
@@ -201,7 +193,7 @@ def _spec_of(rg, info) -> dict | None:
     if draft is None or snap is None:
         return None
     try:
-        from mlx_vlm.speculative.common import speculative_stats_since
+        from gmlx._vendor.mlx_vlm.speculative.common import speculative_stats_since
 
         rounds, accepted, drafted = speculative_stats_since(draft, snap)
         if rounds is None:
@@ -214,7 +206,7 @@ def _spec_of(rg, info) -> dict | None:
             dl = list(getattr(draft, "draft_lens", None) or ())
             rounds, accepted = len(al), sum(al)
             drafted = sum(dl) if len(dl) == len(al) else 0
-        rate = (float(accepted) / float(drafted)) if drafted else None
+        rate = (float(accepted or 0) / float(drafted)) if drafted else None
         return {"rounds": int(rounds), "accepted": float(accepted or 0),
                 "drafted": int(drafted or 0),
                 "accept_rate": round(rate, 3) if rate is not None else None}
@@ -351,14 +343,6 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
     except Exception:  # noqa: S110 - one unreadable section must not hide the others
         pass
 
-    # speculative engine: rows tracked from the loop's logging hooks
-    try:
-        table = _SPEC.get(key)
-        if table and table["rows"]:
-            rows.extend(_spec_rows(rg, table, now, model))
-    except Exception:  # noqa: S110 - one unreadable section must not hide the others
-        pass
-
     return rows
 
 
@@ -373,88 +357,6 @@ def _prune_memos(key, active) -> None:
         for k in list(memo):
             if k[0] == key and k[1] not in active:
                 memo.pop(k, None)
-
-
-# --- speculative engines -------------------------------------------------
-
-def _spec_table(rg, create: bool = False) -> dict | None:
-    key = _snap_key(rg)
-    table = _SPEC.get(key)
-    if table is None and create:
-        try:
-            ref = weakref.ref(rg)
-        except TypeError:
-            ref = None
-        table = _SPEC[key] = {"ref": ref, "snap": None, "rows": {}}
-    return table
-
-
-def spec_prefill_started(rg, request, state: dict) -> None:
-    """A request admitted to a speculative batch: track it from the
-    prefill hook's log state (the dict the loop keeps per uid)."""
-    try:
-        table = _spec_table(rg, create=True)
-        rows = table["rows"]
-        # A new batch only starts after the previous one finished; rows
-        # still in decode belong to a batch that died on the error path.
-        if any(r["state"] == "decode" for r in rows.values()):
-            rows.clear()
-        if not rows:
-            try:
-                from mlx_vlm.speculative.common import speculative_stats_snapshot
-
-                table["snap"] = speculative_stats_snapshot(getattr(rg, "draft_model", None))
-            except Exception:
-                table["snap"] = None
-        uid = id(getattr(request, "rqueue", None))
-        rows[uid] = {"state": "prefill", "info": state,
-                     "prompt_tokens": getattr(request, "prompt_tokens", None),
-                     "max_tokens": getattr(getattr(request, "args", None), "max_tokens", None)}
-        _THREAD_RG[threading.get_ident()] = _snap_key(rg)
-        publish(rg, None, None, force=True)
-    except Exception:
-        _log.debug("speculative prefill hook failed", exc_info=True)
-
-
-def spec_decode_progress(uid, info: dict, finish_reason) -> None:
-    """A token emitted by a speculative round loop (same engine thread as
-    the prefill hook). No-op for uids the loop does not track."""
-    try:
-        key = _THREAD_RG.get(threading.get_ident())
-        table = _SPEC.get(key) if key is not None else None
-        if table is None:
-            return
-        row = table["rows"].get(uid)
-        if row is None:
-            return
-        row["state"] = "decode"
-        if finish_reason:
-            table["rows"].pop(uid, None)
-        rg = table["ref"]() if table["ref"] is not None else None
-        if rg is None:
-            return
-        publish(rg, None, None, force=bool(finish_reason))
-    except Exception:
-        _log.debug("speculative decode hook failed", exc_info=True)
-
-
-def _spec_rows(rg, table: dict, now: float, model) -> list:
-    rows = []
-    snap = table.get("snap")
-    for uid, r in list(table["rows"].items()):
-        info = r["info"]
-        spec = _spec_of(rg, {"spec_snapshot": snap}) if snap is not None else None
-        rows.append(_row(uid, info, model=model, state=r["state"], now=now,
-                         prompt_tokens=r["prompt_tokens"],
-                         generated=int(info.get("generated_tokens", 0) or 0),
-                         max_tokens=r["max_tokens"], warm=None, tier=None,
-                         spec=spec))
-    return rows
-
-
-def _has_spec_rows(rg) -> bool:
-    table = _SPEC.get(_snap_key(rg))
-    return bool(table and table["rows"])
 
 
 def publish(rg, batch_gen, active, *, force: bool = False) -> None:
@@ -477,7 +379,6 @@ def publish(rg, batch_gen, active, *, force: bool = False) -> None:
         if not force and snap is not None and now - snap["at"] < _MIN_INTERVAL_S:
             return
         rows = [] if not active and not _has_queue(rg, batch_gen) \
-            and not _has_spec_rows(rg) \
             else build_rows(rg, batch_gen, active, now=now)
         try:
             ref = weakref.ref(rg)
@@ -492,7 +393,7 @@ def publish(rg, batch_gen, active, *, force: bool = False) -> None:
 def _has_queue(rg, batch_gen) -> bool:
     try:
         q = getattr(getattr(rg, "requests", None), "qsize", None)
-        if callable(q) and q() > 0:
+        if callable(q) and cast(int, q()) > 0:
             return True
         return bool(getattr(batch_gen, "_unprocessed_sequences", ()))
     except Exception:
@@ -510,7 +411,6 @@ def live_requests_view() -> list:
             ref = snap.get("ref")
             if ref is not None and ref() is None:      # engine torn down
                 _SNAPS.pop(key, None)
-                _SPEC.pop(key, None)
                 _MODEL_ID.pop(key, None)
                 for memo in (_TIER, _WARM):
                     for k in list(memo):
@@ -528,8 +428,6 @@ def _reset() -> None:
         _SNAPS.clear()
     _TIER.clear()
     _WARM.clear()
-    _SPEC.clear()
-    _THREAD_RG.clear()
     _MODEL_ID.clear()
 
 
@@ -537,9 +435,9 @@ def install_live_requests() -> None:
     """Wrap ``ResponseGenerator._step`` to publish after each tick.
     Passthrough: the wrapped step's result and exceptions are untouched.
     Idempotent."""
-    from mlx_vlm.server import generation as gen_mod
+    from gmlx._vendor.mlx_vlm.server import generation as gen_mod
 
-    if getattr(gen_mod.ResponseGenerator._step, _STEP_FLAG, False):
+    if wrapped_with(gen_mod.ResponseGenerator._step, _STEP_FLAG):
         return
     _orig_step = gen_mod.ResponseGenerator._step
 
@@ -550,37 +448,6 @@ def install_live_requests() -> None:
             publish(self, batch_gen, active, force=not active)
 
     setattr(_publishing_step, _STEP_FLAG, True)
-    gen_mod.ResponseGenerator._step = _publishing_step
-    _install_speculative_hooks(gen_mod)
+    gen_mod.ResponseGenerator._step = link(_publishing_step, _orig_step)
     _log.info("live request view installed")
 
-
-def _install_speculative_hooks(gen_mod) -> None:
-    """Track speculative batches from the per-request logging hooks the
-    round loop calls (it never steps a BatchGenerator). Passthrough on
-    both; ``_log_decode_progress`` stays a staticmethod. Idempotent."""
-    cls = gen_mod.ResponseGenerator
-    if getattr(cls._log_prefill_started, _SPEC_FLAG, False):
-        return
-    _orig_prefill = cls._log_prefill_started
-    _orig_progress = cls.__dict__["_log_decode_progress"]
-    _orig_progress_fn = getattr(_orig_progress, "__func__", _orig_progress)
-
-    def _prefill_started(self, request, *, backend):
-        state = _orig_prefill(self, request, backend=backend)
-        if isinstance(backend, str) and backend.startswith("speculative"):
-            spec_prefill_started(self, request, state)
-        return state
-
-    def _decode_progress(uid, info, *, token, text, finish_reason, token_count=1):
-        try:
-            return _orig_progress_fn(uid, info, token=token, text=text,
-                                     finish_reason=finish_reason,
-                                     token_count=token_count)
-        finally:
-            spec_decode_progress(uid, info, finish_reason)
-
-    setattr(_prefill_started, _SPEC_FLAG, True)
-    setattr(_decode_progress, _SPEC_FLAG, True)
-    cls._log_prefill_started = _prefill_started
-    cls._log_decode_progress = staticmethod(_decode_progress)

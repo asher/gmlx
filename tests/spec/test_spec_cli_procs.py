@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_lm.generate import generate_step
-from mlx_lm.sample_utils import make_logits_processors, make_sampler
+from gmlx._vendor.mlx_lm.generate import generate_step
+from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 import gmlx.gen.generation as generation
 from gmlx.gen.generation import make_spec_sampler

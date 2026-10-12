@@ -8,6 +8,7 @@ needs.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sys
@@ -19,13 +20,14 @@ import mlx.nn as nn
 import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
+import gmlx.load.rope_scaling as rope_mod
+import gmlx.load.rope_swap as rope_swap
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
+from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_int
 from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch,
     _patch_dense_head_verify,
-    _patch_gated_delta_tiled_v,
-    _patch_mlxvlm_gated_delta_tiled_v,
+    require_tiled_gdn,
 )
 from gmlx.load.gguf_meta import first_nonzero_int, read_int, read_string
 from gmlx.load.loader import (
@@ -43,7 +45,6 @@ from gmlx.load.loader import (
 from gmlx.load.mtp_target import (
     _MTP_TARGET_HOOKS,
     _MTP_TARGET_HOOKS_BY_TYPE,
-    _ensure_argmax_hook,
     _spec_hook_key,
 )
 from gmlx.load.wire import (
@@ -265,7 +266,7 @@ def _load_mtp_drafter(
             Glm5NextMTPConfig(
                 text_config=ModelArgs.from_dict(config_dict),
                 # Pinned at 2: < 2 exits the owned decode loop after one
-                # token, and > 2 needs a multi-update PoolingCache undo log
+                # token, and > 2 needs a multi-update DS4PoolingCache undo log
                 # the drafter-side accept trim does not have yet.
                 block_size=2,
             )
@@ -275,7 +276,7 @@ def _load_mtp_drafter(
             f"block_size={drafter.config.block_size}"
         )
     elif model_type == "nemotron_h":
-        from mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
         from gmlx.models.nemotron_h.mtp import (
             NemotronHMTPConfig,
             NemotronHMTPDrafter,
@@ -337,10 +338,10 @@ def _load_mtp_drafter(
         return drafter
     else:
         cfg_mod = importlib.import_module(
-            "mlx_vlm.speculative.drafters.qwen3_5_mtp.config"
+            "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.config"
         )
         drafter_mod = importlib.import_module(
-            "mlx_vlm.speculative.drafters.qwen3_5_mtp.qwen3_5_mtp"
+            "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.qwen3_5_mtp"
         )
 
         mtp_config = cfg_mod.Qwen3_5MTPConfig.from_dict(
@@ -360,6 +361,10 @@ def _load_mtp_drafter(
         else:
             drafter = drafter_mod.Qwen3_5MTPDraftModel(mtp_config)
             log("[mtp] drafter: mlx-vlm Qwen3_5MTPDraftModel")
+
+    # The head attends at the trunk's positions, so it rotates as the trunk
+    # does: the target's resolved rope scaling goes onto its ropes.
+    rope_swap.apply(drafter, config_dict)
 
     d_weights, d_meta, d_stats = remap_mtp_arrays(
         arrays,
@@ -447,8 +452,20 @@ def _patch_draft_head_quantized(drafter, head_attr: str = "_lm_head_fn") -> None
     drafter.bind = _bind_with_quant_head
 
 
+def _rotate_as_target(drafter, drafter_text_config: dict,
+                      target_config: dict | None) -> int:
+    """A drafter that attends the target's KV rotates as the target does:
+    the target's resolved rope scaling goes onto the drafter's ropes."""
+    target_rope = (target_config or {}).get(rope_mod.CONFIG_KEY)
+    if target_rope is None:
+        return 0
+    return rope_swap.apply(
+        drafter, {**drafter_text_config, rope_mod.CONFIG_KEY: target_rope})
+
+
 def _load_gemma4_assistant_drafter(
-    draft_gguf_path: str, target, *, zero_copy: bool = True, log=loadlog.verbose_print
+    draft_gguf_path: str, target, *, zero_copy: bool = True, log=loadlog.verbose_print,
+    target_config: dict | None = None,
 ):
     """Build + load + bind the gemma4 assistant drafter from a companion GGUF.
 
@@ -489,13 +506,14 @@ def _load_gemma4_assistant_drafter(
     )
 
     cfg_mod = importlib.import_module(
-        "mlx_vlm.speculative.drafters.gemma4_assistant.config"
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.config"
     )
     drafter_mod = importlib.import_module(
-        "mlx_vlm.speculative.drafters.gemma4_assistant.gemma4_assistant"
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.gemma4_assistant"
     )
     dcfg = cfg_mod.Gemma4AssistantConfig.from_dict(drafter_cfg)
     drafter = drafter_mod.Gemma4AssistantDraftModel(dcfg)
+    _rotate_as_target(drafter, tc, target_config)
 
     d_weights, d_meta, d_stats = remap_gemma4_assistant_arrays(arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
@@ -1219,6 +1237,16 @@ def _dflash_config_from_meta(
         factor = meta.get("dflash.rope.scaling.factor")
         if factor is not None:
             rope_scaling["factor"] = float(factor)
+    # The drafter's own header and the run options decide its rope, as
+    # llama.cpp copies the rope flags into the draft context; its trained
+    # context is its own (or the target's trained one, never the target's
+    # extended one). The class reads type and factor only.
+    n_ctx_train = int(
+        meta.get("dflash.context_length")
+        or target_config_dict.get(rope_mod.TRAINED_CONTEXT_KEY)
+        or target_config_dict["max_position_embeddings"])
+    scaling = rope_mod.resolve(meta, "dflash", rope_mod.active_override(),
+                               n_ctx_train=n_ctx_train)
     causal = meta.get("dflash.attention.causal")
     softcap = meta.get("dflash.final_logit_softcapping",
                        target_config_dict.get("final_logit_softcapping"))
@@ -1239,10 +1267,11 @@ def _dflash_config_from_meta(
         head_dim=int(meta["dflash.attention.key_length"]),
         rms_norm_eps=float(meta["dflash.attention.layer_norm_rms_epsilon"]),
         vocab_size=vocab,
-        max_position_embeddings=int(meta.get("dflash.context_length")
-                                    or target_config_dict["max_position_embeddings"]),
+        max_position_embeddings=n_ctx_train,
         rope_theta=float(meta["dflash.rope.freq_base"]),
         rope_scaling=rope_scaling,
+        gmlx_rope_scaling=(dataclasses.asdict(scaling) if scaling.active
+                           else None),
         tie_word_embeddings=False,
         block_size=block_total,
         native_block_size=native_total,
@@ -1844,11 +1873,13 @@ def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
             draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log
         )
     return _load_gemma4_assistant_drafter(
-        draft_gguf_path, model, zero_copy=zero_copy, log=log
+        draft_gguf_path, model, zero_copy=zero_copy, log=log,
+        target_config=text_config_dict,
     )
 
 
 @loadlog.seeds
+@rope_mod.scoped
 def load_mtp_model(
     gguf_path: str,
     *,
@@ -1858,6 +1889,7 @@ def load_mtp_model(
     zero_copy: bool = True,
     verbose: bool = False,
     wire: bool = True,
+    rope_override: rope_mod.RopeOverride | None = None,
 ):
     """Load an MTP target+drafter pair: the text target on mlx-vlm classes plus
     a drafter. Two drafter-acquisition shapes:
@@ -1945,6 +1977,7 @@ def load_mtp_model(
     loadlog.stage("building model")
     model, config = build_model(config_dict, mtp=True)
     loadlog.fact("model_type", config.get("model_type"))
+    rope_swap.apply(model, config)
 
     # deepseek_v4 needs sanitize=True (the vendored Model.sanitize does the
     # wo_a 2D->3D MultiLinear reshape, same as the plain-text load path) and
@@ -1969,13 +2002,13 @@ def load_mtp_model(
         hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
     )
 
-    # 2b. post-install arming: tiled-V + the fused gated-delta verify kernel
+    # 2b. post-install arming: the tiled-V check + the fused gated-delta verify kernel
     #     (the MTP round's roofline; measured ~7% at M=5, ~15% at M=8 on the
     #     27B hybrid, token-lossless) + dense-head verify / prepare_runtime,
     #     per arch. Shared with load_vlm_mtp_model; all pieces are
     #     forward-time rebinds, so running after _install_and_load is safe.
     #     GMLX_FUSED_GDN=0 kills the fused verify.
-    _arm_spec_target(model, config_dict, stock_vlm_regime=False, log=_log)
+    _arm_spec_target(model, config_dict, log=_log)
 
     # 3. drafter - native-head (extracted from this GGUF's MTP block) or
     #    assistant (a separate companion GGUF). Seam 4.
@@ -2008,7 +2041,7 @@ def load_mtp_model(
 
     # 4. tokenizer (synthesized; multi-EOS wrapped) - same as the text path.
     loadlog.stage("building tokenizer")
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     from gmlx.load.tokenizer import (
         bundled_chat_template_for_arch,
@@ -2032,51 +2065,19 @@ def load_mtp_model(
     return model, drafter, config, tokenizer
 
 
-def _install_stock_qwen35_verify_patches(model) -> None:
-    """Full verify patch set for a stock-built qwen3.5/3.6 MTP target.
-
-    Since the spec-target seam, ``load_vlm_mtp_model`` builds the owned
-    classes by default like the text path, so this fires only for the
-    GMLX_QWEN_OWNED=0 VLM fallback - which keeps the full patched regime
-    the pre-seam VLM path ran. The ``GMLX_QWEN_OWNED=0`` *text* fallback
-    does not take this path: bare stock plus tiled-V is its debugging
-    contract (the ``stock_vlm_regime`` discriminator in
-    ``_arm_spec_target``).
-    """
-    from gmlx.upstream.gdn_patches import (
-        _patch_batched_verify_sdpa,
-        _patch_bf16_verify_linear,
-        _patch_gated_delta_fused_verify,
-    )
-    from gmlx.models.qwen35.verify_fold import install_qwen35_verify_fold
-    from .ragged_decode import install_unified_ragged_plan
-
-    _patch_gated_delta_fused_verify(model)
-    _patch_batched_verify_sdpa()
-    install_qwen35_verify_fold()
-    install_unified_ragged_plan()
-    _patch_bf16_verify_linear()
-    loadlog.verbose_print(
-        "[build] qwen3.5 stock verify patch set installed (vlm mtp target)"
-    )
-
-
-def _arm_spec_target(model, text_config_dict: dict, *,
-                     stock_vlm_regime: bool, log) -> None:
+def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
     """Post-install arming for an MTP target, shared by the text and VLM
     loaders (the VLM loader calls it once, covering both drafter shapes).
 
     All pieces are forward-time rebinds or per-module flag sets, safe after
     weight install and safe to re-run:
 
-    - tiled-V for asymmetric gated-delta K/V heads: the mlx-lm module patch
-      always; the mlx-vlm-side rebind only for stock trees (owned forwards
-      never read the patched module globals).
-    - qwen3.5/3.6 verify levers: owned trees arm their in-tree fused routes
-      (prepare_gdn); a stock tree gets the full stock verify patch set only
-      when ``stock_vlm_regime`` (the VLM GMLX_QWEN_OWNED=0 fallback) - the
-      text =0 fallback stays bare stock plus tiled-V, its debugging
-      contract. Dense-head verify applies to both trees.
+    - tiled-V for asymmetric gated-delta K/V heads: every layer read
+      kv_head_layout from its config at construction; a tree that would
+      pair its heads in the grouped order is refused here.
+    - qwen3.5/3.6 verify levers: owned trees, which every loader builds,
+      arm their in-tree fused routes (prepare_gdn). Dense-head verify
+      applies to a base-built tree too.
     - qwen4_exp: prepare_runtime (idempotent; load_vlm_model may have run
       it already on the VLM path).
     - gemma4 family: nothing to arm. Dense-head verify is categorically
@@ -2085,15 +2086,10 @@ def _arm_spec_target(model, text_config_dict: dict, *,
       levers live in qwen3_5 modules gemma4 never routes through.
     """
     mt = text_config_dict.get("model_type")
-    if _needs_tiled_v_patch(text_config_dict):
-        _patch_gated_delta_tiled_v()
-        if not is_owned_language_model(model):
-            _patch_mlxvlm_gated_delta_tiled_v()
+    require_tiled_gdn(model, text_config_dict)
     if mt in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text"):
         if is_owned_language_model(model):
             prepare_gdn(model)
-        elif stock_vlm_regime:
-            _install_stock_qwen35_verify_patches(model)
         _patch_dense_head_verify(model)
     elif mt == "qwen4_exp":
         from gmlx.models.qwen4_exp.model import prepare_runtime
@@ -2105,6 +2101,7 @@ def _arm_spec_target(model, text_config_dict: dict, *,
 
 
 @loadlog.seeds
+@rope_mod.scoped
 def load_vlm_mtp_model(
     gguf_path: str,
     mmproj_path: str,
@@ -2115,14 +2112,15 @@ def load_vlm_mtp_model(
     hf_source: str | None = None,
     zero_copy: bool = True,
     verbose: bool = False,
+    rope_override: rope_mod.RopeOverride | None = None,
 ):
     """Load a VLM target + MTP drafter for TEXT-ONLY speculative decoding.
 
     Same MTP engine as ``load_mtp_model``, but the target is a full mlx-vlm VLM
     (K-quant LLM GGUF + float mmproj) loaded with ``spec_target=True``, so its
     ``.language_model`` is the same hook-bearing class the text MTP path
-    builds (owned qwen3.5/gemma4 classes via ``_vlm_spec_language_model``;
-    vendored archs carry their hook mixins natively). Text-only requests run
+    builds (owned qwen3.5 classes via ``_vlm_spec_language_model``; the
+    owned gemma4 containers and the vendored archs build theirs natively). Text-only requests run
     through the MTP rounds (which only touch ``.language_model`` + caches);
     image requests stay on the plain VLM path. Returns
     ``(model, drafter, config, tokenizer, processor)``.
@@ -2132,14 +2130,12 @@ def load_vlm_mtp_model(
     explicit or autodetected companion GGUF (gemma4 assistant, DFlash/DFlash2,
     qwen4exp-mtp, dspark), or a native head (nextn block re-read from the LLM
     GGUF; ``load_vlm_model`` discards the raw arrays). Post-install arming is
-    the shared ``_arm_spec_target`` (with ``stock_vlm_regime=True``: a
-    GMLX_QWEN_OWNED=0 stock tree still gets the full stock verify patch set
-    here, unlike the text path's bare-stock debugging fallback).
+    the shared ``_arm_spec_target``.
     """
 
     _log = loadlog.verbose_print
 
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     from gmlx.load.vlm import load_vlm_model
 
@@ -2171,7 +2167,7 @@ def load_vlm_mtp_model(
 
     # 2. the MTP engine drives model.language_model; fail loud if a mlx-vlm bump
     #    drops a hook rather than corrupting decode. Same per-arch hook row as
-    #    _build_mtp_target, probed on the instance (covers synthesized hooks).
+    #    _build_mtp_target, probed on the instance.
     lm = getattr(model, "language_model", model)
     hooks = _MTP_TARGET_HOOKS_BY_TYPE.get(
         _spec_hook_key(config.get("model_type", "")), _MTP_TARGET_HOOKS)
@@ -2181,10 +2177,9 @@ def load_vlm_mtp_model(
             f"VLM language_model {type(lm).__name__} lacks MTP hooks {missing}; "
             "this VLM arch can't run text-only MTP"
         )
-    _ensure_argmax_hook(lm)
 
     # 2b. post-install arming, both drafter shapes (shared with load_mtp_model).
-    _arm_spec_target(model, text_config, stock_vlm_regime=True, log=_log)
+    _arm_spec_target(model, text_config, log=_log)
 
     # 3. drafter - companion GGUF (explicit --draft-gguf, or autodetected for
     #    companion-only families) or native head (nextn inside the LLM GGUF).
@@ -2259,10 +2254,11 @@ def _wire_big_model(model) -> None:
     run outside that context -- unwired, an 87 GB target decodes at ~0.5
     tok/s vs ~20 wired."""
     try:
-        if not mx.metal.is_available():
+        # A model on the CPU device has nothing to wire.
+        if not mx.metal.is_available() or cpu_default_device():
             return
         max_rec_size = int(
-            mx.device_info()["max_recommended_working_set_size"]
+            metal_value("max_recommended_working_set_size")
         )
         # Unconditional, like mlx-lm's wired_limit (its 0.9x threshold only
         # gates a warning): the limit is a cap, not an allocation.

@@ -11,13 +11,14 @@ real unbound upstream method.
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as se
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache.snapshot import ckpt_lookup
 from gmlx.spec.speculative import _sidecar_boundary
+from helpers import bind_stock_checkpoint_methods
 
 from test_ckpt_tier import make_hybrid_cache
 
@@ -241,9 +242,9 @@ def _armed_batch(man, ids, first, terminal, interval):
         "ckpt_interval": interval,
         "ckpt_last_stored": 0,
     }
-    return SimpleNamespace(
+    return bind_stock_checkpoint_methods(SimpleNamespace(
         _kq_ckpt_armed=True, _apc_manager=man, _apc_meta=[meta],
-        prompt_cache=None, _row_real_tokens_processed=lambda idx: 0), meta
+        prompt_cache=None, _row_real_tokens_processed=lambda idx: 0)), meta
 
 
 def test_cursor_advances_and_latches():
@@ -300,7 +301,7 @@ def test_stock_store_suppressed_by_advance():
     before the stock _store_apc_exact_checkpoints, and the advance (not the
     latch) is what keeps the stock multi-GB clone from firing on an armed
     row -- at every boundary of the schedule, not just the last."""
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     man = APCManager(num_blocks=64, block_size=16)
     calls = []
@@ -387,7 +388,7 @@ def test_ckpt_formation_serializes_prefill(monkeypatch):
 
     from test_ckpt_tier import KVCache
 
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
     class _ProbeBG:
         def __init__(self, model, processor, **kwargs):

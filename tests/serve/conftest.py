@@ -1,16 +1,18 @@
 """Shared serve-suite fixtures.
 
-The seam snapshot/restore fixture guards every test in this directory;
-it is a no-op when mlx-vlm is not installed."""
+The seam snapshot/restore fixtures guard every test in this directory;
+they are no-ops when mlx-vlm is not installed."""
 from __future__ import annotations
 
 import importlib
 import sys
+import types
 
 import pytest
 
 try:
     import gmlx.lora_rows as lora_rows
+    from gmlx.cache import media_salt
     import gmlx.serve.bridge_vlm as serving
     from gmlx.serve.patches import _common as sp_common
     from gmlx.serve.patches import hardening as sp_hardening
@@ -18,9 +20,9 @@ try:
     from gmlx.serve.patches import routes as sp_routes
     from gmlx.serve import media_sinks
     from gmlx.serve import server as srv
-    _APP = importlib.import_module("mlx_vlm.server.app")
-    _UTILS = importlib.import_module("mlx_vlm.utils")
-    _PKG = importlib.import_module("mlx_vlm.server")
+    _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    _PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 except ImportError:
     _APP = None
 
@@ -29,14 +31,45 @@ _PATCH_MODULES = {
     "test_server_patches",
     "test_patches_chat_behavior",
     "test_patches_routes",
+    "test_image_routes",
+    "test_image_steps",
     "test_patches_sampling",
 }
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _restore_batch_next():
+    """The tick installers wrap BatchGenerator._next, and a test module
+    that runs one leaves its layer for every later test in the process."""
+    try:
+        ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    except ImportError:
+        yield
+        return
+    saved = ar.BatchGenerator._next
+    yield
+    ar.BatchGenerator._next = saved
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_render():
+    """install_faithful_history wraps the prompt_utils render functions,
+    and a test module that runs it leaves its layers for every later test
+    in the process."""
+    try:
+        pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    except ImportError:
+        yield
+        return
+    saved = (pu.get_chat_template, pu.apply_chat_template)
+    yield
+    pu.get_chat_template, pu.apply_chat_template = saved
+
+
 def _engine_classes() -> list:
     """The mlx-vlm engine classes that the server patches wrap."""
-    ar = importlib.import_module("mlx_vlm.generate.ar")
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     names = ("BatchGenerator", "GenerationBatch", "PromptProcessingBatch",
              "SpeculativeGenerationBatch")
     return [getattr(ar, n) for n in names if hasattr(ar, n)] + [gen.ResponseGenerator]
@@ -49,6 +82,46 @@ def _restore_class(cls, attrs: dict) -> None:
     for name, value in attrs.items():
         if vars(cls).get(name) is not value:
             setattr(cls, name, value)
+
+
+_UNSET = object()
+
+
+def _snapshot_engine_seams() -> dict:
+    """The engine classes, and each process flag that stops a second
+    install of a patch on them."""
+    # The LoRA row channel wraps methods of several engine classes, and a
+    # process flag stops a second install. Restore the classes and the flag
+    # together, or a later install finds the flag set and does nothing.
+    # The media salt wraps three methods of the engine classes and two apc
+    # functions, and keeps its flag on the apc module. Restore them
+    # together for the same reason.
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    salt = ("hash_image_payload", "semantic_extra_hash",
+            media_salt._INSTALLED_FLAG)
+    return {"classes": [(cls, dict(vars(cls))) for cls in _engine_classes()],
+            "lora_channel": lora_rows._channel_installed,
+            "media_salt": {n: vars(apc).get(n, _UNSET) for n in salt}}
+
+
+def _restore_engine_seams(saved: dict) -> None:
+    for cls, attrs in saved["classes"]:
+        _restore_class(cls, attrs)
+    lora_rows._channel_installed = saved["lora_channel"]
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    for name, value in saved["media_salt"].items():
+        if value is _UNSET:
+            vars(apc).pop(name, None)
+        else:
+            setattr(apc, name, value)
+
+
+@pytest.fixture
+def engine_seams():
+    """The snapshot and restore of the engine seams that ``_restore_mlxvlm``
+    runs around each test of the patch modules."""
+    return types.SimpleNamespace(snapshot=_snapshot_engine_seams,
+                                 restore=_restore_engine_seams)
 
 
 @pytest.fixture(autouse=True)
@@ -73,23 +146,19 @@ def _restore_mlxvlm(request):
         "mw_kwargs": [(m, dict(getattr(m, "kwargs", {}) or {}))
                       for m in fastapi_app.user_middleware],
     }
-    openai = sys.modules.get("mlx_vlm.server.openai")
-    anthropic = sys.modules.get("mlx_vlm.server.anthropic")
+    openai = sys.modules.get("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic = sys.modules.get("gmlx._vendor.mlx_vlm.server.anthropic")
     saved["openai_bga"] = getattr(openai, "_build_gen_args", None)
     saved["anthropic_bga"] = getattr(anthropic, "_build_gen_args", None)
-    apc = sys.modules.get("mlx_vlm.apc") or importlib.import_module("mlx_vlm.apc")
+    apc = sys.modules.get("gmlx._vendor.mlx_vlm.apc") or importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     saved["apc_harvest"] = apc.harvest_blocks_from_batch_cache
     saved["apc_lone_flag"] = getattr(apc, "_kq_lone_harvest", False)
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
-    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     saved["get_chat_template"] = pu.get_chat_template
-    # The LoRA row channel wraps methods of several engine classes, and a
-    # process flag stops a second install. Restore the classes and the flag
-    # together, or a later install finds the flag set and does nothing.
-    saved["engine_classes"] = [(cls, dict(vars(cls))) for cls in _engine_classes()]
-    saved["lora_channel"] = lora_rows._channel_installed
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    saved["engine_seams"] = _snapshot_engine_seams()
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
     saved["stopping_call"] = _UTILS.StoppingCriteria.__call__
     serving.clear_resolved_models()
@@ -99,9 +168,7 @@ def _restore_mlxvlm(request):
     apc._kq_lone_harvest = saved["apc_lone_flag"]
     gen.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
     pu.get_chat_template = saved["get_chat_template"]
-    for cls, attrs in saved["engine_classes"]:
-        _restore_class(cls, attrs)
-    lora_rows._channel_installed = saved["lora_channel"]
+    _restore_engine_seams(saved["engine_seams"])
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
     _APP._server_runtime_snapshot = saved["snapshot"]
@@ -133,6 +200,6 @@ def _restore_mlxvlm(request):
             delattr(fastapi_app.state, flag)
     media_sinks.uninstall()
     media_gate.set_media_root(None)
-    sp_routes._MISSING_SERVICES.clear()
+    sp_routes.clear_missing_services()
     srv._LIVE_SERVICES.clear()
     serving.clear_resolved_models()

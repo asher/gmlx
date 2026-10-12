@@ -1,7 +1,7 @@
 """Shared-prefix cascade decode route: claim gates, fused-kernel numerics
 vs the masked reference on stamped caches, ragged left pads, stamp
-lifecycle (warm-multi detection, extend drop, filter survival), and
-install hygiene.
+formation and install hygiene. The owned batch caches carry the stamp
+through filter and extend (tests/cache/test_owned_cascade_stamp.py).
 
 Numerics require the mlx_kquant fused op (GPU); those tests skip on
 platforms where the op is unavailable. Stamp-detection tests are pure
@@ -12,9 +12,10 @@ import pytest
 
 import importlib
 
-from mlx_lm.models import llama as llama_mod
+from gmlx._vendor.mlx_lm.models import llama as llama_mod
 
 import gmlx.upstream.cascade_sdpa as cs
+from gmlx.upstream.patching import wrapped_with
 
 _SEAM_MODS = []
 for _pkg, _name in cs._MODULES:
@@ -58,9 +59,6 @@ class _FakeBatchCache:
         self._right_padding = None
         if P is not None:
             self._gmlx_cascade = {"P": P}
-
-    def extend(self, other):
-        return "extended"
 
 
 def _install():
@@ -343,6 +341,61 @@ def test_install_idempotent_and_killable(monkeypatch):
     assert not cs.install_cascade_sdpa()
 
 
+@pytest.mark.parametrize("origin", ["gmlx._vendor.mlx_lm.models.cache",
+                                    "gmlx._vendor.mlx_vlm.models.cache"])
+def test_rotating_cache_declined_past_window(monkeypatch, origin):
+    """A stamped BatchRotatingKVCache past its window holds a trimmed,
+    rotated buffer with negative pads that its updates move in place.
+    Claiming it attends the wrong slots and other rows' keys, so the
+    route declines it; a BatchKVCache with the same stamp still claims.
+    Host-only: a spy stands in for the fused op."""
+    import mlx_kquant
+
+    cm = pytest.importorskip(origin)
+    _install()
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "16")
+    calls = []
+
+    def spy(q, *a, **kw):
+        calls.append(q.shape)
+        return mx.zeros(q.shape, q.dtype)
+
+    monkeypatch.setattr(mlx_kquant, "sdpa_decode_gqa_cascade", spy,
+                        raising=False)
+    route = llama_mod.scaled_dot_product_attention
+    W, P, suf, hq, hkv, d = 64, 96, [10, 7], 4, 2, 64
+    L = P + max(suf)
+    pads = [L - P - s for s in suf]
+    rows = [_rb(list(range(P)) + [1000 + 100 * b + j for j in range(s)])
+            for b, s in enumerate(suf)]
+    mx.random.seed(5)
+    kv = mx.random.normal((2, hkv, L, d)).astype(mx.float16)
+
+    def decode(cache, **mask_kw):
+        assert cs._stamp_caches([cache], rows)
+        for s in range(0, L, 32):
+            cache.update_and_fetch(kv[:, :, s:s + 32], kv[:, :, s:s + 32])
+        for _ in range(4):
+            mask = cache.make_mask(1, **mask_kw)  # models mask first
+            nk = mx.random.normal((2, hkv, 1, d)).astype(mx.float16)
+            k, v = cache.update_and_fetch(nk, nk)
+            q = mx.random.normal((2, hq, 1, d)).astype(mx.float16)
+            got = route(q, k, v, cache=cache, scale=0.125, mask=mask)
+            ref = route._gmlx_orig(q, k, v, cache=cache, scale=0.125,
+                                   mask=mask)
+            yield got, ref
+
+    rot = cm.BatchRotatingKVCache(max_size=W, left_padding=pads)
+    for got, ref in decode(rot, window_size=W):
+        assert mx.array_equal(got, ref)
+    assert rot.rotated and min(rot.left_padding.tolist()) < 0
+    assert calls == []
+
+    for _ in decode(cm.BatchKVCache(left_padding=pads)):
+        pass
+    assert len(calls) == 4
+
+
 # ---------------------------------------------------------------------------
 # Stamp v3: token-prefix currency (host-only)
 # ---------------------------------------------------------------------------
@@ -398,77 +451,20 @@ def test_kv_q8_claim(monkeypatch):
 
 def test_carry_stamp():
     """Owned prefill merge rebuilds cache objects; carry_stamp moves the
-    formation stamp onto the merged cache and re-arms the extend hook."""
+    formation stamp onto the merged cache."""
     src = _FakeBatchCache([0, 0], P=512)
     dst = _FakeBatchCache([0, 0])
     cs.carry_stamp(src, dst)
     assert dst._gmlx_cascade == src._gmlx_cascade
-    assert getattr(dst.extend, "_gmlx_cascade_merge", False)
     # unstamped src is a no-op
     dst2 = _FakeBatchCache([0, 0])
     cs.carry_stamp(_FakeBatchCache([0, 0]), dst2)
     assert "_gmlx_cascade" not in dst2.__dict__
 
 
-def test_lcp_rows():
-    a = list(range(100))
-    assert cs._lcp_rows([_rb(a), _rb(a)]) == 100
-    assert cs._lcp_rows([_rb(a), _rb(a[:50] + [999] + a[51:])]) == 50
-    assert cs._lcp_rows([_rb(a), _rb(a[:30])]) == 30
-    assert cs._lcp_rows([_rb(a)]) == 100
-    assert cs._lcp_rows([]) == 0
-    assert cs._lcp_rows([_rb(a), b""]) == 0
-
-
-def test_stamp_caches_and_merge():
-    pre = list(range(64))
-    r1 = _rb(pre + [7, 8])
-    r2 = _rb(pre + [9])
-    cache = _FakeBatchCache([0, 0])
-    assert cs._stamp_caches([cache], [r1, r2])
-    assert cache._gmlx_cascade["P"] == 64
-
-    # same-prefix admission keeps cascading at the common P
-    other = _FakeBatchCache([0])
-    cs._stamp_caches([other], [_rb(pre[:40] + [999])])
-    assert cache.extend(other) == "extended"
-    assert cache._gmlx_cascade["P"] == 40
-    assert len(cache._gmlx_cascade["tok"]) == 3
-
-    # unstamped admission clears
-    assert cache.extend(_FakeBatchCache([0])) == "extended"
-    assert not hasattr(cache, "_gmlx_cascade")
-
-
-def test_stamp_divergent_clears():
-    cache = _FakeBatchCache([0])
-    cs._stamp_caches([cache], [_rb([1, 2, 3])])
-    other = _FakeBatchCache([0])
-    cs._stamp_caches([other], [_rb([9, 9, 9])])
-    cache.extend(other)
-    assert not hasattr(cache, "_gmlx_cascade")
-
-
 def test_stamp_no_common_prefix_no_stamp():
     cache = _FakeBatchCache([0, 0])
     assert not cs._stamp_caches([cache], [_rb([1, 2]), _rb([3, 4])])
-    assert not hasattr(cache, "_gmlx_cascade")
-
-
-class _FilterCache(_FakeBatchCache):
-    def filter(self, keep):
-        return "filtered"
-
-
-def test_stamp_filter_masks_rows():
-    pre = list(range(32))
-    rows = [_rb(pre + [i]) for i in range(3)]
-    cache = _FilterCache([0, 0, 0])
-    cs._stamp_caches([cache], rows)
-    assert cache.filter([True, False, True]) == "filtered"
-    info = cache._gmlx_cascade
-    assert info["P"] == 32 and len(info["tok"]) == 2
-    assert cache.filter([False, False]) == "filtered"
     assert not hasattr(cache, "_gmlx_cascade")
 
 
@@ -559,17 +555,19 @@ def test_stamp_install_killable(monkeypatch):
 
 
 def test_stamp_install_real_seams(monkeypatch):
+    """The stamp is somewhere in each chain: another installer, such as
+    the kvarn fast path, may wrap on top of it."""
     monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
     cs._installed_stamp = False
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     orig_init = ar.PromptProcessingBatch.__init__
     orig_ext = ar._extend_cache
     try:
         assert cs.install_cascade_stamp()
-        assert getattr(ar.PromptProcessingBatch.__init__,
-                       "_gmlx_cascade_stamp", False)
-        assert getattr(ar._extend_cache, "_gmlx_cascade_stamp", False)
+        assert wrapped_with(ar.PromptProcessingBatch.__init__,
+                            "_gmlx_cascade_stamp")
+        assert wrapped_with(ar._extend_cache, "_gmlx_cascade_stamp")
         assert cs.install_cascade_stamp()  # idempotent
     finally:
         ar.PromptProcessingBatch.__init__ = orig_init

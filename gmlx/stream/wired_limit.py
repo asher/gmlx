@@ -2,9 +2,26 @@
 (over-wired-budget) models."""
 from __future__ import annotations
 
+import contextlib
 import os
 
 import mlx.core as mx
+
+from gmlx.upstream.patching import wrapped_with
+
+
+@contextlib.contextmanager
+def cpu_wired_limit(streams=None):
+    """The wired limit context on the CPU device: no limit, and the exit
+    synchronize of the copy's context."""
+    try:
+        yield
+    finally:
+        if streams is not None:
+            for s in streams:
+                mx.synchronize(s)
+        else:
+            mx.synchronize()
 
 
 def _neutralize_wired_limit_sweep():
@@ -32,7 +49,7 @@ def _neutralize_wired_limit_sweep():
     ``import mlx_lm.generate`` binds the function mlx_lm re-exports in
     ``__init__``, not the submodule.
     """
-    if getattr(mx.set_wired_limit, "_kq_no_sweep", False):
+    if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
         return
     # A generator that started before this call left the limit raised, and
     # its exit restore is a no-op from here on. Lower it now: with it up,
@@ -53,7 +70,6 @@ def _neutralize_wired_limit_sweep():
     _no_sweep._kq_no_sweep = True
     mx.set_wired_limit = _no_sweep
 
-    import contextlib
     import importlib
 
     @contextlib.contextmanager
@@ -68,7 +84,7 @@ def _neutralize_wired_limit_sweep():
                 mx.synchronize()
 
     _quiet_wired_limit._kq_no_sweep = True
-    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for mod_name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
         except ImportError:
@@ -95,10 +111,11 @@ def _install_wired_limit_warn_once():
     importlib - ``import mlx_lm.generate`` binds the function mlx_lm
     re-exports in ``__init__``, not the submodule.
     """
-    import contextlib
     import importlib
 
     from mlx.utils import tree_reduce
+
+    from gmlx.device import cpu_default_device, metal_value
 
     state = {"warned": False}
 
@@ -107,10 +124,16 @@ def _install_wired_limit_warn_once():
         if not mx.metal.is_available():
             yield
             return
+        # The CPU device's info has no working set key, and a generation
+        # there has nothing to wire, as in the copy's context.
+        if cpu_default_device():
+            with cpu_wired_limit(streams):
+                yield
+            return
         model_bytes = tree_reduce(
             lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
             model, 0)
-        max_rec_size = mx.device_info()["max_recommended_working_set_size"]
+        max_rec_size = metal_value("max_recommended_working_set_size")
         if model_bytes > 0.9 * max_rec_size and not state["warned"]:
             state["warned"] = True
             model_mb = model_bytes // 2**20
@@ -134,14 +157,14 @@ def _install_wired_limit_warn_once():
             mx.set_wired_limit(old_limit)
 
     _warn_once_wired_limit._kq_warn_once = True
-    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for mod_name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
         except ImportError:
             continue
         fn = getattr(mod, "wired_limit", None)
-        if fn is None or getattr(fn, "_kq_no_sweep", False) or \
-                getattr(fn, "_kq_warn_once", False):
+        if fn is None or wrapped_with(fn, "_kq_no_sweep") or \
+                wrapped_with(fn, "_kq_warn_once"):
             continue
         mod.wired_limit = _warn_once_wired_limit
 
@@ -158,7 +181,6 @@ def configure_cpu_device():
     - ``import mlx_lm.generate`` binds the function mlx_lm re-exports in
     ``__init__``, not the submodule.
     """
-    import contextlib
     import importlib
 
     mx.set_default_device(mx.cpu)
@@ -171,7 +193,7 @@ def configure_cpu_device():
     # No sweep at all on CPU; the marker keeps a later load_model's
     # warn-once variant (_install_wired_limit_warn_once) from clobbering it.
     _wired_noop._kq_no_sweep = True
-    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for mod_name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
         except ImportError:

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5next``).
+"""Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5v``,
+``glm5next`` in the first uploads).
 
-This container pairs the vendored text
-tower (:mod:`gmlx.models.glm5_next.model`) with the GLM-OCR ViT + projector
-(:mod:`gmlx.models.glm5_next.vision`) in the ``language_model`` /
-``vision_tower`` shape mlx-vlm's generate stack expects.
+This container loads ahead of the glm5_next package mlx-vlm ships from 0.7.3.
+It pairs the vendored text tower (:mod:`gmlx.models.glm5_next.model`) with
+the GLM-OCR ViT + projector (:mod:`gmlx.models.glm5_next.vision`) in the
+``language_model`` / ``vision_tower`` shape mlx-vlm's generate stack expects.
 
 The text tower is NoPE, so unlike the qwen2vl-family containers there is no
 position/M-RoPE machinery: image features splice into the embedding stream
@@ -22,13 +23,12 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import (
+from gmlx._vendor.mlx_vlm.models.base import (
     BaseModelConfig,
     InputEmbeddingsFeatures,
     LanguageModelOutput,
 )
 
-from gmlx.models import owned
 
 from .model import Glm5NextModel, ModelArgs
 from .model import Model as _TextModel
@@ -49,9 +49,8 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.glm5_next`` resolve to this module."""
+    """Register the text model's cache classes before a build."""
     _text_ensure_registered()
-    owned.install("mlx_vlm.models.glm5_next", __name__)
 
 
 @dataclass
@@ -97,14 +96,18 @@ class LanguageModel(Glm5NextSpecHooks, nn.Module):
         **kwargs,
     ):
         # The backbone builds its own KDA/MLA masks from the caches.
+        # skip_logits leaves out the head, as in Glm5NextSpecLM.
+        skip_logits = kwargs.pop("skip_logits", False)
         del mask, kwargs
         if return_hidden or return_shared_kv:
             normed, raw = self.model(
                 inputs, cache, return_raw_hidden=True,
                 input_embeddings=inputs_embeds)
-            return _SpecOutput(logits=self._head(normed), hidden_states=[raw])
+            logits = None if skip_logits else self._head(normed)
+            return _SpecOutput(logits=logits, hidden_states=[raw])
         h = self.model(inputs, cache=cache, input_embeddings=inputs_embeds)
-        return LanguageModelOutput(logits=self._head(h))
+        return LanguageModelOutput(
+            logits=None if skip_logits else self._head(h))
 
     @property
     def layers(self):

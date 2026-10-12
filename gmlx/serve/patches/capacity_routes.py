@@ -73,7 +73,7 @@ def readiness() -> tuple:
         conc = concurrency_stats()
         waiting = conc.get("waiting")
         if isinstance(waiting, int) and waiting > 0:
-            runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+            runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
             return False, "queue", _retry_after_s(
                 getattr(runtime, "metrics", None), waiting)
         in_flight = conc.get("in_flight")
@@ -92,7 +92,7 @@ def _any_model_has_headroom(width: int) -> bool:
     so the server is only ``busy`` when every one of them is at width.
     Without a pool the summed in_flight is the single engine's."""
     try:
-        pkg = importlib.import_module("mlx_vlm.server")
+        pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
         pool = getattr(pkg, "_kq_residency_pool", None)
         if pool is None:
             return False
@@ -110,7 +110,7 @@ def install_health_readiness() -> None:
     replaces that handler rather than the stock one."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     route = _find_route(app, "/health", "GET")
     if route is not None and getattr(route.endpoint, _READY_FLAG, False):
         return
@@ -275,7 +275,7 @@ def install_metrics_prometheus() -> None:
     rendering. Idempotent."""
     from fastapi.responses import PlainTextResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     for path in ("/metrics", "/v1/metrics"):
         route = _find_route(app, path, "GET")
         if route is None or getattr(route.endpoint, _PROM_FLAG, False):
@@ -307,14 +307,14 @@ def install_scoped_cache_reset() -> None:
     runs unchanged. Idempotent."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def make_endpoint(original):
         async def cache_reset_endpoint(request: Request):
             pool = _get_pool()
             if pool is None:
                 return await original(request)
-            app_mod = importlib.import_module("mlx_vlm.server.app")
+            app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
             app_mod._require_management_api_key(request)
             try:
                 body = await request.json()
@@ -360,10 +360,10 @@ def install_capacity_plan() -> None:
     Authed like the metrics routes. Idempotent."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def capacity_plan_endpoint(request: Request):
-        app_mod = importlib.import_module("mlx_vlm.server.app")
+        app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
         app_mod._require_management_api_key(request)
         q = request.query_params
         try:
@@ -394,7 +394,7 @@ def install_capacity_plan() -> None:
 # dry-run admission
 def _tenant_of(request) -> str | None:
     try:
-        app_mod = importlib.import_module("mlx_vlm.server.app")
+        app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
         fn = getattr(app_mod, "_read_tenant_id", None)
         return fn(request) if callable(fn) else None
     except Exception:
@@ -417,10 +417,10 @@ def install_estimate() -> None:
     from fastapi.responses import JSONResponse
     from starlette.concurrency import run_in_threadpool
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def estimate_endpoint(request: Request):
-        app_mod = importlib.import_module("mlx_vlm.server.app")
+        app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
         app_mod._require_management_api_key(request)
         try:
             body = await request.json()

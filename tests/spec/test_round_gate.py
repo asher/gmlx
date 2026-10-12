@@ -11,12 +11,11 @@ import numpy as np
 import mlx.core as mx
 import pytest
 
-from mlx_vlm.models.cache import KVCache
+from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
 import gmlx.spec.dflash_drafter as dd
 import gmlx.spec.speculative as sp
 from gmlx.spec.dflash_drafter import greedy_path, path_estimate
-from gmlx.upstream.gdn_patches import _patch_gated_delta_tiled_v
 
 from test_dflash2_drafter import (
     BLOCK,
@@ -31,15 +30,6 @@ from test_dflash2_drafter import (
 )
 
 PROMPT = [[1, 2, 3, 4, 5]]
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _tiled_v():
-    # A gated round runs the plain forward, whose scan takes mlx-lm's
-    # gated_delta, and the verify rounds take the tiled ops. Every qwen3.5
-    # GGUF load tiles mlx-lm's K->V map too, and the two routes agree only
-    # under it.
-    _patch_gated_delta_tiled_v()
 
 
 def _log_softmax(v):

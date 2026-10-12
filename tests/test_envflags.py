@@ -16,7 +16,7 @@ import os
 import mlx.core as mx
 import pytest
 
-from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_float, env_int, env_switch
 
 
 def test_env_int_unset_uses_default(monkeypatch):
@@ -42,6 +42,26 @@ def test_env_float_parses_and_tolerates_garbage(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # env_bool
+
+
+def test_env_switch_takes_the_boolean_words_and_its_choices(monkeypatch):
+    monkeypatch.delenv("GMLX_TEST_FLAG", raising=False)
+    assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == "1"
+    assert env_switch("GMLX_TEST_FLAG", ("a", "b"), "0") == "0"
+    for raw, want in (("1", "1"), ("on", "1"), ("TRUE", "1"), ("0", "0"),
+                      (" off ", "0"), ("no", "0"), ("False", "0"), ("", "0"),
+                      ("a", "a"), (" B ", "b")):
+        monkeypatch.setenv("GMLX_TEST_FLAG", raw)
+        assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == want, raw
+
+
+def test_env_switch_warns_on_an_unknown_value_and_keeps_the_default(
+        monkeypatch):
+    monkeypatch.setenv("GMLX_TEST_FLAG", "sometimes")
+    with pytest.warns(UserWarning, match="GMLX_TEST_FLAG='sometimes'"):
+        assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == "1"
+    with pytest.warns(UserWarning, match="using 0"):
+        assert env_switch("GMLX_TEST_FLAG", ("a", "b"), "0") == "0"
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "True", "YES", "on", " on "])
@@ -104,8 +124,9 @@ def flagmod():
     # restored stale wrapper would fall back to None on its stock route.
     # Leaving the patch uninstalled is safe -- installs are idempotent and
     # re-run on every _install_and_load.
-    mx.fast.scaled_dot_product_attention = getattr(
-        sdpa, "_gmlx_orig_sdpa", sdpa)
+    from gmlx.upstream.patching import under
+
+    mx.fast.scaled_dot_product_attention = under(sdpa, "_gmlx_hd512")
 
 
 _HD512_FLAGS = [
@@ -216,7 +237,7 @@ def test_fused_gdn_kill_switch_decode(monkeypatch):
     patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     saved_call = GatedDeltaNet.__call__
     saved_installed = patches._FUSED_DECODE_PATCH.installed
@@ -246,7 +267,7 @@ def test_fused_gdn_kill_switch_verify(monkeypatch):
     patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_verify_kernel is None:
         pytest.skip("fused gdn verify kernel unavailable")
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
     saved_call = Qwen3_5GatedDeltaNet.__call__
     saved_installed = patches._FUSED_VERIFY_PATCH.installed
@@ -274,7 +295,7 @@ def test_gdn_zba_default_off_and_opt_in(monkeypatch):
     patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     saved_call = GatedDeltaNet.__call__
     saved_installed = patches._FUSED_DECODE_PATCH.installed
@@ -314,7 +335,7 @@ _DSV32_KILL_SITES = [
 @pytest.mark.parametrize("name,fn,flag,clsname", _DSV32_KILL_SITES)
 def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
     patches = importlib.import_module("gmlx.upstream.dsv32_patches")
-    dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
+    dsv32 = importlib.import_module("gmlx._vendor.mlx_lm.models.deepseek_v32")
     patch = getattr(patches, fn)
     cls = getattr(dsv32, clsname) if clsname else None
     saved_call = cls.__call__ if cls else None
@@ -342,7 +363,7 @@ def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
 def test_dsv32_mask_decode_opt_in(monkeypatch):
     # Inverted default: stock gather decode by default, mask path opt-in.
     patches = importlib.import_module("gmlx.upstream.dsv32_patches")
-    dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
+    dsv32 = importlib.import_module("gmlx._vendor.mlx_lm.models.deepseek_v32")
     cp = patches._MASK_DECODE_PATCH
     saved_call = dsv32.DeepseekV32Attention.__call__
     saved_installed = cp.installed
@@ -416,7 +437,7 @@ def test_gdn_zba_merge_content_and_load_order():
 
     import mlx.core as mx
     import mlx.nn as nn
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     gdn = GatedDeltaNet.__new__(GatedDeltaNet)
     nn.Module.__init__(gdn)

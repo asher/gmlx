@@ -1,7 +1,7 @@
 """Single-call speculative-verify attention for qwen3.5/3.6 full-attn layers.
 
-Upstream mlx-vlm's ``Qwen3_5Attention`` has two verify shapes the folded
-kernels in ``attn_hd512`` can never reach:
+The vendored mlx-vlm 0.6.15 ``Qwen3_5Attention`` has two verify shapes the
+folded kernels in ``attn_hd512`` can never reach:
 
 - B==1 hook-path verify (``speculative_verify_hidden``, target_verify=True)
   decomposes the block into L sequential qL==1 SDPA calls, sweeping the whole
@@ -14,21 +14,19 @@ kernels in ``attn_hd512`` can never reach:
   Split per row (each row's keys sliced past its pad, mask "causal"), the rows
   are plain folded verifies: same bytes, fused kernels, pad columns skipped.
 
-Patched seams:
+Patched globals of the vendored ``language`` module:
 
-- ``qwen3_5.language._target_verify_left_padded_attention``: claims the B==1
+- ``_target_verify_left_padded_attention``: claims the B==1
   case as one "causal" call, packed (quantized) KV included, routed through
   the quantized-SDPA dispatch; array masks defer upstream.
-- ``qwen3_5.language.scaled_dot_product_attention``: claims verify-width
+- ``scaled_dot_product_attention``: claims verify-width
   (2 <= qL <= 8) batched calls on plain batch caches, using the cache's
   ``left_padding`` (host-synced once per membership change, identity-cached)
   to slice each row. Unknown array masks without pad info defer upstream.
 
 Disable both with GMLX_QWEN35_VERIFY_FOLD=0.
 
-Still live: the installer runs for stock-built qwen MTP targets
-(multimodal loads, via
-``mtp_load._install_stock_qwen35_verify_patches``) and is the
+Still live: the installer, which no loader calls, is the
 patched-oracle arm of the owned-forward identity tests; ``_pads_list``
 is imported by the owned dispatch (``qwen35_attn``). The owned text
 path composes these routes natively and never installs the patch.
@@ -41,8 +39,10 @@ import sys
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.upstream.patching import wrapped_with
 
 _installed = False
+_FLAG = "_gmlx_verify_fold"
 
 
 def _mask_desc(mask) -> str:
@@ -77,30 +77,40 @@ def _pads_list(cache):
 def install_qwen35_verify_fold() -> bool:
     """Route qwen3.5 verify attention through folded SDPA calls (B==1 single
     call; B>=2 one "causal" call per row). Idempotent; no-op when
-    GMLX_QWEN35_VERIFY_FOLD=0 or the qwen3_5 module is unavailable.
-    Returns True if the patch is active."""
+    GMLX_QWEN35_VERIFY_FOLD=0. Returns True if the patch is active.
+
+    Each fold wraps the global as it finds it, so a wrap another installer
+    put there first stays under it, and a fold already in the chain, under
+    a later wrap, is not added twice."""
     global _installed
     if not env_bool("GMLX_QWEN35_VERIFY_FOLD", True):
         return False
     if _installed:
         return True
-    try:
-        from mlx_vlm.models.qwen3_5 import language as q35
-    except ImportError as e:
-        print(f"[verify-fold] disabled: qwen3_5 module unavailable ({e})",
-              flush=True)
-        return False
+    from . import language as q35
 
-    cur = q35._target_verify_left_padded_attention
-    orig = getattr(cur, "_gmlx_orig", cur)
     dbg = [8] if env_bool("GMLX_VERIFY_FOLD_DEBUG", False) else None
+    cur = q35._target_verify_left_padded_attention
+    if not wrapped_with(cur, _FLAG):
+        q35._target_verify_left_padded_attention = _fold_verify(q35, cur, dbg)
+    cur = q35.scaled_dot_product_attention
+    if not wrapped_with(cur, _FLAG):
+        q35.scaled_dot_product_attention = _fold_batch_sdpa(cur, dbg)
+    _installed = True
+    return True
 
+
+def _fold_verify(q35, orig, dbg):
     def _folded_verify(queries, keys, values, *, cache, scale, mask):
         # Packed (tuple) KV pairs with a quantized cache: the same single
         # "causal" call dispatches to quantized SDPA upstream, which builds
         # the identical bottom-right causal mask. Upstream's own fallback
         # cannot take this case (it slices keys as raw arrays).
         quant = isinstance(keys, (tuple, list))
+        if not quant and not isinstance(keys, mx.array):
+            # A KVarN view has no .ndim; the owned SDPA routes it.
+            return orig(queries, keys, values, cache=cache, scale=scale,
+                        mask=mask)
         claimed = (
             queries.ndim == 4
             and (hasattr(cache, "bits") if quant
@@ -121,17 +131,17 @@ def install_qwen35_verify_fold() -> bool:
             )
         return orig(queries, keys, values, cache=cache, scale=scale, mask=mask)
 
-    _folded_verify._gmlx_orig = orig
-    q35._target_verify_left_padded_attention = _folded_verify
+    _folded_verify.__dict__.update({_FLAG: True, "_gmlx_orig": orig})
+    return _folded_verify
 
-    sdpa_cur = q35.scaled_dot_product_attention
-    sdpa_orig = getattr(sdpa_cur, "_gmlx_orig", sdpa_cur)
 
+def _fold_batch_sdpa(sdpa_orig, dbg):
     def _folded_batch_sdpa(queries, keys, values, cache, scale, mask,
                            sinks=None):
-        if isinstance(keys, (tuple, list)):
-            # Packed KV: never touch .ndim/.shape; upstream dispatches
-            # tuple pairs to quantized SDPA.
+        if not isinstance(keys, mx.array):
+            # Packed KV tuples and KVarN views: never touch .ndim/.shape.
+            # The owned SDPA under this one sends tuple pairs to quantized
+            # SDPA and KVarN views to the KVarN route.
             return sdpa_orig(
                 queries, keys, values, cache=cache, scale=scale, mask=mask,
                 sinks=sinks
@@ -183,7 +193,5 @@ def install_qwen35_verify_fold() -> bool:
             sinks=sinks
         )
 
-    _folded_batch_sdpa._gmlx_orig = sdpa_orig
-    q35.scaled_dot_product_attention = _folded_batch_sdpa
-    _installed = True
-    return True
+    _folded_batch_sdpa.__dict__.update({_FLAG: True, "_gmlx_orig": sdpa_orig})
+    return _folded_batch_sdpa

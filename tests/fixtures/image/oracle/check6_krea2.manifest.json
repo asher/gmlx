@@ -1,0 +1,255 @@
+{
+ "schema": 1,
+ "name": "check6_krea2",
+ "check": 6,
+ "family": "krea2",
+ "script": "scripts/image_oracle/check6_krea2.py",
+ "argv": [
+  "check6_krea2.py",
+  "--dit",
+  "Krea-2-Turbo-Q4_K_M.gguf",
+  "--features",
+  "check2_krea2_plain_features.npz",
+  "--sizes",
+  "512",
+  "--bf16",
+  "512"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "Krea-2-Turbo-Q4_K_M.gguf",
+   "size": 7486289232,
+   "sha256": "1e23e478144ce4c1adc6854efe2ff52930a836cf4e0008b6a0e41d235d9bdd07"
+  },
+  "features": {
+   "name": "check2_krea2_plain_features.npz",
+   "size": 4055310,
+   "sha256": "a9fc4f9ace0230ffa2a8a58fbdedf4342a19919f834d9a18d21a0620d017e3e9"
+  }
+ },
+ "inputs": {
+  "sizes": [
+   512
+  ],
+  "bf16_sizes": [
+   512
+  ],
+  "steps": 8,
+  "blocks": 28,
+  "variant": "turbo",
+  "mu": 1.15,
+  "guidance_scale": 0.0,
+  "scheduler": {
+   "num_train_timesteps": 1000,
+   "use_dynamic_shifting": true,
+   "base_shift": 0.5,
+   "max_shift": 1.15,
+   "base_image_seq_len": 256,
+   "max_image_seq_len": 6400
+  },
+  "schedule": "the pipeline's default, np.linspace(1, 1 / steps, steps)",
+  "sigmas": {
+   "512": [
+    1.0,
+    0.956723690032959,
+    0.9045307636260986,
+    0.8403487801551819,
+    0.7595109343528748,
+    0.654566764831543,
+    0.5128441452980042,
+    0.31090107560157776,
+    0.0
+   ]
+  },
+  "seed": 6,
+  "features": "check2_krea2 fp32 features of the plain prompt",
+  "text_rows": 33,
+  "kept_steps": [
+   1,
+   2,
+   4
+  ],
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 16, size / 8, size / 8)",
+  "latents": "(1, 16, size / 8, size / 8) float32 in model space, after the last step",
+  "gguf_codecs": {
+   "F32": 167,
+   "F16": 1,
+   "Q5_K": 61,
+   "Q4_K": 201
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding",
+   "timestep": "float32 in both modes"
+  },
+  "sizes": {
+   "512": {
+    "fp32_step_s": [
+     17.9,
+     17.8,
+     17.8,
+     17.8,
+     17.8,
+     17.7,
+     17.8,
+     17.9
+    ],
+    "fp32_s": 142.5,
+    "loop_equals_pipeline_steps": 2,
+    "bf16_s": 324.2,
+    "latents_bf16_vs_fp32": {
+     "rel_l2": 0.09898794977499975,
+     "cosine": 0.9951374586596576,
+     "max_abs": 0.9514105916023254
+    },
+    "bf16_vs_fp32_by_step": [
+     0.0013271295459651332,
+     0.0037696278066182165,
+     0.008149179945212512,
+     0.011400049196053747,
+     0.01972923626611825,
+     0.03309815324041776,
+     0.06001254667405126,
+     0.09898794977499975
+    ]
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "final latents and kept steps: relative L2 at twice the oracle's own bf16 against fp32 relative L2 after that step at that size; a size without a bf16 run takes the tolerances of the largest size that has one",
+  "sizes": {
+   "512": {
+    "latents_rel_l2": 0.1979758995499995
+   }
+  }
+ },
+ "notes": [
+  "The official scheduler config is gated. The scheduler is the one Krea2Pipeline's docstring asks for, as in check4_krea2."
+ ],
+ "created": "2026-10-10T07:29:30Z",
+ "npz": "check6_krea2.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    33,
+    30720
+   ],
+   "dtype": "float32",
+   "sha256": "811128d73c767a209605b6b6585b955e834aa467ca1484e5cfa7c4e86c2c151a"
+  },
+  "latents_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "3aa1e6030bef3891636e3fd12eee6970335c6e2c466905ab7d4969fe90aaa210"
+  },
+  "latents_512_bf16": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "fcaf991af91fbdb1b400347467df07ce377adb8f22b25c5e4eaa23d3d38102de"
+  },
+  "latents_512_step1": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "7c861fc25cca79b48ffee31ee153d3d74976e4669651bc9078f864b54cc7484b"
+  },
+  "latents_512_step2": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "a1c4520aa985e4a2441ff991f40cb7244e34fdee1ea061f173b2f64c4dcf3e14"
+  },
+  "latents_512_step4": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "dc424103eb999c54e90d6d89693b7edf0c77e3dfb500a7714dd86cec066d7015"
+  },
+  "noise_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "4fc58e1651f37316856ef093e36b0a29f0ad6de41a860cd5b73a56eb7111af38"
+  },
+  "sigmas_512": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "61a2d8c79ffdd7907efb07c24b13e4c310fb5d449bd87eee0c8ef9842eaa6a9f"
+  },
+  "timesteps_512": {
+   "shape": [
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "8cf2778286554e50c232a8b757dada532feefc811c725216cb3e9573a0b2357e"
+  }
+ }
+}

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from gmlx.cache import refusals
+
 VALID_BITS = (2, 3, 4, 6, 8)
 VALID_GROUPS = (32, 64, 128)
 FP16_BPE = 2.0
@@ -260,24 +262,15 @@ def _classify(c, types):
 
 
 def _cache_kind_types():
-    from gmlx.cache.compat import cache_types
-
-    def _get(*names):
-        out = []
-        for n in names:
-            try:
-                out.extend(cache_types(n))
-            except AttributeError:
-                pass
-        return tuple(out)
+    from gmlx.cache import kv_cache as kvc
 
     return {
-        "kv": _get("KVCache", "ChunkedKVCache", "SimpleKVCache",
-                   "BatchKVCache", "QuantizedKVCache",
-                   "BatchQuantizedKVCache"),
-        "window": _get("RotatingKVCache", "BatchRotatingKVCache",
-                       "BufferedRotatingKVCache"),
-        "state": _get("ArraysCache", "MambaCache", "ConcatenateKVCache"),
+        "kv": (kvc.KVCache, kvc.ChunkedKVCache, kvc.SimpleKVCache,
+               kvc.BatchKVCache, kvc.QuantizedKVCache,
+               kvc.BatchQuantizedKVCache),
+        "window": (kvc.RotatingKVCache, kvc.BatchRotatingKVCache,
+                   kvc.BufferedRotatingKVCache),
+        "state": (kvc.ArraysCache, kvc.ConcatenateKVCache),
     }
 
 
@@ -377,7 +370,7 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
             else "cache stack has no quantizable layers",
             bits, group, mode, stack, kinds)
 
-    from mlx_vlm.models.cache import should_quantize_kv_layer
+    from gmlx.cache.kv_cache import should_quantize_kv_layer
 
     packed = packed_bytes_per_element(bits, group)
     per = []
@@ -408,7 +401,7 @@ def _kvarn_owns(c, kind, rotating_window, batched=False):
     converts throughout. In batched mode any growing KV layer counts --
     serve's batch seam constructs BatchKVarNKVCache itself, so the class
     on the probe stack says nothing about what it will build."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import RotatingKVCache
     from gmlx.cache.kvarn_cache import convertible_kv_types
 
     if kind == "kv":
@@ -420,7 +413,7 @@ def _kvarn_owns(c, kind, rotating_window, batched=False):
                 or getattr(c, "kv_quant_scheme", None) == "kvarn")
     if kind != "window" or not rotating_window:
         return False
-    return (type(c) in cache_types("RotatingKVCache")
+    return (type(c) is RotatingKVCache
             and int(getattr(c, "max_size", 0) or 0) == int(rotating_window))
 
 
@@ -490,7 +483,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
             no_kv_reason if (not can_quantize_kv and no_kv_reason)
             else "cache stack has no kvarn-convertible layers", kinds)
 
-    from mlx_vlm.models.cache import should_quantize_kv_layer
+    from gmlx.cache.kv_cache import should_quantize_kv_layer
 
     record = kvarn_bytes_per_element(k_bits, v_bits)
     regions = ((kvarn_fixed_tokens(tail), FP16_BPE),)
@@ -740,16 +733,17 @@ def _held_to_quantized(self):
 
 def hold_fp16(c):
     """Rebind a fresh cache to a subclass that hides to_quantized, so
-    hasattr-gated converters leave the layer fp16. Held layers must not
-    cross the serve APC rebind: rebind_to_runtime_origin passes them
-    through and APC silently skips the stack."""
+    hasattr-gated converters leave the layer fp16. The subclass also
+    carries the refusals in gmlx.cache.refusals, so the isinstance-gated
+    arms of mlx-vlm's KV quantizer and batch constructor leave it alone."""
     if not hasattr(c, "to_quantized"):
         return c
     cls = type(c)
     held = _HELD_CLASSES.get(cls)
     if held is None:
         held = type("Fp16Held" + cls.__name__, (cls,),
-                    {"to_quantized": property(_held_to_quantized)})
+                    {"to_quantized": property(_held_to_quantized),
+                     **refusals.MEMBERS})
         _HELD_CLASSES[cls] = held
     out = held.__new__(held)
     out.__dict__.update(c.__dict__)
@@ -781,15 +775,12 @@ def _convert_leaf(c, kind, policy: KvQuantPolicy):
                               bits=policy.bits)
     from gmlx.cache.kvarn_cache import KVarNKVCache, KVarNRotatingKVCache
 
-    from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
-
     # A kvarn policy that converts a leaf always carries its key width.
     k = int(policy.bits or 0)
     v = k if policy.value_bits is None else policy.value_bits
     cls = KVarNRotatingKVCache if kind == "window" else KVarNKVCache
     out = cls.from_cache(c, k_bits=k, v_bits=v,
                          tail_tokens=policy.tail_tokens or 0)
-    install_kvarn_sdpa()
     return out
 
 

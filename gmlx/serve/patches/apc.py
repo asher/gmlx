@@ -4,12 +4,21 @@ subclass (``gmlx.cache.apc_manager.GmlxAPCManager``), not as a method patch here
 
 from __future__ import annotations
 
+import contextvars
 import importlib
 import logging
 import weakref
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 _CAPTURE_WARNED: set[str] = set()
+
+# The request's ``tool_parser`` override (None: infer from the template),
+# recorded where each protocol handler resolves its parser, ahead of the
+# render the capture records.
+_REQUEST_TOOL_PARSER: contextvars.ContextVar[str | None] = \
+    contextvars.ContextVar("gmlx_request_tool_parser", default=None)
 
 
 def _warn_capture_once(site: str) -> None:
@@ -42,12 +51,12 @@ def install_apc_lone_harvest() -> None:
     (``_apc.harvest_blocks_from_batch_cache``), so replacing it on the module
     is picked up at the call site without a fork.
 
-    Signature contract: matches the 0.6.15 harvest exactly --
+    Signature contract: matches the 0.7.3 harvest exactly --
     ``full_token_ids`` third positional, ``batch_idx`` keyword-only
     (None = lone request). All callers use that convention."""
     import mlx.core as mx
 
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, "_kq_lone_harvest", False):
         return
 
@@ -112,7 +121,9 @@ def install_retire_render_capture() -> None:
     spec engine later stashes as ``full_ids`` -- while capturing the
     generator's own text-to-ids path so the retirement render tokenizes
     identically. Media requests are not re-keyed (re-encoding text cannot
-    reproduce expanded media token ids). Consumed by speculative retirement
+    reproduce expanded media token ids). The recorded context also carries
+    the request's ``tool_parser`` override, so the retirement parses tool
+    calls with the handler's parser. Consumed by speculative retirement
     via ``retire_key.next_turn_lcp``. Kill: ``GMLX_APC_RETIRE_LCP=0``.
     """
     import os
@@ -122,7 +133,7 @@ def install_retire_render_capture() -> None:
     import gmlx.cache.retire_key as retire_key
 
     from ._common import _render_target_modules
-    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+    gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
     def _make_capture(orig_render):
         def apply_chat_template(processor, config, prompt, *a, **kw):
@@ -136,6 +147,7 @@ def install_retire_render_capture() -> None:
                         "processor": processor,
                         "config": config,
                         "render": orig_render,
+                        "tool_parser": _REQUEST_TOOL_PARSER.get(),
                         "media": bool(kw.get("num_images")
                                       or kw.get("num_audios")
                                       or kw.get("video")),
@@ -151,12 +163,24 @@ def install_retire_render_capture() -> None:
     # retirement keys cover all protocol routes, not just OpenAI.
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, "_kq_retire_capture", False):
+        if fn is not None and not wrapped_with(fn, "_kq_retire_capture"):
             target.apply_chat_template = _make_capture(fn)
+
+    # The handlers resolve their parser through the package attribute
+    # (``_protocol_deps`` looks it up at call time), before they render.
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    infer = getattr(pkg, "_infer_tool_parser_from_processor", None)
+    if infer is not None and not wrapped_with(infer, "_kq_retire_capture"):
+        def _infer_tool_parser_from_processor(processor, override=None):
+            _REQUEST_TOOL_PARSER.set(override)
+            return infer(processor, override=override)
+
+        _infer_tool_parser_from_processor._kq_retire_capture = True
+        pkg._infer_tool_parser_from_processor = _infer_tool_parser_from_processor
 
     cls = gen_mod.ResponseGenerator
     orig_pre = cls._preprocess_request
-    if getattr(orig_pre, "_kq_retire_capture", False):
+    if wrapped_with(orig_pre, "_kq_retire_capture"):
         return
 
     def _preprocess_request(self, prompt, images=None, audio=None,
@@ -187,4 +211,4 @@ def install_retire_render_capture() -> None:
         return raw
 
     _preprocess_request._kq_retire_capture = True
-    cls._preprocess_request = _preprocess_request
+    cls._preprocess_request = link(_preprocess_request, orig_pre)

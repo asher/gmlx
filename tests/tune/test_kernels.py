@@ -33,7 +33,7 @@ def test_a_kquant_expert_backward_over_many_routed_rows(monkeypatch):
     backward is not implemented, without the training setting."""
     import mlx_kquant as kq
     from mlx_kquant.nn import KQuantSwitchLinear
-    from mlx_lm.models.switch_layers import SwitchGLU
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
     monkeypatch.delenv("KQ_SWITCH_GEMM_MIN_ROWS", raising=False)
     d, inter, experts = 256, 512, 8

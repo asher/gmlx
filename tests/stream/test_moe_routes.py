@@ -27,7 +27,7 @@ from test_offload import _kquant_glu
 
 
 def _gptoss_block():
-    from mlx_lm.models.gpt_oss import MLPBlock
+    from gmlx._vendor.mlx_lm.models.gpt_oss import MLPBlock
 
     cfg = SimpleNamespace(
         hidden_size=16, intermediate_size=32, num_local_experts=8,
@@ -136,7 +136,7 @@ def test_gate_without_adapter_records_but_refuses_replay():
 
 
 def test_mlx_lm_deepseek_gate_adapter_matches_select():
-    from mlx_lm.models.deepseek_v3 import MoEGate
+    from gmlx._vendor.mlx_lm.models.deepseek_v3 import MoEGate
 
     for n_group, topk_group, norm in ((1, 1, True), (2, 1, False), (4, 2, True)):
         cfg = SimpleNamespace(
@@ -193,7 +193,7 @@ def _dsv32_fp32_router(module, monkeypatch):
 def test_mlx_lm_sigmoid_gate_adapters_match_select(arch):
     """Each adapter gives the gate's own weights at the gate's own ids, bit
     for bit, across group masks, renormalization, k=1 and both dtypes."""
-    MoEGate = importlib.import_module(f"mlx_lm.models.{arch}").MoEGate
+    MoEGate = importlib.import_module(f"gmlx._vendor.mlx_lm.models.{arch}").MoEGate
     for dtype in (mx.float32, mx.bfloat16):
         for n_group, topk_group, norm, k in ((1, 1, True, 2), (2, 1, False, 2), (4, 2, True, 2),
                                              (1, 1, True, 1)):
@@ -214,7 +214,7 @@ def test_dsv32_gate_adapter_follows_the_fp32_router_patch(monkeypatch):
     """glm-dsa GGUFs load deepseek_v32 with the fp32 router patch on: the
     adapter runs the router matmul in fp32 on a flagged gate and in the
     model dtype on an unflagged one, matching the gate either way."""
-    from mlx_lm.models.deepseek_v32 import MoEGate
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import MoEGate
 
     class _Holder(nn.Module):
         def __init__(self):
@@ -247,7 +247,7 @@ def test_mlx_lm_sigmoid_gate_blocks_replay(arch, fp32, monkeypatch):
     """Replaying a block's own recorded routes reproduces its unhooked
     forward bit for bit, in float32 and (GPU only, the CPU gather_mm is
     float32 only) in bfloat16, and a swapped id moves that position only."""
-    mod = importlib.import_module(f"mlx_lm.models.{arch}")
+    mod = importlib.import_module(f"gmlx._vendor.mlx_lm.models.{arch}")
     mx.random.seed(22)
     x = mx.random.normal((1, 5, 16))
     block = getattr(mod, _SIGMOID_GATE_BLOCKS[arch])(_sigmoid_gate_cfg())
@@ -276,7 +276,7 @@ def test_mlx_lm_sigmoid_gate_blocks_replay(arch, fp32, monkeypatch):
 
 
 def _deepseek_v2_block():
-    from mlx_lm.models.deepseek_v2 import DeepseekV2MoE
+    from gmlx._vendor.mlx_lm.models.deepseek_v2 import DeepseekV2MoE
 
     cfg = SimpleNamespace(
         num_experts_per_tok=2, n_routed_experts=8, routed_scaling_factor=1.0,
@@ -293,7 +293,7 @@ def test_replay_unsupported_names_a_gate_without_an_adapter():
 
     block = _deepseek_v2_block()
     model = _shell(block)
-    want = [(0, "mlx_lm.models.deepseek_v2.MoEGate")]
+    want = [(0, "gmlx._vendor.mlx_lm.models.deepseek_v2.MoEGate")]
     assert replay_unsupported(model) == want
     assert type(block.gate).__name__ == "MoEGate"
     rec = install_moe_route_record(model)
@@ -314,7 +314,7 @@ def test_replay_unsupported_agrees_with_the_installer():
         _Block(_kquant_glu(), _WeightedGate()), _Block(_kquant_glu(), _TupleGate()),
     ]
     for arch, cls in _SIGMOID_GATE_BLOCKS.items():
-        blocks.append(getattr(importlib.import_module(f"mlx_lm.models.{arch}"), cls)(_sigmoid_gate_cfg()))
+        blocks.append(getattr(importlib.import_module(f"gmlx._vendor.mlx_lm.models.{arch}"), cls)(_sigmoid_gate_cfg()))
     seen = set()
     for block in blocks:
         model = _shell(block)
@@ -338,7 +338,7 @@ def test_kimi_k3_replay():
 
 
 def test_hunyuan_replay():
-    from mlx_lm.models.hunyuan import MoeBlock
+    from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
     from gmlx.load.loader import _patch_hunyuan_norm_topk
 

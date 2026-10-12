@@ -93,7 +93,7 @@ def _probe_stack(model):
     make = getattr(lm, "make_cache", None)
     if callable(make):
         return make()
-    from mlx_vlm.models.cache import KVCache
+    from gmlx.cache.kv_cache import KVCache
 
     return [KVCache() for _ in lm.layers]
 
@@ -141,8 +141,8 @@ def _load_window_scheme(rg, model_id: str = "", kv_bits=None,
     truth, exactly as it is for KV_BITS; rg is corrected here because
     upstream's batch construction gates ``_make_cache`` on the attribute,
     not on the policy. An unset or ``auto`` KV_QUANT_SCHEME picks per
-    model when ``kv_bits`` (upstream's parse, None when off or dropped
-    for a qat id) asks for quantization, and stays affine otherwise.
+    model when ``kv_bits`` (upstream's parse, None when off) asks for
+    quantization, and stays affine otherwise.
     """
     scheme = (os.environ.get("KV_QUANT_SCHEME") or "").strip().lower()
     reason = None
@@ -190,7 +190,8 @@ def resolve_for_load(rg, model_id: str):
     Returns the ServeKvPolicy (also stamped on rg), or None when kv
     quantization is not requested. Raises KvPolicyError on an error
     verdict. Must run inside the model's env window: KV_BITS in
-    os.environ distinguishes off from upstream's silent qat drop.
+    os.environ distinguishes off from a generator built without the
+    width it asks for.
     """
     requested = os.environ.get("KV_BITS")
     try:
@@ -206,16 +207,16 @@ def resolve_for_load(rg, model_id: str):
     scheme, auto = _load_window_scheme(rg, model_id, bits, mtp)
     if bits is None and scheme != "kvarn":
         if req_val:
-            # get_quantized_kv_bits drops the flag for "qat" model ids.
-            reason = ("model id marked quantization-aware (qat); "
-                      "upstream drops KV quantization")
+            # The generator was built without the width the window asks
+            # for, so its caches run fp16 and the policy must say so.
+            reason = "the generator was built without kv_bits"
             b = int(req_val)
             pol = ServeKvPolicy(
                 dropped_policy(reason, b, rg.kv_group_size, "single"),
                 dropped_policy(reason, b, rg.kv_group_size, "batched"))
             setattr(rg, RG_ATTR, pol)
             # Warm merges read the model stamp and must stay float
-            # here: upstream dropped the flag and live caches run fp16.
+            # here: live caches run fp16.
             _stamp_model(rg, pol, model_id)
             _log.warning(kv_line(model_id, pol.single))
             return pol
@@ -256,7 +257,7 @@ def resolve_for_load(rg, model_id: str):
     if scheme == "kvarn":
         # kvarn owns its widths: KV_KEY_BITS/KV_VALUE_BITS when set, else
         # the GMLX_KVARN_BITS split, else KV_BITS from the window (default
-        # 6), independent of upstream's kv_bits parse and its qat drop.
+        # 6), independent of upstream's kv_bits parse.
         # rotating_window stays None: serve's MAX_KV_SIZE only caps the
         # request context budget, it never builds a rotating stack.
         from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs

@@ -1,5 +1,5 @@
 import pytest
-from mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
+from gmlx._vendor.mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
                                   QuantizedKVCache, RotatingKVCache)
 
 from gmlx.cache.kv_policy import (kv_line, kvarn_bytes_per_element,

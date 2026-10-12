@@ -11,13 +11,14 @@ checkpoint_done latch fire exactly as unarmed.
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
-from mlx_vlm.models.cache import CacheList, KVCache
+from gmlx._vendor.mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.models.cache import CacheList, KVCache
 
 import gmlx.cache.snapshot as cs
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as se
 from gmlx.cache.snapshot import anchor_exact_lookup, anchor_exact_store
+from helpers import bind_stock_checkpoint_methods
 
 
 def make_kv_cache(p, layers=2, seed=0):
@@ -158,18 +159,21 @@ def test_anchor_boundary_no_render_ctx(monkeypatch):
 def _armed_exact_batch(man, guard, monkeypatch, lcp):
     _stub_sys(monkeypatch, lcp)
     monkeypatch.setenv("GMLX_APC_CKPT_SYS_MIN", "16")
+    # The stock insert publishes both keys; the stock schedule list takes
+    # precedence over checkpoint_len until an armed row drops it.
     meta = {"full_input_ids": IDS, "prefix_len": 0, "extra_hash": 7,
-            "checkpoint_len": guard}
+            "checkpoint_len": guard, "checkpoint_lengths": [guard]}
     batch = SimpleNamespace(
         _apc_manager=man, _apc_meta=[meta], _apc_mode="exact",
         prompt_cache=None)
     batch._apc_prompt_cache_for_store = lambda idx: batch.prompt_cache
+    bind_stock_checkpoint_methods(batch)
     ckpt._exact_anchor_arm(batch, meta, guard, 0)
     return batch, meta
 
 
 def test_anchor_two_stop_schedule(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     man = APCManager(num_blocks=8, block_size=16)
     calls = []
@@ -179,6 +183,7 @@ def test_anchor_two_stop_schedule(monkeypatch):
     batch, meta = _armed_exact_batch(man, guard=96, monkeypatch=monkeypatch,
                                      lcp=64)
     assert batch._kq_anchor_armed and meta["checkpoint_len"] == 64
+    assert "checkpoint_lengths" not in meta
     stock = ar.PromptProcessingBatch._store_apc_exact_checkpoints
 
     # Anchor stop: the hook stores, hands the column back to the guard,
@@ -200,7 +205,7 @@ def test_anchor_two_stop_schedule(monkeypatch):
 
 
 def test_anchor_at_guard_single_stop(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     man = APCManager(num_blocks=8, block_size=16)
     calls = []
@@ -224,17 +229,17 @@ def test_anchor_at_guard_single_stop(monkeypatch):
 def _pooling_model(man):
     """A pooling stack resolves exact and is not ckpt-tier (the layout
     probe rejects unknown cache classes) -- the ds4 shape."""
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     return SimpleNamespace(
         _kq_apc_manager=man, _kq_apc_mode="exact",
         config=SimpleNamespace(),
         make_cache=lambda: [KVCache(),
-                            CacheList(KVCache(), PoolingCache(4))])
+                            CacheList(KVCache(), DS4PoolingCache(4))])
 
 
 def _pick_gen(man):
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     ckpt._install_exact_anchor_pick()
     gen = SimpleNamespace(

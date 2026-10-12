@@ -46,6 +46,7 @@ CANDIDATE_ARCHES = [
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
     "kimi-k3", "muse-glimmer", "qwen4exp", "glm5-next", "glm5next", "hyv4",
+    "qwen3vl",
 ]
 
 # Per-arch extra flags for the llama.cpp reference run.
@@ -165,7 +166,7 @@ def _greedy(model, tok, ids, n, logits_processors=None):
     product paths use -- NOT raw ``generate_step``, which runs outside the
     wired_limit context: unwired, a near-RAM model decodes at ~0.5 tok/s vs
     ~20 wired, turning this 16k sweep into a 9-hour crawl (Hy3 87 GB)."""
-    from mlx_lm.generate import stream_generate
+    from gmlx._vendor.mlx_lm.generate import stream_generate
 
     kwargs = {"max_tokens": n}
     if logits_processors:
@@ -307,7 +308,7 @@ def test_long_decode_integrity(arch, dtype, gguf_index, monkeypatch):
 @pytest.mark.parametrize("dtype", ACTIVATION_DTYPES)
 @pytest.mark.parametrize("arch", CANDIDATE_ARCHES)
 def test_long_prefill_parity(arch, dtype, gguf_index, llamacpp_bin, monkeypatch):
-    from mlx_lm.generate import stream_generate
+    from gmlx._vendor.mlx_lm.generate import stream_generate
 
     monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", dtype)
     if arch in PARITY_SKIP:

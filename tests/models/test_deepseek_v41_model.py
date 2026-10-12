@@ -391,7 +391,7 @@ def test_fused_step_matches_the_ops_block(li):
     """At decode width the block runs the two-dispatch hyper-connection
     route; its stream, pre and next-layer carry agree with the ops
     block to rounding."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import CacheList
     from gmlx.models.deepseek_v4.hyper_connection import hc_expand_m1
 
     model = _wide_bf16_model()
@@ -406,7 +406,7 @@ def test_fused_step_matches_the_ops_block(li):
     def fresh():
         cache = model.make_cache()
         mx.eval(model(mx.array([toks]), cache=cache))
-        return inner._split_cache(li, cache[li], cache_types("CacheList"))
+        return inner._split_cache(li, cache[li], CacheList)
 
     h_ops, pre_ops = layer(h, pre, None, fresh(), len(toks), SharedStreams(),
                            ids)

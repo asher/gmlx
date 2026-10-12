@@ -1,0 +1,285 @@
+{
+ "schema": 1,
+ "name": "check2_qwen_image21_edit_tower",
+ "check": 2,
+ "family": "qwen_image21",
+ "script": "scripts/image_oracle/check2_qwen_image21_edit_tower.py",
+ "argv": [
+  "check2_qwen_image21_edit_tower.py",
+  "--mmproj",
+  "mmproj-BF16.gguf",
+  "--config",
+  "Qwen__Qwen-Image-2.1"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "mmproj": {
+   "name": "mmproj-BF16.gguf",
+   "size": 1162569280,
+   "sha256": "6516bb64bae1503a0fcd7ec9fa39655f8c481580be0a0a066397941d9761c9f4"
+  },
+  "text_encoder_config": {
+   "name": "config.json",
+   "size": 1517,
+   "sha256": "6001331949f7f86ab6d791a80b12246d4f8da5159fa08c3e62368a39f36d63a9"
+  }
+ },
+ "inputs": {
+  "source": "check2_qwen_image21_edit",
+  "source_npz_sha256": {
+   "patches_a": "8dcad66be136cfd523d3cd370c848cabc655a8fe07463fadff9b06490714601b",
+   "patches_b": "f616577ef0947c866551b08916b20f8f33407622b8dfcace6a7d4021d739ba42",
+   "patches_c": "644c37736fe07c45f02421cf6e07e383ec92ae72e93b9ef63dccca4ec6b7d145"
+  },
+  "grids": {
+   "a": [
+    1,
+    32,
+    32
+   ],
+   "b": [
+    1,
+    28,
+    36
+   ],
+   "c": [
+    1,
+    36,
+    28
+   ]
+  },
+  "outputs": [
+   "merger",
+   "deepstack_0",
+   "deepstack_1",
+   "deepstack_2"
+  ],
+  "config_revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+  "tower": "Qwen3VLForConditionalGeneration.model.visual set by name from the mmproj GGUF as check2_qwen_image21_edit.py sets it, its BF16 and F32 tensors read as float32, then every parameter and buffer cast to float64 for the second run"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16
+  },
+  "fp32_vs_fp64": {
+   "a": {
+    "merger": {
+     "rel_l2": 2.4350169289640122e-05,
+     "cosine": 0.9999999997036925
+    },
+    "deepstack_0": {
+     "rel_l2": 5.831684268024062e-06,
+     "cosine": 0.9999999999831193
+    },
+    "deepstack_1": {
+     "rel_l2": 1.3856803087684287e-05,
+     "cosine": 0.9999999999039939
+    },
+    "deepstack_2": {
+     "rel_l2": 1.9411206904546245e-05,
+     "cosine": 0.9999999998120008
+    }
+   },
+   "b": {
+    "merger": {
+     "rel_l2": 4.998592413849095e-05,
+     "cosine": 0.9999999987579656
+    },
+    "deepstack_0": {
+     "rel_l2": 5.9795478326770275e-06,
+     "cosine": 0.999999999982145
+    },
+    "deepstack_1": {
+     "rel_l2": 1.2604125860093028e-05,
+     "cosine": 0.9999999999205693
+    },
+    "deepstack_2": {
+     "rel_l2": 1.8240963451264256e-05,
+     "cosine": 0.9999999998339028
+    }
+   },
+   "c": {
+    "merger": {
+     "rel_l2": 4.040571295041784e-05,
+     "cosine": 0.9999999991836903
+    },
+    "deepstack_0": {
+     "rel_l2": 6.089861789018298e-06,
+     "cosine": 0.9999999999814644
+    },
+    "deepstack_1": {
+     "rel_l2": 1.8853632840683462e-05,
+     "cosine": 0.9999999998222687
+    },
+    "deepstack_2": {
+     "rel_l2": 2.624274083768432e-05,
+     "cosine": 0.9999999996557557
+    }
+   }
+  },
+  "gguf_codecs": {
+   "F32": 236,
+   "BF16": 116
+  }
+ },
+ "tolerances": {
+  "rule": "relative L2 against the float64 run at twice the oracle's own float32 against float64 relative L2 on the same output",
+  "rel_l2": {
+   "a": {
+    "merger": 4.8700338579280245e-05,
+    "deepstack_0": 1.1663368536048124e-05,
+    "deepstack_1": 2.7713606175368575e-05,
+    "deepstack_2": 3.882241380909249e-05
+   },
+   "b": {
+    "merger": 9.99718482769819e-05,
+    "deepstack_0": 1.1959095665354055e-05,
+    "deepstack_1": 2.5208251720186057e-05,
+    "deepstack_2": 3.648192690252851e-05
+   },
+   "c": {
+    "merger": 8.081142590083569e-05,
+    "deepstack_0": 1.2179723578036595e-05,
+    "deepstack_1": 3.7707265681366925e-05,
+    "deepstack_2": 5.248548167536864e-05
+   }
+  }
+ },
+ "notes": [],
+ "created": "2026-10-09T15:28:03Z",
+ "npz": "check2_qwen_image21_edit_tower.npz",
+ "tensors": {
+  "deepstack_0_f64_a": {
+   "shape": [
+    256,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "1c38e59810a254f04b7ececf62fbd7e38abef2284c4b6b1e7d024d609f045e49"
+  },
+  "deepstack_0_f64_b": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "5541d3e81b7801b1119f6490b9db2ac61f17a04ebfeadd863fb5250a0a3fd35d"
+  },
+  "deepstack_0_f64_c": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "9136e016042f6337474b52d612f9cf71ccced0abe870cfb85754731ff7ae5788"
+  },
+  "deepstack_1_f64_a": {
+   "shape": [
+    256,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "393a0a9712093d8ab6fa3ff9a45fa4cda7d0ba6bc5e7cced53bbfca253564844"
+  },
+  "deepstack_1_f64_b": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "c9a69c7f38cb72f10d7b10b6c2e20b35c21568d76cd0a4e774bc1282b6d1907c"
+  },
+  "deepstack_1_f64_c": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "77d6f72b35f1d96292e06d28e71193f3349ada7b59ef8bc86f64dfe98194bdee"
+  },
+  "deepstack_2_f64_a": {
+   "shape": [
+    256,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "a252369f245a0cca1d61b046f041934abaa3522270bbffaee6a9b3e9db0f2956"
+  },
+  "deepstack_2_f64_b": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "314bdff2b472e2fc4c04c72b94440001c635cb6e931a098495e9c875cce9c4c9"
+  },
+  "deepstack_2_f64_c": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "742a36657affd94b2278ff81b8118e6c23a147454c8e89d94b2a2403a6687c51"
+  },
+  "merger_f64_a": {
+   "shape": [
+    256,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "7f3b3dfd4b1c5a698f45bc7c4e545b5831aef5988e2939cd7cb356e79fe7ee12"
+  },
+  "merger_f64_b": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "a997b9b49ec3533e4aa6a6c9a9e77b863a33c6107575b3481cc49043508ff24d"
+  },
+  "merger_f64_c": {
+   "shape": [
+    252,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "d1a2a711005fb220f9bd00e64b91963ea161193e39b7c042597ef8e50b608d17"
+  }
+ }
+}

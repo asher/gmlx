@@ -100,7 +100,7 @@ def _thinking_markers(kw: dict):
     """The same (open, close) marker pairs the response splitter tries,
     including its built-in defaults -- the request kwargs rarely carry
     explicit thinking tokens."""
-    from mlx_vlm.server.responses_state import ThinkingStreamState
+    from gmlx._vendor.mlx_vlm.server.responses_state import ThinkingStreamState
     return ThinkingStreamState._build_open_close_markers(
         kw.get("thinking_start_token"), kw.get("thinking_end_token"))
 
@@ -194,12 +194,13 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     """Parse a completion into the assistant message a client echoes back.
 
     Mirrors the server's response construction: thinking split via the
-    request's thinking tokens, tool calls parsed by the template-inferred
-    tool module with arguments normalized to dicts (the endpoint
-    json-decodes them before templating), and post-tool text scrubbed of
-    control tokens.
+    request's thinking tokens, tool calls parsed by the request's tool
+    module (its ``tool_parser`` override, else the one inferred from the
+    template) when the request declares tools, with arguments normalized
+    to dicts (the endpoint json-decodes them before templating), and
+    post-tool text scrubbed of control tokens.
     """
-    from mlx_vlm.server import openai as srv
+    from gmlx._vendor.mlx_vlm.server import openai as srv
 
     kw = ctx.get("kw") or {}
     ts = kw.get("thinking_start_token")
@@ -215,14 +216,19 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
 
     tool_calls = None
     tools = kw.get("tools")
-    parser = srv._infer_tool_parser_from_processor(ctx["processor"])
-    tool_module = srv.load_tool_module(parser) if parser else None
+    tool_module = None
+    if tools:
+        # The handlers parse tool calls only for a request that declares
+        # tools; without them tool markup stays in the content.
+        parser = srv._infer_tool_parser_from_processor(
+            ctx["processor"], override=ctx.get("tool_parser"))
+        tool_module = srv.load_tool_module(parser) if parser else None
     if tool_module is not None:
         tc = srv.process_tool_calls(
             model_output=full_text, tool_module=tool_module, tools=tools)
-        if tc.get("calls"):
+        if tc.calls:
             tool_calls = []
-            for call in tc["calls"]:
+            for call in tc.calls:
                 call = dict(call) if isinstance(call, dict) else call
                 if isinstance(call, dict) and "function" in call:
                     fn = dict(call["function"])
@@ -234,8 +240,7 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
                             fn["arguments"] = {}
                     call["function"] = fn
                 tool_calls.append(call)
-            _, content = srv._split_thinking(tc.get("remaining_text") or "",
-                                             ts, te)
+            _, content = srv._split_thinking(tc.remaining_text or "", ts, te)
             if content:
                 content = _CONTROL_TOKEN_RE.sub("", content).strip()
             content = content or None
@@ -400,7 +405,7 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
     return lcp
 
 
-def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
+def next_turn_lcp(ctx: dict | None, seq: list[int], generated: list[int],
                   *, partial: bool = False) -> int | None:
     """Longest common prefix of ``seq`` with the predicted next-turn render.
 

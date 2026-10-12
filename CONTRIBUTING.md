@@ -9,9 +9,9 @@ the [gmlx documentation](docs/README.md) is authoritative.
 gmlx needs Python 3.11 or newer, and macOS 26.2 or newer on Apple Silicon.
 Its kernel dependency, `mlx-kquant`, comes from PyPI as a prebuilt arm64
 wheel. On Linux, `mlx-kquant` builds CPU-only, which is enough for the
-default test tier. The version bounds on mlx-vlm, mlx-lm, mlx-kquant and mlx
-are explained in
-[Upgrading mlx-vlm, mlx-lm and mlx](docs/internals/upstream-upgrades.md).
+default test tier. gmlx carries mlx-vlm and mlx-lm in `gmlx/_vendor`, and
+[Upstream releases](docs/internals/upstream-upgrades.md) explains how that
+copy takes upstream changes and how the mlx version is held.
 
 Dev setup is a venv, a clone and an editable install with the `chat` and
 `assistant` extras. Without `assistant`, the MCP tool-server tests skip
@@ -76,16 +76,16 @@ ruff check .
 python scripts/check-docs.py   # docs style and link check, also a CI step
 pip install --group docs && mkdocs serve   # preview the docs site locally
 pre-commit install             # optional, runs ruff on each commit
-pip install "pyright[nodejs]==1.1.414" && pyright   # seam drift check, needs the deps installed
+pip install "pyright[nodejs]==1.1.414" && pyright   # calls into the copy, needs the deps installed
 ```
 
-pyright guards against upstream symbol and signature drift, and it does not
-type-check the whole tree. It covers the files in `[tool.pyright].include`, all
-of them at zero errors. The other files that import mlx_vlm or mlx_lm
-statically are listed in `[tool.gmlx.pyright].backlog` and join the gate
-one file at a time as each reaches zero. `tests/test_pyright_scope.py`
-holds both lists to the tree, so a new static import lands in one list or
-the other.
+pyright type-checks gmlx's calls into the copied mlx-vlm and mlx-lm, and it
+does not type-check the whole tree. It covers the files in
+`[tool.pyright].include`, all of them at zero errors. The other files that
+import the copy statically are listed in `[tool.gmlx.pyright].backlog` and
+join the gate one file at a time as each reaches zero.
+`tests/test_pyright_scope.py` holds both lists to the tree, so a new static
+import lands in one list or the other.
 
 A `# pyright: ignore[rule]` is allowed only where the false positive comes
 from upstream typing (a stub that omits the attribute, a scalar union, a
@@ -105,15 +105,15 @@ docs index. The site's CI build fails on a page that is missing from the
 
 ## Things to know before you patch
 
-- The serving stack is stock mlx-vlm with late-bound patches over its
-  seams, in `gmlx/serve/bridge_vlm.py`, `gmlx/serve/residency.py` and
-  `gmlx/serve/patches/`. The loader patches a few mlx-lm classes at load
-  time, and `gmlx/serve/bridge_lm.py` separately patches the
-  `ModelProvider._load` of `mlx_lm.server`, the sequential mlx-lm server.
-  Every patch is registered as a seam, guarded, and raises rather than
-  no-ops when upstream moves. The rules for adding one and for moving the
-  pins are in
-  [Upgrading mlx-vlm, mlx-lm and mlx](docs/internals/upstream-upgrades.md).
+- The serving stack is the mlx-vlm server that gmlx carries in
+  `gmlx/_vendor`, with patches in `gmlx/serve/bridge_vlm.py`,
+  `gmlx/serve/residency.py` and `gmlx/serve/patches/`. The loader patches a
+  few mlx-lm classes at load time, and `gmlx/serve/bridge_lm.py` separately
+  patches the `ModelProvider._load` of the copied mlx-lm server, the
+  sequential one. A fix to the copy goes in place with a `# gmlx:` comment.
+  Every patch has a row in the claims table, is guarded, and raises rather
+  than doing nothing when the name it rebinds is missing. The rules are in
+  [Upstream releases](docs/internals/upstream-upgrades.md).
 - Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py` and arch metadata in
   `gmlx/load/arch_table.py`. Those three are where a new architecture lands.
@@ -123,7 +123,7 @@ docs index. The site's CI build fails on a page that is missing from the
   |---------|---------|
   | `gmlx/load/` | It covers GGUF discovery, parsing, remap, config synthesis and model construction. |
   | `gmlx/models/` | It holds the owned model backbones, one subpackage or module per family. |
-  | `gmlx/upstream/` | It holds the patches installed over upstream mlx-lm/mlx-vlm seams. |
+  | `gmlx/upstream/` | It holds the patches installed over the copied mlx-lm and mlx-vlm, and the claims table that checks them. |
   | `gmlx/cache/` | It holds the automatic prompt cache and KV-cache persistence. |
   | `gmlx/spec/` | It covers speculative decoding, MTP, drafters and acceptance. |
   | `gmlx/stream/` | It covers weight streaming and residency for over-RAM models. |

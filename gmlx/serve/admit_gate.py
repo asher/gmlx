@@ -59,6 +59,8 @@ import logging
 import os
 import time
 
+from gmlx.upstream.patching import link, wrapped_with
+
 from .batch_rows import batch_rows
 
 _log = logging.getLogger(__name__)
@@ -227,9 +229,9 @@ def install_admit_headroom_gate() -> None:
     probe failure degrades to stock admission rather than a crash. Must
     install after install_decode_priority_sched (see module docstring).
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return
     if os.environ.get("GMLX_ADMIT_HEADROOM", "1") == "0":
         return
@@ -263,5 +265,5 @@ def install_admit_headroom_gate() -> None:
                 stash_pending.extend(arrived)
 
     setattr(_gated_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _gated_next
+    _ar.BatchGenerator._next = link(_gated_next, _orig_next)
     _log.info("admission headroom gate installed")

@@ -4,7 +4,7 @@ CPU-only, no model load.
 Exercises ``parse_tool_call`` on wrapper-inner text as mlx-vlm's
 ``process_tool_calls`` hands it over (the caller strips the module's
 ``tool_call_start``/``tool_call_end``), the schema-driven value coercion, and
-the ``ensure_registered`` graft into mlx-vlm's parser registry.
+the ``ensure_registered`` registration with mlx-vlm's parser registry.
 """
 
 from __future__ import annotations
@@ -114,10 +114,16 @@ def test_multiline_parameter_value_is_preserved():
     assert parse_tool_call(body, _TOOLS)[0]["arguments"]["city"] == "Paris\nFrance"
 
 
-def test_ensure_registered_grafts_into_mlx_vlm():
-    pytest.importorskip("mlx_vlm.tool_parsers")
+def test_ensure_registered_registers_with_mlx_vlm():
+    from gmlx._vendor.mlx_vlm.tools import registry
+
     muse_glimmer_tools.ensure_registered()
-    assert "mlx_vlm.tool_parsers.muse_glimmer" in sys.modules
-    mod = sys.modules["mlx_vlm.tool_parsers.muse_glimmer"]
-    assert hasattr(mod, "parse_tool_call")
+    assert registry.load_tool_module("muse_glimmer") is muse_glimmer_tools
+    assert "gmlx._vendor.mlx_vlm.tools.parsers.muse_glimmer" not in sys.modules
+    # The stock atem spec shares the ATEM markers; the gmlx spec outranks it.
+    template = ('<atem:function_calls><atem:invoke name="f">'
+                '</atem:invoke></atem:function_calls>')
+    assert registry._infer_tool_parser(template) == "muse_glimmer"
+    before = registry.SPECS
     muse_glimmer_tools.ensure_registered()   # idempotent
+    assert registry.SPECS == before

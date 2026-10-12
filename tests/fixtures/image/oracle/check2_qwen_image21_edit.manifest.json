@@ -1,0 +1,835 @@
+{
+ "schema": 1,
+ "name": "check2_qwen_image21_edit",
+ "check": 2,
+ "family": "qwen_image21",
+ "script": "scripts/image_oracle/check2_qwen_image21_edit.py",
+ "argv": [
+  "check2_qwen_image21_edit.py",
+  "--encoder",
+  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+  "--mmproj",
+  "mmproj-BF16.gguf",
+  "--config",
+  "Qwen__Qwen-Image-2.1"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "encoder": {
+   "name": "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+   "size": 5027785568,
+   "sha256": "108e7ff92b78eefd3db4741885104acba514255c11b617d3c7b197a5f46efe89"
+  },
+  "mmproj": {
+   "name": "mmproj-BF16.gguf",
+   "size": 1162569280,
+   "sha256": "6516bb64bae1503a0fcd7ec9fa39655f8c481580be0a0a066397941d9761c9f4"
+  },
+  "tokenizer": {
+   "name": "tokenizer.json",
+   "size": 11422654,
+   "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+  },
+  "chat_template": {
+   "name": "chat_template.jinja",
+   "size": 5292,
+   "sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4"
+  },
+  "preprocessor_config": {
+   "name": "preprocessor_config.json",
+   "size": 782,
+   "sha256": "93585062a80db5e8ca038efc7726a3e6411d9db948472d81d63c6303993be8c5"
+  },
+  "text_encoder_config": {
+   "name": "config.json",
+   "size": 1517,
+   "sha256": "6001331949f7f86ab6d791a80b12246d4f8da5159fa08c3e62368a39f36d63a9"
+  }
+ },
+ "inputs": {
+  "cases": {
+   "one": {
+    "prompt": "Paint the largest rectangle bright red and leave the rest of the picture as it is.",
+    "images": [
+     "a"
+    ]
+   },
+   "one_neg": {
+    "prompt": "blurry, low quality, distorted, watermark",
+    "images": [
+     "a"
+    ]
+   },
+   "two": {
+    "prompt": "Place the shapes of the first picture over the background of the second picture.",
+    "images": [
+     "b",
+     "c"
+    ]
+   },
+   "two_neg": {
+    "prompt": "blurry, low quality, distorted, watermark",
+    "images": [
+     "b",
+     "c"
+    ]
+   },
+   "two_swapped": {
+    "prompt": "Place the shapes of the first picture over the background of the second picture.",
+    "images": [
+     "c",
+     "b"
+    ]
+   }
+  },
+  "images": {
+   "a": {
+    "width": 768,
+    "height": 768,
+    "alpha": false
+   },
+   "b": {
+    "width": 640,
+    "height": 480,
+    "alpha": false
+   },
+   "c": {
+    "width": 480,
+    "height": 640,
+    "alpha": true
+   }
+  },
+  "image_seed": 21,
+  "output_resolution": 512,
+  "rendered": {
+   "one": "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n<image1><|vision_start|><|image_pad|><|vision_end|>Paint the largest rectangle bright red and leave the rest of the picture as it is.<|im_end|>\n<|im_start|>assistant\n",
+   "one_neg": "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n<image1><|vision_start|><|image_pad|><|vision_end|>blurry, low quality, distorted, watermark<|im_end|>\n<|im_start|>assistant\n",
+   "two": "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n<image1><|vision_start|><|image_pad|><|vision_end|> <image2><|vision_start|><|image_pad|><|vision_end|>Place the shapes of the first picture over the background of the second picture.<|im_end|>\n<|im_start|>assistant\n",
+   "two_neg": "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n<image1><|vision_start|><|image_pad|><|vision_end|> <image2><|vision_start|><|image_pad|><|vision_end|>blurry, low quality, distorted, watermark<|im_end|>\n<|im_start|>assistant\n",
+   "two_swapped": "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n<image1><|vision_start|><|image_pad|><|vision_end|> <image2><|vision_start|><|image_pad|><|vision_end|>Place the shapes of the first picture over the background of the second picture.<|im_end|>\n<|im_start|>assistant\n"
+  },
+  "rows": {
+   "one": 287,
+   "one_neg": 279,
+   "two": 539,
+   "two_neg": 533,
+   "two_swapped": 539
+  },
+  "layout": {
+   "one": {
+    "images": [
+     "a"
+    ],
+    "sizes": [
+     [
+      512,
+      512
+     ]
+    ],
+    "image_rows": [
+     256
+    ],
+    "first_slot": 8
+   },
+   "one_neg": {
+    "images": [
+     "a"
+    ],
+    "sizes": [
+     [
+      512,
+      512
+     ]
+    ],
+    "image_rows": [
+     256
+    ],
+    "first_slot": 8
+   },
+   "two": {
+    "images": [
+     "b",
+     "c"
+    ],
+    "sizes": [
+     [
+      576,
+      448
+     ],
+     [
+      448,
+      576
+     ]
+    ],
+    "image_rows": [
+     252,
+     252
+    ],
+    "first_slot": 8
+   },
+   "two_neg": {
+    "images": [
+     "b",
+     "c"
+    ],
+    "sizes": [
+     [
+      576,
+      448
+     ],
+     [
+      448,
+      576
+     ]
+    ],
+    "image_rows": [
+     252,
+     252
+    ],
+    "first_slot": 8
+   },
+   "two_swapped": {
+    "images": [
+     "c",
+     "b"
+    ],
+    "sizes": [
+     [
+      448,
+      576
+     ],
+     [
+      576,
+      448
+     ]
+    ],
+    "image_rows": [
+     252,
+     252
+    ],
+    "first_slot": 8
+   }
+  },
+  "drop_index": 14,
+  "tap": "output of decoder layer 35 (all 36 layers run), before the final norm, less the first drop_index rows",
+  "template": "QwenImage21Pipeline.prompt_template_ti2i with one image slot per reference, as _get_qwen_prompt_embeds renders it",
+  "call": "QwenImage21Pipeline.__call__(prompt, image, height, width, output_resolution), stopped after encode_prompt",
+  "padding": "none: batch 1",
+  "config_revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+  "encoder": "Qwen3VLForConditionalGeneration with the language model set by name from the text GGUF, gguf-py float32 dequantization, and the vision tower set by name from the mmproj GGUF, whose BF16 and F32 tensors are read as float32; the output head is not loaded; the bf16 models are the float32 one rounded in place, the language model first and then the tower too, with the rotary frequencies left in float32",
+  "processor": "Qwen3VLProcessor with the tokenizer and chat template of the official processor folder, the PIL backend of its image processor config and no video processor",
+  "gguf_codecs": {
+   "F32": 145,
+   "Q4_K": 217,
+   "Q6_K": 36,
+   "mmproj F32": 236,
+   "mmproj BF16": 116
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "name_map_check": {
+   "prompt": "<|im_start|>user\nComplete the sentence in one word. The capital of France is<|im_end|>\n<|im_start|>assistant\n",
+   "token_id": 59604,
+   "token": "Paris",
+   "logit": 47.21697235107422
+  },
+  "vision_map_check": {
+   "red": {
+    "token_id": 1151,
+    "token": "red",
+    "logit": 52.277992248535156
+   },
+   "blue": {
+    "token_id": 12203,
+    "token": "blue",
+    "logit": 54.29238510131836
+   }
+  },
+  "tap_checks": {
+   "one": {
+    "fp32": true,
+    "bf16": true,
+    "bf16_tower": true
+   },
+   "one_neg": {
+    "fp32": true,
+    "bf16": true,
+    "bf16_tower": true
+   },
+   "two": {
+    "fp32": true,
+    "bf16": true,
+    "bf16_tower": true
+   },
+   "two_neg": {
+    "fp32": true,
+    "bf16": true,
+    "bf16_tower": true
+   },
+   "two_swapped": {
+    "fp32": true,
+    "bf16": true,
+    "bf16_tower": true
+   }
+  },
+  "bf16_vs_fp32": {
+   "one": {
+    "rel_l2": 0.056978783533299916,
+    "cosine": 0.9983816109853609,
+    "max_abs": 265.00445556640625,
+    "image_rows": {
+     "rows": 256,
+     "rel_l2": 0.05864959927599415,
+     "token_cosine_min": 0.896324323758722,
+     "row_norm_median": 563.8781118421667
+    },
+    "text_rows": {
+     "rows": 31,
+     "rel_l2": 0.04479967781584529,
+     "token_cosine_min": 0.9785115440062226,
+     "row_norm_median": 669.0218616624439
+    },
+    "token_cosine_min": 0.896324323758722,
+    "token_cosine_min_row": 48,
+    "token_cosine_min_token_id": 151655
+   },
+   "one_neg": {
+    "rel_l2": 0.05706929833416235,
+    "cosine": 0.9983760874910302,
+    "max_abs": 265.00445556640625,
+    "image_rows": {
+     "rows": 256,
+     "rel_l2": 0.05864959927599415,
+     "token_cosine_min": 0.896324323758722,
+     "row_norm_median": 563.8781118421667
+    },
+    "text_rows": {
+     "rows": 23,
+     "rel_l2": 0.04431285119628013,
+     "token_cosine_min": 0.9785115440062226,
+     "row_norm_median": 704.7366741696695
+    },
+    "token_cosine_min": 0.896324323758722,
+    "token_cosine_min_row": 48,
+    "token_cosine_min_token_id": 151655
+   },
+   "two": {
+    "rel_l2": 0.04501735862899442,
+    "cosine": 0.998988019388131,
+    "max_abs": 294.1121826171875,
+    "image_rows": {
+     "rows": 504,
+     "rel_l2": 0.04526750818433782,
+     "token_cosine_min": 0.8996743909147139,
+     "row_norm_median": 573.2919832214914
+    },
+    "text_rows": {
+     "rows": 35,
+     "rel_l2": 0.04221901453274434,
+     "token_cosine_min": 0.9785115440062226,
+     "row_norm_median": 685.9839735325193
+    },
+    "token_cosine_min": 0.8996743909147139,
+    "token_cosine_min_row": 23,
+    "token_cosine_min_token_id": 151655
+   },
+   "two_neg": {
+    "rel_l2": 0.04495539174750048,
+    "cosine": 0.9989906423528234,
+    "max_abs": 294.1121826171875,
+    "image_rows": {
+     "rows": 504,
+     "rel_l2": 0.04526750818433782,
+     "token_cosine_min": 0.8996743909147139,
+     "row_norm_median": 573.2919832214914
+    },
+    "text_rows": {
+     "rows": 29,
+     "rel_l2": 0.04132997731166267,
+     "token_cosine_min": 0.9785115440062226,
+     "row_norm_median": 716.4076250343863
+    },
+    "token_cosine_min": 0.8996743909147139,
+    "token_cosine_min_row": 23,
+    "token_cosine_min_token_id": 151655
+   },
+   "two_swapped": {
+    "rel_l2": 0.040818636293451935,
+    "cosine": 0.9991702242424387,
+    "max_abs": 155.2445068359375,
+    "image_rows": {
+     "rows": 504,
+     "rel_l2": 0.04052341521276687,
+     "token_cosine_min": 0.9216703117866688,
+     "row_norm_median": 562.3147935461643
+    },
+    "text_rows": {
+     "rows": 35,
+     "rel_l2": 0.043688522171787994,
+     "token_cosine_min": 0.9785115440062226,
+     "row_norm_median": 697.3161725636033
+    },
+    "token_cosine_min": 0.9216703117866688,
+    "token_cosine_min_row": 47,
+    "token_cosine_min_token_id": 151655
+   }
+  },
+  "bf16_with_tower_vs_fp32": {
+   "one": {
+    "rel_l2": 0.2850193233396706,
+    "cosine": 0.9592388484463712,
+    "max_abs": 273.00445556640625,
+    "token_cosine_min": 0.34751066491777544,
+    "image_rows": {
+     "rel_l2": 0.3057602982607142,
+     "token_cosine_min": 0.34751066491777544
+    },
+    "text_rows": {
+     "rel_l2": 0.051147160192473104,
+     "token_cosine_min": 0.9785115440062226
+    }
+   },
+   "one_neg": {
+    "rel_l2": 0.28670574454051573,
+    "cosine": 0.9587476633282505,
+    "max_abs": 273.00445556640625,
+    "token_cosine_min": 0.34751066491777544,
+    "image_rows": {
+     "rel_l2": 0.3057602982607142,
+     "token_cosine_min": 0.34751066491777544
+    },
+    "text_rows": {
+     "rel_l2": 0.04860279876887393,
+     "token_cosine_min": 0.9785115440062226
+    }
+   },
+   "two": {
+    "rel_l2": 0.3007063004873684,
+    "cosine": 0.9547248234502517,
+    "max_abs": 350.120849609375,
+    "token_cosine_min": 0.160247360038812,
+    "image_rows": {
+     "rel_l2": 0.31402171289019515,
+     "token_cosine_min": 0.160247360038812
+    },
+    "text_rows": {
+     "rel_l2": 0.04414815943582592,
+     "token_cosine_min": 0.9785115440062226
+    }
+   },
+   "two_neg": {
+    "rel_l2": 0.30105337508658636,
+    "cosine": 0.9546061115602115,
+    "max_abs": 350.120849609375,
+    "token_cosine_min": 0.160247360038812,
+    "image_rows": {
+     "rel_l2": 0.31402171289019515,
+     "token_cosine_min": 0.160247360038812
+    },
+    "text_rows": {
+     "rel_l2": 0.04499941874418228,
+     "token_cosine_min": 0.9785115440062226
+    }
+   },
+   "two_swapped": {
+    "rel_l2": 0.2700973963680166,
+    "cosine": 0.963520034064261,
+    "max_abs": 378.2842102050781,
+    "token_cosine_min": 0.3356939549868501,
+    "image_rows": {
+     "rel_l2": 0.2827535636461911,
+     "token_cosine_min": 0.3356939549868501
+    },
+    "text_rows": {
+     "rel_l2": 0.047826261596083,
+     "token_cosine_min": 0.9785115440062226
+    }
+   }
+  },
+  "reference_order": {
+   "rel_l2": 1.084691836130288,
+   "token_cosine_min": -0.08311962900302894
+  },
+  "vae_input": "the resized RGBA image on the [-1, 1] scale, equal in bits for every image",
+  "seconds": {
+   "load_s": 14.6,
+   "cast_s": 1.1,
+   "one": {
+    "fp32_s": 4.0,
+    "bf16_s": 4.9,
+    "bf16_tower_s": 6.6
+   },
+   "one_neg": {
+    "fp32_s": 4.0,
+    "bf16_s": 4.9,
+    "bf16_tower_s": 6.5
+   },
+   "two": {
+    "fp32_s": 6.7,
+    "bf16_s": 9.3,
+    "bf16_tower_s": 13.0
+   },
+   "two_neg": {
+    "fp32_s": 6.6,
+    "bf16_s": 9.1,
+    "bf16_tower_s": 13.0
+   },
+   "two_swapped": {
+    "fp32_s": 6.6,
+    "bf16_s": 9.4,
+    "bf16_tower_s": 13.3
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt, and at most the starting value; the bf16 run of the gate has the language model in bfloat16 and the vision tower in float32; the same relative L2 rule over the image rows and over the text rows alone",
+  "starting": {
+   "rel_l2": 0.02,
+   "token_cosine_min": 0.999
+  },
+  "rel_l2": {
+   "one": 0.11395756706659983,
+   "one_neg": 0.1141385966683247,
+   "two": 0.09003471725798884,
+   "two_neg": 0.08991078349500096,
+   "two_swapped": 0.08163727258690387
+  },
+  "token_cosine_min": {
+   "one": 0.5852972950348878,
+   "one_neg": 0.5852972950348878,
+   "two": 0.5986975636588556,
+   "two_neg": 0.5986975636588556,
+   "two_swapped": 0.6866812471466752
+  },
+  "rel_l2_image_rows": {
+   "one": 0.1172991985519883,
+   "one_neg": 0.1172991985519883,
+   "two": 0.09053501636867564,
+   "two_neg": 0.09053501636867564,
+   "two_swapped": 0.08104683042553373
+  },
+  "rel_l2_text_rows": {
+   "one": 0.08959935563169058,
+   "one_neg": 0.08862570239256026,
+   "two": 0.08443802906548868,
+   "two_neg": 0.08265995462332534,
+   "two_swapped": 0.08737704434357599
+  }
+ },
+ "notes": [
+  "The pipeline encodes one prompt with its images at batch 1 with no padding and no mask, as gmlx encodes one.",
+  "The pipeline loads the encoder in bfloat16, tower and all. The run with the tower in bfloat16 is recorded under bf16_with_tower_vs_fp32 and sets no gate."
+ ],
+ "created": "2026-10-07T07:18:59Z",
+ "npz": "check2_qwen_image21_edit.npz",
+ "tensors": {
+  "grids_one": {
+   "shape": [
+    1,
+    3
+   ],
+   "dtype": "int64",
+   "sha256": "b2792a6c5b2a0c672ebf7b2b54dd0d5c41f66f287722f636642e5c7b7ede5a7a"
+  },
+  "grids_one_neg": {
+   "shape": [
+    1,
+    3
+   ],
+   "dtype": "int64",
+   "sha256": "b2792a6c5b2a0c672ebf7b2b54dd0d5c41f66f287722f636642e5c7b7ede5a7a"
+  },
+  "grids_two": {
+   "shape": [
+    2,
+    3
+   ],
+   "dtype": "int64",
+   "sha256": "fc037d78bd54d330a5550c0b8375c5d678d83b760e34085001534a9e299c1457"
+  },
+  "grids_two_neg": {
+   "shape": [
+    2,
+    3
+   ],
+   "dtype": "int64",
+   "sha256": "fc037d78bd54d330a5550c0b8375c5d678d83b760e34085001534a9e299c1457"
+  },
+  "grids_two_swapped": {
+   "shape": [
+    2,
+    3
+   ],
+   "dtype": "int64",
+   "sha256": "96e43859e6371ac0a9a9c0ddfcca1c2d2d3d3d61df65db5a8e7d9234dd4cd191"
+  },
+  "ids_one": {
+   "shape": [
+    301
+   ],
+   "dtype": "int64",
+   "sha256": "bc964638834f8c74a9c111e38cb8e055352bebfbb274acfab00e43cb9d7e74fe"
+  },
+  "ids_one_neg": {
+   "shape": [
+    293
+   ],
+   "dtype": "int64",
+   "sha256": "7c08bca28824b0c488002b0386c321df9cb4cc8bf2e43028a2a6eb7bf84a4fbb"
+  },
+  "ids_two": {
+   "shape": [
+    553
+   ],
+   "dtype": "int64",
+   "sha256": "a99ca2cee53d4d1588733debaa8ed88a06a3b811f81777d5faf1c458ba2ee934"
+  },
+  "ids_two_neg": {
+   "shape": [
+    547
+   ],
+   "dtype": "int64",
+   "sha256": "ff4ba1d4ecbf6a6c3a33995334246c4a868c387afb3f5751f579157cdb38d84c"
+  },
+  "ids_two_swapped": {
+   "shape": [
+    553
+   ],
+   "dtype": "int64",
+   "sha256": "a99ca2cee53d4d1588733debaa8ed88a06a3b811f81777d5faf1c458ba2ee934"
+  },
+  "patches_a": {
+   "shape": [
+    1024,
+    1536
+   ],
+   "dtype": "float32",
+   "sha256": "8dcad66be136cfd523d3cd370c848cabc655a8fe07463fadff9b06490714601b"
+  },
+  "patches_b": {
+   "shape": [
+    1008,
+    1536
+   ],
+   "dtype": "float32",
+   "sha256": "f616577ef0947c866551b08916b20f8f33407622b8dfcace6a7d4021d739ba42"
+  },
+  "patches_c": {
+   "shape": [
+    1008,
+    1536
+   ],
+   "dtype": "float32",
+   "sha256": "644c37736fe07c45f02421cf6e07e383ec92ae72e93b9ef63dccca4ec6b7d145"
+  },
+  "resized_a": {
+   "shape": [
+    512,
+    512,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "403056602449587bb98e25cfe041403bceb6a014a1dbed10ee3219abe55d8534"
+  },
+  "resized_b": {
+   "shape": [
+    448,
+    576,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "2e8bcc3217a5439b1f24af553abb9f8cbca0a5a33cd57b63dadc2561cb5ab32b"
+  },
+  "resized_c": {
+   "shape": [
+    576,
+    448,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "c0d01f183c0b8a5d48da75f25f744c275d8d3676f7e0b820f3f9ad7a0a775316"
+  },
+  "slots_one": {
+   "shape": [
+    256
+   ],
+   "dtype": "int64",
+   "sha256": "794239664e19bce020aeaf13601bae222e9ed1decbeaaf19a12e924307140681"
+  },
+  "slots_one_neg": {
+   "shape": [
+    256
+   ],
+   "dtype": "int64",
+   "sha256": "794239664e19bce020aeaf13601bae222e9ed1decbeaaf19a12e924307140681"
+  },
+  "slots_two": {
+   "shape": [
+    504
+   ],
+   "dtype": "int64",
+   "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
+  },
+  "slots_two_neg": {
+   "shape": [
+    504
+   ],
+   "dtype": "int64",
+   "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
+  },
+  "slots_two_swapped": {
+   "shape": [
+    504
+   ],
+   "dtype": "int64",
+   "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
+  },
+  "source_a": {
+   "shape": [
+    768,
+    768,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "611fb9ec5c97cf0572c262b7bf3ea58acc54984610900763ad8db5431153b18a"
+  },
+  "source_b": {
+   "shape": [
+    480,
+    640,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "c731ea4444a67eac1a6b7acc35d21561587c05b07bdafd3f1da2080d61d12911"
+  },
+  "source_c": {
+   "shape": [
+    640,
+    480,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "6ea9b070bcb6aebf7faf31b97a66e766d49b98b2a644aa796227a3076f4de416"
+  },
+  "tap_bf16_one": {
+   "shape": [
+    287,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "e32475a5afcf052b00c9a5f8154a521759254d0eae1150deae5fe49b5564cf08"
+  },
+  "tap_bf16_one_neg": {
+   "shape": [
+    279,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "de2eae33e814ebcacd1fa836a8e90d9744f483f5ba74198b8254110a1f330ce0"
+  },
+  "tap_bf16_two": {
+   "shape": [
+    539,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "bfa77c9ffcfde4002268ffaf96f16fd7d82d68ca9eadbc646c2983afefaad83d"
+  },
+  "tap_bf16_two_neg": {
+   "shape": [
+    533,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "e7ad5c2cd829956fddcc11d54fb42e11d354c829937d057bb0716b67d3a221bd"
+  },
+  "tap_bf16_two_swapped": {
+   "shape": [
+    539,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "ad183b70ad5600debe88d968191b3e579d37ede9c2210289a25b84bdcea00a3f"
+  },
+  "tap_one": {
+   "shape": [
+    287,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "36cb9652bb22e364d12c9781cdc020cb72397f75e60b51ad106fab0df19533c3"
+  },
+  "tap_one_neg": {
+   "shape": [
+    279,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "d421fce6d132be9b959640639a8c244f7e2f06e80af7f7b8f39a17ab6b080d64"
+  },
+  "tap_two": {
+   "shape": [
+    539,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "630a9de5a8a8911d51a07e14821a0d8d92adafbe9e116693fbeb84a781478059"
+  },
+  "tap_two_neg": {
+   "shape": [
+    533,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "e180391167bd1d045e0d5b9ff432dbd93742e1729f846c7e20f69bea51324e28"
+  },
+  "tap_two_swapped": {
+   "shape": [
+    539,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "5e0bba406135b2b65118f8d5fbc4237c353e2c5e067392cbb4f6382e1e12b1a2"
+  }
+ }
+}

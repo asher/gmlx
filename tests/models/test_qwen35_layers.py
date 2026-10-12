@@ -15,20 +15,16 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5_moe.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5_moe.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache
-from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.qwen3_5_moe import language as _ML
-from mlx_vlm.models.qwen3_5_moe.config import TextConfig as MoeTextConfig
-from mlx_vlm.models.qwen3_5_moe.language import LanguageModel as MoeStock
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from gmlx.models.qwen35 import language as _L
+from gmlx.models.qwen35 import moe_language as _ML
+from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import TextConfig as MoeTextConfig
+from gmlx.models.qwen35.moe_language import LanguageModel as MoeStock
 
 import gmlx.models.qwen35.layers as qwen35_layers
 import gmlx.models.qwen35.owned as qwen35_owned
-from gmlx.upstream.gdn_patches import (
-    _patch_gated_delta_tiled_v,
-    _patch_mlxvlm_gated_delta_tiled_v,
-)
 
 ATOL = 2e-3
 _NEEDS_GPU = pytest.mark.skipif(
@@ -36,14 +32,6 @@ _NEEDS_GPU = pytest.mark.skipif(
     reason="qwen3_5 GDN forward is Metal-only")
 
 PROMPT = (3, 17, 42, 99, 7, 63, 5, 28)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _tiled_oracle():
-    # Same posture as test_qwen35_owned: production always installs the
-    # mlx-lm tiled rebind, and the stock-oracle arm gets the vlm rebind.
-    _patch_gated_delta_tiled_v()
-    _patch_mlxvlm_gated_delta_tiled_v()
 
 
 def _norm(fn):
@@ -111,6 +99,7 @@ def _cfg():
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
+        kv_head_layout="tiled",
     )
 
 

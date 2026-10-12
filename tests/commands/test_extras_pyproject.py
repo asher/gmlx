@@ -76,6 +76,16 @@ def test_missing_extra_modules_empty_when_all_import(monkeypatch):
     assert extras.extra_installed("talk") is True
 
 
+def test_the_embeddings_extra_has_nothing_to_probe(monkeypatch):
+    """The extra is empty and only keeps `gmlx[embeddings]` resolvable, so no
+    module decides whether it is installed."""
+    import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a, **k: None)
+    assert extras.missing_extra_modules("embeddings") == []
+    assert extras.extra_installed("embeddings") is True
+
+
 # -- install routing ----------------------------------------------------------
 # gmlx can live in a plain venv or in an environment owned by `uv tool` or
 # pipx. uv's has no pip at all, so the historical `python -m pip install` both

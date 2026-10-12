@@ -1,8 +1,8 @@
 """gemma4 hd512 batched-decode route: claim gates, left-pad tail-slice
 numerics vs the masked reference, pad memoization, the producer->consumer
-mask relay for kv-shared layers, dual-seam install (mlx_lm gemma4_text +
-mlx_vlm gemma4 language), install hygiene, and the decode-width one-call
-starts path (single batched kq.sdpa_decode_gqa with per-row key starts).
+mask relay for kv-shared layers, the owned attention dispatch taking the
+route under its gate, and the decode-width one-call starts path (single
+batched kq.sdpa_decode_gqa with per-row key starts).
 
 Row-loop numerics run in f32 through whatever mx.fast route the platform
 provides (stock on CI): the pin is that per-row tail slicing reproduces the
@@ -16,47 +16,18 @@ import os
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.gemma4.language")
-from mlx_lm.models import gemma4_text as g4t
-from mlx_vlm.models.gemma4 import language as g4v
-
-import gmlx.upstream.attn_hd512 as attn_hd512
 import gmlx.models.gemma4.batched_sdpa as gb
+import gmlx.upstream.attn_hd512 as attn_hd512
+from gmlx.models.gemma4 import dispatch
 
 
-def _chain(fn):
-    while fn is not None:
-        yield fn
-        fn = getattr(fn, "_gmlx_orig", None)
-
-
-def _stock(fn):
-    for fn in _chain(fn):
-        pass
-    return fn
-
-
-# Walk to the true originals: with a real-model suite the loader may have
-# installed route chains on these symbols before this module imports.
-_orig_vlm = _stock(g4v.scaled_dot_product_attention)
-_orig_lm = _stock(g4t.scaled_dot_product_attention)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _fresh_route_state():
-    """Other suites can leave gb._installed latched while the module symbols
-    hold a chain without the g4 route (a teardown elsewhere rebound them).
-    Clear the latch so _install() wraps fresh on whatever chain exists, and
-    restore the entry state on exit instead of severing chains to stock."""
-    snap_vlm = g4v.scaled_dot_product_attention
-    snap_lm = g4t.scaled_dot_product_attention
-    snap_latch = gb._installed
-    gb._installed = False
+@pytest.fixture(autouse=True)
+def _fresh_route_state(monkeypatch):
+    """An empty mask relay, and the dispatch gates back as they were."""
+    for name in ("_SPARSE", "_CASCADE", "_BATCHED"):
+        monkeypatch.setattr(dispatch, name, getattr(dispatch, name))
     gb._MASK_PADS.clear()
     yield
-    g4v.scaled_dot_product_attention = snap_vlm
-    g4t.scaled_dot_product_attention = snap_lm
-    gb._installed = snap_latch
     gb._MASK_PADS.clear()
 
 
@@ -67,8 +38,24 @@ class _FakeBatchCache:
 
 
 def _install():
+    """The hd512 wrapper, then the dispatch gates the loader reads."""
     assert attn_hd512.install_hd512_sdpa()
-    assert gb.install_gemma4_batched_sdpa()
+    dispatch.configure()
+    assert dispatch.gates()["batched"]
+
+
+def _route(q, k, v, cache=None, scale=1.0, mask=None, sinks=None):
+    return dispatch.scaled_dot_product_attention(q, k, v, cache, scale, mask,
+                                                 sinks)
+
+
+def _ref(q, k, v, scale, mask):
+    return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale,
+                                                mask=mask)
+
+
+def _declines(q, k, v, cache=None, scale=0.5, mask=None, sinks=None):
+    return gb._claim(q, k, v, cache, scale, mask, sinks) is None
 
 
 def _rand(B, hq, hkv, L, d=512):
@@ -93,33 +80,30 @@ def test_route_matches_masked_reference(monkeypatch):
     cache = _FakeBatchCache(pads)
 
     n0 = gb.claims()
-    got = g4v.scaled_dot_product_attention(
-        q, k, v, cache=cache, scale=0.125, mask=_pad_mask(pads, 64))
+    got = _route(q, k, v, cache=cache, scale=0.125, mask=_pad_mask(pads, 64))
     assert gb.claims() == n0 + 1
-    ref = _orig_vlm(q, k, v, cache=cache, scale=0.125,
-                    mask=_pad_mask(pads, 64))
+    ref = _ref(q, k, v, 0.125, _pad_mask(pads, 64))
     err = mx.abs(got - ref).max().item()
     assert err < 1e-4, f"tail-slice vs mask err={err}"
 
 
-def test_gemma4_text_seam_claims(monkeypatch):
-    """Text-only loads build from mlx_lm.models.gemma4_text; the route must
-    claim at that module's symbol too, chained to mlx_lm's own original."""
+def test_the_dispatch_claims_only_under_its_gate(monkeypatch):
+    """The owned dispatch takes the route when configure() set its gate,
+    and otherwise hands the same call to the base."""
     _install()
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
-    route = g4t.scaled_dot_product_attention
-    assert getattr(route, "_gmlx_g4_route", False)
-    assert any(fn is _orig_lm for fn in _chain(route))
     mx.random.seed(5)
     pads = [3, 0]
     q, k, v = _rand(2, 4, 2, 48)
+    mask = _pad_mask(pads, 48)
     n0 = gb.claims()
-    got = route(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
-                mask=_pad_mask(pads, 48))
+    got = _route(q, k, v, cache=_FakeBatchCache(pads), scale=0.125, mask=mask)
     assert gb.claims() == n0 + 1
-    ref = _orig_lm(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
-                   mask=_pad_mask(pads, 48))
-    assert mx.abs(got - ref).max().item() < 1e-4
+    monkeypatch.setattr(dispatch, "_BATCHED", False)
+    base = _route(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+                  mask=mask)
+    assert gb.claims() == n0 + 1
+    assert mx.abs(got - base).max().item() < 1e-4
 
 
 def test_pads_memoized_on_array_identity(monkeypatch):
@@ -127,16 +111,13 @@ def test_pads_memoized_on_array_identity(monkeypatch):
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
     cache = _FakeBatchCache([1, 0])
     q, k, v = _rand(2, 4, 2, 48)
-    g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.5,
-                                     mask=None)
+    _route(q, k, v, cache=cache, scale=0.5, mask=None)
     memo = cache._gmlx_g4_pads
     assert memo[1] == [1, 0]
-    g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.5,
-                                     mask=None)
+    _route(q, k, v, cache=cache, scale=0.5, mask=None)
     assert cache._gmlx_g4_pads is memo  # same lp array -> no re-read
     cache.left_padding = mx.array([0, 0])  # rebinding invalidates
-    g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.5,
-                                     mask=None)
+    _route(q, k, v, cache=cache, scale=0.5, mask=None)
     assert cache._gmlx_g4_pads is not memo
 
 
@@ -151,14 +132,12 @@ def test_mask_relay_producer_to_consumer(monkeypatch):
     mask = _pad_mask(pads, 64)
     qp, kp, vp = _rand(3, 8, 2, 64)
     n0 = gb.claims()
-    g4t.scaled_dot_product_attention(qp, kp, vp, cache=_FakeBatchCache(pads),
-                                     scale=0.125, mask=mask)
+    _route(qp, kp, vp, cache=_FakeBatchCache(pads), scale=0.125, mask=mask)
     assert gb.claims() == n0 + 1
     qc, kc, vc = _rand(3, 8, 2, 64)
-    got = g4t.scaled_dot_product_attention(qc, kc, vc, cache=None,
-                                           scale=0.125, mask=mask)
+    got = _route(qc, kc, vc, cache=None, scale=0.125, mask=mask)
     assert gb.claims() == n0 + 2
-    ref = _orig_lm(qc, kc, vc, cache=None, scale=0.125, mask=mask)
+    ref = _ref(qc, kc, vc, 0.125, mask)
     assert mx.abs(got - ref).max().item() < 1e-4
 
 
@@ -167,11 +146,9 @@ def test_mask_relay_cold_miss_falls_through(monkeypatch):
     through -- the mask may encode padding the route cannot reconstruct."""
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
     gb._MASK_PADS.clear()
-    seen = []
-    route = gb._make_route(lambda *a, **kw: seen.append(1) or mx.zeros(1))
     q, k, v = _rand(2, 4, 2, 48)
-    route(q, k, v, cache=None, scale=0.5, mask=_pad_mask([0, 0], 48))
-    assert seen == [1]
+    assert _declines(q, k, v, cache=None, scale=0.5,
+                     mask=_pad_mask([0, 0], 48))
 
 
 def _verify_mask(pads, L, qL):
@@ -197,19 +174,16 @@ def test_verify_width_matches_masked_reference(monkeypatch):
     mx.eval(q, k, v)
     mask = _verify_mask(pads, 64, qL)
     n0 = gb.claims()
-    got = g4t.scaled_dot_product_attention(
-        q, k, v, cache=_FakeBatchCache(pads), scale=0.125, mask=mask)
+    got = _route(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+                 mask=mask)
     assert gb.claims() == n0 + 1
-    ref = _orig_lm(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
-                   mask=mask)
+    ref = _ref(q, k, v, 0.125, mask)
     err = mx.abs(got - ref).max().item()
     assert err < 1e-4, f"verify tail-slice vs mask err={err}"
 
 
 def test_verify_width_non_claims(monkeypatch):
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
-    seen = []
-    route = gb._make_route(lambda *a, **kw: seen.append(1) or mx.zeros(1))
     cache = _FakeBatchCache([0, 5])
 
     def qkv(qL, L=48):
@@ -219,39 +193,35 @@ def test_verify_width_non_claims(monkeypatch):
         return q, k, v
 
     q, k, v = qkv(9)  # above the verify-block range
-    route(q, k, v, cache=cache, scale=0.5, mask=_verify_mask([0, 5], 48, 9))
+    assert _declines(q, k, v, cache=cache, mask=_verify_mask([0, 5], 48, 9))
     q, k, v = qkv(3)  # qL>1 with mask None: unmasked block, never claim
-    route(q, k, v, cache=cache, scale=0.5, mask=None)
+    assert _declines(q, k, v, cache=cache, mask=None)
     q, k, v = qkv(3)  # mask width mismatched to qL
-    route(q, k, v, cache=cache, scale=0.5, mask=_verify_mask([0, 5], 48, 1))
+    assert _declines(q, k, v, cache=cache, mask=_verify_mask([0, 5], 48, 1))
     q, k, v = qkv(4)  # pad overlaps the block: 46 > 48 - 4
-    route(q, k, v, cache=_FakeBatchCache([0, 46]), scale=0.5,
-          mask=_verify_mask([0, 46], 48, 4))
-    assert len(seen) == 4
+    assert _declines(q, k, v, cache=_FakeBatchCache([0, 46]),
+                     mask=_verify_mask([0, 46], 48, 4))
 
 
 def test_non_claims_fall_through(monkeypatch):
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
-    seen = []
-    route = gb._make_route(lambda *a, **kw: seen.append(1) or mx.zeros(1))
     cache = _FakeBatchCache([0, 0])
 
     q, k, v = _rand(1, 4, 2, 48)  # B=1
-    route(q, k, v, cache=cache, scale=0.5, mask=None)
+    assert _declines(q, k, v, cache=cache)
     q, k, v = _rand(2, 4, 2, 48, d=256)  # hd256
-    route(q, k, v, cache=cache, scale=0.5, mask=None)
+    assert _declines(q, k, v, cache=cache)
     q, k, v = _rand(2, 4, 2, 48)  # attention sinks present
-    route(q, k, v, cache=cache, scale=0.5, mask=None, sinks=mx.zeros((4,)))
+    assert _declines(q, k, v, cache=cache, sinks=mx.zeros((4,)))
     q, k, v = _rand(2, 4, 2, 16)  # below MIN_KV
-    route(q, k, v, cache=cache, scale=0.5, mask=None)
+    assert _declines(q, k, v, cache=cache)
 
     class _QCache(_FakeBatchCache):
         bits = 4
         group_size = 64
 
     q, k, v = _rand(2, 4, 2, 48)  # quantized-style cache
-    route(q, k, v, cache=_QCache([0, 0]), scale=0.5, mask=None)
-    assert len(seen) == 5
+    assert _declines(q, k, v, cache=_QCache([0, 0]))
 
 
 _gpu_only = pytest.mark.skipif(
@@ -279,7 +249,7 @@ def test_onecall_starts_engagement_and_numerics(monkeypatch):
     pads = [0, 17, 40]
     q, k, v = _rand16(3, 8, 2, 64)
     n0, o0 = gb.claims(), gb.onecall_claims()
-    got = g4v.scaled_dot_product_attention(
+    got = _route(
         q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
         mask=_pad_mask(pads, 64))
     assert gb.claims() == n0 + 1
@@ -307,12 +277,10 @@ def test_onecall_pad_zero_and_kill_switch(monkeypatch):
     q, k, v = _rand16(2, 8, 2, 64)
     cache = _FakeBatchCache([0, 0])
     o0 = gb.onecall_claims()
-    a = g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.125,
-                                         mask=None)
+    a = _route(q, k, v, cache=cache, scale=0.125, mask=None)
     assert gb.onecall_claims() == o0 + 1  # pad-0: starts omitted, still one
     monkeypatch.setenv("GMLX_G4_SDPA_STARTS", "0")
-    b = g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.125,
-                                         mask=None)
+    b = _route(q, k, v, cache=cache, scale=0.125, mask=None)
     assert gb.onecall_claims() == o0 + 1  # kill switch -> row loop
     err = mx.abs(a.astype(mx.float32) - b.astype(mx.float32)).max().item()
     assert err < 2e-2, f"one-call vs row loop err={err}"
@@ -330,7 +298,7 @@ def test_onecall_verify_width_stays_rowloop(monkeypatch):
     q, k, v = _rand16(2, 8, 2, 64, qL=4)
     o0 = gb.onecall_claims()
     n0 = gb.claims()
-    g4v.scaled_dot_product_attention(
+    _route(
         q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
         mask=_verify_mask(pads, 64, 4))
     assert gb.claims() == n0 + 1
@@ -347,7 +315,7 @@ def test_onecall_dtype_gate_keeps_f32_on_rowloop(monkeypatch):
     q, k, v = _rand(2, 8, 2, 64)
     o0 = gb.onecall_claims()
     n0 = gb.claims()
-    g4v.scaled_dot_product_attention(
+    _route(
         q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
         mask=_pad_mask(pads, 64))
     assert gb.claims() == n0 + 1
@@ -363,7 +331,7 @@ def test_onecall_absent_kernel_falls_back(monkeypatch):
     q, k, v = _rand(2, 8, 2, 64)
     o0 = gb.onecall_claims()
     n0 = gb.claims()
-    g4v.scaled_dot_product_attention(
+    _route(
         q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
         mask=_pad_mask(pads, 64))
     assert gb.claims() == n0 + 1
@@ -382,21 +350,23 @@ def test_starts_ring_memoizes_by_value():
     assert len(gb._STARTS_RING) <= 8
 
 
-def test_install_idempotent_and_killable(monkeypatch):
-    g4v.scaled_dot_product_attention = _orig_vlm
-    g4t.scaled_dot_product_attention = _orig_lm
-    gb._installed = False
+def test_the_kill_switch_turns_the_route_off(monkeypatch):
+    """GMLX_G4_BATCHED_SDPA=0 leaves the gate off at configure(), and the
+    dispatch hands a claimable call to the base."""
+    assert attn_hd512.install_hd512_sdpa()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    pads = [2, 0]
+    q, k, v = _rand(2, 8, 2, 64)
     monkeypatch.setenv("GMLX_G4_BATCHED_SDPA", "0")
-    assert gb.install_gemma4_batched_sdpa() is False
-    assert g4v.scaled_dot_product_attention is _orig_vlm
-    assert g4t.scaled_dot_product_attention is _orig_lm
-
-    monkeypatch.delenv("GMLX_G4_BATCHED_SDPA", raising=False)
-    _install()
-    pv = g4v.scaled_dot_product_attention
-    pl = g4t.scaled_dot_product_attention
-    assert pv is not _orig_vlm and pv._gmlx_orig is _orig_vlm
-    assert pl is not _orig_lm and pl._gmlx_orig is _orig_lm
-    assert gb.install_gemma4_batched_sdpa()
-    assert g4v.scaled_dot_product_attention is pv  # no double wrap
-    assert g4t.scaled_dot_product_attention is pl
+    dispatch.configure()
+    assert not dispatch.gates()["batched"]
+    n0 = gb.claims()
+    _route(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+           mask=_pad_mask(pads, 64))
+    assert gb.claims() == n0
+    monkeypatch.delenv("GMLX_G4_BATCHED_SDPA")
+    dispatch.configure()
+    assert dispatch.gates()["batched"]
+    _route(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+           mask=_pad_mask(pads, 64))
+    assert gb.claims() == n0 + 1

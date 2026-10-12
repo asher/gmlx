@@ -8,10 +8,12 @@ version = "0.4.24"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
-# MIT covers the files with an SPDX MIT header (LICENSE-MIT). MIT and
-# Apache-2.0 also cover the third-party files that licenses/ lists.
+# MIT covers the files with an SPDX MIT header (LICENSE-MIT). Apache-2.0
+# covers the ComfyUI node pack in gmlx/comfyui_pack (its own LICENSE). MIT
+# and Apache-2.0 also cover the third-party files that licenses/ lists.
 license = "BUSL-1.1 AND MIT AND Apache-2.0"
-license-files = ["LICENSE", "LICENSE-MIT", "licenses/*", "THIRD_PARTY_NOTICES.md"]
+license-files = ["LICENSE", "LICENSE-MIT", "gmlx/comfyui_pack/LICENSE", "licenses/*",
+                 "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -25,38 +27,42 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
-# mlx-lm is capped below its next minor release until that release is
-# qualified: a new minor can ship model modules under names gmlx owns.
-# check_upstream_versions (gmlx.upstream.seams) enforces the floor at
-# runtime and warns on versions newer than the qualified set - a stale venv
-# resolves these constraints only once, so the pip pin alone can't catch it.
-# mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
-# together per docs/internals/upstream-upgrades.md.
+# mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader,
+# and pins the exact mlx its kernels were built against. gmlx carries
+# mlx-vlm 0.7.3 and mlx-lm 0.31.3 in gmlx/_vendor and declares what that
+# copy imports instead of either package. check_mlx_version
+# (gmlx.upstream.versions) enforces the mlx floor the copy needs at runtime:
+# a stale venv resolves these constraints only once, so the pip pin alone
+# can't catch it. See docs/internals/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.4.18,<0.5",
-    "mlx-lm>=0.31,<0.32",
-    # Direct imports of both throughout (mx.*, np.*); declared explicitly
-    # rather than inherited through mlx-lm.
+    # 0.5.0 on pins mlx 0.32.3, above the copied mlx-vlm's floor of 0.32.2
+    # (tests/test_ci_pins.py checks the CI pin); <0.6 guards the next
+    # kquant breaking change.
+    "mlx-kquant>=0.5.0,<0.6",
+    # Direct imports of both throughout (mx.*, np.*).
     "mlx",
     "numpy",
-    # Exact pin: gmlx patches well over a hundred private mlx-vlm symbols (see
-    # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
-    # switch_layers and rewrote the cache module - see
-    # gmlx/cache/compat.py for the dual-origin cache-class rules).
-    # 0.6.15 requires mlx>=0.32.0; mlx-kquant 0.4.4 (PyPI) carries the
-    # matching mlx 0.32.1 pin; <0.5 guards the next kquant breaking change.
-    "mlx-vlm==0.6.15",
-    # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /
-    # ModernBERT / XLM-RoBERTa `/v1/embeddings` backends) build from mlx-embeddings
-    # model classes. Lazy-imported only when an encoder embedder loads (no CLI
-    # startup cost); every transitive dep is already pulled by mlx-vlm/transformers.
-    "mlx-embeddings",
-    # >=4.52: vlm.py imports transformers.BaseVideoProcessor at module top
-    # (mlx-vlm itself pins transformers>=5.5.0, so the resolved floor is
-    # higher). The old <5.13 ceiling (AutoTokenizer.register() vs mlx-lm's
+    # The copy's floors. tests/test_dependencies.py holds each requirement
+    # of the copied releases to a decision here.
+    "jinja2>=3.1.0",
+    # Also image reads and writes for `gmlx image`, which needs
+    # Image.Resampling (9.1 on).
+    "Pillow>=10.3.0",
+    # response_format json_schema: grammar-constrained decoding.
+    "llguidance>=1.7.0",
+    "requests>=2.31.0",
+    "starlette>=1.0.1",
+    "sentencepiece>=0.2.0",
+    "protobuf",
+    # The copy's speech-to-text routes parse multipart forms.
+    "python-multipart>=0.0.9",
+    # The copy's server imports mlx_audio at module top on every serve. It
+    # also brings miniaudio and tqdm, which the copy imports.
+    "mlx-audio>=0.5.2",
+    # The release the copied mlx-vlm was qualified with; it also excludes
+    # 5.13.0. The old <5.13 ceiling (AutoTokenizer.register() vs mlx-lm's
     # NewlineTokenizer) no longer reproduces on 5.15.1.
-    "transformers>=4.52",
+    "transformers>=5.14.0",
     "tokenizers",
     "gguf",
     # comment-preserving YAML round-trip for `gmlx sync-models`.
@@ -82,10 +88,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# mlx-vlm moved to core `dependencies` (the serve engine hard-requires it for every
-# model, vision or text-only). This empty extra is kept for back-compat so an
-# existing `pip install 'gmlx[vlm]'` still resolves.
+# Vision support is part of the core install. This empty extra is kept for
+# back-compat so an existing `pip install 'gmlx[vlm]'` still resolves.
 vlm = []
+# Video input, and DeepSeek-VL image input: the copied mlx-vlm reads video
+# frames and resizes those images with OpenCV, and names this extra when
+# OpenCV is missing.
+video = ["opencv-python>=4.12.0.88"]
 # `gmlx chat` line-editor upgrade: completion menus while typing, history
 # ghost-suggestions, bottom toolbar. Falls back to readline without it.
 chat = ["prompt_toolkit", "rich"]
@@ -133,13 +142,14 @@ talk = ["sounddevice", "sherpa-onnx", "gmlx[stt,tts]"]
 # client and moved its types to snake_case fields (input_schema, is_error),
 # and gmlx/assistant/mcp.py reads neither.
 assistant = ["mcp<2"]
-# Everything: the chat TUI, the full voice stack, and the MCP assistant in one
-# install. Self-references only, so the leaf extras stay the source of truth.
+# The chat TUI, the full voice stack, and the MCP assistant in one install;
+# `video` stays out, for OpenCV's size. Self-references only, so the leaf
+# extras stay the source of truth.
 all = ["gmlx[chat,talk,assistant]"]
-# mlx-embeddings moved to core `dependencies` (the `/v1/embeddings` encoder
-# backends - safetensors and the EmbeddingGemma GGUF path - build from its model
-# classes). This empty extra is kept for back-compat so an existing
-# `pip install 'gmlx[embeddings]'` still resolves.
+# The `/v1/embeddings` encoders (EmbeddingGemma, Qwen3-Embedding, BERT,
+# XLM-RoBERTa, ModernBERT) are gmlx's own code (gmlx/models/embedders) and need
+# no package beyond the core ones. This empty extra is kept for back-compat so
+# an existing `pip install 'gmlx[embeddings]'` still resolves.
 embeddings = []
 
 [project.urls]
@@ -167,11 +177,14 @@ gmlx = "gmlx.commands.cli:umbrella_main"
 include = ["gmlx*"]
 
 [tool.setuptools.package-data]
-"gmlx.upstream" = ["seams.json"]
 "gmlx.models.deepseek_v41" = ["chat_template.jinja"]
 "gmlx.container" = ["files/Containerfile", "guest/gmlx-entry"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
-            "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
+            "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt",
+            "_vendor/mlx_vlm/LICENSE", "_vendor/mlx_lm/LICENSE"]
+# The ComfyUI node pack: its Apache-2.0 LICENSE, README and example
+# workflows. tests/test_comfyui_pack.py holds every pack file to these globs.
+"gmlx.comfyui_pack" = ["LICENSE", "README.md", "example_workflows/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -182,47 +195,67 @@ markers = [
 ]
 
 [tool.pyright]
-# Structural drift guard at the static upstream import sites: pyright
-# infers signatures from the installed mlx-vlm / mlx-lm source, so a
-# moved symbol, changed signature or class-identity move fails here
-# before it fails at runtime. Scope is exactly the files that import
-# mlx_vlm / mlx_lm statically, minus gmlx/models (mirrors, annotation
-# exempt); tests/test_pyright_scope.py keeps the list in step with the
-# tree. Seams reached through importlib.import_module are opaque to
-# pyright and stay covered by gmlx/upstream/seams.py. Runs in the macOS
-# CI job, not the deps-free lint job: without the libraries installed
-# there is nothing to infer from.
+# Type-checks gmlx's calls into the copied mlx-vlm and mlx-lm
+# (gmlx/_vendor). Scope is the files that import the copy statically,
+# minus gmlx/models (mirrors, annotation exempt) and the backlog below;
+# tests/test_pyright_scope.py keeps the list in step with the tree. Names
+# reached through importlib.import_module are opaque to pyright; the
+# claims check (gmlx/upstream/claims.py) covers the names gmlx rebinds.
+# Runs in the macOS CI job, not the deps-free lint job: the copy imports
+# mlx, transformers and the rest, which only that job installs.
 include = [
     "gmlx/cache/apc_manager.py",
-    "gmlx/cache/kv_policy.py",
+    "gmlx/cache/apc_pooling.py",
+    "gmlx/cache/fresh_gate.py",
+    "gmlx/cache/retire_key.py",
+    "gmlx/cache/snapshot.py",
     "gmlx/commands/cli.py",
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
     "gmlx/gen/benchmarks.py",
     "gmlx/gen/generation.py",
+    "gmlx/gen/media_spans.py",
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
+    "gmlx/image/families/qwen_image21/edit.py",
     "gmlx/load/hadamard_modules.py",
+    "gmlx/load/loader.py",
+    "gmlx/load/mlx_checkpoint.py",
     "gmlx/load/modules.py",
+    "gmlx/load/mtp_target.py",
+    "gmlx/load/rope_swap.py",
+    "gmlx/load/vlm.py",
+    "gmlx/lora_rows.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
-    "gmlx/serve/capacity.py",
     "gmlx/serve/cb_phase.py",
     "gmlx/serve/engine_jobs.py",
-    "gmlx/serve/kv_policy.py",
+    "gmlx/serve/estimate.py",
+    "gmlx/serve/gpu_share.py",
+    "gmlx/serve/live_requests.py",
+    "gmlx/serve/media_decode.py",
+    "gmlx/serve/patches/chat_behavior.py",
     "gmlx/serve/patches/spec_processors.py",
+    "gmlx/serve/residency.py",
+    "gmlx/spec/ckpt.py",
     "gmlx/spec/dflash_drafter.py",
-    "gmlx/spec/helpers.py",
-    "gmlx/spec/mtp_drafter.py",
+    "gmlx/spec/engine.py",
+    "gmlx/spec/kv_quant.py",
     "gmlx/spec/mtp_load.py",
+    "gmlx/spec/mtp_prefill.py",
     "gmlx/spec/row_procs.py",
-    "gmlx/systemone/ar_reader.py",
+    "gmlx/systemone/denoise.py",
     "gmlx/systemone/engine.py",
     "gmlx/tui/chat.py",
     "gmlx/tune/gdn.py",
+    "gmlx/tune/kquant_lora.py",
     "gmlx/tune/lora.py",
+    "gmlx/upstream/cascade_sdpa.py",
+    "gmlx/upstream/gdn_patches.py",
     "scripts/structured_read_bench.py",
 ]
+# The ComfyUI node pack runs in ComfyUI's Python, against torch and ComfyUI.
+exclude = ["gmlx/comfyui_pack", "tests/comfyui_pack"]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
 pythonPlatform = "Darwin"
@@ -243,65 +276,44 @@ reportOptionalIterable = "none"
 reportOptionalOperand = "none"
 
 [tool.gmlx.pyright]
-# Static mlx_vlm / mlx_lm importers not yet in the pyright gate. A file
+# Static importers of the copy not yet in the pyright gate. A file
 # moves from here to [tool.pyright].include once it checks clean; the
 # list only shrinks. tests/test_pyright_scope.py holds both lists to
 # the tree.
 backlog = [
-    "gmlx/cache/apc_pooling.py",
-    "gmlx/cache/fresh_gate.py",
-    "gmlx/cache/kvarn_cache.py",
     "gmlx/cache/kvarn_serve.py",
-    "gmlx/cache/retire_key.py",
-    "gmlx/cache/snapshot.py",
     "gmlx/commands/train.py",
     "gmlx/eval_guard.py",
     "gmlx/gen/diffusion.py",
-    "gmlx/gen/media_spans.py",
     "gmlx/gen/thinking_budget.py",
-    "gmlx/load/loader.py",
-    "gmlx/load/mtp_target.py",
-    "gmlx/load/vlm.py",
-    "gmlx/lora_rows.py",
     "gmlx/serve/admit_gate.py",
     "gmlx/serve/batch_sched.py",
     "gmlx/serve/decode_batch.py",
-    "gmlx/serve/estimate.py",
     "gmlx/serve/governor.py",
-    "gmlx/serve/live_requests.py",
     "gmlx/serve/mem_preflight.py",
     "gmlx/serve/memtrace.py",
-    "gmlx/serve/patches/chat_behavior.py",
     "gmlx/serve/patches/mtp_thinking.py",
     "gmlx/serve/patches/row_failed.py",
     "gmlx/serve/patches/sampling.py",
     "gmlx/serve/queue_cap.py",
-    "gmlx/serve/residency.py",
     "gmlx/serve/seed_rows.py",
     "gmlx/serve/step_timing.py",
     "gmlx/serve/tick_guard.py",
     "gmlx/spec/admission.py",
-    "gmlx/spec/ckpt.py",
-    "gmlx/spec/engine.py",
-    "gmlx/spec/kv_quant.py",
-    "gmlx/spec/mtp_prefill.py",
-    "gmlx/spec/ragged_decode.py",
-    "gmlx/upstream/cascade_sdpa.py",
     "gmlx/upstream/dsv32_patches.py",
-    "gmlx/upstream/gdn_patches.py",
     "gmlx/upstream/occupancy_fuse.py",
-    "gmlx/upstream/qkv_fuse.py",
-    "gmlx/upstream/quantized_cache_pack_fix.py",
-    "gmlx/upstream/quantized_sdpa_fix.py",
-    "gmlx/upstream/rotating_cache_fix.py",
-    "gmlx/upstream/softcap_f32.py",
     "scripts/check-coverage.py",
     "scripts/kld_harness.py",
 ]
 
 [tool.ruff]
-# Vendored third-party code is linted upstream, not here.
-extend-exclude = ["gmlx/_vendor", "tests/systemone/_openjev_helper_ref.py"]
+# Vendored third-party code keeps its upstream style. For the copied
+# mlx-vlm and mlx-lm, `scripts/vendor_upstream.py lint` runs the E9, F821
+# and F811 rules against a baseline, so a broken edit there still fails.
+# The ComfyUI node pack and its suites run in ComfyUI's Python and keep
+# the pack's own style.
+extend-exclude = ["gmlx/_vendor", "tests/cache/upstream", "tests/systemone/_openjev_helper_ref.py",
+                  "gmlx/comfyui_pack", "tests/comfyui_pack"]
 
 [tool.ruff.lint]
 # S110: a silent try-except-pass needs a reason on its except line
@@ -314,5 +326,6 @@ extend-select = ["S110"]
 "tests/**" = ["E731", "S110"]
 # Verbatim upstream copies (source-equality-tested); a noqa comment would
 # break the byte fidelity the equality tests certify.
+"gmlx/models/qwen35/language.py" = ["E741"]
 "gmlx/models/qwen35/verify_linear.py" = ["E741"]
-"gmlx/models/gemma4/owned.py" = ["E741"]
+"gmlx/models/gemma4/language.py" = ["E741"]

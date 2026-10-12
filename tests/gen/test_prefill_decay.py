@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 import gmlx.gen.prefill_decay as pd
 
 HEADS = 32
@@ -359,10 +361,11 @@ def test_build_credit_follows_active_growth_up_to_the_cap(monkeypatch):
 
 
 def test_build_credit_ends_at_the_install_credit_or_deduction(monkeypatch):
-    # The install credits tracked experts (or deducts untracked ones) at
-    # the first request, after the build. Either ends the build credit for
-    # the key's owners, so the two never overlap. A table credit, or
-    # another model's credit, does not end it.
+    # The install credits tracked streamed bytes (or deducts untracked
+    # ones) at the first request, after the build. Any of these ends the
+    # build credit for the key's owners, a table's included (a table-only
+    # install credits nothing else), so the two never overlap. Another
+    # model's credit does not end it.
     _fresh_streamed(monkeypatch)
     box = _active(monkeypatch)
     key = ("/models/moe.gguf",)
@@ -373,12 +376,11 @@ def test_build_credit_ends_at_the_install_credit_or_deduction(monkeypatch):
     finally:
         pd.set_untracked_weights_owner(None)
     box["active"] = 349 * GB
-    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table", cap=339 * GB)
-    assert pd.build_credit_bytes() == 330 * GB
     pd.note_streamed_tracked_bytes(2 * GB, key=("/models/other.gguf",), source="experts")
     assert pd.build_credit_bytes() == 330 * GB
-    pd.note_streamed_tracked_bytes(276 * GB, key=key, source="experts", cap=339 * GB)
+    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table", cap=339 * GB)
     assert pd.build_credit_bytes() == 0
+    pd.note_streamed_tracked_bytes(276 * GB, key=key, source="experts", cap=339 * GB)
     assert pd.headroom_bytes() == 120 * GB - 349 * GB + 332 * GB
     # Untracked regime: the warm pass registers the file, the install
     # deducts the streamed share.
@@ -404,6 +406,130 @@ def test_streamed_credit_union_cap_clamps(monkeypatch):
     pd.note_streamed_tracked_bytes(90 * GB, key=key, source="experts",
                                    cap=100 * GB)
     assert pd.streamed_tracked_bytes() == 100 * GB
+
+
+def test_release_takes_back_credit_and_cap(monkeypatch):
+    # Tracked regime: the stacks are credited, then unmapped, and the
+    # tracker stops counting them; a credit left in place reads them free
+    # twice.
+    _fresh_streamed(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table",
+                                   cap=170 * GB)
+    pd.note_streamed_tracked_bytes(109 * GB, key=key, source="experts",
+                                   cap=170 * GB)
+    pd.release_streamed_tracked_bytes(100 * GB, key, "experts")
+    assert pd.streamed_tracked_bytes() == 63 * GB
+    assert pd._STREAMED_CAP[key] == 70 * GB
+    pd.release_streamed_tracked_bytes(50 * GB, key, "experts")
+    # The experts credit clamps at zero, and the cap falls by all 50 GB:
+    # the tracker stopped counting each freed byte.
+    assert pd.streamed_tracked_bytes() == 20 * GB
+    pd.release_streamed_tracked_bytes(5 * GB, ("/models/other.gguf",))
+    pd.release_streamed_tracked_bytes(5 * GB, None)
+    assert pd.streamed_tracked_bytes() == 20 * GB
+
+
+# The accounting invariant. The weights are N (every-token), T (a
+# streamable table) and E (the routed experts); each part loads either
+# allocator-tracked (in get_active_memory) or zero-copy (in the untracked
+# registry). The arena and the KV are tracked allocations. At every stage
+# the free figure must be the real one, ws minus the resident weights,
+# the arena and the KV, and the install must end the serve build credit.
+_N, _E, _ARENA, _KV, _WS = 20 * GB, 100 * GB, 8 * GB, 4 * GB, 120 * GB
+_TABLES = {"small-table": 27 * GB, "large-table": 130 * GB}   # T < E, T >= E
+_REGIMES = {                    # the parts that load allocator-tracked
+    "zero-copy": set(),
+    "tracked": {"N", "T", "E"},
+    "views-untracked": {"N"},   # casts and repacks tracked, views not
+    "experts-tracked": {"E"},
+}
+_INSTALLS = {                   # (model parts, streamed parts)
+    "compose": ({"N", "T", "E"}, {"T", "E"}),
+    "table-only": ({"N", "T", "E"}, {"T"}),
+    "experts-only": ({"N", "E"}, {"E"}),
+}
+_CASES = [(r, i, t, serve, unmap)
+          for r in _REGIMES for i in _INSTALLS for t in _TABLES
+          for serve in (False, True) for unmap in (False, True)
+          if (not unmap or "E" in _INSTALLS[i][1])
+          and (i != "experts-only" or t == "small-table")]
+
+
+@pytest.mark.parametrize("regime,install,table,serve,unmap", _CASES)
+def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
+                                              table, serve, unmap):
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch, ws_gb=_WS // GB)
+    size = {"N": _N, "T": _TABLES[table], "E": _E}
+    parts, streamed = _INSTALLS[install]
+    tracked_parts = _REGIMES[regime] & parts
+    total = sum(size[p] for p in parts)
+    tracked = sum(size[p] for p in tracked_parts)
+    key = ("/models/moe.gguf",)
+
+    def real(resident, extra=0.0):
+        return _WS - resident - extra
+
+    # The build: serve opens a window and credits the bytes the header
+    # predicts the install will stream (capacity.predicted_stream_bytes)
+    # until the install accounts them.
+    resident = total - sum(size[p] for p in streamed)
+    box["active"] = 0.0
+    if serve:
+        pd.set_untracked_weights_owner("entry")
+        pd.note_build_credit("entry", sum(size[p] for p in streamed))
+    box["active"] = float(tracked)
+    pd.note_untracked_weights(float(total - tracked), key=key)
+    pd.set_untracked_weights_owner(None)
+    if serve:
+        assert pd.headroom_bytes() == real(resident)
+
+    # The install, in install_expert_streaming's order: the table share,
+    # the walk over the experts, the experts share, the end of the credit.
+    untracked0 = pd.untracked_weight_bytes_for(key)
+    split = max(0.0, total - untracked0)
+    table_credit = 0.0
+    if "T" in streamed:
+        table_credit = pd.credit_streamed(key, size["T"], split, "table")
+        if "E" not in streamed:
+            pd.end_build_credit(key)
+        if serve or "E" not in streamed:
+            # Across the pin, the prefetcher and the wrap walk.
+            left = _N if "E" in streamed else _N + _E
+            assert pd.headroom_bytes() == real(left)
+    if "E" in streamed:
+        pd.credit_streamed(key, _E, split, "experts", prior=table_credit)
+    pd.end_build_credit(key)
+    box["active"] = float(tracked + _ARENA + _KV)
+    assert pd.build_credit_bytes() == 0
+    assert pd.headroom_bytes() == real(resident, _ARENA + _KV)
+
+    # The feeders take the stacks: their tracked bytes leave active memory.
+    if unmap:
+        freed = _E if "E" in tracked_parts else 0
+        box["active"] -= freed
+        if freed:
+            pd.release_streamed_tracked_bytes(freed, key, "experts")
+        assert pd.headroom_bytes() == real(resident, _ARENA + _KV)
+
+
+def test_a_keyless_release_ends_the_open_build_credit(monkeypatch):
+    # No weights key: nothing was credited, so the release ends the open
+    # owner's build credit, which would keep crediting the freed stacks.
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch)
+    pd.set_untracked_weights_owner("owner")
+    try:
+        pd.note_build_credit("owner", 330 * GB)
+        box["active"] = 349 * GB
+        assert pd.build_credit_bytes() == 330 * GB
+        pd.release_streamed_tracked_bytes(0, None)     # nothing freed
+        assert pd.build_credit_bytes() == 330 * GB
+        pd.release_streamed_tracked_bytes(300 * GB, None)
+        assert pd.build_credit_bytes() == 0
+    finally:
+        pd.set_untracked_weights_owner(None)
 
 
 def test_forget_drops_streamed_credit_with_owner(monkeypatch):
@@ -534,6 +660,128 @@ def test_profile_base_step_swap(monkeypatch):
     # the kill switch bypasses swap and decay alike
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     assert pd.decayed_for_batch(_pbatch(2048, 200_000)) == 2048
+
+
+def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
+    """For a model that projects every column, stock needs_processing reads
+    the prefill step only to test it for None. Run with the decayed step in
+    place of the batch's, it answers as stock does: decay at depth, the arch
+    base swap, a pinned media step and a None step, each with no
+    embeddings, a one-token prompt, a longer one and a pending checkpoint
+    column."""
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
+
+    stock = PromptProcessingBatch.needs_processing
+    _cap(monkeypatch, 1.0)
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    _register(monkeypatch, "fake_arch",
+              lambda m, c: FLASH._replace(base_step=4096))
+
+    def with_decayed_step(b):
+        base = b.prefill_step_size
+        b.prefill_step_size = pd.decayed_for_batch(b)
+        try:
+            return stock(b)
+        finally:
+            b.prefill_step_size = base
+
+    def pinned():
+        b = _batch(2048, 0)
+        b._gmlx_pinned_step = 300
+        return b
+
+    makers = (lambda: _batch(2048, 100_000), lambda: _pbatch(2048, 0),
+              pinned, lambda: _batch(None, 100_000))
+    moved = 0
+    for make in makers:
+        for embeds in (None, (1, 1, 8), (1, 9, 8)):
+            for col in (None, 5):
+                b = make()
+                b.draft_model = None
+                b._inputs_embeds = (None if embeds is None
+                                    else SimpleNamespace(shape=embeds))
+                b._next_apc_checkpoint_column = lambda col=col: col
+                moved += pd.decayed_for_batch(b) != b.prefill_step_size
+                assert with_decayed_step(b) == stock(b), (make, embeds, col)
+    assert moved == 18  # every case but the None step moves it
+
+
+def _installed(monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as P
+
+    monkeypatch.setattr(P, "prompt_step", P.prompt_step)
+    monkeypatch.setattr(P, "needs_processing", P.needs_processing)
+    monkeypatch.delattr(P, pd._FLAG, raising=False)
+    return P
+
+
+def test_install_wraps_prompt_step_and_needs_processing(monkeypatch):
+    P = _installed(monkeypatch)
+    step, needs = P.prompt_step, P.needs_processing
+    assert pd.install_prefill_decay()
+    assert P.prompt_step is not step
+    assert P.needs_processing is not needs
+
+
+def test_a_batch_that_keeps_the_last_logits_folds_at_the_decayed_step(
+        monkeypatch):
+    """A batch whose model keeps only the last logits hands generate() the
+    columns left once they fit a step. The wrapped needs_processing reads
+    the decayed step, so at depth 1000 columns take chunks first, where at
+    the base step all 1000 would fold into generate(). A speculative batch
+    and a model that projects every column keep the last column alone, at
+    any step."""
+    _cap(monkeypatch, 1.0)
+    monkeypatch.setattr(pd, "_LIVE_DECODE_ROWS", 0)
+    P = _installed(monkeypatch)
+    assert pd.install_prefill_decay()
+
+    def batch(keeps, draft=None, depth=100_000, cols=1000):
+        b = _batch(2048, depth)
+        b.model.language_model = SimpleNamespace(
+            supports_logits_to_keep=keeps)
+        b.draft_model = draft
+        b._inputs_embeds = SimpleNamespace(shape=(1, cols, 8))
+        b._next_apc_checkpoint_column = lambda: None
+        return b
+
+    assert pd.decayed_for_batch(batch(True)) == 256
+    assert P.needs_processing(batch(True)) is True
+    assert P.needs_processing(batch(True, cols=256)) is False
+    assert P.needs_processing(batch(True, depth=0)) is False
+    assert P.needs_processing(batch(True, depth=0, cols=2049)) is True
+    assert P.needs_processing(batch(False, cols=2)) is True
+    assert P.needs_processing(batch(True, draft=object(), cols=2)) is True
+    assert P.needs_processing(batch(False, cols=1)) is False
+
+
+def test_a_streamed_tail_merges_into_the_folded_last_forward(monkeypatch):
+    """A streamed MoE prefill widens the step so a short tail joins the
+    chunk before it. A batch that folds merges over the whole prompt, so
+    2100 columns at a step of 2048 run as one forward, where a batch that
+    keeps the last column alone merges over 2099 and still leaves it."""
+    import gmlx.stream.expert_streaming as es
+
+    _cap(monkeypatch, 1.0)
+    monkeypatch.setattr(pd, "_LIVE_DECODE_ROWS", 0)
+    monkeypatch.setattr(es, "moe_streaming_active", lambda model: True)
+    P = _installed(monkeypatch)
+    assert pd.install_prefill_decay()
+
+    def batch(keeps, draft=None):
+        b = _batch(2048, 0)
+        b.model.language_model = SimpleNamespace(
+            supports_logits_to_keep=keeps)
+        b.draft_model = draft
+        b._inputs_embeds = SimpleNamespace(shape=(1, 2100, 8))
+        b._next_apc_checkpoint_column = lambda: None
+        return b
+
+    assert pd.decayed_for_batch(batch(True)) == 2100
+    assert P.needs_processing(batch(True)) is False
+    assert pd.decayed_for_batch(batch(False)) == 2099
+    assert P.needs_processing(batch(False)) is True
+    assert pd.decayed_for_batch(batch(True, draft=object())) == 2099
 
 
 def test_decayed_seed_step_with_profile(monkeypatch):

@@ -35,9 +35,11 @@ from __future__ import annotations
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.upstream.patching import link, under, wrapped_with
 
 _installed = False
 _orig_rope = None
+_FLAG = "_gmlx_rope_batch_fix"
 
 
 def _fixed_rope(a, dims, *, traditional, base, scale, offset, freqs=None,
@@ -58,15 +60,18 @@ def _fixed_rope(a, dims, *, traditional, base, scale, offset, freqs=None,
 
 def install_rope_batch_fix() -> bool:
     """Wrap mx.fast.rope with the int-offset batch-row fix.
-    Idempotent; no-op when GMLX_ROPE_BATCH_FIX=0. Returns True when active."""
+    Idempotent; no-op when GMLX_ROPE_BATCH_FIX=0. Returns True when active.
+    A fix layer left on top (a reinstall after a module reload) is
+    replaced; one under another wrap stays in place under it."""
     global _orig_rope, _installed
     if not env_bool("GMLX_ROPE_BATCH_FIX", True):
         return False
     if _installed:
         return True
     cur = mx.fast.rope
-    _orig_rope = getattr(cur, "_gmlx_orig_rope", cur)
-    _fixed_rope._gmlx_orig_rope = _orig_rope
-    mx.fast.rope = _fixed_rope
+    _orig_rope = under(cur, _FLAG)
+    link(_fixed_rope, _orig_rope, _FLAG)
+    if getattr(cur, _FLAG, False) or not wrapped_with(cur, _FLAG):
+        mx.fast.rope = _fixed_rope
     _installed = True
     return True

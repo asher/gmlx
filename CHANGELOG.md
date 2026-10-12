@@ -6,6 +6,277 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Chat, Responses and Messages requests take a `tool_parser` field that names
+  the tool-call parser, gmlx's own parsers included.
+- `server.embeddings` loads Qwen3-Embedding safetensors checkpoints, such as
+  `mlx-community/Qwen3-Embedding-0.6B-8bit`.
+- `gmlx image generate` makes images from a Z-Image-Turbo GGUF, its Qwen3-4B
+  text encoder GGUF and its VAE. `bench` times them and `pack-vae` packs a VAE.
+- `gmlx image generate` makes images from a Qwen-Image 2.1 GGUF, its
+  Qwen3-VL-8B text encoder GGUF and its VAE, and `--ref PATH` edits from up to
+  10 reference images with the encoder's mmproj as `--encoder-mmproj`.
+- `gmlx image generate`, `serve` and the ComfyUI pack make images from a
+  Krea 2 Turbo GGUF, its Qwen3-VL-4B-Instruct text encoder GGUF and its VAE.
+- A Qwen-Image 2.1 GGUF labeled `qwen_image21`, and a Krea 2 GGUF labeled
+  `krea-2`, `flux` or `pig`, load as their tensors say.
+- `gmlx image generate` fits Qwen-Image 2.1 at 1024x1024 in the memory budget
+  of a 16 GB Mac: the text encoder loads, encodes and is released before the
+  DiT loads when the parts do not fit together.
+- `gmlx image generate --background transparent` writes the alpha channel that
+  Qwen-Image 2.1 decodes, as a png or a webp.
+- `gmlx image generate` reads `--ref`, `--init-image` and `--mask` images upright
+  by their EXIF orientation, so a phone photo is not encoded on its side.
+- `gmlx image generate` and `bench` take `--adapter PATH[:STRENGTH]` for a LoRA
+  safetensors file in the kohya, diffusers, PEFT or OneTrainer key spelling.
+- An image request's `adapters` adds LoRAs for that request, and naming one of
+  the model's own adapters sets its strength instead of applying it twice.
+- On GPUs with NAX (M5), an image step under `--adapter` takes 1 to 2% less
+  time on a Q4_K, Q5_K or Q6_K DiT when mlx-kquant has its low-rank kernel.
+- On GPUs with NAX (M5), both image VAEs decode and Qwen-Image 2.1 steps run
+  on new mlx-kquant kernels when the installed build has them.
+- `gmlx serve` loads the image models of an `image_models` config block beside
+  the chat models, and `ps`, `keep` and `unload` name each model's kind.
+- `gmlx serve` answers the OpenAI image generations, edits and variations
+  routes, with streamed partial images and `url` responses.
+- In `gmlx serve`, a chat reply keeps decoding while an image renders, at a
+  share of the GPU that `GMLX_IMAGE_CHAT_SHARE` sets.
+- `gmlx serve` runs an image model whose text encoder does not fit beside its
+  DiT by loading the encoder alone for each new prompt, as `image generate` does.
+- `server.image.tensor_cache_mb` and `adapter_cache_mb` set how much each
+  served image model keeps of encoded prompts and request LoRAs.
+- `/v1/models` lists each image model with its family, variant and `edit`, and
+  `/v1/metrics` counts image jobs and times each image and step.
+- Qwen-Image 2.1 Turbo GGUFs sample in 8 steps on the model's own schedule,
+  instead of the base model's 40.
+- `gmlx serve` answers image step routes under `/internal/image-steps/v1`, one
+  denoise step per request, for samplers that run elsewhere such as ComfyUI.
+- `gmlx image bench --via-steps` runs each step through the step routes and
+  records the transport time per step.
+- `gmlx pull z-image-turbo`, `qwen-image`, `qwen-image-turbo` or `krea-2-turbo`
+  downloads the DiT, text encoder and VAE at the quants for this Mac's memory,
+  and registers it.
+- Image generation needs an M3 or newer. On an M1 or M2, `gmlx pull` refuses an
+  image model before it downloads anything, unless `--force`.
+- On an M1 or M2, `GMLX_IMAGE_ALLOW_FP16=1` runs Z-Image-Turbo in float16, with
+  images that differ from an M3's, and lets `gmlx pull` take it.
+- On a 16 GB Mac, `gmlx pull krea-2-turbo` writes `defaults.size: 512x512`
+  into the entry, and `image generate` takes an entry's `defaults.size`.
+- An `image_models` entry takes `variant`, and `image generate` and `bench`
+  take `--variant`, for a DiT whose weights match no known variant.
+- Model discovery and `gmlx sync-models` add an image DiT found with its text
+  encoder and VAE, and name the `gmlx pull` that completes a partial set.
+- `gmlx list` shows a KIND column and takes `--image`, `--family`, `--edit` and
+  `--shared-encoder`, and `gmlx ps --image` shows the resident image models.
+- `gmlx rm` removes an image model's files, keeping an encoder another model uses.
+- `gmlx doctor` checks that each image model's DiT, encoder and VAE belong together.
+- `gmlx launch comfyui` runs ComfyUI with the gmlx node pack pointed at the server.
+- The ComfyUI node pack ships with gmlx. `gmlx comfyui install` puts it into
+  ComfyUI or Comfy Desktop, and `launch comfyui` does so itself.
+- A gmlx upgrade updates the node pack in ComfyUI at the next server start.
+- When a ComfyUI update breaks the node pack, its nodes still load, and
+  running one names the change and the command that upgrades gmlx.
+- `gmlx launch open-webui` turns on image generation with the server's default
+  image model, and image edits when that model edits.
+- `gmlx image generate` and `bench` take an `image_models` id in place of the files.
+- Qwen3-VL GGUFs (architecture `qwen3vl`, such as Qwen3-VL-8B-Instruct) load as
+  text models, and read images with their mmproj.
+- `GMLX_QWEN35_VISION_FP32=1` loads the vision encoder of a Qwen3.5 or Qwen3.6
+  pair in float32, which makes its image features more exact.
+- `gmlx run`, `chat` and `serve` take llama.cpp's rope scaling flags, such as
+  `--rope-scaling yarn --rope-scale 4`, and a `rope_scaling` model key, to run a
+  model past its trained context. See [Long context](docs/long-context.md).
+
+### Changed
+
+- Batched decode of GLM-5.3-Flash and DeepSeek-V4 runs slightly faster.
+- Requires mlx 0.32.3 and mlx-kquant 0.5.0, and no longer requires mlx-vlm,
+  mlx-lm or OpenCV.
+- Video input and DeepSeek-VL image input need the new `video` extra.
+- `/v1/chat/completions` merges all system messages into one leading system
+  message, as mlx-vlm 0.7.3 does. Developer messages stay where they were sent.
+- In `gmlx run` and `gmlx chat`, a Gemma-4 12B or DeepSeek-V4-Flash-Vision-Exp
+  image prompt prefills in chunks that keep each image whole, not in one pass.
+- In `gmlx serve`, a Gemma-4 12B image prompt prefills in chunks that keep each
+  image whole, not in one pass.
+- In `gmlx serve`, a turn that adds an image reuses the cached earlier turns on
+  Gemma-4 and on the qwen35 and qwen35moe architectures.
+- On an M1 or M2, `gmlx distill --cpu` and a Python load on the CPU default
+  device run the model in float16, as the GPU does, not bfloat16.
+- gmlx runs its own copies of mlx-vlm 0.7.3 and mlx-lm 0.31.3 and no longer
+  patches an installed mlx-vlm or mlx-lm in the same process.
+- `/v1/embeddings` runs its encoders on gmlx's own code, and gmlx no longer
+  installs mlx-embeddings.
+- BGE-M3 and Arctic-Embed pool the first token, as their upstream
+  sentence-transformers configs set. Re-embed an index from an earlier gmlx.
+- A BERT or XLM-RoBERTa checkpoint without a pooling config takes the mean, or
+  the first token for BGE v1, v1.5 and both mxbai-embed large models.
+- A cached `server.embeddings` encoder whose files and name leave its pooling
+  open fetches its model card at the cached commit, until the Hub answers.
+- EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
+  as the reference model does, so the vectors of those inputs change.
+- EmbeddingGemma scales its token embeddings as the reference model does, not
+  by 27, so every vector from a quantized checkpoint or the GGUF changes.
+- EmbeddingGemma no longer runs in float16, which its model card rules out: it
+  runs in bfloat16, or in float32 on an M1 or M2 or with `--dtype float16`.
+- `server.embeddings` refuses a chat model GGUF or an encoder GGUF it cannot
+  run, and a Gemma 3 or Qwen3 chat checkpoint of an embedder's model type.
+- On GPUs with NAX (M5), a LoRA adapter layer on a K-quant model picks its path
+  by rank and row count. `GMLX_LORA_EPILOGUE=always` keeps the earlier path.
+- With such an adapter, time to first token drops, most at rank 32 and above,
+  and greedy output can differ from earlier releases where the path changes.
+- MTP decode at long context no longer copies the draft head's KV cache every
+  round: at 128K a round peaks about 0.5 GB lower and runs 2 to 6 percent faster.
+- `gmlx distill cache --resume` refuses a run that an earlier gmlx started on a
+  teacher GGUF with rope scaling in its header, whose logits have changed.
+
+### Removed
+
+- `install_gguf_bridge` no longer patches a stock `mlx_lm.server`, so that server
+  loads no GGUF file. `python -m gmlx.serve.bridge_lm` runs the patched server.
+- `GMLX_QSDPA_MASK_FIX=0` no longer turns off the fix for concurrent `kv_bits`
+  requests on grouped-query models. The fix is always on.
+- `GMLX_QSDPA_MASK_FIX=0` no longer turns off the fused `kv_bits` prefill and
+  decode paths. `GMLX_KV8_PREFILL_FLASH=0` and `GMLX_QSDPA_KQ=0` still do.
+- `GMLX_QKV_PACK_FIX=0` no longer turns off the fix for `kv_bits` 3, 5 or 6
+  requests failing in `gmlx serve`. The fix is always on.
+- `server.embeddings` no longer loads lfm2, siglip, colqwen2_5, qwen3_vl or
+  colidefics3 checkpoints, and `/v1/embeddings` answers 501 with the reason.
+- `GMLX_GEMMA_OWNED=0`, `GMLX_G4_NOSYNC=0` and `GMLX_G4_SOFTCAP_F32=0` no longer
+  switch Gemma 4 back to mlx-vlm's model code. gmlx's own runs on every route.
+- `GMLX_QWEN_OWNED=0` no longer builds Qwen3.5 and 3.6 speculative targets
+  without gmlx's own forward. It runs on every such load.
+
+### Fixed
+
+- A `gmlx launch` client that opened many connections at once could get 503
+  from the server on a busy Mac; it now waits its turn at the relay.
+- `--stream-experts` and `stream: experts` loaded a model that fits into
+  memory instead of streaming it; they now stream its experts and tables.
+- `gmlx sync-models` kept a `stream: experts` key from an earlier scan after
+  the model came to fit in memory; it now drops it.
+- Discovery wrote `stream: experts` for a model over the memory budget by file
+  size but under it by its weights; it now compares the weights the load keeps.
+- `gmlx serve` exited at startup when its config named a speech service whose
+  extra is missing; it now warns and starts without that service.
+- `gmlx run` and `gmlx chat` kept every freed MLX buffer, so a deep prompt
+  grew memory use with depth; they now cap the buffer cache as `serve` does.
+- `gmlx run` and `gmlx chat` with MTP held the logits of the last prompt chunk,
+  up to about 1 GB, until the reply ended.
+- GLM-5.3-Flash mmproj files with llama.cpp's `glm5v` projector load instead
+  of failing as unsupported, with the vision SwiGLU clamp read from the file.
+- A Gemma 3 4B or larger GGUF ran its full attention layers without the linear
+  rope factor 8 in its header, so its output differed from llama.cpp's.
+- A qwen2moe, qwen3moe or glm4moe GGUF with YaRN in its header ran with a plain
+  rope, and its output drifted from llama.cpp's at every position.
+- A GGUF with YaRN in its header and no original context, such as a qwen3 one,
+  placed the YaRN ramp at 4096 tokens rather than at its trained context.
+- A mistral3 GGUF with a rope scaling factor under a linear or missing type ran
+  as YaRN.
+- A llava or pixtral GGUF with YaRN in its header refused to load.
+- A deepseek4 config whose YaRN block lacked a factor or an original context
+  refused to build.
+- A DFlash or DSpark drafter with YaRN in its header, such as the Kimi K3 DSpark
+  one, placed the YaRN ramp at 4096 tokens rather than at its original context.
+- `gmlx launch` output sent to a file or a pipe keeps the summary it prints
+  before the client starts.
+- `gmlx pull`, `init` and `sync-models` reload a server started with
+  `--foreground` at the config's address, or say why it did not reload.
+- On the CPU default device, a Qwen3.5 or 3.6 GGUF loaded with its mmproj
+  gave wrong text after a prompt of more than one token.
+- An MLX-format Qwen3.5 or Qwen3-Next checkpoint gave wrong text in a process
+  that had loaded a Qwen3.5 or 3.6 GGUF. A Qwen3-Next GGUF was refused there.
+- A quantized EmbeddingGemma safetensors checkpoint gave wrong vectors for a
+  text shorter than the longest one in the same `/v1/embeddings` request.
+- The EmbeddingGemma GGUF embedded up to 8192 tokens of an input, past its
+  2048-token context. It now cuts at 2048 and keeps the closing EOS.
+- A GGUF embedder that sets mean or first-token pooling, as KaLM-Embedding
+  does, gave its last token's vector. One that sets rank pooling gets a 501.
+- A GGUF embedder that sets `attention.causal` to false, as Nemotron-3-Embed
+  does, ran with the causal mask. Where gmlx needs the mask, it gets a 501.
+- An EmbeddingGemma-architecture GGUF that pools the last token, such as
+  KaLM-Embedding-Gemma3, was mean-pooled. It now gets a 501.
+- Concurrent MTP requests on a Qwen3.5, 3.6 or 3.8 model could decode wrong
+  tokens after a round in which they accepted different numbers of drafts.
+- A Qwen3.5, 3.6 or 3.8 image request could fail or answer wrongly when it
+  reused a cached prompt prefix, or when MTP prefilled it in several chunks.
+- With MTP, a request could reuse the cached prefix of an earlier request that
+  had the same tokens but another image or LoRA adapter, and answer for that one.
+- A Gemma-4 request whose images differ in size could reuse the cached prefix of
+  a request with other images of the same sizes, and answer about those images.
+- A Kimi K2.5, DeepSeek-V4 or V4.1 image request could reuse the cached prefix
+  of a request whose image had the same pixels in another shape.
+- On `/v1/chat/completions`, an image sent in an earlier turn reached the model
+  in the latest user message, and a new turn could not reuse the earlier turns.
+- On `/v1/messages`, an image sent in an earlier turn reached the model in the
+  latest user message, and a new turn could not reuse the earlier turns.
+- In a chat, Responses or Messages request, a message's images reached the model
+  ahead of its text (after it on Kimi K2.5), whatever order the client used.
+- On `/v1/messages`, text sent beside a tool result reached the model ahead of
+  the result, and a Gemma-4 model did not see the result at all.
+- On `/v1/messages`, a tool result image failed the request on DeepSeek-V4 and
+  on other models could reach it twice, in another turn or as a Python list.
+- On `/v1/chat/completions`, `/v1/responses` and `/v1/messages`, a Mistral model
+  failed a request whose user text or image came right after a tool result.
+- A Gemma-4 model loaded with its mmproj, a Gemma-4 12B, DiffusionGemma and an
+  MLX-format Gemma-4 read the system or developer message as a Python list.
+- An image prompt, and a prompt in `gmlx chat`, started with two BOS tokens
+  when the chat template wrote one and the tokenizer added another, as on
+  Gemma-4, Llama-3, Mistral and Pixtral models.
+- `gmlx chat` left out the BOS token that `gmlx run` and `gmlx serve` add when
+  the tokenizer adds one and the chat template does not write it.
+- The usage `cached_tokens` and the "Prefill completed" log line showed 0 when a
+  request reused a prefix from the checkpoint tier or the MTP prefix cache.
+- With a decode batch wider than 8 and the prefix cache on, a request sharing a
+  prefill batch with a much longer one could start its reply with a wrong token.
+- A DeepSeek-V4 or V4.1 vision model loaded with its mmproj failed on a system
+  message, or read the system prompt and earlier replies as raw lists.
+- `POST /v1/estimate` and `"dry_run": true` failed or left out the developer
+  text when the template had no developer role.
+- A Gemma-4 12B image request with the prefix cache on could answer wrongly,
+  whether or not it reused a cached prefix.
+- A Gemma-4 12B image request served with MTP (`--draft-gguf`) could answer
+  wrongly when the prompt was longer than one prefill step.
+- A Gemma-4 12B request holding both an image and audio could answer wrongly,
+  and answered differently with MTP than without it.
+- With `--kv-bits`, MTP and the prefix cache on, a request that reused a
+  cached prefix could fail when it joined a batch that was already decoding.
+- Concurrent requests on a Gemma-4 model that shared a prompt prefix of 1024
+  or more tokens could decode wrong tokens.
+- Concurrent MTP requests on a Gemma-4 or DeepSeek-V4 model could decode wrong
+  tokens in a short request batched with one longer than the sliding window.
+- MTP on a DeepSeek-V4 model could decode wrong tokens after a concurrent
+  request finished, once the remaining request passed the sliding window.
+- In a server that had loaded a DeepSeek-V4 model, MTP on a Gemma-4 model
+  could decode wrong tokens once a request passed the sliding window.
+- With Gemma-4 MTP, a request past the sliding window could decode wrong tokens
+  once another joined its batch or its thinking budget or Ctrl-T ended thinking.
+- With MTP on a Gemma-4, DeepSeek-V4 or other sliding-window model, a request
+  reusing a cached prompt one or two tokens shorter could decode wrong tokens.
+- A Gemma-4 12B image request could answer wrongly, because image tokens
+  attended to later image tokens on the full-attention layers.
+- A Gemma-4 26B-A4B or 31B image request could answer wrongly, because each
+  image token saw only the image tokens before it.
+- On a request without tools, a reply holding tool-call text left less of the
+  conversation in the prefix cache for the next turn.
+- A model whose load failed after its weights were read, as when its
+  `--kv-bits` setting was refused, stayed in memory.
+- A Gemma-4 model loaded with `--hf-source` ran on random weights and answered
+  with nonsense.
+- A Qwen3.5 or Qwen3.6 model loaded with `--hf-source` answered wrongly, and
+  Qwen3.6-35B-A3B failed at its first token.
+- With `--hf-source`, a Gemma-4 12B, Gemma-3 4B to 27B, Mistral-Small-3.1,
+  Ministral-3 or Qwen3-VL-MoE model failed to load.
+- A GGUF load that left model weights without a tensor ran with random values
+  in them. It now stops and names the weights it could not fill.
+- In Python, `generate` raised KeyError `max_recommended_working_set_size`
+  when the program had made the CPU the MLX default device.
+- `gmlx distill --cpu` failed to load a model with a table past the Metal
+  buffer ceiling.
+- `gmlx run` and `gmlx chat` with MTP copied the whole KV cache for every
+  prompt chunk, so memory use during a deep prefill ran gigabytes high.
+
 ## [0.4.24] - 2026-10-10
 
 ### Fixed

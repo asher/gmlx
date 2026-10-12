@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The single-BOS rule every generate entry point encodes through
+"""The one-BOS rule every generate entry point encodes through
 (gmlx.gen.generation.encode_prompt)."""
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ class _Tok:
     unless the caller opts out."""
 
     bos_token = BOS
+    bos_token_id = 0
 
     def encode(self, text, add_special_tokens=True):
         ids = [ord(c) for c in text.replace(BOS, "\x00")]
@@ -48,3 +49,15 @@ def test_the_deepseek41_template_stays_single_bos(flag):
             return ([0] + ids) if (add_special_tokens and flag) else ids
 
     assert encode_prompt(_T(), BOS + "<think>").count(0) == 1
+
+
+@pytest.mark.parametrize("prompt", [BOS + "hi", "hi"], ids=["bos", "no-bos"])
+def test_a_tokenizer_that_adds_eos_too_gives_one_bos_and_no_eos(prompt):
+    """A generation prompt that ends in EOS would ask the model to go on
+    past the end of its text."""
+    class _T(_Tok):
+        def encode(self, text, add_special_tokens=True):
+            ids = super().encode(text, add_special_tokens)
+            return ids + [1] if add_special_tokens else ids
+
+    assert encode_prompt(_T(), prompt) == [0, ord("h"), ord("i")]

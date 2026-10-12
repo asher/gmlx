@@ -7,6 +7,8 @@ import importlib
 import inspect
 import sys
 
+from gmlx.upstream.patching import link, wrapped_with
+
 
 _PATCH_FLAG = "_kq_gguf_server_patches"
 # The ASGI scope key that marks a request on a launch session socket. Only
@@ -43,8 +45,8 @@ def _install_gen_args_transform(flag: str, transform) -> None:
     from fastapi import HTTPException
 
     Refusal = refusal_type()
-    app = importlib.import_module("mlx_vlm.server.app")
-    if getattr(app._build_gen_args, flag, False):
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    if wrapped_with(app._build_gen_args, flag):
         return
     original = app._build_gen_args
 
@@ -59,24 +61,24 @@ def _install_gen_args_transform(flag: str, transform) -> None:
 
     build_gen_args.__dict__.update(original.__dict__)   # earlier patch flags
     build_gen_args.__dict__[flag] = True
-    app._build_gen_args = build_gen_args
+    app._build_gen_args = link(build_gen_args, original)
     deps = getattr(app, "_protocol_deps", None)
     if deps is not None:
         deps.build_gen_args = build_gen_args
-    for modname in ("mlx_vlm.server.openai", "mlx_vlm.server.anthropic"):
+    for modname in ("gmlx._vendor.mlx_vlm.server.openai", "gmlx._vendor.mlx_vlm.server.anthropic"):
         mod = sys.modules.get(modname)
         if mod is not None and getattr(mod, "_build_gen_args", None) is original:
             mod._build_gen_args = build_gen_args
 
 
 def _render_target_modules():
-    """Namespaces holding a captured ``apply_chat_template`` binding: the
-    protocol modules plus ``app._protocol_deps``. deps captures the openai
-    module's function object at namespace construction and anthropic holds
-    its own binding, so rebinding one module attr misses the other two."""
+    """Namespaces holding an ``apply_chat_template`` binding: the protocol
+    modules plus ``app._protocol_deps``. Each protocol module copies the
+    deps member at route registration, so rebinding one of the three
+    misses the other two."""
     targets = [sys.modules.get(m) or importlib.import_module(m)
-               for m in ("mlx_vlm.server.openai", "mlx_vlm.server.anthropic")]
-    app = importlib.import_module("mlx_vlm.server.app")
+               for m in ("gmlx._vendor.mlx_vlm.server.openai", "gmlx._vendor.mlx_vlm.server.anthropic")]
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     deps = getattr(app, "_protocol_deps", None)
     if deps is not None:
         targets.append(deps)
@@ -84,7 +86,7 @@ def _render_target_modules():
 
 
 def _get_pool():
-    pkg = sys.modules.get("mlx_vlm.server")
+    pkg = sys.modules.get("gmlx._vendor.mlx_vlm.server")
     return getattr(pkg, "_kq_residency_pool", None) if pkg else None
 
 

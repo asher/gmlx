@@ -235,9 +235,9 @@ class _SwitchRecorder(nn.Module):
 
 
 def _arch_fixtures():
-    from mlx_lm.models.minimax import MiniMaxSparseMoeBlock
-    from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
-    from mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.minimax import MiniMaxSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     from gmlx.models.minimax_m3 import MiniMaxM3SparseMoeBlock
 
@@ -334,7 +334,7 @@ def test_hunyuan_seam_gated_by_attrs():
         moe_topk=4,
         moe_intermediate_size=None,
     )
-    from mlx_lm.models.hunyuan import MoeBlock
+    from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
     class _Holder(nn.Module):
         def __init__(self):

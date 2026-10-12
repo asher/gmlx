@@ -1,0 +1,271 @@
+{
+ "schema": 1,
+ "name": "check6_z_image_turbo",
+ "check": 6,
+ "family": "z_image",
+ "script": "scripts/image_oracle/check6_z_image.py",
+ "argv": [
+  "check6_z_image.py",
+  "--dit",
+  "z-image-turbo-Q4_K_M.gguf",
+  "--encoder",
+  "Qwen3-4B-Q4_K_M.gguf",
+  "--config",
+  "Tongyi-MAI__Z-Image-Turbo",
+  "--sizes",
+  "512",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "z-image-turbo-Q4_K_M.gguf",
+   "size": 5017613376,
+   "sha256": "e6494f87de6abaf6a561924f50317a5f271fc34bb4222aabbd801197df8f7daa"
+  },
+  "encoder": {
+   "name": "Qwen3-4B-Q4_K_M.gguf",
+   "size": 2497281312,
+   "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"
+  },
+  "vae": {
+   "name": "diffusion_pytorch_model.safetensors",
+   "size": 167666902,
+   "sha256": "f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3"
+  }
+ },
+ "inputs": {
+  "sizes": [
+   512,
+   1024
+  ],
+  "steps": 8,
+  "seed": 6,
+  "prompt": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+  "guidance": 1.0,
+  "config_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 16, size / 8, size / 8)",
+  "caption": "pipeline encode_prompt, hidden_states[-2], masked rows",
+  "image": "vae.decode((latents / scaling) + shift) in the mode's dtype, x / 2 + 0.5 clamped to [0, 1], (H, W, 3)"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 12,
+   "dequant": "exact",
+   "bf16_products": "bf16 operands, float32 conv and GEMM, one bf16 rounding"
+  },
+  "encode_seconds": 34.6,
+  "caption_bf16_vs_fp32": {
+   "rel_l2": 0.010904591653558074,
+   "cosine": 0.9999869740577002,
+   "max_abs": 152.9033203125
+  },
+  "sizes": {
+   "512": {
+    "image_bf16_vs_fp32": {
+     "rel_l2": 0.0768232428041034,
+     "cosine": 0.9970720556483118,
+     "max_abs": 0.7104215621948242,
+     "psnr_db": 29.539525956694717
+    },
+    "latents_bf16_vs_fp32": {
+     "rel_l2": 0.09965300217970317,
+     "cosine": 0.9950223342340079,
+     "max_abs": 1.2787954807281494
+    },
+    "seconds": {
+     "fp32_sample_s": 71.5,
+     "fp32_decode_s": 2.6,
+     "bf16_sample_s": 171.8,
+     "bf16_decode_s": 3.7
+    }
+   },
+   "1024": {
+    "image_bf16_vs_fp32": {
+     "rel_l2": 0.09025861049665139,
+     "cosine": 0.9959183780268052,
+     "max_abs": 0.8821097016334534,
+     "psnr_db": 28.614937799680924
+    },
+    "latents_bf16_vs_fp32": {
+     "rel_l2": 0.13281100683729768,
+     "cosine": 0.9911731764772246,
+     "max_abs": 1.6924444139003754
+    },
+    "seconds": {
+     "fp32_sample_s": 260.7,
+     "fp32_decode_s": 11.1,
+     "bf16_sample_s": 1848.9,
+     "bf16_decode_s": 24.2
+    }
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "image PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB, on (H, W, 3) images in [0, 1] with peak 1",
+  "starting": {
+   "image_psnr_db": 35.0
+  },
+  "sizes": {
+   "512": {
+    "image_psnr_db": 23.518926043415092
+   },
+   "1024": {
+    "image_psnr_db": 22.5943378864013
+   }
+  }
+ },
+ "notes": [],
+ "created": "2026-10-03T14:42:59Z",
+ "npz": "check6_z_image_turbo.npz",
+ "tensors": {
+  "cap_feats_bf16": {
+   "shape": [
+    36,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "e916de9a6d4f29979ec365790be755d838b8f09b12b9ee34415e9e79052417f0"
+  },
+  "cap_feats_fp32": {
+   "shape": [
+    36,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "cae0f9a036bfb3f7669fa729ea42c6905b524a6a3af8c3a22f91d37c2f02e48c"
+  },
+  "image_1024": {
+   "shape": [
+    1024,
+    1024,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "76314d2e3c2fd412e7b14295362153263775b1c1547f7bd42a437cf5531cf220"
+  },
+  "image_1024_bf16": {
+   "shape": [
+    1024,
+    1024,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "54cbdb2745d9745e36cb0493e2773ad107116f4301bd0f6e6869489388d753f1"
+  },
+  "image_512": {
+   "shape": [
+    512,
+    512,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "411296cc5b8aa3a9719e1d8285888792079e4f5a6dbd188c815b38550db74081"
+  },
+  "image_512_bf16": {
+   "shape": [
+    512,
+    512,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "68b5802040775704c48c56baa897b5f672d14cadfd0515b687c42ace2e7e7fd2"
+  },
+  "latents_1024": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "8dde510c6dd79aea96b0fafd1245823e72727e43d92caeb55b06f1fc440d0e17"
+  },
+  "latents_1024_bf16": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "f1de8fd3662ecff7e8dde92ee35a44d296e314eba6b09bef07f99bd8f0c9d938"
+  },
+  "latents_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "b09696cffb6c434b4234faa068095804b2ad047fa69d5918431c4f03ab17a0f6"
+  },
+  "latents_512_bf16": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "10ce152208f2122ddf7dbef87984756c9fd77e9de89a36a61593e5b471fdb3e0"
+  },
+  "noise_1024": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "a1cb139d242f9d4cf60975d417d2aa87bc1e508ff7a9befa20cb89854092cee8"
+  },
+  "noise_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "4fc58e1651f37316856ef093e36b0a29f0ad6de41a860cd5b73a56eb7111af38"
+  }
+ }
+}

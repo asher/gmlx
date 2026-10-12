@@ -70,20 +70,33 @@ def test_flag_on_drafter_or_target_clamps(where):
     assert _uniform_batch_accept(drafter, lm)
 
 
-def test_gemma4_target_clamps_and_others_do_not():
-    gemma4 = pytest.importorskip("mlx_vlm.models.gemma4.language")
-    lm = gemma4.LanguageModel.__new__(gemma4.LanguageModel)
+def test_the_owned_gemma4_target_clamps_and_others_do_not():
+    from gmlx.models.gemma4.language import LanguageModel
+
+    lm = LanguageModel.__new__(LanguageModel)
+    assert LanguageModel.requires_uniform_batch_acceptance is True
     assert _uniform_batch_accept(SimpleNamespace(), lm)
     assert not _uniform_batch_accept(SimpleNamespace(), SimpleNamespace())
 
 
-def test_owned_gemma4_target_clamps_through_the_rollback_guard():
-    """The class gmlx loads inherits the gemma4 hook, and the load path
-    rebinds the hook on the instance."""
-    from gmlx.gen.generation import harden_mtp_rollback
-    from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel
+def test_the_owned_qwen35_target_keeps_the_accept_count_of_each_row():
+    """The class states the value its rollback needs. The mlx-vlm class it
+    replaces states True for a rollback that cannot trim one row."""
+    from gmlx.models.qwen35.language import LanguageModel
+    from gmlx.models.qwen35.owned import OwnedQwen3_5LanguageModel
 
-    lm = OwnedGemma4LanguageModel.__new__(OwnedGemma4LanguageModel)
+    assert vars(LanguageModel)["requires_uniform_batch_acceptance"] is False
+    for cls in (LanguageModel, OwnedQwen3_5LanguageModel):
+        assert not _uniform_batch_accept(SimpleNamespace(), cls.__new__(cls))
+
+
+def test_the_owned_gemma4_target_clamps_through_the_rollback_guard():
+    """The load path rebinds the rollback hook on the instance, and the
+    class attribute still clamps."""
+    from gmlx.gen.generation import harden_mtp_rollback
+    from gmlx.models.gemma4.language import LanguageModel
+
+    lm = LanguageModel.__new__(LanguageModel)
     harden_mtp_rollback(lm)
     assert getattr(lm.rollback_speculative_cache, "_gmlx_kvarn_guard", False)
     assert _uniform_batch_accept(SimpleNamespace(), lm)

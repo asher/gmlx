@@ -1,9 +1,8 @@
 """KVarN SDPA route: attention over KVarNKVCache regions.
 
-install_kvarn_sdpa() rebinds ``scaled_dot_product_attention`` in every
-loaded mlx_lm.models.* / mlx_vlm.models.* module (and both base modules,
-so later imports inherit the wrapper). The wrapper only claims calls whose
-keys are KVarNView handles; everything else passes through untouched.
+The owned ``scaled_dot_product_attention`` (gmlx.cache.attention), which
+every mlx_lm and mlx_vlm model module calls, sends each call whose keys
+are KVarNView handles to ``kvarn_attention`` here.
 
 Decode (qL 1, plain causal masking) runs fused on the vector kernel: the
 query is WHT-rotated, kq.sdpa_decode_gqa_kvarn walks sink rows + sealed
@@ -37,15 +36,11 @@ width on the vector kernel (an A/B). Both read at call time.
 from __future__ import annotations
 
 import logging
-import sys
 
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
-from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
-
-_MODEL_PREFIXES = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
-_BASE_MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
+from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache
 
 _log = logging.getLogger(__name__)
 
@@ -581,44 +576,3 @@ def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None, ends=None):
     ):
         return _decode(q, cache, float(scale))
     return _prefill(q, cache, float(scale), mask)
-
-
-def _make_wrapper(orig):
-    def scaled_dot_product_attention(queries, keys, values, *args, **kwargs):
-        if isinstance(keys, KVarNView):
-            scale = kwargs.get("scale", args[1] if len(args) > 1 else 1.0)
-            mask = kwargs.get("mask", args[2] if len(args) > 2 else None)
-            sinks = kwargs.get("sinks", args[3] if len(args) > 3 else None)
-            return kvarn_attention(queries, keys.cache, scale, mask, sinks)
-        return orig(queries, keys, values, *args, **kwargs)
-
-    scaled_dot_product_attention._gmlx_kvarn = True
-    scaled_dot_product_attention._gmlx_orig = orig
-    return scaled_dot_product_attention
-
-
-def install_kvarn_sdpa() -> int:
-    """Sweep-rebind the SDPA symbol over loaded model modules. Idempotent
-    per module; returns the number of modules now carrying the wrapper."""
-    import importlib
-
-    for name in _BASE_MODULES:
-        try:
-            importlib.import_module(name)
-        except ImportError:
-            pass
-    patched = 0
-    for name, mod in list(sys.modules.items()):
-        if mod is None or not (
-            name in _BASE_MODULES or name.startswith(_MODEL_PREFIXES)
-        ):
-            continue
-        cur = getattr(mod, "scaled_dot_product_attention", None)
-        if cur is None or not callable(cur):
-            continue
-        if getattr(cur, "_gmlx_kvarn", False):
-            patched += 1
-            continue
-        mod.scaled_dot_product_attention = _make_wrapper(cur)
-        patched += 1
-    return patched

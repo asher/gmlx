@@ -162,7 +162,7 @@ class MuseGlimmerSpecLM(SpecHooks, mg.Model):
         h = self.model(inputs, cache, inputs_embeds=inputs_embeds)
         logits = self._spec_logits(h)
         if not want_hidden:
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[h])

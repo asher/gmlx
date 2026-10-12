@@ -436,7 +436,7 @@ def _pick_embedding(io: WizardIO, default: str = "1"):
         if p["tier"] == "gguf":
             rows.append(p)
             io.note(_preset_row(len(rows), p))
-    io.note("  safetensors encoders (via mlx-embeddings):")
+    io.note("  safetensors encoders:")
     for p in embeddings.EMBEDDING_PRESETS:
         if p["tier"] == "mlx":
             rows.append(p)

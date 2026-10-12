@@ -42,9 +42,9 @@ _runtime_mod = None
 def _modules():
     global _app_mod, _gen_mod, _runtime_mod
     if _app_mod is None:
-        _app_mod = importlib.import_module("mlx_vlm.server.app")
-        _gen_mod = importlib.import_module("mlx_vlm.server.generation")
-        _runtime_mod = importlib.import_module("mlx_vlm.server.runtime")
+        _app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+        _gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+        _runtime_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
     return _app_mod, _gen_mod, _runtime_mod
 
 
@@ -442,7 +442,7 @@ def install_completions_route() -> None:
     """Register ``POST /v1/completions`` (+ ``/completions``). Install before
     the load-offload / keepalive route wrappers so those wrap this route
     too."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, *_COMPLETIONS_PATHS)
     app.add_api_route("/v1/completions", completions_endpoint,
                       methods=["POST"], include_in_schema=False)
