@@ -59,6 +59,10 @@ class ServeHost:
     def models(self) -> dict:
         return serving.image_models()
 
+    def default_model(self) -> str | None:
+        """The id an image request with no model takes, or None."""
+        return serving.default_image_model_id()
+
     def resident(self, path) -> bool:
         from ..residency import _installed_pool
 
@@ -302,7 +306,9 @@ async def models(request: Request):
             continue
         out.append({"model": mid, "family": fam.name, "variant": variant,
                     "resident": _resident(spec.path)})
-    return _json(200, {"models": out})
+    default = getattr(SETTINGS.host, "default_model", None)
+    return _json(200, {"models": out,
+                       "default_model": default() if default else None})
 
 
 async def status(request: Request):

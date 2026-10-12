@@ -189,6 +189,14 @@ def test_a_request_in_another_major_is_refused_naming_the_side(host, value,
         {"model": "zit", "family": None}, {"model": "qit", "family": None}]
 
 
+def test_the_model_list_names_the_default_image_model(host, monkeypatch):
+    import gmlx.serve.bridge_vlm as serving
+    monkeypatch.setattr(serving, "default_image_model_id", lambda: "qit")
+    assert _http().get(f"{P}/models", headers=V).json()["default_model"] == "qit"
+    monkeypatch.setattr(serving, "default_image_model_id", lambda: None)
+    assert _http().get(f"{P}/models", headers=V).json()["default_model"] is None
+
+
 def test_a_peer_off_loopback_is_refused_unless_steps_remote(host):
     far = _http(client=("10.0.0.5", 1))
     for path in ("capabilities", "models"):
