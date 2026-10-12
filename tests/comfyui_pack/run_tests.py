@@ -81,6 +81,25 @@ def summarize(rec: dict) -> dict:
     return counts
 
 
+def tail(path: str, n: int = 4000) -> str:
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()[-n:]
+    except OSError:
+        return ""
+
+
+def show_failures(name: str, part: dict, log: str) -> None:
+    """Print each failure with its traceback to the step log, or the end of
+    the suite's own log when it ended before writing its results."""
+    bad = [r for r in part.get("records", []) if r["status"] in ("fail", "error")]
+    for r in bad:
+        print(f"--- {name} {r['status']}: {r['id']}\n{r['detail'].rstrip()}", flush=True)
+    if part.get("rc") and not bad:
+        print(f"--- {name} exited {part['rc']} with no failure recorded; end of {log}:\n"
+              f"{tail(log)}", flush=True)
+
+
 def markdown(doc: dict) -> str:
     lines = [f"# gmlx node pack tests: {doc['label']}", "",
              f"- ComfyUI: {doc['comfy']} ({doc['comfyui_version']}, {doc['git']})",
@@ -150,25 +169,37 @@ def main():
         suites.append(("mps", ["test_mps"], {"GMLX_TEST_MPS": "1"}))
     for name, mods, extra in suites:
         path = os.path.join(out, f"{a.label}-{name}.json")
+        log = os.path.join(out, f"{a.label}-{name}.log")
         rc = sub([os.path.join(TESTS, "run_tests.py"), "--unit", *mods, "--json", path],
-                 {**env, **extra}, os.path.join(out, f"{a.label}-{name}.log"))
+                 {**env, **extra}, log)
         part = {"rc": rc}
         if os.path.exists(path):
             with open(path) as f:
                 part.update(json.load(f))
             part["counts"] = summarize(part)
         doc["suites"][name] = part
-        print(f"{name}: rc {rc} {part.get('counts')}")
+        print(f"{name}: rc {rc} {part.get('counts')}", flush=True)
+        show_failures(name, part, log)
     if not a.no_headless and not a.mps:
+        hlog = os.path.join(out, f"headless-{a.label}.log")
         rc = sub([os.path.join(TESTS, "headless.py"), "--comfy", comfy, "--out", out, "--label", a.label],
-                 env, os.path.join(out, f"headless-{a.label}.log"))
+                 env, hlog)
         hp = os.path.join(out, f"headless-{a.label}.json")
         if os.path.exists(hp):
             with open(hp) as f:
                 doc["headless"] = json.load(f)
         doc["headless_rc"] = rc
-        print(f"headless: rc {rc} passed {doc.get('headless', {}).get('passed')} "
-              f"failed {doc.get('headless', {}).get('failed')}")
+        h = doc.get("headless", {})
+        print(f"headless: rc {rc} passed {h.get('passed')} failed {h.get('failed')}", flush=True)
+        for c in h.get("cases", []):
+            for k in c.get("checks", []):
+                if not k["ok"]:
+                    print(f"--- headless FAIL {c['case']}: {k['check']}: {k['detail']}", flush=True)
+        if h.get("fatal"):
+            print(f"--- headless fatal:\n{h['fatal']}", flush=True)
+        if rc and not h:
+            print(f"--- headless exited {rc} with no results; end of {hlog}:\n{tail(hlog)}",
+                  flush=True)
     with open(os.path.join(out, f"{a.label}.json"), "w") as f:
         json.dump(doc, f, indent=1, default=str)
     with open(os.path.join(out, f"{a.label}.md"), "w") as f:
