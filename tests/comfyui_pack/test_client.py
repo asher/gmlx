@@ -551,8 +551,18 @@ class _NotGmlx(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def _not_gmlx():
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NotGmlx)
+def _not_gmlx(status: int = 404, body: bytes = b'{"error": "File Not Found"}'):
+    """A server that answers /health, and the capabilities route with
+    ``status`` and ``body``."""
+    class Handler(_NotGmlx):
+        def do_GET(self):
+            if self.path == "/health":
+                return super().do_GET()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, f"http://127.0.0.1:{srv.server_port}"
 
@@ -724,6 +734,48 @@ class StartAndCancel(unittest.TestCase):
             stub.close()
             other.shutdown()
             other.server_close()
+
+    def test_only_a_server_without_the_step_routes_is_not_gmlx(self):
+        cases = [
+            (404, b'{"error": "File Not Found"}', C.GmlxNotGmlx, "server.image.steps_api is off"),
+            (200, b"<html>hi</html>", C.GmlxNotGmlx, "not a gmlx one"),
+            (200, b"[1, 2]", C.GmlxNotGmlx, "not a gmlx one"),
+            (200, b'{"contract": "1.0"}', C.GmlxNotGmlx, "not a gmlx one"),
+            (200, b'{"contract": {"major": 1}, "min_client": [1]}', C.GmlxNotGmlx,
+             "not a gmlx one"),
+            (401, b'{"error": "missing or bad API key"}', C.GmlxError, "set GMLX_API_KEY"),
+            (403, b'{"error": "the peer 10.0.0.5 is not loopback"}', C.GmlxError,
+             "server.image.steps_remote"),
+        ]
+        for status, body, kind, says in cases:
+            srv, url = _not_gmlx(status, body)
+            try:
+                with self.assertRaises(kind) as e:
+                    C.get_client(url, start_server=False)
+                msg = str(e.exception)
+                self.assertIn(says, msg, (status, body))
+                if status in (401, 403):
+                    self.assertNotIsInstance(e.exception, C.GmlxNotGmlx)
+                    self.assertNotIn("not a gmlx image server", msg)
+                else:
+                    self.assertIn(f"a server answers at {url}, but it is not a gmlx image "
+                                  "server", msg)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_cancel_stops_the_status_call_of_the_wait(self):
+        """`gmlx status` hangs after `gmlx serve` exited: Cancel still stops
+        the wait at once."""
+        self.gmlx("exit 0", None)
+        exe = os.path.join(self.dir, "gmlx")
+        with open(exe, "w") as f:
+            f.write("#!/bin/sh\ncase \"$1\" in\n  serve) exit 0 ;;\n  *) exec /bin/sleep 30 ;;\nesac\n")
+        C.set_interrupt_check(_cancel_after(0.8))
+        t0 = time.monotonic()
+        with self.assertRaises(_Cancelled):
+            C.get_client(None, start_server=True, start_timeout=30)
+        self.assertLess(time.monotonic() - t0, 2.0)
 
     def test_the_interrupt_waits_5_s_at_most(self):
         self.assertEqual(C.INTERRUPT_TIMEOUT, 5.0)

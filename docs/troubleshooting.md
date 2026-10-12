@@ -461,8 +461,17 @@ that, then run the workflow again, or start the server yourself with
 ### `a server answers at ..., but it is not a gmlx image server`
 
 Another server, such as llama-server, listens at the address the loader
-uses and does not answer the gmlx handshake. Set the loader's `server_url`
-to the gmlx server's address, which `gmlx status` shows.
+uses and has no gmlx image step routes, or its answer to the handshake is
+not a gmlx one. Set the loader's `server_url` to the gmlx server's
+address, which `gmlx status` shows. When the address is a gmlx server,
+its `server.image.steps_api` is off: turn it on and run `gmlx restart`.
+
+### `the capabilities handshake was refused (401)` or `(403)`
+
+A gmlx server answered and refused the nodes. With 401, the server has an
+API key: set `GMLX_API_KEY`, or `api_key` in the nodes' settings file.
+With 403, the server takes step requests from its own Mac only: run
+ComfyUI there, or set `server.image.steps_remote` in the server's config.
 
 ### `gmlx is not installed`
 

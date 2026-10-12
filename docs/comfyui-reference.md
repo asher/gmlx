@@ -46,8 +46,9 @@ then the default, and only a server that answers the gmlx handshake: a
 workflow saved on a Mac whose server uses another port still runs, and
 llama-server on port 8080 is not taken for gmlx. When the loaders leave
 the default for another address, `gmlx Server Status` and any error say
-which address they use. Any other address is used as it is, and the run
-stops when no gmlx server answers there.
+which address they use. Any other address is used as it is. When nothing
+answers there, the run stops if `start_server` is off; with it on, the
+loaders first start `gmlx serve` on this Mac and wait for that address.
 
 With their `start_server` input on, the default, the loaders start
 `gmlx serve` when no server answers. While the server loads, they wait.

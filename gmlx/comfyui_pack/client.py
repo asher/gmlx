@@ -56,6 +56,10 @@ class GmlxRefusal(GmlxError):
     """Something a gmlx model does not support, refused by name."""
 
 
+class GmlxNotGmlx(GmlxError):
+    """The server at the address does not answer as a gmlx image server."""
+
+
 class GmlxVersionError(GmlxError):
     """The node pack and the server speak different step contract majors."""
 
@@ -354,10 +358,13 @@ class StepClient:
             raise GmlxInterrupted(f"{what}: {msg}")
         if status == 400 and "step contract" in str(msg):
             raise GmlxVersionError(f"gmlx: {msg}")
-        if status in (401, 403):
-            raise GmlxError(f"gmlx: {what} was refused ({status}): {msg}. Set "
-                            "GMLX_API_KEY when the server has a key, and run the "
-                            "server on this machine")
+        if status == 401:
+            raise GmlxError(f"gmlx: {what} was refused ({status}): {msg}. The server has an "
+                            "API key: set GMLX_API_KEY, or api_key in the settings file")
+        if status == 403:
+            raise GmlxError(f"gmlx: {what} was refused ({status}): {msg}. The server takes "
+                            "step requests from its own Mac only: run ComfyUI there, or set "
+                            "server.image.steps_remote in the server's config")
         raise GmlxError(f"gmlx: {what} failed ({status}): {msg}")
 
     def call_json(self, method: str, path: str, obj=None, *, what: str = "",
@@ -390,14 +397,29 @@ class StepClient:
     def handshake(self) -> dict:
         """The server's capabilities, after checking that this pack speaks its
         contract. A major mismatch names the side to upgrade."""
-        caps = self.call_json("GET", "/capabilities", what="the capabilities handshake",
-                              timeout=30.0)
-        c = caps.get("contract") or {}
-        major, minor = int(c.get("major", -1)), int(c.get("minor", 0))
-        mc = caps.get("min_client") or {"major": major, "minor": 0}
+        s, _, d = self.request("GET", PREFIX + "/capabilities", versioned=False, timeout=30.0)
+        if s == 404:
+            raise GmlxNotGmlx("it has no image step routes; on a gmlx server, "
+                              "server.image.steps_api is off")
+        if s != 200:
+            self._fail(s, d, "the capabilities handshake")
+        try:
+            caps = json.loads(d)
+            if not isinstance(caps, dict):
+                raise ValueError
+            c = caps.get("contract") or {}
+            if not isinstance(c, dict):
+                raise ValueError
+            major, minor = int(c.get("major", -1)), int(c.get("minor", 0))
+            mc = caps.get("min_client") or {"major": major, "minor": 0}
+            if not isinstance(mc, dict):
+                raise ValueError
+            need = (int(mc.get("major", 0)), int(mc.get("minor", 0)))
+        except (ValueError, TypeError):
+            raise GmlxNotGmlx("its capabilities answer is not a gmlx one") from None
         server = caps.get("gmlx_version") or "unknown"
         ours = f"{CONTRACT[0]}.{CONTRACT[1]}"
-        if major != CONTRACT[0] or (int(mc.get("major", 0)), int(mc.get("minor", 0))) > CONTRACT:
+        if major != CONTRACT[0] or need > CONTRACT:
             if major < 0:
                 what = "the server names no step contract"
             elif major != CONTRACT[0]:
@@ -615,14 +637,13 @@ def _tail(f, lines: int = 20) -> str:
 
 
 def _gmlx_at(c: StepClient) -> str | None:
-    """None when the server of ``c`` passes the handshake, else why not. A
-    server of another step contract major raises: it is gmlx."""
+    """None when the server of ``c`` passes the handshake, else why it is
+    not a gmlx image server. Any other failure of the handshake raises,
+    such as a refused API key or another step contract major."""
     try:
         c.handshake()
-    except GmlxVersionError:
-        raise
-    except (GmlxError, ValueError) as e:
-        return str(e).removeprefix("gmlx: ")
+    except GmlxNotGmlx as e:
+        return str(e)
     return None
 
 
@@ -675,12 +696,12 @@ def get_client(base_url: str | None = None, *, start_server: bool = False,
         note = _redirect(typed, url)
     for where, why in refused:
         if where == url:
-            raise GmlxError(_noted(_not_gmlx(url, why), note))
+            raise GmlxNotGmlx(_noted(_not_gmlx(url, why), note))
     c = _client(url, key)
     _start(c, start_server, start_timeout, note)
     why = _gmlx_at(c)
     if why is not None:
-        raise GmlxError(_noted(_not_gmlx(url, why), note))
+        raise GmlxNotGmlx(_noted(_not_gmlx(url, why), note))
     c.redirect_note = note
     return c
 
@@ -732,7 +753,7 @@ def _start(c: StepClient, start_server: bool, start_timeout: float, note: str | 
                 probe = now + 0.5
             code = proc.poll()
             if code is not None and now >= status_at:
-                running, logfile = discovery.server_state(url)
+                running, logfile = interruptible(lambda: discovery.server_state(url))
                 status_at = time.monotonic() + STATUS_EVERY
                 if (running is False or (running is None and code != 0)) and not c.health():
                     raise GmlxError(_noted(_serve_failed(url, code, _tail(out), logfile), note))
