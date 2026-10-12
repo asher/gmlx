@@ -255,9 +255,9 @@ def _local_checkpoint(model_path: str) -> str | None:
     if os.path.isdir(expanded):
         return expanded
     try:
-        from huggingface_hub import snapshot_download
+        from .hf_cache import cached_snapshot
 
-        return snapshot_download(model_path, local_files_only=True)
+        return cached_snapshot(model_path, local_files_only=True)
     except Exception:                     # noqa: BLE001 (not cached, or no id)
         return None
 

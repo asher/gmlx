@@ -141,9 +141,9 @@ def resolve_path(model_ref: str) -> str:
     expanded = os.path.expanduser(model_ref)
     if os.path.isdir(expanded):
         return expanded
-    from huggingface_hub import snapshot_download
+    from gmlx.serve.hf_cache import cached_snapshot
 
-    return snapshot_download(model_ref)
+    return cached_snapshot(model_ref)
 
 
 def _read_json(path: str, name: str) -> dict | list | None:

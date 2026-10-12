@@ -39,13 +39,11 @@ def resolve(path_or_hf_repo: str | Path, revision: Optional[str] = None) -> Path
     path = Path(path_or_hf_repo)
     if path.exists():
         return path
-    from huggingface_hub import snapshot_download
-
-    from gmlx.serve.hf_cache import network_fetch_allowed
+    from gmlx.serve.hf_cache import cached_snapshot, network_fetch_allowed
 
     with network_fetch_allowed():
-        return Path(snapshot_download(str(path_or_hf_repo), revision=revision,
-                                      allow_patterns=_ALLOW_PATTERNS))
+        return Path(cached_snapshot(str(path_or_hf_repo), revision=revision,
+                                    allow_patterns=_ALLOW_PATTERNS))
 
 
 def load(

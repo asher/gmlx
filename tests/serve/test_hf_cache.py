@@ -196,9 +196,9 @@ def _card(snapshot):
 
 
 def _window_snapshot(repo):
-    import huggingface_hub
-
-    return huggingface_hub.snapshot_download(repo, local_files_only=True)
+    # The encoder backend's lookup in the window (resolve_path), which
+    # takes a snapshot that lacks the card as huggingface_hub 1 does.
+    return hf_cache.cached_snapshot(repo, local_files_only=True)
 
 
 def test_a_fetch_reads_the_cached_commit_and_moves_no_ref(hub, tmp_path):
@@ -511,3 +511,74 @@ def test_a_fetch_writes_nothing_outside_the_snapshot(hub, tmp_path):
     assert hub.requests == []
     assert sorted(os.listdir(tmp_path / "hf" / "models--acme--encoder")) == \
         sorted(before + [hf_cache.FETCHED_DIR])
+
+
+# huggingface_hub 2 refuses a cached snapshot that lacks some files of its
+# commit when it cannot fetch them, where huggingface_hub 1 returns it. The
+# error class is stood in for, so these run on either version.
+
+@pytest.fixture
+def partial_snapshot(monkeypatch, tmp_path):
+    """A cached snapshot that huggingface_hub 2 calls incomplete: every
+    snapshot_download raises IncompleteSnapshotError naming it. Returns
+    ``(snapshot, calls)``."""
+    import huggingface_hub
+    import huggingface_hub.errors as errors
+
+    class IncompleteSnapshotError(errors.LocalEntryNotFoundError):
+        def __init__(self, message, snapshot_path=None):
+            super().__init__(message)
+            self.snapshot_path = snapshot_path
+
+    snap = tmp_path / "snapshots" / ("1" * 40)
+    (snap / "voices").mkdir(parents=True)
+    (snap / "voices" / "af_heart.pt").write_bytes(b"")
+    calls = []
+
+    def snapshot_download(repo, **kwargs):
+        calls.append(kwargs)
+        raise IncompleteSnapshotError("incomplete", snapshot_path=str(snap))
+
+    monkeypatch.setattr(errors, "IncompleteSnapshotError",
+                        IncompleteSnapshotError, raising=False)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    return snap, calls
+
+
+def test_a_partial_snapshot_loads_offline_with_no_download(partial_snapshot):
+    snap, calls = partial_snapshot
+    with hf_cache.offline_resolve("acme/encoder"):
+        pass
+    assert calls == [{"local_files_only": True}]
+
+
+def test_a_partial_snapshot_is_the_encoder_checkpoint(partial_snapshot):
+    from gmlx.models.embedders.checkpoint import resolve_path
+
+    snap, _ = partial_snapshot
+    assert resolve_path("acme/encoder") == str(snap)
+
+
+def test_a_partial_snapshot_is_on_disk_for_the_embeddings_route(
+        partial_snapshot):
+    from gmlx.serve.embeddings import _local_checkpoint
+
+    snap, _ = partial_snapshot
+    assert _local_checkpoint("acme/encoder") == str(snap)
+
+
+def test_a_partial_snapshot_lists_its_voices(partial_snapshot):
+    from gmlx.serve.tts import available_voices
+
+    assert available_voices("acme/Kokoro-82M") == ["af_heart"]
+
+
+def test_an_incomplete_snapshot_without_its_folder_is_raised(partial_snapshot):
+    import shutil
+
+    import huggingface_hub.errors as errors
+
+    snap, _ = partial_snapshot
+    shutil.rmtree(snap)
+    with pytest.raises(errors.LocalEntryNotFoundError):
+        hf_cache.cached_snapshot("acme/encoder", local_files_only=True)

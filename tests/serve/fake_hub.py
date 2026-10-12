@@ -4,8 +4,8 @@ the real huggingface_hub cache code against a scratch cache.
 :class:`FakeHub` serves in-memory repos on 127.0.0.1 as the Hub serves
 them: ``HEAD`` and ``GET`` of ``/<repo>/resolve/<revision>/<file>``, with
 the ``X-Repo-Commit`` and ``ETag`` headers, a 404 with ``X-Error-Code:
-EntryNotFound`` for a file the commit lacks, and the repo info route that
-``snapshot_download`` reads. ``main`` resolves to the head commit. Every
+EntryNotFound`` for a file the commit lacks, and the repo info route and
+(huggingface_hub 2) the file tree route that ``snapshot_download`` reads. ``main`` resolves to the head commit. Every
 request is recorded. :class:`BlackHole` accepts connections and never
 answers, and :func:`refused_port` gives a port nothing listens on.
 ``fail_status`` makes the Hub answer every request with that status, and
@@ -115,6 +115,20 @@ class FakeHub:
                         "id": repo, "sha": sha,
                         "siblings": [{"rfilename": n} for n in sorted(files)],
                     }).encode()
+                    return self._send(200, {"Content-Type": "application/json"},
+                                      body)
+                if parts[:2] == ["api", "models"] and "tree" in parts:
+                    # huggingface_hub 2 lists a commit's files here; one
+                    # page, so no Link header.
+                    i = parts.index("tree")
+                    repo, rev = "/".join(parts[2:i]), parts[i + 1]
+                    sha, files = hub._resolve(repo, rev)
+                    if files is None:
+                        return self._send(404, {"X-Error-Code": "RevisionNotFound"})
+                    body = json.dumps([
+                        {"type": "file", "path": n, "size": len(b),
+                         "oid": git_sha1(b)}
+                        for n, b in sorted(files.items())]).encode()
                     return self._send(200, {"Content-Type": "application/json"},
                                       body)
                 if "resolve" in parts:

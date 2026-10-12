@@ -3675,12 +3675,10 @@ def load_vlm_model(
         # weights (the GGUF supplies those), unlike mlx-vlm's get_model_path.
         src = Path(hf_source)
         if not src.exists():
-            from huggingface_hub import snapshot_download
-
-            from gmlx.serve.hf_cache import network_fetch_allowed
+            from gmlx.serve.hf_cache import cached_snapshot, network_fetch_allowed
             with network_fetch_allowed():
-                src = Path(snapshot_download(
-                    repo_id=hf_source,
+                src = Path(cached_snapshot(
+                    hf_source,
                     allow_patterns=["*.json", "*.txt", "*.model", "*.tiktoken",
                                     "*.jinja", "*.py"]))
         processor = load_processor(src)

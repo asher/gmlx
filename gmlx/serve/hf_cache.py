@@ -259,6 +259,31 @@ def _touch(path: str) -> bool:
     return True
 
 
+def cached_snapshot(repo: str, *, hf=None, **kwargs) -> str:
+    """``snapshot_download(repo, **kwargs)``, except that a cached snapshot
+    lacking some files of its commit is returned as it is.
+
+    huggingface_hub 1 returns such a snapshot. huggingface_hub 2 caches the
+    commit's file list and raises ``IncompleteSnapshotError`` when it
+    cannot fetch the rest: offline, with ``local_files_only``, or with the
+    Hub out of reach. A backend that downloads some files of a repo leaves
+    such a snapshot. ``hf`` is the huggingface_hub module, imported when
+    not given."""
+    if hf is None:
+        import huggingface_hub as hf
+    try:
+        from huggingface_hub.errors import IncompleteSnapshotError
+    except ImportError:  # huggingface_hub 1
+        return hf.snapshot_download(repo, **kwargs)
+    try:
+        return hf.snapshot_download(repo, **kwargs)
+    except IncompleteSnapshotError as e:
+        path = getattr(e, "snapshot_path", None)
+        if isinstance(path, str) and os.path.isdir(path):
+            return path
+        raise
+
+
 @contextlib.contextmanager
 def offline_resolve(model_ref: str, wanted=None):
     """Context manager: within the block, a backend that resolves
@@ -300,11 +325,11 @@ def offline_resolve(model_ref: str, wanted=None):
         # while this thread holds the lock, so the flag is the user's own.
         offline = _offline_now(hf)
         try:
-            snapshot = hf.snapshot_download(model_ref, local_files_only=True)
+            snapshot = cached_snapshot(model_ref, hf=hf, local_files_only=True)
         except LocalEntryNotFoundError:
             print(f"[server] {model_ref}: not in the HF cache, downloading "
                   f"once...", flush=True)
-            hf.snapshot_download(model_ref)
+            cached_snapshot(model_ref, hf=hf)
             snapshot = None
     # 2. The files the cached snapshot lacks, with no lock held.
     if wanted is not None and snapshot is not None:
