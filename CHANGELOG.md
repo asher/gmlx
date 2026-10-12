@@ -150,6 +150,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A `gmlx launch` client that opened many connections at once could get 503
+  from the server on a busy Mac; it now waits its turn at the relay.
 - `--stream-experts` and `stream: experts` loaded a model that fits into
   memory instead of streaming it; they now stream its experts and tables.
 - `gmlx sync-models` kept a `stream: experts` key from an earlier scan after

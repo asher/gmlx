@@ -231,13 +231,15 @@ class _Sessions:
         session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed,
                            web_ports, project)
         sock = _listen(session.path)
-        # uvicorn counts the connection that carries a request, so a limit
-        # one over the relay's cap serves a request on each connection the
-        # relay holds.
+        # The relay holds the container to SESSION_CONNECTIONS_MAX; this
+        # limit backs it up. uvicorn drops a connection and its request task
+        # from its counts only after the relay has seen the close, so while
+        # the relay turns its connections over, up to its cap of old ones
+        # still count beside its cap of new ones.
         config = uvicorn.Config(
             _SessionApp(self, session), lifespan="off", ws="none",
             proxy_headers=False, server_header=False, log_config=None,
-            backlog=_BACKLOG, limit_concurrency=SESSION_CONNECTIONS_MAX + 1)
+            backlog=_BACKLOG, limit_concurrency=2 * SESSION_CONNECTIONS_MAX + 1)
         session.server = _SessionServer(config)
         logging.getLogger("uvicorn.error").addFilter(_LOG_FILTER)
         session.task = asyncio.get_running_loop().create_task(
