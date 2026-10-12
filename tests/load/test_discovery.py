@@ -984,7 +984,7 @@ def test_scan_overram_moe_streams_experts_and_drops_mtp(
         tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(disc, "classify_gguf", _classify_as(
         "hy_v3", {"hy_v3.nextn_predict_layers": 1, "hy_v3.expert_count": 64}))
-    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 128 * 10**9)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: 100 * 10**9)
     monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 200 * 10**9)
     root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
     m = _scan(root)[0]
@@ -994,9 +994,27 @@ def test_scan_overram_moe_streams_experts_and_drops_mtp(
     assert "over-RAM MoE" in err and "speculative off" in err
 
 
+def test_the_stream_mark_is_keyed_on_the_resident_budget(tmp_path, monkeypatch):
+    """The mark forces streaming, so a MoE under the installer's budget gets
+    none, even when it is over 0.8 x RAM; without Metal, 0.8 x RAM stands in."""
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.expert_count": 64}))
+    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 128 * 10**9)
+    import gmlx.device as dev
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: 108 * 10**9)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 105 * 10**9)
+    root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
+    assert _scan(root)[0].stream is None          # over 0.8 x RAM, under budget
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 110 * 10**9)
+    assert _scan(root)[0].stream == "experts"
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: None)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 105 * 10**9)
+    assert _scan(root)[0].stream == "experts"     # no Metal: 0.8 x 128 GB
+
+
 def test_scan_overram_dense_gets_hint_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(disc, "classify_gguf", _classify_as("llama"))
-    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 64 * 10**9)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: 50 * 10**9)
     monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 100 * 10**9)
     root = _write(tmp_path, "Big-Dense-Q8_0.gguf")
     m = _scan(root)[0]

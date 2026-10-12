@@ -438,7 +438,7 @@ These flags run a model bigger than memory, as
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--stream-experts` | Off | Stream the routed experts from disk. Attention and the KV cache stay on GPU. |
+| `--stream-experts` | Off | Stream the routed experts from disk, whatever the model size. Attention and the KV cache stay on GPU. |
 | `--stream-cpu` | Off | Run the whole model on the CPU device from the page cache. |
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the prefetch policy under `--stream-experts`. `auto` measures the drive at load. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |

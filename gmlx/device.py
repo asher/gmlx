@@ -41,3 +41,13 @@ def metal_value(key: str) -> Any:
     if info is None:
         raise KeyError(key)
     return info[key]
+
+
+def stream_budget_bytes() -> int | None:
+    """The weight bytes a model may hold resident: 0.9 of the Metal
+    working set. A model over it streams its experts, and discovery marks
+    a MoE over it ``stream: experts``. None without Metal."""
+    try:
+        return int(0.9 * metal_value("max_recommended_working_set_size"))
+    except (KeyError, TypeError, ValueError):
+        return None

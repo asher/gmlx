@@ -150,6 +150,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--stream-experts` and `stream: experts` loaded a model under 90% of the GPU
+  working set into memory instead of streaming it; they now always stream.
 - `gmlx serve` exited at startup when its config named a speech service whose
   extra is missing; it now warns and starts without that service.
 - `gmlx run` and `gmlx chat` kept every freed MLX buffer, so a deep prompt

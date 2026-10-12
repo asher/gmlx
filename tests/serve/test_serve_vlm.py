@@ -148,7 +148,8 @@ def test_vlm_stream_experts_places_on_the_text_tower(
     target, _args, kwargs = spy_placement["install_expert_streaming"]
     # The tower, not the VLM wrapper: the vision tower stays on the GPU.
     assert target is model.language_model
-    assert kwargs == {"gguf_path": "/m/llm.gguf",
+    # explicit: `stream: experts` streams a model under the budget too.
+    assert kwargs == {"gguf_path": "/m/llm.gguf", "explicit": True,
                       "feeder_prefill": True, "feeder_decode": False,
                       "fast_disk": None}
     assert "configure_stream_cpu" not in spy_placement

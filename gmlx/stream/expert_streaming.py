@@ -10,7 +10,7 @@ import mlx.core as mx
 import numpy as np
 from mlx.utils import tree_flatten
 
-from gmlx.device import metal_info, metal_value
+from gmlx.device import metal_info, metal_value, stream_budget_bytes
 from gmlx.envflags import env_bool, env_int
 from gmlx.gen.prefill_decay import deduct_untracked_weights
 from gmlx.load import loadlog
@@ -277,6 +277,7 @@ def install_expert_streaming(
     feeder_decode: bool | None = None,
     stats_verbose: bool | None = None,
     fast_disk: str | None = None,
+    explicit: bool = False,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -290,6 +291,10 @@ def install_expert_streaming(
     ``gguf_path`` (the loaded checkpoint) enables sequential expert prefetch
     for streaming-mode models - see ``gmlx.stream.prefetch``. Without it,
     over-budget prefill demand-faults expert bytes at random-read bandwidth.
+
+    ``explicit`` is ``--stream-experts`` or ``stream: experts``: a model
+    under the budget streams as with ``force_stream``, and one over it
+    takes the budget-keyed ladder (table first) as without the flag.
     """
     from gmlx.load.modules import switch_layer_types
 
@@ -301,21 +306,20 @@ def install_expert_streaming(
 
     # Streaming mode: neutralize the generation-time residency sweep (which
     # would otherwise wire the whole model - see _neutralize_wired_limit_sweep)
-    # and run every expert call on the CPU stream. Engaged when the model is
-    # over the wired budget (it must stream) or when force_stream is set:
-    # --stream-cpu (configure_stream_cpu) passes force_stream so the flag does
-    # what it says - experts on CPU regardless of model size; on a fits-in-RAM
-    # model the page cache then serves those bytes from RAM rather than faulting
-    # from disk. --stream-experts keeps the budget-keyed decision, so below the
-    # budget it still routes prefill-sized calls to the GPU stream
-    # (GMLX_STREAM_GPU_TOKENS) - the fast path in-RAM.
+    # and run every expert call on the CPU stream or the decode arena.
+    # Engaged when the model is over the wired budget (it must stream) or
+    # when streaming is forced: --stream-cpu passes force_stream, and
+    # --stream-experts and `stream: experts` pass explicit, which forces it
+    # under the budget, so the flag streams whatever the model size. Without
+    # either (the distill teacher's auto path, a direct call), a model under
+    # budget routes every expert call to the GPU stream
+    # (GMLX_STREAM_GPU_TOKENS), the fast path in-RAM.
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
-    try:
-        budget = int(0.9 * metal_value("max_recommended_working_set_size"))
-    except Exception:
-        budget = None
+    budget = stream_budget_bytes()
     over_budget = budget is not None and total_bytes > budget
+    if explicit and not over_budget:
+        force_stream = True
 
     # Streamed lookup tables (docs/internals/streaming-measurements.md): archs with a
     # declared streamable lookup table (e.g. qwen4exp's 26.8 GiB PLE
@@ -983,7 +987,8 @@ def install_expert_streaming(
             room_bytes=room.bytes,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
-            cast_dead_bytes=cast_dead_bytes)
+            cast_dead_bytes=cast_dead_bytes,
+            forced=explicit and not over_budget)
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget, **arena_kw)
     ring = 0

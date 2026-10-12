@@ -606,7 +606,8 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "routed-expert stacks (~90%% of MoE bytes) stay file-backed, "
         "with decode served from a wired popularity-managed GPU "
         "expert arena (misses read from the GGUF) and the CPU "
-        "stream as fallback.",
+        "stream as fallback. Streams whatever the model size; a model "
+        "that fits decodes faster without it.",
     )
     placement.add_argument(
         "--stream-cpu",
@@ -1516,8 +1517,9 @@ def _apply_placement(args, model) -> None:
     else:
         from gmlx.stream.expert_streaming import install_expert_streaming
 
+        # The flag streams whatever the model size.
         n, _ = install_expert_streaming(
-            model, gguf_path=gguf_path,
+            model, gguf_path=gguf_path, explicit=True,
             stats_verbose=bool(getattr(args, "verbose", False)),
             feeder_prefill=prefill, feeder_decode=decode)
         if n == 0:

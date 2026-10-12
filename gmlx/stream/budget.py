@@ -214,16 +214,23 @@ def _ram_floor_bytes(ram: int | None) -> int:
     return host_floor_bytes(ram)
 
 
+# The share of the expert bytes a forced stream's arena may hold when the
+# model fits under the budget. An arena of all of them would wire every
+# expert, which is the resident load the flag asks to avoid.
+FORCED_ARENA_SHARE = 0.5
+
+
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, room_bytes: int | None = None,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
-    cast_dead_bytes: int = 0, ring_bytes: int = 0,
+    cast_dead_bytes: int = 0, ring_bytes: int = 0, forced: bool = False,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
     after the non-expert weights, the KV room, the prefill ring and the
     host floor, clamped to the RAM reclaimable right now, and capped at
-    the expert bytes themselves (a model whose experts fit goes fully
-    resident).
+    the expert bytes themselves. ``forced`` is a stream the flag asked for
+    on a model under the budget: its cap is ``FORCED_ARENA_SHARE`` of the
+    expert bytes, so the experts stay streamed rather than all wired.
 
     The ceiling is the serve governor's (``gmlx.stream.budget``), so the
     arena, the prefill ring and the KV cache share one budget: at decode
@@ -317,7 +324,8 @@ def _decode_arena_bytes(
                 "of RAM; a co-resident workload or a cold page cache is the "
                 "usual cause)")
         arena = min(arena, reclaimable)
-    return min(max(0, arena), expert_bytes)
+    cap = int(FORCED_ARENA_SHARE * expert_bytes) if forced else expert_bytes
+    return min(max(0, arena), cap)
 
 
 def _prefill_ring_reason(offsets, left: int | None) -> str | None:

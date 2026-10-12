@@ -948,11 +948,27 @@ def _classify_each(paths, *, progress):
         yield classify_gguf(p)
 
 
-# Memory fit - a model whose weights alone exceed this share of physical RAM
-# cannot run fully resident (KV cache, activations, and the OS need the rest,
-# and the GPU wired limit sits below physmem), so discovery wires the over-RAM
-# placement instead of scaffolding a config that fails at load.
+# Memory fit - a model whose weights exceed the stream budget cannot run
+# fully resident, so discovery wires the over-RAM placement instead of
+# scaffolding a config that fails at load. Without Metal, this share of
+# physical RAM stands in for the budget.
 _OVERRAM_RAM_FRACTION = 0.8
+
+
+def _stream_budget_bytes() -> int | None:
+    """The budget a MoE's weights must exceed for discovery to mark it
+    ``stream: experts``: the one the expert streaming installer reads
+    (``gmlx.device.stream_budget_bytes``). The mark forces streaming, so
+    a model under it keeps loading resident."""
+    try:
+        from gmlx.device import stream_budget_bytes
+        budget = stream_budget_bytes()
+    except ImportError:
+        budget = None
+    if budget is not None:
+        return budget
+    phys = _physmem_bytes()
+    return int(_OVERRAM_RAM_FRACTION * phys) if phys else None
 
 
 def _physmem_bytes() -> int | None:
@@ -985,10 +1001,10 @@ def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
     a MoE gets ``stream: experts`` (and loses ``speculative`` - MTP needs a plain
     fully-resident base); a dense over-RAM model just gets a stderr hint (whole-
     model CPU streaming is a big enough behavior change to leave opt-in)."""
-    total, phys = _gguf_set_bytes(c.path), _physmem_bytes()
-    if not total or not phys or total <= _OVERRAM_RAM_FRACTION * phys:
+    total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()
+    if not total or not budget or total <= budget:
         return
-    size = f"{total / 1e9:.0f} GB weights, {phys / 1e9:.0f} GB RAM"
+    size = f"{total / 1e9:.0f} GB weights, {budget / 1e9:.0f} GB resident budget"
     if c.moe:
         mc.stream = "experts"
         note = ""

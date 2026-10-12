@@ -278,3 +278,55 @@ def test_auto_scheme_normalizes_to_unset():
     args = types.SimpleNamespace(kv_quant_scheme="kvarn")
     cli.normalize_kv_scheme(args)
     assert args.kv_quant_scheme == "kvarn"
+
+
+# --stream-experts streams whatever the model size.
+
+def _small_moe(monkeypatch, budget_bytes):
+    """A one-layer MoE under (or over) a fake stream budget, with the
+    process-wide wired-limit patches the install makes undone at teardown."""
+    import importlib
+    import types
+
+    import mlx.core as mx
+
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    for name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
+        mod = importlib.import_module(name)
+        if hasattr(mod, "wired_limit"):
+            monkeypatch.setattr(mod, "wired_limit", mod.wired_limit)
+    monkeypatch.setattr(
+        mx, "device_info",
+        lambda *a: {"max_recommended_working_set_size": budget_bytes / 0.9})
+    glu = SwitchGLU(16, 32, 4)
+    mx.eval(glu.parameters())
+    layer = types.SimpleNamespace(modules=lambda: [glu])
+    model = types.SimpleNamespace(layers=[layer], parameters=lambda: {"glu": glu.parameters()})
+    return model, glu
+
+
+def test_stream_experts_streams_a_model_under_the_budget(monkeypatch):
+    import types
+
+    import mlx.core as mx
+
+    from gmlx.upstream.patching import wrapped_with
+
+    model, glu = _small_moe(monkeypatch, 1 << 40)
+    cli._apply_placement(types.SimpleNamespace(stream_experts=True, gguf=None), model)
+    assert glu.__class__.__name__.endswith("_CPUOffload")       # wrapped
+    assert getattr(glu, "_kq_cpu_only", False)                  # experts stream
+    assert model._kq_streaming is True
+    assert wrapped_with(mx.set_wired_limit, "_kq_no_sweep")     # sweep neutralized
+
+
+def test_without_the_flag_a_model_under_the_budget_stays_resident(monkeypatch):
+    from gmlx.stream.expert_streaming import install_expert_streaming
+
+    model, glu = _small_moe(monkeypatch, 1 << 40)
+    n, _ = install_expert_streaming(model)
+    assert n == 1
+    assert not getattr(glu, "_kq_cpu_only", False)
+    assert model._kq_streaming is False
