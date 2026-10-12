@@ -93,7 +93,9 @@ def _run(share: float, blocks: int, chat_delay: float):
     chat.begin()
     chat.end()                      # chat is active before the job starts
     th.start()
-    pacer = ImagePacer(chat, share=share, evaluate=evaluate)
+    # A loaded machine can take far longer than the default wait to run
+    # the chat step; the order, not the wait, is under test.
+    pacer = ImagePacer(chat, share=share, wait_s=5.0, evaluate=evaluate)
     with pacing.paced(pacer):
         for i in range(blocks):
             pacing.point(i)

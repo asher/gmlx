@@ -222,9 +222,16 @@ def _opencv_first_functions():
 @pytest.fixture
 def no_opencv(monkeypatch):
     from gmlx.commands import extras
+    from gmlx.serve import media_sinks
+    from gmlx.upstream.patching import under
 
     monkeypatch.setitem(sys.modules, "cv2", None)
     monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_PIP)
+    # The loaders themselves, without the serve media gate a serve test
+    # may have left on them.
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    for name in ("load_image", "load_audio", "load_video"):
+        monkeypatch.setattr(utils, name, under(getattr(utils, name), media_sinks._FLAG))
 
 
 @pytest.mark.parametrize("module,cls,func", list(_opencv_first_functions()))
@@ -261,7 +268,7 @@ def test_load_video_names_the_video_extra(no_opencv):
 
 
 @pytest.mark.parametrize("route", ["pip", "pipx", "homebrew"])
-def test_the_opencv_hint_follows_the_install_route(monkeypatch, route):
+def test_the_opencv_hint_follows_the_install_route(no_opencv, monkeypatch, route):
     """Each install route gets its own command for the video extra. A keg
     ships every extra, so it gets a reinstall, not pip."""
     import re

@@ -12,6 +12,16 @@ KL = 4096
 SCALE = D**-0.5
 
 
+@pytest.fixture(autouse=True)
+def _fresh_install(monkeypatch):
+    """Each test's install wraps the SDPA it finds. A flag left set by an
+    earlier test over a restored stock SDPA would skip the wrap, and the
+    route counters would never move."""
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention",
+                        mx.fast.scaled_dot_product_attention)
+    monkeypatch.setattr(attn_hd512, "_installed", False)
+    monkeypatch.setattr(attn_hd512, "_orig_sdpa", attn_hd512._orig_sdpa)
+
 
 def _stock_sdpa():
     """The stock kernel, even when an earlier test left the hd512 wrapper
