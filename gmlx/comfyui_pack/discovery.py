@@ -56,8 +56,6 @@ STATUS_TIMEOUT = 3.0
 SERVER_TIMEOUT = 1.0
 LIST_TIMEOUT = 5.0
 KEEP = 10.0
-KEEP_SLOW = 60.0
-SLOW = 2.0
 
 log = logging.getLogger("gmlx")
 
@@ -106,7 +104,8 @@ def status_url(timeout: float = 10.0) -> str | None:
 def server_state(url: str, timeout: float = STATUS_TIMEOUT) -> tuple[bool | None, str | None]:
     """Whether the managed server on the port of ``url`` runs, by its
     runfile pid as ``gmlx status --json`` reports it, and the path of its
-    log. None for the first when gmlx gives no answer."""
+    log. None for the first when gmlx gives no answer or names no server on
+    that port."""
     doc = _gmlx_json(["status", "--json"], timeout)
     if doc is None:
         return None, None
@@ -121,7 +120,7 @@ def server_state(url: str, timeout: float = STATUS_TIMEOUT) -> tuple[bool | None
                 return bool(r.get("running")), (str(r["log"]) if r.get("log") else None)
         except (TypeError, ValueError):
             continue
-    return False, None
+    return None, None
 
 
 def resolve_base_url(widget: str | None = None, timeout: float = 10.0) -> str:
@@ -228,16 +227,14 @@ def forget() -> None:
 
 
 def _refresh(gen: int) -> None:
-    start = time.monotonic()
     try:
         w = _probe()
     except Exception as e:  # noqa: BLE001: a widget list never fails ComfyUI
         log.warning("gmlx: listing the image models failed: %r", e)
         w = _fallback()
-    took = time.monotonic() - start
     with _LOCK:
         if gen == _STATE["gen"]:
-            _KEPT["w"] = (time.monotonic() + (KEEP_SLOW if took > SLOW else KEEP), w)
+            _KEPT["w"] = (time.monotonic() + KEEP, w)
 
 
 def refresh() -> threading.Thread:
@@ -317,7 +314,8 @@ def not_on_server(name: str, url: str, models: list) -> str:
                 and (m.get("family"), m.get("variant")) == PULL_KINDS[recipe]]
         if same:
             return (f"{head} It has that model as {same[0]!r}: pick {same[0]!r} in the "
-                    "loader's model_name.")
+                    f"loader's model_name, or run `gmlx pull {recipe}` and pick the id it "
+                    "adds.")
         return (f"{head} Run `gmlx pull {recipe}`, which downloads it and adds it to "
                 "gmlx's config, then run the workflow again.")
     return (f"{head} Pick one it has, or add one with `gmlx pull`, such as "

@@ -359,6 +359,20 @@ def test_pull_names_are_the_catalog_recipes(widgets):
     assert widgets.settings.FALLBACK_MODEL in widgets.PULL_NAMES
 
 
+def test_a_kept_list_is_probed_again_after_keep_seconds(widgets, tmp_path, monkeypatch):
+    """A slow probe keeps its answer no longer: R after a pull shows the new
+    list within seconds."""
+    monkeypatch.setattr(widgets, "KEEP", 0.2)
+    exe = _gmlx_script(tmp_path / "bin", "/bin/sleep 1.5; " + _answers(_listing("a-model")))
+    _record(gmlx_command=str(exe))
+    assert _probed(widgets)["model_name"][0] == ["a-model"]
+    _gmlx_script(tmp_path / "bin", _answers(_listing("b-model")))
+    time.sleep(0.3)
+    widgets.loader_inputs()            # old answer; starts a probe
+    widgets.refresh().join(30)
+    assert widgets.loader_inputs()["required"]["model_name"][0] == ["b-model"]
+
+
 def test_the_model_list_is_the_configured_ids_default_first(widgets, tmp_path, monkeypatch):
     exe = _gmlx_script(tmp_path / "bin", _answers(
         _listing("krea-2-turbo", "my-qwen", "z-image-turbo", default="my-qwen")))
@@ -480,7 +494,8 @@ def test_the_server_state_is_the_runfile_of_the_port(widgets, tmp_path):
         "running": True, "port": 9132, "log": "/x/9132.log"}))
     _record(gmlx_command=str(exe))
     assert widgets.server_state("http://127.0.0.1:9132") == (True, "/x/9132.log")
-    assert widgets.server_state("http://127.0.0.1:9133") == (False, None)
+    # No status row for the port: unknown, so the wait goes on.
+    assert widgets.server_state("http://127.0.0.1:9133") == (None, None)
     _gmlx_script(tmp_path / "bin", _answers(status={"servers": [
         {"running": True, "port": 9134}, {"running": False, "port": 9135, "log": "/x/l"}]}))
     assert widgets.server_state("http://127.0.0.1:9134") == (True, None)
@@ -512,4 +527,4 @@ def test_a_model_the_server_has_under_another_id_is_named(widgets, asked, has):
     not add the name, so the refusal names the id to pick."""
     msg = widgets.not_on_server(asked, "http://127.0.0.1:8080", _rows("z-image-turbo", has))
     assert f"It has that model as {has!r}: pick {has!r}" in msg
-    assert "gmlx pull" not in msg
+    assert "or run `gmlx pull qwen-image` and pick the id it adds" in msg

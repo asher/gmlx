@@ -777,7 +777,7 @@ class Widgets(unittest.TestCase):
         # id, since `gmlx pull qwen-image` would add no qwen-image id.
         text = P.nodes.GmlxServerStatus().status("qwen-image", server_url=self.stub.url)["result"][0]
         self.assertIn(f"pick {QID!r}", text)
-        self.assertNotIn("gmlx pull", text)
+        self.assertIn("or run `gmlx pull qwen-image` and pick the id it adds", text)
         with self.assertRaises(C.GmlxRefusal) as e:
             P.nodes.GmlxModelLoader().load("qwen-image", self.stub.url, False)
         self.assertIn(f"It has that model as {QID!r}", str(e.exception))
