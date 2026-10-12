@@ -280,7 +280,7 @@ def test_auto_scheme_normalizes_to_unset():
     assert args.kv_quant_scheme == "kvarn"
 
 
-# --stream-experts streams whatever the model size.
+# --stream-experts streams a model that fits too.
 
 def _small_moe(monkeypatch, budget_bytes):
     """A one-layer MoE under (or over) a fake stream budget, with the
@@ -330,3 +330,60 @@ def test_without_the_flag_a_model_under_the_budget_stays_resident(monkeypatch):
     assert n == 1
     assert not getattr(glu, "_kq_cpu_only", False)
     assert model._kq_streaming is False
+
+
+def test_a_forced_stream_under_the_budget_frees_the_expert_headroom(monkeypatch):
+    """The experts of a forced stream are page cache, as over the budget: the
+    headroom estimate drops them, so it does not read them twice."""
+    from mlx.utils import tree_flatten
+
+    from gmlx.stream.expert_streaming import install_expert_streaming
+
+    model, glu = _small_moe(monkeypatch, 1 << 40)
+    deducted, credited = [], []
+    monkeypatch.setattr("gmlx.stream.expert_streaming.deduct_untracked_weights",
+                        lambda n, key=None: deducted.append(n))
+    monkeypatch.setattr("gmlx.gen.prefill_decay.note_streamed_tracked_bytes",
+                        lambda n, key=None, **kw: credited.append(n))
+    monkeypatch.setattr("gmlx.gen.prefill_decay.untracked_weight_bytes_for",
+                        lambda key: 0.0)
+    _, offloaded = install_expert_streaming(model, explicit=True)
+    assert offloaded == sum(a.nbytes for _, a in tree_flatten(glu.parameters()))
+    assert deducted == [offloaded]
+    assert credited == [offloaded]
+
+
+def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):
+    import types
+
+    import gmlx.gen.prefill_decay as decay
+    import gmlx.stream.budget as sbudget
+    import gmlx.stream.pin_weights as pins
+    import gmlx.stream.prefetch as prefetch
+    from gmlx.stream.expert_streaming import install_expert_streaming
+
+    model, _ = _small_moe(monkeypatch, 1 << 40)
+    monkeypatch.setattr(prefetch, "maybe_make_prefetcher",
+                        lambda path: types.SimpleNamespace(offsets={}))
+    monkeypatch.setattr(pins, "cast_copies", lambda m, p: types.SimpleNamespace(
+        dead_bytes=0, names=frozenset()))
+    monkeypatch.setattr(pins, "maybe_pin_weights", lambda *a, **kw: None)
+    monkeypatch.setattr(sbudget, "kv_room_bytes",
+                        lambda p: types.SimpleNamespace(bytes=0))
+    monkeypatch.setattr(decay, "note_streamed_tracked_bytes", lambda *a, **kw: None)
+    monkeypatch.setattr("gmlx.stream.expert_streaming.deduct_untracked_weights",
+                        lambda n, key=None: None)
+    seen = []
+
+    class Reached(Exception):
+        pass
+
+    def arena(*a, **kw):
+        seen.append(kw.get("forced"))
+        raise Reached
+
+    monkeypatch.setattr("gmlx.stream.expert_streaming._decode_arena_bytes", arena)
+    with pytest.raises(Reached):
+        install_expert_streaming(model, gguf_path="m.gguf", explicit=True,
+                                 feeder_prefill=False, feeder_decode=False)
+    assert seen == [True]

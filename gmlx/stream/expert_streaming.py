@@ -310,7 +310,7 @@ def install_expert_streaming(
     # Engaged when the model is over the wired budget (it must stream) or
     # when streaming is forced: --stream-cpu passes force_stream, and
     # --stream-experts and `stream: experts` pass explicit, which forces it
-    # under the budget, so the flag streams whatever the model size. Without
+    # under the budget, so the flag streams a model that fits too. Without
     # either (the distill teacher's auto path, a direct call), a model under
     # budget routes every expert call to the GPU stream
     # (GMLX_STREAM_GPU_TOKENS), the fast path in-RAM.
@@ -922,7 +922,9 @@ def install_expert_streaming(
                 m._kq_cpu_only = True
             offloaded += sum(a.nbytes for _, a in tree_flatten(m.parameters()))
             n_wrapped += 1
-    if over_budget and offloaded:
+    if streaming and offloaded:
+        # Keyed on streaming, not over_budget: a forced stream of a model
+        # that fits holds its experts in the arena and the page cache too.
         # Streamed expert bytes are page cache, never wired, and must not
         # tax headroom_bytes() or the admission gate and request preflight
         # starve every request. Which side of the accounting they sit on
@@ -1276,11 +1278,13 @@ def install_expert_streaming(
             loadlog.info(f"[stream] {'; '.join(fallback)}")
         if not over_budget:
             b = f"~{budget / 1e9:.0f} GB" if budget else "unknown"
+            flag = ("--stream-cpu (stream: cpu)" if base_dev == "CPU"
+                    else "--stream-experts (stream: experts)")
             print(
-                f"[stream] --stream-cpu streams experts even though the "
+                f"[stream] {flag} streams experts even though the "
                 f"{total_bytes / 1e9:.0f} GB model fits the wired budget "
-                f"({b}) - omit --stream-cpu for the faster all-GPU path on "
-                "a model that fits"
+                f"({b}); without it, a model that fits takes the faster "
+                "all-GPU path"
             )
     else:
         gpu_tokens = _stream_gpu_tokens(1)
