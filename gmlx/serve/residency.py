@@ -971,12 +971,13 @@ class _ResidencyPool:
             preload_gate_bytes,
             streamed_off_disk_bytes,
         )
-        if getattr(build_spec, "stream", None) == "cpu":
-            # Before the load, as in the CLI: --stream-cpu forces table
-            # streaming, and the warm touch must not wire the table first.
-            from gmlx.stream.table_stream import force_table_stream
+        # Before the load, as in the CLI: both stream placements stream
+        # the tables and the experts, and the warm touch must not wire
+        # them first. Set per build, so a later resident model is touched.
+        from gmlx.stream.table_stream import force_table_stream
 
-            force_table_stream()
+        force_table_stream(
+            getattr(build_spec, "stream", None) in ("cpu", "experts"))
         gate_bytes = footprint
         streamed = 0
         if getattr(build_spec, "stream", None) == "experts":

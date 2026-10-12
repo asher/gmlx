@@ -606,8 +606,8 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "routed-expert stacks (~90%% of MoE bytes) stay file-backed, "
         "with decode served from a wired popularity-managed GPU "
         "expert arena (misses read from the GGUF) and the CPU "
-        "stream as fallback. Streams whatever the model size; a model "
-        "that fits decodes faster without it.",
+        "stream as fallback. A model that fits streams too, but decodes "
+        "faster without it.",
     )
     placement.add_argument(
         "--stream-cpu",
@@ -1517,7 +1517,7 @@ def _apply_placement(args, model) -> None:
     else:
         from gmlx.stream.expert_streaming import install_expert_streaming
 
-        # The flag streams whatever the model size.
+        # The flag streams a model that fits too.
         n, _ = install_expert_streaming(
             model, gguf_path=gguf_path, explicit=True,
             stats_verbose=bool(getattr(args, "verbose", False)),
@@ -2353,9 +2353,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     if rc is not None:
         return rc
     _ensure_stream_cb_caps(args)
-    if getattr(args, "stream_cpu", False):
-        # Before the load: the warm touch reads this to leave a streamable
-        # table untouched.
+    if (getattr(args, "stream_cpu", False)
+            or getattr(args, "stream_experts", False)):
+        # Before the load: the warm touch reads this to leave the
+        # streamable tables and the expert stacks untouched.
         from gmlx.stream.table_stream import force_table_stream
 
         force_table_stream()

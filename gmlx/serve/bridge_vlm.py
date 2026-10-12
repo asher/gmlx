@@ -550,7 +550,7 @@ def _install_stream_placement(
             fast_disk=fast_disk)
     elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
         from gmlx.stream.expert_streaming import install_expert_streaming
-        # `stream: experts` streams whatever the model size; discovery
+        # `stream: experts` streams a model that fits too; discovery
         # writes it only for a model over the budget.
         install_expert_streaming(
             text_model, gguf_path=gguf_path, explicit=True,

@@ -190,10 +190,11 @@ _FORCED = False
 
 
 def force_table_stream(on: bool = True) -> None:
-    """Latch ``--stream-cpu`` before the weights load. The load-time warm
-    touch runs before ``install_expert_streaming``, so it cannot see the
-    flag the placement call carries; without the latch it would GPU-touch
-    a table the placement then streams."""
+    """Latch ``--stream-cpu`` or ``--stream-experts`` before the weights
+    load. The load-time warm touch runs before ``install_expert_streaming``,
+    so it cannot see the flag the placement call carries; without the latch
+    it would GPU-touch the tables and expert stacks the placement then
+    streams."""
     global _FORCED
     _FORCED = bool(on)
 
@@ -352,17 +353,27 @@ def streamed_table_array_ids(model) -> set[int]:
 def warm_touch_exclusions(model, total_bytes: int,
                           budget: int | None) -> set[int]:
     """``id()``s of arrays the load-time GPU warm touch must skip: the
-    declared tables, whenever the selection ladder will stream them. The
-    warm touch runs before ``install_expert_streaming``, so this re-runs
-    the same ladder test; without it, a fits-in-RAM load under
-    ``GMLX_STREAM_PLE=1`` or ``--stream-cpu`` would GPU-touch the table
-    and wire it before streaming ever installs."""
-    if not table_stream_selected(model, total_bytes, budget):
-        return set()
+    declared tables, whenever the selection ladder will stream them, and
+    the expert stacks under a stream flag latch. The warm touch runs
+    before ``install_expert_streaming``, so this re-runs the same ladder
+    test; without it, a fits-in-RAM load under ``GMLX_STREAM_PLE=1`` or a
+    stream flag would GPU-touch the table and the experts and wire them
+    before streaming ever installs."""
     out: set[int] = set()
-    for _, mod in streamable_tables_for(model):
-        for attr in ("weight", "scales"):
-            a = getattr(mod, attr, None)
-            if a is not None:
-                out.add(id(a))
+    if table_stream_selected(model, total_bytes, budget):
+        for _, mod in streamable_tables_for(model):
+            for attr in ("weight", "scales"):
+                a = getattr(mod, attr, None)
+                if a is not None:
+                    out.add(id(a))
+    modules = getattr(model, "modules", None)
+    if _FORCED and callable(modules):
+        from mlx.utils import tree_flatten
+
+        from gmlx.load.modules import switch_layer_types
+
+        _, glu_types = switch_layer_types()
+        for mod in modules():
+            if isinstance(mod, glu_types):
+                out.update(id(a) for _, a in tree_flatten(mod.parameters()))
     return out

@@ -244,6 +244,23 @@ def test_warm_touch_excludes_table_iff_it_will_stream(monkeypatch):
     assert ts.warm_touch_exclusions(model, tbytes + 100, 150) == set()
 
 
+def test_warm_touch_skips_the_expert_stacks_under_a_stream_flag(monkeypatch):
+    """A stream flag streams the experts of a model that fits; the load-time
+    touch must not wire them first."""
+    from mlx.utils import tree_flatten
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    model, glu = _moe_table_model()
+    model.modules = lambda: [model.model.ple_embed, glu]
+    experts = {id(a) for _, a in tree_flatten(glu.parameters())}
+    fits = 1 << 40
+    assert ts.warm_touch_exclusions(model, 100, fits) == set()
+    ts.force_table_stream()
+    skip = ts.warm_touch_exclusions(model, 100, fits)
+    assert experts <= skip
+    assert id(model.model.ple_embed.weight) in skip
+
+
 # --- pin-set exclusion ----------------------------------------------------
 
 
