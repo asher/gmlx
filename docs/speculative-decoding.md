@@ -76,10 +76,13 @@ bits if memory requires it.
 ## Several requests at once
 
 Checking a draft costs little while one request decodes and much more when
-several do. The server therefore gives each model a width cap: it
-speculates while at most that many requests generate together, decodes
-without speculation past the cap, and speculates again when the batch
-shrinks.
+several do. The server therefore gives each model a width cap, the number
+of requests that speculate together. Past the cap, the oldest requests keep
+speculating and the others decode without speculation in the same step,
+and when a speculating request finishes, the next oldest takes its place.
+On a mixture-of-experts model, and with the gemma-4 assistant drafter, the
+whole batch decodes without speculation past the cap instead, and
+speculates again when the batch shrinks.
 
 | Drafter | Default cap |
 |---------|-------------|
@@ -91,7 +94,7 @@ shrinks.
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) sets the
 cap for one model, and `0` removes it. `gmlx serve --speculative-width-cap N`
 sets it for every model and overrides each model's key. [Speculative batching](internals/speculative-batching.md)
-describes how the batch switches between the two modes.
+describes how the batch switches between these modes.
 
 ## DFlash 2 drafters
 

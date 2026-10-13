@@ -305,9 +305,13 @@ def install_continuous_batch_admission() -> None:
             return False
         it = self._rounds_iter
         captured = []
+        # The scalar loop fills this when the rebuilt batch can keep the
+        # row's live drafter (a mixed batch); the batch loop pops it.
+        handoff: dict = {}
         if it is not None:
             self._rounds_iter = None
             self.model._kq_preempt_capture = captured
+            self.model._kq_preempt_handoff = handoff
             try:
                 it.close()
             finally:
@@ -315,6 +319,11 @@ def install_continuous_batch_admission() -> None:
                     del self.model._kq_preempt_capture
                 except AttributeError:
                     pass
+                if not handoff:
+                    try:
+                        del self.model._kq_preempt_handoff
+                    except AttributeError:
+                        pass
         responses = []
         uid = self._all_uids[0]
         for tok in captured:
@@ -332,6 +341,10 @@ def install_continuous_batch_admission() -> None:
         if self._finished[0]:
             # The captured tail finished the row; nothing to rebuild. The
             # pending injections promote through __len__ once drained.
+            try:
+                del self.model._kq_preempt_handoff
+            except AttributeError:
+                pass
             self._refresh_uids()
             return False
         self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]

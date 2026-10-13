@@ -434,6 +434,86 @@ class QwenMTPDrafter(nn.Module):
             self._set_seed(h[:, -1:, :], sampler, greedy)
         self._round_appended = 0
 
+    # --- parked row contexts (mixed batches) ---------------------------------
+
+    def _row_cache(self) -> list[Any]:
+        """A one-row head KV of the class the live batch uses: a batch class
+        where the drafter batches, else its B=1 class."""
+        try:
+            return self.make_cache(left_padding=[0])
+        except NotImplementedError:
+            return self.make_cache()
+
+    def row_context_open(self, input_ids: mx.array, hidden: mx.array,
+                         bonus_token, kv: list[Any] | None = None,
+                         token_dtype: mx.Dtype = mx.int32) -> dict:
+        """A parked context for a row the engine decodes plain: its own head
+        KV, teacher-forced from the row's prompt capture the way
+        ``prefill_from_target_hidden`` seeds the live head. ``kv`` adopts a
+        streamed seed that already holds the prompt's leading columns. The
+        seed pick waits for adoption, so a parked row never runs the head."""
+        cache = kv if kv is not None else self._row_cache()
+        n = int(input_ids.shape[1])
+        n_hidden = int(hidden.shape[1])
+        h_len = min(n_hidden, n)
+        if h_len == 0:
+            return {"kv": cache, "h": None}
+        if isinstance(bonus_token, int):
+            bonus = mx.array([[bonus_token]], dtype=token_dtype)
+        else:
+            bonus = bonus_token.reshape(-1)[:1, None].astype(token_dtype)
+        shifted = mx.concatenate(
+            [input_ids[:, n - h_len + 1:].astype(token_dtype), bonus], axis=1)
+        hid = hidden[:, n_hidden - h_len:, :]
+        if h_len > 1:
+            self.seed_chunk(shifted[:, :-1], hid[:, :-1], cache)
+        h = self._forward(shifted[:, -1:], hid[:, -1:], cache=cache)
+        return {"kv": cache, "h": h}
+
+    def row_context_ingest(self, ctx: dict, verify_hidden: mx.array,
+                           new_tokens: list[int], accepted: int) -> None:
+        """Teacher-force a plain round's committed positions into a parked
+        head KV: (token p+1, hidden p) pairs, as accept_verified_tokens
+        appends them for a live row."""
+        toks = [int(t) for t in new_tokens[: int(accepted) + 1]]
+        if not toks:
+            return
+        h = self._forward(mx.array([toks], dtype=mx.int32),
+                          verify_hidden[:, : len(toks), :], cache=ctx["kv"])
+        ctx["h"] = h[:, -1:, :]
+
+    def row_context_state(self, ctx: dict) -> list[Any]:
+        return [c.state for c in ctx["kv"]] + (
+            [ctx["h"]] if ctx["h"] is not None else [])
+
+    def row_context_adopt(self, ctx: dict, sampler, token_dtype=mx.int32,
+                          greedy: bool = False) -> None:
+        """Make a parked context the live row: its head KV, and the seed the
+        head picks from its last committed position. The drafter holds no
+        live row."""
+        self._cache = list(ctx["kv"])
+        self._round_appended = 0
+        if ctx["h"] is None:
+            self._seed_token = None
+            self._seed_hidden = None
+            return
+        self._set_seed(ctx["h"], sampler, greedy)
+
+    def row_context_extend(self, ctx: dict, sampler, token_dtype=mx.int32,
+                           greedy: bool = False) -> None:
+        """Append a parked context to the live batch as its last row."""
+        for old, new in zip(self._cache, ctx["kv"]):
+            old.extend(new)
+        if ctx["h"] is None:
+            raise ValueError("row context has no committed position to seed from")
+        seed_token = self._pick(self._logits(ctx["h"]), sampler, greedy)
+        seed_hidden = self._next_hidden(ctx["h"])
+        if self._seed_token is None or self._seed_hidden is None:
+            self._seed_token, self._seed_hidden = seed_token, seed_hidden
+        else:
+            self._seed_token = mx.concatenate([self._seed_token, seed_token])
+            self._seed_hidden = mx.concatenate([self._seed_hidden, seed_hidden])
+
     # --- batched accept + filter (B>1 stopgap; M2 owns the batched round) ---
 
     def accept_verified_tokens_batch(

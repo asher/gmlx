@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A speculative batch wider than the drafter's width cap keeps speculating on
+  its oldest requests instead of decoding plain. `GMLX_MTP_MIXED=0` reverts.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

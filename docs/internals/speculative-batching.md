@@ -25,25 +25,62 @@ point the next round starts from. Drafting is greedy, since coupled RNG does
 not extend across rows. Under kvarn KV, each row keeps its own start and
 end, so a rollback trims each row by its own rejected count.
 
-Each round checks the per-model width cap. A batch wider than the cap
-decodes plain, because verification widens each row's weight reads,
-and past the measured width the batch is faster without drafting.
+Each round checks the per-model width cap, the number of rows that can
+speculate before verification widens each row's weight reads past the
+point where drafting pays. A batch wider than the cap becomes a mixed
+batch, described below, or decodes plain where a mixed batch does not
+apply.
 
 New requests join between verify rounds, when the loop drains an injection
 queue. It checks the cap against the width the admission would reach,
 extends the target KV cache with the new rows, and adds the rows to the
-drafter only when the batch stays within the cap.
+drafter while the drafter has a free row.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Scalar: first request
     Scalar --> [*]: request finishes, no waiters
     Scalar --> Batched: waiters arrive (preempt)
-    Batched --> Gated: over the cap
+    Batched --> Mixed: over the cap
+    Mixed --> Batched: back within the cap
+    Batched --> Gated: over the cap, no mixed batch
     Gated --> Batched: back within the cap
     Batched --> [*]: last row finishes
+    Mixed --> [*]: last row finishes
     Gated --> [*]: last row finishes
 ```
+
+## Mixed batches
+
+A mixed batch speculates on its oldest rows, as many as the cap allows,
+and decodes the other rows plain in the same verify forward. Each plain
+row fills its block with copies of its bonus token. The exact-match walk
+accepts a copy only where the target emits the same token, so a plain
+row's output is what plain decode gives, and the target cache rolls each
+row back by its own accepted count. One forward reads the weights once
+for every row, where a separate plain step would read them twice.
+
+The speculating rows keep their drafter state and their acceptance rule.
+At temperature above zero with a cap of 1, the speculating row takes the
+scalar loop's stochastic walk, and the plain rows sample the target
+distribution as plain batched decode does.
+
+When a speculating row finishes, the oldest plain row takes its drafter
+row, since a row left plain would lose the speedup for the rest of its
+budget. A drafter that can hold a parked context for each plain row, as
+DFlash and the native MTP head can, feeds it each round's committed
+positions, so the promoted row drafts at once with its full context. A
+parked context costs one drafter cache per plain row. Other drafters
+start the promoted row cold from the round's verify capture, as a resumed
+batch does.
+
+A mixed batch needs a drafter that holds its own per-row state and a
+target that rolls back each row separately. Drafters that read the
+target's shared KV stay on the plain-decode gate. Targets with routed
+experts stay on the gate too: a plain row's padded block widens the set
+of experts each step reads, which costs the same as speculating on every
+row. `GMLX_MTP_MIXED=1` forces mixed batches on such targets, and
+`GMLX_MTP_MIXED=0` restores the gate for every model.
 
 ## Preempting a scalar generation
 
@@ -61,13 +98,18 @@ the server therefore preempts it:
 2. The generation is rebuilt as an unarmed batch-loop generator that
    restarts from the round's bonus token, with its real emitted count. Single-sequence caches convert to their batch classes.
 3. The rebuilt loop's first injection drain admits the waiters. If
-   the new width exceeds the cap, the batch decodes plain. Otherwise it
-   arms itself with a capture round and keeps speculating.
+   the new width exceeds the cap, the batch decodes as a mixed batch or
+   plain. Otherwise it arms itself with a capture round and keeps
+   speculating.
+
+At a cap of 1 with a mixed batch, the closing round commits its accepted
+positions into the drafter before the rebuild. The rebuilt row keeps that
+drafter and speculates from its first round, with no capture round.
 
 ## Re-arming a drained batch
 
-A batch gated to plain decode re-arms when finishing rows bring it back
-within the cap. Re-arming needs fresh hidden state and shared KV for each
+A batch gated to plain decode, when a mixed batch does not apply, re-arms
+when finishing rows bring it back within the cap. Re-arming needs fresh hidden state and shared KV for each
 surviving row, so the resume path runs the generator's cold-start
 sequence again instead of reusing per-row state:
 
@@ -101,6 +143,6 @@ cap.
 - The capture round emits at plain-decode rate, and the speedup returns
   on the round after.
 
-Both transitions have an off switch for A/B runs, `GMLX_MTP_PREEMPT` and
-`GMLX_MTP_RESUME`, which the
+The transitions have off switches for A/B runs, `GMLX_MTP_PREEMPT`,
+`GMLX_MTP_RESUME` and `GMLX_MTP_MIXED`, which the
 [debug switches](debug-switches.md#speculative-decoding) list.

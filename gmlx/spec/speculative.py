@@ -40,6 +40,7 @@ from gmlx.envflags import env_bool, env_float, env_int
 from .helpers import (
     _MTPVerifyResult,
     _SpeculativeSamplerRNG,
+    _append_arrays,
     _buffer_mtp_target_cache,
     _resolve_block_total,
     _mtp_cache_offset_max,
@@ -527,29 +528,44 @@ def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
     sample from p. Same (accepted, new_tokens) contract as _coupled_walk.
     process (the request's logits processors, one row per position) shapes
     p, so a draft the processors rule out has p = 0 and is rejected."""
-    n_draft = int(draft_tokens.shape[1])
     with mx.stream(generation_stream):
         logits = _verify_logits(lm, verify)
         if logits.ndim == 3:
             logits = logits[0]
         if process is not None:
             logits = process(logits.astype(mx.float32))
-        p = _stoch_target_probs(sampler, logits)              # [n_draft+1, V]
         draft_row = draft_tokens.reshape(-1)
-        p_n = p[:n_draft]
-        q = mx.stack(q_rows)                                  # [n_draft, V]
-        p_at = mx.take_along_axis(p_n, draft_row[:, None], axis=-1)[:, 0]
-        q_at = mx.take_along_axis(q, draft_row[:, None], axis=-1)[:, 0]
-        u = mx.random.uniform(shape=(n_draft,))
-        acc = u * q_at < p_at
-        res = mx.maximum(p_n - q, 0.0)
-        z = res.sum(axis=-1, keepdims=True)
-        res = mx.where(z > 0, res / z, p_n)
-        res_tokens = mx.random.categorical(mx.log(res), axis=-1)  # [n_draft]
-        bonus = mx.random.categorical(mx.log(p[n_draft:]), axis=-1)  # [1]
-    mx.eval(acc, res_tokens, bonus, draft_row)                    # the one sync
+        graph = _stoch_walk_graph(sampler, logits, draft_row, q_rows)
+    mx.eval(*graph, draft_row)                                    # the one sync
+    return _stoch_walk_finish(graph, draft_row.tolist(), budget)
+
+
+def _stoch_walk_graph(sampler, logits: mx.array, draft_row: mx.array,
+                      q_rows: list[mx.array]):
+    """One row's rejection walk as a deferred graph: ``logits`` [n_draft+1, V]
+    (processors applied), ``draft_row`` [n_draft]. Returns (accept flags,
+    residual draws, bonus draw) for _stoch_walk_finish."""
+    n_draft = int(draft_row.shape[0])
+    p = _stoch_target_probs(sampler, logits)                  # [n_draft+1, V]
+    p_n = p[:n_draft]
+    q = mx.stack(q_rows)                                      # [n_draft, V]
+    p_at = mx.take_along_axis(p_n, draft_row[:, None], axis=-1)[:, 0]
+    q_at = mx.take_along_axis(q, draft_row[:, None], axis=-1)[:, 0]
+    u = mx.random.uniform(shape=(n_draft,))
+    acc = u * q_at < p_at
+    res = mx.maximum(p_n - q, 0.0)
+    z = res.sum(axis=-1, keepdims=True)
+    res = mx.where(z > 0, res / z, p_n)
+    res_tokens = mx.random.categorical(mx.log(res), axis=-1)  # [n_draft]
+    bonus = mx.random.categorical(mx.log(p[n_draft:]), axis=-1)  # [1]
+    return acc, res_tokens, bonus
+
+
+def _stoch_walk_finish(graph, drf: list[int], budget: int):
+    """Host half of the rejection walk over an evaluated _stoch_walk_graph."""
+    acc, res_tokens, bonus = graph
+    n_draft = len(drf)
     acc_i = _accepted_prefix(acc.tolist(), n_draft)
-    drf = draft_row.tolist()
     if acc_i == n_draft:
         new = drf + bonus.tolist()
     else:
@@ -720,6 +736,59 @@ def _coupled_walk_batch(
         acc_list = [a] * B
         new_tokens_list = [(drf[i][:a] + [tgt[i][a]])[:budgets[i]]
                            for i in range(B)]
+    return acc_list, new_tokens_list
+
+
+def _mixed_walk(
+    lm,
+    verify,
+    draft_tokens: mx.array,
+    sampler,
+    budgets: list[int],
+    *,
+    stoch_row: int | None = None,
+    q_rows: list | None = None,
+    process=None,
+) -> tuple[list[int], list[list[int]]]:
+    """A mixed round's walk, with a single host sync.
+
+    Every row takes the exact-match walk of _coupled_walk_batch, which keeps
+    a plain row's padding drafts lossless: a pad is accepted only where it
+    equals the target's own token. ``stoch_row`` names the one speculating
+    row whose drafts were drawn from the q rows in ``q_rows``; that row takes
+    the min(1, p/q) walk instead. A stash that does not align with the
+    drafts falls back to exact match for the round."""
+    n_draft = int(draft_tokens.shape[1])
+    if (stoch_row is None or sampler is None or not q_rows
+            or len(q_rows) != n_draft):
+        return _coupled_walk_batch(lm, verify, draft_tokens, sampler, budgets,
+                                   process=process)
+    B = int(draft_tokens.shape[0])
+    n_pos = n_draft + 1
+    others = [i for i in range(B) if i != stoch_row]
+    with mx.stream(generation_stream):
+        logits = _verify_logits(lm, verify).astype(mx.float32)   # [B, n_pos, V]
+        if process is not None:
+            logits = _process_rows(logits, process)
+        graph = _stoch_walk_graph(sampler, logits[stoch_row],
+                                  draft_tokens[stoch_row], q_rows)
+        target = None
+        if others:
+            rest = logits[mx.array(others, dtype=mx.int32)]
+            logprobs = rest - mx.logsumexp(rest, axis=-1, keepdims=True)
+            flat = logprobs.reshape(-1, logprobs.shape[-1])
+            target = sampler(flat).reshape(len(others), n_pos)
+    mx.eval(*graph, draft_tokens, *([target] if target is not None else []))
+    drf = draft_tokens.tolist()
+    tgt = target.tolist() if target is not None else []
+    acc_list = [0] * B
+    new_tokens_list: list[list[int]] = [[] for _ in range(B)]
+    acc_list[stoch_row], new_tokens_list[stoch_row] = _stoch_walk_finish(
+        graph, drf[stoch_row], budgets[stoch_row])
+    for k, i in enumerate(others):
+        a = _accepted_prefix([t == d for t, d in zip(tgt[k], drf[i])], n_draft)
+        acc_list[i] = a
+        new_tokens_list[i] = (drf[i][:a] + [tgt[k][a]])[:budgets[i]]
     return acc_list, new_tokens_list
 
 
@@ -1306,6 +1375,24 @@ def _owned_decode_rounds(
                         with mx.stream(generation_stream):
                             _rollback_fn(prompt_cache, verify.gdn_states,
                                          accepted, bs)
+                    slot = getattr(model, "_kq_preempt_handoff", None)
+                    if (isinstance(slot, dict) and _has_accept
+                            and n_new == accepted + 1
+                            and not _needs_shared_kv
+                            and _mtp_width_cap(drafter) == 1
+                            and _mixed_policy(drafter, lm, 1)):
+                        # A mixed batch keeps this row speculating on the
+                        # same drafter: commit the round into it as the
+                        # loop would after delivery, and hand over the
+                        # next round's draft hidden.
+                        sampler_rng.draft_call(
+                            _accept_fn, verify.hidden, draft_tokens,
+                            accepted, new_tokens, draft_sampler,
+                            token_dtype, **draft_kwargs)
+                        nxt = verify.hidden[:, accepted:accepted + 1, :]
+                        slot["hidden"] = (_draft_hidden_fn(nxt)
+                                          if _has_draft_hidden else nxt)
+                        slot["drafter"] = drafter
                     raise
                 # Consumer stopped mid-round (EOS / stop string). Roll the target
                 # cache back to the delivered tokens so the finish seam sees
@@ -2322,6 +2409,33 @@ def _mtp_width_cap(drafter) -> int:
     return cap
 
 
+def _mixed_policy(drafter, lm, cap: int) -> bool:
+    """Whether a batch wider than the width cap keeps speculating on up to
+    ``cap`` rows and decodes the rest plain in the same verify forward
+    (a mixed batch), instead of converting to plain decode until it drains.
+
+    GMLX_MTP_MIXED: ``auto`` (default), ``1`` forces it where the mechanism
+    applies, ``0`` restores the plain-decode trip. The mechanism needs a
+    drafter that owns its per-row state (no shared target KV), a target
+    that rolls back each row by its own accept count, and a cap. ``auto``
+    also leaves routed-expert targets on the trip: a plain row verifies a
+    full block of padding drafts, and on an MoE target those positions
+    widen the expert union the same as speculating on every row, the cost
+    the MoE cap exists to avoid."""
+    mode = os.environ.get("GMLX_MTP_MIXED", "auto").strip().lower()
+    if mode in ("0", "off", "false", "no") or cap < 1:
+        return False
+    if getattr(drafter, "uses_shared_kv", True):
+        return False
+    if _uniform_batch_accept(drafter, lm):
+        return False
+    if not callable(getattr(lm, "rollback_speculative_cache", None)):
+        return False
+    if mode in ("1", "on", "true", "yes"):
+        return True
+    return not getattr(drafter, "mtp_target_moe", False)
+
+
 _gov_width_clamp = 0
 
 
@@ -2433,6 +2547,7 @@ def _owned_decode_rounds_batch(
     row_ids: list[int] | None = None,
     thinking_hook=None,
     row_procs: list | None = None,
+    handoff: dict | None = None,
 ) -> Iterator[tuple[list[int | None], Any]]:
     """Owned batched MTP decode loop (B >= 1 under continuous batching).
 
@@ -2467,6 +2582,18 @@ def _owned_decode_rounds_batch(
     bring theirs. Such a row gets its processors in every round kind, and
     while one is active the gated rounds give up their lookahead step,
     because the next step's processing depends on the token it produces.
+
+    Mixed batches (_mixed_policy): past the width cap the batch keeps
+    speculating on the ``cap`` oldest rows and verifies every other row in
+    the same forward behind padding drafts, which the exact-match walk
+    accepts only where they equal the target's token. The drafter runs on
+    the speculating rows alone. A plain row keeps a parked drafter context
+    (row_context_* on the drafter) warm from each round's capture, so it
+    takes over the drafter at full context when a speculating row
+    finishes; a drafter without parked contexts is cold-started from the
+    round's capture instead. ``handoff`` carries a preempted scalar
+    generation's live drafter (speculative.py preempt close), so the
+    incumbent keeps drafting without a re-seed.
     """
     token_dtype = mx.int32
     greedy = sampler is None
@@ -2521,17 +2648,18 @@ def _owned_decode_rounds_batch(
     # hidden/shared-KV from fresh state rather than reusing stale per-row
     # state (see the resume block in the loop).
     cap = _mtp_width_cap(drafter)
-    gated = bool(cap) and len(b) > cap
-    if gated:
-        _log_width_cap_once(
-            f"gate: batch B={len(b)} > cap={cap} at formation; plain decode "
-            f"until the batch drains")
     # A packed batch cache without ragged rollback (a stale stack) can
     # neither trim per row nor roll: the batch decodes plain for its whole
     # life, never re-arming.
     packed = [type(c).__name__ for c in _leaf_caches(prompt_cache)
               if _packed_batch_cache(c)]
     packed_gate = bool(packed) and len(b) > 1
+    mixed = not packed_gate and _mixed_policy(drafter, lm, cap)
+    gated = bool(cap) and len(b) > cap and not mixed
+    if gated:
+        _log_width_cap_once(
+            f"gate: batch B={len(b)} > cap={cap} at formation; plain decode "
+            f"until the batch drains")
     if packed_gate and not gated:
         gated = True
         _log_width_cap_once(
@@ -2567,23 +2695,77 @@ def _owned_decode_rounds_batch(
     # must be a capture round that arms the drafter.
     need_arm = (not gated) and hidden is None
 
+    # Mixed batches: the speculating rows (oldest first, in drafter row
+    # order) and the parked drafter contexts of the plain rows, by row.
+    spec: list[int] = []
+    parked: dict = {}
+    _ctx_open = getattr(drafter, "row_context_open", None) if mixed else None
+    took_handoff = (mixed and hidden is None and cap == 1 and len(b) == 1
+                    and handoff is not None
+                    and handoff.get("drafter") is drafter)
+
     # reset() is bind + empty caches, no compute, so it runs gated too (that
     # keeps "the previous batch already released the drafter" off the critical
     # path). Without left_padding when gated: B=1-only drafters raise on a
     # batched one, and gated mode never touches the drafter's KV anyway.
-    if gated:
+    if took_handoff:
+        # The preempted scalar round accepted into this drafter before it
+        # closed, so it already holds row 0's context and next seed.
+        need_arm = False
+        spec = [0]
+        hidden = handoff["hidden"]
+        _log_spec_once("mixed: preempted row keeps its drafter")
+    elif gated or (mixed and need_arm):
         drafter.reset(model)
     else:
-        _reset_armed(len(b))
+        _reset_armed(min(cap, len(b)) if mixed else len(b))
     sampler_rng = _SpeculativeSamplerRNG(drafter, enabled=False)
 
     draft_kwargs = {}
     if getattr(drafter, "supports_greedy_draft_argmax", False):
         draft_kwargs["greedy"] = True
     draft_sampler = _argmax_sampler
+    # The one speculating row of a mixed batch at cap 1 takes the scalar
+    # loop's stochastic walk: drafts drawn from a stashed proposal q.
+    stoch_stash: list[mx.array] = []
+    mixed_stoch = (mixed and cap == 1 and _STOCH_ACCEPT and not greedy
+                   and _stoch_supported_sampler(sampler)
+                   and getattr(drafter, "stochastic_draft", True))
+    if mixed_stoch:
+        if getattr(drafter, "supports_q_stash", False):
+            from .drafter_protocol import DraftStash
 
-    if not gated and not need_arm:
-        prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
+            draft_sampler = sampler
+            draft_kwargs = {"stash": DraftStash(q=stoch_stash)}
+        else:
+            draft_sampler = _stoch_draft_sampler(stoch_stash)
+            draft_kwargs = {}
+    _adopt_greedy = bool(draft_kwargs.get("greedy", False))
+
+    prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
+    if mixed and not need_arm and not took_handoff:
+        # Formation past the cap: the drafter seeds the oldest rows, the
+        # others park a context from their own prompt capture.
+        k = min(cap, len(b))
+        spec = list(range(k))
+        lp_arr = _batch_left_padding(prompt_cache)
+        if callable(prefill_draft) and seed_tokens is not None:
+            if k == 1:
+                toks, hid = _strip_row(seed_tokens, hidden, lp_arr, 0)
+            else:
+                rows_k = mx.arange(k)
+                toks, hid = seed_tokens[rows_k], hidden[rows_k]
+            sampler_rng.draft_call(
+                prefill_draft, toks, hid, mx.array(b[:k], dtype=token_dtype),
+                draft_sampler, token_dtype, **draft_kwargs)
+        if callable(_ctx_open) and seed_tokens is not None:
+            for r in range(k, len(b)):
+                toks, hid = _strip_row(seed_tokens, hidden, lp_arr, r)
+                parked[r] = _ctx_open(toks, hid,
+                                      mx.array([b[r]], dtype=token_dtype))
+            _eval_parked(drafter, parked.values())
+        hidden = _mtp_draft_hidden(lm, hidden[mx.arange(k), -1:, :])
+    elif not gated and not need_arm and not mixed:
         if callable(prefill_draft) and seed_tokens is not None:
             sampler_rng.draft_call(
                 prefill_draft, seed_tokens, hidden,
@@ -2598,6 +2780,8 @@ def _owned_decode_rounds_batch(
         # TypeError. Every remaining use of either is behind `not gated`.
         hidden = None
         shared_kv = None
+    elif mixed:
+        shared_kv = None
     elif not need_arm:
         if hidden.shape[1] > 1:
             hidden = hidden[:, -1:, :]
@@ -2605,7 +2789,7 @@ def _owned_decode_rounds_batch(
 
     L_prefill = _mtp_cache_offset_max(prompt_cache)
     positions = [L_prefill] * len(b)
-    if not gated and not need_arm:
+    if not gated and not need_arm and not mixed:
         drafter.set_shared_kv(
             shared_kv, kv_offset=L_prefill,
             position=_mtp_draft_position(mx.array(positions)),
@@ -2625,6 +2809,121 @@ def _owned_decode_rounds_batch(
     _walk_sampler = None if greedy else sampler
     _needs_shared_kv = getattr(drafter, "uses_shared_kv", True)
     _draft_block = drafter.draft_block
+    _accept_one_fn = getattr(drafter, "accept_verified_tokens", None)
+
+    def _spec_accept(verify_hidden, drafts, acc: list, new: list) -> None:
+        """Commit a round into the drafter's live rows. A B=1-only drafter
+        has no batched accept; a mixed batch drives it at width 1."""
+        if _has_accept_batch:
+            sampler_rng.draft_call(
+                _accept_batch_fn, verify_hidden, drafts, acc, new,
+                draft_sampler, token_dtype, **draft_kwargs)
+        elif mixed and len(acc) == 1 and callable(_accept_one_fn):
+            sampler_rng.draft_call(
+                _accept_one_fn, verify_hidden, drafts, int(acc[0]), new[0],
+                draft_sampler, token_dtype, **draft_kwargs)
+
+    def _mixed_admit(orig: int, toks, hid, first, seed_kv) -> None:
+        """Admit a row into a mixed batch: it speculates while the drafter
+        has a free row, else it parks a context from its prompt capture."""
+        nonlocal hidden
+        if hid is None or toks is None:
+            return              # no capture: promotion cold-starts it
+        if len(spec) < cap:
+            if not spec:
+                _reset_armed(1)
+                if seed_kv is not None and callable(
+                        getattr(drafter, "restore_kv", None)):
+                    drafter.restore_kv(seed_kv)
+                if callable(prefill_draft):
+                    sampler_rng.draft_call(
+                        prefill_draft, toks, hid, first, draft_sampler,
+                        token_dtype, **draft_kwargs)
+                hidden = _mtp_draft_hidden(lm, hid[:, -1:, :])
+            else:
+                inject_fn = getattr(drafter, "inject_rows", None)
+                if not callable(inject_fn):
+                    return
+                inject_fn(toks, hid, first, draft_sampler, token_dtype,
+                          greedy=True)
+                hidden = mx.concatenate(
+                    [hidden, _mtp_draft_hidden(lm, hid[:, -1:, :])], axis=0)
+            spec.append(orig)
+        elif callable(_ctx_open):
+            parked[orig] = _ctx_open(
+                toks, hid, first, kv=seed_kv if cap == 1 else None)
+            _eval_parked(drafter, [parked[orig]])
+
+    def _mixed_filter() -> None:
+        """Drop finished rows from the speculating set and the parked
+        contexts (the cache filter drops them from the batch)."""
+        nonlocal hidden, spec
+        for o in [o for o in parked if finished[o]]:
+            del parked[o]
+        keep = [i for i, o in enumerate(spec) if not finished[o]]
+        if len(keep) == len(spec):
+            return
+        if keep:
+            keep_mx = mx.array(keep, dtype=mx.int32)
+            filter_fn = getattr(drafter, "filter_batch", None)
+            if callable(filter_fn):
+                filter_fn(keep_mx)
+            hidden = hidden[keep_mx]
+        else:
+            hidden = None
+        spec = [spec[i] for i in keep]
+
+    def _mixed_promote(rnd) -> None:
+        """Fill free drafter rows with the oldest plain rows. A parked
+        context takes over at full context; without one the row cold-starts
+        from this round's capture, as a resumed batch does."""
+        nonlocal hidden
+        verify, verify_input, acc_l, new_l, row_order = rnd
+        pos_of = {o: j for j, o in enumerate(row_order)}
+        for o in active_idx:
+            if len(spec) >= cap:
+                break
+            j = pos_of.get(o)
+            if o in spec or finished[o] or j is None:
+                continue
+            a = acc_l[j]
+            vh = verify.hidden[j:j + 1, :a + 1]
+            nxt = _mtp_draft_hidden(lm, verify.hidden[j:j + 1, a:a + 1])
+            bonus = mx.array([b[o]], dtype=token_dtype)
+            ctx = parked.pop(o, None)
+            stoch_stash.clear()
+            if not spec:
+                if ctx is not None:
+                    sampler_rng.draft_call(
+                        drafter.row_context_adopt, ctx, draft_sampler,
+                        token_dtype, greedy=_adopt_greedy)
+                else:
+                    _reset_armed(1)
+                    if callable(prefill_draft):
+                        sampler_rng.draft_call(
+                            prefill_draft, verify_input[j:j + 1, :a + 1], vh,
+                            bonus, draft_sampler, token_dtype, **draft_kwargs)
+                hidden = nxt
+            else:
+                extend_fn = getattr(drafter, "row_context_extend", None)
+                inject_fn = getattr(drafter, "inject_rows", None)
+                if ctx is not None and callable(extend_fn):
+                    sampler_rng.draft_call(
+                        extend_fn, ctx, draft_sampler, token_dtype,
+                        greedy=_adopt_greedy)
+                elif callable(inject_fn):
+                    inject_fn(verify_input[j:j + 1, :a + 1], vh, bonus,
+                              draft_sampler, token_dtype, greedy=True)
+                else:
+                    if ctx is not None:
+                        parked[o] = ctx
+                    break
+                hidden = mx.concatenate([hidden, nxt], axis=0)
+            spec.append(o)
+            _log_spec_once(
+                "mixed: plain row promoted to speculating "
+                + ("from its parked context" if ctx is not None
+                   else "cold from the round's capture"))
 
     # Double buffer for gated (plain-decode) rounds: the tokens the GPU is
     # already computing. None means "re-prime", set whenever the batch shape
@@ -2694,8 +2993,9 @@ def _owned_decode_rounds_batch(
         """Capture round: an S=1 verify of the pending bonus tokens with
         hidden/shared-KV capture on, then the drafter cold start from that
         fresh state (the generator-entry sequence, never stale per-row
-        state). Emits one token per row through the shared round tail."""
-        nonlocal hidden
+        state). Emits one token per row through the shared round tail. A
+        mixed batch seeds the oldest ``cap`` rows and parks the others."""
+        nonlocal hidden, spec
         b_arr = mx.array([b[i] for i in active_idx], dtype=token_dtype)
         has_procs = _has_row_procs()
         with mx.stream(generation_stream), \
@@ -2709,17 +3009,26 @@ def _owned_decode_rounds_batch(
         accepted_list, new_tokens_list = _coupled_walk_batch(
             lm, verify, mx.zeros((len(active_idx), 0), dtype=token_dtype),
             _walk_sampler, budgets, process=process)
-        _reset_armed(len(active_idx))
-        prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
+        n = len(active_idx)
+        k = min(cap, n) if mixed else n
+        _reset_armed(k)
+        next_b = mx.array([nt[-1] for nt in new_tokens_list],
+                          dtype=token_dtype)
         if callable(prefill_draft):
             # One (bonus, hidden) pair per row; the seed contract accepts a
             # 1-token capture (draft quality ramps back up over rounds).
-            next_b = mx.array([nt[-1] for nt in new_tokens_list],
-                              dtype=token_dtype)
             sampler_rng.draft_call(
-                prefill_draft, b_arr[:, None], verify.hidden, next_b,
+                prefill_draft, b_arr[:k, None], verify.hidden[:k], next_b[:k],
                 draft_sampler, token_dtype, **draft_kwargs)
-        hidden = _mtp_draft_hidden(lm, verify.hidden[:, -1:, :])
+        if mixed:
+            spec = list(active_idx[:k])
+            if callable(_ctx_open):
+                for j in range(k, n):
+                    parked[active_idx[j]] = _ctx_open(
+                        b_arr[j:j + 1, None], verify.hidden[j:j + 1],
+                        next_b[j:j + 1])
+                _eval_parked(drafter, parked.values())
+        hidden = _mtp_draft_hidden(lm, verify.hidden[:k, -1:, :])
         return accepted_list, new_tokens_list, verify
 
     def _drain_injections():
@@ -2748,7 +3057,7 @@ def _owned_decode_rounds_batch(
             # inject_rows, which teacher-forces the whole injected prompt
             # through a drafter this batch will never use again. The queue can
             # hold several entries, so admissions sum.
-            if not gated and cap:
+            if not gated and cap and not mixed:
                 incoming = sum(len(inj["uids"]) for inj in gen_inj)
                 if len(active_idx) + incoming > cap:
                     _trip_width_gate(len(active_idx) + incoming)
@@ -2767,7 +3076,28 @@ def _owned_decode_rounds_batch(
                 # hidden is None while un-armed (arm-from-capture entry):
                 # the drafter holds no state to inject into, and the capture
                 # round will build hidden/shared-KV for every row at once.
-                if not gated and hidden is not None:
+                if mixed and not need_arm:
+                    seed_kv = None
+                    stream = (_pop_seed_stream(inj["prompt_cache"])
+                              if B_new == 1 else None)
+                    if stream and int(stream.get("len", 0) or 0) > 0:
+                        from .mtp_drafter import _cache_offset
+                        kv = stream.get("kv") or []
+                        if kv and _cache_offset(kv) == int(stream["len"]):
+                            seed_kv = kv
+                    inj_lp = _batch_left_padding(inj["prompt_cache"])
+                    for row in range(B_new):
+                        toks, hid = None, None
+                        if inj.get("hidden") is not None:
+                            toks, hid = _strip_row(
+                                inj.get("prompt_tokens"), inj["hidden"],
+                                inj_lp if B_new > 1 else None, row)
+                        _mixed_admit(
+                            B_orig + row, toks, hid,
+                            mx.array([int(inj["first_tokens_list"][row])],
+                                     dtype=token_dtype),
+                            seed_kv)
+                elif not gated and hidden is not None and not mixed:
                     inject_fn = getattr(drafter, "inject_rows", None)
                     if callable(inject_fn):
                         inject_fn(
@@ -2868,7 +3198,7 @@ def _owned_decode_rounds_batch(
         _drain_injections()
         # Env can be lowered on a live server (per-round read, like the pacing
         # ratio), so re-check even without an admission.
-        if not gated and cap and len(active_idx) > cap:
+        if not gated and cap and not mixed and len(active_idx) > cap:
             _trip_width_gate(len(active_idx))
         # Resume: a gated batch drained back under the cap re-enters
         # speculation via a capture round. The gated double buffer holds a
@@ -2887,6 +3217,7 @@ def _owned_decode_rounds_batch(
             else:
                 dispatch_next = False
         n_active = len(active_idx)
+        mixed_round = None
 
         # ^T/budget forced close: only for a single armed row (see the
         # docstring). take_forced consumes a pending ^T request, so it must
@@ -2897,7 +3228,8 @@ def _owned_decode_rounds_batch(
         # would be a verify shape crash, not a soft degrade.
         forced = None
         if (thinking_hook is not None and n_active == 1 and B_orig == 1
-                and not gated and not need_arm and hidden is not None):
+                and not gated and not need_arm and hidden is not None
+                and (not mixed or spec == active_idx)):
             forced = _next_forced_chunk(
                 thinking_hook, forced_queue, block_total)
             if forced is not None:
@@ -2989,12 +3321,106 @@ def _owned_decode_rounds_batch(
             sampler_rng.target_sampled(sync_draft=True)
             # Forced rounds drafted nothing; recording them would skew
             # accept stats and the adaptive block sizing.
-            if _has_accept_batch:
-                sampler_rng.draft_call(
-                    _accept_batch_fn, verify.hidden, draft_tokens,
-                    accepted_list, new_tokens_list, draft_sampler, token_dtype,
-                    **draft_kwargs)
+            _spec_accept(verify.hidden, draft_tokens, accepted_list,
+                         new_tokens_list)
             hidden = _mtp_draft_hidden(lm, verify.hidden[:, -1:, :])
+        elif mixed:
+            # Mixed round: the speculating rows draft, every other row
+            # pads its block with its bonus token, and one verify forward
+            # covers the whole batch. See the docstring.
+            _t0 = time.perf_counter()
+            _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
+            pos_of = {o: j for j, o in enumerate(active_idx)}
+            spec_j = [pos_of[o] for o in spec]
+            b_arr = mx.array([b[o] for o in active_idx], dtype=token_dtype)
+            bs = 1
+            draft_spec = None
+            if spec:
+                remaining = [max(1, max_tok[o] - emitted[o] + 1) for o in spec]
+                bs = _mtp_next_block_size(
+                    drafter, block_total, configured_block_total,
+                    min(remaining))
+            if bs > 1:
+                draft_spec = sampler_rng.draft_tokens(
+                    _draft_block, b_arr[mx.array(spec_j, dtype=mx.int32)],
+                    hidden, None, bs, draft_sampler, token_dtype,
+                    **draft_kwargs)
+                bs = int(draft_spec.shape[1]) + 1
+            n_draft = bs - 1
+            draft_tokens = mx.broadcast_to(b_arr[:, None], (n_active, n_draft))
+            if draft_spec is not None and n_draft > 0:
+                if spec_j == list(range(n_active)):
+                    draft_tokens = draft_spec
+                else:
+                    row_of = [0] * n_active
+                    for i, j in enumerate(spec_j):
+                        row_of[j] = i
+                    spec_set = set(spec_j)
+                    is_spec = mx.array([j in spec_set for j in range(n_active)])
+                    draft_tokens = mx.where(
+                        is_spec[:, None],
+                        draft_spec[mx.array(row_of, dtype=mx.int32)],
+                        draft_tokens)
+            draft_tokens = draft_tokens.astype(token_dtype)
+            if _ROUND_PROFILE:
+                mx.eval(draft_tokens)
+            _td = time.perf_counter()
+
+            has_procs = _has_row_procs()
+            with mx.stream(generation_stream), \
+                    lora_rows.published([row_uids[i] for i in active_idx]):
+                verify_input = mx.concatenate(
+                    [b_arr[:, None], draft_tokens], axis=1)
+                verify = _mtp_verify_target(
+                    lm, verify_input, prompt_cache, sampler,
+                    sample_target_tokens=greedy and not has_procs)
+            if _ROUND_PROFILE:
+                mx.eval(verify.hidden)
+            _tv = time.perf_counter()
+
+            process = None
+            if has_procs:
+                mx.async_eval(verify.hidden)
+                process = _round_procs(draft_tokens.tolist())
+            budgets = [max_tok[o] - emitted[o] for o in active_idx]
+            stoch_j = (spec_j[0] if mixed_stoch and len(spec) == 1
+                       and n_draft > 0 else None)
+            accepted_list, new_tokens_list = _mixed_walk(
+                lm, verify, draft_tokens, _walk_sampler, budgets,
+                stoch_row=stoch_j, q_rows=list(stoch_stash), process=process)
+            stoch_stash.clear()
+            _t1 = time.perf_counter()
+            sampler_rng.target_sampled(sync_draft=True)
+            max_a = max(accepted_list)
+            if spec:
+                acc_s = [accepted_list[j] for j in spec_j]
+                new_s = [new_tokens_list[j] for j in spec_j]
+                if n_draft > 0:
+                    # Plain rows stay out of the accept stats: a pad that
+                    # matched is not the drafter's acceptance.
+                    _record_speculative_round(
+                        drafter, sum(acc_s) / len(acc_s), n_draft)
+                if spec_j == list(range(n_active)):
+                    vh = verify.hidden
+                else:
+                    vh = verify.hidden[mx.array(spec_j, dtype=mx.int32)]
+                _spec_accept(
+                    vh, draft_spec if draft_spec is not None
+                    else mx.zeros((len(spec), 0), dtype=token_dtype),
+                    acc_s, new_s)
+                hidden = _mtp_draft_hidden(
+                    lm, vh[mx.arange(len(spec)),
+                           mx.array(acc_s, dtype=mx.int32)][:, None])
+            if parked:
+                for j, o in enumerate(active_idx):
+                    ctx = parked.get(o)
+                    if ctx is not None:
+                        drafter.row_context_ingest(
+                            ctx, verify.hidden[j:j + 1],
+                            new_tokens_list[j], accepted_list[j])
+                _eval_parked(drafter, parked.values())
+            mixed_round = (verify, verify_input, accepted_list,
+                           new_tokens_list, list(active_idx))
         else:
             remaining = [
                 max(1, max_tok[active_idx[j]] - emitted[active_idx[j]] + 1)
@@ -3145,7 +3571,13 @@ def _owned_decode_rounds_batch(
             empty = mx.array([], dtype=mx.int32)
             _filter_batch_rows_empty(prompt_cache)
             _gated_pending = None  # adopted batch re-primes at its own width
-            if not gated:
+            if mixed:
+                # The drafter's live rows are dead; the next admission seeds
+                # it afresh.
+                spec = []
+                parked.clear()
+                hidden = None
+            elif not gated:
                 _filter_drafter = getattr(drafter, "filter_batch", None)
                 if callable(_filter_drafter):
                     _filter_drafter(empty)
@@ -3178,7 +3610,9 @@ def _owned_decode_rounds_batch(
                     # Same row order as the cache filter, so the dispatched
                     # lookahead stays aligned with the surviving rows.
                     _gated_pending = _gated_pending[keep_mx]
-                if not gated:
+                if mixed:
+                    _mixed_filter()
+                elif not gated:
                     filter_drafter = getattr(drafter, "filter_batch", None)
                     if callable(filter_drafter):
                         filter_drafter(keep_mx)
@@ -3190,7 +3624,11 @@ def _owned_decode_rounds_batch(
                                 K_next[keep_mx], V_next[keep_mx])
                 active_idx = [active_idx[j] for j in keep_slots]
 
-        if not gated:
+        if mixed and mixed_round is not None:
+            _mixed_promote(mixed_round)
+        mixed_round = None
+
+        if not gated and not mixed:
             positions_active = [positions[i] for i in active_idx]
             new_kv_offset = max(positions_active) if positions_active else 0
             drafter.set_shared_kv(
@@ -3240,6 +3678,32 @@ def _slice_shared_kv_batch(
             V_next = V_next * keep_f
         next_shared_kv[k] = (K_next, V_next)
     return next_shared_kv
+
+
+def _strip_row(tokens, hidden: mx.array, left_padding, r: int):
+    """Row ``r`` of a left-padded prefill capture without its padding:
+    (tokens [1, L - pad] or None, hidden [1, n, ...]). The hidden covers the
+    row's trailing positions, so only the padding inside it is dropped."""
+    lp = 0
+    if left_padding is not None and int(left_padding.size) > r:
+        lp = int(left_padding[r].item())
+    L = int(tokens.shape[1]) if tokens is not None else int(hidden.shape[1])
+    h0 = max(0, lp - (L - int(hidden.shape[1])))
+    return (tokens[r:r + 1, lp:] if tokens is not None else None,
+            hidden[r:r + 1, h0:])
+
+
+def _eval_parked(drafter, contexts) -> None:
+    """Dispatch the parked contexts' pending writes, so no graph grows
+    across rounds."""
+    state_fn = getattr(drafter, "row_context_state", None)
+    if not callable(state_fn):
+        return
+    arrays: list[mx.array] = []
+    for ctx in contexts:
+        _append_arrays(state_fn(ctx), arrays)
+    if arrays:
+        mx.async_eval(*arrays)
 
 
 def _batch_left_padding(prompt_cache: list) -> mx.array | None:
@@ -3303,6 +3767,16 @@ def owned_server_rounds_batch(
             pass
     if not emitted or len(emitted) != B:
         emitted = [1] * B
+    # A preempted scalar generation's drafter, live for row 0 (admission
+    # _preempt_scalar); popped so it can never reach a later batch.
+    handoff = getattr(model, "_kq_preempt_handoff", None)
+    if handoff is not None:
+        try:
+            del model._kq_preempt_handoff
+        except AttributeError:
+            pass
+        if not handoff.get("drafter") or hidden is not None or B != 1:
+            handoff = None
     yield from _owned_decode_rounds_batch(
         model, drafter, lm, prompt_cache,
         hidden=hidden, b=b, shared_kv=shared_kv_states,
@@ -3311,4 +3785,4 @@ def owned_server_rounds_batch(
         sampler=eff_sampler, draft_block_size=draft_block_size,
         stop_check=stop_check, eos_token_ids=eos_token_ids,
         row_ids=row_ids, retire_ctx0=retire_ctx0,
-        thinking_hook=thinking_hook, row_procs=row_procs)
+        thinking_hook=thinking_hook, row_procs=row_procs, handoff=handoff)

@@ -151,7 +151,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     # MoE verify multiplies the expert union each drafted position touches, and
     # both measured MoE families lose the trade above B=1. Structural, so a new
     # MoE arch inherits it without a table row; dense stays family-defaulted.
-    if cap != 1 and target is not None and model_is_moe(target):
+    target_moe = target is not None and model_is_moe(target)
+    if cap != 1 and target_moe:
         log(f"[mtp] width cap: routed-expert target -> 1 "
             f"(family default was {cap or 'uncapped'})")
         cap = 1
@@ -169,6 +170,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     try:
         drafter.mtp_width_cap = cap
         drafter.mtp_width_limit = limit
+        # Read by the mixed-batch policy (speculative._mixed_policy).
+        drafter.mtp_target_moe = bool(target_moe)
     except AttributeError:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
     log(f"[mtp] width cap: {cap or 'uncapped'}"
