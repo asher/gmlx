@@ -103,6 +103,7 @@ from .hardening import (
 )
 from .messages_route import install_messages_route
 from .mtp_thinking import install_mtp_thinking_budget
+from .context_copy import install_context_copy_transport
 from .spec_processors import install_mtp_logits_processors
 from .observability import (
     install_request_timing_log,
@@ -179,6 +180,7 @@ __all__ = [
     "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_mtp_logits_processors",
+    "install_context_copy_transport",
     "install_mtp_thinking_budget",
     "install_openai_stop_sequences",
     "install_optional_request_model",
@@ -385,6 +387,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # outermost _make_logits_processors wrap, and its build must read the
     # row processors before the owned MTP prefill clears them.
     install_mtp_logits_processors()
+    # Context copy's prompt ids ride the same build and transport seams.
+    install_context_copy_transport()
     # After every other thinking-criteria patch: its wrapper carries their
     # flags forward, and none of them may replace it.
     install_until_eos_default()

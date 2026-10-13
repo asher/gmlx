@@ -11,7 +11,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, rope_scaling, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, context_copy, rope_scaling, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -187,8 +187,8 @@ _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
                          "prefill_feeder", "decode_feeder",
                          "stream_fast_disk", "speculative",
-                         "speculative_width_cap", "rope_scaling",
-                         "overrides", "pin", "ttl_s"})
+                         "speculative_width_cap", "context_copy",
+                         "rope_scaling", "overrides", "pin", "ttl_s"})
 _RULE_KEYS = frozenset({"match", "profile"})
 _DISCOVER_KEYS = frozenset({"dir", "recursive", "pair_mmproj", "speculative"})
 _CACHE_KEYS = frozenset(set(CACHE_ENV) | {"disk"})
@@ -582,6 +582,8 @@ class ModelCfg:
     # loaded). None = the drafter family's measured default; 0 = uncapped;
     # N = cap. Clamped by a per-drafter hard limit (B=1-only drafters).
     speculative_width_cap: int | None = None
+    # Context copy: draft from the prompt where the output repeats it.
+    context_copy: bool = False
     # Rope scaling options (a RopeOverride): llama.cpp's rope flags, keyed
     # as in the `rope_scaling:` block. None = the GGUF header's scaling.
     rope_scaling: Any = None
@@ -1133,6 +1135,8 @@ class ResolvedModel:
     # N = speculate only while the live decode batch is <= N wide.
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
+    # Context copy on this id's drafter. Load-affecting the same way.
+    context_copy: bool = False
     # Rope scaling options (a RopeOverride, None = the header's). Load-
     # affecting: the rope tables are built at load, and KV made under one
     # scaling is wrong under another.
@@ -1194,6 +1198,7 @@ class ResolvedModel:
             self.draft_gguf,
             bool(self.speculative),
             str(self.speculative_width_cap),
+            bool(self.context_copy),
             self.chat_template,
             adapters,
             str(stream),
@@ -1979,6 +1984,7 @@ def resolve_model(
         reasoning_effort=reasoning_effort,
         speculative=bool(model.speculative or model.draft_gguf or model.native_mtp),
         speculative_width_cap=model.speculative_width_cap,
+        context_copy=bool(model.context_copy),
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
         draft_gguf=(None if model.native_mtp
                     else resolve_path(model.draft_gguf, cfg.model_dirs)),
@@ -2118,6 +2124,7 @@ def env_for(resolved: ResolvedModel) -> dict[str, str]:
     # sibling id's cap linger in the process env and be inherited here.
     cap = resolved.speculative_width_cap
     env["MLX_VLM_GGUF_SPEC_WIDTH_CAP"] = "" if cap is None else str(cap)
+    env["MLX_VLM_GGUF_CONTEXT_COPY"] = "1" if resolved.context_copy else ""
     return env
 
 
@@ -2637,6 +2644,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         speculative=bool(raw.get("speculative", False)),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
+        context_copy=bool(_normalize_optional_bool(
+            raw.get("context_copy"), "context_copy", f"model {model_id!r}")),
         rope_scaling=_normalize_rope_scaling(
             raw.get("rope_scaling"), f"model {model_id!r}"),
         overrides=dict(ov),

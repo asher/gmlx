@@ -124,6 +124,29 @@ most prompts, and the Bonsai-trained drafters lead only on long code
 output. Start with the Qwen3.8 drafter and measure the others on your own
 work.
 
+## Context copy
+
+When the output repeats the prompt, as when the model edits code it was
+given or quotes a document, the prompt itself is a good draft. Context copy
+looks for the newest generated tokens in the prompt, and when it finds them,
+the round checks the prompt tokens that follow in place of the drafter's
+draft. The model accepts them by the same rule as any draft, so the output
+does not change. The drafter learns the accepted tokens and drafts the next
+round as usual.
+
+A copy can run longer than the drafter's block, up to 24 tokens. Copies
+that the model accepts whole grow toward that limit, and when the model
+rejects most of a copy, copying pauses for a while. On the server, a
+request copies when it starts while no other request decodes, and stops
+copying when another request joins it.
+
+[`context_copy: true`](config.md#modelscontext_copy) turns it on for a
+model. `GMLX_CONTEXT_COPY=1` turns it on for every model, in `run` and
+`chat` too, `GMLX_CONTEXT_COPY=0` turns it off everywhere, and
+`GMLX_CONTEXT_COPY_MAX` sets the longest copy. Context copy gains on
+grounded answers, edits and rewrites, and does nothing on free prose that
+does not repeat the prompt.
+
 ## Stochastic acceptance
 
 By default, the model accepts a draft only when it matches the token that

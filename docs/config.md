@@ -138,6 +138,7 @@ keeps running. `gmlx sync-models` removes such entries.
 | <a id="modelsdraft_gguf"></a>`draft_gguf` | none | A separate [drafter](glossary.md#drafter) GGUF. Setting it turns on `speculative`. |
 | <a id="modelsnative_mtp"></a>`native_mtp` | `false` | Draft with the GGUF's own MTP head even when `draft_gguf` is set |
 | <a id="modelsspeculative_width_cap"></a>`speculative_width_cap` | `null` | Speculate on at most this many requests at a time. `null` takes the drafter's default, `0` removes the cap. |
+| <a id="modelscontext_copy"></a>`context_copy` | `false` | Also draft from the prompt, as [Context copy](speculative-decoding.md#context-copy) describes. The output stays token-identical. |
 | <a id="modelsadapter"></a>`adapter` | none | [LoRA adapter](lora.md) GGUF applied at load. Ids with the same `path` and different adapters share the base weights. |
 | <a id="modelspin"></a>`pin` | `false` | Load at start and stay loaded. Only `POST /unload` unloads a pinned model. |
 | <a id="modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |

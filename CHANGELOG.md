@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
+  output repeats it, which speeds up edits and quotes with the same output.
+
 ### Changed
 
 - A speculative batch wider than the drafter's width cap keeps speculating on

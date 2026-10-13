@@ -136,7 +136,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     ``hard_limit`` is a drafter-imposed ceiling (the B=1-only DFlash
     drafters) that replaces the family's table row.
     MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
-    both and is itself clamped by the hard limit.
+    both and is itself clamped by the hard limit. MLX_VLM_GGUF_CONTEXT_COPY
+    (same window) stamps the model's context_copy key.
     """
     if hard_limit is not None:
         limit = int(hard_limit)
@@ -172,6 +173,10 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
         drafter.mtp_width_limit = limit
         # Read by the mixed-batch policy (speculative._mixed_policy).
         drafter.mtp_target_moe = bool(target_moe)
+        # The model's context_copy config key (load-window env), read by
+        # context_copy.context_copy_enabled.
+        drafter.context_copy = (
+            os.environ.get("MLX_VLM_GGUF_CONTEXT_COPY", "") == "1")
     except AttributeError:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
     log(f"[mtp] width cap: {cap or 'uncapped'}"

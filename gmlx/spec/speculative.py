@@ -52,6 +52,7 @@ from .helpers import (
     _slice_shared_kv_after_reject,
     generation_stream,
 )
+from .context_copy import PromptCopy, context_copy_enabled
 from .row_procs import SpecRowProcessors, batch_processors
 
 _log = logging.getLogger(__name__)
@@ -534,12 +535,13 @@ def _verify_logits(lm, verify) -> mx.array:
 
 
 def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
-                     q_rows: list[mx.array], process=None):
+                     q_rows: list[mx.array] | None, process=None):
     """Leviathan rejection walk with a single host sync.
 
     Accept draft j with prob min(1, p_j(d_j) / q_j(d_j)); the first rejection
     emits a residual max(p - q, 0) sample, full acceptance emits a bonus
     sample from p. Same (accepted, new_tokens) contract as _coupled_walk.
+    q_rows None proposes each draft with probability 1 (a copied token).
     process (the request's logits processors, one row per position) shapes
     p, so a draft the processors rule out has p = 0 and is rejected."""
     with mx.stream(generation_stream):
@@ -555,14 +557,20 @@ def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
 
 
 def _stoch_walk_graph(sampler, logits: mx.array, draft_row: mx.array,
-                      q_rows: list[mx.array]):
+                      q_rows: list[mx.array] | None):
     """One row's rejection walk as a deferred graph: ``logits`` [n_draft+1, V]
     (processors applied), ``draft_row`` [n_draft]. Returns (accept flags,
     residual draws, bonus draw) for _stoch_walk_finish."""
     n_draft = int(draft_row.shape[0])
     p = _stoch_target_probs(sampler, logits)                  # [n_draft+1, V]
     p_n = p[:n_draft]
-    q = mx.stack(q_rows)                                      # [n_draft, V]
+    if q_rows is None:
+        # Point mass on each draft: accept with p(d), and the residual
+        # (p - q)+ is p with d removed.
+        q = (mx.arange(p.shape[-1])[None, :]
+             == draft_row[:, None]).astype(p.dtype)
+    else:
+        q = mx.stack(q_rows)                                  # [n_draft, V]
     p_at = mx.take_along_axis(p_n, draft_row[:, None], axis=-1)[:, 0]
     q_at = mx.take_along_axis(q, draft_row[:, None], axis=-1)[:, 0]
     u = mx.random.uniform(shape=(n_draft,))
@@ -991,6 +999,7 @@ def _owned_decode_rounds(
     thinking_hook=None,
     round_pos: list | None = None,
     row_procs=None,
+    copy_prompt: list[int] | None = None,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
     serve decode-only path.
@@ -1012,6 +1021,9 @@ def _owned_decode_rounds(
 
     row_procs (a SpecRowProcessors) runs the request's logits processors
     (penalties, a response_format grammar, XTC) at every verify position.
+
+    copy_prompt, the request's full prompt ids, turns on context copy
+    (gmlx.spec.context_copy) when the model or GMLX_CONTEXT_COPY enables it.
     """
     token_dtype = mx.int32
     row_uid = (getattr(model, "_kq_row_uids", None) or [None])[0]
@@ -1203,6 +1215,12 @@ def _owned_decode_rounds(
                        new_tokens[:delivered] if bonus_delivered else [],
                        draft_sampler, token_dtype, **draft_kwargs)
 
+    copier = None
+    if copy_prompt and context_copy_enabled(drafter):
+        copier = PromptCopy(copy_prompt)
+        copier.extend([b])
+        _log_spec_once("context copy: drafting from the prompt")
+
     _round_log_session(kv_offset, max_tokens)
     _prev_end = time.perf_counter()
     _last_clear = emitted
@@ -1212,6 +1230,7 @@ def _owned_decode_rounds(
             _t0 = time.perf_counter()
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             gated = False
+            copied: list[int] = []
             forced = (_next_forced_chunk(thinking_hook, forced_queue, block_total)
                       if thinking_hook is not None else None)
             if forced is not None:
@@ -1245,9 +1264,16 @@ def _owned_decode_rounds(
                                               max_tokens - emitted + 1)
                 if bs <= 1:
                     break
-                draft_tokens = sampler_rng.draft_tokens(
-                    _draft_block, b, hidden, None, bs, draft_sampler, token_dtype,
-                    **draft_kwargs)
+                copied = (copier.propose(bs - 1, max_tokens - emitted)
+                          if copier is not None else [])
+                if copied:
+                    # Context copy: the prompt's continuation stands in for
+                    # the drafter's block this round, at its own length.
+                    draft_tokens = mx.array([copied], dtype=token_dtype)
+                else:
+                    draft_tokens = sampler_rng.draft_tokens(
+                        _draft_block, b, hidden, None, bs, draft_sampler,
+                        token_dtype, **draft_kwargs)
                 # The drafter may return fewer drafts than requested (e.g. the
                 # deepseek-v4 confidence-gated rollout); every downstream bs
                 # consumer (rollback width, accept bookkeeping, finish seams)
@@ -1262,7 +1288,7 @@ def _owned_decode_rounds(
                 threshold = (gate_cost.threshold() if gate_cost is not None
                              else _ROUND_GATE)
                 estimate = (getattr(drafter, "round_estimate", None)
-                            if threshold > 0 else None)
+                            if threshold > 0 and not copied else None)
                 if estimate is not None:
                     mx.async_eval(estimate)
                     snap = _cache_snapshot(prompt_cache)
@@ -1316,7 +1342,13 @@ def _owned_decode_rounds(
                     process = row_procs.processor(
                         draft_tokens.reshape(-1).tolist())
 
-                if stoch and len(stoch_stash) == draft_tokens.shape[1]:
+                if stoch and copied:
+                    # A copied token is a proposal with all its mass on
+                    # that token (q = 1 there).
+                    accepted, new_tokens = _stochastic_walk(
+                        lm, verify, draft_tokens, sampler,
+                        max_tokens - emitted, None, process=process)
+                elif stoch and len(stoch_stash) == draft_tokens.shape[1]:
                     accepted, new_tokens = _stochastic_walk(
                         lm, verify, draft_tokens, sampler,
                         max_tokens - emitted, list(stoch_stash),
@@ -1329,8 +1361,9 @@ def _owned_decode_rounds(
                     accepted, new_tokens = _coupled_walk(
                         lm, verify, draft_tokens, _walk_sampler,
                         max_tokens - emitted,
-                        top2=list(top2_stash) if top2_stash else None,
-                        pq=list(pq_stash) if pq_stash else None,
+                        top2=(list(top2_stash) if top2_stash and not copied
+                              else None),
+                        pq=list(pq_stash) if pq_stash and not copied else None,
                         base_pos=emitted, process=process)
             stoch_stash.clear()
             if top2_stash is not None:
@@ -1345,12 +1378,15 @@ def _owned_decode_rounds(
                 # Counted apart: no draft was verified, and a zero-length
                 # round would skew accept stats and adaptive block sizing.
                 drafter.gated_rounds = getattr(drafter, "gated_rounds", 0) + 1
+            elif copied:
+                # The drafter's stats and block sizing stay its own.
+                copier.record(bs - 1, accepted)
             elif forced is None:
                 # Forced rounds drafted nothing; recording them would skew
                 # accept stats and the adaptive block sizing.
                 _record_speculative_round(drafter, accepted, bs - 1)
             _t1 = time.perf_counter()
-            if gate_cost is not None and forced is None:
+            if gate_cost is not None and forced is None and not copied:
                 gate_cost.add(gated, _t1 - _t0)
 
             n_new = len(new_tokens)
@@ -1417,6 +1453,8 @@ def _owned_decode_rounds(
                 _finish_round(delivered)
                 raise
             emitted += n_new
+            if copier is not None:
+                copier.extend(new_tokens)
             if emitted >= max_tokens:
                 # Budget exhausted: the same finish-seam contract as the
                 # mid-round close above.
@@ -1636,7 +1674,9 @@ def stream_speculative(
         emitted=1, max_tokens=max_tokens, sampler=sampler,
         draft_block_size=draft_block_size,
         seed_stream=({"kv": seed_kv, "len": seed_len} if seed_len else None),
-        thinking_hook=thinking_hook, row_procs=row_procs)
+        thinking_hook=thinking_hook, row_procs=row_procs,
+        copy_prompt=(prompt[0].tolist() if context_copy_enabled(drafter)
+                     else None))
 
 
 def owned_server_rounds(
@@ -1680,6 +1720,7 @@ def owned_server_rounds(
     seed_stream = _pop_seed_stream(prompt_cache)
     thinking_hook = _pop_thinking_hook(prompt_cache)
     row_procs = (_pop_row_procs(prompt_cache) or [None])[0]
+    copy_prompt = _pop_copy_prompt(prompt_cache)
     sidecar_ctx = None
     if retire_ctx is not None:
         sidecar_ctx = {
@@ -1713,7 +1754,7 @@ def owned_server_rounds(
         sampler=eff_sampler, draft_block_size=draft_block_size,
         drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx,
         seed_stream=seed_stream, thinking_hook=thinking_hook, round_pos=pos,
-        row_procs=row_procs)
+        row_procs=row_procs, copy_prompt=copy_prompt)
     try:
         for tok in rounds:
             generated.append(tok)
@@ -1740,7 +1781,7 @@ def owned_server_rounds(
                     retire_ctx = None
                 rounds = None
                 prompt_cache = hidden = shared_kv_states = None
-                drafter_warm = first_bonus = prompt_tokens = None
+                drafter_warm = first_bonus = prompt_tokens = copy_prompt = None
                 sidecar_ctx = None
             yield [tok], {"round_pos": pos[0], "round_len": pos[1]}
     finally:
@@ -1956,6 +1997,20 @@ def _pop_thinking_hook(prompt_cache: list):
         except AttributeError:
             pass
     return hook
+
+
+def _pop_copy_prompt(prompt_cache: list) -> list[int] | None:
+    """Detach the request's full prompt ids the serve transport stashes on
+    the first cache entry for context copy (patches.context_copy)."""
+    if not prompt_cache:
+        return None
+    ids = getattr(prompt_cache[0], "_kq_copy_prompt", None)
+    if ids is not None:
+        try:
+            delattr(prompt_cache[0], "_kq_copy_prompt")
+        except AttributeError:
+            pass
+    return ids
 
 
 def _pop_row_procs(prompt_cache: list) -> list | None:
@@ -3770,6 +3825,9 @@ def owned_server_rounds_batch(
     # honored only for a single-row batch.
     thinking_hook = _pop_thinking_hook(prompt_cache)
     row_procs = _pop_row_procs(prompt_cache)
+    # Context copy runs in the scalar loop only; never let a stash outlive
+    # its request.
+    _pop_copy_prompt(prompt_cache)
     if thinking_hook is not None and B != 1:
         thinking_hook = None
     elif thinking_hook is not None:
