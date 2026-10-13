@@ -60,6 +60,12 @@ row's output is what plain decode gives, and the target cache rolls each
 row back by its own accepted count. One forward reads the weights once
 for every row, where a separate plain step would read them twice.
 
+Every row of a mixed round verifies the same number of positions, so a
+plain row's padding costs as much as a draft. A mixed round therefore
+verifies a shorter block, about one full block of positions across the
+batch and at least three per row, and the drafter's own block size
+returns once every row speculates.
+
 The speculating rows keep their drafter state and their acceptance rule.
 At temperature above zero with a cap of 1, the speculating row takes the
 scalar loop's stochastic walk, and the plain rows sample the target

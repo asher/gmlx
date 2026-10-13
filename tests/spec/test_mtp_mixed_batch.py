@@ -226,24 +226,25 @@ def test_formation_over_cap_speculates_on_the_oldest_row():
     out, lm, _ = _drive(d, B=3, max_tokens=13)
     streams = _streams(out, 3)
     # every row streams its own echo chain to its budget (12 after the
-    # first token), the speculating row a full block of 4 a round
+    # first token), the speculating row 3 a round (mixed rounds verify a
+    # shorter block, _mixed_block)
     for r, start in enumerate([10, 20, 30]):
         assert streams[r] == _chain(start, 12)
     # row 0 drafts until it finishes, then row 1, then row 2 is promoted
     names = d.names()
     first = names.index("adopt")
     second = names.index("adopt", first + 1)
-    assert [e[1] for e in d.log[:first] if e[0] == "draft"] == [10, 14, 18]
+    assert [e[1] for e in d.log[:first] if e[0] == "draft"] == [10, 13, 16, 19]
     assert all(20 < e[1] < 33
                for e in d.log[first:second] if e[0] == "draft")
     assert all(e[1] > 33 for e in d.log[second:] if e[0] == "draft")
     # one verify per round over every row, each a full block
-    assert all(len(rows) == 3 and len(rows[0]) == 4
+    assert all(len(rows) == 3 and len(rows[0]) == 3
                for rows in lm.inputs[:3])
     # plain rows pad their block with their bonus; the pads never match
     # an echo target, so their rollbacks are per row
-    assert lm.inputs[0][1] == [20, 20, 20, 20]
-    assert lm.rollbacks[0] == [3, 0, 0]
+    assert lm.inputs[0][1] == [20, 20, 20]
+    assert lm.rollbacks[0] == [2, 0, 0]
     # drafter seeded the speculating row, parked contexts for the others
     assert d.names()[:4] == ["reset", "prefill", "open", "open"]
 
@@ -266,7 +267,7 @@ def test_b1_only_drafter_accepts_through_its_scalar_hook():
     d = _RowDrafter(block_size=4)
     _drive(d, B=2, max_tokens=7)
     accepts = [e for e in d.log if e[0] == "accept"]
-    assert accepts[0] == ("accept", 3) and len(accepts) >= 2
+    assert accepts[0] == ("accept", 2) and len(accepts) >= 2
 
 
 def test_padding_drafts_are_accepted_only_where_the_target_agrees():
@@ -575,3 +576,72 @@ def test_scalar_preempt_keeps_the_old_contract_without_a_mixed_batch(
     d = _RowDrafter(block_size=4)
     assert _scalar_preempt(d) == {}
     assert ("accept", 3) not in d.log
+
+
+# -- mixed round block size -----------------------------------------------
+
+
+def test_mixed_block_keeps_the_batch_near_one_block(monkeypatch):
+    assert spec._mixed_block(8, 2) == 4
+    assert spec._mixed_block(8, 3) == 3
+    assert spec._mixed_block(4, 2) == 3          # at least two drafts
+    assert spec._mixed_block(16, 2) == 8
+    monkeypatch.setattr(spec, "_MIXED_BLOCK", 6)
+    assert spec._mixed_block(8, 2) == 6
+
+
+def test_mixed_rounds_verify_the_shorter_block():
+    d = _RowDrafter(block_size=8)
+    out, lm, _ = _drive(d, B=2, max_tokens=13)
+    streams = _streams(out, 2)
+    assert streams[0] == _chain(10, 12)
+    assert streams[1] == _chain(20, 12)
+    # mixed rounds: 2 rows x 4 positions; once alone, the full block
+    widths = [len(rows[0]) for rows in lm.inputs]
+    assert widths[0] == 4 and len(lm.inputs[0]) == 2
+    assert 8 in widths
+
+
+# -- review fixes ---------------------------------------------------------
+
+
+def test_trip_resume_feeds_a_b1_drafter_its_rounds(monkeypatch):
+    """With mixed batches off, a batch that drains back within the cap
+    re-arms; a B=1-only drafter that owns its context takes each round's
+    commits through its scalar accept, or its context stays at the
+    capture."""
+    monkeypatch.setenv("GMLX_MTP_MIXED", "0")
+    d = _RowDrafter(block_size=4)
+    d.set_shared_kv = lambda *a, **k: None    # the old path binds it
+    _drive(d, B=2, max_tokens=120, stop_check=lambda r, t: r == 0)
+    names = d.names()
+    assert "prefill" in names and "accept" in names[names.index("prefill"):]
+
+
+def _seeded_queue(model, first=50):
+    _queue(model, first=first, max_tokens=6)
+    seed = SimpleNamespace(offset=3)
+    model._generator_injections[0]["prompt_cache"][0]._kq_seed_stream = {
+        "kv": [seed], "len": 3}
+    return seed
+
+
+@pytest.mark.parametrize("cap", [1, 2])
+def test_streamed_seed_restores_only_at_cap_one(cap):
+    """A streamed seed is a B=1 head cache: adopting it at cap 2 would
+    leave a second admitted row nothing to extend."""
+    d = _RowDrafter(block_size=4, cap=cap, limit=0)
+    restored = []
+    d.restore_kv = restored.append
+    model = SimpleNamespace()
+    gen = _owned_decode_rounds_batch(
+        model, d, _EchoLM(), [_FakeCache(width=1)],
+        hidden=mx.zeros((1, 5, 8)), b=[10], shared_kv=None,
+        seed_tokens=mx.zeros((1, 5), dtype=mx.int32), emitted=[1],
+        max_tokens=2, sampler=None, draft_block_size=None)
+    next(gen)
+    seed = _seeded_queue(model)
+    list(gen)
+    assert restored == ([[seed]] if cap == 1 else [])
+
+

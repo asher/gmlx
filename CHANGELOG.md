@@ -11,6 +11,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A speculative batch wider than the drafter's width cap keeps speculating on
   its oldest requests instead of decoding plain. `GMLX_MTP_MIXED=0` reverts.
 
+### Fixed
+
+- A DFlash drafter that took speculation back up after a batch shrank within
+  the width cap drafted from stale context, so almost no draft was accepted.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

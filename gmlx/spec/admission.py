@@ -308,6 +308,11 @@ def install_continuous_batch_admission() -> None:
         # The scalar loop fills this when the rebuilt batch can keep the
         # row's live drafter (a mixed batch); the batch loop pops it.
         handoff: dict = {}
+        try:
+            # A rebuild that was never iterated leaves its handoff behind.
+            del self.model._kq_preempt_handoff
+        except AttributeError:
+            pass
         if it is not None:
             self._rounds_iter = None
             self.model._kq_preempt_capture = captured

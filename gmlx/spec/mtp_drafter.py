@@ -634,6 +634,9 @@ class QwenMTPDrafter(nn.Module):
         """
         B_new = int(prompt_tokens.shape[0])
         old_cache = self._cache
+        if not all(callable(getattr(c, "extend", None)) for c in old_cache):
+            # A B=1 head cache cannot take rows; the seeds would outgrow it.
+            raise RuntimeError("inject_rows needs a batch head cache")
         old_seed_token = self._seed_token
         old_seed_hidden = self._seed_hidden
 
@@ -646,9 +649,7 @@ class QwenMTPDrafter(nn.Module):
 
         self._cache = old_cache
         for old, temp in zip(old_cache, temp_cache):
-            extend_fn = getattr(old, "extend", None)
-            if callable(extend_fn):
-                extend_fn(temp)
+            old.extend(temp)
         if old_seed_token is not None and new_seed_token is not None:
             self._seed_token = mx.concatenate([old_seed_token, new_seed_token])
         else:

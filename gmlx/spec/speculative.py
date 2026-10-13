@@ -227,6 +227,20 @@ _PQ_LOG = env_bool("GMLX_MTP_PQ_LOG", False)
 # presets the default for A/B runs. Acceptance gains are measured in
 # docs/benchmarks.md.
 _STOCH_ACCEPT = env_bool("GMLX_MTP_STOCH_ACCEPT", False)
+# Block size of a mixed round (plain rows present): 0 picks it from the
+# width (_mixed_block), N >= 2 fixes it.
+_MIXED_BLOCK = env_int("GMLX_MTP_MIXED_BLOCK", 0)
+
+
+def _mixed_block(block_total: int, width: int) -> int:
+    """Block size of a round with plain rows. Every row verifies the full
+    block, so a plain row's padding costs as much as a draft. Keeping the
+    batch near one block of verify positions in all, with at least two
+    drafts for the speculating rows, holds the round close to the cost of
+    a lone speculating round."""
+    if _MIXED_BLOCK > 1:
+        return _MIXED_BLOCK
+    return max(3, -(-int(block_total) // max(1, int(width))))
 # Round gate (B=1 owned rounds): a drafter that publishes round_estimate
 # after its draft, the tokens the round is expected to emit, has a round
 # under the threshold run as one plain target step instead of a verify.
@@ -2813,12 +2827,14 @@ def _owned_decode_rounds_batch(
 
     def _spec_accept(verify_hidden, drafts, acc: list, new: list) -> None:
         """Commit a round into the drafter's live rows. A B=1-only drafter
-        has no batched accept; a mixed batch drives it at width 1."""
+        that owns its context has no batched accept; it takes the scalar
+        accept at width 1, or a re-armed row's context never grows."""
         if _has_accept_batch:
             sampler_rng.draft_call(
                 _accept_batch_fn, verify_hidden, drafts, acc, new,
                 draft_sampler, token_dtype, **draft_kwargs)
-        elif mixed and len(acc) == 1 and callable(_accept_one_fn):
+        elif (len(acc) == 1 and not _needs_shared_kv
+              and callable(_accept_one_fn)):
             sampler_rng.draft_call(
                 _accept_one_fn, verify_hidden, drafts, int(acc[0]), new[0],
                 draft_sampler, token_dtype, **draft_kwargs)
@@ -2830,9 +2846,12 @@ def _owned_decode_rounds_batch(
         if hid is None or toks is None:
             return              # no capture: promotion cold-starts it
         if len(spec) < cap:
+            stoch_stash.clear()
             if not spec:
                 _reset_armed(1)
-                if seed_kv is not None and callable(
+                # A streamed seed is a B=1 cache: the live head may adopt it
+                # only while no second row can join (cap 1).
+                if cap == 1 and seed_kv is not None and callable(
                         getattr(drafter, "restore_kv", None)):
                     drafter.restore_kv(seed_kv)
                 if callable(prefill_draft):
@@ -3295,6 +3314,7 @@ def _owned_decode_rounds_batch(
             # verify round (no draft; see the scalar loop's forced round).
             # Every seam below (delivery, retire, shared-kv slide) runs
             # unchanged; rollback is skipped because nothing was rejected.
+            stoch_stash.clear()
             _t0 = time.perf_counter()
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             bs = len(forced)
@@ -3340,6 +3360,8 @@ def _owned_decode_rounds_batch(
                 bs = _mtp_next_block_size(
                     drafter, block_total, configured_block_total,
                     min(remaining))
+                if n_active > len(spec):
+                    bs = min(bs, _mixed_block(block_total, n_active))
             if bs > 1:
                 draft_spec = sampler_rng.draft_tokens(
                     _draft_block, b_arr[mx.array(spec_j, dtype=mx.int32)],
@@ -3481,11 +3503,8 @@ def _owned_decode_rounds_batch(
 
             max_a = max(accepted_list)
 
-            if _has_accept_batch:
-                sampler_rng.draft_call(
-                    _accept_batch_fn, verify.hidden, draft_tokens,
-                    accepted_list, new_tokens_list, draft_sampler, token_dtype,
-                    **draft_kwargs)
+            _spec_accept(verify.hidden, draft_tokens, accepted_list,
+                         new_tokens_list)
 
             if max_a < bs - 1 or any(a < max_a for a in accepted_list):
                 row_idx = mx.arange(n_active)
@@ -3576,6 +3595,7 @@ def _owned_decode_rounds_batch(
                 # it afresh.
                 spec = []
                 parked.clear()
+                stoch_stash.clear()
                 hidden = None
             elif not gated:
                 _filter_drafter = getattr(drafter, "filter_batch", None)
@@ -3775,7 +3795,7 @@ def owned_server_rounds_batch(
             del model._kq_preempt_handoff
         except AttributeError:
             pass
-        if not handoff.get("drafter") or hidden is not None or B != 1:
+        if handoff.get("drafter") is None or hidden is not None or B != 1:
             handoff = None
     yield from _owned_decode_rounds_batch(
         model, drafter, lm, prompt_cache,
