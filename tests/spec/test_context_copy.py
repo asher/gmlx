@@ -194,6 +194,7 @@ class _Scripted:
         self.seen = []
         self.records = []
         self.calls = 0
+        self.rounds = self.copied = self.accepted = 0
 
     def extend(self, tokens):
         self.seen.extend(int(t) for t in tokens)
@@ -211,6 +212,9 @@ class _Scripted:
 
     def record(self, copied, accepted):
         self.records.append((copied, accepted))
+        self.rounds += 1
+        self.copied += copied
+        self.accepted += accepted
 
 
 def _dflash_walk(monkeypatch, scripted, n):
@@ -364,3 +368,16 @@ def test_transport_carries_a_lone_rows_full_prompt(monkeypatch):
 
     off = PPB([[1, 2]], draft_model=SimpleNamespace(), draft_kind="mtp")
     assert not hasattr(off, "_kq_copy_prompts")
+
+
+def test_round_log_notes_the_copy_totals(monkeypatch, tmp_path):
+    log = tmp_path / "rounds.tsv"
+    monkeypatch.setenv("GMLX_ROUND_LOG", str(log))
+    try:
+        _, _, script, _, _, _ = _dflash_walk(
+            monkeypatch, lambda r: _Scripted(r), 24)
+    finally:
+        spec._round_log_close()
+    copied = sum(c for c, _ in script.records)
+    assert (f"# context copy rounds={len(script.records)} copied={copied}"
+            in log.read_text())

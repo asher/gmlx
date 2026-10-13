@@ -1496,6 +1496,10 @@ def _owned_decode_rounds(
 
     finally:
         _walk_report()
+        if copier is not None and copier.rounds:
+            _round_log_note(
+                f"context copy rounds={copier.rounds} "
+                f"copied={copier.copied} accepted={copier.accepted}")
 
 
 def _reserve_prompt_kv(caches, more: int) -> None:
