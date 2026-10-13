@@ -87,6 +87,32 @@ def test_whole_accepts_grow_the_copy_and_a_misfire_pauses():
     assert c.propose(1, 100) == []
 
 
+def test_a_copy_slower_than_the_drafter_is_a_misfire():
+    prompt = list(range(100, 200))
+    c = _gen(PromptCopy(prompt, longest=24), prompt[:KEY])
+    c.drafted(8, 0.050)                          # 160 tokens/s
+    c.record(8, 8, 0.050)                        # 180 tokens/s: kept
+    assert len(c.propose(1, 100)) == 16
+    c.record(16, 10, 0.090)                      # 122 tokens/s: misfire
+    assert c.propose(1, 100) == []
+
+
+def test_a_copy_outgrows_the_drafters_yield():
+    prompt = list(range(100, 300))
+    c = _gen(PromptCopy(prompt, longest=24), prompt[:KEY])
+    c.drafted(3, 0.05)
+    assert len(c.propose(1, 100)) == 8           # 2 * 3 - 1 = 5 < START
+    c.drafted(8, 0.06)
+    for _ in range(20):
+        c.drafted(8, 0.06)
+    assert len(c.propose(7, 100)) == 15          # 2 * 8 - 1
+    c.extend(prompt[180:180 + KEY])
+    assert c.propose(7, 100) == []               # 14 left, under 15
+    c = _gen(PromptCopy(prompt, longest=12), prompt[:KEY])
+    c.drafted(8, 0.06)
+    assert c.propose(7, 100) == []               # longest under the floor
+
+
 def test_partial_accept_keeps_the_length():
     prompt = list(range(100, 200))
     c = _gen(PromptCopy(prompt, longest=24), prompt[:KEY])
@@ -210,7 +236,10 @@ class _Scripted:
             out[self.wrong_at] = (out[self.wrong_at] + 1) % 100
         return out if len(out) >= max(shortest, 1) else []
 
-    def record(self, copied, accepted):
+    def drafted(self, tokens, seconds):
+        pass
+
+    def record(self, copied, accepted, seconds=None):
         self.records.append((copied, accepted))
         self.rounds += 1
         self.copied += copied

@@ -15,12 +15,19 @@ furthest back, then the latest one.
 
 Copy length adapts per request. A copy round that is accepted whole doubles
 the next copy, up to the longest. A round that keeps under a quarter of its
-copy is a misfire: copying pauses for a number of tokens that doubles with
-each misfire in a row, and the length starts over.
+copy, or that yields fewer tokens per second than the request's drafter
+rounds, is a misfire: copying pauses for a number of tokens that doubles
+with each misfire in a row, and the length starts over. A copy is also at
+least twice as long as the tokens a drafter round commits on average, so a
+drafter that already drafts the text well keeps its rounds. Both tests
+matter for block drafters, whose rounds verify a nearly accepted block for
+one drafter pass: a wide copy verify that keeps a few tokens costs more
+than it saves.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from collections import deque
 from collections.abc import Sequence
@@ -33,6 +40,7 @@ CEILING = 31        # verify rows a buffered rotating target cache can trim
 CANDIDATES = 32     # latest candidate positions ranked per lookup
 PAUSE = 16          # tokens without copies after a first misfire
 PAUSE_MAX = 1024
+RATE_WEIGHT = 0.25  # weight of the newest drafter round in its averages
 
 
 def context_copy_enabled(drafter) -> bool:
@@ -70,6 +78,8 @@ class PromptCopy:
         self.length = min(START, self.longest)
         self._wait = 0
         self._pause = PAUSE
+        self._draft_rate: float | None = None
+        self._draft_yield = 0.0
         self.rounds = 0
         self.copied = 0
         self.accepted = 0
@@ -110,24 +120,42 @@ class PromptCopy:
     def propose(self, shortest: int, budget: int) -> list[int]:
         """A copy of at least ``shortest`` and at most ``budget`` tokens, or
         an empty list."""
-        if self._wait > 0 or budget < max(shortest, 1):
+        shortest = max(shortest, 1, math.ceil(2 * self._draft_yield) - 1)
+        if self._wait > 0 or budget < shortest or shortest > self.longest:
             return []
         pos = self._lookup()
         if pos is None:
             return []
-        n = min(self.length, budget, len(self._prompt) - pos)
-        if n < max(shortest, 1):
+        n = min(max(self.length, shortest), budget, len(self._prompt) - pos)
+        if n < shortest:
             return []
         return self._prompt[pos:pos + n]
 
-    def record(self, copied: int, accepted: int) -> None:
+    def drafted(self, tokens: int, seconds: float) -> None:
+        """Take a drafter round's committed tokens and wall time."""
+        if seconds <= 0:
+            return
+        rate = tokens / seconds
+        if self._draft_rate is None:
+            self._draft_rate, self._draft_yield = rate, float(tokens)
+            return
+        self._draft_rate += RATE_WEIGHT * (rate - self._draft_rate)
+        self._draft_yield += RATE_WEIGHT * (tokens - self._draft_yield)
+
+    def record(self, copied: int, accepted: int,
+               seconds: float | None = None) -> None:
+        """Take a copy round's outcome: drafts copied, drafts accepted and,
+        when known, the round's wall time."""
         self.rounds += 1
         self.copied += copied
         self.accepted += accepted
-        if accepted >= copied:
-            self.length = min(self.length * 2, self.longest)
-            self._pause = PAUSE
-        elif accepted * 4 < copied:
+        slow = (seconds is not None and seconds > 0
+                and self._draft_rate is not None
+                and (accepted + 1) / seconds < self._draft_rate)
+        if accepted * 4 < copied or slow:
             self._wait = self._pause
             self._pause = min(self._pause * 2, PAUSE_MAX)
             self.length = min(START, self.longest)
+        elif accepted >= copied:
+            self.length = min(max(self.length, copied) * 2, self.longest)
+            self._pause = PAUSE

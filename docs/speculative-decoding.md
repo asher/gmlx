@@ -135,8 +135,11 @@ does not change. The drafter learns the accepted tokens and drafts the next
 round as usual.
 
 A copy can run longer than the drafter's block, up to 24 tokens. Copies
-that the model accepts whole grow toward that limit, and when the model
-rejects most of a copy, copying pauses for a while. On the server, a
+that the model accepts whole grow toward that limit. When the model rejects
+most of a copy, or a copy round makes tokens more slowly than the drafter's
+rounds, copying pauses for a while and starts again shorter. A copy is
+at least twice as long as what a drafter round adds on average, so a
+drafter that already predicts the text well keeps most rounds. On the server, a
 request copies when it starts while no other request decodes, and stops
 copying when another request joins it.
 

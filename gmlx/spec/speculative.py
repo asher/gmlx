@@ -1380,11 +1380,13 @@ def _owned_decode_rounds(
                 drafter.gated_rounds = getattr(drafter, "gated_rounds", 0) + 1
             elif copied:
                 # The drafter's stats and block sizing stay its own.
-                copier.record(bs - 1, accepted)
+                copier.record(bs - 1, accepted, time.perf_counter() - _t0)
             elif forced is None:
                 # Forced rounds drafted nothing; recording them would skew
                 # accept stats and the adaptive block sizing.
                 _record_speculative_round(drafter, accepted, bs - 1)
+                if copier is not None:
+                    copier.drafted(accepted + 1, time.perf_counter() - _t0)
             _t1 = time.perf_counter()
             if gate_cost is not None and forced is None and not copied:
                 gate_cost.add(gated, _t1 - _t0)
