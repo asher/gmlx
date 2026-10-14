@@ -2124,6 +2124,55 @@ class Qwen3_5Model(nn.Module):
         return self.norm(h)
 
 
+def rollback_attention_caches(caches, accepted_list: list, block_size: int) -> list:
+    """The attention half of the speculative rollback: trim every
+    trimmable cache to the longest accepted row, and trim the shorter rows'
+    tails (right padding, or zeroed rows). Returns the recurrent caches,
+    in layer order, for the caller's state rollback."""
+    max_a = max(accepted_list)
+    n = max_a + 1
+    trim = block_size - n
+    is_batch = len(accepted_list) > 1
+    valid_ends_list = [a + 1 for a in accepted_list]
+    ssm_caches = []
+    for c in caches:
+        if c is None:
+            continue
+        if not c.is_trimmable() and not hasattr(c, "zero_row_tail"):
+            ssm_caches.append(c)
+            continue
+        if c.is_trimmable() and trim > 0:
+            c.trim(trim)
+        right_trimmed = False
+        if is_batch and max_a > 0:
+            extra_trim_list = [max_a - a for a in accepted_list]
+            if any(extra_trim_list):
+                prepare = getattr(c, "prepare", None)
+                finalize = getattr(c, "finalize", None)
+                if c.keys is not None and callable(prepare) and callable(finalize):
+                    prepare(right_padding=extra_trim_list)
+                    finalize()
+                    right_trimmed = True
+        if (
+            is_batch
+            and not right_trimmed
+            and hasattr(c, "_idx")
+            and c.keys is not None
+            and max_a > 0
+        ):
+            kv_len = c._idx
+            verify_start = kv_len - n
+            for bi, ve in enumerate(valid_ends_list):
+                start = verify_start + ve
+                if start < kv_len:
+                    if hasattr(c, "zero_row_tail"):
+                        c.zero_row_tail(bi, start, kv_len)
+                    else:
+                        c.keys[bi, :, start:kv_len, :] = 0
+                        c.values[bi, :, start:kv_len, :] = 0
+    return ssm_caches
+
+
 class LanguageModel(nn.Module):
     # The rollback trims each row of a batch to its own accept count.
     requires_uniform_batch_acceptance = False
@@ -2178,7 +2227,6 @@ class LanguageModel(nn.Module):
 
         max_a = max(accepted_list)
         n = max_a + 1
-        trim = block_size - n
         is_batch = len(accepted_list) > 1
         valid_ends_list = [a + 1 for a in accepted_list]
         accepted_mx = None
@@ -2196,45 +2244,7 @@ class LanguageModel(nn.Module):
                 valid_ends_mx = mx.array(valid_ends_list, dtype=mx.int32)
             return valid_ends_mx
 
-        def _is_ssm_cache(c):
-            return not c.is_trimmable() and not hasattr(c, "zero_row_tail")
-
-        ssm_caches = []
-        for c in caches:
-            if c is None:
-                continue
-            if _is_ssm_cache(c):
-                ssm_caches.append(c)
-                continue
-            if c.is_trimmable() and trim > 0:
-                c.trim(trim)
-            right_trimmed = False
-            if is_batch and max_a > 0:
-                extra_trim_list = [max_a - a for a in accepted_list]
-                if any(extra_trim_list):
-                    prepare = getattr(c, "prepare", None)
-                    finalize = getattr(c, "finalize", None)
-                    if c.keys is not None and callable(prepare) and callable(finalize):
-                        prepare(right_padding=extra_trim_list)
-                        finalize()
-                        right_trimmed = True
-            if (
-                is_batch
-                and not right_trimmed
-                and hasattr(c, "_idx")
-                and c.keys is not None
-                and max_a > 0
-            ):
-                kv_len = c._idx
-                verify_start = kv_len - n
-                for bi, ve in enumerate(valid_ends_list):
-                    start = verify_start + ve
-                    if start < kv_len:
-                        if hasattr(c, "zero_row_tail"):
-                            c.zero_row_tail(bi, start, kv_len)
-                        else:
-                            c.keys[bi, :, start:kv_len, :] = 0
-                            c.values[bi, :, start:kv_len, :] = 0
+        ssm_caches = rollback_attention_caches(caches, accepted_list, block_size)
 
         if not ssm_caches:
             return max_a

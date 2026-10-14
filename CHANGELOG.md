@@ -15,6 +15,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A speculative batch wider than the drafter's width cap keeps speculating on
   its oldest requests instead of decoding plain. `GMLX_MTP_MIXED=0` reverts.
+- `gmlx serve` with MTP on Qwen3.5 to 3.8 decodes faster when it batches
+  several requests.
 
 ### Fixed
 

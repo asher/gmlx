@@ -435,7 +435,7 @@ _GDN_FUSED_DECODE_TEMPLATE = r"""
 # replay (see set_gdn_replay): each state row first replays the R recorded
 # positions, the same float ops the verify scan ran.
 _GDN_DECODE_REPLAY = r"""
-        for (int p = 0; p < (int)R; ++p) {
+        for (int p = 0; p < R[b_idx]; ++p) {
             uint rb = (b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
             float gp = rg[rb];
             float dp = rd[rb * Dv + dv];
@@ -905,7 +905,7 @@ def _gdn_ba_kq(gdn):
 #
 # The scan has two forms. The states form writes the final state and the
 # state after every position but the last, which the rollback indexes. The
-# records form (B=1) writes, per position, the three values a step adds to
+# records form writes, per position, the three values a step adds to
 # the state: the decay g, the scaled key and the delta row. A state is then
 # its start state plus a replay of the first R records, and the next kernel
 # to read the state replays them in registers before its own first step
@@ -1024,7 +1024,7 @@ _GDN_VERIFY_STATES_EPILOGUE = r"""
 
 # Records form. The replay loop is shared with the replay-only kernel below.
 _GDN_REPLAY_ROWS = r"""
-    for (int p = 0; p < (int)R; ++p) {
+    for (int p = 0; p < R[b_idx]; ++p) {
         uint rb = ((uint)b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
         float gp = rg[rb];
         float kp[n_per_t];
@@ -1036,9 +1036,11 @@ _GDN_REPLAY_ROWS = r"""
     }
 """
 # A kernel that replayed pending records starts from a state no buffer
-# holds, so it stores that state as the base of its own records.
+# holds, so it stores that state as the base of its own records. Every
+# row stores it, a row with no records to replay too, so the base of a
+# batch is one array.
 _GDN_VERIFY_REC_PROLOGUE = _GDN_REPLAY_ROWS + r"""
-    if (R > 0) {
+    if (REPLAY) {
         for (int r = 0; r < RPS; ++r) {
             auto s_state = start + ((uint)(n * Dv + row0 + r)) * Dk;
             for (int i = 0; i < n_per_t; ++i) s_state[n_per_t * lane + i] = (StT)st[r][i];
@@ -1203,14 +1205,26 @@ def _no_records() -> tuple:
     return _NO_RECORDS[0]
 
 
-def gdn_replay_state(base: mx.array, records: tuple, steps: int) -> mx.array:
-    """The recurrent state after the first ``steps`` recorded positions,
-    replayed onto ``base``. Lazy: a fused kernel that takes the replay
-    itself leaves this array unevaluated."""
+def replay_steps(steps, rows: int) -> mx.array:
+    """Per-row replay step counts as the int32 [rows] array the replay
+    kernels read: an int applies to every row, a sequence gives one count
+    per row."""
+    if isinstance(steps, mx.array):
+        return steps.astype(mx.int32).reshape(rows)
+    if isinstance(steps, int):
+        return mx.full((rows,), steps, dtype=mx.int32)
+    return mx.array([int(t) for t in steps], dtype=mx.int32)
+
+
+def gdn_replay_state(base: mx.array, records: tuple, steps) -> mx.array:
+    """The recurrent state after the first ``steps`` recorded positions of
+    each row, replayed onto ``base``. ``steps`` is an int for every row or
+    one count per row. Lazy: a fused kernel that takes the replay itself
+    leaves this array unevaluated."""
     B, Hv, Dv, Dk = base.shape
     SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
     (state,) = _gdn_replay_kernel(
-        inputs=[base, *records, steps],
+        inputs=[base, *records, replay_steps(steps, B)],
         template=[("StT", base.dtype), ("Dk", Dk), ("Dv", Dv), ("Hv", Hv),
                   ("SGS", SGS), ("RPS", RPS)],
         grid=(32, SGS, B * Hv * (Dv // _GDN_VERIFY_ROWS)),
@@ -1221,11 +1235,13 @@ def gdn_replay_state(base: mx.array, records: tuple, steps: int) -> mx.array:
     return state
 
 
-def set_gdn_replay(cache, base: mx.array, records: tuple, steps: int) -> None:
+def set_gdn_replay(cache, base: mx.array, records: tuple, steps) -> None:
     """Leave ``cache``'s recurrent state as ``base`` plus a replay of
-    ``steps`` records. ``cache[1]`` becomes the lazy replay, so any reader
-    gets the right state, and the fused kernels take the pending replay
-    into their own prologue instead (take_gdn_replay)."""
+    ``steps`` records (an int for every row, or one count per row).
+    ``cache[1]`` becomes the lazy replay, so any reader gets the right
+    state, and the fused kernels take the pending replay into their own
+    prologue instead (take_gdn_replay)."""
+    steps = replay_steps(steps, int(base.shape[0]))
     state = gdn_replay_state(base, records, steps)
     cache[1] = state
     cache._gdn_replay = (state, base, records, steps)
@@ -1399,8 +1415,8 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
     guarantee the route conditions: sink set, S>1, kernel available,
     Dv%16==0, Dk%32==0.
 
-    ``records`` runs the records form of the scan at B=1: the sink carries
-    a GdnRecords and the cache a pending replay of all S positions, so the
+    ``records`` runs the records form of the scan: the sink carries a
+    GdnRecords and the cache a pending replay of all S positions, so the
     caller's rollback must know GdnRecords (the owned qwen3.5 one does)."""
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
@@ -1522,20 +1538,23 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
         ("CONV_BF16", 1),
     ]
     grid = (32, SGS, B * Hv * (Dv // _GDN_VERIFY_ROWS))
-    records = records and B == 1 and _gdn_verify_rec_kernel is not None
+    records = records and _gdn_verify_rec_kernel is not None
     if records:
         pend = take_gdn_replay(cache) if cache is not None else None
-        base, replay, steps = pend if pend is not None else (state, _no_records(), 0)
+        if pend is None:
+            base, replay, steps = state, _no_records(), replay_steps(0, B)
+        else:
+            base, replay, steps = pend
         pre, start, rd, rk, rg = _gdn_verify_rec_kernel(
             inputs=[conv_input, conv_weight, ba, self.A_log, self.dt_bias, base, S,
                     *replay, steps],
-            template=template,
+            template=template + [("REPLAY", int(pend is not None))],
             grid=grid,
             threadgroup=(32, SGS, 1),
             output_shapes=[
                 (B, S, Hv, Dv),
                 # Written only after a replay; else the base is the start.
-                base.shape if steps else (1,),
+                base.shape if pend is not None else (1,),
                 (B, S, Hv, Dv),
                 (B, S, Hv, Dk),
                 (B, S, Hv),
@@ -1543,7 +1562,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             output_dtypes=[mx.float32, base.dtype, mx.float32, mx.float32,
                            mx.float32],
         )
-        rollback = GdnRecords(start if steps else base, (rd, rk, rg))
+        rollback = GdnRecords(start if pend is not None else base, (rd, rk, rg))
         if cache is not None:
             # Full accept; the rollback shortens the replay on a rejection.
             set_gdn_replay(cache, rollback.base, rollback.records, S)
