@@ -765,14 +765,22 @@ def _parse_round_log(path):
         return None, None
     total_drafted = 0
     total_accepted = 0
+    # The "# idx" header names the columns; a log without one ends in
+    # accepted, bs.
+    i_acc, i_bs = -2, -1
     for line in lines:
         line = line.strip()
+        if line.startswith("# idx"):
+            cols = line.lstrip("#").split()
+            if "accepted" in cols and "bs" in cols:
+                i_acc, i_bs = cols.index("accepted"), cols.index("bs")
+            continue
         if not line or line.startswith("#"):
             continue
         parts = line.split("\t")
         try:
-            accepted = int(parts[-2])
-            bs = int(parts[-1])
+            accepted = int(parts[i_acc])
+            bs = int(parts[i_bs])
             total_drafted += bs - 1
             total_accepted += accepted
         except (ValueError, IndexError):
