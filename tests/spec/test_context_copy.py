@@ -623,6 +623,52 @@ def test_a_sampled_weak_match_waits_beside_a_strong_drafter():
     assert c.propose(7, 100) == []
 
 
+
+def _strong(c, rounds=8):
+    for _ in range(rounds):
+        c.drafted(6, 0.06)                  # a drafter that adds 6 a round
+
+
+def test_a_prompt_that_repeats_itself_is_no_sampled_evidence():
+    """Prompt S + T + S: after one sampled token the lookup matches the
+    first S, and the tokens before that key are the prompt's own. Only
+    tokens the generation sampled count toward the copy rate."""
+    rng = np.random.default_rng(0)
+    s_ = (rng.permutation(5000)[:64] + 1000).tolist()
+    t_ = (rng.permutation(900)[:40] + 100).tolist()
+    filler = (rng.permutation(400)[:30] + 6000).tolist()
+    c = PromptCopy(filler + s_ + t_ + s_, longest=24, sampled=True)
+    c.extend([t_[0]])
+    _strong(c)
+    assert c._agreement(len(filler) + len(s_) + 1) == (0, 0)
+    assert c.propose(7, 24) == []
+
+
+def test_sampled_evidence_counts_generated_tokens_only():
+    prompt = list(range(1000, 1400))
+    c = PromptCopy(prompt, longest=24, sampled=True)
+    c.extend(prompt[:20])
+    # the key is the last 6 of 20 generated, so 14 tokens can agree
+    assert c._agreement(20) == (14, 0)
+
+
+def test_sampled_copying_recovers_after_misfires_stopped_it():
+    """Misfires lower the copy rate until no copy runs. The record fades
+    as drafter rounds pass, so text that repeats the prompt far back
+    copies again later in the request."""
+    prompt = list(range(1000, 1400))
+    c = PromptCopy(prompt, longest=24, sampled=True)
+    _strong(c)
+    for _ in range(8):
+        c.record(24, 0)
+    c._wait = 0
+    c.extend(prompt[:100])
+    assert c.propose(5, 24) == []
+    for _ in range(100):
+        c.drafted(6, 0.06)
+    copy = c.propose(5, 24)
+    assert len(copy) >= 5 and copy == prompt[100:100 + len(copy)]
+
 def test_copy_off_reason_names_the_cap_or_the_rollback(monkeypatch):
     ns = SimpleNamespace
     assert cc.copy_off_reason(ns()) is None

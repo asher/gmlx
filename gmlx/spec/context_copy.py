@@ -29,16 +29,16 @@ sampling, a copied token survives with the target's probability of it, so
 whole accepts come in shorter runs. The copy stops where the chance that a
 copied token survives falls under ``KEEP``, and runs only when the tokens
 it is expected to add reach ``SAMPLED_MARGIN`` times a drafter round's.
-The chance comes from the request's copy rounds and, at each lookup, from
-how far back the generation already repeats the prompt before the match:
-a sampled token that equals the prompt's is the same event as a copied
-token that survives. A drafter that adds many tokens a round therefore
+The chance comes from the request's copy rounds, whose record fades as
+drafter rounds pass, and, at each lookup, from how far back the generated
+tokens already repeat the prompt before the match: a sampled token that
+equals the prompt's is the same event as a copied token that survives. A drafter that adds many tokens a round therefore
 still copies verbatim text, which no prior alone would let it try.
 
 A round that keeps under a quarter of its copy, or that yields fewer tokens
 per second than the request's drafter rounds, is a misfire: copying pauses
-for a number of tokens that doubles with each misfire in a row, and the
-length starts over. The rate test and the floors matter for block
+for a number of tokens that doubles with each misfire in a row, and at
+temperature 0 the length starts over. The rate test and the floors matter for block
 drafters, whose rounds verify a nearly accepted block for one drafter pass:
 a wide copy verify that keeps a few tokens costs more than it saves.
 """
@@ -70,6 +70,7 @@ KEEP = 0.3          # least survival chance worth a copied position
 PRIOR_KEPT = 14.0   # prior of the per-token copy accept rate, 7 in 8
 PRIOR_LOST = 2.0
 DECAY = 0.9         # weight of older copy rounds in the accept rate
+FORGET = 0.98       # weight the copy rounds keep per drafter round
 SAMPLED_MARGIN = 1.5
 
 _MUL = np.uint64(0x9E3779B97F4A7C15)
@@ -179,6 +180,7 @@ class PromptCopy:
         self._draft_yield = 0.0
         self._kept = 0.0
         self._lost = 0.0
+        self._generated = 0
         self.rounds = 0
         self.copied = 0
         self.accepted = 0
@@ -187,6 +189,7 @@ class PromptCopy:
         for t in tokens:
             self._tail.append(int(t))
         self._wait -= len(tokens)
+        self._generated += len(tokens)
 
     def _lookup(self) -> int | None:
         tail = list(self._tail)[-REACH:]
@@ -209,12 +212,15 @@ class PromptCopy:
         return best
 
     def _agreement(self, pos: int) -> tuple[int, int]:
-        """Tokens before the key match at ``pos`` that the generation
-        repeats, and 1 when a differing token ends the run (0 when the
-        compared window or the prompt start ends it)."""
+        """Generated tokens before the key match at ``pos`` that equal the
+        prompt's, and 1 when a differing token ends the run (0 when the
+        compared window, the generation start or the prompt start ends
+        it). The tail starts with the prompt's own last tokens, which were
+        never sampled, so they are no evidence."""
         tail = list(self._tail)
         ids = self._index.ids
-        limit = min(len(tail) - KEY, pos - KEY)
+        limit = max(min(len(tail), self._generated) - KEY, 0)
+        limit = min(limit, pos - KEY)
         run = 0
         while run < limit and ids[pos - KEY - 1 - run] == tail[-KEY - 1 - run]:
             run += 1
@@ -262,6 +268,10 @@ class PromptCopy:
         """Take a drafter round's committed tokens and wall time."""
         if seconds <= 0:
             return
+        # The copy rounds' record fades as drafter rounds pass, so a run
+        # of misfires that stopped copying does not stop it for good.
+        self._kept *= FORGET
+        self._lost *= FORGET
         rate = tokens / seconds
         if self._draft_rate is None:
             self._draft_rate, self._draft_yield = rate, float(tokens)
