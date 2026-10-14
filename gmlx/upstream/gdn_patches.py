@@ -565,6 +565,11 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
             hv = self.num_v_heads
             b = ba[..., :hv]
             a = ba[..., hv:]
+        elif (ba_kq := _gdn_ba_kq(self)) is not None:
+            ba = ba_kq(inputs)
+            hv = self.num_v_heads
+            b = ba[..., :hv]
+            a = ba[..., hv:]
         else:
             b = self.in_proj_b(inputs)
             a = self.in_proj_a(inputs)
@@ -761,7 +766,11 @@ def _gdn_try_cat_ba(gdn) -> bool:
         return False  # zba merge already owns these rows
     if getattr(gdn, "_gdn_ba_weight", None) is not None:
         return False  # already cat: arming may run on both load paths
+    if getattr(gdn, "_gdn_ba_kq", None) is not None:
+        return False
     mods = [getattr(gdn, "in_proj_b", None), getattr(gdn, "in_proj_a", None)]
+    if _gdn_try_cat_ba_kq(gdn, mods):
+        return True
     for m in mods:
         if m is None or type(m) is not nn.Linear or "bias" in m:
             return False
@@ -779,6 +788,55 @@ def _gdn_try_cat_ba(gdn) -> bool:
     object.__setattr__(gdn, "_gdn_ba_weight", cat)
     return True
 
+
+
+def _gdn_try_cat_ba_kq(gdn, mods) -> bool:
+    """The k-quant form of the b/a cat, for files that store b and a in a
+    block codec: one KQuantLinear over b's rows then a's, so each step
+    runs one quantized matmul where it ran two. Block-codec rows are
+    self-contained, so the cat is bit-exact against the two calls. Same
+    storage discipline: the cat owns the wire rows and b and a become
+    row-slice views of it."""
+    import importlib
+
+    KQuantLinear = importlib.import_module("mlx_kquant.nn").KQuantLinear
+    b, a = mods
+    if type(b) is not KQuantLinear or type(a) is not KQuantLinear:
+        return False
+    if "bias" in b or "bias" in a or b.kquant_type != a.kquant_type:
+        return False
+    h = getattr(gdn, "num_v_heads", None)
+    if (not h or b.weight.ndim != 2 or a.weight.ndim != 2
+            or b.weight.shape != a.weight.shape or b.weight.shape[0] != h):
+        return False
+    in_dims = int(getattr(gdn, "hidden_size", 0) or 0)
+    if not in_dims:
+        return False
+    cat = KQuantLinear(in_dims, 2 * h, bias=False, codec=b.kquant_type)
+    if cat.weight.shape != (2 * h, b.weight.shape[1]):
+        return False
+    cat.weight = mx.concatenate([b.weight, a.weight], axis=0)
+    cat.scales = b.scales
+    mx.eval(cat.weight)
+    b.weight = cat.weight[:h]
+    a.weight = cat.weight[h:]
+    # Kept out of the parameter tree like the float cat: its weight is
+    # the storage b and a view.
+    object.__setattr__(gdn, "_gdn_ba_kq", cat)
+    return True
+
+
+def _gdn_ba_kq(gdn):
+    """The k-quant b/a cat while b and a are still the modules it was cut
+    from, else None. A wrapper such as an in-process LoRA replaces a
+    member and has to be called."""
+    cat = getattr(gdn, "_gdn_ba_kq", None)
+    if cat is None:
+        return None
+    for name in ("in_proj_b", "in_proj_a"):
+        if type(getattr(gdn, name, None)) is not type(cat):
+            return None
+    return cat
 
 # The multi-position (S>1) analog of the decode kernel above, for the MTP
 # speculative-verify forward, in two dispatches. The scan kernel runs the
@@ -1323,6 +1381,8 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
         self._gdn_verify_ba_weight = cba
     if cba[1] is not None:
         ba = _f16_head_gemv(inputs, cba[1])
+    elif (ba_kq := _gdn_ba_kq(self)) is not None:
+        ba = ba_kq(inputs)
     else:
         ba = mx.concatenate(
             [

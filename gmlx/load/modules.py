@@ -2518,12 +2518,13 @@ def install_lora_adapter(model: nn.Module, plan,
 # and checks for an adapter only then, so one built before the install would
 # keep serving the base weights alone. The gated-delta z, b and a weights
 # (gdn_patches.py) are concatenated at load, before any install, and only a
-# wrapped member invalidates them. Their builders take plain Linears only,
-# so a cleared cat stays cleared.
+# wrapped member invalidates them. Their builders and readers refuse a
+# wrapped member, so a cleared cat stays cleared.
 _FUSED_WIRE_SLOTS = ("_kq_wqkv", "_kq_bqkv", "_kq_wgu", "_kq_wdn", "_kq_router_cat")
 _FUSED_CAT_SLOTS = {
     "_gdn_zba_weight": ("in_proj_z", "in_proj_b", "in_proj_a"),
     "_gdn_ba_weight": ("in_proj_b", "in_proj_a"),
+    "_gdn_ba_kq": ("in_proj_b", "in_proj_a"),
 }
 # Row-fused projection pairs the model holds as child modules and calls in
 # place of their members (deepseek_v4 install_gemv_row_fusion, run at every
