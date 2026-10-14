@@ -54,6 +54,7 @@ import numpy as np
 
 KEY = 6             # tokens that must match to propose a copy
 REACH = 16          # tokens compared when ranking candidates
+EVIDENCE = 64       # tokens compared to measure a match (sampling)
 START = 8           # first copy length
 LONGEST = 24        # default longest copy
 # Upper bound of GMLX_CONTEXT_COPY_MAX. A target's rollback width
@@ -66,8 +67,8 @@ PAUSE_MAX = 1024
 RATE_WEIGHT = 0.25  # weight of the newest drafter round in its averages
 # Sampling only.
 KEEP = 0.3          # least survival chance worth a copied position
-PRIOR_KEPT = 7.0    # prior of the per-token copy accept rate, 7 in 8
-PRIOR_LOST = 1.0
+PRIOR_KEPT = 14.0   # prior of the per-token copy accept rate, 7 in 8
+PRIOR_LOST = 2.0
 DECAY = 0.9         # weight of older copy rounds in the accept rate
 SAMPLED_MARGIN = 1.5
 
@@ -167,7 +168,8 @@ class PromptCopy:
         self._index = (prompt if isinstance(prompt, PromptIndex)
                        else PromptIndex(prompt))
         ids = self._index.ids
-        self._tail: deque[int] = deque(ids[-REACH:].tolist(), maxlen=REACH)
+        self._tail: deque[int] = deque(ids[-EVIDENCE:].tolist(),
+                                       maxlen=EVIDENCE)
         self.longest = longest if longest is not None else longest_copy()
         self.sampled = sampled
         self.length = min(START, self.longest)
@@ -187,7 +189,7 @@ class PromptCopy:
         self._wait -= len(tokens)
 
     def _lookup(self) -> int | None:
-        tail = list(self._tail)
+        tail = list(self._tail)[-REACH:]
         if len(tail) < KEY:
             return None
         cands = self._index.candidates(tail[-KEY:])
@@ -206,11 +208,25 @@ class PromptCopy:
                 best, best_run = pos, run
         return best
 
-    def accept_rate(self) -> float:
-        """Chance that a copied token survives, from this request's copy
-        rounds (sampling)."""
-        return ((self._kept + PRIOR_KEPT)
-                / (self._kept + self._lost + PRIOR_KEPT + PRIOR_LOST))
+    def _agreement(self, pos: int) -> tuple[int, int]:
+        """Tokens before the key match at ``pos`` that the generation
+        repeats, and 1 when a differing token ends the run (0 when the
+        compared window or the prompt start ends it)."""
+        tail = list(self._tail)
+        ids = self._index.ids
+        limit = min(len(tail) - KEY, pos - KEY)
+        run = 0
+        while run < limit and ids[pos - KEY - 1 - run] == tail[-KEY - 1 - run]:
+            run += 1
+        return run, int(run < limit)
+
+    def accept_rate(self, matched: int = 0, missed: int = 0) -> float:
+        """Chance that a copied token survives (sampling), from this
+        request's copy rounds and, for one lookup, the tokens before the
+        match that the generation sampled the same as the prompt."""
+        return ((self._kept + PRIOR_KEPT + matched)
+                / (self._kept + self._lost + PRIOR_KEPT + PRIOR_LOST
+                   + matched + missed))
 
     def _sampled_cap(self, r: float) -> int:
         if r >= 1.0:
@@ -228,15 +244,16 @@ class PromptCopy:
         pos = self._lookup()
         if pos is None:
             return []
-        n = min(max(self.length, shortest), budget,
-                len(self._index) - pos)
+        end = len(self._index) - pos
         if self.sampled:
-            r = self.accept_rate()
-            n = min(n, self._sampled_cap(r))
+            r = self.accept_rate(*self._agreement(pos))
+            n = min(self._sampled_cap(r), budget, end)
             expected = 1 + (n if r >= 1.0 else r * (1 - r ** n) / (1 - r))
             if (n >= shortest and self._draft_yield
                     and expected < SAMPLED_MARGIN * self._draft_yield):
                 return []
+        else:
+            n = min(max(self.length, shortest), budget, end)
         if n < shortest:
             return []
         return self._index.ids[pos:pos + n].tolist()
@@ -269,7 +286,5 @@ class PromptCopy:
             self._pause = min(self._pause * 2, PAUSE_MAX)
             self.length = min(START, self.longest)
         elif accepted >= copied:
-            grown = (max(self.length, copied) + START // 2 if self.sampled
-                     else max(self.length, copied) * 2)
-            self.length = min(grown, self.longest)
+            self.length = min(max(self.length, copied) * 2, self.longest)
             self._pause = PAUSE

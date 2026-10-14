@@ -548,20 +548,22 @@ def _walk_with_index(monkeypatch, index, n):
     return toks
 
 
-def test_sampled_whole_accepts_grow_by_half_a_start():
+def test_sampled_length_follows_the_accept_rate():
+    """No doubling after one whole accept: the length follows the rate."""
     prompt = list(range(100, 300))
     c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
     first = len(c.propose(1, 100))
-    assert first == cc.START
+    assert first == 9                       # where (7/8)^n falls under KEEP
     c.record(first, first)
-    assert len(c.propose(1, 100)) == cc.START + cc.START // 2
+    second = len(c.propose(1, 100))
+    assert first < second < 2 * first
 
 
 def test_sampled_length_stops_where_copies_stop_surviving():
     prompt = list(range(100, 300))
     c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
-    for _ in range(6):                      # each copy keeps 2 then fails
-        c.record(4, 2)
+    for _ in range(12):                     # each copy keeps 1 then fails
+        c.record(4, 1)
     r = c.accept_rate()
     assert r < 0.75
     n = len(c.propose(1, 100))
@@ -575,7 +577,7 @@ def test_sampled_copy_needs_to_beat_the_drafter_in_expectation():
     assert c.propose(7, 100) == []          # 8 copies at 7 in 8 add < 12
     c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
     c.drafted(3, 0.05)                      # a head that adds 3 a round
-    assert len(c.propose(1, 100)) == cc.START
+    assert len(c.propose(1, 100)) == 9
 
 
 def test_sampled_rounds_take_the_sampled_policy(monkeypatch):
@@ -595,6 +597,30 @@ def test_sampled_rounds_take_the_sampled_policy(monkeypatch):
         max_tokens=6, sampler=_sampler(0.5), draft_block_size=None,
         copy_prompt=list(range(40))))
     assert made and made[0]["sampled"] is True
+
+
+def test_a_sampled_row_on_verbatim_context_keeps_copying():
+    """The generation already repeats the prompt far back, so a strong
+    drafter's row copies at once, and keeps copying while copies hold."""
+    prompt = list(range(1000, 1400))
+    c = PromptCopy(prompt, longest=24, sampled=True)
+    c.drafted(8, 0.06)                      # a block drafter at 7 of 7
+    done = 70
+    c.extend(prompt[:done])
+    for _ in range(5):
+        copy = c.propose(7, 100)
+        assert len(copy) >= 7 and copy == prompt[done:done + len(copy)]
+        c.record(len(copy), len(copy))
+        done += len(copy) + 1               # the copy and the bonus token
+        c.extend(prompt[done - len(copy) - 1:done])
+
+
+def test_a_sampled_weak_match_waits_beside_a_strong_drafter():
+    prompt = list(range(1000, 1400))
+    c = PromptCopy(prompt, longest=24, sampled=True)
+    c.drafted(8, 0.06)
+    c.extend([5] * 20 + prompt[100:100 + KEY])  # only the key matches
+    assert c.propose(7, 100) == []
 
 
 def test_copy_off_reason_names_the_cap_or_the_rollback(monkeypatch):

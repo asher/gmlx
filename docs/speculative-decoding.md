@@ -163,9 +163,11 @@ temperature 0, a copy round can add at least twice the tokens of an
 average drafter round, so a drafter that already predicts the text well
 keeps its rounds. When sampling, the model keeps a copied token only as
 often as it would pick that token, so copies grow more slowly. A copy stops
-where a copied token's chance to be kept, measured on the request's
-earlier copies, gets low, and a copy runs only when the tokens it is
-expected to add beat a drafter round by half.
+where a copied token's chance to be kept gets low, and a copy runs only
+when the tokens it is expected to add beat a drafter round by half. That
+chance comes from the request's earlier copies and from how far back the
+output already repeats the prompt, so text that the output repeats word
+for word still copies beside a strong drafter.
 
 On the server, a request copies when it starts while no other request
 decodes, and stops copying when another request joins it.
