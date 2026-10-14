@@ -6,7 +6,7 @@ such as a DFlash 2 file). A copy of the drafter's draft length verifies at
 the drafter's width, so the greedy output matches a run without copies. A
 wider copy verifies on other kernels, whose rounding can flip a near tie
 later on, but the drafter must still hold exactly the committed positions
-after it.
+after it. The last test runs the real prompt lookup under the identity cap.
 """
 
 import os
@@ -26,6 +26,51 @@ PROMPT = (
     "few tips on etiquette we should know before we go?")
 N = 200
 AT = 9
+CODE = """
+def merge_intervals(intervals):
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda iv: iv[0])
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        last = merged[-1]
+        if start <= last[1]:
+            last[1] = max(last[1], end)
+        else:
+            merged.append([start, end])
+    return [tuple(iv) for iv in merged]
+
+
+def parse_line(line):
+    parts = line.strip().split(",")
+    if len(parts) != 3:
+        raise ValueError("bad line: " + line)
+    name, start, end = parts
+    return name.strip(), int(start), int(end)
+
+
+def load_schedule(path):
+    by_name = {}
+    with open(path) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith("#"):
+                continue
+            name, start, end = parse_line(line)
+            by_name.setdefault(name, []).append((start, end))
+    return {name: merge_intervals(ivs) for name, ivs in by_name.items()}
+
+
+def busiest(schedule):
+    best, best_total = None, -1
+    for name, ivs in schedule.items():
+        total = sum(end - start for start, end in ivs)
+        if total > best_total:
+            best, best_total = name, total
+    return best, best_total
+"""
+# A near-verbatim edit: the reply repeats the prompt's code.
+EDIT = ("Add the line `# Reviewed.` as the first line of this Python code. "
+        "Change nothing else. Reply with the full code only.\n\n" + CODE)
 
 
 @pytest.fixture(scope="module")
@@ -71,12 +116,22 @@ class _Forced:
         self.records.append((copied, accepted))
 
 
-def _generate(pair, monkeypatch, forced, widths, rounds=None):
+def _generate(pair, monkeypatch, forced, widths, rounds=None,
+              prompt=PROMPT, made=None):
     from gmlx.cache.kv_cache import make_prompt_cache
 
     model, drafter, _cfg, tok = pair
     monkeypatch.setenv("GMLX_CONTEXT_COPY", "1")
-    monkeypatch.setattr(spec, "PromptCopy", lambda p, **k: forced)
+    if forced is not None:
+        monkeypatch.setattr(spec, "PromptCopy", lambda p, **k: forced)
+    else:
+        from gmlx.spec.context_copy import PromptCopy as real
+
+        def build(p, **k):
+            made.append(real(p, **k))
+            return made[-1]
+
+        monkeypatch.setattr(spec, "PromptCopy", build)
     orig = spec._mtp_verify_target
 
     def verify(lm_, ids, *a, **k):
@@ -92,16 +147,20 @@ def _generate(pair, monkeypatch, forced, widths, rounds=None):
             rounds.append((len(out), int(drafter._cache[0].offset)))
             return orig_draft(*a, **k)
 
-        monkeypatch.setattr(drafter, "draft_block", draft_block)
+        drafter.draft_block = draft_block
     lm = getattr(model, "language_model", model)
     text = tok.apply_chat_template(
-        [{"role": "user", "content": PROMPT}], tokenize=False,
+        [{"role": "user", "content": prompt}], tokenize=False,
         add_generation_prompt=True, enable_thinking=False)
     ids = mx.array(tok.encode(text), dtype=mx.int32)
-    for t in spec.stream_speculative(
-            model, drafter, ids, prompt_cache=make_prompt_cache(lm),
-            max_tokens=N, sampler=None):
-        out.append(int(t))
+    try:
+        for t in spec.stream_speculative(
+                model, drafter, ids, prompt_cache=make_prompt_cache(lm),
+                max_tokens=N, sampler=None):
+            out.append(int(t))
+    finally:
+        if rounds is not None:
+            del drafter.draft_block     # the class method again
     mx.clear_cache()
     return out
 
@@ -109,10 +168,19 @@ def _generate(pair, monkeypatch, forced, widths, rounds=None):
 _REF = {}
 
 
-def _ref(pair, monkeypatch):
-    if "ref" not in _REF:
-        _REF["ref"] = _generate(pair, monkeypatch, _Forced(None, 0, False), [])
-    return _REF["ref"]
+def _ref(pair, monkeypatch, prompt=PROMPT):
+    """The copy-off output and the drafter's (committed, offset) per round."""
+    if prompt not in _REF:
+        rounds = []
+        out = _generate(pair, monkeypatch, _Forced(None, 0, False), [],
+                        rounds, prompt=prompt)
+        _REF[prompt] = out, rounds
+    return _REF[prompt]
+
+
+def _offset_less_committed(rounds):
+    # The last round can meet the end of the drafter's buffer.
+    return {off - n for n, off in rounds[:-1]}
 
 
 def _block(pair):
@@ -122,7 +190,7 @@ def _block(pair):
 @pytest.mark.parametrize("wrong", [True, False])
 def test_a_copy_at_the_drafters_width_keeps_the_greedy_output(
         pair, monkeypatch, wrong):
-    ref = _ref(pair, monkeypatch)
+    ref, _ = _ref(pair, monkeypatch)
     block = _block(pair)
     forced = _Forced(ref, block - 1, wrong)
     widths = []
@@ -135,12 +203,36 @@ def test_a_copy_at_the_drafters_width_keeps_the_greedy_output(
 @pytest.mark.parametrize("wrong", [True, False])
 def test_the_drafter_holds_the_committed_positions_after_a_wide_copy(
         pair, monkeypatch, wrong):
-    ref = _ref(pair, monkeypatch)
+    ref, ref_rounds = _ref(pair, monkeypatch)
     forced = _Forced(ref, _block(pair) + 1, wrong)
     widths, rounds = [], []
     _generate(pair, monkeypatch, forced, widths, rounds)
     assert forced.records, "no copy round ran"
     assert max(widths) > _block(pair)
-    # offset less committed tokens stays fixed from round to round; the
-    # last round can meet the end of the drafter's buffer
-    assert len({off - n for n, off in rounds[:-1]}) == 1
+    want = _offset_less_committed(ref_rounds)
+    assert len(want) == 1 and _offset_less_committed(rounds) == want
+
+
+def test_the_identity_cap_keeps_the_output_end_to_end(pair, monkeypatch):
+    """GMLX_CONTEXT_COPY_MAX at the drafter's draft length, with the real
+    prompt lookup and copy lengths: copies run, and the output and the
+    drafter's positions match a run without copies."""
+    from gmlx.spec.context_copy import SHORTEST_USEFUL
+
+    block = _block(pair)
+    if block - 1 < SHORTEST_USEFUL:
+        pytest.skip("this drafter's draft is too short to copy at its width")
+    ref, ref_rounds = _ref(pair, monkeypatch, EDIT)
+    monkeypatch.setenv("GMLX_CONTEXT_COPY_MAX", str(block - 1))
+    # Drafter rounds feed no yield: a strong drafter on this text lifts the
+    # floor of twice its yield past the cap, which would stop every copy.
+    from gmlx.spec.context_copy import PromptCopy
+
+    monkeypatch.setattr(PromptCopy, "drafted", lambda self, t, s: None)
+    made, widths, rounds = [], [], []
+    out = _generate(pair, monkeypatch, None, widths, rounds, prompt=EDIT,
+                    made=made)
+    assert made and made[0].rounds, "no copy round ran"
+    assert max(widths) <= block
+    assert out == ref
+    assert _offset_less_committed(rounds) == _offset_less_committed(ref_rounds)
