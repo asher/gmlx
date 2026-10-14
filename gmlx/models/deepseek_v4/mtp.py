@@ -50,7 +50,7 @@ import mlx.nn as nn
 
 from . import model as v4
 from gmlx.cache.attention import create_attention_mask
-from gmlx.cache.kv_cache import set_undo_armed
+from gmlx.cache.kv_cache import MTP_UNDO_WIDTH, set_undo_armed
 from gmlx.spec.drafter_protocol import native_block_size
 from .hyper_connection import HyperHead
 
@@ -107,6 +107,10 @@ class DeepseekV4SpecHooks:
     container's ``LanguageModel`` (gmlx.models.deepseek_v4.vlm_model) -
     which share the attribute layout the hooks read (``self.model``
     backbone, ``self.lm_head``, ``self._dspark_capture``)."""
+
+    # Widest verify the rollback can undo: the pooling caches and the
+    # rotating stash keep an undo log only up to this width.
+    spec_rollback_width = MTP_UNDO_WIDTH
 
     def _init_spec_hooks(self) -> None:
         # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
@@ -195,10 +199,11 @@ class DeepseekV4SpecHooks:
         return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
 
     def speculative_verify_hidden(self, verify_input: mx.array, prompt_cache):
-        """The single verify forward (qL = drafts + 1, S<=3), with the
-        rotating undo log armed so ``rollback_speculative_cache`` can undo
-        it on rejection (the PoolingCaches stash their own undo
-        unconditionally for L<=3)."""
+        """The single verify forward (qL = drafts + 1, at most
+        ``spec_rollback_width``), with the rotating undo log armed so
+        ``rollback_speculative_cache`` can undo it on rejection (the
+        PoolingCaches stash their own undo unconditionally up to the same
+        width)."""
         set_undo_armed(True)
         try:
             if self._dspark_capture is not None:

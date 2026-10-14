@@ -52,7 +52,8 @@ from .helpers import (
     _slice_shared_kv_after_reject,
     generation_stream,
 )
-from .context_copy import PromptCopy, context_copy_enabled
+from .context_copy import (PromptCopy, PromptIndex, context_copy_enabled,
+                           copy_limit)
 from .row_procs import SpecRowProcessors, batch_processors
 
 _log = logging.getLogger(__name__)
@@ -999,7 +1000,7 @@ def _owned_decode_rounds(
     thinking_hook=None,
     round_pos: list | None = None,
     row_procs=None,
-    copy_prompt: list[int] | None = None,
+    copy_prompt: list[int] | PromptIndex | None = None,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
     serve decode-only path.
@@ -1022,8 +1023,9 @@ def _owned_decode_rounds(
     row_procs (a SpecRowProcessors) runs the request's logits processors
     (penalties, a response_format grammar, XTC) at every verify position.
 
-    copy_prompt, the request's full prompt ids, turns on context copy
-    (gmlx.spec.context_copy) when the model or GMLX_CONTEXT_COPY enables it.
+    copy_prompt, the request's full prompt ids or their PromptIndex, turns
+    on context copy (gmlx.spec.context_copy) when the model or
+    GMLX_CONTEXT_COPY enables it and the target can roll a copy back.
     """
     token_dtype = mx.int32
     row_uid = (getattr(model, "_kq_row_uids", None) or [None])[0]
@@ -1216,10 +1218,19 @@ def _owned_decode_rounds(
                        draft_sampler, token_dtype, **draft_kwargs)
 
     copier = None
-    if copy_prompt and context_copy_enabled(drafter):
-        copier = PromptCopy(copy_prompt)
-        copier.extend([b])
-        _log_spec_once("context copy: drafting from the prompt")
+    copy_cap = 0
+    if (copy_prompt is not None and len(copy_prompt)
+            and context_copy_enabled(drafter)):
+        # A copy stays within the target's rollback reach.
+        copy_cap = copy_limit(lm) or 0
+        if copy_cap:
+            copier = PromptCopy(copy_prompt, longest=copy_cap,
+                                sampled=not greedy)
+            copier.extend([b])
+            _log_spec_once("context copy: drafting from the prompt")
+        else:
+            _log_spec_once("context copy: off, the model cannot roll back "
+                           "a useful copy")
 
     _round_log_session(kv_offset, max_tokens)
     _prev_end = time.perf_counter()
@@ -1264,8 +1275,9 @@ def _owned_decode_rounds(
                                               max_tokens - emitted + 1)
                 if bs <= 1:
                     break
-                copied = (copier.propose(bs - 1, max_tokens - emitted)
-                          if copier is not None else [])
+                copied = (copier.propose(
+                    bs - 1, min(max_tokens - emitted, copy_cap))
+                    if copier is not None else [])
                 if copied:
                     # Context copy: the prompt's continuation stands in for
                     # the drafter's block this round, at its own length.
@@ -1660,6 +1672,9 @@ def stream_speculative(
                      first_logits, axis=-1, keepdims=True)))
     hidden = hiddens[0] if len(hiddens) == 1 else mx.concatenate(hiddens, axis=1)
     shared_kv = out.shared_kv_states
+    # Hashed on the host while the GPU finishes the prefill.
+    copy_index = (PromptIndex(prompt[0]) if context_copy_enabled(drafter)
+                  else None)
     b = int(first.item())
     # out holds the last chunk's full logits and first_logits is a view of
     # them. The decode rounds read neither, so release them here.
@@ -1681,8 +1696,7 @@ def stream_speculative(
         draft_block_size=draft_block_size,
         seed_stream=({"kv": seed_kv, "len": seed_len} if seed_len else None),
         thinking_hook=thinking_hook, row_procs=row_procs,
-        copy_prompt=(prompt[0].tolist() if context_copy_enabled(drafter)
-                     else None))
+        copy_prompt=copy_index)
 
 
 def owned_server_rounds(
@@ -2005,9 +2019,10 @@ def _pop_thinking_hook(prompt_cache: list):
     return hook
 
 
-def _pop_copy_prompt(prompt_cache: list) -> list[int] | None:
-    """Detach the request's full prompt ids the serve transport stashes on
-    the first cache entry for context copy (patches.context_copy)."""
+def _pop_copy_prompt(prompt_cache: list):
+    """Detach the PromptIndex of the request's full prompt that the serve
+    transport stashes on the first cache entry for context copy
+    (patches.context_copy)."""
     if not prompt_cache:
         return None
     ids = getattr(prompt_cache[0], "_kq_copy_prompt", None)

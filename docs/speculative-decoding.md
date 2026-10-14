@@ -140,18 +140,32 @@ When the output repeats the prompt, as when the model edits code it was
 given or quotes a document, the prompt itself is a good draft. Context copy
 looks for the newest generated tokens in the prompt, and when it finds them,
 the round checks the prompt tokens that follow in place of the drafter's
-draft. The model accepts them by the same rule as any draft, so the output
-does not change. The drafter learns the accepted tokens and drafts the next
-round as usual.
+draft. The model accepts them by the same rule as any draft. The drafter
+learns the accepted tokens and drafts the next round as usual.
 
-A copy can run longer than the drafter's block, up to 24 tokens. Copies
-that the model accepts whole grow toward that limit. When the model rejects
-most of a copy, or a copy round makes tokens more slowly than the drafter's
-rounds, copying pauses for a while and starts again shorter. A copy is
-at least twice as long as what a drafter round adds on average, so a
-drafter that already predicts the text well keeps most rounds. On the server, a
-request copies when it starts while no other request decodes, and stops
-copying when another request joins it.
+A copy can run longer than the drafter's draft, up to 24 tokens. The model
+checks a longer copy with other kernels than a drafter round uses, and
+their rounding can change which token wins where the model's top two
+candidates are almost equally likely. From such a token on, the output can
+differ from a run without context copy. `GMLX_CONTEXT_COPY_MAX` set to the
+drafter's draft length, 7 for a DFlash 2 drafter with blocks of 8, keeps
+the output token-identical to a run without it. DeepSeek-V4 and
+GLM-5.3-Flash copy at most 5 tokens a round, the most they can take back
+after a rejected draft.
+
+Copies that the model accepts whole grow toward that limit. When the model
+rejects most of a copy, or a copy round makes tokens more slowly than the
+drafter's rounds, copying pauses for a while and starts again shorter. At
+temperature 0, a copy round can add at least twice the tokens of an
+average drafter round, so a drafter that already predicts the text well
+keeps its rounds. When sampling, the model keeps a copied token only as
+often as it would pick that token, so copies grow more slowly. A copy stops
+where a copied token's chance to be kept, measured on the request's
+earlier copies, gets low, and a copy runs only when the tokens it is
+expected to add beat a drafter round by half.
+
+On the server, a request copies when it starts while no other request
+decodes, and stops copying when another request joins it.
 
 [`context_copy: true`](config.md#modelscontext_copy) turns it on for a
 model. `GMLX_CONTEXT_COPY=1` turns it on for every model, in `run` and

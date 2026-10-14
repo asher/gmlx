@@ -4,14 +4,16 @@ Context copy (``gmlx.spec.context_copy``) drafts from the request's prompt,
 and the speculative batch keeps only the prefill's last chunk of it. The
 route mirrors the logits-processor transport:
 
-* capture - ``PromptProcessingBatch.__init__`` keeps each row's full prompt
-  ids when context copy is on for the model: the prefill input for a cold
-  row, the APC entry's full ids for a warm row whose input is the suffix.
+* capture - ``PromptProcessingBatch.__init__`` indexes each row's full
+  prompt (a ``PromptIndex``) when context copy is on for the model: the
+  prefill input for a cold row, the APC entry's full ids for a warm row
+  whose input is the suffix. The index is built before the prefill, so no
+  decode round waits for it.
 * build - ``PromptProcessingBatch.generate`` hangs them on the speculative
   batch it returns.
 * transport - ``SpeculativeGenerationBatch._start_rounds`` stashes a lone
-  row's ids on the first cache entry, where the owned scalar rounds pop
-  them. A batch of several rows runs no context copy.
+  row's index on the first cache entry, where the owned scalar rounds pop
+  it. A batch of several rows runs no context copy.
 """
 
 from __future__ import annotations
@@ -40,16 +42,14 @@ def _innermost(fn):
     return fn
 
 
-def _row_ids(ids) -> list[int]:
-    return [int(t) for t in (ids.tolist() if hasattr(ids, "tolist") else ids)]
+def _full_prompts(input_ids, apc_meta) -> list:
+    from gmlx.spec.context_copy import PromptIndex
 
-
-def _full_prompts(input_ids, apc_meta) -> list[list[int]]:
     rows = []
     for i, ids in enumerate(input_ids if input_ids is not None else ()):
         meta = apc_meta[i] if apc_meta and i < len(apc_meta) else None
         full = meta.get("full_input_ids") if meta else None
-        rows.append(_row_ids(full if full is not None else ids))
+        rows.append(PromptIndex(full if full is not None else ids))
     return rows
 
 

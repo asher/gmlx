@@ -255,7 +255,7 @@ def _dflash_walk(monkeypatch, scripted, n):
     ref = _engine_reference(lm, prompt, n)
     script = scripted(ref)
     monkeypatch.setenv("GMLX_CONTEXT_COPY", "1")
-    monkeypatch.setattr(spec, "PromptCopy", lambda p: script)
+    monkeypatch.setattr(spec, "PromptCopy", lambda p, **k: script)
     drafter = _drafter(lm)
     widths = []
     orig = spec._mtp_verify_target
@@ -315,7 +315,8 @@ def test_copy_off_by_default(monkeypatch):
     from test_dflash2_drafter import _drafter, _target
 
     made = []
-    monkeypatch.setattr(spec, "PromptCopy", lambda p: made.append(p))
+    monkeypatch.setattr(spec, "PromptCopy",
+                        lambda p, **k: made.append(p))
     lm = _target()
     assert not cc.context_copy_enabled(_drafter(lm))
     assert made == []
@@ -386,8 +387,10 @@ def test_transport_carries_a_lone_rows_full_prompt(monkeypatch):
                draft_model=drafter, draft_kind="mtp")
     sb = warm.generate()
     assert sb._start_rounds() == "started"
-    assert sb.prompt_cache[0]._kq_copy_prompt == [1, 2, 7, 8]
-    assert spec._pop_copy_prompt(sb.prompt_cache) == [1, 2, 7, 8]
+    index = sb.prompt_cache[0]._kq_copy_prompt
+    assert isinstance(index, cc.PromptIndex)     # built at capture
+    assert index.ids.tolist() == [1, 2, 7, 8]
+    assert spec._pop_copy_prompt(sb.prompt_cache) is index
     assert not hasattr(sb.prompt_cache[0], "_kq_copy_prompt")
 
     pair = PPB([[1, 2], [3, 4]], draft_model=drafter, draft_kind="mtp")
@@ -410,3 +413,164 @@ def test_round_log_notes_the_copy_totals(monkeypatch, tmp_path):
     copied = sum(c for c, _ in script.records)
     assert (f"# context copy rounds={len(script.records)} copied={copied}"
             in log.read_text())
+
+
+# -- reach, index and sampling --------------------------------------------
+
+
+def test_copy_limit_follows_the_targets_rollback_width(monkeypatch):
+    ns = SimpleNamespace
+    assert cc.copy_limit(ns()) == cc.LONGEST
+    assert cc.copy_limit(ns(spec_rollback_width=6)) == 5
+    assert cc.copy_limit(ns(spec_rollback_width=4)) is None
+    monkeypatch.setenv("GMLX_CONTEXT_COPY_MAX", "4")
+    assert cc.copy_limit(ns(spec_rollback_width=6)) == 4
+    monkeypatch.setenv("GMLX_CONTEXT_COPY_MAX", "3")
+    assert cc.copy_limit(ns()) is None
+
+
+def test_a_narrow_target_gets_no_copier(monkeypatch):
+    made = []
+    monkeypatch.setattr(spec, "PromptCopy",
+                        lambda p, **k: made.append(k))
+    monkeypatch.setattr(spec, "copy_limit", lambda lm: None)
+    toks, ref, *_ = _dflash_walk_plain(monkeypatch, 12)
+    assert toks[:12] == ref and made == []
+
+
+def _dflash_walk_plain(monkeypatch, n):
+    from test_dflash2_drafter import (BLOCK, CAPTURE, _drafter,
+                                      _engine_reference, _target)
+
+    lm = _target()
+    prompt = mx.array([[1, 2, 3, 4, 5]])
+    ref = _engine_reference(lm, prompt, n)
+    monkeypatch.setenv("GMLX_CONTEXT_COPY", "1")
+    drafter = _drafter(lm)
+    lm.set_dflash_capture(CAPTURE)
+    cache = lm.make_cache()
+    out = lm(prompt, cache=cache, return_hidden=True, return_shared_kv=True)
+    b = int(mx.argmax(out.logits[:, -1, :], axis=-1).item())
+    spec._buffer_mtp_target_cache(cache, drafter, BLOCK)
+    toks = [b]
+    toks.extend(spec._owned_decode_rounds(
+        lm, drafter, lm, cache, hidden=out.hidden_states[-1], b=b,
+        shared_kv=out.shared_kv_states, seed_tokens=prompt, emitted=1,
+        max_tokens=n, sampler=None, draft_block_size=BLOCK,
+        copy_prompt=cc.PromptIndex(ref * 3)))
+    return toks, ref
+
+
+def test_prompt_index_matches_a_direct_scan():
+    rng = np.random.default_rng(0)
+    prompt = rng.integers(0, 5, 400).tolist()
+    index = cc.PromptIndex(prompt)
+    for _ in range(50):
+        i = int(rng.integers(0, 390))
+        key = prompt[i:i + KEY]
+        want = [e for e in range(KEY, len(prompt))
+                if prompt[e - KEY:e] == key][-cc.CANDIDATES:]
+        assert index.candidates(key).tolist() == want
+    assert index.candidates([9] * KEY).tolist() == []
+    assert cc.PromptIndex([1, 2]).candidates([1] * KEY).tolist() == []
+
+
+def test_decode_rounds_build_no_index(monkeypatch):
+    """The index is built before the rounds (at capture or while the
+    prefill runs); a round only hashes its own key."""
+    built = []
+    orig = cc._hash_rows
+
+    def hash_rows(ids, n_rows):
+        if n_rows > 1:
+            built.append(n_rows)
+        return orig(ids, n_rows)
+
+    from test_dflash2_drafter import _engine_reference, _target
+
+    toks_ref = _engine_reference(_target(), mx.array([[1, 2, 3, 4, 5]]), 24)
+    index = cc.PromptIndex(toks_ref * 2)
+    monkeypatch.setattr(cc, "_hash_rows", hash_rows)
+
+    calls = []
+    real_propose = cc.PromptCopy.propose
+
+    def propose(self, shortest, budget):
+        calls.append(len(built))
+        return real_propose(self, shortest, budget)
+
+    monkeypatch.setattr(cc.PromptCopy, "propose", propose)
+    toks = _walk_with_index(monkeypatch, index, 24)
+    assert toks[:24] == toks_ref
+    assert calls and built == []
+
+
+def _walk_with_index(monkeypatch, index, n):
+    from test_dflash2_drafter import BLOCK, CAPTURE, _drafter, _target
+
+    lm = _target()
+    prompt = mx.array([[1, 2, 3, 4, 5]])
+    monkeypatch.setenv("GMLX_CONTEXT_COPY", "1")
+    drafter = _drafter(lm)
+    lm.set_dflash_capture(CAPTURE)
+    cache = lm.make_cache()
+    out = lm(prompt, cache=cache, return_hidden=True, return_shared_kv=True)
+    b = int(mx.argmax(out.logits[:, -1, :], axis=-1).item())
+    spec._buffer_mtp_target_cache(cache, drafter, BLOCK)
+    toks = [b]
+    toks.extend(spec._owned_decode_rounds(
+        lm, drafter, lm, cache, hidden=out.hidden_states[-1], b=b,
+        shared_kv=out.shared_kv_states, seed_tokens=prompt, emitted=1,
+        max_tokens=n, sampler=None, draft_block_size=BLOCK,
+        copy_prompt=index))
+    return toks
+
+
+def test_sampled_whole_accepts_grow_by_half_a_start():
+    prompt = list(range(100, 300))
+    c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
+    first = len(c.propose(1, 100))
+    assert first == cc.START
+    c.record(first, first)
+    assert len(c.propose(1, 100)) == cc.START + cc.START // 2
+
+
+def test_sampled_length_stops_where_copies_stop_surviving():
+    prompt = list(range(100, 300))
+    c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
+    for _ in range(6):                      # each copy keeps 2 then fails
+        c.record(4, 2)
+    r = c.accept_rate()
+    assert r < 0.75
+    n = len(c.propose(1, 100))
+    assert 1 <= n and r ** n >= cc.KEEP > r ** (n + 1)
+
+
+def test_sampled_copy_needs_to_beat_the_drafter_in_expectation():
+    prompt = list(range(100, 300))
+    c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
+    c.drafted(8, 0.06)                      # a block drafter at 7 of 7
+    assert c.propose(7, 100) == []          # 8 copies at 7 in 8 add < 12
+    c = _gen(PromptCopy(prompt, longest=24, sampled=True), prompt[:KEY])
+    c.drafted(3, 0.05)                      # a head that adds 3 a round
+    assert len(c.propose(1, 100)) == cc.START
+
+
+def test_sampled_rounds_take_the_sampled_policy(monkeypatch):
+    made = []
+    monkeypatch.setattr(spec, "PromptCopy",
+                        lambda p, **k: made.append(k) or _Scripted([]))
+    monkeypatch.setattr(spec, "_STOCH_ACCEPT", False)
+    from test_mtp_mixed_batch import _EchoLM, _FakeCache, _RowDrafter
+
+    monkeypatch.setenv("GMLX_CONTEXT_COPY", "1")
+    d = _RowDrafter(block_size=4)
+    d.set_shared_kv = lambda *a, **k: None
+    list(spec._owned_decode_rounds(
+        SimpleNamespace(), d, _EchoLM(), [_FakeCache(width=1)],
+        hidden=mx.zeros((1, 4, 8)), b=6, shared_kv=None,
+        seed_tokens=mx.zeros((1, 4), dtype=mx.int32), emitted=1,
+        max_tokens=6, sampler=_sampler(0.5), draft_block_size=None,
+        copy_prompt=list(range(40))))
+    assert made and made[0]["sampled"] is True
+
