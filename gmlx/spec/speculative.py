@@ -53,7 +53,7 @@ from .helpers import (
     generation_stream,
 )
 from .context_copy import (PromptCopy, PromptIndex, context_copy_enabled,
-                           copy_limit)
+                           copy_limit, copy_off_reason)
 from .row_procs import SpecRowProcessors, batch_processors
 
 _log = logging.getLogger(__name__)
@@ -1231,8 +1231,7 @@ def _owned_decode_rounds(
             copier.extend([b])
             _log_spec_once("context copy: drafting from the prompt")
         else:
-            _log_spec_once("context copy: off, the model cannot roll back "
-                           "a useful copy")
+            _log_spec_once(f"context copy: off, {copy_off_reason(lm)}")
 
     _round_log_session(kv_offset, max_tokens)
     _prev_end = time.perf_counter()

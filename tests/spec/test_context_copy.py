@@ -596,3 +596,10 @@ def test_sampled_rounds_take_the_sampled_policy(monkeypatch):
         copy_prompt=list(range(40))))
     assert made and made[0]["sampled"] is True
 
+
+def test_copy_off_reason_names_the_cap_or_the_rollback(monkeypatch):
+    ns = SimpleNamespace
+    assert cc.copy_off_reason(ns()) is None
+    assert "roll back" in cc.copy_off_reason(ns(spec_rollback_width=4))
+    monkeypatch.setenv("GMLX_CONTEXT_COPY_MAX", "3")
+    assert "GMLX_CONTEXT_COPY_MAX" in cc.copy_off_reason(ns())

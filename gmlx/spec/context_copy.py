@@ -17,19 +17,23 @@ A copy can run longer than the drafter's block. A verify wider than a
 drafter round runs other kernels, whose rounding can pick a different
 token where the target's top two candidates nearly tie, so the output can
 differ from a run without copies from there on. ``GMLX_CONTEXT_COPY_MAX``
-at the drafter's draft length keeps it token-identical. A copy is never
-wider than the target can roll back (``spec_rollback_width``); where that
-leaves less than ``SHORTEST_USEFUL`` tokens, the request does not copy.
+at a block drafter's draft length keeps it token-identical. A copy is
+never wider than the target can roll back (``spec_rollback_width``). Where
+the cap or the rollback leaves less than ``SHORTEST_USEFUL`` tokens, the
+request does not copy.
 
 Copy length adapts per request. At temperature 0, a copy round that is
 accepted whole doubles the next copy, up to the longest, and a copy round
 can add at least twice the tokens of an average drafter round. When
 sampling, a copied token survives with the target's probability of it, so
-whole accepts come in shorter runs: the length grows by half a start
-length per whole accept, stops where the chance that a copied token
-survives, from the request's own copy rounds, falls under ``KEEP``, and a
-copy runs only when the tokens it is expected to add reach
-``SAMPLED_MARGIN`` times a drafter round's.
+whole accepts come in shorter runs. The copy stops where the chance that a
+copied token survives falls under ``KEEP``, and runs only when the tokens
+it is expected to add reach ``SAMPLED_MARGIN`` times a drafter round's.
+The chance comes from the request's copy rounds and, at each lookup, from
+how far back the generation already repeats the prompt before the match:
+a sampled token that equals the prompt's is the same event as a copied
+token that survives. A drafter that adds many tokens a round therefore
+still copies verbatim text, which no prior alone would let it try.
 
 A round that keeps under a quarter of its copy, or that yields fewer tokens
 per second than the request's drafter rounds, is a misfire: copying pauses
@@ -107,6 +111,16 @@ def copy_limit(lm) -> int | None:
     if rollback is not None:
         cap = min(cap, rollback)
     return cap if cap >= SHORTEST_USEFUL else None
+
+
+def copy_off_reason(lm) -> str | None:
+    """Why ``copy_limit`` turns copying off for this target, or None."""
+    if longest_copy() < SHORTEST_USEFUL:
+        return f"GMLX_CONTEXT_COPY_MAX is under {SHORTEST_USEFUL}"
+    if copy_limit(lm) is None:
+        return (f"the model cannot roll back a copy of {SHORTEST_USEFUL} "
+                "tokens")
+    return None
 
 
 def _hash_rows(ids: np.ndarray, n_rows: int) -> np.ndarray:

@@ -147,11 +147,14 @@ A copy can run longer than the drafter's draft, up to 24 tokens. The model
 checks a longer copy with other kernels than a drafter round uses, and
 their rounding can change which token wins where the model's top two
 candidates are almost equally likely. From such a token on, the output can
-differ from a run without context copy. `GMLX_CONTEXT_COPY_MAX` set to the
-drafter's draft length, 7 for a DFlash 2 drafter with blocks of 8, keeps
-the output token-identical to a run without it. DeepSeek-V4 and
-GLM-5.3-Flash copy at most 5 tokens a round, the most they can take back
-after a rejected draft.
+differ from a run without context copy. For a block drafter,
+`GMLX_CONTEXT_COPY_MAX` set to its draft length, 7 for a DFlash 2 drafter
+with blocks of 8, keeps the output token-identical to a run without copies.
+A copy shorter than 4 tokens is not worth a round, so a value of 2 or 3
+turns copying off. A native head that drafts 2 or 3 tokens therefore has
+no copy length that keeps the output identical, other than no copies at
+all. DeepSeek-V4 and GLM-5.3-Flash copy at most 5 tokens a round, the most
+they can take back after a rejected draft.
 
 Copies that the model accepts whole grow toward that limit. When the model
 rejects most of a copy, or a copy round makes tokens more slowly than the
