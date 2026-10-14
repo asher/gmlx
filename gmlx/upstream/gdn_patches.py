@@ -797,9 +797,7 @@ def _gdn_try_cat_ba_kq(gdn, mods) -> bool:
     self-contained, so the cat is bit-exact against the two calls. Same
     storage discipline: the cat owns the wire rows and b and a become
     row-slice views of it."""
-    import importlib
-
-    KQuantLinear = importlib.import_module("mlx_kquant.nn").KQuantLinear
+    KQuantLinear = _kquant_linear_cls()
     b, a = mods
     if type(b) is not KQuantLinear or type(a) is not KQuantLinear:
         return False
@@ -825,6 +823,37 @@ def _gdn_try_cat_ba_kq(gdn, mods) -> bool:
     object.__setattr__(gdn, "_gdn_ba_kq", cat)
     return True
 
+
+
+def _kquant_linear_cls():
+    import importlib
+
+    return importlib.import_module("mlx_kquant.nn").KQuantLinear
+
+
+def kquant_multi(linears, x: mx.array):
+    """The outputs of ``linears`` on ``x`` from one
+    ``kq.quantized_matmul_multi`` call, or None where it does not apply.
+
+    It applies at 2 to 8 rows of ``x``, the verify widths, to a group of
+    plain unbiased KQuantLinears of one codec: the op runs up to four
+    weights that share ``x`` in one dispatch, each read from its own
+    buffer. None on an mlx-kquant without the op, so callers keep their
+    per-weight calls, and for any member an adapter or a fold wraps."""
+    import importlib
+
+    multi = getattr(importlib.import_module("mlx_kquant"),
+                    "quantized_matmul_multi", None)
+    if multi is None or len(linears) < 2 or x.ndim < 2:
+        return None
+    if not 2 <= x.size // x.shape[-1] <= 8:
+        return None
+    cls = _kquant_linear_cls()
+    codec = getattr(linears[0], "kquant_type", None)
+    for lin in linears:
+        if type(lin) is not cls or "bias" in lin or lin.kquant_type != codec:
+            return None
+    return tuple(multi(x, [lin["weight"] for lin in linears], codec))
 
 def _gdn_ba_kq(gdn):
     """The k-quant b/a cat while b and a are still the modules it was cut
@@ -1350,11 +1379,23 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
 
+    multi = None
     if is_folded(self.in_proj_z):
         mixed_qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
     else:
-        mixed_qkv = self.in_proj_qkv(inputs)
-        z = _bf16_verify_linear(self.in_proj_z, inputs)
+        # A q4_0 file runs qkv, z and the b/a pair as one multi-weight
+        # matmul at verify widths.
+        ba_kq = _gdn_ba_kq(self)
+        multi = kquant_multi(
+            (self.in_proj_qkv, self.in_proj_z)
+            + ((ba_kq,) if ba_kq is not None
+               else (self.in_proj_b, self.in_proj_a)),
+            inputs)
+        if multi is not None:
+            mixed_qkv, z = multi[0], multi[1]
+        else:
+            mixed_qkv = self.in_proj_qkv(inputs)
+            z = _bf16_verify_linear(self.in_proj_z, inputs)
     # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
     # ~2x the combined one at these sizes, so run them as one [2 * Hv]
     # gemv against the concatenated weight (row-independent, bit-exact).
@@ -1379,7 +1420,10 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             mx.eval(wba)
         cba = (ba_key, wba)
         self._gdn_verify_ba_weight = cba
-    if cba[1] is not None:
+    if multi is not None:
+        ba = (multi[2] if len(multi) == 3
+              else mx.concatenate(list(multi[2:]), axis=-1))
+    elif cba[1] is not None:
         ba = _f16_head_gemv(inputs, cba[1])
     elif (ba_kq := _gdn_ba_kq(self)) is not None:
         ba = ba_kq(inputs)
