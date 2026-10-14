@@ -228,6 +228,11 @@ def install_continuous_batch_admission() -> None:
         if row_procs:
             self._kq_row_procs = [row_procs[i] if i < len(row_procs) else None
                                   for i in keep]
+        copy_prompts = getattr(self, "_kq_copy_prompts", None)
+        if copy_prompts:
+            self._kq_copy_prompts = [
+                copy_prompts[i] if i < len(copy_prompts) else None
+                for i in keep]
         self.uids = list(self._all_uids)
         self.max_tokens = [self.max_tokens[i] for i in keep]
         self._num_tokens = [self._num_tokens[i] for i in keep]
