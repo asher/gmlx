@@ -766,7 +766,7 @@ def _parse_round_log(path):
     total_drafted = 0
     total_accepted = 0
     # The "# idx" header names the columns; a log without one ends in
-    # accepted, bs.
+    # accepted, bs. A batch round logs its rows' mean accept, a float.
     i_acc, i_bs = -2, -1
     for line in lines:
         line = line.strip()
@@ -779,7 +779,7 @@ def _parse_round_log(path):
             continue
         parts = line.split("\t")
         try:
-            accepted = int(parts[i_acc])
+            accepted = float(parts[i_acc])
             bs = int(parts[i_bs])
             total_drafted += bs - 1
             total_accepted += accepted
@@ -1362,7 +1362,7 @@ def render_md(meta, specs, cfg, results):
                 dn = sum(e["draft_n"] for e in entries)
                 da = sum(e["draft_n_accepted"] for e in entries)
                 if dn:
-                    L.append(f"\n_{rt}/{al} draft acceptance: {da}/{dn} "
+                    L.append(f"\n_{rt}/{al} draft acceptance: {round(da, 2):g}/{dn} "
                              f"({100.0 * da / dn:.0f}%)._")
             L.append("")
         # concurrent aggregate throughput

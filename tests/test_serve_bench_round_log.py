@@ -54,3 +54,18 @@ def test_parses_the_profiled_layout(bench, tmp_path):
                    "total_ms\taccepted\tbs\tgap_ms\tcopied\n"
                    "0\t1\t2\t3\t4\t5\t15\t2\t4\t0.250\t0\n")
     assert bench._parse_round_log(log) == (3, 2)
+
+
+def test_counts_the_batch_rounds(bench, tmp_path, monkeypatch):
+    """A batch round logs the mean accept over its rows."""
+    log = tmp_path / "batch.tsv"
+    monkeypatch.setenv("GMLX_ROUND_LOG", str(log))
+    monkeypatch.setattr(spec, "_ROUND_PROFILE", False)
+    try:
+        spec._round_log_session(10, 64)
+        spec._round_log(1.0, 0.1, 0.1, round(5 / 2, 2), 8, gap_ms=0.5)
+        spec._round_log(1.0, 0.1, 0.1, 3, 8, gap_ms=0.5)
+    finally:
+        spec._round_log_close()
+        spec._round_log_state.update(fh=None, path=None)
+    assert bench._parse_round_log(log) == (14, 5.5)
