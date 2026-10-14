@@ -69,7 +69,7 @@ def test_signature_without_options_is_unchanged():
     common = dict(path="/p", load={}, cache={}, system=None, speculative=False,
                   mmproj=None, draft_gguf=None, pin=False, ttl_s=None)
     a = cfgmod.ResolvedModel(id="a", sampling={}, **common)
-    assert len(a.load_signature()) == 18
+    assert len(a.load_signature()) == 19
 
 
 @pytest.mark.parametrize("block,needle", [
