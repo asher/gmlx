@@ -80,9 +80,19 @@ several do. The server therefore gives each model a width cap, the number
 of requests that speculate together. Past the cap, the oldest requests keep
 speculating and the others decode without speculation in the same step,
 and when a speculating request finishes, the next oldest takes its place.
-On a mixture-of-experts model, and with the gemma-4 assistant drafter, the
+This needs a drafter that keeps its own state for each request and a model
+that undoes each request's rejected drafts separately. In these cases the
 whole batch decodes without speculation past the cap instead, and
-speculates again when the batch shrinks.
+speculates again when the batch shrinks:
+
+- Any mixture-of-experts model, because the padded positions of the other
+  requests widen the set of experts each step reads.
+  `GMLX_MTP_MIXED=1` gives such a model mixed batches anyway.
+- The gemma-4 assistant drafter, which reads the model's own KV cache.
+- gemma-4, DeepSeek-V4, Nemotron-H and MiniMax-M3 models, and the MTP heads
+  of GLM-DSA, Inkling and Hy-V4 models, which accept the same number of
+  drafts for every request in a batch.
+- A quantized KV cache that cannot roll back each request separately.
 
 | Drafter | Default cap |
 |---------|-------------|
