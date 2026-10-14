@@ -23,6 +23,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A sampled request whose structured output allowed fewer tokens than its
   `top_k` could return token ids past the vocab when the vocab size is not a
   multiple of 128.
+- A sampled request returned random tokens when its `logit_bias` held NaN,
+  or an infinite ban on the only token its structured output allowed.
 
 ## [0.5.0] - 2026-10-12
 
