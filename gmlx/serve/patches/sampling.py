@@ -293,30 +293,32 @@ _HIER_MIN_V = 8192      # below this the flat argpartition is already cheap
 
 
 def _topk_ids(lp, k):
-    """Top-k vocab ids of ``lp`` [1, V] f32, hierarchically.
+    """Top-k vocab ids of each row of ``lp`` [B, V] f32, hierarchically.
 
     ``mx.argpartition`` over a 200k vocab is a full-width sort on the GPU
-    sitting on the decode critical path. Reshape to rows of ``_HIER_ROW``,
-    reduce each row to its max (one bandwidth-bound pass), argpartition the
-    ~V/128 row-maxes, then argpartition the k*128 surviving candidates.
-    Exact: a value in the global top-k bounds its row's max from below, so
-    fewer than k rows can outrank that row -- every top-k value's row
-    survives the row cut. Only tie ORDER at the k-th value can differ from
-    the flat argpartition.
+    sitting on the decode critical path. Reshape each row to rows of
+    ``_HIER_ROW``, reduce those to their max (one bandwidth-bound pass),
+    argpartition the ~V/128 maxes, then argpartition the k*128 surviving
+    candidates. Exact: a value in the global top-k bounds its row's max from
+    below, so fewer than k rows can outrank that row -- every top-k value's
+    row survives the row cut. Only tie ORDER at the k-th value can differ
+    from the flat argpartition.
     """
     import mlx.core as mx
-    v = lp.shape[-1]
+    b, v = lp.shape
     n_rows = (v + _HIER_ROW - 1) // _HIER_ROW
     if n_rows * _HIER_ROW != v:
         pad = mx.full(
-            (1, n_rows * _HIER_ROW - v), -float("inf"), dtype=lp.dtype)
+            (b, n_rows * _HIER_ROW - v), -float("inf"), dtype=lp.dtype)
         lp = mx.concatenate([lp, pad], axis=-1)
-    rows = lp.reshape(n_rows, _HIER_ROW)
-    top_rows = mx.argpartition(-rows.max(axis=1), kth=k - 1)[:k]   # [k]
-    cand = rows[top_rows].reshape(-1)                              # [k * 128]
-    loc = mx.argpartition(-cand, kth=k - 1)[:k]                    # [k]
-    ids = top_rows[loc // _HIER_ROW] * _HIER_ROW + (loc % _HIER_ROW)
-    return ids[None]
+    rows = lp.reshape(b, n_rows, _HIER_ROW)
+    top_rows = mx.argpartition(
+        -rows.max(axis=2), kth=k - 1, axis=-1)[:, :k]             # [B, k]
+    cand = mx.take_along_axis(
+        rows, top_rows[:, :, None], axis=1).reshape(b, -1)       # [B, k*128]
+    loc = mx.argpartition(-cand, kth=k - 1, axis=-1)[:, :k]      # [B, k]
+    return (mx.take_along_axis(top_rows, loc // _HIER_ROW, axis=-1)
+            * _HIER_ROW + (loc % _HIER_ROW))
 
 
 class _FastPositionedSampler:
@@ -372,8 +374,8 @@ class _FastPositionedSampler:
         lp = logprobs.astype(mx.float32)
         v = lp.shape[-1]
         k = self.top_k if 0 < self.top_k < v else min(_TOPP_ONLY_CAP, v)
-        if lp.shape[0] == 1 and k <= 64 and v >= _HIER_MIN_V:
-            part = _topk_ids(lp, k)                              # [1, k] ids
+        if k <= 64 and v >= _HIER_MIN_V:
+            part = _topk_ids(lp, k)                              # [B, k] ids
         else:
             part = mx.argpartition(-lp, kth=k - 1, axis=-1)[:, :k]  # [B, k] ids
         cand = mx.take_along_axis(lp, part, axis=-1)             # [B, k] raw logits

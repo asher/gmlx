@@ -516,6 +516,19 @@ def test_fast_sampler_hierarchical_topk_matches_flat():
         assert hier == flat
 
 
+def test_fast_sampler_hierarchical_topk_takes_every_row():
+    # A verify block samples several rows at once; each row's top-k set
+    # must equal the flat argpartition's, so no row falls back to a
+    # full-vocab sort.
+    import mlx.core as mx
+    lp = mx.random.normal((5, 150001), key=mx.random.key(3)).astype(mx.float32)
+    mx.eval(lp)
+    hier = sp_sampling._topk_ids(lp, 20)
+    flat = mx.argpartition(-lp, kth=19, axis=-1)[:, :20]
+    for r in range(5):
+        assert set(hier[r].tolist()) == set(flat[r].tolist())
+
+
 def test_fast_sampler_masking():
     S = sp_sampling._FastPositionedSampler
     probs = [0.4, 0.3, 0.2, 0.1]

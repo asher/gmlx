@@ -565,6 +565,9 @@ def _stoch_walk_graph(sampler, logits: mx.array, draft_row: mx.array,
     (processors applied), ``draft_row`` [n_draft]. Returns (accept flags,
     residual draws, bonus draw) for _stoch_walk_finish."""
     n_draft = int(draft_row.shape[0])
+    if (hasattr(sampler, "_filtered") and hasattr(sampler, "temperature")
+            and getattr(sampler, "_has_filter", True)):
+        return _stoch_walk_graph_cand(sampler, logits, draft_row, q_rows)
     p = _stoch_target_probs(sampler, logits)                  # [n_draft+1, V]
     p_n = p[:n_draft]
     if q_rows is None:
@@ -583,6 +586,40 @@ def _stoch_walk_graph(sampler, logits: mx.array, draft_row: mx.array,
     res = mx.where(z > 0, res / z, p_n)
     res_tokens = mx.random.categorical(mx.log(res), axis=-1)  # [n_draft]
     bonus = mx.random.categorical(mx.log(p[n_draft:]), axis=-1)  # [1]
+    return acc, res_tokens, bonus
+
+
+def _stoch_walk_graph_cand(sampler, logits: mx.array, draft_row: mx.array,
+                           q_rows: list[mx.array] | None):
+    """_stoch_walk_graph for a filtering serve sampler, in candidate space.
+
+    p is zero outside the sampler's k survivors per row, so p(d), the
+    residual max(p - q, 0) and the bonus draw all live on those k ids: the
+    walk reads q at them and samples over k, with no full-vocab pass after
+    the top-k selection. Same law as the dense walk."""
+    n_draft = int(draft_row.shape[0])
+    masked, part, order = sampler._filtered(logits.astype(mx.float32))
+    ids = mx.take_along_axis(part, order, axis=-1)            # [n_draft+1, k]
+    pc = mx.softmax(masked, axis=-1)                          # p on the ids
+    ids_n, p_n = ids[:n_draft], pc[:n_draft]
+    hit = ids_n == draft_row[:, None]
+    p_at = mx.where(hit, p_n, 0.0).sum(axis=-1)
+    if q_rows is None:
+        q_c = hit.astype(p_n.dtype)
+        q_at = mx.ones_like(p_at)
+    else:
+        q = mx.stack(q_rows)                                  # [n_draft, V]
+        q_c = mx.take_along_axis(q, ids_n, axis=-1).astype(p_n.dtype)
+        q_at = mx.take_along_axis(q, draft_row[:, None], axis=-1)[:, 0]
+    u = mx.random.uniform(shape=(n_draft,))
+    acc = u * q_at < p_at
+    res = mx.maximum(p_n - q_c, 0.0)
+    z = res.sum(axis=-1, keepdims=True)
+    res = mx.where(z > 0, res / z, p_n)
+    res_at = mx.random.categorical(mx.log(res), axis=-1)      # [n_draft]
+    res_tokens = mx.take_along_axis(ids_n, res_at[:, None], axis=-1)[:, 0]
+    bonus_at = mx.random.categorical(mx.log(pc[n_draft:]), axis=-1)
+    bonus = mx.take_along_axis(ids[n_draft:], bonus_at[:, None], axis=-1)[:, 0]
     return acc, res_tokens, bonus
 
 
