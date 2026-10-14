@@ -267,6 +267,37 @@ def test_walk_does_no_full_vocab_sort_for_a_filtering_sampler(monkeypatch):
     assert widths and max(widths) < v
 
 
+
+def test_the_walk_on_a_masked_row_of_a_padded_vocab_emits_vocab_ids():
+    """A width that is not a multiple of 128 is padded inside the top-k.
+    A structured-output row with fewer than k finite logits must still
+    walk, draw residuals and draw the bonus over vocab ids only."""
+    v = 9000
+    row = np.full(v, -np.inf, dtype=np.float32)
+    live = [8970, 8985, 8999]
+    row[live] = [2.0, 1.0, 0.5]
+    logits = mx.array(np.tile(row, (3, 1)))
+    mx.random.seed(0)
+    out = []
+    for _ in range(20):
+        _, res, bonus = sp._stoch_walk_graph(
+            _fast(temperature=1.0, top_k=64), logits,
+            mx.array([8970, 8985], dtype=mx.int32), None)
+        out += np.array(res).reshape(-1).tolist() + np.array(bonus).reshape(-1).tolist()
+    assert set(out) <= set(live)
+
+
+def test_sharp_draw_on_a_masked_row_of_a_padded_vocab():
+    v = 9000
+    row = np.full(v, -np.inf, dtype=np.float32)
+    live = [8970, 8985, 8999]
+    row[live] = [2.0, 1.0, 0.5]
+    idx, q = sp._sharp_draw(mx.array(np.tile(row, (4, 1))), 1.0, 64, 1.0)
+    assert set(np.array(idx).tolist()) <= set(live)
+    q = np.array(q)
+    assert q.shape == (4, v)
+    np.testing.assert_allclose(q[:, live].sum(-1), 1.0, atol=1e-6)
+
 @pytest.mark.parametrize("setting", [(0.6, 20, 0.95, 0.0), (1.0, 20, 0.3, 0.0),
                                      (0.8, 10, 1.0, 0.05), (1.0, 64, 0.9, 0.0)])
 def test_sharp_draw_on_a_wide_row_is_the_pq_probs_proposal(setting):

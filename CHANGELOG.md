@@ -20,6 +20,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A DFlash drafter that took speculation back up after a batch shrank within
   the width cap drafted from stale context, so almost no draft was accepted.
+- A sampled request whose structured output allowed fewer tokens than its
+  `top_k` could return token ids past the vocab when the vocab size is not a
+  multiple of 128.
 
 ## [0.5.0] - 2026-10-12
 
