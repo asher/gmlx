@@ -119,6 +119,7 @@ fusions.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels of the Qwen3.5 and 3.6 hybrids. The fusion affects numerics. |
+| `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. |
 | `GMLX_HADAMARD_FUSE=0` | Rotate the input of a folded down or output projection in its own dispatch instead of inside the gate kernel. |
 | `GMLX_HADAMARD_TRACE=1` | Count the rotations on a folded file since the last `hadamard_modules.reset_rotation_count` call, read back through `hadamard_modules.rotation_count`. |

@@ -158,10 +158,11 @@ they can take back after a rejected draft.
 
 When the model rejects most of a copy, or a copy round makes tokens more
 slowly than the drafter's rounds, copying pauses for a while, longer after
-each such round in a row. At temperature 0, copies start at 8 tokens and
-double each time the model accepts one whole, up to that limit, and a copy
-round can add at least twice the tokens of an average drafter round, so a
-drafter that already predicts the text well keeps its rounds. When
+each such round in a row. At temperature 0, a copy starts at 8 tokens, or
+at one less than twice the tokens of an average drafter round when that is
+more, and doubles each time the model accepts one whole, up to that limit.
+So a copy round can add at least twice the tokens of an average drafter
+round, and a drafter that already predicts the text well keeps its rounds. When
 sampling, the model keeps a copied token only as often as it would pick
 that token, so the copy length follows the chance that a copied token is
 kept. A copy stops where that chance gets low, and a copy runs only when
