@@ -832,14 +832,17 @@ def _kquant_linear_cls():
 
 
 def kquant_multi(linears, x: mx.array):
-    """The outputs of ``linears`` on ``x`` from one
-    ``kq.quantized_matmul_multi`` call, or None where it does not apply.
+    """The outputs of ``linears`` on ``x`` from ``kq.quantized_matmul_multi``
+    calls, one per codec, or None where none applies.
 
-    It applies at 2 to 8 rows of ``x``, the verify widths, to a group of
-    plain unbiased KQuantLinears of one codec: the op runs up to four
-    weights that share ``x`` in one dispatch, each read from its own
-    buffer. None on an mlx-kquant without the op, so callers keep their
-    per-weight calls, and for any member an adapter or a fold wraps."""
+    It applies at 2 to 8 rows of ``x``, the verify widths, to plain
+    unbiased KQuantLinears: the op runs the weights of one codec that share
+    ``x`` in one dispatch, each read from its own buffer. Members are
+    grouped by codec, and a codec with two or more members runs as one
+    call. The other members, those an adapter or a fold wraps, float ones
+    and a codec's only member, come back as None for the caller to run.
+    None on an mlx-kquant without the op, so callers keep their per-weight
+    calls."""
     import importlib
 
     multi = getattr(importlib.import_module("mlx_kquant"),
@@ -849,11 +852,34 @@ def kquant_multi(linears, x: mx.array):
     if not 2 <= x.size // x.shape[-1] <= 8:
         return None
     cls = _kquant_linear_cls()
-    codec = getattr(linears[0], "kquant_type", None)
-    for lin in linears:
-        if type(lin) is not cls or "bias" in lin or lin.kquant_type != codec:
-            return None
-    return tuple(multi(x, [lin["weight"] for lin in linears], codec))
+    groups: dict = {}
+    for i, lin in enumerate(linears):
+        if type(lin) is cls and "bias" not in lin:
+            groups.setdefault(lin.kquant_type, []).append(i)
+    out: list = [None] * len(linears)
+    ran = False
+    for codec, idx in groups.items():
+        if len(idx) < 2:
+            continue
+        res = multi(x, [linears[i]["weight"] for i in idx], codec)
+        for i, r in zip(idx, res):
+            out[i] = r
+        ran = True
+    return tuple(out) if ran else None
+
+
+def kquant_multi_or(linears, x: mx.array, rest):
+    """``kquant_multi`` with the members it leaves out run by
+    ``rest(members)``, which returns their outputs in order. None where
+    ``kquant_multi`` is None."""
+    out = kquant_multi(linears, x)
+    if out is None:
+        return None
+    left = [lin for lin, o in zip(linears, out) if o is None]
+    if not left:
+        return out
+    more = iter(rest(left))
+    return tuple(o if o is not None else next(more) for o in out)
 
 def _gdn_ba_kq(gdn):
     """The k-quant b/a cat while b and a are still the modules it was cut
@@ -1383,18 +1409,21 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
     if is_folded(self.in_proj_z):
         mixed_qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
     else:
-        # A q4_0 file runs qkv, z and the b/a pair as one multi-weight
-        # matmul at verify widths.
+        # At verify widths, the k-quant projections of each codec among
+        # qkv, z and the b/a pair run as one multi-weight matmul.
         ba_kq = _gdn_ba_kq(self)
         multi = kquant_multi(
             (self.in_proj_qkv, self.in_proj_z)
             + ((ba_kq,) if ba_kq is not None
                else (self.in_proj_b, self.in_proj_a)),
             inputs)
-        if multi is not None:
-            mixed_qkv, z = multi[0], multi[1]
+        if multi is not None and multi[0] is not None:
+            mixed_qkv = multi[0]
         else:
             mixed_qkv = self.in_proj_qkv(inputs)
+        if multi is not None and multi[1] is not None:
+            z = multi[1]
+        else:
             z = _bf16_verify_linear(self.in_proj_z, inputs)
     # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
     # ~2x the combined one at these sizes, so run them as one [2 * Hv]
@@ -1420,9 +1449,16 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             mx.eval(wba)
         cba = (ba_key, wba)
         self._gdn_verify_ba_weight = cba
-    if multi is not None:
-        ba = (multi[2] if len(multi) == 3
-              else mx.concatenate(list(multi[2:]), axis=-1))
+    ba_multi = multi[2:] if multi is not None else ()
+    if ba_multi and all(o is not None for o in ba_multi):
+        ba = (ba_multi[0] if len(ba_multi) == 1
+              else mx.concatenate(list(ba_multi), axis=-1))
+    elif any(o is not None for o in ba_multi):
+        # b and a are of two codecs, and one of them ran with qkv or z.
+        ba = mx.concatenate(
+            [o if o is not None else _bf16_verify_linear(m, inputs)
+             for o, m in zip(ba_multi, (self.in_proj_b, self.in_proj_a))],
+            axis=-1)
     elif cba[1] is not None:
         ba = _f16_head_gemv(inputs, cba[1])
     elif (ba_kq := _gdn_ba_kq(self)) is not None:

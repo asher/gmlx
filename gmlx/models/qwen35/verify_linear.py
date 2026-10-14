@@ -26,7 +26,7 @@ from gmlx.upstream.gdn_patches import (
     _f16_head_gemv,
     _float_weight,
     gpu_active,
-    kquant_multi,
+    kquant_multi_or,
 )
 
 __all__ = ["verify_linear", "verify_linears"]
@@ -726,7 +726,8 @@ def verify_linears(linears, x: mx.array, target_verify: bool):
         if out is not None:
             return out
         if target_verify:
-            out = kquant_multi(linears, x)
+            out = kquant_multi_or(
+                linears, x, lambda rest: shared_linears(rest, x))
             if out is not None:
                 return out
         return shared_linears(linears, x)
