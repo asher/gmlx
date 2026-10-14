@@ -76,9 +76,9 @@ def _round_log_open():
             st["fh"].close()
         st["fh"] = open(path, "a")
         if _ROUND_PROFILE:
-            st["fh"].write("# idx\tdraft_ms\tverify_ms\twalk_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\n")
+            st["fh"].write("# idx\tdraft_ms\tverify_ms\twalk_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\tcopied\n")
         else:
-            st["fh"].write("# idx\tcompute_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\n")
+            st["fh"].write("# idx\tcompute_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\tcopied\n")
         st["path"] = path
     return st
 
@@ -114,11 +114,13 @@ def _round_log_note(text):
 
 def _round_log(compute_ms, emit_ms, book_ms, accepted, bs,
                draft_ms=None, verify_ms=None, walk_ms=None,
-               gap_ms=None):
+               gap_ms=None, copied=0):
+    # copied: drafts a context copy round took from the prompt, 0 for a
+    # drafter round.
     st = _round_log_open()
     if st is None:
         return
-    gap_col = f"\t{gap_ms:.3f}" if gap_ms is not None else ""
+    gap_col = f"\t{gap_ms or 0.0:.3f}\t{int(copied)}"
     if _ROUND_PROFILE and draft_ms is not None:
         total = draft_ms + verify_ms + walk_ms + emit_ms + book_ms
         st["fh"].write(
@@ -1505,7 +1507,7 @@ def _owned_decode_rounds(
                        draft_ms=(_td - _t0) * 1e3 if _ROUND_PROFILE else None,
                        verify_ms=(_tv - _td) * 1e3 if _ROUND_PROFILE else None,
                        walk_ms=(_t1 - _tv) * 1e3 if _ROUND_PROFILE else None,
-                       gap_ms=_gap)
+                       gap_ms=_gap, copied=len(copied))
             _prev_end = time.perf_counter()
 
     finally:

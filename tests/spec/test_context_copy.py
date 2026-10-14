@@ -415,6 +415,28 @@ def test_round_log_notes_the_copy_totals(monkeypatch, tmp_path):
             in log.read_text())
 
 
+def test_round_log_marks_copy_rounds(monkeypatch, tmp_path):
+    log = tmp_path / "rounds.tsv"
+    monkeypatch.setenv("GMLX_ROUND_LOG", str(log))
+    try:
+        _, _, script, _, _, _ = _dflash_walk(
+            monkeypatch, lambda r: _Scripted(r, every=2), 32)
+    finally:
+        spec._round_log_close()
+    lines = log.read_text().splitlines()
+    head = next(ln for ln in lines if ln.startswith("# idx")).split()
+    i_bs, i_copied = head.index("bs") - 1, head.index("copied") - 1
+    rows = [ln.split("\t") for ln in lines if not ln.startswith("#")]
+    copies = [int(r[i_copied]) for r in rows if int(r[i_copied])]
+    # The round that reaches max_tokens ends the generator before its row.
+    records = [c for c, _ in script.records]
+    assert len(copies) >= 2 and copies == records[:len(copies)]
+    for r in rows:
+        if int(r[i_copied]):
+            assert int(r[i_bs]) == int(r[i_copied]) + 1
+    assert any(int(r[i_copied]) == 0 for r in rows)
+
+
 # -- reach, index and sampling --------------------------------------------
 
 
