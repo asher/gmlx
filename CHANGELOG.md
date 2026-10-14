@@ -27,6 +27,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multiple of 128.
 - A sampled request returned random tokens when its `logit_bias` held NaN,
   or an infinite ban on the only token its structured output allowed.
+- Long prompts on Qwen3.5 to 3.8 prefill faster on M5-family Macs with
+  macOS 26.2 or later, since the prefill chunk no longer shrinks at depth.
 
 ## [0.5.0] - 2026-10-12
 
