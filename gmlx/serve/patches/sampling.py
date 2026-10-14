@@ -8,6 +8,7 @@ import importlib
 import logging
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.spec.topk import HIER_MIN_V, topk_ids
 from gmlx.upstream.patching import link, wrapped_with
 
 from ._common import (
@@ -288,37 +289,8 @@ _FAST_SAMPLER_FLAG = "_kq_gguf_fast_sampler_patch"
 
 _TOPP_ONLY_CAP = 1024   # top_p-only nucleus is bounded to this many candidates
 _MIN_KEEP = 1           # always keep the argmax so a row can never go all -inf
-_HIER_ROW = 128         # hierarchical top-k row width (see _topk_ids)
-_HIER_MIN_V = 8192      # below this the flat argpartition is already cheap
-
-
-def _topk_ids(lp, k):
-    """Top-k vocab ids of each row of ``lp`` [B, V] f32, hierarchically.
-
-    ``mx.argpartition`` over a 200k vocab is a full-width sort on the GPU
-    sitting on the decode critical path. Reshape each row to rows of
-    ``_HIER_ROW``, reduce those to their max (one bandwidth-bound pass),
-    argpartition the ~V/128 maxes, then argpartition the k*128 surviving
-    candidates. Exact: a value in the global top-k bounds its row's max from
-    below, so fewer than k rows can outrank that row -- every top-k value's
-    row survives the row cut. Only tie ORDER at the k-th value can differ
-    from the flat argpartition.
-    """
-    import mlx.core as mx
-    b, v = lp.shape
-    n_rows = (v + _HIER_ROW - 1) // _HIER_ROW
-    if n_rows * _HIER_ROW != v:
-        pad = mx.full(
-            (b, n_rows * _HIER_ROW - v), -float("inf"), dtype=lp.dtype)
-        lp = mx.concatenate([lp, pad], axis=-1)
-    rows = lp.reshape(b, n_rows, _HIER_ROW)
-    top_rows = mx.argpartition(
-        -rows.max(axis=2), kth=k - 1, axis=-1)[:, :k]             # [B, k]
-    cand = mx.take_along_axis(
-        rows, top_rows[:, :, None], axis=1).reshape(b, -1)       # [B, k*128]
-    loc = mx.argpartition(-cand, kth=k - 1, axis=-1)[:, :k]      # [B, k]
-    return (mx.take_along_axis(top_rows, loc // _HIER_ROW, axis=-1)
-            * _HIER_ROW + (loc % _HIER_ROW))
+_HIER_MIN_V = HIER_MIN_V
+_topk_ids = topk_ids
 
 
 class _FastPositionedSampler:

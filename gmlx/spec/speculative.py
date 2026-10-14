@@ -52,6 +52,7 @@ from .helpers import (
     _slice_shared_kv_after_reject,
     generation_stream,
 )
+from . import topk
 from .context_copy import (PromptCopy, PromptIndex, context_copy_enabled,
                            copy_limit, copy_off_reason)
 from .row_procs import SpecRowProcessors, batch_processors
@@ -506,14 +507,51 @@ def _stoch_target_probs(sampler, logits: mx.array) -> mx.array:
                      min_p=params.get("min_p", 0.0))
 
 
+# Widest top_k the candidate draw takes; wider proposals use _pq_probs.
+_SHARP_CAND_MAX_K = 64
+
+
+def _sharp_draw(rows: mx.array, temp: float, top_k: int, top_p: float,
+                min_p: float = 0.0):
+    """Draw one token per row of ``rows`` [n, W] from _pq_probs(rows, ...).
+    Returns (column index [n], q [n, W]): q is the array the draw used.
+
+    With a small top_k over a wide row, q is zero outside the row's top_k
+    ids, so it is built there: one hierarchical top-k pass, then the top-p
+    and min-p masks, the temperature and the draw over k values, with no
+    full-width sort. The nucleus test is the one _pq_probs makes: a token
+    survives while the mass of the tokens above it is under top_p."""
+    w = int(rows.shape[-1])
+    if not 0 < top_k <= _SHARP_CAND_MAX_K or w < topk.HIER_MIN_V:
+        q = _pq_probs(rows, temp, top_k, top_p, min_p)
+        return mx.random.categorical(mx.log(q), axis=-1), q
+    x = rows.astype(mx.float32)
+    lse = mx.logsumexp(x, axis=-1, keepdims=True)
+    ids = topk.topk_ids(x, top_k)                             # [n, k]
+    lp = mx.take_along_axis(x, ids, axis=-1) - lse
+    order = mx.argsort(-lp, axis=-1)
+    ids = mx.take_along_axis(ids, order, axis=-1)
+    lp = mx.take_along_axis(lp, order, axis=-1)               # descending
+    keep = mx.ones(lp.shape, dtype=mx.bool_)
+    if 0.0 < top_p < 1.0:
+        pr = mx.exp(lp)
+        keep = (mx.cumsum(pr, axis=-1) - pr) < top_p
+    if min_p > 0.0:
+        keep = keep & (lp >= lp[:, :1] + math.log(min_p))
+    qc = mx.softmax(mx.where(keep, lp, -float("inf")) / temp, axis=-1)
+    at = mx.random.categorical(mx.log(qc), axis=-1)
+    idx = mx.take_along_axis(ids, at[:, None], axis=-1)[:, 0]
+    q = mx.put_along_axis(mx.zeros(x.shape, dtype=mx.float32), ids, qc, axis=-1)
+    return idx, q
+
+
 def _stoch_draft_sampler(stash: list):
     """Sharpened-proposal draft sampler: sample from q = sharpened head
     logits and stash the q row, aligned [seed, rollouts...] like the pq/top2
     stashes."""
     def sampler(logits):
         row = logits.reshape(-1, logits.shape[-1])[-1:]
-        q = _pq_probs(row, *_STOCH_DRAFT)
-        tok = mx.random.categorical(mx.log(q), axis=-1)
+        tok, q = _sharp_draw(row, *_STOCH_DRAFT)
         stash.append(q[0])
         return tok.reshape(logits.shape[:-1])
     return sampler

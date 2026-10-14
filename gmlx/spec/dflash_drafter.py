@@ -381,10 +381,9 @@ def draw_rows(rows: mx.array, support: Optional[mx.array], *, vocab: int,
         idx = mx.argmax(rows, axis=-1)
         toks = _pick(support, idx)
     elif stoch:
-        from .speculative import _STOCH_DRAFT, _pq_probs
+        from .speculative import _STOCH_DRAFT, _sharp_draw
 
-        q = _pq_probs(rows, *_STOCH_DRAFT)
-        idx = mx.random.categorical(mx.log(q), axis=-1)
+        idx, q = _sharp_draw(rows, *_STOCH_DRAFT)
         toks = _pick(support, idx)
         stash.q.extend(_scatter(q, support, 0.0, vocab))
     else:

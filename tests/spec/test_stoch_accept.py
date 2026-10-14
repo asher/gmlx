@@ -265,3 +265,50 @@ def test_walk_does_no_full_vocab_sort_for_a_filtering_sampler(monkeypatch):
                                  [q[i] for i in range(3)])
     mx.eval(*graph)
     assert widths and max(widths) < v
+
+
+@pytest.mark.parametrize("setting", [(0.6, 20, 0.95, 0.0), (1.0, 20, 0.3, 0.0),
+                                     (0.8, 10, 1.0, 0.05), (1.0, 64, 0.9, 0.0)])
+def test_sharp_draw_on_a_wide_row_is_the_pq_probs_proposal(setting):
+    """Built on the top-k ids, the proposal equals _pq_probs on every id,
+    and each draw lands where q is positive."""
+    v = 16384
+    rows = mx.random.normal((3, v), key=mx.random.key(4)) * 3
+    idx, q = sp._sharp_draw(rows, *setting)
+    ref = np.array(_pq_probs(rows, *setting[:3], min_p=setting[3]))
+    q = np.array(q)
+    np.testing.assert_allclose(q, ref, atol=1e-6)
+    for i, t in enumerate(np.array(idx).tolist()):
+        assert q[i, t] > 0
+
+
+def test_sharp_draw_frequencies_follow_q():
+    v, n = 8192, 4000
+    rows = mx.broadcast_to(
+        mx.random.normal((1, v), key=mx.random.key(6)) * 4, (n, v))
+    mx.random.seed(3)
+    idx, q = sp._sharp_draw(rows, 0.6, 20, 0.95)
+    q0 = np.array(q[0])
+    counts = np.bincount(np.array(idx), minlength=v) / n
+    assert 0.5 * np.abs(counts - q0).sum() < 0.05
+
+
+def test_draft_sampler_does_no_full_vocab_sort(monkeypatch):
+    """The sharpened draft proposal at the default top_k takes the
+    hierarchical top-k: no sort or partition spans the vocab."""
+    widths = []
+    for name in ("argpartition", "argsort", "sort"):
+        orig = getattr(mx, name)
+
+        def wrap(x, *a, _orig=orig, **k):
+            widths.append(int(x.shape[-1]))
+            return _orig(x, *a, **k)
+
+        monkeypatch.setattr(mx, name, wrap)
+    v = 16384
+    stash: list = []
+    tok = sp._stoch_draft_sampler(stash)(
+        mx.random.normal((1, 1, v), key=mx.random.key(1)))
+    mx.eval(tok, stash[0])
+    assert widths and max(widths) < v
+    assert stash[0].shape == (v,) and float(stash[0][int(tok.item())]) > 0
