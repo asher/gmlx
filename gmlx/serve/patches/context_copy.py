@@ -21,25 +21,13 @@ from __future__ import annotations
 import inspect
 import logging
 
-from gmlx.upstream.patching import link, wrapped_with
+from gmlx.upstream.patching import link, root, wrapped_with
 
 _log = logging.getLogger(__name__)
 
 _CAPTURE_FLAG = "_kq_copy_prompt_capture"
 _BUILD_FLAG = "_kq_copy_prompt_build"
 _START_FLAG = "_kq_copy_prompt_start"
-
-
-def _innermost(fn):
-    """The stock function under every wrapper, whose signature names the
-    arguments the wrappers pass through."""
-    for _ in range(64):
-        nxt = (getattr(fn, "_gmlx_orig", None)
-               or getattr(fn, "__wrapped__", None))
-        if nxt is None:
-            return fn
-        fn = nxt
-    return fn
 
 
 def _full_prompts(input_ids, apc_meta) -> list:
@@ -57,7 +45,9 @@ def _install_capture(ppb_cls) -> None:
     if wrapped_with(ppb_cls.__init__, _CAPTURE_FLAG):
         return
     _orig = ppb_cls.__init__
-    sig = inspect.signature(_innermost(_orig))
+    # The stock function under every wrapper names the arguments the
+    # wrappers pass through.
+    sig = inspect.signature(root(_orig))
 
     def __init__(self, *args, **kwargs):
         _orig(self, *args, **kwargs)
