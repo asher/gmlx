@@ -69,3 +69,21 @@ def test_counts_the_batch_rounds(bench, tmp_path, monkeypatch):
         spec._round_log_close()
         spec._round_log_state.update(fh=None, path=None)
     assert bench._parse_round_log(log) == (14, 5.5)
+
+
+def test_weights_a_round_by_its_speculating_rows(bench, tmp_path,
+                                                 monkeypatch):
+    """A round counts its drafts once per speculating row, and a forced or
+    plain round (no rows) counts none."""
+    log = tmp_path / "rows.tsv"
+    monkeypatch.setenv("GMLX_ROUND_LOG", str(log))
+    monkeypatch.setattr(spec, "_ROUND_PROFILE", False)
+    try:
+        spec._round_log_session(10, 64)
+        spec._round_log(1.0, 0.1, 0.1, 2.5, 4, gap_ms=0.5, rows=2)
+        spec._round_log(1.0, 0.1, 0.1, 3, 4, gap_ms=0.5)
+        spec._round_log(1.0, 0.1, 0.1, 5, 6, gap_ms=0.5, rows=0)
+    finally:
+        spec._round_log_close()
+        spec._round_log_state.update(fh=None, path=None)
+    assert bench._parse_round_log(log) == (9, 8)

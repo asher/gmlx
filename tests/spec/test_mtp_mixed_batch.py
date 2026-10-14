@@ -645,3 +645,28 @@ def test_streamed_seed_restores_only_at_cap_one(cap):
     assert restored == ([[seed]] if cap == 1 else [])
 
 
+
+
+def test_round_log_counts_the_speculating_rows_only(monkeypatch, tmp_path):
+    """A mixed round logs the speculating rows' accept and their count, so a
+    drafter that keeps every draft reads full beside a plain row."""
+    log = tmp_path / "rounds.tsv"
+    monkeypatch.setenv("GMLX_ROUND_LOG", str(log))
+    monkeypatch.setattr(spec, "_ROUND_PROFILE", False)
+    try:
+        _drive(_RowDrafter(block_size=8), B=2, max_tokens=13)
+    finally:
+        spec._round_log_close()
+        spec._round_log_state.update(fh=None, path=None)
+    lines = log.read_text().splitlines()
+    head = next(ln for ln in lines if ln.startswith("# idx")).split()[1:]
+    rows = [dict(zip(head, ln.split("\t"))) for ln in lines
+            if ln and not ln.startswith("#")]
+    drafted = [r for r in rows if int(r["bs"]) > 1]
+    assert drafted
+    # the first rounds are mixed (2 rows behind a block of 4), one row
+    # speculating; the echo drafter keeps all of its drafts
+    assert int(drafted[0]["bs"]) == 4 and drafted[0]["rows"] == "1"
+    for r in drafted:
+        assert float(r["accepted"]) == int(r["bs"]) - 1
+        assert int(r["rows"]) >= 1

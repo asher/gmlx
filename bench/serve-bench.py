@@ -766,14 +766,17 @@ def _parse_round_log(path):
     total_drafted = 0
     total_accepted = 0
     # The "# idx" header names the columns; a log without one ends in
-    # accepted, bs. A batch round logs its rows' mean accept, a float.
-    i_acc, i_bs = -2, -1
+    # accepted, bs. A batch round logs the mean accept of its speculating
+    # rows, a float, and their count in "rows"; a log without that column
+    # counts each round as one row.
+    i_acc, i_bs, i_rows = -2, -1, None
     for line in lines:
         line = line.strip()
         if line.startswith("# idx"):
             cols = line.lstrip("#").split()
             if "accepted" in cols and "bs" in cols:
                 i_acc, i_bs = cols.index("accepted"), cols.index("bs")
+            i_rows = cols.index("rows") if "rows" in cols else None
             continue
         if not line or line.startswith("#"):
             continue
@@ -781,8 +784,9 @@ def _parse_round_log(path):
         try:
             accepted = float(parts[i_acc])
             bs = int(parts[i_bs])
-            total_drafted += bs - 1
-            total_accepted += accepted
+            rows = 1 if i_rows is None else int(parts[i_rows])
+            total_drafted += (bs - 1) * rows
+            total_accepted += accepted * rows
         except (ValueError, IndexError):
             continue
     if total_drafted == 0:

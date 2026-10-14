@@ -77,9 +77,9 @@ def _round_log_open():
             st["fh"].close()
         st["fh"] = open(path, "a")
         if _ROUND_PROFILE:
-            st["fh"].write("# idx\tdraft_ms\tverify_ms\twalk_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\tcopied\n")
+            st["fh"].write("# idx\tdraft_ms\tverify_ms\twalk_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\tcopied\trows\n")
         else:
-            st["fh"].write("# idx\tcompute_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\tcopied\n")
+            st["fh"].write("# idx\tcompute_ms\temit_ms\tbook_ms\ttotal_ms\taccepted\tbs\tgap_ms\tcopied\trows\n")
         st["path"] = path
     return st
 
@@ -115,13 +115,14 @@ def _round_log_note(text):
 
 def _round_log(compute_ms, emit_ms, book_ms, accepted, bs,
                draft_ms=None, verify_ms=None, walk_ms=None,
-               gap_ms=None, copied=0):
+               gap_ms=None, copied=0, rows=1):
     # copied: drafts a context copy round took from the prompt, 0 for a
-    # drafter round.
+    # drafter round. rows: the rows whose drafts the round verified;
+    # accepted is their mean accept. A forced or plain round has none.
     st = _round_log_open()
     if st is None:
         return
-    gap_col = f"\t{gap_ms or 0.0:.3f}\t{int(copied)}"
+    gap_col = f"\t{gap_ms or 0.0:.3f}\t{int(copied)}\t{int(rows)}"
     if _ROUND_PROFILE and draft_ms is not None:
         total = draft_ms + verify_ms + walk_ms + emit_ms + book_ms
         st["fh"].write(
@@ -1581,7 +1582,8 @@ def _owned_decode_rounds(
                        draft_ms=(_td - _t0) * 1e3 if _ROUND_PROFILE else None,
                        verify_ms=(_tv - _td) * 1e3 if _ROUND_PROFILE else None,
                        walk_ms=(_t1 - _tv) * 1e3 if _ROUND_PROFILE else None,
-                       gap_ms=_gap, copied=len(copied))
+                       gap_ms=_gap, copied=len(copied),
+                       rows=0 if forced is not None else 1)
             _prev_end = time.perf_counter()
 
     finally:
@@ -3450,6 +3452,7 @@ def _owned_decode_rounds_batch(
             _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             bs = 1
             accepted_list = [0] * n_active
+            log_rows = []
             new_tokens_list = [[int(t)] for t in toks.tolist()]
             _t1 = time.perf_counter()
         elif need_arm:
@@ -3459,6 +3462,7 @@ def _owned_decode_rounds_batch(
             bs = 1
             max_a = 0
             accepted_list, new_tokens_list, verify = _arm_capture()
+            log_rows = []
             _td = _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             _t1 = time.perf_counter()
         elif forced is not None:
@@ -3487,6 +3491,7 @@ def _owned_decode_rounds_batch(
                 mx.eval(verify.hidden)
             _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             accepted_list = [bs - 1]
+            log_rows = []
             new_tokens_list = [list(forced)]
             max_a = bs - 1
             _t1 = time.perf_counter()
@@ -3566,6 +3571,9 @@ def _owned_decode_rounds_batch(
             _t1 = time.perf_counter()
             sampler_rng.target_sampled(sync_draft=True)
             max_a = max(accepted_list)
+            # Plain rows' pads are not drafts: the round log counts the
+            # speculating rows only.
+            log_rows = list(spec_j) if n_draft > 0 else []
             if spec:
                 acc_s = [accepted_list[j] for j in spec_j]
                 new_s = [new_tokens_list[j] for j in spec_j]
@@ -3644,6 +3652,7 @@ def _owned_decode_rounds_batch(
             accepted_list, new_tokens_list = _coupled_walk_batch(
                 lm, verify, draft_tokens, _walk_sampler, budgets,
                 uniform=_uniform_accept, process=process)
+            log_rows = list(range(n_active))
             _t1 = time.perf_counter()
             sampler_rng.target_sampled(sync_draft=True)
             # Gated rounds stay out of the accept stats: 0-accept plain rounds
@@ -3813,13 +3822,15 @@ def _owned_decode_rounds_batch(
             mx.clear_cache()
             _last_clear = sum(emitted)
 
+        acc_log = ([accepted_list[j] for j in log_rows] if log_rows
+                   else accepted_list)
         _round_log((_t1 - _t0) * 1e3, (_t2 - _t1) * 1e3,
                    (time.perf_counter() - _t2) * 1e3,
-                   round(sum(accepted_list) / len(accepted_list), 2), bs,
+                   round(sum(acc_log) / len(acc_log), 2), bs,
                    draft_ms=(_td - _t0) * 1e3 if _ROUND_PROFILE else None,
                    verify_ms=(_tv - _td) * 1e3 if _ROUND_PROFILE else None,
                    walk_ms=(_t1 - _tv) * 1e3 if _ROUND_PROFILE else None,
-                   gap_ms=_gap)
+                   gap_ms=_gap, rows=len(log_rows))
         _prev_end = time.perf_counter()
 
 

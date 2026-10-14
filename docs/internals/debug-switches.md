@@ -249,7 +249,7 @@ These switches time a run's parts and print or write the results.
 
 | Variable | Meaning |
 |----------|---------|
-| `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too. `GMLX_ROUND_LOG=/path.tsv` writes them to a TSV, with a `copied` column for context copy rounds. |
+| `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too. `GMLX_ROUND_LOG=/path.tsv` writes them to a TSV, with `copied` and speculating `rows` columns. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print the per-token split of a streamed decode between disk stalls and the eval and sync bucket at exit. A clock drop shows as a large sync bucket. |
 | `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses. |
 | `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 and `qwen4exp` decode, evaluate after each layer part and print each part's wall time per token. |
