@@ -150,24 +150,25 @@ candidates are almost equally likely. From such a token on, the output can
 differ from a run without context copy. For a block drafter,
 `GMLX_CONTEXT_COPY_MAX` set to its draft length, 7 for a DFlash 2 drafter
 with blocks of 8, keeps the output token-identical to a run without copies.
-A copy shorter than 4 tokens is not worth a round, so a value of 2 or 3
+A copy shorter than 4 tokens is not worth a round, so a value under 4
 turns copying off. A native head that drafts 2 or 3 tokens therefore has
 no copy length that keeps the output identical, other than no copies at
 all. DeepSeek-V4 and GLM-5.3-Flash copy at most 5 tokens a round, the most
 they can take back after a rejected draft.
 
-Copies that the model accepts whole grow toward that limit. When the model
-rejects most of a copy, or a copy round makes tokens more slowly than the
-drafter's rounds, copying pauses for a while and starts again shorter. At
-temperature 0, a copy round can add at least twice the tokens of an
-average drafter round, so a drafter that already predicts the text well
-keeps its rounds. When sampling, the model keeps a copied token only as
-often as it would pick that token, so copies grow more slowly. A copy stops
-where a copied token's chance to be kept gets low, and a copy runs only
-when the tokens it is expected to add beat a drafter round by half. That
-chance comes from the request's earlier copies and from how far back the
-output already repeats the prompt, so text that the output repeats word
-for word still copies beside a strong drafter.
+When the model rejects most of a copy, or a copy round makes tokens more
+slowly than the drafter's rounds, copying pauses for a while, longer after
+each such round in a row. At temperature 0, copies start at 8 tokens and
+double each time the model accepts one whole, up to that limit, and a copy
+round can add at least twice the tokens of an average drafter round, so a
+drafter that already predicts the text well keeps its rounds. When
+sampling, the model keeps a copied token only as often as it would pick
+that token, so the copy length follows the chance that a copied token is
+kept. A copy stops where that chance gets low, and a copy runs only when
+the tokens it is expected to add beat a drafter round by half. That chance
+comes from the request's recent copies and from how far back the generated
+text already repeats the prompt, so text that the output repeats word for
+word still copies beside a strong drafter.
 
 On the server, a request copies when it starts while no other request
 decodes, and stops copying when another request joins it.
