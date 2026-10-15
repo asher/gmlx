@@ -435,7 +435,7 @@ _GDN_FUSED_DECODE_TEMPLATE = r"""
 # replay (see set_gdn_replay): each state row first replays the R recorded
 # positions, the same float ops the verify scan ran.
 _GDN_DECODE_REPLAY = r"""
-        for (int p = 0; p < (int)R; ++p) {
+        for (int p = 0; p < R[b_idx]; ++p) {
             uint rb = (b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
             float gp = rg[rb];
             float dp = rd[rb * Dv + dv];
@@ -562,6 +562,11 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
                 ).reshape(B, S, -1)
             else:
                 ba = inputs @ ba_w.T
+            hv = self.num_v_heads
+            b = ba[..., :hv]
+            a = ba[..., hv:]
+        elif (ba_kq := _gdn_ba_kq(self)) is not None:
+            ba = ba_kq(inputs)
             hv = self.num_v_heads
             b = ba[..., :hv]
             a = ba[..., hv:]
@@ -761,7 +766,11 @@ def _gdn_try_cat_ba(gdn) -> bool:
         return False  # zba merge already owns these rows
     if getattr(gdn, "_gdn_ba_weight", None) is not None:
         return False  # already cat: arming may run on both load paths
+    if getattr(gdn, "_gdn_ba_kq", None) is not None:
+        return False
     mods = [getattr(gdn, "in_proj_b", None), getattr(gdn, "in_proj_a", None)]
+    if _gdn_try_cat_ba_kq(gdn, mods):
+        return True
     for m in mods:
         if m is None or type(m) is not nn.Linear or "bias" in m:
             return False
@@ -780,6 +789,110 @@ def _gdn_try_cat_ba(gdn) -> bool:
     return True
 
 
+
+def _gdn_try_cat_ba_kq(gdn, mods) -> bool:
+    """The k-quant form of the b/a cat, for files that store b and a in a
+    block codec: one KQuantLinear over b's rows then a's, so each step
+    runs one quantized matmul where it ran two. Block-codec rows are
+    self-contained, so the cat is bit-exact against the two calls. Same
+    storage discipline: the cat owns the wire rows and b and a become
+    row-slice views of it."""
+    KQuantLinear = _kquant_linear_cls()
+    b, a = mods
+    if type(b) is not KQuantLinear or type(a) is not KQuantLinear:
+        return False
+    if "bias" in b or "bias" in a or b.kquant_type != a.kquant_type:
+        return False
+    h = getattr(gdn, "num_v_heads", None)
+    if (not h or b.weight.ndim != 2 or a.weight.ndim != 2
+            or b.weight.shape != a.weight.shape or b.weight.shape[0] != h):
+        return False
+    in_dims = int(getattr(gdn, "hidden_size", 0) or 0)
+    if not in_dims:
+        return False
+    cat = KQuantLinear(in_dims, 2 * h, bias=False, codec=b.kquant_type)
+    if cat.weight.shape != (2 * h, b.weight.shape[1]):
+        return False
+    cat.weight = mx.concatenate([b.weight, a.weight], axis=0)
+    cat.scales = b.scales
+    mx.eval(cat.weight)
+    b.weight = cat.weight[:h]
+    a.weight = cat.weight[h:]
+    # Kept out of the parameter tree like the float cat: its weight is
+    # the storage b and a view.
+    object.__setattr__(gdn, "_gdn_ba_kq", cat)
+    return True
+
+
+
+def _kquant_linear_cls():
+    import importlib
+
+    return importlib.import_module("mlx_kquant.nn").KQuantLinear
+
+
+def kquant_multi(linears, x: mx.array):
+    """The outputs of ``linears`` on ``x`` from ``kq.quantized_matmul_multi``
+    calls, one per codec, or None where none applies.
+
+    It applies at 2 to 8 rows of ``x``, the verify widths, to plain
+    unbiased KQuantLinears: the op runs the weights of one codec that share
+    ``x`` in one dispatch, each read from its own buffer. Members are
+    grouped by codec, and a codec with two or more members runs as one
+    call. The other members, those an adapter or a fold wraps, float ones
+    and a codec's only member, come back as None for the caller to run.
+    None on an mlx-kquant without the op, so callers keep their per-weight
+    calls."""
+    import importlib
+
+    multi = getattr(importlib.import_module("mlx_kquant"),
+                    "quantized_matmul_multi", None)
+    if multi is None or len(linears) < 2 or x.ndim < 2:
+        return None
+    if not 2 <= x.size // x.shape[-1] <= 8:
+        return None
+    cls = _kquant_linear_cls()
+    groups: dict = {}
+    for i, lin in enumerate(linears):
+        if type(lin) is cls and "bias" not in lin:
+            groups.setdefault(lin.kquant_type, []).append(i)
+    out: list = [None] * len(linears)
+    ran = False
+    for codec, idx in groups.items():
+        if len(idx) < 2:
+            continue
+        res = multi(x, [linears[i]["weight"] for i in idx], codec)
+        for i, r in zip(idx, res):
+            out[i] = r
+        ran = True
+    return tuple(out) if ran else None
+
+
+def kquant_multi_or(linears, x: mx.array, rest):
+    """``kquant_multi`` with the members it leaves out run by
+    ``rest(members)``, which returns their outputs in order. None where
+    ``kquant_multi`` is None."""
+    out = kquant_multi(linears, x)
+    if out is None:
+        return None
+    left = [lin for lin, o in zip(linears, out) if o is None]
+    if not left:
+        return out
+    more = iter(rest(left))
+    return tuple(o if o is not None else next(more) for o in out)
+
+def _gdn_ba_kq(gdn):
+    """The k-quant b/a cat while b and a are still the modules it was cut
+    from, else None. A wrapper such as an in-process LoRA replaces a
+    member and has to be called."""
+    cat = getattr(gdn, "_gdn_ba_kq", None)
+    if cat is None:
+        return None
+    for name in ("in_proj_b", "in_proj_a"):
+        if type(getattr(gdn, name, None)) is not type(cat):
+            return None
+    return cat
+
 # The multi-position (S>1) analog of the decode kernel above, for the MTP
 # speculative-verify forward, in two dispatches. The scan kernel runs the
 # serial per-position chain (depthwise causal conv, silu, q/k rms-norm,
@@ -792,7 +905,7 @@ def _gdn_try_cat_ba(gdn) -> bool:
 #
 # The scan has two forms. The states form writes the final state and the
 # state after every position but the last, which the rollback indexes. The
-# records form (B=1) writes, per position, the three values a step adds to
+# records form writes, per position, the three values a step adds to
 # the state: the decay g, the scaled key and the delta row. A state is then
 # its start state plus a replay of the first R records, and the next kernel
 # to read the state replays them in registers before its own first step
@@ -911,7 +1024,7 @@ _GDN_VERIFY_STATES_EPILOGUE = r"""
 
 # Records form. The replay loop is shared with the replay-only kernel below.
 _GDN_REPLAY_ROWS = r"""
-    for (int p = 0; p < (int)R; ++p) {
+    for (int p = 0; p < R[b_idx]; ++p) {
         uint rb = ((uint)b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
         float gp = rg[rb];
         float kp[n_per_t];
@@ -923,9 +1036,11 @@ _GDN_REPLAY_ROWS = r"""
     }
 """
 # A kernel that replayed pending records starts from a state no buffer
-# holds, so it stores that state as the base of its own records.
+# holds, so it stores that state as the base of its own records. Every
+# row stores it, a row with no records to replay too, so the base of a
+# batch is one array.
 _GDN_VERIFY_REC_PROLOGUE = _GDN_REPLAY_ROWS + r"""
-    if (R > 0) {
+    if (REPLAY) {
         for (int r = 0; r < RPS; ++r) {
             auto s_state = start + ((uint)(n * Dv + row0 + r)) * Dk;
             for (int i = 0; i < n_per_t; ++i) s_state[n_per_t * lane + i] = (StT)st[r][i];
@@ -1090,14 +1205,26 @@ def _no_records() -> tuple:
     return _NO_RECORDS[0]
 
 
-def gdn_replay_state(base: mx.array, records: tuple, steps: int) -> mx.array:
-    """The recurrent state after the first ``steps`` recorded positions,
-    replayed onto ``base``. Lazy: a fused kernel that takes the replay
-    itself leaves this array unevaluated."""
+def replay_steps(steps, rows: int) -> mx.array:
+    """Per-row replay step counts as the int32 [rows] array the replay
+    kernels read: an int applies to every row, a sequence gives one count
+    per row."""
+    if isinstance(steps, mx.array):
+        return steps.astype(mx.int32).reshape(rows)
+    if isinstance(steps, int):
+        return mx.full((rows,), steps, dtype=mx.int32)
+    return mx.array([int(t) for t in steps], dtype=mx.int32)
+
+
+def gdn_replay_state(base: mx.array, records: tuple, steps) -> mx.array:
+    """The recurrent state after the first ``steps`` recorded positions of
+    each row, replayed onto ``base``. ``steps`` is an int for every row or
+    one count per row. Lazy: a fused kernel that takes the replay itself
+    leaves this array unevaluated."""
     B, Hv, Dv, Dk = base.shape
     SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
     (state,) = _gdn_replay_kernel(
-        inputs=[base, *records, steps],
+        inputs=[base, *records, replay_steps(steps, B)],
         template=[("StT", base.dtype), ("Dk", Dk), ("Dv", Dv), ("Hv", Hv),
                   ("SGS", SGS), ("RPS", RPS)],
         grid=(32, SGS, B * Hv * (Dv // _GDN_VERIFY_ROWS)),
@@ -1108,11 +1235,13 @@ def gdn_replay_state(base: mx.array, records: tuple, steps: int) -> mx.array:
     return state
 
 
-def set_gdn_replay(cache, base: mx.array, records: tuple, steps: int) -> None:
+def set_gdn_replay(cache, base: mx.array, records: tuple, steps) -> None:
     """Leave ``cache``'s recurrent state as ``base`` plus a replay of
-    ``steps`` records. ``cache[1]`` becomes the lazy replay, so any reader
-    gets the right state, and the fused kernels take the pending replay
-    into their own prologue instead (take_gdn_replay)."""
+    ``steps`` records (an int for every row, or one count per row).
+    ``cache[1]`` becomes the lazy replay, so any reader gets the right
+    state, and the fused kernels take the pending replay into their own
+    prologue instead (take_gdn_replay)."""
+    steps = replay_steps(steps, int(base.shape[0]))
     state = gdn_replay_state(base, records, steps)
     cache[1] = state
     cache._gdn_replay = (state, base, records, steps)
@@ -1286,17 +1415,32 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
     guarantee the route conditions: sink set, S>1, kernel available,
     Dv%16==0, Dk%32==0.
 
-    ``records`` runs the records form of the scan at B=1: the sink carries
-    a GdnRecords and the cache a pending replay of all S positions, so the
+    ``records`` runs the records form of the scan: the sink carries a
+    GdnRecords and the cache a pending replay of all S positions, so the
     caller's rollback must know GdnRecords (the owned qwen3.5 one does)."""
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
 
+    multi = None
     if is_folded(self.in_proj_z):
         mixed_qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
     else:
-        mixed_qkv = self.in_proj_qkv(inputs)
-        z = _bf16_verify_linear(self.in_proj_z, inputs)
+        # At verify widths, the k-quant projections of each codec among
+        # qkv, z and the b/a pair run as one multi-weight matmul.
+        ba_kq = _gdn_ba_kq(self)
+        multi = kquant_multi(
+            (self.in_proj_qkv, self.in_proj_z)
+            + ((ba_kq,) if ba_kq is not None
+               else (self.in_proj_b, self.in_proj_a)),
+            inputs)
+        if multi is not None and multi[0] is not None:
+            mixed_qkv = multi[0]
+        else:
+            mixed_qkv = self.in_proj_qkv(inputs)
+        if multi is not None and multi[1] is not None:
+            z = multi[1]
+        else:
+            z = _bf16_verify_linear(self.in_proj_z, inputs)
     # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
     # ~2x the combined one at these sizes, so run them as one [2 * Hv]
     # gemv against the concatenated weight (row-independent, bit-exact).
@@ -1321,8 +1465,20 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             mx.eval(wba)
         cba = (ba_key, wba)
         self._gdn_verify_ba_weight = cba
-    if cba[1] is not None:
+    ba_multi = multi[2:] if multi is not None else ()
+    if ba_multi and all(o is not None for o in ba_multi):
+        ba = (ba_multi[0] if len(ba_multi) == 1
+              else mx.concatenate(list(ba_multi), axis=-1))
+    elif any(o is not None for o in ba_multi):
+        # b and a are of two codecs, and one of them ran with qkv or z.
+        ba = mx.concatenate(
+            [o if o is not None else _bf16_verify_linear(m, inputs)
+             for o, m in zip(ba_multi, (self.in_proj_b, self.in_proj_a))],
+            axis=-1)
+    elif cba[1] is not None:
         ba = _f16_head_gemv(inputs, cba[1])
+    elif (ba_kq := _gdn_ba_kq(self)) is not None:
+        ba = ba_kq(inputs)
     else:
         ba = mx.concatenate(
             [
@@ -1382,20 +1538,23 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
         ("CONV_BF16", 1),
     ]
     grid = (32, SGS, B * Hv * (Dv // _GDN_VERIFY_ROWS))
-    records = records and B == 1 and _gdn_verify_rec_kernel is not None
+    records = records and _gdn_verify_rec_kernel is not None
     if records:
         pend = take_gdn_replay(cache) if cache is not None else None
-        base, replay, steps = pend if pend is not None else (state, _no_records(), 0)
+        if pend is None:
+            base, replay, steps = state, _no_records(), replay_steps(0, B)
+        else:
+            base, replay, steps = pend
         pre, start, rd, rk, rg = _gdn_verify_rec_kernel(
             inputs=[conv_input, conv_weight, ba, self.A_log, self.dt_bias, base, S,
                     *replay, steps],
-            template=template,
+            template=template + [("REPLAY", int(pend is not None))],
             grid=grid,
             threadgroup=(32, SGS, 1),
             output_shapes=[
                 (B, S, Hv, Dv),
                 # Written only after a replay; else the base is the start.
-                base.shape if steps else (1,),
+                base.shape if pend is not None else (1,),
                 (B, S, Hv, Dv),
                 (B, S, Hv, Dk),
                 (B, S, Hv),
@@ -1403,7 +1562,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             output_dtypes=[mx.float32, base.dtype, mx.float32, mx.float32,
                            mx.float32],
         )
-        rollback = GdnRecords(start if steps else base, (rd, rk, rg))
+        rollback = GdnRecords(start if pend is not None else base, (rd, rk, rg))
         if cache is not None:
             # Full accept; the rollback shortens the replay on a rejection.
             set_gdn_replay(cache, rollback.base, rollback.records, S)

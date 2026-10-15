@@ -551,7 +551,8 @@ def install_full_prompt_mtp_prefill() -> None:
         # block that extends the chunk past a row end keeps that row's
         # logits at its own column.
         from gmlx.gen.media_spans import span_aware_prompt_n
-        n = span_aware_prompt_n(self, n)
+        n_span = span_aware_prompt_n(self, n)
+        n = prefill_decay.fit_cut(self, n_span) if n_span < n else n_span
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)

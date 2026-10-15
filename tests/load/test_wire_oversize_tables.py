@@ -5,6 +5,8 @@ from the GGUF. See gmlx.stream.table_pread."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -62,3 +64,62 @@ def test_an_mlx_kquant_without_skip_is_named(table_gguf, monkeypatch):
     with pytest.raises(RuntimeError, match="past the device buffer ceiling"):
         wire.load_gguf_wire_bytes(table_gguf, shards=[table_gguf],
                                   expect_quant=False)
+
+
+@pytest.fixture
+def mtp_table_gguf(tmp_path):
+    """The table and one Q8_0 matrix, so the wire load finds a codec."""
+    path = str(tmp_path / "m.gguf")
+    w = gguf.GGUFWriter(path, "deepseek41")
+    w.add_tensor("blk.1.engram_embd.weight",
+                 np.ones((ROWS, ROW_BYTES), np.int8),
+                 raw_dtype=gguf.GGMLQuantizationType.I8)
+    w.add_tensor("blk.0.attn_q.weight", np.zeros((4, 34), np.uint8),
+                 raw_dtype=gguf.GGMLQuantizationType.Q8_0)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return path
+
+
+def test_the_mtp_target_install_gets_the_skipped_tables(mtp_table_gguf,
+                                                        monkeypatch):
+    """load_mtp_model hands the install the tables its wire load skipped,
+    so the model reads their rows from the file. Without them the fill
+    check stops the load: the table's parameter has no tensor."""
+    import gmlx.load.config_synth as config_synth
+    import gmlx.spec.mtp_load as ml
+
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
+    pf = SimpleNamespace(arch="deepseek41", shards=[mtp_table_gguf])
+    got = {}
+
+    class Installed(Exception):
+        pass
+
+    def install(model, hf_weights, hf_kquant_meta, **kwargs):
+        got.update(kwargs)
+        raise Installed
+
+    # Everything between the wire load and the install is the model's own.
+    monkeypatch.setattr(ml, "preflight", lambda path, arch=None: pf)
+    monkeypatch.setattr(ml, "maybe_populate_for_load", lambda *a, **k: None)
+    monkeypatch.setattr(config_synth, "synthesize_config", lambda meta, shapes: {
+        "model_type": "deepseek_v41", "mtp_num_hidden_layers": 1})
+    monkeypatch.setattr(ml, "_resolve_companion_drafter", lambda *a, **k: None)
+    monkeypatch.setattr(ml, "require_native_head_tensors", lambda *a: None)
+    monkeypatch.setattr(ml, "read_int", lambda *a: 1)
+    monkeypatch.setattr(ml, "first_nonzero_int", lambda *a: 1)
+    monkeypatch.setattr(ml, "remap_arrays", lambda *a, **k: ({}, {}, {}))
+    monkeypatch.setattr(ml, "build_model", lambda cfg, mtp=False: (
+        SimpleNamespace(language_model=None), cfg))
+    monkeypatch.setattr(ml.rope_swap, "apply", lambda *a: 0)
+    monkeypatch.setattr(ml, "_install_and_load", install)
+
+    with pytest.raises(Installed):
+        ml.load_mtp_model(mtp_table_gguf)
+    tables = got.get("deferred_tables") or {}
+    assert list(tables) == ["blk.1.engram_embd.weight"]
+    assert tables["blk.1.engram_embd.weight"].rows == ROWS
+

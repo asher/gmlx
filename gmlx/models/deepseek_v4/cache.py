@@ -23,7 +23,7 @@ from typing import List
 
 import mlx.core as mx
 
-from gmlx.cache.kv_cache import _BaseCache
+from gmlx.cache.kv_cache import MTP_UNDO_WIDTH, _BaseCache
 
 
 class PackedPool:
@@ -244,15 +244,16 @@ class DS4PoolingCache(_BaseCache):
         # One-update undo log for MTP draft rejection: trim() needs the
         # pre-update state plus this update's raw inputs to undo the last
         # token(s) when they completed a pool window. Only decode / MTP-verify
-        # sized updates (L <= 6; block-total-B rounds verify B-1+1 wide, and
-        # the dspark drafter verifies up to 6) are ever trimmed; skipping the
-        # stash for prompt chunks avoids pinning large prefill projections.
+        # sized updates (L <= MTP_UNDO_WIDTH; block-total-B rounds verify
+        # B-1+1 wide, the dspark drafter up to 6, and context copy rounds
+        # are clamped to it) are ever trimmed; skipping the stash for
+        # prompt chunks avoids pinning large prefill projections.
         # Buffer slices are taken before any mutation, so they reference the
         # pre-update array node. update_and_fetch extends the tuple with the
         # post-append pooled tensor so a confirmed-prefix replay that
         # re-completes a window can slice its pooled row back instead of
         # recompressing (the compressor inputs are gone).
-        if L <= 6:
+        if L <= MTP_UNDO_WIDTH:
             self._undo = (
                 self.buf_kv[:, : self.remainder] if self.remainder > 0 else None,
                 self.buf_gate[:, : self.remainder] if self.remainder > 0 else None,
@@ -736,7 +737,7 @@ class DS4BatchPoolingCache(_BaseCache):
         # old _pool_lengths, so restoring the length lists is enough.
         # L bound matches the scalar cache: MTP-verify sized updates only
         # (block-total-B rounds verify B-1+1 wide, dspark up to 6).
-        if L <= 6:
+        if L <= MTP_UNDO_WIDTH:
             self._undo = (
                 self.buf_kv,
                 self.buf_gate,

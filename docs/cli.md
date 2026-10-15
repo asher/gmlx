@@ -145,7 +145,7 @@ config:
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 | `--decode-prefill-ratio R` | `auto` | Make each prefill chunk wait until decoding streams have had this multiple of its GPU time. `0` restores stock scheduling. |
 | `--prefill-tick-ms MS` | `500` | Give each prefill chunk this wall-clock budget while streams decode. `0` never halves a chunk. |
-| `--speculative-width-cap N` | Each drafter's default | Speculate only while at most N requests decode together, for every model. Wins over each model's `speculative_width_cap`. `0` removes the cap. |
+| `--speculative-width-cap N` | Each drafter's default | Speculate on at most N requests at a time, for every model. Wins over each model's `speculative_width_cap`. `0` removes the cap. |
 | `--ignore-eos` | Off | Decode each request to its output cap. |
 
 These flags apply to a positional GGUF only. In config mode the same

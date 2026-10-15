@@ -412,10 +412,13 @@ class OwnedQwen3_5Model(_L.Qwen3_5Model):
 
 class GdnReplayRollback:
     """Speculative rollback that knows the records form of the fused GDN
-    verify (``_gp.GdnRecords`` in the sink, B=1 only). A rejected round
-    leaves each GDN cache as the round's start state plus a replay of the
+    verify (``_gp.GdnRecords`` in the sink). A rejected round leaves each
+    GDN cache as the round's start state plus a replay of each row's
     accepted positions, which the next fused kernel runs in its prologue.
     Any other sink takes the stock rollback."""
+
+    # Each row replays its own accept count.
+    ragged_spec_rollback = True
 
     def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
         if not gdn_states or not all(
@@ -426,25 +429,27 @@ class GdnReplayRollback:
             )
         if isinstance(accepted, mx.array):
             accepted = accepted.reshape(-1).tolist()
-        if not isinstance(accepted, int):
-            (accepted,) = accepted
-        a0 = int(accepted)
-        # The stock B=1 rollback, with the replay in place of the stored state.
-        trim = block_size - (a0 + 1)
-        ssm = []
-        for c in caches:
-            if c is None:
-                continue
-            if not c.is_trimmable() and not hasattr(c, "zero_row_tail"):
-                ssm.append(c)
-            elif c.is_trimmable() and trim > 0:
-                c.trim(trim)
+        acc = [int(accepted)] if isinstance(accepted, int) else [int(a) for a in accepted]
+        ssm = _L.rollback_attention_caches(caches, acc, block_size)
+        if len(acc) == 1:
+            # The stock B=1 rollback, with the replay in place of the stored state.
+            a0 = acc[0]
+            for c, entry in zip(ssm, gdn_states):
+                conv_input, K, rec = entry[9], entry[10], entry[11]
+                if a0 < int(rec.records[0].shape[1]) - 1:
+                    _gp.set_gdn_replay(c, rec.base, rec.records, a0 + 1)
+                    c[0] = conv_input[:, a0 + 1 : a0 + K]
+            return a0
+        # Each row replays its own accepted positions and keeps the conv
+        # window that ends at them. A fully accepted row replays them all,
+        # the state and window the verify left.
+        steps = mx.array([a + 1 for a in acc], dtype=mx.int32)
         for c, entry in zip(ssm, gdn_states):
             conv_input, K, rec = entry[9], entry[10], entry[11]
-            if a0 < int(rec.records[0].shape[1]) - 1:
-                _gp.set_gdn_replay(c, rec.base, rec.records, a0 + 1)
-                c[0] = conv_input[:, a0 + 1 : a0 + K]
-        return a0
+            _gp.set_gdn_replay(c, rec.base, rec.records, steps)
+            idx = steps[:, None] + mx.arange(int(K) - 1, dtype=mx.int32)[None, :]
+            c[0] = mx.take_along_axis(conv_input, idx[..., None], axis=1)
+        return max(acc)
 
 
 class OwnedQwen3_5LanguageModel(GdnReplayRollback, DFlashCaptureHooks, _L.LanguageModel):

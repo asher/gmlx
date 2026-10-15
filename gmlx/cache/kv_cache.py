@@ -704,6 +704,9 @@ def _ordered_size(cache) -> int:
 # Thread-local, so an engine step of another model on another thread never
 # sees the flag a verify forward armed.
 _UNDO_ARMED = threading.local()
+# Widest update an undo log covers, here and in the DeepSeek-V4 pooling
+# caches: the widest verify a target with these caches can roll back.
+MTP_UNDO_WIDTH = 6
 _ROTATING_UNDO_FIELDS = ("keys", "values", "offset", "_idx")
 _BATCH_ROTATING_UNDO_FIELDS = ("keys", "values", "offset", "_offset", "_idx",
                                "rotated", "left_padding")
@@ -726,13 +729,14 @@ def _stash_undo(cache, keys, values, fields) -> None:
     """Before an update, stash the undo of an armed verify-width update, or
     drop a stale stash.
 
-    Only widths 2 to 6 are undoable (nextn verifies up to 4, dspark up to
-    6). A one-token update writes the ring in place, which would change the
+    Only widths 2 to MTP_UNDO_WIDTH are undoable (nextn verifies up to 4,
+    dspark up to 6). A one-token update writes the ring in place, which would change the
     stashed buffers, and a prompt chunk has no rollback. The concat path
     rebinds the buffers, so plain references keep the values from before
     the update, and no copy of the ring is made.
     """
-    if 2 <= keys.shape[2] <= 6 and getattr(_UNDO_ARMED, "value", False):
+    if (2 <= keys.shape[2] <= MTP_UNDO_WIDTH
+            and getattr(_UNDO_ARMED, "value", False)):
         snap = {f: _stash_value(f, getattr(cache, f)) for f in fields}
         cache._mtp_undo = (snap, keys, values)
     elif cache._mtp_undo is not None:

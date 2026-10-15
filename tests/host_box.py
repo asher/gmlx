@@ -80,8 +80,9 @@ def use(box: dict, vm: dict) -> None:
 
 def install() -> None:
     """Report the current machine from the lowest reads: MLX's
-    ``device_info``, ``os.sysconf("SC_PHYS_PAGES")`` and
-    ``gmlx.serve.kernel_vm.snapshot``. Starts on ``default()``."""
+    ``device_info``, ``os.sysconf("SC_PHYS_PAGES")``,
+    ``gmlx.serve.kernel_vm.snapshot`` and the free-RAM reads under it.
+    Starts on ``default()``."""
     if os.environ.get(REAL_HOST_ENV, "") == "1" or _real:
         return
     import mlx.core as mx
@@ -119,3 +120,42 @@ def install() -> None:
     device_info.__module__ = real_info.__module__
     mx.device_info = device_info
     os.sysconf = sysconf
+    _simulate_free_ram()
+
+
+def free_ram_bytes() -> int:
+    """free + inactive of the current machine, what every free-RAM read
+    reports under the simulation."""
+    vm = _current["vm"]
+    return int(vm["free"] + vm["inactive"])
+
+
+def real(name: str):
+    """The real read ``install`` replaced: ``apc_free_ram`` (the copied
+    mlx-vlm apc's stock read) or ``vm_stat_free_ram`` (gmlx's
+    /usr/bin/vm_stat read). Without the simulation, the bound one."""
+    if name in _real:
+        return _real[name]
+    if name == "apc_free_ram":
+        from gmlx._vendor.mlx_vlm import apc
+
+        return apc._free_ram_bytes
+    from gmlx.cache import apc_manager
+
+    return apc_manager._vm_stat_free_ram_bytes
+
+
+def _simulate_free_ram() -> None:
+    """The free-RAM reads below the mach counters report the machine too:
+    the copied apc's stock read (psutil, else vm_stat on PATH), which the
+    APC disk-restore gate and the memory headroom call until the APC
+    manager build rebinds it, and gmlx's /usr/bin/vm_stat read, which that
+    build binds when the mach counters are off. Otherwise a test reads the
+    simulated machine or the real one by which read happens to be bound."""
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx.cache import apc_manager
+
+    _real["apc_free_ram"] = apc._free_ram_bytes
+    _real["vm_stat_free_ram"] = apc_manager._vm_stat_free_ram_bytes
+    apc._free_ram_bytes = free_ram_bytes
+    apc_manager._vm_stat_free_ram_bytes = free_ram_bytes

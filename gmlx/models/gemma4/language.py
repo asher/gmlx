@@ -817,6 +817,8 @@ class Gemma4TextModel(nn.Module):
 
 class LanguageModel(nn.Module):
     requires_uniform_batch_acceptance = True
+    # The rollback takes the per-row accept list, clamped to one count.
+    ragged_spec_rollback = True
 
     def __init__(self, config: TextConfig):
         super().__init__()

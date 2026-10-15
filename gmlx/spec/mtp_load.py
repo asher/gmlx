@@ -136,7 +136,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     ``hard_limit`` is a drafter-imposed ceiling (the B=1-only DFlash
     drafters) that replaces the family's table row.
     MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
-    both and is itself clamped by the hard limit.
+    both and is itself clamped by the hard limit. MLX_VLM_GGUF_CONTEXT_COPY
+    (same window) stamps the model's context_copy key.
     """
     if hard_limit is not None:
         limit = int(hard_limit)
@@ -151,7 +152,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     # MoE verify multiplies the expert union each drafted position touches, and
     # both measured MoE families lose the trade above B=1. Structural, so a new
     # MoE arch inherits it without a table row; dense stays family-defaulted.
-    if cap != 1 and target is not None and model_is_moe(target):
+    target_moe = target is not None and model_is_moe(target)
+    if cap != 1 and target_moe:
         log(f"[mtp] width cap: routed-expert target -> 1 "
             f"(family default was {cap or 'uncapped'})")
         cap = 1
@@ -169,6 +171,12 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     try:
         drafter.mtp_width_cap = cap
         drafter.mtp_width_limit = limit
+        # Read by the mixed-batch policy (speculative._mixed_policy).
+        drafter.mtp_target_moe = bool(target_moe)
+        # The model's context_copy config key (load-window env), read by
+        # context_copy.context_copy_enabled.
+        drafter.context_copy = (
+            os.environ.get("MLX_VLM_GGUF_CONTEXT_COPY", "") == "1")
     except AttributeError:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
     log(f"[mtp] width cap: {cap or 'uncapped'}"
@@ -1987,6 +1995,7 @@ def load_mtp_model(
     # keep sanitize=False (seam 2: GGUF norms already raw).
     _mt = config_dict.get("model_type") or ""
     from gmlx.load.hadamard import hadamard_targets_for
+    from gmlx.stream.table_pread import oversize_tables
 
     _install_and_load(
         model.language_model,
@@ -1999,6 +2008,8 @@ def load_mtp_model(
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
         source_key=weights_source_key(*pf.shards),
         active_before=active_before,
+        # The tables the wire load skipped past the buffer ceiling.
+        deferred_tables=oversize_tables(pf.shards, arch),
         hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
     )
 

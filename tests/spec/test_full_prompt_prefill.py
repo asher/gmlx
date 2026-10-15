@@ -20,11 +20,23 @@ import os
 import re
 import warnings
 
+import host_box
 import pytest
 
 import mlx.core as mx
 
-pytestmark = pytest.mark.integration
+
+def _this_mac_gb() -> int:
+    """This Mac's memory in GiB, as the real device reports it."""
+    try:
+        return int(host_box.real_device_info()["memory_size"]) // host_box.GB
+    except Exception:
+        return int(host_box.RUNNER_GB)
+
+
+# The real-model tier: each test loads a model that only a large Mac holds,
+# so it runs on a Mac of this one's memory (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(_this_mac_gb())]
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)
 
@@ -1337,9 +1349,10 @@ def test_continuous_batch_injection(mtp_model):
 
 def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
                                                       capfd):
-    """A batch wider than the cap decodes plain, and under greedy that has to
-    be token-identical to the same batch decoded speculatively: MTP is a
-    speed optimization, so gating it may not move a single token.
+    """With mixed batches off, a batch wider than the cap decodes plain, and
+    under greedy that has to be token-identical to the same batch decoded
+    speculatively: MTP is a speed optimization, so gating it may not move a
+    single token.
 
     Unit coverage for the gate's mechanics is tests/spec/test_mtp_width_cap.py;
     this is the end-to-end arm through the real engine and a real model.
@@ -1357,6 +1370,7 @@ def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
     ref = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
 
     monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "2")      # B=3 > 2 -> gated
+    monkeypatch.setenv("GMLX_MTP_MIXED", "0")
     spec._width_cap_memo = ("", None)
     spec._width_cap_logged.clear()
     capfd.readouterr()
@@ -1370,6 +1384,51 @@ def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
         _assert_greedy_match(
             model, ids[i], a, b,
             f"row {i}: gated decode vs speculative decode")
+
+
+def test_width_cap_mixed_batch_matches_ungated_greedy(mtp_model, monkeypatch,
+                                                      capfd):
+    """A batch wider than the cap keeps speculating on its oldest rows and
+    decodes the rest plain in the same verify forward. Under greedy that has
+    to be token-identical to the same batch decoded without a mixed batch:
+    speculatively, or plain past a drafter's width limit.
+
+    Unit coverage for the mixed batch is tests/spec/test_mtp_mixed_batch.py;
+    this is the end-to-end arm through the real engine and a real model.
+    """
+    import gmlx.spec.speculative as spec
+
+    model, drafter, config, tokenizer = mtp_model
+    if not _drafter_supports_batch(drafter):
+        pytest.skip("drafter does not support batched reset (assistant-model)")
+    monkeypatch.setenv("GMLX_MTP_MIXED", "1")
+    if not spec._mixed_policy(drafter, getattr(model, "language_model", model), 2):
+        pytest.skip("this drafter and target cannot run a mixed batch")
+
+    ids = [_build_text_prompt(tokenizer, 300, start=i) for i in range(3)]
+
+    monkeypatch.setenv("GMLX_MTP_MIXED", "0")          # the reference never mixes
+    monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "0")      # uncapped reference
+    spec._width_cap_memo = ("", None)
+    ref = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
+
+    monkeypatch.setenv("GMLX_MTP_MIXED", "1")
+    monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "2")      # B=3 > 2 -> mixed
+    spec._width_cap_memo = ("", None)
+    spec._width_cap_logged.clear()
+    capfd.readouterr()
+    got = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
+    err = capfd.readouterr().err
+
+    assert "[spec] mixed" in err, (
+        f"no mixed batch at B=3 with cap=2; stderr: {err[-400:]}")
+    assert "[spec] width-cap gate" not in err, (
+        f"the mixed batch decoded plain; stderr: {err[-400:]}")
+    for i, (a, b) in enumerate(zip(ref, got)):
+        assert a and b, f"row {i}: empty output (ref {len(a)}, mixed {len(b)})"
+        _assert_greedy_match(
+            model, ids[i], a, b,
+            f"row {i}: mixed decode vs unmixed decode")
 
 
 def test_width_cap_leaves_single_stream_speculating(mtp_model, monkeypatch,

@@ -362,6 +362,59 @@ def test_no_limit_leaves_cap_alone(monkeypatch):
     assert _mtp_width_cap(_StrictDrafter(cap=2, limit=0)) == 3
 
 
+def test_a_target_that_rolls_back_one_row_caps_at_1(monkeypatch):
+    """A batched round hands the rollback a per-row list. A target whose
+    hook takes one int speculates one row at a time, whatever the cap asks;
+    a target without the hook, or with the per-row flag, keeps its cap."""
+    def rollback(*a):
+        return None
+
+    one_row = SimpleNamespace(rollback_speculative_cache=rollback)
+    per_row = SimpleNamespace(rollback_speculative_cache=rollback,
+                              ragged_spec_rollback=True)
+    assert _mtp_width_cap(_StrictDrafter(cap=2), one_row) == 1
+    assert _mtp_width_cap(_StrictDrafter(cap=0), one_row) == 1
+    assert _mtp_width_cap(_StrictDrafter(cap=2), per_row) == 2
+    assert _mtp_width_cap(_StrictDrafter(cap=0), per_row) == 0
+    assert _mtp_width_cap(_StrictDrafter(cap=2), SimpleNamespace()) == 2
+    monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "4")
+    assert _mtp_width_cap(_StrictDrafter(cap=2), one_row) == 1
+    assert _mtp_width_cap(_StrictDrafter(cap=2), per_row) == 4
+
+
+# The MTP target classes whose rollback takes the per-row accept list.
+PER_ROW_TARGETS = {"qwen3_5", "qwen3_5_moe", "gemma4_text"}
+
+
+def test_target_classes_declare_a_per_row_rollback():
+    """Every wired MTP target class carries ragged_spec_rollback exactly when
+    its rollback takes the per-row list; the six whose hook takes one int
+    speculate one row at a time. A newly wired target fails here until it
+    is sorted into one group."""
+    from gmlx.load.arch_table import MTP_WIRED_MODEL_TYPES
+    from gmlx.load.mtp_target import _mtp_target_classes
+    from gmlx.models.gemma4 import language as gemma4_language
+    from gmlx.models.qwen35 import language as qwen35_language
+    from gmlx.models.qwen35 import moe_language as qwen35_moe_language
+    from gmlx.models.qwen35.owned import GdnReplayRollback
+    from gmlx.spec.speculative import _ragged_rollback
+
+    for cls in (qwen35_language.LanguageModel,
+                qwen35_moe_language.LanguageModel, GdnReplayRollback,
+                gemma4_language.LanguageModel):
+        assert getattr(cls, "ragged_spec_rollback", False) is True, cls
+    assert PER_ROW_TARGETS <= MTP_WIRED_MODEL_TYPES
+    one_row = MTP_WIRED_MODEL_TYPES - PER_ROW_TARGETS
+    assert one_row == {"deepseek_v4", "hy_v3", "muse_glimmer", "qwen4_exp",
+                       "glm5_next", "nemotron_h"}
+    for model_type in sorted(MTP_WIRED_MODEL_TYPES):
+        cls, _build = _mtp_target_classes(model_type)
+        assert callable(getattr(cls, "rollback_speculative_cache", None))
+        per_row = model_type in PER_ROW_TARGETS
+        assert _ragged_rollback(cls) is per_row, (model_type, cls.__name__)
+        assert _mtp_width_cap(_StrictDrafter(cap=0), cls) == (0 if per_row else 1)
+
+
 def test_memo_does_not_leak_clamp_across_drafters(monkeypatch):
     """The memo covers the raw-string parse only. Memoizing the clamped result
     (as the process-global pacing resolver does) would let a B=1-only model's

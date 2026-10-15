@@ -381,10 +381,9 @@ def draw_rows(rows: mx.array, support: Optional[mx.array], *, vocab: int,
         idx = mx.argmax(rows, axis=-1)
         toks = _pick(support, idx)
     elif stoch:
-        from .speculative import _STOCH_DRAFT, _pq_probs
+        from .speculative import _STOCH_DRAFT, _sharp_draw
 
-        q = _pq_probs(rows, *_STOCH_DRAFT)
-        idx = mx.random.categorical(mx.log(q), axis=-1)
+        idx, q = _sharp_draw(rows, *_STOCH_DRAFT)
         toks = _pick(support, idx)
         stash.q.extend(_scatter(q, support, 0.0, vocab))
     else:
@@ -635,10 +634,11 @@ class DFlashDrafter(nn.Module):
         # buffer directly and would otherwise see the packed strides.
         return mx.contiguous(packed[..., self._hidden:])
 
-    def append_context(self, captures: mx.array) -> None:
-        """Encode committed positions and inject their K/V into the ring."""
+    def append_context(self, captures: mx.array, cache=None) -> None:
+        """Encode committed positions and inject their K/V into the ring.
+        ``cache`` names a parked row's ring instead of the live one."""
         h_ctx = self.hidden_norm(self.fc(captures))
-        for layer, c in zip(self.layers, self._cache):
+        for layer, c in zip(self.layers, self._cache if cache is None else cache):
             layer.inject(h_ctx, self.rope, c)
 
     # --- draft mode ---------------------------------------------------------
@@ -720,6 +720,36 @@ class DFlashDrafter(nn.Module):
         matching the rolled-back target 1:1."""
         del draft_tokens, new_tokens, sampler, token_dtype, greedy, stash
         self.append_context(self._captures(verify_hidden[:, : int(accepted) + 1]))
+
+    # --- parked row contexts (mixed batches) ---------------------------------
+
+    def row_context_open(self, input_ids, hidden: mx.array, bonus_token,
+                         kv=None) -> list:
+        """A parked context for a row the engine decodes plain: a ring of its
+        own, seeded from the row's prompt capture as the live ring is."""
+        del input_ids, bonus_token, kv
+        ring = self.make_cache()
+        if int(hidden.shape[1]):
+            limit = self.hidden_capture_limit
+            self.append_context(
+                self._captures(hidden[:, -limit:] if limit else hidden), ring)
+        return ring
+
+    def row_context_ingest(self, ctx: list, verify_hidden: mx.array,
+                           new_tokens: List[int], accepted: int) -> None:
+        """Inject a plain round's committed positions into a parked ring."""
+        del new_tokens
+        self.append_context(
+            self._captures(verify_hidden[:, : int(accepted) + 1]), ctx)
+
+    def row_context_state(self, ctx: list) -> List[Any]:
+        return [c.state for c in ctx]
+
+    def row_context_adopt(self, ctx: list, sampler, token_dtype=mx.int32,
+                          greedy: bool = False, stash=None) -> None:
+        """Make a parked ring the live one. The drafter holds no live row."""
+        del sampler, token_dtype, greedy, stash
+        self._cache = ctx
 
 
 class DFlash2Drafter(DFlashDrafter):

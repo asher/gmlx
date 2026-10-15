@@ -39,6 +39,15 @@ from test_deepseek_v4_mtp import _randomize_zero_params
 N_LAYERS = 3
 
 
+@pytest.fixture(autouse=True)
+def _seed_global_rng():
+    """The tests draw weights and inputs from the global RNG, which earlier
+    tests in the process leave in any state. About one draw in 50 puts a
+    router score near a tie that the chunked and the whole prefill break
+    to different experts."""
+    mx.random.seed(0)
+
+
 def _cfg(vl=True):
     v4.ensure_registered()
     shapes = dict(_DEEPSEEK4_SHAPES)

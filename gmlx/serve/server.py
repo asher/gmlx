@@ -1279,8 +1279,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "server.prefill_tick_ms.")
     ap.add_argument("--speculative-width-cap", type=int, default=None,
                     metavar="N",
-                    help="Run MTP only while the live decode batch is <= N "
-                         "wide (0 = uncapped; default: per drafter family). "
+                    help="Speculate on at most N rows of the live decode "
+                         "batch (0 = uncapped; default: per drafter family). "
                          "Process-wide, overriding every model's config key. "
                          "Also via GMLX_MTP_WIDTH_CAP; config mode: "
                          "models[].speculative_width_cap.")

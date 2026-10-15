@@ -240,6 +240,8 @@ def install_span_aware_prompt_step(cls=None) -> bool:
         if col is not None:
             n = min(n, col - self._processed_prompt_columns)
         n2 = span_aware_prompt_n(self, n)
+        if 0 < n2 < n:
+            n2 = prefill_decay.fit_cut(self, n2)
         if n2 <= 0 or n2 == n:
             return orig(self)
         self.prefill_step_size = n2

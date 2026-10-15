@@ -233,6 +233,9 @@ def _adapted_gdn(leaves, merge_zba=False):
     root = Root()
     gdn = root.layers[0].linear_attn
     mx.eval(root.parameters())
+    object.__setattr__(gdn, "_test_root", root)
+    if merge_zba is None:
+        return gdn
     if merge_zba:
         assert patches._gdn_try_merge_zba(gdn)
     else:
@@ -304,3 +307,121 @@ def test_the_fused_verify_calls_adapted_b_a_and_out(monkeypatch):
     want = mx.concatenate([gdn.in_proj_b(x), gdn.in_proj_a(x)], axis=-1)
     assert mx.allclose(seen["ba"], want)
     assert mx.allclose(out, gdn.out_proj(mx.zeros((1, 3, gdn.value_dim))))
+
+
+def _kq_linear(rows, k, seed):
+    import mlx_kquant as kq
+    from mlx_kquant.nn import KQuantLinear
+
+    mx.random.seed(seed)
+    lin = KQuantLinear(k, rows, bias=False, codec="q4_0")
+    lin.weight = kq.quantize(mx.random.normal((rows, k)) * 0.1, "q4_0")[0]
+    return lin
+
+
+def _kq_ba_gdn(k=64, hv=2):
+    """The real-tree GatedDeltaNet with b and a stored in q4_0, as the
+    Qwen3.6/3.8 GGUFs store ssm_beta and ssm_alpha."""
+    gdn = _adapted_gdn((), merge_zba=None)
+    gdn.in_proj_b = _kq_linear(hv, k, 1)
+    gdn.in_proj_a = _kq_linear(hv, k, 2)
+    return gdn
+
+
+def _count_kq_calls(monkeypatch):
+    from mlx_kquant.nn import KQuantLinear
+
+    calls = []
+    stock = KQuantLinear.__call__
+
+    def counted(self, x, lora=None):
+        calls.append(self.weight.shape[0])
+        return stock(self, x, lora)
+
+    monkeypatch.setattr(KQuantLinear, "__call__", counted)
+    return calls
+
+
+@pytest.mark.parametrize("m", [1, 6])
+def test_a_kquant_b_a_pair_cats_bit_exact(m):
+    gdn = _kq_ba_gdn()
+    x = mx.random.normal((1, m, 64)).astype(mx.bfloat16)
+    want = mx.concatenate([gdn.in_proj_b(x), gdn.in_proj_a(x)], axis=-1)
+    assert patches._gdn_try_cat_ba(gdn)
+    assert getattr(gdn, "_gdn_ba_weight", None) is None
+    cat = patches._gdn_ba_kq(gdn)
+    assert cat is not None
+    assert mx.array_equal(cat(x), want)
+    # b and a still serve their own rows, as views of the cat
+    assert mx.array_equal(
+        mx.concatenate([gdn.in_proj_b(x), gdn.in_proj_a(x)], axis=-1), want)
+    assert not patches._gdn_try_cat_ba(gdn)  # already cat
+
+
+def test_kquant_cat_refusals():
+    gdn = _kq_ba_gdn()
+    gdn.in_proj_a = _kq_linear(3, 64, 2)
+    assert not patches._gdn_try_cat_ba(gdn)  # rows != num_v_heads
+    gdn = _kq_ba_gdn()
+    gdn.in_proj_a = nn.Linear(64, 2, bias=False)
+    assert not patches._gdn_try_cat_ba(gdn)  # mixed kinds
+    gdn = _kq_ba_gdn()
+    gdn.in_proj_a.kquant_type = "q8_0"
+    assert not patches._gdn_try_cat_ba(gdn)  # codec mismatch
+
+
+def test_the_decode_body_runs_one_kquant_matmul_for_b_and_a(monkeypatch):
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache
+
+    gdn = _kq_ba_gdn()
+    x = mx.random.normal((1, 1, 64))
+    want_b, want_a = gdn.in_proj_b(x), gdn.in_proj_a(x)
+    assert patches._gdn_try_cat_ba(gdn)
+    seen = {}
+
+    def kernel(inputs, template, grid, threadgroup, output_shapes, output_dtypes):
+        seen["a"], seen["b"] = inputs[2], inputs[3]
+        return [mx.zeros(output_shapes[0], output_dtypes[0]), inputs[6]]
+
+    monkeypatch.setattr(patches, "_gdn_fused_decode_kernel", kernel)
+    calls = _count_kq_calls(monkeypatch)
+    cache = ArraysCache(size=2)
+    cache[0] = mx.zeros((1, 3, gdn.conv_dim))
+    cache[1] = mx.zeros((1, 2, 32, 32))
+    patches._gdn_fused_decode_body(gdn, x, cache)
+    assert calls == [4]
+    assert mx.array_equal(seen["b"], want_b.reshape(seen["b"].shape))
+    assert mx.array_equal(seen["a"], want_a.reshape(seen["a"].shape))
+
+
+def test_the_fused_verify_runs_one_kquant_matmul_for_b_and_a(monkeypatch):
+    gdn = _kq_ba_gdn()
+    x = mx.random.normal((1, 3, 64))
+    want = mx.concatenate([gdn.in_proj_b(x), gdn.in_proj_a(x)], axis=-1)
+    assert patches._gdn_try_cat_ba(gdn)
+    seen = {}
+
+    def kernel(inputs, template, grid, threadgroup, output_shapes, output_dtypes):
+        seen["ba"] = inputs[2]
+        return [mx.zeros(s, d) for s, d in zip(output_shapes, output_dtypes)]
+
+    monkeypatch.setattr(patches, "_gdn_fused_verify_kernel", kernel)
+    calls = _count_kq_calls(monkeypatch)
+    patches._gdn_fused_verify_body(gdn, x, None, None, [])
+    assert calls == [4]
+    assert mx.array_equal(seen["ba"], want)
+
+
+def test_an_adapter_on_a_kquant_b_clears_its_cat():
+    from gmlx.load.adapter import LoraAdapter, LoraModule
+    from gmlx.load.modules import install_lora_adapter
+
+    gdn = _kq_ba_gdn()
+    assert patches._gdn_try_cat_ba(gdn)
+    root = gdn._test_root
+    install_lora_adapter(root, LoraAdapter(alpha=4.0, arch="qwen35", modules={
+        "layers.0.linear_attn.in_proj_b": LoraModule(
+            "layers.0.linear_attn.in_proj_b", mx.random.normal((4, 64)),
+            mx.random.normal((2, 4)), 4, 1.0)}))
+    assert getattr(gdn, "_gdn_ba_kq", None) is None
+    assert patches._gdn_ba_kq(gdn) is None

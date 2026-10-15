@@ -78,6 +78,11 @@ def rig(monkeypatch):
     monkeypatch.setattr(sm, "admit_reserve_bytes",
                         lambda ws, gen=None: 2e9)
     import gmlx.gen.prefill_decay as pd
+    # An empty weight registry: a model another test loaded leaves its
+    # streamed bytes there, and the throttle limit adds them.
+    for name in ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS",
+                 "_STREAMED_TRACKED", "_STREAMED_CAP", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 50e9)
     gov._REG.clear()
     gov._INJECT_FIRED.clear()
