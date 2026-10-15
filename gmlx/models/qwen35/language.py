@@ -2176,6 +2176,7 @@ def rollback_attention_caches(caches, accepted_list: list, block_size: int) -> l
 class LanguageModel(nn.Module):
     # The rollback trims each row of a batch to its own accept count.
     requires_uniform_batch_acceptance = False
+    ragged_spec_rollback = True
 
     def __init__(self, args: TextConfig, config: ModelConfig = None):
         super().__init__()

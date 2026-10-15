@@ -417,6 +417,9 @@ class GdnReplayRollback:
     accepted positions, which the next fused kernel runs in its prologue.
     Any other sink takes the stock rollback."""
 
+    # Each row replays its own accept count.
+    ragged_spec_rollback = True
+
     def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
         if not gdn_states or not all(
             len(s) > 11 and isinstance(s[11], _gp.GdnRecords) for s in gdn_states

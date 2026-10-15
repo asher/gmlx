@@ -89,9 +89,12 @@ speculates again when the batch shrinks:
   requests widen the set of experts each step reads.
   `GMLX_MTP_MIXED=1` gives such a model mixed batches anyway.
 - The gemma-4 assistant drafter, which reads the model's own KV cache.
-- gemma-4, DeepSeek-V4, Nemotron-H and MiniMax-M3 models, and the MTP heads
-  of GLM-DSA, Inkling and Hy-V4 models, which accept the same number of
-  drafts for every request in a batch.
+- gemma-4 and MiniMax-M3 models, and the MTP heads of GLM-DSA, Inkling and
+  Hy-V4 models, which accept the same number of drafts for every request in
+  a batch.
+- Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and
+  GLM-5.3-Flash models, which undo the rejected drafts of one request at a
+  time.
 - A quantized KV cache that cannot roll back each request separately.
 
 | Drafter | Default cap |
@@ -99,7 +102,7 @@ speculates again when the batch shrinks:
 | A native head on a dense Qwen model | No cap |
 | The gemma-4 assistant drafter, and any family without a default of its own | 2 |
 | Any mixture-of-experts model | 1 |
-| The heads of Hy3, DeepSeek-V4, Muse Glimmer, Qwen3.8-Flash-Next and GLM-5.3-Flash, and every DFlash drafter | 1, which no setting raises |
+| The heads of Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and GLM-5.3-Flash, and every DFlash drafter | 1, which no setting raises |
 
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) sets the
 cap for one model, and `0` removes it. `gmlx serve --speculative-width-cap N`

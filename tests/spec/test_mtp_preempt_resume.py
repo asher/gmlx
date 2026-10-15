@@ -220,6 +220,8 @@ class _RowSplitDrafter(_ArmableDrafter):
 
 
 class _ListRollbackLM(_VerifyEchoLM):
+    ragged_spec_rollback = True
+
     def __init__(self, uniform):
         super().__init__()
         self.requires_uniform_batch_acceptance = uniform

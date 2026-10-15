@@ -88,6 +88,11 @@ of experts each step reads, which costs the same as speculating on every
 row. `GMLX_MTP_MIXED=1` forces mixed batches on such targets, and
 `GMLX_MTP_MIXED=0` restores the gate for every model.
 
+A target marks a rollback that takes each row's accept count with
+`ragged_spec_rollback`. A target whose rollback takes one count gets no
+mixed batch, and its width cap is 1 whatever the settings ask, since a
+batched round would hand it a count per row.
+
 ## Preempting a scalar generation
 
 The scalar loop has no injection boundary, because its speed comes from

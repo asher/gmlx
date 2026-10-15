@@ -912,6 +912,16 @@ def _uniform_batch_accept(drafter, lm) -> bool:
                for o in (drafter, lm))
 
 
+def _ragged_rollback(lm) -> bool:
+    """Whether the target's rollback_speculative_cache takes the per-row
+    accept list of a batched round, which the target declares with
+    ragged_spec_rollback. A hook without the flag takes one int, so such a
+    target speculates on one row at a time (_mtp_width_cap) and runs no
+    mixed batch (_mixed_policy)."""
+    return (callable(getattr(lm, "rollback_speculative_cache", None))
+            and bool(getattr(lm, "ragged_spec_rollback", False)))
+
+
 def _next_forced_chunk(hook, queue: list, block_total: int):
     """The next chunk of forced close ids to commit as a fully-accepted
     round, or None. Chunks are capped at the drafter's block width so every
@@ -1520,7 +1530,7 @@ def _owned_decode_rounds(
                     if (isinstance(slot, dict) and _has_accept
                             and n_new == accepted + 1
                             and not _needs_shared_kv
-                            and _mtp_width_cap(drafter) == 1
+                            and _mtp_width_cap(drafter, lm) == 1
                             and _mixed_policy(drafter, lm, 1)):
                         # A mixed batch keeps this row speculating on the
                         # same drafter: commit the round into it as the
@@ -2529,16 +2539,18 @@ _width_cap_memo: tuple[str, int | None] = ("", None)
 _RESUME_MIN_REMAINING = 32
 
 
-def _mtp_width_cap(drafter) -> int:
+def _mtp_width_cap(drafter, lm=None) -> int:
     """Effective MTP batch-width cap: speculate only while the live decode
     batch is this wide, 0 = uncapped.
 
     env GMLX_MTP_WIDTH_CAP wins over the drafter's load-time stamp, then a
     drafter hard limit clamps both (B=1-only drafters raise above theirs, so
-    crossing it is a guaranteed exception rather than a perf trade). The memo
-    covers the raw-string parse ONLY -- unlike batch_sched._ratio this
-    resolver is per-drafter, so memoizing the clamped result would leak one
-    model's limit onto the next model in a multi-model server.
+    crossing it is a guaranteed exception rather than a perf trade). A
+    target ``lm`` whose rollback takes one int clamps to 1 the same way
+    (_ragged_rollback). The memo covers the raw-string parse ONLY -- unlike
+    batch_sched._ratio this resolver is per-drafter, so memoizing the
+    clamped result would leak one model's limit onto the next model in a
+    multi-model server.
     """
     global _width_cap_memo
     cap = None
@@ -2570,6 +2582,13 @@ def _mtp_width_cap(drafter) -> int:
         _log_width_cap_once(
             f"clamp: requested {cap or 'uncapped'} -> {limit} (drafter limit)")
         cap = limit
+    if (lm is not None and cap != 1
+            and callable(getattr(lm, "rollback_speculative_cache", None))
+            and not _ragged_rollback(lm)):
+        _log_width_cap_once(
+            f"clamp: requested {cap or 'uncapped'} -> 1 (target rolls back "
+            f"one row)")
+        cap = 1
     if _gov_width_clamp >= 1 and (cap == 0 or cap > _gov_width_clamp):
         _log_width_cap_once(
             f"clamp: governor caps width at {_gov_width_clamp}")
@@ -2585,11 +2604,11 @@ def _mixed_policy(drafter, lm, cap: int) -> bool:
     GMLX_MTP_MIXED: ``auto`` (default), ``1`` forces it where the mechanism
     applies, ``0`` restores the plain-decode trip. The mechanism needs a
     drafter that owns its per-row state (no shared target KV), a target
-    that rolls back each row by its own accept count, and a cap. ``auto``
-    also leaves routed-expert targets on the trip: a plain row verifies a
-    full block of padding drafts, and on an MoE target those positions
-    widen the expert union the same as speculating on every row, the cost
-    the MoE cap exists to avoid."""
+    that rolls back each row by its own accept count (_ragged_rollback),
+    and a cap. ``auto`` also leaves routed-expert targets on the trip: a
+    plain row verifies a full block of padding drafts, and on an MoE target
+    those positions widen the expert union the same as speculating on every
+    row, the cost the MoE cap exists to avoid."""
     mode = os.environ.get("GMLX_MTP_MIXED", "auto").strip().lower()
     if mode in ("0", "off", "false", "no") or cap < 1:
         return False
@@ -2597,7 +2616,7 @@ def _mixed_policy(drafter, lm, cap: int) -> bool:
         return False
     if _uniform_batch_accept(drafter, lm):
         return False
-    if not callable(getattr(lm, "rollback_speculative_cache", None)):
+    if not _ragged_rollback(lm):
         return False
     if mode in ("1", "on", "true", "yes"):
         return True
@@ -2815,7 +2834,7 @@ def _owned_decode_rounds_batch(
     # lets it re-arm through a capture round, which re-seeds every row's
     # hidden/shared-KV from fresh state rather than reusing stale per-row
     # state (see the resume block in the loop).
-    cap = _mtp_width_cap(drafter)
+    cap = _mtp_width_cap(drafter, lm)
     # A packed batch cache without ragged rollback (a stale stack) can
     # neither trim per row nor roll: the batch decodes plain for its whole
     # life, never re-arming.

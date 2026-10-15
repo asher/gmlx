@@ -1390,7 +1390,8 @@ def test_width_cap_mixed_batch_matches_ungated_greedy(mtp_model, monkeypatch,
                                                       capfd):
     """A batch wider than the cap keeps speculating on its oldest rows and
     decodes the rest plain in the same verify forward. Under greedy that has
-    to be token-identical to the same batch decoded speculatively.
+    to be token-identical to the same batch decoded without a mixed batch:
+    speculatively, or plain past a drafter's width limit.
 
     Unit coverage for the mixed batch is tests/spec/test_mtp_mixed_batch.py;
     this is the end-to-end arm through the real engine and a real model.
@@ -1406,10 +1407,12 @@ def test_width_cap_mixed_batch_matches_ungated_greedy(mtp_model, monkeypatch,
 
     ids = [_build_text_prompt(tokenizer, 300, start=i) for i in range(3)]
 
+    monkeypatch.setenv("GMLX_MTP_MIXED", "0")          # the reference never mixes
     monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "0")      # uncapped reference
     spec._width_cap_memo = ("", None)
     ref = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
 
+    monkeypatch.setenv("GMLX_MTP_MIXED", "1")
     monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "2")      # B=3 > 2 -> mixed
     spec._width_cap_memo = ("", None)
     spec._width_cap_logged.clear()
@@ -1425,7 +1428,7 @@ def test_width_cap_mixed_batch_matches_ungated_greedy(mtp_model, monkeypatch,
         assert a and b, f"row {i}: empty output (ref {len(a)}, mixed {len(b)})"
         _assert_greedy_match(
             model, ids[i], a, b,
-            f"row {i}: mixed decode vs speculative decode")
+            f"row {i}: mixed decode vs unmixed decode")
 
 
 def test_width_cap_leaves_single_stream_speculating(mtp_model, monkeypatch,

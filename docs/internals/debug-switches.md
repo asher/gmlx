@@ -55,7 +55,7 @@ is already running does not see a variable you export later.
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, as `--draft-block-size` sets. A round drafts one token fewer. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
-| `GMLX_MTP_MIXED` | `0` decodes a batch past the width cap plain, not as a [mixed batch](speculative-batching.md#mixed-batches). `1` forces mixed batches on MoE targets. |
+| `GMLX_MTP_MIXED` | `0` decodes a batch past the width cap plain, not as a [mixed batch](speculative-batching.md#mixed-batches). `1` forces mixed batches on MoE targets that roll back each row by its own count. |
 | `GMLX_MTP_MIXED_BLOCK=N` | Verify blocks of N positions in a mixed batch round, instead of the size picked from the batch width. |
 
 ## Prompt cache

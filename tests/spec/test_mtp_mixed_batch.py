@@ -45,6 +45,8 @@ class _EchoLM:
     """Echo target serving the plain-forward verify branch. Records each
     verify's input rows and each rollback's per-row accepts."""
 
+    ragged_spec_rollback = True
+
     def __init__(self, step=1):
         self.step = step
         self.inputs = []
@@ -67,6 +69,16 @@ class _EchoLM:
                                    block_size):
         self.rollbacks.append(
             [int(accepted)] if isinstance(accepted, int) else list(accepted))
+
+
+class _OneRowLM(_EchoLM):
+    """A target whose rollback takes one int, as qwen4exp's does."""
+
+    ragged_spec_rollback = False
+
+    def rollback_speculative_cache(self, caches, gdn_states, accepted,
+                                   block_size):
+        self.rollbacks.append([int(accepted)])
 
 
 class _RowDrafter:
@@ -192,6 +204,28 @@ def test_policy_needs_cap_owned_state_and_ragged_rollback(monkeypatch):
     assert not _mixed_policy(d, SimpleNamespace(), 1)  # no rollback hook
     monkeypatch.setenv("GMLX_MTP_MIXED", "0")
     assert not _mixed_policy(d, lm, 1)
+
+
+def test_policy_refuses_a_target_that_rolls_back_one_row(monkeypatch):
+    """A mixed round rolls back every row of the verify, plain rows
+    included, so a hook that takes one int would get a list."""
+    d = _RowDrafter()
+    assert not _mixed_policy(d, _OneRowLM(), 1)
+    monkeypatch.setenv("GMLX_MTP_MIXED", "1")
+    assert not _mixed_policy(d, _OneRowLM(), 1)
+
+
+def test_one_row_target_past_the_cap_decodes_plain(monkeypatch):
+    """GMLX_MTP_MIXED=1 on such a target keeps the plain-decode trip: every
+    row streams its own chain one token a round, and nothing rolls back."""
+    monkeypatch.setenv("GMLX_MTP_MIXED", "1")
+    lm = _OneRowLM()
+    out, _, _ = _drive(_RowDrafter(block_size=4), B=2, max_tokens=5, lm=lm)
+    streams = _streams(out, 2)
+    assert streams[0] == _chain(10, 4)
+    assert streams[1] == _chain(20, 4)
+    assert all(meta["round_len"] == 1 for _, meta in out)
+    assert lm.rollbacks == []
 
 
 def test_policy_auto_leaves_moe_targets_on_the_trip(monkeypatch):
