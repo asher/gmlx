@@ -228,6 +228,12 @@ def synth_config(view: HeaderView) -> dict:
     }
 
 
+def build(config: dict):
+    from .model import Flux3KleinDiT
+
+    return Flux3KleinDiT(config)
+
+
 FAMILY = Family(
     name="flux3_klein",
     title=TITLE,
@@ -239,7 +245,7 @@ FAMILY = Family(
     fingerprint=fingerprint,
     synth_config=synth_config,
     constants=CONSTANTS,
-    build=None,
+    build=build,
     # The q and k norms run in fp32, as the reference's do.
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),
 )

@@ -574,6 +574,63 @@ def test_glu_falls_back_to_the_composition(spies, routes, case):
     assert spies.glu.calls == 0
 
 
+def test_glu_takes_the_two_halves_of_one_fused_leaf(spies):
+    """A gate and up pair stored as one matrix, as FLUX.3 klein's mlp_in:
+    the first half of the rows is the gate, the second the up."""
+    fused = _leaf("q4_k", 128, 256, 1)
+    x = _x((1, 1024, 256), mx.bfloat16)
+    pair = ops.glu_halves(fused, x)
+    assert pair is not None and pair[2] == "q4_k"
+    w = fused["weight"]
+    assert mx.array_equal(pair[0], w[:64]).item()
+    assert mx.array_equal(pair[1], w[64:]).item()
+    y = ops.swiglu_fused(x, *pair)
+    mx.eval(y)
+    assert spies.glu.calls == 1 and y.shape == (1, 1024, 64)
+    a, b = mx.split(fused(x), 2, axis=-1)
+    want = ops.swiglu(a, b)
+    assert _rel(_f64(y), _f64(want)) <= 2 * PAIR_TOL[mx.bfloat16]
+
+
+@pytest.mark.parametrize("case", [
+    "route_off", "rows_1023", "odd_rows", "bias", "float_leaf", "float32_x",
+    "one_dim_x", "zero_k", "k_off_tile", "codec", "no_outputs",
+    "no_tensor_ops", "cpu"])
+def test_glu_halves_fall_back_to_the_composition(spies, routes, monkeypatch,
+                                                 case):
+    fused = _leaf("q4_k", 128, 256, 1)
+    x = _x((1, 1024, 256), mx.bfloat16)
+    if case == "route_off":
+        routes.install(("qk",))
+    elif case == "rows_1023":
+        x = x[:, :1023]
+    elif case == "odd_rows":
+        fused.weight = fused.weight[:127]
+    elif case == "bias":
+        fused = _leaf("q4_k", 128, 256, 1, bias=True)
+    elif case == "float_leaf":
+        fused = nn.Linear(256, 128, bias=False)
+    elif case == "float32_x":
+        x = x.astype(mx.float32)
+    elif case == "one_dim_x":
+        x = x[0, 0]
+    elif case == "zero_k":
+        x = x[..., :0]
+    elif case == "k_off_tile":
+        # The predicate reads the inner dim of x: 192 is off the tile.
+        x = _x((1, 1024, 192), mx.bfloat16)
+    elif case == "codec":
+        fused = _leaf("q8_0", 128, 256, 1)
+    elif case == "no_outputs":
+        fused.weight = fused.weight[:0]
+    elif case == "no_tensor_ops":
+        routes._OPS["nax"] = False
+    elif case == "cpu":
+        monkeypatch.setattr(kq_routes, "_gpu", lambda: False)
+    assert ops.glu_halves(fused, x) is None
+    assert spies.glu.calls == 0
+
+
 def test_glu_takes_rows_above_32767(spies):
     gate, up = _pair()
     # A batch of two at 2048x2048 flattens to 33792 rows.
