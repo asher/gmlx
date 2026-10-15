@@ -227,22 +227,34 @@ def exact_floats(model, path: str) -> int:
     return len(pairs)
 
 
+COND = ("emb_in.image_cond", "content_mode_blocks.image_cond.")
+
+
 @contextmanager
-def _exact(model):
+def _exact(model, arrays: dict):
+    """The exact path, after which every K-quant product of the step ran
+    dense. A step with no reference image calls no leaf of the
+    image_cond stream."""
     with bg.exact_products(model) as used:
         yield
-        bg.assert_all_dense(model, used)
+        if n_refs(arrays):
+            bg.assert_all_dense(model, used)
+            return
+        assert not used.kernel, used.kernel[:3]
+        left = sorted(p for i, p in bg.kquant_leaves(model).items()
+                      if i not in used)
+        assert left and all(p.startswith(COND) for p in left), left[:3]
 
 
 def exact_measures(model, arrays: dict) -> dict:
-    with _exact(model):
+    with _exact(model, arrays):
         return measures(model, arrays)
 
 
 def exact_free_floor(model, arrays: dict) -> dict:
     """Relative L2 of each free row of ``measures`` and of the velocity
     between the exact step on the GPU and on the CPU stream."""
-    with _exact(model):
+    with _exact(model, arrays):
         gpu = free_rows(model, arrays)
         with mx.stream(mx.cpu):
             cpu = free_rows(model, arrays)
