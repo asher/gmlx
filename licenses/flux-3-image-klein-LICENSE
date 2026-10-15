@@ -7,15 +7,17 @@ source.
 
 - gmlx/image/families/flux3_klein/family.py: the constants of
   src/flux3/dit.py (AXES_DIM, THETA, the eps of the norms),
-  src/flux3/pipeline.py (IMAGE_ROPE_SCALE) and src/flux3/text_encoder.py
-  (OUTPUT_LAYERS, PAD_MULTIPLE, MAX_LENGTH, the pad token and position,
-  the chat template of one user turn), and the tensor names and shapes of
-  the DiT of src/flux3/dit.py.
+  src/flux3/pipeline.py (IMAGE_ROPE_SCALE, the alpha of the schedule) and
+  src/flux3/text_encoder.py (OUTPUT_LAYERS, PAD_MULTIPLE, MAX_LENGTH, the
+  pad token and position, the chat template of one user turn), and the
+  tensor names and shapes of the DiT of src/flux3/dit.py.
 - gmlx/image/families/flux3_klein/model.py: the DiT of src/flux3/dit.py
   (its parallel block, mode modulations, time embedders, RoPE tables and
   final layer, and the order of the joint tokens), and the image,
   reference and text position ids of src/flux3/pipeline.py,
   src/flux3/autoencoder.py and src/flux3/text_encoder.py.
+- gmlx/image/schedule.py: the schedule of timesteps in
+  src/flux3/sampling.py, in flux3_sigmas.
 - gmlx/image/vae/flux2_ae.py: the 2x2 patchify of the latents and their
   BatchNorm and its inverse in AutoEncoder.encode and AutoEncoder.decode
   of src/flux3/autoencoder.py.

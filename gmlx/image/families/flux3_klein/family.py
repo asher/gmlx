@@ -20,7 +20,8 @@ refused with the name of its family.
 from __future__ import annotations
 
 # The constants are AXES_DIM, THETA and the eps of the norms in
-# src/flux3/dit.py, IMAGE_ROPE_SCALE in src/flux3/pipeline.py, and
+# src/flux3/dit.py, IMAGE_ROPE_SCALE and the alpha default of
+# Pipeline.generate in src/flux3/pipeline.py, and
 # OUTPUT_LAYERS, PAD_MULTIPLE, MAX_LENGTH, the pad token, the pad position
 # and the chat template of one user turn in src/flux3/text_encoder.py. The
 # official config.json and transformer/config.json give the same DiT
@@ -84,6 +85,9 @@ CONSTANTS = ConstantsRow(
         "size_multiple": 16,
         "patch_size": 1,
         "out_modes": ["image"],
+        # The shift of the schedule, the same for both variants and every
+        # image size; the official config.json says sampler.alpha 6.93 too.
+        "alpha": 6.93,
     },
     repo="black-forest-labs/flux-3-image-klein",
     revision="8454017f9ebaada30c998fccd9f67a80c7580f68",
@@ -297,6 +301,14 @@ def encoder():
     )
 
 
+def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
+    """Sigmas of ``steps`` shifted by alpha, for either variant and any
+    image size."""
+    from gmlx.image.schedule import flux3_sigmas
+
+    return flux3_sigmas(steps, CONSTANTS.values["alpha"])
+
+
 FAMILY = Family(
     name="flux3_klein",
     title=TITLE,
@@ -312,4 +324,5 @@ FAMILY = Family(
     # The q and k norms run in fp32, as the reference's do.
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),
     encoder=encoder,
+    schedule=schedule,
 )
