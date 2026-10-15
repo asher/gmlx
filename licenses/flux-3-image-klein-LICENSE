@@ -8,8 +8,9 @@ source.
 - gmlx/image/families/flux3_klein/family.py: the constants of
   src/flux3/dit.py (AXES_DIM, THETA, the eps of the norms),
   src/flux3/pipeline.py (IMAGE_ROPE_SCALE) and src/flux3/text_encoder.py
-  (OUTPUT_LAYERS, PAD_MULTIPLE, MAX_LENGTH), and the tensor names and
-  shapes of the DiT of src/flux3/dit.py.
+  (OUTPUT_LAYERS, PAD_MULTIPLE, MAX_LENGTH, the pad token and position,
+  the chat template of one user turn), and the tensor names and shapes of
+  the DiT of src/flux3/dit.py.
 - gmlx/image/families/flux3_klein/model.py: the DiT of src/flux3/dit.py
   (its parallel block, mode modulations, time embedders, RoPE tables and
   final layer, and the order of the joint tokens), and the image,

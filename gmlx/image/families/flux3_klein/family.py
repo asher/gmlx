@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2026 Black Forest Labs, Inc.
+# Ported from BFL's FLUX.3 klein reference at commit 45e57c9: the
+# constants of src/flux3/dit.py, src/flux3/pipeline.py and
+# src/flux3/text_encoder.py, and the tensor names and shapes of the DiT of
+# src/flux3/dit.py, and modified for gmlx (Apache-2.0; see
+# licenses/flux-3-image-klein-LICENSE).
 """FLUX.3 klein fingerprint, constants, config synthesis and the hooks of
 its registry row.
 
@@ -12,12 +19,12 @@ refused with the name of its family.
 
 from __future__ import annotations
 
-# The constants are those of BFL's reference code at commit 45e57c9
-# (Apache-2.0; see licenses/flux-3-image-klein-LICENSE): AXES_DIM, THETA
-# and the eps of the norms in src/flux3/dit.py, IMAGE_ROPE_SCALE in
-# src/flux3/pipeline.py, and OUTPUT_LAYERS, PAD_MULTIPLE and MAX_LENGTH in
-# src/flux3/text_encoder.py. The official config.json and
-# transformer/config.json give the same DiT values.
+# The constants are AXES_DIM, THETA and the eps of the norms in
+# src/flux3/dit.py, IMAGE_ROPE_SCALE in src/flux3/pipeline.py, and
+# OUTPUT_LAYERS, PAD_MULTIPLE, MAX_LENGTH, the pad token, the pad position
+# and the chat template of one user turn in src/flux3/text_encoder.py. The
+# official config.json and transformer/config.json give the same DiT
+# values.
 
 import re
 
