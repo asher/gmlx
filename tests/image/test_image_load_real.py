@@ -9,7 +9,8 @@ import pytest
 
 import mlx.core as mx
 
-pytestmark = pytest.mark.integration
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
 
 
 def _z_image_file(gguf_index: dict) -> tuple[str, object]:

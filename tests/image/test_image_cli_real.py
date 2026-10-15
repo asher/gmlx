@@ -13,7 +13,8 @@ from image_dir import vae_files
 
 import mlx.core as mx
 
-pytestmark = pytest.mark.integration
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
 
 PROMPT = "a red bicycle leaning on a brick wall"
 SEED = 7

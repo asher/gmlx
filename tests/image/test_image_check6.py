@@ -21,7 +21,9 @@ from oracle_fixture import fixture, fx
 
 import mlx.core as mx
 
-pytestmark = pytest.mark.integration
+# A Mac of 24 GB: with the DiT, the encoder and the VAE loaded, a 16 GB
+# Mac has no room left for the decode (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
 
 NAME = "check6_z_image_turbo"
 

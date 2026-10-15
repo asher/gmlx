@@ -22,7 +22,8 @@ import pytest
 from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
 
-pytestmark = pytest.mark.integration
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
 
 NAME = "check6_krea2"
 

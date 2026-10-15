@@ -46,7 +46,9 @@ from image_fixtures import image_dits
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
 
-pytestmark = pytest.mark.integration
+# A Mac of 24 GB: the module peaks at 20.3 GiB, past the 14 GiB working
+# set of a 16 GB Mac (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
 
 COMFY = "check7_krea2_comfy_512"
 SYNTHETIC = "check7_krea2_synthetic_512"

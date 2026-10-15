@@ -43,6 +43,9 @@ from block_gates import (EXACT_TOL, GROUPS, LEAVES, Sites, assert_all_dense,
                          stock_ops_only, thin, velocity)
 from oracle_fixture import committed, fixture, fx
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 
 # The tiny model, against diffusers' code on the same weights.
 
