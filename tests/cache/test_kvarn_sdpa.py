@@ -57,6 +57,15 @@ def _ref_attention(q, cache, qL):
     return kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
 
 
+def _fa_probed(d):
+    """Run the FA probe for head dim d now. The probe runs once per process
+    and calls _decode_fa and sdpa_fa_verify_kvarn, so a test that counts
+    those calls must not be the first to reach d."""
+    from gmlx.cache import kvarn_sdpa
+
+    assert kvarn_sdpa._fa_runs(d)
+
+
 def _assert_close(out, ref, atol=5e-3):
     d = np.abs(np.array(out.astype(mx.float32)) - np.array(ref)).max()
     assert d < atol, f"max|d|={d}"
@@ -373,6 +382,7 @@ def test_verify_width_routes_to_the_fa_kernels(monkeypatch, ql):
     from gmlx.cache import kvarn_sdpa
 
     cache = filled(700)
+    _fa_probed(D)
     seen = []
     real = kvarn_sdpa._decode_fa
     monkeypatch.setattr(
@@ -396,6 +406,7 @@ def test_wide_folds_chunk_the_gqa_group(monkeypatch, d, hq, ql, chunks):
 
     cache = filled(700, d=d)
     assert kvarn_sdpa._fa_chunks(hq // H, ql, kvarn_sdpa._fa_row_cap(d)) == chunks
+    _fa_probed(d)
     calls = []
     real = kq.sdpa_fa_verify_kvarn
     monkeypatch.setattr(
