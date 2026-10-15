@@ -157,13 +157,15 @@ def test_check3_rows_at_512(dits, case):
     arrays, m = _rows(case)
     model, _ = dits(m)
     got = fg.measures(model, arrays)
-    out = fg.missed(got, m["tolerances"])
-    ratio = {k: v / m["tolerances"][k]["rel_l2"] for k, v in got.items()
-             if not k.startswith("free ")}
+    out = fg.missed(got, m)
+    ratio = {k: v / fg.gate(k, m) for k, v in got.items()}
     top = max(ratio, key=ratio.get)
-    print(f"flux3 check3 512 {case}: {len(ratio)} rows, worst {got[top]:.2e} "
-          f"at {top}, {ratio[top]:.2f} of its gate; velocity "
-          f"{got['velocity']:.2e} of gate "
+    free = {k: r for k, r in ratio.items() if k.startswith("free ")}
+    ftop = max(free, key=free.get)
+    print(f"flux3 check3 512 {case}: {len(ratio)} measures, worst "
+          f"{got[top]:.2e} at {top}, {ratio[top]:.2f} of its gate; of the "
+          f"{len(free)} blocks run free, {free[ftop]:.2f} of its gate at "
+          f"{ftop[len('free '):]}; velocity {got['velocity']:.2e} of gate "
           f"{m['tolerances']['velocity']['rel_l2']:.2e}")
     assert not out, out
 

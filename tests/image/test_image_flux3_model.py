@@ -80,7 +80,7 @@ def test_the_tiny_model_in_bf16_is_inside_the_bf16_tolerances(tiny, name):
     arrays, m, flow = _case(name)
     model = fg.tiny_model(weights, cfg, act=mx.bfloat16, flow_map=flow)
     got = fg.measures(model, arrays)
-    out = fg.missed(got, m["tolerances"])
+    out = fg.missed(got, m)
     assert not out, out
 
 

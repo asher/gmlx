@@ -163,10 +163,22 @@ def forced_rows(model, arrays: dict) -> dict:
     return out
 
 
+# Fixture arrays that are inputs of the step, not rows of it.
+INPUTS = ("latents", "features", "sigma", "target", "velocity_bf16")
+INPUT_PREFIXES = ("refs.", "ids.", "in.")
+
+
+def fixture_rows(arrays: dict) -> set:
+    """The rows a fixture holds: every array but the step's inputs."""
+    return {k for k in arrays
+            if k not in INPUTS and not k.startswith(INPUT_PREFIXES)}
+
+
 def measures(model, arrays: dict) -> dict:
     """Relative L2 of every row against the fixture: teacher-forced for
     the blocks and the final layer, free running for the rest, and
-    ``free <row>`` for each block and the final layer run free."""
+    ``free <row>`` for each block and the final layer run free. The rows
+    measured are the fixture's rows, each of them."""
     free = free_rows(model, arrays)
     forced = forced_rows(model, arrays)
     got = {}
@@ -178,19 +190,29 @@ def measures(model, arrays: dict) -> dict:
             got[f"free {k}"] = rel(v, arrays[k])
         elif k in arrays:
             got[k] = rel(v, arrays[k])
+    rows = {k for k in got if not k.startswith("free ")}
+    want = fixture_rows(arrays)
+    assert rows == want, (f"rows the step did not give: {sorted(want - rows)}"
+                          f"; rows the fixture lacks: {sorted(rows - want)}")
     return got
 
 
-def missed(got: dict, tolerances: dict) -> dict:
-    """The measures over their tolerance, by name. A ``free`` measure has
-    no tolerance of its own and is not gated."""
+def gate(name: str, m: dict) -> float:
+    """The product gate of a measure: the manifest's tolerance of a row,
+    and for a block or the final layer run free, ``free <row>``, twice the
+    oracle's own bf16 against fp32 gap of that row run free."""
+    if name.startswith("free "):
+        return 2 * m["results"]["free_bf16_vs_fp32"][name[len("free "):]]
+    return m["tolerances"][name]["rel_l2"]
+
+
+def missed(got: dict, m: dict) -> dict:
+    """The measures over their gate, by name."""
     out = {}
     for k, v in got.items():
-        if k.startswith("free "):
-            continue
-        tol = tolerances[k]["rel_l2"]
-        if not v <= tol:
-            out[k] = (v, tol)
+        g = gate(k, m)
+        if not v <= g:
+            out[k] = (v, g)
     return out
 
 
