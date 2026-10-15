@@ -661,6 +661,20 @@ def _make_fused_kquant(base_cls, caps):
                 object.__setattr__(self, "_kq_shexp_mod", None)
             return projs
 
+        def _kq_bias32(self, slot, proj):
+            """``proj``'s bias in float32, as the swiglu_clamp kernels take
+            it, copied once instead of on every call. The copy is kept
+            while the bias is the same array, so a load that replaces the
+            bias replaces the copy too. A copy made at install would hold
+            the constructor's zeros: the weights load after the install."""
+            bias = proj.bias
+            hit = self.__dict__.get(slot)
+            if hit is not None and hit[0] is bias:
+                return hit[1]
+            b32 = bias.astype(mx.float32)
+            object.__setattr__(self, slot, (bias, b32))
+            return b32
+
         def _fused_h(self, x, idx, scores=None):
             """The gate/up gather: ``[t, k, I]`` activated hidden (``k + 1``
             slots per token when the shexp fold rides along with scores).
@@ -677,8 +691,8 @@ def _make_fused_kquant(base_cls, caps):
             elif act == "swiglu_clamp":
                 akw["limit"] = self._kq_glu_limit
                 akw["alpha"] = self._kq_glu_alpha
-                akw["gate_bias"] = self._kq_gb32
-                akw["up_bias"] = self._kq_ub32
+                akw["gate_bias"] = self._kq_bias32("_kq_gb32", gate)
+                akw["up_bias"] = self._kq_bias32("_kq_ub32", up)
             se = self._kq_shexp_projs() if scores is not None else None
             if se is not None:
                 sg, su, _ = se
@@ -726,7 +740,8 @@ def _make_fused_kquant(base_cls, caps):
                     h, down.weight, down.kquant_type, idx,
                     scores.reshape(t, k), **lkw)
                 return y.reshape(t, y.shape[-1])
-            dkw = {"bias": self._kq_db32} if "bias" in down else {}
+            dkw = ({"bias": self._kq_bias32("_kq_db32", down)}
+                   if "bias" in down else {})
             y = kq.gather_qmv_kq(
                 h, down.weight, down.kquant_type, idx, **dkw, **lkw)
             return y.reshape(t, k, y.shape[-1])
@@ -849,18 +864,11 @@ def _install_kquant_glu_fusion(model, caps) -> int:
             object.__setattr__(
                 m, "_kq_glu_limit", float(m.activation.limit))
         elif act_kind == "swiglu_clamp":
-            # gpt-oss constants (swiglu() defaults in mlx-lm).
+            # gpt-oss constants (swiglu() defaults in mlx-lm). The float32
+            # bias copies are made on the first fused call, after the
+            # weights load (_kq_bias32).
             object.__setattr__(m, "_kq_glu_alpha", 1.702)
             object.__setattr__(m, "_kq_glu_limit", 7.0)
-            # f32 bias copies cached once: the ops astype-and-copy the
-            # per-expert biases on every call otherwise (~26 MB and a
-            # few percent of decode at gpt-oss size).
-            for attr, proj in (("_kq_gb32", m.gate_proj),
-                               ("_kq_ub32", m.up_proj),
-                               ("_kq_db32", m.down_proj)):
-                object.__setattr__(
-                    m, attr, proj.bias.astype(mx.float32))
-            mx.eval(m._kq_gb32, m._kq_ub32, m._kq_db32)
         _swap_class(m, classes, _make_fused_kquant, caps)
         if _GATEUP_CONCAT_ENABLED:
             budget = _install_gateup_concat(m, budget)

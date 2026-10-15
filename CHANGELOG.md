@@ -31,6 +31,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   macOS 26.2 or later, since the prefill chunk no longer shrinks at depth.
 - MTP on Qwen3.8-Flash-Next refused to load on a Mac whose GPU buffer limit
   is smaller than the model's per-layer embedding table.
+- gpt-oss gave wrong tokens on a Mac it does not fit, and with
+  `--stream-experts` or a CPU placement.
 
 ## [0.5.0] - 2026-10-12
 
