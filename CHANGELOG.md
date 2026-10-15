@@ -29,6 +29,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or an infinite ban on the only token its structured output allowed.
 - Long prompts on Qwen3.5 to 3.8 prefill faster on M5-family Macs with
   macOS 26.2 or later, since the prefill chunk no longer shrinks at depth.
+- MTP on Qwen3.8-Flash-Next refused to load on a Mac whose GPU buffer limit
+  is smaller than the model's per-layer embedding table.
 
 ## [0.5.0] - 2026-10-12
 

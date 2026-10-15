@@ -1995,6 +1995,7 @@ def load_mtp_model(
     # keep sanitize=False (seam 2: GGUF norms already raw).
     _mt = config_dict.get("model_type") or ""
     from gmlx.load.hadamard import hadamard_targets_for
+    from gmlx.stream.table_pread import oversize_tables
 
     _install_and_load(
         model.language_model,
@@ -2007,6 +2008,8 @@ def load_mtp_model(
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
         source_key=weights_source_key(*pf.shards),
         active_before=active_before,
+        # The tables the wire load skipped past the buffer ceiling.
+        deferred_tables=oversize_tables(pf.shards, arch),
         hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
     )
 
