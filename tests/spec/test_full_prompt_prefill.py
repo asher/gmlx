@@ -20,11 +20,23 @@ import os
 import re
 import warnings
 
+import host_box
 import pytest
 
 import mlx.core as mx
 
-pytestmark = pytest.mark.integration
+
+def _this_mac_gb() -> int:
+    """This Mac's memory in GiB, as the real device reports it."""
+    try:
+        return int(host_box.real_device_info()["memory_size"]) // host_box.GB
+    except Exception:
+        return int(host_box.RUNNER_GB)
+
+
+# The real-model tier: each test loads a model that only a large Mac holds,
+# so it runs on a Mac of this one's memory (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(_this_mac_gb())]
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)
 
