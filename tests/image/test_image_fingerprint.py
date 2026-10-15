@@ -279,7 +279,11 @@ def _bfl(txt_in: tuple, img_in: tuple, *extra: str) -> fp.HeaderView:
 
 # Files whose converters write flux or pig, and the name each refusal gives.
 _SHARED_LABEL_FILES = {
-    "FLUX.1": (lambda: _bfl((4096, 3072), (64, 3072)), "a FLUX GGUF"),
+    "FLUX.1": (lambda: _bfl((4096, 3072), (64, 3072),
+                            "double_blocks.0.img_mod.lin.weight"),
+               "a FLUX.1 GGUF"),
+    # The FLUX.1 block names with no modulation of the FLUX.1 layout.
+    "FLUX, unknown": (lambda: _bfl((4096, 3072), (64, 3072)), "a FLUX GGUF"),
     "FLUX.2 klein": (lambda: _bfl(
         (7680, 3072), (128, 3072), "double_stream_modulation_img.lin.weight",
         "single_stream_modulation.lin.weight"), "a FLUX.2 klein 4B GGUF"),
