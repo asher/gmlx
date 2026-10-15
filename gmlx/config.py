@@ -177,9 +177,9 @@ TEMPLATE_CALL_KEYS = frozenset({
     "tools", "tool_choice", "documents", "add_generation_prompt",
     "continue_final_message", "tokenize", "padding", "truncation", "max_length",
     "return_tensors", "return_dict", "return_assistant_tokens_mask",
-    "tokenizer_kwargs", "return_messages", "num_images", "num_audios", "video",
-    "max_pixels", "fps", "audio_token", "processor_kwargs",
-    "load_audio_from_video"})
+    "tokenizer_kwargs", "sanitize_control_tokens", "return_messages",
+    "num_images", "num_audios", "video", "max_pixels", "fps", "audio_token",
+    "processor_kwargs", "load_audio_from_video"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "draft_gguf", "native_mtp", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
