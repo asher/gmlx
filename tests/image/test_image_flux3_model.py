@@ -206,12 +206,13 @@ def _text_at_one_axis_early(mp, model):
 
 
 def _single_order(mp, model):
+    """The single stream's tokens reversed with their position ids kept
+    in order, so each token runs at another token's position."""
     real = fm.Flux3KleinDiT._stream
 
     def stream(self, x, blocks, mod, ids, name, taps):
         if name == "single_blocks":
             x = x[:, ::-1]
-            ids = ids[::-1].copy()
             mod = tuple(t[:, ::-1] for t in mod)
             return real(self, x, blocks, mod, ids, name, taps)[:, ::-1]
         return real(self, x, blocks, mod, ids, name, taps)
@@ -249,14 +250,26 @@ FAULTS = {"shift and scale swapped": _shift_scale_swapped,
           "glu halves swapped": _glu_halves_swapped,
           "image ids unscaled": _rope_unscaled,
           "text position on another axis": _text_at_one_axis_early,
-          "single stream token order": _single_order,
+          "single stream tokens at other positions": _single_order,
           "target time left out of the image": _no_ref_time,
           "time embedding in fp32": _time_unrounded,
           "final shift and scale swapped": _final_shift_scale_swapped}
 
 
+@pytest.fixture(scope="module")
+def clean_velocity(tiny):
+    weights, cfg = tiny
+    arrays, _, _ = _case(TINY)
+    with mx.stream(mx.cpu):
+        return fg.measures(fg.tiny_model(weights, cfg), arrays)["velocity"]
+
+
 @pytest.mark.parametrize("name", list(FAULTS))
-def test_each_wrong_model_misses_the_fp32_bound(tiny, monkeypatch, name):
+def test_each_wrong_model_misses_the_fp32_bound(tiny, clean_velocity,
+                                                monkeypatch, name):
+    """Each wrong model moves its most moved row past 100 times the
+    bound, and moves the velocity past 100 times the clean run's, so a
+    fault that leaves the forward as it was fails here."""
     weights, cfg = tiny
     arrays, _, _ = _case(TINY)
     model = fg.tiny_model(weights, cfg)
@@ -265,5 +278,8 @@ def test_each_wrong_model_misses_the_fp32_bound(tiny, monkeypatch, name):
         with mx.stream(mx.cpu):
             got = fg.measures(model, arrays)
     worst = max(got, key=got.get)
-    print(f"flux3 tiny, {name}: worst {got[worst]:.2e} at {worst}")
+    print(f"flux3 tiny, {name}: worst {got[worst]:.2e} at {worst}, "
+          f"velocity {got['velocity']:.2e} against {clean_velocity:.2e} "
+          "clean")
     assert got[worst] > 100 * TOL, (name, worst, got[worst])
+    assert got["velocity"] > 100 * clean_velocity, (name, got["velocity"])
