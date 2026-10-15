@@ -23,6 +23,12 @@ each tile that is nearer its own center than any neighbor's. All tiles'
 activations at one GroupNorm are held at once, which is about the size of
 that activation for the whole image times the overlap.
 
+The FLUX.2 decoder reads farther across a cut than the FLUX.1 one, so its
+VAE row sets the least overlap of its tiles to 128 pixels
+(``memfit.tile_overlap``). At 1024 pixels in tiles that overlap by 64, its
+tiled decode is 52 dB from the whole decode, where the FLUX.1 decode holds
+75 dB.
+
 The Qwen-Image 2.1 autoencoder normalizes each pixel over its channels and
 takes no statistic of the whole image. The part with its mid attention
 runs whole too, so the attention sees every latent pixel, and its tiles
@@ -309,11 +315,12 @@ def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
         if not in_tiles:
             out = vae.decode(z).astype(mx.float32)
         elif vae.lockstep:
-            head = vae.decoder.head(z.astype(vae.dtype))
+            t, lap, _ = crop_layout(vae, "decode", tile, overlap)
+            head = vae.decode_head(z.astype(vae.dtype))
             mx.eval(head)
             out = mx.array(run_lockstep(
                 vae.decoder.tail_steps, head, in_scale=1, out_scale=s,
-                tile=tile // s, overlap=overlap // s))
+                tile=t, overlap=lap))
         else:
             t, lap, r = crop_layout(vae, "decode", tile, overlap)
             head = vae.decode_head(z.astype(vae.dtype))
@@ -351,9 +358,9 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
         if not in_tiles:
             mean, logvar = vae.encode(x)
         elif vae.lockstep:
+            t, lap, _ = crop_layout(vae, "encode", tile, overlap)
             head = run_lockstep(vae.encoder.head_steps, x.astype(vae.dtype),
-                                in_scale=s, out_scale=1, tile=tile // s,
-                                overlap=overlap // s)
+                                in_scale=s, out_scale=1, tile=t, overlap=lap)
             mean, logvar = vae.split_moments(
                 vae.encoder.tail(mx.array(head).astype(vae.dtype)))
         else:

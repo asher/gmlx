@@ -16,9 +16,10 @@ a resnet, one attention head of 512 and a resnet, and there are no quant
 convs. GroupNorm is the owned contiguous-group wrapper.
 
 ``original_name`` maps the original FLUX.1 layout, as in ``ae.safetensors``,
-to diffusers names. Up blocks there count from the output side, and the mid
-attention projections are 1x1 convs, which the reader reshapes to Linear
-weights.
+to diffusers names, and the FLUX.2 one, which keeps its quant convs inside
+the encoder and the decoder. Up blocks there count from the output side,
+and the mid attention projections are 1x1 convs, which the reader reshapes
+to Linear weights.
 """
 
 from __future__ import annotations
@@ -66,7 +67,22 @@ class Flux1AEConfig:
 
 def config_from_shapes(shapes: dict) -> Flux1AEConfig | None:
     """The config from diffusers-named torch shapes, or None when the names
-    are not this autoencoder's."""
+    are not this autoencoder's. A tree with both quant convs and the
+    BatchNorm statistics is the FLUX.2 autoencoder's; with some of them it
+    is this one's with tensors the load does not expect."""
+    if all(n in shapes for n in FLUX2_MARKS):
+        return None
+    return tree_config(shapes)
+
+
+# Tensors the FLUX.1 autoencoder lacks and the FLUX.2 one has.
+FLUX2_MARKS = ("quant_conv.weight", "post_quant_conv.weight",
+               "bn.running_mean", "bn.running_var")
+
+
+def tree_config(shapes: dict) -> Flux1AEConfig | None:
+    """The config of the encoder and decoder tree in diffusers-named torch
+    shapes, or None when the names are not that tree's."""
     need = ("encoder.conv_in.weight", "encoder.conv_out.weight",
             "decoder.conv_in.weight", "decoder.conv_out.weight",
             "decoder.mid_block.attentions.0.to_q.weight")
@@ -113,6 +129,10 @@ _ORIGINAL_PARTS = (
     (".mid.attn_1.proj_out.", ".mid_block.attentions.0.to_out.0."),
     (".norm_out.", ".conv_norm_out."),
 )
+# The FLUX.2 autoencoder's original layout keeps its quant convs inside the
+# encoder and the decoder.
+_ORIGINAL_TOP = (("encoder.quant_conv.", "quant_conv."),
+                 ("decoder.post_quant_conv.", "post_quant_conv."))
 _ORIGINAL_UP = re.compile(r"^decoder\.up\.(\d+)\.")
 _ORIGINAL_DOWN = re.compile(r"^encoder\.down\.(\d+)\.")
 
@@ -125,6 +145,9 @@ def is_original_layout(names) -> bool:
 def original_name(name: str, levels: int) -> str:
     """The diffusers name of an original-layout tensor. ``levels`` is the
     number of up blocks, since the original counts them from the output."""
+    for old, new in _ORIGINAL_TOP:
+        if name.startswith(old):
+            return new + name[len(old):]
     name = _ORIGINAL_UP.sub(
         lambda m: f"decoder.up_blocks.{levels - 1 - int(m.group(1))}.", name)
     name = _ORIGINAL_DOWN.sub(r"encoder.down_blocks.\1.", name)
@@ -370,6 +393,11 @@ class Flux1AE(nn.Module):
 
     def decode(self, z: mx.array) -> mx.array:
         return self.decoder(z.astype(self.dtype))
+
+    def decode_head(self, z: mx.array) -> mx.array:
+        """The part of the decode at latent resolution, which a tiled
+        decode runs whole."""
+        return self.decoder.head(z)
 
     def to_vae_space(self, latents: mx.array) -> mx.array:
         """Model-space (B, C, h, w) to VAE-space (B, h, w, C), in float32."""

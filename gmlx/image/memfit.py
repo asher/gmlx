@@ -337,6 +337,8 @@ class VaeMemoryRow:
     tile's result reads its input when the tiles of that op are cropped
     and not blended, and 0 when they are blended. Cropped tiles overlap
     by at least twice that.
+    ``overlap`` is the least overlap of blended tiles in pixels, or 0 for
+    the overlap asked for. A tiled pass takes the larger of the two.
     ``tiles_first`` makes tiles the automatic choice for every image
     larger than one tile, whatever is free. An unmeasured row always
     takes tiles first.
@@ -353,6 +355,7 @@ class VaeMemoryRow:
     one_tile: bool = False
     tiles_first: bool = False
     crop: Callable | None = None    # see ``_qwen_image21_vae_crop``
+    overlap: int = 0
     scores: float = 0.0
     whole_px: int = 0
 
@@ -436,6 +439,24 @@ VAE_ROWS = {
         measured=False, channels={"decode": 96, "encode": 96},
         floor=_qwen_image_vae_floor, one_tile=True,
         crop=_qwen_image_vae_crop),
+    # The FLUX.2 autoencoder: the FLUX.1 encoder and decoder at 32 latent
+    # channels, which change no activation at full resolution, so it is
+    # priced by the FLUX.1 fits. Measured on the official file on an M5
+    # Max, each pass grew the footprint by less than its price: a whole
+    # bf16 decode at 1024 pixels by 4.49 GiB against 5.61, in fp32 by 7.24
+    # against 8.45, a tiled bf16 decode at 2048 pixels by 8.25 against
+    # 9.30, a whole bf16 encode at 1024 by 2.93 against 4.20, and a tiled
+    # one at 2048 by 5.82 against 6.58. The closest was the whole fp32
+    # decode at 512 pixels, 3.73 against 4.02.
+    # Its tiles overlap by at least 128 pixels. Its decoder reads farther
+    # across a cut than the FLUX.1 one: at 1024 pixels in tiles that
+    # overlap by 64, a tiled fp32 decode is 52.0 dB from the whole decode,
+    # where the FLUX.1 decoder holds 75.4 dB. At 128 it is 64.8 dB, and a
+    # tiled bf16 decode is 55.5 dB from the oracle against 55.9 whole.
+    "flux3_klein": VaeMemoryRow(
+        measured=True, channels={"decode": 128, "encode": 128},
+        whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED,
+        overlap=128),
 }
 
 
@@ -1100,12 +1121,12 @@ def croppable(family: str, op: str, tile: int = TILE_PX,
 def tile_overlap(family: str, op: str, tile: int = TILE_PX,
                  overlap: int = OVERLAP_PX, config=None) -> int:
     """The overlap of neighboring tiles of a tiled ``op``, in pixels:
-    ``overlap``, or twice the reach of a cut where the tiles are cropped
-    and that is more. Raises ValueError for a ``tile`` that is not
-    ``croppable``."""
+    ``overlap``, or where it is more, the least overlap of the row when the
+    tiles are blended and twice the reach of a cut when they are cropped.
+    Raises ValueError for a ``tile`` that is not ``croppable``."""
     reach = crop_reach(family, op, config)
     if not reach:
-        return int(overlap)
+        return max(int(overlap), vae_row(family).overlap)
     scale = _latent_px(family, config)
     if not croppable(family, op, tile, config):
         raise ValueError(

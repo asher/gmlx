@@ -2,8 +2,10 @@
 
 Tensor bytes are copied unchanged under their official names in torch
 layout, so other GGUF readers can use the file. The default dtype is the
-source dtype, which is the lossless case. A downcast is an explicit option
-and records ``gmlx.vae.lossless = false``. A GGUF tensor has at most four
+source dtype, which is the lossless case. A downcast is an explicit option,
+applies to float tensors alone, and records ``gmlx.vae.lossless = false``.
+An int64 tensor, such as a BatchNorm's batch count, is copied as I64, and a
+scalar is written at shape (1,). A GGUF tensor has at most four
 dims, so a tensor of more, such as the kernel of a video conv, is written
 with its first two dims, the product of the middle ones and its last,
 and its own shape goes under ``comfy.gguf.orig_shape``, the key the
@@ -28,7 +30,9 @@ from .reader import (CONFIG_KEY, ORIG_SHAPE_KEY, VAES, VAEError,
 
 PACKER_VERSION = "1"
 
-_NP = {"F32": np.float32, "F16": np.float16, "BF16": np.uint16}
+_NP = {"F32": np.float32, "F16": np.float16, "BF16": np.uint16,
+       "I64": np.int64}
+FLOATS = ("F32", "F16", "BF16")
 
 
 @dataclass(frozen=True)
@@ -113,7 +117,7 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
             raise VAEError(f"{src} is already a GGUF")
     if os.path.exists(dst) and not overwrite:
         raise VAEError(f"{dst} exists")
-    if dtype is not None and dtype not in _NP:
+    if dtype is not None and dtype not in FLOATS:
         raise VAEError(f"pack dtype {dtype!r} is not F32, F16 or BF16")
     try:
         json.loads(config_json)
@@ -147,7 +151,12 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
         a, b = info["data_offsets"]
         raw = mm[data_start + a:data_start + b]
         shape = tuple(int(d) for d in info["shape"]) or (1,)
-        out_dt = dtype or info["dtype"]
+        if info["dtype"] not in _NP:
+            raise VAEError(f"{src}: {name} is {info['dtype']}, which the "
+                           "packer does not write")
+        # A downcast applies to float tensors; others are copied.
+        out_dt = (dtype or info["dtype"]) if info["dtype"] in FLOATS \
+            else info["dtype"]
         data, exact = _convert(raw, info["dtype"], out_dt)
         lossless = lossless and exact
         if len(shape) > 4:

@@ -72,7 +72,9 @@ def priced_by(request, monkeypatch):
 
 
 def test_every_family_has_a_vae_row():
-    assert set(memfit.VAE_ROWS) == set(memfit.PEAKS) == set(reader.VAES)
+    assert set(memfit.VAE_ROWS) == set(reader.VAES)
+    # A family may decode before its passes are priced.
+    assert set(memfit.PEAKS) <= set(reader.VAES)
     z, row = memfit.VAE_ROWS["z_image"], memfit.VAE_ROWS[FAMILY]
     assert z.measured is True and z.floor is None
     assert z.whole == {"decode": memfit.VAE_DECODE,
@@ -100,7 +102,8 @@ def test_every_family_has_a_vae_row():
     assert not hasattr(memfit.PEAKS[FAMILY], "vae_channels")
     for price in (memfit.vae_peak, memfit.vae_tiling):
         with pytest.raises(ValueError, match="no VAE memory row for image "
-                           "family 'flux'; known: krea2, qwen_image21, z_image"):
+                           "family 'flux'; known: flux3_klein, krea2, "
+                           "qwen_image21, z_image"):
             price("decode", 512, 512, family="flux", itemsize=2)
 
 

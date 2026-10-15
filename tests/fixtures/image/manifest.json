@@ -140,5 +140,26 @@
     "key": "chat_template",
     "size": 5502,
     "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+  },
+  "flux3_klein_vae.header.json": {
+    "repo": "Comfy-Org/flux2-dev",
+    "revision": "ed33133cd56476eac818c0943b6f9419b3e4a3a1",
+    "file": "split_files/vae/flux2-vae.safetensors",
+    "size": 336213556,
+    "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+  },
+  "flux3_klein_ae.header.json": {
+    "repo": "black-forest-labs/flux-3-image-klein",
+    "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+    "file": "ae.safetensors",
+    "size": 336211292,
+    "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+  },
+  "flux3_klein_vae_config.json": {
+    "repo": "black-forest-labs/flux-3-image-klein",
+    "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+    "file": "vae/config.json",
+    "size": 808,
+    "sha256": "66564b3cd3f3f3ce5ce3cd4df72f1de883b242c7f338e27d420fe5ddcb0a6ed9"
   }
 }

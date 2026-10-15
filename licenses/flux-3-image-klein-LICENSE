@@ -16,6 +16,9 @@ source.
   final layer, and the order of the joint tokens), and the image,
   reference and text position ids of src/flux3/pipeline.py,
   src/flux3/autoencoder.py and src/flux3/text_encoder.py.
+- gmlx/image/vae/flux2_ae.py: the 2x2 patchify of the latents and their
+  BatchNorm and its inverse in AutoEncoder.encode and AutoEncoder.decode
+  of src/flux3/autoencoder.py.
 
 flux-3-image-klein is distributed under the Apache License 2.0:
 
