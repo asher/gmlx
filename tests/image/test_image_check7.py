@@ -43,6 +43,7 @@ GMLX_IMAGE_FIXTURES.
 """
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 
@@ -57,6 +58,9 @@ from block_gates import (EXACT_TOL, adapter_sites, assert_all_dense,
                          exact_products, free_run, gate, rerun_exact,
                          rerun_sites, right_sites, site_process, site_reach,
                          stock_ops_only, table_sites, table_velocity, thin)
+
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
 
 NAME = "check7_z_image_turbo_lora_512"
 
@@ -79,6 +83,10 @@ def turbo_pipe(gguf_index, name: str):
     from gmlx.image.loader import load_dit
     from gmlx.image.registry import get_family
 
+    # A DiT that an earlier module loaded can sit in a reference cycle,
+    # and the load gate measures its memory as taken.
+    gc.collect()
+    mx.clear_cache()
     model, _ = load_dit(p, log=lambda *_: None)
     return api.ImagePipeline(dit=model, family=get_family("z_image"),
                              variant="turbo")

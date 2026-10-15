@@ -46,6 +46,9 @@ from test_image_check7 import (block_gate, blocks_fixture, exact_gate,
                                mutation_misses, need_blocks, site_gate, step,
                                turbo_pipe)
 
+# A Mac of 16 GB, as most users run (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(16)
+
 NAME = "check7_z_image_turbo_community_512"
 ENV = "GMLX_TEST_LORA_DIR"
 DELTA_TOL = 1e-6
