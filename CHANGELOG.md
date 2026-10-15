@@ -17,6 +17,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its oldest requests instead of decoding plain. `GMLX_MTP_MIXED=0` reverts.
 - `gmlx serve` with MTP on Qwen3.5 to 3.8 decodes faster when it batches
   several requests.
+- Requires mlx-kquant 0.5.1. With it, speculative decoding on Qwen3.5 to 3.8
+  runs faster on NAX GPUs (M5).
 
 ### Fixed
 
