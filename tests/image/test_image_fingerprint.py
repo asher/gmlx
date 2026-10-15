@@ -26,9 +26,10 @@ def _refused(view, **kw) -> str:
 
 def test_families_sort_by_order_and_name():
     assert [f.name for f in families()] == ["z_image", "krea2",
-                                            "qwen_image21"]
+                                            "qwen_image21", "flux3_klein"]
     assert get_family("z_image").title == "Z-Image"
-    with pytest.raises(ValueError, match="known: z_image, krea2, qwen_image21"):
+    with pytest.raises(ValueError, match="known: z_image, krea2, qwen_image21, "
+                                         "flux3_klein"):
         get_family("flux")
     assert is_image_arch("lumina2") and is_image_arch("qwen_image")
     assert is_image_arch("krea2")
@@ -281,7 +282,7 @@ _SHARED_LABEL_FILES = {
     "FLUX.1": (lambda: _bfl((4096, 3072), (64, 3072)), "a FLUX GGUF"),
     "FLUX.2 klein": (lambda: _bfl(
         (7680, 3072), (128, 3072), "double_stream_modulation_img.lin.weight",
-        "single_stream_modulation.lin.weight"), "a FLUX GGUF"),
+        "single_stream_modulation.lin.weight"), "a FLUX.2 klein 4B GGUF"),
     # LongCat-Image as ComfyUI stores it: the FLUX.1 block names, with the
     # text width of Qwen2.5-VL-7B.
     "LongCat-Image": (lambda: _bfl((3584, 3072), (64, 3072)), "a FLUX GGUF"),

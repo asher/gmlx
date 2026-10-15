@@ -78,5 +78,59 @@
     "file": "vae/qwen_image_vae.safetensors",
     "size": 253806246,
     "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+  },
+  "flux3_klein_q4_k_m.header.json": {
+    "repo": "realrebelai/FLUX-3-Image-Klein_GGUFs",
+    "revision": "c582c7c6b5f2bafbc9b3a9a6b76a737275c7b142",
+    "file": "DISTILLED/flux3_image_klein_sd-Q4_K_M.gguf",
+    "size": 3391951648,
+    "sha256": "2e429f54f9b2f2161b3123a615167ee6137aa21f1287f426dc895bb7647af5ec",
+    "kv_kept": "general.architecture"
+  },
+  "flux3_klein_base_q4_k_m.header.json": {
+    "repo": "realrebelai/FLUX-3-Image-Klein_GGUFs",
+    "revision": "c582c7c6b5f2bafbc9b3a9a6b76a737275c7b142",
+    "file": "BASE/flux3_image_klein-Q4_K_M.gguf",
+    "size": 3371504288,
+    "sha256": "b360892ffaee56ee4a4c76897d3b56977ca0183d233d57edccd9a1080200821b",
+    "kv_kept": "general.architecture"
+  },
+  "flux3_klein_abiray_q4_k_m.header.json": {
+    "repo": "Abiray/flux-3-image-klein-sd-GGUF",
+    "revision": "1960618efcfaeec728f22fd7f656a7034ee5f73b",
+    "file": "flux3_image_klein_sd_Q4_K_M.gguf",
+    "size": 3269858080,
+    "sha256": "c0dc60488f1d73517e60252d0d1ce24a8a9a19275ea669c0b96408a10fc871ac",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_4b_q4_k_m.header.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
+    "file": "flux-2-klein-4b-Q4_K_M.gguf",
+    "size": 2604311104,
+    "sha256": "0b25d143c8469b342bc5af3bce92b783bf6b0636d285f7b2f75e38af63af9a15",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_9b_q4_k_m.header.json": {
+    "repo": "unsloth/FLUX.2-klein-9B-GGUF",
+    "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
+    "file": "flux-2-klein-9b-Q4_K_M.gguf",
+    "size": 5909829920,
+    "sha256": "5489463ed96056b0bb5472abb5d1bba7055e48d574e37877acb43b407465e26f",
+    "kv_kept": "general.architecture"
+  },
+  "flux3_klein_config.json": {
+    "repo": "black-forest-labs/flux-3-image-klein",
+    "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+    "file": "config.json",
+    "size": 828,
+    "sha256": "c4fc638a9618e8ddc25f013c009be4d2aa9bd631d89dcf45149a377dd472c67d"
+  },
+  "flux3_klein_transformer_config.json": {
+    "repo": "black-forest-labs/flux-3-image-klein",
+    "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+    "file": "transformer/config.json",
+    "size": 436,
+    "sha256": "e748b382508f3171d1f4039688b23d1f809aebe4507b3ed5a29bca01b4b58877"
   }
 }
