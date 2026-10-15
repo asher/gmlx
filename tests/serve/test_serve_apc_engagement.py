@@ -29,7 +29,10 @@ pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
 
-pytestmark = pytest.mark.integration
+# A Mac of 24 GB: the big rows load models of 12 and 15 GB, which the 14
+# GiB working set of a 16 GB Mac cannot hold beside the stores the tiers
+# make (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)  # noqa: E731
 N_DECODE = 8
