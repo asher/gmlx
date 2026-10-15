@@ -132,5 +132,13 @@
     "file": "transformer/config.json",
     "size": 436,
     "sha256": "e748b382508f3171d1f4039688b23d1f809aebe4507b3ed5a29bca01b4b58877"
+  },
+  "flux3_klein_chat_template.jinja": {
+    "repo": "black-forest-labs/flux-3-image-klein",
+    "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+    "file": "text_encoder/chat_template.json",
+    "key": "chat_template",
+    "size": 5502,
+    "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
   }
 }

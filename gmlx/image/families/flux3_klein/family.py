@@ -90,13 +90,41 @@ CONSTANTS = ConstantsRow(
 # key, so gmlx follows the code.
 PROMPT = ConstantsRow(
     values={
+        # What the Qwen3-VL chat template renders for one user turn with
+        # the generation prompt.
+        "template": "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+        # hidden_states indices of the encoder, 0 being the embeddings.
         "tap_layers": (4, 8, 12, 16, 20, 24, 28, 32),
         "pad_multiple": 80,
         "max_tokens": 4096,
+        # The tokenizer's pad token <|endoftext|>, and the position the
+        # reference gives every pad row: its masked cumsum minus 1 with
+        # the pads filled with 1.
+        "pad_id": 151643,
+        "pad_position": 1,
     },
     repo="github.com/black-forest-labs/flux-3-image-klein",
     revision="45e57c9fb06f9751cdced29a65c5d2171003be05",
 )
+
+# Norm tensors that identify the encoder weights: GGUF name, path in the
+# loaded model and sha256 of the bf16 bits. The Qwen3-VL-4B-Instruct
+# Q8_0 GGUF of unsloth/Qwen3-VL-4B-Instruct-GGUF, which Krea 2 reads too,
+# holds the weights of the reference's text_encoder: these norms equal its
+# bf16 tensors bit for bit, and its Q8_0 blocks equal its bf16 matrices
+# quantized to Q8_0.
+ENCODER_IDENTITY = (
+    ("blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight",
+     "a06277a2724034a966ccb331fdd94d5bbff4b3a1e9dd6144fa9a1315a0550034"),
+    ("blk.17.ffn_norm.weight",
+     "model.layers.17.post_attention_layernorm.weight",
+     "34fbce23a08e85df36bd37ddb84c82d2c2dc526d46c1ca89fe45369d8d8adbe8"),
+    ("output_norm.weight", "model.norm.weight",
+     "59be4927491b995e61ca021ca3d1bddf90bed0f522ec73e9311ebfb5fb8bd9e8"),
+)
+ENCODER_IDENTITY_SOURCE = (
+    "black-forest-labs/flux-3-image-klein text_encoder at "
+    "8454017f9ebaada30c998fccd9f67a80c7580f68")
 
 # FLUX.1 and FLUX.2 files under the same label, by the block names of
 # BFL's flux and flux2 code. FLUX.2 klein takes its text width from the
@@ -234,6 +262,34 @@ def build(config: dict):
     return Flux3KleinDiT(config)
 
 
+def encoder():
+    """The text encoder of the family: Qwen3-VL-4B read as a text model,
+    after eight of its layers and before its final norm, on the chat
+    template of one user turn. The eight states of a token are its
+    features side by side, layer by layer, and the pad rows the reference
+    keeps follow the prompt's rows. The tap runs in float32."""
+    from gmlx.image.text_encoder import EncoderSpec, IdentityTensor
+
+    p = PROMPT.values
+    return EncoderSpec(
+        name="qwen3-vl-4b",
+        arch="qwen3vl",
+        model_type="qwen3",
+        hidden=2560,
+        layers=36,
+        tap_layers=tuple(p["tap_layers"]),
+        template=p["template"],
+        max_tokens=p["max_tokens"],
+        stack=True,
+        identity=tuple(IdentityTensor(*row) for row in ENCODER_IDENTITY),
+        identity_source=ENCODER_IDENTITY_SOURCE,
+        activation="float32",
+        pad_multiple=p["pad_multiple"],
+        pad_id=p["pad_id"],
+        pad_position=p["pad_position"],
+    )
+
+
 FAMILY = Family(
     name="flux3_klein",
     title=TITLE,
@@ -248,4 +304,5 @@ FAMILY = Family(
     build=build,
     # The q and k norms run in fp32, as the reference's do.
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),
+    encoder=encoder,
 )
