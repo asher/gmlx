@@ -29,6 +29,9 @@ BASE = "selftest_flux3_klein_tiny_base"
 # The tiny model in fp32 on the CPU against the oracle in fp32. The
 # weakest wrong model of FAULTS moves its most moved row far past it.
 TOL = 4e-6
+# Times 4 and 5 of sampling.timesteps(16, 6.93), in float32.
+STEP4 = 0.954107403755188
+STEP4_TARGET = 0.9384464025497437
 
 
 @pytest.fixture(scope="module")
@@ -91,13 +94,26 @@ def test_the_position_ids_are_the_references(tiny):
     assert set(np.unique(ids["image_cond"][:, 3])) == {-1.0, -2.0}
 
 
-def test_the_time_embedding_follows_the_bf16_pipeline():
-    """1000 times the bf16 time rounds to bf16 before the sinusoid: 0.9905
-    is 0.9921875 in bf16, and 1000 times that is 992 in bf16."""
-    got = np.array(fm.time_embedding(np.float32(0.9905), 8))
-    want = np.array(ops.timestep_embedding(np.array([992.0], np.float32), 8))
-    want = np.array(mx.array(want).astype(mx.bfloat16).astype(mx.float32))
-    assert np.array_equal(got, want)
+def _embedded(t1000: float, dim: int = 8) -> np.ndarray:
+    want = ops.timestep_embedding(np.array([t1000], np.float32), dim)
+    return np.array(want.astype(mx.bfloat16).astype(mx.float32))
+
+
+@pytest.mark.parametrize("t, t1000", [(0.9905, 992.0), (STEP4, 952.0),
+                                      (STEP4_TARGET, 936.0)])
+def test_the_time_embedding_follows_the_bf16_pipeline(t, t1000):
+    """The time rounds to bf16, then 1000 times it rounds to bf16 before
+    the sinusoid. 0.9905 is 0.9921875 in bf16, and 1000 times that is 992
+    with or without the first rounding. The time of step 4 of the 16-step
+    schedule, 0.954107, is 0.953125 in bf16 and gives 952, where 1000
+    times the time itself gives 956; the time of step 5 gives 936, not
+    940."""
+    got = np.array(fm.time_embedding(np.float32(t), 8))
+    assert np.array_equal(got, _embedded(t1000))
+    unrounded = float(fm._bf16(np.float32(1000) * np.float32(t))[()])
+    if t != 0.9905:
+        assert unrounded == t1000 + 4.0
+        assert not np.array_equal(got, _embedded(unrounded))
 
 
 def test_the_step_parts_give_the_step(tiny):

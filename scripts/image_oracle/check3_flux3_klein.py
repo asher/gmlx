@@ -25,7 +25,8 @@ are cast to the mode's dtype, as autocast casts them at the first
 product.
 
 The latents are seeded normal rounded to bf16, as the pipeline's noise
-is, at the first step, time 1 (--sigma). The text features are seeded
+is, at the time of --step in sampling.timesteps(16, 6.93), which is 1 at
+the first step, or at --sigma. The text features are seeded
 normal with --feature-std, rounded to bf16, in --text-len tokens, at
 position ids (0, 0, 0, i). With --refs N, N reference images of
 --ref-size pixels each give seeded normal tokens, bf16, at the
@@ -455,10 +456,11 @@ def main(argv=None) -> int:
                     help="pixels of a reference side, 0 for the size")
     ap.add_argument("--text-len", type=int, default=80)
     ap.add_argument("--feature-std", type=float, default=4.0)
-    ap.add_argument("--sigma", type=float, default=1.0)
+    ap.add_argument("--sigma", type=float,
+                    help="the image's time, the time of --step when unset")
     ap.add_argument("--step", type=int, default=0,
-                    help="step of the 16-step schedule whose next entry "
-                         "is the flow map's target")
+                    help="step of the 16-step schedule: its time is the "
+                         "image's and its next entry the flow map's target")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dequant", choices=oracle.DEQUANT, default="exact")
     ap.add_argument("--name", default="check3_flux3_klein")
@@ -478,10 +480,10 @@ def main(argv=None) -> int:
     print(f"[check3] loaded {a.dit.name} in "
           f"{time.perf_counter() - t0:.1f}s, codecs {census}, flow map "
           f"{flow_map}", flush=True)
-    target = None
-    if flow_map:
-        schedule = sampling.timesteps(STEPS, ALPHA)
-        target = float(schedule[a.step + 1])
+    schedule = sampling.timesteps(STEPS, ALPHA)
+    if a.sigma is None:
+        a.sigma = float(schedule[a.step])
+    target = float(schedule[a.step + 1]) if flow_map else None
     rng = np.random.default_rng(a.seed)
     feats = seeded(torch, rng, (a.text_len, dit.IN_CHANNELS["text"]),
                    a.feature_std)

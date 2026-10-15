@@ -1,12 +1,16 @@
 """Check 3 of the image acceptance gate for FLUX.3 klein: one denoise step
 of the gmlx DiT, row by row, against BFL's reference DiT on the same GGUF,
-under the plan's three gates, for the distilled flow map and for Base.
+under three gates, for the distilled flow map and for Base.
 
 scripts/image_oracle/check3_flux3_klein.py writes the fixtures. Each step
 is the first of the sampler, at time 1, where seeded normal latents are on
-every trajectory, with seeded normal text features (part 3 brings the
-encoder's) and, in the r1 fixtures, one reference image at the output
-size. The distilled step goes to the next time of the 16-step schedule.
+every trajectory, with seeded normal text features and, in the r1
+fixtures, one reference image at the output size. The distilled step goes
+to the next time of the 16-step schedule. One more distilled step is the
+fifth of that schedule, from time 0.954107 to 0.938446, on seeded normal
+latents: there 1000 times the time rounded to bf16 differs from 1000 times
+the time itself, in bf16, so the step holds the rounding the reference
+makes first.
 Every row of the step at 512 and the velocity at 1024 are in fp32, with
 the oracle's own bf16 against fp32 gap of each.
 
@@ -52,7 +56,8 @@ pytestmark = pytest.mark.host_gb(16)
 ROWS = {"distilled": "check3_flux3_klein_512",
         "distilled r1": "check3_flux3_klein_r1_512",
         "base": "check3_flux3_klein_base_512",
-        "base r1": "check3_flux3_klein_base_r1_512"}
+        "base r1": "check3_flux3_klein_base_r1_512",
+        "distilled step 4": "check3_flux3_klein_s4_512"}
 VELOCITY = {"distilled": "check3_flux3_klein_1024",
             "distilled r1": "check3_flux3_klein_r1_1024",
             "base": "check3_flux3_klein_base_1024"}
@@ -107,10 +112,10 @@ def _rows(case: str) -> tuple[dict, dict]:
 
 def test_the_manifests_follow_the_rule():
     """The committed manifests alone: each step is the first of the
-    sampler on the reference's commit, the distilled one going to the
-    next time of the 16-step schedule and Base to none, every row
-    tolerance is twice the gap beside it, and the exact gate's free-row
-    and velocity tolerances follow their floors."""
+    sampler on the reference's commit, or the fifth for the step 4 case,
+    the distilled one going to the next time of the 16-step schedule and
+    Base to none, every row tolerance is twice the gap beside it, and the
+    exact gate's free-row and velocity tolerances follow their floors."""
     t = [i / 16 for i in range(16, -1, -1)]
     schedule = [6.93 * x / (1 + 5.93 * x) for x in t]
     for case, name in [*ROWS.items(), *VELOCITY.items()]:
@@ -119,12 +124,15 @@ def test_the_manifests_follow_the_rule():
         base = case.startswith("base")
         assert m["files"]["dit"]["name"] == DITS[case.split()[0]], name
         assert ins["reference_commit"] == REFERENCE_COMMIT, name
-        assert ins["sigma"] == 1.0 and ins["step"] == 0, name
+        step = 4 if case.endswith("step 4") else 0
+        assert ins["step"] == step, name
+        assert ins["sigma"] == pytest.approx(schedule[step], abs=1e-7)
         assert ins["flow_map"] is not base, name
         if base:
             assert ins["target"] is None, name
         else:
-            assert ins["target"] == pytest.approx(schedule[1], abs=1e-7)
+            assert ins["target"] == pytest.approx(schedule[step + 1],
+                                                  abs=1e-7)
         assert ins["refs"] == (1 if case.endswith("r1") else 0), name
         assert ins["refs"] == 0 or ins["ref_size"] == ins["size"], name
         gap = m["results"]["velocity_bf16_vs_fp32"]
@@ -132,8 +140,9 @@ def test_the_manifests_follow_the_rule():
         assert tol["rel_l2"] == 2 * gap["rel_l2"]
         assert tol["cosine_min"] == pytest.approx(
             1 - 4 * (1 - gap["cosine"]), abs=1e-12)
-        # The oracle's own gap is the size of one step's rounding.
-        assert gap["rel_l2"] < 0.03, (name, gap)
+        # The oracle's own gap is the size of one step's rounding. At
+        # step 4 the seeded latents are off every trajectory.
+        assert gap["rel_l2"] < (0.03 if step == 0 else 0.1), (name, gap)
     for name in ROWS.values():
         rows = _manifest(name)
         for k, g in rows["results"]["rows_bf16_vs_fp32"].items():
