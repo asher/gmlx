@@ -11,6 +11,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 
+### Fixed
+
+- `gmlx list` names the family of an image entry whose `family` is spelled
+  `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added
