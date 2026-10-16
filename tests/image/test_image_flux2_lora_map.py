@@ -202,6 +202,108 @@ def test_the_key_map_names_every_linear_weight_of_the_diffusers_model():
             0, 3072, 6144], module
 
 
+# The diffusers names of each GGUF module, written apart from the map from
+# diffusers' Apache-2.0 _convert_non_diffusers_flux2_lora_to_diffusers
+# (diffusers 0.41): a fused q, k and v weight splits into thirds of its
+# rows, and every other module takes one name.
+_D_DOUBLE = (("img_attn.proj", "attn.to_out.0"),
+             ("txt_attn.proj", "attn.to_add_out"),
+             ("img_mlp.0", "ff.linear_in"), ("img_mlp.2", "ff.linear_out"),
+             ("txt_mlp.0", "ff_context.linear_in"),
+             ("txt_mlp.2", "ff_context.linear_out"))
+_D_QKV = (("img_attn.qkv", ("attn.to_q", "attn.to_k", "attn.to_v")),
+          ("txt_attn.qkv", ("attn.add_q_proj", "attn.add_k_proj",
+                            "attn.add_v_proj")))
+_D_SINGLE = (("linear1", "attn.to_qkv_mlp_proj"), ("linear2", "attn.to_out"))
+_D_TOP = (("img_in", "x_embedder"), ("txt_in", "context_embedder"),
+          ("time_in.in_layer",
+           "time_guidance_embed.timestep_embedder.linear_1"),
+          ("time_in.out_layer",
+           "time_guidance_embed.timestep_embedder.linear_2"),
+          ("final_layer.linear", "proj_out"), (ADALN, "norm_out.linear"),
+          ("single_stream_modulation.lin", "single_stream_modulation.linear"),
+          ("double_stream_modulation_img.lin",
+           "double_stream_modulation_img.linear"),
+          ("double_stream_modulation_txt.lin",
+           "double_stream_modulation_txt.linear"))
+
+
+def diffusers_names(depth: int, single: int) -> dict:
+    """GGUF module to its [(diffusers name, third of its rows or None)]."""
+    out = {}
+    for i in range(depth):
+        x, d = f"double_blocks.{i}", f"transformer_blocks.{i}"
+        for leaf, dname in _D_DOUBLE:
+            out[f"{x}.{leaf}"] = [(f"{d}.{dname}", None)]
+        for leaf, names in _D_QKV:
+            out[f"{x}.{leaf}"] = [(f"{d}.{n}", j) for j, n in enumerate(names)]
+    for i in range(single):
+        x, d = f"single_blocks.{i}", f"single_transformer_blocks.{i}"
+        for leaf, dname in _D_SINGLE:
+            out[f"{x}.{leaf}"] = [(f"{d}.{dname}", None)]
+    for native, dname in _D_TOP:
+        out[native] = [(dname, None)]
+    return out
+
+
+@pytest.mark.parametrize("source", ["tiny", HEADERS[0]])
+def test_each_diffusers_name_lands_where_diffusers_converts_it_from(source):
+    """Every diffusers name of the map is the one diffusers' converter
+    gives its GGUF module, at the same third of a fused q, k and v."""
+    cfg = (tiny_config() if source == "tiny"
+           else fp.identify(fixture_view(source)).config)
+    km = lora_map(cfg)
+    depth, single = cfg["num_layers"], cfg["num_single_layers"]
+    dim = cfg["num_attention_heads"] * cfg["attention_head_dim"]
+    want = {dname: (module, None if third is None
+                    else (0, third * dim, dim))
+            for module, names in diffusers_names(depth, single).items()
+            for dname, third in names}
+    assert set(diffusers_targets(km)) == set(want)
+    for dname, target in want.items():
+        assert km.targets[dname] == target, dname
+
+
+def test_a_diffusers_converted_adapter_places_the_deltas_of_its_source(
+        tmp_path):
+    """An adapter in the GGUF names and its diffusers conversion, as
+    diffusers' converter splits the fused q, k and v pairs, give the same
+    delta on every module. The pair on norm_out.linear holds its up rows
+    in the order of the diffusers model's weight, the halves swapped."""
+    cfg = tiny_config()
+    km, dims = lora_map(cfg), dims_of(cfg)
+    dim = cfg["num_attention_heads"] * cfg["attention_head_dim"]
+    table = diffusers_names(cfg["num_layers"], cfg["num_single_layers"])
+    assert set(table) == set(dims)
+    src = _adapter(km, dims, 6, None, sorted(dims))
+    conv = {}
+    for module, (down, up, alpha) in src.items():
+        for dname, third in table[module]:
+            rows = up if third is None else up[third * dim:(third + 1) * dim]
+            if dname == NORM_OUT:
+                rows = swap_halves(rows)
+            conv[dname] = (down, rows, alpha)
+
+    def deltas(path):
+        res = reader.resolve(reader.read_lora(str(path)), km)
+        parts: dict = {}
+        for t in res.dit:
+            parts.setdefault(t.module, []).append(plan.Part(
+                t.pair.down, t.pair.up, t.pair.alpha, t.band, 1.0))
+        out = {}
+        for module, ps in parts.items():
+            lm = plan.block_diagonal(module, ps, dims[module])
+            out[module] = (np.array(lm.b, np.float64)
+                           @ np.array(lm.a, np.float64))
+        return out
+
+    a = deltas(write_adapter(tmp_path / "gguf.safetensors", "diffusers", src))
+    b = deltas(write_adapter(tmp_path / "conv.safetensors", "diffusers", conv))
+    assert set(a) == set(b) == set(dims)
+    for module in dims:
+        assert rel_l2(b[module], a[module]) <= DELTA_TOL, module
+
+
 def _stem(row: tuple, target: str) -> str:
     prefix, under, _, _, _ = row
     return prefix + (target.replace(".", "_") if under else target)
