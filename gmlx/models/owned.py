@@ -51,5 +51,6 @@ OWNED_VLM_MODELS = {
     "deepseek_v41_vl": "gmlx.models.deepseek_v41.vlm_model",
     "glm5_next": "gmlx.models.glm5_next.vlm_model",
     "muse_glimmer": "gmlx.models.muse_glimmer.vlm_model",
+    "muse_spark": "gmlx.models.muse_spark.vlm_model",
     "qwen4_exp": "gmlx.models.qwen4_exp.vlm_model",
 }

@@ -137,9 +137,8 @@ def _route(monkeypatch):
     for name in ("extract_text_from_content",
                  "_normalize_instruction_messages"):
         monkeypatch.setattr(_OPENAI, name, getattr(_OPENAI, name))
-    # The vendored table lacks the DeepSeek rows (the loader adds them) and
-    # the muse_spark row (the vision step adds it).
-    for row in ("deepseek_v4_vl", "deepseek_v41_vl", "muse_spark"):
+    # The vendored table lacks the DeepSeek rows (the loader adds them).
+    for row in ("deepseek_v4_vl", "deepseek_v41_vl"):
         monkeypatch.setitem(_PROMPT_UTILS.MODEL_CONFIG, row,
                             _PROMPT_UTILS.MessageFormat.LIST_WITH_IMAGE_FIRST)
     conversion = _ANTHROPIC._anthropic_messages_to_internal

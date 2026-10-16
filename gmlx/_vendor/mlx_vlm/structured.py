@@ -171,6 +171,7 @@ class ThinkingAwareLogitsProcessor:
         enable_thinking: bool = False,
         prompt_ids=None,
     ) -> None:
+        # gmlx: gate on the whole answer opener, see the class docstring.
         from gmlx.gen.thinking_budget import AnswerGate, answer_opener_seqs
 
         self.processor = processor

@@ -25,9 +25,11 @@ from gmlx.models.owned import OWNED_LM_MODELS, OWNED_VLM_MODELS
 from test_config_synth import (  # noqa: E402
     _GLM5NEXT_SHAPES,
     _MUSE_GLIMMER_SHAPES,
+    _MUSE_SPARK_SHAPES,
     _QWEN4EXP_SHAPES,
     _glm5next_meta,
     _muse_glimmer_meta,
+    _muse_spark_meta,
     _qwen4exp_meta,
 )
 
@@ -70,8 +72,12 @@ def _configs() -> dict:
     muse_glimmer = gvlm.synthesize_vlm_config(
         "muse_glimmer", _muse_glimmer_meta(), _MUSE_GLIMMER_SHAPES,
         {**_CLIP, "clip.vision.projection_dim": m_text["hidden_size"]})
+    s_text = synthesize_config(_muse_spark_meta(), _MUSE_SPARK_SHAPES)
+    muse_spark = gvlm.synthesize_vlm_config(
+        "muse_spark", _muse_spark_meta(), _MUSE_SPARK_SHAPES,
+        {**_CLIP, "clip.vision.projection_dim": s_text["hidden_size"]})
     return {"qwen4_exp": qwen4_exp, "glm5_next": glm5_next,
-            "muse_glimmer": muse_glimmer}
+            "muse_glimmer": muse_glimmer, "muse_spark": muse_spark}
 
 
 def _flat_caches(model):
@@ -125,7 +131,7 @@ def test_every_mtp_splitter_row_names_a_module_of_the_copy():
 
 
 @pytest.mark.parametrize("model_type", ["glm5_next", "muse_glimmer",
-                                        "qwen4_exp"])
+                                        "muse_spark", "qwen4_exp"])
 def test_build_vlm_model_builds_the_gmlx_class(model_type):
     model, _ = gvlm.build_vlm_model(_configs()[model_type])
     assert type(model).__module__ == OWNED_VLM_MODELS[model_type]

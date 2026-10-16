@@ -909,6 +909,9 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
     # Vision only - the text tower's bf16 holds 16k parity.
     "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
+    # muse_spark carries the same tower. Its audio weights are exact in bf16,
+    # so the audio encoder takes the plain cast and gives the same output.
+    "muse_spark": ("vision_tower.", "vision_adapter.", "vision_projection."),
     "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 
