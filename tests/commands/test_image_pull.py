@@ -593,6 +593,117 @@ def test_the_json_plan_names_the_size_the_entry_gets(lib, monkeypatch,
     assert plan["memory_class"] == 16 and plan["default_size"] == "512x512"
 
 
+F = catalog.RECIPES["flux-3-klein"]
+FB = catalog.RECIPES["flux-3-klein-base"]
+K = catalog.RECIPES["krea-2-turbo"]
+
+
+def _shared_scan(roots, *, recursive=True, families=None):
+    """What catalog.scan sees of Krea 2 and FLUX.3 files: the Qwen3-VL-4B
+    file is the encoder of both families."""
+    out = []
+    for r in roots:
+        for d, _s, files in os.walk(r):
+            for f in sorted(files):
+                p = os.path.join(d, f)
+                if f.startswith("flux3_image_klein_sd-"):
+                    out.append(catalog.ImageFile(p, "dit", "flux3_klein",
+                                                 "distilled"))
+                elif f.startswith("flux3_image_klein-"):
+                    out.append(catalog.ImageFile(p, "dit", "flux3_klein",
+                                                 "base"))
+                elif f.startswith("Krea-2-Turbo-"):
+                    out.append(catalog.ImageFile(p, "dit", "krea2", "turbo"))
+                elif f.startswith("Qwen3-VL-4B-Instruct-"):
+                    out += [catalog.ImageFile(p, "encoder", fam)
+                            for fam in ("krea2", "flux3_klein")]
+                elif f == F.vae_pack:
+                    out.append(catalog.ImageFile(p, "vae", "flux3_klein",
+                                                 sha256=F.vae_sha256))
+                elif f == K.vae_pack:
+                    out.append(catalog.ImageFile(p, "vae", "krea2",
+                                                 sha256=K.vae_sha256))
+    return [f for f in out if families is None or f.family in families]
+
+
+def _shared_pull(lib, monkeypatch, name, ram_gb=32):
+    root, cfg = lib
+    r = catalog.recipe(name)
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
+                        lambda: ram_gb << 30)
+    monkeypatch.setattr(catalog, "scan", _shared_scan)
+    got = _downloads(monkeypatch)
+    monkeypatch.setattr(catalog, "sha256_file", lambda p: r.vae_sha256)
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: (r.family, r.vae_sha256))
+    import gmlx.image.vae as vae_pkg
+    packed = []
+
+    def pack(src, dst, **kw):
+        with open(dst, "wb") as f:
+            f.write(b"g")
+        packed.append((src, kw))
+
+    monkeypatch.setattr(vae_pkg, "pack_vae", pack)
+    assert manage.cmd_pull([name, "--config", str(cfg)]) == 0
+    return got, packed, _cfg(cfg).image_models.get(name)
+
+
+@pytest.mark.parametrize("r, ram_gb, quant, folder", [
+    (F, 32, "Q8_0", "DISTILLED/flux3_image_klein_sd-"),
+    (F, 16, "Q4_K_M", "DISTILLED/flux3_image_klein_sd-"),
+    (FB, 24, "Q8_0", "BASE/flux3_image_klein-"),
+    (FB, 16, "Q4_K_M", "BASE/flux3_image_klein-"),
+])
+def test_a_flux3_pull_takes_its_variant_folder_and_packs_the_comfy_vae(
+        lib, monkeypatch, capsys, r, ram_gb, quant, folder):
+    root, cfg = lib
+    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb)
+    assert catalog.DEFAULT_QUANTS[r.name][catalog.memory_class(
+        ram_gb << 30)][0] == quant
+    assert (r.dit_repo, f"{folder}{quant}.gguf", "main") in got
+    assert (r.encoder_repo, "Qwen3-VL-4B-Instruct-Q8_0.gguf", "main") in got
+    # The FLUX.2 VAE folder holds no config.json, so only the safetensors
+    # comes, and its folders go with it after the pack.
+    assert [g for g in got if g[0] == r.vae_repo] == [
+        (r.vae_repo, r.vae_file, r.vae_revision)]
+    ((src, kw),) = packed
+    assert kw["config_json"] == "{}" and kw["family"] == "flux3_klein"
+    assert kw["source_revision"] == r.vae_revision
+    assert not (root / "Comfy-Org__flux2-dev" / "split_files").exists()
+    assert m.path == f"realrebelai__FLUX-3-Image-Klein_GGUFs/{folder}{quant}.gguf"
+    assert (root / m.path).is_file()
+    assert m.vae == "Comfy-Org__flux2-dev/flux2-vae-F32.gguf"
+    assert m.encoder_mmproj is None and not m.defaults.get("size")
+    assert (f"license: {r.title} flux-kommunity, non-commercial use, and "
+            "commercial use of the images only under $5M annual revenue, "
+            "affiliates counted, with content filters in place "
+            "(https://huggingface.co/black-forest-labs/flux-3-image-klein/"
+            "blob/main/LICENSE.md); encoder apache-2.0"
+            in capsys.readouterr().out)
+
+
+def test_a_flux3_pull_after_krea_2_shares_its_encoder_file(lib, monkeypatch):
+    got, _, krea = _shared_pull(lib, monkeypatch, "krea-2-turbo")
+    got, _, flux = _shared_pull(lib, monkeypatch, "flux-3-klein")
+    # Only the DiT and the VAE download: the encoder Krea 2's pull fetched
+    # is FLUX.3's too, by its weights.
+    assert [g[0] for g in got] == [F.dit_repo, F.vae_repo]
+    assert flux.encoder == krea.encoder
+    assert flux.encoder.endswith("Qwen3-VL-4B-Instruct-Q8_0.gguf")
+    got, _, base = _shared_pull(lib, monkeypatch, "flux-3-klein-base")
+    assert [g[0] for g in got] == [FB.dit_repo]
+    assert base.encoder == krea.encoder and base.vae == flux.vae
+
+
+def test_a_flux3_pull_takes_no_encoder_quant_but_q8_0(lib, capsys):
+    root, cfg = lib
+    assert manage.cmd_pull(["flux-3-klein", "--encoder-quant", "Q4_K_M",
+                            "--config", str(cfg)]) == 2
+    assert ("--encoder-quant Q4_K_M is not a quant of flux-3-klein; choose "
+            "one of Q8_0" in capsys.readouterr().err)
+
+
 def _qwen_pull(lib, monkeypatch, chat_mmproj):
     root, cfg = lib
     (root / "Qwen3-VL-8B-Instruct-Q8_0.gguf").write_bytes(b"e")

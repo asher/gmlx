@@ -73,6 +73,28 @@ _KREA2_LICENSE = ("https://cdn.jsdelivr.net/gh/krea-ai/krea-2@"
 _KREA2_NOTE = ("free commercial use only under $1M annual revenue, "
                "affiliates counted, and a deployer must filter content")
 
+# FLUX.3 klein's VAE is the FLUX.2 autoencoder, which Comfy-Org's FLUX.2
+# repository holds in the diffusers layout and without a config.json. Both
+# checkpoints share the encoder file of Krea 2.
+_FLUX3 = dict(
+    family="flux3_klein", dit_repo="realrebelai/FLUX-3-Image-Klein_GGUFs",
+    dit_quants=("Q4_K_M", "Q8_0"),
+    encoder_repo=_KREA2_ENCODER,
+    encoder_file="Qwen3-VL-4B-Instruct-{quant}.gguf", encoder_quants=("Q8_0",),
+    vae_repo="Comfy-Org/flux2-dev",
+    vae_revision="ed33133cd56476eac818c0943b6f9419b3e4a3a1",
+    vae_file="split_files/vae/flux2-vae.safetensors", vae_config="",
+    vae_sha256="d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
+    vae_pack="flux2-vae-F32.gguf",
+    license="flux-kommunity",
+    license_url="https://huggingface.co/black-forest-labs/flux-3-image-klein/"
+                "blob/main/LICENSE.md",
+    license_note=("non-commercial use, and commercial use of the images only "
+                  "under $5M annual revenue, affiliates counted, with content "
+                  "filters in place"),
+    encoder_license="apache-2.0",
+    encoder_bytes=4_280_406_816, vae_bytes=336_205_920)
+
 RECIPES = {r.name: r for r in (
     Recipe(
         name="z-image-turbo", title="Z-Image-Turbo", family="z_image",
@@ -143,6 +165,12 @@ RECIPES = {r.name: r for r in (
         license="krea-2-community", license_url=_KREA2_LICENSE,
         license_note=_KREA2_NOTE, encoder_license="apache-2.0",
         encoder_bytes=4_280_406_816, vae_bytes=253_807_712),
+    Recipe(
+        name="flux-3-klein", title="FLUX.3 klein", variant="distilled",
+        dit_file="DISTILLED/flux3_image_klein_sd-{quant}.gguf", **_FLUX3),
+    Recipe(
+        name="flux-3-klein-base", title="FLUX.3 klein Base", variant="base",
+        dit_file="BASE/flux3_image_klein-{quant}.gguf", **_FLUX3),
 )}
 
 # The DiT and encoder quants a recipe pulls on each memory class.
@@ -160,6 +188,12 @@ DEFAULT_QUANTS = {
     # the staged load. Q8_0 needs the 32 GB class.
     "krea-2-turbo": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # A Q8_0 DiT fits a 1024 pixel image from the 24 GB class up, with the
+    # encoder released on 24 GB.
+    "flux-3-klein": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                     32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    "flux-3-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                          32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
 }
 
 

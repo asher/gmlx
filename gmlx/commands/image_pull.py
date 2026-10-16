@@ -392,9 +392,13 @@ def _pack(plan: Plan, part: Part, got: list, *, keep_source: bool) -> str:
         for p in (src, conf):
             if p is not None:
                 os.remove(p)
+        # The source's folders in the repo, such as split_files/vae, go
+        # when the pack leaves them empty.
+        top = os.path.dirname(part.path)
         sub = os.path.dirname(src)
-        if sub != os.path.dirname(part.path) and not os.listdir(sub):
+        while sub.startswith(top + os.sep) and not os.listdir(sub):
             os.rmdir(sub)
+            sub = os.path.dirname(sub)
     part.size = os.path.getsize(part.path)
     return part.path
 
