@@ -10,8 +10,9 @@ the target from the processed logits, so every emitted token has the
 distribution plain decode gives it, whatever the drafter proposed.
 
 Processors that the stock ``ThinkingAwareLogitsProcessor`` wraps stay off
-until the thinking end marker and then see only the tokens from the marker
-on, as in plain decode.
+until its answer gate opens (the thinking end marker, or the answer header
+of a format that has one) and then see only the tokens from the gate's last
+token on, as in plain decode.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 import numpy as np
+
+from gmlx.gen.thinking_budget import AnswerGate
 
 from .grammar import SpecGrammar, _fresh_matcher, apply_masks
 
@@ -34,7 +37,7 @@ class _Gate:
     """Thinking state of one wrapped processor. ``start`` indexes the row
     context where the processor's own context begins, once active."""
 
-    end_id: int
+    opener: AnswerGate
     start: int | None
 
 
@@ -95,7 +98,7 @@ class SpecRowProcessors:
         for proc in processors or ():
             gate, inner = None, proc
             if isinstance(proc, ThinkingAwareLogitsProcessor):
-                gate = _Gate(int(proc.thinking_end_token_id),
+                gate = _Gate(proc.answer_gate.restart(context[-16:]),
                              len(context) if proc._active else None)
                 inner = proc.processor
             if isinstance(inner, LLGuidanceLogitsProcessor):
@@ -106,7 +109,7 @@ class SpecRowProcessors:
                     _fresh_matcher(inner),
                     vocab_size=inner.llg_tokenizer.vocab_size,
                     active=gate.start is not None if gate else True,
-                    end_id=gate.end_id if gate else None)
+                    gate=gate.opener.restart(gate.opener.tail) if gate else None)
                 steps.append(_Step(None, None))
             elif callable(inner) and not hasattr(inner, "process_last_token"):
                 steps.append(_Step(inner, gate))
@@ -133,8 +136,10 @@ class SpecRowProcessors:
         self._context_arr = None
         for step in self.steps:
             gate = step.gate
-            if gate is not None and gate.start is None and gate.end_id in tokens:
-                gate.start = n + tokens.index(gate.end_id)
+            if gate is not None and gate.start is None:
+                j = gate.opener.advance(tokens)
+                if j is not None:
+                    gate.start = n + j
         if self.grammar is not None:
             self.grammar.commit(tokens)
 
@@ -152,11 +157,11 @@ class SpecRowProcessors:
                 continue
             gate = step.gate
             start = 0 if gate is None else gate.start
+            hit = gate.opener.find(drafts) if start is None else None
             rows = []
             for j in range(n_pos):
                 rows.append(start)
-                if (start is None and j < len(drafts)
-                        and drafts[j] == gate.end_id):
+                if start is None and j == hit:
                     start = n_ctx + j
             any_fn = any_fn or any(r is not None for r in rows)
             starts.append(rows)

@@ -27,6 +27,7 @@ commits the forced close sequence directly as fully-accepted verify rounds.
 
 from __future__ import annotations
 
+import functools
 import os
 import signal
 import sys
@@ -161,6 +162,181 @@ def _encode_ids(tokenizer, text: str):
         return tokenizer.encode(text, add_special_tokens=False)
     except TypeError:
         return tokenizer.encode(text)
+
+
+def marker_ids(tokenizer, text) -> tuple:
+    """Every token id of a marker. mlx-vlm keeps only the last one, which
+    for ATEM's ``<|start|>assistant to=self<|message|>`` is the
+    ``<|message|>`` that opens every message, answer and commentary too."""
+    if not text:
+        return ()
+    return tuple(int(t) for t in _encode_ids(tokenizer, text))
+
+
+def ends_with_seq(tail, seq) -> bool:
+    return bool(seq) and len(tail) >= len(seq) and tail[-len(seq):] == list(seq)
+
+
+def rfind_seq(toks, seq) -> int:
+    """Start index of the last occurrence of ``seq`` in ``toks``, or -1."""
+    k = len(seq)
+    if not k:
+        return -1
+    last, head = seq[-1], list(seq)
+    for i in range(len(toks) - 1, k - 2, -1):
+        if toks[i] == last and toks[i - k + 1:i + 1] == head:
+            return i - k + 1
+    return -1
+
+
+def prompt_opens_block(toks, start_seq, end_seq) -> bool:
+    """Whether the token list ``toks`` ends inside a block: its last start
+    marker comes after its last end marker. Markers match on all their
+    tokens."""
+    last_start = rfind_seq(toks, start_seq)
+    return last_start >= 0 and last_start > rfind_seq(toks, end_seq)
+
+
+def prompt_tail_ids(input_ids, n: int = 16) -> list:
+    """The last ``n`` token ids of ``input_ids`` (an array or a list) as a
+    list. ``n`` is longer than any thinking marker."""
+    if input_ids is None:
+        return []
+    flat = input_ids.flatten() if hasattr(input_ids, "flatten") else input_ids
+    tail = flat[-n:]
+    return [int(t) for t in (tail.tolist() if hasattr(tail, "tolist") else tail)]
+
+
+@functools.cache
+def seq_thinking_budget_criteria_cls():
+    """Subclass of mlx-vlm's ``ThinkingBudgetCriteria`` that matches each
+    marker on all of its tokens. A marker that spans several tokens opens or
+    closes a block only when the whole sequence arrives, and the forced
+    close emits the whole end marker. ``prompt_ids`` gives the prompt's last
+    tokens, so a start marker the generation prompt begins (ATEM's prompt
+    ends ``<|start|>assistant``) completes on the generated rest.
+    ``prompt_open_thinking`` is the in-thinking state at the start, kept
+    apart from the stock ``enable_thinking`` gates. Single-token markers
+    behave as the stock criteria. Built lazily so importing this module
+    never imports mlx-vlm."""
+    from gmlx._vendor.mlx_vlm.utils import ThinkingBudgetCriteria
+
+    class SeqThinkingBudgetCriteria(ThinkingBudgetCriteria):
+        def __init__(self, tokenizer, thinking_budget,
+                     thinking_end_token="</think>", thinking_start_token=None,
+                     *, prompt_open_thinking=False, prompt_ids=None, **kw):
+            super().__init__(tokenizer, thinking_budget,
+                             thinking_end_token=thinking_end_token,
+                             thinking_start_token=thinking_start_token, **kw)
+            self._start_seq = marker_ids(tokenizer, thinking_start_token)
+            self._end_seq = marker_ids(tokenizer, thinking_end_token)
+            self._forced_sequence = (self._forced_sequence[:-1]
+                                     + list(self._end_seq))
+            self._tail_max = max(len(self._start_seq), len(self._end_seq))
+            keep = self._tail_max - 1
+            self._prompt_tail = ([int(t) for t in prompt_ids[-keep:]]
+                                 if prompt_ids is not None and keep else [])
+            self._tail = list(self._prompt_tail)
+            self._prompt_open = bool(prompt_open_thinking)
+            self.in_thinking = self._prompt_open
+
+        def reset_thinking_state(self):
+            super().reset_thinking_state()
+            self.in_thinking = self._prompt_open
+            self._tail = list(self._prompt_tail)
+
+        def __call__(self, token_id):
+            self._tail.append(int(token_id))
+            del self._tail[:-self._tail_max]
+            if self.enable_thinking and ends_with_seq(self._tail, self._start_seq):
+                self.in_thinking = True
+                return None
+            if ends_with_seq(self._tail, self._end_seq):
+                # Also a commentary <|eom|> outside reasoning, where it
+                # changes nothing.
+                self.in_thinking = False
+                self.budget_exceeded = False
+                self._forced_index = 0
+                return None
+            if self.in_thinking:
+                self.thinking_token_count += 1
+                if self.thinking_token_count > self.thinking_budget:
+                    self.budget_exceeded = True
+            if (self.budget_exceeded
+                    and self._forced_index < len(self._forced_sequence)):
+                forced = self._forced_sequence[self._forced_index]
+                self._forced_index += 1
+                self.forced_token_id = forced
+                return forced
+            self.forced_token_id = None
+            return None
+
+    return SeqThinkingBudgetCriteria
+
+
+# The final-answer headers of formats whose answer opens with a header of
+# its own, keyed by the reasoning start marker. ATEM's reasoning closes on
+# <|eom|>, which also closes commentary and tool calls, and the answer text
+# starts only after "<|start|>assistant to=user<|message|>". The recipient
+# is optional, as in llama.cpp's Muse parsers.
+_ANSWER_HEADERS = {
+    "<|start|>assistant to=self<|message|>": (
+        "<|start|>assistant to=user<|message|>",
+        "<|start|>assistant<|message|>"),
+}
+
+
+def answer_opener_seqs(tokenizer, start_token, end_token) -> tuple:
+    """The token sequences after which the final answer starts: the
+    format's answer headers, else the whole end marker."""
+    texts = _ANSWER_HEADERS.get(start_token or "") or (end_token,)
+    return tuple(s for s in (marker_ids(tokenizer, t) for t in texts) if s)
+
+
+def has_answer_header(start_token) -> bool:
+    """Whether the answer of this marker format opens with its own header,
+    so a grammar must wait for it in every request, thinking or not."""
+    return (start_token or "") in _ANSWER_HEADERS
+
+
+class AnswerGate:
+    """Finds where the final answer starts in a token stream, so a grammar
+    constrains the answer only. The answer starts on the token after any
+    sequence in ``seqs``, matched on all its tokens. ``tail`` holds the
+    last tokens seen, so an opener that the prompt begins completes on
+    generated tokens."""
+
+    def __init__(self, seqs, tail=()):
+        self.seqs = tuple(tuple(int(t) for t in s) for s in seqs if s)
+        self.keep = max((len(s) for s in self.seqs), default=1)
+        self.tail = [int(t) for t in tail][-self.keep:]
+
+    def restart(self, tail=()) -> AnswerGate:
+        """A fresh gate on the same openers, seeded with ``tail``."""
+        return AnswerGate(self.seqs, tail)
+
+    def opened(self) -> bool:
+        """Whether the tokens seen end with an opener."""
+        return any(ends_with_seq(self.tail, s) for s in self.seqs)
+
+    def feed(self, tok) -> bool:
+        """Take one token. True when it completes an opener."""
+        self.tail.append(int(tok))
+        del self.tail[:-self.keep]
+        return self.opened()
+
+    def advance(self, tokens) -> int | None:
+        """Take ``tokens``. The index of the first one that completes an
+        opener, or None."""
+        hit = None
+        for j, t in enumerate(tokens):
+            if self.feed(t) and hit is None:
+                hit = j
+        return hit
+
+    def find(self, tokens) -> int | None:
+        """As ``advance``, without changing the gate."""
+        return self.restart(self.tail).advance(tokens)
 
 
 def _last_token_id(tokenizer, text: str):

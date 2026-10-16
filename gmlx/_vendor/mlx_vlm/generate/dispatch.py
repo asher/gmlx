@@ -19,7 +19,6 @@ from ..speculative.utils import format_speculative_stats
 from ..tokenizer_utils import make_streaming_detokenizer
 from ..utils import (
     StoppingCriteria,
-    ThinkingBudgetCriteria,
     load,
     prepare_inputs,
     should_add_special_tokens,
@@ -1013,19 +1012,30 @@ def stream_generate(
                 apc_coordinator.release_hit(plan)
 
     if thinking_budget is not None:
-        thinking_start_token_id = tokenizer.encode(
-            thinking_start_token, add_special_tokens=False
-        )[-1]
-        prompt_preopens_thinking = (
-            thinking_start_token_id in input_ids.flatten().tolist()
+        # gmlx: match each marker on all its tokens. The last token of ATEM's
+        # "<|start|>assistant to=self<|message|>" opens every message, so the
+        # stock id check counted the answer too. The whole prompt decides
+        # whether a block is open, prefix reuse or not.
+        from gmlx.gen.thinking_budget import (
+            marker_ids,
+            prompt_opens_block,
+            seq_thinking_budget_criteria_cls,
         )
-        tokenizer.thinking_budget_criteria = ThinkingBudgetCriteria(
+
+        prompt_preopens_thinking = prompt_opens_block(
+            full_input_ids_list,
+            marker_ids(tokenizer, thinking_start_token),
+            marker_ids(tokenizer, thinking_end_token),
+        )
+        tokenizer.thinking_budget_criteria = seq_thinking_budget_criteria_cls()(
             tokenizer=tokenizer,
             thinking_budget=thinking_budget,
             thinking_end_token=thinking_end_token,
             thinking_start_token=thinking_start_token,
             enable_thinking=enable_thinking,
             prompt_preopens_thinking=prompt_preopens_thinking,
+            prompt_open_thinking=enable_thinking and prompt_preopens_thinking,
+            prompt_ids=full_input_ids_list[-16:],
         )
         kwargs["thinking_budget_criteria"] = tokenizer.thinking_budget_criteria
     else:

@@ -24,16 +24,16 @@ class SpecGrammar:
     """One request's llguidance matcher, driven by verified rounds.
 
     ``active`` is False while the model thinks: the grammar constrains the
-    answer, so it starts on the token after ``end_id`` (the stock
-    ``ThinkingAwareLogitsProcessor`` contract).
+    answer, so it starts on the token after ``gate`` opens (an
+    ``AnswerGate``, the stock ``ThinkingAwareLogitsProcessor`` contract).
     """
 
     def __init__(self, matcher, *, vocab_size: int, active: bool = True,
-                 end_id: int | None = None):
+                 gate=None):
         self.matcher = matcher
         self.words = (int(vocab_size) + 31) // 32
         self.active = bool(active)
-        self.end_id = end_id
+        self.gate = gate
         self.started = False
 
     def start(self, token: int) -> None:
@@ -49,7 +49,7 @@ class SpecGrammar:
         for t in tokens:
             t = int(t)
             if not self.active:
-                self.active = t == self.end_id
+                self.active = self.gate is not None and self.gate.feed(t)
                 continue
             if m.is_stopped():
                 # The grammar is complete. The row stops on this token.
@@ -70,7 +70,8 @@ class SpecGrammar:
         """
         drafts = [int(d) for d in drafts]
         active = self.active
-        if not active and self.end_id not in drafts:
+        hit = None if active or self.gate is None else self.gate.find(drafts)
+        if not active and hit is None:
             return None
         import llguidance.numpy as llg_np
 
@@ -85,7 +86,7 @@ class SpecGrammar:
                     break
                 d = drafts[j]
                 if not active:
-                    active = d == self.end_id
+                    active = j == hit
                     continue
                 if not _allowed(out[j], d) or m.is_stopped():
                     break
