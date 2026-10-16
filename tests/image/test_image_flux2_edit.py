@@ -2,12 +2,14 @@
 crop of the reference's encode_image_refs, the refusals, and the
 conditioning a pipeline makes of a prompt with references, whose encoder
 reads the prompt alone and whose references reach the DiT as VAE latents
-in bf16. CPU tier."""
+in bf16, normalized by the VAE's batch norm. The schedule of an edit
+counts the image's tokens alone. CPU tier."""
 from __future__ import annotations
 
 import dataclasses
 import io
 import math
+from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
@@ -16,6 +18,7 @@ from test_image_api import _Encoder
 from test_image_flux3_edit import _RefDit, _Vae
 
 from gmlx.image import api
+from gmlx.image.conditioning import Conditioning
 from gmlx.image.families.flux2_klein import edit
 from gmlx.image.families.flux2_klein import family as ff
 from gmlx.image.families.flux2_klein import model as fm
@@ -205,3 +208,87 @@ def test_references_take_no_area_and_prepared_ones_pass_through(pipe):
         api.references(pipe, [a], area=512 * 512)
     with pytest.raises(ValueError, match="at most 10 reference images"):
         api.references(pipe, [a] * 11)
+
+
+class _Rows:
+    """A zero velocity that keeps the sigma and the reference count of
+    each row it runs."""
+
+    def __init__(self):
+        self.cfg = SimpleNamespace(in_channels=4, patch=1, flow_map=False)
+        self.act_dtype = mx.float32
+        self.rows = []
+
+    def references(self, latents):
+        return [np.array(z) for z in latents]
+
+    def __call__(self, latents, sigma, cap_feats, refs=None):
+        self.rows.append((float(np.asarray(sigma)[0]),
+                          0 if refs is None else len(refs)))
+        return mx.zeros_like(latents)
+
+
+def test_the_schedule_of_an_edit_counts_the_image_tokens_alone():
+    """get_schedule reads the image's tokens, as the reference's
+    denoise does, and never the tokens of its references."""
+    fam = get_family("flux2_klein")
+    dit = _Rows()
+    pipe = api.ImagePipeline(dit=dit, family=fam, variant="distilled")
+    ref = mx.zeros((4, 64, 64))
+    cond = Conditioning(mx.zeros((3, 4)), ref_latents=(ref,))
+    with mx.stream(mx.cpu):
+        api.sample(pipe, cond, height=256, width=256, steps=4, seed=0)
+    image = fam.schedule(4, tokens=16 * 16)
+    counted = fam.schedule(4, tokens=16 * 16 + 64 * 64)
+    assert not np.allclose(image, counted)
+    assert [s for s, _ in dit.rows] == [float(s) for s in image[:-1]]
+    assert {n for _, n in dit.rows} == {1}
+    assert np.array_equal(api.image_sigmas(pipe, 4, 256, 256), image)
+
+
+def _tiny_flux2_vae():
+    """A tiny FLUX.2 autoencoder on its initial weights, in float32, with
+    batch norm statistics far from 0 and 1."""
+    from gmlx.image.vae import flux2_ae
+
+    vae = flux2_ae.Flux2AE(flux2_ae.Flux2AEConfig(
+        in_channels=3, out_channels=3, latent_channels=8,
+        block_out_channels=(32, 64), layers_per_block=1,
+        norm_num_groups=32, eps=1e-6))
+    rng = np.random.default_rng(5)
+    n = vae.config.model_channels
+    vae.bn.running_mean = mx.array(rng.standard_normal(n), mx.float32)
+    vae.bn.running_var = mx.array(rng.uniform(0.5, 2.0, n), mx.float32)
+    return vae
+
+
+def test_reference_latents_are_normalized_by_the_batch_norm(monkeypatch):
+    """A reference's latents are the mean of the encode, patchified 2 x 2
+    channel first and normalized by the batch norm statistics, as the
+    reference's encode does, and not the patchified mean alone."""
+    from gmlx.image.vae import tiling
+
+    monkeypatch.setattr(tiling, "_plan", lambda *a, **k: False)
+    vae = _tiny_flux2_vae()
+    pipe = api.ImagePipeline(dit=_Rows(), family=get_family("flux2_klein"),
+                             variant="distilled", vae=vae)
+    (ref,) = edit.prepare([_picture(96, 64, 7)])
+    cond = Conditioning(mx.zeros((3, 4)), refs=(ref,))
+    with mx.stream(mx.cpu):
+        (got,) = api.encode_references(pipe, cond).ref_latents
+        x = mx.array(ref.pixels[..., :3].astype(np.float32) / 255.0)[None]
+        mean, _ = vae.encode(x * 2 - 1)
+        mx.eval(got, mean)
+    m = np.array(mean.astype(mx.float32))
+    b, hh, ww, c = m.shape
+    patched = (m.reshape(b, hh // 2, 2, ww // 2, 2, c)
+               .transpose(0, 5, 2, 4, 1, 3)
+               .reshape(b, c * 4, hh // 2, ww // 2))[0]
+    mu = np.array(vae.bn.running_mean)[:, None, None]
+    sd = np.sqrt(np.array(vae.bn.running_var) + vae.config.bn_eps)[:, None,
+                                                                    None]
+    want = (patched - mu) / sd
+    got = np.array(got)
+    assert got.shape == want.shape == (32, 64 // 4, 96 // 4)
+    assert np.allclose(got, want, rtol=1e-5, atol=1e-5)
+    assert not np.allclose(got, patched, atol=0.1)

@@ -82,6 +82,9 @@ SAMPLING = {
     "distilled": SamplingRow(4, 1.0, 1.0, *_BFL),
     "base": SamplingRow(50, 4.0, 1.0, *_BFL),
 }
+# The distilled checkpoints fix their guidance at 1 in fixed_params, and
+# scripts/cli.py refuses any other: Base takes guidance.
+UNGUIDED = {"distilled": "base"}
 
 # The loop of denoise and denoise_cfg in src/flux2/sampling.py, on the bf16
 # noise of scripts/cli.py: the latents, the velocity, its guidance and the
@@ -401,6 +404,7 @@ FAMILY = Family(
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     sampling=SAMPLING,
+    unguided=UNGUIDED,
     schedule=schedule,
     loop=LOOP,
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],

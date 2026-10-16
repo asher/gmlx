@@ -347,6 +347,52 @@ def test_a_request_on_turbo_takes_only_its_own_step_count(variant, steps,
     assert e.value.param == "steps"
 
 
+@pytest.mark.parametrize("variant,guidance,default,refused", [
+    ("distilled", None, 1.0, False), ("distilled", 1.0, 1.0, False),
+    ("distilled", 4.0, 1.0, True), ("distilled", None, 4.0, True),
+    ("base", 4.0, 4.0, False), ("base", None, 1.0, False)])
+def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
+                                                    default, refused):
+    from gmlx.image.registry import get_family
+
+    fam = get_family("flux2_klein")
+    served = SimpleNamespace(pipe=SimpleNamespace(family=fam, variant=variant),
+                             spec=SimpleNamespace(id="f2"),
+                             plan=SimpleNamespace(cfg=default))
+    req = image_service.parse_request("generations", {
+        "prompt": "p", **({} if guidance is None else {"guidance": guidance})})
+    if not refused:
+        image_service.check_family(req, served)
+        return
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.check_family(req, served)
+    assert e.value.param == "guidance" and e.value.status == 400
+    assert str(e.value) == (
+        "guidance: the FLUX.2 klein distilled DiT samples without guidance: "
+        f"drop guidance {guidance or default:g}, or run the FLUX.2 klein "
+        "base checkpoint, which takes guidance")
+
+
+def test_a_distilled_flux2_entry_refuses_a_guidance_default(plan_stubs,
+                                                            monkeypatch):
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    fam = get_family("flux2_klein")
+    for variant in ("distilled", "base"):
+        monkeypatch.setattr(loader, "identify_dit", lambda path, _v=variant,
+                            **k: SimpleNamespace(family=fam, variant=_v))
+        assert image_service.entry_plan(_spec(defaults={"guidance": 1.0}))
+    assert image_service.entry_plan(_spec(defaults={"guidance": 4.0}))
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k:
+                        SimpleNamespace(family=fam, variant="distilled"))
+    with pytest.raises(ImageModelError, match="defaults.guidance: the FLUX.2 "
+                       "klein distilled DiT samples without guidance: drop "
+                       "guidance 4, or run the FLUX.2 klein base checkpoint"):
+        image_service.entry_plan(_spec(defaults={"guidance": 4.0}))
+
+
 def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
                                                          monkeypatch):
     from gmlx.image import memfit
@@ -858,12 +904,33 @@ def test_several_flux3_references_are_cropped_and_the_first_sizes_it():
     assert image_service.target_size(req, served) == (96, 64)
 
 
-@pytest.mark.parametrize("width, refused", [(4096, False), (4112, True),
-                                            (20000, True)])
-def test_a_thin_first_flux3_reference_meets_the_side_limit(width, refused):
-    """Each of several references keeps its shape, so the size the first
-    gives a request without one is held to the limits of a size asked
-    for."""
+@pytest.mark.parametrize("family, images, ref, want", [
+    ("flux3_klein", [(128, 8192), (512, 512)], (8192, 128), (4096, 64)),
+    ("flux3_klein", [(30, 4096), (512, 512)], (4096, 16), (4096, 16)),
+    ("flux2_klein", [(625, 5000)], (4992, 624), (4096, 512)),
+    ("flux2_klein", [(64, 512)], (512, 64), (512, 64))])
+def test_an_unsized_edit_scales_a_thin_first_reference_into_the_limits(
+        family, images, ref, want):
+    """Each reference can keep its shape, so the size the first gives a
+    request without one is scaled into the limits of a size asked for,
+    as the first image of a family without that rule is. A size the
+    request gives is kept."""
+    import numpy as np
+
+    served = _edit_served(family, mmproj=False)
+    req = _edit_req(1)
+    req.images = [np.zeros(s + (3,), np.uint8) for s in images]
+    image_service.check_family(req, served)
+    assert (req.refs[0].width, req.refs[0].height) == ref
+    assert image_service.target_size(req, served) == want
+    sized = _edit_req(1, size="512x512")
+    sized.images = req.images
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (512, 512)
+
+
+@pytest.mark.parametrize("width", [4112, 20000])
+def test_a_first_reference_too_thin_to_scale_is_refused(width):
     import numpy as np
 
     served = _edit_served("flux3_klein", mmproj=False)
@@ -872,18 +939,23 @@ def test_a_thin_first_flux3_reference_meets_the_side_limit(width, refused):
                   np.zeros((512, 512, 3), np.uint8)]
     image_service.check_family(req, served)
     assert (req.refs[0].width, req.refs[0].height) == (width, 16)
-    if not refused:
-        assert image_service.target_size(req, served) == (width, 16)
-        return
     with pytest.raises(image_service.ImageRequestError,
-                       match=f"the first image sizes the request at "
-                             f"{width}x16, over the limit") as e:
+                       match=f"the first reference sizes the edit at "
+                             f"{width}x16, which keeps no side of 16 "
+                             f"pixels") as e:
         image_service.target_size(req, served)
     assert e.value.param == "size" and e.value.status == 400
-    sized = _edit_req(1, size="512x512")
-    sized.images = req.images
-    image_service.check_family(sized, served)
-    assert image_service.target_size(sized, served) == (512, 512)
+
+
+def test_the_canvas_of_one_padded_flux3_reference_is_in_the_limits():
+    """The output of one padded reference is cropped by a box on its
+    canvas, so the canvas is never scaled: its rule keeps it in the
+    limits."""
+    from gmlx.image.families.flux3_klein.family import REFERENCES
+    from gmlx.image.registry import MAX_PIXELS, MAX_SIDE
+
+    r = REFERENCES.values
+    assert r["match_max_pixels"] <= MAX_PIXELS and r["max_side"] <= MAX_SIDE
 
 
 def test_a_flux3_reference_the_rules_refuse_is_named():

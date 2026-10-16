@@ -98,11 +98,23 @@ def check_steps(family, variant: str, steps: int) -> None:
             f"distilled to, not {steps}")
 
 
+def check_guidance(family, variant: str, cfg: float) -> None:
+    """Refuse guidance on a variant the family declares distilled to
+    sample without it, naming the variant that takes it."""
+    other = family.unguided.get(variant)
+    if other is not None and cfg != 1.0:
+        raise ValueError(
+            f"the {family.title} {variant} DiT samples without guidance: "
+            f"drop guidance {cfg:g}, or run the {family.title} {other} "
+            f"checkpoint, which takes guidance")
+
+
 def check_sampling(family, variant: str, flow_map: bool, cfg: float,
                    sampler: str = "euler") -> None:
-    """Refuse guidance and samplers a flow map DiT does not sample with.
-    ``flow_map`` is the flag of the DiT's config, which its header
-    gives."""
+    """Refuse guidance and samplers a flow map DiT does not sample with,
+    and guidance on a variant distilled to sample without it. ``flow_map``
+    is the flag of the DiT's config, which its header gives."""
+    check_guidance(family, variant, cfg)
     if flow_map and cfg != 1.0:
         raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
                          f"which samples without guidance: drop cfg {cfg}")
@@ -1095,6 +1107,21 @@ def _latent_mask(mask, shape: tuple, scale: int) -> mx.array:
     return mx.array(m)
 
 
+def image_tokens(pipe: ImagePipeline, height: int, width: int) -> int:
+    """The DiT tokens of the image a request makes, without the tokens of
+    its references."""
+    token_px = pipe.vae_scale * pipe.dit.cfg.patch
+    return (height // token_px) * (width // token_px)
+
+
+def image_sigmas(pipe: ImagePipeline, steps: int, height: int,
+                 width: int) -> np.ndarray:
+    """The schedule of ``steps`` for an image of ``height`` by ``width``.
+    A dynamic shift reads the image's own tokens, as the reference
+    pipelines do, and never those of the references of an edit."""
+    return pipe.sigmas(steps, image_tokens(pipe, height, width))
+
+
 def sample(pipe: ImagePipeline, cond: Conditioning, *,
            neg: Conditioning | None = None, cfg: float | None = None,
            height: int, width: int, steps: int | None = None,
@@ -1131,9 +1158,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         raise ValueError("denoise below 1 and mask need init_latents")
 
     if sigmas is None:
-        token_px = pipe.vae_scale * pipe.dit.cfg.patch
-        s = pipe.sigmas(pipe.defaults.steps if steps is None else steps,
-                        (height // token_px) * (width // token_px))
+        s = image_sigmas(pipe, pipe.defaults.steps if steps is None
+                         else steps, height, width)
     else:
         s = check_sigmas(sigmas)
         if steps is not None and steps != len(s) - 1:

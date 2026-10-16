@@ -958,10 +958,16 @@ the weights load.
 | Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
 | Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
 | FLUX.3 klein | Qwen3-VL-4B-Instruct, its text GGUF | The FLUX.2 autoencoder | 16 steps and guidance 1. Base: 50 steps and guidance 3.5. |
+| FLUX.2 klein | Qwen3-4B | The FLUX.2 autoencoder | 4 steps and guidance 1, which is the only guidance it takes. Base: 50 steps and guidance 4. |
 
 FLUX.3 klein Base shares the distilled model's architecture, encoder and
 VAE, and gmlx tells the two apart by their tensors. The distilled model
 runs any step count on its own schedule.
+
+FLUX.2 klein Base and the distilled model are told apart the same way.
+The distilled model refuses `--guidance` other than 1 before any file
+loads, as BFL's command line does, and names Base as the checkpoint that
+takes guidance.
 
 Qwen-Image 2.1 Turbo shares the base model's architecture, encoder and VAE.
 gmlx tells the two apart by their weights. Turbo samples on the eight sigmas

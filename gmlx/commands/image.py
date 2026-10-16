@@ -659,9 +659,13 @@ def _generate(a) -> int:
     stride = _stride(fam)
     refs = _references(a, fam)
     edit = fam.edit
-    # A family that sizes a request by its references names that size.
-    ref_size = (edit.size(refs) if refs and edit is not None
-                and edit.size is not None else None)
+    # A family that sizes a request by its references names that size,
+    # scaled into the image limits.
+    ref_size = None
+    if a.size is None and a.init_image is None:
+        from gmlx.image.registry import edit_size
+
+        ref_size = edit_size(fam, refs, stride)
     init = crop = None
     if a.init_image is not None:
         init = read_image(a.init_image, a.size, stride)
@@ -978,8 +982,7 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
         return [np.array(f) for f in feats]
 
     def schedule():
-        token_px = pipe.vae_scale * pipe.dit.cfg.patch
-        s = pipe.sigmas(steps, (height // token_px) * (width // token_px))
+        s = api.image_sigmas(pipe, steps, height, width)
         shape = (1, pipe.dit.cfg.in_channels, height // pipe.vae_scale,
                  width // pipe.vae_scale)
         return np.asarray(s, np.float32), make_sampler(sampler, s), shape

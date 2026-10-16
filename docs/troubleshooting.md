@@ -320,6 +320,12 @@ sampler alone. Leave out `--guidance` and `--sampler`, or the request's
 `guidance` and `sampler`, or set them to 1 and `euler`. FLUX.3 klein Base
 takes other values of both.
 
+### `distilled DiT samples without guidance: drop guidance ...`
+
+FLUX.2 klein is distilled to sample without guidance. Leave out
+`--guidance`, the request's `guidance` and the entry's
+`defaults.guidance`, or set them to 1. FLUX.2 klein Base takes guidance.
+
 ### `gmlx image does not apply` or `is not a ... adapter`
 
 The LoRA is of a kind gmlx does not apply, or it was made for another

@@ -14,7 +14,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   output repeats it, which speeds up edits and quotes.
 - Muse Spark (GGUF arch `muse-spark`), with reasoning effort intents, tool calls
   and image and audio input through its `--mmproj` companion.
-
 - An image LoRA whose PEFT header sets `use_rslora` loads, scaled as PEFT
   scales it, where it was refused.
 

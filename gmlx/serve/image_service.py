@@ -27,6 +27,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+# The largest image a request makes: its pixels and its longer side.
+from gmlx.image.registry import MAX_PIXELS, MAX_SIDE
+
 from .subservice import SingleWorker
 
 _log = logging.getLogger(__name__)
@@ -160,7 +163,8 @@ def entry_plan(spec) -> EntryPlan:
     model, a family the config does not name, and an entry that cannot
     hold one image of its default size in the working budget."""
     from gmlx.image import memfit
-    from gmlx.image.api import _header_bytes, check_steps, sampler_defaults
+    from gmlx.image.api import (_header_bytes, check_guidance, check_steps,
+                                sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
 
@@ -193,6 +197,11 @@ def entry_plan(spec) -> EntryPlan:
     cfg = (spec.defaults or {}).get("guidance")
     if cfg is None:
         cfg = defaults.cfg if defaults is not None else 1.0
+    try:
+        check_guidance(fam, ident.variant, float(cfg))
+    except ValueError as e:
+        raise ImageModelError(
+            f"image model {spec.id!r}: defaults.guidance: {e}") from None
     act = image_activation(fam.name)
     tensor_cache, adapter_cache = cache_bytes()
     own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
@@ -469,9 +478,6 @@ RESPONSE_FORMATS = ("b64_json", "url")
 MAX_N = 10
 MAX_PARTIALS = 3
 MAX_REFS = 16
-# The largest image a request makes: its pixels and its longer side.
-MAX_PIXELS = 2048 * 2048
-MAX_SIDE = 4096
 # Model names an OpenAI client sends that mean the default image model.
 _ALIAS_PREFIXES = ("gpt-image-", "dall-e-", "chatgpt-image")
 # Accepted and ignored, with one warning line.
@@ -949,7 +955,10 @@ def _stride(pipe) -> int:
 def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     """(width, height) of the request: its size, else the size the family
     gives its prepared references, else the first image's for an edit or
-    a variation, else the entry's default."""
+    a variation, else the entry's default. A size the request does not
+    give is scaled into the image limits."""
+    from gmlx.image.registry import edit_size
+
     pipe = served.pipe
     unit = _stride(pipe)
     if req.size is not None:
@@ -959,14 +968,12 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
                        f"of {unit}", "size")
         return w, h
     if req.refs and req.mask is None and pipe.family.edit.size is not None:
-        w, h = pipe.family.edit.size(req.refs)
-        # Several references are each kept at their own shape, so a thin
-        # first one can give a size past the limits of a size asked for.
-        if not _in_limits((w, h)):
-            raise _bad(f"the first image sizes the request at {w}x{h}, over "
-                       f"the limit of {MAX_PIXELS} pixels (2048x2048) and a "
-                       f"side of {MAX_SIDE}: pass a size", "size")
-        return w, h
+        # Each reference of a request can keep its own shape, so a thin
+        # first one gives a size that is scaled into the limits.
+        try:
+            return edit_size(pipe.family, req.refs, unit)
+        except ValueError as e:
+            raise _bad(str(e), "size") from None
     if req.images:
         h, w = req.images[0].shape[:2]
         # A large image gives the largest size of its shape in the limits.
@@ -1000,10 +1007,11 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     """Refuse what the family cannot do: transparency without an alpha
     VAE, a step count other than the one a variant with a fixed schedule
     runs, more images than an edit takes, and edits without a vision
-    tower. The references of a family that prepares them together are
-    prepared here into ``req.refs``, and an image its rules refuse gets
-    a 400 that names it."""
-    from gmlx.image.api import fixed_steps
+    tower, and guidance on a variant distilled to sample without it. The
+    references of a family that prepares them together are prepared here
+    into ``req.refs``, and an image its rules refuse gets a 400 that
+    names it."""
+    from gmlx.image.api import check_guidance, fixed_steps
 
     pipe = served.pipe
     fam = pipe.family
@@ -1011,6 +1019,11 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if n is not None and req.steps is not None and req.steps != n:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
+    if pipe.variant in fam.unguided:
+        try:
+            check_guidance(fam, pipe.variant, _guided(req, served))
+        except ValueError as e:
+            raise _bad(f"guidance: {e}", "guidance") from None
     if req.background == "transparent":
         from gmlx.image.vae.reader import VAES
 
@@ -1426,8 +1439,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             timeout_s and time.monotonic() - last[0] > timeout_s)
 
     denoise = 1.0 if strength is None else float(strength)
-    token_px = pipe.vae_scale * pipe.dit.cfg.patch
-    sigmas = pipe.sigmas(steps, (height // token_px) * (width // token_px))
+    sigmas = api.image_sigmas(pipe, steps, height, width)
     if init_latents is not None:
         sigmas = sigmas[img2img_start(len(sigmas) - 1, denoise):]
     run_steps = len(sigmas) - 1
@@ -1497,7 +1509,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
         del x
         mx.clear_cache()
 
-    tokens = (height // token_px) * (width // token_px)
+    tokens = api.image_tokens(pipe, height, width)
     text_tokens = int(cond.features.shape[0]) - len(cond.image_slots) + (
         0 if neg is None else int(neg.features.shape[0]) - len(neg.image_slots))
     image_tokens = 0

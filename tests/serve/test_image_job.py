@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """The image job of the serve routes over a stub pipeline: the stop event
-ends the sampler, and each image of a request takes its own seed. The
-sampler and the VAE are stubs, so nothing heavy runs."""
+ends the sampler, and each image of a request takes its own seed. An
+edit's schedule counts the image's tokens alone, and the negative row of
+a guided edit takes the references. The sampler and the VAE are stubs,
+so nothing heavy runs."""
 from __future__ import annotations
 
 import json
@@ -192,3 +194,84 @@ def test_a_flux3_edit_runs_its_prepared_references_and_crops_the_pad(
         assert im.size == want
         # The metadata records the size written, not the canvas.
         assert json.loads(im.text["gmlx"])["size"] == "%dx%d" % want
+
+
+def _flux2_job(monkeypatch, variant, fields, shape=(256, 256, 3)):
+    """A FLUX.2 klein edit of one image through check_family, target_size
+    and the job, with the encode of the serve path and stub primitives
+    under it. Returns the sizes the schedule was asked for, the encodes,
+    and the conditionings the sampler got."""
+    import dataclasses
+
+    import numpy as np
+
+    from gmlx.image.conditioning import Conditioning
+
+    rec = SimpleNamespace(sigmas=[], encoded=[], sampled=[])
+    served = _served()
+    pipe = served.pipe
+    pipe.family = get_family("flux2_klein")
+    pipe.variant = variant
+    pipe.size_multiple = 16
+    pipe.vae_scale, pipe.dit.cfg.patch = 16, 1
+    pipe.sigmas = lambda steps, n: rec.sigmas.append((steps, n)) or [
+        1.0 - i / steps for i in range(steps + 1)]
+    served.spec.encoder_mmproj = None
+    served.plan.cfg = 4.0 if variant == "base" else 1.0
+
+    def encode_text(pipe, prompt, *, images=(), ref_latents=True):
+        rec.encoded.append((prompt, tuple(images)))
+        return Conditioning(mx.zeros((5, 4)), refs=tuple(images))
+
+    def encode_references(pipe, c, plan=None):
+        return dataclasses.replace(c, ref_latents=tuple(
+            mx.zeros((128, r.height // 16, r.width // 16)) for r in c.refs))
+
+    def sample(pipe, cond, *, neg, cfg, height, width, seed, steps,
+               should_stop, on_step, **kw):
+        rec.sampled.append((cond, neg, cfg))
+        return mx.zeros((1, 128, height // 16, width // 16))
+
+    monkeypatch.setattr(api, "encode_text", encode_text)
+    monkeypatch.setattr(api, "encode_references", encode_references)
+    monkeypatch.setattr(api, "sample", sample)
+    monkeypatch.setattr(api, "plan_request",
+                        lambda *a, **k: SimpleNamespace(release_encoder=False))
+    monkeypatch.setattr(api, "vae_decode", lambda pipe, x, *, alpha, plan:
+                        mx.zeros((1, x.shape[2] * 16, x.shape[3] * 16, 3)))
+    req = svc.parse_request("edits", fields)
+    req.images = [np.full(shape, 9, np.uint8)]
+    svc.check_family(req, served)
+    size = svc.target_size(req, served)
+    out = svc.run_job(served, req, size=size, budget=None,
+                      stop=threading.Event())
+    return rec, req, size, out
+
+
+def test_a_flux2_edit_schedules_by_the_image_tokens_alone(monkeypatch):
+    """A 256 x 256 reference holds 256 tokens beside the 16 of a 64 x 64
+    image: the schedule reads the 16."""
+    rec, req, size, out = _flux2_job(
+        monkeypatch, "distilled", {"prompt": "make it red", "size": "64x64",
+                                   "steps": "4"})
+    assert size == (64, 64)
+    (cond, _, _), = rec.sampled
+    assert [z.shape for z in cond.ref_latents] == [(128, 16, 16)]
+    assert rec.sigmas == [(4, 16)]
+    assert out.usage["output_tokens"] == 16
+
+
+def test_the_negative_row_of_a_guided_flux2_base_edit_takes_the_references(
+        monkeypatch):
+    """Base guides the prompt's row by the empty prompt's, and both rows
+    carry the references, as the reference's denoise_cfg gives img_cond_seq
+    to both."""
+    rec, req, _, _ = _flux2_job(monkeypatch, "base",
+                                {"prompt": "make it red"})
+    refs = tuple(req.refs)
+    assert rec.encoded == [("make it red", refs), ("", refs)]
+    (cond, neg, cfg), = rec.sampled
+    assert cfg == 4.0 and neg is not None
+    assert neg.refs == cond.refs == refs
+    assert [z.shape for z in neg.ref_latents] == [
+        z.shape for z in cond.ref_latents] == [(128, 16, 16)]
