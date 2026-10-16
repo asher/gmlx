@@ -696,7 +696,12 @@ def test_the_real_rows_of_a_padded_tap_are_the_tap_of_the_prompt():
     ids = [3, 17, 42, 5]
     (plain,) = te.tap(m, ids, layers=(3,))
     (padded,) = te.tap(m, ids, layers=(3,), pad=3, pad_id=9)
-    assert mx.allclose(padded[:, :4], plain, rtol=1e-5, atol=1e-6).item()
+    # The CPU's float32 GEMM rounds 5 rows apart from 4: the real rows read
+    # 5.4e-7 of relative L2 from the plain tap there, and match on the GPU.
+    # Real rows that read the pad row read 1.1 away.
+    got = np.array(padded[0, :4], np.float64)
+    want = np.array(plain[0], np.float64)
+    assert np.linalg.norm(got - want) / np.linalg.norm(want) < 1e-5
     # One token and its pads: the pad row reads the token alone.
     (one,) = _cpu_tap(m, [7], layers=(2,), pad=2, pad_id=9)
     want = _np_forward(m, [7, 9, 9], [0, 1, 1],
