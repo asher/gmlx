@@ -856,6 +856,45 @@ def test_glu_kernel_against_the_float64_reference(routes, codec, dtype, lead):
     assert err <= 1.1 * err_stock, (err, err_stock)
 
 
+@needs_glu
+@pytest.mark.parametrize("lead", [(1, 4176), (1, 8272)],
+                         ids=["t2i_1024", "edit_1024"])
+def test_a_flux3_block_mlp_past_4096_rows_against_the_float64_reference(
+        routes, lead):
+    """FLUX.3 klein's ``Block.hidden`` on the route path, with its gate and
+    up halves stored as one q4_k leaf, at the joint rows of a 1024 step:
+    4096 image rows and 80 text rows, and those with 4096 reference rows.
+    Every row is held, the ones past 4096 too."""
+    from gmlx.image.families.flux3_klein import model as fm
+
+    if not _fused_glu():
+        pytest.skip("the GLU kernel runs on a GPU with tensor ops")
+    assert routes.install(("glu",)) == {"glu"}
+    fused = _leaf("q4_k", 128, 256, 1)
+    x = _x((*lead, 256), mx.bfloat16)
+    assert ops.glu_halves(fused, x) is not None
+    block = SimpleNamespace(mlp_in=fused)
+    got = fm.Block.hidden(block, x)
+    a, b = mx.split(fused(x), 2, axis=-1)
+    stock = ops.swiglu(a, b)
+    mx.eval(got, stock)
+    w = np.array(kq.dequantize(fused.weight, fused.scales, "q4_k",
+                               dtype=mx.float32), np.float64)
+    xf = _f64(x)
+    g, u = xf @ w[:64].T, xf @ w[64:].T
+    ref = g / (1.0 + np.exp(-g)) * u
+    assert got.shape == (*lead, 64) and got.dtype == mx.bfloat16
+    for rows, tag in ((slice(0, 4096), "first 4096"),
+                      (slice(4096, None), "past 4096")):
+        r, gr, sr = ref[:, rows], _f64(got)[:, rows], _f64(stock)[:, rows]
+        err, err_stock = _rel(gr, r), _rel(sr, r)
+        print(f"flux3 block glu {lead} {tag}: kernel {err:.3e} stock "
+              f"{err_stock:.3e}")
+        assert np.isfinite(gr).all()
+        assert err <= GLU_TOL[mx.bfloat16], (tag, err)
+        assert err <= 1.1 * err_stock, (tag, err, err_stock)
+
+
 @needs_qk
 @pytest.mark.parametrize("dtype", DTYPES, ids=["bf16", "f16"])
 def test_a_routed_step_stays_near_the_stock_step(routes, dtype):
