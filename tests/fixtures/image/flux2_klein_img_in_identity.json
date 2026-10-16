@@ -1,0 +1,165 @@
+{
+ "_note": "img_in.weight of every GGUF of the two unsloth FLUX.2 klein 4B repos by HTTP range reads: its codec and the sha256 of its bf16 bits, as gmlx.image.fingerprint.weight_identity forms it over the identity tensors",
+ "repos": {
+  "unsloth/FLUX.2-klein-4B-GGUF": {
+   "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
+   "files": {
+    "flux-2-klein-4b-BF16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 7751115328
+    },
+    "flux-2-klein-4b-F16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 7751115328
+    },
+    "flux-2-klein-4b-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 1827807808
+    },
+    "flux-2-klein-4b-Q3_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2124489280
+    },
+    "flux-2-klein-4b-Q3_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2101928512
+    },
+    "flux-2-klein-4b-Q4_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2460394048
+    },
+    "flux-2-klein-4b-Q4_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2690425408
+    },
+    "flux-2-klein-4b-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2604311104
+    },
+    "flux-2-klein-4b-Q4_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2583077440
+    },
+    "flux-2-klein-4b-Q5_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 2920456768
+    },
+    "flux-2-klein-4b-Q5_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 3150488128
+    },
+    "flux-2-klein-4b-Q5_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 3073368640
+    },
+    "flux-2-klein-4b-Q5_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 3050807872
+    },
+    "flux-2-klein-4b-Q6_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 3409273408
+    },
+    "flux-2-klein-4b-Q8_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816ed3639a9",
+     "size": 4300644928
+    }
+   }
+  },
+  "unsloth/FLUX.2-klein-base-4B-GGUF": {
+   "revision": "5fd6513800b1f13016fab83600b392a35f29d56d",
+   "files": {
+    "flux-2-klein-base-4b-BF16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 7751115328
+    },
+    "flux-2-klein-base-4b-F16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 7751115328
+    },
+    "flux-2-klein-base-4b-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 1827807808
+    },
+    "flux-2-klein-base-4b-Q3_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2124489280
+    },
+    "flux-2-klein-base-4b-Q3_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2101928512
+    },
+    "flux-2-klein-base-4b-Q4_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2460394048
+    },
+    "flux-2-klein-base-4b-Q4_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2690425408
+    },
+    "flux-2-klein-base-4b-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2604311104
+    },
+    "flux-2-klein-base-4b-Q4_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2583077440
+    },
+    "flux-2-klein-base-4b-Q5_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 2920456768
+    },
+    "flux-2-klein-base-4b-Q5_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 3150488128
+    },
+    "flux-2-klein-base-4b-Q5_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 3073368640
+    },
+    "flux-2-klein-base-4b-Q5_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 3050807872
+    },
+    "flux-2-klein-base-4b-Q6_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 3409273408
+    },
+    "flux-2-klein-base-4b-Q8_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce",
+     "size": 4300644928
+    }
+   }
+  }
+ }
+}

@@ -115,6 +115,37 @@ def test_the_identity_table_names_both_4b_variants_with_their_sampling():
     assert fam.unknown_variant is None and not fam.needs_variant
 
 
+def test_every_published_quant_keeps_the_identity_tensor_bf16():
+    """img_in.weight is BF16 in every GGUF of both unsloth 4B repos, the
+    F16 file included, so every file of a checkpoint gives the hash of
+    its variant row. The range reads of the fixtures hold the codec and
+    the hash of each file, and the F16 header stores every other matrix
+    F16 and still matches the 4B config."""
+    from collections import Counter
+
+    table = load_json("flux2_klein_img_in_identity.json")["repos"]
+    want = {"unsloth/FLUX.2-klein-4B-GGUF": ("distilled", DISTILLED_HASH),
+            "unsloth/FLUX.2-klein-base-4B-GGUF": ("base", BASE_HASH)}
+    assert set(table) == set(want)
+    fam = get_family("flux2_klein")
+    for repo, row in table.items():
+        variant, digest = want[repo]
+        files = row["files"]
+        assert len(files) == 15, repo
+        assert {f.rsplit("-", 1)[1] for f in files} >= {
+            "F16.gguf", "BF16.gguf", "Q4_K_M.gguf", "Q8_0.gguf"}
+        assert {v["img_in.weight"] for v in files.values()} == {"BF16"}
+        assert {v["sha256"] for v in files.values()} == {digest}
+        assert fam.variants[digest].name == variant
+    view = fixture_view("flux2_klein_4b_f16.header.json")
+    assert view.tensors["img_in.weight"].codec == "BF16"
+    assert Counter(t.codec for t in view.tensors.values()) == {
+        "F32": 60, "F16": 80, "BF16": 9}
+    got = fp.identify(view)
+    assert got.family.name == "flux2_klein"
+    assert got.config == official_config(CONFIG_4B)
+
+
 @pytest.mark.parametrize("digest,variant", [(DISTILLED_HASH, "distilled"),
                                             (BASE_HASH, "base"),
                                             ("0" * 64, "unknown")])

@@ -127,6 +127,20 @@
     "sha256": "5489463ed96056b0bb5472abb5d1bba7055e48d574e37877acb43b407465e26f",
     "kv_kept": "general.architecture"
   },
+  "flux2_klein_4b_f16.header.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
+    "file": "flux-2-klein-4b-F16.gguf",
+    "size": 7751115328,
+    "sha256": "c814dc08a07e3a6203547183eae8299835d32dc002fe0c24e1d02b4f2af649da",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_img_in_identity.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF and unsloth/FLUX.2-klein-base-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66 and 5fd6513800b1f13016fab83600b392a35f29d56d",
+    "file": "img_in.weight of every .gguf, by HTTP range reads",
+    "note": "each file's size is in the fixture; the hashes are of the tensor's bf16 bits"
+  },
   "flux2_klein_4b_transformer_config.json": {
     "repo": "black-forest-labs/FLUX.2-klein-4B",
     "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
