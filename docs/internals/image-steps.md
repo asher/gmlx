@@ -52,7 +52,7 @@ that the body hashes to the name in the path.
 | Route | Purpose |
 |-------|---------|
 | `GET capabilities` | The contract version, families, wire dtypes and limits |
-| `GET models`, `GET models/{model}/status`, `GET models/{model}/manifest` | The image models and the default one; one model's family, latent format, memory and sampling, with the rule and constants of a schedule that follows the image size under `sampling.schedule`; its DiT tensor names and shapes |
+| `GET models`, `GET models/{model}/status`, `GET models/{model}/manifest` | The image models and the default one; one model's family, latent format, memory and sampling; its DiT tensor names and shapes |
 | `POST models/load`, `POST models/unload` | Load or unload a model |
 | `POST encode` | A prompt, with reference images for an edit, as a conditioning; the server keeps its tensors by hash |
 | `HEAD tensors/{hash}`, `PUT tensors/{hash}` | Ask whether the server holds a tensor, or upload it |
@@ -62,6 +62,10 @@ that the body hashes to the name in the path.
 | `POST step` | The model output for latents at a timestep, one row per conditioning |
 | `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
 | `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
+
+A model's status gives, under `sampling.schedule`, the rule and the
+constants of its schedule when that schedule follows the image size,
+as on FLUX.2 klein and Qwen-Image 2.1, and null on any other.
 
 ## Bodies and hashes
 
