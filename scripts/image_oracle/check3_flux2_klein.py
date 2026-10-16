@@ -412,7 +412,11 @@ def seeded(torch, rng, shape, std=1.0) -> np.ndarray:
 
 def tiny_state(torch, fm, params, seed: int) -> dict:
     """Random tiny weights by name, float32 numpy in torch order: norm
-    scales near one, matrices at 1 / sqrt(fan in)."""
+    scales near one, matrices at 1 / sqrt(fan in). The key norm scales
+    are then 1.5 times their draw at even indices and 1 / 1.5 times at odd
+    ones. A swap of the query and key scales changes the logits only
+    through the cross terms of each rotary pair, so the key scales differ
+    from the query scales inside each pair."""
     with torch.device("meta"):
         model = fm.Flux2(params)
     rng = np.random.default_rng(seed)
@@ -421,6 +425,8 @@ def tiny_state(torch, fm, params, seed: int) -> dict:
         shape = tuple(p.shape)
         if name.endswith(".scale"):
             v = 1 + rng.standard_normal(shape) * 0.2
+            if name.endswith("key_norm.scale"):
+                v = v * np.where(np.arange(shape[-1]) % 2 == 0, 1.5, 1 / 1.5)
         else:
             v = rng.standard_normal(shape) / np.sqrt(shape[-1])
         out[name] = v.astype(np.float32)

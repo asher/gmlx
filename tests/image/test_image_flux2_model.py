@@ -324,6 +324,11 @@ def _final_shift_scale_swapped(mp, model):
                lambda self, x, shift, scale: real(self, x, scale, shift))
 
 
+def _qk_scales_swapped(mp, model):
+    mp.setattr(fm, "qk", lambda norm, q, k, cos, sin, eps: ops.qk_norm_rope(
+        q, k, norm.key_norm.scale, norm.query_norm.scale, cos, sin, eps))
+
+
 FAULTS = {"shift and scale swapped": _shift_scale_swapped,
           "attention and feed-forward modulations swapped":
               _norm_mods_swapped,
@@ -335,7 +340,8 @@ FAULTS = {"shift and scale swapped": _shift_scale_swapped,
           "reference time axis unscaled": _refs_unscaled,
           "text position on another axis": _text_at_one_axis_early,
           "time embedding in fp32": _time_unrounded,
-          "final shift and scale swapped": _final_shift_scale_swapped}
+          "final shift and scale swapped": _final_shift_scale_swapped,
+          "q and k norm scales swapped": _qk_scales_swapped}
 
 
 @pytest.fixture(scope="module")
