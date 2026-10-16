@@ -170,11 +170,14 @@ gmlx node pack runs these image models in it, on the gmlx server.
 | `qwen-image` | Qwen-Image 2.1 | 40 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `qwen-image-turbo` | Qwen-Image 2.1 Turbo | 8 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `krea-2-turbo` | Krea 2 Turbo | 8 | From one image | Qwen3-VL-4B-Instruct |
-| `flux-3-klein` | FLUX.3 klein | 16 | From up to 10 reference images | Qwen3-VL-4B-Instruct |
+| `flux-3-klein` | FLUX.3 klein | 16, with the `euler` sampler and guidance 1 only | From up to 10 reference images | Qwen3-VL-4B-Instruct |
 | `flux-3-klein-base` | FLUX.3 klein Base | 50 | From up to 10 reference images | Qwen3-VL-4B-Instruct |
 
-FLUX.3 klein reads its reference images without the encoder's vision
-tower, so it edits with the encoder file alone. FLUX.3 klein and Krea 2
+FLUX.3 klein is distilled to sample without guidance, and with `euler`
+alone, so a request or a flag that sets another guidance or sampler is
+refused. FLUX.3 klein Base takes both. FLUX.3 klein reads its reference
+images without the encoder's vision tower, so it edits with the encoder
+file alone. FLUX.3 klein and Krea 2
 Turbo use the same Qwen3-VL-4B-Instruct file, and `pull` downloads it once
 for both.
 

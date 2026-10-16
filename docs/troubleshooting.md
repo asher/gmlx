@@ -313,6 +313,13 @@ Move or delete that file, and pull again.
 The VAE that `gmlx pull` downloaded is not the published file. Delete the
 file that the message names, and pull again.
 
+### `is a flow map, which samples without guidance: drop cfg ...` or `is a flow map, which samples with euler only, not ...`
+
+FLUX.3 klein is distilled to sample without guidance and with the `euler`
+sampler alone. Leave out `--guidance` and `--sampler`, or the request's
+`guidance` and `sampler`, or set them to 1 and `euler`. FLUX.3 klein Base
+takes other values of both.
+
 ### `gmlx image does not apply` or `is not a ... adapter`
 
 The LoRA is of a kind gmlx does not apply, or it was made for another
