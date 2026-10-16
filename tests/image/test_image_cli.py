@@ -883,6 +883,20 @@ def test_the_preflight_prices_the_rows_a_prompt_can_give(monkeypatch):
         assert plan.terms[k] == want.terms[k] < most.terms[k], k
     over = pf.check("d", "e", "v", prompts=[short, long], **kw)
     assert over.terms["step_peak"] == most.terms["step_peak"]
+    # An edit whose encoder reads the images passes no prompts, and is
+    # priced at the most rows beside the tokens of its reference.
+    row = memfit.PEAKS["flux3_klein"]
+    edit = pf.check("d", "e", "v", refs=[(1024, 1024)], **kw)
+    assert edit.terms["step_peak"] == row.step.bytes(
+        (4096 + 4096 + 4096) * row.width * 2)
+    # Z-Image prices the most caption rows whatever the prompt.
+    z = get_family("z_image")
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
+        family=z, variant="turbo"))
+    assert rows_at_most(encoder_spec(z), short) < 512
+    for k in ("step_peak", "encode_peak"):
+        assert pf.check("d", "e", "v", prompts=[short], **kw).terms[k] == \
+            pf.check("d", "e", "v", **kw).terms[k], k
 
 
 class _TinyEncoder(_OwnedEncoder):
@@ -1584,6 +1598,23 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
         capsys.readouterr().err
     # All refused before any model loads.
     assert edit.pipes == [] and edit.loads == []
+
+
+@pytest.mark.parametrize("rules", ["qwen_image21", "flux3_klein"])
+def test_an_edit_prices_its_prompts_when_the_encoder_reads_them_alone(
+        env, monkeypatch, tmp_path, rules):
+    """The fit check before the load is given the prompts of an edit whose
+    encoder reads them alone, and none for an encoder that reads the
+    reference images with them, which is priced at the most rows."""
+    parts = get_family(rules).edit
+    e = _edit_env(env, monkeypatch, tmp_path, parts)
+    assert umbrella_main(e.base + [
+        "--prompt", "swap them", "--size", "32x32", "--seed", "3",
+        "--guidance", "3", "--negative-prompt", "blurry", "--ref",
+        e.refs[0], "--encoder-mmproj", e.mmproj,
+        "--output", str(tmp_path / "o.png")]) == 0
+    assert e.checks[0]["prompts"] == (
+        ["swap them", "blurry"] if parts.text_only else ())
 
 
 def test_one_flux3_reference_sizes_the_request_and_crops_its_image(

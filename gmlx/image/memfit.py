@@ -530,6 +530,8 @@ class PeakRow:
     ref_token_px: int = 0           # pixels per reference token on each
                                     # axis when the reference tokens join
                                     # the rows of every step, else 0
+    prices_prompt: bool = True      # a plan that knows the prompt prices
+                                    # its text rows, else the family's most
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:
@@ -542,9 +544,13 @@ class PeakRow:
 
 
 PEAKS = {
+    # Z-Image prices the most caption rows whatever the prompt. At its own
+    # rows a step of a short caption is priced 0.07 GiB above the cell of
+    # 1056 rows and 0.16 GiB above the cell of 4128 rows, where the most
+    # rows leave 0.22 and 0.32 GiB.
     "z_image": PeakRow(token_px=16, row_multiple=32, caption_rows=512,
                        width=11520 + 2 * 10240, step=Z_IMAGE_STEP,
-                       encode_row_bytes=3 * 9728 * 2),
+                       encode_row_bytes=3 * 9728 * 2, prices_prompt=False),
     # A step runs the target rows alone: the fused MLP product and its
     # gated half are the widest outputs. The sizes are those the
     # fingerprint holds the file to: 32 blocks, 4096 wide, a 12288 MLP.
@@ -773,6 +779,13 @@ def load_transient(encoder=None, vae=None, mmproj=None) -> int:
     if vae is not None and not isinstance(vae, (int, float)):
         copies = vae_bytes(vae, 4)
     return int(LOAD_ROOM * max(head, copies))
+
+
+def prices_prompt(family: str) -> bool:
+    """Whether a plan of ``family`` that knows the prompt prices its text
+    rows, where one that does not prices the family's most."""
+    row = PEAKS.get(family)
+    return row is not None and row.prices_prompt
 
 
 def image_rows(row: PeakRow, height: int, width: int,

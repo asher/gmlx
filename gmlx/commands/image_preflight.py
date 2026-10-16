@@ -100,7 +100,8 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     the (height, width) in pixels of each reference image of the request.
     ``prompts`` holds the texts of a request whose encoder reads them
     alone, in the family's template, and prices their rows at the most
-    their bytes can give; without them the rows are the family's most.
+    their bytes can give on a family whose plan prices the prompt; else
+    the rows are the family's most.
     Raises ``ImageMemoryError`` when the request cannot fit."""
     if not enabled():
         return None
@@ -122,7 +123,7 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     # The DiT loads after the encoder, in either order.
     cast = dit_transient(dit, act.dit)
     caption = None
-    if prompts:
+    if prompts and memfit.prices_prompt(fam):
         spec = encoder_spec(ident.family)
         caption = max(rows_at_most(spec, p) for p in prompts)
     return memfit.plan_memory(
