@@ -45,6 +45,9 @@ _Q_NORM = "double_blocks.0.img_attn.norm.query_norm.scale"
 # Klein4BParams and Klein9BParams. The text width is that of three
 # stacked layers of the Qwen3 encoder of each size.
 SIZES = {"4B": (3072, 5, 20, 7680), "9B": (4096, 8, 24, 12288)}
+# The sizes gmlx image runs. A 9B file is told apart and refused, since
+# the encoder and the memory rows gmlx image has are the 4B's.
+RUN_SIZES = ("4B",)
 _HEAD, _LATENT, _T, _MLP_RATIO = 128, 128, 256, 3
 # (img_in, txt_in) of FLUX.2 dev (Flux2Params) and of FLUX.1.
 _FLUX2_DEV = ((128, 6144), (15360, 6144))
@@ -285,6 +288,9 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
         more = f" (+{len(diffs) - 8} more)" if len(diffs) > 8 else ""
         return Refusal(f"a {TITLE} relative that gmlx image does not "
                        f"support: {shown}{more}")
+    if size not in RUN_SIZES:
+        return Refusal(f"{title} is not supported yet. gmlx image runs "
+                       f"{TITLE} 4B and base 4B.")
     return Match()
 
 

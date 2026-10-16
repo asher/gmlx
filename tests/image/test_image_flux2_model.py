@@ -22,7 +22,6 @@ import flux2_gates as fg
 from image_fixtures import fixture_view
 from oracle_fixture import committed_fixture
 
-from gmlx.image import fingerprint as fp
 from gmlx.image import ops
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.families.flux2_klein import model as fm
@@ -50,11 +49,14 @@ def tiny():
 def test_the_module_tree_names_every_tensor_of_the_file(name):
     """Strict name equality and the torch shape of every tensor, on the
     real config. Nothing is evaluated."""
-    got = fp.identify(fixture_view(name))
-    model = get_family("flux2_klein").build(got.config)
-    check_names(model, got.view.tensors, "FLUX.2 klein")
+    # The 9B is refused by its fingerprint, so its config is the one the
+    # family synthesizes from the header.
+    view = fixture_view(name)
+    fam = get_family("flux2_klein")
+    model = fam.build(fam.synth_config(view))
+    check_names(model, view.tensors, "FLUX.2 klein")
     params = dict(tree_flatten(model.parameters()))
-    for n, t in got.view.tensors.items():
+    for n, t in view.tensors.items():
         assert params[n].shape == tuple(reversed(t.shape)), n
 
 

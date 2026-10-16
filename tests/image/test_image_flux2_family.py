@@ -1,7 +1,8 @@
-"""The FLUX.2 klein registry row: the 4B and 9B files, the config against
-the official transformer/config.json of both 4B checkpoints (check 1),
-the variant from the identity hash, relatives refused with the reason,
-and the line between FLUX.2 klein and the other FLUX models. CPU-only.
+"""The FLUX.2 klein registry row: the 4B files and the 9B told apart and
+refused, the config against the official transformer/config.json of both
+4B checkpoints (check 1), the variant from the identity hash, relatives
+refused with the reason, and the line between FLUX.2 klein and the other
+FLUX models. CPU-only.
 Header fixtures hold names, shapes and codecs, no weights. The rows on
 the real files read their headers and the identity tensor, and skip
 without them."""
@@ -53,14 +54,22 @@ def test_the_4b_file_gives_the_official_config_of_both_checkpoints(config,
     assert got.config == official_config(config)
 
 
-def test_the_9b_file_is_flux2_klein_9b():
-    """The 9B widths and depths of Klein9BParams. The official 9B config
-    is gated, so check 1 at 9B waits for it."""
-    got = fp.identify(fixture_view(KLEIN_9B))
-    assert got.family.name == "flux2_klein"
+NOT_YET = ("FLUX.2 klein 9B is not supported yet. gmlx image runs FLUX.2 "
+           "klein 4B and base 4B.")
+
+
+def test_the_9b_file_is_flux2_klein_9b_and_refused_by_name():
+    """The 9B widths and depths of Klein9BParams, told apart from the 4B
+    and refused by name, pointing to the 4B. The official 9B config is
+    gated, so check 1 at 9B waits for it."""
+    view = fixture_view(KLEIN_9B)
+    assert f2.size_of(view) == "9B" and f2.RUN_SIZES == ("4B",)
+    assert f2.fingerprint(view) == fp.Refusal(NOT_YET)
+    assert _refused(view) == NOT_YET
+    assert _refused(view, family="flux2_klein") == NOT_YET
     want = dict(official_config(CONFIG_4B), joint_attention_dim=12288,
                 num_attention_heads=32, num_layers=8, num_single_layers=24)
-    assert got.config == want
+    assert f2.synth_config(view) == want
 
 
 def test_the_config_fixtures_are_the_official_files_in_bytes():
