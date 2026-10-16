@@ -1244,6 +1244,30 @@ def test_a_flux3_step_prices_the_reference_latents_of_its_rows(
     assert host.held == 0
 
 
+def test_each_row_of_a_step_takes_ten_references_and_no_more(
+        host, fpipes, monkeypatch):
+    """The family's count of references is allowed in every row, and one
+    more in any row is refused with that row's index."""
+    _serve(host, "f3d", fpipes[True])
+    c = _client()
+    feats = np.random.default_rng(13).standard_normal((1, 10, 24)).astype(
+        np.float32)
+    x = np.zeros((2, *F3_SHAPE[1:]), np.float32)
+    small = c.put(np.zeros((1, 8, 2, 3), np.float32))
+    row = _rows(c, feats)[0]
+    ten = [{**row, "ref_latents": [small] * 10} for _ in range(2)]
+    _reaches_the_dit(monkeypatch, lambda: c.step(
+        "f3d", None, x, [0.75], ten, sample_sigmas=SIGMAS))
+    for i in range(2):
+        rows = [dict(r) for r in ten]
+        rows[i]["ref_latents"] = [small] * 11
+        with pytest.raises(StepsClientError, match="FLUX.3 klein takes at "
+                           f"most 10 reference latents in a row, and row {i} "
+                           "has 11"):
+            c.step("f3d", None, x, [0.75], rows, sample_sigmas=SIGMAS)
+    assert host.held == 0
+
+
 def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host,
                                                             monkeypatch):
     """Two reference latents of 1024 pixels in a Qwen-Image 2.1 row put
