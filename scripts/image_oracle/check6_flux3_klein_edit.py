@@ -9,8 +9,8 @@ output when the request gives no size, each of several by
 prepare_multi_reference, and the size by default_size. The source
 images are synthetic, made from --seed. The preparations of the sources
 of PREPARE are kept beside those of the runs, so the sizing rules are
-held at a resize, a reflect pad, a symmetric pad, the least side and the
-greatest side.
+held at a resize, a reflect pad, a symmetric pad on a least side of 16
+pixels, the least side of a canvas and the greatest side.
 
 A run is BFL's own Pipeline.generate as in check6_flux3_klein, on the
 same stand-ins for the text encoder and the noise, with BFL's
@@ -47,12 +47,17 @@ SEED = 6
 # Synthetic sources, (width, height, channels).
 SOURCES = {"wide": (600, 400, 3), "square": (400, 400, 4),
            "large": (2400, 1800, 3), "small": (40, 24, 3),
-           "long": (5000, 200, 3), "many": (1600, 1000, 3)}
+           "long": (5000, 200, 3), "many": (1600, 1000, 3),
+           "tiny": (20, 16, 3)}
 # The edits the DiT runs: the sources of each, in order.
 CASES = {"one": ("wide",), "two": ("wide", "square")}
 # Sources prepared alone, as one reference, and as one of several.
-PREPARE = {"single": ("wide", "square", "large", "small", "long"),
+PREPARE = {"single": ("wide", "square", "large", "small", "long", "tiny"),
            "multi": ("wide", "square", "large", "many")}
+# The gate of a run, at the default size of its references.
+RULE = ("latents after a kept step and after the last: relative L2 at "
+        "twice the oracle's own bf16 against fp32 relative L2 after that "
+        "step, on the run's own size")
 
 
 def source(rng, width: int, height: int, channels: int) -> np.ndarray:
@@ -314,7 +319,7 @@ def main(argv=None) -> int:
                     "w); the DiT reads them in bf16",
         ref_ids="the image_cond ids the DiT read, (L, 4) float32",
         reference_commit=commit, gguf_codecs=census)
-    fx.tolerances["rule"] = c6.RULE
+    fx.tolerances["rule"] = RULE
     path = fx.write(a.out)
     print(f"[edit] wrote {path}", flush=True)
     return 0
