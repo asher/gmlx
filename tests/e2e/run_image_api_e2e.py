@@ -62,6 +62,26 @@ FAMILIES = (("z", "z-image-turbo"), ("qwen", "qwen-image"),
 # The --family choices: each family, both of the first two, and all three.
 CHOICES = {"z": ("z",), "qwen": ("qwen",), "flux": ("flux",),
            "both": ("z", "qwen"), "all": ("z", "qwen", "flux")}
+# The DEFAULTS keys of each family's files.
+PREFIX = {"z": "z_", "qwen": "q_", "flux": "f_"}
+# How to make a file a pull packs rather than downloads.
+MAKE = {"f_vae": "gmlx pull flux-3-klein packs the FLUX.2 VAE there, or "
+                 "pass the GGUF that gmlx image pack-vae wrote"}
+
+
+def missing_files(a) -> list:
+    """A line for each file of the run that is not there, before the
+    server starts."""
+    keys = ["chat"] + [k for k in DEFAULTS for f in CHOICES[a.family]
+                       if k.startswith(PREFIX[f])]
+    out = []
+    for k in keys:
+        path = getattr(a, k)
+        if not os.path.isfile(path):
+            hint = f": {MAKE[k]}" if k in MAKE else ""
+            out.append(f"--{k.replace('_', '-')} {path} is not a "
+                       f"file{hint}")
+    return out
 PROMPT = "a red lighthouse on a rocky coast at dusk, photograph"
 
 
@@ -413,6 +433,10 @@ def main() -> int:
     a = ap.parse_args()
     if a.measure:
         a.family = "z"
+    missing = missing_files(a)
+    if missing:
+        print("\n".join(missing), file=sys.stderr)
+        return 2
     os.makedirs(a.out, exist_ok=True)
     import yaml
 
