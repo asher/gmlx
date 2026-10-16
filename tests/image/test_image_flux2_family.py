@@ -1,14 +1,15 @@
 """The FLUX.2 klein registry row: the 4B files and the 9B told apart and
-refused, the config against the official transformer/config.json of both
-4B checkpoints (check 1), the variant from the identity hash, relatives
-refused with the reason, and the line between FLUX.2 klein and the other
-FLUX models. CPU-only.
+refused, the VAE sources, the config against the official
+transformer/config.json of both 4B checkpoints (check 1), the variant
+from the identity hash, relatives refused with the reason, and the line
+between FLUX.2 klein and the other FLUX models. CPU-only.
 Header fixtures hold names, shapes and codecs, no weights. The rows on
 the real files read their headers and the identity tensor, and skip
 without them."""
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -70,6 +71,120 @@ def test_the_9b_file_is_flux2_klein_9b_and_refused_by_name():
     want = dict(official_config(CONFIG_4B), joint_attention_dim=12288,
                 num_attention_heads=32, num_layers=8, num_single_layers=24)
     assert f2.synth_config(view) == want
+
+
+def _header_gguf(path, name: str) -> str:
+    """A GGUF of the header fixture ``name``: its names, shapes and
+    codecs, and no tensor bytes."""
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), "flux")
+    for tname, shape, codec in load_json(name)["tensors"]:
+        raw = getattr(gguf.GGMLQuantizationType, codec)
+        block, size = gguf.GGML_QUANT_SIZES[raw]
+        n = int(np.prod(shape)) // block * size
+        # The fixture holds GGUF dims, innermost first, and gguf-py takes
+        # numpy order. Any dtype but uint8 keeps the shape in elements.
+        w.add_tensor_info(tname, list(reversed(shape)), np.dtype(np.float32),
+                          n, raw_dtype=raw)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_ti_data_to_file()
+    w.close()
+    return str(path)
+
+
+def test_a_9b_file_gets_no_memory_plan(tmp_path, monkeypatch):
+    """The memory rows of the family are measured on the 4B files: the
+    preflight of a 9B file refuses it by name and prices no plan, while
+    the same request on a 4B header is priced."""
+    from gmlx.commands import image_preflight
+    from gmlx.load.headerscan import scan_gguf
+
+    monkeypatch.setenv("GMLX_TOOL_PREFLIGHT", "1")
+    # The price, not the fit on this host.
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    kw = dict(height=1024, width=1024, cfg=1.0)
+    paths = {n: _header_gguf(tmp_path / f"{i}.gguf", n)
+             for i, n in enumerate((KLEIN_4B, KLEIN_9B))}
+    for name, path in paths.items():
+        got = [[t.name, list(t.shape), t.type_name]
+               for t in scan_gguf(path).tensors]
+        assert sorted(got) == sorted(load_json(name)["tensors"])
+    plan = image_preflight.check(paths[KLEIN_4B], None, None, **kw)
+    assert plan is not None and plan.terms["step_peak"] > 0
+    with pytest.raises(fp.ImageModelError) as ei:
+        image_preflight.check(paths[KLEIN_9B], None, None, **kw)
+    assert str(ei.value) == NOT_YET
+
+
+# The files a FLUX.2 klein VAE source can be: Comfy-Org's flux2-vae and
+# BFL's 4B VAE, both in diffusers names, F32 and BF16, and BFL's original
+# ae.safetensors, F32.
+VAE_SOURCES = {"flux3_klein_vae.header.json": ("diffusers", "F32"),
+               "flux2_klein_vae.header.json": ("diffusers", "BF16"),
+               "flux3_klein_ae.header.json": ("original", "F32")}
+
+
+@pytest.mark.parametrize("name", list(VAE_SOURCES))
+def test_each_vae_source_reads_as_the_flux2_klein_vae(name):
+    """Names and shapes alone identify the VAE, so any of the sources is
+    the one FLUX.3 klein reads, at the same config, and its price in the
+    memory plan comes from its shapes, not its dtype."""
+    from gmlx.image import memfit
+    from gmlx.image.vae import reader
+
+    head = load_json(name)
+    manifest = load_json("manifest.json")[name]
+    assert head["n_tensors"] == len(head["tensors"]) == 251
+    assert len(manifest["sha256"]) == 64 and manifest["size"] == (
+        8 + head["header_bytes"] + head["payload_bytes"])
+    shapes = {n: tuple(s) for n, s, _ in head["tensors"]}
+    dtypes = {n: d for n, _, d in head["tensors"]}
+    layout, names = reader.diffusers_names({n: n for n in shapes})
+    want_layout, codec = VAE_SOURCES[name]
+    assert layout == want_layout
+    assert {d for n, d in dtypes.items()
+            if n != "bn.num_batches_tracked"} == {codec}
+    mapped = {}
+    for n, f in names.items():
+        s = shapes[f]
+        if layout == "original" and ".attentions.0.to_" in n and len(s) == 4:
+            s = s[:2]
+        mapped[n] = s
+    header = reader.VaeHeader(name, "safetensors", layout, names, mapped,
+                              {n: dtypes[f] for n, f in names.items()}, {})
+    cfg = reader.identify(header, "flux2_klein")
+    assert cfg == reader.identify(header, "flux3_klein")
+    assert (cfg.latent_channels, cfg.block_out_channels) == (
+        32, (128, 256, 512, 512))
+    assert memfit.VAE_ROWS["flux2_klein"] is memfit.VAE_ROWS["flux3_klein"]
+    comfy = load_json("flux3_klein_vae.header.json")
+    assert memfit.vae_bytes(header, 2) == memfit.vae_bytes(
+        SimpleNamespace(shapes={n: tuple(s) for n, s, _ in comfy["tensors"]}),
+        2)
+
+
+def test_the_shared_vae_packs_for_flux3_klein_unless_told(tmp_path):
+    """A packed VAE names one family. The FLUX.2 autoencoder packs for
+    FLUX.3 klein, which registered it first, as before FLUX.2 klein read
+    it, and for FLUX.2 klein when told. FLUX.2 klein loads either."""
+    from oracle_fixture import committed_fixture
+    from test_image_check5_flux3_klein import TINY, _tiny_tensors, _write_st
+
+    from gmlx.image import catalog
+    from gmlx.image.vae import load_vae, pack_vae
+
+    src = _write_st(tmp_path / "vae.safetensors",
+                    _tiny_tensors(committed_fixture(TINY)))
+    kw = dict(source_repo="r", source_revision="v", config_json="{}")
+    shared = pack_vae(src, tmp_path / "shared.gguf", **kw)
+    own = pack_vae(src, tmp_path / "own.gguf", family="flux2_klein", **kw)
+    assert (shared.family, own.family) == ("flux3_klein", "flux2_klein")
+    for rep in (shared, own):
+        assert catalog.vae_identity(rep.path)[0] == rep.family
+        assert load_vae(rep.path, family="flux2_klein",
+                        dtype="fp32").family == "flux2_klein"
 
 
 def test_the_config_fixtures_are_the_official_files_in_bytes():

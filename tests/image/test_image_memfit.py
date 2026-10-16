@@ -574,8 +574,8 @@ class _TinyVae:
 
 
 def test_unknown_family_is_refused(z_view):
-    with pytest.raises(ValueError, match="known: flux3_klein, krea2, "
-                                         "qwen_image21, z_image"):
+    with pytest.raises(ValueError, match="known: flux2_klein, flux3_klein, "
+                                         "krea2, qwen_image21, z_image"):
         plan_memory(z_view, 0, 0, family="flux", height=8, width=8,
                     budget=1e12, overcommit=False)
 
@@ -960,6 +960,87 @@ def test_the_flux3_encode_term_covers_every_measured_encode():
     # Without the base the shortest prompt is priced under its reading.
     assert 80 * row.encode_row_bytes * memfit.ENCODE_LIVE < \
         encodes[0]["gib"] * GiB
+
+
+FLUX2_CELLS = QWEN_CELLS.with_name("flux2_klein_cells.json")
+
+
+def test_the_flux2_row_covers_every_measured_step():
+    """The 4B cells: the 512 text rows of every prompt, sizes to 2048
+    pixels, one, two and four 1024 pixel references and guided Base
+    steps. Their rows count as FLUX.3 klein's do."""
+    row = memfit.PEAKS["flux2_klein"]
+    assert row.step is memfit.FLUX2_KLEIN_4B_STEP
+    assert row.width == 36864 and row.caption_rows == row.text_rows == 512
+    assert not memfit.prices_prompt("flux2_klein")
+    cells = json.loads(FLUX2_CELLS.read_text())["cells"]
+    assert {c["size"] for c in cells} == {256, 512, 768, 1024, 1280, 1536,
+                                          2048}
+    assert {c["text_rows"] for c in cells} == {512}
+    assert {c["size"] for c in cells if c["guided"]} == {512, 1024, 1536}
+    assert sorted(c["refs"] for c in cells if c.get("refs")) == [1, 2, 4]
+    assert {c["ref_px"] for c in cells if c.get("refs")} == {1024}
+    room = [_flux3_room(row, c) for c in cells]
+    assert min(room) >= ROOM
+    # A fit, not a ceiling: the closest cell is within 0.35 GiB, and none
+    # is priced more than 1.25 GiB above its reading.
+    assert min(room) <= 0.35 * GiB and max(room) <= 1.25 * GiB
+
+
+def test_a_thinner_flux2_row_misses_a_measured_cell():
+    row = memfit.PEAKS["flux2_klein"]
+    cells = json.loads(FLUX2_CELLS.read_text())["cells"]
+
+    def worst(**change) -> float:
+        thin = dataclasses.replace(row, step=dataclasses.replace(
+            row.step, **change))
+        return min(_flux3_room(thin, c) for c in cells)
+
+    assert worst() >= ROOM
+    assert worst(base=2.52 * GiB) < ROOM
+    assert worst(k=3.0) < ROOM
+    # Without the reference tokens in the rows, two 1024 pixel references
+    # are priced under their reading.
+    two = next(c for c in cells if c.get("refs") == 2)
+    alone = dataclasses.replace(row, ref_token_px=10 ** 9)
+    assert _flux3_room(alone, two) < ROOM
+
+
+def test_the_flux2_plan_counts_the_references_and_its_text_rows():
+    """Every prompt is 512 text rows, so the plan prices them whatever the
+    caller knows, and each reference's tokens in every step."""
+    row = memfit.PEAKS["flux2_klein"]
+    kw = dict(family="flux2_klein", height=1024, width=768,
+              budget=BUDGET_128, overcommit=False)
+
+    def step(rows, conds=1):
+        return row.step.bytes(rows * row.width * 2, conds)
+
+    text = 64 * 48 + 512
+    assert plan_memory(0, 0, 0, **kw).terms["step_peak"] == step(text)
+    p = plan_memory(0, 0, 0, ref_sizes=[(1024, 1024), (512, 768)], **kw)
+    assert p.terms["step_peak"] == step(text + 64 * 64 + 32 * 48)
+    p = plan_memory(0, 0, 0, refs=2, ref_px=512, cfg=4.0, **kw)
+    assert p.rows == 2 and p.terms["step_peak"] == step(text + 2 * 32 * 32,
+                                                        2)
+
+
+def test_the_flux2_encode_term_covers_every_measured_encode():
+    """An encode is 512 rows whatever the prompt, on either encoder file."""
+    row = memfit.PEAKS["flux2_klein"]
+    encodes = json.loads(FLUX2_CELLS.read_text())["encode"]
+    assert {e["rows"] for e in encodes} == {512}
+    assert {e["encoder"] for e in encodes} == {"Qwen3-4B-Q8_0.gguf",
+                                               "Qwen3-4B-Q4_K_M.gguf"}
+    p = plan_memory(0, ENCODER, 0, family="flux2_klein", height=512,
+                    width=512, budget=BUDGET_128, overcommit=False)
+    assert p.terms["encode_peak"] == int(
+        row.encode_base + 512 * row.encode_row_bytes * memfit.ENCODE_LIVE)
+    room = [p.terms["encode_peak"] - e["gib"] * GiB for e in encodes]
+    assert min(room) >= ROOM
+    # Without the base every encode is priced under its reading.
+    assert 512 * row.encode_row_bytes * memfit.ENCODE_LIVE < min(
+        e["gib"] for e in encodes) * GiB
 
 
 def test_a_thinner_qwen_row_misses_a_measured_cell():

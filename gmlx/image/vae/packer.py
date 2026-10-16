@@ -57,7 +57,9 @@ def _sha256_file(path: str) -> str:
 
 
 def _family(header, family: str | None) -> str:
-    names = [family] if family else sorted(VAES)
+    # A VAE that several families read, as FLUX.3 klein and FLUX.2 klein
+    # read the FLUX.2 autoencoder, packs for the first row that names it.
+    names = [family] if family else list(VAES)
     errors = []
     for name in names:
         try:

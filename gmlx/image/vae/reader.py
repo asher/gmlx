@@ -105,6 +105,12 @@ VAES = {
         flux2_ae.Flux2AE, 32, _own_space, flux2_ae.expected_unused,
         config_disagreements=flux2_ae.config_disagreements,
         fp32_keep=flux2_ae.BN_STATS),
+    # FLUX.2 klein's own autoencoder, the one FLUX.3 klein reads.
+    "flux2_klein": VaeRow(
+        "the FLUX.2 autoencoder", flux2_ae.config_from_shapes,
+        flux2_ae.Flux2AE, 32, _own_space, flux2_ae.expected_unused,
+        config_disagreements=flux2_ae.config_disagreements,
+        fp32_keep=flux2_ae.BN_STATS),
 }
 
 

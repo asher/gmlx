@@ -204,5 +204,12 @@
     "file": "vae/config.json",
     "size": 808,
     "sha256": "66564b3cd3f3f3ce5ce3cd4df72f1de883b242c7f338e27d420fe5ddcb0a6ed9"
+  },
+  "flux2_klein_vae.header.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "vae/diffusion_pytorch_model.safetensors",
+    "size": 168120878,
+    "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
   }
 }

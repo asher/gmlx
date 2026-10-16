@@ -398,8 +398,8 @@ def test_other_files_and_families_are_refused(tmp_path):
     junk.write_bytes(b"\xff" * 64)
     with pytest.raises(reader.VAEError, match="neither a GGUF"):
         reader.load_vae(junk, family="z_image", dtype=mx.float32)
-    with pytest.raises(reader.VAEError, match="known: flux3_klein, krea2, "
-                       "qwen_image21, z_image"):
+    with pytest.raises(reader.VAEError, match="known: flux2_klein, flux3_klein, "
+                       "krea2, qwen_image21, z_image"):
         reader.load_vae(path, family="sd15", dtype=mx.float32)
 
 
