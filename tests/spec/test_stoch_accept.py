@@ -195,3 +195,151 @@ def test_stoch_draft_sampler_stashes_and_samples_from_sharp_q(monkeypatch):
     np.testing.assert_allclose(q.sum(), 1.0, atol=1e-5)
     assert (q > 0).sum() == 4  # top-k truncated proposal
     assert q[int(tok.reshape(-1)[0].item())] > 0  # sampled inside the support
+
+
+def _fast(**kw):
+    from gmlx.serve.patches.sampling import _FastPositionedSampler
+
+    return _FastPositionedSampler(**kw)
+
+
+def test_candidate_walk_keeps_the_law_for_a_filtering_sampler():
+    """The serve sampler's walk runs over its k survivors. Every position is
+    an independent trial: acceptance is sum(min(p, q)), a rejection never
+    re-emits the rejected draft unless the residual keeps it, and the
+    emitted token's law is p."""
+    mx.random.seed(2)
+    rng = np.random.default_rng(2)
+    v, n = 32, 20000
+    row = rng.normal(0, 1.5, size=v).astype(np.float32)
+    sampler = _fast(temperature=0.8, top_p=0.9, top_k=8)
+    p = np.array(_stoch_target_probs(sampler, mx.array(row[None])))[0]
+    q = _softmax(rng.normal(0, 1.5, size=v)[None])[0].astype(np.float32)
+    drafts = rng.choice(v, size=n, p=q / q.sum())
+    logits = mx.array(np.tile(row, (n + 1, 1)))
+    q_rows = [mx.array(q)] * n
+    acc, res, bonus = sp._stoch_walk_graph(
+        sampler, logits, mx.array(drafts, dtype=mx.int32), q_rows)
+    acc, res = np.array(acc), np.array(res)
+    assert abs(acc.mean() - np.minimum(p, q).sum()) < 0.015
+    emitted = np.where(acc, drafts, res)
+    freq = np.bincount(emitted, minlength=v) / n
+    assert 0.5 * np.abs(freq - p).sum() < 0.02
+    assert p[int(np.array(bonus)[0])] > 0
+
+
+def test_candidate_walk_point_mass_keeps_the_law():
+    mx.random.seed(4)
+    rng = np.random.default_rng(4)
+    v, n = 32, 20000
+    row = rng.normal(0, 1.5, size=v).astype(np.float32)
+    sampler = _fast(temperature=1.0, top_k=6)
+    p = np.array(_stoch_target_probs(sampler, mx.array(row[None])))[0]
+    d = int(np.argsort(-p)[1])
+    acc, res, _ = sp._stoch_walk_graph(
+        sampler, mx.array(np.tile(row, (n + 1, 1))),
+        mx.full((n,), d, dtype=mx.int32), None)
+    acc, res = np.array(acc), np.array(res)
+    assert abs(acc.mean() - p[d]) < 0.015 and not (res == d).any()
+    freq = np.bincount(np.where(acc, d, res), minlength=v) / n
+    assert 0.5 * np.abs(freq - p).sum() < 0.02
+
+
+def test_walk_does_no_full_vocab_sort_for_a_filtering_sampler(monkeypatch):
+    """A verify block's rows take the hierarchical top-k, and the walk
+    after it works on k ids: no sort or partition spans the vocab."""
+    widths = []
+    for name in ("argpartition", "argsort", "sort"):
+        orig = getattr(mx, name)
+
+        def wrap(x, *a, _orig=orig, **k):
+            widths.append(int(x.shape[-1]))
+            return _orig(x, *a, **k)
+
+        monkeypatch.setattr(mx, name, wrap)
+    v = 16384
+    logits = mx.random.normal((4, v), key=mx.random.key(1))
+    q = mx.softmax(mx.random.normal((3, v), key=mx.random.key(2)), axis=-1)
+    graph = sp._stoch_walk_graph(_fast(temperature=1.0, top_p=0.95, top_k=20),
+                                 logits, mx.array([1, 2, 3], dtype=mx.int32),
+                                 [q[i] for i in range(3)])
+    mx.eval(*graph)
+    assert widths and max(widths) < v
+
+
+
+def test_the_walk_on_a_masked_row_of_a_padded_vocab_emits_vocab_ids():
+    """A width that is not a multiple of 128 is padded inside the top-k.
+    A structured-output row with fewer than k finite logits must still
+    walk, draw residuals and draw the bonus over vocab ids only."""
+    v = 9000
+    row = np.full(v, -np.inf, dtype=np.float32)
+    live = [8970, 8985, 8999]
+    row[live] = [2.0, 1.0, 0.5]
+    logits = mx.array(np.tile(row, (3, 1)))
+    mx.random.seed(0)
+    out = []
+    for _ in range(20):
+        _, res, bonus = sp._stoch_walk_graph(
+            _fast(temperature=1.0, top_k=64), logits,
+            mx.array([8970, 8985], dtype=mx.int32), None)
+        out += np.array(res).reshape(-1).tolist() + np.array(bonus).reshape(-1).tolist()
+    assert set(out) <= set(live)
+
+
+def test_sharp_draw_on_a_masked_row_of_a_padded_vocab():
+    v = 9000
+    row = np.full(v, -np.inf, dtype=np.float32)
+    live = [8970, 8985, 8999]
+    row[live] = [2.0, 1.0, 0.5]
+    idx, q = sp._sharp_draw(mx.array(np.tile(row, (4, 1))), 1.0, 64, 1.0)
+    assert set(np.array(idx).tolist()) <= set(live)
+    q = np.array(q)
+    assert q.shape == (4, v)
+    np.testing.assert_allclose(q[:, live].sum(-1), 1.0, atol=1e-6)
+
+@pytest.mark.parametrize("setting", [(0.6, 20, 0.95, 0.0), (1.0, 20, 0.3, 0.0),
+                                     (0.8, 10, 1.0, 0.05), (1.0, 64, 0.9, 0.0)])
+def test_sharp_draw_on_a_wide_row_is_the_pq_probs_proposal(setting):
+    """Built on the top-k ids, the proposal equals _pq_probs on every id,
+    and each draw lands where q is positive."""
+    v = 16384
+    rows = mx.random.normal((3, v), key=mx.random.key(4)) * 3
+    idx, q = sp._sharp_draw(rows, *setting)
+    ref = np.array(_pq_probs(rows, *setting[:3], min_p=setting[3]))
+    q = np.array(q)
+    np.testing.assert_allclose(q, ref, atol=1e-6)
+    for i, t in enumerate(np.array(idx).tolist()):
+        assert q[i, t] > 0
+
+
+def test_sharp_draw_frequencies_follow_q():
+    v, n = 8192, 4000
+    rows = mx.broadcast_to(
+        mx.random.normal((1, v), key=mx.random.key(6)) * 4, (n, v))
+    mx.random.seed(3)
+    idx, q = sp._sharp_draw(rows, 0.6, 20, 0.95)
+    q0 = np.array(q[0])
+    counts = np.bincount(np.array(idx), minlength=v) / n
+    assert 0.5 * np.abs(counts - q0).sum() < 0.05
+
+
+def test_draft_sampler_does_no_full_vocab_sort(monkeypatch):
+    """The sharpened draft proposal at the default top_k takes the
+    hierarchical top-k: no sort or partition spans the vocab."""
+    widths = []
+    for name in ("argpartition", "argsort", "sort"):
+        orig = getattr(mx, name)
+
+        def wrap(x, *a, _orig=orig, **k):
+            widths.append(int(x.shape[-1]))
+            return _orig(x, *a, **k)
+
+        monkeypatch.setattr(mx, name, wrap)
+    v = 16384
+    stash: list = []
+    tok = sp._stoch_draft_sampler(stash)(
+        mx.random.normal((1, 1, v), key=mx.random.key(1)))
+    mx.eval(tok, stash[0])
+    assert widths and max(widths) < v
+    assert stash[0].shape == (v,) and float(stash[0][int(tok.item())]) > 0

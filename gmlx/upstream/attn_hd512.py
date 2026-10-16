@@ -309,13 +309,15 @@ def _eligible(q, k, v, mask):
 
 
 def _prefill_eligible(q, k, v, mask):
-    # B==1, query wider than the verify path (a prefill), and a head_dim that stock
-    # has no fused full-attention kernel for. Stock's full kernel only handles
-    # head_dim in _FULL_HD; anything else materializes the whole [Hq, qL, kL] score
-    # tensor for every such layer (~128 GB for a 32-head model at 32k) and thrashes
-    # to swap. gemma-4 has two unsupported prefill head dims: 512 (global/causal
-    # layers) and 256 (sliding/array-mask layers, the majority of the layer count),
-    # so both must be chunked.
+    # B==1, query wider than the verify path (a prefill), and a shape that stock
+    # has no fused full-attention kernel for. Stock's full kernel handles head_dim
+    # in _FULL_HD, and 256 at fused_min_rows(256) rows or more with a causal or
+    # array mask on NAX GPUs; anything else materializes the whole [Hq, qL, kL]
+    # score tensor for every such layer (~128 GB for a 32-head model at 32k) and
+    # thrashes to swap. gemma-4 has two such prefill head dims: 512 (global/causal
+    # layers) and 256 (sliding/array-mask layers, the majority of the layer
+    # count), so both must be chunked. A tile under the fused width would run
+    # unfused, so a query stock fuses goes to stock whole.
     if q.shape[0] != 1 or q.ndim != 4:
         return False
     hd = q.shape[-1]
@@ -324,6 +326,9 @@ def _prefill_eligible(q, k, v, mask):
     qL = q.shape[2]
     if qL <= 8 or qL > k.shape[2]:
         return False
+    if (mask is not None and hd == v.shape[-1] and q.dtype != mx.float32
+            and _stock_fuses(hd, qL)):
+        return False
     # None (a bidirectional encoder's full attention) and "causal" both tile by
     # query rows; _chunked_prefill keeps them apart, since only causal may also
     # slice keys to the tile horizon.
@@ -331,6 +336,14 @@ def _prefill_eligible(q, k, v, mask):
         return True
     # an array mask we can slice along the query axis (sliding-window layers)
     return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == qL
+
+
+def _stock_fuses(hd: int, qL: int) -> bool:
+    from gmlx.device import cpu_default_device
+    from gmlx.gen.prefill_decay import fused_min_rows
+
+    rows = fused_min_rows(hd)
+    return bool(rows) and qL >= rows and not cpu_default_device()
 
 
 def _chunked_prefill(q, k, v, scale, mask, tile, sinks=None):

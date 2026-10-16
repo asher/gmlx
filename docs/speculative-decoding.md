@@ -76,22 +76,38 @@ bits if memory requires it.
 ## Several requests at once
 
 Checking a draft costs little while one request decodes and much more when
-several do. The server therefore gives each model a width cap: it
-speculates while at most that many requests generate together, decodes
-without speculation past the cap, and speculates again when the batch
-shrinks.
+several do. The server therefore gives each model a width cap, the number
+of requests that speculate together. Past the cap, the oldest requests keep
+speculating and the others decode without speculation in the same step,
+and when a speculating request finishes, the next oldest takes its place.
+This needs a drafter that keeps its own state for each request and a model
+that undoes each request's rejected drafts separately. In these cases the
+whole batch decodes without speculation past the cap instead, and
+speculates again when the batch shrinks:
+
+- Any mixture-of-experts model, because the padded positions of the other
+  requests widen the set of experts each step reads.
+  `GMLX_MTP_MIXED=1` gives such a model mixed batches anyway.
+- The gemma-4 assistant drafter, which reads the model's own KV cache.
+- gemma-4 and MiniMax-M3 models, and the MTP heads of GLM-DSA, Inkling and
+  Hy-V4 models, which accept the same number of drafts for every request in
+  a batch.
+- Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and
+  GLM-5.3-Flash models, which undo the rejected drafts of one request at a
+  time.
+- A quantized KV cache that cannot roll back each request separately.
 
 | Drafter | Default cap |
 |---------|-------------|
 | A native head on a dense Qwen model | No cap |
 | The gemma-4 assistant drafter, and any family without a default of its own | 2 |
 | Any mixture-of-experts model | 1 |
-| The heads of Hy3, DeepSeek-V4, Muse Glimmer, Qwen3.8-Flash-Next and GLM-5.3-Flash, and every DFlash drafter | 1, which no setting raises |
+| The heads of Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and GLM-5.3-Flash, and every DFlash drafter | 1, which no setting raises |
 
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) sets the
 cap for one model, and `0` removes it. `gmlx serve --speculative-width-cap N`
 sets it for every model and overrides each model's key. [Speculative batching](internals/speculative-batching.md)
-describes how the batch switches between the two modes.
+describes how the batch switches between these modes.
 
 ## DFlash 2 drafters
 
@@ -120,6 +136,53 @@ which draft a block in one pass too. The loader reports them as
 most prompts, and the Bonsai-trained drafters lead only on long code
 output. Start with the Qwen3.8 drafter and measure the others on your own
 work.
+
+## Context copy
+
+When the output repeats the prompt, as when the model edits code it was
+given or quotes a document, the prompt itself is a good draft. Context copy
+looks for the newest generated tokens in the prompt, and when it finds them,
+the round checks the prompt tokens that follow in place of the drafter's
+draft. The model accepts them by the same rule as any draft. The drafter
+learns the accepted tokens and drafts the next round as usual.
+
+A copy can run longer than the drafter's draft, up to 24 tokens. The model
+checks a longer copy with other kernels than a drafter round uses, and
+their rounding can change which token wins where the model's top two
+candidates are almost equally likely. From such a token on, the output can
+differ from a run without context copy. For a block drafter,
+`GMLX_CONTEXT_COPY_MAX` set to its draft length, 7 for a DFlash 2 drafter
+with blocks of 8, keeps the output token-identical to a run without copies.
+A copy shorter than 4 tokens is not worth a round, so a value under 4
+turns copying off. A native head that drafts 2 or 3 tokens therefore has
+no copy length that keeps the output identical, other than no copies at
+all. DeepSeek-V4 and GLM-5.3-Flash copy at most 5 tokens a round, the most
+they can take back after a rejected draft.
+
+When the model rejects most of a copy, or a copy round makes tokens more
+slowly than the drafter's rounds, copying pauses for a while, longer after
+each such round in a row. At temperature 0, a copy starts at 8 tokens, or
+at one less than twice the tokens of an average drafter round when that is
+more, and doubles each time the model accepts one whole, up to that limit.
+So a copy round can add at least twice the tokens of an average drafter
+round, and a drafter that already predicts the text well keeps its rounds. When
+sampling, the model keeps a copied token only as often as it would pick
+that token, so the copy length follows the chance that a copied token is
+kept. A copy stops where that chance gets low, and a copy runs only when
+the tokens it is expected to add beat a drafter round by half. That chance
+comes from the request's recent copies and from how far back the generated
+text already repeats the prompt, so text that the output repeats word for
+word still copies beside a strong drafter.
+
+On the server, a request copies when it starts while no other request
+decodes, and stops copying when another request joins it.
+
+[`context_copy: true`](config.md#modelscontext_copy) turns it on for a
+model. `GMLX_CONTEXT_COPY=1` turns it on for every model, in `run` and
+`chat` too, `GMLX_CONTEXT_COPY=0` turns it off everywhere, and
+`GMLX_CONTEXT_COPY_MAX` sets the longest copy. Context copy gains on
+grounded answers, edits and rewrites, and does nothing on free prose that
+does not repeat the prompt.
 
 ## Stochastic acceptance
 

@@ -55,6 +55,8 @@ is already running does not see a variable you export later.
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, as `--draft-block-size` sets. A round drafts one token fewer. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
+| `GMLX_MTP_MIXED` | `0` decodes a batch past the width cap plain, not as a [mixed batch](speculative-batching.md#mixed-batches). `1` forces mixed batches on MoE targets too. |
+| `GMLX_MTP_MIXED_BLOCK=N` | Verify blocks of N positions in a mixed batch round, instead of the size picked from the batch width. |
 
 ## Prompt cache
 
@@ -117,6 +119,7 @@ fusions.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels of the Qwen3.5 and 3.6 hybrids. The fusion affects numerics. |
+| `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. |
 | `GMLX_HADAMARD_FUSE=0` | Rotate the input of a folded down or output projection in its own dispatch instead of inside the gate kernel. |
 | `GMLX_HADAMARD_TRACE=1` | Count the rotations on a folded file since the last `hadamard_modules.reset_rotation_count` call, read back through `hadamard_modules.rotation_count`. |
@@ -247,7 +250,7 @@ These switches time a run's parts and print or write the results.
 
 | Variable | Meaning |
 |----------|---------|
-| `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
+| `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too. `GMLX_ROUND_LOG=/path.tsv` writes them to a TSV, with `copied` and speculating `rows` columns. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print the per-token split of a streamed decode between disk stalls and the eval and sync bucket at exit. A clock drop shows as a large sync bucket. |
 | `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses. |
 | `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 and `qwen4exp` decode, evaluate after each layer part and print each part's wall time per token. |

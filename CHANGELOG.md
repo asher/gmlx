@@ -10,9 +10,33 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
+- `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
+  output repeats it, which speeds up edits and quotes.
+
+### Changed
+
+- A speculative batch wider than the drafter's width cap keeps speculating on
+  its oldest requests instead of decoding plain. `GMLX_MTP_MIXED=0` reverts.
+- `gmlx serve` with MTP on Qwen3.5 to 3.8 decodes faster when it batches
+  several requests.
+- Requires mlx-kquant 0.5.1. With it, speculative decoding on Qwen3.5 to 3.8
+  runs faster on NAX GPUs (M5).
 
 ### Fixed
 
+- A DFlash drafter that took speculation back up after a batch shrank within
+  the width cap drafted from stale context, so almost no draft was accepted.
+- A sampled request whose structured output allowed fewer tokens than its
+  `top_k` could return token ids past the vocab when the vocab size is not a
+  multiple of 128.
+- A sampled request returned random tokens when its `logit_bias` held NaN,
+  or an infinite ban on the only token its structured output allowed.
+- Long prompts on Qwen3.5 to 3.8 prefill faster on M5-family Macs with
+  macOS 26.2 or later, since the prefill chunk no longer shrinks at depth.
+- MTP on Qwen3.8-Flash-Next refused to load on a Mac whose GPU buffer limit
+  is smaller than the model's per-layer embedding table.
+- gpt-oss gave wrong tokens on a Mac it does not fit, and with
+  `--stream-experts` or a CPU placement.
 - `gmlx list` names the family of an image entry whose `family` is spelled
   `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
 - `gmlx rm` keeps a file that another model names through a symlink, where it

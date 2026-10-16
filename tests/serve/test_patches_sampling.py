@@ -516,6 +516,51 @@ def test_fast_sampler_hierarchical_topk_matches_flat():
         assert hier == flat
 
 
+def test_fast_sampler_hierarchical_topk_takes_every_row():
+    # A verify block samples several rows at once; each row's top-k set
+    # must equal the flat argpartition's, so no row falls back to a
+    # full-vocab sort.
+    import mlx.core as mx
+    lp = mx.random.normal((5, 150001), key=mx.random.key(3)).astype(mx.float32)
+    mx.eval(lp)
+    hier = sp_sampling._topk_ids(lp, 20)
+    flat = mx.argpartition(-lp, kth=19, axis=-1)[:, :20]
+    for r in range(5):
+        assert set(hier[r].tolist()) == set(flat[r].tolist())
+
+
+
+@pytest.mark.parametrize("k", [20, 64])
+def test_topk_ids_stays_inside_a_padded_vocab_on_a_masked_row(k):
+    # A vocab that is not a multiple of 128 is padded with -inf. A row
+    # with fewer than k finite values ties those pads with its own -inf
+    # entries, and every id it returns must still be a vocab id.
+    import mlx.core as mx
+    import numpy as np
+    for v in (8200, 9000):
+        row = np.full(v, -np.inf, dtype=np.float32)
+        live = [v - 30, v - 15, v - 1]
+        row[live] = [2.0, 1.0, 0.5]
+        ids = sp_sampling._topk_ids(mx.array(row[None]), k)[0].tolist()
+        assert max(ids) < v
+        assert len(set(ids)) == k
+        assert set(live) <= set(ids)
+
+
+def test_masked_sampler_draws_only_vocab_ids():
+    # The sampler gathers the logits at the top-k ids, so a pad id would
+    # read past the vocab and could be drawn.
+    import mlx.core as mx
+    import numpy as np
+    v = 9000
+    row = np.full(v, -np.inf, dtype=np.float32)
+    row[[8970, 8985, 8999]] = [2.0, 1.0, 0.5]
+    sampler = sp_sampling._FastPositionedSampler(temperature=1.0, top_k=64)
+    x = mx.array(row[None])
+    mx.random.seed(0)
+    draws = {sampler(x).item() for _ in range(64)}
+    assert draws <= {8970, 8985, 8999}
+
 def test_fast_sampler_masking():
     S = sp_sampling._FastPositionedSampler
     probs = [0.4, 0.3, 0.2, 0.1]

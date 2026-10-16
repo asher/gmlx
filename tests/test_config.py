@@ -693,7 +693,9 @@ def test_env_for_load_params():
                    "MLX_VLM_GGUF_DRAFT": "",
                    # always emitted; "" = no per-model cap, use the family
                    # default (see test_env_for_always_emits_width_cap)
-                   "MLX_VLM_GGUF_SPEC_WIDTH_CAP": ""}
+                   "MLX_VLM_GGUF_SPEC_WIDTH_CAP": "",
+                   # always emitted; "" = context copy off
+                   "MLX_VLM_GGUF_CONTEXT_COPY": ""}
 
 
 def test_env_for_emits_the_per_id_drafter():
@@ -776,6 +778,24 @@ def test_env_for_always_emits_width_cap():
     assert env_cap(None) == ""
     assert env_cap(0) == "0"
     assert env_cap(3) == "3"
+
+
+def test_context_copy_key_parses_and_reaches_the_load_env():
+    def resolved(value):
+        raw = {"path": "/p.gguf", "speculative": True}
+        if value is not None:
+            raw["context_copy"] = value
+        cfg = cfgmod.build_config({"models": {"m": raw}})
+        assert cfg.models["m"].context_copy is bool(value)
+        r = cfgmod.ResolvedModel(
+            id="m", path="/p", sampling={}, load={}, cache={}, system=None,
+            speculative=True, mmproj=None, draft_gguf=None, pin=False,
+            ttl_s=None, context_copy=bool(value))
+        return cfgmod.env_for(r)["MLX_VLM_GGUF_CONTEXT_COPY"]
+
+    assert resolved(None) == ""
+    assert resolved(False) == ""
+    assert resolved(True) == "1"
 
 
 def test_width_cap_parse_and_validate():

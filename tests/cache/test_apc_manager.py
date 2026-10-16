@@ -133,6 +133,9 @@ def test_the_free_ram_read_never_runs_vm_stat_from_path(monkeypatch, tmp_path):
     still reads the memory."""
     import subprocess
 
+    import host_box
+
+    from gmlx.cache import apc_manager
     from gmlx.serve import kernel_vm
 
     planted = tmp_path / "vm_stat"
@@ -148,6 +151,9 @@ def test_the_free_ram_read_never_runs_vm_stat_from_path(monkeypatch, tmp_path):
 
     monkeypatch.setattr(apc, "_free_ram_bytes", stock)
     monkeypatch.setattr(kernel_vm, "snapshot", lambda: None)
+    # The real /usr/bin/vm_stat read, which the simulated host replaces.
+    monkeypatch.setattr(apc_manager, "_vm_stat_free_ram_bytes",
+                        host_box.real("vm_stat_free_ram"))
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
     for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):
         monkeypatch.delenv(k, raising=False)

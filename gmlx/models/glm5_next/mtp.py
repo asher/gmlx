@@ -42,6 +42,7 @@ import mlx.nn as nn
 
 from . import model as glm5
 from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import MTP_UNDO_WIDTH
 from gmlx.spec.drafter_protocol import native_block_size
 from gmlx.spec.mtp_drafter import _POSTNORM_FEED, QwenMTPDrafter
 
@@ -90,6 +91,10 @@ class Glm5NextSpecHooks:
     ``hidden_states`` is the collapsed PRE-final-norm trunk hidden - what
     the drafter's ``hnorm`` consumes; the from-hidden hooks apply the final
     norm before the head."""
+
+    # Widest verify the rollback can undo: the MLA pooling caches keep an
+    # undo log only up to this width.
+    spec_rollback_width = MTP_UNDO_WIDTH
 
     def _head(self, out: mx.array) -> mx.array:
         if self.lm_head is None:

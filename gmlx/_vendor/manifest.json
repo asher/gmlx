@@ -1523,7 +1523,7 @@
   "mlx_vlm/server/model_discovery.py": {"status": "verbatim", "upstream": "0d6fb031c579b7a1b4c63adb94f926e5913bd588234271942f52e4b9e21e72d2"},
   "mlx_vlm/server/openai.py": {"sha256": "00a590ad84b2cdaaa7bf058a633117b1fc004c3b1b6e61b1336868f26c2a181a", "status": "codemod", "upstream": "fd5dafaba30c5779390657110aa16c1fa2409335853d58bf4ceec1fa701fe6c7"},
   "mlx_vlm/server/realtime.py": {"sha256": "942671328088936df3145eb72ba7e6650d0171c22ca17321d79ad113cd0482b9", "status": "codemod", "upstream": "815998c835bd348649779ce480152c48cf8ff770ca53503f1a1c31649668b416"},
-  "mlx_vlm/server/request_normalization.py": {"status": "verbatim", "upstream": "37eb0727a61eb8a647cf010af20098f388688336d0e9df9f217c2409fc3a00e5"},
+  "mlx_vlm/server/request_normalization.py": {"sha256": "38c69ac6dd59534f5b6ad93adf15be145bf299c1aae9af0c9d0216338c006c59", "status": "edited", "upstream": "37eb0727a61eb8a647cf010af20098f388688336d0e9df9f217c2409fc3a00e5"},
   "mlx_vlm/server/reranking.py": {"status": "verbatim", "upstream": "36b03fb077741261696795a3b32bfcae64339d0d50d091ee39f2df4b97343179"},
   "mlx_vlm/server/responses_state.py": {"sha256": "58919f35ec6bed9a40390ce45e9af28d65dbdf52e166ace2854afd9267167862", "status": "codemod", "upstream": "138184cb972c43c6f48fc104642608add2605180c1682d3cc1dfb0bd408f3657"},
   "mlx_vlm/server/runtime.py": {"status": "verbatim", "upstream": "de80f06d985f98270d7f5d16d2c4e41f1f8ecd69c15c9a819ec8e891ff1f83d2"},

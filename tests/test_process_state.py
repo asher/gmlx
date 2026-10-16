@@ -160,6 +160,27 @@ def test_h_the_next_test_finds_the_stock_device_info():
     assert mx.device_info is _MIRRORS["device_info"]
 
 
+
+def test_h2_an_apc_manager_build_rebinds_the_free_ram_read(monkeypatch):
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx.cache.apc_manager import build_apc_manager
+
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    monkeypatch.delenv("APC_DISK_PATH", raising=False)
+    _MIRRORS["free_ram_read"] = apc._free_ram_bytes
+    build_apc_manager()
+    assert apc._free_ram_bytes is not _MIRRORS["free_ram_read"]
+
+
+def test_h3_the_next_test_finds_the_stock_free_ram_read():
+    """A stock APCManager built by a later test reads the RAM gate the
+    way the session started, whatever an earlier build rebound."""
+    from gmlx._vendor.mlx_vlm import apc
+
+    if "free_ram_read" not in _MIRRORS:
+        pytest.skip("runs after test_h2")
+    assert apc._free_ram_bytes is _MIRRORS["free_ram_read"]
+
 def test_i_a_server_notes_its_cache_limit_and_arms_the_governor(monkeypatch):
     from gmlx.gen import prefill_decay
     from gmlx.serve import governor, memory

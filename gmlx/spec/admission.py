@@ -228,6 +228,11 @@ def install_continuous_batch_admission() -> None:
         if row_procs:
             self._kq_row_procs = [row_procs[i] if i < len(row_procs) else None
                                   for i in keep]
+        copy_prompts = getattr(self, "_kq_copy_prompts", None)
+        if copy_prompts:
+            self._kq_copy_prompts = [
+                copy_prompts[i] if i < len(copy_prompts) else None
+                for i in keep]
         self.uids = list(self._all_uids)
         self.max_tokens = [self.max_tokens[i] for i in keep]
         self._num_tokens = [self._num_tokens[i] for i in keep]
@@ -305,9 +310,18 @@ def install_continuous_batch_admission() -> None:
             return False
         it = self._rounds_iter
         captured = []
+        # The scalar loop fills this when the rebuilt batch can keep the
+        # row's live drafter (a mixed batch); the batch loop pops it.
+        handoff: dict = {}
+        try:
+            # A rebuild that was never iterated leaves its handoff behind.
+            del self.model._kq_preempt_handoff
+        except AttributeError:
+            pass
         if it is not None:
             self._rounds_iter = None
             self.model._kq_preempt_capture = captured
+            self.model._kq_preempt_handoff = handoff
             try:
                 it.close()
             finally:
@@ -315,6 +329,11 @@ def install_continuous_batch_admission() -> None:
                     del self.model._kq_preempt_capture
                 except AttributeError:
                     pass
+                if not handoff:
+                    try:
+                        del self.model._kq_preempt_handoff
+                    except AttributeError:
+                        pass
         responses = []
         uid = self._all_uids[0]
         for tok in captured:
@@ -332,6 +351,10 @@ def install_continuous_batch_admission() -> None:
         if self._finished[0]:
             # The captured tail finished the row; nothing to rebuild. The
             # pending injections promote through __len__ once drained.
+            try:
+                del self.model._kq_preempt_handoff
+            except AttributeError:
+                pass
             self._refresh_uids()
             return False
         self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]

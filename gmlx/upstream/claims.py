@@ -103,9 +103,12 @@ CLAIMS: tuple[Claim, ...] = (
           "mtp_prefill.install_full_prompt_mtp_prefill (prefill-step "
           "restore, stock-path ckpt arming, packed warm_cache kwarg "
           "recovered to fp16 before init); "
-          "apc_pooling.install_pooled_prompt_kv_quant",
+          "apc_pooling.install_pooled_prompt_kv_quant; "
+          "patches.context_copy (indexes a row's full prompt for context "
+          "copy)",
           install=_CASCADE,
           wrappers=("gmlx.cache.apc_pooling", "gmlx.cache.kvarn_serve",
+                    "gmlx.serve.patches.context_copy",
                     "gmlx.spec.mtp_prefill", "gmlx.upstream.cascade_sdpa")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "_extend_cache",
           "cascade_sdpa.install_cascade_stamp (stamp carry across the "
@@ -179,16 +182,21 @@ CLAIMS: tuple[Claim, ...] = (
           "seed_rows.install_per_request_seed (row-uid publish); "
           "patches.mtp_thinking (thinking-hook transport); "
           "patches.spec_processors (reads each row's processors and "
-          "prompt tokens before the prefill clears them, outermost)",
+          "prompt tokens before the prefill clears them, outermost); "
+          "patches.context_copy (hangs the prompt indexes on the "
+          "speculative batch)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
+                    "gmlx.serve.patches.context_copy",
                     "gmlx.serve.patches.mtp_thinking",
                     "gmlx.serve.patches.spec_processors", "gmlx.serve.seed_rows",
                     "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "SpeculativeGenerationBatch._start_rounds",
           "patches.spec_processors (stashes the row processors on the first "
-          "cache entry before the rounds generator starts)",
-          wrappers=("gmlx.serve.patches.spec_processors",)),
+          "cache entry before the rounds generator starts); "
+          "patches.context_copy (stashes a lone row's prompt index there)",
+          wrappers=("gmlx.serve.patches.context_copy",
+                    "gmlx.serve.patches.spec_processors")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
           "admission.install_continuous_batch_admission",
           wrappers=("gmlx.serve.cb_phase", "gmlx.serve.seed_rows",

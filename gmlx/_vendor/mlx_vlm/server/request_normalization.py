@@ -1,5 +1,6 @@
 """Normalize compatible API requests into server generation arguments."""
 
+import math
 from typing import Optional, Tuple, Union
 
 from ..generate import (
@@ -19,6 +20,28 @@ from .generation import (
 from .runtime import runtime
 
 _DISABLED_REASONING_EFFORTS = {"none", "off", "disabled", "false", "0"}
+
+# gmlx: a bias this large already bans or forces its token. A larger one,
+# or an infinite one, can leave a row with no finite logit, and NaN makes
+# every logit NaN. A sampler draws arbitrary ids from such a row.
+_LOGIT_BIAS_MAX = 1e9
+
+
+def _checked_logit_bias(logit_bias: dict) -> dict:
+    """``logit_bias`` with int ids and float values held within
+    +-_LOGIT_BIAS_MAX. ValueError names a value that is not a number."""
+    out = {}
+    for key, value in logit_bias.items():
+        tid = int(key)
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            v = math.nan
+        if isinstance(value, bool) or math.isnan(v):
+            raise ValueError(
+                f"logit_bias for token {tid} must be a number, got {value!r}")
+        out[tid] = max(-_LOGIT_BIAS_MAX, min(_LOGIT_BIAS_MAX, v))
+    return out
 
 
 def _request_field_is_set(request, field_name: str) -> bool:
@@ -149,7 +172,7 @@ def _build_gen_args(
         max_tokens = get_server_max_tokens()
     logit_bias = getattr(request, "logit_bias", None)
     if logit_bias is not None and isinstance(logit_bias, dict):
-        logit_bias = {int(k): v for k, v in logit_bias.items()}
+        logit_bias = _checked_logit_bias(logit_bias)
     standard_reasoning, reasoning_effort, has_standard_reasoning = (
         _standard_reasoning_control(request)
     )

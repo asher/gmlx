@@ -26,6 +26,7 @@ The real rows need the Z-Image-Turbo GGUF under KQUANT_TEST_GGUF_DIR.
 """
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 
@@ -108,6 +109,10 @@ def turbo(gguf_index):
         pytest.fail(f"{p} is not the file the oracle read")
     from gmlx.image.loader import load_dit
 
+    # A DiT that an earlier module loaded can sit in a reference cycle,
+    # and the load gate measures its memory as taken.
+    gc.collect()
+    mx.clear_cache()
     model, _ = load_dit(p, log=lambda *_: None)
     return model
 

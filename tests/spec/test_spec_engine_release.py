@@ -355,6 +355,23 @@ def test_prestart_filter_compacts_rows(monkeypatch):
     assert len(batch) == 2
 
 
+def test_prestart_filter_compacts_copy_prompts():
+    """A cancelled pre-start row takes its context-copy prompt with it, so
+    the surviving row copies from its own prompt."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    cache = _FilterCache()
+    batch = _make_dict_batch(ar, uids=(0, 1), max_tokens=(9, 9),
+                             cache=cache)
+    batch._kq_copy_prompts = [[1, 2, 3], [7, 8, 9]]
+
+    batch.filter([1])  # cancel uid 0 before the first tick
+
+    assert batch._all_uids == [1]
+    assert batch._kq_copy_prompts == [[7, 8, 9]]
+
+
 def test_prestart_abort_releases_fully(monkeypatch):
     from gmlx._vendor.mlx_vlm.generate import ar
 

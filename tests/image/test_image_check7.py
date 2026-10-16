@@ -43,6 +43,7 @@ GMLX_IMAGE_FIXTURES.
 """
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 
@@ -82,6 +83,10 @@ def turbo_pipe(gguf_index, name: str):
     from gmlx.image.loader import load_dit
     from gmlx.image.registry import get_family
 
+    # A DiT that an earlier module loaded can sit in a reference cycle,
+    # and the load gate measures its memory as taken.
+    gc.collect()
+    mx.clear_cache()
     model, _ = load_dit(p, log=lambda *_: None)
     return api.ImagePipeline(dit=model, family=get_family("z_image"),
                              variant="turbo")

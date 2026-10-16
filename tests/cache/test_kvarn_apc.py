@@ -199,6 +199,9 @@ def _wait_for_exact_file(disk, timeout=10.0):
     return False
 
 
+# The exact disk restore needs the 2 GB of free RAM its gate asks for,
+# which the CI runner does not have.
+@pytest.mark.host_gb(16)
 @needs_kvarn_ops
 def test_disk_round_trip_and_version_fail_closed(restorable, tmp_path):
     kvarn_apc.install_kvarn_apc()

@@ -26,6 +26,7 @@ from gmlx.upstream.gdn_patches import (
     _f16_head_gemv,
     _float_weight,
     gpu_active,
+    kquant_multi_or,
 )
 
 __all__ = ["verify_linear", "verify_linears"]
@@ -711,7 +712,8 @@ def verify_linear(linear, x: mx.array, target_verify: bool):
 def verify_linears(linears, x: mx.array, target_verify: bool):
     """``_target_verify_linears`` routing per-linear calls through the
     wrapper, so the bf16 lever engages exactly where the patched global
-    did. Body mirrors the upstream dispatcher."""
+    did. Body mirrors the upstream dispatcher, and a verify-width group of
+    k-quant linears runs as one multi-weight matmul."""
     if not (
         target_verify
         and x.ndim == 3
@@ -723,6 +725,11 @@ def verify_linears(linears, x: mx.array, target_verify: bool):
         out = _decode_quantized_linears_fused(linears, x)
         if out is not None:
             return out
+        if target_verify:
+            out = kquant_multi_or(
+                linears, x, lambda rest: shared_linears(rest, x))
+            if out is not None:
+                return out
         return shared_linears(linears, x)
 
     return tuple(verify_linear(linear, x, target_verify) for linear in linears)

@@ -765,16 +765,28 @@ def _parse_round_log(path):
         return None, None
     total_drafted = 0
     total_accepted = 0
+    # The "# idx" header names the columns; a log without one ends in
+    # accepted, bs. A batch round logs the mean accept of its speculating
+    # rows, a float, and their count in "rows"; a log without that column
+    # counts each round as one row.
+    i_acc, i_bs, i_rows = -2, -1, None
     for line in lines:
         line = line.strip()
+        if line.startswith("# idx"):
+            cols = line.lstrip("#").split()
+            if "accepted" in cols and "bs" in cols:
+                i_acc, i_bs = cols.index("accepted"), cols.index("bs")
+            i_rows = cols.index("rows") if "rows" in cols else None
+            continue
         if not line or line.startswith("#"):
             continue
         parts = line.split("\t")
         try:
-            accepted = int(parts[-2])
-            bs = int(parts[-1])
-            total_drafted += bs - 1
-            total_accepted += accepted
+            accepted = float(parts[i_acc])
+            bs = int(parts[i_bs])
+            rows = 1 if i_rows is None else int(parts[i_rows])
+            total_drafted += (bs - 1) * rows
+            total_accepted += accepted * rows
         except (ValueError, IndexError):
             continue
     if total_drafted == 0:
@@ -1354,7 +1366,7 @@ def render_md(meta, specs, cfg, results):
                 dn = sum(e["draft_n"] for e in entries)
                 da = sum(e["draft_n_accepted"] for e in entries)
                 if dn:
-                    L.append(f"\n_{rt}/{al} draft acceptance: {da}/{dn} "
+                    L.append(f"\n_{rt}/{al} draft acceptance: {round(da, 2):g}/{dn} "
                              f"({100.0 * da / dn:.0f}%)._")
             L.append("")
         # concurrent aggregate throughput

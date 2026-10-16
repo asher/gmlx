@@ -21,6 +21,18 @@ stops once the columns left fit one step and hands those to generate().
 prompt_step and that test both read the decayed step, so the cresting
 forward never outgrows it.
 
+A chunk that stock MLX runs through its fused attention kernel never
+materializes the score tensor. An arch whose prefill attention is stock
+SDPA with a causal or array mask registers fused_attention_profile, which
+prices such a chunk at zero: on the GPU, on plain float KV caches, a chunk
+at least fused_min_rows(head_dim) wide stays whole at any depth. Shrinking
+it below that width would create the transient it means to cap. At head
+dim 256, MLX 0.32.x fuses chunks of 1024 rows or more only on NAX GPUs,
+for 16-bit activations or with TF32 on. A chunk a caller cuts under the
+fused width (the prompt's tail, a row end, a prefix-cache checkpoint, a
+media block) takes the dense fit, and a batch cache's bool mask, (B + 1)
+bytes per score element while it is built, still bounds a fused chunk.
+
 The dense [heads, step, S] model is the conservative default. Archs whose
 prefill attention runs fused/streaming kernels never materialize it; their
 real transient is far smaller (e.g. deepseek_v4's native DSA path peaks at
@@ -53,6 +65,8 @@ Knobs:
                                     (default 500; 0 disables the tick term)
     GMLX_PREFILL_SCORE_PROFILE=0  ignore arch score profiles (dense model
                                     everywhere, pre-profile behavior)
+    GMLX_PREFILL_FUSED_256=0    price head dim 256 as unfused, as on a GPU
+                                    without NAX
     GMLX_PREFILL_HEADROOM_CAP=1 raise the body cap to min(half the live
                                     free working set, the configured
                                     GMLX_CACHE_LIMIT_GB); requires a cache
@@ -72,7 +86,7 @@ from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
 
-from gmlx.device import metal_value
+from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_bool, env_float, env_int
 from gmlx.upstream.patching import link
 
@@ -100,6 +114,8 @@ class ScoreTransientProfile(NamedTuple):
     depth_divisor: int = 1  # transient key length = (depth + step) / divisor
     base_step: int | None = None  # arch-default chunk (None = stock base)
     rows: int = 0  # live score rows under per-block evaluation (0 = the chunk)
+    fused_min_step: int = 0  # chunks this wide or wider run fused (0 = never)
+    fused_mask_bytes: int = 0  # mask bytes per score element of a fused chunk
 
 
 # model_type -> provider(model, prompt_cache) -> profile | None. A provider
@@ -131,6 +147,119 @@ def resolve_score_profile(model, prompt_cache) -> Optional[ScoreTransientProfile
         return provider(model, prompt_cache)
     except Exception:
         return None
+
+
+def fused_min_rows(head_dim: int) -> int:
+    """Narrowest causal or array-masked prefill chunk of 16-bit activations
+    that stock MLX runs through its fused attention kernel at this head dim
+    on this GPU, where no [heads, step, S] score tensor exists. 0 = never
+    fused.
+    tests/gen/test_prefill_fused_rule.py pins the table against the
+    installed MLX on the GPU."""
+    if head_dim in (64, 72, 80, 96, 128):
+        return 9
+    if head_dim == 256 and _fused_256():
+        return 1024
+    return 0
+
+
+def _fused_256() -> bool:
+    # MLX 0.32.x runs head dim 256 fused at 1024+ rows only on NAX GPUs.
+    if not env_bool("GMLX_PREFILL_FUSED_256", True):
+        return False
+    return (0, 32, 3) <= _mlx_version() < (0, 33) and _nax_available()
+
+
+def _nax_available() -> bool:
+    try:
+        import mlx_kquant as kq
+
+        return bool(kq.nax_available())
+    except Exception:
+        return False
+
+
+def _mlx_version() -> tuple[int, ...]:
+    try:
+        return tuple(
+            int(x) for x in getattr(mx, "__version__", "").split(".")[:3])
+    except ValueError:
+        return (0,)
+
+
+def _attention_head_dims(model) -> set[int] | None:
+    """Head dims of the text model's attention, or None when the config
+    describes an attention this rule does not cover (latent or split
+    query and value dims). mlx-lm style models carry their config as
+    ``args``, the others as ``config``, as kvarn_head_dims reads them."""
+    for holder in (model, getattr(model, "language_model", None)):
+        for cfg in (getattr(holder, "args", None),
+                    getattr(holder, "config", None)):
+            for c in (getattr(cfg, "text_config", None), cfg):
+                if c is None:
+                    continue
+                if any(getattr(c, k, None) for k in (
+                        "kv_lora_rank", "q_lora_rank", "qk_rope_head_dim",
+                        "v_head_dim")):
+                    return None
+                heads = getattr(c, "num_attention_heads", None)
+                dim = getattr(c, "head_dim", None)
+                if not dim and heads and getattr(c, "hidden_size", None):
+                    dim = int(c.hidden_size) // int(heads)
+                if not dim:
+                    continue
+                dims = {int(dim)}
+                if getattr(c, "global_head_dim", None):
+                    dims.add(int(c.global_head_dim))
+                return dims
+    return None
+
+
+def _plain_kv_types() -> tuple[type, ...]:
+    from gmlx.cache import kv_cache as kc
+
+    return (kc.KVCache, kc.RotatingKVCache, kc.BufferedRotatingKVCache,
+            kc.ArraysCache, kc.ChunkedKVCache, kc.BatchKVCache,
+            kc.BatchRotatingKVCache, kc.ConcatenateKVCache)
+
+
+def fused_attention_profile(model, prompt_cache):
+    """Provider for an arch whose prefill attention is stock SDPA with a
+    causal or array mask: a chunk stock MLX runs fused prices no score
+    transient. Arms only on the GPU and on a cache of plain float KV
+    leaves, since quantized and KVarN caches run their own prefill
+    attention, which materializes. With no cache to inspect, the dense
+    model stays."""
+    from gmlx.cache.kv_cache import ArraysCache
+
+    if cpu_default_device():
+        return None
+    caches = list(_walk_caches(prompt_cache))
+    if not caches:
+        return None
+    dims = _attention_head_dims(model)
+    if not dims:
+        return None
+    rows = [fused_min_rows(d) for d in dims]
+    if not all(rows):
+        return None
+    plain = _plain_kv_types()
+    batch_rows = 0
+    for c in caches:
+        # Recurrent ArraysCache subclasses hold no attention keys.
+        if type(c) not in plain and not isinstance(c, ArraysCache):
+            return None
+        if _cache_is_quantized(c):
+            return None
+        lp = getattr(c, "left_padding", None)
+        if isinstance(lp, mx.array):
+            batch_rows = max(batch_rows, int(lp.size))
+    # A batch cache masks with a [B, 1, step, S] bool array, built beside
+    # its [step, S] comparison.
+    return ScoreTransientProfile(
+        heads=score_heads(model), bytes_per_elem=2,
+        fused_min_step=max(rows),
+        fused_mask_bytes=batch_rows + 1 if batch_rows else 0)
 
 
 def _walk_caches(prompt_cache):
@@ -306,14 +435,31 @@ def decayed_step(base: int, depth: int, heads: int,
         cap = _body_cap_bytes()
     if profile is not None:
         h, bpe, div = profile.heads, profile.bytes_per_elem, profile.depth_divisor
-        rows = profile.rows
+        rows, fused = profile.rows, profile.fused_min_step
+        mask = profile.fused_mask_bytes
     else:
-        h, bpe, div, rows = heads, 2, 1, 0
+        h, bpe, div, rows, fused, mask = heads, 2, 1, 0, 0, 0
+
+    def scores(s: int) -> float:
+        return h * _live_rows(s, rows) * (depth + s) * bpe / div
+
+    def fit(s: int) -> int:
+        while s > min_step and scores(s) > cap:
+            s //= 2
+        return s
+
     step = int(base)
-    while (step > min_step
-           and h * _live_rows(step, rows) * (depth + step) * bpe > cap * div):
-        step //= 2
-    return step
+    if not (fused and step >= fused):
+        return fit(step)
+    floor = max(min_step, fused)
+    while step > floor and mask * step * (depth + step) > cap:
+        step = max(step // 2, floor)
+    held = mask * step * (depth + step)
+    if held <= cap or step <= min_step:
+        return step
+    # Over the cap even at the fused width: unfused only if that is smaller.
+    sub = fit(step // 2)
+    return sub if scores(sub) < held else step
 
 
 def _live_rows(step: int, rows: int) -> int:
@@ -627,14 +773,35 @@ def headroom_bytes() -> float | None:
 _headroom_bytes = headroom_bytes
 
 
-def score_transient_bytes(model, prompt_cache, depth: int) -> float:
+def score_transient_bytes(model, prompt_cache, depth: int,
+                          prefill_rows: int | None = None) -> float:
     """Projected peak prefill score transient for a request at ``depth``,
     evaluated at the chunk step the decay policy would actually choose
     there. Uses the arch's ScoreTransientProfile when one arms (resolved
     against ``prompt_cache``; a batched cache may disarm the profile, which
-    falls back to the dense model, the conservative side)."""
+    falls back to the dense model, the conservative side). ``prefill_rows``,
+    when the caller knows them, size a fused chunk's mask in place of the
+    cache's own rows."""
     heads = score_heads(model)
+    if not any(True for _ in _walk_caches(prompt_cache)):
+        # No cache yet: the prompt's own plain cache may arm a fused
+        # profile, whose cut chunks can outgrow the dense price.
+        from gmlx.cache.kv_cache import KVCache
+
+        dense = _transient_price(None, depth, heads)
+        probe = resolve_score_profile(model, [KVCache()])
+        if probe is None or not probe.fused_min_step:
+            return dense
+        probe = probe._replace(fused_mask_bytes=int(prefill_rows or 1) + 1)
+        return max(dense, _transient_price(probe, depth, heads))
     profile = resolve_score_profile(model, prompt_cache)
+    if profile is not None and profile.fused_min_step and prefill_rows:
+        profile = profile._replace(fused_mask_bytes=int(prefill_rows) + 1)
+    return _transient_price(profile, depth, heads)
+
+
+def _transient_price(profile: ScoreTransientProfile | None, depth: int,
+                     heads: int) -> float:
     base = _STOCK_BASE
     if (profile is not None and profile.base_step
             and "PREFILL_STEP_SIZE" not in os.environ):
@@ -646,7 +813,20 @@ def score_transient_bytes(model, prompt_cache, depth: int) -> float:
         rows = profile.rows
     else:
         h, bpe, div, rows = heads, 2, 1, 0
-    return h * _live_rows(step, rows) * (depth + step) * bpe / div
+
+    def scores(s: int) -> float:
+        return h * _live_rows(s, rows) * (depth + s) * bpe / div
+
+    if profile is None or not profile.fused_min_step:
+        return scores(step)
+    fused = profile.fused_min_step
+    held = (float(profile.fused_mask_bytes * step * (depth + step))
+            if step >= fused else scores(step))
+    # A chunk cut under the fused width runs unfused: whole while it fits
+    # the cap, else at most the floor chunk.
+    min_step = max(1, env_int("GMLX_PREFILL_MIN_STEP", 256))
+    cut = min(scores(fused - 1), max(_body_cap_bytes(), scores(min_step)))
+    return max(held, cut)
 
 
 def _seed_cap_bytes() -> float:
@@ -701,6 +881,41 @@ def _folds(batch) -> bool:
             and _keeps_last_logits(batch.model))
 
 
+def _cut_chunk(batch, step: int) -> int:
+    """The chunk prompt_step, the folded last forward or the MTP prefill body
+    runs from ``step``: cut at the columns left, the next right-padded row
+    end and the next prefix-cache checkpoint column."""
+    embeds = getattr(batch, "_inputs_embeds", None)
+    if embeds is None:
+        return step
+    n = min(step, int(embeds.shape[1]) - (0 if _folds(batch) else 1))
+    start = int(getattr(batch, "_processed_prompt_columns", 0) or 0)
+    if getattr(batch, "_right_pad_per_row", None) is not None:
+        ends = [e for e in batch._suffix_lens if e > start]
+        if ends:
+            n = min(n, min(ends) - start)
+    nxt = getattr(batch, "_next_apc_checkpoint_column", None)
+    col = nxt() if callable(nxt) else None
+    if isinstance(col, int):
+        n = min(n, col - start)
+    return n
+
+
+def fit_cut(batch, n: int) -> int:
+    """``n`` once a caller has cut a chunk from the decayed step: a chunk
+    under the fused width runs unfused, so it takes the dense fit, and a
+    wider one stays whole, as the step it was cut from does."""
+    model = getattr(batch, "model", None)
+    cache = getattr(batch, "prompt_cache", None)
+    if n <= 0 or model is None or not _enabled():
+        return n
+    profile = resolve_score_profile(model, cache)
+    if profile is None or not profile.fused_min_step:
+        return n
+    return decayed_step(n, kv_depth(cache), score_heads(model),
+                        profile=profile)
+
+
 def decayed_for_batch(batch) -> int | None:
     """Depth-decayed prefill step for a PromptProcessingBatch-shaped object
     (None passes through: caller falls back to one-shot)."""
@@ -725,6 +940,16 @@ def decayed_for_batch(batch) -> int | None:
     ticked = False
     if tick is not None and tick < step:
         step, ticked = tick, True
+        if profile is not None and step < profile.fused_min_step:
+            # Below the fused width the chunk materializes: refit the cap.
+            step = decayed_step(step, depth, score_heads(batch.model),
+                                profile=profile)
+    if (profile is not None and profile.fused_min_step
+            and step >= profile.fused_min_step):
+        n = _cut_chunk(batch, step)
+        if 0 < n < profile.fused_min_step:
+            step = decayed_step(n, depth, score_heads(batch.model),
+                                profile=profile)
     embeds = getattr(batch, "_inputs_embeds", None)
     if step == base and embeds is not None:
         from gmlx.stream.expert_streaming import (
