@@ -1136,9 +1136,10 @@ official file is F32 and stays F32, the Qwen-Image autoencoder for
 `krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`,
 `flux2_klein` and `flux2_klein_9b`. BFL's FLUX.2 klein 4B file of that
 autoencoder is BF16 with its config, and the Comfy-Org
-`flux2-vae.safetensors` is F32 and needs no config. It packs from that layout or from the original one of
-BFL's `ae.safetensors`. The family follows from the tensor names and
-shapes, the first family for the FLUX.2 autoencoder, and a pack of it
+`flux2-vae.safetensors` is F32 and needs no config. It packs from that
+layout or from the original one of BFL's `ae.safetensors`. The family
+follows from the tensor names and shapes. A pack of the FLUX.2
+autoencoder without `--family` is labeled `flux3_klein`, and a pack of it
 serves every klein family whichever one it names. A file that fills none
 of them is refused with what it holds, for example another family's VAE
 under `--family`, or a video VAE of the same layout.
@@ -1159,7 +1160,7 @@ and a `--source-config` that is not one is refused.
 | `SRC`, positional | Required | Pack this safetensors VAE. |
 | `--out FILE.gguf` | Required | Write the GGUF here. |
 | `--dtype f32/f16/bf16` | The source dtype | Store every tensor in this dtype. A narrower dtype is not lossless, and the file records that. |
-| `--family NAME` | The family the file fills | Pack the VAE of this image family, such as `z-image`, `qwen-image-2.1`, `krea-2` or `flux-3-klein`. |
+| `--family NAME` | The family the file fills, `flux3_klein` for the FLUX.2 autoencoder | Pack the VAE of this image family, such as `z-image`, `qwen-image-2.1`, `krea-2`, `flux-3-klein` or `flux-2-klein`. |
 | `--source-repo ID` | `unknown` | Record this repository as the source. |
 | `--source-revision REV` | `unknown` | Record this revision of the source repository. |
 | `--source-config FILE` | `config.json` beside `SRC`, when it is a VAE config | Record this VAE config. |

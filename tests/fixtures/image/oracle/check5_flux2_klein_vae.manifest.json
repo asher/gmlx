@@ -2,12 +2,14 @@
  "schema": 1,
  "name": "check5_flux2_klein_vae",
  "check": 5,
- "family": "flux3_klein",
+ "family": "flux2_klein",
  "script": "scripts/image_oracle/check5_flux3_klein_vae.py",
  "argv": [
   "check5_flux3_klein_vae.py",
   "--vae",
   "diffusion_pytorch_model.safetensors",
+  "--family",
+  "flux2_klein",
   "--sizes",
   "512",
   "1024"

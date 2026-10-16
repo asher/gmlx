@@ -1250,8 +1250,9 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                    help="The image family whose VAE this is, such as "
                         "z-image, qwen-image-2.1, krea-2, flux-3-klein or "
                         "flux-2-klein (default: the family whose VAE the "
-                        "file fills, the first one for the FLUX.2 "
-                        "autoencoder, which serves both klein families).")
+                        "file fills, and flux3_klein for the FLUX.2 "
+                        "autoencoder, whose pack serves every klein "
+                        "family).")
     p.add_argument("--source-repo", default="unknown", metavar="ID",
                    help="Record this repository as the source (default "
                         "unknown).")

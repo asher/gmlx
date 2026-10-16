@@ -34,8 +34,9 @@ Max, and the oracle runs no larger size.
 
 FLUX.2 klein reads the same autoencoder, which gmlx pulls from BFL's
 FLUX.2 klein 4B repository in BF16. ``--vae`` that file, ``--config`` a
-copy of that repository and ``--name check5_flux2_klein_vae`` write its
-fixture, the fp32 and float64 runs reading the bf16 weights upcast.
+copy of that repository, ``--name check5_flux2_klein_vae`` and
+``--family flux2_klein`` write its fixture, the fp32 and float64 runs
+reading the bf16 weights upcast.
 
 --self-test builds the class at a tiny config with seeded weights and
 BatchNorm statistics, which the fixture holds by diffusers name, and runs
@@ -235,7 +236,7 @@ def write(torch, a, name, vae32, sizes, files, argv, extra, notes,
           results_extra=None) -> int:
     vaes, vae64 = _modes(torch, vae32)
     fx = fixtures.FixtureWriter(
-        name, check=5, family="flux3_klein",
+        name, check=5, family=a.family,
         script=f"scripts/image_oracle/{Path(__file__).name}", argv=argv)
     for role, path in files.items():
         fx.add_file(role, path)
@@ -413,6 +414,10 @@ def main(argv=None) -> int:
     ap.add_argument("--sizes", type=int, nargs="*", default=[512, 1024],
                     help="square sizes in pixels, encoded and decoded")
     ap.add_argument("--name", default=NAME)
+    ap.add_argument("--family", choices=("flux3_klein", "flux2_klein"),
+                    default="flux3_klein",
+                    help="the family the manifest records, which reads the "
+                         "autoencoder")
     ap.add_argument("--self-test", action="store_true",
                     help="write the tiny random model fixture and stop")
     ap.add_argument("--out", type=Path,
@@ -463,8 +468,8 @@ def main(argv=None) -> int:
     del state
     return write(
         torch, a, a.name, vae32, [(s, s) for s in a.sizes], files,
-        [Path(__file__).name, "--vae", a.vae.name, "--sizes",
-         *map(str, a.sizes)],
+        [Path(__file__).name, "--vae", a.vae.name, "--family", a.family,
+         "--sizes", *map(str, a.sizes)],
         extra, notes, STARTING, RULE, bfl=bfl, results_extra=results_extra)
 
 

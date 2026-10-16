@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -173,6 +174,35 @@ def test_the_tiny_bf16_file_packs_losslessly_and_serves_both_families(
                 assert _differ(src[d], got) == [], (fam, use, d)
 
 
+def test_a_bare_pack_takes_the_label_the_help_and_the_cli_page_name(
+        tiny_bf16, tmp_path):
+    """Without --family the FLUX.2 autoencoder packs for the label that
+    the pack-vae help and docs/cli.md name."""
+    from gmlx.commands.image import _pack_vae_parser
+    from gmlx.image.vae import pack_vae
+
+    label = pack_vae(tiny_bf16, tmp_path / "bare.gguf", source_repo="r",
+                     source_revision="v", config_json="{}").family
+    assert label == OTHER
+    help_text = " ".join(_pack_vae_parser("p").format_help().split())
+    assert f"and {label} for the FLUX.2 autoencoder" in help_text
+    page = (Path(__file__).resolve().parents[2] / "docs" / "cli.md").read_text()
+    section = page.split("### image pack-vae", 1)[1].split("\n## ", 1)[0]
+    assert f"without `--family` is labeled `{label}`" in " ".join(
+        section.split())
+    row = [ln for ln in section.splitlines() if ln.startswith("| `--family")]
+    assert f"`{label}` for the FLUX.2 autoencoder" in row[0]
+    assert "`flux-2-klein`" in row[0]
+
+
+def test_the_manifest_names_the_family_it_was_written_for():
+    """FLUX.3's oracle script writes FLUX.2's fixture with --family."""
+    m = committed(NAME)
+    assert m["family"] == FAMILY
+    assert m["argv"][m["argv"].index("--family") + 1] == FAMILY
+    assert committed(F32_NAME)["family"] == OTHER
+
+
 def test_the_bf16_vae_of_an_f32_file_and_of_its_bf16_rounding(
         tiny, tiny_f32, tiny_bf16):
     """The bf16 VAE of each holds the same weights, the BatchNorm statistics
@@ -311,8 +341,8 @@ def test_the_file_is_the_inventoried_one(check5, vaes):
     path = vaes("bf16").source
     want = load_json("manifest.json")[HEADER]
     m = check5[1]
-    # The oracle script is FLUX.3 klein's, and the VAE serves both.
-    assert m["family"] in catalog.vae_families(FAMILY)
+    assert m["family"] == FAMILY
+    assert OTHER in catalog.vae_families(FAMILY)
     assert want["sha256"] == m["files"]["vae"]["sha256"]
     assert m["files"]["vae_config"]["sha256"] == load_json("manifest.json")[
         "flux2_klein_vae_config.json"]["sha256"]
