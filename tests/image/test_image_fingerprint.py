@@ -501,7 +501,8 @@ def test_the_real_file_lookup_hides_only_a_refusal(tmp_path, monkeypatch):
     """image_dits lists the files the fingerprint takes for a family. A
     refused file is left out, and a fingerprint or a scan that fails any
     other way raises instead of leaving the file out, which would skip
-    every row on the real file."""
+    every row on the real file. A directory whose name ends in .gguf is
+    no file, and is passed over."""
     from image_fixtures import image_dits
 
     from gmlx.load import headerscan
@@ -515,6 +516,7 @@ def test_the_real_file_lookup_hides_only_a_refusal(tmp_path, monkeypatch):
         d = tmp_path / name
         d.mkdir()
         (d / "a.gguf").write_bytes(b"x")
+        (d / "b.gguf").mkdir()
         return d
 
     assert image_dits(root("taken"), "qwen_image21") == [
