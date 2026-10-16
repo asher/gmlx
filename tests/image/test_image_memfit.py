@@ -903,7 +903,8 @@ def _short_room(family: str, c: dict) -> float:
 def test_a_short_prompt_plan_covers_every_measured_cell(family):
     """A request plan made from the conditionings of a short prompt holds
     ROOM above every measured cell of that prompt. Z-Image's plan prices
-    the most caption rows, since at its own rows it holds less."""
+    the most caption rows, since at its own rows it holds less than
+    ROOM."""
     row = memfit.PEAKS[family]
     cells = _short_cells(family)
     assert len(cells) == {"z_image": 3, "krea2": 3, "qwen_image21": 79,
@@ -924,14 +925,10 @@ def test_a_short_prompt_plan_covers_every_measured_cell(family):
         own = [row.step.bytes(formula(c, c["text"])) - c["gib"] * GiB
                for c in cells]
         assert min(own) < ROOM
-        # The Z-Image fit covers each cell without ROOM: the closest, of
-        # 1056 rows, by 0.22 GiB at the most caption rows.
-        assert min(room) >= 0
-        return
-    assert memfit.prices_prompt(family)
-    if row.caption_rows:
-        # The step is priced at the cell's own text rows.
-        for c in cells:
+    else:
+        assert memfit.prices_prompt(family)
+        # A step that joins the text rows is priced at the cell's own.
+        for c in cells if row.caption_rows else ():
             assert _short_plan(family, c).terms["step_peak"] == \
                 row.step.bytes(formula(c, c["text"]),
                                2 if c["guided"] else 1)

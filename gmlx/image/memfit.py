@@ -114,8 +114,9 @@ class StepFit:
 # active peak is 1.05 GiB above the weights, and the rest is freed buffers
 # the cache keeps up to its bound. A line in the formula bytes through the
 # 1056 and 4128 row cells has a slope of 5.0. The slope is raised 10
-# percent and the base covers every cell.
-Z_IMAGE_STEP = StepFit(base=1.0 * GiB, k=5.5)
+# percent. A plan prices the most caption rows, and there the base leaves
+# 0.25 GiB above every cell, the one of 1056 rows the closest.
+Z_IMAGE_STEP = StepFit(base=1.03 * GiB, k=5.5)
 
 # One Qwen-Image 2.1 Q4_K_M step through ``api.sample`` under bounded_cache
 # on an M5 Max, in fresh processes, over the settled process and less the
@@ -545,9 +546,9 @@ class PeakRow:
 
 PEAKS = {
     # Z-Image prices the most caption rows whatever the prompt. At its own
-    # rows a step of a short caption is priced 0.07 GiB above the cell of
-    # 1056 rows and 0.16 GiB above the cell of 4128 rows, where the most
-    # rows leave 0.22 and 0.32 GiB.
+    # rows a step of a short caption is priced 0.10 GiB above the cell of
+    # 1056 rows and 0.19 GiB above the cell of 4128 rows, where the most
+    # rows leave 0.25 and 0.35 GiB.
     "z_image": PeakRow(token_px=16, row_multiple=32, caption_rows=512,
                        width=11520 + 2 * 10240, step=Z_IMAGE_STEP,
                        encode_row_bytes=3 * 9728 * 2, prices_prompt=False),
