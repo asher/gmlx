@@ -170,7 +170,8 @@ def test_capabilities_answer_without_the_version_header(host):
     assert r.status_code == 200
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
-    assert caps["families"] == ["krea2", "qwen_image21", "z_image"]
+    assert caps["families"] == ["flux3_klein", "krea2", "qwen_image21",
+                                "z_image"]
     assert caps["conventions"] == ["comfy"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -379,7 +380,7 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
     # velocity back, so every convention is the identity.
-    for fam in ("z_image", "qwen_image21", "krea2"):
+    for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
@@ -390,6 +391,166 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
     want = _on_worker(lambda: np.array(api.denoise_step(
         pipe, mx.array(x), 0.75, api.Conditioning(mx.array(feats[0]), "k"))))
     assert np.array_equal(out, -want)
+
+
+# FLUX.3 klein: a flow map reads the time its step goes to from the
+# client's schedule, and the VAE routes carry model-space latents.
+
+F3_SHAPE = (1, 8, 4, 6)                 # 96x64 pixels at the stride of 16
+
+
+@pytest.fixture(scope="module")
+def fpipes():
+    """The tiny FLUX.3 klein DiT of the check 3 self-test, as a flow map
+    and as Base."""
+    def build():
+        import flux3_gates as fg
+        from oracle_fixture import committed_fixture
+
+        weights, m = committed_fixture("selftest_flux3_klein_tiny_weights")
+        cfg = m["inputs"]["config"]
+        fam = get_family("flux3_klein")
+        return {flow: api.ImagePipeline(
+            dit=fg.tiny_model(weights, cfg, flow_map=flow), family=fam,
+            variant="distilled" if flow else "base")
+            for flow in (True, False)}
+    return _on_worker(build)
+
+
+def _serve(host, mid, pipe):
+    """``pipe`` served as ``mid`` beside the host's own."""
+    host.served[mid] = SimpleNamespace(
+        pipe=pipe, adapters=(),
+        spec=SimpleNamespace(id=mid, path=f"/abs/{mid}.gguf", encoder=None,
+                             vae="/abs/vae.gguf", encoder_model=None),
+        plan=SimpleNamespace(keep_encoder=True))
+
+
+def _f3_velocity(pipe, x, sigma, cond, target=None):
+    return _on_worker(lambda: np.array(api.denoise_step(
+        pipe, mx.array(x), sigma, cond, target=target)))
+
+
+def _f3_cond(feats, ref=None):
+    return api.Conditioning(
+        mx.array(feats[0]), "k",
+        ref_latents=() if ref is None else (mx.array(ref[0]),))
+
+
+def test_a_flux3_flow_map_step_goes_to_the_next_time_of_the_schedule(
+        host, fpipes):
+    """Each step of a flow map goes to the entry of ``sample_sigmas``
+    after the one nearest its timestep, as ComfyUI's forward takes it,
+    with and without a reference, and two rows go together."""
+    pipe = fpipes[True]
+    _serve(host, "f3d", pipe)
+    c = _client()
+    rng = np.random.default_rng(7)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    rows = _rows(c, feats)
+    for i in range(len(SIGMAS) - 1):
+        out = c.step("f3d", None, x, [SIGMAS[i]], rows, sample_sigmas=SIGMAS)
+        assert np.array_equal(out, _f3_velocity(
+            pipe, x, SIGMAS[i], _f3_cond(feats), SIGMAS[i + 1])), i
+    # A timestep between two entries goes after the nearest, and the last
+    # entry to itself.
+    for t, to in ((0.55, 0.25), (0.0, 0.0)):
+        out = c.step("f3d", None, x, [t], rows, sample_sigmas=SIGMAS)
+        assert np.array_equal(out, _f3_velocity(
+            pipe, x, t, _f3_cond(feats), to)), t
+    with_ref = [{"cond": rows[0]["cond"], "ref_latents": [c.put(ref)]}]
+    out = c.step("f3d", None, x, [0.75], with_ref, sample_sigmas=SIGMAS)
+    assert np.array_equal(out, _f3_velocity(
+        pipe, x, 0.75, _f3_cond(feats, ref), 0.5))
+    two = c.step("f3d", None, np.concatenate([x, x]), [0.75, 0.75],
+                 rows + with_ref, sample_sigmas=SIGMAS)
+    assert np.array_equal(two[1:], out)
+    assert host.held == 0
+
+
+def test_a_flux3_flow_map_step_without_its_schedule_is_refused(host,
+                                                                fpipes):
+    _serve(host, "f3d", fpipes[True])
+    c = _client()
+    rows = _rows(c, np.ones((1, 10, 24), np.float32))
+    x = np.zeros(F3_SHAPE, np.float32)
+    with pytest.raises(StepsClientError, match="is a flow map: a step body "
+                       "holds sample_sigmas"):
+        c.step("f3d", None, x, [0.5], rows)
+    for bad in ([0.5], [1.0, np.nan]):
+        with pytest.raises(StepsClientError, match="2 or more finite"):
+            c.step("f3d", None, x, [0.5], rows, sample_sigmas=bad)
+    assert host.held == 0
+
+
+def test_a_flux3_base_step_reads_no_schedule(host, fpipes):
+    pipe = fpipes[False]
+    _serve(host, "f3b", pipe)
+    c = _client()
+    feats = np.random.default_rng(8).standard_normal(
+        (1, 10, 24)).astype(np.float32)
+    x = noise_from_seed(6, F3_SHAPE)
+    want = _f3_velocity(pipe, x, 0.5, _f3_cond(feats))
+    for sched in (None, SIGMAS):
+        out = c.step("f3b", None, x, [0.5], _rows(c, feats),
+                     sample_sigmas=sched)
+        assert np.array_equal(out, want)
+
+
+def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
+        host, fpipes, monkeypatch):
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("flux3_klein"), "distilled"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "f3d", fpipes[True])
+    st = _client().status("f3d")
+    assert st["comfy"] == {"model_class": "Flux3", "image_model": "flux3"}
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+
+
+def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
+                                                         monkeypatch):
+    """ComfyUI's FLUX.3 latents are the model's: the routes hand them to
+    the core VAE passes as they are, where the other families map them
+    to and from the VAE's own space."""
+    def no_map(_z):
+        raise AssertionError("FLUX.3 latents are mapped to no other space")
+
+    pipe = dataclasses.replace(fpipes[True], vae=SimpleNamespace(
+        config=SimpleNamespace(in_channels=3), to_model_space=no_map,
+        to_vae_space=no_map))
+    _serve(host, "f3d", pipe)
+    seen = []
+
+    def decode(p, z, *, alpha=False, **kw):
+        seen.append(np.array(z))
+        return mx.full((1, 32, 48, 3), 0.25)
+
+    lat = np.random.default_rng(9).standard_normal(
+        (2, 128, 2, 3)).astype(np.float32)
+    monkeypatch.setattr(api, "vae_decode", decode)
+    monkeypatch.setattr(api, "vae_encode", lambda p, img, **kw: mx.array(
+        lat[:1]))
+    c = _client()
+    got, _, _ = c.container("vae/decode", {"latents": lat}, {"model": "f3d"})
+    assert got["image"].shape == (2, 32, 48, 3)
+    assert [z.shape for z in seen] == [(1, 128, 2, 3)] * 2
+    assert np.array_equal(np.concatenate(seen), lat)
+    got, _, _ = c.container("vae/encode",
+                            {"image": np.zeros((1, 32, 48, 3), np.float32)},
+                            {"model": "f3d"})
+    assert np.array_equal(got["latents"], lat[:1])
+
+
+def test_flow_targets_follow_comfyuis_rule():
+    s = np.array([1.0, 0.75, 0.5, 0.0], np.float32)
+    assert steps.flow_targets(s, [1.0, 0.8, 0.6, 0.5, 0.3, 0.0]) == [
+        0.75, 0.5, 0.0, 0.0, 0.0, 0.0]
+    # A tie goes to the first of the two nearest, as torch's argmin does.
+    assert steps.flow_targets(s, [0.625]) == [0.5]
 
 
 # Patch tables.

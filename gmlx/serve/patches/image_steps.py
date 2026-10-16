@@ -456,8 +456,8 @@ def _table(served, tid):
 
 
 async def step(request: Request):
-    from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE,
-                               Missing, StepError, row_hashes, run_step)
+    from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE, Missing,
+                               StepError, flow_targets, row_hashes, run_step)
 
     t0 = time.perf_counter()
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
@@ -500,6 +500,17 @@ async def step(request: Request):
         ts = np.broadcast_to(np.asarray(t_w.numpy(), np.float32).reshape(-1),
                              (len(rows),))
         sig = [float(conv.scale * t + conv.shift) for t in ts]
+        targets = None
+        if getattr(served.pipe.dit.cfg, "flow_map", False):
+            # The schedule is in the client's timestep convention.
+            s_w = tensors.get("sample_sigmas")
+            if s_w is None:
+                raise StepError(400, f"the {served.pipe.family.title} DiT is "
+                                "a flow map: a step body holds "
+                                "sample_sigmas, the schedule the client "
+                                "samples on")
+            targets = [float(conv.scale * t + conv.shift)
+                       for t in flow_targets(s_w.numpy(), ts)]
         gen = run.gen if run is not None else 0
 
         def work():
@@ -527,7 +538,7 @@ async def step(request: Request):
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
-                                           gen)
+                                           gen, targets)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work)
