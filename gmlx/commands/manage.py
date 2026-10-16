@@ -1950,7 +1950,7 @@ def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
     """The ``gmlx list`` row of an image_models entry: its family (the
     entry's, else its DiT's fingerprint), whether it edits, the chat model
     it shares as its encoder, and the size of the files it loads."""
-    family, title, edit = im.family, None, False
+    family, title, edit, text_only = im.family, None, False, False
     path = _try_resolve(im.path, cfg.model_dirs)
     try:
         from gmlx.image import catalog
@@ -1961,12 +1961,14 @@ def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
         if family:
             fam = get_family(family)
             family, title, edit = fam.name, fam.title, fam.edit is not None
+            text_only = edit and fam.edit.text_only
     except (ValueError, OSError):
         pass
     shared = im.encoder if im.encoder in cfg.models else None
     # An edit runs the encoder's vision tower, the entry's own or that of
-    # the chat model it shares, as /v1/models says.
-    edit = edit and bool(im.encoder_mmproj
+    # the chat model it shares, as /v1/models says, unless the encoder
+    # reads the prompt alone.
+    edit = edit and bool(text_only or im.encoder_mmproj
                          or (shared and cfg.models[shared].mmproj))
     files = [im.path, im.vae, im.encoder_mmproj]
     if shared is None:

@@ -899,6 +899,24 @@ def test_list_edit_needs_the_vision_tower(images, capsys):
     assert {r["id"] for r in rows} == {"qi"}
 
 
+def test_list_edit_takes_flux3_klein_on_its_encoder_alone(images, capsys,
+                                                          monkeypatch):
+    """FLUX.3 klein's encoder reads the prompt alone, so its entry edits
+    without a tower, as /v1/models says."""
+    lib, cfg = images
+    (lib / "f3.gguf").write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + "  f3:\n    path: f3.gguf\n"
+                   "    encoder: vl.gguf\n    vae: qvae.gguf\n")
+    fams = {"f3.gguf": ("flux3_klein", "distilled"),
+            "qi.gguf": ("qwen_image21", "base"),
+            "qt.gguf": ("qwen_image21", "turbo")}
+    monkeypatch.setattr(catalog, "dit_identity",
+                        lambda p: fams.get(os.path.basename(p)))
+    assert manage.cmd_list(["--config", str(cfg), "--json", "--edit"]) == 0
+    rows = json.loads(capsys.readouterr().out)["models"]
+    assert {r["id"] for r in rows} == {"qi", "qt", "f3"}
+
+
 @pytest.mark.parametrize("flags, ids", [
     (["--image"], {"zit", "qi", "qt"}),
     (["--family", "qwen-image-2.1"], {"qi", "qt"}),
