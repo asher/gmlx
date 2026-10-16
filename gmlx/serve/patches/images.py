@@ -642,13 +642,17 @@ def _retrieved(f) -> None:
 def _job_refusal(e: Exception) -> tuple | None:
     """``(message, param, logged error)`` of an error a job raised that
     refuses the request, which both paths answer as a 400, or None for a
-    job that failed."""
+    job that failed. A refusal is one of the types gmlx raises for a bad
+    request: a plan that does not fit, a primitive's RequestRefusal, or an
+    adapter the request names that does not load. Any other error, a
+    ValueError among them, is the server's."""
+    from gmlx.image.lora.reader import AdapterError
     from gmlx.image.memfit import ImageMemoryError
+    from gmlx.image.refusal import RequestRefusal
 
     if isinstance(e, ImageMemoryError):
         return str(e), "size", "ImageMemoryError"
-    if isinstance(e, ValueError):
-        # The primitives refuse a request they cannot run by name.
+    if isinstance(e, (RequestRefusal, AdapterError)):
         return str(e), None, str(e)
     return None
 

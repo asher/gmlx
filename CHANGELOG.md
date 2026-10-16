@@ -64,6 +64,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closed terminal did not end the session until the client exited.
 - `gmlx Sigmas` in ComfyUI gave Qwen-Image 2.1 ComfyUI's simple schedule. It
   takes the image's width and height and gives the schedule of that size.
+- An image request that failed on an internal error got a 400 and left no
+  trace in the log. It gets a 500, and the server logs its trace.
 
 ## [0.5.0] - 2026-10-12
 

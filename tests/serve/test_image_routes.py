@@ -321,17 +321,22 @@ def test_a_flux3_flow_map_with_guidance_is_a_400_before_any_stream(
 
 
 @pytest.mark.parametrize("raised, param", [
-    (ValueError("the DiT is a flow map, which samples without guidance"),
-     None), ("memory", "size")])
+    ("refusal", None), ("adapter", None), ("memory", "size")])
 def test_a_refusal_raised_in_a_streamed_job_is_the_plain_paths_400(
         served, monkeypatch, caplog, capsys, raised, param):
-    """api.sample's own refusal, or a plan that does not fit, raised inside
-    the job: the stream's error frame is the body the plain request gets
-    as its 400, and the job is logged as refused, not failed."""
+    """api.sample's own refusal, an adapter the request names that does not
+    load, or a plan that does not fit, raised inside the job: the stream's
+    error frame is the body the plain request gets as its 400, and the job
+    is logged as refused, not failed."""
+    from gmlx.image.lora.reader import UnmatchedKeysError
     from gmlx.image.memfit import ImageMemoryError
+    from gmlx.image.refusal import RequestRefusal
 
-    if raised == "memory":
-        raised = ImageMemoryError("the image needs 9 GiB of 4")
+    raised = {"refusal": RequestRefusal(
+                  "the DiT is a flow map, which samples without guidance"),
+              "adapter": UnmatchedKeysError("the adapter has 3 keys no "
+                                            "layer of the DiT takes", ()),
+              "memory": ImageMemoryError("the image needs 9 GiB of 4")}[raised]
     monkeypatch.setattr(images.STATE, "counts", dict.fromkeys(
         ("jobs", "failed", "cancelled", "images", "steps"), 0))
     served.job = lambda req, kw: (_ for _ in ()).throw(raised)
@@ -352,6 +357,51 @@ def test_a_refusal_raised_in_a_streamed_job_is_the_plain_paths_400(
             if ln.startswith("[req]")]
     assert len(line) == 1 and " refused " in line[0], line
     assert served.released == [1, 1]
+
+
+def test_the_primitives_refuse_a_request_with_the_refusal_type():
+    """The refusals a job can meet after the request checks are
+    RequestRefusal, which the routes answer with a 400."""
+    from gmlx.image import api, schedule
+    from gmlx.image.refusal import RequestRefusal
+    from gmlx.image.registry import get_family
+
+    f3, f2 = get_family("flux3_klein"), get_family("flux2_klein")
+    q = get_family("qwen_image21")
+    for call in (lambda: api.check_sampling(f3, "distilled", True, 3.5),
+                 lambda: api.check_sampling(f3, "distilled", True, 1.0,
+                                            "uni_pc_bh2"),
+                 lambda: api.check_guidance(f2, "distilled", 4.0),
+                 lambda: api.check_steps(q, "turbo", 20),
+                 lambda: schedule.qwen21_sigmas(1, 4096),
+                 lambda: schedule.flux2_sigmas(0, 4096),
+                 lambda: schedule.zimage_sigmas(0)):
+        with pytest.raises(RequestRefusal):
+            call()
+
+
+def test_an_internal_value_error_in_a_job_is_a_500_with_its_trace(
+        served, monkeypatch, caplog):
+    """A ValueError that is no refusal, such as a shape mismatch inside a
+    primitive, is the server's: a 500 on both paths, with its trace in the
+    log, and the job counts as failed."""
+    monkeypatch.setattr(images.STATE, "counts", dict.fromkeys(
+        ("jobs", "failed", "cancelled", "images", "steps"), 0))
+    served.job = lambda req, kw: (_ for _ in ()).throw(
+        ValueError("latents must be (B, C, H, W), not (2, 3)"))
+    with caplog.at_level(logging.INFO):
+        plain = _client().post("/v1/images/generations", json={"prompt": "x"})
+        r = _client().post("/v1/images/generations",
+                           json={"prompt": "x", "stream": True})
+    assert plain.status_code == 500 and r.status_code == 200
+    assert plain.json()["error"]["type"] == "server_error"
+    assert "ValueError" in plain.json()["error"]["message"]
+    assert _frames(r.text) == [("error", plain.json())]
+    assert "latents must be" not in plain.text + r.text
+    traced = [rec for rec in caplog.records if rec.levelno >= logging.ERROR
+              and rec.exc_info and rec.exc_info[0] is ValueError]
+    assert len(traced) == 2, [rec.getMessage() for rec in caplog.records]
+    assert images.STATE.metrics()["jobs_failed_total"] == 2
 
 
 def test_a_failed_streamed_job_is_the_plain_paths_500(served, monkeypatch):

@@ -56,6 +56,8 @@ import math
 
 import numpy as np
 
+from .refusal import RequestRefusal
+
 _F32 = np.float32
 
 
@@ -116,7 +118,7 @@ def zimage_sigmas(steps: int, shift: float = 3.0) -> np.ndarray:
     torch rounds a scalar argument to the output dtype.
     """
     if steps < 1:
-        raise ValueError(f"steps must be at least 1, not {steps}")
+        raise RequestRefusal(f"steps must be at least 1, not {steps}")
     base = linspace_f32(1.0, 1.0 / steps, steps)
     return np.append(shift_static(base, shift), _F32(0)).astype(_F32)
 
@@ -160,8 +162,8 @@ def qwen21_sigmas(steps: int, image_tokens: int, *, base_len: int = 256,
     One step has no schedule: its only base sigma is 1, the stretch then
     divides zero by zero, and the reference returns NaN."""
     if steps < 2:
-        raise ValueError(f"the Qwen-Image 2.1 schedule needs at least 2 "
-                         f"steps, not {steps}; pass sigmas for fewer")
+        raise RequestRefusal(f"the Qwen-Image 2.1 schedule needs at least "
+                             f"2 steps, not {steps}; pass sigmas for fewer")
     base = np.linspace(1.0, 1.0 / steps, steps).astype(_F32)
     mu = calculate_shift(image_tokens, base_len, max_len, base_shift,
                          max_shift)
@@ -173,7 +175,7 @@ def krea2_sigmas(steps: int, mu: float) -> np.ndarray:
     """Krea 2 sigmas shifted by ``mu``, length ``steps + 1`` with a final
     zero."""
     if steps < 1:
-        raise ValueError(f"steps must be at least 1, not {steps}")
+        raise RequestRefusal(f"steps must be at least 1, not {steps}")
     base = np.linspace(1.0, 1.0 / steps, steps).astype(_F32)
     return np.append(shift_exponential(base, mu), _F32(0)).astype(_F32)
 
@@ -182,7 +184,7 @@ def flux3_sigmas(steps: int, alpha: float) -> np.ndarray:
     """FLUX.3 klein sigmas, ``linspace_f32(1.0, 0.0, steps + 1)`` shifted
     by ``alpha``: length ``steps + 1``, the last one zero."""
     if steps < 1:
-        raise ValueError(f"steps must be at least 1, not {steps}")
+        raise RequestRefusal(f"steps must be at least 1, not {steps}")
     return shift_static(linspace_f32(1.0, 0.0, steps + 1), alpha)
 
 
@@ -214,7 +216,7 @@ def flux2_sigmas(steps: int, tokens: int) -> np.ndarray:
     zero, and the first is 1 or the float32 value next below it.
     """
     if steps < 1:
-        raise ValueError(f"steps must be at least 1, not {steps}")
+        raise RequestRefusal(f"steps must be at least 1, not {steps}")
     t = linspace_f32(1.0, 0.0, steps + 1)
     e = _F32(math.exp(flux2_mu(tokens, steps)))
     with np.errstate(divide="ignore"):

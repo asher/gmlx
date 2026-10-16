@@ -56,6 +56,7 @@ from . import memfit
 from .conditioning import (ByteLRU, Conditioning, Reference, array_bytes,
                            conditioning_key)
 from .ops import kq_routes
+from .refusal import RequestRefusal
 from .registry import Family
 from .samplers import (img2img_start, inpaint_blend, make_sampler, noised,
                        noise_from_seed)
@@ -93,7 +94,7 @@ def check_steps(family, variant: str, steps: int) -> None:
     """Refuse a step count a variant with a fixed schedule does not run."""
     n = fixed_steps(family, variant)
     if n is not None and int(steps) != n:
-        raise ValueError(
+        raise RequestRefusal(
             f"{family.title} {variant} runs {n} steps, the schedule it was "
             f"distilled to, not {steps}")
 
@@ -103,7 +104,7 @@ def check_guidance(family, variant: str, cfg: float) -> None:
     sample without it, naming the variant that takes it."""
     other = family.unguided.get(variant)
     if other is not None and cfg != 1.0:
-        raise ValueError(
+        raise RequestRefusal(
             f"the {family.title} {variant} DiT samples without guidance: "
             f"drop guidance {cfg:g}, or run the {family.title} {other} "
             f"checkpoint, which takes guidance")
@@ -116,11 +117,13 @@ def check_sampling(family, variant: str, flow_map: bool, cfg: float,
     is the flag of the DiT's config, which its header gives."""
     check_guidance(family, variant, cfg)
     if flow_map and cfg != 1.0:
-        raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
-                         f"which samples without guidance: drop cfg {cfg}")
+        raise RequestRefusal(f"the {family.title} {variant} DiT is a flow "
+                             f"map, which samples without guidance: drop "
+                             f"cfg {cfg}")
     if flow_map and sampler != "euler":
-        raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
-                         f"which samples with euler only, not {sampler}")
+        raise RequestRefusal(f"the {family.title} {variant} DiT is a flow "
+                             f"map, which samples with euler only, not "
+                             f"{sampler}")
 
 
 def _canonical_table(entries: tuple) -> str:
@@ -544,21 +547,23 @@ def references(pipe: ImagePipeline, images, *,
     if edit is None:
         if not images:
             return ()
-        raise ValueError(f"{pipe.family.title} takes no reference images")
+        raise RequestRefusal(f"{pipe.family.title} takes no reference "
+                             "images")
     if len(images) > edit.max_refs:
-        raise ValueError(
+        raise RequestRefusal(
             f"{pipe.family.title} takes at most {edit.max_refs} reference "
             f"images, and the request has {len(images)}")
     if edit.prepare_all is not None:
         if area is not None:
-            raise ValueError(f"{pipe.family.title} sizes its references by "
-                             "its own rule, and takes no reference area")
+            raise RequestRefusal(f"{pipe.family.title} sizes its references "
+                                 "by its own rule, and takes no reference "
+                                 "area")
         if images and all(isinstance(r, Reference) for r in images):
             return tuple(images)
         return edit.prepare_all(images)
     area = edit.area if area is None else int(area)
     if not edit.min_area <= area <= edit.area:
-        raise ValueError(
+        raise RequestRefusal(
             f"a reference area of {area} pixels is outside "
             f"{edit.min_area} to {edit.area}, which {pipe.family.title} "
             "takes")
@@ -1174,7 +1179,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         raise ValueError(f"height and width must be positive multiples of "
                          f"{unit}, not {height}x{width}")
     if not 0.0 < denoise <= 1.0:
-        raise ValueError(f"denoise must lie in (0, 1], not {denoise}")
+        raise RequestRefusal(f"denoise must lie in (0, 1], not {denoise}")
     if init_latents is None and (denoise < 1.0 or mask is not None):
         raise ValueError("denoise below 1 and mask need init_latents")
 
@@ -1191,7 +1196,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         init = mx.array(init_latents).astype(mx.float32)
         s = s[img2img_start(len(s) - 1, denoise):]
         if len(s) < 2:
-            raise ValueError(f"denoise {denoise} leaves no step")
+            raise RequestRefusal(f"denoise {denoise} leaves no step")
 
     if init is not None:
         b = init.shape[0]
@@ -1281,7 +1286,8 @@ def vae_decode(pipe: ImagePipeline, latents, *, tiled: bool | None = None,
     the bytes it leaves for the pass."""
     vae = _need_vae(pipe)
     if alpha and vae.config.out_channels != 4:
-        raise ValueError(f"the {pipe.family.title} VAE has no alpha channel")
+        raise RequestRefusal(f"the {pipe.family.title} VAE has no alpha "
+                             "channel")
     from .vae import tiling
 
     tiled, free = _vae_pass(plan, "decode", tiled)
