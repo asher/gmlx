@@ -76,6 +76,75 @@ def test_each_image_of_a_request_takes_the_next_seed(stubs):
     assert len(out.images) == 2 and out.images[0] != out.images[1]
 
 
+def _flux3_served():
+    served = _served()
+    served.pipe.family = get_family("flux3_klein")
+    served.pipe.variant = "distilled"
+    served.pipe.size_multiple = 16
+    served.pipe.vae_scale, served.pipe.dit.cfg.patch = 16, 1
+    served.spec.encoder_mmproj = None
+    return served
+
+
+def _flux3_job(monkeypatch, fields, mask=None, emit=None):
+    """An unsized FLUX.3 edit of one 100x60 image through the job, whose
+    VAE decodes to the canvas it is given."""
+    import numpy as np
+
+    monkeypatch.setattr(api, "vae_decode", lambda pipe, x, *, alpha, plan:
+                        mx.zeros((1, h, w, 3)))
+    monkeypatch.setattr(api, "vae_encode", lambda pipe, img, *, plan:
+                        mx.zeros((1, 32, h // 16, w // 16)))
+    monkeypatch.setattr(api, "encode_references", lambda pipe, c, plan: c)
+    served = _flux3_served()
+    req = svc.parse_request("edits", fields)
+    req.images = [np.full((60, 100, 3), 9, np.uint8)]
+    req.mask = mask
+    svc.check_family(req, served)
+    w, h = svc.target_size(req, served)
+    out = svc.run_job(served, req, size=(w, h), budget=None,
+                      stop=threading.Event(), emit=emit)
+    return (w, h), out
+
+
+def test_a_masked_unsized_flux3_edit_keeps_the_size_of_its_image(
+        stubs, monkeypatch):
+    """A mask sizes the edit at the first image on the stride and blends
+    its output into that image, so the canvas of the padded reference
+    crops nothing."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    mask = np.zeros((60, 100, 4), np.uint8)
+    size, out = _flux3_job(monkeypatch, {"prompt": "make it red"},
+                           mask=mask)
+    assert size == (96, 48) and out.size == size
+    with Image.open(io.BytesIO(out.images[0])) as im:
+        assert im.size == size
+
+
+def test_the_partial_images_of_a_cropped_flux3_edit_are_cropped(
+        stubs, monkeypatch):
+    """Each partial image of a stream comes out at the size of the final
+    one, cropped from the canvas of the padded reference."""
+    import io
+
+    from PIL import Image
+
+    sent = []
+    size, out = _flux3_job(
+        monkeypatch, {"prompt": "make it red", "stream": "true",
+                      "partial_images": "2"},
+        emit=lambda i, data: sent.append(data))
+    assert size != (100, 60) and out.size == (100, 60)
+    assert len(sent) == 2
+    for data in [*sent, *out.images]:
+        with Image.open(io.BytesIO(data)) as im:
+            assert im.size == (100, 60)
+
+
 @pytest.mark.parametrize("route,size,want", [
     ("edits", None, (100, 60)), ("variations", None, (100, 60)),
     ("edits", "128x64", (128, 64))])
@@ -105,12 +174,7 @@ def test_a_flux3_edit_runs_its_prepared_references_and_crops_the_pad(
     monkeypatch.setattr(svc, "_encode", encode)
     monkeypatch.setattr(api, "vae_decode", vae_decode)
     monkeypatch.setattr(api, "encode_references", lambda pipe, c, plan: c)
-    served = _served()
-    served.pipe.family = get_family("flux3_klein")
-    served.pipe.variant = "distilled"
-    served.pipe.size_multiple = 16
-    served.pipe.vae_scale, served.pipe.dit.cfg.patch = 16, 1
-    served.spec.encoder_mmproj = None
+    served = _flux3_served()
     fields = {"prompt": "" if route == "variations" else "make it red"}
     if size:
         fields["size"] = size
