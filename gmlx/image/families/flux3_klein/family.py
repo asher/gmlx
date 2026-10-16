@@ -13,8 +13,8 @@ state dict keys of the reference DiT. Converters label the file ``flux``,
 as they label FLUX.1 and FLUX.2 files, so the names and shapes decide,
 and the label alone names no family. The distilled checkpoint, a flow
 map, has the ``ref_time_in`` embedder of the target time and Base has
-none, so the tensors name the variant. A FLUX.1 or FLUX.2 file is
-refused with the name of its family.
+none, so the tensors name the variant. A FLUX.1 or FLUX.2 file given as
+FLUX.3 klein is refused with the name of its model.
 """
 
 from __future__ import annotations
@@ -154,31 +154,18 @@ ENCODER_IDENTITY_SOURCE = (
     "black-forest-labs/flux-3-image-klein text_encoder at "
     "8454017f9ebaada30c998fccd9f67a80c7580f68")
 
-# FLUX.1 and FLUX.2 files under the same label, by the block names of
-# BFL's flux and flux2 code. FLUX.2 klein takes its text width from the
-# stacked layers of its Qwen3 encoder.
-_FLUX_DOUBLE = "double_blocks.0.img_attn.proj.weight"
-_FLUX2_MOD = "double_stream_modulation_img.lin.weight"
-_FLUX1_MOD = "double_blocks.0.img_mod.lin.weight"
-_FLUX2_KLEIN = {((128, 3072), (7680, 3072)): "FLUX.2 klein 4B",
-                ((128, 4096), (12288, 4096)): "FLUX.2 klein 9B"}
-
-
 def _older_flux(view: HeaderView) -> Refusal | None:
-    """The refusal of a FLUX.1 or FLUX.2 file, by name, or None."""
-    if not view.has(_FLUX_DOUBLE):
+    """The refusal of a FLUX.1 or FLUX.2 file, by name, or None. The
+    FLUX.2 klein row meets these files first; this one names them when
+    the family is given as FLUX.3 klein."""
+    from gmlx.image.families.flux2_klein import family as flux2
+
+    name = flux2.flux_model(view)
+    if name is None:
         return None
-    shapes = (view.shape("img_in.weight"), view.shape(TXT_IN))
-    if view.has(_FLUX2_MOD):
-        name = _FLUX2_KLEIN.get(shapes, "FLUX.2")
-    elif view.has(_FLUX1_MOD) and shapes == ((64, 3072), (4096, 3072)):
-        name = "FLUX.1"
-    else:
-        # Another model in the FLUX.1 block names, which the generic
-        # FLUX row of the fingerprint refuses.
-        return None
-    return Refusal(f"this is a {name} GGUF, which gmlx image does not "
-                   f"support; {TITLE} is the FLUX model it runs")
+    if name.startswith(flux2.TITLE):
+        return Refusal(f"this is a {name} GGUF, not a {TITLE} one")
+    return flux2.older_refusal(name)
 
 
 def expected(flow_map: bool) -> dict:

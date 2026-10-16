@@ -127,6 +127,20 @@
     "sha256": "5489463ed96056b0bb5472abb5d1bba7055e48d574e37877acb43b407465e26f",
     "kv_kept": "general.architecture"
   },
+  "flux2_klein_4b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "transformer/config.json",
+    "size": 541,
+    "sha256": "09733c74a3da6d17dd0a0472a091a8950c7c6935889c32c16cc800ede05029de"
+  },
+  "flux2_klein_base_4b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+    "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+    "file": "transformer/config.json",
+    "size": 531,
+    "sha256": "c8a88c1433f24e52c01f46766c9f519e76d91d1c00bfb43fe0db2e4ed3c84d70"
+  },
   "flux3_klein_config.json": {
     "repo": "black-forest-labs/flux-3-image-klein",
     "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
