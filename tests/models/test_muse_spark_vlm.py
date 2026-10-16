@@ -17,6 +17,8 @@ mx = pytest.importorskip("mlx.core")
 
 from mlx.utils import tree_flatten, tree_unflatten  # noqa: E402
 
+from gmlx._vendor.mlx_vlm import apc as _apc  # noqa: E402
+from gmlx.cache.apc_media import install_media_token_ids  # noqa: E402
 import gmlx.load.vlm as gvlm  # noqa: E402
 import gmlx.models.muse_glimmer.tools as muse_tools  # noqa: E402
 import gmlx.models.muse_spark.vlm_model as vm  # noqa: E402
@@ -103,7 +105,6 @@ def test_audio_encoder_matches_the_numpy_graph(audio):
 
 
 def test_audio_embeddings_depend_only_on_earlier_samples(audio):
-    """The trailing-placeholder rule for a reused prefix relies on this."""
     model, _, _ = audio
     wave = mx.array(np.random.default_rng(3).normal(0, 0.3, 6 * PER)
                     .astype(np.float32))
@@ -341,20 +342,32 @@ def test_audio_features_land_on_the_audio_rows(model):
     assert mx.array_equal(merged[0, mx.array(others)], text[0, mx.array(others)])
 
 
-def test_a_reused_prefix_takes_the_last_audio_features(model):
-    """Prompt-cache reuse trims input_ids to the suffix but keeps the
-    waveform, so the remaining placeholders take the trailing features."""
-    waves, mask = _waves(4)
-    feats = model.audio_tower(waves[0])
-    suffix = mx.array([[AUDIO_TOKEN, AUDIO_TOKEN, END, 2]])
-    out = model.get_input_embeddings(
-        suffix, input_features=waves, input_features_mask=mask).inputs_embeds
-    assert mx.allclose(out[0, :2], feats[2:].astype(out.dtype), atol=1e-5).item()
-    # A suffix past every placeholder is plain text.
+def test_the_prefix_guard_keeps_audio_slots_whole(model):
+    """The APC guard sees the audio slots as media, so a reused prefix
+    holds every slot or none, on the container and the text config."""
+    install_media_token_ids()
+    for config in (model.config, model.language_model.config):
+        assert AUDIO_TOKEN in _apc.multimodal_token_ids_from_config(config)
+    ids = [1, START, AUDIO_TOKEN, AUDIO_TOKEN, AUDIO_TOKEN, END, 2]
+    media = _apc.multimodal_token_ids_from_config(model.language_model.config)
+    assert not _apc.prefix_leaves_text_only_suffix(ids, 3, media)
+    assert _apc.prefix_leaves_text_only_suffix(ids, 5, media)
+
+
+def test_a_suffix_past_the_audio_is_plain_text(model):
+    waves, _ = _waves(4)
     text = mx.array([[END, 2]])
     assert mx.array_equal(
         model.get_input_embeddings(text, input_features=waves).inputs_embeds,
         model.get_input_embeddings(text).inputs_embeds)
+
+
+def test_fewer_placeholders_than_features_fail_by_name(model):
+    waves, mask = _waves(4)
+    ids = mx.array([[AUDIO_TOKEN, AUDIO_TOKEN, END, 2]])
+    with pytest.raises(ValueError, match="2 audio placeholder tokens but 4"):
+        model.get_input_embeddings(
+            ids, input_features=waves, input_features_mask=mask)
 
 
 def test_more_placeholders_than_features_fail_by_name(model):

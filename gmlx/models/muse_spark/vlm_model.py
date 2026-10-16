@@ -70,6 +70,7 @@ class TextConfig(BaseModelConfig):
     routed_scaling_factor: float = 1.0
     norm_topk_prob: bool = True
     tie_word_embeddings: bool = False
+    media_token_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -83,10 +84,20 @@ class ModelConfig(BaseModelConfig):
     audio_token_id: int = 200038
     vocab_size: int = 202048
     eos_token_id: Optional[List[int]] = None
+    # The APC guard keeps a reused prefix from ending inside the audio
+    # slots, so the suffix holds every slot or none.
+    media_token_ids: List[int] = field(default_factory=list)
 
     def __post_init__(self):
         if self.image_token_index is None:
             self.image_token_index = self.image_token_id
+        if not self.media_token_ids:
+            self.media_token_ids = [int(self.audio_token_id)]
+        tc = self.text_config
+        if isinstance(tc, dict):
+            tc["media_token_ids"] = list(self.media_token_ids)
+        elif tc is not None and hasattr(tc, "media_token_ids"):
+            tc.media_token_ids = list(self.media_token_ids)
 
 
 class LanguageModel(_SparkLM):
@@ -147,6 +158,10 @@ class Model(nn.Module):
         if config.audio_config is not None:
             self.audio_tower = AudioModel(config.audio_config)
         self.language_model = LanguageModel(config.text_config)
+        # The serve engine reads media ids off the language model's config.
+        tc = self.language_model.config
+        if hasattr(tc, "media_token_ids") and not tc.media_token_ids:
+            tc.media_token_ids = list(config.media_token_ids)
 
     _image_features = _GlimmerModel._image_features
 
@@ -186,6 +201,7 @@ class Model(nn.Module):
             embeds = _scatter(self.config.image_token_index, features, embeds,
                               input_ids, "image")
         waves = kwargs.get("input_features")
+        # A reused prompt prefix that holds the audio leaves no slots here.
         n_slots = (int(mx.sum(input_ids == self.config.audio_token_id).item())
                    if waves is not None else 0)
         if n_slots:
@@ -194,10 +210,6 @@ class Model(nn.Module):
                     "audio input needs an mmproj with an audio encoder")
             features = self._audio_features(
                 waves, kwargs.get("input_features_mask"))
-            # A reused prompt prefix leaves only the last placeholders in
-            # input_ids, and they take the last features.
-            if n_slots < features.shape[0]:
-                features = features[features.shape[0] - n_slots:]
             embeds = _scatter(self.config.audio_token_id, features, embeds,
                               input_ids, "audio")
         return InputEmbeddingsFeatures(inputs_embeds=embeds)
