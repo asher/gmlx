@@ -432,8 +432,6 @@ def family_of(spec) -> tuple:
 def status(spec, resident: bool, plan=None) -> dict:
     from gmlx.image.dtypes import image_activation
 
-    from .image_service import serves_edits
-
     fam, variant = family_of(spec)
     facts = COMFY.get(fam.name)
     if facts is None:
@@ -454,7 +452,11 @@ def status(spec, resident: bool, plan=None) -> dict:
             "comfy": {"model_class": facts["model_class"],
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
-            "edit_capable": serves_edits(fam),
+            # A step takes the reference latents the client encoded on
+            # the VAE route, so a DiT that reads references edits here,
+            # though the server prepares FLUX.3's reference images for
+            # gmlx image generate alone.
+            "edit_capable": fam.edit is not None,
             "sampling": sampling(fam, variant),
             "compute_dtype": str(act.dit).rsplit(".", 1)[-1].replace(
                 "bfloat16", "bf16").replace("float16", "f16").replace(

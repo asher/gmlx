@@ -539,6 +539,8 @@ def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
     _serve(host, "f3d", fpipes[True])
     st = _client().status("f3d")
     assert st["comfy"] == {"model_class": "Flux3", "image_model": "flux3"}
+    # ComfyUI's FLUX.3 edit hands the step the latents of its references.
+    assert st["edit_capable"]
     assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
     assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
 
@@ -860,11 +862,13 @@ def test_status_carries_the_turbo_sampling_schedule(host, monkeypatch):
     assert st["sampling"]["sigmas"] == [*map(float, row.sigmas), 0.0]
     assert st["sampling"]["steps"] == len(st["sampling"]["sigmas"]) - 1
     assert st["memory"]["dit_bytes"] == 7
+    assert st["edit_capable"]
     # Z-Image Turbo samples on its family schedule, which has no fixed
     # sigmas.
     z = c.status("zit")
     assert z["comfy"]["model_class"] == "ZImage"
     assert z["sampling"]["sigmas"] is None and z["sampling"]["steps"] == 8
+    assert not z["edit_capable"]
     # Krea 2 Turbo: ComfyUI's Krea2 class on 16 channel latents at 8x, in
     # 2x2 patches, an RGB VAE, 8 steps on its family schedule, no guidance.
     q = host.served["qit"]
