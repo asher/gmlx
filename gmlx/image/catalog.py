@@ -89,9 +89,12 @@ _FLUX3 = dict(
     license="flux-kommunity",
     license_url="https://huggingface.co/black-forest-labs/flux-3-image-klein/"
                 "blob/main/LICENSE.md",
+    # LICENSE.md 2.a, 2.e and the Qualifying User of 1.e.
     license_note=("non-commercial use, and commercial use of the images only "
                   "under $5M annual revenue, affiliates counted, with content "
-                  "filters in place"),
+                  "filters or a review of each image for unlawful or "
+                  "infringing content before it is shared, and a disclosure "
+                  "that it is made with AI where the law requires one"),
     encoder_license="apache-2.0",
     encoder_bytes=4_280_406_816, vae_bytes=336_205_920)
 

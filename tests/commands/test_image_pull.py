@@ -677,8 +677,10 @@ def test_a_flux3_pull_takes_its_variant_folder_and_packs_the_comfy_vae(
     assert m.encoder_mmproj is None and not m.defaults.get("size")
     assert (f"license: {r.title} flux-kommunity, non-commercial use, and "
             "commercial use of the images only under $5M annual revenue, "
-            "affiliates counted, with content filters in place "
-            "(https://huggingface.co/black-forest-labs/flux-3-image-klein/"
+            "affiliates counted, with content filters or a review of each "
+            "image for unlawful or infringing content before it is shared, "
+            "and a disclosure that it is made with AI where the law requires "
+            "one (https://huggingface.co/black-forest-labs/flux-3-image-klein/"
             "blob/main/LICENSE.md); encoder apache-2.0"
             in capsys.readouterr().out)
 
