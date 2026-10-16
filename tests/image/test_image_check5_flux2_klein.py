@@ -42,6 +42,8 @@ pytestmark = pytest.mark.host_gb(16)
 
 FAMILY = "flux2_klein"
 OTHER = "flux3_klein"
+# Every family that decodes with the FLUX.2 autoencoder.
+KLEIN = (FAMILY, OTHER, "flux2_klein_9b")
 NAME = "check5_flux2_klein_vae"
 F32_NAME = "check5_flux3_klein_vae"
 TINY = "selftest_flux3_klein_vae_tiny"
@@ -143,7 +145,7 @@ def _bn_rounded(vae) -> None:
 def test_the_tiny_bf16_file_packs_losslessly_and_serves_both_families(
         tiny_bf16, tmp_path):
     """BF16 stays BF16 and the batch count I64. A pack for either klein
-    family loads for both, bit for bit with the file."""
+    family loads for every klein family, bit for bit with the file."""
     import gguf
 
     from gmlx.image import catalog, preflight
@@ -164,8 +166,8 @@ def test_the_tiny_bf16_file_packs_losslessly_and_serves_both_families(
         assert "gmlx.vae.lossless" not in r.fields
         assert preflight.classify(str(dst)) == "vae"
         assert catalog.vae_families(fam) == (
-            (FAMILY, OTHER) if fam == FAMILY else (OTHER, FAMILY))
-        for use in (FAMILY, OTHER):
+            fam, *(f for f in KLEIN if f != fam))
+        for use in KLEIN:
             for d in ("fp32", "bf16"):
                 got = _params(load_vae(str(dst), family=use, dtype=d))
                 assert _differ(src[d], got) == [], (fam, use, d)
