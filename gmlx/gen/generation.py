@@ -1400,6 +1400,7 @@ def generate_speculative_owned(
         verbose=verbose,
         start_token=thinking_start_token,
         end_token=thinking_end_token,
+        prompt_ids=prompt_ids,
     )
     set_finish_key_target(hook)
     tic = time.perf_counter()
@@ -1584,6 +1585,7 @@ def _stream_generate_speculative_owned(
         start_in_thinking=start_in_thinking,
         start_token=thinking_start_token,
         end_token=thinking_end_token,
+        prompt_ids=prompt_ids,
     )
     set_finish_key_target(hook)
     tic = time.perf_counter()

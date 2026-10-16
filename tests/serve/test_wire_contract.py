@@ -159,7 +159,9 @@ _CONFIG = _WireConfig()
 # -- fixture: real routes + full patch set over the fakes ----------------------
 
 @pytest.fixture(scope="module")
-def wire_app():
+def wire_app(module_engine_seams):
+    # module_engine_seams restores the engine classes after this teardown,
+    # ResponseGenerator._make_logits_processors among them.
     fastapi_app = _APP.app
     apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")

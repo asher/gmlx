@@ -116,6 +116,18 @@ def _restore_engine_seams(saved: dict) -> None:
             setattr(apc, name, value)
 
 
+@pytest.fixture(scope="module")
+def module_engine_seams():
+    """Restore the engine seams when the module ends. For a module whose
+    fixture installs the server patches once for all of its tests."""
+    if _APP is None:
+        yield
+        return
+    saved = _snapshot_engine_seams()
+    yield
+    _restore_engine_seams(saved)
+
+
 @pytest.fixture
 def engine_seams():
     """The snapshot and restore of the engine seams that ``_restore_mlxvlm``

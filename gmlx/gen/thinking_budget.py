@@ -146,6 +146,16 @@ def prompt_opens_thinking(prompt, start_token: str | None = None,
     ) is not None
 
 
+def _opens_marker(tail, seq) -> bool:
+    """Whether ``tail`` ends partway into the multi-token marker ``seq``.
+    The leading pieces of a start marker (ATEM's ``<|start|>assistant``)
+    are not answer tokens yet."""
+    if not seq or len(seq) < 2:
+        return False
+    tail = [int(t) for t in tail]
+    return any(tail[-j:] == list(seq[:j]) for j in range(1, len(seq)))
+
+
 def _encode_ids(tokenizer, text: str):
     try:
         return tokenizer.encode(text, add_special_tokens=False)
@@ -168,20 +178,19 @@ def _single_token_id(tokenizer, text: str):
 
 def _tag_pair_seqs(tokenizer, start_tag, end_tag):
     """``(start_seq, end_seq)`` for a known marker spelling, or None when the
-    end tag does not encode at all (the caller then keeps probing). Single
-    vocab entries are preferred over the BPE pieces of the same spelling;
-    ``start_tag`` may be None, which yields a None start_seq."""
+    end tag does not encode at all (the caller then keeps probing). Each tag
+    keeps its whole encoding, so a start marker that spans several tokens
+    (ATEM's ``<|start|>assistant to=self<|message|>`` is five) still opens
+    a block when its end marker is one token. ``start_tag`` may be None,
+    which yields a None start_seq."""
     if not end_tag:
         return None
-    end_id = _single_token_id(tokenizer, end_tag)
-    if end_id is not None:
-        start_id = _single_token_id(tokenizer, start_tag) if start_tag else None
-        return ((start_id,) if start_id is not None else None, (end_id,))
     end_ids = _encode_ids(tokenizer, end_tag)
     if not end_ids:
         return None
     start_ids = _encode_ids(tokenizer, start_tag) if start_tag else None
-    return (tuple(start_ids) if start_ids else None, tuple(end_ids))
+    return (tuple(int(t) for t in start_ids) if start_ids else None,
+            tuple(int(t) for t in end_ids))
 
 
 def _thinking_token_seqs(tokenizer, start_token=None, end_token=None):
@@ -232,20 +241,23 @@ def _thinking_token_seqs(tokenizer, start_token=None, end_token=None):
 class ThinkingBudgetProcessor:
     """mlx-lm logits processor that caps generated thinking tokens.
 
-    Called as ``processor(tokens, logits)`` where ``tokens`` is the *full*
-    accumulated sequence (prompt + everything generated so far) and ``logits``
-    is ``(1, vocab)`` for the next token. Only the generated suffix is counted:
-    a length baseline taken on the first call skips the prompt. When the count
-    of generated thinking tokens exceeds ``budget``, the next steps' logits are
-    forced (one-hot) through ``forced_ids``; generation then continues normally.
+    Called as ``processor(tokens, logits)`` where ``tokens`` is the sequence
+    mlx-lm accumulates (the prompt's last token, then everything generated so
+    far) and ``logits`` is ``(1, vocab)`` for the next token. Only the
+    generated suffix is counted: a length baseline taken on the first call
+    skips the prompt. When the count of generated thinking tokens exceeds
+    ``budget``, the next steps' logits are forced (one-hot) through
+    ``forced_ids``; generation then continues normally.
     A natural ``end_seq`` before the budget disarms the processor.
     ``budget=None`` never trips on its own: the processor is armed only for an
     external ``request_close()`` (the ^T finish-thinking key), which closes the
     block through ``skip_ids`` and then behaves exactly like a spent budget.
 
     ``start_seq`` / ``end_seq`` are token-id tuples. They are multi-token for
-    channel-style delimiters (``<|channel>thought`` / ``<channel|>``) and length
-    one for ``<think>`` / ``</think>``; matching is on the token suffix.
+    channel-style delimiters (``<|channel>thought`` / ``<channel|>``) and
+    ATEM's reasoning header, and length one for ``<think>`` / ``</think>``.
+    Matching is on the suffix of the tokens seen so far (see ``_seed_tail``
+    for a start marker that the prompt begins).
 
     A *forced* close leaves the model at a seam it was never trained on.
     Interleaved-thinking models (MiniMax-M3) legitimately alternate think
@@ -291,6 +303,8 @@ class ThinkingBudgetProcessor:
         self.count = 0
         self._close_requested = False
         self._baseline = None  # len(tokens) at first call -> skip the prompt
+        self._tail: list[int] = []  # last tokens seen, for marker matching
+        self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1)
         self._forcing = False
         self._forced_idx = 0
         self._force_seq = self.forced_ids
@@ -318,12 +332,24 @@ class ThinkingBudgetProcessor:
             self._ban_rows[ids] = row
         return row.astype(logits.dtype)
 
-    @staticmethod
-    def _ends_with(tokens, seq):
+    def _tail_is(self, seq) -> bool:
         k = len(seq)
-        if k == 0 or tokens.shape[0] < k:
-            return False
-        return [int(x) for x in tokens[-k:].tolist()] == list(seq)
+        return k > 0 and len(self._tail) >= k and self._tail[-k:] == list(seq)
+
+    def _seed_tail(self, tokens) -> None:
+        """Seed the marker tail from the prompt tokens of the first call.
+        mlx-lm hands over only the prompt's last token, so when those tokens
+        end a proper prefix of a multi-token start marker (ATEM's prompt
+        ends "<|start|>assistant"), the tail takes that whole prefix and the
+        generated rest of the marker completes it."""
+        seen = [int(t) for t in tokens[-self._tail_max:].tolist()]
+        seq = self.start_seq or ()
+        for j in range(len(seq) - 1, 0, -1):
+            m = min(len(seen), j)
+            if m and seen[-m:] == list(seq[j - m:j]):
+                self._tail = list(seq[:j])
+                return
+        self._tail = seen
 
     def _strike(self):
         self._strikes += 1
@@ -348,11 +374,14 @@ class ThinkingBudgetProcessor:
         if self._baseline is None:
             # First call: everything so far is the prompt; don't count it.
             self._baseline = n
+            self._seed_tail(tokens)
         elif n > self._baseline and not self.done:
             # Exactly one new generated token per step after the first.
             self._baseline = n
+            self._tail.append(int(tokens[-1].item()))
+            del self._tail[:-self._tail_max]
             if not self._forcing:
-                if (self._ends_with(tokens, self.end_seq)
+                if (self._tail_is(self.end_seq)
                         and not self._outside_block()):
                     self.in_thinking = False
                     if self._landing:
@@ -361,8 +390,8 @@ class ThinkingBudgetProcessor:
                         self.done = True  # natural close - disarm
                     elif self._answer_pending:
                         self._strike()  # stray close with no answer between
-                elif self.start_seq is not None and self._ends_with(
-                    tokens, self.start_seq
+                elif self.start_seq is not None and self._tail_is(
+                    self.start_seq
                 ):
                     self.in_thinking = True
                     self.count = 0
@@ -372,7 +401,8 @@ class ThinkingBudgetProcessor:
                         self._close_requested = True
                 elif self.in_thinking:
                     self.count += 1
-                elif self._answer_pending:
+                elif self._answer_pending and not _opens_marker(
+                        self._tail, self.start_seq):
                     # A real answer token landed; the turn may end freely.
                     self._answer_pending = False
                     self._strikes = 0
@@ -589,7 +619,8 @@ class MTPFinishThinking:
     """
 
     def __init__(self, *, end_seq, skip_ids, reclose_ids, forced_ids=None,
-                 budget=None, start_seq=None, start_in_thinking=False):
+                 budget=None, start_seq=None, start_in_thinking=False,
+                 prompt_ids=None):
         self.end_seq = tuple(end_seq)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.skip_ids = list(skip_ids)
@@ -603,8 +634,15 @@ class MTPFinishThinking:
         self._spent = False
         self._answer_pending = False
         self._strikes = 0
-        self._tail: list[int] = []
         self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1)
+        # The prompt's last tokens, so a start marker that the generation
+        # prompt begins (ATEM's "<|start|>assistant") completes on the
+        # generated tokens. Never a whole marker, so the prompt itself
+        # opens and closes nothing here.
+        keep = self._tail_max - 1
+        self._tail: list[int] = (
+            [int(t) for t in prompt_ids[-keep:]]
+            if prompt_ids is not None and keep else [])
 
     def request_close(self):
         """Finish thinking now (^T). Consumed as a no-op at the next round
@@ -641,7 +679,8 @@ class MTPFinishThinking:
                 self._close_requested = True
         elif self.in_thinking:
             self.count += 1
-        elif self._answer_pending:
+        elif self._answer_pending and not _opens_marker(
+                self._tail, self.start_seq):
             # A real answer token landed; stop counting closes as strikes.
             self._answer_pending = False
             self._strikes = 0
@@ -676,14 +715,16 @@ class MTPFinishThinking:
 
 def make_mtp_finish_hook(
     tokenizer, *, budget=None, start_in_thinking=False, verbose=False,
-    start_token=None, end_token=None,
+    start_token=None, end_token=None, prompt_ids=None,
 ):
     """Build the thinking-budget/^T hook for the owned MTP round loop, or
     ``None`` when the model's thinking delimiters can't be resolved (the
     budget is then ignored - warning when ``verbose`` - and the key is a
     silent no-op, matching the plain path). ``budget=None`` arms ^T only.
     Best-effort by design: a tokenizer the probe can't handle must not break
-    MTP decode."""
+    MTP decode. ``prompt_ids`` (the prompt's token ids, a list or a 1-D
+    array) lets a start marker that the prompt begins complete on the
+    generated tokens."""
     if budget is not None and budget < 0:
         return None
     try:
@@ -710,6 +751,7 @@ def make_mtp_finish_hook(
         budget=budget,
         start_seq=start_seq,
         start_in_thinking=start_in_thinking,
+        prompt_ids=prompt_ids,
     )
 
 

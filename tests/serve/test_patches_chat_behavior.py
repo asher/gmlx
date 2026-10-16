@@ -20,6 +20,8 @@ _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
 _PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
+import atem_tokens as at  # noqa: E402
+import mlx.core as mx  # noqa: E402
 from test_server_patches import _FakeThinkTok  # noqa: E402
 
 
@@ -66,6 +68,116 @@ def test_armed_criteria_reset_restores_prompt_seed():
     c.in_thinking = True
     c.reset_thinking_state()
     assert c.in_thinking is False                       # back to the prompt seed
+
+
+# ATEM (Muse Spark, Muse Glimmer) with the real token ids: the reasoning
+# header is five tokens and ends on <|message|>, which opens every message.
+# Counting must start only on the whole header, and a commentary <|eom|>
+# must change nothing.
+_ATEM_PROMPT = "<|start|>user<|message|>hi<|eot|><|start|>assistant"
+_ATEM_REST = ("<|start|>assistant to=commentary<|message|>Working on it.<|eom|>"
+              "<|start|>assistant to=user<|message|>Hello world foo bar<|eot|>")
+
+
+def _atem_criteria(budget, tok):
+    """The criteria as the installed builder makes it for an ATEM request."""
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        me = types.SimpleNamespace(tokenizer=tok)
+        args = types.SimpleNamespace(
+            thinking_budget=budget, enable_thinking=False,
+            thinking_start_token=at.SELF_OPEN, thinking_end_token=at.EOM)
+        prompt = mx.array([tok.encode(_ATEM_PROMPT)])
+        return cls._make_thinking_budget_criteria(me, args, prompt)
+    finally:
+        cls._make_thinking_budget_criteria = original
+
+
+def _atem_serve_run(crit, script, after, tok):
+    """Drive the criteria as the batch loop does: a forced id replaces the
+    model's next token. The model writes ``script`` until a close is forced,
+    then ``after``."""
+    src, rest, emitted, nxt = iter(tok.encode(script)), None, [], None
+    while len(emitted) < 300:
+        if nxt is not None:
+            tid, src = nxt, None
+            rest = rest or iter(tok.encode(after))
+        else:
+            tid = next(src if src is not None else rest, None)
+            if tid is None:
+                break
+        emitted.append(tid)
+        crit(tid)
+        nxt = crit.pop_forced_token_id()
+    return tok.decode(emitted)
+
+
+@pytest.mark.parametrize("template", ["spark", "glimmer"])
+def test_atem_serve_budget_caps_reasoning_only(template):
+    tok = at.AtemTokenizer(template)
+    crit = _atem_criteria(3, tok)
+    assert crit.in_thinking is False
+    text = _atem_serve_run(
+        crit, " to=self<|message|>Thinking hard about it now.<|eom|>"
+        + _ATEM_REST, _ATEM_REST, tok)
+    assert text == (" to=self<|message|>Thinking hard about\n<|eom|>"
+                    + _ATEM_REST)
+
+
+def test_atem_serve_budget_leaves_the_answer_alone():
+    """The budget=3 case that used to cut the answer after its first token:
+    every <|message|> turned counting on."""
+    tok = at.AtemTokenizer()
+    script = (" to=self<|message|>abc<|eom|>"
+              "<|start|>assistant to=user<|message|>Hello world foo bar")
+    crit = _atem_criteria(3, tok)
+    assert _atem_serve_run(crit, script, "", tok) == script
+    assert crit.thinking_token_count == 3
+
+
+def test_atem_serve_commentary_first_then_capped_reasoning():
+    tok = at.AtemTokenizer()
+    head = " to=commentary<|message|>Hello world<|eom|><|start|>assistant"
+    answer = "<|start|>assistant to=user<|message|>Hello world foo bar<|eot|>"
+    crit = _atem_criteria(3, tok)
+    text = _atem_serve_run(
+        crit, head + " to=self<|message|>Thinking hard about it now.<|eom|>"
+        + answer, answer, tok)
+    assert text == (head + " to=self<|message|>Thinking hard about\n<|eom|>"
+                    + answer)
+
+
+def test_atem_prompt_seed_reads_the_whole_header():
+    tok = at.AtemTokenizer()
+    me = types.SimpleNamespace(tokenizer=tok)
+    args = types.SimpleNamespace(thinking_start_token=at.SELF_OPEN,
+                                 thinking_end_token=at.EOM)
+    opens = sp_chat._prompt_opens_thinking_tokens
+    assert not opens(me, args, mx.array([tok.encode(_ATEM_PROMPT)]))
+    assert opens(me, args, tok.encode(
+        _ATEM_PROMPT + " to=self<|message|>Thinking"))
+    assert not opens(me, args, tok.encode(
+        _ATEM_PROMPT + " to=self<|message|>Thinking<|eom|>"))
+
+
+def test_atem_serve_mtp_hook_completes_the_header_on_generated_tokens():
+    from gmlx.serve.patches import mtp_thinking
+
+    tok = at.AtemTokenizer()
+    rg = types.SimpleNamespace(tokenizer=tok)
+    args = types.SimpleNamespace(
+        thinking_budget=3, thinking_start_token=at.SELF_OPEN,
+        thinking_end_token=at.EOM)
+    hook = mtp_thinking._build_hook(rg, args,
+                                    mx.array([tok.encode(_ATEM_PROMPT)]))
+    assert not hook.in_thinking
+    for t in tok.encode(" to=self<|message|>Thinking hard about"):
+        hook.observe(t)
+    forced = hook.take_forced()
+    assert forced is not None and forced[-1] == at.PIECES[at.EOM]
 
 
 def test_prompt_tail_opens_thinking_cases():

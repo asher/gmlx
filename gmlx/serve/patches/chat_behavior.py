@@ -305,22 +305,99 @@ def install_role_normalization() -> None:
 _TBUDGET_FLAG = "_kq_gguf_thinking_budget_fix"
 
 
+def _marker_ids(tokenizer, text) -> tuple:
+    """Every token id of a thinking marker. mlx-vlm keeps only the last one,
+    which for ATEM's ``<|start|>assistant to=self<|message|>`` is the
+    ``<|message|>`` that opens every message, answer and commentary too."""
+    return tuple(int(t) for t in tokenizer.encode(text, add_special_tokens=False))
+
+
+def _ends_with(tail, seq) -> bool:
+    return bool(seq) and len(tail) >= len(seq) and tail[-len(seq):] == list(seq)
+
+
+def _rfind_seq(toks, seq) -> int:
+    """Start index of the last occurrence of ``seq`` in ``toks``, or -1."""
+    k = len(seq)
+    if not k:
+        return -1
+    last, head = seq[-1], list(seq)
+    for i in range(len(toks) - 1, k - 2, -1):
+        if toks[i] == last and toks[i - k + 1:i + 1] == head:
+            return i - k + 1
+    return -1
+
+
 def _armed_thinking_budget_criteria_cls():
     """Subclass of mlx-vlm's criteria that decouples 'armed' (counting + forced
-    close, gated on enable_thinking) from 'starts inside a block' (in_thinking).
+    close, gated on enable_thinking) from 'starts inside a block' (in_thinking),
+    and matches each marker on all of its tokens. A marker that spans several
+    tokens opens or closes a block only when the whole sequence arrives, and
+    the forced close emits the whole end marker. ``prompt_ids`` gives the
+    prompt's last tokens, so a start marker the generation prompt begins
+    (ATEM's prompt ends ``<|start|>assistant``) completes on the generated
+    rest. Single-token markers behave as the stock criteria.
     Built lazily so importing this module never imports mlx-vlm."""
     from gmlx._vendor.mlx_vlm.utils import ThinkingBudgetCriteria
 
     class _ArmedThinkingBudgetCriteria(ThinkingBudgetCriteria):
-        def __init__(self, *args, prompt_open_thinking=False, **kw):
-            super().__init__(*args, **kw)  # sets in_thinking = enable_thinking
+        def __init__(self, tokenizer, thinking_budget,
+                     thinking_end_token="</think>", thinking_start_token=None,
+                     *, prompt_open_thinking=False, prompt_ids=None, **kw):
+            super().__init__(tokenizer, thinking_budget,
+                             thinking_end_token=thinking_end_token,
+                             thinking_start_token=thinking_start_token, **kw)
+            self._start_seq = _marker_ids(tokenizer, thinking_start_token)
+            self._end_seq = _marker_ids(tokenizer, thinking_end_token)
+            self._forced_sequence = (self._forced_sequence[:-1]
+                                     + list(self._end_seq))
+            self._tail_max = max(len(self._start_seq), len(self._end_seq))
+            keep = self._tail_max - 1
+            self._prompt_tail = ([int(t) for t in prompt_ids[-keep:]]
+                                 if prompt_ids is not None and keep else [])
+            self._tail = list(self._prompt_tail)
             self._prompt_open = bool(prompt_open_thinking)
             self.in_thinking = self._prompt_open
+
         def reset_thinking_state(self):
             super().reset_thinking_state()
             self.in_thinking = self._prompt_open
+            self._tail = list(self._prompt_tail)
+
+        def __call__(self, token_id):
+            self._tail.append(int(token_id))
+            del self._tail[:-self._tail_max]
+            if self.enable_thinking and _ends_with(self._tail, self._start_seq):
+                self.in_thinking = True
+                return None
+            if _ends_with(self._tail, self._end_seq):
+                # Also a commentary <|eom|> outside reasoning, where it
+                # changes nothing.
+                self.in_thinking = False
+                self.budget_exceeded = False
+                self._forced_index = 0
+                return None
+            if self.in_thinking:
+                self.thinking_token_count += 1
+                if self.thinking_token_count > self.thinking_budget:
+                    self.budget_exceeded = True
+            if (self.budget_exceeded
+                    and self._forced_index < len(self._forced_sequence)):
+                forced = self._forced_sequence[self._forced_index]
+                self._forced_index += 1
+                self.forced_token_id = forced
+                return forced
+            self.forced_token_id = None
+            return None
 
     return _ArmedThinkingBudgetCriteria
+
+
+def _thinking_marker_seqs(rg, args) -> tuple[tuple, tuple]:
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    start = args.thinking_start_token or gen.DEFAULT_THINKING_START_TOKEN
+    end = args.thinking_end_token or gen.DEFAULT_THINKING_END_TOKEN
+    return _marker_ids(rg.tokenizer, start), _marker_ids(rg.tokenizer, end)
 
 
 def _prompt_opens_thinking_tokens(rg, args, input_ids) -> bool:
@@ -329,21 +406,26 @@ def _prompt_opens_thinking_tokens(rg, args, input_ids) -> bool:
     mlx-vlm's ``_prompt_has_open_thinking`` (which returns False whenever
     ``enable_thinking`` is off - and the server default is off - so it misses
     pre-fill models whose template opened <think> regardless of the flag, exactly
-    the case an explicit budget must cap)."""
+    the case an explicit budget must cap). Markers match on all their tokens."""
     if input_ids is None:
         return False
-    start_id, end_id = rg._thinking_token_ids(args)
+    start_seq, end_seq = _thinking_marker_seqs(rg, args)
     toks = input_ids.flatten().tolist() if hasattr(input_ids, "flatten") \
         else list(input_ids)
-    try:
-        last_start = len(toks) - 1 - toks[::-1].index(start_id)
-    except ValueError:
+    last_start = _rfind_seq(toks, start_seq)
+    if last_start < 0:
         return False
-    try:
-        last_end = len(toks) - 1 - toks[::-1].index(end_id)
-    except ValueError:
-        last_end = -1
-    return last_start > last_end
+    return last_start > _rfind_seq(toks, end_seq)
+
+
+def _prompt_tail_ids(input_ids, n: int = 16) -> list:
+    """The prompt's last ``n`` token ids as a list. ``n`` is longer than any
+    thinking marker."""
+    if input_ids is None:
+        return []
+    flat = input_ids.flatten() if hasattr(input_ids, "flatten") else input_ids
+    tail = flat[-n:]
+    return [int(t) for t in (tail.tolist() if hasattr(tail, "tolist") else tail)]
 
 
 def install_thinking_budget_fix() -> None:
@@ -376,6 +458,7 @@ def install_thinking_budget_fix() -> None:
             thinking_start_token=start,
             enable_thinking=True,             # arm the gates regardless of origin
             prompt_open_thinking=prompt_open,  # but only start inside if pre-filled
+            prompt_ids=_prompt_tail_ids(input_ids),
         )
 
     _make_thinking_budget_criteria.__dict__[_TBUDGET_FLAG] = True
