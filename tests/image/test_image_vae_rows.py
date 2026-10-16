@@ -128,6 +128,60 @@ def test_the_qwen_row_is_the_official_file():
     assert steps == mem.memory_terms(cfg, "decode", 1024, 1024, itemsize=2)
 
 
+def _official_vaes() -> dict:
+    """The config of each family's official VAE."""
+    from gmlx.image.vae import flux1_ae, flux2_ae
+    from gmlx.image.vae import qwen_image_memory as qm
+
+    flux = dict(in_channels=3, out_channels=3,
+                block_out_channels=(128, 256, 512, 512), layers_per_block=2,
+                norm_num_groups=32, eps=1e-6)
+    out = {"z_image": flux1_ae.Flux1AEConfig(latent_channels=16, **flux),
+           "flux3_klein": flux2_ae.Flux2AEConfig(latent_channels=32, **flux),
+           "krea2": qm.OFFICIAL, "qwen_image21": mem.OFFICIAL}
+    assert set(out) == set(reader.VAES)
+    return out
+
+
+def _run_layout(family: str, cfg, op: str, size: int, tile: int,
+                overlap: int) -> tuple[int, int]:
+    """Tiles along one axis of ``size`` pixels as tiling cuts them for a
+    VAE of ``cfg``: their count and length in pixels."""
+    vae = SimpleNamespace(config=cfg, family=family)
+    t, lap, _ = tiling.crop_layout(vae, op, tile, overlap)
+    lat = size // cfg.scale
+    length = tiling.tile_length(lat, t, lap)
+    return len(tiling.tile_starts(lat, length, lap)), length * cfg.scale
+
+
+@pytest.mark.parametrize("op", ["decode", "encode"])
+def test_the_priced_tiles_are_the_tiles_a_pass_cuts(op):
+    """For every family, at every size to 4096 pixels by 16, the tiles a
+    tiled pass is priced on are those tiling cuts, for the official VAE,
+    which the plan prices, and for the VAE at hand. The FLUX.2 VAE cuts
+    at 8 pixels per latent pixel, where its family's factor is 16."""
+    seen = 0
+    for family, cfg in _official_vaes().items():
+        for tile, overlap in ((memfit.TILE_PX, memfit.OVERLAP_PX),
+                              (768, 192)):
+            for px in range(16, 4112, 16):
+                h, w = px, max(16, 4096 - px)
+                want = tuple(_run_layout(family, cfg, op, s, tile, overlap)
+                             for s in (h, w))
+                for config in (None, cfg):
+                    got = memfit.tile_grid(family, op, h, w, tile=tile,
+                                           overlap=overlap, config=config)
+                    assert got == want, (family, px, config is None)
+                seen += want != ((1, h), (1, w))
+    assert seen
+    # Two FLUX.2 tiles cover 720 pixels in 424 at 8 pixels per latent
+    # pixel, overlapping by 128, and would be priced at 432 at 16.
+    assert memfit.vae_scale("flux3_klein") == 16
+    assert memfit.tile_grid("flux3_klein", op, 720, 720) == (
+        (2, 424), (2, 424))
+    assert memfit.tile_layout(720, 512, 128, 16) == (2, 432)
+
+
 def test_the_tile_layout_follows_the_scale_of_the_vae():
     for px in range(16, 4112, 16):
         lat = px // 16
@@ -388,18 +442,20 @@ def test_a_vae_of_another_config_is_priced_at_its_own_channels_and_rows():
                            channels=144, **kw) == memfit.vae_peak(
                                "decode", 512, 512, **kw)
     # That VAE runs every up block in tiles, which read 8 of its latent
-    # pixels across a cut, so its tiles overlap by 64 pixels. The tiles of
-    # a measured row are laid out at the scale of its family: 100 pixels
-    # in tiles of 80 are priced as three of 80, where that VAE cuts three
-    # of 76. The scores are those of its own 25 x 25 latent pixels.
+    # pixels across a cut, so its tiles overlap by 64 pixels. Its tiles
+    # are priced as it cuts them, at its own scale: 100 pixels in tiles of
+    # 80 are three of 76, where the family's scale of 16 would give three
+    # of 80. The scores are those of its own 25 x 25 latent pixels.
     assert q.whole_up_blocks(small) == 0 and q.reach(small, "decode") == 8
     assert memfit.tile_overlap(FAMILY, "decode", 80, 8, small) == 64
     assert memfit.tile_layout(100, 80, 64, 4) == (3, 76)
     assert memfit.tile_layout(100, 80, 64, 16) == (3, 80)
+    assert memfit.tile_grid(FAMILY, "decode", 100, 100, tile=80, overlap=8,
+                            config=small) == ((3, 76), (3, 76))
     assert memfit.vae_peak(
         "decode", 100, 100, config=small, channels=6, tiled=True, tile=80,
         overlap=8, **kw) == memfit.QWEN_VAE_TILED["decode"][4].bytes(
-            80 * 80, 100 * 100, 6, 4) + int(1.5 * (25 * 25) ** 2 * 4)
+            76 * 76, 100 * 100, 6, 4) + int(1.5 * (25 * 25) ** 2 * 4)
     with pytest.raises(ValueError, match="a tile of 48 pixels is 12 latent "
                        "pixels, and a tiled decode of this VAE needs more "
                        "than 16, which is 68 pixels"):

@@ -594,14 +594,16 @@ def test_the_request_plan_releases_an_owned_encoder_and_tiles(pipe):
 
 def _small(pipe):
     """A small pipeline for the plan: weights in bytes, an owned encoder
-    with an mmproj, and a VAE of the family's row that no pass runs."""
+    with an mmproj, and a VAE of the family's row that no pass runs, at
+    the 8 pixels per latent pixel of the family's VAE."""
     G = memfit.GiB
     pipe.weights = {"dit": G, "encoder": G, "mmproj": G // 2,
                     "vae": 100 << 20}
     pipe.encoder = SimpleNamespace(released=False, owned=True)
     pipe.vae = SimpleNamespace(
         family="z_image", dtype=mx.bfloat16, conv="exact",
-        config=SimpleNamespace(out_channels=3), channels=lambda op: 128)
+        config=SimpleNamespace(out_channels=3, scale=8),
+        channels=lambda op: 128)
     return dict(height=1024, width=1024, cfg=3.0, overcommit=False)
 
 

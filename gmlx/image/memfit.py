@@ -346,7 +346,11 @@ class VaeMemoryRow:
     were measured on, or 0 for no bound. A pass of more pixels, counted
     over its batch, is in tiles by the automatic choice whatever is free,
     since its whole price is the fit carried past what was measured. A
-    caller can still force it whole."""
+    caller can still force it whole.
+    ``scale`` is the image pixels per latent pixel of the official VAE,
+    or 0 when that is the family's ``vae_scale_factor``. A family whose
+    model space packs the VAE's latent pixels counts the packing in that
+    factor, and a tiled pass lays its tiles out at the VAE's own scale."""
     measured: bool
     channels: dict                  # op -> base channels at full resolution
     whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
@@ -358,6 +362,7 @@ class VaeMemoryRow:
     overlap: int = 0
     scores: float = 0.0
     whole_px: int = 0
+    scale: int = 0
 
     @property
     def auto_tiles(self) -> bool:
@@ -453,10 +458,12 @@ VAE_ROWS = {
     # overlap by 64, a tiled fp32 decode is 52.0 dB from the whole decode,
     # where the FLUX.1 decoder holds 75.4 dB. At 128 it is 64.8 dB, and a
     # tiled bf16 decode is 55.5 dB from the oracle against 55.9 whole.
+    # Its latent pixel is 8 image pixels; the family's 16 counts the 2x2
+    # packing of model space.
     "flux3_klein": VaeMemoryRow(
         measured=True, channels={"decode": 128, "encode": 128},
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED,
-        overlap=128),
+        overlap=128, scale=8),
 }
 
 
@@ -1104,8 +1111,23 @@ def crop_reach(family: str, op: str, config=None) -> int:
 
 def _latent_px(family: str, config=None) -> int:
     """Image pixels per latent pixel of the VAE of ``config``, or of the
-    family's when None."""
-    return vae_scale(family) if config is None else int(config.scale)
+    official VAE of the family's row when None."""
+    if config is not None:
+        return int(config.scale)
+    return vae_row(family).scale or vae_scale(family)
+
+
+def tile_grid(family: str, op: str, height: int, width: int, *,
+              tile: int = TILE_PX, overlap: int = OVERLAP_PX,
+              config=None) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The tiles of a tiled ``op`` of a ``height`` x ``width`` image, as
+    tiling lays them out for the VAE of ``config`` or the official one
+    when None: (count, length in pixels) down the rows and across the
+    columns."""
+    lap = tile_overlap(family, op, tile, overlap, config)
+    scale = _latent_px(family, config)
+    return (tile_layout(height, tile, lap, scale),
+            tile_layout(width, tile, lap, scale))
 
 
 def croppable(family: str, op: str, tile: int = TILE_PX,
@@ -1202,8 +1224,8 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
         channels = row.channels[op]
     fits = row.whole[op]
     fit = fits[conv][itemsize]
-    # The scores count the latent pixels of the VAE at hand. The tiles of
-    # a measured row are laid out at the scale of its family.
+    # The scores count the latent pixels of the VAE at hand, and its tiles
+    # are laid out at its scale, as tiling lays them out.
     held = 0
     if row.scores:
         latent = _latent_px(family, config)
@@ -1211,9 +1233,8 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
         held = int(row.scores * batch * rows * rows * itemsize)
     if not tiled or (height <= tile and width <= tile):
         return fit.bytes(batch * height * width, channels, itemsize) + held
-    scale = vae_scale(family)
-    ny, th = tile_layout(height, tile, overlap, scale)
-    nx, tw = tile_layout(width, tile, overlap, scale)
+    (ny, th), (nx, tw) = tile_grid(family, op, height, width, tile=tile,
+                                   overlap=overlap, config=config)
     tiled_fit = row.tiled[op][itemsize]
     tiles = 1 if row.one_tile else ny * nx
     out = tiled_fit.bytes(batch * tiles * th * tw, batch * height * width,
