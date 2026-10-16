@@ -207,6 +207,12 @@ ARCH_ALIAS = {
     # a plain nn.RMSNorm consumes directly, so the arch stays out of
     # _GEMMA_NORM_BAKED_ARCHS.
     "muse-glimmer": "MUSE_GLIMMER",
+    # Meta Muse Spark (llama.cpp 'muse-spark'): Muse Glimmer's attention plus
+    # norm-preserving residuals and a latent MoE on every layer. The
+    # MUSE_SPARK block claims every tensor. Q/K pass through un-permuted for
+    # traditional rope, as on Muse Glimmer, and the folded +1 norms load as
+    # plain gains.
+    "muse-spark": "MUSE_SPARK",
     # DiffusionGemma (llama.cpp 'diffusion-gemma'): an encoder-decoder block-
     # diffusion model on the Gemma-4 MoE backbone. The decoder backbone uses the
     # exact Gemma-4 GGUF tensor names, but the mlx-vlm Model nests them under
@@ -524,6 +530,64 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         # in_proj_z, so claim it here for the afmoe-shaped self_attn.gate_proj.
         (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
          "model.layers.{bid}.self_attn.gate_proj.weight", "passthrough"),
+    ],
+    "MUSE_SPARK": [
+        # Every tensor is claimed here. The resid alpha/beta vectors land
+        # as raw arrays on the layer. exp_probs_b is the selection-only
+        # router bias. post_ffw_norm scales the latent_up output before
+        # its weightless norm, so it lives in the MoE block.
+        (re.compile(r"^token_embd\.weight$"),
+         "model.embed_tokens.weight", "passthrough"),
+        (re.compile(r"^output_norm\.weight$"),
+         "model.norm.weight", "passthrough"),
+        (re.compile(r"^output\.weight$"),
+         "lm_head.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_norm\.weight$"),
+         "model.layers.{bid}.self_attn.q_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_norm\.weight$"),
+         "model.layers.{bid}.self_attn.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_resid_alpha\.weight$"),
+         "model.layers.{bid}.attn_resid_alpha", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_resid_beta\.weight$"),
+         "model.layers.{bid}.attn_resid_beta", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.mlp.e_score_correction_bias", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_latent_down\.weight$"),
+         "model.layers.{bid}.mlp.latent_down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_pre_exp_norm\.weight$"),
+         "model.layers.{bid}.mlp.pre_exp_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_post_exp_norm\.weight$"),
+         "model.layers.{bid}.mlp.post_exp_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_latent_up\.weight$"),
+         "model.layers.{bid}.mlp.latent_up.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.post_ffw_norm\.weight$"),
+         "model.layers.{bid}.mlp.post_ffw_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_resid_alpha\.weight$"),
+         "model.layers.{bid}.ffn_resid_alpha", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_resid_beta\.weight$"),
+         "model.layers.{bid}.ffn_resid_beta", "passthrough"),
     ],
     "ERNIE4_5_MOE": [
         # Baidu ERNIE-4.5-MoE: shared-expert fine-grained MoE with leading dense

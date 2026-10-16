@@ -164,6 +164,11 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # the nearest relative). Pairs with the Muse Glimmer mmproj (--mmproj) and
     # the DFlash drafter (--draft-gguf).
     "muse-glimmer": "muse_glimmer",
+    # Meta Muse Spark Open 816B-A42B: Muse Glimmer's attention (output gate,
+    # per-head qk-norm, RoPE on the sliding layers only) with norm-preserving
+    # residuals and a latent sigmoid MoE on every layer. Model class owned by
+    # gmlx (no mlx-lm class).
+    "muse-spark": "muse_spark",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -1814,6 +1819,65 @@ def _synth_muse_glimmer(meta, shapes, config: dict) -> None:
                                arch=arch, gguf_field=f"{arch}.rope.freq_base"),
         "rope_type": "default",
     }
+
+
+# muse-spark (Meta Muse Spark Open 816B-A42B)
+
+def _synth_muse_spark(meta, shapes, config: dict) -> None:
+    """Synthesize a muse_spark config from a 'muse-spark'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ctx/eps/head_dim/tie/
+    vocab. This adds the per-layer sliding/full schedule, the sliding rope
+    base, the post-norm epsilon, the logit scale and softcap, and the latent
+    MoE. llama.cpp reads every one of these keys as required, so a missing
+    key fails here too. ``feed_forward_length`` is unused: every layer
+    routes.
+    """
+    arch = "muse-spark"
+    n_layers = config["num_hidden_layers"]
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    _require(config.get("rms_norm_eps"), arch=arch,
+             gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")
+    config["post_norm_eps"] = req(_read_float, "post_norm_epsilon")
+    config["sliding_window"] = req(_read_int, "attention.sliding_window")
+
+    key = "attention.sliding_window_pattern"
+    pattern = req(_read_bool_array, key)
+    if len(pattern) != n_layers:
+        raise ValueError(
+            f"muse-spark synth: {arch}.{key} has {len(pattern)} entries for "
+            f"{n_layers} layers")
+    config["layer_types"] = [
+        "sliding_attention" if v else "full_attention" for v in pattern]
+
+    # Only the sliding layers rotate, at the sliding base.
+    theta = req(_read_float, "rope.freq_base_swa")
+    config["rope_theta"] = theta
+    config["rope_parameters"] = {"rope_theta": theta, "rope_type": "default"}
+
+    config["output_multiplier"] = req(_read_float, "logit_scale")
+    config["final_logit_softcapping"] = req(
+        _read_float, "final_logit_softcapping")
+
+    v3 = _read_v3_moe(meta, shapes, arch)
+    if not v3["sigmoid"]:
+        raise NotImplementedError(
+            f"muse-spark synth: {arch}.expert_gating_func is not 2 (sigmoid). "
+            "The Muse Spark converter always writes sigmoid.")
+    if v3["n_shared"]:
+        raise NotImplementedError(
+            "muse-spark synth: the GGUF declares shared experts, which "
+            "Muse Spark does not have.")
+    config["num_experts"] = v3["n_experts"]
+    config["num_experts_per_tok"] = v3["n_used"]
+    config["moe_intermediate_size"] = v3["moe_ffn"]
+    config["moe_latent_size"] = req(_read_int, "moe_latent_size")
+    config["routed_scaling_factor"] = req(_read_float, "expert_weights_scale")
+    config["norm_topk_prob"] = req(_read_bool, "expert_weights_norm")
 
 
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
@@ -3750,6 +3814,7 @@ _SYNTH = {
     "hunyuan-moe": _synth_hunyuan,
     "hy_v3": _synth_hy_v3,
     "muse-glimmer": _synth_muse_glimmer,
+    "muse-spark": _synth_muse_spark,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

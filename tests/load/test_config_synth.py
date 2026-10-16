@@ -2772,3 +2772,105 @@ def test_muse_glimmer_synth_softcap_defaults_off_when_absent():
     del m["muse-glimmer.final_logit_softcapping"]
     c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
     assert c["final_logit_softcapping"] == 0.0
+
+
+def _muse_spark_meta() -> dict:
+    arch = "muse-spark"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    m[f"{arch}.feed_forward_length"] = 256
+    m[f"{arch}.attention.layer_norm_rms_epsilon"] = 1e-5
+    m[f"{arch}.post_norm_epsilon"] = 1e-8
+    m[f"{arch}.attention.sliding_window"] = 8
+    # The shipped schedule starts [T, F, T, T]: layer 1 is the first global.
+    m[f"{arch}.attention.sliding_window_pattern"] = [True, False, True, True]
+    m[f"{arch}.rope.freq_base"] = 500000.0
+    m[f"{arch}.rope.freq_base_swa"] = 250000.0
+    m[f"{arch}.logit_scale"] = 0.1767766922712326
+    m[f"{arch}.final_logit_softcapping"] = 20.0
+    m[f"{arch}.expert_count"] = 8
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.moe_latent_size"] = 32
+    m[f"{arch}.expert_weights_scale"] = 1.0
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.expert_gating_func"] = 2
+    return m
+
+
+_MUSE_SPARK_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_gate.weight": [64, 64],
+    "blk.0.ffn_latent_down.weight": [64, 32],
+    "blk.0.ffn_gate_exps.weight": [32, 24, 8],
+}
+
+
+def test_muse_spark_synth_fields():
+    c = synthesize_config(_muse_spark_meta(), tensor_shapes=_MUSE_SPARK_SHAPES)
+    assert c["model_type"] == "muse_spark"
+    assert c["layer_types"] == [
+        "sliding_attention", "full_attention", "sliding_attention",
+        "sliding_attention"]
+    assert c["sliding_window"] == 8
+    assert c["rms_norm_eps"] == pytest.approx(1e-5)
+    assert c["post_norm_eps"] == pytest.approx(1e-8)
+    # Only the sliding layers rotate, so their base is the rope base.
+    assert c["rope_theta"] == 250000.0
+    assert c["rope_parameters"] == {"rope_theta": 250000.0,
+                                    "rope_type": "default"}
+    assert c["output_multiplier"] == pytest.approx(0.1767766922712326)
+    assert c["final_logit_softcapping"] == 20.0
+    assert (c["num_experts"], c["num_experts_per_tok"]) == (8, 2)
+    assert c["moe_intermediate_size"] == 24
+    assert c["moe_latent_size"] == 32
+    assert c["routed_scaling_factor"] == 1.0
+    assert c["norm_topk_prob"] is True
+    assert c["head_dim"] == 16
+    assert not c["tie_word_embeddings"]
+
+
+def test_muse_spark_synth_instantiates():
+    from gmlx.models.muse_spark.model import Model, ModelArgs
+
+    c = synthesize_config(_muse_spark_meta(), tensor_shapes=_MUSE_SPARK_SHAPES)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    logits = m(mx.array([[1, 2, 3]]))
+    assert logits.shape == (1, 3, VOCAB)
+    assert float(mx.abs(logits).max().item()) <= 20.0
+    assert m.layers[0].self_attn.rope is not None
+    assert m.layers[1].self_attn.rope is None
+
+
+@pytest.mark.parametrize("key", [
+    "post_norm_epsilon", "attention.sliding_window",
+    "attention.sliding_window_pattern", "rope.freq_base_swa", "logit_scale",
+    "final_logit_softcapping", "moe_latent_size", "expert_weights_scale",
+    "expert_weights_norm",
+])
+def test_muse_spark_required_keys_fail_loud(key):
+    m = _muse_spark_meta()
+    del m[f"muse-spark.{key}"]
+    with pytest.raises(ValueError, match=f"muse-spark.{key}"):
+        synthesize_config(m, tensor_shapes=_MUSE_SPARK_SHAPES)
+
+
+def test_muse_spark_synth_pattern_length_must_match_layers():
+    m = _muse_spark_meta()
+    m["muse-spark.attention.sliding_window_pattern"] = [True, False]
+    with pytest.raises(ValueError, match="entries for"):
+        synthesize_config(m, tensor_shapes=_MUSE_SPARK_SHAPES)
+
+
+def test_muse_spark_synth_refuses_softmax_gating_and_shared_experts():
+    m = _muse_spark_meta()
+    m["muse-spark.expert_gating_func"] = 1
+    with pytest.raises(NotImplementedError, match="sigmoid"):
+        synthesize_config(m, tensor_shapes=_MUSE_SPARK_SHAPES)
+    m = _muse_spark_meta()
+    m["muse-spark.expert_shared_count"] = 1
+    with pytest.raises(NotImplementedError, match="shared experts"):
+        synthesize_config(m, tensor_shapes=_MUSE_SPARK_SHAPES)

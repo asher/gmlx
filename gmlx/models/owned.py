@@ -31,6 +31,9 @@ OWNED_LM_MODELS = {
     # llama.cpp LLM_ARCH_MUSE_GLIMMER; afmoe is the nearest relative and has
     # neither the NoPE/RoPE inversion nor the second norm epsilon.
     "muse_glimmer": "gmlx.models.muse_glimmer.model",
+    # llama.cpp LLM_ARCH_MUSE_SPARK; muse_glimmer is the nearest relative
+    # and has neither the latent MoE nor the norm-preserving residuals.
+    "muse_spark": "gmlx.models.muse_spark.model",
     # llama.cpp PR #27754 (GLM-5.3-Flash); kimi_k3 is the nearest relative
     # and has none of the indexer, hyper-connection or clamped-swiglu
     # mechanisms.

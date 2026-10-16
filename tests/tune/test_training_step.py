@@ -64,7 +64,7 @@ ZERO_GRAD = {
 # amplifies most: a one-ulp bump of its first layer's output moves the
 # logits by about 3%.
 PARITY_TOL = {
-    "qwen3_moe": 3e-2, "muse_glimmer": 3e-2, "hy_v3": 3e-2, "glm5_next": 4e-2,
+    "qwen3_moe": 3e-2, "muse_glimmer": 3e-2, "muse_spark": 3e-2, "hy_v3": 3e-2, "glm5_next": 4e-2,
     "kimi_k3": 1e-1, "hy_v4": 4e-2, "minimax_m3": 3e-2, "qwen4_exp": 2e-2,
     "qwen3_next": 4e-2, "qwen3_5": 3e-2, "qwen3_5_moe": 4e-2, "qwen3_5_hadamard": 4e-2,
 }

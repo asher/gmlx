@@ -47,11 +47,12 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 # Kimi-K3 XTML sections (multi-token markers; the prompt
                 # pre-opens the think section).
                 ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
-                # Onyx ATEM (Muse Glimmer): the reasoning message is addressed
-                # to self and ends at <|eom|>. Both literals appear verbatim in
-                # the template source. The generation prompt stops one marker
-                # short (at "<|start|>assistant"), so the block is not
-                # prompt-opened and the model emits the whole header itself.
+                # Onyx ATEM (Muse Glimmer, Muse Spark): the reasoning message
+                # is addressed to self and ends at <|eom|>. Both literals
+                # appear verbatim in the template source. The generation
+                # prompt stops one marker short (at "<|start|>assistant"), so
+                # the block is not prompt-opened and the model emits the whole
+                # header itself.
                 ("<|start|>assistant to=self<|message|>", "<|eom|>"))
 
 # Forced into the thinking block ahead of the first budget-triggered close.
@@ -329,6 +330,13 @@ class ThinkingBudgetProcessor:
         if self._strikes >= 3:
             self.done = True
 
+    def _outside_block(self) -> bool:
+        """Whether an end marker now closes no block this processor saw
+        open. Muse Spark ends a user-visible commentary message with the
+        same <|eom|> that ends reasoning, and that must not disarm."""
+        return (not self.in_thinking and not self._spent
+                and self.start_seq is not None)
+
     def request_close(self):
         """Finish thinking now (^T): the next step force-closes the open
         thinking block exactly as if the budget had just been exceeded.
@@ -344,7 +352,8 @@ class ThinkingBudgetProcessor:
             # Exactly one new generated token per step after the first.
             self._baseline = n
             if not self._forcing:
-                if self._ends_with(tokens, self.end_seq):
+                if (self._ends_with(tokens, self.end_seq)
+                        and not self._outside_block()):
                     self.in_thinking = False
                     if self._landing:
                         self._landing = False  # our own forced close arriving
@@ -602,6 +611,12 @@ class MTPFinishThinking:
         boundary when the model is not thinking."""
         self._close_requested = True
 
+    def _outside_block(self) -> bool:
+        """Whether an end marker now closes no block this hook saw open,
+        as in :meth:`ThinkingBudgetProcessor._outside_block`."""
+        return (not self.in_thinking and not self._spent
+                and self.start_seq is not None)
+
     def _tail_is(self, seq) -> bool:
         k = len(seq)
         return k > 0 and len(self._tail) >= k and self._tail[-k:] == list(seq)
@@ -613,7 +628,7 @@ class MTPFinishThinking:
         self._tail.append(int(tok))
         if len(self._tail) > self._tail_max:
             del self._tail[: len(self._tail) - self._tail_max]
-        if self._tail_is(self.end_seq):
+        if self._tail_is(self.end_seq) and not self._outside_block():
             self.in_thinking = False
             if not self._spent:
                 self.done = True  # natural close - disarm, as on the plain path

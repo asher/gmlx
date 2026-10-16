@@ -683,6 +683,41 @@ def test_muse_glimmer_closed_reasoning_message_is_not_open():
     assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())
 
 
+def test_muse_spark_think_pair_resolves_from_its_template():
+    from pathlib import Path
+
+    from gmlx.gen.thinking_budget import _template_think_pair
+
+    class _SparkTok:
+        chat_template = (Path(__file__).parents[1] / "fixtures"
+                         / "muse_spark_template.jinja").read_text()
+
+    assert _template_think_pair(_SparkTok()) == (
+        "<|start|>assistant to=self<|message|>", "<|eom|>")
+
+
+def test_commentary_close_before_reasoning_keeps_the_budget_armed():
+    """Muse Spark can send a to=commentary message first. Its <|eom|> is the
+    reasoning end marker too, but it closes no reasoning block, so the
+    reasoning that follows is still capped."""
+    p = ThinkingBudgetProcessor(
+        end_seq=(END,), forced_ids=[NL, END], budget=2, start_seq=(START,),
+        start_in_thinking=False,
+    )
+    forced = _run(p, [50, 51, END, START, 60, 61, 62, 63], prompt=(1, 2, 3))
+    assert not p.done
+    assert NL in forced and END in forced
+    assert p._spent
+
+
+def test_mtp_hook_commentary_close_before_reasoning_keeps_it_armed():
+    h = _mtp_hook(start_in_thinking=False, budget=1)
+    for t in (50, END, START, 60, 61):
+        h.observe(t)
+    assert not h.done and h.in_thinking
+    assert h.take_forced() is not None
+
+
 # --- MTPFinishThinking (^T on the owned MTP rounds) --------------------------
 
 def _mtp_hook(**kw):

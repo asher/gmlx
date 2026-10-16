@@ -200,7 +200,8 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
-    if mt == "muse_glimmer":
+    if mt in ("muse_glimmer", "muse_spark"):
+        # Muse Spark calls tools in the same ATEM format.
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
 
         muse_glimmer_tools.ensure_registered()
@@ -890,6 +891,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # tests/models/test_hy_v4_model.py cross-checks against this row.
     "hy_v4": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
               ".mlp.gate.weight", ".weights_proj."),
+    # muse_spark: sigmoid top-8-of-256 routing with a selection bias is
+    # near-tie-heavy, and the residual alpha/beta scale every layer's stream.
+    # Kept in step with the model class's cast_predicate.
+    "muse_spark": (".mlp.gate.weight", ".e_score_correction_bias",
+                   "_resid_alpha", "_resid_beta"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX

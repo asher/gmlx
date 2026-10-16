@@ -19,6 +19,7 @@ import importlib
 import json
 import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -721,6 +722,103 @@ def test_chat_tool_calls_shape(wire):
     assert call["id"]
     assert call["function"]["name"] == "get_time"
     assert json.loads(call["function"]["arguments"]) == {"tz": "UTC"}
+
+
+# 7b. Muse Spark's commentary recipient. llama.cpp's muse-spark parser reads
+#     a to=commentary message as content and to=self as reasoning, and an
+#     ATEM call after the aside is a tool call. The prompt stops at
+#     "<|start|>assistant", so the model writes its own first recipient.
+_SPARK_PROMPT = ("<|begin_of_text|><|start|>system<|message|>Be brief.<|eot|>"
+                 "<|start|>user<|message|>hi<|eot|><|start|>assistant")
+_SPARK_REPLY = [
+    (" to=self<|message|>Think", None), ("ing.<|eom|><|start|>assistant", None),
+    (" to=commentary<|message|>Working", None), (" on it.<|eom|>", None),
+    ("<|start|>assistant to=user<|message|>Hello!", "stop")]
+_SPARK_CALL_REPLY = [
+    (" to=self<|message|>Need the weather.<|eom|>", None),
+    ("<|start|>assistant to=commentary<|message|>Let me ", None),
+    ("look that up.<|eom|><|start|>assistant to=get_weather<|message|>", None),
+    ("<atem:function_calls>\n<atem:invoke name=\"get_weather\">\n", None),
+    ('<atem:parameter name="city">Paris</atem:parameter>\n', None),
+    ("</atem:invoke>\n</atem:function_calls>", "stop")]
+_WEATHER = [{"type": "function", "function": {
+    "name": "get_weather",
+    "parameters": {"type": "object",
+                   "properties": {"city": {"type": "string"}}}}}]
+
+
+@pytest.fixture()
+def spark(wire, monkeypatch):
+    import gmlx.models.muse_glimmer.tools as atem_tools
+
+    atem_tools.ensure_registered()
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "muse_spark_template.jinja").read_text()
+    monkeypatch.setattr(_WireTokenizer, "chat_template", template)
+    monkeypatch.setattr(_PKG, "apply_chat_template",
+                        lambda *a, **k: _SPARK_PROMPT)
+    return wire
+
+
+def _stream_parts(text):
+    content, reasoning, calls, finish = "", "", [], None
+    for payload in _sse_data_lines(text)[:-1]:
+        for ch in json.loads(payload).get("choices", []):
+            delta = ch.get("delta", {})
+            content += delta.get("content") or ""
+            reasoning += delta.get("reasoning") or ""
+            calls += delta.get("tool_calls") or []
+            finish = ch.get("finish_reason") or finish
+    return content, reasoning, calls, finish
+
+
+def test_spark_commentary_is_content_non_stream(spark):
+    spark.gen.script = _SPARK_REPLY
+    r = spark.client.post("/v1/chat/completions", json=_chat_body())
+    assert r.status_code == 200, r.text
+    msg = r.json()["choices"][0]["message"]
+    assert msg["content"] == "Working on it.Hello!"
+    assert msg["reasoning"] == "Thinking."
+
+
+def test_spark_commentary_is_content_stream(spark):
+    spark.gen.script = _SPARK_REPLY
+    r = spark.client.post("/v1/chat/completions",
+                          json=_chat_body(stream=True))
+    assert r.status_code == 200, r.text
+    content, reasoning, calls, finish = _stream_parts(r.text)
+    assert content == "Working on it.Hello!"
+    assert reasoning == "Thinking."
+    assert not calls and finish == "stop"
+
+
+def test_spark_commentary_then_tool_call_non_stream(spark):
+    spark.gen.script = _SPARK_CALL_REPLY
+    r = spark.client.post("/v1/chat/completions",
+                          json=_chat_body(tools=_WEATHER))
+    assert r.status_code == 200, r.text
+    choice = r.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    msg = choice["message"]
+    assert msg["content"] == "Let me look that up."
+    assert msg["reasoning"] == "Need the weather."
+    [call] = msg["tool_calls"]
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}
+
+
+def test_spark_commentary_then_tool_call_stream(spark):
+    spark.gen.script = _SPARK_CALL_REPLY
+    r = spark.client.post("/v1/chat/completions",
+                          json=_chat_body(stream=True, tools=_WEATHER))
+    assert r.status_code == 200, r.text
+    content, reasoning, calls, finish = _stream_parts(r.text)
+    assert content == "Let me look that up."
+    assert reasoning == "Need the weather."
+    assert finish == "tool_calls"
+    [call] = calls
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}
 
 
 # 8. response_format (docs/api.md, structured output). json_schema -> 200.

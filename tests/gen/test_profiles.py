@@ -179,6 +179,25 @@ def test_muse_glimmer_family_carries_the_atem_think_markers_and_four_levels():
                       "high": "high", "xhigh": "xhigh"}
 
 
+def test_muse_spark_family_copies_the_header_and_spells_reasoning_effort():
+    """Spark is its own family: the base copies the GGUF header's sampling
+    (top_p 1.0, not Glimmer's 0.95), and the four levels use the template's
+    reasoning_effort spelling."""
+    fam = profiles.FAMILIES["muse-spark"]
+    assert profiles.detect_family("muse-spark") == "muse-spark"
+    assert profiles.detect_family("muse-glimmer") == "muse"
+    assert fam["base"]["sampling"] == {
+        "temperature": 1.0, "top_p": 1.0, "top_k": 64,
+        "thinking_start_token": "<|start|>assistant to=self<|message|>",
+        "thinking_end_token": "<|eom|>"}
+    levels = {
+        name.split("-", 1)[1]: spec["chat_template_kwargs"]["reasoning_effort"]
+        for name, spec in fam["intents"].items()
+    }
+    assert levels == {"low": "low", "medium": "medium",
+                      "high": "high", "xhigh": "xhigh"}
+
+
 def test_kimi_k2_refines_off_the_deepseek_arch():
     """K2.5/K2.7 convert to 'deepseek2' but ship Moonshot's card (t=1.0), so the
     general.name refinement has to split them off DeepSeek's t=0.6 while

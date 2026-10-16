@@ -287,6 +287,7 @@ def _later_arches():
         "hy_v3": (t._hy_v3_meta, t._HY_V3_SHAPES),
         "hyv4": (t._hyv4_meta, t._HYV4_SHAPES),
         "muse-glimmer": (t._muse_glimmer_meta, t._MUSE_GLIMMER_SHAPES),
+        "muse-spark": (t._muse_spark_meta, t._MUSE_SPARK_SHAPES),
         "minimax-m3": (t._minimax_m3_meta, t._MINIMAX_M3_SHAPES),
         "falcon-h1": (t._falcon_h1_meta, t._FALCON_H1_SHAPES),
         "granitehybrid": (t._granitehybrid_meta, {}),
@@ -295,8 +296,8 @@ def _later_arches():
 
 
 @pytest.mark.parametrize("arch", ["hy_v3", "hyv4", "muse-glimmer",
-                                  "minimax-m3", "falcon-h1", "granitehybrid",
-                                  "ernie4_5-moe"])
+                                  "muse-spark", "minimax-m3", "falcon-h1",
+                                  "granitehybrid", "ernie4_5-moe"])
 def test_later_class_built_arches_take_the_options(arch):
     assert arch in rs.SWAP_ARCHES and arch in rs.WIRED_ARCHES
     meta_fn, shapes = _later_arches()[arch]

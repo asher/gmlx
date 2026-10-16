@@ -645,3 +645,76 @@ def test_wrapper_prefers_out_of_band_router_input(monkeypatch):
     out = model.layers[0].mlp(mx.random.normal((1, 1, DIM)))
     mx.eval(out)
     assert len(seen) == 1 and seen[0] is full
+
+
+def _spark_args(**over):
+    from gmlx.models.muse_spark.model import ModelArgs
+
+    kw = dict(
+        model_type="muse_spark",
+        hidden_size=DIM,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        vocab_size=32,
+        layer_types=["sliding_attention"] * 2,
+        num_experts=NE,
+        num_experts_per_tok=K,
+        moe_intermediate_size=HID,
+        moe_latent_size=24,
+    )
+    kw.update(over)
+    return ModelArgs(**kw)
+
+
+def test_router_replica_matches_the_muse_spark_block():
+    """The block's plain-Linear gate routes it to the sigmoid-plus-bias
+    replica, which ranks by score plus bias and returns the bias-free mass
+    on the same experts the block picks."""
+    from gmlx.models.muse_spark.model import MuseSparkMoE
+    from gmlx.stream.lookahead import _SIGMOID_BIAS_BLOCKS, _base_block_name
+
+    mx.random.seed(11)
+    blk = MuseSparkMoE(_spark_args())
+    blk.e_score_correction_bias = mx.random.normal((NE,))
+    mx.eval(blk.parameters())
+    assert _base_block_name(blk) in _SIGMOID_BIAS_BLOCKS
+    select = _router_fn_for(blk)
+    assert select is not None
+
+    picked = []
+    orig = blk.switch_mlp
+
+    class _Spy(nn.Module):
+        def __call__(self, x, inds):
+            picked.append(np.array(inds).reshape(-1))
+            return orig(x, inds)
+
+    blk.switch_mlp = _Spy()
+    x = mx.random.normal((1, 1, DIM))
+    mx.eval(blk(x))
+    ids, mass = select(x)
+    ids = np.array(ids).reshape(-1)
+    assert sorted(ids.tolist()) == sorted(picked[0].tolist())
+    scores = mx.sigmoid(blk.gate(x.astype(mx.float32)))
+    want = np.array(scores).reshape(-1)[ids]
+    np.testing.assert_allclose(np.array(mass).reshape(-1), want, rtol=1e-6)
+    choice = np.array(scores + blk.e_score_correction_bias).reshape(-1)[ids]
+    assert (np.diff(choice) <= 0).all()
+
+
+def test_muse_spark_block_hands_its_full_width_input_to_lookahead():
+    """The expert container reads the latent input, so the block stashes
+    the full-width router input for the wrapper when lookahead is on."""
+    from gmlx.models.muse_spark.model import MuseSparkMoE
+
+    mx.random.seed(12)
+    blk = MuseSparkMoE(_spark_args())
+    mx.eval(blk.parameters())
+    x = mx.random.normal((1, 1, DIM))
+    mx.eval(blk(x))
+    assert getattr(blk.switch_mlp, "_kq_la_input", None) is None
+    object.__setattr__(blk.switch_mlp, "_kq_lookahead", object())
+    mx.eval(blk(x))
+    assert blk.switch_mlp._kq_la_input is x

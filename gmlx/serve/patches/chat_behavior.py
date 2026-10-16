@@ -484,7 +484,7 @@ def install_stream_thinking_seed() -> None:
                 self.in_thinking = _prompt_tail_opens_thinking(
                     prompt, self.open_close_markers)
                 if prompt.rstrip().endswith("<|start|>assistant"):
-                    # harmony (gpt-oss) and ATEM (Muse Glimmer): the state
+                    # harmony (gpt-oss) and ATEM (Muse models): the state
                     # machine's open/close pairs cannot express channel or
                     # recipient routing, so the stream splits through the
                     # REPL's marker filter instead. Both prompts stop
@@ -549,7 +549,7 @@ def install_stream_thinking_seed() -> None:
                 "<|start|>assistant")
             if text and ("<|channel|>" in text or (in_header
                                                    and "<|message|>" in text)):
-                # harmony (gpt-oss) and ATEM (Muse Glimmer): the stock splitter
+                # harmony (gpt-oss) and ATEM (Muse models): the stock splitter
                 # knows none of these markers and returns the raw markup as
                 # content, which the model's own chat template rejects with a
                 # 500 once a client sends the reply back as history. ATEM emits

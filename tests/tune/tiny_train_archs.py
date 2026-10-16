@@ -50,6 +50,16 @@ CONFIGS = {
         final_logit_softcapping=20.0, output_multiplier=0.19611613, post_norm_eps=1e-8,
         rms_norm_eps=1e-6, rope_parameters=_ROPE, rope_theta=10000.0,
         max_position_embeddings=1024, tie_word_embeddings=False),
+    "muse_spark": dict(
+        model_type="muse_spark", hidden_size=256, num_hidden_layers=4, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=64, vocab_size=512,
+        layer_types=["sliding_attention", "full_attention", "sliding_attention",
+                     "sliding_attention"], sliding_window=512, num_experts=8,
+        num_experts_per_tok=4, moe_intermediate_size=256, moe_latent_size=256,
+        routed_scaling_factor=1.0, norm_topk_prob=True, final_logit_softcapping=20.0,
+        output_multiplier=0.1767766922712326, post_norm_eps=1e-8, rms_norm_eps=1e-5,
+        rope_parameters={"rope_theta": 5e5, "rope_type": "default"}, rope_theta=5e5,
+        max_position_embeddings=4096, tie_word_embeddings=False),
     "hy_v3": dict(
         model_type="hy_v3", hidden_size=256, intermediate_size=512, expert_hidden_dim=256,
         num_hidden_layers=3, first_k_dense_replace=1, num_attention_heads=4,
@@ -148,6 +158,7 @@ class Case:
 CASES = {
     "qwen3_moe": Case("qwen3moe"),
     "muse_glimmer": Case("muse-glimmer"),
+    "muse_spark": Case("muse-spark"),
     "hy_v3": Case("hy_v3", (r"router\.gate$",)),
     "glm5_next": Case("glm5next"),
     "kimi_k3": Case("kimi-k3"),
