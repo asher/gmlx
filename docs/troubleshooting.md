@@ -327,6 +327,12 @@ FLUX.2 klein is distilled to sample without guidance. Leave out
 `--guidance`, the request's `guidance` and the entry's
 `defaults.guidance`, or set them to 1. FLUX.2 klein Base takes guidance.
 
+### `has a side under 64` or `is wider or taller than 8 to 1`
+
+FLUX.2 klein takes a reference image whose sides are 64 pixels or more,
+and whose long side is at most 8 times its short side. The message names
+the image and its size. Crop or resize that image into those limits.
+
 ### `gmlx image does not apply` or `is not a ... adapter`
 
 The LoRA is of a kind gmlx does not apply, or it was made for another

@@ -18,8 +18,8 @@ holds the PEFT config of each component under ``lora_adapter_metadata``,
 and ``header_configs`` reads the rank and the alpha of every pair from it.
 A rank-stabilized config scales a pair by its alpha over the square root
 of its rank, as PEFT does. A config field that would change the delta in
-another way is refused by name. An alpha that is not finite and a factor with a value that is not
-finite are refused at the read.
+another way is refused by name. An alpha that is not finite and a factor
+with a value that is not finite are refused at the read.
 """
 
 from __future__ import annotations
@@ -319,7 +319,8 @@ def _header_config(path: str, comp: str, fields: dict) -> HeaderConfig:
             raise UnsupportedAdapterError(
                 f"{where} sets {comp}.{name}, a field gmlx image does not "
                 "read. It reads r, lora_alpha, rank_pattern, alpha_pattern, "
-                "target_modules and exclude_modules", "adapter header")
+                "target_modules, exclude_modules and use_rslora",
+                "adapter header")
         raise UnsupportedAdapterError(
             f"{where} sets {comp}.{name} to {value!r}, which makes this "
             f"{kind}. gmlx image does not apply it. It applies plain LoRA "

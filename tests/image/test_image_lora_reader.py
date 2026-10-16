@@ -622,6 +622,14 @@ def test_every_refused_header_field_has_its_refusal_row():
     assert "use_rslora" not in reader._HEADER_REFUSED
 
 
+def test_the_refusal_of_an_unread_field_names_every_field_gmlx_reads():
+    with pytest.raises(UnsupportedAdapterError) as e:
+        reader.header_configs(header({**CONFIG, "a_later_field": True}), "f")
+    said = str(e.value).split("It reads ", 1)[1]
+    named = set(said.replace(" and ", ", ").split(", "))
+    assert named == reader._HEADER_READ
+
+
 def _scales(res) -> dict:
     """The scale each pair runs at, by target."""
     return {t.pair.stem.removeprefix("transformer."):

@@ -179,10 +179,12 @@ size, and `Flux2Scheduler` for the sigmas, which `SamplerCustomAdvanced`
 samples on with a `CFGGuider` and a `KSamplerSelect`. `Flux2Scheduler`
 gives the schedule FLUX.2 klein is made for, which follows the image size,
 so give it the latent's width and height. The schedulers of `KSampler` run
-on another schedule. An edit encodes each reference image with a
-`VAE Encode` and puts it on the prompt and on the negative with a
-`Set Reference Latent` (`ReferenceLatent`), and the first image sets the
-size. FLUX.2 klein samples at `cfg` 1, so its negative can be a
+on another schedule. An edit scales each reference image to one megapixel
+with `Scale Image to Total Pixels` (`ImageScaleToTotalPixels`), encodes it
+with a `VAE Encode`, and puts it on the prompt and on the negative with a
+`Set Reference Latent` (`ReferenceLatent`). A `Get Image Size` of the
+first scaled image gives `Empty Flux 2 Latent` and `Flux2Scheduler` their
+width and height. FLUX.2 klein samples at `cfg` 1, so its negative can be a
 `Conditioning Zero Out` of the positive. FLUX.2 klein Base takes a negative
 prompt and a higher `cfg`. FLUX.2 klein places its reference images by the
 `index` method, and an `Edit Model Reference Method`
