@@ -154,6 +154,34 @@ def write_zimage_lora(path: str, manifest: dict, layers=(0, 1), rank: int = 4, a
     return n
 
 
+def write_flux3_lora(path: str, manifest: dict, rank: int = 4, alpha: float = 2.0,
+                     seed: int = 0) -> list:
+    """A small FLUX.3 LoRA on native layer names, inside the blocks and out:
+    the single blocks in the kohya ``lora_unet_`` form, the rest in the
+    dotted ``diffusion_model`` form, both of which ComfyUI's generic key map
+    reads. Returns the target layer names."""
+    import torch
+    from safetensors.torch import save_file
+    shapes = {t["name"]: t["shape"] for t in manifest["tensors"]}
+    stems = [f"single_blocks.0.{leaf}" for leaf in
+             ("q_proj", "k_proj", "v_proj", "attn_out", "mlp_in", "mlp_out")]
+    stems += ["content_mode_blocks.image.1.q_proj", "content_mode_blocks.image_cond.0.v_proj",
+              "txt_mode_blocks.0.mlp_out", "txt_in", "time_in.in_layer",
+              "early_stream_modulations.txt.lin", "final_layer.image.linear",
+              "ref_time_in.in_layer"]
+    g = torch.Generator().manual_seed(seed)
+    sd = {}
+    for stem in stems:
+        dout, dn = shapes[f"{stem}.weight"]
+        k = ("lora_unet_" + stem.replace(".", "_")) if stem.startswith("single_blocks.") \
+            else "diffusion_model." + stem
+        sd[f"{k}.lora_down.weight"] = (torch.randn(rank, dn, generator=g) * 0.01).to(torch.bfloat16)
+        sd[f"{k}.lora_up.weight"] = (torch.randn(dout, rank, generator=g) * 0.01).to(torch.bfloat16)
+        sd[f"{k}.alpha"] = torch.tensor(alpha)
+    save_file(sd, path)
+    return stems
+
+
 def manifest(family: str) -> dict:
     with open(os.path.join(FIXTURES, f"manifest-{family}.json")) as f:
         return json.load(f)

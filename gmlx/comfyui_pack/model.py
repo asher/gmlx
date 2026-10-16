@@ -26,10 +26,12 @@ import torch
 import comfy.model_detection
 import comfy.model_management
 import comfy.patcher_extension
+import comfy.supported_models
 import comfy.utils
 
 from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
                      set_interrupt_check, tensor_hash)
+from .compat import comfyui_version
 from .patcher import CPU, GmlxBinding, GmlxModelPatcher
 
 log = logging.getLogger("gmlx")
@@ -77,6 +79,9 @@ def manifest_state_dict(manifest: dict, inline: bool = True) -> dict:
 def build_weightless(manifest: dict, model_class: str):
     """``(model, model_config)`` built on the meta device from a manifest,
     after checking that ComfyUI detects ``model_class``."""
+    if not hasattr(comfy.supported_models, model_class):
+        raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} has no {model_class} model, which "
+                        f"the server serves {manifest.get('model')!r} as; update ComfyUI")
     sd = manifest_state_dict(manifest)
     prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
     stripped = comfy.utils.state_dict_prefix_replace(sd, {prefix: ""}, filter_keys=True)
@@ -84,18 +89,51 @@ def build_weightless(manifest: dict, model_class: str):
         sd = stripped
     cfg = comfy.model_detection.model_config_from_unet(sd, "")
     if cfg is None:
-        raise GmlxError("gmlx: ComfyUI detects no model in the server's manifest; this "
-                        "ComfyUI may be older than the model")
+        raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} detects no model in the server's "
+                        f"manifest, where the server serves {model_class}; this ComfyUI may "
+                        "be older than the model")
     detected = type(cfg).__name__
     if detected != model_class:
         raise GmlxError(f"gmlx: ComfyUI detects {detected} where the server serves "
                         f"{model_class}; update ComfyUI or the gmlx server")
+    if cfg.unet_config.get("fused_qkv"):
+        raise GmlxRefusal(f"gmlx: the server's {model_class} DiT holds the fused qkv layout "
+                          "(single_blocks.0.qkv.weight), which a gmlx model does not take; "
+                          "serve a file that stores q_proj, k_proj and v_proj apart")
     dtypes = list(cfg.supported_inference_dtypes)
     dtype = torch.float32 if torch.float32 in dtypes else dtypes[0]
     cfg.set_inference_dtype(dtype, None, device=CPU)
     model = cfg.get_model(sd, "", device=torch.device("meta"))
     model.device = CPU
+    if hasattr(model.diffusion_model, "preprocess_conds"):
+        _conditioning_on_server(model)
     return model, cfg
+
+
+def _conditioning_on_server(model) -> None:
+    """FLUX.3: ComfyUI runs the DiT's conditioning blocks once in
+    ``extra_conds`` when the DiT is no flow map. Those blocks run on the
+    server, so the model's ``extra_conds`` hands the step the conditioning
+    as it does for a flow map, and a call of the blocks in ComfyUI is
+    refused by name."""
+    dm = model.diffusion_model
+
+    def preprocess_conds(*args, **kwargs):
+        raise GmlxRefusal(f"gmlx: ComfyUI ran the conditioning blocks of the "
+                          f"{type(dm).__name__} DiT outside its forward, which a gmlx model "
+                          "runs on the server")
+    dm.preprocess_conds = preprocess_conds
+    if getattr(dm, "flow_map", True):
+        return
+    extra_conds = model.extra_conds
+
+    def keep_conditioning(**kwargs):
+        dm.flow_map = True
+        try:
+            return extra_conds(**kwargs)
+        finally:
+            dm.flow_map = False
+    model.extra_conds = keep_conditioning
 
 
 def walk_back(prompt: dict, node_id: str, classes: set) -> list:
@@ -159,6 +197,9 @@ class RemoteForward:
     def __init__(self, base_model, binding: GmlxBinding):
         self.base_model = base_model
         self.b = binding
+        # A flow map DiT, FLUX.3's distilled one, reads the schedule the
+        # sampler runs on, which each step carries.
+        self.flow_map = bool(getattr(base_model.diffusion_model, "flow_map", False))
         self.warned: set = set()
         self.memo: dict = {}
         self.calls = collections.deque(maxlen=512)
@@ -240,7 +281,7 @@ class RemoteForward:
             rows.append(row)
         return rows, held
 
-    def _send(self, x, timesteps, fields):
+    def _send(self, x, timesteps, fields, sigmas=None):
         client: StepClient = self.b.client
 
         def stop():
@@ -249,12 +290,24 @@ class RemoteForward:
             except GmlxError as e:
                 log.warning("gmlx: the interrupt did not reach the server: %s", e)
 
-        return client.step(x, timesteps, fields, on_interrupt=stop)
+        return client.step(x, timesteps, fields, on_interrupt=stop, sample_sigmas=sigmas)
+
+    def _schedule(self, to: dict):
+        """The sampler's schedule a flow map step carries, else None."""
+        if not self.flow_map:
+            return None
+        s = to.get("sample_sigmas")
+        if s is None:
+            raise GmlxError(f"gmlx: {self.b.model_id!r} is a flow map DiT, which reads the "
+                            "schedule the sampler runs on, and this call carries no "
+                            "transformer_options['sample_sigmas']")
+        return torch.as_tensor(s).detach().float().reshape(-1).cpu()
 
     def __call__(self, x, timesteps, context=None, control=None, transformer_options={}, **kwargs):
         t0 = time.perf_counter()
         to = transformer_options or {}
         prefix_cache = self._check(control, to, kwargs)
+        sigmas = self._schedule(to)
         # A latent format with a frame axis, such as Krea 2's, gives one frame.
         framed = x.ndim == 5 and x.shape[2] == 1
         if framed:
@@ -276,7 +329,7 @@ class RemoteForward:
         ts = timesteps.float().reshape(-1)
         t1 = time.perf_counter()
         try:
-            out, hdrs = self._send(xs, ts, fields)
+            out, hdrs = self._send(xs, ts, fields, sigmas)
         except GmlxMissing as e:
             client.stats["missing_retries"] += 1
             missing = set(e.missing)
@@ -285,7 +338,7 @@ class RemoteForward:
             if table is not None and table in missing:
                 table = patcher.sync_patches(force=True)
                 fields["patch_table"] = table
-            out, hdrs = self._send(xs, ts, fields)
+            out, hdrs = self._send(xs, ts, fields, sigmas)
         except GmlxInterrupted:
             comfy.model_management.throw_exception_if_processing_interrupted()
             raise

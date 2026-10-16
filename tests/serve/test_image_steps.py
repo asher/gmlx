@@ -499,6 +499,38 @@ def test_a_flux3_base_step_reads_no_schedule(host, fpipes):
         assert np.array_equal(out, want)
 
 
+def test_a_flux3_table_on_comfyuis_native_keys_steps_as_the_core_table(
+        host, fpipes):
+    """The pack names a FLUX.3 pair by ComfyUI's weight key, the GGUF name
+    under diffusion_model., in a block and outside the blocks."""
+    from lora_fixtures import make_pair
+
+    pipe = fpipes[True]
+    _serve(host, "f3d", pipe)
+    c = _client()
+    rng = np.random.default_rng(10)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    plain = _f3_velocity(pipe, x, 0.75, _f3_cond(feats), 0.5)
+    for name, (dout, din) in (("single_blocks.0.q_proj", (64, 64)),
+                              ("ref_time_in.in_layer", (64, 256)),
+                              ("txt_in", (64, 24))):
+        down, up, _ = make_pair(rng, dout, din, 2)
+        tid = c.define_table("f3d", {"entries": [{
+            "key": f"diffusion_model.{name}.weight", "band": None,
+            "patches": [{"up": c.put(up, kind="adapters"),
+                         "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                         "strength": 0.8}]}]})
+        core = steps.STATE.tables_of("f3d", pipe)[tid]
+        out = c.step("f3d", None, x, [0.75], _rows(c, feats),
+                     patch_table=tid, sample_sigmas=SIGMAS)
+        want = _on_worker(lambda: np.array(api.denoise_step(
+            pipe, mx.array(x), 0.75, _f3_cond(feats), patch_table=core,
+            target=0.5)))
+        assert np.array_equal(out, want), name
+        assert not np.array_equal(out, plain), name
+
+
 def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
         host, fpipes, monkeypatch):
     monkeypatch.setattr(steps, "family_of", lambda spec: (
