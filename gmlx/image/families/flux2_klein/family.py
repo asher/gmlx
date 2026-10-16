@@ -4,8 +4,9 @@
 # Klein4BParams, Klein9BParams and Flux2Params in src/flux2/model.py and
 # the defaults of FLUX2_MODEL_INFO in src/flux2/util.py, the tensor names
 # and shapes of Flux2 in src/flux2/model.py, the prompt rules of
-# Qwen3Embedder in src/flux2/text_encoder.py and the rounding of denoise
-# and denoise_cfg in src/flux2/sampling.py, and modified for gmlx
+# Qwen3Embedder in src/flux2/text_encoder.py, the rounding of denoise
+# and denoise_cfg and the reference image rules of encode_image_refs and
+# cap_min_pixels in src/flux2/sampling.py, and modified for gmlx
 # (Apache-2.0; see licenses/flux2-LICENSE).
 """FLUX.2 klein fingerprint, constants, config synthesis and the hooks of
 its registry row.
@@ -24,8 +25,8 @@ from __future__ import annotations
 import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import (ConstantsRow, Family, LoopRules,
-                                 SamplingRow, VariantRow)
+from gmlx.image.registry import (ConstantsRow, EditParts, Family,
+                                 LoopRules, SamplingRow, VariantRow)
 
 TITLE = "FLUX.2 klein"
 # What a refusal of another FLUX model names as the ones gmlx image runs.
@@ -333,6 +334,39 @@ def synth_config(view: HeaderView) -> dict:
     }
 
 
+# The reference images of an edit, by encode_image_refs and default_prep
+# in src/flux2/sampling.py: sides of 64 pixels at least and an aspect
+# ratio of 8 at most, one reference under 2024 x 2024 pixels and each of
+# several under 1024 x 1024, cropped to the grid of one latent token. The
+# reference sets no count; gmlx takes 10, as FLUX.3 klein's does. The
+# encoder reads the prompt alone, and the references reach the DiT as
+# latents only.
+REFERENCES = ConstantsRow(
+    values={
+        "max_refs": 10,
+        "one_max_pixels": 2024 ** 2,
+        "multi_max_pixels": 1024 ** 2,
+        "min_side": 64,
+        "max_aspect": 8,
+        "grid": 16,
+    },
+    repo="github.com/black-forest-labs/flux2",
+    revision="50fe5162777813d869182b139e83b10743caef15",
+)
+
+
+def _prepare_all(images):
+    from .edit import prepare
+
+    return prepare(images)
+
+
+def _size(refs):
+    from .edit import default_size
+
+    return default_size(refs)
+
+
 FAMILY = Family(
     name="flux2_klein",
     title=TITLE,
@@ -356,4 +390,6 @@ FAMILY = Family(
     sampling=SAMPLING,
     schedule=schedule,
     loop=LOOP,
+    edit=EditParts(max_refs=REFERENCES.values["max_refs"],
+                   prepare_all=_prepare_all, size=_size),
 )

@@ -159,7 +159,8 @@ def test_the_reference_tokens_run_in_the_activation_dtype(tiny):
     arrays, _ = committed_fixture(TINY)
     model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
     lat, feats, refs, sigma = fg.inputs(model, arrays)
-    refs = fm.References(refs.tokens * (1 + 2.0 ** -12) + 1e-3, refs.ids)
+    refs = fm.References(refs.tokens.astype(mx.float32) * (1 + 2.0 ** -12)
+                         + 1e-3, refs.ids)
     rounded = fm.References(refs.tokens.astype(mx.bfloat16), refs.ids)
     assert not mx.array_equal(rounded.tokens.astype(mx.float32),
                               refs.tokens).item()

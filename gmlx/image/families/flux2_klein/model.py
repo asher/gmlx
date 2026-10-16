@@ -460,8 +460,11 @@ class Flux2KleinDiT(nn.Module):
 
     def references(self, latents) -> References:
         """The reference latents (B, C, h, w), in the order of their
-        images, as the tokens and ids the DiT takes."""
-        return References.of(list(latents))
+        images, as the tokens and ids the DiT takes. The tokens are
+        bf16, as encode_image_refs gives them, so an fp32 run reads the
+        references the reference's does."""
+        return References.of([mx.array(z).astype(mx.bfloat16)
+                              for z in latents])
 
     def caption(self, feats: mx.array, taps: dict | None = None) -> Caption:
         """The text tokens of features (B, L, text dim) after txt_in."""
