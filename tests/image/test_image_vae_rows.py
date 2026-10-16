@@ -72,9 +72,7 @@ def priced_by(request, monkeypatch):
 
 
 def test_every_family_has_a_vae_row():
-    assert set(memfit.VAE_ROWS) == set(reader.VAES)
-    # A family may decode before its passes are priced.
-    assert set(memfit.PEAKS) <= set(reader.VAES)
+    assert set(memfit.VAE_ROWS) == set(memfit.PEAKS) == set(reader.VAES)
     z, row = memfit.VAE_ROWS["z_image"], memfit.VAE_ROWS[FAMILY]
     assert z.measured is True and z.floor is None
     assert z.whole == {"decode": memfit.VAE_DECODE,

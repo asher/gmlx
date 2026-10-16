@@ -168,6 +168,20 @@ QWEN_IMAGE21_PREFILL = StepFit(base=1.25 * GiB, k=6.5)
 # Qwen-Image 2.1's does, and takes its slope of 0.5 for the second row.
 KREA2_STEP = StepFit(base=2.35 * GiB, k=2.4, row_k=0.5)
 
+# One FLUX.3 klein Q4_K_M step through ``api.sample`` under bounded_cache
+# on an M5 Max, in fresh processes, over the settled process. The cells
+# are in tests/fixtures/image/memfit/flux3_klein_cells.json: 256 to 2048
+# pixels with 80 text rows, 256 to 1536 with 4096, one with 640, steps
+# with one to four reference images, and four guided steps of the Base
+# file. The cache term reaches its bound early: a 256 pixel step reads
+# 1.42 GiB with 80 text rows and 2.78 with 4096. A line through the 1536
+# and 2048 pixel cells has a slope of 2.7, raised 10 percent to 3.0. The
+# base is 0.25 GiB above every cell, the 512 pixel cell with 4096 text
+# rows the closest. The second row of a guided step reads 0.41 to 0.79
+# GiB above one row, so it takes the slope of 1.0, which leaves 0.25 GiB
+# above every guided cell where 0.5 does not.
+FLUX3_KLEIN_STEP = StepFit(base=2.45 * GiB, k=3.0, row_k=1.0)
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -512,6 +526,10 @@ class PeakRow:
                                     # this beside its rows, for the tower
     mmproj_fp32: bool = False       # the encoder's load casts the float
                                     # tensors of its mmproj to float32
+    encode_base: int = 0            # bytes an encode holds at any length
+    ref_token_px: int = 0           # pixels per reference token on each
+                                    # axis when the reference tokens join
+                                    # the rows of every step, else 0
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:
@@ -557,6 +575,21 @@ PEAKS = {
     "krea2": PeakRow(token_px=16, row_multiple=1, caption_rows=512,
                      width=2 * 16384 + 2 * 6144, step=KREA2_STEP,
                      encode_row_bytes=3 * 9728 * 4, text_rows=546),
+    # FLUX.3 klein joins up to 4096 text rows, padded to 80, to the image
+    # rows in every block, and the tokens of each reference image too.
+    # The MLP's fused gate and up product and its gated half are the
+    # widest outputs: 3072 wide, a 9216 MLP. The plan does not know the
+    # prompt, so it prices the most text rows. An encode of the encoder
+    # alone, Qwen3-VL-4B Q8_0 tapped in float32, reads 0.34 GiB over the
+    # settled process at 80 rows, 0.50 at 640, 1.19 at 2080 and 1.33 at
+    # 4096: a base of 0.6 GiB and 28 KiB times ENCODE_LIVE a row leave
+    # 0.25 GiB above every cell, where Krea 2's rows alone would price
+    # 7.1 GiB at 4096.
+    "flux3_klein": PeakRow(token_px=16, row_multiple=1, caption_rows=4096,
+                           width=2 * 9216 + 9216, step=FLUX3_KLEIN_STEP,
+                           encode_row_bytes=28 * 1024,
+                           encode_base=int(0.6 * GiB), text_rows=4096,
+                           ref_token_px=16),
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
@@ -834,7 +867,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     The prefix rows of a conditioning come from ``text_tokens``, ``refs``
     and ``ref_px``. With ``refs`` at 0 the count takes the references of
-    ``ref_sizes`` at their own sizes. ``prefix_rows`` gives the rows of
+    ``ref_sizes`` at their own sizes. A family without a prefix whose
+    reference tokens join the rows of every step counts them there, by
+    the same rule. ``prefix_rows`` gives the rows of
     the request's own conditionings, the positive first, in place of
     that count. ``prefix_shared`` says the two of a guided request are
     one, whose state is held once. A cache of prefix states that holds
@@ -885,6 +920,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         "prefix_cache": 0,
     }
     rows = image_rows(row, height, width, caption_tokens)
+    if row.ref_token_px:
+        # The reference tokens join the rows of every step.
+        p = row.ref_token_px
+        rows += sum((int(h) // p) * (int(w) // p) for h, w in (
+            [(ref_px, ref_px)] * refs if refs else ref_sizes))
     text = row.text_rows if text_tokens is None else text_tokens
     counted = slots = 0
     if row.prefix is not None:
@@ -929,7 +969,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     caption = row.text_rows if caption_tokens is None else caption_tokens
     # An encode with reference images runs their image rows beside the
     # text, and the tower.
-    encode_peak = ((caption + slots) * row.encode_row_bytes * ENCODE_LIVE
+    encode_peak = (row.encode_base
+                   + (caption + slots) * row.encode_row_bytes * ENCODE_LIVE
                    + (row.encode_tower_bytes if slots else 0))
 
     def build(b: int, release: bool, tiled: bool, levers: tuple,

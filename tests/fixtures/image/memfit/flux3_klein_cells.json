@@ -1,0 +1,223 @@
+{
+ "what": "FLUX.3 klein distilled Q4_K_M (realrebelai flux3_image_klein_sd), or the Base Q4_K_M a cell names, on an M5 Max, one fresh process per cell, through api.sample under the bounded cache, with random features of text_rows rows and random reference latents of refs images of ref_px pixels. steps_gib is the footprint of each of three steps over the settled process, the DiT loaded. A guided cell runs cfg 3.5, its two rows together. encode holds one prompt encode of the Qwen3-VL-4B-Instruct Q8_0 encoder alone at rows rows, the footprint over the settled process.",
+ "cells": [
+  {
+   "size": 256,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    1.4158,
+    1.4162,
+    1.4164
+   ]
+  },
+  {
+   "size": 256,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    2.7485,
+    2.7836,
+    2.5185
+   ]
+  },
+  {
+   "size": 512,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    1.7934,
+    1.858,
+    1.8582
+   ]
+  },
+  {
+   "size": 512,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    2.9443,
+    2.769,
+    2.606
+   ]
+  },
+  {
+   "size": 768,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    2.2825,
+    2.3221,
+    2.3223
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    2.4145,
+    2.4145,
+    2.4076
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 640,
+   "guided": false,
+   "steps_gib": [
+    2.5435,
+    2.5757,
+    2.4823
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    3.1404,
+    2.9071,
+    2.8554
+   ]
+  },
+  {
+   "size": 1280,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    3.1107,
+    2.9361,
+    2.9771
+   ]
+  },
+  {
+   "size": 1536,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    3.094,
+    2.998,
+    3.045
+   ]
+  },
+  {
+   "size": 1536,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    3.5107,
+    3.3637,
+    3.4108
+   ]
+  },
+  {
+   "size": 2048,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    4.0996,
+    3.8714,
+    3.8717
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 80,
+   "guided": false,
+   "refs": 1,
+   "ref_px": 1024,
+   "steps_gib": [
+    3.0089,
+    3.0015,
+    3.0017
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 80,
+   "guided": false,
+   "refs": 2,
+   "ref_px": 1024,
+   "steps_gib": [
+    3.3173,
+    3.3593,
+    3.3595
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 80,
+   "guided": false,
+   "refs": 4,
+   "ref_px": 512,
+   "steps_gib": [
+    3.0126,
+    3.0052,
+    3.0055
+   ]
+  },
+  {
+   "size": 512,
+   "text_rows": 80,
+   "guided": true,
+   "dit": "Base Q4_K_M",
+   "steps_gib": [
+    2.1481,
+    2.1965,
+    2.2661
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 80,
+   "guided": true,
+   "dit": "Base Q4_K_M",
+   "steps_gib": [
+    2.9872,
+    2.9801,
+    2.9803
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 4096,
+   "guided": true,
+   "dit": "Base Q4_K_M",
+   "steps_gib": [
+    3.5943,
+    3.5941,
+    3.6413
+   ]
+  },
+  {
+   "size": 1536,
+   "text_rows": 80,
+   "guided": true,
+   "dit": "Base Q4_K_M",
+   "steps_gib": [
+    3.7197,
+    3.7799,
+    3.8857
+   ]
+  }
+ ],
+ "encode": [
+  {
+   "rows": 80,
+   "gib": 0.3403
+  },
+  {
+   "rows": 640,
+   "gib": 0.4991
+  },
+  {
+   "rows": 2080,
+   "gib": 1.1936
+  },
+  {
+   "rows": 4096,
+   "gib": 1.3293
+  }
+ ]
+}
