@@ -15,6 +15,13 @@ masked reference batch take the same values up to rounding. A family
 whose template opens with a fixed turn drops the rows of that turn from
 the conditioning, after they ran: the rows it keeps attended to them.
 
+A family whose reference keeps the rows of right padding in the
+conditioning names its pad token, the multiple the rows are padded to
+and the position each pad row takes. In the reference each pad row
+attends to every real token and to no pad row, itself included, so
+every pad row of a layer holds the same values. The tap runs one pad row
+after the real tokens, with that mask and its position, and repeats it.
+
 A family that conditions on reference images loads the encoder with its
 vision tower, from the encoder GGUF and its mmproj, as the multimodal
 class of the model. A text prompt taps that class by the same walk, and
@@ -37,6 +44,7 @@ import hashlib
 import importlib
 import json
 import os
+import unicodedata
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -76,18 +84,25 @@ class EncoderSpec:
     vision_identity_source: str = ""
     keep_tail: int = 0               # last ids the token cap never cuts
     stack: bool = False              # features hold every tap side by side
+    pad_multiple: int = 0            # rows padded to a multiple of this,
+                                     # at most max_tokens; 0 for no pads
+    pad_id: int | None = None        # token id of the pad rows
+    pad_position: int = 1            # rotary position of every pad row
 
     @property
     def template_id(self) -> str:
         """sha256 of what turns a prompt into the rows of a conditioning
         beside the token ids: the template, and the count of dropped rows
-        when the spec drops any, and that the features stack the taps when
-        they do."""
+        when the spec drops any, that the features stack the taps when
+        they do, and the pad rule when the rows are padded."""
         text = self.template
         if self.drop:
             text += f"\x00drop={self.drop}"
         if self.stack:
             text += "\x00stack"
+        if self.pad_multiple:
+            text += (f"\x00pad={self.pad_multiple},{self.pad_id},"
+                     f"{self.pad_position}")
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -175,6 +190,34 @@ def token_ids(spec: EncoderSpec, tokenizer, prompt: str) -> list[int]:
     return ids
 
 
+def pad_rows(spec: EncoderSpec, n: int) -> int:
+    """Pad rows after ``n`` token ids: up to the next multiple of the
+    spec's pad multiple, at most its token cap. 0 for a spec with no
+    pads."""
+    if not spec.pad_multiple:
+        return 0
+    if spec.drop or spec.pad_id is None:
+        raise ValueError(f"the pad rule of {spec.name} needs a pad id and "
+                         "no dropped rows")
+    rows = -(-n // spec.pad_multiple) * spec.pad_multiple
+    if spec.max_tokens is not None:
+        rows = min(rows, spec.max_tokens)
+    return max(0, rows - n)
+
+
+def rows_at_most(spec: EncoderSpec, prompt: str) -> int:
+    """The most rows the features of ``prompt`` hold, from its text alone,
+    before a tokenizer loads: the encoders here tokenize the NFC form of
+    the rendered text by byte-level BPE, so each token id holds at least
+    one byte of it. The NFC form of some characters holds more bytes."""
+    text = render(spec, prompt)
+    n = max(len(t.encode("utf-8"))
+            for t in (text, unicodedata.normalize("NFC", text)))
+    if spec.max_tokens is not None:
+        n = min(n, spec.max_tokens)
+    return max(0, n - spec.drop) + pad_rows(spec, n)
+
+
 def _text_stack(model):
     """The embedding and the decoder layer list of a loaded text model,
     or of the language model of a multimodal one."""
@@ -190,29 +233,88 @@ def _text_stack(model):
     return embed, layers
 
 
-def tap(model, ids, *, layers: tuple,
-        activation: str | None = None) -> list[mx.array]:
+def tap(model, ids, *, layers: tuple, activation: str | None = None,
+        pad: int = 0, pad_id: int | None = None,
+        pad_position: int = 1) -> list[mx.array]:
     """Hidden states after running the first ``n`` decoder layers, for each
     ``n`` in ``layers``, with no final norm. ``ids`` is one prompt's token
     ids. Each result is (1, L, hidden) in the model's activation dtype, and
     layers past the last tap never run. With ``activation`` the embeddings
     are cast to that dtype, and the layers run in it by promotion over the
-    weights as loaded."""
+    weights as loaded.
+
+    With ``pad`` the result has ``pad`` more rows: one row of token
+    ``pad_id`` at rotary position ``pad_position`` that attends to every
+    real token and not to itself, repeated."""
     embed, blocks = _text_stack(model)
     stops = sorted(set(layers))
     if not stops or stops[0] < 1 or stops[-1] > len(blocks):
         raise ValueError(f"tap layers {layers} outside 1..{len(blocks)}")
-    x = mx.array(np.asarray(ids, np.int32).reshape(1, -1))
+    n = len(ids)
+    seq = list(ids) + ([pad_id] if pad else [])
+    if pad and pad_id is None:
+        raise ValueError("pad rows need a pad id")
+    x = mx.array(np.asarray(seq, np.int32).reshape(1, -1))
     h = embed(x)
     if activation is not None:
         h = h.astype(getattr(mx, activation))
-    mask = "causal" if h.shape[1] > 1 else None
+    if pad:
+        allowed = np.tril(np.ones((n + 1, n + 1), bool))
+        allowed[n, n] = False
+        mask = mx.array(allowed)
+        place = pad_rope(model, n, pad_position)
+    else:
+        mask = "causal" if n > 1 else None
+        place = contextlib.nullcontext()
     out: dict[int, mx.array] = {}
-    for i in range(stops[-1]):
-        h = blocks[i](h, mask, None)
-        if i + 1 in stops:
-            out[i + 1] = h
-    return [out[n] for n in layers]
+    with place:
+        for i in range(stops[-1]):
+            h = blocks[i](h, mask, None)
+            if i + 1 in stops:
+                out[i + 1] = h
+    if pad:
+        for k, v in out.items():
+            row = mx.broadcast_to(v[:, n:], (1, pad, v.shape[-1]))
+            out[k] = mx.concatenate([v[:, :n], row], axis=1)
+    return [out[k] for k in layers]
+
+
+class _PadRope:
+    """A rotary embedding that rotates the last of ``n + 1`` rows at the
+    pad position and the others as the wrapped one does."""
+
+    def __init__(self, rope, n: int, position: int):
+        self.rope, self.n, self.position = rope, n, position
+
+    def __call__(self, x: mx.array, offset: int = 0) -> mx.array:
+        if x.shape[-2] != self.n + 1:
+            return self.rope(x, offset=offset)
+        head = self.rope(x[..., :self.n, :], offset=offset)
+        tail = self.rope(x[..., self.n:, :], offset=self.position)
+        return mx.concatenate([head, tail], axis=-2)
+
+
+@contextlib.contextmanager
+def pad_rope(model, n: int, position: int):
+    """Run a tap of ``n`` tokens and one pad row with each attention's
+    rope placing the pad row at ``position``, and restore the ropes
+    after."""
+    _, blocks = _text_stack(model)
+    found = []
+    for b in blocks:
+        attn = getattr(b, "self_attn", None)
+        rope = getattr(attn, "rope", None)
+        if rope is None:
+            raise TypeError(f"{type(b).__name__} has no self_attn.rope to "
+                            "place a pad row with")
+        found.append((attn, rope))
+    try:
+        for attn, rope in found:
+            attn.rope = _PadRope(rope, n, position)
+        yield
+    finally:
+        for attn, rope in found:
+            attn.rope = rope
 
 
 class _VisionRope:
@@ -406,13 +508,15 @@ class TextTap:
     """One prompt's encoding: its token ids and one hidden state per tap
     layer, each (1, L, hidden). ``features`` are the rows of the first tap
     that condition the DiT, (L - drop, hidden), or with ``stack`` the rows
-    of every tap side by side in tap order, (L - drop, taps * hidden)."""
+    of every tap side by side in tap order, (L - drop, taps * hidden).
+    ``pads`` rows of padding follow the rows of the ids."""
     ids: tuple
     hidden: tuple
     template_id: str
     tap_layers: tuple
     drop: int = 0
     stack: bool = False
+    pads: int = 0
 
     @property
     def features(self) -> mx.array:
@@ -473,15 +577,18 @@ class EncoderHandle:
         if self.model is None:
             raise RuntimeError(
                 f"the {self.spec.name} text encoder was released")
-        ids = token_ids(self.spec, self.tokenizer, prompt)
-        with vision_rope(self.model, self.spec):
-            hidden = tap(self.model, ids, layers=self.spec.tap_layers,
-                         activation=self.spec.activation)
+        spec = self.spec
+        ids = token_ids(spec, self.tokenizer, prompt)
+        pads = pad_rows(spec, len(ids))
+        with vision_rope(self.model, spec):
+            hidden = tap(self.model, ids, layers=spec.tap_layers,
+                         activation=spec.activation, pad=pads,
+                         pad_id=spec.pad_id, pad_position=spec.pad_position)
             mx.eval(hidden)
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
-                       template_id=self.spec.template_id,
-                       tap_layers=tuple(self.spec.tap_layers),
-                       drop=self.spec.drop, stack=self.spec.stack)
+                       template_id=spec.template_id,
+                       tap_layers=tuple(spec.tap_layers),
+                       drop=spec.drop, stack=spec.stack, pads=pads)
 
     def token_ids(self, prompt: str) -> list[int]:
         return token_ids(self.spec, self.tokenizer, prompt)

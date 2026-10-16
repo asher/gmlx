@@ -45,6 +45,11 @@ COMFY = {
               "latent": {"channels": 16, "stride": 8, "patch": 2},
               "vae": {"channels_out": 3, "stride": 8}, "edit": False,
               "context": ("txtfusion.layerwise_blocks.0.prenorm.scale", 0, 12)},
+    # FLUX.3's LATENT is the DiT's model space, which its VAE routes carry.
+    "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
+                    "latent": {"channels": 128, "stride": 16, "patch": 1},
+                    "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
+                    "context": ("txt_in.weight", 1)},
 }
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
 MODELS = {
@@ -53,7 +58,11 @@ MODELS = {
     "qwen-image-2.1-turbo": ("qwen_image21", "turbo",
                              {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": TURBO_SIGMAS}),
     "krea-2-turbo": ("krea2", "turbo", {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
+    "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93, "sigmas": None}),
+    "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93, "sigmas": None}),
 }
+# The manifest of a model whose file is not its family's fixture.
+FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
 
 _NP = {"F32": "<f4", "F16": "<f2", "BF16": "<u2", "U8": "u1", "BOOL": "?"}
 
@@ -104,9 +113,9 @@ def scalar(s: str) -> float:
 
 def load_manifests() -> dict:
     out = {}
-    for fam in COMFY:
-        with open(os.path.join(FIXTURES, f"manifest-{fam}.json")) as f:
-            out[fam] = json.load(f)
+    for name in [*COMFY, *FIXTURE.values()]:
+        with open(os.path.join(FIXTURES, f"manifest-{name}.json")) as f:
+            out[name] = json.load(f)
     return out
 
 
@@ -139,6 +148,13 @@ class State:
         kw["t"] = time.time()
         with self.lock:
             self.log.append(kw)
+
+    def manifest(self, mid):
+        return self.manifests[FIXTURE.get(mid, MODELS[mid][0])]
+
+    def flow_map(self, mid) -> bool:
+        """Whether the model is a flow map DiT, which reads the client's schedule."""
+        return any(t["name"].startswith("ref_time_in.") for t in self.manifest(mid)["tensors"])
 
     def context_dim(self, fam):
         name, axis, *times = COMFY[fam]["context"]
@@ -245,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             fam, variant, sampling = m
             if parts[2] == "manifest":
-                return self._json(200, {**st.manifests[fam], "model": parts[1]})
+                return self._json(200, {**st.manifest(parts[1]), "model": parts[1]})
             if parts[2] == "status":
                 f = COMFY[fam]
                 return self._json(200, {
@@ -435,6 +451,15 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             st.event(kind="step_missing", run=rid, missing=len(set(missing)))
             return self._err(409, "not held", missing=sorted(set(missing)))
+        sched = tensors.get("sample_sigmas")
+        targets = None
+        if st.flow_map(req["model"]):
+            if sched is None or len(sched[1]) != 1 or sched[1][0] < 2:
+                return self._err(400, "a flow map step holds sample_sigmas, the schedule the "
+                                      "client samples on")
+            s = sched[3].astype(np.float32)
+            targets = [float(s[min(int(np.abs(s - np.float32(v)).argmin()) + 1, len(s) - 1)])
+                       for v in ts[3].astype(np.float32).reshape(-1)]
         gen = run.gen if run else 0
         st.event(kind="step_begin", run=rid)
         deadline = time.perf_counter() + st.delay
@@ -455,10 +480,13 @@ class Handler(BaseHTTPRequestHandler):
                  timestep=[float(v) for v in t], convention=req.get("convention"),
                  num_tokens=[r.get("num_tokens") for r in rows],
                  refs=[len(r.get("ref_latents") or []) for r in rows],
+                 ref_shapes=[[list(st.tensors[h][1]) for h in r.get("ref_latents") or []]
+                             for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
-                 fields=sorted(req))
+                 fields=sorted(req), tensors=sorted(tensors), targets=targets,
+                 sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)])
         self._send(200, write_body({"out": out.astype(np.float32)}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",

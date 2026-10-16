@@ -1,0 +1,253 @@
+{
+ "schema": 1,
+ "name": "check6_flux3_klein_1024",
+ "check": 6,
+ "family": "flux3_klein",
+ "script": "scripts/image_oracle/check6_flux3_klein.py",
+ "argv": [
+  "check6_flux3_klein.py",
+  "--reference",
+  "src",
+  "--dit",
+  "flux3_image_klein_sd-Q4_K_M.gguf",
+  "--features",
+  "check2_flux3_klein.npz",
+  "--sizes",
+  "1024",
+  "--bf16",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "flux3_image_klein_sd-Q4_K_M.gguf",
+   "size": 3391951648,
+   "sha256": "2e429f54f9b2f2161b3123a615167ee6137aa21f1287f426dc895bb7647af5ec"
+  },
+  "features": {
+   "name": "check2_flux3_klein.npz",
+   "size": 157437070,
+   "sha256": "fc087b917e2c1614738e24f9b0ba467bae4882efeeb02798264ac1e94c601bea"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "variant": "distilled",
+  "flow_map": true,
+  "steps": 16,
+  "guidance": null,
+  "alpha": 6.93,
+  "seed": 6,
+  "bf16": true,
+  "kept_steps": [
+   1,
+   2,
+   4,
+   8
+  ],
+  "refs": 0,
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); generate rounds it to bf16",
+  "features": "check2_flux3_klein float32 features_plain, and features_empty for Base, rounded to bf16",
+  "latents": "(1, 128, size / 16, size / 16) float32 tokens in the gmlx layout, after the step",
+  "times": "the bf16 image time the DiT saw at each step, as float32",
+  "reference_commit": "45e57c9fb06f9751cdced29a65c5d2171003be05",
+  "gguf_codecs": {
+   "Q4_K": 261,
+   "F32": 86,
+   "BF16": 12
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "run": {
+   "fp32_s": 457.8,
+   "fp32_median_step_s": 28.59,
+   "prompts": [
+    "plain"
+   ],
+   "bf16_s": 472.5,
+   "latents_bf16_vs_fp32": {
+    "rel_l2": 0.03473962711742153,
+    "cosine": 0.999398501063125,
+    "max_abs": 1.566718578338623
+   },
+   "bf16_vs_fp32_by_step": [
+    0.0001072364025043065,
+    0.00017246024949553224,
+    0.00024262855436322817,
+    0.0004078218336265227,
+    0.0006067902939226239,
+    0.0007962054658379754,
+    0.0010452754618304255,
+    0.0014407956128173376,
+    0.0020237464666235418,
+    0.002724462145681909,
+    0.0039409303477482265,
+    0.005949938924355951,
+    0.009054525109381135,
+    0.014178515745593282,
+    0.02093431322021586,
+    0.03473962711742153
+   ]
+  },
+  "gmlx_bf16": {
+   "rel_l2": {
+    "1": 9.591084781031086e-05,
+    "2": 0.0001625811428462869,
+    "4": 0.0003418088180834927,
+    "8": 0.0024819523139896758,
+    "16": 0.07097709539255134
+   },
+   "share_of_512_gate": {
+    "1": 0.3151399798062335,
+    "2": 0.32525985699977555,
+    "4": 0.455145429761502,
+    "8": 1.1663443902739494,
+    "16": 1.6902473209473328
+   }
+  }
+ },
+ "tolerances": {
+  "exact_rel_l2": 0.001,
+  "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated"
+ },
+ "notes": [
+  "results.gmlx_bf16: gmlx's bf16 latents at 1024, kernel routes at their default, against the fp32 latents after each kept step and the last, and as a share of the 512 gate of that step, as tests/image/test_image_check6_flux3_klein.py prints them. A reading, not a gate."
+ ],
+ "created": "2026-10-16T00:11:33Z",
+ "npz": "check6_flux3_klein_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    80,
+    20480
+   ],
+   "dtype": "float32",
+   "sha256": "59cb9d9f5999c5b54893a12b7721e44ab7db23fb7f52c687c599701c3263114d"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "494f48df8ee8728ae161f37f6cccdcf68152ad27aa7ff84d22ce204c77c79b58"
+  },
+  "latents_bf16": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "33c8a8c064ad9154c059b107089e6791836c0266796d2583b7d47dd7939d8219"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "86783699f69992d357f3c92be1bce3642ecbb624046741deff2cdd730d7cb549"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "d2cabf5b7f90baf2185dc954fcc26e86f7c1617e5ae50302d6f8eacb0ae8413e"
+  },
+  "latents_step4": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "63bd048bca0b2f268af904e8a16828cc46c96cc80829ea522c2c464d85228fd4"
+  },
+  "latents_step8": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "995ccbf7b51365c6f6be6d6c367811e391e94111ef249004f430423a9d1266b5"
+  },
+  "noise": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "bcd95295bb6b6d4f2030450a235b4f3e631d78cfeabead17132ec18138429b6a"
+  },
+  "schedule": {
+   "shape": [
+    17
+   ],
+   "dtype": "float32",
+   "sha256": "47b2e4ea9acca305918cff60d25537c22e5c04a3fa66ce06a8dd05f0a461f462"
+  },
+  "times": {
+   "shape": [
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "376fa2e898b2a38feaea154d41bdd33e90ae6e991f1e41ad12205e2ad325c140"
+  }
+ }
+}

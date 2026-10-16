@@ -168,8 +168,11 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "1 (default empty).")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
-                        "on Qwen-Image 2.1 (default: the init image's, else the "
-                        "entry's defaults.size, else the variant's).")
+                        "on Qwen-Image 2.1 (default: the init image's, else "
+                        "on FLUX.3 klein the first reference's, else the "
+                        "entry's defaults.size, else the variant's). On "
+                        "FLUX.3 klein without it, the image of one reference "
+                        "is cropped to that reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
@@ -192,10 +195,13 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--ref", action="append", default=None, metavar="PATH",
                    help="Edit from this reference image. Repeat the flag for "
                         "several, in the order the prompt names them. Needs "
-                        "--encoder-mmproj.")
+                        "--encoder-mmproj, except on FLUX.3 klein, whose "
+                        "encoder reads the prompt alone.")
     p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
                    help="Resize each reference to about N x N pixels at its "
-                        "own aspect ratio (default 1024).")
+                        "own aspect ratio (default 1024). FLUX.3 klein sizes "
+                        "its references by its own rule and takes no "
+                        "--ref-size.")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",
@@ -455,8 +461,6 @@ def _check_files(a) -> None:
         raise FileNotFoundError(f"MODEL {a.model}: no such file")
     if a.encoder is None or a.vae is None:
         raise _Usage("--encoder and --vae are required with a DiT path")
-    if a.ref and a.encoder_mmproj is None:
-        raise _Usage("--ref needs --encoder-mmproj with a DiT path")
     if a.ref_size is not None and not a.ref:
         raise _Usage("--ref-size needs --ref")
     for flag, path in (("--encoder", a.encoder), ("--vae", a.vae),
@@ -473,7 +477,8 @@ def _check_files(a) -> None:
 def _references(a, family) -> tuple:
     """The ``--ref`` images as the family runs them, in order. A family
     that takes none, a count over its cap and a size outside what it takes
-    are usage errors."""
+    are usage errors. A family that prepares the references of a request
+    together gives them with ``crop``, and sizes them by its own rule."""
     if not a.ref:
         return ()
     edit = family.edit
@@ -482,6 +487,19 @@ def _references(a, family) -> tuple:
     if len(a.ref) > edit.max_refs:
         raise _Usage(f"--ref: {family.title} takes at most {edit.max_refs} "
                      f"reference images, and the request has {len(a.ref)}")
+    if a.encoder_mmproj is None and not edit.text_only:
+        raise _Usage("--ref needs --encoder-mmproj with a DiT path")
+    if edit.prepare_all is not None:
+        if a.ref_size is not None:
+            raise _Usage(f"--ref-size: {family.title} sizes its references "
+                         "by its own rule")
+        images = [open_image("--ref", path) for path in a.ref]
+        try:
+            return edit.prepare_all(images)
+        except ValueError as e:
+            i = getattr(e, "index", None)
+            where = "--ref" if i is None else f"--ref {a.ref[i]}"
+            raise _Usage(f"{where}: {e}") from None
     low, high = math.isqrt(edit.min_area - 1) + 1, math.isqrt(edit.area)
     side = high if a.ref_size is None else a.ref_size
     if not low <= side <= high:
@@ -590,10 +608,13 @@ def _settings(a, ident, defaults):
             f"{a.model} matches no known {ident.family.title} variant; pass "
             f"--steps and --guidance")
     steps = a.steps if a.steps is not None else defaults.steps
-    from gmlx.image.api import check_steps
+    from gmlx.image.api import check_sampling, check_steps
 
     check_steps(ident.family, ident.variant, steps)
     cfg = a.guidance if a.guidance is not None else defaults.cfg
+    # Before any file loads.
+    check_sampling(ident.family, ident.variant,
+                   bool(ident.config.get("flow_map")), cfg, a.sampler)
     strength = None
     if a.init_image is not None:
         strength = a.strength
@@ -636,10 +657,19 @@ def _generate(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     steps, cfg, strength = _settings(a, ident, defaults)
     stride = _stride(fam)
-    init = None
+    refs = _references(a, fam)
+    edit = fam.edit
+    # A family that sizes a request by its references names that size.
+    ref_size = (edit.size(refs) if refs and edit is not None
+                and edit.size is not None else None)
+    init = crop = None
     if a.init_image is not None:
         init = read_image(a.init_image, a.size, stride)
         width, height = init.shape[1], init.shape[0]
+    elif a.size is None and ref_size is not None:
+        width, height = ref_size
+        # The output of a padded reference is cropped back to its box.
+        crop = getattr(refs, "crop", None)
     else:
         width, height = a.size or getattr(a, "entry_size", None) or (
             defaults.size if defaults else (1024, 1024))
@@ -647,11 +677,14 @@ def _generate(a) -> int:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
     mask = read_mask(a.mask, (width, height)) if a.mask else None
-    refs = _references(a, fam)
-    mmproj = a.encoder_mmproj if refs else None
+    text_only = edit is not None and edit.text_only
+    mmproj = a.encoder_mmproj if refs and not text_only else None
     if a.encoder_mmproj is not None and not refs:
         log("note: --encoder-mmproj is unused without --ref, and is not "
             "loaded")
+    elif a.encoder_mmproj is not None and mmproj is None:
+        log(f"note: --encoder-mmproj is unused, since the {fam.title} "
+            "encoder reads the prompt alone, and is not loaded")
     if cfg == 1.0 and a.negative_prompt:
         log("warning: --negative-prompt is unused, since --guidance 1 turns "
             "guidance off")
@@ -673,7 +706,8 @@ def _generate(a) -> int:
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
         mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
-        variant=a.variant)
+        variant=a.variant, prompts=() if refs and not text_only else (
+            [prompt] + ([] if cfg == 1.0 else [a.negative_prompt or ""])))
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
 
@@ -733,6 +767,13 @@ def _generate(a) -> int:
         settings["refs"] = [
             {"file": os.path.basename(p), "size": f"{r.width}x{r.height}",
              "sha256": _file_sha256(p)} for p, r in zip(a.ref, refs)]
+    if crop is not None:
+        # The size written, the size sampled, and the (left, top, right,
+        # bottom) box of the written image in the sampled one.
+        left, top, right, bottom = (int(v) for v in crop)
+        settings.update(size=f"{right - left}x{bottom - top}",
+                        canvas=f"{width}x{height}",
+                        crop=[left, top, right, bottom])
     if init is not None:
         settings.update(init_image=os.path.basename(a.init_image),
                         strength=strength)
@@ -748,6 +789,9 @@ def _generate(a) -> int:
                        mask=mask, patch_table=table, plan=plan)
         latents.append(np.array(x))
         pixels = to_uint8(api.vae_decode(pipe, x, alpha=alpha, plan=plan))
+        if crop is not None:
+            left, top, right, bottom = crop
+            pixels = np.ascontiguousarray(pixels[top:bottom, left:right])
         meta = None
         if fmt == "png" and not a.no_metadata:
             meta = {**settings, "seed": s, "model": files["dit"],
@@ -1048,7 +1092,8 @@ def _bench(a) -> int:
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
-                          keep_encoder=True, variant=a.variant)
+                          keep_encoder=True, variant=a.variant,
+                          prompts=[a.prompt] + ([] if cfg == 1.0 else [""]))
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
 
@@ -1175,8 +1220,10 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                         "source dtype). A narrower dtype is not lossless, "
                         "and the file records that.")
     p.add_argument("--family", default=None, metavar="NAME",
-                   help="The image family whose VAE this is (default: the "
-                        "one family whose VAE the file fills).")
+                   help="The image family whose VAE this is, such as "
+                        "z-image, qwen-image-2.1, krea-2 or flux-3-klein "
+                        "(default: the one family whose VAE the file "
+                        "fills).")
     p.add_argument("--source-repo", default="unknown", metavar="ID",
                    help="Record this repository as the source (default "
                         "unknown).")
@@ -1184,8 +1231,9 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                    help="Record this revision of the source repository "
                         "(default unknown).")
     p.add_argument("--source-config", default=None, metavar="FILE",
-                   help="Record this VAE config.json (default: config.json "
-                        "beside SRC when there is one).")
+                   help="Record this VAE config.json, which names its "
+                        "Autoencoder class in _class_name (default: the "
+                        "config.json beside SRC when it is a VAE config).")
     p.add_argument("--force", action="store_true",
                    help="Replace --out when it exists.")
     p.add_argument("--json", action="store_true",
@@ -1193,26 +1241,61 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
     return p
 
 
+def _not_a_vae_config(text: str) -> str | None:
+    """Why a config.json text is not a VAE's, or None. A VAE config names
+    its Autoencoder class in ``_class_name``, as diffusers writes it."""
+    try:
+        config = json.loads(text)
+    except ValueError:
+        return "is not JSON"
+    name = config.get("_class_name") if isinstance(config, dict) else None
+    if isinstance(name, str) and name.startswith("Autoencoder"):
+        return None
+    if name is None:
+        return "names no Autoencoder class in _class_name"
+    return f"is the config of a {name}, not of a VAE"
+
+
 def cmd_pack_vae(argv: list[str], prog: str = "gmlx image pack-vae") -> int:
     a = _pack_vae_parser(prog).parse_args(argv)
     from gmlx.image.vae import VAEError, pack_vae
 
-    cfg_path = a.source_config
-    if cfg_path is None:
-        beside = os.path.join(os.path.dirname(os.path.abspath(a.src)),
-                              "config.json")
-        cfg_path = beside if os.path.isfile(beside) else None
     config_json = "{}"
-    if cfg_path is not None:
+    if a.source_config is not None:
         try:
-            with open(cfg_path, encoding="utf-8") as f:
+            with open(a.source_config, encoding="utf-8") as f:
                 config_json = f.read()
         except OSError as e:
-            return _refuse(f"--source-config {cfg_path}: {e.strerror}")
+            return _refuse(f"--source-config {a.source_config}: {e.strerror}")
+        why = _not_a_vae_config(config_json)
+        if why:
+            return _refuse(f"--source-config {a.source_config}: {why}")
+    else:
+        beside = os.path.join(os.path.dirname(os.path.abspath(a.src)),
+                              "config.json")
+        try:
+            with open(beside, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = None
+        why = text is not None and _not_a_vae_config(text)
+        if why:
+            # A model folder can hold the VAE beside its pipeline config.
+            print(f"note: {beside} {why}, so the GGUF records no config; "
+                  "--source-config names one", file=sys.stderr)
+        elif text is not None:
+            config_json = text
+    family = a.family
+    if family is not None:
+        from gmlx.image.registry import family_named
+
+        # Spelled as the server reads a family: flux-3-klein is flux3_klein.
+        named = family_named(family)
+        family = named.name if named else family
     try:
         rep = pack_vae(a.src, a.out, source_repo=a.source_repo,
                        source_revision=a.source_revision,
-                       config_json=config_json, family=a.family,
+                       config_json=config_json, family=family,
                        dtype=_PACK_DTYPES.get(a.dtype), overwrite=a.force)
     except VAEError as e:
         return _refuse(str(e))

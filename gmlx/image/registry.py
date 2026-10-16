@@ -65,6 +65,19 @@ class StepParts:
 
 
 @dataclass(frozen=True)
+class LoopRules:
+    """Where a family's reference sampling loop rounds, when it does not
+    run in float32 throughout. ``noise`` is the dtype the initial noise
+    is rounded to; the latents stay float32 across the steps. With
+    ``act_update`` the guided velocity and the Euler product take the
+    DiT's activation dtype, each op rounded to it as the reference's
+    tensors of that dtype are, and only the sum with the latents runs in
+    float32."""
+    noise: str | None = None
+    act_update: bool = False
+
+
+@dataclass(frozen=True)
 class EditParts:
     """How a family conditions on reference images.
 
@@ -78,14 +91,31 @@ class EditParts:
     returns the ids, the features ``(L, D)`` and the rows of the features
     that are image slots. ``template_id()`` names the template in a
     conditioning key.
+
+    A family whose encoder reads the prompt alone has no ``token_ids``,
+    ``encode`` or ``template_id``: its references reach the DiT as VAE
+    latents only. A family whose rule for a reference depends on the
+    other references of the request has ``prepare_all(images)`` in place
+    of ``prepare`` and the areas: it gives the references of a request,
+    a tuple with ``crop``, the (left, top, right, bottom) box the output
+    is cropped to when the request gives no size, or None. ``size(refs)``
+    is then the (width, height) of a request with references and no
+    size of its own.
     """
     max_refs: int
-    area: int
-    min_area: int
-    prepare: Callable
-    token_ids: Callable
-    encode: Callable
-    template_id: Callable
+    area: int = 0
+    min_area: int = 0
+    prepare: Callable | None = None
+    token_ids: Callable | None = None
+    encode: Callable | None = None
+    template_id: Callable | None = None
+    prepare_all: Callable | None = None
+    size: Callable | None = None
+
+    @property
+    def text_only(self) -> bool:
+        """Whether the encoder reads the prompt without the images."""
+        return self.encode is None
 
 
 @dataclass(frozen=True)
@@ -118,6 +148,7 @@ class Family:
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
     edit: EditParts | None = None      # None takes no reference images
+    loop: LoopRules | None = None      # None runs the loop in float32
     # Tensors a converter may store flattened with their shape under
     # comfy.gguf.orig_shape, which the load restores.
     reshaped: tuple = ()
@@ -178,6 +209,31 @@ def get_family(name: str) -> Family:
             return fam
     known = ", ".join(f.name for f in families())
     raise ValueError(f"unknown image family {name!r}; known: {known}")
+
+
+def _alnum(text: str) -> str:
+    return "".join(c for c in str(text).lower() if c.isalnum())
+
+
+def names_family(name: str, family: Family, variant: str = "") -> bool:
+    """Whether a configured ``family`` value names this family: its name,
+    its title, or its name with the variant, compared on letters and
+    digits alone, so ``qwen-image-2.1``, ``flux-3-klein`` and
+    ``z-image-turbo`` match."""
+    want = _alnum(name)
+    return want in {_alnum(family.name), _alnum(family.title),
+                    _alnum(family.name + variant),
+                    _alnum(family.title + variant)}
+
+
+def family_named(name: str) -> Family | None:
+    """The family a configured ``family`` value names, as
+    ``names_family`` reads it with any variant the family runs, or None."""
+    for fam in families():
+        variants = ("", *fam.sampling, *fam.variant_names())
+        if any(names_family(name, fam, v) for v in variants):
+            return fam
+    return None
 
 
 def is_image_arch(arch: str | None) -> bool:

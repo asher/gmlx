@@ -33,6 +33,7 @@ import comfy.model_patcher  # noqa: E402
 import comfy.patcher_extension  # noqa: E402
 import comfy.samplers  # noqa: E402
 import comfy.sd  # noqa: E402
+import comfy.supported_models  # noqa: E402
 import comfy.utils  # noqa: E402
 import comfy.weight_adapter  # noqa: E402
 import folder_paths  # noqa: E402
@@ -42,11 +43,19 @@ from comfy_extras.nodes_model_advanced import ModelSamplingAuraFlow  # noqa: E40
 C = P.client
 ZID, QID, QTID = "z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo"
 KID = "krea-2-turbo"
+F3ID, F3BID = "flux-3-klein", "flux-3-klein-base"
 STEPS = 4
 LORAS = tempfile.mkdtemp(prefix="gmlx-pack-loras-")
 folder_paths.add_model_folder_path("loras", LORAS)
 LORA = "zimage-test-lora.safetensors"
 LORA_TARGETS = support.write_zimage_lora(os.path.join(LORAS, LORA), support.manifest("z_image"))
+LORA_F3 = "flux3-test-lora.safetensors"
+LORA_F3_KEYS = {f"diffusion_model.{s}.weight" for s in
+                support.write_flux3_lora(os.path.join(LORAS, LORA_F3), support.manifest("flux3_klein"))}
+# FLUX.3 came to ComfyUI after the pinned checkout; there its models are
+# refused by name.
+HAS_FLUX3 = hasattr(comfy.supported_models, "Flux3")
+needs_flux3 = unittest.skipUnless(HAS_FLUX3, "this ComfyUI has no FLUX.3")
 
 
 def rss() -> int:
@@ -237,6 +246,55 @@ class Weightless(Base):
         self.assertIn("ZImage", str(e.exception))
         self.assertIn("QwenImage21", str(e.exception))
 
+    @needs_flux3
+    def test_flux3_builds_on_meta_with_its_flow_map_from_the_manifest(self):
+        for mid, flow in ((F3ID, True), (F3BID, False)):
+            with self.subTest(mid):
+                names = [t["name"] for t in self.client.manifest(mid)["tensors"]]
+                count = lambda g: len({n.split(".")[1] for n in names if n.startswith(g)})  # noqa: E731
+                gc.collect()
+                r0 = rss()
+                m = self.model(mid)
+                gc.collect()
+                grew = (rss() - r0) / 2 ** 20
+                uc = m.model.model_config.unet_config
+                self.assertEqual(type(m.model.model_config).__name__, "Flux3")
+                self.assertEqual((uc["flow_map"], uc["fused_qkv"], uc["depth"], uc["depth_single_blocks"]),
+                                 (flow, False, count("txt_mode_blocks."), count("single_blocks.")))
+                self.assertIs(m.model.diffusion_model.flow_map, flow)
+                self.assertIs(m.model.diffusion_model.forward.flow_map, flow)
+                self.assertTrue(all(p.device.type == "meta" for p in m.model.parameters()))
+                self.assertLess(grew, 200.0)
+                self.assertEqual(m.model.get_dtype(), torch.float32)
+
+    @needs_flux3
+    def test_the_fused_qkv_flux3_layout_is_refused_by_name(self):
+        man = self.client.manifest(F3ID)
+        fused = []
+        for t in man["tensors"]:
+            n = t["name"]
+            if n.endswith(".q_proj.weight"):
+                fused.append({**t, "name": n.replace(".q_proj.", ".qkv."),
+                              "shape": [3 * t["shape"][0], t["shape"][1]]})
+            elif not n.endswith((".k_proj.weight", ".v_proj.weight")):
+                fused.append(t)
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.model.build_weightless({**man, "tensors": fused}, "Flux3")
+        self.assertIn("fused qkv layout (single_blocks.0.qkv.weight)", str(e.exception))
+
+    @unittest.skipIf(HAS_FLUX3, "this ComfyUI has FLUX.3")
+    def test_flux3_on_a_comfyui_without_it_is_refused_by_name(self):
+        for mid in (F3ID, F3BID):
+            with self.subTest(mid):
+                with self.assertRaises(C.GmlxError) as e:
+                    self.model(mid)
+                for want in (f"ComfyUI {P.compat.comfyui_version()} has no Flux3 model",
+                             repr(mid), "update ComfyUI"):
+                    self.assertIn(want, str(e.exception))
+        # The nodes load beside it: no internal the pack needs is missing.
+        self.assertIsNone(P.compat.first_missing())
+        self.assertEqual(type(self.model(KID).model.model_config).__name__, "Krea2")
+
 
 class Loads(Base):
     """Loads that free nothing on the cpu device, and clones that keep the class."""
@@ -342,6 +400,23 @@ class Capture(Base):
         self.assertEqual({len(e["patches"]) for e in table["entries"]}, {2})
         self.assertEqual(len({s[3] for s in seq if s[3]}), 3)
 
+    @needs_flux3
+    def test_a_flux3_lora_on_native_keys_becomes_a_table(self):
+        LL = comfy_nodes.LoraLoaderModelOnly()
+        m = LL.load_lora_model_only(self.model(F3ID), LORA_F3, 0.8)[0]
+        self.assertEqual(set(m.patches), LORA_F3_KEYS)
+        self.assertEqual({t[3] for v in m.patches.values() for t in v}, {None})
+        tid = m.sync_patches()
+        table, _ = P.patches.build_table(F3ID, m.patches)
+        self.assertEqual(tid, C.table_id(table)[0])
+        (put,) = self.stub.events("put_table")
+        self.assertEqual((put["id"], put["entries"], put["bands"], put["strengths"]),
+                         (tid, len(LORA_F3_KEYS), 0, [0.8]))
+        self.assertEqual(len(self.stub.events("put_adapter")), 2 * len(LORA_F3_KEYS))
+        # Base has no target time embedder, so ComfyUI's key map drops that pair.
+        b = LL.load_lora_model_only(self.model(F3BID), LORA_F3, 0.8)[0]
+        self.assertEqual(set(b.patches), LORA_F3_KEYS - {"diffusion_model.ref_time_in.in_layer.weight"})
+
     def test_a_dropped_adapter_is_uploaded_again_on_409(self):
         m = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(self.model(), LORA, 0.7)[0]
         # The client believes the server holds every pair; the server holds none.
@@ -433,6 +508,29 @@ class Refusals(Base):
         finally:
             m.model.current_patcher = None
 
+    @needs_flux3
+    def test_flux3_refusals_name_what_reached_the_forward(self):
+        m = self.model(F3ID)
+        f = m.model.diffusion_model.forward
+        cond = self.cond(F3ID, "x")[0][0]
+        ss = torch.tensor([1.0, 0.5, 0.0])
+        cases = {"the DiT input 'txt_states'": (C.GmlxRefusal, dict(txt_states=torch.zeros(1, 32, 3072))),
+                 "the DiT input 'ref_states'": (C.GmlxRefusal, dict(ref_states=torch.zeros(1, 16, 3072))),
+                 "transformer_options['patches_replace']": (C.GmlxRefusal, dict(transformer_options={
+                     "sample_sigmas": ss, "patches_replace": {"dit": {("single_block", 0): 1}}})),
+                 "transformer_options['sample_sigmas']": (C.GmlxError, dict(transformer_options={}))}
+        for name, (cls, kw) in cases.items():
+            with self.subTest(name):
+                args = {"context": cond, "transformer_options": {"sample_sigmas": ss}, **kw}
+                with self.assertRaises(cls) as e:
+                    f(torch.zeros(1, 128, 4, 4), torch.tensor([1.0]), **args)
+                self.assertIn(name, str(e.exception))
+        self.assertEqual(self.stub.events("step"), [])
+        # The DiT's conditioning blocks never run in ComfyUI.
+        with self.assertRaises(C.GmlxRefusal) as e:
+            m.model.diffusion_model.preprocess_conds(cond)
+        self.assertIn("conditioning blocks of the Flux3 DiT", str(e.exception))
+
     def test_unknown_options_warn_once_and_the_cache_maps(self):
         m = self.model(QID)
         cond = self.cond(QID, "x")[0][0]
@@ -498,6 +596,51 @@ class Sampling(Base):
         with self.assertRaises(C.GmlxError) as e:
             fwd(torch.zeros(1, 16, 2, 8, 8), torch.ones(1), context=torch.zeros(1, 4, 30720))
         self.assertIn("(B, C, h, w)", str(e.exception))
+
+    @needs_flux3
+    def test_a_flux3_flow_map_step_carries_the_sampler_schedule(self):
+        """Each step holds ComfyUI's sample_sigmas, so the server's target is
+        the entry after the step's timestep, as ComfyUI's FLUX.3 forward takes it."""
+        m = self.model(F3ID)
+        with torch.inference_mode():
+            out = self.sample(m, F3ID, cfg=1.0)
+        sig = [float(v) for v in comfy.samplers.calculate_sigmas(
+            m.get_model_object("model_sampling"), "simple", STEPS)]
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), STEPS)
+        for i, s in enumerate(steps):
+            self.assertEqual(s["sample_sigmas"], sig)
+            self.assertAlmostEqual(s["timestep"][0], sig[i], places=6)
+            self.assertEqual(s["targets"], [sig[i + 1]])
+        self.assertEqual({tuple(s["tensors"]) for s in steps}, {("sample_sigmas", "timestep", "x")})
+        self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(1, 128, 4, 4)})
+        self.assertEqual({tuple(s["row_keys"]) for s in steps}, {("cond", "num_tokens")})
+        self.assertEqual(tuple(out.shape), (1, 128, 4, 4))
+        self.assertTrue(bool(torch.isfinite(out).all()))
+
+    @needs_flux3
+    def test_a_flux3_base_sample_under_inference_mode_sends_its_conditioning(self):
+        """ComfyUI runs the conditioning blocks of a FLUX.3 DiT that is no flow
+        map once in extra_conds under inference mode. On a gmlx model the step
+        takes the conditioning and runs them on the server, and sends no schedule."""
+        m = self.model(F3BID)
+        with torch.inference_mode():
+            out = self.sample(m, F3BID, cfg=3.5)
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), STEPS)
+        self.assertEqual({s["rows"] for s in steps}, {2})
+        self.assertEqual({tuple(s["tensors"]) for s in steps}, {("timestep", "x")})
+        self.assertEqual({tuple(s["row_keys"]) for s in steps}, {("cond", "num_tokens")})
+        self.assertTrue(bool(torch.isfinite(out).all()))
+        self.assertIs(m.model.diffusion_model.flow_map, False)
+        kw = dict(cross_attn=torch.zeros(1, 32, 20480), device=torch.device("cpu"),
+                  noise=torch.zeros(1, 128, 4, 4))
+        with torch.inference_mode():
+            self.assertEqual(set(m.model.extra_conds(**kw)), {"c_crossattn"})
+            # ComfyUI's own extra_conds would run the blocks; the call is refused by name.
+            with self.assertRaises(C.GmlxRefusal) as e:
+                type(m.model).extra_conds(m.model, **kw)
+        self.assertIn("conditioning blocks of the Flux3 DiT", str(e.exception))
 
     def test_unequal_token_counts_send_single_rows(self):
         self.sample(self.model(), neg_tokens=17)
@@ -688,6 +831,77 @@ class ClipAndVae(Base):
         self.assertEqual(steps[0]["x_shape"], [2, 64, 6, 4])
         self.assertEqual(tuple(res["samples"].shape), (1, 64, 6, 4))
 
+    def test_flux3_clip_and_vae_carry_its_features_and_model_space_latents(self):
+        clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
+        (cond,) = comfy_nodes.CLIPTextEncode().encode(clip, "a lighthouse")
+        self.assertEqual(tuple(cond[0][0].shape), (1, 32, 20480))
+        # Flux3Tokenizer passes prevent_empty_text to Qwen3VLTokenizer.
+        clip.encode_from_tokens_scheduled(clip.tokenize("", prevent_empty_text=True))
+        self.assertEqual([e["text"] for e in self.stub.events("encode")], ["a lighthouse", " "])
+        vae = P.nodes.GmlxVAELoader().load(F3ID, self.stub.url, False)[0]
+        (img,) = comfy_nodes.VAEDecode().decode(vae, {"samples": torch.zeros(1, 128, 4, 6)})
+        self.assertEqual(tuple(img.shape), (1, 64, 96, 3))
+        (lat,) = comfy_nodes.VAEEncode().encode(vae, torch.rand(1, 70, 100, 3))
+        self.assertEqual(tuple(lat["samples"].shape), (1, 128, 4, 6))
+        self.assertEqual(self.stub.events("vae_encode")[-1]["shape"], [1, 64, 96, 3])
+
+    @needs_flux3
+    def test_a_flux3_edit_through_reference_multi_latent_reaches_the_step(self):
+        """ComfyUI's FLUX.3 edit template: the text encode, its zeroed negative,
+        and ReferenceMultiLatent encoding each reference with the VAE."""
+        from comfy_extras.nodes_edit_model import ReferenceMultiLatent
+        clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
+        vae = P.nodes.GmlxVAELoader().load(F3ID, self.stub.url, False)[0]
+        (pos,) = comfy_nodes.CLIPTextEncode().encode(clip, "make it blue")
+        (neg,) = comfy_nodes.ConditioningZeroOut().zero_out(pos)
+        ims = {"image1": torch.rand(1, 96, 64, 3), "image2": torch.rand(1, 64, 64, 3)}
+        out = ReferenceMultiLatent.execute(pos, {"resolution": "keep resolution"}, neg, vae, ims)
+        pos, neg, latent = out[0], out[1], out[2]
+        self.assertEqual([tuple(r.shape) for r in pos[0][1]["reference_latents"]],
+                         [(1, 128, 6, 4), (1, 128, 4, 4)])
+        self.assertEqual([e["shape"] for e in self.stub.events("vae_encode")],
+                         [[1, 96, 64, 3], [1, 64, 64, 3]])
+        self.stub.reset()
+        with torch.inference_mode():
+            (res,) = comfy_nodes.common_ksampler(self.model(F3ID), 1, 2, 1.0, "euler", "simple",
+                                                 pos, neg, latent)
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), 2)
+        self.assertEqual({tuple(s["refs"]) for s in steps}, {(2,)})
+        self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(1, 128, 6, 4)})
+        self.assertEqual({tuple(s["row_keys"]) for s in steps}, {("cond", "num_tokens", "ref_latents")})
+        self.assertEqual(tuple(res["samples"].shape), (1, 128, 6, 4))
+
+    @needs_flux3
+    def test_a_flux3_step_sends_its_references_in_their_order(self):
+        """Two references of other sizes reach every row of the step in the
+        order of the conditioning, the positive and the zeroed negative."""
+        from comfy_extras.nodes_edit_model import ReferenceMultiLatent
+        clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
+        vae = P.nodes.GmlxVAELoader().load(F3ID, self.stub.url, False)[0]
+        (pos,) = comfy_nodes.CLIPTextEncode().encode(clip, "put the cat on the sofa")
+        (neg,) = comfy_nodes.ConditioningZeroOut().zero_out(pos)
+        ims = {"image1": torch.full((1, 64, 96, 3), 0.25), "image2": torch.full((1, 96, 64, 3), 0.75)}
+        pos, neg, latent = ReferenceMultiLatent.execute(pos, {"resolution": "keep resolution"}, neg, vae, ims)[:3]
+        want = [list(r.shape) for r in pos[0][1]["reference_latents"]]
+        self.assertEqual(want, [[1, 128, 4, 6], [1, 128, 6, 4]])
+        self.stub.reset()
+        with torch.inference_mode():
+            comfy_nodes.common_ksampler(self.model(F3ID), 1, 1, 2.0, "euler", "simple", pos, neg, latent)
+        steps = self.stub.events("step")
+        self.assertEqual(sum(s["rows"] for s in steps), 2)
+        for s in steps:
+            self.assertEqual(s["ref_shapes"], [want] * s["rows"])
+
+    @needs_flux3
+    def test_stock_lora_loader_with_the_gmlx_flux3_clip(self):
+        model = self.model(F3ID)
+        clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
+        m2, c2 = comfy_nodes.LoraLoader().load_lora(model, clip, LORA_F3, 0.8, 1.0)
+        self.assertIsInstance(m2, P.patcher.GmlxModelPatcher)
+        self.assertIsInstance(c2, P.clip.GmlxCLIP)
+        self.assertEqual(set(m2.patches), LORA_F3_KEYS)
+
     def test_vae_nodes(self):
         zvae = P.nodes.GmlxVAELoader().load(ZID, self.stub.url, False)[0]
         qvae = P.nodes.GmlxVAELoader().load(QID, self.stub.url, False)[0]
@@ -744,7 +958,7 @@ class Widgets(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_loaders_list_the_server_models_default_first(self):
-        want = [QID, ZID, QTID, KID]
+        want = [QID, ZID, QTID, KID, F3ID, F3BID]
         for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
             node = P.NODE_CLASS_MAPPINGS[name]
             req = node.INPUT_TYPES()["required"]
@@ -763,7 +977,7 @@ class Widgets(unittest.TestCase):
             os.environ.pop("GMLX_DEFAULT_IMAGE_MODEL")
             self.probed()
             names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
-            self.assertEqual(names, [KID, ZID, QID, QTID])
+            self.assertEqual(names, [KID, ZID, QID, QTID, F3ID, F3BID])
             self.assertEqual(opts["default"], KID)
         finally:
             stub.close()
@@ -843,31 +1057,41 @@ class RoundTrip(Base):
             self.assertLess(v, 25.0, label)
 
 
-@unittest.skipUnless(os.environ.get("GMLX_TEST_ZIMAGE_GGUF"),
-                     "the ComfyUI-GGUF comparison needs GMLX_TEST_ZIMAGE_GGUF and ComfyUI-GGUF in the checkout")
 class AgainstComfyGGUF(Base):
-    """The weightless model's unet_config and LoRA patches equal
-    those of a ComfyUI-GGUF model of the same file."""
+    """The weightless model's unet_config and LoRA patches equal those of a
+    ComfyUI-GGUF model of the same file, the one the stub's manifest of the
+    model was read from."""
 
     def test_unet_config_and_patches_equal_comfyui_gguf(self):
+        self.against("GMLX_TEST_ZIMAGE_GGUF", ZID, LORA)
+
+    @needs_flux3
+    def test_flux3_unet_config_and_patches_equal_comfyui_gguf(self):
+        self.against("GMLX_TEST_FLUX3_GGUF", F3ID, LORA_F3)
+
+    def against(self, var, mid, lora):
         import importlib.util
         import sys
-        path = os.environ["GMLX_TEST_ZIMAGE_GGUF"]
+        path = os.environ.get(var)
+        if not path:
+            self.skipTest(f"the ComfyUI-GGUF comparison needs {var} and ComfyUI-GGUF in the checkout")
         gdir = os.path.join(support.setup_comfy(), "custom_nodes", "ComfyUI-GGUF")
         if not os.path.isdir(gdir):
             self.skipTest("ComfyUI-GGUF is not in this checkout")
         folder_paths.add_model_folder_path("diffusion_models", os.path.dirname(path))
-        spec = importlib.util.spec_from_file_location("ComfyUI_GGUF", os.path.join(gdir, "__init__.py"),
-                                                      submodule_search_locations=[gdir])
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["ComfyUI_GGUF"] = mod
-        spec.loader.exec_module(mod)
+        mod = sys.modules.get("ComfyUI_GGUF")
+        if mod is None:
+            spec = importlib.util.spec_from_file_location("ComfyUI_GGUF", os.path.join(gdir, "__init__.py"),
+                                                          submodule_search_locations=[gdir])
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["ComfyUI_GGUF"] = mod
+            spec.loader.exec_module(mod)
         (gg,) = mod.nodes.UnetLoaderGGUF().load_unet(os.path.basename(path))
-        ours = self.model()
+        ours = self.model(mid)
         a = {k: v for k, v in ours.model.model_config.unet_config.items() if k != "dtype"}
         b = {k: v for k, v in gg.model.model_config.unet_config.items() if k != "dtype"}
         self.assertEqual(a, b)
-        sd = comfy.utils.load_torch_file(os.path.join(LORAS, LORA), safe_load=True)
+        sd = comfy.utils.load_torch_file(os.path.join(LORAS, lora), safe_load=True)
         mw, _ = comfy.sd.load_lora_for_models(ours, None, sd, 0.8, 0.0)
         mg, _ = comfy.sd.load_lora_for_models(gg, None, sd, 0.8, 0.0)
         self.assertEqual(set(mw.patches), set(mg.patches))

@@ -2,7 +2,7 @@
 
 A VAE is identified by tensor names and shapes, never by an arch string.
 The prefixes ``vae.`` and ``first_stage_model.`` are stripped, and the
-FLUX.1 and Qwen-Image autoencoders are also read in their original
+FLUX.1, FLUX.2 and Qwen-Image autoencoders are also read in their original
 layouts. The whole header is
 checked before any tensor bytes are read. Loading is strict both ways:
 every module parameter is filled, and every file tensor is consumed or is
@@ -15,7 +15,9 @@ constants differs there.
 
 Both formats hold torch layout. Conv kernels (O, I, kH, kW) become
 (O, kH, kW, I), and every weight is cast to the decode dtype as an owned,
-contiguous array. A kernel of rank 5, (O, I, T, kH, kW), is a causal
+contiguous array, except those the family keeps in float32. A tensor
+that stays unread may hold integers, and a GGUF holds a scalar at shape
+(1,). A kernel of rank 5, (O, I, T, kH, kW), is a causal
 video conv, which pads its frames in front: one frame reads its last time
 slice alone, and that slice is the kernel. A GGUF holds such a kernel
 flattened to rank 4, with its shape under ``comfy.gguf.orig_shape``.
@@ -33,7 +35,7 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 from ..fingerprint import ImageModelError
-from . import flux1_ae, qwen_image21_vae, qwen_image_vae
+from . import flux1_ae, flux2_ae, qwen_image21_vae, qwen_image_vae
 from .conv import conv_path, set_conv_path
 
 STRIP_PREFIXES = ("vae.", "first_stage_model.")
@@ -65,6 +67,7 @@ class VaeRow:
     config_disagreements: Callable | None = None    # vae/config.json dict
                                         # -> fields that differ from the
                                         # VAE's constants
+    fp32_keep: tuple = ()               # parameters kept in float32
 
 
 def _flux1_space(c: dict) -> dict:
@@ -96,6 +99,12 @@ VAES = {
         qwen_image_vae.expected_unused,
         image_channels=qwen_image_vae.IMAGE_CHANNELS,
         config_disagreements=qwen_image_vae.config_disagreements),
+    # The latent BatchNorm statistics come with the VAE and stay float32.
+    "flux3_klein": VaeRow(
+        "the FLUX.2 autoencoder", flux2_ae.config_from_shapes,
+        flux2_ae.Flux2AE, 32, _own_space, flux2_ae.expected_unused,
+        config_disagreements=flux2_ae.config_disagreements,
+        fp32_keep=flux2_ae.BN_STATS),
 }
 
 
@@ -105,8 +114,8 @@ class VaeHeader:
     names, shapes torch order."""
     path: str
     format: str                     # "gguf" or "safetensors"
-    layout: str                     # "diffusers", "original" (FLUX.1)
-                                    # or "wan" (Qwen-Image)
+    layout: str                     # "diffusers", "original" (FLUX.1
+                                    # and FLUX.2) or "wan" (Qwen-Image)
     names: dict                     # diffusers name -> file name
     shapes: dict                    # diffusers name -> torch shape
     dtypes: dict                    # diffusers name -> "F32", "F16", "BF16"
@@ -203,8 +212,9 @@ def strip_names(names) -> dict:
 
 def diffusers_names(names: dict) -> tuple[str, dict]:
     """The layout of stripped names (name -> file name) and the names
-    under diffusers names: "original" for the FLUX.1 autoencoder's own
-    layout, "wan" for the Qwen-Image autoencoder's, else "diffusers"."""
+    under diffusers names: "original" for the FLUX.1 and FLUX.2
+    autoencoders' own layout, "wan" for the Qwen-Image autoencoder's, else
+    "diffusers"."""
     if flux1_ae.is_original_layout(names):
         levels = flux1_ae.original_levels(names)
         return "original", {flux1_ae.original_name(n, levels): f
@@ -261,8 +271,9 @@ def identify(header: VaeHeader, family: str):
     text = header.metadata.get(CONFIG_KEY)
     if header.format == "gguf" and text is not None:
         check_config(header.path, text, family)
-    bad = sorted({d for d in header.dtypes.values()
-                  if d not in FLOAT_CODECS})
+    unread = row.expected_unused(cfg) if row.expected_unused else {}
+    bad = sorted({d for n, d in header.dtypes.items()
+                  if d not in FLOAT_CODECS and n not in unread})
     if bad:
         raise VAEError(f"VAE tensors must be F32, F16 or BF16, and this file "
                        f"holds {', '.join(bad)}")
@@ -317,7 +328,7 @@ def check_names(header: VaeHeader, params: dict, row: VaeRow, cfg) -> None:
     # A tensor that stays unread is still held to its shape, so a file of
     # another model does not pass on the names alone.
     wrong += sorted(n for n, shape in unread.items() if n in header.shapes
-                    and tuple(header.shapes[n]) != tuple(shape))
+                    and not _same_shape(header, n, shape))
     parts = []
     if missing:
         parts.append(f"{len(missing)} missing ({', '.join(missing[:8])})")
@@ -329,6 +340,14 @@ def check_names(header: VaeHeader, params: dict, row: VaeRow, cfg) -> None:
     if parts:
         raise VAEError(f"{header.path} does not fill {row.title}: "
                        + "; ".join(parts))
+
+
+def _same_shape(header: VaeHeader, name: str, shape: tuple) -> bool:
+    """Whether the file's ``name`` has torch shape ``shape``. A GGUF holds
+    a scalar at shape (1,)."""
+    got = tuple(header.shapes[name])
+    return got == tuple(shape) or (header.format == "gguf" and shape == ()
+                                   and got == (1,))
 
 
 def _mlx_shape(shape: tuple) -> tuple:
@@ -362,11 +381,15 @@ def resolve_dtype(dtype) -> mx.Dtype:
     return dt
 
 
-def _file_arrays(header: VaeHeader) -> dict:
+def _file_arrays(header: VaeHeader, skip=()) -> dict:
+    """The file's arrays by file name. A GGUF loads none for the file names
+    in ``skip``, so an unread tensor of a type MLX does not load stays
+    unread."""
     if header.format == "gguf":
         import mlx_kquant as kq
 
-        arrays, codecs, _, _ = kq.load_gguf(header.path, zero_copy=False)
+        arrays, codecs, _, _ = kq.load_gguf(header.path, zero_copy=False,
+                                            skip=list(skip))
         if codecs:
             raise VAEError(f"VAE tensors must be F32, F16 or BF16, and "
                            f"{header.path} holds {sorted(set(codecs.values()))}")
@@ -388,7 +411,10 @@ def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
     params = dict(tree_flatten(vae.parameters()))
     check_names(header, params, row, cfg)
 
-    arrays = _file_arrays(header)
+    unread = row.expected_unused(cfg) if row.expected_unused else {}
+    arrays = _file_arrays(header, [header.names[n] for n in unread
+                                   if n in header.names])
+    keep = set(row.fp32_keep)
     weights = []
     for name in params:
         a = arrays.pop(header.names[name])
@@ -398,7 +424,8 @@ def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
             a = frame_kernel(a)
         if a.ndim == 4:
             a = a.transpose(0, 2, 3, 1)
-        weights.append((name, mx.contiguous(a.astype(dt))))
+        weights.append((name, mx.contiguous(
+            a.astype(mx.float32 if name in keep else dt))))
     del arrays
     mx.eval([w for _, w in weights])
     vae.load_weights(weights, strict=True)

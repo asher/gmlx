@@ -1106,9 +1106,9 @@ a second quant). Files landing under a model_dirs root are registered in the
 config and served immediately. Refuses an unloadable GGUF unless --force.
 
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
-krea-2-turbo) pulls the DiT, its text encoder and its VAE, uses the
-parts your model folders already hold, and adds the model under
-image_models: in the config.
+krea-2-turbo, flux-3-klein, flux-3-klein-base) pulls the DiT, its text
+encoder and its VAE, uses the parts your model folders already hold,
+and adds the model under image_models: in the config.
 """
 
 _PULL_EXAMPLES = """\
@@ -1155,7 +1155,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "/tree/ or /blob/ link resolves the same way. "
                          "Additional bare filenames are fetched from the first "
                          "ref's repo. An image model name (z-image-turbo, "
-                         "qwen-image, qwen-image-turbo, krea-2-turbo) "
+                         "qwen-image, qwen-image-turbo, krea-2-turbo, "
+                         "flux-3-klein, flux-3-klein-base) "
                          "pulls the model with its text encoder and VAE. See "
                          "the examples below.")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",
@@ -1361,7 +1362,8 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
     """Files to delete (all shards + companions no other model references)
     and their sizes; explanatory notes append to ``notes``. ``images`` are
     the discovered image models."""
-    # Paths any other model (configured or discovered) still resolves to.
+    # Paths any other model (configured or discovered) still resolves to,
+    # through any symlink, so a file one model reaches by a link stays.
     others = [mc for mid, mc in cfg.models.items() if mid != target]
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
@@ -1369,13 +1371,13 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                ref_paths.add(os.path.abspath(rp))
+                ref_paths.add(os.path.realpath(rp))
     # An image model that names this model's GGUF as its encoder keeps it.
     for im in _all_images(cfg, images):
         for p in (im.encoder, im.encoder_mmproj):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                ref_paths.add(os.path.abspath(rp))
+                ref_paths.add(os.path.realpath(rp))
 
     to_delete: list[str] = []
     if not keep_files:
@@ -1387,7 +1389,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             if main is None:
                 notes.append(f"model file not found ({m.path}) - removing "
                              "the config entry only")
-            elif os.path.abspath(main) in ref_paths:
+            elif os.path.realpath(main) in ref_paths:
                 notes.append("model file kept: another model references it")
             else:
                 to_delete += _shard_files(main)
@@ -1398,7 +1400,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             rp = _try_resolve(comp, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.abspath(rp) in ref_paths:
+            if os.path.realpath(rp) in ref_paths:
                 notes.append(f"{label} kept: another model references it")
             else:
                 to_delete += _shard_files(rp)
@@ -1660,15 +1662,15 @@ def _all_images(cfg, images=()) -> list:
 
 
 def _image_refs(cfg, disc, skip: str, images=()) -> set:
-    """Resolved paths every model but the image entry ``skip`` loads: chat
-    models (configured and discovered) and the other image entries,
-    configured and discovered (``images``)."""
+    """Real paths every model but the image entry ``skip`` loads, through
+    any symlink: chat models (configured and discovered) and the other
+    image entries, configured and discovered (``images``)."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.abspath(rp))
+                refs.add(os.path.realpath(rp))
     for im in _all_images(cfg, images):
         if im.id == skip:
             continue
@@ -1676,7 +1678,7 @@ def _image_refs(cfg, disc, skip: str, images=()) -> set:
                   *(a for a, _st in im.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.abspath(rp))
+                refs.add(os.path.realpath(rp))
     return refs
 
 
@@ -1700,7 +1702,7 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
             rp = _try_resolve(p, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.abspath(rp) in refs:
+            if os.path.realpath(rp) in refs:
                 notes.append(f"{label} kept: another model uses it")
             else:
                 to_delete += _shard_files(rp)
@@ -1821,7 +1823,7 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                      help="List only the image models.")
     img.add_argument("--family", default=None, metavar="NAME",
                      help="List only the image models of this family, such "
-                          "as z-image or qwen-image-2.1.")
+                          "as z-image, qwen-image-2.1 or flux-3-klein.")
     img.add_argument("--edit", action="store_true",
                      help="List only the image models that edit from "
                           "reference images.")
@@ -1946,26 +1948,30 @@ def _family_key(name: str) -> str:
 
 
 def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
-    """The ``gmlx list`` row of an image_models entry: its family (the
-    entry's, else its DiT's fingerprint), whether it edits, the chat model
-    it shares as its encoder, and the size of the files it loads."""
-    family, title, edit = im.family, None, False
+    """The ``gmlx list`` row of an image_models entry: its family (its
+    DiT's fingerprint, as /v1/models reads it, else the family the entry
+    names), whether it edits, the chat model it shares as its encoder, and
+    the size of the files it loads."""
+    family, title, edit, text_only = im.family, None, False, False
     path = _try_resolve(im.path, cfg.model_dirs)
     try:
         from gmlx.image import catalog
-        from gmlx.image.registry import get_family
-        if family is None and path:
-            got = catalog.dit_identity(path)
-            family = got[0] if got else None
-        if family:
-            fam = get_family(family)
+        from gmlx.image.registry import family_named, get_family
+        got = catalog.dit_identity(path) if path else None
+        # A configured family is matched on letters and digits, as the
+        # server matches it, so flux-3-klein names flux3_klein.
+        fam = get_family(got[0]) if got else (family_named(family)
+                                               if family else None)
+        if fam:
             family, title, edit = fam.name, fam.title, fam.edit is not None
+            text_only = edit and fam.edit.text_only
     except (ValueError, OSError):
         pass
     shared = im.encoder if im.encoder in cfg.models else None
     # An edit runs the encoder's vision tower, the entry's own or that of
-    # the chat model it shares, as /v1/models says.
-    edit = edit and bool(im.encoder_mmproj
+    # the chat model it shares, as /v1/models says, unless the encoder
+    # reads the prompt alone.
+    edit = edit and bool(text_only or im.encoder_mmproj
                          or (shared and cfg.models[shared].mmproj))
     files = [im.path, im.vae, im.encoder_mmproj]
     if shared is None:

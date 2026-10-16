@@ -936,7 +936,8 @@ def test_other_files_and_families_are_refused(tmp_path, st_file):
     with pytest.raises(reader.VAEError, match="not a VAE gmlx image reads"):
         reader.load_vae(path, family=FAMILY, dtype=mx.float32)
     with pytest.raises(reader.VAEError,
-                       match="known: krea2, qwen_image21, z_image"):
+                       match="known: flux3_klein, krea2, qwen_image21, "
+                       "z_image"):
         reader.load_vae(st_file, family="sd15", dtype=mx.float32)
     # A file with another number of levels has no official time flags.
     for i, config in enumerate((OTHER_FLAGS["three_levels"],
@@ -1022,9 +1023,10 @@ def test_the_packer_gives_a_refusal_once_when_the_families_share_it(
         pack_vae(video, tmp_path / "video.gguf", **kw)
     text = str(e.value)
     assert text.startswith(f"{video} matches no image family's VAE: ")
-    assert text.count("holds a video VAE in the Wan 2.2 layout") == 3
+    assert text.count("holds a video VAE in the Wan 2.2 layout") == 4
     assert "qwen_image21 decodes with" in text
     assert "z_image decodes with" in text
+    assert "flux3_klein decodes with" in text
 
 
 def test_pack_vae_on_the_command_line_picks_the_family(st_dir, st_file,

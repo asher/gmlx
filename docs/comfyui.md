@@ -45,7 +45,8 @@ uv pip install -r requirements.txt
 
 ComfyUI's requirements include PyTorch, so the environment takes about
 1.7 GB. The gmlx nodes need ComfyUI 0.37 or newer and no Python packages
-beyond ComfyUI's own.
+beyond ComfyUI's own. FLUX.3 klein needs ComfyUI 0.41 or newer, and on an
+older ComfyUI its model loader stops with a message to update ComfyUI.
 
 ## Put the gmlx nodes into ComfyUI
 
@@ -107,7 +108,7 @@ gmlx launch comfyui
 is running, then starts ComfyUI. Among its lines it prints:
 
 ```text
-[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.39.2)
+[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.41.1)
 [launch] ComfyUI runs at http://localhost:8188, which you open in a browser, from /Users/you/ComfyUI.
 ```
 
@@ -158,6 +159,19 @@ found, as
 [How the nodes find the server](comfyui-reference.md#how-the-nodes-find-the-server)
 describes.
 
+For FLUX.3 klein, `gmlx CLIP Loader` encodes the prompt on the server with
+the model's GGUF text encoder, so ComfyUI needs no text encoder file of its
+own. FLUX.3 klein needs ComfyUI 0.41 or newer. Its workflows take the three
+gmlx loaders with `flux-3-klein` or `flux-3-klein-base` in `model_name`,
+and ComfyUI's `Empty Flux 2 Latent` (`EmptyFlux2LatentImage`) for the
+image's size. An edit adds its reference images with
+`Set Reference Multi Latent` (`ReferenceMultiLatent`), which encodes each
+image with the VAE and gives an empty latent of the first one's size, or
+with a `VAE Encode` and a `Set Reference Latent` (`ReferenceLatent`) for
+each image. FLUX.3 klein samples at `cfg` 1 with `euler`, so its negative
+can be a `Conditioning Zero Out` of the positive. FLUX.3 klein Base takes a
+negative prompt and a higher `cfg`.
+
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
 `SamplerCustomAdvanced`, though `KSampler` works on every model.
@@ -168,7 +182,7 @@ stock nodes work with a gmlx model and what runs where.
 
 ## The example workflows
 
-ComfyUI's template browser lists three workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists five workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -177,6 +191,8 @@ with the commands that install the gmlx nodes and pull its model.
 | `z-image-turbo-t2i` | Z-Image-Turbo text to image at 1024x1024 in 8 steps | Nothing beyond the model |
 | `z-image-turbo-lora-t2i` | The same through a stock `LoraLoader` | A Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or another picked in the node |
 | `qwen-image-2.1-edit-two-references` | A Qwen-Image 2.1 edit from two reference images, through `TextEncodeQwenImage21` | `gmlx pull qwen-image`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
+| `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 
 ## LoRAs
 

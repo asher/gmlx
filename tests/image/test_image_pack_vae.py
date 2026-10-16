@@ -47,6 +47,73 @@ def test_pack_vae_round_trips_and_records_its_sources(src, tmp_path, capsys):
         assert rec["source_sha256"] == hashlib.sha256(f.read()).hexdigest()
 
 
+# The config.json at the root of BFL's FLUX.3 klein repository, beside its
+# ae.safetensors, describes the pipeline, not the VAE.
+PIPELINE_JSON = json.dumps({"format_version": 1, "model": "m",
+                            "vae": {"path": "ae.safetensors"}})
+DIT_JSON = json.dumps({"_class_name": "Flux2Transformer2DModel"})
+
+
+@pytest.mark.parametrize("beside, told", [
+    (PIPELINE_JSON, "names no Autoencoder class in _class_name"),
+    (DIT_JSON, "is the config of a Flux2Transformer2DModel, not of a VAE"),
+    ("{", "is not JSON")])
+def test_a_config_beside_src_is_recorded_only_when_it_is_a_vae_config(
+        tmp_path, capsys, beside, told):
+    """A model folder can hold the VAE beside another config, which is
+    left out with a note; --source-config records the VAE's."""
+    d = tmp_path / "repo"
+    d.mkdir()
+    (d / "config.json").write_text(beside)
+    src = write_safetensors(d / "ae.safetensors", tiny_tensors())
+    out = tmp_path / "ae.gguf"
+    assert umbrella_main(["image", "pack-vae", src, "--out", str(out)]) == 0
+    err = capsys.readouterr().err
+    assert f"{d / 'config.json'} {told}, so the GGUF records no config" in err
+    assert _field(gguf.GGUFReader(str(out)), "gmlx.vae.config_json") == "{}"
+    vae = tmp_path / "vae.json"
+    vae.write_text(CONFIG_JSON)
+    assert umbrella_main(["image", "pack-vae", src, "--out", str(out),
+                          "--source-config", str(vae), "--force"]) == 0
+    assert "records no config" not in capsys.readouterr().err
+    assert json.loads(_field(gguf.GGUFReader(str(out)),
+                             "gmlx.vae.config_json")) == json.loads(CONFIG_JSON)
+
+
+def test_a_source_config_of_another_model_is_refused(src, tmp_path, capsys):
+    other = tmp_path / "config.json"
+    other.write_text(PIPELINE_JSON)
+    out = tmp_path / "ae.gguf"
+    assert umbrella_main(["image", "pack-vae", src, "--out", str(out),
+                          "--source-config", str(other)]) == 1
+    assert f"--source-config {other}: names no Autoencoder class" in \
+        capsys.readouterr().err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("family", ["z-image", "Z-Image", "z_image"])
+def test_family_takes_the_spellings_the_server_takes(src, tmp_path, capsys,
+                                                     family):
+    out = tmp_path / "ae.gguf"
+    assert umbrella_main(["image", "pack-vae", src, "--out", str(out),
+                          "--family", family, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["family"] == "z_image"
+
+
+def test_family_names_the_family_it_reads_when_the_file_is_another(
+        src, tmp_path, capsys):
+    """flux-3-klein reads as flux3_klein, whose VAE the FLUX.1 file is
+    not, and a name of no family is refused with the known ones."""
+    out = str(tmp_path / "ae.gguf")
+    assert umbrella_main(["image", "pack-vae", src, "--out", out,
+                          "--family", "flux-3-klein"]) == 1
+    assert "and flux3_klein decodes with" in capsys.readouterr().err
+    assert umbrella_main(["image", "pack-vae", src, "--out", out,
+                          "--family", "flux-4"]) == 1
+    assert "no VAE is known for image family 'flux-4'" in \
+        capsys.readouterr().err
+
+
 def test_an_existing_out_is_refused_unless_forced(src, tmp_path, capsys):
     out = str(tmp_path / "ae.gguf")
     assert umbrella_main(["image", "pack-vae", src, "--out", out]) == 0

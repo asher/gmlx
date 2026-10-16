@@ -8,6 +8,10 @@
 # base sigmas of krea2_sigmas from
 # src/diffusers/pipelines/krea2/pipeline_krea2.py, at e0abab83 and
 # modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
+# SPDX-FileCopyrightText: Copyright 2026 Black Forest Labs, Inc.
+# flux3_sigmas follows timesteps of src/flux3/sampling.py of BFL's FLUX.3
+# klein reference at commit 45e57c9 (Apache-2.0; see
+# licenses/flux-3-image-klein-LICENSE).
 """Sigma schedules, computed on the host in numpy with float32 results.
 
 A schedule is part of a family's numerics, so it must equal the reference
@@ -30,6 +34,10 @@ where it meets an array, as NumPy 2 does.
 
 Krea 2's reference forms the same base sigmas and shifts them by a mu,
 fixed for Turbo and of the image token count otherwise, with no stretch.
+
+FLUX.3 klein's reference forms ``torch.linspace(1.0, 0.0, n + 1)`` in
+float32, which ends at zero, and applies the static shift with its alpha,
+the same for every image size.
 """
 
 from __future__ import annotations
@@ -158,6 +166,14 @@ def krea2_sigmas(steps: int, mu: float) -> np.ndarray:
         raise ValueError(f"steps must be at least 1, not {steps}")
     base = np.linspace(1.0, 1.0 / steps, steps).astype(_F32)
     return np.append(shift_exponential(base, mu), _F32(0)).astype(_F32)
+
+
+def flux3_sigmas(steps: int, alpha: float) -> np.ndarray:
+    """FLUX.3 klein sigmas, ``linspace_f32(1.0, 0.0, steps + 1)`` shifted
+    by ``alpha``: length ``steps + 1``, the last one zero."""
+    if steps < 1:
+        raise ValueError(f"steps must be at least 1, not {steps}")
+    return shift_static(linspace_f32(1.0, 0.0, steps + 1), alpha)
 
 
 def check_sigmas(sigmas) -> np.ndarray:

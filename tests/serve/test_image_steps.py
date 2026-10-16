@@ -170,7 +170,8 @@ def test_capabilities_answer_without_the_version_header(host):
     assert r.status_code == 200
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
-    assert caps["families"] == ["krea2", "qwen_image21", "z_image"]
+    assert caps["families"] == ["flux3_klein", "krea2", "qwen_image21",
+                                "z_image"]
     assert caps["conventions"] == ["comfy"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -379,7 +380,7 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
     # velocity back, so every convention is the identity.
-    for fam in ("z_image", "qwen_image21", "krea2"):
+    for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
@@ -390,6 +391,228 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
     want = _on_worker(lambda: np.array(api.denoise_step(
         pipe, mx.array(x), 0.75, api.Conditioning(mx.array(feats[0]), "k"))))
     assert np.array_equal(out, -want)
+
+
+# FLUX.3 klein: a flow map reads the time its step goes to from the
+# client's schedule, and the VAE routes carry model-space latents.
+
+F3_SHAPE = (1, 8, 4, 6)                 # 96x64 pixels at the stride of 16
+
+
+@pytest.fixture(scope="module")
+def fpipes():
+    """The tiny FLUX.3 klein DiT of the check 3 self-test, as a flow map
+    and as Base."""
+    def build():
+        import flux3_gates as fg
+        from oracle_fixture import committed_fixture
+
+        weights, m = committed_fixture("selftest_flux3_klein_tiny_weights")
+        cfg = m["inputs"]["config"]
+        fam = get_family("flux3_klein")
+        return {flow: api.ImagePipeline(
+            dit=fg.tiny_model(weights, cfg, flow_map=flow), family=fam,
+            variant="distilled" if flow else "base")
+            for flow in (True, False)}
+    return _on_worker(build)
+
+
+def _serve(host, mid, pipe):
+    """``pipe`` served as ``mid`` beside the host's own."""
+    host.served[mid] = SimpleNamespace(
+        pipe=pipe, adapters=(),
+        spec=SimpleNamespace(id=mid, path=f"/abs/{mid}.gguf", encoder=None,
+                             vae="/abs/vae.gguf", encoder_model=None),
+        plan=SimpleNamespace(keep_encoder=True))
+
+
+def _f3_velocity(pipe, x, sigma, cond, target=None):
+    return _on_worker(lambda: np.array(api.denoise_step(
+        pipe, mx.array(x), sigma, cond, target=target)))
+
+
+def _f3_cond(feats, ref=None):
+    return api.Conditioning(
+        mx.array(feats[0]), "k",
+        ref_latents=() if ref is None else (mx.array(ref[0]),))
+
+
+def test_a_flux3_flow_map_step_goes_to_the_next_time_of_the_schedule(
+        host, fpipes):
+    """Each step of a flow map goes to the entry of ``sample_sigmas``
+    after the one nearest its timestep, as ComfyUI's forward takes it,
+    with and without a reference, and two rows go together."""
+    pipe = fpipes[True]
+    _serve(host, "f3d", pipe)
+    c = _client()
+    rng = np.random.default_rng(7)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    rows = _rows(c, feats)
+    for i in range(len(SIGMAS) - 1):
+        out = c.step("f3d", None, x, [SIGMAS[i]], rows, sample_sigmas=SIGMAS)
+        assert np.array_equal(out, _f3_velocity(
+            pipe, x, SIGMAS[i], _f3_cond(feats), SIGMAS[i + 1])), i
+    # A timestep between two entries goes after the nearest, and the last
+    # entry to itself.
+    for t, to in ((0.55, 0.25), (0.0, 0.0)):
+        out = c.step("f3d", None, x, [t], rows, sample_sigmas=SIGMAS)
+        assert np.array_equal(out, _f3_velocity(
+            pipe, x, t, _f3_cond(feats), to)), t
+    with_ref = [{"cond": rows[0]["cond"], "ref_latents": [c.put(ref)]}]
+    out = c.step("f3d", None, x, [0.75], with_ref, sample_sigmas=SIGMAS)
+    assert np.array_equal(out, _f3_velocity(
+        pipe, x, 0.75, _f3_cond(feats, ref), 0.5))
+    two = c.step("f3d", None, np.concatenate([x, x]), [0.75, 0.75],
+                 rows + with_ref, sample_sigmas=SIGMAS)
+    assert np.array_equal(two[1:], out)
+    assert host.held == 0
+
+
+def test_a_flux3_step_takes_its_references_in_the_order_of_the_row(
+        host, fpipes):
+    """Two references of other shapes reach the DiT in the order of the
+    row, and the other order gives another step."""
+    pipe = fpipes[True]
+    _serve(host, "f3d", pipe)
+    c = _client()
+    rng = np.random.default_rng(11)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    a = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    b = rng.standard_normal((1, 8, 3, 2)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"],
+           "ref_latents": [c.put(a), c.put(b)]}
+    out = c.step("f3d", None, x, [0.75], [row], sample_sigmas=SIGMAS)
+
+    def cond(*refs):
+        # No prefix key, which the other steps here hold with other rows.
+        return api.Conditioning(mx.array(feats[0]), "", ref_latents=tuple(
+            mx.array(r[0]) for r in refs))
+
+    want = _f3_velocity(pipe, x, 0.75, cond(a, b), 0.5)
+    assert np.array_equal(out, want)
+    assert not np.array_equal(out, _f3_velocity(pipe, x, 0.75, cond(b, a),
+                                                0.5))
+    assert host.held == 0
+
+
+def test_a_flux3_flow_map_step_without_its_schedule_is_refused(host,
+                                                                fpipes):
+    _serve(host, "f3d", fpipes[True])
+    c = _client()
+    rows = _rows(c, np.ones((1, 10, 24), np.float32))
+    x = np.zeros(F3_SHAPE, np.float32)
+    with pytest.raises(StepsClientError, match="is a flow map: a step body "
+                       "holds sample_sigmas"):
+        c.step("f3d", None, x, [0.5], rows)
+    for bad in ([0.5], [1.0, np.nan]):
+        with pytest.raises(StepsClientError, match="2 or more finite"):
+            c.step("f3d", None, x, [0.5], rows, sample_sigmas=bad)
+    assert host.held == 0
+
+
+def test_a_flux3_base_step_reads_no_schedule(host, fpipes):
+    pipe = fpipes[False]
+    _serve(host, "f3b", pipe)
+    c = _client()
+    feats = np.random.default_rng(8).standard_normal(
+        (1, 10, 24)).astype(np.float32)
+    x = noise_from_seed(6, F3_SHAPE)
+    want = _f3_velocity(pipe, x, 0.5, _f3_cond(feats))
+    for sched in (None, SIGMAS):
+        out = c.step("f3b", None, x, [0.5], _rows(c, feats),
+                     sample_sigmas=sched)
+        assert np.array_equal(out, want)
+
+
+def test_a_flux3_table_on_comfyuis_native_keys_steps_as_the_core_table(
+        host, fpipes):
+    """The pack names a FLUX.3 pair by ComfyUI's weight key, the GGUF name
+    under diffusion_model., in a block and outside the blocks."""
+    from lora_fixtures import make_pair
+
+    pipe = fpipes[True]
+    _serve(host, "f3d", pipe)
+    c = _client()
+    rng = np.random.default_rng(10)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    plain = _f3_velocity(pipe, x, 0.75, _f3_cond(feats), 0.5)
+    for name, (dout, din) in (("single_blocks.0.q_proj", (64, 64)),
+                              ("ref_time_in.in_layer", (64, 256)),
+                              ("txt_in", (64, 24))):
+        down, up, _ = make_pair(rng, dout, din, 2)
+        tid = c.define_table("f3d", {"entries": [{
+            "key": f"diffusion_model.{name}.weight", "band": None,
+            "patches": [{"up": c.put(up, kind="adapters"),
+                         "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                         "strength": 0.8}]}]})
+        core = steps.STATE.tables_of("f3d", pipe)[tid]
+        out = c.step("f3d", None, x, [0.75], _rows(c, feats),
+                     patch_table=tid, sample_sigmas=SIGMAS)
+        want = _on_worker(lambda: np.array(api.denoise_step(
+            pipe, mx.array(x), 0.75, _f3_cond(feats), patch_table=core,
+            target=0.5)))
+        assert np.array_equal(out, want), name
+        assert not np.array_equal(out, plain), name
+
+
+def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
+        host, fpipes, monkeypatch):
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("flux3_klein"), "distilled"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "f3d", fpipes[True])
+    st = _client().status("f3d")
+    assert st["comfy"] == {"model_class": "Flux3", "image_model": "flux3"}
+    # ComfyUI's FLUX.3 edit hands the step the latents of its references.
+    assert st["edit_capable"]
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+
+
+def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
+                                                         monkeypatch):
+    """ComfyUI's FLUX.3 latents are the model's: the routes hand them to
+    the core VAE passes as they are, where the other families map them
+    to and from the VAE's own space."""
+    def no_map(_z):
+        raise AssertionError("FLUX.3 latents are mapped to no other space")
+
+    pipe = dataclasses.replace(fpipes[True], vae=SimpleNamespace(
+        config=SimpleNamespace(in_channels=3), to_model_space=no_map,
+        to_vae_space=no_map))
+    _serve(host, "f3d", pipe)
+    seen = []
+
+    def decode(p, z, *, alpha=False, **kw):
+        seen.append(np.array(z))
+        return mx.full((1, 32, 48, 3), 0.25)
+
+    lat = np.random.default_rng(9).standard_normal(
+        (2, 128, 2, 3)).astype(np.float32)
+    monkeypatch.setattr(api, "vae_decode", decode)
+    monkeypatch.setattr(api, "vae_encode", lambda p, img, **kw: mx.array(
+        lat[:1]))
+    c = _client()
+    got, _, _ = c.container("vae/decode", {"latents": lat}, {"model": "f3d"})
+    assert got["image"].shape == (2, 32, 48, 3)
+    assert [z.shape for z in seen] == [(1, 128, 2, 3)] * 2
+    assert np.array_equal(np.concatenate(seen), lat)
+    got, _, _ = c.container("vae/encode",
+                            {"image": np.zeros((1, 32, 48, 3), np.float32)},
+                            {"model": "f3d"})
+    assert np.array_equal(got["latents"], lat[:1])
+
+
+def test_flow_targets_follow_comfyuis_rule():
+    s = np.array([1.0, 0.75, 0.5, 0.0], np.float32)
+    assert steps.flow_targets(s, [1.0, 0.8, 0.6, 0.5, 0.3, 0.0]) == [
+        0.75, 0.5, 0.0, 0.0, 0.0, 0.0]
+    # A tie goes to the first of the two nearest, as torch's argmin does.
+    assert steps.flow_targets(s, [0.625]) == [0.5]
 
 
 # Patch tables.
@@ -667,11 +890,13 @@ def test_status_carries_the_turbo_sampling_schedule(host, monkeypatch):
     assert st["sampling"]["sigmas"] == [*map(float, row.sigmas), 0.0]
     assert st["sampling"]["steps"] == len(st["sampling"]["sigmas"]) - 1
     assert st["memory"]["dit_bytes"] == 7
+    assert st["edit_capable"]
     # Z-Image Turbo samples on its family schedule, which has no fixed
     # sigmas.
     z = c.status("zit")
     assert z["comfy"]["model_class"] == "ZImage"
     assert z["sampling"]["sigmas"] is None and z["sampling"]["steps"] == 8
+    assert not z["edit_capable"]
     # Krea 2 Turbo: ComfyUI's Krea2 class on 16 channel latents at 8x, in
     # 2x2 patches, an RGB VAE, 8 steps on its family schedule, no guidance.
     q = host.served["qit"]
@@ -821,6 +1046,22 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
         assert e.value.status == 400
 
 
+def test_a_flux3_step_encode_takes_the_prompt_and_no_images(monkeypatch):
+    """FLUX.3 klein's encoder reads the prompt alone, and its steps take
+    the reference latents of the VAE route, so images on the encode are
+    refused by that rule."""
+    served, seen, _ = _stub_step_encode(monkeypatch)
+    served.pipe.family = get_family("flux3_klein")
+    img = np.zeros((256, 256, 3), np.uint8)
+    with pytest.raises(steps.StepError, match="the FLUX.3 klein encoder "
+                       "reads the prompt alone; a step takes the reference "
+                       "latents the VAE route encodes") as e:
+        _on_worker(lambda: steps.encode(served, "a", [img]))
+    assert e.value.status == 400 and seen == []
+    _on_worker(lambda: steps.encode(served, "a", []))
+    assert seen == [()]
+
+
 def test_wire_slots_are_comfyuis_and_map_onto_the_core_layout():
     xs = np.arange(5 * 2, dtype=np.float32).reshape(5, 2) + 1
     shapes = [(2, 4), (4, 4)]          # 2 and 4 slot rows
@@ -935,6 +1176,332 @@ def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
         r = _put_container(path, tensors, {"model": "zit"})
         assert r.status_code == 400, r.text
     assert seen == [True, False]
+
+
+def _bare_and_full(served, h, w, **full):
+    """The step plan peaks of ``served`` at h x w pixels without its rows'
+    conditioning, as the size check before the rows load prices it, and
+    with ``full``, the terms of its references."""
+    from gmlx.image import memfit
+    from gmlx.serve import image_service
+
+    args = image_service._fit_args(served.pipe, served, 1 << 50, 1.0)
+    bare = memfit.plan_memory(height=h, width=w, _hint=False, **args).peak
+    return bare, memfit.plan_memory(height=h, width=w, _hint=False,
+                                    **args, **full).peak
+
+
+def _refused_by_its_plan(monkeypatch, call) -> None:
+    """``call`` is refused by the plan of its rows before the DiT runs. A
+    step the plan lets through stops at the DiT, whose forward on these
+    references would take gigabytes."""
+    def reached(*a, **k):
+        raise AssertionError("the step reached the DiT")
+
+    with monkeypatch.context() as m:
+        m.setattr(steps, "run_step", reached)
+        with pytest.raises(StepsClientError, match="with the references of "
+                           "its rows does not fit in memory"):
+            call()
+
+
+def test_a_flux3_step_prices_the_reference_latents_of_its_rows(
+        host, fpipes, monkeypatch):
+    """Four reference latents of 1024 pixels join every step's rows, so a
+    step that fits as text to image is refused with them, and more than
+    the family's 10 references in a row are refused by count."""
+    from gmlx.image import memfit
+
+    _serve(host, "f3d", fpipes[True])
+    served = host.served["f3d"]
+    c = _client()
+    rng = np.random.default_rng(9)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    x = np.zeros(F3_SHAPE, np.float32)
+    refs = [c.put(rng.standard_normal((1, 8, 64, 64)).astype(np.float32))
+            for _ in range(4)]
+    rows = _rows(c, feats)
+    with_refs = [{**rows[0], "ref_latents": refs}]
+    caption = 10 if memfit.prices_prompt("flux3_klein") else None
+    w, h = routes._px(served, "latent", *F3_SHAPE[2:])
+    bare, full = _bare_and_full(served, h, w, caption_tokens=caption,
+                                step_refs=[(1024, 1024)] * 4)
+    assert full > bare
+    host.budget_bytes = (bare + full) / 2
+    try:
+        assert c.step("f3d", None, x, [0.75], rows,
+                      sample_sigmas=SIGMAS).shape == F3_SHAPE
+        _refused_by_its_plan(monkeypatch, lambda: c.step(
+            "f3d", None, x, [0.75], with_refs, sample_sigmas=SIGMAS))
+    finally:
+        host.budget_bytes = None
+    small = c.put(np.zeros((1, 8, 2, 3), np.float32))
+    with pytest.raises(StepsClientError, match="FLUX.3 klein takes at most "
+                       "10 reference latents in a row, and row 0 has 11"):
+        c.step("f3d", None, x, [0.75], [{**rows[0],
+                                         "ref_latents": [small] * 11}],
+               sample_sigmas=SIGMAS)
+    assert host.held == 0
+
+
+def test_each_row_of_a_step_takes_ten_references_and_no_more(
+        host, fpipes, monkeypatch):
+    """The family's count of references is allowed in every row, and one
+    more in any row is refused with that row's index."""
+    _serve(host, "f3d", fpipes[True])
+    c = _client()
+    feats = np.random.default_rng(13).standard_normal((1, 10, 24)).astype(
+        np.float32)
+    x = np.zeros((2, *F3_SHAPE[1:]), np.float32)
+    small = c.put(np.zeros((1, 8, 2, 3), np.float32))
+    row = _rows(c, feats)[0]
+    ten = [{**row, "ref_latents": [small] * 10} for _ in range(2)]
+    _reaches_the_dit(monkeypatch, lambda: c.step(
+        "f3d", None, x, [0.75], ten, sample_sigmas=SIGMAS))
+    for i in range(2):
+        rows = [dict(r) for r in ten]
+        rows[i]["ref_latents"] = [small] * 11
+        with pytest.raises(StepsClientError, match="FLUX.3 klein takes at "
+                           f"most 10 reference latents in a row, and row {i} "
+                           "has 11"):
+            c.step("f3d", None, x, [0.75], rows, sample_sigmas=SIGMAS)
+    assert host.held == 0
+
+
+def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host,
+                                                            monkeypatch):
+    """Two reference latents of 1024 pixels in a Qwen-Image 2.1 row put
+    their tokens in the prefix of every block, which the plan of the step
+    counts."""
+    from gmlx.image import memfit
+
+    served = host.served["qit"]
+    c = _client()
+    rng = np.random.default_rng(10)
+    text = 9
+    feats = rng.standard_normal((1, text, 24)).astype(np.float32)
+    refs = [c.put(rng.standard_normal((1, 8, 64, 64)).astype(np.float32))
+            for _ in range(2)]
+    row = {"cond": c.put(feats), "num_tokens": text, "ref_latents": refs,
+           "image_slots": [2, 5]}
+    x = np.zeros((1, 8, 4, 6), np.float32)
+    caption = text if memfit.prices_prompt("qwen_image21") else None
+    w, h = routes._px(served, "latent", *x.shape[2:])
+    bare, full = _bare_and_full(served, h, w, caption_tokens=caption,
+                                prefix_rows=[text + 2 * 64 * 64])
+    assert full > bare
+    host.budget_bytes = (bare + full) / 2
+    try:
+        plain = {"cond": row["cond"], "num_tokens": text}
+        assert c.step("qit", None, x, [0.75], [plain]).shape == x.shape
+        _refused_by_its_plan(monkeypatch,
+                             lambda: c.step("qit", None, x, [0.75], [row]))
+    finally:
+        host.budget_bytes = None
+    assert host.held == 0
+
+
+def _least_budget(served, h, w, cfg, terms) -> int:
+    """The least budget at which the plan of a step of ``served`` with
+    ``terms`` fits, its levers applied, as the step route plans one."""
+    from gmlx.image import memfit
+    from gmlx.serve import image_service
+
+    def fits(budget):
+        args = image_service._fit_args(served.pipe, served, budget, cfg)
+        args.update(terms)
+        try:
+            return memfit.plan_memory(height=h, width=w, _hint=False,
+                                      **args).fits
+        except memfit.ImageMemoryError:
+            return False
+
+    lo, hi = 0, 1 << 50
+    assert fits(hi) and not fits(lo)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if fits(mid) else (mid, hi)
+    return hi
+
+
+def _reaches_the_dit(monkeypatch, call) -> None:
+    """``call`` passes the plan of its rows and reaches the DiT, which a
+    stub stands in for, as these references would take gigabytes."""
+    seen = []
+
+    def stub(served, x, *a, **k):
+        seen.append(tuple(x.shape))
+        return mx.zeros(x.shape, mx.float32), 0.0, "none"
+
+    with monkeypatch.context() as m:
+        m.setattr(steps, "run_step", stub)
+        call()
+    assert seen
+
+
+def _priced_to_the_byte(host, monkeypatch, served, h, w, terms, step):
+    """``step`` runs on the least budget of the plan of ``terms`` with
+    guidance, and is refused by the plan of its rows one byte below it."""
+    price = _least_budget(served, h, w, 2.0, terms)
+    # The rows' plan, not the size check before the rows load, decides.
+    assert _least_budget(served, h, w, 2.0, {}) < price - 1
+    try:
+        host.budget_bytes = price - 1
+        _refused_by_its_plan(monkeypatch, step)
+        host.budget_bytes = price
+        _reaches_the_dit(monkeypatch, step)
+    finally:
+        host.budget_bytes = None
+    assert host.held == 0
+    return price
+
+
+def test_a_guided_flux3_step_is_priced_at_its_rows_to_the_byte(
+        host, fpipes, monkeypatch):
+    """Two rows whose second holds the most reference pixels: one small
+    reference in the first row and four of 1024 pixels in the second.
+    Pricing the references of the first row, or the family's most text
+    rows, misses the budget of the plan by a byte or more."""
+    _serve(host, "f3d", fpipes[True])
+    served = host.served["f3d"]
+    pipe = served.pipe
+    c = _client()
+    rng = np.random.default_rng(11)
+    rows = []
+    for shapes in ([(16, 16)], [(64, 64)] * 4):
+        feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+        rows.append({"cond": c.put(feats), "num_tokens": 10, "ref_latents": [
+            c.put(rng.standard_normal((1, 8) + hw).astype(np.float32))
+            for hw in shapes]})
+    x = np.zeros((2,) + F3_SHAPE[1:], np.float32)
+    w, h = routes._px(served, "latent", *F3_SHAPE[2:])
+    p, scale = pipe.dit.cfg.patch, pipe.vae_scale
+    terms = dict(caption_tokens=10,
+                 prefix_rows=[10 + (16 // p) ** 2, 10 + 4 * (64 // p) ** 2],
+                 prefix_shared=False, prefix_other=0, prefix_bound=0,
+                 ref_sizes=[], step_refs=[(64 * scale, 64 * scale)] * 4)
+    conds = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "flux3_klein") for r in rows])
+    assert api.plan_terms(pipe, conds, height=h, width=w) == terms
+    price = _priced_to_the_byte(host, monkeypatch, served, h, w, terms,
+                                lambda: c.step("f3d", None, x, [0.75], rows,
+                                               sample_sigmas=SIGMAS))
+    assert _least_budget(served, h, w, 2.0, {
+        **terms, "step_refs": [(16 * scale, 16 * scale)]}) < price
+    assert _least_budget(served, h, w, 2.0, {
+        **terms, "caption_tokens": None}) > price
+
+
+def test_a_guided_qwen_step_is_priced_at_both_prefix_states_to_the_byte(
+        host, monkeypatch):
+    """A guided pair of two conditionings, each with two reference latents
+    of 1024 pixels, holds two prefix states. Pricing one, as an unguided
+    step would, misses the budget of the plan by a byte or more."""
+    served = host.served["qit"]
+    pipe = served.pipe
+    c = _client()
+    rng = np.random.default_rng(12)
+    refs = [c.put(rng.standard_normal((1, 8, 64, 64)).astype(np.float32))
+            for _ in range(2)]
+    rows = [{"cond": c.put(rng.standard_normal((1, 9, 24)).astype(
+        np.float32)), "num_tokens": 9, "ref_latents": refs,
+        "image_slots": [2, 5]} for _ in range(2)]
+    x = np.zeros((2, 8, 4, 6), np.float32)
+    w, h = routes._px(served, "latent", *x.shape[2:])
+    p, scale = pipe.dit.cfg.patch, pipe.vae_scale
+    # The wire cond holds the text rows alone: the route sets the two
+    # image slots into them.
+    terms = dict(caption_tokens=9,
+                 prefix_rows=[9 + 2 * (64 // p) ** 2] * 2,
+                 prefix_shared=False, prefix_other=pipe.captions.bytes,
+                 prefix_bound=pipe.family.step.state_bytes, ref_sizes=[],
+                 step_refs=[(64 * scale, 64 * scale)] * 2)
+    conds = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "qwen_image21") for r in rows])
+    assert api.plan_terms(pipe, conds, height=h, width=w) == terms
+    price = _priced_to_the_byte(host, monkeypatch, served, h, w, terms,
+                                lambda: c.step("qit", None, x, [0.75], rows))
+    assert _least_budget(served, h, w, 1.0, terms) < price
+
+
+def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
+        host, monkeypatch):
+    """The plan of a step's rows takes the step's patch table, which
+    names the prefix states its run holds, and the guidance of its two
+    rows."""
+    from lora_fixtures import make_pair
+
+    from gmlx.serve import image_service
+
+    c = _client()
+    rows = _qwen_rows(c)
+    down, up, _ = make_pair(np.random.default_rng(4), 32, 32, 2)
+    tid = c.define_table("qit", {"entries": [{
+        "key": "diffusion_model.transformer_blocks.0.attn.to_q.weight",
+        "band": None,
+        "patches": [{"up": c.put(up, kind="adapters"),
+                     "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                     "strength": 0.8}]}]})
+    core = steps.STATE.tables_of("qit", host.served["qit"].pipe)[tid]
+    seen = []
+
+    def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
+                  patch_table=None):
+        seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
+        return conds is None
+
+    monkeypatch.setattr(image_service, "size_fits", size_fits)
+    import qwen_tiny as qt
+
+    x = np.asarray(qt.latents())
+    pair = [rows[0], rows[0]]
+    _refused_by_its_plan(monkeypatch, lambda: c.step(
+        "qit", None, np.concatenate([x, x]), [0.75], pair, patch_table=tid))
+    bare, planned = seen
+    assert bare["cfg"] == planned["cfg"] == 2.0 and bare["conds"] is None
+    assert len(planned["conds"]) == 2 and planned["patch_table"] is core
+
+
+def test_the_plan_of_a_qwen_run_counts_its_held_prefix_once(host, qpipe):
+    """After a step of a guided pair of one conditioning under a table,
+    the plan of the next step holds one prefix state for the pair, and
+    counts the state its run holds under that table as its own, not as
+    another conditioning's."""
+    import qwen_tiny as qt
+    from lora_fixtures import make_pair
+
+    c = _client()
+    rows = _qwen_rows(c)
+    down, up, _ = make_pair(np.random.default_rng(4), 32, 32, 2)
+    tid = c.define_table("qit", {"entries": [{
+        "key": "diffusion_model.transformer_blocks.0.attn.to_q.weight",
+        "band": None,
+        "patches": [{"up": c.put(up, kind="adapters"),
+                     "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                     "strength": 0.8}]}]})
+    core = steps.STATE.tables_of("qit", qpipe)[tid]
+    x = np.asarray(qt.latents())
+    pair = [rows[0], rows[0]]
+    run = c.begin("qit")
+    c.step("qit", run, np.concatenate([x, x]), [0.75], pair, patch_table=tid)
+    conds = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "qwen_image21") for r in pair])
+    w, h = routes._px(host.served["qit"], "latent", *x.shape[2:])
+    held = qpipe.captions.bytes
+    assert held > 0
+    terms = api.plan_terms(qpipe, conds, height=h, width=w,
+                           patch_table=core)
+    assert terms["prefix_shared"] is True and terms["prefix_other"] == 0
+    # Under no table the state is another conditioning's.
+    assert api.plan_terms(qpipe, conds, height=h, width=w)[
+        "prefix_other"] == held
+    (other,) = _qwen_rows(c, "ref1")
+    two = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "qwen_image21") for r in (rows[0], other)])
+    assert api.plan_terms(qpipe, two, height=h, width=w,
+                          patch_table=core)["prefix_shared"] is False
+    c.end(run)
+    assert host.held == 0
 
 
 def test_a_patch_table_body_that_is_no_object_is_400(host):

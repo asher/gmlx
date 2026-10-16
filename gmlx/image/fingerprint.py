@@ -82,6 +82,9 @@ class HeaderView:
 @dataclass(frozen=True)
 class Match:
     layout: str = "default"
+    # The variant the tensor names decide, for a family whose variants
+    # differ in their tensors. None leaves it to the identity hash.
+    variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -279,7 +282,8 @@ def identify(view: HeaderView, *, family: str | None = None,
                 f"{fam.title} (arch {_arch_list(fam)})")
         return Identified(
             family=fam, config=fam.synth_config(v), prefix=v.prefix,
-            layout=res.layout, **_variant(fam, v, variant), view=v)
+            layout=res.layout, **_variant(fam, v, variant, res.variant),
+            view=v)
     v = strip_prefix(view, _GENERIC_PREFIXES)
     if family:
         raise ImageModelError(
@@ -297,7 +301,16 @@ def _arch_list(fam) -> str:
                               for a in fam.arch_strings | fam.shared_arch_strings))
 
 
-def _variant(fam, view: HeaderView, variant: str | None) -> dict:
+def _variant(fam, view: HeaderView, variant: str | None,
+             named: str | None = None) -> dict:
+    if named is not None:
+        # The tensors name the variant, so no hash and no name given
+        # can change it.
+        if variant is not None and variant != named:
+            raise ImageModelError(
+                f"variant={variant!r} contradicts the tensors, which are "
+                f"{fam.title} {named}")
+        return {"variant": named, "identity_hash": None}
     if not fam.identity_tensors:
         return {"variant": variant or "default", "identity_hash": None}
     h = weight_identity(view, fam.identity_tensors)

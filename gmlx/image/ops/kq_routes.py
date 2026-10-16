@@ -289,6 +289,30 @@ def glu_pair(gate, up, x: mx.array):
     return w_gate, w_up, codec
 
 
+def glu_halves(lin, x: mx.array):
+    """``(w_gate, w_up, codec)`` when ``swiglu_fused`` takes ``silu(a) *
+    b`` for the two halves ``a, b`` of ``lin(x)``, a gate and up pair
+    stored as one matrix, else None. The halves are the first and the
+    last half of the leaf's rows, under the terms of ``glu_pair``."""
+    if "glu" not in _active or x.ndim < 2:
+        return None
+    k = x.shape[-1]
+    if k == 0 or x.size // k < _GLU_MIN_ROWS:
+        return None
+    if not _gpu() or not _nax():
+        return None
+    leaf = kquant_leaf(lin, x.dtype)
+    if leaf is None or "bias" in leaf:
+        return None
+    codec = leaf.kquant_type
+    tile = _GLU_K_TILE.get((codec, x.dtype))
+    w = leaf["weight"]
+    n = w.shape[0]
+    if tile is None or k % tile or n == 0 or n % 2:
+        return None
+    return w[:n // 2], w[n // 2:], codec
+
+
 def swiglu_fused(x: mx.array, w_gate: mx.array, w_up: mx.array,
                  codec: str) -> mx.array:
     """``silu(x @ w_gate^T) * (x @ w_up^T)`` over the wire bytes of two

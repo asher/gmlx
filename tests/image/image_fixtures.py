@@ -48,6 +48,9 @@ def _image_dits(root: str, family: str) -> tuple:
 
     found = []
     for path in sorted(Path(root).rglob("*.gguf")):
+        if not path.is_file():
+            # A download directory can take the name of its file.
+            continue
         arch = scan_gguf(str(path), include_tensors=False).kv.get(
             "general.architecture")
         if arch is not None and arch not in image_arches():

@@ -46,7 +46,9 @@ from image_fixtures import image_dits
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
 
-pytestmark = pytest.mark.integration
+# A Mac of 24 GB: the gates peak at 20.3 GiB, past the 14 GiB working
+# set of a 16 GB Mac (tests/host_box.py).
+pytestmark = pytest.mark.host_gb(24)
 
 COMFY = "check7_krea2_comfy_512"
 SYNTHETIC = "check7_krea2_synthetic_512"
@@ -198,6 +200,7 @@ def test_the_manifests_read_the_trajectory_step_and_follow_the_rule():
 
 # The product gate.
 
+@pytest.mark.integration
 def test_check7_adapter_step_rows_at_512(check7, pipe, lora_path):
     arrays, m = check7
     tol = m["tolerances"]
@@ -218,6 +221,7 @@ def test_check7_adapter_step_rows_at_512(check7, pipe, lora_path):
     assert not out, out
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("wrong", ["base", "strength 0.8"])
 def test_check7_rows_see_the_adapter_and_its_strength(check7, pipe,
                                                       lora_path, wrong):
@@ -233,6 +237,7 @@ def test_check7_rows_see_the_adapter_and_its_strength(check7, pipe,
     assert out
 
 
+@pytest.mark.integration
 def test_check7_velocity_of_the_request_path(check7, pipe, lora_path):
     from gmlx.image import api
 
@@ -251,6 +256,7 @@ def test_check7_velocity_of_the_request_path(check7, pipe, lora_path):
     assert got["cosine"] >= tol["cosine_min"]
 
 
+@pytest.mark.integration
 def test_check7_synthetic_adapter_step_rows_at_512(synthetic, pipe,
                                                    tmp_path):
     """The product gate on the synthetic adapter, written in a dialect
@@ -308,6 +314,7 @@ def wrong_tables(entries: list, strength: float, moved: bool) -> dict:
     return out
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("kind", ["comfy", "synthetic"])
 def test_check7_exact_gate_at_512(pipe, tmp_path, request, kind):
     """Every measure within its exact gate under the right table, the
@@ -386,6 +393,7 @@ def _site_setup(pipe, tmp, kind: str, lp):
     return arrays, m, entries, api.define_patch_table(pipe, entries)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("kind", ["comfy", "synthetic"])
 def test_check7_site_gate_at_512(pipe, tmp_path, request, kind):
     """Every op of every block and every linear leaf a step calls under
@@ -417,6 +425,7 @@ def test_check7_site_gate_at_512(pipe, tmp_path, request, kind):
     assert rel <= m["tolerances"]["velocity"]["rel_l2"], rel
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("kind", ["comfy", "synthetic"])
 def test_check7_a_leaf_that_drops_its_delta_fails_the_site_gate(
         pipe, tmp_path, request, monkeypatch, kind):

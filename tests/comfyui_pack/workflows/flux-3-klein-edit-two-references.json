@@ -1,0 +1,167 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "flux-3-klein",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxModelLoader",
+    "_meta": {
+      "title": "gmlx Model Loader"
+    }
+  },
+  "2": {
+    "inputs": {
+      "model_name": "flux-3-klein",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxCLIPLoader",
+    "_meta": {
+      "title": "gmlx CLIP Loader"
+    }
+  },
+  "3": {
+    "inputs": {
+      "model_name": "flux-3-klein",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxVAELoader",
+    "_meta": {
+      "title": "gmlx VAE Loader"
+    }
+  },
+  "4": {
+    "inputs": {
+      "image": "reference-1.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Reference 1"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "reference-2.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Reference 2"
+    }
+  },
+  "6": {
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": "Put the cat from the second image on the sofa in the first image"
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive prompt"
+    }
+  },
+  "7": {
+    "inputs": {
+      "conditioning": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "Negative (unused at cfg 1)"
+    }
+  },
+  "8": {
+    "inputs": {
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "images.image0": [
+        "4",
+        0
+      ],
+      "images.image1": [
+        "5",
+        0
+      ],
+      "resolution": "resize",
+      "resolution.megapixels": 1.0
+    },
+    "class_type": "ReferenceMultiLatent",
+    "_meta": {
+      "title": "Reference latents"
+    }
+  },
+  "9": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "8",
+        0
+      ],
+      "negative": [
+        "8",
+        1
+      ],
+      "latent_image": [
+        "8",
+        2
+      ],
+      "seed": 42,
+      "steps": 16,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "10": {
+    "inputs": {
+      "samples": [
+        "9",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "11": {
+    "inputs": {
+      "images": [
+        "10",
+        0
+      ],
+      "filename_prefix": "gmlx/flux-3-klein-edit"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

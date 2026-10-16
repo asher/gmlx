@@ -20,10 +20,18 @@ latents in model space and a timestep per row, and gives back what
 ComfyUI expects, which ``CONVENTIONS`` holds per family. ComfyUI's
 Lumina2 forward, which runs Z-Image, takes ``1 - timestep`` as the time of
 the native model and negates its output; its Qwen-Image 2.1 forward takes
-the timestep as it is and returns the native output, as its Krea 2
-forward does. All give, for the flow schedule, the velocity
+the timestep as it is and returns the native output, as its Krea 2 and
+FLUX.3 forwards do. All give, for the flow schedule, the velocity
 ``d x / d sigma`` at ``sigma = timestep``, which ``denoise_step``
 returns.
+
+A FLUX.3 flow map DiT also reads the time its step goes to. ComfyUI's
+forward takes it from the schedule its sampler runs on: the entry after
+the one nearest the timestep, the last at most. A step on a flow map
+holds that schedule as ``sample_sigmas`` and the route takes the target
+of each row by the same rule. ComfyUI's FLUX.3 latents are the DiT's
+own model space, the VAE's latents in 2x2 patches and normalized, so its
+VAE routes take and give model-space latents.
 """
 
 from __future__ import annotations
@@ -64,11 +72,13 @@ class Convention:
 
 CONVENTIONS = {
     "comfy": {"z_image": Convention(), "qwen_image21": Convention(),
-              "krea2": Convention()},
+              "krea2": Convention(), "flux3_klein": Convention()},
 }
 
 # What a client builds its model from, per family: ComfyUI's model class
-# and image model name, the latent format and the VAE's.
+# and image model name, the latent format and the VAE's. The VAE's
+# latents on the wire are in the VAE's own space unless its ``space`` is
+# "model".
 COMFY = {
     "z_image": {"model_class": "ZImage", "image_model": "lumina2",
                 "latent": {"channels": 16, "stride": 8, "patch": 2},
@@ -80,7 +90,33 @@ COMFY = {
     "krea2": {"model_class": "Krea2", "image_model": "krea2",
               "latent": {"channels": 16, "stride": 8, "patch": 2},
               "vae": {"channels_out": 3, "stride": 8}},
+    "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
+                    "latent": {"channels": 128, "stride": 16, "patch": 1},
+                    "vae": {"channels_out": 3, "stride": 16,
+                            "space": "model"}},
 }
+
+
+def _model_space(family: str) -> bool:
+    """Whether the VAE routes of ``family`` carry model-space latents."""
+    return COMFY.get(family, {}).get("vae", {}).get("space") == "model"
+
+
+def flow_targets(sample_sigmas, timesteps) -> list:
+    """The time each row's step goes to on a flow map DiT, as ComfyUI's
+    FLUX.3 forward takes it: the entry of the client's schedule after the
+    one nearest the row's timestep, the last at most."""
+    import numpy as np
+
+    s = np.asarray(sample_sigmas, np.float32).reshape(-1)
+    if s.size < 2 or not np.isfinite(s).all():
+        raise StepError(400, "sample_sigmas is a schedule of 2 or more "
+                        "finite sigmas")
+    out = []
+    for t in timesteps:
+        i = int(np.abs(s - np.float32(t)).argmin())
+        out.append(float(s[min(i + 1, s.size - 1)]))
+    return out
 
 
 class StepError(Exception):
@@ -416,6 +452,8 @@ def status(spec, resident: bool, plan=None) -> dict:
             "comfy": {"model_class": facts["model_class"],
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
+            # A step takes the reference latents the client encoded on
+            # the VAE route, so a DiT that reads references edits here.
             "edit_capable": fam.edit is not None,
             "sampling": sampling(fam, variant),
             "compute_dtype": str(act.dit).rsplit(".", 1)[-1].replace(
@@ -697,9 +735,11 @@ def step_pacer(run: Run | None, gen: int):
     return fn
 
 
-def run_step(served, x, sigmas, conds, table, run, gen) -> tuple:
-    """One ``denoise_step`` over the rows on the image worker. Returns
-    (velocity f32 evaluated, forward seconds, prefix cache answer)."""
+def run_step(served, x, sigmas, conds, table, run, gen,
+             targets=None) -> tuple:
+    """One ``denoise_step`` over the rows on the image worker, to the
+    ``targets`` of a flow map DiT. Returns (velocity f32 evaluated,
+    forward seconds, prefix cache answer)."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -711,7 +751,8 @@ def run_step(served, x, sigmas, conds, table, run, gen) -> tuple:
     cache = _prefix_answer(pipe, conds, table, x.shape[2:])
     t0 = time.perf_counter()
     with paced(step_pacer(run, gen)):
-        v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table)
+        v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table,
+                             target=targets)
         v = v.astype(mx.float32)
         mx.eval(v)
     # Without chat the step is one evaluation, which an interrupt or an end
@@ -816,6 +857,10 @@ def encode(served, text: str, images: list, borrow=None,
         if edit is None:
             raise StepError(400, f"{pipe.family.title} takes no reference "
                             "images")
+        if edit.text_only:
+            raise StepError(400, f"the {pipe.family.title} encoder reads the "
+                            "prompt alone; a step takes the reference "
+                            "latents the VAE route encodes")
         try:
             refs = api.references(pipe, [
                 api.references(pipe, [im],
@@ -857,7 +902,8 @@ def _host(a):
 
 
 def vae_decode(served, raw: WireTensor, alpha: bool):
-    """VAE-space latents (B, C, h, w) to an image (B, H, W, C) f32 in
+    """Latents (B, C, h, w) in the VAE's space, or the model's for a
+    family whose VAE facts say so, to an image (B, H, W, C) f32 in
     [0, 1], as numpy. The images decode one at a time, as the routes plan
     them."""
     import mlx.core as mx
@@ -867,10 +913,12 @@ def vae_decode(served, raw: WireTensor, alpha: bool):
 
     pipe = served.pipe
     vae = pipe.vae
-    z = _f32(raw).transpose(0, 2, 3, 1)
+    model = _model_space(pipe.family.name)
+    z = _f32(raw) if model else _f32(raw).transpose(0, 2, 3, 1)
     out = []
     for i in range(z.shape[0]):
-        img = api.vae_decode(pipe, vae.to_model_space(z[i:i + 1]),
+        one = z[i:i + 1]
+        img = api.vae_decode(pipe, one if model else vae.to_model_space(one),
                              alpha=alpha)
         mx.eval(img)
         out.append(_host(img.astype(mx.float32)))
@@ -878,8 +926,9 @@ def vae_decode(served, raw: WireTensor, alpha: bool):
 
 
 def vae_encode(served, image: WireTensor):
-    """An image (B, H, W, C) f32 in [0, 1] to VAE-space latents
-    (B, C, h, w) f32, as numpy."""
+    """An image (B, H, W, C) f32 in [0, 1] to latents (B, C, h, w) f32 in
+    the VAE's space, or the model's for a family whose VAE facts say so,
+    as numpy."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -890,10 +939,12 @@ def vae_encode(served, image: WireTensor):
     img = _f32(image)
     if pipe.vae.config.in_channels == 3:
         img = img[..., :3]
+    keep = _model_space(pipe.family.name)
     out = []
     for i in range(img.shape[0]):
         model = api.vae_encode(pipe, img[i:i + 1])
-        raw = pipe.vae.to_vae_space(model).transpose(0, 3, 1, 2)
+        raw = model if keep else pipe.vae.to_vae_space(model).transpose(
+            0, 3, 1, 2)
         mx.eval(raw)
         out.append(_host(raw.astype(mx.float32)))
     return np.concatenate(out, axis=0)

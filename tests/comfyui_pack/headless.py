@@ -18,6 +18,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,16 @@ from support import PACK, Stub, manifest, write_zimage_lora
 WORKFLOWS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflows")
 LINK = "comfyui-gmlx"
 LORA = "z-image-turbo-style.safetensors"
+
+
+def comfy_version(comfy_dir: str) -> tuple:
+    """The release of a ComfyUI checkout. FLUX.3 came in 0.41.0."""
+    try:
+        with open(os.path.join(comfy_dir, "comfyui_version.py")) as f:
+            m = re.search(r'__version__\s*=\s*"([0-9.]+)"', f.read())
+    except OSError:
+        m = None
+    return tuple(int(p) for p in m.group(1).split(".")) if m else (0,)
 
 
 def free_port() -> int:
@@ -348,6 +359,53 @@ class Cases:
         self.results[-1]["latent_sha256"] = self.latent_qwen
         self.results[-1]["x_shape"] = steps[0]["x_shape"] if steps else None
 
+    async def flux3_t2i(self):
+        wf = workflow("flux-3-klein-t2i.json")
+        wf["7"]["inputs"].update(width=256, height=192)
+        wf["8"]["inputs"]["steps"] = 3
+        wf["11"] = {"class_type": "SaveLatent", "inputs": {"samples": ["8", 0],
+                                                           "filename_prefix": "latents/flux3-t2i"}}
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("one encode of the prompt", [e["text"] for e in enc] == [wf["5"]["inputs"]["text"]],
+                   [e["text"] for e in enc])
+        steps = kinds(log, "step")
+        self.check("steps", len(steps) == 3, len(steps))
+        self.check("one row a step at cfg 1, no references", {(e["rows"], tuple(e["refs"])) for e in steps}
+                   == {(1, (0,))}, [(e["rows"], e["refs"]) for e in steps])
+        self.check("model space latent", {tuple(e["x_shape"]) for e in steps} == {(1, 128, 12, 16)},
+                   [e["x_shape"] for e in steps][:1])
+        self.check("steps carry the schedule", all(e["sample_sigmas"] for e in steps), None)
+        self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
+        self.check("latent saved", latent_sha(self.work, "latents/flux3-t2i") is not None, None)
+
+    async def flux3_edit(self):
+        wf = workflow("flux-3-klein-edit-two-references.json")
+        wf["8"]["inputs"]["resolution.megapixels"] = 0.25
+        wf["9"]["inputs"]["steps"] = 2
+        wf["12"] = {"class_type": "SaveLatent", "inputs": {"samples": ["9", 0],
+                                                           "filename_prefix": "latents/flux3-edit"}}
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "vae_encode")
+        shapes = [e["shape"] for e in enc]
+        # reference-1.png is 512 wide and 768 high, reference-2.png square.
+        self.check("each reference encoded once, in order", len(shapes) == 2 and shapes[0][1] > shapes[0][2]
+                   and shapes[1][1] == shapes[1][2], shapes)
+        steps = kinds(log, "step")
+        lat = [[1, 128, h // 16, w // 16] for _, h, w, _ in shapes]
+        self.check("steps", len(steps) == 2, len(steps))
+        self.check("every row carries both references in order",
+                   all(e["ref_shapes"] == [lat] * e["rows"] for e in steps), [e["ref_shapes"] for e in steps][:1])
+        self.check("the first reference sizes the latent",
+                   {tuple(e["x_shape"]) for e in steps} == {tuple(lat[0]) if lat else None},
+                   [e["x_shape"] for e in steps][:1])
+        self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
+        self.check("latent saved", latent_sha(self.work, "latents/flux3-edit") is not None, None)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -425,6 +483,11 @@ async def amain(a) -> dict:
             await c.case("version mismatch names the side to upgrade", c.version)
             await c.case("qwen-image-2.1 edit with two references", c.qwen_edit)
             await c.case("fixed sigmas through GmlxSigmas and SamplerCustom", c.turbo_sigmas)
+            if comfy_version(a.comfy) >= (0, 41, 0):
+                await c.case("flux-3-klein t2i", c.flux3_t2i)
+                await c.case("flux-3-klein edit with two references", c.flux3_edit)
+            else:
+                out["skipped"] = ["flux-3-klein t2i", "flux-3-klein edit with two references"]
             out["cases"] = c.results
     except Exception:  # noqa: BLE001
         out["fatal"] = traceback.format_exc()
@@ -453,6 +516,8 @@ def main():
         for k in c["checks"]:
             if not k["ok"]:
                 print(f"     {k['check']}: {str(k['detail'])[:600]}")
+    for name in out.get("skipped", []):
+        print(f"skip {name}: this ComfyUI has no FLUX.3")
     if out.get("fatal"):
         print(out["fatal"])
     sys.exit(0 if not out["failed"] and not out.get("fatal") else 1)

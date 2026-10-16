@@ -262,9 +262,9 @@ default, or unload chat models with [`POST /unload`](api.md#endpoints).
 `gmlx pull` refuses an image model on an M1 or M2 Mac before it downloads
 anything, and `--force` downloads the files anyway. The models run in
 bfloat16, which M1 and M2 chips lack. On those Macs `gmlx image generate`
-and the server refuse Qwen-Image 2.1 and Krea 2 with `needs bfloat16, which
-the M1 chip lacks`. Z-Image-Turbo can run in float16, as the next entry
-describes.
+and the server refuse Qwen-Image 2.1, Krea 2 and FLUX.3 klein with
+`needs bfloat16, which the M1 chip lacks`. Z-Image-Turbo can run in
+float16, as the next entry describes.
 
 ### `runs in float16 on the M1 chip, which misses the reference checks`
 
@@ -313,10 +313,24 @@ Move or delete that file, and pull again.
 The VAE that `gmlx pull` downloaded is not the published file. Delete the
 file that the message names, and pull again.
 
+### `is a flow map, which samples without guidance: drop cfg ...` or `is a flow map, which samples with euler only, not ...`
+
+FLUX.3 klein is distilled to sample without guidance and with the `euler`
+sampler alone. Leave out `--guidance` and `--sampler`, or the request's
+`guidance` and `sampler`, or set them to 1 and `euler`. FLUX.3 klein Base
+takes other values of both.
+
 ### `gmlx image does not apply` or `is not a ... adapter`
 
 The LoRA is of a kind gmlx does not apply, or it was made for another
 model. [Use a LoRA](images.md#use-a-lora) says which LoRAs work.
+
+### `gmlx applies them and ComfyUI drops them`
+
+The LoRA loads in `gmlx image`, and ComfyUI's LoraLoader skips its keys,
+so ComfyUI makes the image without it. A FLUX.3 klein LoRA trained with
+diffusers is one: ComfyUI reads FLUX.3 keys only in the GGUF names, under
+`lora_unet_` or `diffusion_model.`.
 
 ### `has text encoder layers; set it on the image model's adapters instead`
 

@@ -26,6 +26,9 @@ def test_a_recipe_resolves_by_name_or_alias():
     assert catalog.recipe("krea-2-raw") is None
     assert catalog.recipe("krea-2") is None
     assert catalog.recipe_for("krea2", "turbo").name == "krea-2-turbo"
+    assert catalog.recipe_for("flux3_klein", "distilled").name == "flux-3-klein"
+    assert catalog.recipe_for("flux3_klein", "base").name == "flux-3-klein-base"
+    assert catalog.recipe("FLUX-3-Klein").variant == "distilled"
 
 
 @pytest.mark.parametrize("gb, cls", [(8, 16), (16, 16), (18, 16), (24, 24),
@@ -275,6 +278,40 @@ def test_a_krea_2_pull_takes_the_parts_on_disk_by_their_weights(gguf_dir,
         "Qwen3-VL-4B-Instruct-")
     assert catalog.vae_identity(plan.part("vae").path) == ("krea2",
                                                            r.vae_sha256)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", ["flux-3-klein", "flux-3-klein-base"])
+def test_a_flux3_pull_takes_the_krea_2_encoder_file_by_its_weights(
+        gguf_dir, tmp_path, name):
+    from image_dir import image_dir
+
+    from gmlx.commands import image_pull
+
+    r = catalog.RECIPES[name]
+    roots = [str(gguf_dir), str(image_dir())]
+    found = catalog.scan(roots, families=("flux3_klein", "krea2"))
+    dits = [f.path for f in found if f.role == "dit"
+            and f.family == "flux3_klein" and f.variant == r.variant]
+    vaes = [f for f in found if f.role == "vae" and f.family == "flux3_klein"]
+    encs = {f.family: f.path for f in found if f.role == "encoder"}
+    if not dits or not vaes or "flux3_klein" not in encs:
+        pytest.skip(f"a {r.title} DiT, the Qwen3-VL-4B encoder and the packed "
+                    "FLUX.2 VAE are not all under KQUANT_TEST_GGUF_DIR and "
+                    "GMLX_TEST_IMAGE_DIR")
+    # One encoder file serves both families.
+    assert encs.get("krea2") == encs["flux3_klein"]
+    plan = image_pull.plan_pull(
+        r, dit_quant=image_pull._quant_of(dits[0]), encoder_quant="Q8_0",
+        encoder_quant_given=False, only=image_pull.PARTS, roots=roots,
+        base_dir=str(tmp_path), nest=True)
+    assert [(p.role, p.download) for p in plan.parts] == [
+        ("dit", False), ("encoder", False), ("vae", False)]
+    assert plan.part("encoder").path == encs["flux3_klein"]
+    assert catalog.vae_identity(plan.part("vae").path) == ("flux3_klein",
+                                                           r.vae_sha256)
+    assert catalog.dit_identity(plan.part("dit").path) == ("flux3_klein",
+                                                           r.variant)
 
 
 def test_a_32_gb_mac_pulls_qwen_image_at_q8_0_since_its_f16_load_does_not_fit():

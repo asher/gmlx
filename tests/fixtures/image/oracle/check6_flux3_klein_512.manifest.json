@@ -1,0 +1,253 @@
+{
+ "schema": 1,
+ "name": "check6_flux3_klein_512",
+ "check": 6,
+ "family": "flux3_klein",
+ "script": "scripts/image_oracle/check6_flux3_klein.py",
+ "argv": [
+  "check6_flux3_klein.py",
+  "--reference",
+  "src",
+  "--dit",
+  "flux3_image_klein_sd-Q4_K_M.gguf",
+  "--features",
+  "check2_flux3_klein.npz",
+  "--sizes",
+  "512",
+  "--bf16",
+  "512"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "flux3_image_klein_sd-Q4_K_M.gguf",
+   "size": 3391951648,
+   "sha256": "2e429f54f9b2f2161b3123a615167ee6137aa21f1287f426dc895bb7647af5ec"
+  },
+  "features": {
+   "name": "check2_flux3_klein.npz",
+   "size": 157437070,
+   "sha256": "fc087b917e2c1614738e24f9b0ba467bae4882efeeb02798264ac1e94c601bea"
+  }
+ },
+ "inputs": {
+  "size": 512,
+  "variant": "distilled",
+  "flow_map": true,
+  "steps": 16,
+  "guidance": null,
+  "alpha": 6.93,
+  "seed": 6,
+  "bf16": true,
+  "kept_steps": [
+   1,
+   2,
+   4,
+   8
+  ],
+  "refs": 0,
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); generate rounds it to bf16",
+  "features": "check2_flux3_klein float32 features_plain, and features_empty for Base, rounded to bf16",
+  "latents": "(1, 128, size / 16, size / 16) float32 tokens in the gmlx layout, after the step",
+  "times": "the bf16 image time the DiT saw at each step, as float32",
+  "reference_commit": "45e57c9fb06f9751cdced29a65c5d2171003be05",
+  "gguf_codecs": {
+   "Q4_K": 261,
+   "F32": 86,
+   "BF16": 12
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "run": {
+   "fp32_s": 115.2,
+   "fp32_median_step_s": 7.2,
+   "prompts": [
+    "plain"
+   ],
+   "bf16_s": 120.6,
+   "latents_bf16_vs_fp32": {
+    "rel_l2": 0.020996068005234528,
+    "cosine": 0.9997823460236887,
+    "max_abs": 0.38617372512817383
+   },
+   "bf16_vs_fp32_by_step": [
+    0.0001521718188045872,
+    0.00024992500511121957,
+    0.00030063494647937164,
+    0.00037549406819552364,
+    0.0005012364788712642,
+    0.0006200391483373541,
+    0.0007870361071618054,
+    0.0010639877615421626,
+    0.001359117965452478,
+    0.0016703601691055929,
+    0.0023612203411438803,
+    0.003665103271417322,
+    0.005474792249799924,
+    0.0083728333494939,
+    0.01207801511568286,
+    0.020996068005234528
+   ]
+  }
+ },
+ "tolerances": {
+  "latents_rel_l2": 0.041992136010469056,
+  "by_step_rel_l2": [
+   0.0003043436376091744,
+   0.0004998500102224391,
+   0.0006012698929587433,
+   0.0007509881363910473,
+   0.0010024729577425284,
+   0.0012400782966747082,
+   0.0015740722143236109,
+   0.0021279755230843253,
+   0.002718235930904956,
+   0.0033407203382111858,
+   0.004722440682287761,
+   0.007330206542834644,
+   0.010949584499599848,
+   0.0167456666989878,
+   0.02415603023136572,
+   0.041992136010469056
+  ],
+  "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated"
+ },
+ "notes": [],
+ "created": "2026-10-15T23:55:57Z",
+ "npz": "check6_flux3_klein_512.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    80,
+    20480
+   ],
+   "dtype": "float32",
+   "sha256": "59cb9d9f5999c5b54893a12b7721e44ab7db23fb7f52c687c599701c3263114d"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "a1ad126ebeb657a4d706a3a9ae985d901e21d19399e1a48dca6b6765c4762edc"
+  },
+  "latents_bf16": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "83b0cdd1f0fb4a140e542038370908f8bcee2f12a919f42323eefe8b0d2efb35"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "7ddf088cde800b922bbdc23241efcc7e934f9190394f4cd006f898e42c58ff36"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "798f03959b726af2f0f6459802b025710077b7e98d42716f772aa3aee7ec1590"
+  },
+  "latents_step4": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "c89925cda0eb877b9e36119ece021f7b31c21d57638a63013ccb25069a90365b"
+  },
+  "latents_step8": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "fa632d75a2d96c8fda3ca775a3eedbb1e7c46379e1ee4e893afaaa90d359921e"
+  },
+  "noise": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d614e8f6414c19a6e58b7af3fb3e7e866a4c21c40c780bf93ece8c4f09d875de"
+  },
+  "schedule": {
+   "shape": [
+    17
+   ],
+   "dtype": "float32",
+   "sha256": "47b2e4ea9acca305918cff60d25537c22e5c04a3fa66ce06a8dd05f0a461f462"
+  },
+  "times": {
+   "shape": [
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "376fa2e898b2a38feaea154d41bdd33e90ae6e991f1e41ad12205e2ad325c140"
+  }
+ }
+}

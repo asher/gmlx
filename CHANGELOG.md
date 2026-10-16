@@ -8,6 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
+  and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 - `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
   output repeats it, which speeds up edits and quotes.
 
@@ -35,6 +37,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is smaller than the model's per-layer embedding table.
 - gpt-oss gave wrong tokens on a Mac it does not fit, and with
   `--stream-experts` or a CPU placement.
+- `gmlx list` names the family of an image entry whose `family` is spelled
+  `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
+- `gmlx rm` keeps a file that another model names through a symlink, where it
+  deleted the file as unused.
 
 ## [0.5.0] - 2026-10-12
 

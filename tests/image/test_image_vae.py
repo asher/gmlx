@@ -398,7 +398,8 @@ def test_other_files_and_families_are_refused(tmp_path):
     junk.write_bytes(b"\xff" * 64)
     with pytest.raises(reader.VAEError, match="neither a GGUF"):
         reader.load_vae(junk, family="z_image", dtype=mx.float32)
-    with pytest.raises(reader.VAEError, match="known: krea2, qwen_image21, z_image"):
+    with pytest.raises(reader.VAEError, match="known: flux3_klein, krea2, "
+                       "qwen_image21, z_image"):
         reader.load_vae(path, family="sd15", dtype=mx.float32)
 
 
@@ -631,8 +632,9 @@ def _unit_fits(monkeypatch):
 
 
 # With k = 1 the tiny VAE (32 base channels, fp32) at 24x20 needs 61440
-# bytes whole, and with k_tiles = 0.25 32768 bytes in four 16 pixel tiles.
-WHOLE, TILES = 24 * 20 * 32 * 4, 4 * 16 * 16 * 32 * 4 // 4
+# bytes whole, and with k_tiles = 0.25 21504 bytes in the four tiles of
+# 14 x 12 pixels that tiling cuts at its 2 pixels per latent pixel.
+WHOLE, TILES = 24 * 20 * 32 * 4, 4 * 14 * 12 * 32 * 4 // 4
 
 
 def test_decode_and_encode_tile_only_when_a_whole_pass_does_not_fit(

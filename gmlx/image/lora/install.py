@@ -173,14 +173,26 @@ def linear_leaves(dit: nn.Module) -> dict:
     return out
 
 
+def _child(obj, part: str):
+    """The child ``part`` of a module, list or dict of modules, as
+    ``named_modules`` names it."""
+    if isinstance(obj, (list, tuple)):
+        return obj[int(part)]
+    if isinstance(obj, dict) and not isinstance(obj, nn.Module):
+        return obj[part]
+    return getattr(obj, part)
+
+
 def _set(root, path: str, new) -> None:
     parts = path.split(".")
     obj = root
     for part in parts[:-1]:
-        obj = obj[int(part)] if part.isdigit() else getattr(obj, part)
+        obj = _child(obj, part)
     last = parts[-1]
-    if last.isdigit():
+    if isinstance(obj, list):
         obj[int(last)] = new
+    elif isinstance(obj, dict) and not isinstance(obj, nn.Module):
+        obj[last] = new
     else:
         setattr(obj, last, new)
 

@@ -31,7 +31,9 @@ from oracle_fixture import ORACLE, fixture, fx
 
 import mlx.core as mx
 
-pytestmark = pytest.mark.integration
+# A Mac of 24 GB, where the run at the family defaults loads every part
+# at once; a 16 GB Mac loads it in stages (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
 
 NAME = "check6_qwen_image21"
 FAMILY = "qwen_image21"

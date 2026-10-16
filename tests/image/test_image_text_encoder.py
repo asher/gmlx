@@ -142,10 +142,11 @@ def _tiny_qwen3(layers: int = 4, seed: int = 0, tied: bool = True):
     return m, config
 
 
-def _spec(layers=4, tap=(3,), identity=(), **kw):
+def _spec(layers=4, tap=(3,), identity=(), max_tokens=16, **kw):
     return te.EncoderSpec(
         name="tiny", arch="qwen3", model_type="qwen3", hidden=64,
-        layers=layers, tap_layers=tap, template="<u>{}</u>", max_tokens=16,
+        layers=layers, tap_layers=tap, template="<u>{}</u>",
+        max_tokens=max_tokens,
         identity=identity, identity_source="test", **kw)
 
 
@@ -522,3 +523,243 @@ def test_stacked_features_hold_every_tap_side_by_side():
     assert mx.array_equal(one.features, got.features[:, :64]).item()
     # Stacking is part of what a conditioning depends on.
     assert spec.template_id != _spec(tap=(1, 3), drop=2).template_id
+
+
+_FLUX3_TEMPLATE = "flux3_klein_chat_template.jinja"
+
+
+@pytest.mark.parametrize("prompt", _PROMPTS)
+def test_the_flux3_template_is_the_official_render_of_one_user_turn(prompt):
+    """FLUX.3 klein's reference renders the Qwen3-VL chat template of its
+    text encoder on one user turn with the generation prompt."""
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
+    tmpl = env.from_string((FIXTURES / _FLUX3_TEMPLATE).read_text())
+    want = tmpl.render(messages=[{"role": "user", "content": prompt}],
+                       add_generation_prompt=True)
+    assert te.render(te.encoder_spec("flux3_klein"), prompt) == want
+    row = load_json("manifest.json")[_FLUX3_TEMPLATE]
+    assert row["repo"] == "black-forest-labs/flux-3-image-klein"
+    assert len(row["revision"]) == 40
+
+
+def test_the_flux3_spec_pads_as_the_reference_does():
+    from gmlx.image.families.flux3_klein import family as ff
+
+    spec = te.encoder_spec("flux3_klein")
+    assert (spec.arch, spec.model_type, spec.hidden, spec.layers) == (
+        "qwen3vl", "qwen3", 2560, 36)
+    assert spec.tap_layers == (4, 8, 12, 16, 20, 24, 28, 32) and spec.stack
+    assert (spec.pad_multiple, spec.max_tokens) == (80, 4096)
+    assert (spec.pad_id, spec.pad_position) == (151643, 1)
+    assert spec.drop == 0 and spec.activation == "float32"
+    assert spec.identity_source == ff.ENCODER_IDENTITY_SOURCE
+    # The same encoder weights as Krea 2's, in its own template.
+    krea = te.encoder_spec("krea2")
+    assert spec.identity == krea.identity
+    assert spec.template_id != krea.template_id
+
+
+def test_pad_rows_reach_the_next_multiple_under_the_cap():
+    spec = _spec(pad_multiple=8, pad_id=0)
+    assert [te.pad_rows(spec, n) for n in (1, 3, 8, 9, 15, 16)] == [
+        7, 5, 0, 7, 1, 0]
+    capped = dataclasses.replace(spec, max_tokens=12)
+    assert [te.pad_rows(capped, n) for n in (3, 8, 9, 12)] == [5, 0, 3, 0]
+    assert te.pad_rows(_spec(), 3) == 0
+    with pytest.raises(ValueError, match="pad id"):
+        te.pad_rows(_spec(pad_multiple=8), 3)
+    with pytest.raises(ValueError, match="no dropped rows"):
+        te.pad_rows(_spec(pad_multiple=8, pad_id=0, drop=2), 3)
+    # The pad rule is part of what a conditioning depends on.
+    ids = {s.template_id for s in (
+        _spec(), spec, dataclasses.replace(spec, pad_multiple=4),
+        dataclasses.replace(spec, pad_id=1),
+        dataclasses.replace(spec, pad_position=0))}
+    assert len(ids) == 5
+    # A spec with no pads keeps the key it had before pads existed.
+    assert _spec().template_id == dataclasses.replace(
+        _spec(), pad_id=0, pad_position=3).template_id
+
+
+@pytest.mark.parametrize("family", ["z_image", "krea2", "qwen_image21",
+                                    "flux3_klein"])
+def test_the_rows_of_a_prompt_are_bounded_by_its_utf8_bytes(family):
+    """Byte-level BPE gives each token at least one byte, so the bound of
+    a prompt is its UTF-8 bytes, not its code points: a prompt of 2, 3 and
+    4 byte characters is bounded as an ASCII prompt of its bytes. A
+    character whose NFC form holds more bytes is bounded at those."""
+    spec = te.encoder_spec(family)
+    for ch, size in (("\u00e9", 2), ("\u732b", 3), ("\U0001F6B2", 4),
+                     ("\ufb2c", 6)):
+        prompt = "a cat " + ch * 12
+        assert te.rows_at_most(spec, prompt) == te.rows_at_most(
+            spec, "a cat " + "x" * (12 * size)), (family, ch)
+
+
+def _np_forward(m, seq, positions, allowed, layers):
+    """The tiny Qwen3's decoder layers in float64 numpy, with one rotary
+    position per row and a boolean mask of the keys each row reads."""
+    from mlx.utils import tree_flatten
+
+    p = {k: np.array(v, np.float64) for k, v in tree_flatten(m.parameters())}
+    nh, nkv, hd = 4, 2, 16
+    inv = 1e6 ** (-np.arange(0, hd, 2) / hd)
+    ang = np.asarray(positions, np.float64)[:, None] * inv[None]
+    cos, sin = np.cos(ang), np.sin(ang)
+
+    def rms(x, w):
+        return x / np.sqrt((x * x).mean(-1, keepdims=True) + 1e-6) * w
+
+    def rope(t):
+        a, b = t[..., :hd // 2], t[..., hd // 2:]
+        return np.concatenate([a * cos - b * sin, a * sin + b * cos], -1)
+
+    x = p["model.embed_tokens.weight"][np.asarray(seq)]
+    length = len(seq)
+    out = {}
+    for i in range(max(layers)):
+        w = {k[len(f"model.layers.{i}."):]: v for k, v in p.items()
+             if k.startswith(f"model.layers.{i}.")}
+        h = rms(x, w["input_layernorm.weight"])
+
+        def heads(name, n):
+            return (h @ w[f"self_attn.{name}_proj.weight"].T).reshape(
+                length, n, hd).transpose(1, 0, 2)
+
+        q = rope(rms(heads("q", nh), w["self_attn.q_norm.weight"]))
+        k = rope(rms(heads("k", nkv), w["self_attn.k_norm.weight"]))
+        v = heads("v", nkv)
+        k, v = np.repeat(k, nh // nkv, 0), np.repeat(v, nh // nkv, 0)
+        s = np.where(allowed, q @ k.transpose(0, 2, 1) * hd ** -0.5, -np.inf)
+        a = np.exp(s - s.max(-1, keepdims=True))
+        a /= a.sum(-1, keepdims=True)
+        o = (a @ v).transpose(1, 0, 2).reshape(length, nh * hd)
+        x = x + o @ w["self_attn.o_proj.weight"].T
+        h = rms(x, w["post_attention_layernorm.weight"])
+        g = h @ w["mlp.gate_proj.weight"].T
+        x = x + (g / (1 + np.exp(-g)) * (h @ w["mlp.up_proj.weight"].T)
+                 ) @ w["mlp.down_proj.weight"].T
+        if i + 1 in layers:
+            out[i + 1] = x
+    return [out[k] for k in layers]
+
+
+def _close(got, want, tol=2e-5):
+    g = np.array(got[0], np.float64)
+    return np.linalg.norm(g - want) / np.linalg.norm(want) < tol
+
+
+def _cpu_tap(*a, **kw):
+    """A tap on the CPU, whose float32 products are not rounded to
+    TF32 as the GPU's are, so a float64 reference reads it at 2e-5."""
+    with mx.stream(mx.cpu):
+        return te.tap(*a, **kw)
+
+
+def test_pad_rows_are_the_reference_forward_of_the_padded_prompt():
+    """The reference runs every pad row: token pad_id, at the pad position,
+    reading the real keys alone under the causal mask. Each tap of the
+    padded prompt equals that forward, row for row."""
+    m, _ = _tiny_qwen3()
+    ids, pad, pad_id = [3, 17, 42, 5, 99, 1, 64], 5, 9
+    n = len(ids)
+    seq = ids + [pad_id] * pad
+    allowed = np.tril(np.ones((n + pad, n + pad), bool))
+    allowed[:, n:] = False
+    layers = (1, 4)
+    plain = _np_forward(m, ids, range(n), np.tril(np.ones((n, n), bool)),
+                        layers)
+    for got, want in zip(_cpu_tap(m, ids, layers=layers), plain):
+        assert _close(got, want)
+    for position in (1, 0, 5):
+        want = _np_forward(m, seq, list(range(n)) + [position] * pad,
+                           allowed, layers)
+        got = _cpu_tap(m, ids, layers=layers, pad=pad, pad_id=pad_id,
+                     pad_position=position)
+        for g, w in zip(got, want):
+            assert g.shape == (1, n + pad, 64)
+            assert _close(g, w), position
+            assert np.allclose(w[n:], w[n], rtol=1e-12, atol=0)
+    # Pads that read themselves, or each other as causal tokens, are
+    # another forward.
+    for wrong in (np.tril(np.ones((n + pad, n + pad), bool)),
+                  allowed | np.eye(n + pad, dtype=bool)):
+        (w,) = _np_forward(m, seq, list(range(n)) + [1] * pad, wrong, (4,))
+        (g,) = _cpu_tap(m, ids, layers=(4,), pad=pad, pad_id=pad_id)
+        assert not _close(g, w, tol=1e-2)
+
+
+def test_the_real_rows_of_a_padded_tap_are_the_tap_of_the_prompt():
+    m, _ = _tiny_qwen3()
+    ids = [3, 17, 42, 5]
+    (plain,) = te.tap(m, ids, layers=(3,))
+    (padded,) = te.tap(m, ids, layers=(3,), pad=3, pad_id=9)
+    # The CPU's float32 GEMM rounds 5 rows apart from 4: the real rows read
+    # 5.4e-7 of relative L2 from the plain tap there, and match on the GPU.
+    # Real rows that read the pad row read 1.1 away.
+    got = np.array(padded[0, :4], np.float64)
+    want = np.array(plain[0], np.float64)
+    assert np.linalg.norm(got - want) / np.linalg.norm(want) < 1e-5
+    # One token and its pads: the pad row reads the token alone.
+    (one,) = _cpu_tap(m, [7], layers=(2,), pad=2, pad_id=9)
+    want = _np_forward(m, [7, 9, 9], [0, 1, 1],
+                       np.array([[1, 0, 0], [1, 0, 0], [1, 0, 0]], bool),
+                       (2,))[0]
+    assert _close(one, want)
+    with pytest.raises(ValueError, match="pad id"):
+        _cpu_tap(m, ids, layers=(3,), pad=2)
+
+
+def test_a_padded_tap_restores_the_ropes_and_refuses_a_block_without_one():
+    m, _ = _tiny_qwen3()
+    ropes = [b.self_attn.rope for b in m.model.layers]
+
+    def restored():
+        return all(b.self_attn.rope is r
+                   for b, r in zip(m.model.layers, ropes))
+
+    te.tap(m, [3, 17], layers=(4,), pad=2, pad_id=9)
+    assert restored()
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        with te.pad_rope(m, 2, 1):
+            assert all(isinstance(b.self_attn.rope, te._PadRope)
+                       for b in m.model.layers)
+            raise _Boom
+    assert restored()
+
+    class _NoAttention:
+        def __call__(self, x, mask, cache):
+            return x
+
+    m.model.layers[2] = _NoAttention()
+    with pytest.raises(TypeError, match="_NoAttention has no self_attn"):
+        te.tap(m, [3, 17], layers=(4,), pad=2, pad_id=9)
+    assert all(m.model.layers[i].self_attn.rope is ropes[i] for i in (0, 1, 3))
+    # A tap without pads swaps nothing, so it runs.
+    te.tap(m, [3, 17], layers=(4,))
+
+
+def test_an_encoding_keeps_its_pad_rows():
+    m, _ = _tiny_qwen3()
+    tok = _CharTokenizer()
+    spec = _spec(tap=(1, 3), stack=True, pad_multiple=8, pad_id=9,
+                 max_tokens=24)
+    got = te.EncoderHandle(m, tok, spec, owned=False).encode("ab")
+    n = len(got.ids)
+    assert got.ids == tuple(ord(c) for c in te.render(spec, "ab"))
+    assert got.pads == te.pad_rows(spec, n) == 16 - n
+    assert got.features.shape == (16, 2 * 64)
+    want = te.tap(m, list(got.ids), layers=(1, 3), pad=got.pads, pad_id=9)
+    assert mx.array_equal(got.features,
+                          mx.concatenate([w[0] for w in want], -1)).item()
+    assert got.template_id == spec.template_id
+    plain = te.EncoderHandle(m, tok, _spec(tap=(1, 3), stack=True,
+                                           max_tokens=24),
+                             owned=False).encode("ab")
+    assert plain.pads == 0 and plain.features.shape == (n, 2 * 64)

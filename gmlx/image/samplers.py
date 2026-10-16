@@ -47,16 +47,25 @@ class Sampler:
 
 class Euler(Sampler):
     """``x + (sigma_next - sigma) * v``. The difference is formed in
-    float32 on the host, then the product and the sum run in float32."""
+    float32 on the host, then the product and the sum run in float32.
+    With ``product`` the product is rounded to that dtype before the sum,
+    as a reference that multiplies a bfloat16 velocity by a float rounds
+    it."""
 
     name = "euler"
+
+    def __init__(self, sigmas, product: mx.Dtype | None = None):
+        super().__init__(sigmas)
+        self.product = product
 
     def step(self, x: mx.array, v: mx.array, i: int) -> mx.array:
         if not 0 <= i < self.steps:
             raise IndexError(f"step {i} outside 0..{self.steps - 1}")
         dt = self.sigmas[i + 1] - self.sigmas[i]
-        return x.astype(mx.float32) + mx.array(dt, mx.float32) * v.astype(
-            mx.float32)
+        p = mx.array(dt, mx.float32) * v.astype(mx.float32)
+        if self.product is not None:
+            p = p.astype(self.product).astype(mx.float32)
+        return x.astype(mx.float32) + p
 
 
 def _registry() -> dict:
@@ -69,13 +78,14 @@ def sampler_names() -> tuple[str, ...]:
     return tuple(sorted(_registry()))
 
 
-def make_sampler(name: str, sigmas) -> Sampler:
+def make_sampler(name: str, sigmas, **kw) -> Sampler:
+    """The sampler ``name`` over ``sigmas``; ``kw`` go to its class."""
     try:
         cls = _registry()[name]
     except KeyError:
         known = ", ".join(sampler_names())
         raise ValueError(f"unknown sampler {name!r}; known: {known}") from None
-    return cls(sigmas)
+    return cls(sigmas, **kw)
 
 
 def img2img_start(steps: int, denoise: float) -> int:

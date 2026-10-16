@@ -574,6 +574,63 @@ def test_glu_falls_back_to_the_composition(spies, routes, case):
     assert spies.glu.calls == 0
 
 
+def test_glu_takes_the_two_halves_of_one_fused_leaf(spies):
+    """A gate and up pair stored as one matrix, as FLUX.3 klein's mlp_in:
+    the first half of the rows is the gate, the second the up."""
+    fused = _leaf("q4_k", 128, 256, 1)
+    x = _x((1, 1024, 256), mx.bfloat16)
+    pair = ops.glu_halves(fused, x)
+    assert pair is not None and pair[2] == "q4_k"
+    w = fused["weight"]
+    assert mx.array_equal(pair[0], w[:64]).item()
+    assert mx.array_equal(pair[1], w[64:]).item()
+    y = ops.swiglu_fused(x, *pair)
+    mx.eval(y)
+    assert spies.glu.calls == 1 and y.shape == (1, 1024, 64)
+    a, b = mx.split(fused(x), 2, axis=-1)
+    want = ops.swiglu(a, b)
+    assert _rel(_f64(y), _f64(want)) <= 2 * PAIR_TOL[mx.bfloat16]
+
+
+@pytest.mark.parametrize("case", [
+    "route_off", "rows_1023", "odd_rows", "bias", "float_leaf", "float32_x",
+    "one_dim_x", "zero_k", "k_off_tile", "codec", "no_outputs",
+    "no_tensor_ops", "cpu"])
+def test_glu_halves_fall_back_to_the_composition(spies, routes, monkeypatch,
+                                                 case):
+    fused = _leaf("q4_k", 128, 256, 1)
+    x = _x((1, 1024, 256), mx.bfloat16)
+    if case == "route_off":
+        routes.install(("qk",))
+    elif case == "rows_1023":
+        x = x[:, :1023]
+    elif case == "odd_rows":
+        fused.weight = fused.weight[:127]
+    elif case == "bias":
+        fused = _leaf("q4_k", 128, 256, 1, bias=True)
+    elif case == "float_leaf":
+        fused = nn.Linear(256, 128, bias=False)
+    elif case == "float32_x":
+        x = x.astype(mx.float32)
+    elif case == "one_dim_x":
+        x = x[0, 0]
+    elif case == "zero_k":
+        x = x[..., :0]
+    elif case == "k_off_tile":
+        # The predicate reads the inner dim of x: 192 is off the tile.
+        x = _x((1, 1024, 192), mx.bfloat16)
+    elif case == "codec":
+        fused = _leaf("q8_0", 128, 256, 1)
+    elif case == "no_outputs":
+        fused.weight = fused.weight[:0]
+    elif case == "no_tensor_ops":
+        routes._OPS["nax"] = False
+    elif case == "cpu":
+        monkeypatch.setattr(kq_routes, "_gpu", lambda: False)
+    assert ops.glu_halves(fused, x) is None
+    assert spies.glu.calls == 0
+
+
 def test_glu_takes_rows_above_32767(spies):
     gate, up = _pair()
     # A batch of two at 2048x2048 flattens to 33792 rows.
@@ -797,6 +854,45 @@ def test_glu_kernel_against_the_float64_reference(routes, codec, dtype, lead):
     assert np.isfinite(_f64(got)).all()
     assert err <= GLU_TOL[dtype], err
     assert err <= 1.1 * err_stock, (err, err_stock)
+
+
+@needs_glu
+@pytest.mark.parametrize("lead", [(1, 4176), (1, 8272)],
+                         ids=["t2i_1024", "edit_1024"])
+def test_a_flux3_block_mlp_past_4096_rows_against_the_float64_reference(
+        routes, lead):
+    """FLUX.3 klein's ``Block.hidden`` on the route path, with its gate and
+    up halves stored as one q4_k leaf, at the joint rows of a 1024 step:
+    4096 image rows and 80 text rows, and those with 4096 reference rows.
+    Every row is held, the ones past 4096 too."""
+    from gmlx.image.families.flux3_klein import model as fm
+
+    if not _fused_glu():
+        pytest.skip("the GLU kernel runs on a GPU with tensor ops")
+    assert routes.install(("glu",)) == {"glu"}
+    fused = _leaf("q4_k", 128, 256, 1)
+    x = _x((*lead, 256), mx.bfloat16)
+    assert ops.glu_halves(fused, x) is not None
+    block = SimpleNamespace(mlp_in=fused)
+    got = fm.Block.hidden(block, x)
+    a, b = mx.split(fused(x), 2, axis=-1)
+    stock = ops.swiglu(a, b)
+    mx.eval(got, stock)
+    w = np.array(kq.dequantize(fused.weight, fused.scales, "q4_k",
+                               dtype=mx.float32), np.float64)
+    xf = _f64(x)
+    g, u = xf @ w[:64].T, xf @ w[64:].T
+    ref = g / (1.0 + np.exp(-g)) * u
+    assert got.shape == (*lead, 64) and got.dtype == mx.bfloat16
+    for rows, tag in ((slice(0, 4096), "first 4096"),
+                      (slice(4096, None), "past 4096")):
+        r, gr, sr = ref[:, rows], _f64(got)[:, rows], _f64(stock)[:, rows]
+        err, err_stock = _rel(gr, r), _rel(sr, r)
+        print(f"flux3 block glu {lead} {tag}: kernel {err:.3e} stock "
+              f"{err_stock:.3e}")
+        assert np.isfinite(gr).all()
+        assert err <= GLU_TOL[mx.bfloat16], (tag, err)
+        assert err <= 1.1 * err_stock, (tag, err, err_stock)
 
 
 @needs_qk

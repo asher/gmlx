@@ -254,10 +254,10 @@ def _served(hold):
 
 
 def _check_size(hold, width: int, height: int, *, what: str,
-                cfg: float = 1.0, init: bool = False) -> None:
+                cfg: float = 1.0, init: bool = False):
     """Refuse a step or a VAE pass over the size limits of the image
     routes with 413, and one whose memory plan does not fit beside the
-    models loaded with 400."""
+    models loaded with 400. Returns the budget it planned against."""
     from ..image_service import MAX_PIXELS, MAX_SIDE, size_fits
     from ..image_steps import StepError
 
@@ -271,6 +271,23 @@ def _check_size(hold, width: int, height: int, *, what: str,
                      init=init):
         raise StepError(400, f"{what} of {width}x{height} pixels does not "
                         "fit in memory beside the models now loaded")
+    return budget
+
+
+def _check_refs(served, rows) -> None:
+    """Refuse a row with more reference latents than the family takes."""
+    from ..image_service import MAX_REFS
+    from ..image_steps import StepError
+
+    fam = served.pipe.family
+    if fam.edit is None:
+        return
+    cap = min(fam.edit.max_refs, MAX_REFS)
+    for i, r in enumerate(rows):
+        n = len(r.get("ref_latents") or [])
+        if n > cap:
+            raise StepError(400, f"{fam.title} takes at most {cap} reference "
+                            f"latents in a row, and row {i} has {n}")
 
 
 def _px(served, part: str, h: int, w: int) -> tuple:
@@ -456,8 +473,8 @@ def _table(served, tid):
 
 
 async def step(request: Request):
-    from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE,
-                               Missing, StepError, row_hashes, run_step)
+    from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE, Missing,
+                               StepError, flow_targets, row_hashes, run_step)
 
     t0 = time.perf_counter()
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
@@ -481,8 +498,10 @@ async def step(request: Request):
     hold = await _acquire(model)
     try:
         served = _served(hold)
-        _check_size(hold, *_px(served, "latent", *x_w.shape[2:]),
-                    what="a step", cfg=2.0 if len(rows) > 1 else 1.0)
+        w_px, h_px = _px(served, "latent", *x_w.shape[2:])
+        guided = 2.0 if len(rows) > 1 else 1.0
+        budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided)
+        _check_refs(served, rows)
         fam = served.pipe.family.name
         conv = CONVENTIONS.get(fields.get("convention", "comfy"), {}).get(fam)
         if conv is None:
@@ -500,6 +519,17 @@ async def step(request: Request):
         ts = np.broadcast_to(np.asarray(t_w.numpy(), np.float32).reshape(-1),
                              (len(rows),))
         sig = [float(conv.scale * t + conv.shift) for t in ts]
+        targets = None
+        if getattr(served.pipe.dit.cfg, "flow_map", False):
+            # The schedule is in the client's timestep convention.
+            s_w = tensors.get("sample_sigmas")
+            if s_w is None:
+                raise StepError(400, f"the {served.pipe.family.title} DiT is "
+                                "a flow map: a step body holds "
+                                "sample_sigmas, the schedule the client "
+                                "samples on")
+            targets = [float(conv.scale * t + conv.shift)
+                       for t in flow_targets(s_w.numpy(), ts)]
         gen = run.gen if run is not None else 0
 
         def work():
@@ -509,10 +539,18 @@ async def step(request: Request):
 
             from gmlx.image import api
 
+            from ..image_service import size_fits
             from ..image_steps import _host, conditioning
 
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
+            # The plan of the rows as they are: their text, a prefix and
+            # the reference latents each step runs.
+            if not size_fits(served, w_px, h_px, budget, cfg=guided,
+                             conds=conds, patch_table=table):
+                raise StepError(400, f"a step of {w_px}x{h_px} pixels with "
+                                "the references of its rows does not fit in "
+                                "memory beside the models now loaded")
             scope = conds
             if run is not None:
                 # The run's conditionings keep their states between its
@@ -527,7 +565,7 @@ async def step(request: Request):
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
-                                           gen)
+                                           gen, targets)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work)

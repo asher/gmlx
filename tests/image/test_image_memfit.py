@@ -574,7 +574,8 @@ class _TinyVae:
 
 
 def test_unknown_family_is_refused(z_view):
-    with pytest.raises(ValueError, match="known: krea2, qwen_image21, z_image"):
+    with pytest.raises(ValueError, match="known: flux3_klein, krea2, "
+                                         "qwen_image21, z_image"):
         plan_memory(z_view, 0, 0, family="flux", height=8, width=8,
                     budget=1e12, overcommit=False)
 
@@ -716,6 +717,249 @@ def test_the_krea2_row_covers_every_measured_step():
     # A fit, not a ceiling: the closest cell is within 0.35 GiB, and none
     # is priced more than 1.75 GiB above its reading.
     assert min(room) <= 0.35 * GiB and max(room) <= 1.75 * GiB
+
+
+FLUX3_CELLS = QWEN_CELLS.with_name("flux3_klein_cells.json")
+
+
+def _flux3_room(row, c: dict) -> float:
+    """Bytes the row's step leaves above the cell's largest step: the
+    image rows, the text rows and the tokens of the references."""
+    rows = memfit.image_rows(row, c["size"], c["size"], c["text_rows"])
+    rows += c.get("refs", 0) * (c.get("ref_px", 0) // row.ref_token_px) ** 2
+    plan = row.step.bytes(rows * row.width * 2, 2 if c["guided"] else 1)
+    return plan - max(c["steps_gib"]) * GiB
+
+
+def test_the_flux3_row_covers_every_measured_step():
+    row = memfit.PEAKS["flux3_klein"]
+    assert row.step is memfit.FLUX3_KLEIN_STEP
+    cells = json.loads(FLUX3_CELLS.read_text())["cells"]
+    assert {c["size"] for c in cells} >= {256, 512, 768, 1024, 1280, 1536,
+                                          2048}
+    assert {c["text_rows"] for c in cells} == {80, 640, 4096}
+    assert sum(c["guided"] for c in cells) == 4
+    assert sum(bool(c.get("refs")) for c in cells) == 3
+    room = [_flux3_room(row, c) for c in cells]
+    assert min(room) >= ROOM
+    # A fit, not a ceiling: the closest cell is within 0.35 GiB, and none
+    # is priced more than 1.25 GiB above its reading.
+    assert min(room) <= 0.35 * GiB and max(room) <= 1.25 * GiB
+
+
+def test_a_thinner_flux3_row_misses_a_measured_cell():
+    row = memfit.PEAKS["flux3_klein"]
+    cells = json.loads(FLUX3_CELLS.read_text())["cells"]
+
+    def worst(**change) -> float:
+        thin = dataclasses.replace(row, step=dataclasses.replace(
+            row.step, **change))
+        return min(_flux3_room(thin, c) for c in cells)
+
+    assert worst() >= ROOM
+    assert worst(base=2.35 * GiB) < ROOM
+    assert worst(k=2.7) < ROOM
+    # The second row of a guided step at Krea 2's slope.
+    assert worst(row_k=0.5) < ROOM
+    # Without the reference tokens in the rows, two 1024 pixel references
+    # are priced under their reading.
+    two = next(c for c in cells if c.get("refs") == 2)
+    alone = dataclasses.replace(row, ref_token_px=10 ** 9)
+    assert _flux3_room(alone, two) < ROOM
+
+
+def test_the_flux3_plan_counts_the_references_and_the_most_text():
+    """The plan prices the most text rows the encoder gives, and each
+    reference's tokens in every step."""
+    row = memfit.PEAKS["flux3_klein"]
+    kw = dict(family="flux3_klein", height=1024, width=768,
+              budget=BUDGET_128, overcommit=False)
+    item = 2
+
+    def step(rows, conds=1):
+        return row.step.bytes(rows * row.width * item, conds)
+
+    text = 64 * 48 + 4096
+    p = plan_memory(0, 0, 0, **kw)
+    assert p.terms["step_peak"] == step(text)
+    refs = [(1024, 1024), (512, 768)]
+    p = plan_memory(0, 0, 0, ref_sizes=refs, **kw)
+    assert p.terms["step_peak"] == step(text + 64 * 64 + 32 * 48)
+    p = plan_memory(0, 0, 0, refs=2, ref_px=512, cfg=3.5, **kw)
+    assert p.rows == 2 and p.terms["step_peak"] == step(text + 2 * 32 * 32,
+                                                        2)
+    # A caption the caller knows is priced at its own rows.
+    p = plan_memory(0, 0, 0, caption_tokens=80, **kw)
+    assert p.terms["step_peak"] == step(64 * 48 + 80)
+
+
+def test_a_flux3_request_plan_prices_the_text_rows_of_its_prompt():
+    """The conditioning of a request gives the text rows of every step and
+    of its encode, the more of a guided pair's, and a plan without one
+    prices the family's most."""
+    import mlx.core as mx
+
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.registry import get_family
+
+    row = memfit.PEAKS["flux3_klein"]
+    dit = SimpleNamespace(act_dtype=mx.bfloat16, cfg=SimpleNamespace(patch=1))
+    pipe = api.ImagePipeline(dit=dit, family=get_family("flux3_klein"),
+                             variant="distilled")
+    kw = dict(height=1024, width=768, budget=BUDGET_128, overcommit=False)
+
+    def cond(rows):
+        return Conditioning(mx.zeros((rows, 4)))
+
+    def step(rows, conds=1):
+        return row.step.bytes(rows * row.width * 2, conds)
+
+    image = 64 * 48
+    p = api.plan_request(pipe, conds=cond(80), cfg=1.0, **kw)
+    assert p.terms["step_peak"] == step(image + 80)
+    assert p.terms["encode_peak"] == int(
+        row.encode_base + 80 * row.encode_row_bytes * memfit.ENCODE_LIVE)
+    p = api.plan_request(pipe, conds=[cond(160), cond(80)], cfg=3.5, **kw)
+    assert p.rows == 2 and p.terms["step_peak"] == step(image + 160, 2)
+    assert api.plan_request(pipe, cfg=1.0, **kw).terms[
+        "step_peak"] == step(image + 4096)
+    p = api.plan_request(pipe, conds=cond(80), cfg=1.0, caption_tokens=640,
+                         **kw)
+    assert p.terms["step_peak"] == step(image + 640)
+
+
+SHORT = ("z_image", "krea2", "qwen_image21", "flux3_klein")
+
+
+def _short_cells(family: str) -> list[dict]:
+    """The measured cells of a short prompt on ``family``: the size, the
+    text rows of each conditioning, its references, and the GiB of the
+    largest step and of a prefill alone where one was read."""
+    def cell(h, w, text, gib, refs=0, px=0, guided=False, prefill=None,
+             state=None):
+        return dict(height=h, width=w, text=text, refs=refs, ref_px=px,
+                    guided=guided, gib=gib, prefill=prefill, state=state)
+
+    if family == "z_image":
+        # Every cell but the one of 4608 rows ran a caption of at most 32
+        # tokens.
+        return [cell(s, s, 22, MEASURED_STEP[rows])
+                for s, rows in ((256, 288), (512, 1056), (1024, 4128))]
+    if family == "qwen_image21":
+        out = []
+        for c in _qwen_cells():
+            text = c["prefix"] - c["refs"] * (c["ref_px"] // 16) ** 2
+            if text != 36:
+                continue
+            side = math.isqrt(c["image"]) * 16
+            out.append(cell(c.get("height", side), c.get("width", side), text,
+                            max(c["steps_gib"]), c["refs"], c["ref_px"],
+                            c["guided"], c["prefill_gib"], c["state_bytes"]))
+        return out
+    path, short = {"krea2": (KREA2_CELLS, 36),
+                   "flux3_klein": (FLUX3_CELLS, 80)}[family]
+    return [cell(c["size"], c["size"], c["text_rows"], max(c["steps_gib"]),
+                 c.get("refs", 0), c.get("ref_px", 0), c["guided"])
+            for c in json.loads(path.read_text())["cells"]
+            if c["text_rows"] == short]
+
+
+def _short_plan(family: str, c: dict) -> memfit.MemoryPlan:
+    """The plan of the cell's request on ``family`` from conditionings of
+    its text rows, as a request plans after its encode."""
+    import mlx.core as mx
+
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.registry import get_family
+
+    fam = get_family(family)
+    scale = int(fam.constants.values["vae_scale_factor"])
+    dit = SimpleNamespace(act_dtype=mx.bfloat16, cfg=SimpleNamespace(
+        patch=memfit.PEAKS[family].token_px // scale))
+    pipe = api.ImagePipeline(dit=dit, family=fam, variant="")
+    refs = tuple(SimpleNamespace(height=c["ref_px"], width=c["ref_px"],
+                                 sha256=str(i)) for i in range(c["refs"]))
+    conds = [Conditioning(mx.zeros((c["text"], 4)), refs=refs)
+             for _ in range(2 if c["guided"] else 1)]
+    return api.plan_request(pipe, height=c["height"], width=c["width"],
+                            cfg=3.5 if c["guided"] else 1.0, conds=conds,
+                            budget=BUDGET_128, overcommit=False)
+
+
+def _short_room(family: str, c: dict) -> float:
+    """Bytes the plan of the cell's request holds over its largest step
+    and over its prefill: its prefix states and its step term."""
+    p = _short_plan(family, c)
+    if c["state"] is not None:
+        assert p.terms["prefix_cache"] == (2 if c["guided"] else 1) * c[
+            "state"]
+    held = p.terms["prefix_cache"] + p.terms["step_peak"]
+    return held - max(c["gib"], c["prefill"] or 0) * GiB
+
+
+@pytest.mark.parametrize("family", SHORT)
+def test_a_short_prompt_plan_covers_every_measured_cell(family):
+    """A request plan made from the conditionings of a short prompt holds
+    ROOM above every measured cell of that prompt. Z-Image's plan prices
+    the most caption rows, since at its own rows it holds less than
+    ROOM."""
+    row = memfit.PEAKS[family]
+    cells = _short_cells(family)
+    assert len(cells) == {"z_image": 3, "krea2": 3, "qwen_image21": 79,
+                          "flux3_klein": 13}[family]
+    room = [_short_room(family, c) for c in cells]
+
+    def formula(c, caption):
+        rows = memfit.image_rows(row, c["height"], c["width"], caption)
+        if row.ref_token_px:
+            rows += c["refs"] * (c["ref_px"] // row.ref_token_px) ** 2
+        return rows * row.width * 2
+
+    if family == "z_image":
+        assert not memfit.prices_prompt(family)
+        for c in cells:
+            assert _short_plan(family, c).terms["step_peak"] == \
+                row.step.bytes(formula(c, None))
+        own = [row.step.bytes(formula(c, c["text"])) - c["gib"] * GiB
+               for c in cells]
+        assert min(own) < ROOM
+    else:
+        assert memfit.prices_prompt(family)
+        # A step that joins the text rows is priced at the cell's own.
+        for c in cells if row.caption_rows else ():
+            assert _short_plan(family, c).terms["step_peak"] == \
+                row.step.bytes(formula(c, c["text"]),
+                               2 if c["guided"] else 1)
+    assert min(room) >= ROOM
+
+
+def test_the_flux3_encode_term_covers_every_measured_encode():
+    row = memfit.PEAKS["flux3_klein"]
+    encodes = json.loads(FLUX3_CELLS.read_text())["encode"]
+    assert [e["rows"] for e in encodes] == [80, 640, 2080, 4096]
+    kw = dict(family="flux3_klein", height=512, width=512,
+              budget=BUDGET_128, overcommit=False)
+    room = []
+    for e in encodes:
+        p = plan_memory(0, ENCODER, 0, caption_tokens=e["rows"], **kw)
+        assert p.terms["encode_peak"] == int(
+            row.encode_base
+            + e["rows"] * row.encode_row_bytes * memfit.ENCODE_LIVE)
+        room.append(p.terms["encode_peak"] - e["gib"] * GiB)
+    assert min(room) >= ROOM
+    # The plan of an unknown prompt prices the most rows, under 2.5 GiB,
+    # where Krea 2's rows alone would price 7.1 GiB.
+    p = plan_memory(0, ENCODER, 0, **kw)
+    assert p.terms["encode_peak"] == int(
+        row.encode_base + 4096 * row.encode_row_bytes * memfit.ENCODE_LIVE)
+    assert p.terms["encode_peak"] < 2.5 * GiB
+    assert 4096 * memfit.PEAKS["krea2"].encode_row_bytes \
+        * memfit.ENCODE_LIVE > 7 * GiB
+    # Without the base the shortest prompt is priced under its reading.
+    assert 80 * row.encode_row_bytes * memfit.ENCODE_LIVE < \
+        encodes[0]["gib"] * GiB
 
 
 def test_a_thinner_qwen_row_misses_a_measured_cell():

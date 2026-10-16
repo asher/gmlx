@@ -5,11 +5,15 @@ VAE, read from a GGUF packed from the oracle's safetensors when one is
 found, else from that safetensors file. The fp32 decode must stay within
 the manifest's max abs and the bf16 decode above its PSNR, both against
 the oracle's fp32 decode. Decodes run on both conv paths, and the gates
-hold the default path. The encoder mean is held to the calibrated max abs
-in fp32 and relative L2 in bf16. A tiled bf16 decode at the largest size
-must stay above the calibrated bf16 decode PSNR of that size. A tiled
-bf16 encode at that size stays within 0.05 relative L2 of the whole encode,
-and its round trip holds at least 50 dB PSNR against the whole round trip.
+hold the default path. Each decode is forced whole or in tiles, so a gate
+reads the pass its tolerance was set on. The automatic choice tiles a
+decode that does not fit, and a tiled fp32 decode at 1024 reads 2.0e-2
+max abs against the 1e-3 gate of the whole decode. The encoder mean is
+held to the calibrated max abs in fp32 and relative L2 in bf16. A tiled
+bf16 decode at the largest size must stay above the calibrated bf16
+decode PSNR of that size. A tiled bf16 encode at that size stays within
+0.05 relative L2 of the whole encode, and its round trip holds at least
+50 dB PSNR against the whole round trip.
 On the oracle's synthetic 1024 image the bf16 VAE measured 0.0307 and
 55.44 dB; a natural 1024 image measured 0.0103 and 53.46 dB.
 
@@ -31,7 +35,10 @@ import pytest
 from image_dir import sha256, vae_files
 from oracle_fixture import fixture, fx
 
-pytestmark = pytest.mark.integration
+# A Mac of 24 GB: a whole fp32 decode at 1024 pixels is priced at 8.45 GiB
+# on the default conv path and 11.55 GiB on Winograd, more than a 16 GB
+# Mac has free (tests/host_box.py).
+pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
 
 NAME = "check5_z_image_vae"
 FAMILY = "z_image"
@@ -131,7 +138,7 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
     for conv in CONV_PATHS:
         vae = vaes("fp32", conv)
         for s in _sizes(m):
-            got = _decode(vae, arrays[f"latents_{s}"])
+            got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
             ref = arrays[f"decoded_{s}"]
             err = fx.max_abs(got, ref)
             tol = m["tolerances"]["sizes"][s]["decode_fp32_max_abs"]
@@ -154,7 +161,7 @@ def test_bf16_decode_psnr(check5, vaes):
     for conv in CONV_PATHS:
         vae = vaes("bf16", conv)
         for s in _sizes(m):
-            got = _decode(vae, arrays[f"latents_{s}"])
+            got = _decode(vae, arrays[f"latents_{s}"], tiled=False)
             ref = arrays[f"decoded_{s}"]
             db = fx.psnr(to_unit(got), to_unit(ref), 1.0)
             tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
@@ -218,7 +225,8 @@ def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
     tiled = _decode(vae, lat, tiled=True)
     ref = arrays[f"decoded_{s}"]
     db = fx.psnr(to_unit(tiled), to_unit(ref), 1.0)
-    whole = fx.psnr(to_unit(_decode(vae, lat)), to_unit(ref), 1.0)
+    whole = fx.psnr(to_unit(_decode(vae, lat, tiled=False)), to_unit(ref),
+                    1.0)
     tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
     print(f"[check5] {s} bf16 tiled decode PSNR {db:.2f} dB against "
           f"{whole:.2f} dB whole, tolerance {tol:.2f} dB")

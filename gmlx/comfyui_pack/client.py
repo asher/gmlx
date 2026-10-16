@@ -552,8 +552,14 @@ class StepClient:
             self.known_tensors.add(h)
         return out, fields
 
-    def step(self, x: torch.Tensor, timestep: torch.Tensor, fields: dict, on_interrupt=None):
-        out, _, h = self.call_tensors("/step", {"x": x, "timestep": timestep}, fields,
+    def step(self, x: torch.Tensor, timestep: torch.Tensor, fields: dict, on_interrupt=None,
+             sample_sigmas: torch.Tensor | None = None):
+        """The DiT output for ``x``; ``sample_sigmas`` is the sampler's
+        schedule, which a flow map DiT reads its target times from."""
+        tensors = {"x": x, "timestep": timestep}
+        if sample_sigmas is not None:
+            tensors["sample_sigmas"] = sample_sigmas
+        out, _, h = self.call_tensors("/step", tensors, fields,
                                       what="the step", on_interrupt=on_interrupt)
         self.stats["steps"] += 1
         return out["out"], h

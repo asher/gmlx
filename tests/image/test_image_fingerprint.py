@@ -26,9 +26,10 @@ def _refused(view, **kw) -> str:
 
 def test_families_sort_by_order_and_name():
     assert [f.name for f in families()] == ["z_image", "krea2",
-                                            "qwen_image21"]
+                                            "qwen_image21", "flux3_klein"]
     assert get_family("z_image").title == "Z-Image"
-    with pytest.raises(ValueError, match="known: z_image, krea2, qwen_image21"):
+    with pytest.raises(ValueError, match="known: z_image, krea2, qwen_image21, "
+                                         "flux3_klein"):
         get_family("flux")
     assert is_image_arch("lumina2") and is_image_arch("qwen_image")
     assert is_image_arch("krea2")
@@ -278,10 +279,14 @@ def _bfl(txt_in: tuple, img_in: tuple, *extra: str) -> fp.HeaderView:
 
 # Files whose converters write flux or pig, and the name each refusal gives.
 _SHARED_LABEL_FILES = {
-    "FLUX.1": (lambda: _bfl((4096, 3072), (64, 3072)), "a FLUX GGUF"),
+    "FLUX.1": (lambda: _bfl((4096, 3072), (64, 3072),
+                            "double_blocks.0.img_mod.lin.weight"),
+               "a FLUX.1 GGUF"),
+    # The FLUX.1 block names with no modulation of the FLUX.1 layout.
+    "FLUX, unknown": (lambda: _bfl((4096, 3072), (64, 3072)), "a FLUX GGUF"),
     "FLUX.2 klein": (lambda: _bfl(
         (7680, 3072), (128, 3072), "double_stream_modulation_img.lin.weight",
-        "single_stream_modulation.lin.weight"), "a FLUX GGUF"),
+        "single_stream_modulation.lin.weight"), "a FLUX.2 klein 4B GGUF"),
     # LongCat-Image as ComfyUI stores it: the FLUX.1 block names, with the
     # text width of Qwen2.5-VL-7B.
     "LongCat-Image": (lambda: _bfl((3584, 3072), (64, 3072)), "a FLUX GGUF"),
@@ -496,7 +501,8 @@ def test_the_real_file_lookup_hides_only_a_refusal(tmp_path, monkeypatch):
     """image_dits lists the files the fingerprint takes for a family. A
     refused file is left out, and a fingerprint or a scan that fails any
     other way raises instead of leaving the file out, which would skip
-    every row on the real file."""
+    every row on the real file. A directory whose name ends in .gguf is
+    no file, and is passed over."""
     from image_fixtures import image_dits
 
     from gmlx.load import headerscan
@@ -510,6 +516,7 @@ def test_the_real_file_lookup_hides_only_a_refusal(tmp_path, monkeypatch):
         d = tmp_path / name
         d.mkdir()
         (d / "a.gguf").write_bytes(b"x")
+        (d / "b.gguf").mkdir()
         return d
 
     assert image_dits(root("taken"), "qwen_image21") == [

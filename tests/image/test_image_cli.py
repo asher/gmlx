@@ -95,7 +95,8 @@ def env(tmp_path, monkeypatch):
         "d": SimpleNamespace(shape=(4,), codec="F32")})
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, **k: SimpleNamespace(family=fam, view=view,
-                                                  variant=state.variant))
+                                                  variant=state.variant,
+                                                  config={}))
     monkeypatch.setattr(image_preflight, "check",
                         lambda *a, **k: state.checks.append(k)
                         or state.checked)
@@ -474,7 +475,8 @@ def test_a_krea_2_file_of_unknown_weights_runs_under_a_variant_by_name(
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, variant=None: asked.append(variant) or
                         SimpleNamespace(family=k2, view=SimpleNamespace(
-                            tensors={}), variant=variant or "unknown"))
+                            tensors={}), variant=variant or "unknown",
+                            config={}))
     out = str(tmp_path / "a.png")
     args = ["--prompt", "p", "--size", "32x32", "--output", out]
     assert umbrella_main(env.base + args) == 1
@@ -489,6 +491,31 @@ def test_a_krea_2_file_of_unknown_weights_runs_under_a_variant_by_name(
     assert umbrella_main(["image", "generate", "k2", "--config", str(cfg)]
                          + args) == 0
     assert asked == [None, "turbo", "turbo"]
+
+
+@pytest.mark.parametrize("flags, text", [
+    (["--guidance", "3.5"], "samples without guidance: drop cfg 3.5"),
+    (["--sampler", "uni_pc_bh2"], "with euler only, not uni_pc_bh2")],
+    ids=["guidance", "sampler"])
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_a_flow_map_refuses_guidance_before_the_preflight_and_the_loads(
+        env, tmp_path, monkeypatch, capsys, flags, text, command):
+    """The header of a FLUX.3 klein distilled DiT says it is a flow map, so
+    guidance or another sampler is refused before the memory preflight
+    and before any file loads."""
+    flux = get_family("flux3_klein")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=flux, view=SimpleNamespace(tensors={}),
+                            variant="distilled", config={"flow_map": True}))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--size", "32x32", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:] + ["--sizes", "32x32"]
+    assert umbrella_main(args + flags) == 1
+    assert text in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
 
 
 @pytest.mark.parametrize("flags, code, text", [
@@ -814,6 +841,62 @@ def test_the_preflight_stages_the_load_when_no_other_lever_fits(
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 12 << 30)
     whole = pf.check("d", "e", "v", **kw)
     assert whole.fits and not whole.staged_load and not whole.levers
+
+
+def test_the_preflight_prices_the_rows_a_prompt_can_give(monkeypatch):
+    """Before the encoder loads, the bytes of a rendered prompt bound its
+    token ids. A short FLUX.3 klein prompt is priced at 80 rows, which on
+    a 16 GB Mac at 1024 fits without the staged load that the most rows,
+    4096, take, and a long one at the most."""
+    from gmlx.image import memfit
+    from gmlx.image.text_encoder import encoder_spec, rows_at_most
+    from gmlx.serve import capacity
+
+    pf = image_preflight
+    fam = get_family("flux3_klein")
+    spec = encoder_spec(fam)
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
+        family=fam, variant="distilled"))
+    # The Q4_K_M DiT, the Qwen3-VL-4B Q8_0 encoder and the FLUX.2 VAE.
+    sizes = {"dit": 3_371_504_288, "encoder": 4_280_406_816,
+             "vae": 336_213_556}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
+    monkeypatch.setattr(pf, "load_transient", lambda e, v, m: 200 << 20)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: 17_179_869_184 - 8e9)
+    short, long = "a red bicycle on a brick wall", "a red bicycle " * 400
+    assert rows_at_most(spec, short) == 80
+    assert rows_at_most(spec, long) == 4096
+    kw = dict(height=1024, width=1024, cfg=None)
+    most = pf.check("d", "e", "v", **kw)
+    assert most.fits and most.staged_load
+    plan = pf.check("d", "e", "v", prompts=[short], **kw)
+    assert plan.fits and not plan.staged_load
+    want = memfit.plan_memory(
+        sizes["dit"], sizes["encoder"], sizes["vae"], family="flux3_klein",
+        height=1024, width=1024, cfg=1.0, caption_tokens=80,
+        budget=1e12, overcommit=False)
+    for k in ("step_peak", "encode_peak"):
+        assert plan.terms[k] == want.terms[k] < most.terms[k], k
+    over = pf.check("d", "e", "v", prompts=[short, long], **kw)
+    assert over.terms["step_peak"] == most.terms["step_peak"]
+    # An edit whose encoder reads the images passes no prompts, and is
+    # priced at the most rows beside the tokens of its reference.
+    row = memfit.PEAKS["flux3_klein"]
+    edit = pf.check("d", "e", "v", refs=[(1024, 1024)], **kw)
+    assert edit.terms["step_peak"] == row.step.bytes(
+        (4096 + 4096 + 4096) * row.width * 2)
+    # Z-Image prices the most caption rows whatever the prompt.
+    z = get_family("z_image")
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
+        family=z, variant="turbo"))
+    assert rows_at_most(encoder_spec(z), short) < 512
+    for k in ("step_peak", "encode_peak"):
+        assert pf.check("d", "e", "v", prompts=[short], **kw).terms[k] == \
+            pf.check("d", "e", "v", **kw).terms[k], k
 
 
 class _TinyEncoder(_OwnedEncoder):
@@ -1317,17 +1400,15 @@ def test_the_adapter_flag_completes_as_a_file():
 
 # Reference images.
 
-@pytest.fixture
-def edit(env, monkeypatch, tmp_path):
-    """The env on a family that takes reference images: the toy pipeline
-    under the reference rule of Qwen-Image 2.1. The encoder and the VAE
-    of the references are replaced, and their calls are kept."""
+def _edit_env(env, monkeypatch, tmp_path, parts):
+    """The env on a family that takes reference images by ``parts``. The
+    encoder and the VAE of the references are replaced, and their calls
+    are kept."""
     import dataclasses
 
     from PIL import Image
 
-    fam = dataclasses.replace(get_family("z_image"),
-                              edit=get_family("qwen_image21").edit)
+    fam = dataclasses.replace(get_family("z_image"), edit=parts)
     state = env
     state.calls, state.loads = [], []
 
@@ -1352,7 +1433,8 @@ def edit(env, monkeypatch, tmp_path):
 
     def encode_references(pipe, cond, *, plan=None):
         state.calls.append(("vae", cond.refs, plan, pipe.encoder.released))
-        return cond
+        # The toy DiT reads no references: the text's conditioning goes on.
+        return dataclasses.replace(cond, refs=())
 
     monkeypatch.setattr(api, "load", load)
     monkeypatch.setattr(api, "encode_text", encode_text)
@@ -1360,7 +1442,8 @@ def edit(env, monkeypatch, tmp_path):
     view = image_preflight.identify_dit("x").view
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, **k: SimpleNamespace(family=fam, view=view,
-                                                  variant=state.variant))
+                                                  variant=state.variant,
+                                                  config={}))
     monkeypatch.setattr(os, "environ", {
         k: v for k, v in os.environ.items() if k != "MLX_ENABLE_TF32"})
     rng = np.random.default_rng(0)
@@ -1374,6 +1457,22 @@ def edit(env, monkeypatch, tmp_path):
     mm.write_bytes(b"x")
     state.mmproj = str(mm)
     return state
+
+
+@pytest.fixture
+def edit(env, monkeypatch, tmp_path):
+    """The toy pipeline under the reference rule of Qwen-Image 2.1."""
+    return _edit_env(env, monkeypatch, tmp_path,
+                     get_family("qwen_image21").edit)
+
+
+@pytest.fixture
+def flux3_edit(env, monkeypatch, tmp_path):
+    """The toy pipeline under the reference rules of FLUX.3 klein, which
+    prepares the references of a request together and whose encoder
+    reads the prompt alone."""
+    return _edit_env(env, monkeypatch, tmp_path,
+                     get_family("flux3_klein").edit)
 
 
 def test_references_reach_the_encoder_in_order_and_the_vae_after_it(
@@ -1493,12 +1592,124 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
     view = image_preflight.identify_dit("x").view
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, **k: SimpleNamespace(family=plain, view=view,
-                                                  variant="turbo"))
+                                                  variant="turbo", config={}))
     assert umbrella_main(base + ref + mm) == 2
     assert "--ref: Z-Image takes no reference images" in \
         capsys.readouterr().err
     # All refused before any model loads.
     assert edit.pipes == [] and edit.loads == []
+
+
+@pytest.mark.parametrize("rules", ["qwen_image21", "flux3_klein"])
+def test_an_edit_prices_its_prompts_when_the_encoder_reads_them_alone(
+        env, monkeypatch, tmp_path, rules):
+    """The fit check before the load is given the prompts of an edit whose
+    encoder reads them alone, and none for an encoder that reads the
+    reference images with them, which is priced at the most rows."""
+    parts = get_family(rules).edit
+    e = _edit_env(env, monkeypatch, tmp_path, parts)
+    assert umbrella_main(e.base + [
+        "--prompt", "swap them", "--size", "32x32", "--seed", "3",
+        "--guidance", "3", "--negative-prompt", "blurry", "--ref",
+        e.refs[0], "--encoder-mmproj", e.mmproj,
+        "--output", str(tmp_path / "o.png")]) == 0
+    assert e.checks[0]["prompts"] == (
+        ["swap them", "blurry"] if parts.text_only else ())
+
+
+def test_one_flux3_reference_sizes_the_request_and_crops_its_image(
+        flux3_edit, tmp_path, capsys):
+    from PIL import Image
+
+    lat, out = tmp_path / "lat.npz", tmp_path / "o.png"
+    assert umbrella_main(flux3_edit.base + [
+        "--prompt", "p", "--seed", "3", "--ref", flux3_edit.refs[0],
+        "--encoder-mmproj", flux3_edit.mmproj, "--output", str(out),
+        "--save-latent", str(lat), "--json"]) == 0
+    got = capsys.readouterr()
+    rec = json.loads(got.out)
+    # The encoder reads the prompt alone: no vision tower loads.
+    assert flux3_edit.loads == [None] and "mmproj" not in rec["model"]
+    assert "--encoder-mmproj is unused, since the Z-Image encoder reads " \
+        "the prompt alone" in got.err
+    (ref,) = flux3_edit.calls[0][2]
+    # 300 x 260 pixels on a canvas of 304 x 272, padded by reflection.
+    assert (ref.width, ref.height) == (304, 272)
+    assert flux3_edit.checks[0]["refs"] == [(272, 304)]
+    assert (flux3_edit.checks[0]["width"],
+            flux3_edit.checks[0]["height"]) == (304, 272)
+    # The size written, the canvas it was sampled on, and the box in it.
+    assert rec["settings"]["size"] == "300x260"
+    assert rec["settings"]["canvas"] == "304x272"
+    assert rec["settings"]["crop"] == [2, 6, 302, 266]
+    x = np.load(lat)["latents"]
+    assert x.shape == (1, 4, 34, 38)
+    pipe = flux3_edit.pipes[0]
+    whole = cmd.to_uint8(api.vae_decode(pipe, mx.array(x)))
+    with Image.open(out) as im:
+        assert im.size == (300, 260)
+        meta = json.loads(im.text["gmlx"])
+        assert (meta["size"], meta["canvas"], meta["crop"]) == (
+            "300x260", "304x272", [2, 6, 302, 266])
+        assert np.array_equal(np.asarray(im), whole[6:266, 2:302])
+
+
+def test_a_flux3_request_with_a_size_keeps_the_whole_image(flux3_edit,
+                                                           tmp_path,
+                                                           capsys):
+    from PIL import Image
+
+    out = tmp_path / "o.png"
+    assert umbrella_main(flux3_edit.base + [
+        "--prompt", "p", "--size", "64x48", "--ref", flux3_edit.refs[0],
+        "--output", str(out), "--json"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["settings"]["size"] == "64x48"
+    assert not {"crop", "canvas"} & set(rec["settings"])
+    with Image.open(out) as im:
+        assert im.size == (64, 48)
+
+
+def test_several_flux3_references_take_the_size_of_the_first(flux3_edit,
+                                                             tmp_path,
+                                                             capsys):
+    from PIL import Image
+
+    out = tmp_path / "o.png"
+    assert umbrella_main(flux3_edit.base + [
+        "--prompt", "p", "--ref", flux3_edit.refs[0], "--ref",
+        flux3_edit.refs[1], "--output", str(out), "--json"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    refs = flux3_edit.calls[0][2]
+    # Each under one MiB, cropped to the 16 pixel grid, its alpha dropped.
+    assert [(r.width, r.height) for r in refs] == [(288, 256), (192, 320)]
+    assert all(bool((r.pixels[..., 3] == 255).all()) for r in refs)
+    assert rec["settings"]["size"] == "288x256"
+    assert "crop" not in rec["settings"]
+    assert [r["size"] for r in rec["settings"]["refs"]] == ["288x256",
+                                                            "192x320"]
+    with Image.open(out) as im:
+        assert im.size == (288, 256)
+
+
+def test_flux3_reference_refusals(flux3_edit, tmp_path, capsys):
+    from PIL import Image
+
+    base = flux3_edit.base + ["--prompt", "p"]
+    ref = ["--ref", flux3_edit.refs[0]]
+    tiny = tmp_path / "tiny.png"
+    Image.fromarray(np.zeros((8, 40, 3), np.uint8)).save(tiny)
+    for flags, text in (
+            (ref + ["--ref-size", "512"],
+             "--ref-size: Z-Image sizes its references by its own rule"),
+            (ref * 11, "--ref: Z-Image takes at most 10 reference images, "
+                       "and the request has 11"),
+            (ref + ["--ref", str(tiny)],
+             f"--ref {tiny}: a reference of 40x8 pixels has no 16 x 16 "
+             "pixel tile to keep")):
+        assert umbrella_main(base + flags) == 2, flags
+        assert text in capsys.readouterr().err
+    assert flux3_edit.pipes == [] and flux3_edit.loads == []
 
 
 def test_the_reference_flags_complete_as_files():

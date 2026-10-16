@@ -199,17 +199,22 @@ class StepsClient:
         return tid
 
     def step(self, model: str, run: str | None, x, timestep, rows: list,
-             patch_table: str | None = None) -> np.ndarray:
+             patch_table: str | None = None,
+             sample_sigmas=None) -> np.ndarray:
         """The model output for latents ``x`` (B, C, h, w) at ``timestep``
-        under convention comfy, one row dict per batch row. Records the
-        times of the call."""
+        under convention comfy, one row dict per batch row.
+        ``sample_sigmas`` is the schedule the sampler runs on, which a flow
+        map DiT reads its target times from. Records the times of the
+        call."""
         t = np.asarray(timestep, np.float32).reshape(-1)
         fields = {"model": model, "run": run, "convention": "comfy",
                   "patch_table": patch_table, "rows": rows}
+        tensors = {"x": np.ascontiguousarray(x, np.float32), "timestep": t}
+        if sample_sigmas is not None:
+            tensors["sample_sigmas"] = np.asarray(sample_sigmas,
+                                                  np.float32).reshape(-1)
         t0 = self.clock()
-        got, _f, headers = self.container(
-            "step", {"x": np.ascontiguousarray(x, np.float32),
-                     "timestep": t}, fields)
+        got, _f, headers = self.container("step", tensors, fields)
         wall = (self.clock() - t0) * 1000
         self.records.append(StepRecord(
             wall, float(headers.get("x-gmlx-forward-ms", "nan")),
@@ -226,8 +231,9 @@ class StepsClient:
         the negative rows after the positive ones and the client guides.
         ``update(x, v, i)`` moves ``x`` from ``sigmas[i]`` to
         ``sigmas[i + 1]``; the default is Euler in float32, as
-        ``gmlx.image.samplers.Euler`` computes it. A 409 re-uploads
-        nothing by itself: the caller uploads what it names and retries."""
+        ``gmlx.image.samplers.Euler`` computes it. Each request carries the
+        schedule, as ComfyUI's model options do. A 409 re-uploads nothing
+        by itself: the caller uploads what it names and retries."""
         s = np.asarray(sigmas, np.float32)
         x = np.asarray(noise, np.float32)
         b = x.shape[0]
@@ -238,7 +244,8 @@ class StepsClient:
         for i in range(len(s) - 1):
             xin = np.concatenate([x, x]) if guided else x
             ts = np.full((len(step_rows),), s[i], np.float32)
-            out = self.step(model, run, xin, ts, step_rows, patch_table)
+            out = self.step(model, run, xin, ts, step_rows, patch_table,
+                            sample_sigmas=s)
             v = guide(out[:b], out[b:], cfg) if guided else out
             x = update(x, v, i) if update is not None else euler(x, v, s, i)
             if on_step is not None:

@@ -24,6 +24,20 @@ def test_family_names_match_on_letters_and_digits():
     assert not image_service.family_matches("z-image-base", z, "turbo")
 
 
+@pytest.mark.parametrize("value, name", [
+    ("flux-3-klein", "flux3_klein"), ("FLUX.3 klein base", "flux3_klein"),
+    ("qwen-image-2.1-turbo", "qwen_image21"), ("z-image-turbo", "z_image"),
+    ("krea-2", "krea2"), ("flux-4", None), ("z-image-2.1", None),
+])
+def test_a_family_value_names_the_family_the_server_matches(value, name):
+    """``family_named`` reads a config value as the server's check does,
+    under every variant a family runs."""
+    from gmlx.image.registry import family_named
+
+    fam = family_named(value)
+    assert (fam.name if fam else None) == name
+
+
 @pytest.mark.parametrize("size,want", [(None, (1024, 1024)),
                                        ("768x512", (768, 512))])
 def test_default_size_takes_the_entry_then_the_family(size, want):
@@ -140,6 +154,11 @@ def test_quality_steps_come_from_the_family_table():
     assert [image_service.quality_steps(q, "turbo", lv)
             for lv in ("low", "medium", "high")] == [8, 8, 8]
     assert image_service.quality_steps(q, "unknown", "low") == 16
+    # FLUX.3 klein has no table, so each level runs the variant's steps.
+    f = get_family("flux3_klein")
+    assert [image_service.quality_steps(f, v, lv)
+            for v in ("distilled", "base")
+            for lv in ("low", "medium", "high")] == [None] * 6
 
 
 GB = 1024**3
@@ -593,8 +612,11 @@ def staged_stubs(monkeypatch):
     monkeypatch.setattr(api, "encode_text", encode_text)
     monkeypatch.setattr(api, "conditioning_cached",
                         lambda pipe, p, images=(): p in cached)
+    # A family whose encoder reads its references through the tower.
     pipe = SimpleNamespace(dit="DIT", vae="VAE", encoder=None,
-                           family=SimpleNamespace(name="z_image"))
+                           family=SimpleNamespace(
+                               name="z_image",
+                               edit=SimpleNamespace(text_only=False)))
     served = image_service.ServedImage(
         pipe=pipe, spec=_spec(encoder_mmproj="/tower.gguf"),
         plan=_plan(staged=True, keep_encoder=False))
@@ -615,6 +637,11 @@ def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
     del st.events[:]
     image_service._encode(st.served, "b", "a", ("REF",))
     assert st.events[:2] == ["drop", ("encoder", "/tower.gguf")]
+    # An encoder that reads the prompt alone loads without it.
+    del st.events[:]
+    st.pipe.family.edit.text_only = True
+    image_service._encode(st.served, "c", None, ("REF",))
+    assert st.events[:2] == ["drop", ("encoder", None)]
 
 
 def test_a_failed_staged_encode_leaves_the_dit_loaded(staged_stubs):
@@ -741,16 +768,17 @@ def _edit_served(family: str, mmproj=True):
 
     fam = get_family(family)
     return SimpleNamespace(
-        pipe=SimpleNamespace(family=fam, variant="base"),
+        pipe=SimpleNamespace(family=fam, variant="base", size_multiple=16),
         spec=SimpleNamespace(id="m", encoder_model=None,
-                             encoder_mmproj="/mm.gguf" if mmproj else None))
+                             encoder_mmproj="/mm.gguf" if mmproj else None),
+        plan=SimpleNamespace(size=(1024, 1024)))
 
 
-def _edit_req(n: int):
+def _edit_req(n: int, shape=(32, 32), route="edits", **fields):
     import numpy as np
 
-    req = image_service.parse_request("edits", {"prompt": "x"})
-    req.images = [np.zeros((32, 32, 3), np.uint8)] * n
+    req = image_service.parse_request(route, {"prompt": "x", **fields})
+    req.images = [np.zeros(shape + (3,), np.uint8)] * n
     return req
 
 
@@ -770,6 +798,132 @@ def test_z_image_edits_one_image_at_a_time():
     with pytest.raises(image_service.ImageRequestError,
                        match="Z-Image edits one image at a time"):
         image_service.check_family(_edit_req(2), served)
+
+
+def test_flux3_klein_edits_need_no_vision_tower():
+    """FLUX.3 klein's encoder reads the prompt alone, so its edits run on
+    an entry without the tower, where Qwen-Image's are refused."""
+    from gmlx.image.registry import get_family
+
+    q, f, z = (get_family(n) for n in ("qwen_image21", "flux3_klein",
+                                       "z_image"))
+    assert image_service.serves_edits(q, True)
+    assert not image_service.serves_edits(q, False)
+    assert image_service.serves_edits(f, False)
+    assert image_service.serves_edits(f, True)
+    assert not image_service.serves_edits(z, True)
+    image_service.check_family(_edit_req(1), _edit_served("flux3_klein",
+                                                          mmproj=False))
+    with pytest.raises(image_service.ImageRequestError,
+                       match="need the encoder's vision tower") as e:
+        image_service.check_family(_edit_req(1), _edit_served(
+            "qwen_image21", mmproj=False))
+    assert e.value.param == "image"
+    with pytest.raises(image_service.ImageRequestError,
+                       match="FLUX.3 klein takes at most 10 images, and the "
+                             "request has 11"):
+        image_service.check_family(_edit_req(11), _edit_served("flux3_klein"))
+
+
+@pytest.mark.parametrize("route", ["edits", "variations"])
+def test_one_flux3_reference_is_padded_and_sizes_the_request(route):
+    """One image of 100 x 60 goes on a 112 x 64 canvas, the size of a
+    request without one, and the output is cropped to the image's box."""
+    import numpy as np
+
+    served = _edit_served("flux3_klein", mmproj=False)
+    req = _edit_req(1, (60, 100), route)
+    image_service.check_family(req, served)
+    assert [(r.width, r.height) for r in req.refs] == [(112, 64)]
+    assert req.refs.crop == (6, 2, 106, 62)
+    assert image_service.target_size(req, served) == (112, 64)
+    sized = _edit_req(1, (60, 100), route, size="512x256")
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (512, 256)
+    # A mask edits the first image at its own size, on the stride.
+    req.mask = np.zeros((60, 100, 4), np.uint8)
+    assert image_service.target_size(req, served) == (96, 48)
+
+
+def test_several_flux3_references_are_cropped_and_the_first_sizes_it():
+    import numpy as np
+
+    served = _edit_served("flux3_klein", mmproj=False)
+    req = _edit_req(1)
+    req.images = [np.zeros((70, 100, 3), np.uint8),
+                  np.zeros((40, 40, 4), np.uint8)]
+    image_service.check_family(req, served)
+    assert [(r.width, r.height) for r in req.refs] == [(96, 64), (32, 32)]
+    assert req.refs.crop is None
+    assert image_service.target_size(req, served) == (96, 64)
+
+
+@pytest.mark.parametrize("width, refused", [(4096, False), (4112, True),
+                                            (20000, True)])
+def test_a_thin_first_flux3_reference_meets_the_side_limit(width, refused):
+    """Each of several references keeps its shape, so the size the first
+    gives a request without one is held to the limits of a size asked
+    for."""
+    import numpy as np
+
+    served = _edit_served("flux3_klein", mmproj=False)
+    req = _edit_req(1)
+    req.images = [np.zeros((30, width, 3), np.uint8),
+                  np.zeros((512, 512, 3), np.uint8)]
+    image_service.check_family(req, served)
+    assert (req.refs[0].width, req.refs[0].height) == (width, 16)
+    if not refused:
+        assert image_service.target_size(req, served) == (width, 16)
+        return
+    with pytest.raises(image_service.ImageRequestError,
+                       match=f"the first image sizes the request at "
+                             f"{width}x16, over the limit") as e:
+        image_service.target_size(req, served)
+    assert e.value.param == "size" and e.value.status == 400
+    sized = _edit_req(1, size="512x512")
+    sized.images = req.images
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (512, 512)
+
+
+def test_a_flux3_reference_the_rules_refuse_is_named():
+    import numpy as np
+
+    served = _edit_served("flux3_klein", mmproj=False)
+    req = _edit_req(1)
+    req.images = [np.zeros((64, 64, 3), np.uint8),
+                  np.zeros((8, 64, 3), np.uint8)]
+    with pytest.raises(image_service.ImageRequestError,
+                       match="image 2: a reference of 64x8 pixels has no "
+                             "16 x 16 pixel tile") as e:
+        image_service.check_family(req, served)
+    assert e.value.param == "image" and e.value.status == 400
+
+
+def test_the_fit_check_prices_the_flux3_references_as_prepared(monkeypatch):
+    """The memory plan reads each reference at its prepared size, and a
+    staged entry loads its encoder without a tower for them."""
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family
+
+    served, _ = _fit_served(monkeypatch, 1 << 30)
+    seen = []
+    monkeypatch.setattr(memfit, "plan_memory", lambda **k: (
+        seen.append(k) or SimpleNamespace(fits=True)))
+    served.pipe.family = get_family("flux3_klein")
+    served.pipe.variant = "distilled"
+    served.plan = SimpleNamespace(
+        keep_encoder=True, cfg=1.0, staged=True, encoder_bytes=1,
+        mmproj_bytes=5, load_parts="text", tower_parts="tower")
+    served.spec = SimpleNamespace(id="f", encoder_model=None,
+                                  encoder_mmproj=None)
+    req = _edit_req(1, (60, 100))
+    image_service.check_family(req, served)
+    image_service.fit_check(req, served, (112, 64), 1)
+    k = seen[-1]
+    assert k["ref_sizes"] == [(64, 112)]
+    assert k["mmproj"] == 0 and k["load_parts"] == "text"
+    assert k["init_image"] is False
 
 
 @pytest.mark.parametrize("aid", ["/abs/a.safetensors", "~/a.safetensors",

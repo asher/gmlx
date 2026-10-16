@@ -42,6 +42,8 @@ import numpy as np
 
 from gmlx.image import ops, pacing
 from gmlx.image.dtypes import ImageDtypeError
+from gmlx.image.ops.products import own as _own
+from gmlx.image.ops.products import precise
 
 
 @dataclass(frozen=True)
@@ -109,39 +111,6 @@ def gelu(x: mx.array) -> mx.array:
     return nn.gelu_approx(x.astype(mx.float32)).astype(x.dtype)
 
 
-_PRECISE_ROWS = 4096
-
-
-def precise(lin, x: mx.array) -> mx.array:
-    """``lin(x)`` in fp32 for the one row per sigma of the time vectors.
-    A K-quant product of a row rounds its output to bf16 whatever the
-    input dtype, which puts the time vectors past the reference's own
-    rounding. A K-quant leaf with no live adapter delta therefore runs as
-    an fp32 product on its weight dequantized a band of rows at a time;
-    any other leaf runs its own call on the fp32 row."""
-    from gmlx.image.ops.kq_routes import kquant_leaf
-
-    leaf = kquant_leaf(lin, mx.bfloat16)
-    x = x.astype(mx.float32)
-    if leaf is None:
-        return lin(x).astype(mx.float32)
-    import mlx_kquant as kq
-
-    w = leaf["weight"]
-    parts = []
-    for r in range(0, w.shape[0], _PRECISE_ROWS):
-        band = kq.dequantize(w[r:r + _PRECISE_ROWS], leaf["scales"],
-                             leaf.kquant_type, mx.float32)
-        parts.append(x @ band.T)
-        mx.eval(parts[-1])
-    y = mx.concatenate(parts, axis=-1)
-    if "bias" in leaf:
-        y = y + leaf["bias"].astype(mx.float32)
-    return y
-
-
-def _own(lin, x: mx.array) -> mx.array:
-    return lin(x)
 
 
 def rope_tables(ids: np.ndarray, axes_dims, theta: float) -> tuple:

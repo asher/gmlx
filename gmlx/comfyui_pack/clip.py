@@ -27,8 +27,9 @@ _WEIGHTED = re.compile(r"\([^()]*:\s*-?[0-9.]+\s*\)")
 
 # The families whose stock ComfyUI tokenizer encodes an empty prompt as a
 # space under prevent_empty_text: QwenImageTokenizer, and Qwen3VLTokenizer
-# under Qwen-Image 2.1 and Krea 2. ZImageTokenizer ignores the option.
-_SPACE_FOR_EMPTY = frozenset({"qwen_image", "qwen_image21", "krea2"})
+# under Qwen-Image 2.1, Krea 2 and FLUX.3. ZImageTokenizer ignores the
+# option.
+_SPACE_FOR_EMPTY = frozenset({"qwen_image", "qwen_image21", "krea2", "flux3_klein"})
 
 
 class _StubEncoder(torch.nn.Module):

@@ -90,20 +90,26 @@ def quant_cast_bytes(quant: str, size: int, family: str) -> int:
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,
-          mmproj: str | None = None, refs=(), variant: str | None = None):
+          mmproj: str | None = None, refs=(), variant: str | None = None,
+          prompts=()):
     """The memory plan of one request, or None when the check is off or
     the variant has no defaults and no cfg is given. ``adapters`` is the
     byte count of each adapter, ``init_image`` says the request encodes
     an init image of its size, and ``keep_encoder`` that the encoder is
     not released in it. ``mmproj`` is the encoder's mmproj and ``refs``
     the (height, width) in pixels of each reference image of the request.
+    ``prompts`` holds the texts of a request whose encoder reads them
+    alone, in the family's template, and prices their rows at the most
+    their bytes can give on a family whose plan prices the prompt; else
+    the rows are the family's most.
     Raises ``ImageMemoryError`` when the request cannot fit."""
     if not enabled():
         return None
     from gmlx.image import memfit
     from gmlx.image.api import _header_bytes, sampler_defaults
     from gmlx.image.dtypes import image_activation
-    from gmlx.image.text_encoder import _header_view
+    from gmlx.image.text_encoder import (_header_view, encoder_spec,
+                                         rows_at_most)
 
     ident = identify_dit(dit, variant=variant)
     fam = ident.family.name
@@ -116,12 +122,16 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     tower = None if mmproj is None else _header_view(mmproj)
     # The DiT loads after the encoder, in either order.
     cast = dit_transient(dit, act.dit)
+    caption = None
+    if prompts and memfit.prices_prompt(fam):
+        spec = encoder_spec(ident.family)
+        caption = max(rows_at_most(spec, p) for p in prompts)
     return memfit.plan_memory(
         _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
         _header_bytes(vae, "vae"), tower,
         adapters=adapters, family=fam, height=height, width=width, cfg=cfg,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
-        ref_sizes=[(int(h), int(w)) for h, w in refs],
+        caption_tokens=caption, ref_sizes=[(int(h), int(w)) for h, w in refs],
         load_peak=max(load_transient(encoder, vae, mmproj), cast),
         # Each part alone, for the staged order.
         load_parts=(load_transient(encoder, None, mmproj),

@@ -1,0 +1,190 @@
+{
+ "schema": 1,
+ "name": "check3_flux3_klein_r1_1024",
+ "check": 3,
+ "family": "flux3_klein",
+ "script": "scripts/image_oracle/check3_flux3_klein.py",
+ "argv": [
+  "check3_flux3_klein.py",
+  "--reference",
+  "src",
+  "--dit",
+  "flux3_image_klein_sd-Q4_K_M.gguf",
+  "--sizes",
+  "1024",
+  "--rows",
+  "--refs",
+  "1"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "flux3_image_klein_sd-Q4_K_M.gguf",
+   "size": 3391951648,
+   "sha256": "2e429f54f9b2f2161b3123a615167ee6137aa21f1287f426dc895bb7647af5ec"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "sigma": 1.0,
+  "target": 0.9904716610908508,
+  "step": 0,
+  "schedule": "timesteps(16, 6.93)",
+  "flow_map": true,
+  "seed": 1024,
+  "latents": "seeded normal, rounded to bf16",
+  "features": "seeded normal, std 4.0, rounded to bf16",
+  "text_rows": 80,
+  "refs": 1,
+  "ref_size": 1024,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "bf16 as the reference pipeline packs it, in both modes",
+  "reference_commit": "45e57c9fb06f9751cdced29a65c5d2171003be05",
+  "gguf_codecs": {
+   "Q4_K": 261,
+   "F32": 86,
+   "BF16": 12
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.010757375770552429,
+   "cosine": 0.9999421751429731,
+   "max_abs": 0.07612383365631104
+  },
+  "times": {
+   "fp32_s": 79.6,
+   "bf16_s": 84.0
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.021514751541104857,
+   "cosine_min": 0.9997687005718925
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the time vectors, modulations and embeddings and for the velocity"
+ },
+ "notes": [],
+ "created": "2026-10-15T20:58:21Z",
+ "npz": "check3_flux3_klein_r1_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    80,
+    20480
+   ],
+   "dtype": "float32",
+   "sha256": "8ae373574c359b583e859051a3113833f5c94e9d8e86257d9b8e91e0eeba3d50"
+  },
+  "ids.image": {
+   "shape": [
+    4096,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "915537035119feebf0d8050ff7867c9861be2849c7e19fb1a18aa4d16db97507"
+  },
+  "ids.image_cond": {
+   "shape": [
+    4096,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "6923b0f8f940a590953e1a7a491dbcb4c797f52d028c04f01fb9abeeb21c1186"
+  },
+  "ids.text": {
+   "shape": [
+    80,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "224a00ab6f99d629c82e4c0178b72cbea0b65fea84bf452e0fa0150c70f94769"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "2ce0f3a03885ff5202f83cc448e3caeafce143ff69753702eb39499c5466df80"
+  },
+  "refs.0": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "3838d8dc4ae1a4d33bd8595c6caa1c70aaf963cc8bd0137cb99570f847c1ba45"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+  },
+  "target": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9af754e75c29d68c32982161c4940b316b654d7e28f10394a3490b3f93992e8c"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "ab9963bb5f090bdbfd462806fecb4b976d805bbfb3850f2c6b8d93d79f989636"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "1d0608f67c4f5e260ac04414afb827784e2dc0acbcdee3c361c45a477e894e7b"
+  }
+ }
+}

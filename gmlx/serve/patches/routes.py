@@ -137,22 +137,27 @@ _IMAGE_IDENTITY: dict = {}
 def _image_identity(path: str, variant: str | None = None) -> tuple:
     """``(family, variant, edits)`` of a DiT from its header, under the
     entry's ``variant`` when it names one, cached on the file's size and
-    mtime; ``(None, None, False)`` for a file that does not identify."""
+    mtime. ``edits`` is whether the edits routes take its references on
+    an entry without the vision tower and with it. ``(None, None, (False,
+    False))`` for a file that does not identify."""
+    none = (None, None, (False, False))
     try:
         st = os.stat(path)
     except OSError:
-        return None, None, False
+        return none
     key = (path, variant, st.st_size, st.st_mtime_ns)
     hit = _IMAGE_IDENTITY.get(key)
     if hit is None:
         from gmlx.image.loader import identify_dit
+        from gmlx.serve.image_service import serves_edits
 
         try:
             ident = identify_dit(path, variant=variant)
             hit = (ident.family.name, ident.variant,
-                   ident.family.edit is not None)
+                   (serves_edits(ident.family, False),
+                    serves_edits(ident.family, True)))
         except Exception:  # noqa: BLE001 - a bad file is listed without them
-            hit = (None, None, False)
+            hit = none
         if len(_IMAGE_IDENTITY) > 64:
             _IMAGE_IDENTITY.clear()
         _IMAGE_IDENTITY[key] = hit
@@ -164,7 +169,8 @@ def _image_entry(iid: str, rm, *, resident: bool, pinned: bool,
     """An image model in ``/v1/models``: the keys of a chat entry without
     the context figures, plus ``image``, the family, the variant and
     ``edit``, which is true when the family takes reference images and
-    the entry has its vision tower."""
+    the entry has its vision tower, or its encoder reads the prompt
+    alone."""
     family, variant, edits = _image_identity(rm.path,
                                              getattr(rm, "variant", None))
     return {
@@ -174,7 +180,7 @@ def _image_entry(iid: str, rm, *, resident: bool, pinned: bool,
         "vlm": False, "profile": None,
         "family": family or rm.family, "default": default,
         "image": True, "variant": variant,
-        "edit": bool(edits and rm.encoder_mmproj),
+        "edit": edits[bool(rm.encoder_mmproj)],
     }
 
 

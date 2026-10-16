@@ -47,6 +47,7 @@ import mlx.nn as nn
 from gmlx.image import pacing
 
 from .conv import Conv2d
+from .flux1_ae import channels_last
 from .qwen_image21_vae import (MidBlock, Nearest2x, ResidualBlock, RMSNorm,
                                ZeroPad, clamp, crop_reach)
 
@@ -447,6 +448,12 @@ class QwenImageVAE(nn.Module):
         """VAE-space (B, h, w, C) to model-space (B, C, h, w), in float32."""
         z = z.astype(mx.float32) - mx.array(self.config.latents_mean)
         return (z / mx.array(self.config.latents_std)).transpose(0, 3, 1, 2)
+
+    def to_vae_layout(self, latents: mx.array) -> mx.array:
+        """An array in the layout of model-space latents (B, C, h, w) in
+        the layout of VAE space (B, h, w, C), in float32, with no mean or
+        deviation."""
+        return channels_last(latents, self.config.latent_channels)
 
     def encode(self, x: mx.array) -> tuple[mx.array, mx.array]:
         return self.split_moments(self.encode_tail(self.encode_head(x)))

@@ -438,12 +438,14 @@ def test_models_payload_lists_image_models_with_their_markers(
     from types import SimpleNamespace
 
     from gmlx.image import loader
+    from gmlx.image.registry import get_family
 
     files = {n: tmp_path / n for n in ("zit.gguf", "qi.gguf", "enc.gguf",
                                          "mm.gguf", "vae.gguf")}
     for f in files.values():
         f.write_bytes(b"x")
-    edit = SimpleNamespace(name="qwen_image21", edit=object())
+    edit = SimpleNamespace(name="qwen_image21",
+                           edit=get_family("qwen_image21").edit)
     plain = SimpleNamespace(name="z_image", edit=None)
     monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
         family=edit if path.endswith("qi.gguf") else plain,
@@ -528,6 +530,43 @@ def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
         (True, "krea2", "turbo", False), (True, "krea2", "unknown", False)]
 
 
+def test_models_payload_lists_flux3_klein_as_editing_without_a_tower(
+        monkeypatch, tmp_path):
+    """Both FLUX.3 klein variants by their headers, each an editing entry
+    on the encoder alone."""
+    import json
+    from pathlib import Path
+
+    from gmlx.image import fingerprint, loader
+
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "image"
+    views = {}
+    for stem, name in (("f3d", "flux3_klein_q4_k_m"),
+                       ("f3b", "flux3_klein_base_q4_k_m")):
+        d = json.loads((fixtures / f"{name}.header.json").read_text())
+        views[f"{stem}.gguf"] = fingerprint.HeaderView(
+            kv=dict(d["kv"]), tensors={n: fingerprint.Tensor(tuple(sh), c)
+                                       for n, sh, c in d["tensors"]})
+    for n in (*views, "enc.gguf", "vae.gguf"):
+        (tmp_path / n).write_bytes(b"x")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: (
+        fingerprint.identify(views[Path(path).name])))
+    sp_routes._IMAGE_IDENTITY.clear()
+    entry = {"encoder": str(tmp_path / "enc.gguf"),
+             "vae": str(tmp_path / "vae.gguf")}
+    _register({"image_models": {
+        "f3d": {"path": str(tmp_path / "f3d.gguf"), **entry},
+        "f3b": {"path": str(tmp_path / "f3b.gguf"), **entry}}})
+    _PKG._kq_residency_pool = None
+    try:
+        by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        serving.clear_resolved_models()
+    assert [(by_id[i]["family"], by_id[i]["variant"], by_id[i]["edit"])
+            for i in ("f3d", "f3b")] == [
+        ("flux3_klein", "distilled", True), ("flux3_klein", "base", True)]
+
+
 def test_snapshot_carries_the_image_section_with_image_models():
     from gmlx.serve.patches import images
 
@@ -567,19 +606,28 @@ def test_keep_and_unload_take_an_image_model(monkeypatch):
         serving.clear_resolved_models()
 
 
-@pytest.mark.parametrize("tower,edit", [(None, False), ("/mm.gguf", True)])
-def test_a_models_entry_edits_only_with_the_vision_tower(monkeypatch, tower,
-                                                         edit):
+@pytest.mark.parametrize("family,tower,edit", [
+    ("qwen_image21", None, False), ("qwen_image21", "/mm.gguf", True),
+    ("flux3_klein", None, True), ("z_image", "/mm.gguf", False)])
+def test_a_models_entry_edits_with_the_vision_tower_its_family_needs(
+        monkeypatch, tmp_path, family, tower, edit):
+    """Qwen-Image edits with its tower, FLUX.3 klein's encoder reads the
+    prompt alone, and Z-Image takes no references."""
     from types import SimpleNamespace
 
-    monkeypatch.setattr(sp_routes, "_image_identity",
-                        lambda path, variant=None: ("qwen_image21", "base",
-                                                    True))
-    rm = SimpleNamespace(path="/qi.gguf", family=None, pin=False,
+    from gmlx.image import loader
+    from gmlx.image.registry import get_family
+
+    p = tmp_path / "d.gguf"
+    p.write_bytes(b"x")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
+        SimpleNamespace(family=get_family(family), variant="base")))
+    sp_routes._IMAGE_IDENTITY.clear()
+    rm = SimpleNamespace(path=str(p), family=None, pin=False,
                          encoder_mmproj=tower)
-    entry = sp_routes._image_entry("qi", rm, resident=False, pinned=False,
+    entry = sp_routes._image_entry("m", rm, resident=False, pinned=False,
                                    default=False)
-    assert entry["edit"] is edit
+    assert entry["edit"] is edit and entry["family"] == family
 
 
 def test_image_identity_reads_the_entry_variant(monkeypatch, tmp_path):

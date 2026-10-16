@@ -1,0 +1,459 @@
+{
+ "id": "5fcf24ee-1beb-5a8d-ac3c-c2a3da007683",
+ "revision": 0,
+ "last_node_id": 11,
+ "last_link_id": 9,
+ "nodes": [
+  {
+   "id": 11,
+   "type": "Note",
+   "pos": [
+    -440,
+    80
+   ],
+   "size": [
+    400,
+    350
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "title": "gmlx nodes: install",
+   "properties": {},
+   "widgets_values": [
+    "These gmlx nodes run the image model on a gmlx server on your Mac (Apple Silicon, M3 or newer). FLUX.3 klein needs ComfyUI 0.41 or newer.\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx pull flux-3-klein\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
+   ],
+   "color": "#432",
+   "bgcolor": "#653"
+  },
+  {
+   "id": 1,
+   "type": "GmlxModelLoader",
+   "pos": [
+    0,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      3
+     ]
+    }
+   ],
+   "title": "gmlx Model Loader",
+   "properties": {
+    "Node name for S&R": "GmlxModelLoader"
+   },
+   "widgets_values": [
+    "flux-3-klein",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 2,
+   "type": "GmlxCLIPLoader",
+   "pos": [
+    0,
+    250
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      1
+     ]
+    }
+   ],
+   "title": "gmlx CLIP Loader",
+   "properties": {
+    "Node name for S&R": "GmlxCLIPLoader"
+   },
+   "widgets_values": [
+    "flux-3-klein",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 3,
+   "type": "GmlxVAELoader",
+   "pos": [
+    0,
+    420
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      8
+     ]
+    }
+   ],
+   "title": "gmlx VAE Loader",
+   "properties": {
+    "Node name for S&R": "GmlxVAELoader"
+   },
+   "widgets_values": [
+    "flux-3-klein",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 5,
+   "type": "CLIPTextEncode",
+   "pos": [
+    340,
+    80
+   ],
+   "size": [
+    400,
+    160
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      2,
+      4
+     ]
+    }
+   ],
+   "title": "Positive prompt",
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode"
+   },
+   "widgets_values": [
+    "A lighthouse on a rocky coast at dawn, waves breaking on the rocks, soft golden light, photograph"
+   ]
+  },
+  {
+   "id": 6,
+   "type": "ConditioningZeroOut",
+   "pos": [
+    340,
+    280
+   ],
+   "size": [
+    300,
+    30
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "link": 2
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      5
+     ]
+    }
+   ],
+   "title": "Negative (unused at cfg 1)",
+   "properties": {
+    "Node name for S&R": "ConditioningZeroOut"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 7,
+   "type": "EmptyFlux2LatentImage",
+   "pos": [
+    340,
+    360
+   ],
+   "size": [
+    300,
+    110
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      6
+     ]
+    }
+   ],
+   "title": "Empty latent",
+   "properties": {
+    "Node name for S&R": "EmptyFlux2LatentImage"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    1
+   ]
+  },
+  {
+   "id": 8,
+   "type": "KSampler",
+   "pos": [
+    780,
+    80
+   ],
+   "size": [
+    300,
+    270
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 3
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 4
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 5
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 6
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      7
+     ]
+    }
+   ],
+   "title": "KSampler",
+   "properties": {
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    42,
+    "fixed",
+    16,
+    1.0,
+    "euler",
+    "simple",
+    1.0
+   ]
+  },
+  {
+   "id": 9,
+   "type": "VAEDecode",
+   "pos": [
+    1120,
+    80
+   ],
+   "size": [
+    210,
+    50
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 7
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 8
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      9
+     ]
+    }
+   ],
+   "title": "VAE Decode",
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 10,
+   "type": "SaveImage",
+   "pos": [
+    1120,
+    170
+   ],
+   "size": [
+    420,
+    470
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 9
+    }
+   ],
+   "outputs": [],
+   "title": "Save Image",
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "gmlx/flux-3-klein"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   2,
+   0,
+   5,
+   0,
+   "CLIP"
+  ],
+  [
+   2,
+   5,
+   0,
+   6,
+   0,
+   "CONDITIONING"
+  ],
+  [
+   3,
+   1,
+   0,
+   8,
+   0,
+   "MODEL"
+  ],
+  [
+   4,
+   5,
+   0,
+   8,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   5,
+   6,
+   0,
+   8,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   6,
+   7,
+   0,
+   8,
+   3,
+   "LATENT"
+  ],
+  [
+   7,
+   8,
+   0,
+   9,
+   0,
+   "LATENT"
+  ],
+  [
+   8,
+   3,
+   0,
+   9,
+   1,
+   "VAE"
+  ],
+  [
+   9,
+   9,
+   0,
+   10,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.75,
+   "offset": [
+    480,
+    40
+   ]
+  }
+ },
+ "version": 0.4
+}

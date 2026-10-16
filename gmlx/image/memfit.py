@@ -114,8 +114,9 @@ class StepFit:
 # active peak is 1.05 GiB above the weights, and the rest is freed buffers
 # the cache keeps up to its bound. A line in the formula bytes through the
 # 1056 and 4128 row cells has a slope of 5.0. The slope is raised 10
-# percent and the base covers every cell.
-Z_IMAGE_STEP = StepFit(base=1.0 * GiB, k=5.5)
+# percent. A plan prices the most caption rows, and there the base leaves
+# 0.25 GiB above every cell, the one of 1056 rows the closest.
+Z_IMAGE_STEP = StepFit(base=1.03 * GiB, k=5.5)
 
 # One Qwen-Image 2.1 Q4_K_M step through ``api.sample`` under bounded_cache
 # on an M5 Max, in fresh processes, over the settled process and less the
@@ -167,6 +168,20 @@ QWEN_IMAGE21_PREFILL = StepFit(base=1.25 * GiB, k=6.5)
 # the Q8_0 768 pixel cell the closest. A guided step reads as
 # Qwen-Image 2.1's does, and takes its slope of 0.5 for the second row.
 KREA2_STEP = StepFit(base=2.35 * GiB, k=2.4, row_k=0.5)
+
+# One FLUX.3 klein Q4_K_M step through ``api.sample`` under bounded_cache
+# on an M5 Max, in fresh processes, over the settled process. The cells
+# are in tests/fixtures/image/memfit/flux3_klein_cells.json: 256 to 2048
+# pixels with 80 text rows, 256 to 1536 with 4096, one with 640, steps
+# with one to four reference images, and four guided steps of the Base
+# file. The cache term reaches its bound early: a 256 pixel step reads
+# 1.42 GiB with 80 text rows and 2.78 with 4096. A line through the 1536
+# and 2048 pixel cells has a slope of 2.7, raised 10 percent to 3.0. The
+# base is 0.25 GiB above every cell, the 512 pixel cell with 4096 text
+# rows the closest. The second row of a guided step reads 0.41 to 0.79
+# GiB above one row, so it takes the slope of 1.0, which leaves 0.25 GiB
+# above every guided cell where 0.5 does not.
+FLUX3_KLEIN_STEP = StepFit(base=2.45 * GiB, k=3.0, row_k=1.0)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
@@ -337,6 +352,8 @@ class VaeMemoryRow:
     tile's result reads its input when the tiles of that op are cropped
     and not blended, and 0 when they are blended. Cropped tiles overlap
     by at least twice that.
+    ``overlap`` is the least overlap of blended tiles in pixels, or 0 for
+    the overlap asked for. A tiled pass takes the larger of the two.
     ``tiles_first`` makes tiles the automatic choice for every image
     larger than one tile, whatever is free. An unmeasured row always
     takes tiles first.
@@ -344,7 +361,11 @@ class VaeMemoryRow:
     were measured on, or 0 for no bound. A pass of more pixels, counted
     over its batch, is in tiles by the automatic choice whatever is free,
     since its whole price is the fit carried past what was measured. A
-    caller can still force it whole."""
+    caller can still force it whole.
+    ``scale`` is the image pixels per latent pixel of the official VAE,
+    or 0 when that is the family's ``vae_scale_factor``. A family whose
+    model space packs the VAE's latent pixels counts the packing in that
+    factor, and a tiled pass lays its tiles out at the VAE's own scale."""
     measured: bool
     channels: dict                  # op -> base channels at full resolution
     whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
@@ -353,8 +374,10 @@ class VaeMemoryRow:
     one_tile: bool = False
     tiles_first: bool = False
     crop: Callable | None = None    # see ``_qwen_image21_vae_crop``
+    overlap: int = 0
     scores: float = 0.0
     whole_px: int = 0
+    scale: int = 0
 
     @property
     def auto_tiles(self) -> bool:
@@ -436,6 +459,26 @@ VAE_ROWS = {
         measured=False, channels={"decode": 96, "encode": 96},
         floor=_qwen_image_vae_floor, one_tile=True,
         crop=_qwen_image_vae_crop),
+    # The FLUX.2 autoencoder: the FLUX.1 encoder and decoder at 32 latent
+    # channels, which change no activation at full resolution, so it is
+    # priced by the FLUX.1 fits. Measured on the official file on an M5
+    # Max, each pass grew the footprint by less than its price: a whole
+    # bf16 decode at 1024 pixels by 4.49 GiB against 5.61, in fp32 by 7.24
+    # against 8.45, a tiled bf16 decode at 2048 pixels by 8.25 against
+    # 9.30, a whole bf16 encode at 1024 by 2.93 against 4.20, and a tiled
+    # one at 2048 by 5.82 against 6.58. The closest was the whole fp32
+    # decode at 512 pixels, 3.73 against 4.02.
+    # Its tiles overlap by at least 128 pixels. Its decoder reads farther
+    # across a cut than the FLUX.1 one: at 1024 pixels in tiles that
+    # overlap by 64, a tiled fp32 decode is 52.0 dB from the whole decode,
+    # where the FLUX.1 decoder holds 75.4 dB. At 128 it is 64.8 dB, and a
+    # tiled bf16 decode is 55.5 dB from the oracle against 55.9 whole.
+    # Its latent pixel is 8 image pixels; the family's 16 counts the 2x2
+    # packing of model space.
+    "flux3_klein": VaeMemoryRow(
+        measured=True, channels={"decode": 128, "encode": 128},
+        whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED,
+        overlap=128, scale=8),
 }
 
 
@@ -484,6 +527,12 @@ class PeakRow:
                                     # this beside its rows, for the tower
     mmproj_fp32: bool = False       # the encoder's load casts the float
                                     # tensors of its mmproj to float32
+    encode_base: int = 0            # bytes an encode holds at any length
+    ref_token_px: int = 0           # pixels per reference token on each
+                                    # axis when the reference tokens join
+                                    # the rows of every step, else 0
+    prices_prompt: bool = True      # a plan that knows the prompt prices
+                                    # its text rows, else the family's most
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:
@@ -496,9 +545,13 @@ class PeakRow:
 
 
 PEAKS = {
+    # Z-Image prices the most caption rows whatever the prompt. At its own
+    # rows a step of a short caption is priced 0.10 GiB above the cell of
+    # 1056 rows and 0.19 GiB above the cell of 4128 rows, where the most
+    # rows leave 0.25 and 0.35 GiB.
     "z_image": PeakRow(token_px=16, row_multiple=32, caption_rows=512,
                        width=11520 + 2 * 10240, step=Z_IMAGE_STEP,
-                       encode_row_bytes=3 * 9728 * 2),
+                       encode_row_bytes=3 * 9728 * 2, prices_prompt=False),
     # A step runs the target rows alone: the fused MLP product and its
     # gated half are the widest outputs. The sizes are those the
     # fingerprint holds the file to: 32 blocks, 4096 wide, a 12288 MLP.
@@ -529,6 +582,21 @@ PEAKS = {
     "krea2": PeakRow(token_px=16, row_multiple=1, caption_rows=512,
                      width=2 * 16384 + 2 * 6144, step=KREA2_STEP,
                      encode_row_bytes=3 * 9728 * 4, text_rows=546),
+    # FLUX.3 klein joins up to 4096 text rows, padded to 80, to the image
+    # rows in every block, and the tokens of each reference image too.
+    # The MLP's fused gate and up product and its gated half are the
+    # widest outputs: 3072 wide, a 9216 MLP. A plan that knows the prompt
+    # prices its text rows, and one that does not the most. An encode of
+    # the encoder alone, Qwen3-VL-4B Q8_0 tapped in float32, reads 0.34
+    # GiB over the settled process at 80 rows, 0.50 at 640, 1.19 at 2080
+    # and 1.33 at 4096: a base of 0.6 GiB and 28 KiB times ENCODE_LIVE a
+    # row leave 0.25 GiB above every cell, where Krea 2's rows alone would
+    # price 7.1 GiB at 4096.
+    "flux3_klein": PeakRow(token_px=16, row_multiple=1, caption_rows=4096,
+                           width=2 * 9216 + 9216, step=FLUX3_KLEIN_STEP,
+                           encode_row_bytes=28 * 1024,
+                           encode_base=int(0.6 * GiB), text_rows=4096,
+                           ref_token_px=16),
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
@@ -714,6 +782,13 @@ def load_transient(encoder=None, vae=None, mmproj=None) -> int:
     return int(LOAD_ROOM * max(head, copies))
 
 
+def prices_prompt(family: str) -> bool:
+    """Whether a plan of ``family`` that knows the prompt prices its text
+    rows, where one that does not prices the family's most."""
+    row = PEAKS.get(family)
+    return row is not None and row.prices_prompt
+
+
 def image_rows(row: PeakRow, height: int, width: int,
                caption: int | None) -> int:
     """Rows per item of one step: image tokens padded to the family's
@@ -780,9 +855,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 prefix_shared: bool = False, prefix_other: int = 0,
                 prefix_bound: int = 0, cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
-                ref_sizes=(), vae_price=None, load_peak: int = 0,
-                load_parts=None, budget: float | None = None,
-                overcommit: bool | None = None,
+                ref_sizes=(), step_refs=None, vae_price=None,
+                load_peak: int = 0, load_parts=None,
+                budget: float | None = None, overcommit: bool | None = None,
                 _hint: bool = True) -> MemoryPlan:
     """The memory plan for one image request.
 
@@ -806,10 +881,15 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     The prefix rows of a conditioning come from ``text_tokens``, ``refs``
     and ``ref_px``. With ``refs`` at 0 the count takes the references of
-    ``ref_sizes`` at their own sizes. ``prefix_rows`` gives the rows of
-    the request's own conditionings, the positive first, in place of
-    that count. ``prefix_shared`` says the two of a guided request are
-    one, whose state is held once. A cache of prefix states that holds
+    ``ref_sizes`` at their own sizes. A family without a prefix whose
+    reference tokens join the rows of every step counts them there, by
+    the same rule, or those of ``step_refs`` when it is given: the
+    (height, width) of every reference of one conditioning, an image given
+    twice counted twice, where ``ref_sizes`` holds each image the VAE
+    encodes once. ``prefix_rows`` gives the rows of the request's own
+    conditionings, the positive first, in place of that count.
+    ``prefix_shared`` says the two of a guided request are one, whose
+    state is held once. A cache of prefix states that holds
     ``prefix_other`` bytes of other conditionings sheds them to
     ``prefix_bound`` as the request's states come in, and what stays is
     part of the prefix cache term.
@@ -857,6 +937,12 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         "prefix_cache": 0,
     }
     rows = image_rows(row, height, width, caption_tokens)
+    if row.ref_token_px:
+        # The reference tokens join the rows of every step.
+        p = row.ref_token_px
+        rows += sum((int(h) // p) * (int(w) // p) for h, w in (
+            [(ref_px, ref_px)] * refs if refs else
+            ref_sizes if step_refs is None else step_refs))
     text = row.text_rows if text_tokens is None else text_tokens
     counted = slots = 0
     if row.prefix is not None:
@@ -901,7 +987,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     caption = row.text_rows if caption_tokens is None else caption_tokens
     # An encode with reference images runs their image rows beside the
     # text, and the tower.
-    encode_peak = ((caption + slots) * row.encode_row_bytes * ENCODE_LIVE
+    encode_peak = (row.encode_base
+                   + (caption + slots) * row.encode_row_bytes * ENCODE_LIVE
                    + (row.encode_tower_bytes if slots else 0))
 
     def build(b: int, release: bool, tiled: bool, levers: tuple,
@@ -1083,8 +1170,23 @@ def crop_reach(family: str, op: str, config=None) -> int:
 
 def _latent_px(family: str, config=None) -> int:
     """Image pixels per latent pixel of the VAE of ``config``, or of the
-    family's when None."""
-    return vae_scale(family) if config is None else int(config.scale)
+    official VAE of the family's row when None."""
+    if config is not None:
+        return int(config.scale)
+    return vae_row(family).scale or vae_scale(family)
+
+
+def tile_grid(family: str, op: str, height: int, width: int, *,
+              tile: int = TILE_PX, overlap: int = OVERLAP_PX,
+              config=None) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The tiles of a tiled ``op`` of a ``height`` x ``width`` image, as
+    tiling lays them out for the VAE of ``config`` or the official one
+    when None: (count, length in pixels) down the rows and across the
+    columns."""
+    lap = tile_overlap(family, op, tile, overlap, config)
+    scale = _latent_px(family, config)
+    return (tile_layout(height, tile, lap, scale),
+            tile_layout(width, tile, lap, scale))
 
 
 def croppable(family: str, op: str, tile: int = TILE_PX,
@@ -1100,12 +1202,12 @@ def croppable(family: str, op: str, tile: int = TILE_PX,
 def tile_overlap(family: str, op: str, tile: int = TILE_PX,
                  overlap: int = OVERLAP_PX, config=None) -> int:
     """The overlap of neighboring tiles of a tiled ``op``, in pixels:
-    ``overlap``, or twice the reach of a cut where the tiles are cropped
-    and that is more. Raises ValueError for a ``tile`` that is not
-    ``croppable``."""
+    ``overlap``, or where it is more, the least overlap of the row when the
+    tiles are blended and twice the reach of a cut when they are cropped.
+    Raises ValueError for a ``tile`` that is not ``croppable``."""
     reach = crop_reach(family, op, config)
     if not reach:
-        return int(overlap)
+        return max(int(overlap), vae_row(family).overlap)
     scale = _latent_px(family, config)
     if not croppable(family, op, tile, config):
         raise ValueError(
@@ -1181,8 +1283,8 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
         channels = row.channels[op]
     fits = row.whole[op]
     fit = fits[conv][itemsize]
-    # The scores count the latent pixels of the VAE at hand. The tiles of
-    # a measured row are laid out at the scale of its family.
+    # The scores count the latent pixels of the VAE at hand, and its tiles
+    # are laid out at its scale, as tiling lays them out.
     held = 0
     if row.scores:
         latent = _latent_px(family, config)
@@ -1190,9 +1292,8 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
         held = int(row.scores * batch * rows * rows * itemsize)
     if not tiled or (height <= tile and width <= tile):
         return fit.bytes(batch * height * width, channels, itemsize) + held
-    scale = vae_scale(family)
-    ny, th = tile_layout(height, tile, overlap, scale)
-    nx, tw = tile_layout(width, tile, overlap, scale)
+    (ny, th), (nx, tw) = tile_grid(family, op, height, width, tile=tile,
+                                   overlap=overlap, config=config)
     tiled_fit = row.tiled[op][itemsize]
     tiles = 1 if row.one_tile else ny * nx
     out = tiled_fit.bytes(batch * tiles * th * tw, batch * height * width,

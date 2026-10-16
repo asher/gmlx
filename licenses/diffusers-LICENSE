@@ -25,6 +25,10 @@ source.
   upsample of src/diffusers/models/upsampling.py and the AttnProcessor2_0
   path of src/diffusers/models/attention_processor.py, in channels-last
   layout with an owned contiguous-group GroupNorm.
+- gmlx/image/vae/flux2_ae.py: the quant conv, post quant conv and
+  BatchNorm statistics of AutoencoderKLFlux2 in
+  src/diffusers/models/autoencoders/autoencoder_kl_flux2.py, on the
+  encoder and decoder of flux1_ae.py.
 - gmlx/image/vae/qwen_image21_vae.py: AutoencoderKLQwenImage21 of
   src/diffusers/models/autoencoders/autoencoder_kl_qwenimage21.py with
   its encoder, decoder, residual, attention, resample and RMS norm
