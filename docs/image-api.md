@@ -43,7 +43,7 @@ model, and no context figures.
 | `model` | An image model id. `default`, no model, and a name that starts with `gpt-image-`, `dall-e-` or `chatgpt-image` take the default image model. |
 | `n` | Images to make, 1 to 10, at seeds `seed`, `seed` plus 1 and so on. |
 | `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. |
-| `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. |
+| `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. FLUX.3 klein runs its default steps at each. |
 | `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
 | `seed` | The seed of the first image, random without it. |
 | `guidance` | [Guidance](glossary.md#guidance), 1 to 30. 1 turns it off. |

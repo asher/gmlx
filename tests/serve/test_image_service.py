@@ -154,6 +154,11 @@ def test_quality_steps_come_from_the_family_table():
     assert [image_service.quality_steps(q, "turbo", lv)
             for lv in ("low", "medium", "high")] == [8, 8, 8]
     assert image_service.quality_steps(q, "unknown", "low") == 16
+    # FLUX.3 klein has no table, so each level runs the variant's steps.
+    f = get_family("flux3_klein")
+    assert [image_service.quality_steps(f, v, lv)
+            for v in ("distilled", "base")
+            for lv in ("low", "medium", "high")] == [None] * 6
 
 
 GB = 1024**3
