@@ -172,6 +172,23 @@ each image. FLUX.3 klein samples at `cfg` 1 with `euler`, so its negative
 can be a `Conditioning Zero Out` of the positive. FLUX.3 klein Base takes a
 negative prompt and a higher `cfg`.
 
+FLUX.2 klein reads its prompt the same way, with the Qwen3-4B GGUF on the
+server. Its workflows take the three gmlx loaders with `flux-2-klein` or
+`flux-2-klein-base` in `model_name`, `Empty Flux 2 Latent` for the image's
+size, and `Flux2Scheduler` for the sigmas, which `SamplerCustomAdvanced`
+samples on with a `CFGGuider` and a `KSamplerSelect`. `Flux2Scheduler`
+gives the schedule FLUX.2 klein is made for, which follows the image size,
+so give it the latent's width and height. The schedulers of `KSampler` run
+on another schedule. An edit encodes each reference image with a
+`VAE Encode` and puts it on the prompt and on the negative with a
+`Set Reference Latent` (`ReferenceLatent`), and the first image sets the
+size. FLUX.2 klein samples at `cfg` 1, so its negative can be a
+`Conditioning Zero Out` of the positive. FLUX.2 klein Base takes a negative
+prompt and a higher `cfg`. FLUX.2 klein places its reference images by the
+`index` method, and an `Edit Model Reference Method`
+(`FluxKontextMultiReferenceLatentMethod`) set to another method is refused
+with the node's name.
+
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
 `SamplerCustomAdvanced`, though `KSampler` works on every model.
@@ -182,7 +199,7 @@ stock nodes work with a gmlx model and what runs where.
 
 ## The example workflows
 
-ComfyUI's template browser lists five workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists seven workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -191,6 +208,8 @@ with the commands that install the gmlx nodes and pull its model.
 | `z-image-turbo-t2i` | Z-Image-Turbo text to image at 1024x1024 in 8 steps | Nothing beyond the model |
 | `z-image-turbo-lora-t2i` | The same through a stock `LoraLoader` | A Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or another picked in the node |
 | `qwen-image-2.1-edit-two-references` | A Qwen-Image 2.1 edit from two reference images, through `TextEncodeQwenImage21` | `gmlx pull qwen-image`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `flux-2-klein-t2i` | FLUX.2 klein text to image at 1024x1024 in 4 steps, through `Flux2Scheduler` and `SamplerCustomAdvanced` | `gmlx pull flux-2-klein` |
+| `flux-2-klein-edit-two-references` | A FLUX.2 klein edit from two reference images, through `ReferenceLatent` | `gmlx pull flux-2-klein`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 

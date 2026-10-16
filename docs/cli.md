@@ -639,7 +639,8 @@ gmlx pull qwen-image --quant Q5_K_M
 ```
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
-`krea-2-turbo`, `flux-3-klein` or `flux-3-klein-base`, pulls its DiT, text
+`krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-3-klein` or
+`flux-3-klein-base`, pulls its DiT, text
 encoder and VAE, checks the VAE
 against its published sha256, packs it to GGUF, and adds an `image_models`
 entry. The quants default to
@@ -1005,6 +1006,15 @@ the output has the first reference's size, and the output of a single
 reference is cropped back to the scaled image. FLUX.3 klein sizes its
 references by this rule, and `--ref-size` exits 2 on it.
 
+`--ref` gives FLUX.2 klein up to 10 reference images as well, read as
+FLUX.3 klein reads them, with no `--encoder-mmproj`. A single reference is
+scaled down to at most the area of 2024x2024 pixels, and each of several
+to at most the area of 1024x1024. Each is then cropped to sides that are
+multiples of 16, around the center. A reference needs sides of at least 64
+pixels, and neither side more than 8 times the other. Without `--size` the
+output has the first reference's size as prepared, and it is not cropped
+back. `--ref-size` exits 2 on FLUX.2 klein too.
+
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
 kohya, diffusers, PEFT and OneTrainer key spellings are read. The rank and
@@ -1039,7 +1049,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
-| `--size WxH` | The init image's, else a FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
+| `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
@@ -1047,7 +1057,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
 | `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
-| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1 and FLUX.3 klein. Repeat the flag for up to 10 images, in the order the prompt names them. |
+| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1, FLUX.2 klein and FLUX.3 klein. Repeat the flag for up to 10 images, in the order the prompt names them. |
 | `--ref-size N` | `1024` | On Qwen-Image 2.1, resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |
 | `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
@@ -1116,13 +1126,15 @@ and compares every tensor bit for bit before the file replaces `--out`.
 It packs the VAE of each image family: the FLUX.1 autoencoder for
 `z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
 official file is F32 and stays F32, the Qwen-Image autoencoder for
-`krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`,
-whose Comfy-Org `flux2-vae.safetensors` is F32 and needs no config. It
-packs from that file's layout or from the original one of BFL's
-`ae.safetensors`. The family follows from the tensor names and
-shapes. A file that fills none of them is refused with what it holds, for
-example another family's VAE under `--family`, or a video VAE of the same
-layout.
+`krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`
+and `flux2_klein`. BFL's FLUX.2 klein 4B file of that autoencoder is BF16
+with its config, and the Comfy-Org `flux2-vae.safetensors` is F32 and
+needs no config. It packs from that layout or from the original one of
+BFL's `ae.safetensors`. The family follows from the tensor names and
+shapes, the first family for the FLUX.2 autoencoder, and a pack of it
+serves both klein families whichever one it names. A file that fills none
+of them is refused with what it holds, for example another family's VAE
+under `--family`, or a video VAE of the same layout.
 
 A Qwen-Image 2.1 file may leave out its `time_conv` tensors, which one
 image never reads. The places where the video layout halves time come
