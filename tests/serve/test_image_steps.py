@@ -1191,8 +1191,22 @@ def _bare_and_full(served, h, w, **full):
                                     **args, **full).peak
 
 
-def test_a_flux3_step_prices_the_reference_latents_of_its_rows(host,
-                                                              fpipes):
+def _refused_by_its_plan(monkeypatch, call) -> None:
+    """``call`` is refused by the plan of its rows before the DiT runs. A
+    step the plan lets through stops at the DiT, whose forward on these
+    references would take gigabytes."""
+    def reached(*a, **k):
+        raise AssertionError("the step reached the DiT")
+
+    with monkeypatch.context() as m:
+        m.setattr(steps, "run_step", reached)
+        with pytest.raises(StepsClientError, match="with the references of "
+                           "its rows does not fit in memory"):
+            call()
+
+
+def test_a_flux3_step_prices_the_reference_latents_of_its_rows(
+        host, fpipes, monkeypatch):
     """Four reference latents of 1024 pixels join every step's rows, so a
     step that fits as text to image is refused with them, and more than
     the family's 10 references in a row are refused by count."""
@@ -1217,9 +1231,8 @@ def test_a_flux3_step_prices_the_reference_latents_of_its_rows(host,
     try:
         assert c.step("f3d", None, x, [0.75], rows,
                       sample_sigmas=SIGMAS).shape == F3_SHAPE
-        with pytest.raises(StepsClientError, match="with the references of "
-                           "its rows does not fit in memory"):
-            c.step("f3d", None, x, [0.75], with_refs, sample_sigmas=SIGMAS)
+        _refused_by_its_plan(monkeypatch, lambda: c.step(
+            "f3d", None, x, [0.75], with_refs, sample_sigmas=SIGMAS))
     finally:
         host.budget_bytes = None
     small = c.put(np.zeros((1, 8, 2, 3), np.float32))
@@ -1231,7 +1244,8 @@ def test_a_flux3_step_prices_the_reference_latents_of_its_rows(host,
     assert host.held == 0
 
 
-def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host):
+def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host,
+                                                            monkeypatch):
     """Two reference latents of 1024 pixels in a Qwen-Image 2.1 row put
     their tokens in the prefix of every block, which the plan of the step
     counts."""
@@ -1256,9 +1270,8 @@ def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host):
     try:
         plain = {"cond": row["cond"], "num_tokens": text}
         assert c.step("qit", None, x, [0.75], [plain]).shape == x.shape
-        with pytest.raises(StepsClientError, match="with the references of "
-                           "its rows does not fit in memory"):
-            c.step("qit", None, x, [0.75], [row])
+        _refused_by_its_plan(monkeypatch,
+                             lambda: c.step("qit", None, x, [0.75], [row]))
     finally:
         host.budget_bytes = None
     assert host.held == 0
