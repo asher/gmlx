@@ -384,6 +384,18 @@ def _ref_sizes(states) -> list:
     return list(seen.values())
 
 
+def _step_refs(states) -> list:
+    """(height, width) in pixels of every reference of the conditioning
+    with the most reference pixels, an image given twice counted twice:
+    the DiT runs one token block per reference."""
+    best: list = []
+    for c in states:
+        sizes = [(r.height, r.width) for r in c.refs]
+        if sum(h * w for h, w in sizes) > sum(h * w for h, w in best):
+            best = sizes
+    return best
+
+
 def plan_request(pipe: ImagePipeline, *, height: int, width: int,
                  cfg: float | None = None, caption_tokens: int | None = None,
                  conds=None, patch_table=None, init_image: bool = False,
@@ -445,7 +457,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         prefix_shared=(len(states) == 2
                        and _ident(states[0]) == _ident(states[1])),
         prefix_other=other, prefix_bound=bound, init_image=init_image,
-        ref_sizes=_ref_sizes(states), vae_price=price, budget=budget,
+        ref_sizes=_ref_sizes(states), step_refs=_step_refs(states),
+        vae_price=price, budget=budget,
         overcommit=overcommit)
 
 

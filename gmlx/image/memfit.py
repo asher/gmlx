@@ -841,9 +841,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 prefix_shared: bool = False, prefix_other: int = 0,
                 prefix_bound: int = 0, cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
-                ref_sizes=(), vae_price=None, load_peak: int = 0,
-                load_parts=None, budget: float | None = None,
-                overcommit: bool | None = None,
+                ref_sizes=(), step_refs=None, vae_price=None,
+                load_peak: int = 0, load_parts=None,
+                budget: float | None = None, overcommit: bool | None = None,
                 _hint: bool = True) -> MemoryPlan:
     """The memory plan for one image request.
 
@@ -869,10 +869,13 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     and ``ref_px``. With ``refs`` at 0 the count takes the references of
     ``ref_sizes`` at their own sizes. A family without a prefix whose
     reference tokens join the rows of every step counts them there, by
-    the same rule. ``prefix_rows`` gives the rows of
-    the request's own conditionings, the positive first, in place of
-    that count. ``prefix_shared`` says the two of a guided request are
-    one, whose state is held once. A cache of prefix states that holds
+    the same rule, or those of ``step_refs`` when it is given: the
+    (height, width) of every reference of one conditioning, an image given
+    twice counted twice, where ``ref_sizes`` holds each image the VAE
+    encodes once. ``prefix_rows`` gives the rows of the request's own
+    conditionings, the positive first, in place of that count.
+    ``prefix_shared`` says the two of a guided request are one, whose
+    state is held once. A cache of prefix states that holds
     ``prefix_other`` bytes of other conditionings sheds them to
     ``prefix_bound`` as the request's states come in, and what stays is
     part of the prefix cache term.
@@ -924,7 +927,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         # The reference tokens join the rows of every step.
         p = row.ref_token_px
         rows += sum((int(h) // p) * (int(w) // p) for h, w in (
-            [(ref_px, ref_px)] * refs if refs else ref_sizes))
+            [(ref_px, ref_px)] * refs if refs else
+            ref_sizes if step_refs is None else step_refs))
     text = row.text_rows if text_tokens is None else text_tokens
     counted = slots = 0
     if row.prefix is not None:

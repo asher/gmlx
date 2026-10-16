@@ -289,3 +289,27 @@ def test_the_reference_latents_reach_the_dit_in_their_order(pipe):
     z = api.sample(pipe, plain, height=32, width=32, seed=0, steps=2)
     assert not np.array_equal(np.array(x), np.array(z))
     assert isinstance(cond.refs[0], Reference)
+
+
+def test_the_plan_counts_a_reference_given_twice_in_every_step(pipe):
+    """The DiT runs one token block per reference, so one image given four
+    times prices the step of four distinct images of its size, and the VAE
+    encodes it once."""
+    flux = dataclasses.replace(pipe, family=get_family("flux3_klein"),
+                               vae=None, encoder=None)
+    kw = dict(height=1024, width=1024, cfg=1.0, budget=100e9,
+              overcommit=False)
+
+    def plan(images):
+        cond = api.encode_text(pipe, "ab", images=images, ref_latents=False)
+        return cond, api.plan_request(flux, conds=cond, **kw)
+
+    a = _picture(1024, 1024, 1)
+    same, four = plan([a] * 4)
+    assert len(same.refs) == 4 and len({r.sha256 for r in same.refs}) == 1
+    assert api._ref_sizes([same]) == [(1024, 1024)]
+    _, distinct = plan([a] + [_picture(1024, 1024, s) for s in (2, 3, 4)])
+    _, one = plan([a])
+    assert four.phases["denoise"] == distinct.phases["denoise"]
+    assert four.phases["denoise"] > one.phases["denoise"]
+    assert four.terms["init_peak"] == one.terms["init_peak"]
