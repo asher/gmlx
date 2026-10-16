@@ -78,7 +78,8 @@ The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 
 Some variants, such as Qwen-Image 2.1 Turbo, are distilled to a fixed list of sigmas.
 `gmlx Sigmas` outputs that list and the variant's cfg; connect them to `SamplerCustom` or `SamplerCustomAdvanced` with any stock sampler.
-For a variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
+The schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size. On those, give `gmlx Sigmas` the image's `width` and `height`, and it outputs the schedule gmlx samples that image on. Without them it stops, and for FLUX.2 klein it names the stock `Flux2Scheduler`, which gives the same schedule.
+For any other variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
 `KSampler` with its own scheduler still works on every variant; it samples on ComfyUI's schedule instead.
 
 ### What runs where

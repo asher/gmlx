@@ -196,7 +196,10 @@ ComfyUI: a gmlx loader that names one stops with
 
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
-`SamplerCustomAdvanced`, though `KSampler` works on every model.
+`SamplerCustomAdvanced`, though `KSampler` works on every model. The
+schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size, so
+on those `gmlx Sigmas` takes the image's `width` and `height` and stops
+without them.
 `gmlx Server Status` shows whether a model is loaded, the memory it holds
 and the gmlx version of the nodes. The
 [ComfyUI reference](comfyui-reference.md#how-the-work-is-shared) says which

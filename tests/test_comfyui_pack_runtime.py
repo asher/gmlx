@@ -532,3 +532,101 @@ def test_a_model_the_server_has_under_another_id_is_named(widgets, asked, has):
     msg = widgets.not_on_server(asked, "http://127.0.0.1:8080", _rows("z-image-turbo", has))
     assert f"It has that model as {has!r}: pick {has!r}" in msg
     assert "or run `gmlx pull qwen-image` and pick the id it adds" in msg
+
+
+# gmlx Sigmas on a schedule that follows the image size.
+
+def _schedules():
+    """The pack's schedules module, which imports numpy alone."""
+    spec = importlib.util.spec_from_file_location("_pack_schedules", _PACK / "schedules.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _status(family: str, variant: str) -> dict:
+    from gmlx.image.registry import get_family
+    from gmlx.serve import image_steps as steps
+
+    return {"sampling": steps.sampling(get_family(family), variant),
+            "latent": dict(steps.COMFY[family]["latent"])}
+
+
+SIZES = [(512, 512), (1024, 1024), (1024, 576), (576, 1024), (1360, 768), (2048, 2048),
+         (256, 1024), (1056, 1056)]
+
+
+def test_the_server_names_a_size_rule_for_each_family_whose_schedule_follows_the_size():
+    """A served family's schedule follows the image size when it needs a token
+    count, and only then does its status carry a rule, unless the variant is
+    distilled to fixed sigmas."""
+    from gmlx.image.registry import get_family
+    from gmlx.serve import image_steps as steps
+
+    for name in steps.COMFY:
+        fam = get_family(name)
+        for variant, row in fam.sampling.items():
+            needs = False
+            if fam.schedule is not None and not row.sigmas:
+                fam.schedule(4, tokens=4096, variant=variant)
+                try:
+                    fam.schedule(4, tokens=None, variant=variant)
+                except ValueError:
+                    needs = True
+            got = steps.sampling(fam, variant)["schedule"]
+            assert (got is not None) == needs, (name, variant, got)
+    assert set(steps.SIZE_SCHEDULES) == {"flux2_klein", "qwen_image21"}
+
+
+@pytest.mark.parametrize("family, variant", [("flux2_klein", "distilled"),
+                                             ("flux2_klein", "base"),
+                                             ("qwen_image21", "base")])
+def test_gmlx_sigmas_forms_the_schedule_the_family_samples_on(family, variant):
+    """From the status alone the pack's schedule of an image is the family's
+    own schedule of that image's tokens, bit for bit, and below a denoise of
+    1 the tail of the longer schedule, as ComfyUI's are."""
+    import numpy as np
+
+    from gmlx.image.registry import get_family
+
+    sch, fam, status = _schedules(), get_family(family), _status(family, variant)
+    for w, h in SIZES:
+        tokens = (h // 16) * (w // 16)
+        for n in (2, 3, 4, 9, 28, 50):
+            want = np.asarray(fam.schedule(n, tokens=tokens, variant=variant), np.float32)
+            got = sch.size_sigmas(status, "m", n, 1.0, w, h)
+            assert got.dtype == np.float32 and got.shape == want.shape, (w, h, n)
+            assert np.array_equal(got.view(np.uint32), want.view(np.uint32)), (w, h, n)
+        want = np.asarray(fam.schedule(10, tokens=tokens, variant=variant), np.float32)[-5:]
+        got = sch.size_sigmas(status, "m", 4, 0.4, w, h)
+        assert np.array_equal(got.view(np.uint32), want.view(np.uint32)), (w, h)
+
+
+def test_gmlx_sigmas_without_a_size_is_refused_on_a_size_schedule():
+    """FLUX.2 klein's refusal names Flux2Scheduler, the stock node of its
+    schedule. A variant whose schedule does not follow the size takes none."""
+    sch = _schedules()
+    for family, variant, stock in (("flux2_klein", "distilled", True),
+                                   ("qwen_image21", "base", False)):
+        for w, h in ((0, 0), (1024, 0), (0, 1024)):
+            with pytest.raises(sch.SizeNeeded) as e:
+                sch.size_sigmas(_status(family, variant), "m", 4, 1.0, w, h)
+            assert ("Flux2Scheduler" in str(e.value)) == stock, family
+            assert "width and height" in str(e.value)
+    for family, variant in (("z_image", "turbo"), ("qwen_image21", "turbo"),
+                            ("krea2", "turbo"), ("flux3_klein", "distilled"),
+                            ("flux3_klein", "base")):
+        assert sch.size_sigmas(_status(family, variant), "m", 4, 1.0, 0, 0) is None
+    with pytest.raises(ValueError, match="which these nodes do not know"):
+        sch.size_sigmas({"sampling": {"schedule": {"rule": "flux9"}}}, "m", 4, 1.0, 64, 64)
+
+
+def test_the_stub_server_carries_the_status_size_rules():
+    """The stub the pack suites run against gives each model the rule the
+    server's status gives it."""
+    spec = importlib.util.spec_from_file_location(
+        "_pack_stub", _ROOT / "tests" / "comfyui_pack" / "stub_server.py")
+    stub = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stub)
+    for mid, (family, variant, sampling) in stub.MODELS.items():
+        assert sampling["schedule"] == _status(family, variant)["sampling"]["schedule"], mid

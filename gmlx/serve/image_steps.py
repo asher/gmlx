@@ -478,15 +478,33 @@ def status(spec, resident: bool, plan=None) -> dict:
             "memory": mem}
 
 
+def _qwen_image21_rule(fam) -> dict:
+    c = fam.constants.values
+    return {"rule": "qwen_image21", "base_len": c["base_image_seq_len"],
+            "max_len": c["max_image_seq_len"], "base_shift": c["base_shift"],
+            "max_shift": c["max_shift"], "terminal": c["shift_terminal"]}
+
+
+# The schedule rule of each family whose schedule follows the image size,
+# from which a client forms the sigmas of an image's tokens as the
+# family's own schedule does: FLUX.2 klein's of get_schedule, and
+# Qwen-Image 2.1's dynamic shift with its scheduler's constants.
+SIZE_SCHEDULES = {"flux2_klein": lambda fam: {"rule": "flux2"},
+                  "qwen_image21": _qwen_image21_rule}
+
+
 def sampling(fam, variant: str) -> dict | None:
     """The variant's own sampling: its steps and cfg, and for a variant
     distilled to a fixed schedule, those sigmas with the final zero, which
-    a client samples on in place of its own schedule."""
+    a client samples on in place of its own schedule. ``schedule`` names
+    the rule of a schedule that follows the image size, or is None."""
     row = fam.sampling_row(variant)
     if row is None:
         return None
+    rule = SIZE_SCHEDULES.get(fam.name)
     return {"steps": row.steps, "cfg": row.cfg, "shift": row.shift,
-            "sigmas": [*map(float, row.sigmas), 0.0] if row.sigmas else None}
+            "sigmas": [*map(float, row.sigmas), 0.0] if row.sigmas else None,
+            "schedule": rule(fam) if rule and not row.sigmas else None}
 
 
 def _torch_shape(kv: dict, name: str, ne) -> list:

@@ -797,8 +797,29 @@ class Sampling(Base):
         with self.assertRaises(C.GmlxRefusal):
             P.nodes.GmlxSigmas().get_sigmas(turbo, steps=20)
         self.assertEqual(len(P.nodes.GmlxSigmas().get_sigmas(turbo, 0, 0.5)[0]), 5)
-        base, _ = P.nodes.GmlxSigmas().get_sigmas(self.model(QID))
-        self.assertEqual(len(base), 41)
+        # Qwen-Image 2.1's schedule follows the image size, and ends on its
+        # terminal sigma before the zero.
+        base = self.model(QID)
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.nodes.GmlxSigmas().get_sigmas(base)
+        self.assertIn("width and height", str(e.exception))
+        self.assertNotIn("Flux2Scheduler", str(e.exception))
+        sig, _ = P.nodes.GmlxSigmas().get_sigmas(base, 0, 1.0, 1024, 1024)
+        self.assertEqual(len(sig), 41)
+        self.assertAlmostEqual(float(sig[-2]), 0.02, places=6)
+        self.assertEqual(float(sig[-1]), 0.0)
+
+    def test_variant_sigmas_of_flux2_follow_the_image_size(self):
+        model = self.model(F2ID)
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.nodes.GmlxSigmas().get_sigmas(model)
+        self.assertIn("Flux2Scheduler", str(e.exception))
+        small, _ = P.nodes.GmlxSigmas().get_sigmas(model, 0, 1.0, 512, 512)
+        large, _ = P.nodes.GmlxSigmas().get_sigmas(model, 0, 1.0, 1024, 1024)
+        self.assertEqual((len(small), len(large)), (5, 5))
+        self.assertEqual((float(small[-1]), float(large[-1])), (0.0, 0.0))
+        # A larger image shifts the schedule up.
+        self.assertTrue(all(float(a) < float(b) for a, b in zip(small[1:-1], large[1:-1])))
 
     def test_sampler_custom_samples_on_the_fixed_sigmas(self):
         from comfy_extras.nodes_custom_sampler import SamplerCustom

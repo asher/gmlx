@@ -57,16 +57,29 @@ COMFY = {
                     "context": ("txt_in.weight", 1)},
 }
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
+# The schedule rules of the server's status, for the families whose
+# schedule follows the image size.
+QWEN21_RULE = {"rule": "qwen_image21", "base_len": 256, "max_len": 8192, "base_shift": 0.5,
+               "max_shift": 0.9, "terminal": 0.02}
+FLUX2_RULE = {"rule": "flux2"}
 MODELS = {
-    "z-image-turbo": ("z_image", "turbo", {"steps": 8, "cfg": 1.0, "shift": 3.0, "sigmas": None}),
-    "qwen-image-2.1": ("qwen_image21", "base", {"steps": 40, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
+    "z-image-turbo": ("z_image", "turbo", {"steps": 8, "cfg": 1.0, "shift": 3.0, "sigmas": None,
+                                           "schedule": None}),
+    "qwen-image-2.1": ("qwen_image21", "base", {"steps": 40, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                                                "schedule": QWEN21_RULE}),
     "qwen-image-2.1-turbo": ("qwen_image21", "turbo",
-                             {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": TURBO_SIGMAS}),
-    "krea-2-turbo": ("krea2", "turbo", {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
-    "flux-2-klein": ("flux2_klein", "distilled", {"steps": 4, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
-    "flux-2-klein-base": ("flux2_klein", "base", {"steps": 50, "cfg": 4.0, "shift": 1.0, "sigmas": None}),
-    "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93, "sigmas": None}),
-    "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93, "sigmas": None}),
+                             {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": TURBO_SIGMAS,
+                              "schedule": None}),
+    "krea-2-turbo": ("krea2", "turbo", {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                                        "schedule": None}),
+    "flux-2-klein": ("flux2_klein", "distilled", {"steps": 4, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                                                  "schedule": FLUX2_RULE}),
+    "flux-2-klein-base": ("flux2_klein", "base", {"steps": 50, "cfg": 4.0, "shift": 1.0,
+                                                  "sigmas": None, "schedule": FLUX2_RULE}),
+    "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93,
+                                                  "sigmas": None, "schedule": None}),
+    "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93,
+                                                  "sigmas": None, "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}

@@ -59,10 +59,12 @@ def _loader():
 
 
 def _sigmas():
+    size = ("INT", {"default": 0, "min": 0, "max": 16384, "step": 16})
     return {"required": {
         "model": ("MODEL",),
         "steps": ("INT", {"default": 0, "min": 0, "max": 1000}),
-        "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})}}
+        "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})},
+        "optional": {"width": size, "height": size}}
 
 
 # Each node: its inputs, outputs, output names and whether it is an output
