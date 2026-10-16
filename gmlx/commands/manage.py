@@ -1362,7 +1362,8 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
     """Files to delete (all shards + companions no other model references)
     and their sizes; explanatory notes append to ``notes``. ``images`` are
     the discovered image models."""
-    # Paths any other model (configured or discovered) still resolves to.
+    # Paths any other model (configured or discovered) still resolves to,
+    # through any symlink, so a file one model reaches by a link stays.
     others = [mc for mid, mc in cfg.models.items() if mid != target]
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
@@ -1370,13 +1371,13 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                ref_paths.add(os.path.abspath(rp))
+                ref_paths.add(os.path.realpath(rp))
     # An image model that names this model's GGUF as its encoder keeps it.
     for im in _all_images(cfg, images):
         for p in (im.encoder, im.encoder_mmproj):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                ref_paths.add(os.path.abspath(rp))
+                ref_paths.add(os.path.realpath(rp))
 
     to_delete: list[str] = []
     if not keep_files:
@@ -1388,7 +1389,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             if main is None:
                 notes.append(f"model file not found ({m.path}) - removing "
                              "the config entry only")
-            elif os.path.abspath(main) in ref_paths:
+            elif os.path.realpath(main) in ref_paths:
                 notes.append("model file kept: another model references it")
             else:
                 to_delete += _shard_files(main)
@@ -1399,7 +1400,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             rp = _try_resolve(comp, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.abspath(rp) in ref_paths:
+            if os.path.realpath(rp) in ref_paths:
                 notes.append(f"{label} kept: another model references it")
             else:
                 to_delete += _shard_files(rp)
@@ -1661,15 +1662,15 @@ def _all_images(cfg, images=()) -> list:
 
 
 def _image_refs(cfg, disc, skip: str, images=()) -> set:
-    """Resolved paths every model but the image entry ``skip`` loads: chat
-    models (configured and discovered) and the other image entries,
-    configured and discovered (``images``)."""
+    """Real paths every model but the image entry ``skip`` loads, through
+    any symlink: chat models (configured and discovered) and the other
+    image entries, configured and discovered (``images``)."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.abspath(rp))
+                refs.add(os.path.realpath(rp))
     for im in _all_images(cfg, images):
         if im.id == skip:
             continue
@@ -1677,7 +1678,7 @@ def _image_refs(cfg, disc, skip: str, images=()) -> set:
                   *(a for a, _st in im.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.abspath(rp))
+                refs.add(os.path.realpath(rp))
     return refs
 
 
@@ -1701,7 +1702,7 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
             rp = _try_resolve(p, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.abspath(rp) in refs:
+            if os.path.realpath(rp) in refs:
                 notes.append(f"{label} kept: another model uses it")
             else:
                 to_delete += _shard_files(rp)

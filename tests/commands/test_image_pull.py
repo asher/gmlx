@@ -1067,6 +1067,41 @@ def test_rm_of_a_chat_model_keeps_a_gguf_an_image_model_names(images):
     assert "own-chat" not in _cfg(cfg).models
 
 
+def _link(lib, how: str) -> str:
+    """own.gguf as another entry names it: through a symlink to the file,
+    or through a symlink to its folder."""
+    if how == "file":
+        (lib / "own-link.gguf").symlink_to(lib / "own.gguf")
+        return "own-link.gguf"
+    (lib.parent / "lib-link").symlink_to(lib)
+    return str(lib.parent / "lib-link" / "own.gguf")
+
+
+@pytest.mark.parametrize("how", ["file", "folder"])
+def test_rm_keeps_an_encoder_another_image_model_reaches_by_a_link(
+        images, capsys, how):
+    lib, cfg = images
+    (lib / "qt2.gguf").write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + f"  qt2:\n    path: qt2.gguf\n"
+                   f"    encoder: {_link(lib, how)}\n    vae: qvae.gguf\n")
+    assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0
+    assert not (lib / "qt.gguf").exists() and (lib / "own.gguf").exists()
+    assert "encoder kept: another model uses it" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("how", ["file", "folder"])
+def test_rm_of_a_chat_model_keeps_a_gguf_an_image_model_reaches_by_a_link(
+        images, how):
+    lib, cfg = images
+    cfg.write_text(cfg.read_text().replace(
+        "    encoder: own.gguf\n", f"    encoder: {_link(lib, how)}\n").replace(
+        "models:\n  qwen3-4b:", "models:\n  own-chat:\n    path: own.gguf\n"
+        "  qwen3-4b:", 1))
+    assert manage.cmd_rm(["own-chat", "--config", str(cfg), "--yes"]) == 0
+    assert (lib / "own.gguf").exists()
+    assert "own-chat" not in _cfg(cfg).models
+
+
 def test_ps_image_shows_only_image_models(monkeypatch, capsys):
     import io
 

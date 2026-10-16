@@ -15,6 +15,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `gmlx list` names the family of an image entry whose `family` is spelled
   `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
+- `gmlx rm` keeps a file that another model names through a symlink, where it
+  deleted the file as unused.
 
 ## [0.5.0] - 2026-10-12
 
