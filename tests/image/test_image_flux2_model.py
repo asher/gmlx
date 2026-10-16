@@ -198,6 +198,27 @@ def test_a_batch_of_two_gives_each_row_its_own_velocity(tiny):
         assert mx.allclose(two[1:], other, atol=1e-5).item()
 
 
+def test_a_pipeline_samples_on_the_grid_of_one_latent_pixel(tiny):
+    """A latent pixel is one token, so the DiT has no patch of its own:
+    sizes are multiples of the VAE's 16 pixels, and a 32 x 48 request
+    samples a 2 x 3 latent grid."""
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+
+    weights, cfg = tiny
+    arrays, _ = committed_fixture(TINY)
+    model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
+    pipe = api.ImagePipeline(dit=model, family=get_family("flux2_klein"),
+                             variant="distilled")
+    assert model.cfg.patch == 1 and pipe.size_multiple == 16
+    cond = Conditioning(mx.array(arrays["features"]), "tiny")
+    x = api.sample(pipe, cond, height=32, width=48, seed=0, steps=2)
+    assert x.shape == (1, model.cfg.in_channels, 2, 3)
+    assert bool(mx.isfinite(x).all().item())
+    with pytest.raises(ValueError, match="multiples of 16"):
+        api.sample(pipe, cond, height=40, width=48, seed=0, steps=2)
+
+
 def test_float16_is_refused(tiny):
     weights, cfg = tiny
     model = fg.tiny_model(weights, cfg)

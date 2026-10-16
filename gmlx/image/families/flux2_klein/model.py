@@ -71,6 +71,8 @@ class Flux2Config:
     axes_dims: tuple
     theta: float
     eps: float
+    # A latent pixel is one token: the DiT has no patch of its own.
+    patch: int = 1
 
     @classmethod
     def from_dict(cls, c: dict) -> "Flux2Config":
