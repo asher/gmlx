@@ -30,6 +30,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A streamed image request refused while it ran, such as one too large for
+  memory, got a server error frame where the same request unstreamed got a 400.
 - A DFlash drafter that took speculation back up after a batch shrank within
   the width cap drafted from stale context, so almost no draft was accepted.
 - A sampled request whose structured output allowed fewer tokens than its

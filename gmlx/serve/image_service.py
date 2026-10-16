@@ -1007,11 +1007,13 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     """Refuse what the family cannot do: transparency without an alpha
     VAE, a step count other than the one a variant with a fixed schedule
     runs, more images than an edit takes, and edits without a vision
-    tower, and guidance on a variant distilled to sample without it. The
+    tower, and guidance on a variant distilled to sample without it or on
+    a flow map DiT, and a flow map's sampler other than euler, the rules
+    of ``api.check_sampling``, which ``api.sample`` holds too. The
     references of a family that prepares them together are prepared here
     into ``req.refs``, and an image its rules refuse gets a 400 that
     names it."""
-    from gmlx.image.api import check_guidance, fixed_steps
+    from gmlx.image.api import check_sampling, fixed_steps
 
     pipe = served.pipe
     fam = pipe.family
@@ -1019,11 +1021,19 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if n is not None and req.steps is not None and req.steps != n:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
-    if pipe.variant in fam.unguided:
+    dit_cfg = getattr(getattr(pipe, "dit", None), "cfg", None)
+    flow_map = bool(getattr(dit_cfg, "flow_map", False))
+    if flow_map or pipe.variant in fam.unguided:
         try:
-            check_guidance(fam, pipe.variant, _guided(req, served))
+            check_sampling(fam, pipe.variant, flow_map, _guided(req, served))
         except ValueError as e:
             raise _bad(f"guidance: {e}", "guidance") from None
+        defaults = getattr(served.spec, "defaults", None) or {}
+        sampler = req.sampler or defaults.get("sampler") or "euler"
+        try:
+            check_sampling(fam, pipe.variant, flow_map, 1.0, sampler)
+        except ValueError as e:
+            raise _bad(f"sampler: {e}", "sampler") from None
     if req.background == "transparent":
         from gmlx.image.vae.reader import VAES
 

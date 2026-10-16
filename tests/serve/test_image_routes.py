@@ -57,6 +57,7 @@ class _Hold:
 
 _SERVED = SimpleNamespace(spec=SimpleNamespace(id="zit", encoder_model=None),
                           pipe=None)
+_REAL_CHECK_FAMILY = svc.check_family
 
 
 @pytest.fixture
@@ -277,6 +278,105 @@ def test_a_generations_form_is_refused(served):
                        files={"image": ("a.png", _png(), "image/png")},
                        data={"prompt": "x"})
     assert r.status_code == 400
+
+
+def _frames(text: str) -> list:
+    out = []
+    for f in (f for f in text.split("\n\n") if f.strip()):
+        head, data = f.splitlines()[:2]
+        out.append((head.removeprefix("event: "),
+                    json.loads(data.removeprefix("data: "))))
+    return out
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_flux3_flow_map_with_guidance_is_a_400_before_any_stream(
+        served, monkeypatch, stream):
+    """check_family refuses guidance on a flow map DiT, so the streamed
+    request gets the same 400 as the plain one, before the stream opens
+    and before the job."""
+    from gmlx.image.registry import get_family
+
+    flux3 = SimpleNamespace(
+        spec=SimpleNamespace(id="zit", encoder_model=None, defaults={}),
+        pipe=SimpleNamespace(family=get_family("flux3_klein"),
+                             variant="distilled",
+                             dit=SimpleNamespace(cfg=SimpleNamespace(
+                                 flow_map=True))),
+        plan=SimpleNamespace(cfg=1.0))
+    hold = _Hold(served.released)
+    hold._entry = SimpleNamespace(footprint=0, pipeline=flux3)
+    monkeypatch.setattr(residency, "acquire_image_model", lambda m: hold)
+    monkeypatch.setattr(svc, "check_family", _REAL_CHECK_FAMILY)
+    images.install_image_routes(build_config(_DOC))
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "x", "guidance": 3.5, "stream": stream})
+    assert r.status_code == 400, r.text
+    assert r.headers["content-type"].startswith("application/json")
+    err = r.json()["error"]
+    assert err["type"] == "invalid_request_error"
+    assert err["param"] == "guidance"
+    assert "flow map, which samples without guidance" in err["message"]
+    assert served.jobs == [] and served.released == [1]
+
+
+@pytest.mark.parametrize("raised, param", [
+    (ValueError("the DiT is a flow map, which samples without guidance"),
+     None), ("memory", "size")])
+def test_a_refusal_raised_in_a_streamed_job_is_the_plain_paths_400(
+        served, monkeypatch, caplog, capsys, raised, param):
+    """api.sample's own refusal, or a plan that does not fit, raised inside
+    the job: the stream's error frame is the body the plain request gets
+    as its 400, and the job is logged as refused, not failed."""
+    from gmlx.image.memfit import ImageMemoryError
+
+    if raised == "memory":
+        raised = ImageMemoryError("the image needs 9 GiB of 4")
+    monkeypatch.setattr(images.STATE, "counts", dict.fromkeys(
+        ("jobs", "failed", "cancelled", "images", "steps"), 0))
+    served.job = lambda req, kw: (_ for _ in ()).throw(raised)
+    plain = _client().post("/v1/images/generations", json={"prompt": "x"})
+    assert plain.status_code == 400
+    capsys.readouterr()
+    with caplog.at_level(logging.INFO):
+        r = _client().post("/v1/images/generations",
+                           json={"prompt": "x", "stream": True})
+    assert r.status_code == 200
+    assert _frames(r.text) == [("error", plain.json())]
+    assert plain.json()["error"] == {
+        "type": "invalid_request_error", "message": str(raised),
+        "param": param, "code": None}
+    assert images.STATE.metrics()["jobs_failed_total"] == 0
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("[req]")]
+    assert len(line) == 1 and " refused " in line[0], line
+    assert served.released == [1, 1]
+
+
+def test_a_failed_streamed_job_is_the_plain_paths_500(served, monkeypatch):
+    monkeypatch.setattr(images.STATE, "counts", dict.fromkeys(
+        ("jobs", "failed", "cancelled", "images", "steps"), 0))
+    served.job = lambda req, kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    plain = _client().post("/v1/images/generations", json={"prompt": "x"})
+    r = _client().post("/v1/images/generations",
+                       json={"prompt": "x", "stream": True})
+    assert plain.status_code == 500 and r.status_code == 200
+    assert _frames(r.text) == [("error", plain.json())]
+    assert plain.json()["error"]["type"] == "server_error"
+    assert "boom" not in r.text
+    assert images.STATE.metrics()["jobs_failed_total"] == 2
+
+
+def test_a_request_error_raised_in_a_streamed_job_keeps_its_type(served):
+    served.job = lambda req, kw: (_ for _ in ()).throw(svc._bad(
+        "the shared encoder is not loaded", "model", err_type="server_error"))
+    plain = _client().post("/v1/images/generations", json={"prompt": "x"})
+    r = _client().post("/v1/images/generations",
+                       json={"prompt": "x", "stream": True})
+    assert _frames(r.text) == [("error", plain.json())]
+    assert plain.json()["error"]["type"] == "server_error"
+    assert plain.json()["error"]["param"] == "model"
 
 
 def test_a_cancelled_job_answers_499_and_a_timeout_504(served):

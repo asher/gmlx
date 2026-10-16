@@ -373,6 +373,44 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
         "base checkpoint, which takes guidance")
 
 
+def _flux3_served(flow_map: bool, cfg: float = 1.0, defaults=None):
+    from gmlx.image.registry import get_family
+
+    return SimpleNamespace(
+        pipe=SimpleNamespace(
+            family=get_family("flux3_klein"),
+            variant="distilled" if flow_map else "base",
+            dit=SimpleNamespace(cfg=SimpleNamespace(flow_map=flow_map))),
+        spec=SimpleNamespace(id="f3", defaults=defaults),
+        plan=SimpleNamespace(cfg=cfg))
+
+
+@pytest.mark.parametrize("fields,default,param", [
+    ({"guidance": 3.5}, 1.0, "guidance"), ({}, 3.5, "guidance"),
+    ({"sampler": "uni_pc_bh2"}, 1.0, "sampler")])
+def test_a_flux3_flow_map_request_is_refused_before_its_job(fields, default,
+                                                           param):
+    """The rules api.sample holds for a flow map DiT refuse the request in
+    check_family, so a streamed request gets its 400 before the stream."""
+    req = image_service.parse_request("generations", {"prompt": "p",
+                                                      **fields})
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.check_family(req, _flux3_served(True, cfg=default))
+    assert e.value.param == param and e.value.status == 400
+    assert str(e.value).startswith(
+        f"{param}: the FLUX.3 klein distilled DiT is a flow map")
+    # Base is no flow map: it takes guidance and any sampler.
+    image_service.check_family(req, _flux3_served(False, cfg=default))
+
+
+def test_a_flux3_flow_map_takes_the_sampler_of_its_entry_defaults():
+    req = image_service.parse_request("generations", {"prompt": "p"})
+    with pytest.raises(image_service.ImageRequestError, match="euler only"):
+        image_service.check_family(req, _flux3_served(
+            True, defaults={"sampler": "uni_pc_bh2"}))
+    image_service.check_family(req, _flux3_served(True))
+
+
 def test_a_distilled_flux2_entry_refuses_a_guidance_default(plan_stubs,
                                                             monkeypatch):
     from gmlx.image import loader
