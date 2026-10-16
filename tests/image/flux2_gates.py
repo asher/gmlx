@@ -13,14 +13,61 @@ import numpy as np
 
 import block_gates as bg
 import qwen_gates as qg
-from flux3_gates import FLOORS, check_floor, exact_floats, exact_tols, rel
+from flux3_gates import (FLOORS, check_floor, exact_floats, exact_tols,
+                         rel, swap_halves)
 
 from gmlx.image.families.flux2_klein import model as fm
 
-__all__ = ["FLOORS", "check_floor", "exact_floats", "exact_tols", "rel"]
+__all__ = ["FLOORS", "check_floor", "exact_floats", "exact_tols", "rel",
+           "swap_halves"]
 
 MODS = ("double_stream_modulation_img", "double_stream_modulation_txt",
         "single_stream_modulation", "final_layer.adaLN_modulation")
+
+
+# The diffusers names of each GGUF module, written apart from the map from
+# diffusers' Apache-2.0 _convert_non_diffusers_flux2_lora_to_diffusers
+# (diffusers 0.41): a fused q, k and v weight splits into thirds of its
+# rows, and every other module takes one name.
+_D_DOUBLE = (("img_attn.proj", "attn.to_out.0"),
+             ("txt_attn.proj", "attn.to_add_out"),
+             ("img_mlp.0", "ff.linear_in"), ("img_mlp.2", "ff.linear_out"),
+             ("txt_mlp.0", "ff_context.linear_in"),
+             ("txt_mlp.2", "ff_context.linear_out"))
+_D_QKV = (("img_attn.qkv", ("attn.to_q", "attn.to_k", "attn.to_v")),
+          ("txt_attn.qkv", ("attn.add_q_proj", "attn.add_k_proj",
+                            "attn.add_v_proj")))
+_D_SINGLE = (("linear1", "attn.to_qkv_mlp_proj"), ("linear2", "attn.to_out"))
+_D_TOP = (("img_in", "x_embedder"), ("txt_in", "context_embedder"),
+          ("time_in.in_layer",
+           "time_guidance_embed.timestep_embedder.linear_1"),
+          ("time_in.out_layer",
+           "time_guidance_embed.timestep_embedder.linear_2"),
+          ("final_layer.linear", "proj_out"),
+          ("final_layer.adaLN_modulation.1", "norm_out.linear"),
+          ("single_stream_modulation.lin", "single_stream_modulation.linear"),
+          ("double_stream_modulation_img.lin",
+           "double_stream_modulation_img.linear"),
+          ("double_stream_modulation_txt.lin",
+           "double_stream_modulation_txt.linear"))
+
+
+def diffusers_names(depth: int, single: int) -> dict:
+    """GGUF module to its [(diffusers name, third of its rows or None)]."""
+    out = {}
+    for i in range(depth):
+        x, d = f"double_blocks.{i}", f"transformer_blocks.{i}"
+        for leaf, dname in _D_DOUBLE:
+            out[f"{x}.{leaf}"] = [(f"{d}.{dname}", None)]
+        for leaf, names in _D_QKV:
+            out[f"{x}.{leaf}"] = [(f"{d}.{n}", j) for j, n in enumerate(names)]
+    for i in range(single):
+        x, d = f"single_blocks.{i}", f"single_transformer_blocks.{i}"
+        for leaf, dname in _D_SINGLE:
+            out[f"{x}.{leaf}"] = [(f"{d}.{dname}", None)]
+    for native, dname in _D_TOP:
+        out[native] = [(dname, None)]
+    return out
 
 
 def tiny_model(weights: dict, config: dict, act=mx.float32):
@@ -367,13 +414,16 @@ def block_names(model) -> dict:
 
 @contextmanager
 def step_sites(model, sites: dict, routed: dict | None = None,
-               heads: dict | None = None, skipped: set | None = None):
+               heads: dict | None = None, built=None,
+               skipped: set | None = None):
     """Fill ``sites`` with a reading for every op of every block and every
     call of a linear leaf while steps run: key to (relative L2, gate).
     ``routed`` takes the mlx-kquant op of each site a kernel route ran,
     ``heads`` the place of the worst head row of each q and k site.
-    ``skipped`` takes the path of a leaf called on a float32 input, which
-    runs in float32 and has no site."""
+    ``built`` is the built table of the patch table the step runs under,
+    from ``install.build_table`` in the block form, and gives the exact
+    side each leaf's delta. ``skipped`` takes the path of a leaf called on
+    a float32 input, which runs in float32 and has no site."""
     import mlx_kquant as kq
 
     from gmlx.image import ops
@@ -387,14 +437,32 @@ def step_sites(model, sites: dict, routed: dict | None = None,
     counts: dict = {}
     calls: dict = {}
     ran: list = []
-    paths = {id(m): p for p, m in install.modules(model).items()
-             if install.linear_dims(m) is not None}
+    # Under a patch table a path holds the leaf's ImageLoRALinear.
+    held = {p: m for p, m in install.modules(model).items()
+            if install.linear_dims(m) is not None}
+    paths = {id(m): p for p, m in held.items()}
 
-    def exact_leaf(mod, x32):
-        codec = getattr(mod, "kquant_type", None)
-        w = mod["weight"].astype(f) if codec is None else \
-            kq.dequantize(mod["weight"], mod["scales"], codec, f)
-        return x32 @ w.T
+    def factors(path):
+        g = None if built is None else built.get(path)
+        return None if g is None else (g.a_t.astype(f), g.b_t.astype(f))
+
+    def exact_leaf(mod, x32, path=None):
+        """The leaf's product in float32 on its dequantized weight, with
+        its delta."""
+        base = getattr(mod, "base", mod)
+        codec = getattr(base, "kquant_type", None)
+        w = base["weight"].astype(f) if codec is None else \
+            kq.dequantize(base["weight"], base["scales"], codec, f)
+        y = x32 @ w.T
+        fac = factors(paths.get(id(mod)) if path is None else path)
+        if fac is not None:
+            y = y + (x32 @ fac[0]) @ fac[1]
+        return y
+
+    def delta_rounds(mod) -> int:
+        """The roundings a leaf's delta adds on the stock ops: its two
+        products."""
+        return 2 if factors(paths.get(id(mod))) is not None else 0
 
     def read(op, got, want, rounds, by_head=False):
         key = (cur[-1], "step", op)
@@ -483,7 +551,7 @@ def step_sites(model, sites: dict, routed: dict | None = None,
                 return epilogues.swiglu(a, b)
 
             key = read("glu", y, want, bg.KERNEL_ROUNDINGS["glu"] if kernel
-                       else OP_ROUNDINGS["glu"])
+                       else OP_ROUNDINGS["glu"] + delta_rounds(mlp[0]))
             if kernel:
                 if routed is not None:
                     routed[key] = bg.KERNEL_OPS["glu"]
@@ -509,7 +577,8 @@ def step_sites(model, sites: dict, routed: dict | None = None,
             return epilogues.gated_residual(
                 x.astype(f), gate.astype(f), exact_leaf(lin, rows.astype(f)))
 
-        key = read("out", y, want, each if fused else OP_ROUNDINGS["out"])
+        key = read("out", y, want, each if fused
+                   else OP_ROUNDINGS["out"] + delta_rounds(lin))
         if fused:
             if routed is not None:
                 routed[key] = "quantized_matmul_residual"
@@ -553,14 +622,19 @@ def step_sites(model, sites: dict, routed: dict | None = None,
                 return y
             with mx.stream(mx.cpu):
                 r = qg._rel_l2(y, exact_leaf(mod, x.astype(f)))
-            rounds = 1
-            if "lora" in ran[before:]:
+            rounds = 1 + delta_rounds(mod)
+            kernel = "lora" in ran[before:]
+            if kernel:
                 rounds = bg.KERNEL_ROUNDINGS["lora"]
             leaf_site(path, r, 2 * rounds * qg.SITE_UNIT)
+            if kernel and routed is not None:
+                routed[(path, calls[path])] = bg.KERNEL_OPS["lora"]
             return y
         return run
 
-    leaf_types = {type(m) for m in install.linear_leaves(model).values()}
+    # A leaf under a patch table is read at its ImageLoRALinear, which
+    # calls its base inside.
+    leaf_types = {type(m) for m in held.values()}
     hooks = [(fm.DoubleBlock, "__call__", within),
              (fm.SingleBlock, "__call__", within),
              (fm.DoubleBlock, "adaln", adaln), (fm.SingleBlock, "adaln", adaln),

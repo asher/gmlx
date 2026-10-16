@@ -60,6 +60,16 @@ The spec is a JSON file:
 A relative path is taken from the spec file's directory. Each adapter
 writes the fixture <name>_<id>_512.
 
+With --synthetic SEED in place of --spec the adapter is written here: one
+pair on every linear layer of double blocks 0 and 4 and single blocks 0,
+10 and 19, and on seven layers outside the blocks, the time, modulation
+and final layers among them, at ranks 4 to 16, each with an alpha of half
+its rank, its down rows at unit spread over the input and its up rows at
+--gain over the rank. The pairs are on the reference names, and the
+fixture <name>_synthetic_512 holds them as ``down.<name>`` and
+``up.<name>``, so the gmlx side writes the same adapter in a dialect, the
+diffusers names among them.
+
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check7_flux2_klein_community.py --reference <flux2>/src \\
       --spec adapters.json --only pixel_art
@@ -271,6 +281,37 @@ def read_pairs(torch, path: Path, model) -> tuple[dict, dict]:
     return pairs, facts
 
 
+# The layers of the synthetic adapter: every linear layer of these
+# blocks, and these layers outside the blocks.
+SYNTHETIC_BLOCKS = {"double_blocks": (0, 4), "single_blocks": (0, 10, 19)}
+SYNTHETIC_TOP = ("img_in", "txt_in", "time_in.out_layer",
+                 "double_stream_modulation_img.lin",
+                 "single_stream_modulation.lin",
+                 "final_layer.adaLN_modulation.1", "final_layer.linear")
+SYNTHETIC_SOURCE = "check3_flux2_klein_512"
+
+
+def synthetic_pairs(model, seed: int, gain: float) -> dict:
+    """Reference name -> pair of the synthetic adapter, as read_pairs
+    gives a file's, with ``alpha`` half the rank."""
+    layers = linear_layers(model)
+    names = [n for g, idx in SYNTHETIC_BLOCKS.items() for i in idx
+             for n in sorted(layers) if n.startswith(f"{g}.{i}.")]
+    names += [n for n in SYNTHETIC_TOP if n in layers]
+    rng = np.random.default_rng(seed)
+    out = {}
+    for j, name in enumerate(names):
+        o, i = layers[name]
+        rank = 4 * (1 + j % 4)
+        down = rng.standard_normal((rank, i)) / np.sqrt(i)
+        up = rng.standard_normal((o, rank)) * gain / np.sqrt(rank)
+        out[name] = {"module": name, "band": None,
+                     "down": down.astype(np.float32),
+                     "up": up.astype(np.float32), "scale": 0.5,
+                     "stem": name, "alpha": rank / 2}
+    return out
+
+
 def install(torch, model, pairs: dict, strength: float, mode: str) -> list:
     """A forward hook per pair that adds its product to its rows."""
     dtype = oracle.torch_dtype(mode)
@@ -419,8 +460,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--reference", type=Path, required=True,
                     help="src directory of BFL's flux2")
-    ap.add_argument("--spec", type=Path, required=True,
+    ap.add_argument("--spec", type=Path,
                     help="JSON list of the adapters, see the module text")
+    ap.add_argument("--synthetic", type=int, metavar="SEED",
+                    help="write the synthetic adapter of SEED in place of "
+                    "the spec's files")
+    ap.add_argument("--gain", type=float, default=1.0,
+                    help="spread of the synthetic up rows over the rank")
+    ap.add_argument("--strength", type=float, default=1.0,
+                    help="strength of the synthetic adapter")
     ap.add_argument("--gguf", type=Path, required=True, nargs="+",
                     help="the DiT GGUFs the spec names")
     ap.add_argument("--only", nargs="+", default=None, metavar="ID",
@@ -428,19 +476,24 @@ def main(argv=None) -> int:
     ap.add_argument("--dequant", choices=oracle.DEQUANT, default="exact")
     ap.add_argument("--name", default=NAME)
     a = ap.parse_args(argv)
+    if (a.spec is None) == (a.synthetic is None):
+        ap.error("pass --spec or --synthetic")
     torch = oracle.setup()
     oracle.set_dequant(a.dequant)
     fm, sampling = c3.reference(a.reference.expanduser())
     root = fixtures.fixture_root()
     dits = {p.name: p for p in a.gguf}
-    spec = json.loads(a.spec.read_text())["adapters"]
+    if a.synthetic is not None:
+        m3 = fixtures.read_manifest(SYNTHETIC_SOURCE, root=root)
+        spec = [{"id": "synthetic", "strength": a.strength,
+                 "dit": m3["files"]["dit"]["name"],
+                 "source": SYNTHETIC_SOURCE}]
+    else:
+        spec = json.loads(a.spec.read_text())["adapters"]
     if a.only:
         spec = [s for s in spec if s["id"] in a.only]
     for row in spec:
         aid, strength = row["id"], float(row.get("strength", 1.0))
-        path = Path(row["path"]).expanduser()
-        if not path.is_absolute():
-            path = a.spec.parent / path
         m3 = fixtures.read_manifest(row["source"], root=root)
         dit = dits[row["dit"]]
         want = m3["files"]["dit"]
@@ -451,22 +504,38 @@ def main(argv=None) -> int:
             src = {k: z[k] for k in z.files}
         state, census = c3.gguf_state(torch, dit)
         models = {m: c3.build(torch, fm, state, m) for m in ("fp32", "bf16")}
-        pairs, facts = read_pairs(torch, path, models["fp32"])
         tcheck = table_check(torch, models["fp32"])
-        ccheck = converter_check(torch, path, pairs, models["fp32"])
-        print(f"[check7] {aid}: {facts['pairs']} pairs, {facts['spelling']}"
-              f", ranks {facts['ranks']}, scales {facts['scales']} "
-              f"({facts['scale_source']}); table {tcheck}; diffusers "
-              f"loader {ccheck}", flush=True)
+        files = {"dit": dit}
+        if a.synthetic is not None:
+            pairs = synthetic_pairs(models["fp32"], a.synthetic, a.gain)
+            ranks = sorted({int(p["down"].shape[0]) for p in pairs.values()})
+            adapter = {"id": aid, "spelling": "reference",
+                       "pairs": len(pairs), "ranks": ranks,
+                       "source": f"synthetic, seed {a.synthetic}, gain "
+                       f"{a.gain}, ranks 4 to 16, alpha half the rank"}
+            ccheck = None
+            print(f"[check7] synthetic: {len(pairs)} pairs, ranks {ranks}; "
+                  f"table {tcheck}", flush=True)
+        else:
+            path = Path(row["path"]).expanduser()
+            if not path.is_absolute():
+                path = a.spec.parent / path
+            files["lora"] = path
+            pairs, facts = read_pairs(torch, path, models["fp32"])
+            ccheck = converter_check(torch, path, pairs, models["fp32"])
+            adapter = {"id": aid, "repo": row["repo"],
+                       "revision": row["revision"],
+                       "license": row["license"], **facts}
+            print(f"[check7] {aid}: {facts['pairs']} pairs, "
+                  f"{facts['spelling']}, ranks {facts['ranks']}, scales "
+                  f"{facts['scales']} ({facts['scale_source']}); table "
+                  f"{tcheck}; diffusers loader {ccheck}", flush=True)
         for mode, model in models.items():
             install(torch, model, pairs, strength, mode)
         refs = [src[f"refs.{i}"] for i in range(m3["inputs"]["refs"])]
         inputs = dict(m3["inputs"])
         inputs.update(
-            source=row["source"], strength=strength,
-            adapter={"id": aid, "repo": row["repo"],
-                     "revision": row["revision"], "license": row["license"],
-                     **facts},
+            source=row["source"], strength=strength, adapter=adapter,
             lora_pairs=len(pairs),
             targets=sorted([p["module"], list(p["band"]) if p["band"]
                             else None] for p in pairs.values()),
@@ -474,16 +543,24 @@ def main(argv=None) -> int:
                         "to each pair's rows of its layer's output in the "
                         "mode's dtype")
 
-        def more(fx, _vel, src=src, tcheck=tcheck, ccheck=ccheck):
+        def more(fx, _vel, src=src, tcheck=tcheck, ccheck=ccheck,
+                 pairs=pairs):
             fx.results["adapter_effect"] = {
                 k: fixtures.rel_l2(fx.arrays[k], src[k])
                 for k in fx.arrays if k in src and k not in c3_inputs(src)}
             fx.results["key_table"] = tcheck
-            fx.results["diffusers_loader"] = ccheck
+            if ccheck is not None:
+                fx.results["diffusers_loader"] = ccheck
+            if a.synthetic is not None:
+                for name, p in pairs.items():
+                    fx.add(f"down.{name}", p["down"])
+                    fx.add(f"up.{name}", p["up"])
+                fx.inputs["lora_pair_alphas"] = {
+                    name: p["alpha"] for name, p in pairs.items()}
 
         c3.run_case(torch, sampling, models, src["latents"], src["features"],
                     refs, float(src["sigma"]), True, f"{a.name}_{aid}_512",
-                    inputs, {"dit": dit, "lora": path}, [
+                    inputs, files, [
                         "the adapter is applied unmerged as PEFT applies "
                         "it; the gmlx side runs it under a patch table"],
                     check=7, script=SCRIPT, more=more)
