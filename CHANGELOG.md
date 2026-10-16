@@ -41,6 +41,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
 - `gmlx rm` keeps a file that another model names through a symlink, where it
   deleted the file as unused.
+  `--stream-experts` or a CPU placement. The batch tests now cover both
+  `GMLX_NATIVE_FP` layouts, `wire` and `packed`.
 
 ## [0.5.0] - 2026-10-12
 
