@@ -10,6 +10,7 @@ Supported model families:
 - Z-Image (Z-Image-Turbo), text to image.
 - Qwen-Image 2.1 and Qwen-Image 2.1 Turbo, text to image and editing with up to 10 reference images.
 - Krea 2 Turbo, text to image.
+- FLUX.2 klein 4B and FLUX.2 klein Base 4B, text to image and editing with up to 10 reference images.
 
 ## Install
 
@@ -37,11 +38,13 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has five graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has seven graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
 - `qwen-image-2.1-edit-two-references.json`: Qwen-Image 2.1 editing with two reference images through the stock `TextEncodeQwenImage21` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
+- `flux-2-klein-t2i.json`: FLUX.2 klein text to image through the stock `Flux2Scheduler`, `CFGGuider` and `SamplerCustomAdvanced`. `Flux2Scheduler` gives the schedule FLUX.2 klein samples on, which follows the image size, so keep its width and height those of the latent.
+- `flux-2-klein-edit-two-references.json`: FLUX.2 klein editing with two reference images, each encoded by `VAEEncode` and put on the prompt and its zeroed negative by the stock `ReferenceLatent`. The first reference sets the image size. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
 - `flux-3-klein-t2i.json`: FLUX.3 klein text to image through the stock `EmptyFlux2LatentImage`. It needs ComfyUI 0.41 or newer.
 - `flux-3-klein-edit-two-references.json`: FLUX.3 klein editing with two reference images through the stock `ReferenceMultiLatent` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.41 or newer.
 
@@ -110,7 +113,7 @@ That runs the wire, client and in-process ComfyUI suites on the cpu device, then
 
 ### Parity with the stock loaders
 
-Three checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo and for Krea 2 Turbo, and ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set. They need the model files and both loaders, so they are not part of `run_tests.py`.
+Four checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo and FLUX.2 klein, and ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set. They need the model files and both loaders, so they are not part of `run_tests.py`.
 
 The step check is the gate. The stock model in bf16 samples and records, at each step, the latent it is fed and the denoised output it returns. The gmlx MODEL and the stock model in fp32 are then fed the same latents and sigmas. At every step the relative L2 of the gmlx output from the stock bf16 output must be at most 1.5 times that of the stock fp32 output, or at most 2e-2 where that is larger. A fixed 2e-2 cannot hold on its own: the stock fp32 output is 0.11 from the stock bf16 output at the first step of Z-Image Turbo.
 
@@ -119,8 +122,9 @@ The step check is the gate. The stock model in bf16 samples and records, at each
 | Z-Image Turbo | 1024x1024, 8 steps, stock LoRA loader | 0.115 | 0.111 | 1.14 | pass |
 | Qwen-Image 2.1 | 512x512, 30 steps, cfg 4, two references | 0.106 | 0.113 | 1.27 | pass |
 | Krea 2 Turbo | 1024x1024, 8 steps, cfg 1 | 0.055 | 0.095 | 0.72 | pass |
+| FLUX.2 klein 4B | 512x512, 4 steps, cfg 1, `Flux2Scheduler` | 0.037 | 0.041 | 1.20 | pass |
 
-On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1 and Krea 2 checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
+On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2 and FLUX.2 klein checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
 
 The final image check is reported beside it: the gmlx image must be at least as close to the stock fp32 image as the stock bf16 image is, within 6 dB.
 
@@ -129,6 +133,7 @@ The final image check is reported beside it: the gmlx image must be at least as 
 | Z-Image Turbo, 1024x1024, 8 steps | 25.25 dB | 20.30 dB | pass |
 | Qwen-Image 2.1, 256x256, 30 steps, cfg 4, two references | 19.99 dB | 16.68 dB | pass |
 | Krea 2 Turbo, 1024x1024, 8 steps | 21.61 dB | 22.10 dB | pass |
+| FLUX.2 klein 4B, 512x512, 4 steps | 25.49 dB | 27.58 dB | pass |
 
 A fault planted in the Z-Image step convention shows why the step check is the gate. With the velocity sign dropped, the worst step ratio is 188 and the final image reads 8.35 dB. With the timestep read 3% low, the worst step ratio is 7.1, while the final image reads 13.49 dB against a bound of 14.30 dB and fails by only 0.8 dB, so a smaller timestep fault would pass the final image check.
 

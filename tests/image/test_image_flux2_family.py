@@ -23,6 +23,7 @@ from gmlx.image.families.flux2_klein import family as f2
 from gmlx.image.registry import get_family
 
 KLEIN_4B = "flux2_klein_4b_q4_k_m.header.json"
+KLEIN_4B_Q8 = "flux2_klein_4b_q8_0.header.json"
 KLEIN_9B = "flux2_klein_9b_q4_k_m.header.json"
 CONFIG_4B = "flux2_klein_4b_transformer_config.json"
 CONFIG_BASE_4B = "flux2_klein_base_4b_transformer_config.json"
@@ -39,13 +40,15 @@ def _refused(view, **kw) -> str:
     return str(ei.value)
 
 
+@pytest.mark.parametrize("header", [KLEIN_4B, KLEIN_4B_Q8])
 @pytest.mark.parametrize("config", [CONFIG_4B, CONFIG_BASE_4B])
 @pytest.mark.parametrize("arch", ["flux", None])
-def test_the_4b_file_gives_the_official_config_of_both_checkpoints(config,
-                                                                    arch):
-    """Check 1: the distilled and Base 4B files share the header, and the
-    config synthesized from it is each official transformer config."""
-    view = fixture_view(KLEIN_4B, kv={"general.architecture": arch} if arch
+def test_the_4b_file_gives_the_official_config_of_both_checkpoints(
+        header, config, arch):
+    """Check 1: the distilled and Base 4B files of a quant share the
+    header, and the config synthesized from the Q4_K_M and the Q8_0 one is
+    each official transformer config."""
+    view = fixture_view(header, kv={"general.architecture": arch} if arch
                         else {})
     got = fp.identify(view)
     assert got.family.name == "flux2_klein"
@@ -205,7 +208,7 @@ def test_the_config_fixtures_are_the_official_files_in_bytes():
 
 def test_the_header_fixtures_are_pinned():
     manifest = load_json("manifest.json")
-    for name, n in ((KLEIN_4B, 149), (KLEIN_9B, 201)):
+    for name, n in ((KLEIN_4B, 149), (KLEIN_4B_Q8, 149), (KLEIN_9B, 201)):
         d = load_json(name)
         assert d["n_tensors"] == len(d["tensors"]) == n
         assert d["kv"] == {"general.architecture": "flux"}
@@ -213,7 +216,8 @@ def test_the_header_fixtures_are_pinned():
         assert len(manifest[name]["sha256"]) == 64
 
 
-@pytest.mark.parametrize("name,size", [(KLEIN_4B, "4B"), (KLEIN_9B, "9B")])
+@pytest.mark.parametrize("name,size", [(KLEIN_4B, "4B"), (KLEIN_4B_Q8, "4B"),
+                                       (KLEIN_9B, "9B")])
 def test_the_header_holds_exactly_the_expected_tensors(name, size):
     view = fixture_view(name)
     assert {n: t.shape for n, t in view.tensors.items()} == f2.expected(size)
@@ -428,13 +432,20 @@ def _klein_files(root) -> list:
     return files
 
 
+REAL_HEADERS = {("4b", "Q4_K_M"): KLEIN_4B, ("4b", "Q8_0"): KLEIN_4B_Q8,
+                ("9b", "Q4_K_M"): KLEIN_9B}
+
+
 def test_each_real_file_has_the_header_of_its_size(gguf_dir):
-    """Distilled and Base files of a size hold the same names, shapes and
-    codecs, those of the size's fixture. Headers only."""
+    """Distilled and Base files of a size and quant hold the same names,
+    shapes and codecs, those of the fixture of that size and quant.
+    Headers only."""
     from gmlx.load.headerscan import scan_gguf
 
     for p in _klein_files(gguf_dir):
-        fixture = KLEIN_9B if "-9b-" in p.name else KLEIN_4B
+        key = ("9b" if "-9b-" in p.name else "4b", p.stem.rsplit("-", 1)[1])
+        assert key in REAL_HEADERS, f"{p.name} has no header fixture"
+        fixture = REAL_HEADERS[key]
         want = [list(t) for t in load_json(fixture)["tensors"]]
         scan = scan_gguf(str(p))
         got = [[t.name, list(t.shape), t.type_name] for t in scan.tensors]

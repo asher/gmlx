@@ -169,10 +169,11 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
                         "on Qwen-Image 2.1 (default: the init image's, else "
-                        "on FLUX.3 klein the first reference's, else the "
-                        "entry's defaults.size, else the variant's). On "
-                        "FLUX.3 klein without it, the image of one reference "
-                        "is cropped to that reference's own aspect.")
+                        "on FLUX.2 klein and FLUX.3 klein the first "
+                        "reference's, else the entry's defaults.size, else "
+                        "the variant's). On FLUX.3 klein without it, the "
+                        "image of one reference is cropped to that "
+                        "reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
@@ -195,13 +196,13 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--ref", action="append", default=None, metavar="PATH",
                    help="Edit from this reference image. Repeat the flag for "
                         "several, in the order the prompt names them. Needs "
-                        "--encoder-mmproj, except on FLUX.3 klein, whose "
-                        "encoder reads the prompt alone.")
+                        "--encoder-mmproj, except on FLUX.2 klein and FLUX.3 "
+                        "klein, whose encoders read the prompt alone.")
     p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
                    help="Resize each reference to about N x N pixels at its "
-                        "own aspect ratio (default 1024). FLUX.3 klein sizes "
-                        "its references by its own rule and takes no "
-                        "--ref-size.")
+                        "own aspect ratio (default 1024). FLUX.2 klein and "
+                        "FLUX.3 klein size their references by their own "
+                        "rules and take no --ref-size.")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",
@@ -1224,9 +1225,10 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                         "and the file records that.")
     p.add_argument("--family", default=None, metavar="NAME",
                    help="The image family whose VAE this is, such as "
-                        "z-image, qwen-image-2.1, krea-2 or flux-3-klein "
-                        "(default: the one family whose VAE the file "
-                        "fills).")
+                        "z-image, qwen-image-2.1, krea-2, flux-3-klein or "
+                        "flux-2-klein (default: the family whose VAE the "
+                        "file fills, the first one for the FLUX.2 "
+                        "autoencoder, which serves both klein families).")
     p.add_argument("--source-repo", default="unknown", metavar="ID",
                    help="Record this repository as the source (default "
                         "unknown).")

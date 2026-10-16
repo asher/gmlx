@@ -108,7 +108,7 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
              dtype: str | None = None, overwrite: bool = False) -> PackReport:
     """Pack the safetensors VAE ``src`` into the GGUF ``dst``.
 
-    ``family`` defaults to the one family whose VAE the file fills.
+    ``family`` defaults to the first family whose VAE the file fills.
     ``dtype`` is None for the source dtype, or "F32", "F16" or "BF16".
     """
     src, dst = str(src), str(dst)

@@ -1,0 +1,362 @@
+{
+ "schema": 1,
+ "name": "check5_flux2_klein_vae",
+ "check": 5,
+ "family": "flux3_klein",
+ "script": "scripts/image_oracle/check5_flux3_klein_vae.py",
+ "argv": [
+  "check5_flux3_klein_vae.py",
+  "--vae",
+  "diffusion_pytorch_model.safetensors",
+  "--sizes",
+  "512",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "diffusion_pytorch_model.safetensors",
+   "size": 168120878,
+   "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+  },
+  "vae_config": {
+   "name": "config.json",
+   "size": 821,
+   "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948"
+  }
+ },
+ "inputs": {
+  "sizes": [
+   [
+    512,
+    512
+   ],
+   [
+    1024,
+    1024
+   ]
+  ],
+  "seed": 5,
+  "image": "synthetic_image(height, width, seed) of check5_qwen_image21_vae.py, RGB, NCHW in [-1, 1]",
+  "batch_norm_eps": 0.0001,
+  "patch_size": [
+   2,
+   2
+  ],
+  "latents": "Flux2KleinPipeline._patchify_latents of the encoder mean, then (z - running_mean) / sqrt(running_var + batch_norm_eps), in float32 from each mode's mean",
+  "decode_input": "latents * sqrt(running_var + eps) + running_mean, then Flux2KleinPipeline._unpatchify_latents, in float32 from the fp32 latents, cast to the VAE dtype",
+  "decoded": "RGB, NCHW, unclamped as the VAE returns it",
+  "psnr": "on x / 2 + 0.5 clamped to [0, 1], peak 1",
+  "source_dtypes": [
+   "torch.bfloat16",
+   "torch.int64"
+  ],
+  "config_revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+  "load": "AutoencoderKLFlux2.from_config(vae/config.json), then the file strict, in float32"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_products": "bf16 operands, float32 conv and linear, one bf16 rounding"
+  },
+  "sizes": {
+   "512x512": {
+    "decode_bf16_vs_fp32": {
+     "rel_l2": 0.0037208575728741337,
+     "cosine": 0.9999931108294154,
+     "max_abs": 0.07782581448554993,
+     "psnr_db": 59.46044809994699
+    },
+    "encode_bf16_vs_fp32": {
+     "rel_l2": 0.01739012329408501,
+     "cosine": 0.9998490640077118,
+     "max_abs": 0.19057875871658325
+    },
+    "encode_fp32_vs_fp64": {
+     "rel_l2": 1.85394467142218e-06,
+     "cosine": 0.999999999998282,
+     "max_abs": 1.1787637656662797e-05
+    },
+    "encode_mean_fp32_vs_fp64": {
+     "rel_l2": 1.8462501499014103e-06,
+     "cosine": 0.9999999999982965,
+     "max_abs": 2.1508609541726065e-05
+    },
+    "decode_fp32_vs_fp64": {
+     "rel_l2": 1.290729409947131e-06,
+     "cosine": 0.9999999999991659,
+     "max_abs": 2.963936126654243e-05
+    },
+    "round_trip_fp32_psnr_db": 26.8682238506928,
+    "latents_std": 0.8341149687767029,
+    "peak_rss_gib": {
+     "encode": 8.67,
+     "decode": 14.15
+    },
+    "seconds": {
+     "fp32_encode_s": 1.2,
+     "bf16_encode_s": 1.7,
+     "fp32_decode_s": 2.4,
+     "bf16_decode_s": 3.0,
+     "float64_decode_s": 8.0
+    }
+   },
+   "1024x1024": {
+    "decode_bf16_vs_fp32": {
+     "rel_l2": 0.0038218185553775446,
+     "cosine": 0.9999927791916089,
+     "max_abs": 0.09549552202224731,
+     "psnr_db": 59.129745883502515
+    },
+    "encode_bf16_vs_fp32": {
+     "rel_l2": 0.029780096139354124,
+     "cosine": 0.9995578754429438,
+     "max_abs": 0.4994291365146637
+    },
+    "encode_fp32_vs_fp64": {
+     "rel_l2": 3.91706261461626e-06,
+     "cosine": 0.999999999992329,
+     "max_abs": 3.675377888912035e-05
+    },
+    "encode_mean_fp32_vs_fp64": {
+     "rel_l2": 3.887321914440507e-06,
+     "cosine": 0.9999999999924465,
+     "max_abs": 6.529417830059003e-05
+    },
+    "decode_fp32_vs_fp64": {
+     "rel_l2": 6.312469230535541e-06,
+     "cosine": 0.999999999980234,
+     "max_abs": 0.0001617857038869186
+    },
+    "round_trip_fp32_psnr_db": 26.891196346542486,
+    "latents_std": 0.7904156446456909,
+    "peak_rss_gib": {
+     "encode": 18.41,
+     "decode": 32.19
+    },
+    "seconds": {
+     "fp32_encode_s": 4.8,
+     "bf16_encode_s": 16.6,
+     "fp32_decode_s": 10.6,
+     "bf16_decode_s": 21.7,
+     "float64_decode_s": 34.5
+    }
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "fp32 decode max abs at twice the oracle's own fp32 against float64 max abs; fp32 encode max abs, on the model space latents, at 1e-3, or at twice the oracle's own fp32 against float64 max abs where that is larger; bf16 decode PSNR at twice the oracle's own bf16 against fp32 RMS error, its PSNR less 20 log10(2) dB; bf16 encode relative L2, on the model space latents, at twice the oracle's own",
+  "fp32_max_abs": 0.001,
+  "sizes": {
+   "512x512": {
+    "decode_fp32_max_abs": 5.927872253308486e-05,
+    "decode_bf16_psnr_db": 53.43984818666736,
+    "encode_fp32_max_abs": 0.001,
+    "encode_bf16_rel_l2": 0.03478024658817002
+   },
+   "1024x1024": {
+    "decode_fp32_max_abs": 0.0003235714077738372,
+    "decode_bf16_psnr_db": 53.10914597022289,
+    "encode_fp32_max_abs": 0.001,
+    "encode_bf16_rel_l2": 0.05956019227870825
+   }
+  }
+ },
+ "notes": [
+  "The file holds bfloat16 weights, which the fp32 and float64 runs read upcast. The bf16 VAE is a bfloat16 copy with its BatchNorm statistics kept float32."
+ ],
+ "created": "2026-10-16T19:02:48Z",
+ "npz": "check5_flux2_klein_vae.npz",
+ "tensors": {
+  "bn_running_mean": {
+   "shape": [
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "9027fac5727854f779ebbeae3032cfce0d47a11bc85f4329eb0a317c9ad90217"
+  },
+  "bn_running_var": {
+   "shape": [
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "8b4656821cfe8827490068f768f0dba57e09423e900b8b018da097f0c4537009"
+  },
+  "decoded_1024x1024": {
+   "shape": [
+    1,
+    3,
+    1024,
+    1024
+   ],
+   "dtype": "float32",
+   "sha256": "b877df123ac14c97784e85e19e449d37304548239ef8cd16380c5ce468854fe5"
+  },
+  "decoded_512x512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "35d5356b9353573fce7e50f5da6988b312cbb388f42277225a5d2081841f8df3"
+  },
+  "decoded_bf16_1024x1024": {
+   "shape": [
+    1,
+    3,
+    1024,
+    1024
+   ],
+   "dtype": "float32",
+   "sha256": "60b21b15764cb3d46837a156883da6644e519a410b8b113dd8e26a7be22dbb3a"
+  },
+  "decoded_bf16_512x512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "fd9c89ebfa73f2e4873931ceeab9d1f7ea28bccb1797a9ecb8078350ea4a6ce2"
+  },
+  "encode_mean_1024x1024": {
+   "shape": [
+    1,
+    32,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "e25c0df3d5be4d976cb92dd01191ec0df279372b74bf5505844aeddb41dfa8ad"
+  },
+  "encode_mean_512x512": {
+   "shape": [
+    1,
+    32,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "72c807775e530a0c4fc07a96c4ebff86251dd839d93c135f5a5643050b4a86ad"
+  },
+  "encode_mean_bf16_1024x1024": {
+   "shape": [
+    1,
+    32,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "d91533b309cd78a00fb0c5dd0050b70ed397c30d3655e64f508a6a982c6aa4cc"
+  },
+  "encode_mean_bf16_512x512": {
+   "shape": [
+    1,
+    32,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "11a390e65832643f0e9a888bd14bae293bf0158dd705b5d9fb56e47b1287a578"
+  },
+  "image_1024x1024": {
+   "shape": [
+    1,
+    3,
+    1024,
+    1024
+   ],
+   "dtype": "float32",
+   "sha256": "3930a02c0be88010b140dd1b6c71a1bf518c6f75d78d0ad2fa78942f998cb1a6"
+  },
+  "image_512x512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "4020c0997410077532d908bbecca27898c4c7b7cfb2d7ba29333177c2c44ee5e"
+  },
+  "latents_1024x1024": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c87fce5ec93e1ab0acb0d2e56d27af75dcc2d67eb2666abe43bbda04292c5e26"
+  },
+  "latents_512x512": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "280deb3315669ad11024f79090922a6dab13f83fd043e665629eb5225c323811"
+  },
+  "latents_bf16_1024x1024": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "91cedc4bfe75ab2aa1e4e0fc2fb846aa4a68af95eddf503df2149e916e6f2d8f"
+  },
+  "latents_bf16_512x512": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "ce4a39f7da605086a42796276ec3c88a8ebc3d7013acf2b46dcb6d92ad942de0"
+  }
+ }
+}

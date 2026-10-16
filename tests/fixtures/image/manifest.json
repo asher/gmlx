@@ -119,6 +119,14 @@
     "sha256": "0b25d143c8469b342bc5af3bce92b783bf6b0636d285f7b2f75e38af63af9a15",
     "kv_kept": "general.architecture"
   },
+  "flux2_klein_4b_q8_0.header.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
+    "file": "flux-2-klein-4b-Q8_0.gguf",
+    "size": 4300644928,
+    "sha256": "24a812e8f9b640e21c784164ea48571d8017ca22873696f4badeeabb006d509c",
+    "kv_kept": "general.architecture"
+  },
   "flux2_klein_9b_q4_k_m.header.json": {
     "repo": "unsloth/FLUX.2-klein-9B-GGUF",
     "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
@@ -211,6 +219,13 @@
     "file": "vae/diffusion_pytorch_model.safetensors",
     "size": 168120878,
     "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+  },
+  "flux2_klein_vae_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "vae/config.json",
+    "size": 821,
+    "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948"
   },
   "flux2_klein_diffusers_names.json": {
     "repo": "black-forest-labs/FLUX.2-klein-4B",

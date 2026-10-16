@@ -90,7 +90,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 5
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 7
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -160,6 +160,15 @@ _WIDGETS = {
     "EmptyFlux2LatentImage": ["width", "height", "batch_size"],
     # A dynamic combo: the option, then the inputs of that option.
     "ReferenceMultiLatent": ["resolution", "resolution.megapixels"],
+    "Flux2Scheduler": ["steps", "width", "height"],
+    "RandomNoise": ["noise_seed", "control_after_generate"],
+    "KSamplerSelect": ["sampler_name"],
+    "CFGGuider": ["cfg"],
+    "SamplerCustomAdvanced": [],
+    "ImageScaleToTotalPixels": ["upscale_method", "megapixels", "resolution_steps"],
+    "VAEEncode": [],
+    "ReferenceLatent": [],
+    "GetImageSize": [],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 
@@ -167,7 +176,7 @@ _FRONTEND_ONLY = {"control_after_generate", "upload"}
 def to_api(ui: dict) -> dict:
     """The API-format prompt of a UI-format graph, as ComfyUI's frontend
     queues it: Note nodes drop out, links become [node id, slot] pairs and
-    widget values take their input names."""
+    widget values take their input names, but for a widget a link feeds."""
     links = {lk[0]: lk for lk in ui["links"]}
     out = {}
     for n in ui["nodes"]:
@@ -182,7 +191,7 @@ def to_api(ui: dict) -> dict:
         values = n.get("widgets_values", [])
         assert len(values) == len(names), (n["type"], values)
         for name, value in zip(names, values):
-            if name not in _FRONTEND_ONLY:
+            if name not in _FRONTEND_ONLY and name not in inputs:
                 inputs[name] = value
         out[str(n["id"])] = {"inputs": inputs, "class_type": n["type"],
                              "_meta": {"title": n.get("title", n["type"])}}

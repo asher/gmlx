@@ -325,8 +325,9 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
         print(f"  the entry gets defaults.size {plan.size}, the largest image "
               f"this DiT makes on a {plan.memory_class} GB Mac")
     note = f", {r.license_note}" if r.license_note else ""
+    vae = f"; VAE {r.vae_license}" if r.vae_license else ""
     print(f"  license: {r.title} {r.license}{note} ({r.license_url}); "
-          f"encoder {r.encoder_license}")
+          f"encoder {r.encoder_license}{vae}")
 
 
 def _cast(plan: Plan) -> int:
@@ -582,6 +583,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             "free_bytes": free, "license": r.license,
             "license_note": r.license_note or None,
             "encoder_license": r.encoder_license,
+            "vae_license": r.vae_license or None,
             "parts": [{"role": p.role, "name": p.name, "path": p.path,
                        "size_bytes": p.size, "download": p.download
                        and p.wanted, "on_disk": not p.download,

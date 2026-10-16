@@ -17,6 +17,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -47,6 +48,20 @@ def comfy_version(comfy_dir: str) -> tuple:
     except OSError:
         m = None
     return tuple(int(p) for p in m.group(1).split(".")) if m else (0,)
+
+
+def flux2_sigmas(steps: int, width: int, height: int) -> list:
+    """Flux2Scheduler's schedule, the sigmas a FLUX.2 klein step sees."""
+    n = round(width * height / 256)
+    a1, b1, a2, b2 = 8.73809524e-05, 1.89833333, 0.00016927, 0.45666666
+    if n > 4300:
+        mu = a2 * n + b2
+    else:
+        m200, m10 = a2 * n + b2, a1 * n + b1
+        a = (m200 - m10) / 190.0
+        mu = a * steps + m200 - 200.0 * a
+    t = np.linspace(1.0, 0.0, steps + 1, dtype=np.float32)[:-1].astype(np.float64)
+    return [float(math.exp(mu) / (math.exp(mu) + (1 / x - 1))) for x in t]
 
 
 def free_port() -> int:
@@ -406,6 +421,82 @@ class Cases:
         self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
         self.check("latent saved", latent_sha(self.work, "latents/flux3-edit") is not None, None)
 
+    async def flux2_t2i(self):
+        wf = workflow("flux-2-klein-t2i.json")
+        wf["6"]["inputs"].update(width=256, height=192)
+        wf["7"]["inputs"].update(steps=3, width=256, height=192)
+        wf["14"] = {"class_type": "SaveLatent", "inputs": {"samples": ["11", 0],
+                                                           "filename_prefix": "latents/flux2-t2i"}}
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("one encode of the prompt", [e["text"] for e in enc] == [wf["4"]["inputs"]["text"]],
+                   [e["text"] for e in enc])
+        steps = kinds(log, "step")
+        self.check("steps", len(steps) == 3, len(steps))
+        self.check("one row a step at cfg 1, its 512 text rows, no references",
+                   {(e["rows"], tuple(e["num_tokens"]), tuple(e["refs"])) for e in steps} == {(1, (512,), (0,))},
+                   [(e["rows"], e["num_tokens"], e["refs"]) for e in steps])
+        self.check("model space latent", {tuple(e["x_shape"]) for e in steps} == {(1, 128, 12, 16)},
+                   [e["x_shape"] for e in steps][:1])
+        got = [e["timestep"][0] for e in steps]
+        want = flux2_sigmas(3, 256, 192)
+        self.check("timesteps of Flux2Scheduler", np.allclose(got, want, atol=1e-5), {"got": got, "want": want})
+        self.check("no schedule sent", not any(e["sample_sigmas"] for e in steps), None)
+        self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
+        self.check("latent saved", latent_sha(self.work, "latents/flux2-t2i") is not None, None)
+
+    def flux2_edit_workflow(self, steps=2) -> dict:
+        wf = workflow("flux-2-klein-edit-two-references.json")
+        for scale in ("6", "7"):
+            wf[scale]["inputs"]["megapixels"] = 0.25
+        wf["18"]["inputs"]["steps"] = steps
+        return wf
+
+    async def flux2_edit(self):
+        wf = self.flux2_edit_workflow()
+        wf["25"] = {"class_type": "SaveLatent", "inputs": {"samples": ["22", 0],
+                                                           "filename_prefix": "latents/flux2-edit"}}
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "vae_encode")
+        shapes = [e["shape"] for e in enc]
+        # reference-1.png is 512 wide and 768 high, reference-2.png square.
+        # ComfyUI runs the two encodes of this graph in either order.
+        tall = [s for s in shapes if s[1] > s[2]]
+        square = [s for s in shapes if s[1] == s[2]]
+        self.check("each reference encoded once", len(shapes) == 2 and len(tall) == len(square) == 1, shapes)
+        steps = kinds(log, "step")
+        lat = [[1, 128, h // 16, w // 16] for _, h, w, _ in tall + square]
+        self.check("steps", len(steps) == 2, len(steps))
+        self.check("one row a step carries both references in order",
+                   all(e["rows"] == 1 and e["ref_shapes"] == [lat] for e in steps),
+                   [(e["rows"], e["ref_shapes"]) for e in steps][:1])
+        self.check("the first reference sizes the latent",
+                   {tuple(e["x_shape"]) for e in steps} == {tuple(lat[0]) if lat else None},
+                   [e["x_shape"] for e in steps][:1])
+        self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
+        self.check("latent saved", latent_sha(self.work, "latents/flux2-edit") is not None, None)
+
+    async def flux2_reference_method(self):
+        """FLUX.2 klein places its references by the index method, and
+        FluxKontextMultiReferenceLatentMethod asks for another."""
+        wf = self.flux2_edit_workflow()
+        wf["30"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                    "inputs": {"conditioning": ["13", 0], "reference_latents_method": "offset"}}
+        wf["21"]["inputs"]["positive"] = ["30", 0]
+        r = await self.s.run(wf)
+        err = r.get("error") or {}
+        self.check("error", r["status"] == "error", r["status"])
+        self.check("on the sampler", str(err.get("node_id")) == "22", err.get("node_id"))
+        msg = str(err.get("exception_message"))
+        self.check("names the method and the node", all(w in msg for w in (
+            "'index' method", "'offset'", "FluxKontextMultiReferenceLatentMethod")), msg)
+        n = len(kinds(self.stub.log(), "step"))
+        self.check("no step served", n == 0, n)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -483,6 +574,10 @@ async def amain(a) -> dict:
             await c.case("version mismatch names the side to upgrade", c.version)
             await c.case("qwen-image-2.1 edit with two references", c.qwen_edit)
             await c.case("fixed sigmas through GmlxSigmas and SamplerCustom", c.turbo_sigmas)
+            await c.case("flux-2-klein t2i through Flux2Scheduler", c.flux2_t2i)
+            await c.case("flux-2-klein edit with two references", c.flux2_edit)
+            await c.case("FluxKontextMultiReferenceLatentMethod refused on flux-2-klein, naming it",
+                         c.flux2_reference_method)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)

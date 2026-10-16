@@ -54,19 +54,28 @@ DEFAULTS = {
                           "DISTILLED", "flux3_image_klein_sd-Q4_K_M.gguf"),
     "f_encoder": os.path.join(_GGUF, "unsloth__Qwen3-VL-4B-Instruct-GGUF",
                               "Qwen3-VL-4B-Instruct-Q8_0.gguf"),
-    "f_vae": os.path.join(_GGUF, "Comfy-Org__flux2-dev",
-                          "flux2-vae-F32.gguf"),
+    "f_vae": os.path.join(_GGUF, "black-forest-labs__FLUX.2-klein-4B",
+                          "flux2-vae-BF16.gguf"),
+    "f2_dit": os.path.join(_GGUF, "unsloth__FLUX.2-klein-4B-GGUF",
+                           "flux-2-klein-4b-Q4_K_M.gguf"),
+    "f2_encoder": os.path.join(_GGUF, "unsloth__Qwen3-4B-GGUF",
+                               "Qwen3-4B-Q8_0.gguf"),
+    "f2_vae": os.path.join(_GGUF, "black-forest-labs__FLUX.2-klein-4B",
+                           "flux2-vae-BF16.gguf"),
 }
 FAMILIES = (("z", "z-image-turbo"), ("qwen", "qwen-image"),
-            ("flux", "flux-3-klein"))
-# The --family choices: each family, both of the first two, and all three.
+            ("flux", "flux-3-klein"), ("flux2", "flux-2-klein"))
+# The --family choices: each family, both of the first two, and all four.
 CHOICES = {"z": ("z",), "qwen": ("qwen",), "flux": ("flux",),
-           "both": ("z", "qwen"), "all": ("z", "qwen", "flux")}
+           "flux2": ("flux2",), "both": ("z", "qwen"),
+           "all": ("z", "qwen", "flux", "flux2")}
 # The DEFAULTS keys of each family's files.
-PREFIX = {"z": "z_", "qwen": "q_", "flux": "f_"}
+PREFIX = {"z": "z_", "qwen": "q_", "flux": "f_", "flux2": "f2_"}
 # How to make a file a pull packs rather than downloads.
-MAKE = {"f_vae": "gmlx pull flux-3-klein packs the FLUX.2 VAE there, or "
-                 "pass the GGUF that gmlx image pack-vae wrote"}
+_PACK = ("packs the FLUX.2 VAE there, or pass the GGUF that gmlx image "
+         "pack-vae wrote")
+MAKE = {"f_vae": f"gmlx pull flux-3-klein {_PACK}",
+        "f2_vae": f"gmlx pull flux-2-klein {_PACK}"}
 
 
 def missing_files(a) -> list:
@@ -104,6 +113,10 @@ def _config(a) -> dict:
         # The encoder reads the prompt alone: no vision tower.
         image_models["flux-3-klein"] = {
             "path": a.f_dit, "encoder": a.f_encoder, "vae": a.f_vae}
+    if "flux2" in families:
+        # The encoder reads the prompt alone: no vision tower.
+        image_models["flux-2-klein"] = {
+            "path": a.f2_dit, "encoder": a.f2_encoder, "vae": a.f2_vae}
     return {"models": models,
             "image_models": image_models,
             "server": {"defaults": {"model": "chat",
@@ -218,7 +231,7 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
 
     def edit():
         src = made["png"]
-        if family in ("qwen", "flux"):
+        if family in ("qwen", "flux", "flux2"):
             r = client.images.edit(model=model, image=[("a.png", src, "image/png"),
                                                        ("b.png", src, "image/png")],
                                    prompt="put the two lighthouses side by side",
@@ -230,8 +243,10 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
         assert _decode(r.data[0].b64_json).size == (512, 512)
 
     def edit_unsized():
-        # One reference off the 16 pixel grid is padded to its canvas, and
-        # the output is cropped back to the image's own size.
+        # FLUX.3 klein pads one reference off the 16 pixel grid to its
+        # canvas and crops the output back to the image's own size. FLUX.2
+        # klein crops the reference to the grid, and the output keeps the
+        # cropped size.
         from PIL import Image
 
         buf = io.BytesIO()
@@ -241,7 +256,7 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
                                                    "image/png"),
                                prompt="the same lighthouse at night")
         got = _decode(r.data[0].b64_json).size
-        assert got == (500, 300), got
+        assert got == ((496, 288) if family == "flux2" else (500, 300)), got
         return f"{got[0]}x{got[1]}"
 
     def edit_stream():
@@ -285,8 +300,8 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
             except BadRequestError:
                 continue
             raise AssertionError(f"no 400 for {kw}")
-        if family == "flux":
-            # The most references FLUX.3 klein takes.
+        if family in ("flux", "flux2"):
+            # The most references either klein takes.
             src = ("a.png", made["png"], "image/png")
             try:
                 client.images.edit(model=model, image=[src] * 11, prompt="x")
@@ -299,7 +314,7 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
     rep.check(f"{tag} generations url jpeg", gen_url)
     rep.check(f"{tag} stream partial_images=2", stream)
     rep.check(f"{tag} edits", edit)
-    if family == "flux":
+    if family in ("flux", "flux2"):
         rep.check(f"{tag} edits without a size", edit_unsized)
     rep.check(f"{tag} edits stream", edit_stream)
     rep.check(f"{tag} variations", variation)
@@ -417,7 +432,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--family", choices=tuple(CHOICES), default="both",
                     help="both is Z-Image and Qwen-Image, all adds FLUX.3 "
-                         "klein")
+                         "klein and FLUX.2 klein")
     for k, v in DEFAULTS.items():
         ap.add_argument("--" + k.replace("_", "-"), dest=k, default=v)
     ap.add_argument("--with-chat", action="store_true",

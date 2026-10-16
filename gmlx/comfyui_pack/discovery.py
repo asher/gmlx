@@ -44,6 +44,8 @@ PULL_NAMES = {
     "qwen-image": ("qwen-image-2.1",),
     "qwen-image-turbo": ("qwen-image-2.1-turbo",),
     "krea-2-turbo": (),
+    "flux-2-klein": (),
+    "flux-2-klein-base": (),
     "flux-3-klein": (),
     "flux-3-klein-base": (),
 }
@@ -52,6 +54,8 @@ PULL_KINDS = {
     "qwen-image": ("qwen_image21", "base"),
     "qwen-image-turbo": ("qwen_image21", "turbo"),
     "krea-2-turbo": ("krea2", "turbo"),
+    "flux-2-klein": ("flux2_klein", "distilled"),
+    "flux-2-klein-base": ("flux2_klein", "base"),
     "flux-3-klein": ("flux3_klein", "distilled"),
     "flux-3-klein-base": ("flux3_klein", "base"),
 }

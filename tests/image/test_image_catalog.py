@@ -29,6 +29,8 @@ def test_a_recipe_resolves_by_name_or_alias():
     assert catalog.recipe_for("flux3_klein", "distilled").name == "flux-3-klein"
     assert catalog.recipe_for("flux3_klein", "base").name == "flux-3-klein-base"
     assert catalog.recipe("FLUX-3-Klein").variant == "distilled"
+    assert catalog.recipe_for("flux2_klein", "distilled").name == "flux-2-klein"
+    assert catalog.recipe_for("flux2_klein", "base").name == "flux-2-klein-base"
 
 
 @pytest.mark.parametrize("gb, cls", [(8, 16), (16, 16), (18, 16), (24, 24),
@@ -153,6 +155,66 @@ def _scan(root, **kw):
     return chat, images
 
 
+def test_the_klein_recipes_share_bfls_bf16_flux2_autoencoder():
+    """FLUX.2 klein and FLUX.3 klein pull one VAE: BFL's BF16 file of the
+    FLUX.2 autoencoder at a pinned revision, with its config, packed in its
+    own dtype under an Apache-2.0 license line."""
+    names = ("flux-2-klein", "flux-2-klein-base", "flux-3-klein",
+             "flux-3-klein-base")
+    rows = {(r.vae_repo, r.vae_revision, r.vae_file, r.vae_config,
+             r.vae_sha256, r.vae_pack, r.vae_license, r.vae_bytes)
+            for r in map(catalog.recipe, names)}
+    assert rows == {("black-forest-labs/FLUX.2-klein-4B",
+                     "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+                     "vae/diffusion_pytorch_model.safetensors",
+                     "vae/config.json",
+                     "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+                     "flux2-vae-BF16.gguf", "apache-2.0", catalog.recipe(
+                         "flux-2-klein").vae_bytes)}
+    for name in names[:2]:
+        r = catalog.recipe(name)
+        assert (r.family, r.license, r.encoder_license) == (
+            "flux2_klein", "apache-2.0", "apache-2.0")
+        assert (r.encoder_repo, r.encoder_name("Q8_0")) == (
+            "unsloth/Qwen3-4B-GGUF", "Qwen3-4B-Q8_0.gguf")
+        assert r.encoder_bytes == catalog.recipe(
+            "z-image-turbo").encoder_bytes
+    assert catalog.recipe("flux-2-klein").dit_name("Q8_0") == \
+        "flux-2-klein-4b-Q8_0.gguf"
+    assert catalog.recipe("flux-2-klein-base").dit_name("Q4_K_M") == \
+        "flux-2-klein-base-4b-Q4_K_M.gguf"
+
+
+@pytest.mark.parametrize("label, other", [("flux3_klein", "flux2_klein"),
+                                          ("flux2_klein", "flux3_klein")])
+def test_a_pack_of_the_flux2_autoencoder_serves_both_klein_families(
+        tmp_path, monkeypatch, label, other):
+    """The scan offers a pack of the FLUX.2 autoencoder to FLUX.2 klein and
+    FLUX.3 klein whichever family it names, and a pull of either takes it
+    from disk. A VAE of another autoencoder serves its family alone."""
+    from gmlx.commands import image_pull
+
+    assert catalog.vae_families(label) == (label, other)
+    for fam in ("z_image", "qwen_image21", "krea2", "nonesuch"):
+        assert catalog.vae_families(fam) == (fam,)
+    sha = catalog.recipe("flux-2-klein").vae_sha256
+    vae = _vae(tmp_path / "flux2-vae-BF16.gguf", family=label, sha=sha)
+    (tmp_path / "krea").mkdir()
+    _vae(tmp_path / "krea" / "qwen-image-vae-BF16.gguf", family="krea2")
+    got = {(f.role, f.family, f.path) for f in catalog.scan([tmp_path])}
+    assert {g for g in got if g[2] == vae} == {("vae", label, vae),
+                                               ("vae", other, vae)}
+    monkeypatch.setattr(image_pull, "_repo_sizes", lambda *a: {})
+    for name in ("flux-2-klein", "flux-2-klein-base", "flux-3-klein",
+                 "flux-3-klein-base"):
+        plan = image_pull.plan_pull(
+            catalog.recipe(name), dit_quant="Q8_0", encoder_quant="Q8_0",
+            encoder_quant_given=False, only=image_pull.PARTS,
+            roots=[str(tmp_path)], base_dir=str(tmp_path), nest=True)
+        part = plan.part("vae")
+        assert (part.path, part.download) == (vae, False), name
+
+
 def test_discovery_pairs_a_dit_with_its_encoder_and_vae(tmp_path, tiny_spec,
                                                         capsys):
     (tmp_path / "enc").mkdir()
@@ -169,6 +231,35 @@ def test_discovery_pairs_a_dit_with_its_encoder_and_vae(tmp_path, tiny_spec,
     assert im.encoder == chat[0].id
     assert im.id.startswith("z-image-turbo")
     assert "image model" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("fam, label", [("flux2_klein", "flux3_klein"),
+                                        ("flux3_klein", "flux2_klein")])
+def test_discovery_pairs_a_klein_dit_with_the_other_klein_familys_vae(
+        tmp_path, tiny_spec, monkeypatch, fam, label):
+    """A pack of the FLUX.2 autoencoder named for one klein family pairs
+    with a DiT of the other, and a VAE of another autoencoder beside the
+    DiT does not."""
+    # The klein registry rows give their encoder specs.
+    spec_of = te.encoder_spec
+    monkeypatch.setattr(te, "encoder_spec",
+                        lambda f: tiny_spec if f == fam else spec_of(f))
+
+    def dit_identity(path):
+        with open(path, "rb") as f:
+            head = f.read(4096)
+        return (fam, "distilled") if b"lumina2" in head else None
+
+    monkeypatch.setattr(catalog, "dit_identity", dit_identity)
+    (tmp_path / "dit").mkdir()
+    (tmp_path / "vae").mkdir()
+    _encoder(tmp_path / "Qwen3-4B-Q8_0.gguf")
+    _dit(tmp_path / "dit" / "klein-Q4_K_M.gguf")
+    _vae(tmp_path / "dit" / "qwen-image-vae-BF16.gguf", family="krea2")
+    vae = _vae(tmp_path / "vae" / "flux2-vae-BF16.gguf", family=label)
+    _chat, images = _scan(tmp_path)
+    (im,) = images
+    assert im.vae == vae
 
 
 def test_a_configured_chat_model_is_shared_as_the_encoder(tmp_path,
@@ -293,12 +384,13 @@ def test_a_flux3_pull_takes_the_krea_2_encoder_file_by_its_weights(
     found = catalog.scan(roots, families=("flux3_klein", "krea2"))
     dits = [f.path for f in found if f.role == "dit"
             and f.family == "flux3_klein" and f.variant == r.variant]
-    vaes = [f for f in found if f.role == "vae" and f.family == "flux3_klein"]
+    vaes = [f for f in found if f.role == "vae" and f.family == "flux3_klein"
+            and f.sha256 == r.vae_sha256]
     encs = {f.family: f.path for f in found if f.role == "encoder"}
     if not dits or not vaes or "flux3_klein" not in encs:
         pytest.skip(f"a {r.title} DiT, the Qwen3-VL-4B encoder and the packed "
-                    "FLUX.2 VAE are not all under KQUANT_TEST_GGUF_DIR and "
-                    "GMLX_TEST_IMAGE_DIR")
+                    "BF16 FLUX.2 VAE are not all under KQUANT_TEST_GGUF_DIR "
+                    "and GMLX_TEST_IMAGE_DIR")
     # One encoder file serves both families.
     assert encs.get("krea2") == encs["flux3_klein"]
     plan = image_pull.plan_pull(
@@ -308,9 +400,46 @@ def test_a_flux3_pull_takes_the_krea_2_encoder_file_by_its_weights(
     assert [(p.role, p.download) for p in plan.parts] == [
         ("dit", False), ("encoder", False), ("vae", False)]
     assert plan.part("encoder").path == encs["flux3_klein"]
-    assert catalog.vae_identity(plan.part("vae").path) == ("flux3_klein",
-                                                           r.vae_sha256)
+    label, sha = catalog.vae_identity(plan.part("vae").path)
+    assert sha == r.vae_sha256 and "flux3_klein" in catalog.vae_families(label)
     assert catalog.dit_identity(plan.part("dit").path) == ("flux3_klein",
+                                                           r.variant)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", ["flux-2-klein", "flux-2-klein-base"])
+def test_a_flux2_pull_takes_the_z_image_encoder_and_the_klein_vae_on_disk(
+        gguf_dir, tmp_path, name):
+    """The Qwen3-4B file of Z-Image and the FLUX.2 VAE pack, whichever
+    klein family it names, serve the pull with nothing downloaded."""
+    from image_dir import image_dir
+
+    from gmlx.commands import image_pull
+
+    r = catalog.RECIPES[name]
+    roots = [str(gguf_dir), str(image_dir())]
+    found = catalog.scan(roots, families=("flux2_klein", "z_image"))
+    dits = [f.path for f in found if f.role == "dit"
+            and f.family == "flux2_klein" and f.variant == r.variant]
+    vaes = [f for f in found if f.role == "vae" and f.family == "flux2_klein"
+            and f.sha256 == r.vae_sha256]
+    encs = {f.family: f.path for f in found if f.role == "encoder"
+            and Path(f.path).name == "Qwen3-4B-Q8_0.gguf"}
+    if not dits or not vaes or "flux2_klein" not in encs:
+        pytest.skip(f"a {r.title} DiT, the Qwen3-4B Q8_0 encoder and the "
+                    "packed BF16 FLUX.2 VAE are not all under "
+                    "KQUANT_TEST_GGUF_DIR and GMLX_TEST_IMAGE_DIR")
+    assert encs.get("z_image") == encs["flux2_klein"]
+    plan = image_pull.plan_pull(
+        r, dit_quant=image_pull._quant_of(dits[0]), encoder_quant="Q8_0",
+        encoder_quant_given=False, only=image_pull.PARTS, roots=roots,
+        base_dir=str(tmp_path), nest=True)
+    assert [(p.role, p.download) for p in plan.parts] == [
+        ("dit", False), ("encoder", False), ("vae", False)]
+    assert plan.part("encoder").path == encs["flux2_klein"]
+    label, sha = catalog.vae_identity(plan.part("vae").path)
+    assert sha == r.vae_sha256 and "flux2_klein" in catalog.vae_families(label)
+    assert catalog.dit_identity(plan.part("dit").path) == ("flux2_klein",
                                                            r.variant)
 
 

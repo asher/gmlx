@@ -32,6 +32,11 @@ full resolution activation and keeps them, 5.7 GiB at 512 pixels in fp32,
 so a run at 512 and 1024 pixels with float64 peaked at 32.8 GiB on an M5
 Max, and the oracle runs no larger size.
 
+FLUX.2 klein reads the same autoencoder, which gmlx pulls from BFL's
+FLUX.2 klein 4B repository in BF16. ``--vae`` that file, ``--config`` a
+copy of that repository and ``--name check5_flux2_klein_vae`` write its
+fixture, the fp32 and float64 runs reading the bf16 weights upcast.
+
 --self-test builds the class at a tiny config with seeded weights and
 BatchNorm statistics, which the fixture holds by diffusers name, and runs
 one 48x64 image through it.
@@ -428,9 +433,11 @@ def main(argv=None) -> int:
     extra = {"source_dtypes": dtypes, "config_revision": a.config_revision,
              "load": "AutoencoderKLFlux2.from_config(vae/config.json), "
              "then the file strict, in float32"}
+    held = ("bfloat16 weights, which the fp32 and float64 runs read "
+            "upcast" if "torch.bfloat16" in dtypes else "float32 weights")
     results_extra, bfl, notes = {}, None, [
-        "The file holds float32 weights. The bf16 VAE is a bfloat16 copy "
-        "with its BatchNorm statistics kept float32."]
+        f"The file holds {held}. The bf16 VAE is a bfloat16 copy with its "
+        "BatchNorm statistics kept float32."]
     if a.original is not None:
         files["vae_original"] = a.original
         bfl_state = None
