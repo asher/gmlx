@@ -13,14 +13,14 @@ pytestmark = pytest.mark.integration
 FAMILIES = ("z_image", "krea2", "qwen_image21", "flux3_klein")
 PROMPTS = {
     "ascii": "a red bicycle leaning on a brick wall at dusk",
-    "cjk": "黄昏时分，一辆红色自"
-           "行车靠在砖墙上",
+    "cjk": "\u9ec4\u660f\u65f6\u5206\uff0c\u4e00\u8f86\u7ea2\u8272\u81ea"
+           "\u884c\u8f66\u9760\u5728\u7816\u5899\u4e0a",
     "emoji": "a bike \U0001F6B2 by a wall \U0001F9F1 at dusk \U0001F306 "
              "\U0001F44D\U0001F3FD",
     # A Hebrew presentation form of three bytes, whose NFC form is three
     # code points of six bytes and five tokens: under the token cap of
     # every family, more tokens than the bytes as given.
-    "nfc": "שּׁ" * 96,
+    "nfc": "\ufb2c" * 96,
     "empty": "",
     "past the cap": "a red bicycle leaning on a brick wall " * 800,
 }
