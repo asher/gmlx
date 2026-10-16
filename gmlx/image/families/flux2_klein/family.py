@@ -143,7 +143,14 @@ def encoder():
     layers and before its final norm, on the chat template of one user
     turn with thinking off. The three states of a token are its features
     side by side, layer by layer, and the 512 rows hold the pad rows the
-    reference keeps, each at its own position. The tap runs in float32."""
+    reference keeps, each at its own position.
+
+    The residual stream and the norms run in float32, and q, k and v are
+    cast to float32 after their products, so the qk norm, the rotary
+    embedding and the attention run in float32 too. The products of a
+    quantized file return bfloat16: the attention's output product and
+    the feed-forward, its activation included, return bfloat16 to the
+    float32 residual."""
     from gmlx.image.text_encoder import Z_IMAGE, EncoderSpec
 
     p = PROMPT.values
@@ -163,6 +170,7 @@ def encoder():
         pad_multiple=p["max_tokens"],
         pad_id=p["pad_id"],
         pad_position=None,
+        fp32_qkv=True,
     )
 
 

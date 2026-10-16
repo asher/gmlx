@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import mlx.core as mx
+import mlx.nn as nn
 
 from image_fixtures import FIXTURES, load_json
 
@@ -844,6 +845,137 @@ def test_a_padded_tap_restores_the_ropes_and_refuses_a_block_without_one():
     assert all(m.model.layers[i].self_attn.rope is ropes[i] for i in (0, 1, 3))
     # A tap without pads swaps nothing, so it runs.
     te.tap(m, [3, 17], layers=(4,))
+
+
+class _Bf16Product(nn.Module):
+    """A product that returns bfloat16 whatever its input, as a Q8_0
+    KQuantLinear does on a float32 input."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def __call__(self, x):
+        return self.inner(x).astype(mx.bfloat16)
+
+
+class _Float32Product(nn.Module):
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def __call__(self, x):
+        return self.inner(x).astype(mx.float32)
+
+
+def _bf16_products(m):
+    """The tiny model as a quantized file loads: bf16 weights, so bf16
+    norm scales, and products that return bf16."""
+    m.set_dtype(mx.bfloat16)
+    for b in m.model.layers:
+        for o, names in ((b.self_attn, ("q_proj", "k_proj", "v_proj",
+                                        "o_proj")),
+                         (b.mlp, ("gate_proj", "up_proj", "down_proj"))):
+            for name in names:
+                setattr(o, name, _Bf16Product(getattr(o, name)))
+
+
+def test_fp32_qkv_runs_the_qk_norm_rope_and_attention_in_float32(
+        monkeypatch):
+    from gmlx._vendor.mlx_lm.models import qwen3
+
+    m, _ = _tiny_qwen3()
+    _bf16_products(m)
+    seen = []
+    sdpa = qwen3.scaled_dot_product_attention
+
+    def spy(q, k, v, **kw):
+        seen.append((q.dtype, k.dtype, v.dtype))
+        return sdpa(q, k, v, **kw)
+
+    monkeypatch.setattr(qwen3, "scaled_dot_product_attention", spy)
+    products = [[getattr(b.self_attn, n) for n in te._QKV]
+                for b in m.model.layers]
+    ids = [3, 17, 42, 5]
+    kw = dict(layers=(2, 4), activation="float32", pad=3, pad_id=9,
+              pad_position=None)
+    plain = te.tap(m, ids, **kw)
+    assert len(seen) == 4 and set(seen) == {(mx.bfloat16,) * 3}
+    seen.clear()
+    cast = te.tap(m, ids, fp32_qkv=True, **kw)
+    assert len(seen) == 4 and set(seen) == {(mx.float32,) * 3}
+    assert all(getattr(b.self_attn, n) is p
+               for b, ps in zip(m.model.layers, products)
+               for n, p in zip(te._QKV, ps))
+    for a, b in zip(plain, cast):
+        assert a.dtype == b.dtype == mx.float32
+        assert not mx.array_equal(a, b).item()
+    # The cast tap is the tap of a model whose q, k and v products return
+    # float32 after their own rounding, and the other products are as
+    # they were.
+    for b in m.model.layers:
+        for n in te._QKV:
+            setattr(b.self_attn, n, _Float32Product(getattr(b.self_attn, n)))
+    for a, b in zip(cast, te.tap(m, ids, **kw)):
+        assert mx.array_equal(a, b).item()
+    # The products are restored after a tap that raises, and a block with
+    # no products to cast swaps none.
+    m2, _ = _tiny_qwen3()
+    before = [[getattr(b.self_attn, n) for n in te._QKV]
+              for b in m2.model.layers]
+
+    def same():
+        return all(getattr(b.self_attn, n) is p
+                   for b, ps in zip(m2.model.layers, before)
+                   for n, p in zip(te._QKV, ps))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with te.float32_qkv(m2):
+            assert all(isinstance(b.self_attn.q_proj, te._Float32Out)
+                       for b in m2.model.layers)
+            raise RuntimeError("boom")
+    assert same()
+
+    class _NoAttention:
+        def __call__(self, x, mask, cache):
+            return x
+
+    keep = m2.model.layers[2]
+    m2.model.layers[2] = _NoAttention()
+    with pytest.raises(TypeError, match="_NoAttention has no self_attn"):
+        te.tap(m2, ids, layers=(4,), fp32_qkv=True)
+    m2.model.layers[2] = keep
+    assert same()
+
+
+def test_an_encoding_casts_qkv_only_when_its_spec_says():
+    m, _ = _tiny_qwen3()
+    _bf16_products(m)
+    tok = _CharTokenizer()
+    spec = _spec(tap=(1, 3), stack=True, pad_multiple=8, pad_id=9,
+                 max_tokens=24, pad_position=None)
+    got = {}
+    for flag in (False, True):
+        s = dataclasses.replace(spec, fp32_qkv=flag)
+        enc = te.EncoderHandle(m, tok, s, owned=False).encode("ab")
+        want = te.tap(m, list(enc.ids), layers=(1, 3), pad=enc.pads,
+                      pad_id=9, pad_position=None, fp32_qkv=flag)
+        assert mx.array_equal(enc.features,
+                              mx.concatenate([w[0] for w in want], -1)).item()
+        assert enc.template_id == spec.template_id
+        got[flag] = enc.features
+    assert not mx.array_equal(got[False], got[True]).item()
+
+
+def test_only_the_flux2_spec_casts_qkv():
+    specs = {}
+    for fam in registry.families():
+        try:
+            specs[fam.name] = te.encoder_spec(fam)
+        except te.ImageModelError:
+            continue
+    assert {n for n, s in specs.items() if s.fp32_qkv} == {"flux2_klein"}
+    assert len(specs) > 1
 
 
 def test_an_encoding_keeps_its_pad_rows():

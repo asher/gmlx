@@ -92,6 +92,9 @@ class EncoderSpec:
     pad_id: int | None = None        # token id of the pad rows
     pad_position: int | None = 1     # rotary position of every pad row,
                                      # None for each at its own index
+    fp32_qkv: bool = False           # q, k and v cast to float32 after
+                                     # their products, for the qk norm,
+                                     # the rotary and the attention
 
     @property
     def template_id(self) -> str:
@@ -240,7 +243,8 @@ def _text_stack(model):
 
 def tap(model, ids, *, layers: tuple, activation: str | None = None,
         pad: int = 0, pad_id: int | None = None,
-        pad_position: int | None = 1) -> list[mx.array]:
+        pad_position: int | None = 1,
+        fp32_qkv: bool = False) -> list[mx.array]:
     """Hidden states after running the first ``n`` decoder layers, for each
     ``n`` in ``layers``, with no final norm. ``ids`` is one prompt's token
     ids. Each result is (1, L, hidden) in the model's activation dtype, and
@@ -252,7 +256,11 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
     attending to every real token and to no pad row. At a ``pad_position``
     they are one row at that rotary position, repeated. With
     ``pad_position`` None each runs at its own index after the real
-    tokens."""
+    tokens.
+
+    With ``fp32_qkv`` every attention casts its q, k and v products to
+    float32, so its qk norm, rotary embedding and attention run in
+    float32 whatever dtype a quantized product returns."""
     embed, blocks = _text_stack(model)
     stops = sorted(set(layers))
     if not stops or stops[0] < 1 or stops[-1] > len(blocks):
@@ -277,7 +285,8 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
         mask = "causal" if n > 1 else None
         place = contextlib.nullcontext()
     out: dict[int, mx.array] = {}
-    with place:
+    cast = (float32_qkv(model) if fp32_qkv else contextlib.nullcontext())
+    with place, cast:
         for i in range(stops[-1]):
             h = blocks[i](h, mask, None)
             if i + 1 in stops:
@@ -287,6 +296,43 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
             row = mx.broadcast_to(v[:, n:], (1, pad, v.shape[-1]))
             out[k] = mx.concatenate([v[:, :n], row], axis=1)
     return [out[k] for k in layers]
+
+
+class _Float32Out:
+    """A product whose output is cast to float32."""
+
+    def __init__(self, product):
+        self.product = product
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.product(x).astype(mx.float32)
+
+
+_QKV = ("q_proj", "k_proj", "v_proj")
+
+
+@contextlib.contextmanager
+def float32_qkv(model):
+    """Run a tap with each attention's q, k and v products cast to
+    float32, and restore the products after."""
+    _, blocks = _text_stack(model)
+    found = []
+    for b in blocks:
+        attn = getattr(b, "self_attn", None)
+        products = [getattr(attn, name, None) for name in _QKV]
+        if any(p is None for p in products):
+            raise TypeError(f"{type(b).__name__} has no self_attn q_proj, "
+                            "k_proj and v_proj to cast")
+        found.append((attn, products))
+    try:
+        for attn, products in found:
+            for name, p in zip(_QKV, products):
+                setattr(attn, name, _Float32Out(p))
+        yield
+    finally:
+        for attn, products in found:
+            for name, p in zip(_QKV, products):
+                setattr(attn, name, p)
 
 
 class _PadRope:
@@ -593,7 +639,8 @@ class EncoderHandle:
         with vision_rope(self.model, spec):
             hidden = tap(self.model, ids, layers=spec.tap_layers,
                          activation=spec.activation, pad=pads,
-                         pad_id=spec.pad_id, pad_position=spec.pad_position)
+                         pad_id=spec.pad_id, pad_position=spec.pad_position,
+                         fp32_qkv=spec.fp32_qkv)
             mx.eval(hidden)
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
                        template_id=spec.template_id,

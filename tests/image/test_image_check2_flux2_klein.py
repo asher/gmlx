@@ -177,11 +177,11 @@ def _features(handle, spec, prompt: str, *, layers=None, pads=True,
     layers = layers or spec.tap_layers
     if causal_pads:
         hs = te.tap(handle.model, ids + [spec.pad_id] * n, layers=layers,
-                    activation=spec.activation)
+                    activation=spec.activation, fp32_qkv=spec.fp32_qkv)
     else:
         hs = te.tap(handle.model, ids, layers=layers,
                     activation=spec.activation, pad=n, pad_id=spec.pad_id,
-                    pad_position=spec.pad_position)
+                    pad_position=spec.pad_position, fp32_qkv=spec.fp32_qkv)
     rows = [h[0] for h in hs]
     f = mx.concatenate(rows, axis=-1) if stack else rows[0]
     return ids + [spec.pad_id] * n, np.array(f.astype(mx.float32))
