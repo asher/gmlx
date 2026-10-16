@@ -1150,6 +1150,92 @@ def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
     assert seen == [True, False]
 
 
+def _bare_and_full(served, h, w, **full):
+    """The step plan peaks of ``served`` at h x w pixels without its rows'
+    conditioning, as the size check before the rows load prices it, and
+    with ``full``, the terms of its references."""
+    from gmlx.image import memfit
+    from gmlx.serve import image_service
+
+    args = image_service._fit_args(served.pipe, served, 1 << 50, 1.0)
+    bare = memfit.plan_memory(height=h, width=w, _hint=False, **args).peak
+    return bare, memfit.plan_memory(height=h, width=w, _hint=False,
+                                    **args, **full).peak
+
+
+def test_a_flux3_step_prices_the_reference_latents_of_its_rows(host,
+                                                              fpipes):
+    """Four reference latents of 1024 pixels join every step's rows, so a
+    step that fits as text to image is refused with them, and more than
+    the family's 10 references in a row are refused by count."""
+    from gmlx.image import memfit
+
+    _serve(host, "f3d", fpipes[True])
+    served = host.served["f3d"]
+    c = _client()
+    rng = np.random.default_rng(9)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    x = np.zeros(F3_SHAPE, np.float32)
+    refs = [c.put(rng.standard_normal((1, 8, 64, 64)).astype(np.float32))
+            for _ in range(4)]
+    rows = _rows(c, feats)
+    with_refs = [{**rows[0], "ref_latents": refs}]
+    caption = 10 if memfit.prices_prompt("flux3_klein") else None
+    w, h = routes._px(served, "latent", *F3_SHAPE[2:])
+    bare, full = _bare_and_full(served, h, w, caption_tokens=caption,
+                                step_refs=[(1024, 1024)] * 4)
+    assert full > bare
+    host.budget_bytes = (bare + full) / 2
+    try:
+        assert c.step("f3d", None, x, [0.75], rows,
+                      sample_sigmas=SIGMAS).shape == F3_SHAPE
+        with pytest.raises(StepsClientError, match="with the references of "
+                           "its rows does not fit in memory"):
+            c.step("f3d", None, x, [0.75], with_refs, sample_sigmas=SIGMAS)
+    finally:
+        host.budget_bytes = None
+    small = c.put(np.zeros((1, 8, 2, 3), np.float32))
+    with pytest.raises(StepsClientError, match="FLUX.3 klein takes at most "
+                       "10 reference latents in a row, and row 0 has 11"):
+        c.step("f3d", None, x, [0.75], [{**rows[0],
+                                         "ref_latents": [small] * 11}],
+               sample_sigmas=SIGMAS)
+    assert host.held == 0
+
+
+def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host):
+    """Two reference latents of 1024 pixels in a Qwen-Image 2.1 row put
+    their tokens in the prefix of every block, which the plan of the step
+    counts."""
+    from gmlx.image import memfit
+
+    served = host.served["qit"]
+    c = _client()
+    rng = np.random.default_rng(10)
+    text = 9
+    feats = rng.standard_normal((1, text, 24)).astype(np.float32)
+    refs = [c.put(rng.standard_normal((1, 8, 64, 64)).astype(np.float32))
+            for _ in range(2)]
+    row = {"cond": c.put(feats), "num_tokens": text, "ref_latents": refs,
+           "image_slots": [2, 5]}
+    x = np.zeros((1, 8, 4, 6), np.float32)
+    caption = text if memfit.prices_prompt("qwen_image21") else None
+    w, h = routes._px(served, "latent", *x.shape[2:])
+    bare, full = _bare_and_full(served, h, w, caption_tokens=caption,
+                                prefix_rows=[text + 2 * 64 * 64])
+    assert full > bare
+    host.budget_bytes = (bare + full) / 2
+    try:
+        plain = {"cond": row["cond"], "num_tokens": text}
+        assert c.step("qit", None, x, [0.75], [plain]).shape == x.shape
+        with pytest.raises(StepsClientError, match="with the references of "
+                           "its rows does not fit in memory"):
+            c.step("qit", None, x, [0.75], [row])
+    finally:
+        host.budget_bytes = None
+    assert host.held == 0
+
+
 def test_a_patch_table_body_that_is_no_object_is_400(host):
     body = b"[1]"
     r = _http().put(f"{P}/patch-tables/{steps.table_id(body)}?model=zit",

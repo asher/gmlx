@@ -1137,15 +1137,21 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 
 
 def size_fits(served: ServedImage, width: int, height: int, budget, *,
-              cfg: float = 1.0, init: bool = False) -> bool:
+              cfg: float = 1.0, init: bool = False, conds=None,
+              patch_table=None) -> bool:
     """Whether the memory plan of an image of ``width`` x ``height`` on
     ``served`` fits ``budget``, as the image routes plan a request. The
-    step routes ask it before a step, a VAE decode and a VAE encode."""
-    from gmlx.image import memfit
+    step routes ask it before a step, a VAE decode and a VAE encode. The
+    conditionings of a step, ``conds``, are priced as ``plan_request``
+    prices them: their text rows, a prefix and the reference latents."""
+    from gmlx.image import api, memfit
 
     if budget is None:
         return True
     args = _fit_args(served.pipe, served, budget, cfg)
+    if conds:
+        args.update(api.plan_terms(served.pipe, conds, height=int(height),
+                                   width=int(width), patch_table=patch_table))
     try:
         return memfit.plan_memory(height=int(height), width=int(width),
                                   init_image=init, _hint=False, **args).fits

@@ -404,16 +404,59 @@ def _ref_sizes(states) -> list:
     return list(seen.values())
 
 
-def _step_refs(states) -> list:
+def _step_refs(states, scale: int) -> list:
     """(height, width) in pixels of every reference of the conditioning
     with the most reference pixels, an image given twice counted twice:
-    the DiT runs one token block per reference."""
+    the DiT runs one token block per reference. A conditioning whose
+    references came as latents alone, as a step's do, counts each latent
+    at ``scale`` pixels per latent pixel."""
     best: list = []
     for c in states:
-        sizes = [(r.height, r.width) for r in c.refs]
+        sizes = ([(r.height, r.width) for r in c.refs] if c.refs else
+                 [(int(z.shape[-2]) * scale, int(z.shape[-1]) * scale)
+                  for z in c.ref_latents])
         if sum(h * w for h, w in sizes) > sum(h * w for h, w in best):
             best = sizes
     return best
+
+
+def _states(conds) -> list:
+    return ([] if conds is None else [conds]
+            if isinstance(conds, Conditioning) else list(conds))
+
+
+def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
+               patch_table=None) -> dict:
+    """The ``memfit.plan_memory`` arguments that the conditionings of a
+    request set, as ``plan_request`` passes them: the text rows of a
+    family whose plan prices the prompt, the prefix rows of each
+    conditioning and whether the two of a guided request are one, the
+    prefix states of other conditionings a cache holds and its bound, the
+    reference images the VAE encodes, and the references each step runs.
+    ``conds`` is one Conditioning or several, as ``plan_request`` takes
+    them, and a conditioning whose references came as latents alone, as
+    those of the step routes do, is priced by their shapes."""
+    states = _states(conds)
+    terms = dict(
+        caption_tokens=(_text_rows(states)
+                        if memfit.prices_prompt(pipe.family.name) else None),
+        prefix_rows=[_prefix_rows(pipe, c) for c in states] or None,
+        prefix_shared=(len(states) == 2
+                       and _ident(states[0]) == _ident(states[1])),
+        prefix_other=0, prefix_bound=0,
+        ref_sizes=_ref_sizes(states),
+        step_refs=_step_refs(states, pipe.vae_scale))
+    parts = pipe.family.step
+    if parts is not None:
+        # The states of a step in parts are the plan's prefix cache term.
+        # Those of this request count there once, held already or not.
+        table = _table_id(pipe, patch_table)
+        size = (height // pipe.vae_scale, width // pipe.vae_scale)
+        held = sum(pipe.captions.nbytes(key) for key in {
+            _state_key(pipe, c, table, size) for c in states if c.key})
+        terms.update(prefix_other=pipe.captions.bytes - held,
+                     prefix_bound=parts.state_bytes)
+    return terms
 
 
 def plan_request(pipe: ImagePipeline, *, height: int, width: int,
@@ -443,23 +486,13 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
     vae_dtype = getattr(pipe.vae, "dtype", None)
-    states = ([] if conds is None else [conds]
-              if isinstance(conds, Conditioning) else list(conds))
-    if caption_tokens is None and memfit.prices_prompt(pipe.family.name):
-        caption_tokens = _text_rows(states)
+    terms = plan_terms(pipe, conds, height=height, width=width,
+                       patch_table=patch_table)
+    if caption_tokens is not None:
+        terms["caption_tokens"] = caption_tokens
     caches = pipe.conditionings.bytes + pipe.modulations.bytes
-    parts = pipe.family.step
-    other = bound = 0
-    if parts is None:
+    if pipe.family.step is None:
         caches += pipe.captions.bytes
-    else:
-        # The states of a step in parts are the plan's prefix cache term.
-        # Those of this request count there once, held already or not.
-        table = _table_id(pipe, patch_table)
-        size = (height // pipe.vae_scale, width // pipe.vae_scale)
-        held = sum(pipe.captions.nbytes(key) for key in {
-            _state_key(pipe, c, table, size) for c in states if c.key})
-        other, bound = pipe.captions.bytes - held, parts.state_bytes
     price = None
     if pipe.vae is not None:
         from .vae import tiling
@@ -477,14 +510,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         cfg=pipe.defaults.cfg if cfg is None else cfg, dtype=act,
         vae_dtype=vae_dtype,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
-        caption_tokens=caption_tokens, cache_bytes=caches,
-        prefix_rows=[_prefix_rows(pipe, c) for c in states] or None,
-        prefix_shared=(len(states) == 2
-                       and _ident(states[0]) == _ident(states[1])),
-        prefix_other=other, prefix_bound=bound, init_image=init_image,
-        ref_sizes=_ref_sizes(states), step_refs=_step_refs(states),
-        vae_price=price, budget=budget,
-        overcommit=overcommit)
+        cache_bytes=caches, init_image=init_image, vae_price=price,
+        budget=budget, overcommit=overcommit, **terms)
 
 
 def references(pipe: ImagePipeline, images, *,
