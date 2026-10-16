@@ -396,6 +396,8 @@ def family_of(spec) -> tuple:
 def status(spec, resident: bool, plan=None) -> dict:
     from gmlx.image.dtypes import image_activation
 
+    from .image_service import serves_edits
+
     fam, variant = family_of(spec)
     facts = COMFY.get(fam.name)
     if facts is None:
@@ -416,7 +418,7 @@ def status(spec, resident: bool, plan=None) -> dict:
             "comfy": {"model_class": facts["model_class"],
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
-            "edit_capable": fam.edit is not None,
+            "edit_capable": serves_edits(fam),
             "sampling": sampling(fam, variant),
             "compute_dtype": str(act.dit).rsplit(".", 1)[-1].replace(
                 "bfloat16", "bf16").replace("float16", "f16").replace(
@@ -807,7 +809,7 @@ def encode(served, text: str, images: list, borrow=None,
 
     from gmlx.image import api
 
-    from .image_service import _encode
+    from .image_service import _encode, serves_edits
 
     pipe = served.pipe
     refs: tuple = ()
@@ -816,6 +818,10 @@ def encode(served, text: str, images: list, borrow=None,
         if edit is None:
             raise StepError(400, f"{pipe.family.title} takes no reference "
                             "images")
+        if not serves_edits(pipe.family):
+            raise StepError(400, f"the server takes no {pipe.family.title} "
+                            "reference images; gmlx image generate --ref "
+                            "runs them")
         try:
             refs = api.references(pipe, [
                 api.references(pipe, [im],

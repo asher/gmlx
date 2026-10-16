@@ -73,11 +73,13 @@ class Conditioning:
     unpadded, and its cache key. An empty key is never cached. An edit
     also holds ``image_slots``, the indices of the rows of ``features``
     that the encoder gave to image tokens, ascending, and ``refs``, the
-    ``Reference`` of each image in prompt order. ``ref_latents`` are the
-    latents ``(C, h, w)`` of each reference in model space, which the VAE
-    adds after the encoder ran, and ``ref_hashes`` name their content:
-    the state a DiT derives from the conditioning depends on them, and
-    the key does not hold them."""
+    ``Reference`` of each image in prompt order. On a family whose
+    encoder reads the prompt alone it has no image slots, and its key is
+    that of the text. ``ref_latents`` are the latents ``(C, h, w)`` of
+    each reference in model space, which the VAE adds after the encoder
+    ran, and ``ref_hashes`` name their content: the state a DiT derives
+    from the conditioning depends on them, and the key does not hold
+    them."""
     features: mx.array
     key: str = ""
     ref_latents: tuple = ()
@@ -95,9 +97,9 @@ class Conditioning:
 
     @property
     def pending(self) -> bool:
-        """Whether the conditioning has image slots and no reference
-        latents yet."""
-        return bool(self.image_slots) and not self.ref_latents
+        """Whether the conditioning has reference images, in image slots
+        or beside the text, and no reference latents yet."""
+        return bool(self.image_slots or self.refs) and not self.ref_latents
 
 
 def conditioning_key(*, family: str, encoder: str, adapters: str = "",

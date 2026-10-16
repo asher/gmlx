@@ -91,14 +91,31 @@ class EditParts:
     returns the ids, the features ``(L, D)`` and the rows of the features
     that are image slots. ``template_id()`` names the template in a
     conditioning key.
+
+    A family whose encoder reads the prompt alone has no ``token_ids``,
+    ``encode`` or ``template_id``: its references reach the DiT as VAE
+    latents only. A family whose rule for a reference depends on the
+    other references of the request has ``prepare_all(images)`` in place
+    of ``prepare`` and the areas: it gives the references of a request,
+    a tuple with ``crop``, the (left, top, right, bottom) box the output
+    is cropped to when the request gives no size, or None. ``size(refs)``
+    is then the (width, height) of a request with references and no
+    size of its own.
     """
     max_refs: int
-    area: int
-    min_area: int
-    prepare: Callable
-    token_ids: Callable
-    encode: Callable
-    template_id: Callable
+    area: int = 0
+    min_area: int = 0
+    prepare: Callable | None = None
+    token_ids: Callable | None = None
+    encode: Callable | None = None
+    template_id: Callable | None = None
+    prepare_all: Callable | None = None
+    size: Callable | None = None
+
+    @property
+    def text_only(self) -> bool:
+        """Whether the encoder reads the prompt without the images."""
+        return self.encode is None
 
 
 @dataclass(frozen=True)

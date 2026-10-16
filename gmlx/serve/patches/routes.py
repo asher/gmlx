@@ -146,11 +146,12 @@ def _image_identity(path: str, variant: str | None = None) -> tuple:
     hit = _IMAGE_IDENTITY.get(key)
     if hit is None:
         from gmlx.image.loader import identify_dit
+        from gmlx.serve.image_service import serves_edits
 
         try:
             ident = identify_dit(path, variant=variant)
             hit = (ident.family.name, ident.variant,
-                   ident.family.edit is not None)
+                   serves_edits(ident.family))
         except Exception:  # noqa: BLE001 - a bad file is listed without them
             hit = (None, None, False)
         if len(_IMAGE_IDENTITY) > 64:

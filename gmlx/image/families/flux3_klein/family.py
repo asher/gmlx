@@ -30,7 +30,8 @@ from __future__ import annotations
 import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family, LoopRules, SamplingRow
+from gmlx.image.registry import (ConstantsRow, EditParts, Family, LoopRules,
+                                 SamplingRow)
 
 TITLE = "FLUX.3 klein"
 # The input modes in the order their tokens take inside a sample, and the
@@ -325,6 +326,37 @@ def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
     return flux3_sigmas(steps, CONSTANTS.values["alpha"])
 
 
+# The reference images of an edit, by src/flux3/pipeline.py and
+# generate.py: the canvas of one reference at most 4 MiB pixels with
+# sides of 64 to 4096, each of several at most 1 MiB pixels, on the grid
+# of one latent token, and at most 10 of them. The encoder reads the
+# prompt alone, and the references reach the DiT as latents only.
+REFERENCES = ConstantsRow(
+    values={
+        "max_refs": 10,
+        "match_max_pixels": 4 * 1024 * 1024,
+        "multi_max_pixels": 1024 * 1024,
+        "min_side": 64,
+        "max_side": 4096,
+        "grid": 16,
+    },
+    repo="github.com/black-forest-labs/flux-3-image-klein",
+    revision="45e57c9fb06f9751cdced29a65c5d2171003be05",
+)
+
+
+def _prepare_all(images):
+    from .edit import prepare
+
+    return prepare(images)
+
+
+def _size(refs):
+    from .edit import default_size
+
+    return default_size(refs)
+
+
 FAMILY = Family(
     name="flux3_klein",
     title=TITLE,
@@ -343,4 +375,6 @@ FAMILY = Family(
     schedule=schedule,
     sampling=SAMPLING,
     loop=LOOP,
+    edit=EditParts(max_refs=REFERENCES.values["max_refs"],
+                   prepare_all=_prepare_all, size=_size),
 )

@@ -168,8 +168,11 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "1 (default empty).")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
-                        "on Qwen-Image 2.1 (default: the init image's, else the "
-                        "entry's defaults.size, else the variant's).")
+                        "on Qwen-Image 2.1 (default: the init image's, else "
+                        "on FLUX.3 klein the first reference's, else the "
+                        "entry's defaults.size, else the variant's). On "
+                        "FLUX.3 klein without it, the image of one reference "
+                        "is cropped to that reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
@@ -192,10 +195,13 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--ref", action="append", default=None, metavar="PATH",
                    help="Edit from this reference image. Repeat the flag for "
                         "several, in the order the prompt names them. Needs "
-                        "--encoder-mmproj.")
+                        "--encoder-mmproj, except on FLUX.3 klein, whose "
+                        "encoder reads the prompt alone.")
     p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
                    help="Resize each reference to about N x N pixels at its "
-                        "own aspect ratio (default 1024).")
+                        "own aspect ratio (default 1024). FLUX.3 klein sizes "
+                        "its references by its own rule and takes no "
+                        "--ref-size.")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",
@@ -455,8 +461,6 @@ def _check_files(a) -> None:
         raise FileNotFoundError(f"MODEL {a.model}: no such file")
     if a.encoder is None or a.vae is None:
         raise _Usage("--encoder and --vae are required with a DiT path")
-    if a.ref and a.encoder_mmproj is None:
-        raise _Usage("--ref needs --encoder-mmproj with a DiT path")
     if a.ref_size is not None and not a.ref:
         raise _Usage("--ref-size needs --ref")
     for flag, path in (("--encoder", a.encoder), ("--vae", a.vae),
@@ -473,7 +477,8 @@ def _check_files(a) -> None:
 def _references(a, family) -> tuple:
     """The ``--ref`` images as the family runs them, in order. A family
     that takes none, a count over its cap and a size outside what it takes
-    are usage errors."""
+    are usage errors. A family that prepares the references of a request
+    together gives them with ``crop``, and sizes them by its own rule."""
     if not a.ref:
         return ()
     edit = family.edit
@@ -482,6 +487,19 @@ def _references(a, family) -> tuple:
     if len(a.ref) > edit.max_refs:
         raise _Usage(f"--ref: {family.title} takes at most {edit.max_refs} "
                      f"reference images, and the request has {len(a.ref)}")
+    if a.encoder_mmproj is None and not edit.text_only:
+        raise _Usage("--ref needs --encoder-mmproj with a DiT path")
+    if edit.prepare_all is not None:
+        if a.ref_size is not None:
+            raise _Usage(f"--ref-size: {family.title} sizes its references "
+                         "by its own rule")
+        images = [open_image("--ref", path) for path in a.ref]
+        try:
+            return edit.prepare_all(images)
+        except ValueError as e:
+            i = getattr(e, "index", None)
+            where = "--ref" if i is None else f"--ref {a.ref[i]}"
+            raise _Usage(f"{where}: {e}") from None
     low, high = math.isqrt(edit.min_area - 1) + 1, math.isqrt(edit.area)
     side = high if a.ref_size is None else a.ref_size
     if not low <= side <= high:
@@ -636,10 +654,19 @@ def _generate(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     steps, cfg, strength = _settings(a, ident, defaults)
     stride = _stride(fam)
-    init = None
+    refs = _references(a, fam)
+    edit = fam.edit
+    # A family that sizes a request by its references names that size.
+    ref_size = (edit.size(refs) if refs and edit is not None
+                and edit.size is not None else None)
+    init = crop = None
     if a.init_image is not None:
         init = read_image(a.init_image, a.size, stride)
         width, height = init.shape[1], init.shape[0]
+    elif a.size is None and ref_size is not None:
+        width, height = ref_size
+        # The output of a padded reference is cropped back to its box.
+        crop = getattr(refs, "crop", None)
     else:
         width, height = a.size or getattr(a, "entry_size", None) or (
             defaults.size if defaults else (1024, 1024))
@@ -647,11 +674,14 @@ def _generate(a) -> int:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
     mask = read_mask(a.mask, (width, height)) if a.mask else None
-    refs = _references(a, fam)
-    mmproj = a.encoder_mmproj if refs else None
+    text_only = edit is not None and edit.text_only
+    mmproj = a.encoder_mmproj if refs and not text_only else None
     if a.encoder_mmproj is not None and not refs:
         log("note: --encoder-mmproj is unused without --ref, and is not "
             "loaded")
+    elif a.encoder_mmproj is not None and mmproj is None:
+        log(f"note: --encoder-mmproj is unused, since the {fam.title} "
+            "encoder reads the prompt alone, and is not loaded")
     if cfg == 1.0 and a.negative_prompt:
         log("warning: --negative-prompt is unused, since --guidance 1 turns "
             "guidance off")
@@ -733,6 +763,9 @@ def _generate(a) -> int:
         settings["refs"] = [
             {"file": os.path.basename(p), "size": f"{r.width}x{r.height}",
              "sha256": _file_sha256(p)} for p, r in zip(a.ref, refs)]
+    if crop is not None:
+        # (left, top, right, bottom) of the written image in the sampled one.
+        settings["crop"] = [int(v) for v in crop]
     if init is not None:
         settings.update(init_image=os.path.basename(a.init_image),
                         strength=strength)
@@ -748,6 +781,9 @@ def _generate(a) -> int:
                        mask=mask, patch_table=table, plan=plan)
         latents.append(np.array(x))
         pixels = to_uint8(api.vae_decode(pipe, x, alpha=alpha, plan=plan))
+        if crop is not None:
+            left, top, right, bottom = crop
+            pixels = np.ascontiguousarray(pixels[top:bottom, left:right])
         meta = None
         if fmt == "png" and not a.no_metadata:
             meta = {**settings, "seed": s, "model": files["dit"],

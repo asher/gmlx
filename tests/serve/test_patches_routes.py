@@ -438,12 +438,14 @@ def test_models_payload_lists_image_models_with_their_markers(
     from types import SimpleNamespace
 
     from gmlx.image import loader
+    from gmlx.image.registry import get_family
 
     files = {n: tmp_path / n for n in ("zit.gguf", "qi.gguf", "enc.gguf",
                                          "mm.gguf", "vae.gguf")}
     for f in files.values():
         f.write_bytes(b"x")
-    edit = SimpleNamespace(name="qwen_image21", edit=object())
+    edit = SimpleNamespace(name="qwen_image21",
+                           edit=get_family("qwen_image21").edit)
     plain = SimpleNamespace(name="z_image", edit=None)
     monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
         family=edit if path.endswith("qi.gguf") else plain,

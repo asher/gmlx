@@ -551,7 +551,7 @@ class _Vae:
     """Latents (8, h / 16, w / 16) that are a function of the pixels."""
     dtype = mx.float32
     lockstep = False
-    config = SimpleNamespace(scale=16, latent_channels=8)
+    config = SimpleNamespace(scale=16, latent_channels=8, in_channels=4)
 
     def __init__(self):
         self.calls = []

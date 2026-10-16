@@ -456,7 +456,12 @@ def references(pipe: ImagePipeline, images, *,
     default the family's own. An image is a PIL image or a uint8 array
     (H, W, 3) or (H, W, 4), and a ``Reference`` passes through. A family
     without reference images and a count over the family's cap are
-    refused by name."""
+    refused by name.
+
+    A family whose rule for a reference depends on the others of the
+    request takes no ``area``. It prepares the images together, and the
+    tuple it gives has ``crop``, the box the output is cropped to when
+    the request gives no size. References alone pass through."""
     edit = pipe.family.edit
     images = list(images)
     if edit is None:
@@ -467,6 +472,13 @@ def references(pipe: ImagePipeline, images, *,
         raise ValueError(
             f"{pipe.family.title} takes at most {edit.max_refs} reference "
             f"images, and the request has {len(images)}")
+    if edit.prepare_all is not None:
+        if area is not None:
+            raise ValueError(f"{pipe.family.title} sizes its references by "
+                             "its own rule, and takes no reference area")
+        if images and all(isinstance(r, Reference) for r in images):
+            return tuple(images)
+        return edit.prepare_all(images)
     area = edit.area if area is None else int(area)
     if not edit.min_area <= area <= edit.area:
         raise ValueError(
@@ -479,10 +491,12 @@ def references(pipe: ImagePipeline, images, *,
 
 def _cond_key(pipe: ImagePipeline, prompt: str, refs: tuple) -> str:
     """The cache key of the conditioning of ``prompt`` with ``refs``. It
-    reads the encoder's tokenizer alone, which a released encoder keeps."""
+    reads the encoder's tokenizer alone, which a released encoder keeps.
+    On a family whose encoder reads the prompt alone it is the key of the
+    text."""
     enc = pipe.encoder
-    if refs:
-        edit = pipe.family.edit
+    edit = pipe.family.edit
+    if refs and edit is not None and not edit.text_only:
         return conditioning_key(
             family=pipe.family.name, encoder=str(enc.source_key),
             adapters=getattr(enc, "adapters", ""),
@@ -558,7 +572,9 @@ def _reference_latents(pipe: ImagePipeline, ref: Reference, plan):
             tiled = (max(ref.height, ref.width) > memfit.TILE_PX
                      and (tiled or memfit.vae_row(pipe.family.name)
                           .tiles_at(ref.height * ref.width)))
-    x = mx.array(ref.pixels.astype(np.float32) / 255.0)[None] * 2 - 1
+    # The channels the VAE encodes: RGB, or RGBA on a VAE that reads alpha.
+    px = ref.pixels[..., :vae.config.in_channels]
+    x = mx.array(px.astype(np.float32) / 255.0)[None] * 2 - 1
     z = tiling.encode(vae, x, tiled=tiled, mode="mode", free=room)[0]
     mx.eval(z)
     pipe.reference_latents.put(key, z, array_bytes([z]))
@@ -578,6 +594,14 @@ def encode_text(pipe: ImagePipeline, prompt: str, *, images=(),
         refs = references(pipe, images)
         if enc is None:
             raise ValueError("this pipeline has no text encoder")
+        edit = pipe.family.edit
+        if edit is not None and edit.text_only:
+            # The encoder reads the prompt alone, and the references reach
+            # the DiT as latents.
+            import dataclasses
+
+            cond = dataclasses.replace(encode_text(pipe, prompt), refs=refs)
+            return encode_references(pipe, cond) if ref_latents else cond
         if not getattr(enc, "vision", False) and not enc.released:
             raise ValueError(
                 "reference images need the encoder's vision tower: load "
@@ -916,6 +940,7 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
             raise ValueError(f"the {pipe.family.title} DiT takes no target "
                              f"time")
         return _parts_row(pipe, pipe.family.step, x, sigma, cond, table)
+    _need_latents(pipe, cond)
     kw = {}
     if cond.ref_latents:
         if not hasattr(dit, "references"):

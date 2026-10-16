@@ -975,11 +975,19 @@ def _guided(req: ImageRequest, served: ServedImage) -> float:
     return float(served.plan.cfg)
 
 
+def serves_edits(fam) -> bool:
+    """Whether the server takes the reference images of ``fam``: a family
+    whose references are prepared one at a time, each at its own area. A
+    family that prepares the references of a request together edits
+    through ``gmlx image generate`` alone."""
+    return fam.edit is not None and fam.edit.prepare is not None
+
+
 def check_family(req: ImageRequest, served: ServedImage) -> None:
     """Refuse what the family cannot do: transparency without an alpha
     VAE, a step count other than the one a variant with a fixed schedule
-    runs, more images than an edit takes, and edits without a vision
-    tower."""
+    runs, more images than an edit takes, edits the server does not take,
+    and edits without a vision tower."""
     from gmlx.image.api import fixed_steps
 
     pipe = served.pipe
@@ -1005,6 +1013,9 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
             raise _bad(f"{fam.title} edits one image at a time, and the "
                        f"request has {len(req.images)}", "image")
         return
+    if not serves_edits(fam):
+        raise _bad(f"the server takes no {fam.title} reference images; "
+                   "gmlx image generate --ref runs them", "image")
     cap = min(edit.max_refs, MAX_REFS)
     if len(req.images) > cap:
         raise _bad(f"{fam.title} takes at most {cap} images, and the request "

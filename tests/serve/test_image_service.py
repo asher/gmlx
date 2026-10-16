@@ -772,6 +772,26 @@ def test_z_image_edits_one_image_at_a_time():
         image_service.check_family(_edit_req(2), served)
 
 
+def test_the_server_refuses_the_references_of_flux3_klein_by_name():
+    """FLUX.3 klein prepares the references of a request together, which
+    the server's path of one image at a time does not; its edits run in
+    the CLI."""
+    from gmlx.image.registry import get_family
+
+    assert image_service.serves_edits(get_family("qwen_image21"))
+    assert not image_service.serves_edits(get_family("flux3_klein"))
+    assert not image_service.serves_edits(get_family("z_image"))
+    served = _edit_served("flux3_klein")
+    with pytest.raises(image_service.ImageRequestError,
+                       match="the server takes no FLUX.3 klein reference "
+                             "images; gmlx image generate --ref runs "
+                             "them") as e:
+        image_service.check_family(_edit_req(1), served)
+    assert e.value.param == "image"
+    gen = image_service.parse_request("generations", {"prompt": "x"})
+    image_service.check_family(gen, served)
+
+
 @pytest.mark.parametrize("aid", ["/abs/a.safetensors", "~/a.safetensors",
                                  "../a.safetensors", "x/../../a.safetensors"])
 def test_an_adapter_id_is_never_an_absolute_or_escaping_path(tmp_path, aid):

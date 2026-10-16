@@ -1317,17 +1317,15 @@ def test_the_adapter_flag_completes_as_a_file():
 
 # Reference images.
 
-@pytest.fixture
-def edit(env, monkeypatch, tmp_path):
-    """The env on a family that takes reference images: the toy pipeline
-    under the reference rule of Qwen-Image 2.1. The encoder and the VAE
-    of the references are replaced, and their calls are kept."""
+def _edit_env(env, monkeypatch, tmp_path, parts):
+    """The env on a family that takes reference images by ``parts``. The
+    encoder and the VAE of the references are replaced, and their calls
+    are kept."""
     import dataclasses
 
     from PIL import Image
 
-    fam = dataclasses.replace(get_family("z_image"),
-                              edit=get_family("qwen_image21").edit)
+    fam = dataclasses.replace(get_family("z_image"), edit=parts)
     state = env
     state.calls, state.loads = [], []
 
@@ -1352,7 +1350,8 @@ def edit(env, monkeypatch, tmp_path):
 
     def encode_references(pipe, cond, *, plan=None):
         state.calls.append(("vae", cond.refs, plan, pipe.encoder.released))
-        return cond
+        # The toy DiT reads no references: the text's conditioning goes on.
+        return dataclasses.replace(cond, refs=())
 
     monkeypatch.setattr(api, "load", load)
     monkeypatch.setattr(api, "encode_text", encode_text)
@@ -1374,6 +1373,22 @@ def edit(env, monkeypatch, tmp_path):
     mm.write_bytes(b"x")
     state.mmproj = str(mm)
     return state
+
+
+@pytest.fixture
+def edit(env, monkeypatch, tmp_path):
+    """The toy pipeline under the reference rule of Qwen-Image 2.1."""
+    return _edit_env(env, monkeypatch, tmp_path,
+                     get_family("qwen_image21").edit)
+
+
+@pytest.fixture
+def flux3_edit(env, monkeypatch, tmp_path):
+    """The toy pipeline under the reference rules of FLUX.3 klein, which
+    prepares the references of a request together and whose encoder
+    reads the prompt alone."""
+    return _edit_env(env, monkeypatch, tmp_path,
+                     get_family("flux3_klein").edit)
 
 
 def test_references_reach_the_encoder_in_order_and_the_vae_after_it(
@@ -1499,6 +1514,96 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
         capsys.readouterr().err
     # All refused before any model loads.
     assert edit.pipes == [] and edit.loads == []
+
+
+def test_one_flux3_reference_sizes_the_request_and_crops_its_image(
+        flux3_edit, tmp_path, capsys):
+    from PIL import Image
+
+    lat, out = tmp_path / "lat.npz", tmp_path / "o.png"
+    assert umbrella_main(flux3_edit.base + [
+        "--prompt", "p", "--seed", "3", "--ref", flux3_edit.refs[0],
+        "--encoder-mmproj", flux3_edit.mmproj, "--output", str(out),
+        "--save-latent", str(lat), "--json"]) == 0
+    got = capsys.readouterr()
+    rec = json.loads(got.out)
+    # The encoder reads the prompt alone: no vision tower loads.
+    assert flux3_edit.loads == [None] and "mmproj" not in rec["model"]
+    assert "--encoder-mmproj is unused, since the Z-Image encoder reads " \
+        "the prompt alone" in got.err
+    (ref,) = flux3_edit.calls[0][2]
+    # 300 x 260 pixels on a canvas of 304 x 272, padded by reflection.
+    assert (ref.width, ref.height) == (304, 272)
+    assert flux3_edit.checks[0]["refs"] == [(272, 304)]
+    assert (flux3_edit.checks[0]["width"],
+            flux3_edit.checks[0]["height"]) == (304, 272)
+    assert rec["settings"]["size"] == "304x272"
+    assert rec["settings"]["crop"] == [2, 6, 302, 266]
+    x = np.load(lat)["latents"]
+    assert x.shape == (1, 4, 34, 38)
+    pipe = flux3_edit.pipes[0]
+    whole = cmd.to_uint8(api.vae_decode(pipe, mx.array(x)))
+    with Image.open(out) as im:
+        assert im.size == (300, 260)
+        assert json.loads(im.text["gmlx"])["crop"] == [2, 6, 302, 266]
+        assert np.array_equal(np.asarray(im), whole[6:266, 2:302])
+
+
+def test_a_flux3_request_with_a_size_keeps_the_whole_image(flux3_edit,
+                                                           tmp_path,
+                                                           capsys):
+    from PIL import Image
+
+    out = tmp_path / "o.png"
+    assert umbrella_main(flux3_edit.base + [
+        "--prompt", "p", "--size", "64x48", "--ref", flux3_edit.refs[0],
+        "--output", str(out), "--json"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["settings"]["size"] == "64x48" and "crop" not in rec["settings"]
+    with Image.open(out) as im:
+        assert im.size == (64, 48)
+
+
+def test_several_flux3_references_take_the_size_of_the_first(flux3_edit,
+                                                             tmp_path,
+                                                             capsys):
+    from PIL import Image
+
+    out = tmp_path / "o.png"
+    assert umbrella_main(flux3_edit.base + [
+        "--prompt", "p", "--ref", flux3_edit.refs[0], "--ref",
+        flux3_edit.refs[1], "--output", str(out), "--json"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    refs = flux3_edit.calls[0][2]
+    # Each under one MiB, cropped to the 16 pixel grid, its alpha dropped.
+    assert [(r.width, r.height) for r in refs] == [(288, 256), (192, 320)]
+    assert all(bool((r.pixels[..., 3] == 255).all()) for r in refs)
+    assert rec["settings"]["size"] == "288x256"
+    assert "crop" not in rec["settings"]
+    assert [r["size"] for r in rec["settings"]["refs"]] == ["288x256",
+                                                            "192x320"]
+    with Image.open(out) as im:
+        assert im.size == (288, 256)
+
+
+def test_flux3_reference_refusals(flux3_edit, tmp_path, capsys):
+    from PIL import Image
+
+    base = flux3_edit.base + ["--prompt", "p"]
+    ref = ["--ref", flux3_edit.refs[0]]
+    tiny = tmp_path / "tiny.png"
+    Image.fromarray(np.zeros((8, 40, 3), np.uint8)).save(tiny)
+    for flags, text in (
+            (ref + ["--ref-size", "512"],
+             "--ref-size: Z-Image sizes its references by its own rule"),
+            (ref * 11, "--ref: Z-Image takes at most 10 reference images, "
+                       "and the request has 11"),
+            (ref + ["--ref", str(tiny)],
+             f"--ref {tiny}: a reference of 40x8 pixels has no 16 x 16 "
+             "pixel tile to keep")):
+        assert umbrella_main(base + flags) == 2, flags
+        assert text in capsys.readouterr().err
+    assert flux3_edit.pipes == [] and flux3_edit.loads == []
 
 
 def test_the_reference_flags_complete_as_files():
