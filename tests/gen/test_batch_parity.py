@@ -29,6 +29,8 @@ correct engine. The meaningful gate is three properties:
      single-stream logprob margin between the two competing tokens is ~0 (an
      exact tie). A real attention/masking/position bug instead picks a
      confidently-wrong token (margin >> 1).
+     ``test_batch_divergence_only_at_ties_native_fp`` checks the same with the
+     MXFP4 or NVFP4 layout pinned to wire and to packed.
 
 ``integration`` + ``slow``; skips unless ``KQUANT_TEST_GGUF_DIR`` points at real
 GGUFs (see ``conftest``). Select one arch with ``-k qwen2``.
@@ -143,6 +145,57 @@ def _first_divergence(a, b):
     return None
 
 
+def _native_fp_codecs(path):
+    """The MXFP4 and NVFP4 codecs of a GGUF's tensors, every shard."""
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.native_fp import NATIVE_FP_CODECS
+    from gmlx.load.preflight import find_split_shards
+
+    return {t.type_name.lower() for p in find_split_shards(path)
+            for t in scan_gguf(p).tensors} & NATIVE_FP_CODECS
+
+
+def _native_fp_layouts(model):
+    """The layouts the native-fp tensors loaded in: "packed" (MLX's packed
+    stacks) or "wire" (the file bytes behind the kq kernels)."""
+    from gmlx.load.modules import NativeFPSwitchLinear
+    from gmlx.load.native_fp import NATIVE_FP_CODECS
+
+    seen = set()
+    for _, m in model.named_modules():
+        if isinstance(m, NativeFPSwitchLinear):
+            seen.add("packed")
+        elif getattr(m, "kquant_type", None) in NATIVE_FP_CODECS:
+            seen.add("wire")
+    return seen
+
+
+def _assert_ties_only(model, tok, arch):
+    ids_list = [_encode(tok, p) for p in PROMPTS]
+    refs = [_single_stream(model, ids, N_TOKENS) for ids in ids_list]
+    batched = _batched(model, ids_list, N_TOKENS)
+
+    for i, bat in enumerate(batched):
+        ref_toks, ref_lps = refs[i]
+        if bat == ref_toks:
+            continue
+        k = _first_divergence(ref_toks, bat)
+        assert k is not None
+        # At the first divergence the prefix is identical, so the single-stream
+        # logprob vector at step k is the shared distribution both paths sampled.
+        lp = ref_lps[k]
+        margin = float(mx.max(lp)) - float(lp[bat[k]])
+        # The batched token's rank in single-stream's own ordering (0 = the top
+        # token) corroborates tie vs bug: a reduction-order flip can only swap the
+        # top-2 (rank 1), while a masking/position bug promotes a far-rank token.
+        rank = int((lp > lp[bat[k]]).sum())
+        assert margin <= TIE_EPS, (
+            f"{arch}: prompt {i} diverged at tok {k} on a NON-tie "
+            f"(margin {margin:.4f} nats > {TIE_EPS}; batched tok is single-stream "
+            f"rank {rank}); ref tok {ref_toks[k]} vs batched tok {bat[k]} - "
+            f"indicates a batched-decode bug, not a floating-point tie-break")
+
+
 # tests
 @pytest.mark.parametrize("arch", CANDIDATE_ARCHES)
 def test_batch_b1_token_exact(gguf_index, arch):
@@ -178,26 +231,27 @@ def test_batch_divergence_only_at_ties(gguf_index, arch):
     from gmlx import load_model
 
     model, _config, tok = load_model(_require(gguf_index, arch), verbose=False)
-    ids_list = [_encode(tok, p) for p in PROMPTS]
-    refs = [_single_stream(model, ids, N_TOKENS) for ids in ids_list]
-    batched = _batched(model, ids_list, N_TOKENS)
+    _assert_ties_only(model, tok, arch)
 
-    for i, bat in enumerate(batched):
-        ref_toks, ref_lps = refs[i]
-        if bat == ref_toks:
-            continue
-        k = _first_divergence(ref_toks, bat)
-        assert k is not None
-        # At the first divergence the prefix is identical, so the single-stream
-        # logprob vector at step k is the shared distribution both paths sampled.
-        lp = ref_lps[k]
-        margin = float(mx.max(lp)) - float(lp[bat[k]])
-        # The batched token's rank in single-stream's own ordering (0 = the top
-        # token) corroborates tie vs bug: a reduction-order flip can only swap the
-        # top-2 (rank 1), while a masking/position bug promotes a far-rank token.
-        rank = int((lp > lp[bat[k]]).sum())
-        assert margin <= TIE_EPS, (
-            f"{arch}: prompt {i} diverged at tok {k} on a NON-tie "
-            f"(margin {margin:.4f} nats > {TIE_EPS}; batched tok is single-stream "
-            f"rank {rank}); ref tok {ref_toks[k]} vs batched tok {bat[k]} - "
-            f"indicates a batched-decode bug, not a floating-point tie-break")
+
+@pytest.mark.parametrize("layout", ["wire", "packed"])
+@pytest.mark.parametrize("arch", CANDIDATE_ARCHES)
+def test_batch_divergence_only_at_ties_native_fp(gguf_index, arch, layout,
+                                                 monkeypatch):
+    """The ragged row with the MXFP4 or NVFP4 layout pinned. Auto picks wire
+    only on a Mac the model does not fit, so a host runs one layout and
+    this row runs both."""
+    import mlx_kquant as kq
+
+    from gmlx import load_model
+
+    path = _require(gguf_index, arch)
+    codecs = _native_fp_codecs(path)
+    if not codecs:
+        pytest.skip(f"{arch}: no MXFP4 or NVFP4 tensors, so no layout choice")
+    if layout == "wire" and not codecs <= set(kq.codecs()):
+        pytest.skip(f"this mlx-kquant build lacks {sorted(codecs)} wire kernels")
+    monkeypatch.setenv("GMLX_NATIVE_FP", layout)
+    model, _config, tok = load_model(path, verbose=False)
+    assert layout in _native_fp_layouts(model)
+    _assert_ties_only(model, tok, arch)
