@@ -400,7 +400,7 @@ def test_check7_delta_half_of_a_file_with_a_header_config(tmp_path, layout):
         assert rel_l2(delta, reference_delta(want[module],
                                              dims[module])) <= DELTA_TOL
     assert reader.vet_header(path, keymap=km) == 18
-    for name, kind in (("use_rslora", "rank-stabilized LoRA"),
+    for name, kind in (("fan_in_fan_out", "LoRA on a transposed weight"),
                        ("use_dora", "DoRA"), ("lora_bias", "LoRA with a "
                                                            "bias")):
         bad = write_keys(tmp_path / f"{name}.safetensors", keys,

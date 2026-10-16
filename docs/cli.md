@@ -1001,11 +1001,14 @@ references by this rule, and `--ref-size` exits 2 on it.
 
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
-kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
-follows the path after a colon and defaults to 1, and it may be negative.
-Repeat the flag to stack adapters, whose deltas add. A LoHa, LoKr, DoRA,
-full-weight or Tucker LoCon file is refused by name from its header, before
-any model loads. So is a file for another model family or one with keys
+kohya, diffusers, PEFT and OneTrainer key spellings are read. The rank and
+alpha in a diffusers file's PEFT header scale each pair as the diffusers
+loader scales it, rank-stabilized LoRA included. ComfyUI does not read that
+header, so such a file runs at another strength there, and gmlx warns of
+it. The strength follows the path after a colon and defaults to 1, and it
+may be negative. Repeat the flag to stack adapters, whose deltas add. A
+LoHa, LoKr, DoRA, full-weight or Tucker LoCon file is refused by name from
+its header, before any model loads. So is a file for another model family or one with keys
 that match no module of the DiT, which its GGUF header names. An adapter's
 text encoder pairs are applied to the text encoder at the same strength.
 

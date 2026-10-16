@@ -3,6 +3,7 @@ name, and the keys that match nothing."""
 from __future__ import annotations
 
 import json
+import math
 
 import mlx.core as mx
 import numpy as np
@@ -567,7 +568,6 @@ def test_a_header_pattern_matches_a_module_as_peft_matches_it(patterns,
 
 REFUSED = [
     ("use_dora", True, "DoRA"),
-    ("use_rslora", True, "rank-stabilized LoRA"),
     ("lora_bias", True, "LoRA with a bias"),
     ("bias", "all", "LoRA with trained base biases"),
     ("bias", "lora_only", "LoRA with trained base biases"),
@@ -610,6 +610,76 @@ def test_a_header_field_that_changes_the_delta_is_refused_by_name(
     for off in (None, False, [], {}, "", 0,
                 *(["none"] if name == "bias" else [])):
         assert _alphas(_resolved(keys, {**CONFIG, name: off})) == {ATT_Q: 1.5}
+
+
+def test_every_refused_header_field_has_its_refusal_row():
+    """Each field of ``_HEADER_REFUSED`` is refused in REFUSED with the
+    kind the reader names, and use_rslora is read, not refused."""
+    rows = {name: kind for name, _, kind in REFUSED
+            if kind != "adapter header"}
+    assert rows == reader._HEADER_REFUSED
+    assert "use_rslora" in reader._HEADER_READ
+    assert "use_rslora" not in reader._HEADER_REFUSED
+
+
+def _scales(res) -> dict:
+    """The scale each pair runs at, by target."""
+    return {t.pair.stem.removeprefix("transformer."):
+            t.pair.alpha / t.pair.rank for t in res.dit}
+
+
+def test_a_rank_stabilized_header_scales_by_the_root_of_the_rank():
+    """use_rslora scales a pair by its alpha over the square root of its
+    rank, as PEFT's LoraLayer does, with the rank and the alpha that
+    rank_pattern and alpha_pattern give a module, and the warning gives
+    the factor of gmlx's scale over ComfyUI's, which reads no header and
+    runs a pair without an alpha tensor at 1."""
+    keys = _saved({ATT_Q: 2, ATT_K: 3, FF_W1: 2})
+    fields = {**CONFIG, "use_rslora": True, "rank_pattern": {ATT_K: 3},
+              "alpha_pattern": {"w1": 4.0, "attention.to_k": 6.0}}
+    res = _resolved(keys, fields)
+    want = {ATT_Q: 1.5 / math.sqrt(2), ATT_K: 6.0 / math.sqrt(3),
+            FF_W1: 4.0 / math.sqrt(2)}
+    got = _scales(res)
+    assert got.keys() == want.keys()
+    for k, v in want.items():
+        assert got[k] == pytest.approx(v, rel=1e-12), k
+    # The same fields without the flag scale by the alpha over the rank.
+    plain = _scales(_resolved(keys, {**fields, "use_rslora": False}))
+    assert plain == {ATT_Q: 1.5 / 2, ATT_K: 6.0 / 3, FF_W1: 4.0 / 2}
+    assert len(res.warnings) == 1
+    w = res.warnings[0]
+    assert "3 pairs take an alpha from the adapter header" in w
+    assert ("The header makes 3 of them rank-stabilized, scaled by the "
+            "alpha over the square root of the rank, and gmlx applies "
+            "those at 1.061 or 2.828 or 3.464 times the strength that "
+            "ComfyUI gives them") in w
+    # A config whose alpha is the root of the rank runs at the scale 1
+    # that ComfyUI gives a pair without an alpha tensor, with no warning.
+    root = _resolved(_saved({ATT_Q: 4}), {**CONFIG, "r": 4,
+                                          "lora_alpha": 2.0,
+                                          "use_rslora": True})
+    assert _scales(root) == {ATT_Q: 1.0} and root.warnings == ()
+
+
+def test_a_rank_stabilized_pair_with_an_alpha_tensor():
+    """An alpha tensor that is the header's alpha takes the rank-stabilized
+    scale too. ComfyUI reads the tensor and scales by it over the rank, so
+    gmlx's scale is the root of the rank times ComfyUI's."""
+    keys = _saved({ATT_Q: 4}, alphas={ATT_Q: 3.0})
+    fields = {**CONFIG, "r": 4, "lora_alpha": 3.0, "use_rslora": True}
+    res = _resolved(keys, fields)
+    assert _scales(res) == {ATT_Q: pytest.approx(3.0 / 2.0, rel=1e-12)}
+    assert len(res.warnings) == 1
+    assert "gmlx applies those at 2 times the strength" in res.warnings[0]
+    assert _resolved(keys, {**fields, "use_rslora": False}).warnings == ()
+
+
+@pytest.mark.parametrize("value", [1, "true", [True], {"on": 1}])
+def test_a_use_rslora_that_is_not_true_or_false_is_refused(value):
+    with pytest.raises(AdapterError, match="use_rslora as .*neither true "
+                                           "nor false"):
+        reader.header_configs(header({**CONFIG, "use_rslora": value}), "f")
 
 
 def test_a_header_config_is_read_whole_or_refused():

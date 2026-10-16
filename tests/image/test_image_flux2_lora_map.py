@@ -323,6 +323,57 @@ def test_the_comfyui_warning_names_every_spelling_comfyui_drops():
         assert bool(res.warnings) == (not loads), stem
 
 
+# The header of Limbicnation/pixel-art-lora: diffusers names under
+# transformer., rank 64, and a rank-stabilized PEFT config of alpha 128.
+PIXEL_ART = "flux2_klein_pixel_art_lora.header.json"
+PIXEL_ART_MODULATIONS = ("transformer.double_stream_modulation_img.linear",
+                         "transformer.double_stream_modulation_txt.linear",
+                         "transformer.single_stream_modulation.linear")
+
+
+def header_pairs(name: str) -> reader.RawLora:
+    """The pairs of a header fixture with their stems and ranks and empty
+    rows, and the header's metadata."""
+    doc = load_json(name)
+    parts: dict = {}
+    for key, shape, _ in doc["tensors"]:
+        stem, _, role = key.rpartition(".lora_")
+        parts.setdefault(stem, {})[role] = shape
+    pairs = {stem: reader.RawPair(stem, mx.zeros((p["A.weight"][0], 1)),
+                                  mx.zeros((1, p["B.weight"][1])), None)
+             for stem, p in parts.items()}
+    return reader.RawLora(name, pairs, doc["metadata"])
+
+
+def test_the_pixel_art_adapter_warns_of_its_modulations_and_its_scale():
+    """The pixel-art adapter resolves whole. Its three modulation pairs
+    have diffusers names that ComfyUI's FLUX table lacks, and the warning
+    names all three and no other. Its rank-stabilized header scales each
+    pair by 128 over the root of 64, 16 times the scale 1 that ComfyUI
+    gives a pair without an alpha tensor, and the header warning says
+    so."""
+    km = lora_map(fp.identify(fixture_view(HEADERS[0])).config)
+    raw = header_pairs(PIXEL_ART)
+    res = reader.resolve(raw, km)
+    assert len(res.dit) == len(raw.pairs) == 86 and res.unmatched == ()
+    assert {t.pair.alpha / t.pair.rank for t in res.dit} == {16.0}
+    dropped = [w for w in res.warnings if "ComfyUI drops them" in w]
+    assert len(dropped) == 1
+    assert (f"3 keys have a spelling that ComfyUI does not read for FLUX.2 "
+            f"klein ({', '.join(PIXEL_ART_MODULATIONS)})") in dropped[0]
+    scaled = [w for w in res.warnings if "rank-stabilized" in w]
+    assert len(scaled) == 1 and len(res.warnings) == 2
+    assert "86 pairs take an alpha from the adapter header" in scaled[0]
+    assert ("The header makes 86 of them rank-stabilized, scaled by the "
+            "alpha over the square root of the rank, and gmlx applies those "
+            "at 16 times the strength that ComfyUI gives them") in scaled[0]
+    # The modulations land on the GGUF modules.
+    mods = {t.pair.stem: t.module for t in res.dit
+            if t.pair.stem in PIXEL_ART_MODULATIONS}
+    assert mods == {s: s.removeprefix("transformer.").replace(
+        ".linear", ".lin") for s in PIXEL_ART_MODULATIONS}
+
+
 def _adapter(km, dims: dict, seed: int, alpha, targets) -> dict:
     """Pairs on ``targets`` at ranks 2 to 4."""
     rng = np.random.default_rng(seed)

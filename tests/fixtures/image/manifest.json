@@ -219,5 +219,14 @@
     "size": 7751109744,
     "sha256": "9f29f9edcfdae452a653ffb51a534ca4decd389952c225724ff3b94042612a6e",
     "sha256_source": "The hub's LFS record of the file whose header the fixture's names and shapes come from. The base 4B file has the same names and shapes."
+  },
+  "flux2_klein_pixel_art_lora.header.json": {
+    "repo": "Limbicnation/pixel-art-lora",
+    "revision": "0ac8e5c3400af68228811edc324721e25fc26777",
+    "file": "pytorch_lora_weights.safetensors",
+    "size": 325280664,
+    "sha256": "72ac6e652196cd9f450d4d3256d197978d3fa690e22dc21361d3bd4fb4e8250e",
+    "license": "apache-2.0",
+    "sha256_source": "The hub's LFS record of the file whose header the fixture holds, which the downloaded file matches."
   }
 }
