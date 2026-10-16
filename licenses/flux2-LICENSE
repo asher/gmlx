@@ -8,13 +8,19 @@ source.
 - gmlx/image/families/flux2_klein/family.py: the constants of
   Klein4BParams, Klein9BParams and Flux2Params in src/flux2/model.py, the
   defaults of FLUX2_MODEL_INFO in src/flux2/util.py, the tensor names and
-  shapes of Flux2 in src/flux2/model.py, and the prompt rules of
-  Qwen3Embedder in src/flux2/text_encoder.py.
+  shapes of Flux2 in src/flux2/model.py, the prompt rules of
+  Qwen3Embedder in src/flux2/text_encoder.py, and the rounding of denoise
+  and denoise_cfg in src/flux2/sampling.py.
 - gmlx/image/families/flux2_klein/model.py: the Flux2 forward,
   DoubleStreamBlock, SingleStreamBlock, SelfAttention, SiLUActivation,
   Modulation, LastLayer, MLPEmbedder, QKNorm, timestep_embedding and rope
   of src/flux2/model.py, and the token ids of prc_img, prc_txt and
   encode_image_refs in src/flux2/sampling.py.
+- gmlx/image/schedule.py: flux2_mu and flux2_sigmas, from
+  compute_empirical_mu and get_schedule in src/flux2/sampling.py.
+- tests/image/test_image_check3_flux2_klein.py: schedule, a transcription
+  of get_schedule and compute_empirical_mu in src/flux2/sampling.py with
+  their constants.
 
 flux2 is distributed under the Apache License 2.0:
 

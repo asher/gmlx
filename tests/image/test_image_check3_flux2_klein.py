@@ -67,6 +67,11 @@ REFERENCE_COMMIT = "50fe5162777813d869182b139e83b10743caef15"
 FULL = "distilled r1"
 
 
+# SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
+# schedule transcribes get_schedule and compute_empirical_mu of
+# src/flux2/sampling.py of BFL's FLUX.2 reference at commit 50fe516, with
+# their constants, in Python floats (Apache-2.0; see
+# licenses/flux2-LICENSE).
 def schedule(steps: int, tokens: int) -> list[float]:
     """get_schedule of BFL's flux2 sampling.py at REFERENCE_COMMIT."""
     a1, b1, a2, b2 = 8.73809524e-05, 1.89833333, 0.00016927, 0.45666666
