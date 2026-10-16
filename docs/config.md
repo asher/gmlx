@@ -265,9 +265,9 @@ entries.
 |-----|---------|---------|
 | <a id="image_modelspath"></a>`path` | required | The DiT GGUF, found as a model [`path`](#modelspath) is |
 | <a id="image_modelsencoder"></a>`encoder` | required | The text encoder: the id of an entry under `models`, whose loaded copy it shares, or a GGUF path |
-| <a id="image_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF, which edits from reference images need. A shared encoder brings its model's `mmproj` instead. |
+| <a id="image_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF, which Qwen-Image 2.1 edits from reference images need. A shared encoder brings its model's `mmproj` instead. |
 | <a id="image_modelsvae"></a>`vae` | required | The VAE, a GGUF or a safetensors file |
-| <a id="image_modelsfamily"></a>`family` | detected | The image family, such as `z-image` or `qwen-image-2.1`. A file of another family is refused at load. |
+| <a id="image_modelsfamily"></a>`family` | detected | The image family, such as `z-image`, `qwen-image-2.1` or `flux-3-klein`. A file of another family is refused at load. |
 | <a id="image_modelsvariant"></a>`variant` | detected | The DiT's variant, such as `turbo`, for a file whose weights match no known variant. A Krea 2 file of unknown weights needs `variant: turbo` to load. |
 | <a id="image_modelsadapters"></a>`adapters` | none | LoRA files applied to every request, each a path or `{path, strength}` with strength 1 by default |
 | <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`) and `negative_prompt` |

@@ -45,7 +45,8 @@ uv pip install -r requirements.txt
 
 ComfyUI's requirements include PyTorch, so the environment takes about
 1.7 GB. The gmlx nodes need ComfyUI 0.37 or newer and no Python packages
-beyond ComfyUI's own.
+beyond ComfyUI's own. FLUX.3 klein needs ComfyUI 0.41 or newer, and on an
+older ComfyUI its model loader stops with a message to update ComfyUI.
 
 ## Put the gmlx nodes into ComfyUI
 
@@ -107,7 +108,7 @@ gmlx launch comfyui
 is running, then starts ComfyUI. Among its lines it prints:
 
 ```text
-[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.39.2)
+[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.41.1)
 [launch] ComfyUI runs at http://localhost:8188, which you open in a browser, from /Users/you/ComfyUI.
 ```
 
@@ -157,6 +158,10 @@ seconds later. A new loader's `server_url` shows the address the nodes
 found, as
 [How the nodes find the server](comfyui-reference.md#how-the-nodes-find-the-server)
 describes.
+
+For FLUX.3 klein, `gmlx CLIP Loader` encodes the prompt on the server with
+the model's GGUF text encoder, so ComfyUI needs no text encoder file of its
+own.
 
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or

@@ -30,7 +30,8 @@ curl -s localhost:8080/v1/images/generations \
 
 Each route also answers without the `/v1` prefix. In `/v1/models` an image
 model has `"image": true`, its `family` and `variant`, and `edit: true` when
-it edits from reference images with its encoder's vision tower. It carries
+it edits from reference images: FLUX.3 klein always, and Qwen-Image 2.1
+when the entry has its encoder's vision tower. It carries
 `resident`, `pinned` and `default`, where `default` marks the default image
 model, and no context figures.
 
@@ -84,10 +85,18 @@ GIF.
 |-------|-------|------------|
 | Z-Image, Krea 2 | One image, which the result starts from at `strength`, 0.6 by default. More images get 400. | The image with an empty prompt, at the default `strength` |
 | Qwen-Image 2.1 | Up to 10 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
+| FLUX.3 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
 
 Without `size`, the result takes the size of the first image, cut down to
 the model's size step and the size limits. With a `mask`, the edit starts
 from the first image at `strength` 1 and changes only the masked region.
+
+FLUX.3 klein scales a single reference down to at most the area of
+2048x2048 pixels, and pads it out to sides that are multiples of 16. Of
+several, it scales each down to at most the area of 1024x1024 and crops it
+to sides that are multiples of 16. Without `size` the result has the size
+of the first reference as prepared, and the result of a single reference is
+cropped back to the scaled image.
 
 ## URL responses
 
@@ -126,6 +135,7 @@ for event in stream:
 | The entry's VAE, encoder or mmproj is of another model | 400 `image_model_mismatch` |
 | A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
+| One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | More requests waiting than [`image.max_queue`](config.md#image-requests) | 429 with `Retry-After` |
 | The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |
 | The job waits for its turn, or for one step, longer than [`token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) | 504, and the log marks the request `timeout` |

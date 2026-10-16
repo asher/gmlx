@@ -51,6 +51,17 @@ def test_pack_versions_are_dotted_numbers():
     assert floor <= tested
 
 
+def test_the_tested_comfyui_runs_every_family_the_pack_serves():
+    """The pack serves FLUX.3 klein, whose model ComfyUI has from 0.41, and
+    the docs' launch line shows the tested release."""
+    meta = _literals(_PACK / "version.py")
+    tested = tuple(int(p) for p in meta["COMFYUI_TESTED"].split("."))
+    assert tested >= (0, 41, 1)
+    page = (_ROOT / "docs" / "comfyui.md").read_text()
+    assert f"(a ComfyUI folder, ComfyUI {meta['COMFYUI_TESTED']})" in page
+    assert "FLUX.3 klein needs ComfyUI 0.41 or newer" in page
+
+
 def _pack_files() -> list[str]:
     out = []
     for p in sorted(_PACK.rglob("*")):

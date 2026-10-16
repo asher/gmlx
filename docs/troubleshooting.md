@@ -262,9 +262,9 @@ default, or unload chat models with [`POST /unload`](api.md#endpoints).
 `gmlx pull` refuses an image model on an M1 or M2 Mac before it downloads
 anything, and `--force` downloads the files anyway. The models run in
 bfloat16, which M1 and M2 chips lack. On those Macs `gmlx image generate`
-and the server refuse Qwen-Image 2.1 and Krea 2 with `needs bfloat16, which
-the M1 chip lacks`. Z-Image-Turbo can run in float16, as the next entry
-describes.
+and the server refuse Qwen-Image 2.1, Krea 2 and FLUX.3 klein with
+`needs bfloat16, which the M1 chip lacks`. Z-Image-Turbo can run in
+float16, as the next entry describes.
 
 ### `runs in float16 on the M1 chip, which misses the reference checks`
 

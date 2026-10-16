@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
+  and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

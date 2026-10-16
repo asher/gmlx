@@ -314,8 +314,8 @@ gmlx list --image --edit
 | `-v`, `--paths` | Off | Also show each model's GGUF path. |
 | `--json` | Off | Emit JSON. |
 | `--image` | Off | List only the [image models](images.md). |
-| `--family NAME` | All | List only the image models of this family, such as `z-image` or `qwen-image-2.1`. |
-| `--edit` | Off | List only the image models that edit from reference images: a family that takes them, with the encoder's vision tower. |
+| `--family NAME` | All | List only the image models of this family, such as `z-image`, `qwen-image-2.1` or `flux-3-klein`. |
+| `--edit` | Off | List only the image models that edit from reference images: a family that takes them, with the encoder's vision tower where it needs one. |
 | `--shared-encoder` | Off | List only the image models whose text encoder is a chat model they share. |
 
 ## gmlx run
@@ -638,8 +638,9 @@ gmlx pull z-image-turbo
 gmlx pull qwen-image --quant Q5_K_M
 ```
 
-An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo` or
-`krea-2-turbo`, pulls its DiT, text encoder and VAE, checks the VAE
+An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
+`krea-2-turbo`, `flux-3-klein` or `flux-3-klein-base`, pulls its DiT, text
+encoder and VAE, checks the VAE
 against its published sha256, packs it to GGUF, and adds an `image_models`
 entry. The quants default to
 the ones for this Mac's memory, and an encoder or VAE already on disk is
@@ -956,6 +957,11 @@ the weights load.
 | Z-Image | Qwen3-4B | The FLUX.1 autoencoder | The variant's steps and guidance. |
 | Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
 | Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
+| FLUX.3 klein | Qwen3-VL-4B-Instruct, its text GGUF | The FLUX.2 autoencoder | 16 steps and guidance 1. Base: 50 steps and guidance 3.5. |
+
+FLUX.3 klein Base shares the distilled model's architecture, encoder and
+VAE, and gmlx tells the two apart by their tensors. The distilled model
+runs any step count on its own schedule.
 
 Qwen-Image 2.1 Turbo shares the base model's architecture, encoder and VAE.
 gmlx tells the two apart by their weights. Turbo samples on the eight sigmas
@@ -983,6 +989,16 @@ or the variant's, and not to a reference's. The fit check counts the references,
 not fit is refused before any model loads. Z-Image and Krea 2 take no
 reference images, and `--ref` exits 2 on them.
 
+`--ref` gives FLUX.3 klein up to 10 reference images too. Its text encoder
+reads the prompt alone, so it needs no `--encoder-mmproj`, and the VAE
+encodes the references for the DiT. A single reference is scaled down to
+at most the area of 2048x2048 pixels and padded out to sides that are
+multiples of 16. Of several, each is scaled down to at most the area of
+1024x1024 and cropped to sides that are multiples of 16. Without `--size`
+the output has the first reference's size, and the output of a single
+reference is cropped back to the scaled image. FLUX.3 klein sizes its
+references by this rule, and `--ref-size` exits 2 on it.
+
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
 kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
@@ -1007,12 +1023,12 @@ file.
 | `--config FILE` | The first default location | Read the `image_models` entry that `MODEL` names from this config. |
 | `--variant NAME` | From the weights, or the entry's `variant` | Run the DiT as this variant, such as `turbo`, when its weights match no known variant. A Krea 2 file of unknown weights needs `--variant turbo`. |
 | `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
-| `--encoder-mmproj GGUF` | None | Read the `--ref` images with this mmproj GGUF of the text encoder. It is required with `--ref` and is not loaded without it. |
+| `--encoder-mmproj GGUF` | None | Read the `--ref` images with this mmproj GGUF of the text encoder. Qwen-Image 2.1 needs it with `--ref`, and it is not loaded without it. |
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE, a GGUF or safetensors file. |
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
-| `--size WxH` | The init image's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 16 on Z-Image and Krea 2 and of 32 on Qwen-Image 2.1. Another size exits 2 and names the multiple. |
+| `--size WxH` | The init image's, else a FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
@@ -1020,8 +1036,8 @@ file.
 | `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
 | `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
-| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1. Repeat the flag for up to 10 images, in the order the prompt names them. |
-| `--ref-size N` | `1024` | Resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
+| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1 and FLUX.3 klein. Repeat the flag for up to 10 images, in the order the prompt names them. |
+| `--ref-size N` | `1024` | On Qwen-Image 2.1, resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |
 | `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
 | `--format png/jpeg/webp` | From `--output`, else `png` | Encode the images in this format. |
@@ -1088,8 +1104,11 @@ and compares every tensor bit for bit before the file replaces `--out`.
 
 It packs the VAE of each image family: the FLUX.1 autoencoder for
 `z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
-official file is F32 and stays F32, and the Qwen-Image autoencoder for
-`krea2`, whose file is BF16. The family follows from the tensor names and
+official file is F32 and stays F32, the Qwen-Image autoencoder for
+`krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`,
+whose Comfy-Org `flux2-vae.safetensors` is F32 and needs no config. It
+packs from that file's layout or from the original one of BFL's
+`ae.safetensors`. The family follows from the tensor names and
 shapes. A file that fills none of them is refused with what it holds, for
 example another family's VAE under `--family`, or a video VAE of the same
 layout.

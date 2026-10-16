@@ -13,4 +13,4 @@ __version__ = "0.5.0"
 COMFYUI_FLOOR = "0.37.0"
 
 # The newest ComfyUI release this version was tested on.
-COMFYUI_TESTED = "0.39.2"
+COMFYUI_TESTED = "0.41.1"
