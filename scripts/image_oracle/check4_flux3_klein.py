@@ -13,7 +13,7 @@ dt, the float32 difference of two times. gmlx must equal all of them bit
 for bit.
 
   python scripts/image_oracle/run.py --python <oracle python> \\
-      check4_flux3_klein.py --reference ~/src/flux-3-image-klein/src
+      check4_flux3_klein.py --reference <flux-3-image-klein>/src
 """
 
 from __future__ import annotations

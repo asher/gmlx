@@ -31,7 +31,7 @@ the relative L2 of each fp32 row with the adapter against the same row
 of the source fixture.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
-      check7_flux3_klein_lora.py --reference ~/src/flux-3-image-klein/src \\
+      check7_flux3_klein_lora.py --reference <flux-3-image-klein>/src \\
       --dit flux3_image_klein_sd-Q4_K_M.gguf --synthetic 7
 """
 

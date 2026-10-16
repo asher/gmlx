@@ -44,7 +44,7 @@ layer, free running for the rest and for the velocity. For the other
 sizes the fixture holds the inputs and the velocities.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
-      check3_flux3_klein.py --reference ~/src/flux-3-image-klein/src \\
+      check3_flux3_klein.py --reference <flux-3-image-klein>/src \\
       --dit flux3_image_klein_sd-Q4_K_M.gguf --sizes 512 --refs 1
 
 --self-test writes a tiny model of the reference class, its sizes set

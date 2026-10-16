@@ -33,7 +33,7 @@ oracle's own smallest per-token cosine of the prompt. A prompt of
 past the 4096-token cap.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
-      check2_flux3_klein.py --reference ~/src/flux-3-image-klein/src \\
+      check2_flux3_klein.py --reference <flux-3-image-klein>/src \\
       --encoder Qwen3-VL-4B-Instruct-Q8_0.gguf \\
       --text-encoder <official repo>/text_encoder
 """

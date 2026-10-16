@@ -38,7 +38,7 @@ size gmlx's exact fp32 run is held to EXACT_REL_L2 after each kept step
 and the last, and its bf16 run is read against the GATE_SIZE gates.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
-      check6_flux3_klein.py --reference ~/src/flux-3-image-klein/src \\
+      check6_flux3_klein.py --reference <flux-3-image-klein>/src \\
       --dit flux3_image_klein_sd-Q4_K_M.gguf \\
       --features check2_flux3_klein.npz --sizes 512 --bf16 512
 

@@ -22,7 +22,7 @@ file. The fp32 and bf16 runs and the gates are those of
 check6_flux3_klein, and the reference encode is float32 in both.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
-      check6_flux3_klein_edit.py --reference ~/src/flux-3-image-klein/src \\
+      check6_flux3_klein_edit.py --reference <flux-3-image-klein>/src \\
       --dit flux3_image_klein_sd-Q4_K_M.gguf --autoencoder ae.safetensors \\
       --features check2_flux3_klein.npz --cases one two
 """

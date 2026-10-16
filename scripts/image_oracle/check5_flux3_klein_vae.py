@@ -38,7 +38,7 @@ one 48x64 image through it.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check5_flux3_klein_vae.py --config <repo dir> --vae flux2-vae.safetensors \\
-      --original ae.safetensors --reference ~/src/flux-3-image-klein/src \\
+      --original ae.safetensors --reference <flux-3-image-klein>/src \\
       --sizes 512 1024
   python scripts/image_oracle/run.py --python <oracle python> \\
       check5_flux3_klein_vae.py --self-test
