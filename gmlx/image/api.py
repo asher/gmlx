@@ -1171,6 +1171,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         noise = noise.astype(getattr(mx, rules.noise)).astype(mx.float32)
     act = (pipe.dit.act_dtype
            if rules is not None and rules.act_update else None)
+    held = (pipe.dit.act_dtype
+            if rules is not None and rules.act_latents else mx.float32)
     m = None if mask is None else _latent_mask(mask, shape, pipe.vae_scale)
 
     x = noise if init is None else noised(s[0], noise, init)
@@ -1195,6 +1197,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             x = smp.step(x, v, i)
             if m is not None:
                 x = inpaint_blend(x, m, noised(s[i + 1], noise, init))
+            if held != mx.float32:
+                x = x.astype(held).astype(mx.float32)
             mx.eval(x)
             if on_step is not None:
                 on_step(i, x)

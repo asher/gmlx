@@ -68,13 +68,15 @@ class StepParts:
 class LoopRules:
     """Where a family's reference sampling loop rounds, when it does not
     run in float32 throughout. ``noise`` is the dtype the initial noise
-    is rounded to; the latents stay float32 across the steps. With
-    ``act_update`` the guided velocity and the Euler product take the
-    DiT's activation dtype, each op rounded to it as the reference's
-    tensors of that dtype are, and only the sum with the latents runs in
-    float32."""
+    is rounded to. With ``act_update`` the guided velocity and the Euler
+    product take the DiT's activation dtype, each op rounded to it as the
+    reference's tensors of that dtype are, and the sum with the latents
+    runs in float32. The latents stay float32 across the steps, unless
+    ``act_latents`` rounds them to the activation dtype after each step,
+    as a reference that keeps its latents in that dtype does."""
     noise: str | None = None
     act_update: bool = False
+    act_latents: bool = False
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,10 @@
 # flux3_sigmas follows timesteps of src/flux3/sampling.py of BFL's FLUX.3
 # klein reference at commit 45e57c9 (Apache-2.0; see
 # licenses/flux-3-image-klein-LICENSE).
+# SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
+# flux2_mu and flux2_sigmas follow compute_empirical_mu and get_schedule of
+# src/flux2/sampling.py of BFL's FLUX.2 reference at commit 50fe516
+# (Apache-2.0; see licenses/flux2-LICENSE).
 """Sigma schedules, computed on the host in numpy with float32 results.
 
 A schedule is part of a family's numerics, so it must equal the reference
@@ -38,6 +42,12 @@ fixed for Turbo and of the image token count otherwise, with no stretch.
 FLUX.3 klein's reference forms ``torch.linspace(1.0, 0.0, n + 1)`` in
 float32, which ends at zero, and applies the static shift with its alpha,
 the same for every image size.
+
+FLUX.2 klein's reference forms the same float32 linspace and shifts it
+exponentially by a mu of the image token count and the step count. It
+divides Python floats by float32 tensors, which torch forms as the
+reciprocal of the tensor times the float, so each such quotient rounds
+twice.
 """
 
 from __future__ import annotations
@@ -174,6 +184,42 @@ def flux3_sigmas(steps: int, alpha: float) -> np.ndarray:
     if steps < 1:
         raise ValueError(f"steps must be at least 1, not {steps}")
     return shift_static(linspace_f32(1.0, 0.0, steps + 1), alpha)
+
+
+def flux2_mu(tokens: int, steps: int) -> float:
+    """mu of the FLUX.2 klein shift, in Python floats and in the
+    reference's order of operations. Above 4300 image tokens it is a line
+    in the token count. At 4300 and below it is read at ``steps`` on the
+    line through the mu of 10 steps and the mu of 200 steps, each a line
+    in the token count."""
+    a1, b1 = 8.73809524e-05, 1.89833333
+    a2, b2 = 0.00016927, 0.45666666
+    if tokens > 4300:
+        return float(a2 * tokens + b2)
+    m200 = a2 * tokens + b2
+    m10 = a1 * tokens + b1
+    a = (m200 - m10) / 190.0
+    b = m200 - 200.0 * a
+    return float(a * steps + b)
+
+
+def flux2_sigmas(steps: int, tokens: int) -> np.ndarray:
+    """FLUX.2 klein sigmas for an image of ``tokens`` latent tokens,
+    length ``steps + 1`` with a final zero.
+
+    ``t = linspace_f32(1.0, 0.0, steps + 1)`` and ``e = exp(mu)`` rounded
+    to float32 give ``r(1 / (e + (r(1 / t) - 1))) * e``, where ``r(1 /
+    a)`` is the float32 reciprocal and every other operation is also in
+    float32. The reciprocal of zero is infinite, so the last sigma is
+    zero, and the first is 1 or the float32 value next below it.
+    """
+    if steps < 1:
+        raise ValueError(f"steps must be at least 1, not {steps}")
+    t = linspace_f32(1.0, 0.0, steps + 1)
+    e = _F32(math.exp(flux2_mu(tokens, steps)))
+    with np.errstate(divide="ignore"):
+        d = _F32(1) / t - _F32(1)
+        return ((_F32(1) / (e + d)) * e).astype(_F32)
 
 
 def check_sigmas(sigmas) -> np.ndarray:

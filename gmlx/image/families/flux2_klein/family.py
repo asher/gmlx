@@ -3,8 +3,9 @@
 # Ported from BFL's FLUX.2 reference at commit 50fe516: the constants of
 # Klein4BParams, Klein9BParams and Flux2Params in src/flux2/model.py and
 # the defaults of FLUX2_MODEL_INFO in src/flux2/util.py, the tensor names
-# and shapes of Flux2 in src/flux2/model.py and the prompt rules of
-# Qwen3Embedder in src/flux2/text_encoder.py, and modified for gmlx
+# and shapes of Flux2 in src/flux2/model.py, the prompt rules of
+# Qwen3Embedder in src/flux2/text_encoder.py and the rounding of denoise
+# and denoise_cfg in src/flux2/sampling.py, and modified for gmlx
 # (Apache-2.0; see licenses/flux2-LICENSE).
 """FLUX.2 klein fingerprint, constants, config synthesis and the hooks of
 its registry row.
@@ -23,8 +24,8 @@ from __future__ import annotations
 import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
-                                 VariantRow)
+from gmlx.image.registry import (ConstantsRow, Family, LoopRules,
+                                 SamplingRow, VariantRow)
 
 TITLE = "FLUX.2 klein"
 # What a refusal of another FLUX model names as the ones gmlx image runs.
@@ -58,6 +59,8 @@ CONSTANTS = ConstantsRow(
         "eps": 1e-06,
         # A latent pixel is one 128-channel token: the VAE's 8x and its
         # 2x2 patchify. The DiT takes the tokens with no patch of its own.
+        "vae_scale_factor": 16,
+        "size_multiple": 16,
         "patch_size": 1,
     },
     repo="black-forest-labs/FLUX.2-klein-4B",
@@ -75,6 +78,11 @@ SAMPLING = {
     "distilled": SamplingRow(4, 1.0, 1.0, *_BFL),
     "base": SamplingRow(50, 4.0, 1.0, *_BFL),
 }
+
+# The loop of denoise and denoise_cfg in src/flux2/sampling.py, on the bf16
+# noise of scripts/cli.py: the latents, the velocity, its guidance and the
+# step's product and sum all in bf16.
+LOOP = LoopRules(noise="bfloat16", act_update=True, act_latents=True)
 
 # The variants of a size share every shape, so the variant comes from the
 # hash of the image input projection, which the distillation changed.
@@ -271,6 +279,17 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
     return Match()
 
 
+def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
+    """The sigmas of get_schedule for an image of ``tokens`` latent tokens,
+    for either variant."""
+    from gmlx.image.schedule import flux2_sigmas
+
+    if tokens is None:
+        raise ValueError(f"the {TITLE} schedule depends on the image token "
+                         f"count; pass tokens")
+    return flux2_sigmas(steps, tokens)
+
+
 def build(config: dict):
     from .model import Flux2KleinDiT
 
@@ -327,4 +346,6 @@ FAMILY = Family(
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     sampling=SAMPLING,
+    schedule=schedule,
+    loop=LOOP,
 )
