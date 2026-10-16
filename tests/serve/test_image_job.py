@@ -4,6 +4,7 @@ ends the sampler, and each image of a request takes its own seed. The
 sampler and the VAE are stubs, so nothing heavy runs."""
 from __future__ import annotations
 
+import json
 import threading
 from types import SimpleNamespace
 
@@ -118,9 +119,12 @@ def test_a_flux3_edit_runs_its_prepared_references_and_crops_the_pad(
     svc.check_family(req, served)
     w, h = svc.target_size(req, served)
     out = svc.run_job(served, req, size=(w, h), budget=None,
-                      stop=threading.Event())
+                      stop=threading.Event(), embed_metadata=True)
     assert seen.refs == tuple(req.refs) and seen.decoded == (w, h)
     assert seen.prompt == ("make it red" if route == "edits"
                            else svc.VARIATION_PROMPT)
     assert out.size == want
-    assert Image.open(io.BytesIO(out.images[0])).size == want
+    with Image.open(io.BytesIO(out.images[0])) as im:
+        assert im.size == want
+        # The metadata records the size written, not the canvas.
+        assert json.loads(im.text["gmlx"])["size"] == "%dx%d" % want

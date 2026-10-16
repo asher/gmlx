@@ -768,8 +768,12 @@ def _generate(a) -> int:
             {"file": os.path.basename(p), "size": f"{r.width}x{r.height}",
              "sha256": _file_sha256(p)} for p, r in zip(a.ref, refs)]
     if crop is not None:
-        # (left, top, right, bottom) of the written image in the sampled one.
-        settings["crop"] = [int(v) for v in crop]
+        # The size written, the size sampled, and the (left, top, right,
+        # bottom) box of the written image in the sampled one.
+        left, top, right, bottom = (int(v) for v in crop)
+        settings.update(size=f"{right - left}x{bottom - top}",
+                        canvas=f"{width}x{height}",
+                        crop=[left, top, right, bottom])
     if init is not None:
         settings.update(init_image=os.path.basename(a.init_image),
                         strength=strength)

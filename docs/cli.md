@@ -1015,7 +1015,9 @@ sampler, scheduler, guidance, adapters, file names and gmlx version, unless
 strength, the `sha256` of the file, and `rows_sha256`, a digest of the
 LoRA pairs gmlx applied and the layers it applied them to. Each reference
 is recorded with its file name, the size it ran at and the `sha256` of the
-file.
+file. The size is that of the image written. An image cropped back from the
+canvas of one reference also records `canvas`, the size it was sampled at,
+and `crop`, the left, top, right and bottom of the image in it.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

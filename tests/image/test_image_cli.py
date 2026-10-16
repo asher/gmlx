@@ -1638,7 +1638,9 @@ def test_one_flux3_reference_sizes_the_request_and_crops_its_image(
     assert flux3_edit.checks[0]["refs"] == [(272, 304)]
     assert (flux3_edit.checks[0]["width"],
             flux3_edit.checks[0]["height"]) == (304, 272)
-    assert rec["settings"]["size"] == "304x272"
+    # The size written, the canvas it was sampled on, and the box in it.
+    assert rec["settings"]["size"] == "300x260"
+    assert rec["settings"]["canvas"] == "304x272"
     assert rec["settings"]["crop"] == [2, 6, 302, 266]
     x = np.load(lat)["latents"]
     assert x.shape == (1, 4, 34, 38)
@@ -1646,7 +1648,9 @@ def test_one_flux3_reference_sizes_the_request_and_crops_its_image(
     whole = cmd.to_uint8(api.vae_decode(pipe, mx.array(x)))
     with Image.open(out) as im:
         assert im.size == (300, 260)
-        assert json.loads(im.text["gmlx"])["crop"] == [2, 6, 302, 266]
+        meta = json.loads(im.text["gmlx"])
+        assert (meta["size"], meta["canvas"], meta["crop"]) == (
+            "300x260", "304x272", [2, 6, 302, 266])
         assert np.array_equal(np.asarray(im), whole[6:266, 2:302])
 
 
@@ -1660,7 +1664,8 @@ def test_a_flux3_request_with_a_size_keeps_the_whole_image(flux3_edit,
         "--prompt", "p", "--size", "64x48", "--ref", flux3_edit.refs[0],
         "--output", str(out), "--json"]) == 0
     rec = json.loads(capsys.readouterr().out)
-    assert rec["settings"]["size"] == "64x48" and "crop" not in rec["settings"]
+    assert rec["settings"]["size"] == "64x48"
+    assert not {"crop", "canvas"} & set(rec["settings"])
     with Image.open(out) as im:
         assert im.size == (64, 48)
 

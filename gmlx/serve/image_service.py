@@ -1437,9 +1437,13 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
     seeds = [seed + i for i in range(req.n)]
     out = []
     image_s = step_s = 0.0
+    # The size written: the output of a padded reference is cropped.
+    shown = (width, height) if crop is None else (crop[2] - crop[0],
+                                                  crop[3] - crop[1])
     meta = None
     if embed_metadata and req.output_format == "png":
-        meta = {"prompt": prompt, "steps": steps, "size": f"{width}x{height}",
+        meta = {"prompt": prompt, "steps": steps,
+                "size": f"{shown[0]}x{shown[1]}",
                 "sampler": sampler, "guidance": cfg,
                 "model": os.path.basename(served.spec.path),
                 "adapters": adapters}
@@ -1510,8 +1514,6 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
              "total_tokens": text_tokens + image_tokens + tokens * req.n}
     _log.info("image job: %d image(s) %dx%d, %d steps, encode %.2fs",
               req.n, width, height, run_steps, encode_s)
-    shown = (width, height) if crop is None else (crop[2] - crop[0],
-                                                  crop[3] - crop[1])
     return ImageJobResult(images=out, size=shown,
                           quality=req.quality, usage=usage, seeds=seeds,
                           steps=steps, run_steps=run_steps, image_s=image_s,
