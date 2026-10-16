@@ -50,44 +50,9 @@ SPELLINGS = {
                           ".lora_up.weight", True),
 }
 TINY = "selftest_flux3_klein_tiny"
-ADALN = "final_layer.image.adaLN_modulation.1"
-# The diffusers names of the GGUF's, as diffusers' FLUX.3 converter
-# renames them.
-_GROUP = {"content_mode_blocks.image": "mode_blocks.image",
-          "content_mode_blocks.image_cond": "mode_blocks.image_cond",
-          "txt_mode_blocks": "txt_mode_blocks",
-          "single_blocks": "single_transformer_blocks"}
-_LEAF = {"q_proj": "attn.to_q", "k_proj": "attn.to_k", "v_proj": "attn.to_v",
-         "attn_out": "attn.to_out.0", "mlp_in": "ff.linear_in",
-         "mlp_out": "ff.linear_out"}
-_TOP = {"emb_in.image": "x_embedders.image",
-        "emb_in.image_cond": "x_embedders.image_cond",
-        "txt_in": "context_embedder",
-        "time_in.in_layer": "timestep_embedder.linear_1",
-        "time_in.out_layer": "timestep_embedder.linear_2",
-        "ref_time_in.in_layer": "target_timestep_embedder.linear_1",
-        "ref_time_in.out_layer": "target_timestep_embedder.linear_2",
-        "final_layer.image.linear": "proj_out", ADALN: "norm_out.linear"}
-
-
-def diffusers_name(path: str) -> str:
-    """The Flux3Transformer2DModel name of a gmlx module path."""
-    if path in _TOP:
-        return _TOP[path]
-    if path.endswith(".lin"):
-        return path[:-len(".lin")] + ".linear"
-    for native, d in _GROUP.items():
-        if path.startswith(native + "."):
-            i, leaf = path[len(native) + 1:].split(".", 1)
-            return f"{d}.{i}.{_LEAF[leaf]}"
-    raise KeyError(path)
-
-
-def swap_halves(a: np.ndarray) -> np.ndarray:
-    """Rows of ``a`` with its two halves in the other order, as diffusers'
-    swap_scale_shift turns the final modulation."""
-    h = a.shape[0] // 2
-    return np.concatenate([a[h:], a[:h]], axis=0)
+ADALN = fg.ADALN
+diffusers_name = fg.diffusers_name
+swap_halves = fg.swap_halves
 
 
 def tiny_config(flow_map: bool = True) -> dict:
