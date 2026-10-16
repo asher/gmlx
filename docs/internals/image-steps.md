@@ -133,7 +133,10 @@ the jobs of the OpenAI routes, and share the GPU with chat in the same way.
 `gmlx image bench --via-steps` runs each step through these routes on a
 loopback port of its own process. The prompt is encoded in the process and
 uploaded by hash, each step is one request, and the latents move between
-steps in the bench with its sampler.
+steps in the bench with its sampler. Its steps take the `reference`
+convention, which embeds the time as `sample` does. The ComfyUI pack's
+steps take `comfy`, which embeds the time as ComfyUI's forward does, and
+for FLUX.2 klein that is the fp32 time.
 
 The record's transport is `steps`. It holds the median per step of the
 request's wall time less the forward time the server reports, and

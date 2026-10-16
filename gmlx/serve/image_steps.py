@@ -26,7 +26,9 @@ velocity ``d x / d sigma`` at ``sigma = timestep``, which
 ``denoise_step`` returns. ComfyUI's FLUX.2 forward embeds the fp32 time,
 where BFL's pipeline, which gmlx samples on, embeds its bf16 time, so a
 FLUX.2 step takes the DiT's "fp32" time rule. ComfyUI's FLUX.3 forward
-embeds the time in the model's dtype, as BFL's does.
+embeds the time in the model's dtype, as BFL's does. Under
+``convention: "reference"`` a step embeds the time by the DiT's reference
+rule, as ``sample`` does, and is otherwise the comfy step.
 
 A FLUX.3 flow map DiT also reads the time its step goes to. ComfyUI's
 forward takes it from the schedule its sampler runs on: the entry after
@@ -46,7 +48,7 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .image_wire import WireError, WireTensor, short_dtype
@@ -79,6 +81,11 @@ CONVENTIONS = {
               "krea2": Convention(), "flux2_klein": Convention(time="fp32"),
               "flux3_klein": Convention()},
 }
+# Under "reference" a step reads the timestep and returns its output as
+# under "comfy", and embeds the time by the DiT's reference rule, as a
+# direct run of gmlx does. ``gmlx image bench --via-steps`` steps on it.
+CONVENTIONS["reference"] = {fam: replace(c, time="reference")
+                            for fam, c in CONVENTIONS["comfy"].items()}
 
 # What a client builds its model from, per family: ComfyUI's model class
 # and image model name, the latent format and the VAE's. The VAE's

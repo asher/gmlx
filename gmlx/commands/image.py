@@ -982,11 +982,26 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
         mx.eval(*feats)
         return [np.array(f) for f in feats]
 
+    # The loop rounds where the family's reference loop does, as sample
+    # does: the noise, the guided velocity and the Euler product, and the
+    # latents held between steps.
+    rules = pipe.family.loop
+    act = (pipe.dit.act_dtype
+           if rules is not None and rules.act_update else None)
+    held = (pipe.dit.act_dtype
+            if rules is not None and rules.act_latents else mx.float32)
+
     def schedule():
         s = api.image_sigmas(pipe, steps, height, width)
         shape = (1, pipe.dit.cfg.in_channels, height // pipe.vae_scale,
                  width // pipe.vae_scale)
-        return np.asarray(s, np.float32), make_sampler(sampler, s), shape
+        noise = mx.array(noise_from_seed(seed, shape))
+        if rules is not None and rules.noise is not None:
+            noise = noise.astype(getattr(mx, rules.noise)).astype(mx.float32)
+        smp = (make_sampler(sampler, s, product=act)
+               if act is not None and sampler == "euler"
+               else make_sampler(sampler, s))
+        return np.asarray(s, np.float32), smp, np.array(noise)
 
     work(start)
     t0 = clock()
@@ -994,19 +1009,25 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
     rows = [[{"cond": client.put(f), "num_tokens": int(f.shape[1])}]
             for f in feats]
     t_enc = clock()
-    sigmas, smp, shape = work(schedule)
+    sigmas, smp, noise = work(schedule)
 
     def update(x, v, i):
-        return work(lambda: np.array(smp.step(mx.array(x), mx.array(v), i)))
+        def run():
+            y = smp.step(mx.array(x), mx.array(v), i)
+            return np.array(y.astype(held).astype(mx.float32))
+        return work(run)
+
+    def combine(pos, neg, g):
+        return work(lambda: np.array(api.guide(mx.array(pos), mx.array(neg),
+                                               g, act)))
 
     marks = [t_enc]
     first = len(client.records)
     run = client.begin(model)
     try:
-        x = client.sample(model, noise_from_seed(seed, shape), sigmas,
-                          rows[0], cfg=cfg,
+        x = client.sample(model, noise, sigmas, rows[0], cfg=cfg,
                           neg_rows=rows[1] if len(rows) > 1 else None,
-                          run=run, update=update,
+                          run=run, update=update, combine=combine,
                           on_step=lambda i, _x: marks.append(clock()))
     finally:
         client.end(run)
@@ -1133,7 +1154,9 @@ def _steps_client(a, pipe):
     host = loop.OneModelHost(mid, pipe, {"dit": a.model, "encoder": a.encoder,
                                          "vae": a.vae})
     with loop.serve(host) as base:
-        yield StepsClient(http_transport(base)), mid
+        # The reference convention embeds the time as the direct run does,
+        # so the latents of the two compare equal.
+        yield StepsClient(http_transport(base), convention="reference"), mid
 
 
 def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,

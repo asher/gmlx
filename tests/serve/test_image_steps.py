@@ -134,14 +134,14 @@ def _http(**kw):
     return TestClient(_APP.app, base_url="http://127.0.0.1", **kw)
 
 
-def _client(http=None) -> StepsClient:
+def _client(http=None, **kw) -> StepsClient:
     http = http or _http()
 
     def call(method, path, body, headers):
         r = http.request(method, path, content=body, headers=headers)
         return r.status_code, {k.lower(): v for k, v in r.headers.items()}, \
             r.content
-    return StepsClient(call)
+    return StepsClient(call, **kw)
 
 
 def _features(seed=0, n=5):
@@ -172,7 +172,7 @@ def test_capabilities_answer_without_the_version_header(host):
     assert caps["contract"] == {"major": 1, "minor": 0}
     assert caps["families"] == ["flux2_klein", "flux3_klein", "krea2",
                                 "qwen_image21", "z_image"]
-    assert caps["conventions"] == ["comfy"]
+    assert caps["conventions"] == ["comfy", "reference"]
     assert caps["wire"]["container"] == "safetensors"
 
 
@@ -385,6 +385,10 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
     assert steps.CONVENTIONS["comfy"]["flux2_klein"] == steps.Convention(
         time="fp32")
+    # The reference convention is comfy's on the reference time rule.
+    assert steps.CONVENTIONS["reference"] == {
+        fam: dataclasses.replace(c, time="reference")
+        for fam, c in steps.CONVENTIONS["comfy"].items()}
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
     c = _client()
@@ -698,6 +702,33 @@ def test_a_flux2_step_is_the_core_step_with_and_without_references(
     two = c.step("f2d", None, np.concatenate([x, x]), [0.75, 0.75],
                  rows + with_ref)
     assert np.array_equal(two[1:], out)
+    assert host.held == 0
+
+
+def test_a_flux2_loop_on_the_reference_convention_gives_the_latents_of_sample(
+        host, f2pipe):
+    """The reference convention embeds the bf16 time of BFL's rule, as
+    sample does. Comfy's fp32 time gives other latents. The noise is in
+    bf16, as FLUX.2's loop rounds it, and the tiny DiT runs in float32,
+    so the rest of the loop takes no rounding."""
+    _serve(host, "f2d", f2pipe)
+    feats = np.random.default_rng(7).standard_normal(
+        (1, 10, 24)).astype(np.float32)
+    noise = np.array(mx.array(noise_from_seed(3, F3_SHAPE)).astype(
+        mx.bfloat16).astype(mx.float32))
+
+    def direct():
+        return np.array(api.sample(
+            f2pipe, _f2_cond(feats, key="f2-direct"), height=64, width=96,
+            noise=mx.array(noise), sigmas=SIGMAS))
+    want = _on_worker(direct)
+    got = {}
+    for conv in ("reference", "comfy"):
+        c = _client(convention=conv)
+        got[conv] = c.sample("f2d", noise, SIGMAS, _rows(c, feats))
+    assert np.isfinite(want).all()
+    assert np.array_equal(got["reference"], want)
+    assert not np.array_equal(got["comfy"], want)
     assert host.held == 0
 
 

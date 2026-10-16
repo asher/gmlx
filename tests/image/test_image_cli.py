@@ -700,6 +700,74 @@ def test_bench_via_steps_gives_the_latents_of_sample(env, capsys, guidance,
     assert STATE.runs == {}
 
 
+@pytest.mark.parametrize("family, variant, guidance", [
+    ("flux2_klein", "distilled", []),
+    ("flux2_klein", "base", ["--guidance", "3"]),
+    ("flux3_klein", "distilled", []),
+    ("flux3_klein", "base", ["--guidance", "3"])])
+def test_bench_via_steps_gives_the_latents_of_sample_on_klein(
+        env, capsys, monkeypatch, family, variant, guidance):
+    """ComfyUI's FLUX.2 forward embeds the fp32 time and the direct run
+    BFL's bf16 time, so the bench steps on the reference convention. The
+    loops of both klein families round the noise, the guided velocity and
+    the Euler product to bf16, FLUX.2's the latents too, as BFL's do, and
+    the bench's loop rounds where they do."""
+    import flux2_gates
+    import flux3_gates
+    from oracle_fixture import committed_fixture
+
+    weights, m = committed_fixture(f"selftest_{family}_tiny_weights")
+    fam = get_family(family)
+
+    def tiny():
+        cfg = m["inputs"]["config"]
+        if family == "flux2_klein":
+            return flux2_gates.tiny_model(weights, cfg, act=mx.bfloat16)
+        return flux3_gates.tiny_model(weights, cfg, act=mx.bfloat16,
+                                      flow_map=variant == "distilled")
+
+    def load(dit, *, text_encoder=None, vae=None, log=print, **kw):
+        pipe = api.ImagePipeline(
+            dit=tiny(), family=fam, variant=variant, vae=object(),
+            load_seconds={"dit": 0.0}, log=log)
+        pipe.decoded, pipe.encoded_images = [], []
+        env.pipes.append(pipe)
+        return pipe
+
+    # The prompt and the empty negative prompt have features of their own.
+    rng = np.random.default_rng(7)
+    feats = {neg: rng.standard_normal((10, 24)).astype(np.float32)
+             for neg in (False, True)}
+    monkeypatch.setattr(api, "load", load)
+    monkeypatch.setattr(api, "encode_text", lambda pipe, prompt, **k:
+                        api.Conditioning(mx.array(feats[prompt == ""]),
+                                         f"f2:{prompt}"))
+    view = SimpleNamespace(tensors={
+        "a": SimpleNamespace(shape=(4, 4), codec="Q4_K")})
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=fam, view=view, variant=variant,
+                            config={}))
+    latents = []
+    real = cmd.bench_run_steps
+
+    def spy(*a, **k):
+        rec, x = real(*a, **k)
+        latents.append(x)
+        return rec, x
+
+    monkeypatch.setattr(cmd, "bench_run_steps", spy)
+    rc = umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "96x64", "--steps", "3", "--runs", "1", "--warmup", "0",
+        "--seed", "5", "--via-steps", "--json", *guidance])
+    io = capsys.readouterr()
+    assert rc == 0, io.err
+    t = json.loads(io.out)["transport"]
+    assert t["mode"] == "steps" and t["equal_to_direct"] is True
+    assert len(latents) == 1 and latents[0].shape == (1, 8, 4, 6)
+    assert np.isfinite(latents[0]).all()
+
+
 def test_bench_via_steps_refuses_adapters(env, capsys):
     assert umbrella_main(["image", "bench"] + env.base[2:] + [
         "--via-steps", "--adapter", "a.safetensors"]) == 2
