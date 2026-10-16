@@ -9,6 +9,11 @@ source.
   Klein4BParams, Klein9BParams and Flux2Params in src/flux2/model.py, the
   defaults of FLUX2_MODEL_INFO in src/flux2/util.py, and the tensor names
   and shapes of Flux2 in src/flux2/model.py.
+- gmlx/image/families/flux2_klein/model.py: the Flux2 forward,
+  DoubleStreamBlock, SingleStreamBlock, SelfAttention, SiLUActivation,
+  Modulation, LastLayer, MLPEmbedder, QKNorm, timestep_embedding and rope
+  of src/flux2/model.py, and the token ids of prc_img, prc_txt and
+  encode_image_refs in src/flux2/sampling.py.
 
 flux2 is distributed under the Apache License 2.0:
 

@@ -1,0 +1,468 @@
+{
+ "schema": 1,
+ "name": "selftest_flux2_klein_tiny_norefs",
+ "check": 3,
+ "family": "flux2_klein",
+ "script": "scripts/image_oracle/check3_flux2_klein.py",
+ "argv": [
+  "check3_flux2_klein.py",
+  "--reference",
+  "src",
+  "--reference-commit",
+  "50fe5162777813d869182b139e83b10743caef15",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "config": {
+   "attention_head_dim": 16,
+   "axes_dims_rope": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "eps": 1e-06,
+   "guidance_embeds": false,
+   "in_channels": 8,
+   "joint_attention_dim": 24,
+   "mlp_ratio": 3.0,
+   "num_attention_heads": 4,
+   "num_layers": 2,
+   "num_single_layers": 2,
+   "out_channels": null,
+   "patch_size": 1,
+   "rope_theta": 2000,
+   "timestep_guidance_channels": 256
+  },
+  "case": {
+   "latent": [
+    4,
+    6
+   ],
+   "refs": [
+    [
+     2,
+     3
+    ],
+    [
+     2,
+     2
+    ]
+   ],
+   "text": 10,
+   "sigma": 0.73
+  },
+  "seed": 0,
+  "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
+  "refs": 0
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.005920716488197906,
+   "cosine": 0.9999836358591561,
+   "max_abs": 0.019063234329223633
+  },
+  "rows_bf16_vs_fp32": {
+   "vec": {
+    "rel_l2": 0.004206520147257769,
+    "cosine": 0.9999911578838456,
+    "max_abs": 0.0038957595825195312,
+    "teacher_forced": false
+   },
+   "double_stream_modulation_img": {
+    "rel_l2": 0.004797003145433416,
+    "cosine": 0.9999885566261811,
+    "max_abs": 0.0030391812324523926,
+    "teacher_forced": false
+   },
+   "double_stream_modulation_txt": {
+    "rel_l2": 0.0049745755897831435,
+    "cosine": 0.9999878769869379,
+    "max_abs": 0.003469109535217285,
+    "teacher_forced": false
+   },
+   "single_stream_modulation": {
+    "rel_l2": 0.0045720852501727515,
+    "cosine": 0.9999896119206672,
+    "max_abs": 0.0030649900436401367,
+    "teacher_forced": false
+   },
+   "img_in": {
+    "rel_l2": 0.0024369144679206194,
+    "cosine": 0.9999970390089069,
+    "max_abs": 0.013224601745605469,
+    "teacher_forced": false
+   },
+   "txt_in": {
+    "rel_l2": 0.002349083299421639,
+    "cosine": 0.9999972424598135,
+    "max_abs": 0.018368244171142578,
+    "teacher_forced": false
+   },
+   "double_blocks.0.img": {
+    "rel_l2": 0.0032554345317725142,
+    "cosine": 0.9999947037772717,
+    "max_abs": 0.017964601516723633,
+    "teacher_forced": true
+   },
+   "double_blocks.0.txt": {
+    "rel_l2": 0.0027706361346572558,
+    "cosine": 0.9999961628827042,
+    "max_abs": 0.03526020050048828,
+    "teacher_forced": true
+   },
+   "double_blocks.1.img": {
+    "rel_l2": 0.0031160911749619834,
+    "cosine": 0.9999951489318638,
+    "max_abs": 0.017408132553100586,
+    "teacher_forced": true
+   },
+   "double_blocks.1.txt": {
+    "rel_l2": 0.0028436237574423285,
+    "cosine": 0.9999959580769077,
+    "max_abs": 0.029097557067871094,
+    "teacher_forced": true
+   },
+   "single_blocks.0": {
+    "rel_l2": 0.002415620316124411,
+    "cosine": 0.999997089780399,
+    "max_abs": 0.024953365325927734,
+    "teacher_forced": true
+   },
+   "single_blocks.1": {
+    "rel_l2": 0.0024889463210277965,
+    "cosine": 0.9999969461077569,
+    "max_abs": 0.026044845581054688,
+    "teacher_forced": true
+   },
+   "final_layer.adaLN_modulation": {
+    "rel_l2": 0.005922086563735664,
+    "cosine": 0.9999831717073902,
+    "max_abs": 0.003377169370651245,
+    "teacher_forced": false
+   },
+   "final_layer": {
+    "rel_l2": 0.00364878451309253,
+    "cosine": 0.9999935575326588,
+    "max_abs": 0.01097041368484497,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "double_blocks.0.img": 0.003680458041837061,
+   "double_blocks.0.txt": 0.0031420512637720627,
+   "double_blocks.1.img": 0.004609837182417063,
+   "double_blocks.1.txt": 0.0037378886956631464,
+   "single_blocks.0": 0.004399246350501496,
+   "single_blocks.1": 0.004695640248471376,
+   "final_layer": 0.005920716488197906
+  },
+  "times": {
+   "fp32_s": 0.0,
+   "bf16_s": 0.0,
+   "bf16_teacher_forced_s": 0.0
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.011841432976395812,
+   "cosine_min": 0.9999345434366242
+  },
+  "vec": {
+   "rel_l2": 0.008413040294515539,
+   "teacher_forced": false
+  },
+  "double_stream_modulation_img": {
+   "rel_l2": 0.009594006290866833,
+   "teacher_forced": false
+  },
+  "double_stream_modulation_txt": {
+   "rel_l2": 0.009949151179566287,
+   "teacher_forced": false
+  },
+  "single_stream_modulation": {
+   "rel_l2": 0.009144170500345503,
+   "teacher_forced": false
+  },
+  "img_in": {
+   "rel_l2": 0.004873828935841239,
+   "teacher_forced": false
+  },
+  "txt_in": {
+   "rel_l2": 0.004698166598843278,
+   "teacher_forced": false
+  },
+  "double_blocks.0.img": {
+   "rel_l2": 0.0065108690635450285,
+   "teacher_forced": true
+  },
+  "double_blocks.0.txt": {
+   "rel_l2": 0.0055412722693145115,
+   "teacher_forced": true
+  },
+  "double_blocks.1.img": {
+   "rel_l2": 0.006232182349923967,
+   "teacher_forced": true
+  },
+  "double_blocks.1.txt": {
+   "rel_l2": 0.005687247514884657,
+   "teacher_forced": true
+  },
+  "single_blocks.0": {
+   "rel_l2": 0.004831240632248822,
+   "teacher_forced": true
+  },
+  "single_blocks.1": {
+   "rel_l2": 0.004977892642055593,
+   "teacher_forced": true
+  },
+  "final_layer.adaLN_modulation": {
+   "rel_l2": 0.011844173127471328,
+   "teacher_forced": false
+  },
+  "final_layer": {
+   "rel_l2": 0.00729756902618506,
+   "teacher_forced": true
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the time vector, modulations and embeddings and for the velocity"
+ },
+ "notes": [
+  "the weights are in selftest_flux2_klein_tiny_weights by GGUF name in torch order"
+ ],
+ "created": "2026-10-16T11:56:33Z",
+ "npz": "selftest_flux2_klein_tiny_norefs.npz",
+ "tensors": {
+  "double_blocks.0.img": {
+   "shape": [
+    24,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "abbcffbcc76f6b4403cf5bdda3afadaabd45e92ff04202f79725cb8a748f71b9"
+  },
+  "double_blocks.0.txt": {
+   "shape": [
+    10,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "070d1e638b447ee7a7a469163118374806204ba075ca5791f591cf3c4655afc5"
+  },
+  "double_blocks.1.img": {
+   "shape": [
+    24,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c8c6b64453eeec1c45a70406bbe907f4cc6b14acfa1cc0fdfd3402c2d30b0d8d"
+  },
+  "double_blocks.1.txt": {
+   "shape": [
+    10,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "f7f3c6a999bb9f038dd7f1ccd0d4868aab2e9d7d7ee96c8a57e37acc04f7c773"
+  },
+  "double_stream_modulation_img": {
+   "shape": [
+    1,
+    384
+   ],
+   "dtype": "float32",
+   "sha256": "bb2bf75bbf705cc0cd526a626c03661ec6c16099c81d1bf524783f4bd977eb11"
+  },
+  "double_stream_modulation_txt": {
+   "shape": [
+    1,
+    384
+   ],
+   "dtype": "float32",
+   "sha256": "15a03eeaaf772afc75428c68ba2e9ae4005475900c3b6d040a39fb9aad0874bb"
+  },
+  "features": {
+   "shape": [
+    10,
+    24
+   ],
+   "dtype": "float32",
+   "sha256": "266f8fc9fef4b1ceddb650a2aea642fb520784c50439535366e924e013a4e372"
+  },
+  "final_layer": {
+   "shape": [
+    24,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "d72bb5d6ba4861bbbe7ca7bf0b22376fcd76496cccb72f6a26d3708c33ae0e91"
+  },
+  "final_layer.adaLN_modulation": {
+   "shape": [
+    1,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "2e3e0a10bf7e690b12449e24b3f046f010c767af20fa4afe2d791776a880f5f2"
+  },
+  "ids.image": {
+   "shape": [
+    24,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "367cd1dab521640e9eb751eb45386ebd36b7b58ba4843b2e219866d3d7e0fcf7"
+  },
+  "ids.text": {
+   "shape": [
+    10,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "e0ad99a12c7367bc4496c4a622d4a5853b020d1432107824791b86d2b03e5ec4"
+  },
+  "img_in": {
+   "shape": [
+    24,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "fd0283692e2f83a80d777be1604f79fd10f90c8aed6e9f0b6d5747771b754e68"
+  },
+  "in.final_layer": {
+   "shape": [
+    24,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "96b56579e11b90687202e870a74a1d4339426db196015f20f7a7355779f6f293"
+  },
+  "in.single_blocks.0": {
+   "shape": [
+    34,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "ce4625d1ab0ccb95c0fdffe8fea634ae16a09ae19396ccbbf3344a94d9f8de4b"
+  },
+  "in.time_in": {
+   "shape": [
+    1,
+    256
+   ],
+   "dtype": "float32",
+   "sha256": "5ca568a959a2467ebedb33adad8652492de1aef351cbc6b7d876d272126ebf1f"
+  },
+  "latents": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "7d0aefea8d2160266e2a288916d22681bf085288383a2ca5041be76b90993927"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "86c887cea8c0b376b06f829ed68d9d51c2a186f1f504370fe2e3352d6c5bd181"
+  },
+  "single_blocks.0": {
+   "shape": [
+    34,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "477d74e70f57aa886cafae25fa29753513696291f2b2779a3f58ae42718b8719"
+  },
+  "single_blocks.1": {
+   "shape": [
+    34,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c75fd204d4b48449d487a77f0030520a0e9d8fa762d18d0d89facae34e0ca5e0"
+  },
+  "single_stream_modulation": {
+   "shape": [
+    1,
+    192
+   ],
+   "dtype": "float32",
+   "sha256": "b016749ee74287f116ac70b723f667c37419ae5d95465f3ab9d9fd613a2d254d"
+  },
+  "txt_in": {
+   "shape": [
+    10,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "4054bd3d93170f7bc76e1abd877be5e9301a2e9aaf4d7de05d61b6a820f332a0"
+  },
+  "vec": {
+   "shape": [
+    1,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "62554ee727d99cf7832656ee902cdb97a9bc4e73fdd44c4164d4a044bbd12b76"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "1c7121ec098e3ac281bc007e2a79faef682b33761fbe01b8b6096285760194c5"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "f56228f3e82ef45285e2cedf1adba9cfb3cf0001dbb0da21411cdd43b1107ca0"
+  }
+ }
+}

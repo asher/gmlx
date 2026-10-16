@@ -211,6 +211,12 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
     return Match()
 
 
+def build(config: dict):
+    from .model import Flux2KleinDiT
+
+    return Flux2KleinDiT(config)
+
+
 def synth_config(view: HeaderView) -> dict:
     """The keys of the official transformer/config.json, from shapes and
     constants."""
@@ -253,7 +259,10 @@ FAMILY = Family(
     fingerprint=fingerprint,
     synth_config=synth_config,
     constants=CONSTANTS,
-    build=None,
+    build=build,
+    # The q and k norm scales, F32 in the file, stay fp32: the norm then
+    # runs in fp32 and rounds once with the rotation.
+    fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     sampling=SAMPLING,
