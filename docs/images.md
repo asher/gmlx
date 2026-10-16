@@ -208,9 +208,14 @@ Raw GGUF by name.
 | Qwen-Image 2.1 | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a license from Qwen. |
 | Qwen-Image 2.1 Turbo | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a license from Qwen. |
 | Krea 2 Turbo | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use for a company, affiliates counted, under $1M of revenue in the last twelve months. A deployment must filter what it makes. |
-| FLUX.3 klein, FLUX.3 klein Base | [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md) | Non-commercial. A user under $5M of yearly revenue, affiliates counted, may use the images commercially with content filters or a review of each image for unlawful or infringing content before it is shared, and with a disclosure that the image is made with AI where the law requires one. |
+| FLUX.3 klein, FLUX.3 klein Base | [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md) | Non-commercial, and commercial use of the images under $5M of yearly revenue, on the terms below |
 | Qwen3-4B, Qwen3-VL-8B-Instruct, Qwen3-VL-4B-Instruct | Apache 2.0 | Any, under the license's terms |
 
+Under the [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md),
+a user whose yearly revenue, affiliates counted, is under $5M may use
+FLUX.3 klein images commercially with content filters or a review of each
+image for unlawful or infringing content before it is shared, and with a
+disclosure that the image is made with AI where the law requires one.
 Other commercial use of FLUX.3 klein needs a license from Black Forest
 Labs. gmlx has no content filter of its own, so a deployment that a
 license asks to filter adds its own.
