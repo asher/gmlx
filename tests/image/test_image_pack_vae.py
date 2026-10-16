@@ -91,6 +91,29 @@ def test_a_source_config_of_another_model_is_refused(src, tmp_path, capsys):
     assert not out.exists()
 
 
+@pytest.mark.parametrize("family", ["z-image", "Z-Image", "z_image"])
+def test_family_takes_the_spellings_the_server_takes(src, tmp_path, capsys,
+                                                     family):
+    out = tmp_path / "ae.gguf"
+    assert umbrella_main(["image", "pack-vae", src, "--out", str(out),
+                          "--family", family, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["family"] == "z_image"
+
+
+def test_family_names_the_family_it_reads_when_the_file_is_another(
+        src, tmp_path, capsys):
+    """flux-3-klein reads as flux3_klein, whose VAE the FLUX.1 file is
+    not, and a name of no family is refused with the known ones."""
+    out = str(tmp_path / "ae.gguf")
+    assert umbrella_main(["image", "pack-vae", src, "--out", out,
+                          "--family", "flux-3-klein"]) == 1
+    assert "and flux3_klein decodes with" in capsys.readouterr().err
+    assert umbrella_main(["image", "pack-vae", src, "--out", out,
+                          "--family", "flux-4"]) == 1
+    assert "no VAE is known for image family 'flux-4'" in \
+        capsys.readouterr().err
+
+
 def test_an_existing_out_is_refused_unless_forced(src, tmp_path, capsys):
     out = str(tmp_path / "ae.gguf")
     assert umbrella_main(["image", "pack-vae", src, "--out", out]) == 0

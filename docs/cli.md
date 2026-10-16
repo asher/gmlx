@@ -1131,7 +1131,7 @@ and a `--source-config` that is not one is refused.
 | `SRC`, positional | Required | Pack this safetensors VAE. |
 | `--out FILE.gguf` | Required | Write the GGUF here. |
 | `--dtype f32/f16/bf16` | The source dtype | Store every tensor in this dtype. A narrower dtype is not lossless, and the file records that. |
-| `--family NAME` | The family the file fills | Pack the VAE of this image family. |
+| `--family NAME` | The family the file fills | Pack the VAE of this image family, such as `z-image`, `qwen-image-2.1`, `krea-2` or `flux-3-klein`. |
 | `--source-repo ID` | `unknown` | Record this repository as the source. |
 | `--source-revision REV` | `unknown` | Record this revision of the source repository. |
 | `--source-config FILE` | `config.json` beside `SRC`, when it is a VAE config | Record this VAE config. |

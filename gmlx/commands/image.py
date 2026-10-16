@@ -1220,8 +1220,10 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                         "source dtype). A narrower dtype is not lossless, "
                         "and the file records that.")
     p.add_argument("--family", default=None, metavar="NAME",
-                   help="The image family whose VAE this is (default: the "
-                        "one family whose VAE the file fills).")
+                   help="The image family whose VAE this is, such as "
+                        "z-image, qwen-image-2.1, krea-2 or flux-3-klein "
+                        "(default: the one family whose VAE the file "
+                        "fills).")
     p.add_argument("--source-repo", default="unknown", metavar="ID",
                    help="Record this repository as the source (default "
                         "unknown).")
@@ -1283,10 +1285,17 @@ def cmd_pack_vae(argv: list[str], prog: str = "gmlx image pack-vae") -> int:
                   "--source-config names one", file=sys.stderr)
         elif text is not None:
             config_json = text
+    family = a.family
+    if family is not None:
+        from gmlx.image.registry import family_named
+
+        # Spelled as the server reads a family: flux-3-klein is flux3_klein.
+        named = family_named(family)
+        family = named.name if named else family
     try:
         rep = pack_vae(a.src, a.out, source_repo=a.source_repo,
                        source_revision=a.source_revision,
-                       config_json=config_json, family=a.family,
+                       config_json=config_json, family=family,
                        dtype=_PACK_DTYPES.get(a.dtype), overwrite=a.force)
     except VAEError as e:
         return _refuse(str(e))

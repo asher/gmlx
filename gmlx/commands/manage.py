@@ -1823,7 +1823,7 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                      help="List only the image models.")
     img.add_argument("--family", default=None, metavar="NAME",
                      help="List only the image models of this family, such "
-                          "as z-image or qwen-image-2.1.")
+                          "as z-image, qwen-image-2.1 or flux-3-klein.")
     img.add_argument("--edit", action="store_true",
                      help="List only the image models that edit from "
                           "reference images.")
