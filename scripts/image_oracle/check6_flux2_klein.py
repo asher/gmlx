@@ -278,7 +278,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--dequant", choices=oracle.DEQUANT, default="exact")
     ap.add_argument("--name", help="fixture name before the size, "
-                    f"{NAME} or {NAME}_base by the variant when unset")
+                    f"{NAME} or {NAME}_base by the variant, with _9b after "
+                    f"{NAME} for a 9B file, when unset")
     ap.add_argument("--out", type=Path,
                     help="fixture directory (default $GMLX_IMAGE_FIXTURES)")
     ap.add_argument("--self-test", action="store_true")
@@ -309,14 +310,16 @@ def main(argv=None) -> int:
     keep = [k for k in (KEEP[variant] if a.keep is None else a.keep)
             if k < steps]
     feats = load_features(torch, a.features)
-    name = a.name or (NAME if variant == "distilled" else f"{NAME}_base")
+    family, size_tag = c3.family_of(c3.params_of(fm, state))
+    name = a.name or (f"{NAME}{size_tag}" if variant == "distilled"
+                      else f"{NAME}{size_tag}_base")
     c = c3.params_of(fm, state).in_channels
     for size in a.sizes:
         n = size // 16
         rng = np.random.Generator(np.random.PCG64(a.seed))
         noise = rng.standard_normal((1, c, n, n), dtype=np.float32)
         fx = fixtures.FixtureWriter(f"{name}_{size}", check=6,
-                                    family="flux2_klein", script=SCRIPT)
+                                    family=family, script=SCRIPT)
         fx.add_file("dit", a.dit)
         fx.add_file("features", a.features)
         fx.add("noise", noise)

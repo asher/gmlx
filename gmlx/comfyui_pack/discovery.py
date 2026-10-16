@@ -46,6 +46,8 @@ PULL_NAMES = {
     "krea-2-turbo": (),
     "flux-2-klein": (),
     "flux-2-klein-base": (),
+    "flux-2-klein-9b": (),
+    "flux-2-klein-base-9b": (),
     "flux-3-klein": (),
     "flux-3-klein-base": (),
 }
@@ -56,6 +58,8 @@ PULL_KINDS = {
     "krea-2-turbo": ("krea2", "turbo"),
     "flux-2-klein": ("flux2_klein", "distilled"),
     "flux-2-klein-base": ("flux2_klein", "base"),
+    "flux-2-klein-9b": ("flux2_klein_9b", "distilled"),
+    "flux-2-klein-base-9b": ("flux2_klein_9b", "base"),
     "flux-3-klein": ("flux3_klein", "distilled"),
     "flux-3-klein-base": ("flux3_klein", "base"),
 }

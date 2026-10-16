@@ -1,6 +1,8 @@
 """Check 3 of the image acceptance gate for FLUX.2 klein: one denoise step
 of the gmlx DiT, row by row, against BFL's reference DiT on the same GGUF,
-under three gates, for the distilled and the Base 4B checkpoints.
+under three gates, for the distilled and the Base 4B checkpoints, and
+under the product and exact gates for the distilled and the Base 9B
+checkpoints.
 
 scripts/image_oracle/check3_flux2_klein.py writes the fixtures. Each step
 is the first of the sampler, at time 1, where seeded normal latents are on
@@ -24,8 +26,9 @@ floor that the manifest records. The site gate holds each op of every
 block and each linear leaf on the path a request takes to the stock op in
 float32 on the same input, within 2 n u (flux2_gates.py).
 
-The rows need the FLUX.2 klein 4B GGUFs under KQUANT_TEST_GGUF_DIR and the
-fixtures under GMLX_IMAGE_FIXTURES. They skip until both are there.
+The rows need the FLUX.2 klein GGUFs under KQUANT_TEST_GGUF_DIR and the
+fixtures under GMLX_IMAGE_FIXTURES. They skip until both are there. The
+9B rows declare a Mac of 24 GB.
 """
 from __future__ import annotations
 
@@ -51,20 +54,38 @@ from gmlx.image.ops import kq_routes
 # A Mac of 16 GB, as most users run (tests/host_box.py).
 pytestmark = pytest.mark.host_gb(16)
 
-ROWS = {"distilled": "check3_flux2_klein_512",
-        "distilled r1": "check3_flux2_klein_r1_512",
-        "base": "check3_flux2_klein_base_512",
-        "base r1": "check3_flux2_klein_base_r1_512",
-        "distilled step 1": "check3_flux2_klein_s1_512"}
-VELOCITY = {"distilled": "check3_flux2_klein_1024",
-            "distilled r1": "check3_flux2_klein_r1_1024",
-            "base": "check3_flux2_klein_base_1024"}
-DITS = {"distilled": "flux-2-klein-4b-Q4_K_M.gguf",
-        "base": "flux-2-klein-base-4b-Q4_K_M.gguf"}
+_ROWS = {"distilled": "_512", "distilled r1": "_r1_512", "base": "_base_512",
+         "base r1": "_base_r1_512", "distilled step 1": "_s1_512"}
+_VELOCITY = {"distilled": "_1024", "distilled r1": "_r1_1024",
+             "base": "_base_1024"}
+# The cases of each size: the 9B fixture names carry _9b after the
+# family's.
+ROWS = {**{c: f"check3_flux2_klein{t}" for c, t in _ROWS.items()},
+        **{f"9b {c}": f"check3_flux2_klein_9b{t}" for c, t in _ROWS.items()}}
+VELOCITY = {**{c: f"check3_flux2_klein{t}" for c, t in _VELOCITY.items()},
+            **{f"9b {c}": f"check3_flux2_klein_9b{t}"
+               for c, t in _VELOCITY.items()}}
+DITS = {("4b", "distilled"): "flux-2-klein-4b-Q4_K_M.gguf",
+        ("4b", "base"): "flux-2-klein-base-4b-Q4_K_M.gguf",
+        ("9b", "distilled"): "flux-2-klein-9b-Q4_K_M.gguf",
+        ("9b", "base"): "flux-2-klein-base-9b-Q4_K_M.gguf"}
+FAMILIES = {"4b": "flux2_klein", "9b": "flux2_klein_9b"}
 STEPS = {"distilled": 4, "base": 50}
 REFERENCE_COMMIT = "50fe5162777813d869182b139e83b10743caef15"
 # The case that runs every stream.
 FULL = "distilled r1"
+
+
+def size_variant(case: str) -> tuple[str, str]:
+    """(size, variant) of a case."""
+    size = "9b" if case.startswith("9b ") else "4b"
+    return size, case.removeprefix("9b ").split()[0]
+
+
+def cases(table: dict) -> list:
+    """The cases of ``table``, the 9B ones on a Mac of 24 GB."""
+    return [pytest.param(c, marks=pytest.mark.host_gb(24))
+            if c.startswith("9b ") else c for c in table]
 
 
 # SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
@@ -109,7 +130,9 @@ class _Dits:
             return self.model, self.path
         self.model = self.path = None
         mx.clear_cache()
-        for p in image_dits(self.root, "flux2_klein"):
+        found = [p for fam in FAMILIES.values()
+                 for p in image_dits(self.root, fam)]
+        for p in found:
             if Path(p).name == want["name"] and \
                     os.path.getsize(p) == want["size"]:
                 break
@@ -140,8 +163,9 @@ def test_the_manifests_follow_the_rule():
     for case, name in [*ROWS.items(), *VELOCITY.items()]:
         m = _manifest(name)
         ins = m["inputs"]
-        variant = case.split()[0]
-        assert m["files"]["dit"]["name"] == DITS[variant], name
+        size, variant = size_variant(case)
+        assert m["files"]["dit"]["name"] == DITS[size, variant], name
+        assert m["family"] == FAMILIES[size], name
         assert ins["reference_commit"] == REFERENCE_COMMIT, name
         step = 1 if case.endswith("step 1") else 0
         n = (ins["size"] // 16) ** 2
@@ -168,7 +192,7 @@ def test_the_manifests_follow_the_rule():
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("case", list(ROWS))
+@pytest.mark.parametrize("case", cases(ROWS))
 def test_check3_rows_at_512(dits, case):
     arrays, m = _rows(case)
     model, _ = dits(m)
@@ -187,7 +211,7 @@ def test_check3_rows_at_512(dits, case):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("case", list(VELOCITY))
+@pytest.mark.parametrize("case", cases(VELOCITY))
 def test_check3_velocity_at_1024(dits, case):
     arrays, m = fixture(_manifest(VELOCITY[case])["name"])
     model, _ = dits(m)
@@ -202,7 +226,7 @@ def test_check3_velocity_at_1024(dits, case):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("case", list(ROWS))
+@pytest.mark.parametrize("case", cases(ROWS))
 def test_check3_own_time_embedding(case):
     """gmlx's own time embedding against the reference's: equal, or one
     entry one bf16 ulp off where the reference's fp32 exp is an ulp off
@@ -260,7 +284,7 @@ EXACT_FAULTS = {"shift and scale swapped": _shift_scale_swapped,
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("case", list(ROWS))
+@pytest.mark.parametrize("case", cases(ROWS))
 def test_check3_exact_gate_at_512(dits, request, monkeypatch, case):
     """Every teacher-forced row within EXACT_TOL of the oracle in its
     arithmetic, the free rows and the velocity within the fixture's gates

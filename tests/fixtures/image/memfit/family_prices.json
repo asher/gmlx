@@ -1,0 +1,3216 @@
+{
+ "prices": {
+  "flux2_klein": {
+   "plans": {
+    "16106127360 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 12792711086,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3934341038,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13789277716,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4930907668,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13132449710,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4274079662,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 14431006228,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 5572636180,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12045286113,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3186916065,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13041852743,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4183482695,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12158532321,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3300162273,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13457088839,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4598718791,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 12792711086,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3934341038,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13789277716,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4930907668,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13132449710,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4274079662,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 14431006228,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 5572636180,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12045286113,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3186916065,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13041852743,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4183482695,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12158532321,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3300162273,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13457088839,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4598718791,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 12792711086,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3934341038,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13789277716,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4930907668,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13132449710,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4274079662,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 14431006228,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 5572636180,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12045286113,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3186916065,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13041852743,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4183482695,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12158532321,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3300162273,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13457088839,
+      "encode": 9807960473
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 949590425,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4598718791,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 7.91, decode 8.09; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.66 GiB, decode_peak 3.84 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 8.84, decode 8.09; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 4.59 GiB, decode_peak 3.84 GiB, encode_peak 0.88 GiB. The largest term is step_peak; try a lower resolution. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 7.91, decode 8.09; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.66 GiB, decode_peak 3.84 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 8.84, decode 8.09; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 4.59 GiB, decode_peak 3.84 GiB, encode_peak 0.88 GiB. The largest term is step_peak; try a lower resolution. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 7.22, decode 6.85; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.97 GiB, decode_peak 2.60 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 8.15, decode 6.85; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.90 GiB, decode_peak 2.60 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 7.22, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.97 GiB, decode_peak 2.60 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 8.15, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.90 GiB, decode_peak 2.60 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
+   },
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=512, width=36864, step=StepFit(base=2813203578.88, k=3.3, row_k=1.0, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=30720, text_rows=512, encode_tower_bytes=0, mmproj_fp32=False, encode_base=697932185, ref_token_px=16, prices_prompt=False)",
+   "vae": {
+    "decode 1024 False": 6029060341,
+    "decode 1024 True": 4125447946,
+    "decode 512 False": 2787702210,
+    "decode 512 True": 2787702210,
+    "encode 1024 False": 4515084369,
+    "encode 1024 True": 3291503656,
+    "encode 512 False": 2360889835,
+    "encode 512 True": 2360889835
+   }
+  },
+  "flux3_klein": {
+   "plans": {
+    "16106127360 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 12847992012,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3989621964,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13527469260,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4669099212,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13300976844,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4442606796,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 14206946508,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 5348576460,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12338384076,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3480014028,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13017861324,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4159491276,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12621499596,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3763129548,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13527469260,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4669099212,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 12847992012,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3989621964,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13527469260,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4669099212,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13300976844,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4442606796,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 14206946508,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 5348576460,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12338384076,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3480014028,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13017861324,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4159491276,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12621499596,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3763129548,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13527469260,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4669099212,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 12847992012,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3989621964,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13527469260,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4669099212,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13300976844,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4442606796,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 14206946508,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 5348576460,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12338384076,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3480014028,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13017861324,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4159491276,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 12621499596,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3763129548,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 13527469260,
+      "encode": 11381663334
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 2523293286,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4669099212,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 7.97, decode 8.09; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.72 GiB, decode_peak 3.84 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 8.60, decode 8.09; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 4.35 GiB, decode_peak 3.84 GiB, encode_peak 2.35 GiB. The largest term is step_peak; try a lower resolution. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 7.97, decode 8.09; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.72 GiB, decode_peak 3.84 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 8.60, decode 8.09; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 4.35 GiB, decode_peak 3.84 GiB, encode_peak 2.35 GiB. The largest term is step_peak; try a lower resolution. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 7.49, decode 6.85; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.24 GiB, decode_peak 2.60 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 8.12, decode 6.85; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.87 GiB, decode_peak 2.60 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 7.49, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.24 GiB, decode_peak 2.60 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 8.12, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.87 GiB, decode_peak 2.60 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
+   },
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=4096, width=27648, step=StepFit(base=2630667468.8, k=3.0, row_k=1.0, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=28672, text_rows=4096, encode_tower_bytes=0, mmproj_fp32=False, encode_base=644245094, ref_token_px=16, prices_prompt=True)",
+   "vae": {
+    "decode 1024 False": 6029060341,
+    "decode 1024 True": 4125447946,
+    "decode 512 False": 2787702210,
+    "decode 512 True": 2787702210,
+    "encode 1024 False": 4515084369,
+    "encode 1024 True": 3291503656,
+    "encode 512 False": 2360889835,
+    "encode 512 True": 2360889835
+   }
+  },
+  "krea2": {
+   "plans": {
+    "16106127360 1024 1.0 0": [
+     {
+      "decode": 12287912959,
+      "denoise": 12378229964,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3519859916,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     true
+    ],
+    "16106127360 1024 1.0 1": [
+     {
+      "decode": 12287912959,
+      "denoise": 12378229964,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3519859916,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     true
+    ],
+    "16106127360 1024 4.0 0": [
+     {
+      "decode": 12287912959,
+      "denoise": 12585848012,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3727477964,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     true
+    ],
+    "16106127360 1024 4.0 1": [
+     {
+      "decode": 12287912959,
+      "denoise": 12585848012,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3727477964,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     true
+    ],
+    "16106127360 512 1.0 0": [
+     {
+      "decode": 11638634700,
+      "denoise": 11713852211,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2855482163,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 1": [
+     {
+      "decode": 11638634700,
+      "denoise": 11713852211,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2855482163,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 0": [
+     {
+      "decode": 11638634700,
+      "denoise": 11783058227,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2924688179,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 1": [
+     {
+      "decode": 11638634700,
+      "denoise": 11783058227,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2924688179,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 0": [
+     {
+      "decode": 12287912959,
+      "denoise": 12378229964,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3519859916,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     true
+    ],
+    "21474836480 1024 1.0 1": [
+     {
+      "decode": 12287912959,
+      "denoise": 12378229964,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3519859916,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     true
+    ],
+    "21474836480 1024 4.0 0": [
+     {
+      "decode": 12287912959,
+      "denoise": 12585848012,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3727477964,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     true
+    ],
+    "21474836480 1024 4.0 1": [
+     {
+      "decode": 12287912959,
+      "denoise": 12585848012,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3727477964,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     true
+    ],
+    "21474836480 512 1.0 0": [
+     {
+      "decode": 11638634700,
+      "denoise": 11713852211,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2855482163,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 1": [
+     {
+      "decode": 11638634700,
+      "denoise": 11713852211,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2855482163,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 0": [
+     {
+      "decode": 11638634700,
+      "denoise": 11783058227,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2924688179,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 1": [
+     {
+      "decode": 11638634700,
+      "denoise": 11783058227,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2924688179,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 0": [
+     {
+      "decode": 12287912959,
+      "denoise": 12378229964,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3519859916,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     true
+    ],
+    "51539607552 1024 1.0 1": [
+     {
+      "decode": 12287912959,
+      "denoise": 12378229964,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3519859916,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     true
+    ],
+    "51539607552 1024 4.0 0": [
+     {
+      "decode": 12287912959,
+      "denoise": 12585848012,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3727477964,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     true
+    ],
+    "51539607552 1024 4.0 1": [
+     {
+      "decode": 12287912959,
+      "denoise": 12585848012,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3429542911,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 3727477964,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     true
+    ],
+    "51539607552 512 1.0 0": [
+     {
+      "decode": 11638634700,
+      "denoise": 11713852211,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2855482163,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 1": [
+     {
+      "decode": 11638634700,
+      "denoise": 11713852211,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2855482163,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 0": [
+     {
+      "decode": 11638634700,
+      "denoise": 11783058227,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2924688179,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 1": [
+     {
+      "decode": 11638634700,
+      "denoise": 11783058227,
+      "encode": 9878175744
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2780264652,
+      "dit": 4294967296,
+      "encode_peak": 1019805696,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2924688179,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 7.53, decode 7.44; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.28 GiB, decode_peak 3.19 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 7.53, decode 7.44; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.28 GiB, decode_peak 3.19 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 7.53, decode 7.44; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.28 GiB, decode_peak 3.19 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 7.53, decode 7.44; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.28 GiB, decode_peak 3.19 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 6.91, decode 6.84; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.66 GiB, decode_peak 2.59 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 6.91, decode 6.84; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.66 GiB, decode_peak 2.59 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 6.91, decode 6.84; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.66 GiB, decode_peak 2.59 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 6.91, decode 6.84; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.66 GiB, decode_peak 2.59 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
+   },
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=512, width=45056, step=StepFit(base=2523293286.4, k=2.4, row_k=0.5, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=116736, text_rows=546, encode_tower_bytes=0, mmproj_fp32=False, encode_base=0, ref_token_px=0, prices_prompt=True)",
+   "vae": {
+    "decode 1024 False": 4411010047,
+    "decode 1024 True": 3429542911,
+    "decode 512 False": 2780264652,
+    "decode 512 True": 2780264652,
+    "encode 1024 False": 4411010047,
+    "encode 1024 True": 3500007218,
+    "encode 512 False": 2780264652,
+    "encode 512 True": 2780264652
+   }
+  },
+  "order": [
+   [
+    "z_image",
+    10
+   ],
+   [
+    "krea2",
+    15
+   ],
+   [
+    "qwen_image21",
+    20
+   ],
+   [
+    "flux2_klein",
+    25
+   ],
+   [
+    "flux3_klein",
+    30
+   ]
+  ],
+  "quants": {
+   "flux-2-klein": {
+    "16": [
+     "Q4_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "64": [
+     "Q8_0",
+     "Q8_0"
+    ]
+   },
+   "flux-2-klein-base": {
+    "16": [
+     "Q4_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "64": [
+     "Q8_0",
+     "Q8_0"
+    ]
+   },
+   "flux-3-klein": {
+    "16": [
+     "Q4_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "64": [
+     "Q8_0",
+     "Q8_0"
+    ]
+   },
+   "flux-3-klein-base": {
+    "16": [
+     "Q4_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "64": [
+     "Q8_0",
+     "Q8_0"
+    ]
+   },
+   "krea-2-turbo": {
+    "16": [
+     "Q3_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q6_K",
+     "Q8_0"
+    ],
+    "32": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "64": [
+     "Q8_0",
+     "Q8_0"
+    ]
+   },
+   "qwen-image": {
+    "16": [
+     "Q4_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "64": [
+     "F16",
+     "Q8_0"
+    ]
+   },
+   "qwen-image-turbo": {
+    "16": [
+     "AD-Q4_K",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "BF16",
+     "Q8_0"
+    ],
+    "64": [
+     "BF16",
+     "Q8_0"
+    ]
+   },
+   "z-image-turbo": {
+    "16": [
+     "Q4_K_M",
+     "Q8_0"
+    ],
+    "24": [
+     "Q8_0",
+     "Q8_0"
+    ],
+    "32": [
+     "BF16",
+     "Q8_0"
+    ],
+    "64": [
+     "BF16",
+     "Q8_0"
+    ]
+   }
+  },
+  "qwen_image21": {
+   "plans": {
+    "16106127360 1024 1.0 0": [
+     {
+      "decode": 12135295877,
+      "denoise": 7818182656,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 268435456,
+      "step_peak": 2986344448,
+      "vae": 268435456
+     },
+     1,
+     [
+      "release the encoder"
+     ],
+     true,
+     true,
+     false
+    ],
+    "16106127360 1024 1.0 1": [
+     {
+      "decode": 14282779525,
+      "denoise": 11173625856,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 2415919104,
+      "step_peak": 4194304000,
+      "vae": 268435456
+     },
+     1,
+     [
+      "release the encoder"
+     ],
+     true,
+     true,
+     false
+    ],
+    "16106127360 1024 4.0 0": [
+     {
+      "decode": 12403731333,
+      "denoise": 8086618112,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 536870912,
+      "step_peak": 2986344448,
+      "vae": 268435456
+     },
+     1,
+     [
+      "sequential rows",
+      "release the encoder"
+     ],
+     true,
+     true,
+     false
+    ],
+    "16106127360 1024 4.0 1": [
+     {
+      "decode": 12521270149,
+      "denoise": 13589544960,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3126029189,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 4831838208,
+      "step_peak": 4194304000,
+      "vae": 268435456
+     },
+     1,
+     [
+      "sequential rows",
+      "release the encoder",
+      "tiled decode"
+     ],
+     true,
+     true,
+     true
+    ],
+    "16106127360 512 1.0 0": [
+     {
+      "decode": 12215616798,
+      "denoise": 11005853696,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 268435456,
+      "step_peak": 1879048192,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 1": [
+     {
+      "decode": 14363100446,
+      "denoise": 14824767488,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 2415919104,
+      "step_peak": 3550478336,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 0": [
+     {
+      "decode": 12484052254,
+      "denoise": 11324620800,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 536870912,
+      "step_peak": 1929379840,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 1": [
+     {
+      "decode": 12484052254,
+      "denoise": 12945719296,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 4831838208,
+      "step_peak": 3550478336,
+      "vae": 268435456
+     },
+     1,
+     [
+      "sequential rows",
+      "release the encoder"
+     ],
+     true,
+     true,
+     false
+    ],
+    "21474836480 1024 1.0 0": [
+     {
+      "decode": 16430263173,
+      "denoise": 12113149952,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 268435456,
+      "step_peak": 2986344448,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 1": [
+     {
+      "decode": 18577746821,
+      "denoise": 15468593152,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 2415919104,
+      "step_peak": 4194304000,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 0": [
+     {
+      "decode": 16698698629,
+      "denoise": 12570329088,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 536870912,
+      "step_peak": 3175088128,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 1": [
+     {
+      "decode": 20993665925,
+      "denoise": 18106810368,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 4831838208,
+      "step_peak": 4416602112,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 0": [
+     {
+      "decode": 12215616798,
+      "denoise": 11005853696,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 268435456,
+      "step_peak": 1879048192,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 1": [
+     {
+      "decode": 14363100446,
+      "denoise": 14824767488,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 2415919104,
+      "step_peak": 3550478336,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 0": [
+     {
+      "decode": 12484052254,
+      "denoise": 11324620800,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 536870912,
+      "step_peak": 1929379840,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 1": [
+     {
+      "decode": 16779019550,
+      "denoise": 17240686592,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 4831838208,
+      "step_peak": 3550478336,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 0": [
+     {
+      "decode": 16430263173,
+      "denoise": 12113149952,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 268435456,
+      "step_peak": 2986344448,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 1": [
+     {
+      "decode": 18577746821,
+      "denoise": 15468593152,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 2415919104,
+      "step_peak": 4194304000,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 0": [
+     {
+      "decode": 16698698629,
+      "denoise": 12570329088,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 536870912,
+      "step_peak": 3175088128,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 1": [
+     {
+      "decode": 20993665925,
+      "denoise": 18106810368,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 7303457669,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 4831838208,
+      "step_peak": 4416602112,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 0": [
+     {
+      "decode": 12215616798,
+      "denoise": 11005853696,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 268435456,
+      "step_peak": 1879048192,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 1": [
+     {
+      "decode": 14363100446,
+      "denoise": 14824767488,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 2415919104,
+      "step_peak": 3550478336,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 0": [
+     {
+      "decode": 12484052254,
+      "denoise": 11324620800,
+      "encode": 9462349824
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 603979776,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 536870912,
+      "step_peak": 1929379840,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 1": [
+     {
+      "decode": 16779019550,
+      "denoise": 17240686592,
+      "encode": 12280922112
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 3088811294,
+      "dit": 4294967296,
+      "encode_peak": 3422552064,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 4831838208,
+      "step_peak": 3550478336,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 8.82 GiB against a budget of 8.00 GiB (phases encode 8.81, denoise 7.28, decode 7.41; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 0.25 GiB, step_peak 2.78 GiB, decode_peak 2.91 GiB, encode_peak 0.56 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 11.44 GiB against a budget of 8.00 GiB (phases encode 11.44, denoise 10.41, decode 9.41; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 2.25 GiB, step_peak 3.91 GiB, decode_peak 2.91 GiB, encode_peak 3.19 GiB. The largest term is dit; try a smaller DiT quant; the request does not fit without reference images either. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 8.82 GiB against a budget of 8.00 GiB (phases encode 8.81, denoise 7.53, decode 7.66; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 0.50 GiB, step_peak 2.78 GiB, decode_peak 2.91 GiB, encode_peak 0.56 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 12.66 GiB against a budget of 8.00 GiB (phases encode 11.44, denoise 12.66, decode 11.66; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 4.50 GiB, step_peak 3.91 GiB, decode_peak 2.91 GiB, encode_peak 3.19 GiB. The largest term is prefix_cache; try fewer or smaller references; the request does not fit without reference images either. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 8.82 GiB against a budget of 8.00 GiB (phases encode 8.81, denoise 6.25, decode 7.38; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 0.25 GiB, step_peak 1.75 GiB, decode_peak 2.88 GiB, encode_peak 0.56 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 11.44 GiB against a budget of 8.00 GiB (phases encode 11.44, denoise 9.81, decode 9.38; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 2.25 GiB, step_peak 3.31 GiB, decode_peak 2.88 GiB, encode_peak 3.19 GiB. The largest term is dit; try a smaller DiT quant; the request does not fit without reference images either. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 8.82 GiB against a budget of 8.00 GiB (phases encode 8.81, denoise 6.50, decode 7.63; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 0.50 GiB, step_peak 1.75 GiB, decode_peak 2.88 GiB, encode_peak 0.56 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 12.06 GiB against a budget of 8.00 GiB (phases encode 11.44, denoise 12.06, decode 11.63; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 4.50 GiB, step_peak 3.31 GiB, decode_peak 2.88 GiB, encode_peak 3.19 GiB. The largest term is prefix_cache; try fewer or smaller references; the request does not fit without reference images either. GMLX_OVERCOMMIT=1 overrides."
+   },
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=0, width=36864, step=StepFit(base=1342177280.0, k=4.0, row_k=0.5, read_k=16.0, read_cap=1073741824.0), prefix=PrefixRow(blocks=32, dim=4096, token_px=16, slot_tokens=4, min_ref_px=256), prefill=StepFit(base=1342177280.0, k=6.5, row_k=None, read_k=0.0, read_cap=0.0), encode_row_bytes=73728, text_rows=512, encode_tower_bytes=1610612736, mmproj_fp32=True, encode_base=0, ref_token_px=0, prices_prompt=True)",
+   "vae": {
+    "decode 1024 False": 7303457669,
+    "decode 1024 True": 3126029189,
+    "decode 512 False": 3088811294,
+    "decode 512 True": 3088811294,
+    "encode 1024 False": 3965462773,
+    "encode 1024 True": 1615296266,
+    "encode 512 False": 1577855221,
+    "encode 512 True": 1577855221
+   }
+  },
+  "recipes": {
+   "flux-2-klein": "Recipe(name='flux-2-klein', title='FLUX.2 klein', family='flux2_klein', variant='distilled', dit_repo='unsloth/FLUX.2-klein-4B-GGUF', dit_file='flux-2-klein-4b-{quant}.gguf', dit_quants=('Q4_K_M', 'Q8_0'), encoder_repo='unsloth/Qwen3-4B-GGUF', encoder_file='Qwen3-4B-{quant}.gguf', encoder_quants=('Q8_0',), vae_repo='black-forest-labs/FLUX.2-klein-4B', vae_revision='e7b7dc27f91deacad38e78976d1f2b499d76a294', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04', vae_pack='flux2-vae-BF16.gguf', license='apache-2.0', license_url='https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/blob/main/LICENSE.md', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280405792, vae_bytes=168114016, aliases=(), license_note='', vae_license='apache-2.0')",
+   "flux-2-klein-base": "Recipe(name='flux-2-klein-base', title='FLUX.2 klein Base', family='flux2_klein', variant='base', dit_repo='unsloth/FLUX.2-klein-base-4B-GGUF', dit_file='flux-2-klein-base-4b-{quant}.gguf', dit_quants=('Q4_K_M', 'Q8_0'), encoder_repo='unsloth/Qwen3-4B-GGUF', encoder_file='Qwen3-4B-{quant}.gguf', encoder_quants=('Q8_0',), vae_repo='black-forest-labs/FLUX.2-klein-4B', vae_revision='e7b7dc27f91deacad38e78976d1f2b499d76a294', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04', vae_pack='flux2-vae-BF16.gguf', license='apache-2.0', license_url='https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B/blob/main/LICENSE.md', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280405792, vae_bytes=168114016, aliases=(), license_note='', vae_license='apache-2.0')",
+   "flux-3-klein": "Recipe(name='flux-3-klein', title='FLUX.3 klein', family='flux3_klein', variant='distilled', dit_repo='realrebelai/FLUX-3-Image-Klein_GGUFs', dit_file='DISTILLED/flux3_image_klein_sd-{quant}.gguf', dit_quants=('Q4_K_M', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-4B-Instruct-GGUF', encoder_file='Qwen3-VL-4B-Instruct-{quant}.gguf', encoder_quants=('Q8_0',), vae_repo='black-forest-labs/FLUX.2-klein-4B', vae_revision='e7b7dc27f91deacad38e78976d1f2b499d76a294', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04', vae_pack='flux2-vae-BF16.gguf', license='flux-kommunity', license_url='https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280406816, vae_bytes=168114016, aliases=(), license_note='non-commercial use, and commercial use of the images only under $5M annual revenue, affiliates counted, with content filters or a review of each image for unlawful or infringing content before it is shared, and a disclosure that it is made with AI where the law requires one', vae_license='apache-2.0')",
+   "flux-3-klein-base": "Recipe(name='flux-3-klein-base', title='FLUX.3 klein Base', family='flux3_klein', variant='base', dit_repo='realrebelai/FLUX-3-Image-Klein_GGUFs', dit_file='BASE/flux3_image_klein-{quant}.gguf', dit_quants=('Q4_K_M', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-4B-Instruct-GGUF', encoder_file='Qwen3-VL-4B-Instruct-{quant}.gguf', encoder_quants=('Q8_0',), vae_repo='black-forest-labs/FLUX.2-klein-4B', vae_revision='e7b7dc27f91deacad38e78976d1f2b499d76a294', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04', vae_pack='flux2-vae-BF16.gguf', license='flux-kommunity', license_url='https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280406816, vae_bytes=168114016, aliases=(), license_note='non-commercial use, and commercial use of the images only under $5M annual revenue, affiliates counted, with content filters or a review of each image for unlawful or infringing content before it is shared, and a disclosure that it is made with AI where the law requires one', vae_license='apache-2.0')",
+   "krea-2-turbo": "Recipe(name='krea-2-turbo', title='Krea 2 Turbo', family='krea2', variant='turbo', dit_repo='Abiray/Krea-2-Turbo-GGUF', dit_file='Krea-2-Turbo-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-4B-Instruct-GGUF', encoder_file='Qwen3-VL-4B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Comfy-Org/Krea-2', vae_revision='eb1eddd3983a54678545a9b2c178c5853b30f7be', vae_file='vae/qwen_image_vae.safetensors', vae_config='', vae_sha256='a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f', vae_pack='qwen-image-vae-BF16.gguf', license='krea-2-community', license_url='https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280406816, vae_bytes=253807712, aliases=(), license_note='free commercial use only under $1M annual revenue, affiliates counted, and a deployer must filter content', vae_license='')",
+   "qwen-image": "Recipe(name='qwen-image', title='Qwen-Image 2.1', family='qwen_image21', variant='base', dit_repo='unsloth/Qwen-Image-2.1-GGUF', dit_file='qwen-image-2.1-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0', 'F16'), encoder_repo='unsloth/Qwen3-VL-8B-Instruct-GGUF', encoder_file='Qwen3-VL-8B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Qwen/Qwen-Image-2.1', vae_revision='790c92633540aa0cb11d9abf19eb46d861714758', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417', vae_pack='qwen-image-2.1-vae-F32.gguf', license='qwen-research', license_url='https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE', encoder_license='apache-2.0', mmproj_file='mmproj-BF16.gguf', encoder_bytes=9872089504, vae_bytes=1350985376, aliases=('qwen-image-2.1',), license_note='non-commercial use only', vae_license='')",
+   "qwen-image-turbo": "Recipe(name='qwen-image-turbo', title='Qwen-Image 2.1 Turbo', family='qwen_image21', variant='turbo', dit_repo='AtomicChat/Qwen-Image-2.1-Turbo-GGUF', dit_file='Qwen-Image-2.1-Turbo-{quant}.gguf', dit_quants=('AD-Q3_K', 'AD-Q4_K', 'AD-Q5_K', 'AD-Q6_K', 'Q8_0', 'BF16'), encoder_repo='unsloth/Qwen3-VL-8B-Instruct-GGUF', encoder_file='Qwen3-VL-8B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Qwen/Qwen-Image-2.1', vae_revision='790c92633540aa0cb11d9abf19eb46d861714758', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417', vae_pack='qwen-image-2.1-vae-F32.gguf', license='qwen-research', license_url='https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE', encoder_license='apache-2.0', mmproj_file='mmproj-BF16.gguf', encoder_bytes=9872089504, vae_bytes=1350985376, aliases=('qwen-image-2.1-turbo',), license_note='non-commercial use only', vae_license='')",
+   "z-image-turbo": "Recipe(name='z-image-turbo', title='Z-Image-Turbo', family='z_image', variant='turbo', dit_repo='unsloth/Z-Image-Turbo-GGUF', dit_file='z-image-turbo-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0', 'BF16'), encoder_repo='unsloth/Qwen3-4B-GGUF', encoder_file='Qwen3-4B-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Tongyi-MAI/Z-Image-Turbo', vae_revision='f332072aa78be7aecdf3ee76d5c247082da564a6', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3', vae_pack='z-image-vae-BF16.gguf', license='apache-2.0', license_url='https://huggingface.co/Tongyi-MAI/Z-Image-Turbo', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280405792, vae_bytes=167660192, aliases=(), license_note='', vae_license='')"
+  },
+  "sizes": {
+   "krea-2-turbo": {
+    "16": "512x512"
+   }
+  },
+  "vae_families": {
+   "flux2_klein": [
+    "flux2_klein",
+    "flux3_klein"
+   ],
+   "flux3_klein": [
+    "flux3_klein",
+    "flux2_klein"
+   ],
+   "krea2": [
+    "krea2"
+   ],
+   "qwen_image21": [
+    "qwen_image21"
+   ],
+   "z_image": [
+    "z_image"
+   ]
+  },
+  "z_image": {
+   "plans": {
+    "16106127360 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 11586340126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2727970078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 11586340126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2727970078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13208356126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4349986078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13208356126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4349986078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 10504996126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 1646626078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 10504996126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 1646626078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 11045668126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2187298078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "16106127360 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 11045668126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2187298078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 11586340126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2727970078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 11586340126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2727970078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13208356126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4349986078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13208356126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4349986078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 10504996126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 1646626078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 10504996126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 1646626078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 11045668126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2187298078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "21474836480 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 11045668126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2187298078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 11586340126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2727970078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 1.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 11586340126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2727970078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 0": [
+     {
+      "decode": 14887430389,
+      "denoise": 13208356126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4349986078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 1024 4.0 1": [
+     {
+      "decode": 14887430389,
+      "denoise": 13208356126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 6029060341,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 4349986078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 10504996126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 1646626078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 1.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 10504996126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 1646626078,
+      "vae": 268435456
+     },
+     1,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 0": [
+     {
+      "decode": 11646072258,
+      "denoise": 11045668126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2187298078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "51539607552 512 4.0 1": [
+     {
+      "decode": 11646072258,
+      "denoise": 11045668126,
+      "encode": 9336520704
+     },
+     {
+      "adapters": 0,
+      "caches": 0,
+      "decode_peak": 2787702210,
+      "dit": 4294967296,
+      "encode_peak": 478150656,
+      "encoder": 4294967296,
+      "mmproj": 0,
+      "prefix_cache": 0,
+      "step_peak": 2187298078,
+      "vae": 268435456
+     },
+     2,
+     [],
+     true,
+     false,
+     false
+    ],
+    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 6.79, decode 7.70; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.54 GiB, decode_peak 3.45 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 6.79, decode 7.70; levers release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.54 GiB, decode_peak 3.45 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 6.79, decode 7.70; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.54 GiB, decode_peak 3.45 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 6.79, decode 7.70; levers sequential rows, release the encoder, tiled decode): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.54 GiB, decode_peak 3.45 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 5.78, decode 6.85; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 1.53 GiB, decode_peak 2.60 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 5.78, decode 6.85; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 1.53 GiB, decode_peak 2.60 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 5.78, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 1.53 GiB, decode_peak 2.60 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 5.78, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 1.53 GiB, decode_peak 2.60 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
+   },
+   "row": "PeakRow(token_px=16, row_multiple=32, caption_rows=512, width=32000, step=StepFit(base=1105954078.72, k=5.5, row_k=None, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=58368, text_rows=512, encode_tower_bytes=0, mmproj_fp32=False, encode_base=0, ref_token_px=0, prices_prompt=False)",
+   "vae": {
+    "decode 1024 False": 6029060341,
+    "decode 1024 True": 3701305507,
+    "decode 512 False": 2787702210,
+    "decode 512 True": 2787702210,
+    "encode 1024 False": 4515084369,
+    "encode 1024 True": 3201260584,
+    "encode 512 False": 2360889835,
+    "encode 512 True": 2360889835
+   }
+  }
+ },
+ "what": "family_prices(skip=('flux2_klein_9b',)) of tests/image/family_prices.py at gmlx acdf35d7, the commit before the FLUX.2 klein 9B rows: the peak row, the plans at four budgets and the VAE passes of each image family, the recipes with their default quants and sizes, the families each VAE serves and the registry order."
+}

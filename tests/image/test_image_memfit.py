@@ -574,7 +574,8 @@ class _TinyVae:
 
 
 def test_unknown_family_is_refused(z_view):
-    with pytest.raises(ValueError, match="known: flux2_klein, flux3_klein, "
+    with pytest.raises(ValueError, match="known: flux2_klein, "
+                                         "flux2_klein_9b, flux3_klein, "
                                          "krea2, qwen_image21, z_image"):
         plan_memory(z_view, 0, 0, family="flux", height=8, width=8,
                     budget=1e12, overcommit=False)
@@ -1033,6 +1034,74 @@ def test_the_flux2_encode_term_covers_every_measured_encode():
     assert {e["encoder"] for e in encodes} == {"Qwen3-4B-Q8_0.gguf",
                                                "Qwen3-4B-Q4_K_M.gguf"}
     p = plan_memory(0, ENCODER, 0, family="flux2_klein", height=512,
+                    width=512, budget=BUDGET_128, overcommit=False)
+    assert p.terms["encode_peak"] == int(
+        row.encode_base + 512 * row.encode_row_bytes * memfit.ENCODE_LIVE)
+    room = [p.terms["encode_peak"] - e["gib"] * GiB for e in encodes]
+    assert min(room) >= ROOM
+    # Without the base every encode is priced under its reading.
+    assert 512 * row.encode_row_bytes * memfit.ENCODE_LIVE < min(
+        e["gib"] for e in encodes) * GiB
+
+
+FLUX2_9B_CELLS = QWEN_CELLS.with_name("flux2_klein_9b_cells.json")
+
+
+def test_the_flux2_9b_row_covers_every_measured_step():
+    """The 9B cells: sizes to 2048 pixels, one, two and four 1024 pixel
+    references at 1024 and guided Base steps on the Q4_K_M files, and two
+    sizes on the distilled Q8_0 file, each with 512 text rows. Their rows
+    count as the 4B's do, at the widths of the 9B."""
+    row = memfit.PEAKS["flux2_klein_9b"]
+    assert row.step is memfit.FLUX2_KLEIN_9B_STEP
+    assert row.width == 49152 and row.caption_rows == row.text_rows == 512
+    assert not memfit.prices_prompt("flux2_klein_9b")
+    cells = json.loads(FLUX2_9B_CELLS.read_text())["cells"]
+    assert {c["size"] for c in cells} == {256, 512, 768, 1024, 1280, 1536,
+                                          2048}
+    assert {c["text_rows"] for c in cells} == {512}
+    assert {c["size"] for c in cells if c["guided"]} == {512, 1024, 1536}
+    assert {c.get("dit") for c in cells if c["guided"]} == {"Base Q4_K_M"}
+    assert sorted(c["refs"] for c in cells if c.get("refs")) == [1, 2, 4]
+    assert {c["ref_px"] for c in cells if c.get("refs")} == {1024}
+    assert {c["size"] for c in cells if c.get("dit") == "Q8_0"} == {1024,
+                                                                    2048}
+    room = [_flux3_room(row, c) for c in cells]
+    assert min(room) >= ROOM
+    # A fit, not a ceiling, as the 4B row's.
+    assert min(room) <= 0.35 * GiB and max(room) <= 1.25 * GiB
+
+
+def test_a_thinner_flux2_9b_row_misses_a_measured_cell():
+    row = memfit.PEAKS["flux2_klein_9b"]
+    cells = json.loads(FLUX2_9B_CELLS.read_text())["cells"]
+
+    def worst(**change) -> float:
+        thin = dataclasses.replace(row, step=dataclasses.replace(
+            row.step, **change))
+        return min(_flux3_room(thin, c) for c in cells)
+
+    assert worst() >= ROOM
+    assert worst(base=row.step.base - 0.1 * GiB) < ROOM
+    assert worst(k=row.step.k - 0.3) < ROOM
+    # The 4B row prices a 9B step under its reading.
+    four = dataclasses.replace(row, width=memfit.PEAKS["flux2_klein"].width,
+                               step=memfit.FLUX2_KLEIN_4B_STEP)
+    assert min(_flux3_room(four, c) for c in cells) < ROOM
+    two = next(c for c in cells if c.get("refs") == 2)
+    alone = dataclasses.replace(row, ref_token_px=10 ** 9)
+    assert _flux3_room(alone, two) < ROOM
+
+
+def test_the_flux2_9b_encode_term_covers_every_measured_encode():
+    """An encode of Qwen3-8B is 512 rows of three 4096 wide float32 states
+    whatever the prompt."""
+    row = memfit.PEAKS["flux2_klein_9b"]
+    assert row.encode_row_bytes == 3 * 4096 * 4
+    encodes = json.loads(FLUX2_9B_CELLS.read_text())["encode"]
+    assert {e["rows"] for e in encodes} == {512}
+    assert {e["encoder"] for e in encodes} == {"Qwen3-8B-Q8_0.gguf"}
+    p = plan_memory(0, ENCODER, 0, family="flux2_klein_9b", height=512,
                     width=512, budget=BUDGET_128, overcommit=False)
     assert p.terms["encode_peak"] == int(
         row.encode_base + 512 * row.encode_row_bytes * memfit.ENCODE_LIVE)

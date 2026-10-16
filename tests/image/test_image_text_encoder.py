@@ -967,15 +967,16 @@ def test_an_encoding_casts_qkv_only_when_its_spec_says():
     assert not mx.array_equal(got[False], got[True]).item()
 
 
-def test_only_the_flux2_spec_casts_qkv():
+def test_only_the_flux2_specs_cast_qkv():
     specs = {}
     for fam in registry.families():
         try:
             specs[fam.name] = te.encoder_spec(fam)
         except te.ImageModelError:
             continue
-    assert {n for n, s in specs.items() if s.fp32_qkv} == {"flux2_klein"}
-    assert len(specs) > 1
+    assert {n for n, s in specs.items() if s.fp32_qkv} == {"flux2_klein",
+                                                           "flux2_klein_9b"}
+    assert len(specs) > 2
 
 
 def test_an_encoding_keeps_its_pad_rows():

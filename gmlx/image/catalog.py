@@ -78,7 +78,7 @@ _KREA2_NOTE = ("free commercial use only under $1M annual revenue, "
 # The FLUX.2 autoencoder, which FLUX.2 klein and FLUX.3 klein decode with:
 # BFL's file in the FLUX.2 klein 4B repository, BF16 in the diffusers
 # layout with its config.json, packed in its own dtype. One pack serves the
-# four recipes.
+# six recipes.
 _FLUX2_VAE = dict(
     vae_repo="black-forest-labs/FLUX.2-klein-4B",
     vae_revision="e7b7dc27f91deacad38e78976d1f2b499d76a294",
@@ -96,6 +96,21 @@ _FLUX2 = dict(
     encoder_quants=("Q8_0",), **_FLUX2_VAE,
     license="apache-2.0", encoder_license="apache-2.0",
     encoder_bytes=4_280_405_792)
+
+# FLUX.2 klein 9B: unsloth's GGUFs of BFL's checkpoints, conditioned on
+# Qwen3-8B, under the FLUX Non-Commercial License. Its VAE is the 4B
+# repository's file, which the 9B repositories hold too.
+_FLUX2_9B = dict(
+    family="flux2_klein_9b", dit_quants=("Q4_K_M", "Q8_0"),
+    encoder_repo="unsloth/Qwen3-8B-GGUF", encoder_file="Qwen3-8B-{quant}.gguf",
+    encoder_quants=("Q8_0",), **_FLUX2_VAE,
+    license="flux-non-commercial-license",
+    # LICENSE.md 2.b and 2.e.
+    license_note=("non-commercial use only, with content filters or a review "
+                  "of each image for unlawful or infringing content before it "
+                  "is shared, and a disclosure that it is made with AI where "
+                  "the law requires one"),
+    encoder_license="apache-2.0", encoder_bytes=8_709_519_168)
 
 # Both FLUX.3 klein checkpoints share the encoder file of Krea 2.
 _FLUX3 = dict(
@@ -198,6 +213,18 @@ RECIPES = {r.name: r for r in (
         license_url="https://huggingface.co/black-forest-labs/"
                     "FLUX.2-klein-base-4B/blob/main/LICENSE.md", **_FLUX2),
     Recipe(
+        name="flux-2-klein-9b", title="FLUX.2 klein 9B", variant="distilled",
+        dit_repo="unsloth/FLUX.2-klein-9B-GGUF",
+        dit_file="flux-2-klein-9b-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/"
+                    "blob/main/LICENSE.md", **_FLUX2_9B),
+    Recipe(
+        name="flux-2-klein-base-9b", title="FLUX.2 klein Base 9B",
+        variant="base", dit_repo="unsloth/FLUX.2-klein-base-9B-GGUF",
+        dit_file="flux-2-klein-base-9b-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/"
+                    "FLUX.2-klein-base-9B/blob/main/LICENSE.md", **_FLUX2_9B),
+    Recipe(
         name="flux-3-klein", title="FLUX.3 klein", variant="distilled",
         dit_file="DISTILLED/flux3_image_klein_sd-{quant}.gguf", **_FLUX3),
     Recipe(
@@ -228,6 +255,18 @@ DEFAULT_QUANTS = {
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-2-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # No FLUX.2 klein 9B DiT these recipes pull makes an image in the 16 GB
+    # class: a Q4_K_M step at 256 pixels needs 8.91 GiB of its 8.55. The
+    # 16 GB row names the smallest, and the memory plan of a request there
+    # refuses it. On 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to
+    # four 1024 pixel references with the encoder released, and Base runs
+    # its two guided rows one at a time. A Q8_0 DiT fits there only with
+    # the staged load and a tiled decode, and from one reference, so it
+    # takes the 32 GB class, with the encoder released.
+    "flux-2-klein-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
+                        32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    "flux-2-klein-base-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
+                             32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A Q8_0 DiT fits a 1024 pixel image from the 24 GB class up, with the
     # encoder released on 24 GB, where Base also runs its two guided rows
     # one at a time.

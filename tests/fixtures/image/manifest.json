@@ -135,6 +135,22 @@
     "sha256": "5489463ed96056b0bb5472abb5d1bba7055e48d574e37877acb43b407465e26f",
     "kv_kept": "general.architecture"
   },
+  "flux2_klein_9b_q8_0.header.json": {
+    "repo": "unsloth/FLUX.2-klein-9B-GGUF",
+    "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
+    "file": "flux-2-klein-9b-Q8_0.gguf",
+    "size": 9978304800,
+    "sha256": "dfa8908dd58c5af6479b944f80558e226ee40a8fe0903729309e8d1b98fe5297",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_9b_kv_q4_k_m.header.json": {
+    "repo": "QuantStack/FLUX.2-Klein-9B-KV-GGUF",
+    "revision": "f4b7b4b0750b7b5cd112f9cc6e386a2ded10061f",
+    "file": "Flux-2-Klein-9B-KV-Q4_K_M.gguf",
+    "size": 5716891936,
+    "sha256": "022f9d41814e24f5ca70d4b40cc6c1d50ead4097de1845e45b232ff53278e956",
+    "kv_kept": "general.architecture"
+  },
   "flux2_klein_4b_f16.header.json": {
     "repo": "unsloth/FLUX.2-klein-4B-GGUF",
     "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
@@ -149,6 +165,12 @@
     "file": "img_in.weight of every .gguf, by HTTP range reads",
     "note": "each file's size is in the fixture; the hashes are of the tensor's bf16 bits"
   },
+  "flux2_klein_9b_identity.json": {
+    "repo": "unsloth/FLUX.2-klein-9B-GGUF, unsloth/FLUX.2-klein-base-9B-GGUF, QuantStack/FLUX.2-Klein-9B-KV-GGUF, vantagewithai/FLUX.2-klein-9b-kv-GGUF and biali/FLUX.2-klein-9b-kv-GGUF",
+    "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079, 069a5df5ba8b7fe9f3355c8d4800486983ee8eb6, f4b7b4b0750b7b5cd112f9cc6e386a2ded10061f, 28216d4b901c5dda4574faef78c10eb941b746ab and 994cdaa73ffd792e3d52f8d933b990c54c9e407c",
+    "file": "img_in.weight of every .gguf of the unsloth repos and of the KV files read, and double_blocks.0.img_attn.norm.query_norm.scale of one Q4_K_M file of each repo, by HTTP range reads",
+    "note": "each file's size is in the fixture; the hashes are of the tensors' bf16 bits"
+  },
   "flux2_klein_4b_transformer_config.json": {
     "repo": "black-forest-labs/FLUX.2-klein-4B",
     "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
@@ -162,6 +184,20 @@
     "file": "transformer/config.json",
     "size": 531,
     "sha256": "c8a88c1433f24e52c01f46766c9f519e76d91d1c00bfb43fe0db2e4ed3c84d70"
+  },
+  "flux2_klein_9b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-9B",
+    "revision": "92196c8e11f7b6cf2b7493e037d8c5345c559216",
+    "file": "transformer/config.json",
+    "size": 542,
+    "sha256": "e82d0d325aff03c3b3b33a1634c47a5f88867478f53071b9c9a39c99010c5d46"
+  },
+  "flux2_klein_base_9b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-base-9B",
+    "revision": "32773329fbe7e81a90ef971740e8ba4b0364ecf3",
+    "file": "transformer/config.json",
+    "size": 532,
+    "sha256": "e32797b28b9e4ab31712e7b341f81c31e059be5db39f3d74fbbeaa168eb36edd"
   },
   "flux2_klein_chat_template.jinja": {
     "repo": "black-forest-labs/FLUX.2-klein-4B",

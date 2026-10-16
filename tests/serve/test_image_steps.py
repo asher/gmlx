@@ -576,6 +576,20 @@ def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
     assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
 
 
+def test_flux2_klein_9b_has_no_step_contract_adapter(monkeypatch):
+    """The step contract carries the 4B checkpoints of FLUX.2 klein, which
+    check 8 ran through ComfyUI. A 9B model is refused by name, and the
+    capabilities list no 9B family."""
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("flux2_klein_9b"), "distilled"))
+    with pytest.raises(steps.StepError) as e:
+        steps.status(SimpleNamespace(id="f2n", path="x.gguf"), False)
+    assert (e.value.status, str(e.value)) == (
+        400, "FLUX.2 klein 9B has no step contract adapter")
+    assert "flux2_klein_9b" not in steps.COMFY
+    assert "flux2_klein_9b" not in steps.CONVENTIONS["comfy"]
+
+
 def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
                                                          monkeypatch):
     """ComfyUI's FLUX.3 latents are the model's: the routes hand them to

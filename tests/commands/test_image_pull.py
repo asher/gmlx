@@ -612,7 +612,7 @@ _PACKED_FOR: dict = {}
 def _shared_scan(roots, *, recursive=True, families=None):
     """What catalog.scan sees of Krea 2, FLUX.2 and FLUX.3 files: the
     Qwen3-VL-4B file is the encoder of Krea 2 and FLUX.3, and the pack of
-    the FLUX.2 autoencoder serves both klein families, whichever it
+    the FLUX.2 autoencoder serves every klein family, whichever it
     names."""
     out = []
     for r in roots:
@@ -631,6 +631,12 @@ def _shared_scan(roots, *, recursive=True, families=None):
                 elif f.startswith("flux-2-klein-4b-"):
                     out.append(catalog.ImageFile(p, "dit", "flux2_klein",
                                                  "distilled"))
+                elif f.startswith("flux-2-klein-base-9b-"):
+                    out.append(catalog.ImageFile(p, "dit", "flux2_klein_9b",
+                                                 "base"))
+                elif f.startswith("flux-2-klein-9b-"):
+                    out.append(catalog.ImageFile(p, "dit", "flux2_klein_9b",
+                                                 "distilled"))
                 elif f.startswith("Krea-2-Turbo-"):
                     out.append(catalog.ImageFile(p, "dit", "krea2", "turbo"))
                 elif f.startswith("Qwen3-VL-4B-Instruct-"):
@@ -638,6 +644,9 @@ def _shared_scan(roots, *, recursive=True, families=None):
                             for fam in ("krea2", "flux3_klein")]
                 elif f.startswith("Qwen3-4B-"):
                     out.append(catalog.ImageFile(p, "encoder", "flux2_klein"))
+                elif f.startswith("Qwen3-8B-"):
+                    out.append(catalog.ImageFile(p, "encoder",
+                                                 "flux2_klein_9b"))
                 elif f == F.vae_pack:
                     label = _PACKED_FOR.get(p, "flux3_klein")
                     out += [catalog.ImageFile(p, "vae", fam,
@@ -741,6 +750,52 @@ def test_a_flux2_pull_takes_unsloths_dit_qwen3_4b_and_bfls_vae(
     assert (f"license: {r.title} apache-2.0 (https://huggingface.co/"
             f"black-forest-labs/{repo}/blob/main/LICENSE.md); encoder "
             "apache-2.0; VAE apache-2.0" in capsys.readouterr().out)
+
+
+F9 = catalog.RECIPES["flux-2-klein-9b"]
+F9B = catalog.RECIPES["flux-2-klein-base-9b"]
+
+
+@pytest.mark.parametrize("r, ram_gb, quant", [
+    (F9, 32, "Q8_0"), (F9, 24, "Q4_K_M"), (F9, 16, "Q4_K_M"),
+    (F9B, 64, "Q8_0"), (F9B, 24, "Q4_K_M")])
+def test_a_flux2_9b_pull_takes_unsloths_dit_qwen3_8b_and_bfls_vae(
+        lib, monkeypatch, capsys, r, ram_gb, quant):
+    """The 9B recipes pull unsloth's 9B DiT, Qwen3-8B and the FLUX.2
+    autoencoder of the 4B repo, and print the FLUX Non-Commercial License
+    with its terms."""
+    root, cfg = lib
+    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb)
+    assert catalog.DEFAULT_QUANTS[r.name][catalog.memory_class(
+        ram_gb << 30)] == (quant, "Q8_0")
+    base = r.variant == "base"
+    stem = "flux-2-klein-base-9b" if base else "flux-2-klein-9b"
+    assert (r.dit_repo, f"{stem}-{quant}.gguf", "main") in got
+    assert ("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q8_0.gguf", "main") in got
+    _bfls_vae(root, r, got, packed, m, "flux2_klein_9b")
+    assert m.path == f"{r.dit_repo.replace('/', '__')}/{stem}-{quant}.gguf"
+    assert m.encoder == "unsloth__Qwen3-8B-GGUF/Qwen3-8B-Q8_0.gguf"
+    assert m.encoder_mmproj is None
+    repo = "FLUX.2-klein-base-9B" if base else "FLUX.2-klein-9B"
+    assert (f"license: {r.title} flux-non-commercial-license, non-commercial "
+            "use only, with content filters or a review of each image for "
+            "unlawful or infringing content before it is shared, and a "
+            "disclosure that it is made with AI where the law requires one "
+            f"(https://huggingface.co/black-forest-labs/{repo}/blob/main/"
+            "LICENSE.md); encoder apache-2.0; VAE apache-2.0"
+            in capsys.readouterr().out)
+
+
+def test_a_flux2_9b_pull_takes_the_vae_a_4b_pull_packed(lib, monkeypatch):
+    """Both sizes decode with the FLUX.2 autoencoder, so the 9B pull after
+    a 4B one downloads the DiT and the encoder alone."""
+    _PACKED_FOR.clear()
+    _got, packed, four = _shared_pull(lib, monkeypatch, "flux-2-klein")
+    assert [kw["family"] for _s, kw in packed] == ["flux2_klein"]
+    got, packed, nine = _shared_pull(lib, monkeypatch, "flux-2-klein-9b")
+    assert [g[0] for g in got] == [F9.dit_repo, F9.encoder_repo]
+    assert packed == [] and nine.vae == four.vae
+    assert nine.encoder != four.encoder
 
 
 @pytest.mark.parametrize("first, then", [("flux-3-klein", "flux-2-klein"),
@@ -1016,6 +1071,10 @@ def test_list_edit_takes_flux3_klein_on_its_encoder_alone(images, capsys,
     ("FLUX.3 klein", "flux3_klein", "distilled", True),
     ("flux3_klein", "flux3_klein", "distilled", True),
     ("flux-3-klein-base", "flux3_klein", "base", True),
+    ("flux-2-klein", "flux2_klein", "distilled", True),
+    ("flux-2-klein-9b", "flux2_klein_9b", "distilled", True),
+    ("FLUX.2 klein 9B", "flux2_klein_9b", "distilled", True),
+    ("flux-2-klein-9b-base", "flux2_klein_9b", "base", True),
     ("qwen-image-2.1", "qwen_image21", "base", True),
     ("qwen-image-2.1-turbo", "qwen_image21", "turbo", True),
     ("z-image-turbo", "z_image", "turbo", False),
@@ -1255,11 +1314,14 @@ def test_doctor_flags_a_vae_of_another_family(images, monkeypatch):
 
 @pytest.mark.parametrize("fam, label, ok", [
     ("flux2_klein", "flux3_klein", True), ("flux3_klein", "flux2_klein", True),
-    ("flux2_klein", "krea2", False)])
+    ("flux2_klein_9b", "flux3_klein", True),
+    ("flux2_klein_9b", "flux2_klein", True),
+    ("flux2_klein", "flux2_klein_9b", True),
+    ("flux2_klein", "krea2", False), ("flux2_klein_9b", "krea2", False)])
 def test_doctor_takes_a_klein_vae_named_for_the_other_klein_family(
         images, monkeypatch, fam, label, ok):
-    """FLUX.2 klein and FLUX.3 klein decode with the FLUX.2 autoencoder,
-    so a pack named for either passes for both."""
+    """FLUX.2 klein at both sizes and FLUX.3 klein decode with the FLUX.2
+    autoencoder, so a pack named for any of them passes for all."""
     import gmlx.commands.doctor as doctor
     from gmlx.config import load_config
 

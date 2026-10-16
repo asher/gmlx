@@ -15,9 +15,11 @@ Shapes are GGUF order, input dim first. The GGUF tensor names are the
 state dict keys of the reference DiT. Converters label the file ``flux``,
 as they label FLUX.1 and FLUX.3 files, so the names and shapes decide,
 and the label alone names no family. The 4B and 9B sizes differ in their
-widths and block counts. The distilled and Base checkpoints of a size
-share every name and shape, so the variant comes from the identity hash.
-A FLUX.1 or FLUX.2 dev file is refused with the name of its model.
+widths and block counts. This row runs the 4B files. The FLUX.2 klein 9B
+row, which comes before it, takes the 9B files with the shapes and rules
+this module holds for both sizes. The distilled and Base checkpoints of a
+size share every name and shape, so the variant comes from the identity
+hash. A FLUX.1 or FLUX.2 dev file is refused with the name of its model.
 """
 
 from __future__ import annotations
@@ -45,9 +47,8 @@ _Q_NORM = "double_blocks.0.img_attn.norm.query_norm.scale"
 # Klein4BParams and Klein9BParams. The text width is that of three
 # stacked layers of the Qwen3 encoder of each size.
 SIZES = {"4B": (3072, 5, 20, 7680), "9B": (4096, 8, 24, 12288)}
-# The sizes gmlx image runs. A 9B file is told apart and refused, since
-# the encoder and the memory rows gmlx image has are the 4B's.
-RUN_SIZES = ("4B",)
+# The size this row runs.
+SIZE = "4B"
 _HEAD, _LATENT, _T, _MLP_RATIO = 128, 128, 256, 3
 # (img_in, txt_in) of FLUX.2 dev (Flux2Params) and of FLUX.1.
 _FLUX2_DEV = ((128, 6144), (15360, 6144))
@@ -145,6 +146,32 @@ ENCODER_IDENTITY_SOURCE = (
     "e7b7dc27f91deacad38e78976d1f2b499d76a294")
 
 
+def qwen3_encoder(name: str, hidden: int, identity: tuple, source: str):
+    """The EncoderSpec of Qwen3Embedder on a Qwen3 encoder of 36 layers
+    and ``hidden`` wide, identified by ``identity`` from ``source``."""
+    from gmlx.image.text_encoder import EncoderSpec
+
+    p = PROMPT.values
+    return EncoderSpec(
+        name=name,
+        arch="qwen3",
+        model_type="qwen3",
+        hidden=hidden,
+        layers=36,
+        tap_layers=tuple(p["tap_layers"]),
+        template=p["template"],
+        max_tokens=p["max_tokens"],
+        stack=True,
+        identity=identity,
+        identity_source=source,
+        activation="float32",
+        pad_multiple=p["max_tokens"],
+        pad_id=p["pad_id"],
+        pad_position=None,
+        fp32_qkv=True,
+    )
+
+
 def encoder():
     """The text encoder of the 4B checkpoints: Qwen3-4B after three of its
     layers and before its final norm, on the chat template of one user
@@ -158,27 +185,10 @@ def encoder():
     quantized file return bfloat16: the attention's output product and
     the feed-forward, its activation included, return bfloat16 to the
     float32 residual."""
-    from gmlx.image.text_encoder import Z_IMAGE, EncoderSpec
+    from gmlx.image.text_encoder import Z_IMAGE
 
-    p = PROMPT.values
-    return EncoderSpec(
-        name="qwen3-4b",
-        arch="qwen3",
-        model_type="qwen3",
-        hidden=2560,
-        layers=36,
-        tap_layers=tuple(p["tap_layers"]),
-        template=p["template"],
-        max_tokens=p["max_tokens"],
-        stack=True,
-        identity=Z_IMAGE.identity,
-        identity_source=ENCODER_IDENTITY_SOURCE,
-        activation="float32",
-        pad_multiple=p["max_tokens"],
-        pad_id=p["pad_id"],
-        pad_position=None,
-        fp32_qkv=True,
-    )
+    return qwen3_encoder("qwen3-4b", 2560, Z_IMAGE.identity,
+                         ENCODER_IDENTITY_SOURCE)
 
 
 def size_of(view: HeaderView) -> str | None:
@@ -264,13 +274,9 @@ def _past_count(name: str, view: HeaderView, size: str) -> bool:
     return int(m[2]) >= min(want, view.count(m[1]))
 
 
-def fingerprint(view: HeaderView) -> Match | Refusal | None:
-    name = flux_model(view)
-    if name is None:
-        return None
-    size = size_of(view) if view.has(_FLUX2_MOD) else None
-    if size is None:
-        return older_refusal(name)
+def relative_refusal(view: HeaderView, size: str) -> Refusal | None:
+    """The refusal of a file of the input widths of ``size`` whose other
+    names, shapes or block counts are not those of the size, or None."""
     want = expected(size)
     title = f"{TITLE} {size}"
     diffs = [f"{g} has {view.count(g)} blocks, {title} has {c}"
@@ -291,10 +297,21 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
         more = f" (+{len(diffs) - 8} more)" if len(diffs) > 8 else ""
         return Refusal(f"a {TITLE} relative that gmlx image does not "
                        f"support: {shown}{more}")
-    if size not in RUN_SIZES:
-        return Refusal(f"{title} is not supported yet. gmlx image runs "
-                       f"{TITLE} 4B and base 4B.")
-    return Match()
+    return None
+
+
+def fingerprint(view: HeaderView) -> Match | Refusal | None:
+    name = flux_model(view)
+    if name is None:
+        return None
+    size = size_of(view) if view.has(_FLUX2_MOD) else None
+    if size is None:
+        return older_refusal(name)
+    if size != SIZE:
+        # The row of that size comes first and takes its files, so this
+        # names one given as this family.
+        return Refusal(f"this is a {name} GGUF, not a {TITLE} {SIZE} one")
+    return relative_refusal(view, size) or Match()
 
 
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
@@ -385,8 +402,9 @@ def _size(refs):
 FAMILY = Family(
     name="flux2_klein",
     title=TITLE,
-    # Before FLUX.3 klein, so a FLUX.2 klein file and the other FLUX models
-    # meet this row first.
+    # After the FLUX.2 klein 9B row, which takes the 9B files alone, and
+    # before FLUX.3 klein, so a 4B file and the other FLUX models meet
+    # this row first.
     order=25,
     # Every FLUX GGUF carries the label flux, so it names no family alone.
     arch_strings=frozenset({None}),

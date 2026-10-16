@@ -4,11 +4,15 @@
 BFL's Qwen3Embedder.forward (src/flux2/text_encoder.py of --reference)
 renders each prompt in the Qwen3 chat template of one user turn with the
 generation prompt and enable_thinking False, tokenizes it with padding to
-max_length 512 and truncation there, and runs Qwen3-4B with the attention
+max_length 512 and truncation there, and runs the encoder of the
+checkpoint's size, Qwen3-4B for 4B and Qwen3-8B for 9B, with the attention
 mask and no position ids, so each row takes its index as its position and
 each pad row reads the real tokens alone. It stacks hidden_states 9, 18
-and 27 of every row, the pad rows kept, to (512, 3 * 2560), layer by
-layer, in the model's dtype. This script calls that method itself, on an
+and 27 of every row, the pad rows kept, to (512, 3 * 2560) at 4B and
+(512, 3 * 4096) at 9B, layer by layer, in the model's dtype. The family
+and the default fixture name follow the encoder's width:
+check2_flux2_klein for Qwen3-4B, check2_flux2_klein_9b for Qwen3-8B.
+This script calls that method itself, on an
 instance whose model is the GGUF's and whose tokenizer is the official
 folder's, and checks that hidden_states[k] is the output of decoder layer
 k - 1, read by a forward hook: the state after k layers, before the final
@@ -59,12 +63,15 @@ from check2_z_image import _LONG, PROMPTS, token_cosine
 
 NAME = "check2_flux2_klein"
 SCRIPT = "scripts/image_oracle/check2_flux2_klein.py"
+# The family and the default fixture name, by the encoder's hidden size.
+SIZES = {2560: ("flux2_klein", NAME),
+         4096: ("flux2_klein_9b", "check2_flux2_klein_9b")}
 RULE = ("relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 "
         "of the same prompt, over all rows, over the real rows and over "
         "the pad rows; per-token cosine of each real row at least "
         "1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the "
         "real rows of the same prompt")
-# The 4B widths, from the GGUF header.
+# The widths of the GGUF header, which the config must give.
 WIDTHS = {"hidden_size": "embedding_length",
           "intermediate_size": "feed_forward_length",
           "num_hidden_layers": "block_count",
@@ -256,12 +263,13 @@ def main(argv=None) -> int:
     ap.add_argument("--reference-commit", required=True,
                     help="commit of --reference, for the manifest")
     ap.add_argument("--encoder", required=True, type=Path,
-                    help="Qwen3-4B text GGUF")
+                    help="Qwen3-4B or Qwen3-8B text GGUF")
     ap.add_argument("--text-encoder", required=True, type=Path,
                     help="the official repo's text_encoder folder")
     ap.add_argument("--tokenizer", required=True, type=Path,
                     help="the official repo's tokenizer folder")
-    ap.add_argument("--name", default=NAME)
+    ap.add_argument("--name", help="fixture name, by default the one of the "
+                    "encoder's size")
     a = ap.parse_args(argv)
     torch = oracle.setup()
     text_encoder = reference(a.reference.expanduser())
@@ -277,7 +285,12 @@ def main(argv=None) -> int:
     load_s = time.perf_counter() - t0
     print(f"[check2] loaded {a.encoder.name} in {load_s:.1f}s, codecs "
           f"{census}", flush=True)
-    fx = fixtures.FixtureWriter(a.name, check=2, family="flux2_klein",
+    hidden = te.config.hidden_size
+    if hidden not in SIZES:
+        raise SystemExit(f"error: hidden size {hidden} is no FLUX.2 klein "
+                         "encoder")
+    family, name = SIZES[hidden]
+    fx = fixtures.FixtureWriter(a.name or name, check=2, family=family,
                                 script=SCRIPT)
     fx.add_file("encoder", a.encoder)
     fx.add_file("text_encoder/config.json", a.text_encoder / "config.json")

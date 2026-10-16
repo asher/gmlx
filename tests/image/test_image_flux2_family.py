@@ -1,6 +1,7 @@
-"""The FLUX.2 klein registry row: the 4B files and the 9B told apart and
-refused, the VAE sources, the config against the official
-transformer/config.json of both 4B checkpoints (check 1), the variant
+"""The FLUX.2 klein registry rows: the 4B files and the 9B told apart,
+each refused by name by the row of the other size, FLUX.2 klein 9B KV
+refused by name, the VAE sources, the config against the official
+transformer/config.json of the four checkpoints (check 1), the variant
 from the identity hash, relatives refused with the reason, and the line
 between FLUX.2 klein and the other FLUX models. CPU-only.
 Header fixtures hold names, shapes and codecs, no weights. The rows on
@@ -20,18 +21,33 @@ from image_fixtures import (FIXTURES, Q_HEADER, Z_HEADER, bf16_bits,
 
 from gmlx.image import fingerprint as fp
 from gmlx.image.families.flux2_klein import family as f2
+from gmlx.image.families.flux2_klein_9b import family as f9
 from gmlx.image.registry import get_family
 
 KLEIN_4B = "flux2_klein_4b_q4_k_m.header.json"
 KLEIN_4B_Q8 = "flux2_klein_4b_q8_0.header.json"
 KLEIN_9B = "flux2_klein_9b_q4_k_m.header.json"
+KLEIN_9B_Q8 = "flux2_klein_9b_q8_0.header.json"
+KLEIN_9B_KV = "flux2_klein_9b_kv_q4_k_m.header.json"
 CONFIG_4B = "flux2_klein_4b_transformer_config.json"
 CONFIG_BASE_4B = "flux2_klein_base_4b_transformer_config.json"
+CONFIG_9B = "flux2_klein_9b_transformer_config.json"
+CONFIG_BASE_9B = "flux2_klein_base_9b_transformer_config.json"
+IDENTITY_9B = "flux2_klein_9b_identity.json"
 FLUX3 = "flux3_klein_q4_k_m.header.json"
 KREA2 = "krea2_turbo_q4_k_m.header.json"
 DISTILLED_HASH = ("591c63d49ea6d7cb55c1d349febb8736613013aef145462659f19816"
                   "ed3639a9")
 BASE_HASH = "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce"
+DISTILLED_9B_HASH = ("a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea05"
+                     "6b25d9e3d4")
+BASE_9B_HASH = ("8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9db"
+                "a12f15")
+KV_HASH = "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706"
+KV_REFUSAL = ("this is a FLUX.2 klein 9B KV GGUF, which gmlx image does not "
+              "support: it samples its reference images through a cache of "
+              "their keys and values. FLUX.2 klein 9B and base 9B are the 9B "
+              "checkpoints it runs")
 
 
 def _refused(view, **kw) -> str:
@@ -58,22 +74,41 @@ def test_the_4b_file_gives_the_official_config_of_both_checkpoints(
     assert got.config == official_config(config)
 
 
-NOT_YET = ("FLUX.2 klein 9B is not supported yet. gmlx image runs FLUX.2 "
-           "klein 4B and base 4B.")
+@pytest.mark.parametrize("header", [KLEIN_9B, KLEIN_9B_Q8])
+@pytest.mark.parametrize("config", [CONFIG_9B, CONFIG_BASE_9B])
+@pytest.mark.parametrize("arch", ["flux", None])
+def test_the_9b_file_gives_the_official_config_of_both_checkpoints(
+        header, config, arch):
+    """Check 1 at 9B: the distilled and Base 9B files of a quant share the
+    header, the FLUX.2 klein 9B row takes them, and the config synthesized
+    from the Q4_K_M and the Q8_0 one is each official transformer
+    config."""
+    view = fixture_view(header, kv={"general.architecture": arch} if arch
+                        else {})
+    assert f2.size_of(view) == "9B"
+    got = fp.identify(view)
+    assert got.family.name == "flux2_klein_9b"
+    assert got.family.title == "FLUX.2 klein 9B"
+    assert (got.prefix, got.layout) == ("", "default")
+    assert (got.variant, got.identity_hash) == ("unknown", None)
+    assert got.config == official_config(config)
 
 
-def test_the_9b_file_is_flux2_klein_9b_and_refused_by_name():
-    """The 9B widths and depths of Klein9BParams, told apart from the 4B
-    and refused by name, pointing to the 4B. The official 9B config is
-    gated, so check 1 at 9B waits for it."""
-    view = fixture_view(KLEIN_9B)
-    assert f2.size_of(view) == "9B" and f2.RUN_SIZES == ("4B",)
-    assert f2.fingerprint(view) == fp.Refusal(NOT_YET)
-    assert _refused(view) == NOT_YET
-    assert _refused(view, family="flux2_klein") == NOT_YET
-    want = dict(official_config(CONFIG_4B), joint_attention_dim=12288,
-                num_attention_heads=32, num_layers=8, num_single_layers=24)
-    assert f2.synth_config(view) == want
+def test_each_size_row_refuses_the_other_size():
+    """The 9B row comes first and returns None for a 4B file, so the 4B
+    row reads it. The 4B row names a 9B file given to it as FLUX.2 klein,
+    and a 4B file given as FLUX.2 klein 9B gets the text every family
+    gives a file of another family."""
+    v4, v9 = fixture_view(KLEIN_4B), fixture_view(KLEIN_9B)
+    assert f9.fingerprint(v4) is None
+    assert f9.fingerprint(v9) == fp.Match()
+    named = "this is a FLUX.2 klein 9B GGUF, not a FLUX.2 klein 4B one"
+    assert f2.fingerprint(v9) == fp.Refusal(named)
+    assert _refused(v9, family="flux2_klein") == named
+    assert _refused(v4, family="flux2_klein_9b").startswith(
+        "not a FLUX.2 klein 9B file. unrecognized image GGUF")
+    assert fp.identify(v4).family.name == "flux2_klein"
+    assert get_family("flux2_klein_9b").order < f2.FAMILY.order
 
 
 def _header_gguf(path, name: str) -> str:
@@ -97,11 +132,12 @@ def _header_gguf(path, name: str) -> str:
     return str(path)
 
 
-def test_a_9b_file_gets_no_memory_plan(tmp_path, monkeypatch):
-    """The memory rows of the family are measured on the 4B files: the
-    preflight of a 9B file refuses it by name and prices no plan, while
-    the same request on a 4B header is priced."""
+def test_each_size_is_priced_by_its_own_row(tmp_path, monkeypatch):
+    """The preflight of a 4B and a 9B header prices each by the memory row
+    of its own size: the 9B step is wider, so it is priced above the 4B
+    one at the same request."""
     from gmlx.commands import image_preflight
+    from gmlx.image import memfit
     from gmlx.load.headerscan import scan_gguf
 
     monkeypatch.setenv("GMLX_TOOL_PREFLIGHT", "1")
@@ -114,11 +150,13 @@ def test_a_9b_file_gets_no_memory_plan(tmp_path, monkeypatch):
         got = [[t.name, list(t.shape), t.type_name]
                for t in scan_gguf(path).tensors]
         assert sorted(got) == sorted(load_json(name)["tensors"])
-    plan = image_preflight.check(paths[KLEIN_4B], None, None, **kw)
-    assert plan is not None and plan.terms["step_peak"] > 0
-    with pytest.raises(fp.ImageModelError) as ei:
-        image_preflight.check(paths[KLEIN_9B], None, None, **kw)
-    assert str(ei.value) == NOT_YET
+    plans = {n: image_preflight.check(p, None, None, **kw)
+             for n, p in paths.items()}
+    four, nine = plans[KLEIN_4B], plans[KLEIN_9B]
+    assert four.terms["step_peak"] > 0
+    assert nine.terms["step_peak"] > four.terms["step_peak"]
+    assert memfit.PEAKS["flux2_klein_9b"].step is memfit.FLUX2_KLEIN_9B_STEP
+    assert memfit.PEAKS["flux2_klein"].step is memfit.FLUX2_KLEIN_4B_STEP
 
 
 # The files a FLUX.2 klein VAE source can be: Comfy-Org's flux2-vae and
@@ -162,6 +200,8 @@ def test_each_vae_source_reads_as_the_flux2_klein_vae(name):
     assert (cfg.latent_channels, cfg.block_out_channels) == (
         32, (128, 256, 512, 512))
     assert memfit.VAE_ROWS["flux2_klein"] is memfit.VAE_ROWS["flux3_klein"]
+    assert memfit.VAE_ROWS["flux2_klein_9b"] is memfit.VAE_ROWS["flux3_klein"]
+    assert cfg == reader.identify(header, "flux2_klein_9b")
     comfy = load_json("flux3_klein_vae.header.json")
     assert memfit.vae_bytes(header, 2) == memfit.vae_bytes(
         SimpleNamespace(shapes={n: tuple(s) for n, s, _ in comfy["tensors"]}),
@@ -171,7 +211,8 @@ def test_each_vae_source_reads_as_the_flux2_klein_vae(name):
 def test_the_shared_vae_packs_for_flux3_klein_unless_told(tmp_path):
     """A packed VAE names one family. The FLUX.2 autoencoder packs for
     FLUX.3 klein, which registered it first, as before FLUX.2 klein read
-    it, and for FLUX.2 klein when told. FLUX.2 klein loads either."""
+    it, and for FLUX.2 klein when told. FLUX.2 klein at both sizes loads
+    either, and a pack serves all three families."""
     from oracle_fixture import committed_fixture
     from test_image_check5_flux3_klein import TINY, _tiny_tensors, _write_st
 
@@ -186,29 +227,40 @@ def test_the_shared_vae_packs_for_flux3_klein_unless_told(tmp_path):
     assert (shared.family, own.family) == ("flux3_klein", "flux2_klein")
     for rep in (shared, own):
         assert catalog.vae_identity(rep.path)[0] == rep.family
-        assert load_vae(rep.path, family="flux2_klein",
-                        dtype="fp32").family == "flux2_klein"
+        for fam in ("flux2_klein", "flux2_klein_9b"):
+            assert load_vae(rep.path, family=fam, dtype="fp32").family == fam
+    assert catalog.vae_families("flux3_klein") == (
+        "flux3_klein", "flux2_klein", "flux2_klein_9b")
 
 
 def test_the_config_fixtures_are_the_official_files_in_bytes():
     manifest = load_json("manifest.json")
-    for name in (CONFIG_4B, CONFIG_BASE_4B):
+    for name in (CONFIG_4B, CONFIG_BASE_4B, CONFIG_9B, CONFIG_BASE_9B):
         data = (FIXTURES / name).read_bytes()
         assert hashlib.sha256(data).hexdigest() == manifest[name]["sha256"]
         assert len(data) == manifest[name]["size"]
         assert manifest[name]["file"] == "transformer/config.json"
-    row = get_family("flux2_klein").constants
-    assert (row.repo, row.revision) == (manifest[CONFIG_4B]["repo"],
-                                        manifest[CONFIG_4B]["revision"])
-    # The checkpoints differ in the path they were saved from alone.
-    a, b = load_json(CONFIG_4B), load_json(CONFIG_BASE_4B)
-    assert a["_name_or_path"] != b["_name_or_path"]
-    assert official_config(CONFIG_4B) == official_config(CONFIG_BASE_4B)
+    for fam, name in (("flux2_klein", CONFIG_4B),
+                      ("flux2_klein_9b", CONFIG_9B)):
+        row = get_family(fam).constants
+        assert (row.repo, row.revision) == (manifest[name]["repo"],
+                                            manifest[name]["revision"])
+    # The checkpoints of a size differ in the path they were saved from
+    # alone, and the sizes in their widths and depths.
+    for a, b in ((CONFIG_4B, CONFIG_BASE_4B), (CONFIG_9B, CONFIG_BASE_9B)):
+        assert load_json(a)["_name_or_path"] != load_json(b)["_name_or_path"]
+        assert official_config(a) == official_config(b)
+    assert {k for k, v in official_config(CONFIG_9B).items()
+            if official_config(CONFIG_4B)[k] != v} == {
+        "joint_attention_dim", "num_attention_heads", "num_layers",
+        "num_single_layers"}
+    assert f9.CONSTANTS.values is f2.CONSTANTS.values
 
 
 def test_the_header_fixtures_are_pinned():
     manifest = load_json("manifest.json")
-    for name, n in ((KLEIN_4B, 149), (KLEIN_4B_Q8, 149), (KLEIN_9B, 201)):
+    for name, n in ((KLEIN_4B, 149), (KLEIN_4B_Q8, 149), (KLEIN_9B, 201),
+                    (KLEIN_9B_Q8, 201), (KLEIN_9B_KV, 201)):
         d = load_json(name)
         assert d["n_tensors"] == len(d["tensors"]) == n
         assert d["kv"] == {"general.architecture": "flux"}
@@ -217,7 +269,8 @@ def test_the_header_fixtures_are_pinned():
 
 
 @pytest.mark.parametrize("name,size", [(KLEIN_4B, "4B"), (KLEIN_4B_Q8, "4B"),
-                                       (KLEIN_9B, "9B")])
+                                       (KLEIN_9B, "9B"), (KLEIN_9B_Q8, "9B"),
+                                       (KLEIN_9B_KV, "9B")])
 def test_the_header_holds_exactly_the_expected_tensors(name, size):
     view = fixture_view(name)
     assert {n: t.shape for n, t in view.tensors.items()} == f2.expected(size)
@@ -274,6 +327,110 @@ def test_every_published_quant_keeps_the_identity_tensor_bf16():
     assert got.config == official_config(CONFIG_4B)
 
 
+def test_the_identity_table_names_both_9b_variants_with_their_sampling():
+    """The 9B row holds its own identity table and the 4B row's sampling
+    defaults, schedule, loop, edit rules and module tree."""
+    fam, four = get_family("flux2_klein_9b"), get_family("flux2_klein")
+    assert fam.identity_tensors == four.identity_tensors == ("img_in.weight",)
+    assert fam.variant_names() == ("base", "distilled")
+    rows = {v.name: v for v in fam.variants.values()}
+    assert fam.variants[DISTILLED_9B_HASH] is rows["distilled"]
+    assert fam.variants[BASE_9B_HASH] is rows["base"]
+    assert rows["distilled"].repo == "unsloth/FLUX.2-klein-9B-GGUF"
+    assert rows["base"].repo == "unsloth/FLUX.2-klein-base-9B-GGUF"
+    assert "flux-2-klein-9b-Q8_0.gguf" in rows["distilled"].files
+    assert "flux-2-klein-base-9b-Q8_0.gguf" in rows["base"].files
+    assert not set(fam.variants) & set(four.variants)
+    for attr in ("sampling", "unguided", "schedule", "loop", "edit", "build",
+                 "synth_config", "fp32_keep", "arch_strings",
+                 "shared_arch_strings", "strip_prefixes"):
+        assert getattr(fam, attr) is getattr(four, attr), attr
+    assert fam.refused == {KV_HASH: KV_REFUSAL} and not four.refused
+    assert fam.unknown_variant is None and not fam.needs_variant
+
+
+def test_every_published_9b_quant_keeps_the_identity_tensor_bf16():
+    """img_in.weight is BF16 in every GGUF of both unsloth 9B repos, so
+    every file of a checkpoint gives the hash of its variant row, and in
+    every FLUX.2 klein 9B KV file read, which gives the refused hash."""
+    table = load_json(IDENTITY_9B)
+    want = {"unsloth/FLUX.2-klein-9B-GGUF": ("distilled", DISTILLED_9B_HASH),
+            "unsloth/FLUX.2-klein-base-9B-GGUF": ("base", BASE_9B_HASH)}
+    assert set(table["repos"]) == set(want)
+    fam = get_family("flux2_klein_9b")
+    for repo, row in table["repos"].items():
+        variant, digest = want[repo]
+        files = row["files"]
+        assert len(files) == 15, repo
+        assert set(files) == set(fam.variants[digest].files)
+        assert row["revision"] == fam.variants[digest].revision
+        assert {v["img_in.weight"] for v in files.values()} == {"BF16"}
+        assert {v["sha256"] for v in files.values()} == {digest}
+        assert fam.variants[digest].name == variant
+    kv = table["kv"]
+    assert len(kv) == 3 and sum(len(r["files"]) for r in kv.values()) == 9
+    assert {v["img_in.weight"] for r in kv.values()
+            for v in r["files"].values()} == {"BF16"}
+    assert {v["sha256"] for r in kv.values()
+            for v in r["files"].values()} == {KV_HASH}
+    assert fam.refused[KV_HASH] == KV_REFUSAL
+
+
+def test_the_kv_marker_tells_kv_apart_from_both_9b_checkpoints():
+    """The q norm scale the 9B row hashes is F32 in a file of each
+    checkpoint and of each KV repo read, its hash is the same in every KV
+    file and differs from those of both 9B checkpoints."""
+    marker = load_json(IDENTITY_9B)["marker"]
+    assert marker["tensor"] == f9.KV_MARK
+    files = marker["files"]
+    assert {v["codec"] for v in files.values()} == {"F32"}
+    kv = {v["sha256"] for k, v in files.items() if "unsloth/" not in k}
+    plain = {v["sha256"] for k, v in files.items() if "unsloth/" in k}
+    assert kv == {f9.KV_MARK_HASH} and len(plain) == 2
+    assert f9.KV_MARK_HASH not in plain
+    assert fixture_view(KLEIN_9B_KV).tensors[f9.KV_MARK].codec == "F32"
+
+
+def _hashes(monkeypatch, img_in: str, mark: str | None):
+    """weight_identity giving ``img_in`` for the identity tensor and
+    ``mark`` for the KV marker."""
+    by = {("img_in.weight",): img_in, (f9.KV_MARK,): mark}
+    monkeypatch.setattr(fp, "weight_identity",
+                        lambda view, names: by[tuple(names)])
+
+
+@pytest.mark.parametrize("img_in,mark", [
+    (KV_HASH, "0" * 64), (KV_HASH, None), ("1" * 64, f9.KV_MARK_HASH),
+    (DISTILLED_9B_HASH, f9.KV_MARK_HASH)],
+    ids=["identity", "identity no bytes", "marker", "marker plain identity"])
+def test_a_kv_file_is_refused_by_name(monkeypatch, img_in, mark):
+    """FLUX.2 klein 9B KV has the 9B header, and the hash of either of its
+    two tensors refuses it by name, with or without a variant or the
+    family given."""
+    _hashes(monkeypatch, img_in, mark)
+    view = fixture_view(KLEIN_9B_KV)
+    assert _refused(view) == KV_REFUSAL
+    assert _refused(view, family="flux2_klein_9b") == KV_REFUSAL
+    assert _refused(view, variant="distilled") == KV_REFUSAL
+
+
+def test_a_file_new_in_both_kv_tensors_loads_as_unknown(monkeypatch):
+    """Only a 9B file whose identity and marker match no row is unknown:
+    it loads with no variant defaults."""
+    _hashes(monkeypatch, "1" * 64, "2" * 64)
+    got = fp.identify(fixture_view(KLEIN_9B_KV))
+    assert (got.family.name, got.variant) == ("flux2_klein_9b", "unknown")
+
+
+@pytest.mark.parametrize("digest,variant", [
+    (DISTILLED_9B_HASH, "distilled"), (BASE_9B_HASH, "base")])
+def test_the_9b_identity_names_the_variant(monkeypatch, digest, variant):
+    _hashes(monkeypatch, digest, "3" * 64)
+    got = fp.identify(fixture_view(KLEIN_9B))
+    assert (got.family.name, got.variant, got.identity_hash) == (
+        "flux2_klein_9b", variant, digest)
+
+
 @pytest.mark.parametrize("digest,variant", [(DISTILLED_HASH, "distilled"),
                                             (BASE_HASH, "base"),
                                             ("0" * 64, "unknown")])
@@ -281,6 +438,16 @@ def test_the_identity_names_the_variant(monkeypatch, digest, variant):
     monkeypatch.setattr(fp, "weight_identity", lambda view, names: digest)
     got = fp.identify(fixture_view(KLEIN_4B))
     assert (got.variant, got.identity_hash) == (variant, digest)
+
+
+def test_a_4b_identity_in_a_9b_file_names_no_variant(monkeypatch):
+    """Each row reads its own identity table: a 4B hash names no 9B
+    variant, and a 9B hash no 4B one."""
+    _hashes(monkeypatch, DISTILLED_HASH, "3" * 64)
+    assert fp.identify(fixture_view(KLEIN_9B)).variant == "unknown"
+    monkeypatch.setattr(fp, "weight_identity",
+                        lambda view, names: DISTILLED_9B_HASH)
+    assert fp.identify(fixture_view(KLEIN_4B)).variant == "unknown"
 
 
 def test_a_variant_given_by_name_must_match_the_weights(monkeypatch):
@@ -402,21 +569,26 @@ def test_another_model_in_the_flux1_names_keeps_the_generic_refusal():
                               "not support")
 
 
-@pytest.mark.parametrize("name", [KLEIN_4B, KLEIN_9B])
-def test_no_family_before_it_takes_a_flux2_file(name):
+@pytest.mark.parametrize("name,takes", [(KLEIN_4B, "flux2_klein"),
+                                        (KLEIN_9B, "flux2_klein_9b")])
+def test_no_family_before_it_takes_a_flux2_file(name, takes):
+    from gmlx.image.registry import families
+
     view = fixture_view(name)
-    for other in ("z_image", "krea2", "qwen_image21"):
-        fam = get_family(other)
-        assert fam.order < f2.FAMILY.order
+    order = [f.name for f in families()]
+    assert order.index("flux2_klein_9b") + 1 == order.index("flux2_klein")
+    assert order.index("flux2_klein") < order.index("flux3_klein")
+    for fam in families()[:order.index(takes)]:
         assert fam.fingerprint(fp.strip_prefix(view, fam.strip_prefixes)) \
-            is None, other
-    assert f2.FAMILY.order < get_family("flux3_klein").order
+            is None, fam.name
+    assert fp.identify(view).family.name == takes
 
 
 @pytest.mark.parametrize("name", [Z_HEADER, Q_HEADER, KREA2, FLUX3])
 def test_flux2_takes_no_file_of_another_family(name):
     view = fp.strip_prefix(fixture_view(name), f2.FAMILY.strip_prefixes)
     assert f2.fingerprint(view) is None
+    assert f9.fingerprint(view) is None
 
 
 def test_a_flux3_file_given_as_flux2_is_refused():
@@ -433,7 +605,7 @@ def _klein_files(root) -> list:
 
 
 REAL_HEADERS = {("4b", "Q4_K_M"): KLEIN_4B, ("4b", "Q8_0"): KLEIN_4B_Q8,
-                ("9b", "Q4_K_M"): KLEIN_9B}
+                ("9b", "Q4_K_M"): KLEIN_9B, ("9b", "Q8_0"): KLEIN_9B_Q8}
 
 
 def test_each_real_file_has_the_header_of_its_size(gguf_dir):
@@ -452,18 +624,46 @@ def test_each_real_file_has_the_header_of_its_size(gguf_dir):
         assert got == want, p.name
 
 
-def test_each_real_4b_file_is_named_by_its_identity(gguf_dir):
-    """The identity of a 4B file names the variant of its repo. The 9B
-    rows wait for the 9B configs, so a 9B file's tensors are not read."""
+def test_each_real_file_is_named_by_its_identity(gguf_dir):
+    """The identity of a 4B or 9B file names the variant of its repo in
+    the row of its size, and the KV marker of a 9B file is not KV's."""
     from gmlx.load.headerscan import scan_gguf
 
-    fam = get_family("flux2_klein")
-    rows = {f: v for v in fam.variants.values() for f in v.files}
+    rows = {f: (fam, v) for fam in (get_family("flux2_klein"),
+                                    get_family("flux2_klein_9b"))
+            for v in fam.variants.values() for f in v.files}
     files = [p for p in _klein_files(gguf_dir) if p.name in rows]
     if not files:
-        pytest.skip("no FLUX.2 klein 4B GGUF under KQUANT_TEST_GGUF_DIR")
+        pytest.skip("no FLUX.2 klein GGUF under KQUANT_TEST_GGUF_DIR")
     for p in files:
-        got = fp.identify(fp.view_from_scans([scan_gguf(str(p))]))
-        assert got.family.name == "flux2_klein"
-        assert got.variant == rows[p.name].name, p.name
-        assert fam.variants[got.identity_hash] is rows[p.name]
+        fam, row = rows[p.name]
+        view = fp.view_from_scans([scan_gguf(str(p))])
+        got = fp.identify(view)
+        assert got.family is fam, p.name
+        assert got.variant == row.name, p.name
+        assert fam.variants[got.identity_hash] is row
+        if fam.name == "flux2_klein_9b":
+            mark = fp.weight_identity(view, (f9.KV_MARK,))
+            assert mark is not None and mark != f9.KV_MARK_HASH, p.name
+
+
+def test_the_9b_rows_leave_every_other_family_as_it_was():
+    """The peak rows, plans, VAE passes, recipes, default quants and
+    sizes, VAE pairings and registry order of every family but the 9B,
+    against what they gave before the 9B rows. A change to another
+    family's prices rewrites the fixture with family_prices.py."""
+    from family_prices import family_prices
+
+    from gmlx.image import catalog
+
+    before = load_json("memfit/family_prices.json")["prices"]
+    assert family_prices(skip=("flux2_klein_9b",)) == before
+    assert {"flux2_klein", "flux3_klein", "krea2", "qwen_image21",
+            "z_image"} <= set(before)
+    # The 9B joins the pairings of the FLUX.2 autoencoder and no other.
+    for label, fams in before["vae_families"].items():
+        got = list(catalog.vae_families(label))
+        if "flux2_klein" in fams:
+            assert got == [*fams, "flux2_klein_9b"]
+        else:
+            assert got == fams

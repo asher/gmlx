@@ -1,9 +1,9 @@
 """Check 6 of the image acceptance gate for FLUX.2 klein, on latents: a
 whole sampling run on injected noise, for the distilled checkpoint and
-for Base. gmlx samples from the seed's noise with the variant's defaults
-on the oracle's conditioning, the empty prompt's for the unconditional
-row of Base. The seed's noise must equal the oracle's, and the schedule
-and the times the DiT saw must be the reference's.
+for Base, at 4B and at 9B. gmlx samples from the seed's noise with the
+variant's defaults on the oracle's conditioning, the empty prompt's for
+the unconditional row of Base. The seed's noise must equal the oracle's,
+and the schedule and the times the DiT saw must be the reference's.
 
 At 512 the run is the model as it ships, in bf16, and the latents after
 each step the oracle kept and after the last must stay within twice the
@@ -17,7 +17,8 @@ the last. The time embedding without its inner bf16 rounding, the
 schedule of another image size, and Base with the prompt as its
 unconditional row each fail it. The bf16 run at 1024 must stay finite,
 and its readings print as a share of the 512 gate of each step, as the
-manifest records them.
+manifest records them. The wrong runs are of the 4B files, and the 9B
+cases declare a Mac of 24 GB.
 
 Skipped unless the manifests of scripts/image_oracle/check6_flux2_klein.py
 are committed, GMLX_IMAGE_FIXTURES holds their arrays and
@@ -38,32 +39,56 @@ from oracle_fixture import ORACLE, committed, fixture, fx
 # A Mac of 16 GB, as most users run (tests/host_box.py).
 pytestmark = pytest.mark.host_gb(16)
 
-NAMES = {"distilled": "check6_flux2_klein", "base": "check6_flux2_klein_base"}
+# A kind is a variant, with "9b " before it for the 9B files.
+NAMES = {"distilled": "check6_flux2_klein", "base": "check6_flux2_klein_base",
+         "9b distilled": "check6_flux2_klein_9b",
+         "9b base": "check6_flux2_klein_9b_base"}
 DITS = {"distilled": "flux-2-klein-4b-Q4_K_M.gguf",
-        "base": "flux-2-klein-base-4b-Q4_K_M.gguf"}
-MODEL_INFO = {"distilled": "flux.2-klein-4b", "base": "flux.2-klein-base-4b"}
+        "base": "flux-2-klein-base-4b-Q4_K_M.gguf",
+        "9b distilled": "flux-2-klein-9b-Q4_K_M.gguf",
+        "9b base": "flux-2-klein-base-9b-Q4_K_M.gguf"}
+MODEL_INFO = {"distilled": "flux.2-klein-4b", "base": "flux.2-klein-base-4b",
+              "9b distilled": "flux.2-klein-9b",
+              "9b base": "flux.2-klein-base-9b"}
 GATE_SIZE = 512
 EXACT_SIZE = 1024
 SIZES = (GATE_SIZE, EXACT_SIZE)
 EXACT_REL_L2 = 1e-3
 REFERENCE_COMMIT = "50fe5162777813d869182b139e83b10743caef15"
-CASES = [(v, s) for v in NAMES for s in SIZES]
 
 
-def _name(variant: str, size: int) -> str:
-    return f"{NAMES[variant]}_{size}"
+def variant_of(kind: str) -> str:
+    return kind.removeprefix("9b ")
 
 
-def _have(variant: str, size: int) -> bool:
-    return (ORACLE / f"{_name(variant, size)}.manifest.json").is_file()
+def family_of(kind: str) -> str:
+    return "flux2_klein_9b" if kind.startswith("9b ") else "flux2_klein"
 
 
-def _manifest(variant: str, size: int) -> dict:
-    if not _have(variant, size):
-        pytest.skip(f"{_name(variant, size)}.manifest.json is not "
+def _param(kind: str, *rest):
+    """A case of ``kind``, the 9B ones on a Mac of 24 GB."""
+    marks = [pytest.mark.host_gb(24)] if kind.startswith("9b ") else []
+    return pytest.param(kind, *rest, marks=marks)
+
+
+KINDS = [_param(k) for k in NAMES]
+CASES = [_param(k, s) for k in NAMES for s in SIZES]
+
+
+def _name(kind: str, size: int) -> str:
+    return f"{NAMES[kind]}_{size}"
+
+
+def _have(kind: str, size: int) -> bool:
+    return (ORACLE / f"{_name(kind, size)}.manifest.json").is_file()
+
+
+def _manifest(kind: str, size: int) -> dict:
+    if not _have(kind, size):
+        pytest.skip(f"{_name(kind, size)}.manifest.json is not "
                     "committed: run scripts/image_oracle/check6_flux2_klein.py"
                     " on the FLUX.2 klein GGUF and commit the manifest")
-    return committed(_name(variant, size))
+    return committed(_name(kind, size))
 
 
 def _bits(a) -> list:
@@ -74,10 +99,10 @@ def _kept(m: dict) -> list:
     return m["inputs"]["kept_steps"] + [m["inputs"]["steps"]]
 
 
-def _gates(variant: str) -> dict:
+def _gates(kind: str) -> dict:
     """The bf16 gate of the latents after each kept step and after the
     last, at the gate size."""
-    m = _manifest(variant, GATE_SIZE)
+    m = _manifest(kind, GATE_SIZE)
     by_step = m["tolerances"]["by_step_rel_l2"]
     assert len(by_step) == m["inputs"]["steps"]
     return {k: by_step[k - 1] for k in _kept(m)}
@@ -100,7 +125,9 @@ class _Pipes:
         if self.path is not None and Path(self.path).name == want["name"]:
             return self.pipe
         self.release()
-        for p in image_dits(self.root, "flux2_klein"):
+        found = [p for fam in ("flux2_klein", "flux2_klein_9b")
+                 for p in image_dits(self.root, fam)]
+        for p in found:
             if Path(p).name == want["name"] and \
                     os.path.getsize(p) == want["size"]:
                 break
@@ -111,6 +138,7 @@ class _Pipes:
         self.pipe = api.load(p, log=lambda *_: None)
         self.path = p
         assert self.pipe.variant == m["inputs"]["variant"]
+        assert self.pipe.family.name == m["family"]
         return self.pipe
 
 
@@ -131,7 +159,7 @@ def _conds(arrays: dict, variant: str, size: int):
     return cond, neg
 
 
-def _run(pipe, arrays: dict, m: dict, variant: str, size: int,
+def _run(pipe, arrays: dict, m: dict, kind: str, size: int,
          stop: int | None = None, neg=False,
          tokens: int | None = None) -> tuple[dict, bool]:
     """The relative L2 of the latents after each kept step and after the
@@ -143,7 +171,7 @@ def _run(pipe, arrays: dict, m: dict, variant: str, size: int,
     steps = m["inputs"]["steps"]
     want = {k: arrays[f"latents_step{k}"] for k in m["inputs"]["kept_steps"]}
     want[steps] = arrays["latents"]
-    cond, uncond = _conds(arrays, variant, size)
+    cond, uncond = _conds(arrays, variant_of(kind), size)
     if neg:
         uncond = cond
     got: dict = {}
@@ -172,53 +200,53 @@ def _line(label: str, got: dict, gates: dict) -> str:
 
 def test_the_manifests_follow_the_rule():
     """The committed manifests alone: each run is the reference's on its
-    commit at FLUX2_MODEL_INFO's steps and guidance for the file's
-    variant, every gate at the gate size is twice the gap beside it, and
-    the exact size holds the exact tolerance and the bf16 readings of
+    commit at FLUX2_MODEL_INFO's steps and guidance for the file's size
+    and variant, every gate at the gate size is twice the gap beside it,
+    and the exact size holds the exact tolerance and the bf16 readings of
     each kept step."""
-    from gmlx.image.registry import get_family
-
-    fam = get_family("flux2_klein")
-    seen = 0
-    for variant, size in CASES:
-        if not _have(variant, size):
-            continue
-        seen += 1
-        m = committed(_name(variant, size))
-        i, r = m["inputs"], m["results"]["run"]
-        row = fam.sampling[variant]
-        assert m["files"]["dit"]["name"] == DITS[variant]
-        assert i["reference_commit"] == REFERENCE_COMMIT
-        assert (i["variant"], i["size"], i["refs"]) == (variant, size, 0)
-        assert i["model_info"] == MODEL_INFO[variant]
-        assert (i["steps"], i["guidance"]) == (row.steps, row.cfg)
-        assert i["tokens"] == (size // 16) ** 2
-        # denoise_cfg runs the empty prompt's row beside the prompt's.
-        assert r["rows"] == ([1] if variant == "distilled" else [2])
-        tol = m["tolerances"]
-        if size == GATE_SIZE:
-            assert i["bf16"]
-            by = r["bf16_vs_fp32_by_step"]
-            assert tol["by_step_rel_l2"] == [2 * g for g in by]
-            assert tol["latents_rel_l2"] == pytest.approx(
-                2 * by[-1], rel=1e-12)
-            assert "exact_rel_l2" not in tol
-        else:
-            assert set(tol) == {"exact_rel_l2", "rule"}
-            assert tol["exact_rel_l2"] == EXACT_REL_L2
-            read = m["results"]["gmlx_bf16"]
-            keys = {str(k) for k in _kept(m)}
-            assert set(read["rel_l2"]) == set(
-                read["share_of_512_gate"]) == keys
+    seen = [_follows_the_rule(k, s) for k in NAMES for s in SIZES
+            if _have(k, s)]
     if not seen:
         pytest.skip("no check 6 manifest of FLUX.2 klein is committed")
 
 
-@pytest.mark.parametrize("variant,size", CASES)
-def test_the_seed_gives_the_noise_of_the_oracle(variant, size):
+def _follows_the_rule(kind: str, size: int) -> None:
+    from gmlx.image.registry import get_family
+
+    variant = variant_of(kind)
+    fam = get_family(family_of(kind))
+    m = committed(_name(kind, size))
+    assert m["family"] == fam.name
+    i, r = m["inputs"], m["results"]["run"]
+    row = fam.sampling[variant]
+    assert m["files"]["dit"]["name"] == DITS[kind]
+    assert i["reference_commit"] == REFERENCE_COMMIT
+    assert (i["variant"], i["size"], i["refs"]) == (variant, size, 0)
+    assert i["model_info"] == MODEL_INFO[kind]
+    assert (i["steps"], i["guidance"]) == (row.steps, row.cfg)
+    assert i["tokens"] == (size // 16) ** 2
+    # denoise_cfg runs the empty prompt's row beside the prompt's.
+    assert r["rows"] == ([1] if variant == "distilled" else [2])
+    tol = m["tolerances"]
+    if size == GATE_SIZE:
+        assert i["bf16"]
+        by = r["bf16_vs_fp32_by_step"]
+        assert tol["by_step_rel_l2"] == [2 * g for g in by]
+        assert tol["latents_rel_l2"] == pytest.approx(2 * by[-1], rel=1e-12)
+        assert "exact_rel_l2" not in tol
+    else:
+        assert set(tol) == {"exact_rel_l2", "rule"}
+        assert tol["exact_rel_l2"] == EXACT_REL_L2
+        read = m["results"]["gmlx_bf16"]
+        keys = {str(k) for k in _kept(m)}
+        assert set(read["rel_l2"]) == set(read["share_of_512_gate"]) == keys
+
+
+@pytest.mark.parametrize("kind,size", CASES)
+def test_the_seed_gives_the_noise_of_the_oracle(kind, size):
     from gmlx.image.samplers import noise_from_seed
 
-    m = _manifest(variant, size)
+    m = _manifest(kind, size)
     arrays, _ = fixture(m["name"])
     noise = arrays["noise"]
     assert noise.shape == (1, 128, size // 16, size // 16)
@@ -226,18 +254,18 @@ def test_the_seed_gives_the_noise_of_the_oracle(variant, size):
                           noise)
 
 
-@pytest.mark.parametrize("variant,size", CASES)
-def test_the_schedule_and_times_are_the_reference_ones(variant, size):
+@pytest.mark.parametrize("kind,size", CASES)
+def test_the_schedule_and_times_are_the_reference_ones(kind, size):
     """The schedule of a request is the one the reference ran bit for
     bit, and the time the DiT reads at each step is its entry in bf16."""
     from gmlx.image.api import ImagePipeline
     from gmlx.image.families.flux2_klein.model import _bf16
     from gmlx.image.registry import get_family
 
-    m = _manifest(variant, size)
+    m = _manifest(kind, size)
     arrays, _ = fixture(m["name"])
-    pipe = ImagePipeline(dit=None, family=get_family("flux2_klein"),
-                         variant=variant)
+    pipe = ImagePipeline(dit=None, family=get_family(family_of(kind)),
+                         variant=variant_of(kind))
     steps = pipe.defaults.steps
     assert steps == m["inputs"]["steps"]
     got = pipe.sigmas(steps, (size // 16) ** 2)
@@ -246,13 +274,13 @@ def test_the_schedule_and_times_are_the_reference_ones(variant, size):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("variant", list(NAMES))
-def test_check6_latents_at_512(pipes, variant):
-    m = _manifest(variant, GATE_SIZE)
+@pytest.mark.parametrize("kind", KINDS)
+def test_check6_latents_at_512(pipes, kind):
+    m = _manifest(kind, GATE_SIZE)
     arrays, _ = fixture(m["name"])
-    gates = _gates(variant)
-    got, finite = _run(pipes(m), arrays, m, variant, GATE_SIZE)
-    print(_line(f"flux2 check6 {variant} {GATE_SIZE}", got, gates))
+    gates = _gates(kind)
+    got, finite = _run(pipes(m), arrays, m, kind, GATE_SIZE)
+    print(_line(f"flux2 check6 {kind} {GATE_SIZE}", got, gates))
     assert finite
     assert sorted(got) == sorted(gates)
     over = {k: (v, gates[k]) for k, v in got.items() if v > gates[k]}
@@ -260,14 +288,14 @@ def test_check6_latents_at_512(pipes, variant):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("variant", list(NAMES))
-def test_check6_bf16_at_1024_stays_finite(pipes, variant):
+@pytest.mark.parametrize("kind", KINDS)
+def test_check6_bf16_at_1024_stays_finite(pipes, kind):
     """The run as it ships at 1024, read against the 512 gates."""
-    m = _manifest(variant, EXACT_SIZE)
+    m = _manifest(kind, EXACT_SIZE)
     arrays, _ = fixture(m["name"])
-    gates = _gates(variant)
-    got, finite = _run(pipes(m), arrays, m, variant, EXACT_SIZE)
-    print(_line(f"flux2 check6 bf16 {variant} {EXACT_SIZE} against the "
+    gates = _gates(kind)
+    got, finite = _run(pipes(m), arrays, m, kind, EXACT_SIZE)
+    print(_line(f"flux2 check6 bf16 {kind} {EXACT_SIZE} against the "
                 f"{GATE_SIZE} gates", got, gates))
     assert sorted(got) == sorted(gates)
     assert finite
@@ -290,9 +318,10 @@ def _time_inner_unrounded(mp, pipe):
 # The schedule of a 512 image, where the run is at 1024.
 OTHER_TOKENS = 1024
 
-# Wrong runs the exact gate must fail: the fault, the steps it runs (all
-# with None), whether the unconditional row is the prompt's, and the
-# token count of the schedule (the image's with None).
+# Wrong runs the exact gate must fail, by the kind of the 4B files: the
+# fault, the steps it runs (all with None), whether the unconditional row
+# is the prompt's, and the token count of the schedule (the image's with
+# None).
 EXACT_FAULTS = {
     "distilled": {
         "time embedding without its inner rounding":
@@ -309,8 +338,8 @@ EXACT_FAULTS = {
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("variant", list(NAMES))
-def test_check6_exact_at_1024(pipes, request, monkeypatch, variant):
+@pytest.mark.parametrize("kind", KINDS)
+def test_check6_exact_at_1024(pipes, request, monkeypatch, kind):
     """The run in the oracle's fp32 arithmetic within EXACT_REL_L2 of its
     latents after each kept step and after the last, with every K-quant
     product dense, and each wrong run of EXACT_FAULTS over the gate at a
@@ -318,7 +347,7 @@ def test_check6_exact_at_1024(pipes, request, monkeypatch, variant):
     from gmlx.image import api
     from gmlx.image.conditioning import ByteLRU
 
-    m = _manifest(variant, EXACT_SIZE)
+    m = _manifest(kind, EXACT_SIZE)
     arrays, _ = fixture(m["name"])
     if not exact_process():
         pipes.release()
@@ -328,12 +357,13 @@ def test_check6_exact_at_1024(pipes, request, monkeypatch, variant):
     n = fg.exact_floats(pipe.dit, pipes.path)
     gate = {k: EXACT_REL_L2 for k in _kept(m)}
     with fg._exact(pipe.dit):
-        got, finite = _run(pipe, arrays, m, variant, EXACT_SIZE)
-    print(_line(f"flux2 check6 exact {variant} {EXACT_SIZE}, {n} float "
+        got, finite = _run(pipe, arrays, m, kind, EXACT_SIZE)
+    print(_line(f"flux2 check6 exact {kind} {EXACT_SIZE}, {n} float "
                 "tensors in fp32", got, gate))
     assert finite and sorted(got) == sorted(gate)
     over = {k: v for k, v in got.items() if v > EXACT_REL_L2}
-    for name, (apply, stop, neg, tokens) in EXACT_FAULTS[variant].items():
+    for name, (apply, stop, neg, tokens) in EXACT_FAULTS.get(kind,
+                                                             {}).items():
         with monkeypatch.context() as mp:
             # The memos of the clean run would hand the fault its
             # modulations and its caption.
@@ -342,9 +372,9 @@ def test_check6_exact_at_1024(pipes, request, monkeypatch, variant):
             if apply is not None:
                 apply(mp, pipe)
             with fg._exact(pipe.dit):
-                bad, _ = _run(pipe, arrays, m, variant, EXACT_SIZE,
+                bad, _ = _run(pipe, arrays, m, kind, EXACT_SIZE,
                               stop=stop, neg=neg, tokens=tokens)
-        print(_line(f"flux2 check6 exact {variant} {EXACT_SIZE}, {name}",
+        print(_line(f"flux2 check6 exact {kind} {EXACT_SIZE}, {name}",
                     bad, gate))
         assert bad and max(bad.values()) > EXACT_REL_L2, (name, bad)
     assert not over, over

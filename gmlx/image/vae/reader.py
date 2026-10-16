@@ -79,8 +79,8 @@ def _own_space(c: dict) -> dict:
     return {}
 
 
-# The FLUX.2 autoencoder, which FLUX.2 klein and FLUX.3 klein both decode
-# with: one row, so a VAE packed for either family serves the other. The
+# The FLUX.2 autoencoder, which FLUX.2 klein at both sizes and FLUX.3 klein
+# decode with: one row, so a VAE packed for one family serves the others. The
 # latent BatchNorm statistics come with the VAE and stay float32.
 _FLUX2_AE = VaeRow(
     "the FLUX.2 autoencoder", flux2_ae.config_from_shapes,
@@ -110,6 +110,7 @@ VAES = {
         config_disagreements=qwen_image_vae.config_disagreements),
     "flux3_klein": _FLUX2_AE,
     "flux2_klein": _FLUX2_AE,
+    "flux2_klein_9b": _FLUX2_AE,
 }
 
 

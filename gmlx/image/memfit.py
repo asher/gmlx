@@ -193,9 +193,22 @@ FLUX3_KLEIN_STEP = StepFit(base=2.45 * GiB, k=3.0, row_k=1.0)
 # leave the least room over the cells: 0.25 GiB at 2048 pixels, and at
 # most 1.12 GiB, at 256 pixels and at four references. The second row of
 # a guided step reads up to 0.32 GiB, 0.92 times the formula, above one
-# row of its size, so it takes the slope of 1.0. The 9B is refused by
-# its fingerprint, so these rows price the 4B alone.
+# row of its size, so it takes the slope of 1.0. The 9B is priced by its
+# own row, from its own cells.
 FLUX2_KLEIN_4B_STEP = StepFit(base=2.62 * GiB, k=3.3, row_k=1.0)
+
+# One FLUX.2 klein 9B Q4_K_M step, measured as the 4B's. The cells are in
+# tests/fixtures/image/memfit/flux2_klein_9b_cells.json: 256 to 2048
+# pixels, one, two and four 1024 pixel references at 1024, three guided
+# steps of the Base file and two sizes of the Q8_0 file, each with 512
+# text rows. A step reads 2.30 GiB at 256 pixels and 6.83 at 2048, and
+# the Q8_0 file 0.3 GiB less than the Q4_K_M one at the same size. The
+# slope of 2.9 and the base of 3.05 GiB leave the least room over the
+# cells: 0.25 GiB at 1536 pixels and at two references, and at most 1.00
+# GiB, on the Q8_0 file at 2048 pixels. The second row of a guided step
+# reads at most 0.11 GiB above one row of its size, so it takes the slope
+# of 0.5, which leaves 0.74 GiB or more above every guided cell.
+FLUX2_KLEIN_9B_STEP = StepFit(base=3.05 * GiB, k=2.9, row_k=0.5)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
@@ -494,8 +507,10 @@ VAE_ROWS = {
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED,
         overlap=128, scale=8),
 }
-# FLUX.2 klein reads the file the FLUX.3 klein row was measured on.
+# FLUX.2 klein at both sizes reads the file the FLUX.3 klein row was
+# measured on.
 VAE_ROWS["flux2_klein"] = VAE_ROWS["flux3_klein"]
+VAE_ROWS["flux2_klein_9b"] = VAE_ROWS["flux3_klein"]
 
 
 @dataclass(frozen=True)
@@ -629,6 +644,18 @@ PEAKS = {
                            encode_row_bytes=3 * 2560 * 4,
                            encode_base=int(0.65 * GiB), ref_token_px=16,
                            prices_prompt=False),
+    # FLUX.2 klein 9B joins its rows as the 4B does, at 4096 wide with a
+    # 12288 MLP. An encode of the encoder alone, Qwen3-8B Q8_0 with its
+    # tap of three layers in float32 over 512 rows, reads 0.44 GiB over
+    # the settled process whatever the prompt: a base of 0.32 GiB and the
+    # three float32 rows of the tap times ENCODE_LIVE leave 0.25 GiB above
+    # every cell.
+    "flux2_klein_9b": PeakRow(token_px=16, row_multiple=1, caption_rows=512,
+                              width=3 * 4096 + 2 * 12288 + 12288,
+                              step=FLUX2_KLEIN_9B_STEP,
+                              encode_row_bytes=3 * 4096 * 4,
+                              encode_base=int(0.32 * GiB), ref_token_px=16,
+                              prices_prompt=False),
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",

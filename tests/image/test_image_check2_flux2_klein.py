@@ -1,7 +1,8 @@
 """Check 2 of the image acceptance gate for FLUX.2 klein: the text encoder
 tap.
 
-gmlx encodes the oracle's prompts with the Qwen3-4B GGUF the oracle read.
+gmlx encodes the oracle's prompts with the GGUF the oracle read: Qwen3-4B
+for the 4B checkpoints, Qwen3-8B for the 9B ones, on a Mac of 24 GB.
 The reference renders each prompt with thinking off, right-pads it with
 the pad token to 512 rows and cuts it there, masks the pads as keys,
 gives each row its index as its position, and keeps the pad rows. The
@@ -15,7 +16,7 @@ reading.
 
 Skipped unless KQUANT_TEST_GGUF_DIR holds the encoder GGUF the fixture
 names and GMLX_IMAGE_FIXTURES holds the fixture.
-scripts/image_oracle/check2_flux2_klein.py writes it."""
+scripts/image_oracle/check2_flux2_klein.py writes both."""
 from __future__ import annotations
 
 import dataclasses
@@ -28,7 +29,10 @@ from oracle_fixture import fixture, fx
 
 pytestmark = pytest.mark.integration
 
-NAME = "check2_flux2_klein"
+# The family and the fixture of each size.
+SIZES = [pytest.param(("flux2_klein", "check2_flux2_klein"), id="4b"),
+         pytest.param(("flux2_klein_9b", "check2_flux2_klein_9b"), id="9b",
+                      marks=pytest.mark.host_gb(24))]
 
 
 def token_cosine(got: np.ndarray, ref: np.ndarray) -> np.ndarray:
@@ -38,16 +42,23 @@ def token_cosine(got: np.ndarray, ref: np.ndarray) -> np.ndarray:
                               * np.linalg.norm(r, axis=-1))
 
 
-@pytest.fixture(scope="module")
-def check2():
-    return fixture(NAME)
+@pytest.fixture(scope="module", params=SIZES)
+def size(request) -> tuple[str, str]:
+    return request.param
 
 
 @pytest.fixture(scope="module")
-def handle(gguf_index, check2):
+def check2(size):
+    arrays, m = fixture(size[1])
+    assert m["family"] == size[0]
+    return arrays, m
+
+
+@pytest.fixture(scope="module")
+def handle(gguf_index, size, check2):
     from gmlx.image import text_encoder as te
 
-    spec = te.encoder_spec("flux2_klein")
+    spec = te.encoder_spec(size[0])
     want = check2[1]["files"]["encoder"]
     for p in gguf_index.get(spec.arch, []):
         if (os.path.basename(p) == want["name"]
@@ -157,7 +168,8 @@ def test_features_are_within_the_calibrated_tolerance(handle, check2):
         if "rel_l2_pads" in r:
             pads = (f", pad rows {r['rel_l2_pads']:.3e} of gate "
                     f"{r['tol_rel_l2_pads']:.3e}")
-        print(f"[check2] flux2 {key}: {r['rows']} rows ({tap.pads} pads), "
+        print(f"[check2] {m['family']} {key}: {r['rows']} rows "
+              f"({tap.pads} pads), "
               f"rel L2 {r['rel_l2']:.3e} of gate {r['tol_rel_l2']:.3e}, "
               f"real rows {r['rel_l2_real']:.3e} of gate "
               f"{r['tol_rel_l2_real']:.3e}, min real token cosine "
@@ -238,7 +250,7 @@ def test_each_wrong_encoder_fails_a_reading(handle, check2, name):
         ids, got = make(handle, handle.spec, prompts[key])
         r = _reading(got, arrays[f"features_{key}"], m["tolerances"], key,
                      m["inputs"]["rows"][key]["real"])
-        print(f"[check2] flux2 {name}, {key}: caught by "
+        print(f"[check2] {m['family']} {name}, {key}: caught by "
               f"{_caught(r, ids, arrays[f'ids_{key}'].tolist())}, "
               + ", ".join(f"{k} {r[k]:.3e} of {r['tol_' + k]:.3e}"
                           for k in ("rel_l2", "rel_l2_real", "rel_l2_pads")

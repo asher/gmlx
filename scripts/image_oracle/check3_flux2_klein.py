@@ -126,6 +126,17 @@ def params_of(fm, state: dict):
     raise SystemExit(f"img_in.weight {tuple(width)} is no FLUX.2 klein size")
 
 
+# The registry family of each FLUX.2 klein width, and the tag its fixture
+# names carry after the family's name.
+FAMILIES = {3072: ("flux2_klein", ""), 4096: ("flux2_klein_9b", "_9b")}
+
+
+def family_of(params) -> tuple[str, str]:
+    """(registry family, fixture name tag) of Klein4BParams or
+    Klein9BParams."""
+    return FAMILIES[params.hidden_size]
+
+
 def _embedding_in_dtype(torch, model, dtype):
     # The embedding is bf16, as the reference returns it for a bf16 time;
     # the fp32 model takes it in its own dtype.
@@ -336,11 +347,12 @@ def rows_of(cap: Capture) -> dict:
 
 def run_case(torch, sampling, models: dict, lat, feats, refs, sigma,
              rows: bool, name: str, inputs: dict, files: dict, notes: list,
-             *, check: int = 3, script: str = SCRIPT, more=None) -> dict:
-    """One step in fp32 and bf16 written as fixture ``name``. ``more``
-    takes the writer and the fp32 velocity before the write. Returns the
-    velocity of each mode."""
-    fx = fixtures.FixtureWriter(name, check=check, family="flux2_klein",
+             *, check: int = 3, script: str = SCRIPT, more=None,
+             family: str = "flux2_klein") -> dict:
+    """One step in fp32 and bf16 written as fixture ``name`` of
+    ``family``. ``more`` takes the writer and the fp32 velocity before the
+    write. Returns the velocity of each mode."""
+    fx = fixtures.FixtureWriter(name, check=check, family=family,
                                 script=script)
     fx.inputs.update(inputs)
     for role, path in files.items():
@@ -524,7 +536,9 @@ def main(argv=None) -> int:
                     help="the image's time, the time of --step when unset")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dequant", choices=oracle.DEQUANT, default="exact")
-    ap.add_argument("--name", default="check3_flux2_klein")
+    ap.add_argument("--name", help="fixture name before the tags, "
+                    "check3_flux2_klein or check3_flux2_klein_9b by the "
+                    "width when unset")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args(argv)
     torch = oracle.setup()
@@ -539,6 +553,8 @@ def main(argv=None) -> int:
     state, census = gguf_state(torch, a.dit)
     models = {m: build(torch, fm, state, m) for m in ("fp32", "bf16")}
     params = params_of(fm, state)
+    family, size_tag = family_of(params)
+    base_name = a.name or f"check3_flux2_klein{size_tag}"
     print(f"[check3] loaded {a.dit.name} in "
           f"{time.perf_counter() - t0:.1f}s, codecs {census}, width "
           f"{params.hidden_size}", flush=True)
@@ -570,8 +586,8 @@ def main(argv=None) -> int:
                   "reference_commit": commit, "gguf_codecs": census}
         tag = f"_r{a.refs}" if a.refs else ""
         run_case(torch, sampling, models, lat, feats, refs, sigma,
-                 size in a.rows, f"{a.name}{tag}_{size}", inputs,
-                 {"dit": a.dit}, [])
+                 size in a.rows, f"{base_name}{tag}_{size}", inputs,
+                 {"dit": a.dit}, [], family=family)
     return 0
 
 
