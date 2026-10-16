@@ -167,6 +167,16 @@ class Flux2AE(flux1_ae.Flux1AE):
         mean, std = self.stats(z.shape[1])
         return (z - mean) / std
 
+    def to_vae_layout(self, latents: mx.array) -> mx.array:
+        """An array in the layout of model-space latents (B, 4C, h, w) in
+        the layout of VAE space (B, 2h, 2w, C), in float32: the
+        unpatchify alone, with no BatchNorm."""
+        p, c = self.config.patch, self.config.latent_channels
+        if latents.ndim != 4 or latents.shape[1] != p * p * c:
+            raise ValueError(f"an array of shape {tuple(latents.shape)} is "
+                             f"not in the layout (B, {p * p * c}, h, w)")
+        return unpatchify(latents.astype(mx.float32), p)
+
 
 def unpatchify(z: mx.array, p: int) -> mx.array:
     """(B, p * p * C, h, w) to (B, p * h, p * w, C). Channel

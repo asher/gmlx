@@ -211,6 +211,15 @@ class Upsample(nn.Module):
         return self.conv(x.reshape(b, 2 * h, 2 * w, c))
 
 
+def channels_last(latents: mx.array, channels: int) -> mx.array:
+    """(B, ``channels``, h, w) as (B, h, w, ``channels``) in float32.
+    Raises ValueError for another shape."""
+    if latents.ndim != 4 or latents.shape[1] != channels:
+        raise ValueError(f"an array of shape {tuple(latents.shape)} is not "
+                         f"in the layout (B, {channels}, h, w)")
+    return latents.astype(mx.float32).transpose(0, 2, 3, 1)
+
+
 def chunked_sdpa(q: mx.array, k: mx.array, v: mx.array,
                  score_bytes: int = ATTN_SCORE_BYTES) -> mx.array:
     """``ops.sdpa`` over row chunks of q (B, H, L, D), so one chunk of
@@ -408,6 +417,12 @@ class Flux1AE(nn.Module):
         """VAE-space (B, h, w, C) to model-space (B, C, h, w), in float32."""
         z = z.astype(mx.float32) - self.config.shift_factor
         return (z * self.config.scaling_factor).transpose(0, 3, 1, 2)
+
+    def to_vae_layout(self, latents: mx.array) -> mx.array:
+        """An array in the layout of model-space latents (B, C, h, w) in
+        the layout of VAE space (B, h, w, C), in float32, with no scale
+        or shift."""
+        return channels_last(latents, self.config.latent_channels)
 
     def encode(self, x: mx.array) -> tuple[mx.array, mx.array]:
         return self.split_moments(self.encoder(x.astype(self.dtype)))
