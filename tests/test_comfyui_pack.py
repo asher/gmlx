@@ -90,7 +90,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 3
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 5
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -156,6 +156,10 @@ _WIDGETS = {
     "SaveImage": ["filename_prefix"],
     "LoadImage": ["image", "upload"],
     "TextEncodeQwenImage21": ["prompt", "negative_prompt", "resolution"],
+    "ConditioningZeroOut": [],
+    "EmptyFlux2LatentImage": ["width", "height", "batch_size"],
+    # A dynamic combo: the option, then the inputs of that option.
+    "ReferenceMultiLatent": ["resolution", "resolution.megapixels"],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 

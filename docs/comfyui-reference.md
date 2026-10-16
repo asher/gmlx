@@ -74,7 +74,7 @@ ComfyUI sees each gmlx model as its own model class, so its stock nodes
 for that model work too, such as `ModelSamplingAuraFlow` and
 `TextEncodeQwenImage21`. The prompt nodes of the example workflows are
 ComfyUI's `CLIP Text Encode (Prompt)`, and the latent node is its
-`EmptySD3LatentImage`.
+`EmptySD3LatentImage`, or its `EmptyFlux2LatentImage` for FLUX.3 klein.
 
 The sampler, the noise, the guidance and the schedule run in ComfyUI. Each
 call to the model is one request to the gmlx server, which runs the DiT,
