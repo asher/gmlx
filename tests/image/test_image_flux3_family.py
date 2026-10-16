@@ -116,12 +116,8 @@ def test_the_encoder_constants_follow_the_reference_code():
 def test_flux2_klein_given_as_flux3_is_refused_by_name(name, title, arch):
     view = fixture_view(name, kv={"general.architecture": arch} if arch
                         else {})
-    if title.endswith("9B"):
-        assert _refused(view) == (
-            "FLUX.2 klein 9B is not supported yet. gmlx image runs FLUX.2 "
-            "klein 4B and base 4B.")
-    else:
-        assert fp.identify(view).family.name == "flux2_klein"
+    assert fp.identify(view).family.name == (
+        "flux2_klein_9b" if title.endswith("9B") else "flux2_klein")
     assert _refused(view, family="flux3_klein") == (
         f"this is a {title} GGUF, not a FLUX.3 klein one")
 
