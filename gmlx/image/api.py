@@ -374,6 +374,13 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
     return int(cond.features.shape[0]) - len(cond.image_slots) + refs
 
 
+def _text_rows(states) -> int | None:
+    """Text rows of the conditioning with the most, None for no
+    conditioning: a guided step runs each row with its own."""
+    return max((int(c.features.shape[0]) - len(c.image_slots)
+                for c in states), default=None)
+
+
 def _ref_sizes(states) -> list:
     """(height, width) in pixels of each distinct reference image of the
     conditionings, which is one VAE encode each."""
@@ -407,6 +414,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     negative one, whose text rows and reference latents size the prefix
     of a family that caches one, and ``patch_table`` the table the
     request runs under, which names the states it holds already.
+    ``caption_tokens`` is the text rows of each row of a step, by default
+    those of ``conds``, and the family's most without them.
     ``init_image`` says the request encodes an init image of its size,
     and ``keep_encoder`` that the caller keeps the encoder through the
     request, so that its release is no lever. The reference images of the
@@ -422,6 +431,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     vae_dtype = getattr(pipe.vae, "dtype", None)
     states = ([] if conds is None else [conds]
               if isinstance(conds, Conditioning) else list(conds))
+    if caption_tokens is None:
+        caption_tokens = _text_rows(states)
     caches = pipe.conditionings.bytes + pipe.modulations.bytes
     parts = pipe.family.step
     other = bound = 0

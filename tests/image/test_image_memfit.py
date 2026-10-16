@@ -793,6 +793,42 @@ def test_the_flux3_plan_counts_the_references_and_the_most_text():
     assert p.terms["step_peak"] == step(64 * 48 + 80)
 
 
+def test_a_flux3_request_plan_prices_the_text_rows_of_its_prompt():
+    """The conditioning of a request gives the text rows of every step and
+    of its encode, the more of a guided pair's, and a plan without one
+    prices the family's most."""
+    import mlx.core as mx
+
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.registry import get_family
+
+    row = memfit.PEAKS["flux3_klein"]
+    dit = SimpleNamespace(act_dtype=mx.bfloat16, cfg=SimpleNamespace(patch=1))
+    pipe = api.ImagePipeline(dit=dit, family=get_family("flux3_klein"),
+                             variant="distilled")
+    kw = dict(height=1024, width=768, budget=BUDGET_128, overcommit=False)
+
+    def cond(rows):
+        return Conditioning(mx.zeros((rows, 4)))
+
+    def step(rows, conds=1):
+        return row.step.bytes(rows * row.width * 2, conds)
+
+    image = 64 * 48
+    p = api.plan_request(pipe, conds=cond(80), cfg=1.0, **kw)
+    assert p.terms["step_peak"] == step(image + 80)
+    assert p.terms["encode_peak"] == int(
+        row.encode_base + 80 * row.encode_row_bytes * memfit.ENCODE_LIVE)
+    p = api.plan_request(pipe, conds=[cond(160), cond(80)], cfg=3.5, **kw)
+    assert p.rows == 2 and p.terms["step_peak"] == step(image + 160, 2)
+    assert api.plan_request(pipe, cfg=1.0, **kw).terms[
+        "step_peak"] == step(image + 4096)
+    p = api.plan_request(pipe, conds=cond(80), cfg=1.0, caption_tokens=640,
+                         **kw)
+    assert p.terms["step_peak"] == step(image + 640)
+
+
 def test_the_flux3_encode_term_covers_every_measured_encode():
     row = memfit.PEAKS["flux3_klein"]
     encodes = json.loads(FLUX3_CELLS.read_text())["encode"]

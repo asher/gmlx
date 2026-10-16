@@ -578,13 +578,13 @@ PEAKS = {
     # FLUX.3 klein joins up to 4096 text rows, padded to 80, to the image
     # rows in every block, and the tokens of each reference image too.
     # The MLP's fused gate and up product and its gated half are the
-    # widest outputs: 3072 wide, a 9216 MLP. The plan does not know the
-    # prompt, so it prices the most text rows. An encode of the encoder
-    # alone, Qwen3-VL-4B Q8_0 tapped in float32, reads 0.34 GiB over the
-    # settled process at 80 rows, 0.50 at 640, 1.19 at 2080 and 1.33 at
-    # 4096: a base of 0.6 GiB and 28 KiB times ENCODE_LIVE a row leave
-    # 0.25 GiB above every cell, where Krea 2's rows alone would price
-    # 7.1 GiB at 4096.
+    # widest outputs: 3072 wide, a 9216 MLP. A plan that knows the prompt
+    # prices its text rows, and one that does not the most. An encode of
+    # the encoder alone, Qwen3-VL-4B Q8_0 tapped in float32, reads 0.34
+    # GiB over the settled process at 80 rows, 0.50 at 640, 1.19 at 2080
+    # and 1.33 at 4096: a base of 0.6 GiB and 28 KiB times ENCODE_LIVE a
+    # row leave 0.25 GiB above every cell, where Krea 2's rows alone would
+    # price 7.1 GiB at 4096.
     "flux3_klein": PeakRow(token_px=16, row_multiple=1, caption_rows=4096,
                            width=2 * 9216 + 9216, step=FLUX3_KLEIN_STEP,
                            encode_row_bytes=28 * 1024,

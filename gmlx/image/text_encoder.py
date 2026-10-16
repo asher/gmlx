@@ -204,6 +204,16 @@ def pad_rows(spec: EncoderSpec, n: int) -> int:
     return max(0, rows - n)
 
 
+def rows_at_most(spec: EncoderSpec, prompt: str) -> int:
+    """The most rows the features of ``prompt`` hold, from its text alone,
+    before a tokenizer loads: the encoders here tokenize by byte-level
+    BPE, so each token id holds at least one byte of the rendered text."""
+    n = len(render(spec, prompt).encode("utf-8"))
+    if spec.max_tokens is not None:
+        n = min(n, spec.max_tokens)
+    return max(0, n - spec.drop) + pad_rows(spec, n)
+
+
 def _text_stack(model):
     """The embedding and the decoder layer list of a loaded text model,
     or of the language model of a multimodal one."""

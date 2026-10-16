@@ -816,6 +816,48 @@ def test_the_preflight_stages_the_load_when_no_other_lever_fits(
     assert whole.fits and not whole.staged_load and not whole.levers
 
 
+def test_the_preflight_prices_the_rows_a_prompt_can_give(monkeypatch):
+    """Before the encoder loads, the bytes of a rendered prompt bound its
+    token ids. A short FLUX.3 klein prompt is priced at 80 rows, which on
+    a 16 GB Mac at 1024 fits without the staged load that the most rows,
+    4096, take, and a long one at the most."""
+    from gmlx.image import memfit
+    from gmlx.image.text_encoder import encoder_spec, rows_at_most
+    from gmlx.serve import capacity
+
+    pf = image_preflight
+    fam = get_family("flux3_klein")
+    spec = encoder_spec(fam)
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
+        family=fam, variant="distilled"))
+    # The Q4_K_M DiT, the Qwen3-VL-4B Q8_0 encoder and the FLUX.2 VAE.
+    sizes = {"dit": 3_371_504_288, "encoder": 4_280_406_816,
+             "vae": 336_213_556}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
+    monkeypatch.setattr(pf, "load_transient", lambda e, v, m: 200 << 20)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: 17_179_869_184 - 8e9)
+    short, long = "a red bicycle on a brick wall", "a red bicycle " * 400
+    assert rows_at_most(spec, short) == 80
+    assert rows_at_most(spec, long) == 4096
+    kw = dict(height=1024, width=1024, cfg=None)
+    most = pf.check("d", "e", "v", **kw)
+    assert most.fits and most.staged_load
+    plan = pf.check("d", "e", "v", prompts=[short], **kw)
+    assert plan.fits and not plan.staged_load
+    want = memfit.plan_memory(
+        sizes["dit"], sizes["encoder"], sizes["vae"], family="flux3_klein",
+        height=1024, width=1024, cfg=1.0, caption_tokens=80,
+        budget=1e12, overcommit=False)
+    for k in ("step_peak", "encode_peak"):
+        assert plan.terms[k] == want.terms[k] < most.terms[k], k
+    over = pf.check("d", "e", "v", prompts=[short, long], **kw)
+    assert over.terms["step_peak"] == most.terms["step_peak"]
+
+
 class _TinyEncoder(_OwnedEncoder):
     """Features of the tiny Z-Image DiT's caption width."""
 

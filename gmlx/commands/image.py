@@ -703,7 +703,8 @@ def _generate(a) -> int:
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
         mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
-        variant=a.variant)
+        variant=a.variant, prompts=() if refs and not text_only else (
+            [prompt] + ([] if cfg == 1.0 else [a.negative_prompt or ""])))
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
 
@@ -1084,7 +1085,8 @@ def _bench(a) -> int:
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
-                          keep_encoder=True, variant=a.variant)
+                          keep_encoder=True, variant=a.variant,
+                          prompts=[a.prompt] + ([] if cfg == 1.0 else [""]))
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
 
