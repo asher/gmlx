@@ -1277,6 +1277,209 @@ def test_a_qwen_step_prices_the_reference_prefix_of_its_rows(host,
     assert host.held == 0
 
 
+def _least_budget(served, h, w, cfg, terms) -> int:
+    """The least budget at which the plan of a step of ``served`` with
+    ``terms`` fits, its levers applied, as the step route plans one."""
+    from gmlx.image import memfit
+    from gmlx.serve import image_service
+
+    def fits(budget):
+        args = image_service._fit_args(served.pipe, served, budget, cfg)
+        args.update(terms)
+        try:
+            return memfit.plan_memory(height=h, width=w, _hint=False,
+                                      **args).fits
+        except memfit.ImageMemoryError:
+            return False
+
+    lo, hi = 0, 1 << 50
+    assert fits(hi) and not fits(lo)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if fits(mid) else (mid, hi)
+    return hi
+
+
+def _reaches_the_dit(monkeypatch, call) -> None:
+    """``call`` passes the plan of its rows and reaches the DiT, which a
+    stub stands in for, as these references would take gigabytes."""
+    seen = []
+
+    def stub(served, x, *a, **k):
+        seen.append(tuple(x.shape))
+        return mx.zeros(x.shape, mx.float32), 0.0, "none"
+
+    with monkeypatch.context() as m:
+        m.setattr(steps, "run_step", stub)
+        call()
+    assert seen
+
+
+def _priced_to_the_byte(host, monkeypatch, served, h, w, terms, step):
+    """``step`` runs on the least budget of the plan of ``terms`` with
+    guidance, and is refused by the plan of its rows one byte below it."""
+    price = _least_budget(served, h, w, 2.0, terms)
+    # The rows' plan, not the size check before the rows load, decides.
+    assert _least_budget(served, h, w, 2.0, {}) < price - 1
+    try:
+        host.budget_bytes = price - 1
+        _refused_by_its_plan(monkeypatch, step)
+        host.budget_bytes = price
+        _reaches_the_dit(monkeypatch, step)
+    finally:
+        host.budget_bytes = None
+    assert host.held == 0
+    return price
+
+
+def test_a_guided_flux3_step_is_priced_at_its_rows_to_the_byte(
+        host, fpipes, monkeypatch):
+    """Two rows whose second holds the most reference pixels: one small
+    reference in the first row and four of 1024 pixels in the second.
+    Pricing the references of the first row, or the family's most text
+    rows, misses the budget of the plan by a byte or more."""
+    _serve(host, "f3d", fpipes[True])
+    served = host.served["f3d"]
+    pipe = served.pipe
+    c = _client()
+    rng = np.random.default_rng(11)
+    rows = []
+    for shapes in ([(16, 16)], [(64, 64)] * 4):
+        feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+        rows.append({"cond": c.put(feats), "num_tokens": 10, "ref_latents": [
+            c.put(rng.standard_normal((1, 8) + hw).astype(np.float32))
+            for hw in shapes]})
+    x = np.zeros((2,) + F3_SHAPE[1:], np.float32)
+    w, h = routes._px(served, "latent", *F3_SHAPE[2:])
+    p, scale = pipe.dit.cfg.patch, pipe.vae_scale
+    terms = dict(caption_tokens=10,
+                 prefix_rows=[10 + (16 // p) ** 2, 10 + 4 * (64 // p) ** 2],
+                 prefix_shared=False, prefix_other=0, prefix_bound=0,
+                 ref_sizes=[], step_refs=[(64 * scale, 64 * scale)] * 4)
+    conds = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "flux3_klein") for r in rows])
+    assert api.plan_terms(pipe, conds, height=h, width=w) == terms
+    price = _priced_to_the_byte(host, monkeypatch, served, h, w, terms,
+                                lambda: c.step("f3d", None, x, [0.75], rows,
+                                               sample_sigmas=SIGMAS))
+    assert _least_budget(served, h, w, 2.0, {
+        **terms, "step_refs": [(16 * scale, 16 * scale)]}) < price
+    assert _least_budget(served, h, w, 2.0, {
+        **terms, "caption_tokens": None}) > price
+
+
+def test_a_guided_qwen_step_is_priced_at_both_prefix_states_to_the_byte(
+        host, monkeypatch):
+    """A guided pair of two conditionings, each with two reference latents
+    of 1024 pixels, holds two prefix states. Pricing one, as an unguided
+    step would, misses the budget of the plan by a byte or more."""
+    served = host.served["qit"]
+    pipe = served.pipe
+    c = _client()
+    rng = np.random.default_rng(12)
+    refs = [c.put(rng.standard_normal((1, 8, 64, 64)).astype(np.float32))
+            for _ in range(2)]
+    rows = [{"cond": c.put(rng.standard_normal((1, 9, 24)).astype(
+        np.float32)), "num_tokens": 9, "ref_latents": refs,
+        "image_slots": [2, 5]} for _ in range(2)]
+    x = np.zeros((2, 8, 4, 6), np.float32)
+    w, h = routes._px(served, "latent", *x.shape[2:])
+    p, scale = pipe.dit.cfg.patch, pipe.vae_scale
+    # The wire cond holds the text rows alone: the route sets the two
+    # image slots into them.
+    terms = dict(caption_tokens=9,
+                 prefix_rows=[9 + 2 * (64 // p) ** 2] * 2,
+                 prefix_shared=False, prefix_other=pipe.captions.bytes,
+                 prefix_bound=pipe.family.step.state_bytes, ref_sizes=[],
+                 step_refs=[(64 * scale, 64 * scale)] * 2)
+    conds = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "qwen_image21") for r in rows])
+    assert api.plan_terms(pipe, conds, height=h, width=w) == terms
+    price = _priced_to_the_byte(host, monkeypatch, served, h, w, terms,
+                                lambda: c.step("qit", None, x, [0.75], rows))
+    assert _least_budget(served, h, w, 1.0, terms) < price
+
+
+def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
+        host, monkeypatch):
+    """The plan of a step's rows takes the step's patch table, which
+    names the prefix states its run holds, and the guidance of its two
+    rows."""
+    from lora_fixtures import make_pair
+
+    from gmlx.serve import image_service
+
+    c = _client()
+    rows = _qwen_rows(c)
+    down, up, _ = make_pair(np.random.default_rng(4), 32, 32, 2)
+    tid = c.define_table("qit", {"entries": [{
+        "key": "diffusion_model.transformer_blocks.0.attn.to_q.weight",
+        "band": None,
+        "patches": [{"up": c.put(up, kind="adapters"),
+                     "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                     "strength": 0.8}]}]})
+    core = steps.STATE.tables_of("qit", host.served["qit"].pipe)[tid]
+    seen = []
+
+    def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
+                  patch_table=None):
+        seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
+        return conds is None
+
+    monkeypatch.setattr(image_service, "size_fits", size_fits)
+    import qwen_tiny as qt
+
+    x = np.asarray(qt.latents())
+    pair = [rows[0], rows[0]]
+    _refused_by_its_plan(monkeypatch, lambda: c.step(
+        "qit", None, np.concatenate([x, x]), [0.75], pair, patch_table=tid))
+    bare, planned = seen
+    assert bare["cfg"] == planned["cfg"] == 2.0 and bare["conds"] is None
+    assert len(planned["conds"]) == 2 and planned["patch_table"] is core
+
+
+def test_the_plan_of_a_qwen_run_counts_its_held_prefix_once(host, qpipe):
+    """After a step of a guided pair of one conditioning under a table,
+    the plan of the next step holds one prefix state for the pair, and
+    counts the state its run holds under that table as its own, not as
+    another conditioning's."""
+    import qwen_tiny as qt
+    from lora_fixtures import make_pair
+
+    c = _client()
+    rows = _qwen_rows(c)
+    down, up, _ = make_pair(np.random.default_rng(4), 32, 32, 2)
+    tid = c.define_table("qit", {"entries": [{
+        "key": "diffusion_model.transformer_blocks.0.attn.to_q.weight",
+        "band": None,
+        "patches": [{"up": c.put(up, kind="adapters"),
+                     "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                     "strength": 0.8}]}]})
+    core = steps.STATE.tables_of("qit", qpipe)[tid]
+    x = np.asarray(qt.latents())
+    pair = [rows[0], rows[0]]
+    run = c.begin("qit")
+    c.step("qit", run, np.concatenate([x, x]), [0.75], pair, patch_table=tid)
+    conds = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "qwen_image21") for r in pair])
+    w, h = routes._px(host.served["qit"], "latent", *x.shape[2:])
+    held = qpipe.captions.bytes
+    assert held > 0
+    terms = api.plan_terms(qpipe, conds, height=h, width=w,
+                           patch_table=core)
+    assert terms["prefix_shared"] is True and terms["prefix_other"] == 0
+    # Under no table the state is another conditioning's.
+    assert api.plan_terms(qpipe, conds, height=h, width=w)[
+        "prefix_other"] == held
+    (other,) = _qwen_rows(c, "ref1")
+    two = _on_worker(lambda: [steps.conditioning(
+        r, steps.STATE.tensors, "qwen_image21") for r in (rows[0], other)])
+    assert api.plan_terms(qpipe, two, height=h, width=w,
+                          patch_table=core)["prefix_shared"] is False
+    c.end(run)
+    assert host.held == 0
+
+
 def test_a_patch_table_body_that_is_no_object_is_400(host):
     body = b"[1]"
     r = _http().put(f"{P}/patch-tables/{steps.table_id(body)}?model=zit",
