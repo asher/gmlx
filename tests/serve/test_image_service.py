@@ -853,6 +853,34 @@ def test_several_flux3_references_are_cropped_and_the_first_sizes_it():
     assert image_service.target_size(req, served) == (96, 64)
 
 
+@pytest.mark.parametrize("width, refused", [(4096, False), (4112, True),
+                                            (20000, True)])
+def test_a_thin_first_flux3_reference_meets_the_side_limit(width, refused):
+    """Each of several references keeps its shape, so the size the first
+    gives a request without one is held to the limits of a size asked
+    for."""
+    import numpy as np
+
+    served = _edit_served("flux3_klein", mmproj=False)
+    req = _edit_req(1)
+    req.images = [np.zeros((30, width, 3), np.uint8),
+                  np.zeros((512, 512, 3), np.uint8)]
+    image_service.check_family(req, served)
+    assert (req.refs[0].width, req.refs[0].height) == (width, 16)
+    if not refused:
+        assert image_service.target_size(req, served) == (width, 16)
+        return
+    with pytest.raises(image_service.ImageRequestError,
+                       match=f"the first image sizes the request at "
+                             f"{width}x16, over the limit") as e:
+        image_service.target_size(req, served)
+    assert e.value.param == "size" and e.value.status == 400
+    sized = _edit_req(1, size="512x512")
+    sized.images = req.images
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (512, 512)
+
+
 def test_a_flux3_reference_the_rules_refuse_is_named():
     import numpy as np
 

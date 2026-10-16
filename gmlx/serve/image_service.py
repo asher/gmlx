@@ -609,11 +609,15 @@ def parse_size(value) -> tuple | None:
         raise _bad(f"size must be WxH or auto, not {value!r}", "size") from None
     if min(size) <= 0:
         raise _bad(f"size {value!r} is not a positive width and height", "size")
-    if size[0] * size[1] > MAX_PIXELS or max(size) > MAX_SIDE:
+    if not _in_limits(size):
         raise _bad(f"size {size[0]}x{size[1]} is over the limit of "
                    f"{MAX_PIXELS} pixels (2048x2048) and a side of "
                    f"{MAX_SIDE}", "size")
     return size
+
+
+def _in_limits(size) -> bool:
+    return size[0] * size[1] <= MAX_PIXELS and max(size) <= MAX_SIDE
 
 
 def _adapters(value) -> list:
@@ -955,7 +959,14 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
                        f"of {unit}", "size")
         return w, h
     if req.refs and req.mask is None and pipe.family.edit.size is not None:
-        return tuple(pipe.family.edit.size(req.refs))
+        w, h = pipe.family.edit.size(req.refs)
+        # Several references are each kept at their own shape, so a thin
+        # first one can give a size past the limits of a size asked for.
+        if not _in_limits((w, h)):
+            raise _bad(f"the first image sizes the request at {w}x{h}, over "
+                       f"the limit of {MAX_PIXELS} pixels (2048x2048) and a "
+                       f"side of {MAX_SIDE}: pass a size", "size")
+        return w, h
     if req.images:
         h, w = req.images[0].shape[:2]
         # A large image gives the largest size of its shape in the limits.
