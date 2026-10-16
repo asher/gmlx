@@ -639,14 +639,16 @@ gmlx pull qwen-image --quant Q5_K_M
 ```
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
-`krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-3-klein` or
-`flux-3-klein-base`, pulls its DiT, text
-encoder and VAE, checks the VAE
-against its published sha256, packs it to GGUF, and adds an `image_models`
-entry. The quants default to
+`krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,
+`flux-2-klein-base-9b`, `flux-3-klein` or `flux-3-klein-base`, pulls its
+DiT, text encoder and VAE, checks the VAE against its published sha256,
+packs it to GGUF, and adds an `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder or VAE already on disk is
 used again when its weights match.
-[Models and quants](images.md#models-and-quants) has the quants for each Mac.
+[Models and quants](images.md#models-and-quants) has the quants for each
+Mac. `pull` prints each model's license before it downloads, and the
+license of `flux-2-klein-9b` and `flux-2-klein-base-9b` allows
+non-commercial use only, as [Licenses](images.md#licenses) says.
 
 Of several encoders on disk, `pull` takes the quant for this Mac first,
 then a chat model, then the file nearest the DiT. A chat model taken as
@@ -960,13 +962,14 @@ the weights load.
 | Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
 | FLUX.3 klein | Qwen3-VL-4B-Instruct, its text GGUF | The FLUX.2 autoencoder | 16 steps and guidance 1. Base: 50 steps and guidance 3.5. |
 | FLUX.2 klein | Qwen3-4B | The FLUX.2 autoencoder | 4 steps and guidance 1, which is the only guidance it takes. Base: 50 steps and guidance 4. |
+| FLUX.2 klein 9B | Qwen3-8B | The FLUX.2 autoencoder | The same as FLUX.2 klein's. Its license allows non-commercial use only. |
 
 FLUX.3 klein Base shares the distilled model's architecture, encoder and
 VAE, and gmlx tells the two apart by their tensors. The distilled model
 runs any step count on its own schedule.
 
-FLUX.2 klein Base and the distilled model are told apart the same way.
-The distilled model refuses `--guidance` other than 1 before any file
+FLUX.2 klein Base and the distilled model are told apart the same way,
+at both sizes. The distilled model refuses `--guidance` other than 1 before any file
 loads, as BFL's command line does, and names Base as the checkpoint that
 takes guidance.
 
@@ -1126,13 +1129,13 @@ and compares every tensor bit for bit before the file replaces `--out`.
 It packs the VAE of each image family: the FLUX.1 autoencoder for
 `z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
 official file is F32 and stays F32, the Qwen-Image autoencoder for
-`krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`
-and `flux2_klein`. BFL's FLUX.2 klein 4B file of that autoencoder is BF16
-with its config, and the Comfy-Org `flux2-vae.safetensors` is F32 and
-needs no config. It packs from that layout or from the original one of
+`krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`,
+`flux2_klein` and `flux2_klein_9b`. BFL's FLUX.2 klein 4B file of that
+autoencoder is BF16 with its config, and the Comfy-Org
+`flux2-vae.safetensors` is F32 and needs no config. It packs from that layout or from the original one of
 BFL's `ae.safetensors`. The family follows from the tensor names and
 shapes, the first family for the FLUX.2 autoencoder, and a pack of it
-serves both klein families whichever one it names. A file that fills none
+serves every klein family whichever one it names. A file that fills none
 of them is refused with what it holds, for example another family's VAE
 under `--family`, or a video VAE of the same layout.
 

@@ -12,6 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein
   4B and FLUX.2 klein Base 4B GGUFs, with edits from up to 10 reference images.
+- `gmlx pull`, `image generate` and `serve` run FLUX.2 klein 9B and FLUX.2 klein
+  Base 9B GGUFs, whose license allows non-commercial use only.
 - `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
   output repeats it, which speeds up edits and quotes.
 - Muse Spark (GGUF arch `muse-spark`), with reasoning effort intents, tool calls

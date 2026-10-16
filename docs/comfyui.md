@@ -189,6 +189,11 @@ prompt and a higher `cfg`. FLUX.2 klein places its reference images by the
 (`FluxKontextMultiReferenceLatentMethod`) set to another method is refused
 with the node's name.
 
+The FLUX.2 klein 9B models, whose license allows non-commercial use only,
+run on the command line and on the server's image routes, but not in
+ComfyUI: a gmlx loader that names one stops with
+`FLUX.2 klein 9B has no step contract adapter`.
+
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
 `SamplerCustomAdvanced`, though `KSampler` works on every model.
