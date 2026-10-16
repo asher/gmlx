@@ -32,9 +32,10 @@ One fixture per variant and size holds the noise, the features, the
 schedule, the time and target the DiT saw at each step, the fp32
 latents after the steps of --keep and after the last one, and with a
 bf16 run the final bf16 latents and the bf16 against fp32 gap after
-every step. The tolerance of the latents after a step is twice that gap.
-A size without a bf16 run takes the tolerances of the largest size of
-its variant that has one.
+every step. At GATE_SIZE the tolerance of gmlx's bf16 latents after a
+step is twice that gap, so that size needs a bf16 run. At every other
+size gmlx's exact fp32 run is held to EXACT_REL_L2 after each kept step
+and the last, and its bf16 run is read against the GATE_SIZE gates.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check6_flux3_klein.py --reference ~/src/flux-3-image-klein/src \\
@@ -67,10 +68,14 @@ SCRIPT = "scripts/image_oracle/check6_flux3_klein.py"
 SEED = 6
 KEEP = {"distilled": (1, 2, 4, 8), "base": (1, 2, 5, 10, 25)}
 PROMPT = "plain"
-RULE = ("latents after a kept step and after the last: relative L2 at "
-        "twice the oracle's own bf16 against fp32 relative L2 after that "
-        "step at that size; a size without a bf16 run takes the "
-        "tolerances of the largest size of its variant that has one")
+GATE_SIZE = 512
+EXACT_REL_L2 = 1e-3
+RULE = (f"latents after a kept step and after the last. At {GATE_SIZE}: "
+        "gmlx's bf16 run at relative L2 twice the oracle's own bf16 "
+        "against fp32 relative L2 after that step. At any other size: "
+        "gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, "
+        f"and its bf16 run read as a share of the {GATE_SIZE} gate of the "
+        "step, not gated")
 # The stub run of --self-test: the latent grid and channels, and the
 # text rows of the prompt and of the empty prompt.
 STUB = {"latent": (4, 6), "channels": 8, "text": (3, 2), "text_dim": 4}
@@ -337,6 +342,9 @@ def main(argv=None) -> int:
         ap.error("--dit and --features are required")
     if any(s % 16 for s in a.sizes) or set(a.bf16) - set(a.sizes):
         ap.error("sizes must be multiples of 16, and --bf16 among --sizes")
+    if GATE_SIZE in a.sizes and GATE_SIZE not in a.bf16:
+        ap.error(f"the {GATE_SIZE} gate is the bf16 run's gap: pass --bf16 "
+                 f"{GATE_SIZE}")
     t0 = time.perf_counter()
     state, census, flow_map = c3.gguf_state(torch, a.dit)
     variant = "distilled" if flow_map else "base"
@@ -395,8 +403,9 @@ def main(argv=None) -> int:
             row.update(bf16_s=round(float(secs16.sum()), 1),
                        latents_bf16_vs_fp32=gap,
                        bf16_vs_fp32_by_step=by_step)
-            fx.tolerances["latents_rel_l2"] = 2 * gap["rel_l2"]
-            fx.tolerances["by_step_rel_l2"] = [2 * g for g in by_step]
+            if size == GATE_SIZE:
+                fx.tolerances["latents_rel_l2"] = 2 * gap["rel_l2"]
+                fx.tolerances["by_step_rel_l2"] = [2 * g for g in by_step]
             print(f"[check6] {variant} {size}: bf16 {row['bf16_s']} s, final "
                   f"rel L2 {gap['rel_l2']:.3e}, by step "
                   f"{[f'{v:.2e}' for v in by_step]}", flush=True)
@@ -420,6 +429,8 @@ def main(argv=None) -> int:
                     "gmlx layout, after the step",
             times="the bf16 image time the DiT saw at each step, as float32",
             reference_commit=commit, gguf_codecs=census)
+        if size != GATE_SIZE:
+            fx.tolerances["exact_rel_l2"] = EXACT_REL_L2
         fx.tolerances["rule"] = RULE
         path = fx.write(a.out)
         print(f"[check6] wrote {path}", flush=True)
