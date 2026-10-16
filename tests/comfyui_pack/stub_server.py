@@ -480,6 +480,8 @@ class Handler(BaseHTTPRequestHandler):
                  timestep=[float(v) for v in t], convention=req.get("convention"),
                  num_tokens=[r.get("num_tokens") for r in rows],
                  refs=[len(r.get("ref_latents") or []) for r in rows],
+                 ref_shapes=[[list(st.tensors[h][1]) for h in r.get("ref_latents") or []]
+                             for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),

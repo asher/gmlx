@@ -873,6 +873,27 @@ class ClipAndVae(Base):
         self.assertEqual(tuple(res["samples"].shape), (1, 128, 6, 4))
 
     @needs_flux3
+    def test_a_flux3_step_sends_its_references_in_their_order(self):
+        """Two references of other sizes reach every row of the step in the
+        order of the conditioning, the positive and the zeroed negative."""
+        from comfy_extras.nodes_edit_model import ReferenceMultiLatent
+        clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
+        vae = P.nodes.GmlxVAELoader().load(F3ID, self.stub.url, False)[0]
+        (pos,) = comfy_nodes.CLIPTextEncode().encode(clip, "put the cat on the sofa")
+        (neg,) = comfy_nodes.ConditioningZeroOut().zero_out(pos)
+        ims = {"image1": torch.full((1, 64, 96, 3), 0.25), "image2": torch.full((1, 96, 64, 3), 0.75)}
+        pos, neg, latent = ReferenceMultiLatent.execute(pos, {"resolution": "keep resolution"}, neg, vae, ims)[:3]
+        want = [list(r.shape) for r in pos[0][1]["reference_latents"]]
+        self.assertEqual(want, [[1, 128, 4, 6], [1, 128, 6, 4]])
+        self.stub.reset()
+        with torch.inference_mode():
+            comfy_nodes.common_ksampler(self.model(F3ID), 1, 1, 2.0, "euler", "simple", pos, neg, latent)
+        steps = self.stub.events("step")
+        self.assertEqual(sum(s["rows"] for s in steps), 2)
+        for s in steps:
+            self.assertEqual(s["ref_shapes"], [want] * s["rows"])
+
+    @needs_flux3
     def test_stock_lora_loader_with_the_gmlx_flux3_clip(self):
         model = self.model(F3ID)
         clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]

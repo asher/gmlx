@@ -470,6 +470,34 @@ def test_a_flux3_flow_map_step_goes_to_the_next_time_of_the_schedule(
     assert host.held == 0
 
 
+def test_a_flux3_step_takes_its_references_in_the_order_of_the_row(
+        host, fpipes):
+    """Two references of other shapes reach the DiT in the order of the
+    row, and the other order gives another step."""
+    pipe = fpipes[True]
+    _serve(host, "f3d", pipe)
+    c = _client()
+    rng = np.random.default_rng(11)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    a = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    b = rng.standard_normal((1, 8, 3, 2)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"],
+           "ref_latents": [c.put(a), c.put(b)]}
+    out = c.step("f3d", None, x, [0.75], [row], sample_sigmas=SIGMAS)
+
+    def cond(*refs):
+        # No prefix key, which the other steps here hold with other rows.
+        return api.Conditioning(mx.array(feats[0]), "", ref_latents=tuple(
+            mx.array(r[0]) for r in refs))
+
+    want = _f3_velocity(pipe, x, 0.75, cond(a, b), 0.5)
+    assert np.array_equal(out, want)
+    assert not np.array_equal(out, _f3_velocity(pipe, x, 0.75, cond(b, a),
+                                                0.5))
+    assert host.held == 0
+
+
 def test_a_flux3_flow_map_step_without_its_schedule_is_refused(host,
                                                                 fpipes):
     _serve(host, "f3d", fpipes[True])
