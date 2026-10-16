@@ -73,3 +73,54 @@ def test_each_image_of_a_request_takes_the_next_seed(stubs):
                       stop=threading.Event())
     assert stubs.seeds == [5, 6] and out.seeds == [5, 6]
     assert len(out.images) == 2 and out.images[0] != out.images[1]
+
+
+@pytest.mark.parametrize("route,size,want", [
+    ("edits", None, (100, 60)), ("variations", None, (100, 60)),
+    ("edits", "128x64", (128, 64))])
+def test_a_flux3_edit_runs_its_prepared_references_and_crops_the_pad(
+        stubs, monkeypatch, route, size, want):
+    """The job conditions on the references check_family prepared, and an
+    output on the canvas of one padded reference is cropped back to the
+    image's box unless the request names its size. A variation takes the
+    fixed instruction."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    seen = SimpleNamespace(refs=None, prompt=None, decoded=None)
+    cond = SimpleNamespace(features=mx.zeros((5, 4)), image_slots=(),
+                           refs=(), ref_latents=())
+
+    def encode(served, prompt, neg, refs, borrow):
+        seen.refs, seen.prompt = refs, prompt
+        return cond, None
+
+    def vae_decode(pipe, x, *, alpha, plan):
+        seen.decoded = (w, h)
+        return mx.zeros((1, h, w, 3))
+
+    monkeypatch.setattr(svc, "_encode", encode)
+    monkeypatch.setattr(api, "vae_decode", vae_decode)
+    monkeypatch.setattr(api, "encode_references", lambda pipe, c, plan: c)
+    served = _served()
+    served.pipe.family = get_family("flux3_klein")
+    served.pipe.variant = "distilled"
+    served.pipe.size_multiple = 16
+    served.pipe.vae_scale, served.pipe.dit.cfg.patch = 16, 1
+    served.spec.encoder_mmproj = None
+    fields = {"prompt": "" if route == "variations" else "make it red"}
+    if size:
+        fields["size"] = size
+    req = svc.parse_request(route, fields)
+    req.images = [np.full((60, 100, 3), 9, np.uint8)]
+    svc.check_family(req, served)
+    w, h = svc.target_size(req, served)
+    out = svc.run_job(served, req, size=(w, h), budget=None,
+                      stop=threading.Event())
+    assert seen.refs == tuple(req.refs) and seen.decoded == (w, h)
+    assert seen.prompt == ("make it red" if route == "edits"
+                           else svc.VARIATION_PROMPT)
+    assert out.size == want
+    assert Image.open(io.BytesIO(out.images[0])).size == want

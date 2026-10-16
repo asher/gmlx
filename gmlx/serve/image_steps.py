@@ -453,9 +453,7 @@ def status(spec, resident: bool, plan=None) -> dict:
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
             # A step takes the reference latents the client encoded on
-            # the VAE route, so a DiT that reads references edits here,
-            # though the server prepares FLUX.3's reference images for
-            # gmlx image generate alone.
+            # the VAE route, so a DiT that reads references edits here.
             "edit_capable": fam.edit is not None,
             "sampling": sampling(fam, variant),
             "compute_dtype": str(act.dit).rsplit(".", 1)[-1].replace(
@@ -850,7 +848,7 @@ def encode(served, text: str, images: list, borrow=None,
 
     from gmlx.image import api
 
-    from .image_service import _encode, serves_edits
+    from .image_service import _encode
 
     pipe = served.pipe
     refs: tuple = ()
@@ -859,10 +857,10 @@ def encode(served, text: str, images: list, borrow=None,
         if edit is None:
             raise StepError(400, f"{pipe.family.title} takes no reference "
                             "images")
-        if not serves_edits(pipe.family):
-            raise StepError(400, f"the server takes no {pipe.family.title} "
-                            "reference images; gmlx image generate --ref "
-                            "runs them")
+        if edit.text_only:
+            raise StepError(400, f"the {pipe.family.title} encoder reads the "
+                            "prompt alone; a step takes the reference "
+                            "latents the VAE route encodes")
         try:
             refs = api.references(pipe, [
                 api.references(pipe, [im],

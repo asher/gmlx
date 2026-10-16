@@ -1018,6 +1018,22 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
         assert e.value.status == 400
 
 
+def test_a_flux3_step_encode_takes_the_prompt_and_no_images(monkeypatch):
+    """FLUX.3 klein's encoder reads the prompt alone, and its steps take
+    the reference latents of the VAE route, so images on the encode are
+    refused by that rule."""
+    served, seen, _ = _stub_step_encode(monkeypatch)
+    served.pipe.family = get_family("flux3_klein")
+    img = np.zeros((256, 256, 3), np.uint8)
+    with pytest.raises(steps.StepError, match="the FLUX.3 klein encoder "
+                       "reads the prompt alone; a step takes the reference "
+                       "latents the VAE route encodes") as e:
+        _on_worker(lambda: steps.encode(served, "a", [img]))
+    assert e.value.status == 400 and seen == []
+    _on_worker(lambda: steps.encode(served, "a", []))
+    assert seen == [()]
+
+
 def test_wire_slots_are_comfyuis_and_map_onto_the_core_layout():
     xs = np.arange(5 * 2, dtype=np.float32).reshape(5, 2) + 1
     shapes = [(2, 4), (4, 4)]          # 2 and 4 slot rows

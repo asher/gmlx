@@ -535,6 +535,8 @@ class ImageRequest:
     images: list = field(default_factory=list)     # uint8 (H, W, 3 or 4)
     mask: Any = None                               # uint8 (H, W, 4)
     ignored: set = field(default_factory=set)
+    # The references of a family that prepares them together, with crop.
+    refs: Any = None
 
 
 def default_model_field(model) -> str:
@@ -948,8 +950,9 @@ def _stride(pipe) -> int:
 
 
 def target_size(req: ImageRequest, served: ServedImage) -> tuple:
-    """(width, height) of the request: its size, else the first image's
-    for an edit or a variation, else the entry's default."""
+    """(width, height) of the request: its size, else the size the family
+    gives its prepared references, else the first image's for an edit or
+    a variation, else the entry's default."""
     pipe = served.pipe
     unit = _stride(pipe)
     if req.size is not None:
@@ -958,6 +961,8 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
             raise _bad(f"size {w}x{h}: width and height must be multiples "
                        f"of {unit}", "size")
         return w, h
+    if req.refs and req.mask is None and pipe.family.edit.size is not None:
+        return tuple(pipe.family.edit.size(req.refs))
     if req.images:
         h, w = req.images[0].shape[:2]
         # A large image gives the largest size of its shape in the limits.
@@ -975,19 +980,25 @@ def _guided(req: ImageRequest, served: ServedImage) -> float:
     return float(served.plan.cfg)
 
 
-def serves_edits(fam) -> bool:
-    """Whether the server takes the reference images of ``fam``: a family
-    whose references are prepared one at a time, each at its own area. A
-    family that prepares the references of a request together edits
-    through ``gmlx image generate`` alone."""
-    return fam.edit is not None and fam.edit.prepare is not None
+def serves_edits(fam, tower: bool) -> bool:
+    """Whether the edits routes take the reference images of ``fam`` on an
+    entry with its vision tower, or without it when ``tower`` is false. A
+    family whose encoder reads the prompt alone needs no tower."""
+    return fam.edit is not None and (tower or fam.edit.text_only)
+
+
+def _tower(pipe, refs) -> bool:
+    """Whether the encoder of a request with ``refs`` loads its tower."""
+    return bool(refs) and not pipe.family.edit.text_only
 
 
 def check_family(req: ImageRequest, served: ServedImage) -> None:
     """Refuse what the family cannot do: transparency without an alpha
     VAE, a step count other than the one a variant with a fixed schedule
-    runs, more images than an edit takes, edits the server does not take,
-    and edits without a vision tower."""
+    runs, more images than an edit takes, and edits without a vision
+    tower. The references of a family that prepares them together are
+    prepared here into ``req.refs``, and an image its rules refuse gets
+    a 400 that names it."""
     from gmlx.image.api import fixed_steps
 
     pipe = served.pipe
@@ -1013,16 +1024,23 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
             raise _bad(f"{fam.title} edits one image at a time, and the "
                        f"request has {len(req.images)}", "image")
         return
-    if not serves_edits(fam):
-        raise _bad(f"the server takes no {fam.title} reference images; "
-                   "gmlx image generate --ref runs them", "image")
     cap = min(edit.max_refs, MAX_REFS)
     if len(req.images) > cap:
         raise _bad(f"{fam.title} takes at most {cap} images, and the request "
                    f"has {len(req.images)}", "image")
-    if served.spec.encoder_model is None and not served.spec.encoder_mmproj:
+    tower = (served.spec.encoder_model is not None
+             or bool(served.spec.encoder_mmproj))
+    if not serves_edits(fam, tower):
         raise _bad(f"edits on {served.spec.id!r} need the encoder's vision "
                    "tower: set encoder_mmproj on the image model", "image")
+    if edit.prepare_all is not None:
+        try:
+            req.refs = edit.prepare_all([i[..., :3] for i in req.images])
+        except ValueError as e:
+            i = getattr(e, "index", None)
+            where = "image" if i is None or len(req.images) == 1 else (
+                f"image {i + 1}")
+            raise _bad(f"{where}: {e}", "image") from None
 
 
 def _fit_args(pipe, served: ServedImage, budget, cfg: float,
@@ -1063,9 +1081,13 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 
     pipe = served.pipe
     cfg = _guided(req, served)
-    refs = [] if pipe.family.edit is None else [
-        r.shape[:2] for r in req.images]
-    args = _fit_args(pipe, served, budget, cfg, tower=bool(refs))
+    if pipe.family.edit is None:
+        refs = []
+    elif req.refs is not None:
+        refs = [(r.height, r.width) for r in req.refs]
+    else:
+        refs = [r.shape[:2] for r in req.images]
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs))
     plan_memory = memfit.plan_memory
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
@@ -1200,7 +1222,7 @@ def _staged_encode(served: ServedImage, run, prompts: list, refs):
         return run()
     _drop_dit(served)
     try:
-        _ensure_encoder(served, tower=bool(refs))
+        _ensure_encoder(served, tower=_tower(pipe, refs))
         try:
             return run()
         finally:
@@ -1344,12 +1366,17 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
 
     prompt = req.prompt
     refs: tuple = ()
-    init = mask = None
+    init = mask = crop = None
     strength = None
     if req.route != "generations":
         first = req.images[0]
         if fam.edit is not None:
-            refs = api.references(pipe, [i[..., :3] for i in req.images])
+            refs = api.references(pipe, req.refs or [
+                i[..., :3] for i in req.images])
+            # The output of a padded reference is cropped back to its box
+            # when the request takes its size from the reference.
+            if req.size is None and req.mask is None:
+                crop = getattr(req.refs, "crop", None)
             if req.route == "variations" and not prompt:
                 prompt = VARIATION_PROMPT
         if fam.edit is None or req.mask is not None:
@@ -1419,6 +1446,9 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
                                                       255, np.uint8)], -1))
             m = mask[..., None]
             pixels = np.round(m * pixels + (1 - m) * keep).astype(np.uint8)
+        if crop is not None:
+            left, top, right, bottom = crop
+            pixels = np.ascontiguousarray(pixels[top:bottom, left:right])
         return pixels
 
     for s in seeds:
@@ -1470,7 +1500,9 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
              "total_tokens": text_tokens + image_tokens + tokens * req.n}
     _log.info("image job: %d image(s) %dx%d, %d steps, encode %.2fs",
               req.n, width, height, run_steps, encode_s)
-    return ImageJobResult(images=out, size=(width, height),
+    shown = (width, height) if crop is None else (crop[2] - crop[0],
+                                                  crop[3] - crop[1])
+    return ImageJobResult(images=out, size=shown,
                           quality=req.quality, usage=usage, seeds=seeds,
                           steps=steps, run_steps=run_steps, image_s=image_s,
                           step_s=step_s)
