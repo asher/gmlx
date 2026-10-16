@@ -38,7 +38,7 @@ from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
 
 # A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
+pytestmark = pytest.mark.host_gb(16)
 
 NAMES = {"distilled": "check6_flux3_klein", "base": "check6_flux3_klein_base"}
 GATE_SIZE = 512
@@ -242,6 +242,7 @@ def test_the_schedule_and_times_are_the_reference_ones(variant, size):
     assert _bits(_bf16(got[:-1])) == _bits(arrays["times"])
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("variant", list(NAMES))
 def test_check6_latents_at_512(pipes, variant):
     m = _manifest(variant, GATE_SIZE)
@@ -255,6 +256,7 @@ def test_check6_latents_at_512(pipes, variant):
     assert not over, over
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("variant", list(NAMES))
 def test_check6_bf16_at_1024_stays_finite(pipes, variant):
     """The run as it ships at 1024, read against the 512 gates."""
@@ -313,6 +315,7 @@ EXACT_FAULTS = {
     "base": {"prompt as the unconditional row": (None, 5, True)}}
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("variant", list(NAMES))
 def test_check6_exact_at_1024(pipes, request, monkeypatch, variant):
     """The run in the oracle's fp32 arithmetic within EXACT_REL_L2 of its
@@ -354,6 +357,7 @@ def test_check6_exact_at_1024(pipes, request, monkeypatch, variant):
     assert not over, over
 
 
+@pytest.mark.integration
 def test_a_flow_map_to_its_own_time_fails_the_kept_steps(pipes,
                                                          monkeypatch):
     variant = "distilled"
@@ -367,6 +371,7 @@ def test_a_flow_map_to_its_own_time_fails_the_kept_steps(pipes,
     assert share and min(share.values()) > 1.0, share
 
 
+@pytest.mark.integration
 def test_base_without_its_unconditional_row_fails_the_kept_steps(pipes):
     variant = "base"
     m = _manifest(variant, GATE_SIZE)

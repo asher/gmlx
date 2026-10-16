@@ -42,7 +42,7 @@ from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
 
 # A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
+pytestmark = pytest.mark.host_gb(16)
 
 SYNTHETIC = "check7_flux3_klein_synthetic_512"
 SOURCE = "check3_flux3_klein_r1_512"
@@ -202,6 +202,7 @@ def _product(pipe, arrays, m, tid, label: str) -> dict:
     return got
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("spelling", list(SPELLINGS))
 def test_check7_adapter_step_rows_at_512(synthetic, pipe, tmp_path,
                                          spelling):
@@ -217,6 +218,7 @@ def test_check7_adapter_step_rows_at_512(synthetic, pipe, tmp_path,
     assert not out, out
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("wrong", ["base", "strength 0.8"])
 def test_check7_rows_see_the_adapter_and_its_strength(synthetic, pipe,
                                                       tmp_path, wrong):
@@ -236,6 +238,7 @@ def test_check7_rows_see_the_adapter_and_its_strength(synthetic, pipe,
     assert out
 
 
+@pytest.mark.integration
 def test_check7_velocity_of_the_request_path(synthetic, pipe, tmp_path):
     """api.denoise_step with the kernel routes at their default, after a
     step of the base model on the same conditioning, whose time vectors,
@@ -302,6 +305,7 @@ def wrong_tables(entries: list, strength: float) -> dict:
                 e for e in entries if e[0] not in _TIME]}
 
 
+@pytest.mark.integration
 def test_check7_exact_gate_at_512(synthetic, pipe, tmp_path, request):
     """Every measure within its exact gate under the right table, the
     free-row and velocity gates from the floors measured now, and each
