@@ -12,6 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 - `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
   output repeats it, which speeds up edits and quotes.
+- Muse Spark (GGUF arch `muse-spark`), with reasoning effort intents, tool calls
+  and image and audio input through its `--mmproj` companion.
 
 ### Changed
 

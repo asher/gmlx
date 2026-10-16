@@ -137,7 +137,7 @@ back.
 - Gemma 1 through 4, except the 3n variant, whose GGUFs are broken upstream
 - DeepSeek V3, R1, V4-Flash and V4.1-Flash
 - GLM 4 through 5.3, Kimi-K3, MiniMax M2 and M3, and gpt-oss
-- Hunyuan, Hy3, HY4 and Muse Glimmer
+- Hunyuan, Hy3, HY4, Muse Glimmer and Muse Spark
 - Granite, Nemotron-H and Falcon-H1
 
 Each family's output is checked against llama.cpp at 16k context. The
