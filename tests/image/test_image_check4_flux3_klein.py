@@ -51,17 +51,31 @@ def test_the_default_step_counts_are_the_reference_ones(check4):
 
 @pytest.mark.parametrize("steps", [16, 50])
 def test_the_values_the_samplers_read_are_the_reference_ones(check4, steps):
-    """The model rounds a time as time_embedding of its module does."""
-    from gmlx.image.families.flux3_klein.model import _bf16
+    """At every step the model's time embedding of the schedule's time is
+    the embedding of the reference's 1000 times the time, in bf16, and
+    the Euler step moves by the reference's dt. The time and the target
+    in bf16 are the reference's too."""
+    import mlx.core as mx
+
+    from gmlx.image import ops
+    from gmlx.image.families.flux3_klein import model as fm
+    from gmlx.image.samplers import Euler
 
     arrays, _ = check4
     sig = get_family("flux3_klein").schedule(steps, tokens=None)
-    t = _bf16(sig[:-1])
-    assert _bits(t) == _bits(arrays[f"t_bf16_{steps}"])
-    assert _bits(_bf16(np.float32(1000) * t)) == _bits(
-        arrays[f"t1000_{steps}"])
-    assert _bits(_bf16(sig[1:])) == _bits(arrays[f"target_bf16_{steps}"])
-    assert _bits(np.diff(sig)) == _bits(arrays[f"dt_{steps}"])
+    assert _bits(fm._bf16(sig[:-1])) == _bits(arrays[f"t_bf16_{steps}"])
+    assert _bits(fm._bf16(sig[1:])) == _bits(arrays[f"target_bf16_{steps}"])
+    t1000 = arrays[f"t1000_{steps}"]
+    euler = Euler(sig)
+    zero, one = mx.zeros((1,), mx.float32), mx.ones((1,), mx.float32)
+    dt = []
+    for i in range(steps):
+        got = fm.time_embedding(sig[i], 256)
+        want = ops.timestep_embedding(t1000[i:i + 1], 256)
+        want = want.astype(mx.bfloat16).astype(mx.float32)
+        assert mx.array_equal(got, want).item(), i
+        dt.append(np.array(euler.step(zero, one, i))[0])
+    assert _bits(dt) == _bits(arrays[f"dt_{steps}"])
 
 
 @pytest.mark.parametrize("variant", ["distilled", "base"])
