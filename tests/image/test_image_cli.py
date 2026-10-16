@@ -95,7 +95,8 @@ def env(tmp_path, monkeypatch):
         "d": SimpleNamespace(shape=(4,), codec="F32")})
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, **k: SimpleNamespace(family=fam, view=view,
-                                                  variant=state.variant))
+                                                  variant=state.variant,
+                                                  config={}))
     monkeypatch.setattr(image_preflight, "check",
                         lambda *a, **k: state.checks.append(k)
                         or state.checked)
@@ -474,7 +475,8 @@ def test_a_krea_2_file_of_unknown_weights_runs_under_a_variant_by_name(
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, variant=None: asked.append(variant) or
                         SimpleNamespace(family=k2, view=SimpleNamespace(
-                            tensors={}), variant=variant or "unknown"))
+                            tensors={}), variant=variant or "unknown",
+                            config={}))
     out = str(tmp_path / "a.png")
     args = ["--prompt", "p", "--size", "32x32", "--output", out]
     assert umbrella_main(env.base + args) == 1
@@ -489,6 +491,31 @@ def test_a_krea_2_file_of_unknown_weights_runs_under_a_variant_by_name(
     assert umbrella_main(["image", "generate", "k2", "--config", str(cfg)]
                          + args) == 0
     assert asked == [None, "turbo", "turbo"]
+
+
+@pytest.mark.parametrize("flags, text", [
+    (["--guidance", "3.5"], "samples without guidance: drop cfg 3.5"),
+    (["--sampler", "uni_pc_bh2"], "with euler only, not uni_pc_bh2")],
+    ids=["guidance", "sampler"])
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_a_flow_map_refuses_guidance_before_the_preflight_and_the_loads(
+        env, tmp_path, monkeypatch, capsys, flags, text, command):
+    """The header of a FLUX.3 klein distilled DiT says it is a flow map, so
+    guidance or another sampler is refused before the memory preflight
+    and before any file loads."""
+    flux = get_family("flux3_klein")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=flux, view=SimpleNamespace(tensors={}),
+                            variant="distilled", config={"flow_map": True}))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--size", "32x32", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:] + ["--sizes", "32x32"]
+    assert umbrella_main(args + flags) == 1
+    assert text in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
 
 
 @pytest.mark.parametrize("flags, code, text", [
@@ -1401,7 +1428,8 @@ def _edit_env(env, monkeypatch, tmp_path, parts):
     view = image_preflight.identify_dit("x").view
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, **k: SimpleNamespace(family=fam, view=view,
-                                                  variant=state.variant))
+                                                  variant=state.variant,
+                                                  config={}))
     monkeypatch.setattr(os, "environ", {
         k: v for k, v in os.environ.items() if k != "MLX_ENABLE_TF32"})
     rng = np.random.default_rng(0)
@@ -1550,7 +1578,7 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
     view = image_preflight.identify_dit("x").view
     monkeypatch.setattr(image_preflight, "identify_dit",
                         lambda p, **k: SimpleNamespace(family=plain, view=view,
-                                                  variant="turbo"))
+                                                  variant="turbo", config={}))
     assert umbrella_main(base + ref + mm) == 2
     assert "--ref: Z-Image takes no reference images" in \
         capsys.readouterr().err

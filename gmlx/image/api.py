@@ -98,6 +98,19 @@ def check_steps(family, variant: str, steps: int) -> None:
             f"distilled to, not {steps}")
 
 
+def check_sampling(family, variant: str, flow_map: bool, cfg: float,
+                   sampler: str = "euler") -> None:
+    """Refuse guidance and samplers a flow map DiT does not sample with.
+    ``flow_map`` is the flag of the DiT's config, which its header
+    gives."""
+    if flow_map and cfg != 1.0:
+        raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
+                         f"which samples without guidance: drop cfg {cfg}")
+    if flow_map and sampler != "euler":
+        raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
+                         f"which samples with euler only, not {sampler}")
+
+
 def _canonical_table(entries: tuple) -> str:
     return json.dumps(
         [{"module": m, "band": None if b is None else list(b),
@@ -1077,14 +1090,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     if cfg is None:
         cfg = pipe.defaults.cfg
     flow_map = bool(getattr(pipe.dit.cfg, "flow_map", False))
-    if flow_map and cfg != 1.0:
-        raise ValueError(f"the {pipe.family.title} {pipe.variant} DiT is a "
-                         f"flow map, which samples without guidance: drop "
-                         f"cfg {cfg}")
-    if flow_map and sampler != "euler":
-        raise ValueError(f"the {pipe.family.title} {pipe.variant} DiT is a "
-                         f"flow map, which samples with euler only, not "
-                         f"{sampler}")
+    check_sampling(pipe.family, pipe.variant, flow_map, cfg, sampler)
     if cfg != 1.0 and neg is None:
         raise ValueError(f"cfg {cfg} needs a negative conditioning")
     unit = pipe.size_multiple

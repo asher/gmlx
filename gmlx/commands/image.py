@@ -608,10 +608,13 @@ def _settings(a, ident, defaults):
             f"{a.model} matches no known {ident.family.title} variant; pass "
             f"--steps and --guidance")
     steps = a.steps if a.steps is not None else defaults.steps
-    from gmlx.image.api import check_steps
+    from gmlx.image.api import check_sampling, check_steps
 
     check_steps(ident.family, ident.variant, steps)
     cfg = a.guidance if a.guidance is not None else defaults.cfg
+    # Before any file loads.
+    check_sampling(ident.family, ident.variant,
+                   bool(ident.config.get("flow_map")), cfg, a.sampler)
     strength = None
     if a.init_image is not None:
         strength = a.strength
