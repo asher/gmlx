@@ -24,6 +24,20 @@ def test_family_names_match_on_letters_and_digits():
     assert not image_service.family_matches("z-image-base", z, "turbo")
 
 
+@pytest.mark.parametrize("value, name", [
+    ("flux-3-klein", "flux3_klein"), ("FLUX.3 klein base", "flux3_klein"),
+    ("qwen-image-2.1-turbo", "qwen_image21"), ("z-image-turbo", "z_image"),
+    ("krea-2", "krea2"), ("flux-4", None), ("z-image-2.1", None),
+])
+def test_a_family_value_names_the_family_the_server_matches(value, name):
+    """``family_named`` reads a config value as the server's check does,
+    under every variant a family runs."""
+    from gmlx.image.registry import family_named
+
+    fam = family_named(value)
+    assert (fam.name if fam else None) == name
+
+
 @pytest.mark.parametrize("size,want", [(None, (1024, 1024)),
                                        ("768x512", (768, 512))])
 def test_default_size_takes_the_entry_then_the_family(size, want):

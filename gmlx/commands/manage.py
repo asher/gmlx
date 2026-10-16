@@ -1947,19 +1947,21 @@ def _family_key(name: str) -> str:
 
 
 def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
-    """The ``gmlx list`` row of an image_models entry: its family (the
-    entry's, else its DiT's fingerprint), whether it edits, the chat model
-    it shares as its encoder, and the size of the files it loads."""
+    """The ``gmlx list`` row of an image_models entry: its family (its
+    DiT's fingerprint, as /v1/models reads it, else the family the entry
+    names), whether it edits, the chat model it shares as its encoder, and
+    the size of the files it loads."""
     family, title, edit, text_only = im.family, None, False, False
     path = _try_resolve(im.path, cfg.model_dirs)
     try:
         from gmlx.image import catalog
-        from gmlx.image.registry import get_family
-        if family is None and path:
-            got = catalog.dit_identity(path)
-            family = got[0] if got else None
-        if family:
-            fam = get_family(family)
+        from gmlx.image.registry import family_named, get_family
+        got = catalog.dit_identity(path) if path else None
+        # A configured family is matched on letters and digits, as the
+        # server matches it, so flux-3-klein names flux3_klein.
+        fam = get_family(got[0]) if got else (family_named(family)
+                                               if family else None)
+        if fam:
             family, title, edit = fam.name, fam.title, fam.edit is not None
             text_only = edit and fam.edit.text_only
     except (ValueError, OSError):

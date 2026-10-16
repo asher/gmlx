@@ -917,6 +917,57 @@ def test_list_edit_takes_flux3_klein_on_its_encoder_alone(images, capsys,
     assert {r["id"] for r in rows} == {"qi", "qt", "f3"}
 
 
+@pytest.mark.parametrize("spelling, family, variant, edit", [
+    ("flux-3-klein", "flux3_klein", "distilled", True),
+    ("FLUX.3 klein", "flux3_klein", "distilled", True),
+    ("flux3_klein", "flux3_klein", "distilled", True),
+    ("flux-3-klein-base", "flux3_klein", "base", True),
+    ("qwen-image-2.1", "qwen_image21", "base", True),
+    ("qwen-image-2.1-turbo", "qwen_image21", "turbo", True),
+    ("z-image-turbo", "z_image", "turbo", False),
+    ("Z-Image", "z_image", "turbo", False),
+])
+@pytest.mark.parametrize("identifies", [True, False],
+                         ids=["header", "no-header"])
+def test_list_reads_the_family_of_an_entry_as_the_server_does(
+        images, capsys, monkeypatch, spelling, family, variant, edit,
+        identifies):
+    """A configured family is matched on letters and digits, as the
+    server matches it, so every spelling the server takes lists the same
+    family and edit flag as /v1/models."""
+    from gmlx.image.registry import get_family
+
+    lib, cfg = images
+    (lib / "new.gguf").write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + f'  new:\n    path: new.gguf\n'
+                   f'    family: "{spelling}"\n    encoder: vl\n'
+                   "    vae: qvae.gguf\n")
+    fams = {"new.gguf": (family, variant)} if identifies else {}
+    monkeypatch.setattr(catalog, "dit_identity",
+                        lambda p: fams.get(os.path.basename(p)))
+    assert manage.cmd_list(["--config", str(cfg), "--json", "--edit"]) == 0
+    rows = json.loads(capsys.readouterr().out)["models"]
+    assert ("new" in {r["id"] for r in rows}) == edit
+    assert manage.cmd_list(["--config", str(cfg), "--json"]) == 0
+    row = next(r for r in json.loads(capsys.readouterr().out)["models"]
+               if r["id"] == "new")
+    assert (row["family"], row["family_title"], row["edit"]) == (
+        family, get_family(family).title, edit)
+
+
+def test_list_keeps_a_family_no_image_family_names(images, capsys):
+    lib, cfg = images
+    (lib / "new.gguf").write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + '  new:\n    path: new.gguf\n'
+                   '    family: "flux-4"\n    encoder: vl\n'
+                   "    vae: qvae.gguf\n")
+    assert manage.cmd_list(["--config", str(cfg), "--json"]) == 0
+    row = next(r for r in json.loads(capsys.readouterr().out)["models"]
+               if r["id"] == "new")
+    assert (row["family"], row["family_title"], row["edit"]) == (
+        "flux-4", None, False)
+
+
 @pytest.mark.parametrize("flags, ids", [
     (["--image"], {"zit", "qi", "qt"}),
     (["--family", "qwen-image-2.1"], {"qi", "qt"}),

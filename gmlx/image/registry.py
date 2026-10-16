@@ -211,5 +211,30 @@ def get_family(name: str) -> Family:
     raise ValueError(f"unknown image family {name!r}; known: {known}")
 
 
+def _alnum(text: str) -> str:
+    return "".join(c for c in str(text).lower() if c.isalnum())
+
+
+def names_family(name: str, family: Family, variant: str = "") -> bool:
+    """Whether a configured ``family`` value names this family: its name,
+    its title, or its name with the variant, compared on letters and
+    digits alone, so ``qwen-image-2.1``, ``flux-3-klein`` and
+    ``z-image-turbo`` match."""
+    want = _alnum(name)
+    return want in {_alnum(family.name), _alnum(family.title),
+                    _alnum(family.name + variant),
+                    _alnum(family.title + variant)}
+
+
+def family_named(name: str) -> Family | None:
+    """The family a configured ``family`` value names, as
+    ``names_family`` reads it with any variant the family runs, or None."""
+    for fam in families():
+        variants = ("", *fam.sampling, *fam.variant_names())
+        if any(names_family(name, fam, v) for v in variants):
+            return fam
+    return None
+
+
 def is_image_arch(arch: str | None) -> bool:
     return bool(arch) and any(arch in f.arch_strings for f in families())

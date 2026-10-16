@@ -68,18 +68,11 @@ class ServedImage:
     adapters: list = field(default_factory=list)
 
 
-def _alnum(text: str) -> str:
-    return "".join(c for c in str(text).lower() if c.isalnum())
-
-
 def family_matches(name: str, family, variant: str) -> bool:
-    """Whether a configured ``family`` value names this family: its name,
-    its title, or its name with the variant, compared on letters and
-    digits alone, so ``qwen-image-2.1`` and ``z-image-turbo`` match."""
-    want = _alnum(name)
-    return want in {_alnum(family.name), _alnum(family.title),
-                    _alnum(family.name + variant),
-                    _alnum(family.title + variant)}
+    """Whether a configured ``family`` value names this family, as
+    ``registry.names_family`` reads it."""
+    from gmlx.image.registry import names_family
+    return names_family(name, family, variant)
 
 
 def default_size(spec, defaults) -> tuple:
