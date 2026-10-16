@@ -22,7 +22,9 @@ templated prompt, as the pipeline forms them without its pads, and the
 fp32 and bf16 features. The manifest records the bf16 against fp32 gap of
 each prompt and sets the tolerances: relative L2 at twice that gap, and a
 per-token cosine floor of 1 - 4 (1 - c), c the oracle's own smallest
-per-token cosine of the prompt.
+per-token cosine of the prompt. The bf16 run casts the model to bf16 and
+keeps its rotary frequencies in fp32, as a model loaded in bf16 keeps
+them.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check2_krea2.py --encoder Qwen3-VL-4B-Instruct-Q8_0.gguf \\
@@ -179,7 +181,12 @@ def main(argv=None) -> int:
     runs = {}
     for mode in ("fp32", "bf16"):
         if mode == "bf16":
+            # A model loaded in bf16 keeps its rotary frequencies in fp32,
+            # which the cast rounds.
+            rot = te.model.language_model.rotary_emb
+            inv = rot.inv_freq.clone()
             te = te.to(torch.bfloat16)
+            rot.inv_freq = inv
             oracle.emulate_bf16_matmul(True)
         runs[mode] = {k: features(torch, te, tok, v)
                       for k, v in prompts.items()}
@@ -205,6 +212,8 @@ def main(argv=None) -> int:
     fx.inputs["rows"] = rows
     fx.results["seconds"] = secs
     fx.tolerances.update(rel_l2=rel, token_cosine_min=cos, rule=RULE)
+    fx.note("The bf16 model is the float32 one cast to bfloat16, with its "
+            "rotary frequencies left in float32.")
     print(f"[check2] wrote {fx.write()}", flush=True)
     return 0
 
