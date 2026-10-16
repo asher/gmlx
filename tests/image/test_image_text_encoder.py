@@ -561,6 +561,50 @@ def test_the_flux3_spec_pads_as_the_reference_does():
     assert spec.template_id != krea.template_id
 
 
+_FLUX2_TEMPLATE = "flux2_klein_chat_template.jinja"
+
+
+@pytest.mark.parametrize("prompt", _PROMPTS)
+def test_the_flux2_template_is_the_official_render_with_thinking_off(prompt):
+    """FLUX.2 klein's reference renders the Qwen3 chat template of the
+    official tokenizer on one user turn with the generation prompt and
+    enable_thinking False. That template is Z-Image's, byte for byte."""
+    from jinja2.ext import loopcontrols
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    text = (FIXTURES / _FLUX2_TEMPLATE).read_text()
+    assert text == (FIXTURES / _TEMPLATE).read_text()
+    env = ImmutableSandboxedEnvironment(
+        trim_blocks=True, lstrip_blocks=True, extensions=[loopcontrols])
+    want = env.from_string(text).render(
+        messages=[{"role": "user", "content": prompt}],
+        add_generation_prompt=True, enable_thinking=False)
+    assert te.render(te.encoder_spec("flux2_klein"), prompt) == want
+    row = load_json("manifest.json")[_FLUX2_TEMPLATE]
+    assert row["repo"] == "black-forest-labs/FLUX.2-klein-4B"
+    assert len(row["revision"]) == 40
+
+
+def test_the_flux2_spec_pads_as_the_reference_does():
+    from gmlx.image.families.flux2_klein import family as ff
+
+    spec = te.encoder_spec("flux2_klein")
+    assert (spec.arch, spec.model_type, spec.hidden, spec.layers) == (
+        "qwen3", "qwen3", 2560, 36)
+    assert spec.tap_layers == (9, 18, 27) and spec.stack
+    # Every prompt fills 512 rows, its own and the pads.
+    assert spec.pad_multiple == spec.max_tokens == 512
+    assert (spec.pad_id, spec.pad_position) == (151643, None)
+    assert spec.drop == 0 and spec.activation == "float32"
+    assert spec.identity_source == ff.ENCODER_IDENTITY_SOURCE
+    assert [te.pad_rows(spec, n) for n in (1, 33, 511, 512)] == [
+        511, 479, 1, 0]
+    assert te.rows_at_most(spec, "a cat") == 512
+    # The same encoder weights as Z-Image's, in another template.
+    assert spec.identity == te.Z_IMAGE.identity
+    assert spec.template_id != te.Z_IMAGE.template_id
+
+
 def test_pad_rows_reach_the_next_multiple_under_the_cap():
     spec = _spec(pad_multiple=8, pad_id=0)
     assert [te.pad_rows(spec, n) for n in (1, 3, 8, 9, 15, 16)] == [
@@ -576,11 +620,17 @@ def test_pad_rows_reach_the_next_multiple_under_the_cap():
     ids = {s.template_id for s in (
         _spec(), spec, dataclasses.replace(spec, pad_multiple=4),
         dataclasses.replace(spec, pad_id=1),
-        dataclasses.replace(spec, pad_position=0))}
-    assert len(ids) == 5
-    # A spec with no pads keeps the key it had before pads existed.
+        dataclasses.replace(spec, pad_position=0),
+        dataclasses.replace(spec, pad_position=None))}
+    assert len(ids) == 6
+    # A spec with no pads keeps the key it had before pads existed, and a
+    # spec with pads at one position the key it had before pads at their
+    # own indices existed.
     assert _spec().template_id == dataclasses.replace(
         _spec(), pad_id=0, pad_position=3).template_id
+    flux3 = te.encoder_spec("flux3_klein")
+    assert flux3.template_id == hashlib.sha256(
+        (flux3.template + "\x00stack\x00pad=80,151643,1").encode()).hexdigest()
 
 
 @pytest.mark.parametrize("family", ["z_image", "krea2", "qwen_image21",
@@ -691,6 +741,57 @@ def test_pad_rows_are_the_reference_forward_of_the_padded_prompt():
         assert not _close(g, w, tol=1e-2)
 
 
+def test_pad_rows_at_their_own_indices_are_the_reference_forward(
+        monkeypatch):
+    """With no pad position each pad row runs at its own index, reading
+    the real keys alone, as FLUX.2 klein's reference runs them. The pad
+    rows then differ, and pads at one position or read as causal tokens
+    are another forward."""
+    m, _ = _tiny_qwen3()
+    ids, pad, pad_id = [3, 17, 42, 5, 99, 1, 64], 5, 9
+    n = len(ids)
+    seq = ids + [pad_id] * pad
+    allowed = np.tril(np.ones((n + pad, n + pad), bool))
+    allowed[:, n:] = False
+    layers = (1, 4)
+    want = _np_forward(m, seq, range(n + pad), allowed, layers)
+    got = _cpu_tap(m, ids, layers=layers, pad=pad, pad_id=pad_id,
+                   pad_position=None)
+    for g, w in zip(got, want):
+        assert g.shape == (1, n + pad, 64)
+        assert _close(g, w)
+        spread = np.linalg.norm(w[n + 1:] - w[n], axis=1) / np.linalg.norm(
+            w[n])
+        assert spread.min() > 1e-3
+    for wrong in (_np_forward(m, seq, list(range(n)) + [n] * pad, allowed,
+                              (4,)),
+                  _np_forward(m, seq, range(n + pad),
+                              np.tril(np.ones((n + pad, n + pad), bool)),
+                              (4,))):
+        assert not _close(got[1], wrong[0], tol=1e-2)
+    # The real rows are the plain tap's, and one token runs with its pads.
+    (plain,) = _cpu_tap(m, ids, layers=(4,))
+    real = np.array(got[1][0, :n], np.float64)
+    ref = np.array(plain[0], np.float64)
+    assert np.linalg.norm(real - ref) / np.linalg.norm(ref) < 1e-5
+    (one,) = _cpu_tap(m, [7], layers=(2,), pad=2, pad_id=9,
+                      pad_position=None)
+    want = _np_forward(m, [7, 9, 9], [0, 1, 2],
+                       np.array([[1, 0, 0], [1, 0, 0], [1, 0, 0]], bool),
+                       (2,))[0]
+    assert _close(one, want)
+    with pytest.raises(ValueError, match="pad id"):
+        _cpu_tap(m, ids, layers=(3,), pad=2, pad_position=None)
+    # No rope is swapped for pads at their own indices.
+    def swapped(*_a, **_k):
+        raise AssertionError("pad_rope ran")
+
+    monkeypatch.setattr(te, "pad_rope", swapped)
+    te.tap(m, [3, 17], layers=(1,), pad=2, pad_id=9, pad_position=None)
+    with pytest.raises(AssertionError, match="pad_rope ran"):
+        te.tap(m, [3, 17], layers=(1,), pad=2, pad_id=9)
+
+
 def test_the_real_rows_of_a_padded_tap_are_the_tap_of_the_prompt():
     m, _ = _tiny_qwen3()
     ids = [3, 17, 42, 5]
@@ -763,3 +864,11 @@ def test_an_encoding_keeps_its_pad_rows():
                                            max_tokens=24),
                              owned=False).encode("ab")
     assert plain.pads == 0 and plain.features.shape == (n, 2 * 64)
+    # Pads at their own indices reach the tap with the spec's rule.
+    each = dataclasses.replace(spec, pad_position=None)
+    got = te.EncoderHandle(m, tok, each, owned=False).encode("ab")
+    want = te.tap(m, list(got.ids), layers=(1, 3), pad=got.pads, pad_id=9,
+                  pad_position=None)
+    assert got.pads == 16 - n and got.template_id == each.template_id
+    assert mx.array_equal(got.features,
+                          mx.concatenate([w[0] for w in want], -1)).item()

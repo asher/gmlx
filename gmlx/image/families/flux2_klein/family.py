@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
 # Ported from BFL's FLUX.2 reference at commit 50fe516: the constants of
 # Klein4BParams, Klein9BParams and Flux2Params in src/flux2/model.py and
-# the defaults of FLUX2_MODEL_INFO in src/flux2/util.py, and the tensor
-# names and shapes of Flux2 in src/flux2/model.py, and modified for gmlx
+# the defaults of FLUX2_MODEL_INFO in src/flux2/util.py, the tensor names
+# and shapes of Flux2 in src/flux2/model.py and the prompt rules of
+# Qwen3Embedder in src/flux2/text_encoder.py, and modified for gmlx
 # (Apache-2.0; see licenses/flux2-LICENSE).
 """FLUX.2 klein fingerprint, constants, config synthesis and the hooks of
 its registry row.
@@ -96,6 +97,65 @@ VARIANTS = {
     "2a60e24acf60f890172dfdf3a887d7f9dc51675c515a566126bb24ddab3d2fce":
         _BASE_4B,
 }
+
+
+# The encoder of Qwen3Embedder in src/flux2/text_encoder.py: Qwen3-4B, the
+# hidden states of three layers stacked per token, the prompt in the chat
+# template of one user turn with thinking off, right-padded with the pad
+# token to 512 rows and cut there, and the pad rows kept. The reference
+# masks the pads as keys and gives each row its index as its position.
+PROMPT = ConstantsRow(
+    values={
+        # What the Qwen3 chat template renders for one user turn with the
+        # generation prompt and enable_thinking False.
+        "template": ("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+                     "<think>\n\n</think>\n\n"),
+        # hidden_states indices of the encoder, 0 being the embeddings.
+        "tap_layers": (9, 18, 27),
+        "max_tokens": 512,
+        # The tokenizer's pad token <|endoftext|>.
+        "pad_id": 151643,
+    },
+    repo="github.com/black-forest-labs/flux2",
+    revision="50fe5162777813d869182b139e83b10743caef15",
+)
+
+# The Qwen3-4B Q8_0 GGUF of unsloth/Qwen3-4B-GGUF, which Z-Image reads too,
+# holds the weights of the 4B text_encoder of the official repository: its
+# F32 norms equal the bf16 tensors there bit for bit, and the Q8_0 blocks
+# of the matrices compared equal those bf16 matrices quantized to Q8_0. So
+# the identity rows are Z-Image's.
+ENCODER_IDENTITY_SOURCE = (
+    "black-forest-labs/FLUX.2-klein-4B text_encoder at "
+    "e7b7dc27f91deacad38e78976d1f2b499d76a294")
+
+
+def encoder():
+    """The text encoder of the 4B checkpoints: Qwen3-4B after three of its
+    layers and before its final norm, on the chat template of one user
+    turn with thinking off. The three states of a token are its features
+    side by side, layer by layer, and the 512 rows hold the pad rows the
+    reference keeps, each at its own position. The tap runs in float32."""
+    from gmlx.image.text_encoder import Z_IMAGE, EncoderSpec
+
+    p = PROMPT.values
+    return EncoderSpec(
+        name="qwen3-4b",
+        arch="qwen3",
+        model_type="qwen3",
+        hidden=2560,
+        layers=36,
+        tap_layers=tuple(p["tap_layers"]),
+        template=p["template"],
+        max_tokens=p["max_tokens"],
+        stack=True,
+        identity=Z_IMAGE.identity,
+        identity_source=ENCODER_IDENTITY_SOURCE,
+        activation="float32",
+        pad_multiple=p["max_tokens"],
+        pad_id=p["pad_id"],
+        pad_position=None,
+    )
 
 
 def size_of(view: HeaderView) -> str | None:
@@ -263,6 +323,7 @@ FAMILY = Family(
     # The q and k norm scales, F32 in the file, stay fp32: the norm then
     # runs in fp32 and rounds once with the rotation.
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),
+    encoder=encoder,
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     sampling=SAMPLING,

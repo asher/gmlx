@@ -141,6 +141,13 @@
     "size": 531,
     "sha256": "c8a88c1433f24e52c01f46766c9f519e76d91d1c00bfb43fe0db2e4ed3c84d70"
   },
+  "flux2_klein_chat_template.jinja": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "tokenizer/chat_template.jinja",
+    "size": 4168,
+    "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+  },
   "flux3_klein_config.json": {
     "repo": "black-forest-labs/flux-3-image-klein",
     "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",

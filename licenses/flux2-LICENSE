@@ -7,8 +7,9 @@ source.
 
 - gmlx/image/families/flux2_klein/family.py: the constants of
   Klein4BParams, Klein9BParams and Flux2Params in src/flux2/model.py, the
-  defaults of FLUX2_MODEL_INFO in src/flux2/util.py, and the tensor names
-  and shapes of Flux2 in src/flux2/model.py.
+  defaults of FLUX2_MODEL_INFO in src/flux2/util.py, the tensor names and
+  shapes of Flux2 in src/flux2/model.py, and the prompt rules of
+  Qwen3Embedder in src/flux2/text_encoder.py.
 - gmlx/image/families/flux2_klein/model.py: the Flux2 forward,
   DoubleStreamBlock, SingleStreamBlock, SelfAttention, SiLUActivation,
   Modulation, LastLayer, MLPEmbedder, QKNorm, timestep_embedding and rope

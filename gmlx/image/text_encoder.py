@@ -17,10 +17,13 @@ the conditioning, after they ran: the rows it keeps attended to them.
 
 A family whose reference keeps the rows of right padding in the
 conditioning names its pad token, the multiple the rows are padded to
-and the position each pad row takes. In the reference each pad row
-attends to every real token and to no pad row, itself included, so
-every pad row of a layer holds the same values. The tap runs one pad row
-after the real tokens, with that mask and its position, and repeats it.
+and the rotary position of the pad rows: one position for all of them,
+or for each its own index after the real tokens. In the reference each
+pad row attends to every real token and to no pad row, itself included.
+Pad rows at one position then hold the same values in every layer, so
+the tap runs one pad row after the real tokens, with that mask and that
+position, and repeats it. Pad rows at their own indices differ, and the
+tap runs each of them with that mask.
 
 A family that conditions on reference images loads the encoder with its
 vision tower, from the encoder GGUF and its mmproj, as the multimodal
@@ -87,7 +90,8 @@ class EncoderSpec:
     pad_multiple: int = 0            # rows padded to a multiple of this,
                                      # at most max_tokens; 0 for no pads
     pad_id: int | None = None        # token id of the pad rows
-    pad_position: int = 1            # rotary position of every pad row
+    pad_position: int | None = 1     # rotary position of every pad row,
+                                     # None for each at its own index
 
     @property
     def template_id(self) -> str:
@@ -101,8 +105,9 @@ class EncoderSpec:
         if self.stack:
             text += "\x00stack"
         if self.pad_multiple:
-            text += (f"\x00pad={self.pad_multiple},{self.pad_id},"
-                     f"{self.pad_position}")
+            where = ("each" if self.pad_position is None
+                     else self.pad_position)
+            text += f"\x00pad={self.pad_multiple},{self.pad_id},{where}"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -235,7 +240,7 @@ def _text_stack(model):
 
 def tap(model, ids, *, layers: tuple, activation: str | None = None,
         pad: int = 0, pad_id: int | None = None,
-        pad_position: int = 1) -> list[mx.array]:
+        pad_position: int | None = 1) -> list[mx.array]:
     """Hidden states after running the first ``n`` decoder layers, for each
     ``n`` in ``layers``, with no final norm. ``ids`` is one prompt's token
     ids. Each result is (1, L, hidden) in the model's activation dtype, and
@@ -243,26 +248,31 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
     are cast to that dtype, and the layers run in it by promotion over the
     weights as loaded.
 
-    With ``pad`` the result has ``pad`` more rows: one row of token
-    ``pad_id`` at rotary position ``pad_position`` that attends to every
-    real token and not to itself, repeated."""
+    With ``pad`` the result has ``pad`` more rows of token ``pad_id``, each
+    attending to every real token and to no pad row. At a ``pad_position``
+    they are one row at that rotary position, repeated. With
+    ``pad_position`` None each runs at its own index after the real
+    tokens."""
     embed, blocks = _text_stack(model)
     stops = sorted(set(layers))
     if not stops or stops[0] < 1 or stops[-1] > len(blocks):
         raise ValueError(f"tap layers {layers} outside 1..{len(blocks)}")
-    n = len(ids)
-    seq = list(ids) + ([pad_id] if pad else [])
     if pad and pad_id is None:
         raise ValueError("pad rows need a pad id")
+    n = len(ids)
+    each = bool(pad) and pad_position is None
+    rows = pad if each else min(pad, 1)
+    seq = list(ids) + [pad_id] * rows
     x = mx.array(np.asarray(seq, np.int32).reshape(1, -1))
     h = embed(x)
     if activation is not None:
         h = h.astype(getattr(mx, activation))
     if pad:
-        allowed = np.tril(np.ones((n + 1, n + 1), bool))
-        allowed[n, n] = False
+        allowed = np.tril(np.ones((n + rows, n + rows), bool))
+        allowed[:, n:] = False
         mask = mx.array(allowed)
-        place = pad_rope(model, n, pad_position)
+        place = (contextlib.nullcontext() if each
+                 else pad_rope(model, n, pad_position))
     else:
         mask = "causal" if n > 1 else None
         place = contextlib.nullcontext()
@@ -272,7 +282,7 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
             h = blocks[i](h, mask, None)
             if i + 1 in stops:
                 out[i + 1] = h
-    if pad:
+    if pad and not each:
         for k, v in out.items():
             row = mx.broadcast_to(v[:, n:], (1, pad, v.shape[-1]))
             out[k] = mx.concatenate([v[:, :n], row], axis=1)
