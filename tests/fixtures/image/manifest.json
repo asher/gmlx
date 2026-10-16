@@ -18,6 +18,14 @@
     "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
     "file": "transformer/config.json"
   },
+  "flux3_klein_diffusers_names.json": {
+    "repo": "black-forest-labs/flux-3-image-klein",
+    "revision": "1755314e2216b2a2c5cc0dd899d4e49ee3404d2c",
+    "file": "transformer/diffusion_pytorch_model.safetensors.index.json",
+    "size": 37951,
+    "sha256": "cc3ba9b73dc3f10ff877dea398c1d48455a4b2164da5cbb7d92b4bb4b66040cc",
+    "sha256_source": "The file the fixture's names come from; the fixture keeps the sorted keys of its weight_map."
+  },
   "qwen_image21_transformer_config.json": {
     "repo": "Qwen/Qwen-Image-2.1",
     "revision": "790c92633540aa0cb11d9abf19eb46d861714758",

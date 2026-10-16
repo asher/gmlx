@@ -178,7 +178,11 @@ class LoraKeyMap:
     ``text_encoders.``, and ``text_targets`` the encoder's module paths.
     ``absent`` maps a target name that the family has in another layout
     of its DiT file, and not in this one, to what the name is and what
-    this file has in its place, which ends the refusal of such a key."""
+    this file has in its place, which ends the refusal of such a key.
+    ``swapped`` names the targets of a layout whose weight holds the two
+    halves of the module's output rows in the other order, as a diffusers
+    final norm puts the scale rows before the shift rows. The halves of
+    the up rows of a pair on such a target are swapped back."""
     family: str
     title: str
     targets: Mapping
@@ -186,6 +190,7 @@ class LoraKeyMap:
     text_names: tuple = ()
     text_targets: tuple = ()
     absent: Mapping = field(default_factory=dict)
+    swapped: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -767,6 +772,18 @@ def is_text_stem(stem: str) -> bool:
     return stem.startswith(TEXT_DOTTED + TEXT_UNDERSCORE)
 
 
+def _halves_swapped(pair: RawPair) -> RawPair:
+    """The pair with the two halves of its up rows in the other order. An
+    odd count of rows is left as it is, for the shape check of the load
+    to refuse."""
+    n = int(pair.up.shape[0])
+    if n % 2:
+        return pair
+    h = n // 2
+    return replace(pair, up=mx.concatenate([pair.up[h:], pair.up[:h]],
+                                           axis=0))
+
+
 def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             allow_unmatched: bool = False) -> ResolvedLora:
     """Place every pair of ``raw`` on a module of the family, or on a
@@ -801,6 +818,8 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
         module, band = keymap.targets[name]
         pair, moved = _under_header(raw.path, configs, DIT_COMPONENT, name,
                                     pair)
+        if name in keymap.swapped:
+            pair = _halves_swapped(pair)
         dit.append(Target(module, band, pair))
         scaled += [stem] * moved
         if underscored and name in keymap.diffusers_only \

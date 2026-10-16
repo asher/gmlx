@@ -290,6 +290,12 @@ def build(config: dict):
     return Flux3KleinDiT(config)
 
 
+def lora_map(config: dict):
+    from .lora_map import lora_map as build_map
+
+    return build_map(config)
+
+
 def encoder():
     """The text encoder of the family: Qwen3-VL-4B read as a text model,
     after eight of its layers and before its final norm, on the chat
@@ -374,6 +380,7 @@ FAMILY = Family(
     encoder=encoder,
     schedule=schedule,
     sampling=SAMPLING,
+    lora_map=lora_map,
     loop=LOOP,
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],
                    prepare_all=_prepare_all, size=_size),
