@@ -164,6 +164,11 @@ def test_quality_steps_come_from_the_family_table():
 GB = 1024**3
 
 
+def _ident(family, variant, **config):
+    """What identify_dit returns, with the config flags a test gives."""
+    return SimpleNamespace(family=family, variant=variant, config=config)
+
+
 def _spec(**kw):
     base = dict(id="zit", path="/dit.gguf", family=None, variant=None,
                 defaults={},
@@ -185,8 +190,7 @@ def plan_stubs(monkeypatch):
     fam = get_family("z_image")
     state = SimpleNamespace(budget=100 * GB, checked=[], planned=[])
     monkeypatch.setattr(loader, "identify_dit",
-                        lambda path, **k: SimpleNamespace(family=fam,
-                                                     variant="turbo"))
+                        lambda path, **k: _ident(fam, "turbo"))
     monkeypatch.setattr(api, "sampler_defaults",
                         lambda *a: SimpleNamespace(size=(1024, 1024), cfg=1.0))
     monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 1)
@@ -217,8 +221,8 @@ def test_an_entry_of_unknown_krea_2_weights_needs_its_variant(
 
     asked = []
     monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
-        asked.append(variant) or SimpleNamespace(
-            family=get_family("krea2"), variant=variant or "unknown")))
+        asked.append(variant) or _ident(get_family("krea2"),
+                                        variant or "unknown")))
     with pytest.raises(ImageModelError,
                        match="image model 'k2': .*--variant turbo"):
         image_service.entry_plan(_spec(id="k2"))
@@ -314,15 +318,15 @@ def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
     from gmlx.image.registry import get_family
 
     q = get_family("qwen_image21")
-    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
-        family=q, variant="turbo"))
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, **k: _ident(q, "turbo"))
     plan = image_service.entry_plan(_spec(defaults={"steps": 8}))
     assert plan.variant == "turbo"
     with pytest.raises(ImageModelError, match="defaults.steps: Qwen-Image "
                        "2.1 turbo runs 8 steps"):
         image_service.entry_plan(_spec(defaults={"steps": 20}))
-    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
-        family=q, variant="unknown"))
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, **k: _ident(q, "unknown"))
     assert image_service.entry_plan(_spec(defaults={"steps": 20}))
 
 
@@ -420,15 +424,40 @@ def test_a_distilled_flux2_entry_refuses_a_guidance_default(plan_stubs,
     fam = get_family("flux2_klein")
     for variant in ("distilled", "base"):
         monkeypatch.setattr(loader, "identify_dit", lambda path, _v=variant,
-                            **k: SimpleNamespace(family=fam, variant=_v))
+                            **k: _ident(fam, _v))
         assert image_service.entry_plan(_spec(defaults={"guidance": 1.0}))
     assert image_service.entry_plan(_spec(defaults={"guidance": 4.0}))
-    monkeypatch.setattr(loader, "identify_dit", lambda path, **k:
-                        SimpleNamespace(family=fam, variant="distilled"))
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, **k: _ident(fam, "distilled"))
     with pytest.raises(ImageModelError, match="defaults.guidance: the FLUX.2 "
                        "klein distilled DiT samples without guidance: drop "
                        "guidance 4, or run the FLUX.2 klein base checkpoint"):
         image_service.entry_plan(_spec(defaults={"guidance": 4.0}))
+
+
+@pytest.mark.parametrize("defaults,name", [
+    ({"guidance": 3.5}, "guidance"), ({"sampler": "uni_pc_bh2"}, "sampler")])
+def test_a_flow_map_entry_refuses_a_guidance_or_sampler_default(
+        plan_stubs, monkeypatch, defaults, name):
+    """A FLUX.3 klein flow map entry with a default it cannot sample with
+    is refused at load, as a distilled FLUX.2 klein guidance default is."""
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    fam = get_family("flux3_klein")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        fam, "distilled", flow_map=True))
+    with pytest.raises(ImageModelError, match=(
+            f"image model 'zit': defaults.{name}: the FLUX.3 klein distilled "
+            "DiT is a flow map")):
+        image_service.entry_plan(_spec(defaults=defaults))
+    assert image_service.entry_plan(_spec(defaults={"guidance": 1.0,
+                                                    "sampler": "euler"}))
+    # Base is no flow map: it takes both defaults.
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        fam, "base", flow_map=False))
+    assert image_service.entry_plan(_spec(defaults=defaults))
 
 
 def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
@@ -759,7 +788,7 @@ def test_a_failed_vae_load_releases_the_encoder_it_loaded(monkeypatch):
     from gmlx.image.registry import get_family
 
     fam = get_family("z_image")
-    ident = SimpleNamespace(family=fam, variant="turbo")
+    ident = _ident(fam, "turbo")
     enc = _Encoder()
     monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 0)
     monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: ident)

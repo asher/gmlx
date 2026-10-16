@@ -163,7 +163,7 @@ def entry_plan(spec) -> EntryPlan:
     model, a family the config does not name, and an entry that cannot
     hold one image of its default size in the working budget."""
     from gmlx.image import memfit
-    from gmlx.image.api import (_header_bytes, check_guidance, check_steps,
+    from gmlx.image.api import (_header_bytes, check_sampling, check_steps,
                                 sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
@@ -197,11 +197,15 @@ def entry_plan(spec) -> EntryPlan:
     cfg = (spec.defaults or {}).get("guidance")
     if cfg is None:
         cfg = defaults.cfg if defaults is not None else 1.0
-    try:
-        check_guidance(fam, ident.variant, float(cfg))
-    except ValueError as e:
-        raise ImageModelError(
-            f"image model {spec.id!r}: defaults.guidance: {e}") from None
+    flow_map = bool(ident.config.get("flow_map"))
+    sampler = (spec.defaults or {}).get("sampler") or "euler"
+    for name, args in (("guidance", (float(cfg),)),
+                       ("sampler", (1.0, sampler))):
+        try:
+            check_sampling(fam, ident.variant, flow_map, *args)
+        except ValueError as e:
+            raise ImageModelError(
+                f"image model {spec.id!r}: defaults.{name}: {e}") from None
     act = image_activation(fam.name)
     tensor_cache, adapter_cache = cache_bytes()
     own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
