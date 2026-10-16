@@ -318,6 +318,48 @@ def test_top_k_is_read_from_the_block():
     assert seen == [1]
 
 
+def test_sliding_layers_get_a_rotating_cache():
+    from gmlx.cache.kv_cache import KVCache, RotatingKVCache
+
+    args = _tiny_args()
+    caches = Model(args).make_cache()
+    for kind, c in zip(_LAYER_TYPES, caches):
+        if kind == "sliding_attention":
+            assert isinstance(c, RotatingKVCache)
+            assert c.max_size == args.sliding_window
+        else:
+            assert type(c) is KVCache
+
+
+def test_lookahead_input_is_kept_only_for_one_token_steps():
+    """Lookahead reads the full-width input on one-token steps only. A
+    prefill chunk must not stay referenced after the call."""
+    args = _tiny_args()
+    moe = _randomize(MuseSparkMoE(args), seed=8)
+    object.__setattr__(moe.switch_mlp, "_kq_lookahead", object())
+    rng = np.random.default_rng(9)
+
+    one = mx.array(rng.standard_normal((1, 1, args.hidden_size)).astype(np.float32))
+    mx.eval(moe(one))
+    assert moe.switch_mlp._kq_la_input is one
+
+    chunk = mx.array(rng.standard_normal((1, 5, args.hidden_size)).astype(np.float32))
+    mx.eval(moe(chunk))
+    assert moe.switch_mlp._kq_la_input is None
+
+
+def test_zero_weight_scale_is_skipped_like_llama_cpp():
+    """llama.cpp applies expert_weights_scale only when it is not 0 or 1."""
+    rng = np.random.default_rng(10)
+    c = mx.array(rng.standard_normal((1, 3, 64)).astype(np.float32))
+    outs = []
+    for scale in (0.0, 1.0):
+        moe = _randomize(MuseSparkMoE(_tiny_args(routed_scaling_factor=scale)), seed=11)
+        outs.append(_np(moe(c)))
+    np.testing.assert_array_equal(outs[0], outs[1])
+    assert np.abs(outs[0]).max() > 0.1
+
+
 def test_cast_predicate_matches_the_loader_keep_list():
     from gmlx.load.loader import _FP32_KEEP_BY_MODEL_TYPE
 

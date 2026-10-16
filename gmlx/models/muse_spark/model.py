@@ -182,7 +182,9 @@ class MuseSparkMoE(nn.Module):
             w = mx.take_along_axis(scores, inds, axis=-1)
             if self.norm_topk_prob:
                 w = w / mx.maximum(w.sum(axis=-1, keepdims=True), _WEIGHT_SUM_FLOOR)
-            return (w * self.routed_scaling_factor).astype(x.dtype)
+            if self.routed_scaling_factor not in (0.0, 1.0):
+                w = w * self.routed_scaling_factor
+            return w.astype(x.dtype)
 
         inds = mx.stop_gradient(mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k])
         weights = weights_at(inds)
@@ -195,9 +197,10 @@ class MuseSparkMoE(nn.Module):
             inds, weights = _apply_expert_controls(self, inds, weights, weights_at)
 
         if getattr(self.switch_mlp, "_kq_lookahead", None) is not None:
-            # The expert container sees the latent input. The router replica
-            # needs the full-width one.
-            object.__setattr__(self.switch_mlp, "_kq_la_input", x)
+            # The router replica needs the full-width input. It runs only on
+            # one-token steps, so a prefill chunk is not kept.
+            la_x = x if x.size == x.shape[-1] else None
+            object.__setattr__(self.switch_mlp, "_kq_la_input", la_x)
         z = self.pre_exp_norm(self.latent_down(x))
         y = self.post_exp_norm(self.switch_mlp(z, inds))
         y = (y * weights[..., None]).sum(axis=-2)

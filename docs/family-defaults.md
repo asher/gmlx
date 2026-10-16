@@ -43,9 +43,6 @@ a model ends up with.
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3; `@creative`: temperature=1.0 min_p=0.05 |
 
-Meta's benchmark setting for Muse Spark turns `top_k` off, and a user
-profile with `top_k: 0` gives you that setting.
-
 [How a request gets its settings](config.md#how-a-request-gets-its-settings)
 explains how the defaults combine with your own profiles, and
 [`models.*.family`](config.md#modelsfamily) replaces one model's detected
