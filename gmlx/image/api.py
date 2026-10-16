@@ -812,12 +812,18 @@ def _table_id(pipe: ImagePipeline, patch_table) -> str:
 
 
 def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
-                 patch_table=None, target=None) -> mx.array:
+                 patch_table=None, target=None,
+                 time: str = "reference") -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
     ``target`` is the sigma the step goes to, likewise, which a flow map
-    DiT takes and every other DiT refuses. Outside a ``state_scope`` the
+    DiT takes and every other DiT refuses. ``time`` names how the DiT
+    embeds the time, one of its ``time_rules``: "reference", the rule
+    gmlx samples on, which every DiT takes. Outside a ``state_scope`` the
     conditionings of the call are its scope."""
+    if time not in getattr(pipe.dit, "time_rules", ("reference",)):
+        raise ValueError(f"the {pipe.family.title} DiT has no time rule "
+                         f"{time!r}")
     table = _table_id(pipe, patch_table)
     x = mx.array(latents).astype(mx.float32)
     if x.ndim != 4:
@@ -837,7 +843,7 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
     with state_scope(pipe, rows):
         out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table,
-                    None if tgt is None else tgt[i]) for i in range(b)]
+                    None if tgt is None else tgt[i], time) for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
 
@@ -1007,11 +1013,18 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
 
 
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
-         cond: Conditioning, table, target=None) -> mx.array:
+         cond: Conditioning, table, target=None,
+         time: str = "reference") -> mx.array:
     """One row. A DiT that takes reference images gets the tokens of the
     conditioning's reference latents from its ``references``, and a flow
-    map the ``target`` its modulation reads."""
+    map the ``target`` its modulation reads. A time rule other than the
+    reference's reaches the DiT through its modulation."""
     dit = pipe.dit
+    modulated = hasattr(dit, "modulation") and hasattr(dit, "caption")
+    if time != "reference" and (pipe.family.step is not None
+                                or not modulated):
+        raise ValueError(f"the {pipe.family.title} DiT takes the time rule "
+                         f"{time!r} through no modulation")
     if pipe.family.step is not None:
         if target is not None:
             raise ValueError(f"the {pipe.family.title} DiT takes no target "
@@ -1025,12 +1038,12 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
                              f"reference images")
         kw["refs"] = dit.references([mx.array(z)[None]
                                      for z in cond.ref_latents])
-    if not (hasattr(dit, "modulation") and hasattr(dit, "caption")):
+    if not modulated:
         if target is not None:
             kw["target"] = np.reshape(np.float32(target), (1,))
         return _under(pipe, table, lambda: dit(
             x, np.reshape(sigma, (1,)), cond.features[None], **kw))
-    mod = _modulation(pipe, sigma, table, target)
+    mod = _modulation(pipe, sigma, table, target, time)
     caption = _caption(pipe, cond, table)
     return _under(pipe, table, lambda: dit(
         x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption, **kw))
@@ -1050,10 +1063,18 @@ def _memo(cache: ByteLRU, key, make):
     return hit
 
 
-def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None):
+def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
+                time: str = "reference"):
     """The modulation of ``sigma``, and of ``target`` for a flow map, kept
-    under their float32 bits and the patch table."""
+    under their float32 bits and the patch table, and under the time rule
+    when it is not the reference's."""
     s = np.float32(sigma)
+    if time != "reference":
+        if target is not None:
+            raise ValueError("a flow map takes the reference's time rule")
+        return _memo(pipe.modulations, (s.tobytes(), table, "time", time),
+                     lambda: _under(pipe, table, lambda: pipe.dit.modulation(
+                         np.reshape(s, (1,)), 1, time=time)))
     if target is None:
         return _memo(pipe.modulations, (s.tobytes(), table),
                      lambda: _under(pipe, table, lambda: pipe.dit.modulation(

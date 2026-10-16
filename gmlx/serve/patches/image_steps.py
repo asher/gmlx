@@ -565,7 +565,7 @@ async def step(request: Request):
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
-                                           gen, targets)
+                                           gen, targets, conv.time)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work)

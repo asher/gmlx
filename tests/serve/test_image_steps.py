@@ -379,10 +379,12 @@ def test_num_tokens_and_an_attention_mask_trim_the_cond(host, pipe):
 def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
-    # velocity back, so every convention is the identity.
-    for fam in ("z_image", "qwen_image21", "krea2", "flux2_klein",
-                "flux3_klein"):
+    # velocity back, so every convention maps the identity. Its FLUX.2
+    # forward alone embeds the fp32 time.
+    for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
+    assert steps.CONVENTIONS["comfy"]["flux2_klein"] == steps.Convention(
+        time="fp32")
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
     c = _client()
@@ -623,9 +625,10 @@ def test_flow_targets_follow_comfyuis_rule():
 
 
 
-# FLUX.2 klein: ComfyUI's Flux2 forward takes sigma as the timestep and
-# returns the native velocity, reads the reference latents of a row in
-# its order, and its VAE routes carry model-space latents, as FLUX.3's do.
+# FLUX.2 klein: ComfyUI's Flux2 forward takes sigma as the timestep,
+# embeds it in fp32 and returns the native velocity, reads the reference
+# latents of a row in its order, and its VAE routes carry model-space
+# latents, as FLUX.3's do.
 
 @pytest.fixture(scope="module")
 def f2pipe():
@@ -646,10 +649,17 @@ def _f2_cond(feats, *refs, key="k"):
         mx.array(r[0]) for r in refs))
 
 
+def _f2_velocity(pipe, x, sigma, cond, table=None, time="fp32"):
+    return _on_worker(lambda: np.array(api.denoise_step(
+        pipe, mx.array(x), sigma, cond, patch_table=table, time=time)))
+
+
 def test_a_flux2_step_is_the_core_step_with_and_without_references(
         host, f2pipe):
-    """Each step equals denoise_step at the timestep as sigma, with no
-    schedule read, with a reference and with two rows."""
+    """Each step equals denoise_step at the timestep as sigma on the fp32
+    time rule, with no schedule read, with a reference and with two rows.
+    At 0.75 the reference's rule embeds 752, the bf16 of 750, and the
+    step embeds 750."""
     _serve(host, "f2d", f2pipe)
     c = _client()
     rng = np.random.default_rng(7)
@@ -660,13 +670,16 @@ def test_a_flux2_step_is_the_core_step_with_and_without_references(
     for t in SIGMAS[:-1]:
         for sched in (None, SIGMAS):
             out = c.step("f2d", None, x, [t], rows, sample_sigmas=sched)
-            assert np.array_equal(out, _f3_velocity(
+            assert np.array_equal(out, _f2_velocity(
                 f2pipe, x, t, _f2_cond(feats))), t
     with_ref = [{"cond": rows[0]["cond"], "ref_latents": [c.put(ref)]}]
+    assert not np.array_equal(c.step("f2d", None, x, [0.75], rows),
+                              _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats),
+                                           time="reference"))
     out = c.step("f2d", None, x, [0.75], with_ref)
-    assert np.array_equal(out, _f3_velocity(f2pipe, x, 0.75,
+    assert np.array_equal(out, _f2_velocity(f2pipe, x, 0.75,
                                             _f2_cond(feats, ref)))
-    assert not np.array_equal(out, _f3_velocity(f2pipe, x, 0.75,
+    assert not np.array_equal(out, _f2_velocity(f2pipe, x, 0.75,
                                                 _f2_cond(feats)))
     two = c.step("f2d", None, np.concatenate([x, x]), [0.75, 0.75],
                  rows + with_ref)
@@ -686,9 +699,9 @@ def test_a_flux2_step_takes_its_references_in_the_order_of_the_row(
     row = {"cond": _rows(c, feats)[0]["cond"],
            "ref_latents": [c.put(a), c.put(b)]}
     out = c.step("f2d", None, x, [0.75], [row])
-    want = _f3_velocity(f2pipe, x, 0.75, _f2_cond(feats, a, b, key=""))
+    want = _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats, a, b, key=""))
     assert np.array_equal(out, want)
-    assert not np.array_equal(out, _f3_velocity(
+    assert not np.array_equal(out, _f2_velocity(
         f2pipe, x, 0.75, _f2_cond(feats, b, a, key="")))
     assert host.held == 0
 
@@ -705,7 +718,7 @@ def test_a_flux2_table_on_comfyuis_native_keys_steps_as_the_core_table(
     rng = np.random.default_rng(10)
     feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
     x = noise_from_seed(5, F3_SHAPE)
-    plain = _f3_velocity(f2pipe, x, 0.75, _f2_cond(feats))
+    plain = _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats))
     for name, band, (dout, din) in (
             ("double_blocks.0.img_attn.qkv", [0, 64, 64], (64, 64)),
             ("double_blocks.1.txt_attn.qkv", None, (192, 64)),
@@ -720,8 +733,7 @@ def test_a_flux2_table_on_comfyuis_native_keys_steps_as_the_core_table(
         core = steps.STATE.tables_of("f2d", f2pipe)[tid]
         out = c.step("f2d", None, x, [0.75], _rows(c, feats),
                      patch_table=tid)
-        want = _on_worker(lambda: np.array(api.denoise_step(
-            f2pipe, mx.array(x), 0.75, _f2_cond(feats), patch_table=core)))
+        want = _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats), core)
         assert np.array_equal(out, want), name
         assert not np.array_equal(out, plain), name
 

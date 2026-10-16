@@ -31,8 +31,10 @@ the gated product of the attention rows and the feed-forward rows.
 
 The time embedding follows the reference pipeline, which holds the time
 in bf16: the embedder multiplies by 1000 in bf16 and returns the embedding
-in bf16, in every activation dtype. The time vector and the modulations
-then run in fp32 and round once.
+in bf16, in every activation dtype. A step on ComfyUI's convention takes
+the "fp32" time rule instead, the embedding of the fp32 time rounded to
+the activation dtype, as ComfyUI's Flux2 forms it. The time vector and
+the modulations then run in fp32 and round once.
 
 RoPE has four axes of 32 dims at theta 2000. An image token sits at (0,
 row, column, 0), a token of reference image i at (10 + 10 i, row, column,
@@ -116,6 +118,22 @@ def time_embedding(t, dim: int) -> mx.array:
     t1000 = _bf16(np.float32(1000) * _bf16(np.reshape(t, (-1,))))
     emb = ops.timestep_embedding(t1000, dim)
     return emb.astype(mx.bfloat16).astype(mx.float32)
+
+
+def fp32_time_embedding(t, dim: int, act: mx.Dtype) -> mx.array:
+    """The embedding (B, dim) of fp32 times ``t`` as ComfyUI's Flux2 forms
+    it: 1000 times the time in fp32, the cosines and sines in fp32, and
+    the embedding rounded to the activation dtype ``act``. Returned in
+    float32."""
+    t1000 = np.float32(1000) * np.asarray(np.reshape(t, (-1,)), np.float32)
+    emb = ops.timestep_embedding(t1000, dim)
+    return emb.astype(act).astype(mx.float32)
+
+
+# How the DiT embeds the time of a step: "reference", the bf16 time of the
+# reference pipeline, which gmlx samples on, or "fp32", the fp32 time a
+# client such as ComfyUI embeds.
+TIME_RULES = ("reference", "fp32")
 
 
 def rope_tables(ids: np.ndarray, axes_dims, theta: float) -> tuple:
@@ -434,18 +452,28 @@ class Flux2KleinDiT(nn.Module):
     def _lin(self):
         return precise if self.act_dtype != mx.float32 else own
 
-    def vector(self, sigma, batch: int) -> mx.array:
-        """The time vector (B, dim) fp32 of ``sigma``."""
+    time_rules = TIME_RULES
+
+    def vector(self, sigma, batch: int, time: str = "reference") -> mx.array:
+        """The time vector (B, dim) fp32 of ``sigma``, its time embedded
+        by the rule ``time`` of TIME_RULES."""
         lin = self._lin()
-        e = time_embedding(np.broadcast_to(np.asarray(sigma, np.float32),
-                                           (batch,)), self.cfg.t_dim)
+        t = np.broadcast_to(np.asarray(sigma, np.float32), (batch,))
+        if time == "reference":
+            e = time_embedding(t, self.cfg.t_dim)
+        elif time == "fp32":
+            e = fp32_time_embedding(t, self.cfg.t_dim, self.act_dtype)
+        else:
+            raise ValueError(f"the FLUX.2 klein DiT has no time rule "
+                             f"{time!r}")
         return lin(self.time_in.out_layer,
                    nn.silu(lin(self.time_in.in_layer, e)))
 
-    def modulation(self, sigma, batch: int) -> StepModulation:
+    def modulation(self, sigma, batch: int,
+                   time: str = "reference") -> StepModulation:
         lin = self._lin()
         act = self.act_dtype
-        v = nn.silu(self.vector(sigma, batch))
+        v = nn.silu(self.vector(sigma, batch, time))
 
         def chunks(mod, n):
             y = lin(mod, v).astype(act)[:, None, :]

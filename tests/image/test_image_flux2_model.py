@@ -154,6 +154,56 @@ def test_the_time_embedding_follows_the_bf16_time(t, t1000):
         assert not np.array_equal(got, _embedded(unrounded))
 
 
+@pytest.mark.parametrize("act", [mx.bfloat16, mx.float32])
+def test_the_fp32_time_rule_embeds_the_fp32_time(act):
+    """ComfyUI's Flux2 embeds 1000 times the fp32 time and rounds the
+    embedding to the activation dtype: 0.9580853, the second time of the
+    4 step schedule at 512, gives 958.0853, where the reference's rule
+    gives 956."""
+    t = np.float32(0.9580853)
+    got = np.array(fm.fp32_time_embedding(t, 8, act))
+    want = ops.timestep_embedding(np.float32(1000) * np.reshape(t, (1,)), 8)
+    assert np.array_equal(got, np.array(want.astype(act).astype(mx.float32)))
+    assert not np.array_equal(got, np.array(fm.time_embedding(t, 8)))
+
+
+def test_the_dit_takes_the_fp32_time_rule_through_its_modulation(
+        tiny, monkeypatch):
+    """The fp32 rule moves the time vector and the step, the reference's
+    is the default, and a rule the DiT does not have is refused, as
+    denoise_step refuses a rule on a DiT without it."""
+    from gmlx.image import api
+
+    weights, cfg = tiny
+    arrays, _ = committed_fixture(TINY)
+    model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
+    lat, feats, refs, _ = fg.inputs(model, arrays)
+    sigma = np.reshape(np.float32(0.9580853), (1,))
+    ref = model(lat, sigma, feats, refs=refs)
+    assert mx.array_equal(ref, model(lat, sigma, feats, refs=refs,
+                                     mod=model.modulation(sigma, 1))).item()
+    fp32 = model(lat, sigma, feats, refs=refs,
+                 mod=model.modulation(sigma, 1, time="fp32"))
+    assert not mx.array_equal(ref, fp32).item()
+    assert not mx.array_equal(model.vector(sigma, 1),
+                              model.vector(sigma, 1, "fp32")).item()
+    with pytest.raises(ValueError, match="no time rule 'bf16'"):
+        model.vector(sigma, 1, "bf16")
+    pipe = api.ImagePipeline(dit=model, family=get_family("flux2_klein"),
+                             variant="distilled")
+    cond = api.Conditioning(feats[0], "")
+    step = api.denoise_step(pipe, lat, sigma, cond, time="fp32")
+    assert mx.array_equal(step, model(
+        lat, sigma, feats, mod=model.modulation(sigma, 1, time="fp32"))).item()
+    assert not mx.array_equal(step, api.denoise_step(pipe, lat, sigma,
+                                                     cond)).item()
+    with pytest.raises(ValueError, match="no time rule 'bf16'"):
+        api.denoise_step(pipe, lat, sigma, cond, time="bf16")
+    monkeypatch.setattr(fm.Flux2KleinDiT, "time_rules", ("reference",))
+    with pytest.raises(ValueError, match="no time rule 'fp32'"):
+        api.denoise_step(pipe, lat, sigma, cond, time="fp32")
+
+
 def test_the_reference_tokens_run_in_the_activation_dtype(tiny):
     """float32 reference latents enter the image stream as the bf16 of
     the activations, as the image's latents do."""

@@ -23,7 +23,10 @@ the native model and negates its output; its Qwen-Image 2.1 forward takes
 the timestep as it is and returns the native output, as its Krea 2,
 FLUX.2 and FLUX.3 forwards do. All give, for the flow schedule, the
 velocity ``d x / d sigma`` at ``sigma = timestep``, which
-``denoise_step`` returns.
+``denoise_step`` returns. ComfyUI's FLUX.2 forward embeds the fp32 time,
+where BFL's pipeline, which gmlx samples on, embeds its bf16 time, so a
+FLUX.2 step takes the DiT's "fp32" time rule. ComfyUI's FLUX.3 forward
+embeds the time in the model's dtype, as BFL's does.
 
 A FLUX.3 flow map DiT also reads the time its step goes to. ComfyUI's
 forward takes it from the schedule its sampler runs on: the entry after
@@ -63,16 +66,17 @@ FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae")
 @dataclass(frozen=True)
 class Convention:
     """How a step reads a timestep and returns its output under one
-    client convention: ``sigma = scale * timestep + shift`` and
-    ``out = sign * velocity``."""
+    client convention: ``sigma = scale * timestep + shift``, the DiT's
+    time rule ``time`` (``denoise_step``) and ``out = sign * velocity``."""
     scale: float = 1.0
     shift: float = 0.0
     sign: float = 1.0
+    time: str = "reference"
 
 
 CONVENTIONS = {
     "comfy": {"z_image": Convention(), "qwen_image21": Convention(),
-              "krea2": Convention(), "flux2_klein": Convention(),
+              "krea2": Convention(), "flux2_klein": Convention(time="fp32"),
               "flux3_klein": Convention()},
 }
 
@@ -741,10 +745,10 @@ def step_pacer(run: Run | None, gen: int):
 
 
 def run_step(served, x, sigmas, conds, table, run, gen,
-             targets=None) -> tuple:
+             targets=None, time_rule: str = "reference") -> tuple:
     """One ``denoise_step`` over the rows on the image worker, to the
-    ``targets`` of a flow map DiT. Returns (velocity f32 evaluated,
-    forward seconds, prefix cache answer)."""
+    ``targets`` of a flow map DiT, on the DiT's ``time_rule``. Returns
+    (velocity f32 evaluated, forward seconds, prefix cache answer)."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -757,7 +761,7 @@ def run_step(served, x, sigmas, conds, table, run, gen,
     t0 = time.perf_counter()
     with paced(step_pacer(run, gen)):
         v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table,
-                             target=targets)
+                             target=targets, time=time_rule)
         v = v.astype(mx.float32)
         mx.eval(v)
     # Without chat the step is one evaluation, which an interrupt or an end
