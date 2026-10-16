@@ -1121,6 +1121,11 @@ from the official config, so a `time_conv` tensor anywhere else is
 refused by name. So is a `--source-config` whose `temperal_downsample`,
 `latents_mean` or `latents_std` differs from the official one.
 
+A VAE config names its Autoencoder class in `_class_name`, as diffusers
+writes it. A `config.json` beside `SRC` that is not one, such as the
+pipeline config beside BFL's `ae.safetensors`, is left out with a note,
+and a `--source-config` that is not one is refused.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `SRC`, positional | Required | Pack this safetensors VAE. |
@@ -1129,7 +1134,7 @@ refused by name. So is a `--source-config` whose `temperal_downsample`,
 | `--family NAME` | The family the file fills | Pack the VAE of this image family. |
 | `--source-repo ID` | `unknown` | Record this repository as the source. |
 | `--source-revision REV` | `unknown` | Record this revision of the source repository. |
-| `--source-config FILE` | `config.json` beside `SRC` | Record this VAE config. |
+| `--source-config FILE` | `config.json` beside `SRC`, when it is a VAE config | Record this VAE config. |
 | `--force` | Off | Replace `--out` when it exists. |
 | `--json` | Off | Print a JSON record of the packed file. |
 

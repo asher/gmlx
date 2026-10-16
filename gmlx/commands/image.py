@@ -1229,8 +1229,9 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                    help="Record this revision of the source repository "
                         "(default unknown).")
     p.add_argument("--source-config", default=None, metavar="FILE",
-                   help="Record this VAE config.json (default: config.json "
-                        "beside SRC when there is one).")
+                   help="Record this VAE config.json, which names its "
+                        "Autoencoder class in _class_name (default: the "
+                        "config.json beside SRC when it is a VAE config).")
     p.add_argument("--force", action="store_true",
                    help="Replace --out when it exists.")
     p.add_argument("--json", action="store_true",
@@ -1238,22 +1239,50 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
     return p
 
 
+def _not_a_vae_config(text: str) -> str | None:
+    """Why a config.json text is not a VAE's, or None. A VAE config names
+    its Autoencoder class in ``_class_name``, as diffusers writes it."""
+    try:
+        config = json.loads(text)
+    except ValueError:
+        return "is not JSON"
+    name = config.get("_class_name") if isinstance(config, dict) else None
+    if isinstance(name, str) and name.startswith("Autoencoder"):
+        return None
+    if name is None:
+        return "names no Autoencoder class in _class_name"
+    return f"is the config of a {name}, not of a VAE"
+
+
 def cmd_pack_vae(argv: list[str], prog: str = "gmlx image pack-vae") -> int:
     a = _pack_vae_parser(prog).parse_args(argv)
     from gmlx.image.vae import VAEError, pack_vae
 
-    cfg_path = a.source_config
-    if cfg_path is None:
-        beside = os.path.join(os.path.dirname(os.path.abspath(a.src)),
-                              "config.json")
-        cfg_path = beside if os.path.isfile(beside) else None
     config_json = "{}"
-    if cfg_path is not None:
+    if a.source_config is not None:
         try:
-            with open(cfg_path, encoding="utf-8") as f:
+            with open(a.source_config, encoding="utf-8") as f:
                 config_json = f.read()
         except OSError as e:
-            return _refuse(f"--source-config {cfg_path}: {e.strerror}")
+            return _refuse(f"--source-config {a.source_config}: {e.strerror}")
+        why = _not_a_vae_config(config_json)
+        if why:
+            return _refuse(f"--source-config {a.source_config}: {why}")
+    else:
+        beside = os.path.join(os.path.dirname(os.path.abspath(a.src)),
+                              "config.json")
+        try:
+            with open(beside, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = None
+        why = text is not None and _not_a_vae_config(text)
+        if why:
+            # A model folder can hold the VAE beside its pipeline config.
+            print(f"note: {beside} {why}, so the GGUF records no config; "
+                  "--source-config names one", file=sys.stderr)
+        elif text is not None:
+            config_json = text
     try:
         rep = pack_vae(a.src, a.out, source_repo=a.source_repo,
                        source_revision=a.source_revision,
