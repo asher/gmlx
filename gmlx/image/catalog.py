@@ -189,7 +189,8 @@ DEFAULT_QUANTS = {
     "krea-2-turbo": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A Q8_0 DiT fits a 1024 pixel image from the 24 GB class up, with the
-    # encoder released on 24 GB.
+    # encoder released on 24 GB, where Base also runs its two guided rows
+    # one at a time.
     "flux-3-klein": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-3-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
