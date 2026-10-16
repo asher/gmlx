@@ -643,8 +643,12 @@ An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 `flux-2-klein-base-9b`, `flux-3-klein` or `flux-3-klein-base`, pulls its
 DiT, text encoder and VAE, checks the VAE against its published sha256,
 packs it to GGUF, and adds an `image_models` entry. The quants default to
-the ones for this Mac's memory, and an encoder or VAE already on disk is
-used again when its weights match.
+the ones for this Mac's memory, and an encoder already on disk is used
+again when its weights match. A VAE GGUF on disk packed from the recipe's
+source is used again. Without one, a pack from another source serves when
+it is labeled for the family or for one that decodes with the same
+autoencoder, such as an earlier F32 pack of the FLUX.2 VAE, and the plan
+names the pack it reuses.
 [Models and quants](images.md#models-and-quants) has the quants for each
 Mac. `pull` prints each model's license before it downloads, and the
 license of `flux-2-klein-9b` and `flux-2-klein-base-9b` allows

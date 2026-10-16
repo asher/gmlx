@@ -40,6 +40,7 @@ class Part:
     need: int | None = None         # bytes still to download
     chat_id: str | None = None      # the configured chat model it is
     wanted: bool = True             # inside --only
+    note: str | None = None         # a line the plan prints under it
 
     @property
     def download(self) -> bool:
@@ -229,12 +230,19 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
                                  size=size,
                                  need=_remaining(dest, size)), dest)
 
-    # The VAE: a packed GGUF of the same source, else the source to pack.
-    vaes = [f for f in of("vae") if f.sha256 == r.vae_sha256]
-    if vaes:
-        p = catalog.nearest(plan.parts[0].path, vaes)[0].path
+    # The VAE: a packed GGUF of the same source, else a held pack whose
+    # label pairs with the family, else the source to pack.
+    held = of("vae")
+    same = [f for f in held if f.sha256 == r.vae_sha256]
+    if same or held:
+        p = catalog.nearest(plan.parts[0].path, same or held)[0].path
+        note = None
+        if not same:
+            label = (catalog.vae_identity(p) or ("?",))[0]
+            note = (f"reuses the VAE pack {os.path.basename(p)}, packed for "
+                    f"{label}, which serves {r.family}")
         plan.parts.append(Part("vae", os.path.basename(p), p,
-                               size=os.path.getsize(p), need=0))
+                               size=os.path.getsize(p), need=0, note=note))
     else:
         d = _dest(r.vae_repo, base_dir, nest)
         dest = os.path.join(d, r.vae_pack)
@@ -291,6 +299,8 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
         print(f"  {p.role:<8} {p.name:<{wid}}  {_gb(p.size):>8}  {state}")
         if not p.download:
             print(f"  {'':<8} {p.path}")
+        if p.note:
+            print(f"  {'':<8} {p.note}")
     need = _need(plan)
     line = f"  download {_gb(need)}"
     if free is not None:
@@ -587,7 +597,8 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             "parts": [{"role": p.role, "name": p.name, "path": p.path,
                        "size_bytes": p.size, "download": p.download
                        and p.wanted, "on_disk": not p.download,
-                       "chat_model": p.chat_id} for p in plan.parts]},
+                       "chat_model": p.chat_id, "note": p.note}
+                      for p in plan.parts]},
             indent=2))
     else:
         _print_plan(plan, ram=ram, free=free, dest=base_dir)

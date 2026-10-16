@@ -209,18 +209,23 @@ def test_parts_on_disk_are_used_where_they_are(lib, monkeypatch, capsys):
     assert "on disk" in capsys.readouterr().out
 
 
-def test_a_packed_vae_of_another_source_is_not_reused(lib, monkeypatch):
+def test_a_packed_vae_of_another_source_is_reused_by_its_label(
+        lib, monkeypatch, capsys):
+    """A pack labeled for the family serves it, as load and doctor take
+    it, so the pull fetches no VAE and names the pack it reuses."""
     root, cfg = lib
     other = root / "elsewhere"
     other.mkdir()
     (other / "packed-vae.gguf").write_bytes(b"v")
     Disk(monkeypatch, root, sha="0" * 64)
     got = _downloads(monkeypatch)
-    _packs(monkeypatch)
+    packed = _packs(monkeypatch)
     assert manage.cmd_pull(["z-image-turbo", "--config", str(cfg)]) == 0
-    assert (Z.vae_repo, Z.vae_file, Z.vae_revision) in got
-    assert _cfg(cfg).image_models["z-image-turbo"].vae != \
+    assert Z.vae_repo not in [g[0] for g in got] and packed == []
+    assert _cfg(cfg).image_models["z-image-turbo"].vae == \
         "elsewhere/packed-vae.gguf"
+    assert ("reuses the VAE pack packed-vae.gguf, packed for z_image, which "
+            "serves z_image" in capsys.readouterr().out)
 
 
 def test_an_encoder_quant_that_is_asked_for_is_not_replaced(lib, monkeypatch,
@@ -655,7 +660,17 @@ def _shared_scan(roots, *, recursive=True, families=None):
                 elif f == K.vae_pack:
                     out.append(catalog.ImageFile(p, "vae", "krea2",
                                                  sha256=K.vae_sha256))
+                elif f == F32_PACK:
+                    out += [catalog.ImageFile(p, "vae", fam, sha256=F32_SHA)
+                            for fam in catalog.vae_families("flux3_klein")]
     return [f for f in out if families is None or f.family in families]
+
+
+# The pack of Comfy-Org's F32 copy of the FLUX.2 autoencoder, which
+# flux-3-klein pulled before it took BFL's BF16 file: labeled flux3_klein,
+# from another source.
+F32_PACK = "flux2-vae-F32.gguf"
+F32_SHA = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
 
 
 def _shared_pull(lib, monkeypatch, name, ram_gb=32):
@@ -666,8 +681,9 @@ def _shared_pull(lib, monkeypatch, name, ram_gb=32):
     monkeypatch.setattr(catalog, "scan", _shared_scan)
     got = _downloads(monkeypatch)
     monkeypatch.setattr(catalog, "sha256_file", lambda p: r.vae_sha256)
-    monkeypatch.setattr(catalog, "vae_identity",
-                        lambda p: (r.family, r.vae_sha256))
+    monkeypatch.setattr(catalog, "vae_identity", lambda p: (
+        ("flux3_klein", F32_SHA) if os.path.basename(p) == F32_PACK
+        else (r.family, r.vae_sha256)))
     import gmlx.image.vae as vae_pkg
     packed = []
 
@@ -812,6 +828,58 @@ def test_a_klein_pull_takes_the_vae_the_other_klein_family_packed(
     got, packed, b = _shared_pull(lib, monkeypatch, then)
     assert catalog.recipe(then).vae_repo not in [g[0] for g in got]
     assert packed == [] and b.vae == a.vae
+
+
+def _f32_pack(root):
+    d = root / "Comfy-Org__flux2-dev"
+    d.mkdir(exist_ok=True)
+    (d / F32_PACK).write_bytes(b"v")
+    return f"Comfy-Org__flux2-dev/{F32_PACK}"
+
+
+@pytest.mark.parametrize("name", ["flux-2-klein", "flux-2-klein-base-9b",
+                                  "flux-3-klein"])
+def test_a_klein_pull_reuses_a_held_pack_that_pairs_by_label(
+        lib, monkeypatch, capsys, name):
+    """A pack of another source whose label pairs with the family serves,
+    so the pull fetches no VAE and names the pack it reuses."""
+    root, _cfg_path = lib
+    rel = _f32_pack(root)
+    r = catalog.recipe(name)
+    got, packed, m = _shared_pull(lib, monkeypatch, name)
+    assert r.vae_repo not in [g[0] for g in got] and packed == []
+    assert [g[0] for g in got] == [r.dit_repo, r.encoder_repo]
+    assert m.vae == rel
+    assert (f"reuses the VAE pack {F32_PACK}, packed for flux3_klein, which "
+            f"serves {r.family}" in capsys.readouterr().out)
+
+
+def test_a_flux3_re_pull_beside_the_f32_pack_fetches_nothing(
+        lib, monkeypatch, capsys):
+    """The DiT, the encoder and the F32 pack an older flux-3-klein pull
+    left are the whole pull."""
+    root, _cfg_path = lib
+    rel = _f32_pack(root)
+    dit = root / "realrebelai__FLUX-3-Image-Klein_GGUFs" / "DISTILLED"
+    dit.mkdir(parents=True)
+    (dit / "flux3_image_klein_sd-Q8_0.gguf").write_bytes(b"d")
+    (root / "Qwen3-VL-4B-Instruct-Q8_0.gguf").write_bytes(b"e")
+    got, packed, m = _shared_pull(lib, monkeypatch, "flux-3-klein")
+    assert got == [] and packed == [] and m.vae == rel
+    assert "download 0" in capsys.readouterr().out
+
+
+def test_a_pull_takes_its_own_source_before_a_pack_that_pairs(
+        lib, monkeypatch, capsys):
+    root, _cfg_path = lib
+    _f32_pack(root)
+    d = root / "black-forest-labs__FLUX.2-klein-4B"
+    d.mkdir()
+    (d / F2.vae_pack).write_bytes(b"v")
+    got, packed, m = _shared_pull(lib, monkeypatch, "flux-2-klein")
+    assert packed == [] and F2.vae_repo not in [g[0] for g in got]
+    assert m.vae == f"black-forest-labs__FLUX.2-klein-4B/{F2.vae_pack}"
+    assert "reuses the VAE pack" not in capsys.readouterr().out
 
 
 def test_a_flux3_pull_removes_only_the_vae_folders_it_empties(

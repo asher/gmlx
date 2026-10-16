@@ -31,6 +31,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs faster on NAX GPUs (M5).
 - With `--stream-experts`, a prompt that uses most of a layer's experts
   prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
+- `gmlx pull` of an image model reuses a VAE GGUF on disk packed for its
+  family from another source, and names it, where it downloaded the VAE again.
 
 ### Fixed
 
