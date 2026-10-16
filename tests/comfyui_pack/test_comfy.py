@@ -365,7 +365,7 @@ class Capture(Base):
         self.assertIn((0, 0, 3840), offsets)
         self.assertIn((0, 7680, 3840), offsets)
         tid = m.sync_patches()
-        table, _ = P.patches.build_table(ZID, m.patches)
+        table, _ = P.patches.build_table(ZID, m.patches, family="z_image")
         self.assertEqual(tid, C.table_id(table)[0])
         (put,) = self.stub.events("put_table")
         self.assertEqual(put["id"], tid)
@@ -418,7 +418,7 @@ class Capture(Base):
         self.assertEqual(by["lora 0.5"][2], 1)
         self.assertEqual(by["compute dtype"][2], 0)
         self.assertEqual(by["compute dtype"][3], m05.gmlx_table_id)
-        table, _ = P.patches.build_table(ZID, stacked.patches)
+        table, _ = P.patches.build_table(ZID, stacked.patches, family="z_image")
         self.assertEqual({len(e["patches"]) for e in table["entries"]}, {2})
         self.assertEqual(len({s[3] for s in seq if s[3]}), 3)
 
@@ -429,7 +429,7 @@ class Capture(Base):
         self.assertEqual(set(m.patches), LORA_F3_KEYS)
         self.assertEqual({t[3] for v in m.patches.values() for t in v}, {None})
         tid = m.sync_patches()
-        table, _ = P.patches.build_table(F3ID, m.patches)
+        table, _ = P.patches.build_table(F3ID, m.patches, family="flux3_klein")
         self.assertEqual(tid, C.table_id(table)[0])
         (put,) = self.stub.events("put_table")
         self.assertEqual((put["id"], put["entries"], put["bands"], put["strengths"]),
@@ -449,7 +449,7 @@ class Capture(Base):
         qkv = m.patches["diffusion_model.double_blocks.0.img_attn.qkv.weight"]
         self.assertEqual(sorted(t[3] for t in qkv), [(0, 0, 3072), (0, 3072, 3072), (0, 6144, 3072)])
         tid = m.sync_patches()
-        table, tensors = P.patches.build_table(F2ID, m.patches)
+        table, tensors = P.patches.build_table(F2ID, m.patches, family="flux2_klein")
         self.assertEqual(tid, C.table_id(table)[0])
         (put,) = self.stub.events("put_table")
         self.assertEqual((put["id"], put["entries"], put["bands"], put["strengths"]),
@@ -466,7 +466,7 @@ class Capture(Base):
     def test_a_dropped_adapter_is_uploaded_again_on_409(self):
         m = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(self.model(), LORA, 0.7)[0]
         # The client believes the server holds every pair; the server holds none.
-        self.client.known_adapters.update(P.patches.build_table(ZID, m.patches)[1])
+        self.client.known_adapters.update(P.patches.build_table(ZID, m.patches, family="z_image")[1])
         m.sync_patches()
         self.assertEqual(len(self.stub.events("table_missing")), 1)
         self.assertEqual(len(self.stub.events("put_table")), 1)
@@ -524,6 +524,30 @@ class Refusals(Base):
                     m.sync_patches()
                 self.assertIn(name, str(e.exception))
                 self.assertIn(key, str(e.exception))
+
+    def test_a_swap_of_the_halves_is_refused_on_a_family_not_verified_for_it(self):
+        """ComfyUI's swap_scale_shift on a patch is taken on FLUX.2 klein
+        alone, whose LoRA test checks the order, and refused by name on
+        every other family."""
+        LoRA = comfy.weight_adapter.LoRAAdapter
+        up, down = torch.zeros(64, 4), torch.zeros(4, 32)
+        patches = {"diffusion_model.final_layer.adaLN_modulation.1.weight": [
+            (1.0, LoRA(set(), (up, down, 1.0, None, None, None)), 1.0, None,
+             comfy.utils.swap_scale_shift)]}
+        self.assertEqual(P.patches.SWAPS_HALVES, {"flux2_klein"})
+        table, tensors = P.patches.build_table(F2ID, patches, family="flux2_klein")
+        (e,) = table["entries"]
+        self.assertTrue(torch.equal(tensors[e["patches"][0]["up"]], torch.cat([up[32:], up[:32]])))
+        for family in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
+            with self.subTest(family), self.assertRaises(C.GmlxRefusal) as err:
+                P.patches.build_table("m", patches, family=family)
+            self.assertIn("swap_scale_shift", str(err.exception))
+            self.assertIn(family, str(err.exception))
+        m = self.model().clone()
+        m.patches, m.patches_uuid = patches, uuid.uuid4()
+        with self.assertRaises(C.GmlxRefusal) as err:
+            m.sync_patches()
+        self.assertIn("not on z_image", str(err.exception))
 
     def forward(self, m, **kw):
         cond = self.cond(ZID, "x")[0][0]

@@ -90,7 +90,7 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
         b = self.gmlx
         if force:
             b.client.forget()
-        self.gmlx_table_id = sync_table(b.client, b.model_id, self.patches)
+        self.gmlx_table_id = sync_table(b.client, b.model_id, self.patches, b.family)
         self.gmlx_synced_uuid = self.patches_uuid
         b.events.append({"kind": "sync", "table": self.gmlx_table_id})
         return self.gmlx_table_id

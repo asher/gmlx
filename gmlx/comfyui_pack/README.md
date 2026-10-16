@@ -70,7 +70,7 @@ The loaders start the server with the `gmlx` command that `gmlx comfyui install`
 ### LoRA
 
 Stock `LoraLoader` and `LoraLoaderModelOnly` work. The pack sends each LoRA's matrices to the server once and then refers to them by hash, so changing a strength or stacking LoRAs costs one small request.
-Plain LoRA pairs are applied, including those ComfyUI maps onto a band of a fused weight.
+Plain LoRA pairs are applied, including those ComfyUI maps onto a band of a fused weight, and on FLUX.2 klein the diffusers `norm_out.linear` pair whose halves ComfyUI swaps. A swapped pair on any other family is refused by name.
 LoHa, LoKr, GLoRA, OFT, BOFT, DoRA, LoRAs with a mid tensor, model merges and `strength_model` values other than 1 on a patch are refused by name.
 The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 
