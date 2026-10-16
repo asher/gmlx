@@ -685,6 +685,23 @@ def test_a_flux3_pull_takes_its_variant_folder_and_packs_the_comfy_vae(
             in capsys.readouterr().out)
 
 
+def test_a_flux3_pull_removes_only_the_vae_folders_it_empties(
+        lib, monkeypatch):
+    """The other files of the VAE repo's folder, in split_files and beside
+    it, stay after the pack."""
+    root, cfg = lib
+    repo = root / "Comfy-Org__flux2-dev"
+    keep = [repo / "split_files" / "diffusion_models" / "flux2-dev.bin",
+            repo / "notes.txt"]
+    for k in keep:
+        k.parent.mkdir(parents=True, exist_ok=True)
+        k.write_bytes(b"k")
+    _shared_pull(lib, monkeypatch, "flux-3-klein")
+    assert all(k.read_bytes() == b"k" for k in keep)
+    assert not (repo / "split_files" / "vae").exists()
+    assert (repo / F.vae_pack).is_file()
+
+
 def test_a_flux3_pull_after_krea_2_shares_its_encoder_file(lib, monkeypatch):
     got, _, krea = _shared_pull(lib, monkeypatch, "krea-2-turbo")
     got, _, flux = _shared_pull(lib, monkeypatch, "flux-3-klein")
