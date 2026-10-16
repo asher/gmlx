@@ -45,7 +45,12 @@ COMFY = {
               "latent": {"channels": 16, "stride": 8, "patch": 2},
               "vae": {"channels_out": 3, "stride": 8}, "edit": False,
               "context": ("txtfusion.layerwise_blocks.0.prenorm.scale", 0, 12)},
-    # FLUX.3's LATENT is the DiT's model space, which its VAE routes carry.
+    # FLUX.2's and FLUX.3's LATENT is the DiT's model space, which their VAE
+    # routes carry.
+    "flux2_klein": {"model_class": "Flux2", "image_model": "flux2",
+                    "latent": {"channels": 128, "stride": 16, "patch": 1},
+                    "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
+                    "context": ("txt_in.weight", 1)},
     "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
@@ -58,6 +63,8 @@ MODELS = {
     "qwen-image-2.1-turbo": ("qwen_image21", "turbo",
                              {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": TURBO_SIGMAS}),
     "krea-2-turbo": ("krea2", "turbo", {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
+    "flux-2-klein": ("flux2_klein", "distilled", {"steps": 4, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
+    "flux-2-klein-base": ("flux2_klein", "base", {"steps": 50, "cfg": 4.0, "shift": 1.0, "sigmas": None}),
     "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93, "sigmas": None}),
     "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93, "sigmas": None}),
 }

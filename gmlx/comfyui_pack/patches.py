@@ -6,7 +6,10 @@ the gmlx MODEL, which keeps ComfyUI's tuples in ``patches``:
 ``(strength_patch, adapter, strength_model, offset, function)`` per weight
 key. A table entry carries the key, the offset as a band, and the adapter
 pairs by hash with their strengths. Plain LoRA pairs are applied; every
-other kind is refused by name.
+other kind is refused by name. ComfyUI's key map swaps the two halves of
+the rows of a diffusers ``norm_out.linear`` pair's product, through
+``swap_scale_shift``; such a pair goes with the halves of its up rows
+swapped, which gives the same product.
 """
 
 from __future__ import annotations
@@ -48,6 +51,18 @@ def _carried(t: torch.Tensor) -> torch.Tensor:
     return t if t.dtype in _CARRIED else t.float()
 
 
+def _swaps_halves(function) -> bool:
+    """Whether ``function`` is ComfyUI's ``swap_scale_shift``."""
+    import comfy.utils
+
+    return function is not None and function is getattr(comfy.utils, "swap_scale_shift", None)
+
+
+def _swap_halves(t: torch.Tensor) -> torch.Tensor:
+    first, second = t.chunk(2, dim=0)
+    return torch.cat([second, first], dim=0)
+
+
 def _alpha(a):
     if a is None:
         return None
@@ -72,7 +87,8 @@ def build_table(model_id: str, patches: dict, client: StepClient | None = None):
             if kind != "lora":
                 raise GmlxRefusal(f"gmlx: {kind} on {key} is not supported on a gmlx model; "
                                   "only plain LoRA pairs apply")
-            if function is not None:
+            swap = offset is None and _swaps_halves(function)
+            if function is not None and not swap:
                 raise GmlxRefusal(f"gmlx: a patch function on {key} is not supported on a "
                                   "gmlx model")
             if float(strength_model) != 1.0:
@@ -81,6 +97,8 @@ def build_table(model_id: str, patches: dict, client: StepClient | None = None):
             if float(strength) == 0.0:
                 continue
             up, down = _carried(adapter.weights[0]), _carried(adapter.weights[1])
+            if swap:
+                up = _swap_halves(up)
             if client is not None:
                 hu, hd = client.ensure_adapter(up), client.ensure_adapter(down)
             else:

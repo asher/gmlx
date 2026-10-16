@@ -20,18 +20,18 @@ latents in model space and a timestep per row, and gives back what
 ComfyUI expects, which ``CONVENTIONS`` holds per family. ComfyUI's
 Lumina2 forward, which runs Z-Image, takes ``1 - timestep`` as the time of
 the native model and negates its output; its Qwen-Image 2.1 forward takes
-the timestep as it is and returns the native output, as its Krea 2 and
-FLUX.3 forwards do. All give, for the flow schedule, the velocity
-``d x / d sigma`` at ``sigma = timestep``, which ``denoise_step``
-returns.
+the timestep as it is and returns the native output, as its Krea 2,
+FLUX.2 and FLUX.3 forwards do. All give, for the flow schedule, the
+velocity ``d x / d sigma`` at ``sigma = timestep``, which
+``denoise_step`` returns.
 
 A FLUX.3 flow map DiT also reads the time its step goes to. ComfyUI's
 forward takes it from the schedule its sampler runs on: the entry after
 the one nearest the timestep, the last at most. A step on a flow map
 holds that schedule as ``sample_sigmas`` and the route takes the target
-of each row by the same rule. ComfyUI's FLUX.3 latents are the DiT's
-own model space, the VAE's latents in 2x2 patches and normalized, so its
-VAE routes take and give model-space latents.
+of each row by the same rule. ComfyUI's FLUX.2 and FLUX.3 latents are
+the DiT's own model space, the VAE's latents in 2x2 patches and
+normalized, so their VAE routes take and give model-space latents.
 """
 
 from __future__ import annotations
@@ -72,7 +72,8 @@ class Convention:
 
 CONVENTIONS = {
     "comfy": {"z_image": Convention(), "qwen_image21": Convention(),
-              "krea2": Convention(), "flux3_klein": Convention()},
+              "krea2": Convention(), "flux2_klein": Convention(),
+              "flux3_klein": Convention()},
 }
 
 # What a client builds its model from, per family: ComfyUI's model class
@@ -90,6 +91,10 @@ COMFY = {
     "krea2": {"model_class": "Krea2", "image_model": "krea2",
               "latent": {"channels": 16, "stride": 8, "patch": 2},
               "vae": {"channels_out": 3, "stride": 8}},
+    "flux2_klein": {"model_class": "Flux2", "image_model": "flux2",
+                    "latent": {"channels": 128, "stride": 16, "patch": 1},
+                    "vae": {"channels_out": 3, "stride": 16,
+                            "space": "model"}},
     "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16,

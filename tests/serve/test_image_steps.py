@@ -170,8 +170,8 @@ def test_capabilities_answer_without_the_version_header(host):
     assert r.status_code == 200
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
-    assert caps["families"] == ["flux3_klein", "krea2", "qwen_image21",
-                                "z_image"]
+    assert caps["families"] == ["flux2_klein", "flux3_klein", "krea2",
+                                "qwen_image21", "z_image"]
     assert caps["conventions"] == ["comfy"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -380,7 +380,8 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
     # velocity back, so every convention is the identity.
-    for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
+    for fam in ("z_image", "qwen_image21", "krea2", "flux2_klein",
+                "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
@@ -578,13 +579,18 @@ def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
     """ComfyUI's FLUX.3 latents are the model's: the routes hand them to
     the core VAE passes as they are, where the other families map them
     to and from the VAE's own space."""
-    def no_map(_z):
-        raise AssertionError("FLUX.3 latents are mapped to no other space")
+    _model_space_vae_routes(host, fpipes[True], "f3d", monkeypatch)
 
-    pipe = dataclasses.replace(fpipes[True], vae=SimpleNamespace(
+
+def _model_space_vae_routes(host, pipe, mid, monkeypatch):
+    def no_map(_z):
+        raise AssertionError(f"{pipe.family.title} latents are mapped to no "
+                             "other space")
+
+    pipe = dataclasses.replace(pipe, vae=SimpleNamespace(
         config=SimpleNamespace(in_channels=3), to_model_space=no_map,
         to_vae_space=no_map))
-    _serve(host, "f3d", pipe)
+    _serve(host, mid, pipe)
     seen = []
 
     def decode(p, z, *, alpha=False, **kw):
@@ -597,13 +603,13 @@ def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
     monkeypatch.setattr(api, "vae_encode", lambda p, img, **kw: mx.array(
         lat[:1]))
     c = _client()
-    got, _, _ = c.container("vae/decode", {"latents": lat}, {"model": "f3d"})
+    got, _, _ = c.container("vae/decode", {"latents": lat}, {"model": mid})
     assert got["image"].shape == (2, 32, 48, 3)
     assert [z.shape for z in seen] == [(1, 128, 2, 3)] * 2
     assert np.array_equal(np.concatenate(seen), lat)
     got, _, _ = c.container("vae/encode",
                             {"image": np.zeros((1, 32, 48, 3), np.float32)},
-                            {"model": "f3d"})
+                            {"model": mid})
     assert np.array_equal(got["latents"], lat[:1])
 
 
@@ -613,6 +619,132 @@ def test_flow_targets_follow_comfyuis_rule():
         0.75, 0.5, 0.0, 0.0, 0.0, 0.0]
     # A tie goes to the first of the two nearest, as torch's argmin does.
     assert steps.flow_targets(s, [0.625]) == [0.5]
+
+
+
+
+# FLUX.2 klein: ComfyUI's Flux2 forward takes sigma as the timestep and
+# returns the native velocity, reads the reference latents of a row in
+# its order, and its VAE routes carry model-space latents, as FLUX.3's do.
+
+@pytest.fixture(scope="module")
+def f2pipe():
+    """The tiny FLUX.2 klein DiT of the check 3 self-test."""
+    def build():
+        import flux2_gates as fg
+        from oracle_fixture import committed_fixture
+
+        weights, m = committed_fixture("selftest_flux2_klein_tiny_weights")
+        return api.ImagePipeline(
+            dit=fg.tiny_model(weights, m["inputs"]["config"]),
+            family=get_family("flux2_klein"), variant="distilled")
+    return _on_worker(build)
+
+
+def _f2_cond(feats, *refs, key="k"):
+    return api.Conditioning(mx.array(feats[0]), key, ref_latents=tuple(
+        mx.array(r[0]) for r in refs))
+
+
+def test_a_flux2_step_is_the_core_step_with_and_without_references(
+        host, f2pipe):
+    """Each step equals denoise_step at the timestep as sigma, with no
+    schedule read, with a reference and with two rows."""
+    _serve(host, "f2d", f2pipe)
+    c = _client()
+    rng = np.random.default_rng(7)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    rows = _rows(c, feats)
+    for t in SIGMAS[:-1]:
+        for sched in (None, SIGMAS):
+            out = c.step("f2d", None, x, [t], rows, sample_sigmas=sched)
+            assert np.array_equal(out, _f3_velocity(
+                f2pipe, x, t, _f2_cond(feats))), t
+    with_ref = [{"cond": rows[0]["cond"], "ref_latents": [c.put(ref)]}]
+    out = c.step("f2d", None, x, [0.75], with_ref)
+    assert np.array_equal(out, _f3_velocity(f2pipe, x, 0.75,
+                                            _f2_cond(feats, ref)))
+    assert not np.array_equal(out, _f3_velocity(f2pipe, x, 0.75,
+                                                _f2_cond(feats)))
+    two = c.step("f2d", None, np.concatenate([x, x]), [0.75, 0.75],
+                 rows + with_ref)
+    assert np.array_equal(two[1:], out)
+    assert host.held == 0
+
+
+def test_a_flux2_step_takes_its_references_in_the_order_of_the_row(
+        host, f2pipe):
+    _serve(host, "f2d", f2pipe)
+    c = _client()
+    rng = np.random.default_rng(11)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    a = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    b = rng.standard_normal((1, 8, 3, 2)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"],
+           "ref_latents": [c.put(a), c.put(b)]}
+    out = c.step("f2d", None, x, [0.75], [row])
+    want = _f3_velocity(f2pipe, x, 0.75, _f2_cond(feats, a, b, key=""))
+    assert np.array_equal(out, want)
+    assert not np.array_equal(out, _f3_velocity(
+        f2pipe, x, 0.75, _f2_cond(feats, b, a, key="")))
+    assert host.held == 0
+
+
+def test_a_flux2_table_on_comfyuis_native_keys_steps_as_the_core_table(
+        host, f2pipe):
+    """ComfyUI names a FLUX.2 pair by the GGUF name under diffusion_model.,
+    a diffusers q, k or v pair as a band of the fused qkv, and the core
+    table of those keys gives the same step."""
+    from lora_fixtures import make_pair
+
+    _serve(host, "f2d", f2pipe)
+    c = _client()
+    rng = np.random.default_rng(10)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    plain = _f3_velocity(f2pipe, x, 0.75, _f2_cond(feats))
+    for name, band, (dout, din) in (
+            ("double_blocks.0.img_attn.qkv", [0, 64, 64], (64, 64)),
+            ("double_blocks.1.txt_attn.qkv", None, (192, 64)),
+            ("single_blocks.0.linear1", None, (576, 64)),
+            ("txt_in", None, (64, 24))):
+        down, up, _ = make_pair(rng, dout, din, 2)
+        tid = c.define_table("f2d", {"entries": [{
+            "key": f"diffusion_model.{name}.weight", "band": band,
+            "patches": [{"up": c.put(up, kind="adapters"),
+                         "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                         "strength": 0.8}]}]})
+        core = steps.STATE.tables_of("f2d", f2pipe)[tid]
+        out = c.step("f2d", None, x, [0.75], _rows(c, feats),
+                     patch_table=tid)
+        want = _on_worker(lambda: np.array(api.denoise_step(
+            f2pipe, mx.array(x), 0.75, _f2_cond(feats), patch_table=core)))
+        assert np.array_equal(out, want), name
+        assert not np.array_equal(out, plain), name
+
+
+def test_the_flux2_status_names_comfyuis_flux2_on_model_space_latents(
+        host, f2pipe, monkeypatch):
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("flux2_klein"), "distilled"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "f2d", f2pipe)
+    st = _client().status("f2d")
+    assert st["comfy"] == {"model_class": "Flux2", "image_model": "flux2"}
+    assert st["edit_capable"]
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+    assert st["sampling"] == {"steps": 4, "cfg": 1.0, "shift": 1.0,
+                              "sigmas": None}
+
+
+def test_the_flux2_vae_routes_carry_model_space_latents(host, f2pipe,
+                                                         monkeypatch):
+    """ComfyUI's FLUX.2 latents are the model's, as FLUX.3's are."""
+    _model_space_vae_routes(host, f2pipe, "f2d", monkeypatch)
 
 
 # Patch tables.
@@ -1046,14 +1178,17 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
         assert e.value.status == 400
 
 
-def test_a_flux3_step_encode_takes_the_prompt_and_no_images(monkeypatch):
-    """FLUX.3 klein's encoder reads the prompt alone, and its steps take
-    the reference latents of the VAE route, so images on the encode are
-    refused by that rule."""
+@pytest.mark.parametrize("fam, title", [("flux2_klein", "FLUX.2 klein"),
+                                        ("flux3_klein", "FLUX.3 klein")])
+def test_a_klein_step_encode_takes_the_prompt_and_no_images(monkeypatch, fam,
+                                                            title):
+    """The FLUX.2 and FLUX.3 klein encoders read the prompt alone, and
+    their steps take the reference latents of the VAE route, so images on
+    the encode are refused by that rule."""
     served, seen, _ = _stub_step_encode(monkeypatch)
-    served.pipe.family = get_family("flux3_klein")
+    served.pipe.family = get_family(fam)
     img = np.zeros((256, 256, 3), np.uint8)
-    with pytest.raises(steps.StepError, match="the FLUX.3 klein encoder "
+    with pytest.raises(steps.StepError, match=f"the {title} encoder "
                        "reads the prompt alone; a step takes the reference "
                        "latents the VAE route encodes") as e:
         _on_worker(lambda: steps.encode(served, "a", [img]))

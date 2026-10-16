@@ -43,6 +43,7 @@ from comfy_extras.nodes_model_advanced import ModelSamplingAuraFlow  # noqa: E40
 C = P.client
 ZID, QID, QTID = "z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo"
 KID = "krea-2-turbo"
+F2ID, F2BID = "flux-2-klein", "flux-2-klein-base"
 F3ID, F3BID = "flux-3-klein", "flux-3-klein-base"
 STEPS = 4
 LORAS = tempfile.mkdtemp(prefix="gmlx-pack-loras-")
@@ -52,6 +53,9 @@ LORA_TARGETS = support.write_zimage_lora(os.path.join(LORAS, LORA), support.mani
 LORA_F3 = "flux3-test-lora.safetensors"
 LORA_F3_KEYS = {f"diffusion_model.{s}.weight" for s in
                 support.write_flux3_lora(os.path.join(LORAS, LORA_F3), support.manifest("flux3_klein"))}
+LORA_F2 = "flux2-test-lora.safetensors"
+LORA_F2_KEYS = {f"diffusion_model.{s}.weight" for s in
+                support.write_flux2_lora(os.path.join(LORAS, LORA_F2), support.manifest("flux2_klein"))}
 # FLUX.3 came to ComfyUI after the pinned checkout; there its models are
 # refused by name.
 HAS_FLUX3 = hasattr(comfy.supported_models, "Flux3")
@@ -246,6 +250,24 @@ class Weightless(Base):
         self.assertIn("ZImage", str(e.exception))
         self.assertIn("QwenImage21", str(e.exception))
 
+    def test_flux2_builds_on_meta_and_reads_the_reference_rule_of_its_dit(self):
+        for mid in (F2ID, F2BID):
+            with self.subTest(mid):
+                gc.collect()
+                r0 = rss()
+                m = self.model(mid)
+                gc.collect()
+                grew = (rss() - r0) / 2 ** 20
+                uc = m.model.model_config.unet_config
+                self.assertEqual(type(m.model.model_config).__name__, "Flux2")
+                self.assertEqual((uc["guidance_embed"], uc["depth"], uc["depth_single_blocks"]),
+                                 (False, 5, 20))
+                f = m.model.diffusion_model.forward
+                self.assertEqual((f.reads_guidance, f.ref_method, f.flow_map), (False, "index", False))
+                self.assertTrue(all(p.device.type == "meta" for p in m.model.parameters()))
+                self.assertLess(grew, 200.0)
+                self.assertEqual(m.model.get_dtype(), torch.float32)
+
     @needs_flux3
     def test_flux3_builds_on_meta_with_its_flow_map_from_the_manifest(self):
         for mid, flow in ((F3ID, True), (F3BID, False)):
@@ -417,6 +439,30 @@ class Capture(Base):
         b = LL.load_lora_model_only(self.model(F3BID), LORA_F3, 0.8)[0]
         self.assertEqual(set(b.patches), LORA_F3_KEYS - {"diffusion_model.ref_time_in.in_layer.weight"})
 
+    def test_a_flux2_lora_in_three_spellings_becomes_a_table(self):
+        """ComfyUI's FLUX.2 key map puts diffusers q, k and v on thirds of the
+        fused weight and norm_out.linear on the final modulation with the
+        halves of its product swapped, and the kohya and native names on their
+        layers."""
+        m = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(self.model(F2ID), LORA_F2, 0.8)[0]
+        self.assertEqual(set(m.patches), LORA_F2_KEYS)
+        qkv = m.patches["diffusion_model.double_blocks.0.img_attn.qkv.weight"]
+        self.assertEqual(sorted(t[3] for t in qkv), [(0, 0, 3072), (0, 3072, 3072), (0, 6144, 3072)])
+        tid = m.sync_patches()
+        table, tensors = P.patches.build_table(F2ID, m.patches)
+        self.assertEqual(tid, C.table_id(table)[0])
+        (put,) = self.stub.events("put_table")
+        self.assertEqual((put["id"], put["entries"], put["bands"], put["strengths"]),
+                         (tid, len(support.FLUX2_PAIRS), 4, [0.8]))
+        self.assertEqual(len(self.stub.events("put_adapter")), 2 * len(support.FLUX2_PAIRS))
+        sd = comfy.utils.load_torch_file(os.path.join(LORAS, LORA_F2), safe_load=True)
+        up = sd["transformer.norm_out.linear.lora_up.weight"]
+        (e,) = [e for e in table["entries"]
+                if e["key"] == "diffusion_model.final_layer.adaLN_modulation.1.weight"]
+        (pp,) = e["patches"]
+        self.assertTrue(torch.equal(tensors[pp["up"]], torch.cat([up[3072:], up[:3072]])))
+        self.assertTrue(torch.equal(tensors[pp["down"]], sd["transformer.norm_out.linear.lora_down.weight"]))
+
     def test_a_dropped_adapter_is_uploaded_again_on_409(self):
         m = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(self.model(), LORA, 0.7)[0]
         # The client believes the server holds every pair; the server holds none.
@@ -498,6 +544,7 @@ class Refusals(Base):
                      "DIFFUSION_MODEL wrapper": dict(transformer_options={"wrappers": {
                          comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL: {"k": [lambda *a: a]}}}),
                      "'siglip_feats'": dict(siglip_feats=[torch.zeros(1, 2, 2, 8)]),
+                     "the DiT input 'guidance'": dict(guidance=torch.tensor([3.5])),
                      "reference latents": dict(ref_latents=[torch.zeros(1, 16, 4, 4)])}
             for name, kw in cases.items():
                 with self.subTest(name):
@@ -507,6 +554,29 @@ class Refusals(Base):
             self.assertEqual(self.stub.events("step"), [])
         finally:
             m.model.current_patcher = None
+
+    def test_a_flux2_forward_reads_no_guidance_and_refuses_another_reference_method(self):
+        """ComfyUI hands a FLUX.2 forward the guidance on every call, which its
+        DiT reads only through a guidance embedder klein has none of. The
+        server places the references by the DiT's own index rule, so another
+        method, which FluxKontextMultiReferenceLatentMethod sets, is refused by
+        name."""
+        f = self.model(F2ID).model.diffusion_model.forward
+        cond = self.cond(F2ID, "x")[0][0]
+        x, t, g = torch.zeros(1, 128, 4, 4), torch.tensor([1.0]), torch.tensor([3.5])
+        ref = torch.zeros(1, 128, 2, 2)
+        f(x, t, context=cond, guidance=g)
+        f(x, t, context=cond, guidance=g, ref_latents=[ref], ref_latents_method="index")
+        self.assertEqual([s["refs"] for s in self.stub.events("step")], [[0], [1]])
+        for method in ("offset", "uxo", "index_timestep_zero"):
+            with self.subTest(method):
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    f(x, t, context=cond, guidance=g, ref_latents=[ref], ref_latents_method=method)
+                self.assertIn(f"{F2ID!r} places its reference latents by the 'index' method, and "
+                              f"this call asks for {method!r}", str(e.exception))
+        # Without references the stock DiT reads no method either.
+        f(x, t, context=cond, guidance=g, ref_latents_method="offset")
+        self.assertEqual(len(self.stub.events("step")), 3)
 
     @needs_flux3
     def test_flux3_refusals_name_what_reached_the_forward(self):
@@ -596,6 +666,25 @@ class Sampling(Base):
         with self.assertRaises(C.GmlxError) as e:
             fwd(torch.zeros(1, 16, 2, 8, 8), torch.ones(1), context=torch.zeros(1, 4, 30720))
         self.assertIn("(B, C, h, w)", str(e.exception))
+
+    def test_a_flux2_sample_sends_its_512_text_rows_and_no_schedule(self):
+        """ComfyUI's Flux2 model pads the text rows at the front to 512 and
+        hands the forward a guidance the step does not carry. The DiT is no
+        flow map, so no schedule goes."""
+        for mid, cfg, rows in ((F2ID, 1.0, 1), (F2BID, 4.0, 2)):
+            with self.subTest(mid):
+                self.stub.reset()
+                with torch.inference_mode():
+                    out = self.sample(self.model(mid), mid, cfg=cfg)
+                steps = self.stub.events("step")
+                self.assertEqual(len(steps), STEPS)
+                self.assertEqual({s["rows"] for s in steps}, {rows})
+                self.assertEqual({tuple(s["tensors"]) for s in steps}, {("timestep", "x")})
+                self.assertEqual({tuple(s["row_keys"]) for s in steps}, {("cond", "num_tokens")})
+                self.assertEqual({tuple(s["num_tokens"]) for s in steps}, {(512,) * rows})
+                self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(rows, 128, 4, 4)})
+                self.assertEqual(tuple(out.shape), (1, 128, 4, 4))
+                self.assertTrue(bool(torch.isfinite(out).all()))
 
     @needs_flux3
     def test_a_flux3_flow_map_step_carries_the_sampler_schedule(self):
@@ -831,6 +920,61 @@ class ClipAndVae(Base):
         self.assertEqual(steps[0]["x_shape"], [2, 64, 6, 4])
         self.assertEqual(tuple(res["samples"].shape), (1, 64, 6, 4))
 
+    def test_flux2_clip_and_vae_carry_its_features_and_model_space_latents(self):
+        clip = P.nodes.GmlxCLIPLoader().load(F2ID, self.stub.url, False)[0]
+        (cond,) = comfy_nodes.CLIPTextEncode().encode(clip, "a lighthouse")
+        self.assertEqual(tuple(cond[0][0].shape), (1, 32, 7680))
+        # KleinTokenizer applies its chat template before prevent_empty_text
+        # reads the prompt, so an empty prompt goes as it is.
+        clip.encode_from_tokens_scheduled(clip.tokenize("", prevent_empty_text=True))
+        self.assertEqual([e["text"] for e in self.stub.events("encode")], ["a lighthouse", ""])
+        vae = P.nodes.GmlxVAELoader().load(F2ID, self.stub.url, False)[0]
+        (img,) = comfy_nodes.VAEDecode().decode(vae, {"samples": torch.zeros(1, 128, 4, 6)})
+        self.assertEqual(tuple(img.shape), (1, 64, 96, 3))
+        (lat,) = comfy_nodes.VAEEncode().encode(vae, torch.rand(1, 70, 100, 3))
+        self.assertEqual(tuple(lat["samples"].shape), (1, 128, 4, 6))
+        self.assertEqual(self.stub.events("vae_encode")[-1]["shape"], [1, 64, 96, 3])
+
+    def test_a_flux2_edit_through_reference_latent_reaches_the_step(self):
+        """ComfyUI's FLUX.2 klein edit template: the text encode, its zeroed
+        negative, and the reference's VAEEncode put on both by
+        ReferenceLatent. FluxKontextMultiReferenceLatentMethod at the DiT's
+        own rule passes, and another method is refused by name."""
+        from comfy_extras.nodes_edit_model import ReferenceLatent
+        from comfy_extras.nodes_flux import FluxKontextMultiReferenceLatentMethod
+        clip = P.nodes.GmlxCLIPLoader().load(F2ID, self.stub.url, False)[0]
+        vae = P.nodes.GmlxVAELoader().load(F2ID, self.stub.url, False)[0]
+        (pos,) = comfy_nodes.CLIPTextEncode().encode(clip, "make it blue")
+        (neg,) = comfy_nodes.ConditioningZeroOut().zero_out(pos)
+        (lat,) = comfy_nodes.VAEEncode().encode(vae, torch.rand(1, 96, 64, 3))
+        pos, neg = ReferenceLatent.execute(pos, lat)[0], ReferenceLatent.execute(neg, lat)[0]
+        latent = {"samples": torch.zeros(1, 128, 4, 4)}
+        for method in (None, "index"):
+            with self.subTest(method):
+                self.stub.reset()
+                p = pos if method is None else FluxKontextMultiReferenceLatentMethod.execute(pos, method)[0]
+                with torch.inference_mode():
+                    (res,) = comfy_nodes.common_ksampler(self.model(F2ID), 1, 2, 2.0, "euler", "simple",
+                                                         p, neg, latent)
+                steps = self.stub.events("step")
+                self.assertEqual(sum(s["rows"] for s in steps), 4)
+                for s in steps:
+                    self.assertEqual(s["ref_shapes"], [[[1, 128, 6, 4]]] * s["rows"])
+                    self.assertEqual(s["row_keys"], ["cond", "num_tokens", "ref_latents"])
+                self.assertEqual(tuple(res["samples"].shape), (1, 128, 4, 4))
+        p = FluxKontextMultiReferenceLatentMethod.execute(pos, "offset")[0]
+        with self.assertRaises(C.GmlxRefusal) as e, torch.inference_mode():
+            comfy_nodes.common_ksampler(self.model(F2ID), 1, 2, 2.0, "euler", "simple", p, neg, latent)
+        self.assertIn("by the 'index' method, and this call asks for 'offset'", str(e.exception))
+
+    def test_stock_lora_loader_with_the_gmlx_flux2_clip(self):
+        model = self.model(F2ID)
+        clip = P.nodes.GmlxCLIPLoader().load(F2ID, self.stub.url, False)[0]
+        m2, c2 = comfy_nodes.LoraLoader().load_lora(model, clip, LORA_F2, 0.8, 1.0)
+        self.assertIsInstance(m2, P.patcher.GmlxModelPatcher)
+        self.assertIsInstance(c2, P.clip.GmlxCLIP)
+        self.assertEqual(set(m2.patches), LORA_F2_KEYS)
+
     def test_flux3_clip_and_vae_carry_its_features_and_model_space_latents(self):
         clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
         (cond,) = comfy_nodes.CLIPTextEncode().encode(clip, "a lighthouse")
@@ -958,7 +1102,7 @@ class Widgets(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_loaders_list_the_server_models_default_first(self):
-        want = [QID, ZID, QTID, KID, F3ID, F3BID]
+        want = [QID, ZID, QTID, KID, F2ID, F2BID, F3ID, F3BID]
         for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
             node = P.NODE_CLASS_MAPPINGS[name]
             req = node.INPUT_TYPES()["required"]
@@ -977,7 +1121,7 @@ class Widgets(unittest.TestCase):
             os.environ.pop("GMLX_DEFAULT_IMAGE_MODEL")
             self.probed()
             names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
-            self.assertEqual(names, [KID, ZID, QID, QTID, F3ID, F3BID])
+            self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F3ID, F3BID])
             self.assertEqual(opts["default"], KID)
         finally:
             stub.close()
@@ -1064,6 +1208,9 @@ class AgainstComfyGGUF(Base):
 
     def test_unet_config_and_patches_equal_comfyui_gguf(self):
         self.against("GMLX_TEST_ZIMAGE_GGUF", ZID, LORA)
+
+    def test_flux2_unet_config_and_patches_equal_comfyui_gguf(self):
+        self.against("GMLX_TEST_FLUX2_GGUF", F2ID, LORA_F2)
 
     @needs_flux3
     def test_flux3_unet_config_and_patches_equal_comfyui_gguf(self):

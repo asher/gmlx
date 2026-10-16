@@ -182,6 +182,45 @@ def write_flux3_lora(path: str, manifest: dict, rank: int = 4, alpha: float = 2.
     return stems
 
 
+# The pairs of write_flux2_lora: the file's key, the GGUF layer ComfyUI's
+# key map puts it on and the third of a fused q, k and v it is, if any.
+FLUX2_PAIRS = (
+    ("transformer.transformer_blocks.0.attn.to_q", "double_blocks.0.img_attn.qkv", 0),
+    ("transformer.transformer_blocks.0.attn.to_k", "double_blocks.0.img_attn.qkv", 1),
+    ("transformer.transformer_blocks.0.attn.to_v", "double_blocks.0.img_attn.qkv", 2),
+    ("transformer.transformer_blocks.1.attn.add_k_proj", "double_blocks.1.txt_attn.qkv", 1),
+    ("transformer.single_transformer_blocks.0.attn.to_qkv_mlp_proj", "single_blocks.0.linear1", None),
+    ("transformer.norm_out.linear", "final_layer.adaLN_modulation.1", None),
+    ("lora_unet_single_blocks_1_linear2", "single_blocks.1.linear2", None),
+    ("diffusion_model.double_blocks.2.txt_mlp.2", "double_blocks.2.txt_mlp.2", None),
+    ("diffusion_model.double_stream_modulation_img.lin", "double_stream_modulation_img.lin", None),
+    ("diffusion_model.txt_in", "txt_in", None),
+)
+
+
+def write_flux2_lora(path: str, manifest: dict, rank: int = 4, alpha: float = 2.0,
+                     seed: int = 0) -> list:
+    """A small FLUX.2 LoRA in the three spellings ComfyUI's key map reads:
+    diffusers names, which put q, k and v on thirds of a fused weight and
+    norm_out.linear on the final modulation with its halves swapped, the
+    kohya ``lora_unet_`` form and the dotted ``diffusion_model`` form.
+    Returns the GGUF layer of each pair, in the order of ``FLUX2_PAIRS``."""
+    import torch
+    from safetensors.torch import save_file
+    shapes = {t["name"]: t["shape"] for t in manifest["tensors"]}
+    g = torch.Generator().manual_seed(seed)
+    sd = {}
+    for key, layer, third in FLUX2_PAIRS:
+        dout, dn = shapes[f"{layer}.weight"]
+        if third is not None:
+            dout //= 3
+        sd[f"{key}.lora_down.weight"] = (torch.randn(rank, dn, generator=g) * 0.01).to(torch.bfloat16)
+        sd[f"{key}.lora_up.weight"] = (torch.randn(dout, rank, generator=g) * 0.01).to(torch.bfloat16)
+        sd[f"{key}.alpha"] = torch.tensor(alpha)
+    save_file(sd, path)
+    return [layer for _, layer, _ in FLUX2_PAIRS]
+
+
 def manifest(family: str) -> dict:
     with open(os.path.join(FIXTURES, f"manifest-{family}.json")) as f:
         return json.load(f)

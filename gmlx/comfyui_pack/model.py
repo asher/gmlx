@@ -56,7 +56,8 @@ INPUTS = {"num_tokens", "attention_mask", "ref_latents", "image_slots", "ref_lat
 IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "SkipLayerGuidanceSD3",
                       "SkipLayerGuidanceDiTSimple", "ControlNetApply", "ControlNetApplyAdvanced",
                       "ControlNetApplySD3", "SetUnionControlNetType", "QwenImageDiffsynthControlnet",
-                      "TomePatchModel", "FreeU", "FreeU_V2", "ScaleROPE"}
+                      "TomePatchModel", "FreeU", "FreeU_V2", "ScaleROPE",
+                      "FluxKontextMultiReferenceLatentMethod"}
 
 LAST_PROMPT: dict = {}
 STRICT_KEYS = False
@@ -200,6 +201,14 @@ class RemoteForward:
         # A flow map DiT, FLUX.3's distilled one, reads the schedule the
         # sampler runs on, which each step carries.
         self.flow_map = bool(getattr(base_model.diffusion_model, "flow_map", False))
+        params = getattr(base_model.diffusion_model, "params", None)
+        # ComfyUI's Flux DiT reads the guidance input only through a guidance
+        # embedder, which FLUX.2 klein has none of, and Flux.extra_conds
+        # hands it on every call.
+        self.reads_guidance = bool(getattr(params, "guidance_embed", True))
+        # The reference rule of a DiT that reads ref_latents_method, which
+        # the server's DiT follows; None for a DiT that reads no method.
+        self.ref_method = getattr(params, "default_ref_method", None)
         self.warned: set = set()
         self.memo: dict = {}
         self.calls = collections.deque(maxlen=512)
@@ -222,9 +231,18 @@ class RemoteForward:
         for k, v in kwargs.items():
             if k in INPUTS or v is None or (isinstance(v, (list, tuple, dict)) and not v):
                 continue
+            if k == "guidance" and not self.reads_guidance:
+                continue
             _refuse(f"the DiT input {k!r}")
         if kwargs.get("ref_latents") and not self.b.edit_capable:
             _refuse(f"reference latents on {self.b.model_id!r}, which takes none")
+        method = kwargs.get("ref_latents_method")
+        if (kwargs.get("ref_latents") and self.ref_method is not None and method is not None
+                and method != self.ref_method):
+            hits = _upstream_names()
+            where = f"; upstream node(s): {', '.join(hits)}" if hits else ""
+            raise GmlxRefusal(f"gmlx: {self.b.model_id!r} places its reference latents by the "
+                              f"{self.ref_method!r} method, and this call asks for {method!r}{where}")
         cache = to.get("qwen_image21_cache") or {}
         if cache.get("dtype", "default") not in ("default", None):
             raise GmlxRefusal(f"gmlx: a {cache['dtype']} prefix cache is not supported on a "
