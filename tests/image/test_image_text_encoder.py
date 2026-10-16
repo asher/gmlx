@@ -583,6 +583,21 @@ def test_pad_rows_reach_the_next_multiple_under_the_cap():
         _spec(), pad_id=0, pad_position=3).template_id
 
 
+@pytest.mark.parametrize("family", ["z_image", "krea2", "qwen_image21",
+                                    "flux3_klein"])
+def test_the_rows_of_a_prompt_are_bounded_by_its_utf8_bytes(family):
+    """Byte-level BPE gives each token at least one byte, so the bound of
+    a prompt is its UTF-8 bytes, not its code points: a prompt of 2, 3 and
+    4 byte characters is bounded as an ASCII prompt of its bytes. A
+    character whose NFC form holds more bytes is bounded at those."""
+    spec = te.encoder_spec(family)
+    for ch, size in (("\u00e9", 2), ("\u732b", 3), ("\U0001F6B2", 4),
+                     ("\ufb2c", 6)):
+        prompt = "a cat " + ch * 12
+        assert te.rows_at_most(spec, prompt) == te.rows_at_most(
+            spec, "a cat " + "x" * (12 * size)), (family, ch)
+
+
 def _np_forward(m, seq, positions, allowed, layers):
     """The tiny Qwen3's decoder layers in float64 numpy, with one rotary
     position per row and a boolean mask of the keys each row reads."""
