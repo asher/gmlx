@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2026 Black Forest Labs, Inc.
+# Ported from BFL's FLUX.3 klein reference at commit 45e57c9: the
+# reference canvas, the single and multi reference preparation and the
+# default size of src/flux3/pipeline.py, and the choice between them and
+# the crop of the output in generate() of src/flux3/generate.py, and
+# modified for gmlx (Apache-2.0; see licenses/flux-3-image-klein-LICENSE).
 """The reference images of a FLUX.3 klein edit, by the rules of the
 reference's pipeline.py and generate.py.
 
