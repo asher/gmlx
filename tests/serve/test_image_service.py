@@ -975,6 +975,8 @@ def test_several_flux3_references_are_cropped_and_the_first_sizes_it():
     ("flux3_klein", [(128, 8192), (512, 512)], (8192, 128), (4096, 64)),
     ("flux3_klein", [(30, 4096), (512, 512)], (4096, 16), (4096, 16)),
     ("flux2_klein", [(625, 5000)], (4992, 624), (4096, 512)),
+    # The example of image-api.md and cli.md.
+    ("flux2_klein", [(1000, 8000)], (5712, 704), (4096, 496)),
     ("flux2_klein", [(64, 512)], (512, 64), (512, 64))])
 def test_an_unsized_edit_scales_a_thin_first_reference_into_the_limits(
         family, images, ref, want):

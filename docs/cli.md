@@ -1009,9 +1009,11 @@ encodes the references for the DiT. A single reference is scaled down to
 at most the area of 2048x2048 pixels and padded out to sides that are
 multiples of 16. Of several, each is scaled down to at most the area of
 1024x1024 and cropped to sides that are multiples of 16. Without `--size`
-the output has the first reference's size, and the output of a single
-reference is cropped back to the scaled image. FLUX.3 klein sizes its
-references by this rule, and `--ref-size` exits 2 on it.
+the output has the first reference's size as prepared, scaled into 4096
+pixels a side and 2048x2048 pixels at its shape when it is past them, and
+the output of a single reference is cropped back to the scaled image.
+FLUX.3 klein sizes its references by this rule, and `--ref-size` exits 2
+on it.
 
 `--ref` gives FLUX.2 klein up to 10 reference images as well, read as
 FLUX.3 klein reads them, with no `--encoder-mmproj`. A single reference is
@@ -1019,8 +1021,10 @@ scaled down to at most the area of 2024x2024 pixels, and each of several
 to at most the area of 1024x1024. Each is then cropped to sides that are
 multiples of 16, around the center. A reference needs sides of at least 64
 pixels, and neither side more than 8 times the other. Without `--size` the
-output has the first reference's size as prepared, and it is not cropped
-back. `--ref-size` exits 2 on FLUX.2 klein too.
+output has the first reference's size as prepared, scaled into the same
+limits, and it is not cropped back, so an 8000x1000 reference, prepared at
+5712x704, gives a 4096x496 output. `--ref-size` exits 2 on FLUX.2 klein
+too.
 
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The

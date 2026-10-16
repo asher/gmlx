@@ -98,17 +98,20 @@ FLUX.3 klein scales a single reference down to at most the area of
 several, it scales each down to at most the area of 1024x1024 and crops it
 to sides that are multiples of 16. Without `size` the result has the size
 of the first reference as prepared, and the result of a single reference is
-cropped back to the scaled image. When that size is past the size limits,
-as from a first reference of 20000x30 pixels among several, the request
-gets 400 and needs a `size`.
+cropped back to the scaled image. A size past the limits of 4096 pixels a
+side and 2048x2048 pixels is scaled into them at its shape, so a first
+reference of 8192x128 pixels among several gives a 4096x64 result. When a
+side scales to less than 16 pixels, as from a first reference of 20000x30
+pixels among several, the request gets 400 and needs a `size`.
 
 FLUX.2 klein scales a single reference down to at most the area of
 2024x2024 pixels, and each of several to at most the area of 1024x1024.
 It then crops each to sides that are multiples of 16, around the center.
 A reference needs sides of at least 64 pixels, and neither side more than
 8 times the other. Without `size` the result has the size of the first
-reference as prepared and is not cropped back, so a 500x300 image gives a
-496x288 result.
+reference as prepared, scaled into the same limits, and is not cropped
+back. A 500x300 image gives a 496x288 result, and an 8000x1000 image,
+prepared at 5712x704, gives a 4096x496 result.
 
 ## URL responses
 
