@@ -182,7 +182,10 @@ class LoraKeyMap:
     ``swapped`` names the targets of a layout whose weight holds the two
     halves of the module's output rows in the other order, as a diffusers
     final norm puts the scale rows before the shift rows. The halves of
-    the up rows of a pair on such a target are swapped back."""
+    the up rows of a pair on such a target are swapped back.
+    ``comfy_prefixes``, when set, are the only stem prefixes under which
+    ComfyUI finds the family's targets, and only those that are not
+    ``diffusers_only``: ComfyUI drops every other spelling."""
     family: str
     title: str
     targets: Mapping
@@ -191,6 +194,7 @@ class LoraKeyMap:
     text_targets: tuple = ()
     absent: Mapping = field(default_factory=dict)
     swapped: frozenset = frozenset()
+    comfy_prefixes: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -768,6 +772,20 @@ def _text_target(stem: str, keymap: LoraKeyMap, under: dict) -> str | None:
     return None
 
 
+def _comfy_drops(stem: str, name: str, underscored: bool,
+                 keymap: LoraKeyMap) -> bool:
+    """Whether ComfyUI's key map lacks the DiT stem ``stem`` of target
+    ``name``."""
+    if keymap.comfy_prefixes:
+        if name in keymap.diffusers_only:
+            return True
+        return not any(
+            stem == p + (name.replace(".", "_") if p.endswith("_") else name)
+            for p in keymap.comfy_prefixes)
+    return (underscored and name in keymap.diffusers_only
+            and not stem.startswith(COMFY_DIFFUSERS_UNDERSCORE))
+
+
 def is_text_stem(stem: str) -> bool:
     return stem.startswith(TEXT_DOTTED + TEXT_UNDERSCORE)
 
@@ -822,8 +840,7 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             pair = _halves_swapped(pair)
         dit.append(Target(module, band, pair))
         scaled += [stem] * moved
-        if underscored and name in keymap.diffusers_only \
-                and not stem.startswith(COMFY_DIFFUSERS_UNDERSCORE):
+        if _comfy_drops(stem, name, underscored, keymap):
             dropped.append(stem)
     skipped = _need_targets(raw.path, keymap, len(raw.pairs),
                             bool(dit or text), unmatched, other,
@@ -835,7 +852,14 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             f"adapter header that is not their rank ({_listed(scaled)}). "
             "gmlx applies it as the diffusers loader does, and ComfyUI "
             "does not read the header, so the image differs from ComfyUI's")
-    if dropped:
+    if dropped and keymap.comfy_prefixes:
+        warnings.append(
+            f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
+            f"does not read for {keymap.title} ({_listed(dropped)}). "
+            "ComfyUI reads the GGUF names under "
+            f"{' or '.join(keymap.comfy_prefixes)}. gmlx applies them and "
+            "ComfyUI drops them, so the image differs from ComfyUI's")
+    elif dropped:
         warnings.append(
             f"{raw.path}: {len(dropped)} underscore keys spell diffusers "
             f"names ({_listed(dropped)}). gmlx applies them and ComfyUI "

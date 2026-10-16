@@ -318,6 +318,13 @@ file that the message names, and pull again.
 The LoRA is of a kind gmlx does not apply, or it was made for another
 model. [Use a LoRA](images.md#use-a-lora) says which LoRAs work.
 
+### `gmlx applies them and ComfyUI drops them`
+
+The LoRA loads in `gmlx image`, and ComfyUI's LoraLoader skips its keys,
+so ComfyUI makes the image without it. A FLUX.3 klein LoRA trained with
+diffusers is one: ComfyUI reads FLUX.3 keys only in the GGUF names, under
+`lora_unet_` or `diffusion_model.`.
+
 ### `has text encoder layers; set it on the image model's adapters instead`
 
 A LoRA in a request applies to the DiT only, so the server refuses one that

@@ -72,6 +72,9 @@ _TOP = {"emb_in.image": "x_embedders.image",
         **{f"{s}_stream_modulations.{k}.lin":
            f"{s}_stream_modulations.{k}.linear"
            for s in ("early", "single") for k in MOD_KEYS}}
+# The prefixes under which ComfyUI's key map finds a FLUX.3 adapter, in
+# the GGUF names only.
+COMFY_PREFIXES = ("lora_unet_", "diffusion_model.")
 REF_TIME = {"ref_time_in.in_layer": "target_timestep_embedder.linear_1",
             "ref_time_in.out_layer": "target_timestep_embedder.linear_2"}
 _BASE = ("the target time embedder of the distilled FLUX.3 klein DiT, and "
@@ -132,4 +135,5 @@ def lora_map(config: dict) -> LoraKeyMap:
     return LoraKeyMap(family="flux3_klein", title="FLUX.3 klein",
                       targets=targets,
                       diffusers_only=frozenset(diffusers_only),
-                      absent=absent, swapped=frozenset({NORM_OUT}))
+                      absent=absent, swapped=frozenset({NORM_OUT}),
+                      comfy_prefixes=COMFY_PREFIXES)

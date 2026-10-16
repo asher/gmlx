@@ -195,12 +195,14 @@ def test_every_spelling_of_every_target_resolves(tmp_path, case):
     res = reader.resolve(reader.read_lora(
         write_keys(tmp_path / "all.safetensors", keys)), lora_map(cfg))
     assert res.text == () and res.unmatched == ()
-    if names == "diffusers" and dialect == "kohya":
-        # ComfyUI reads no diffusers name of FLUX.3.
+    if case in ("kohya gguf", "comfy"):
+        assert res.warnings == ()
+    else:
+        # ComfyUI reads only the GGUF names, under lora_unet_ and
+        # diffusion_model.
         assert len(res.warnings) == 1
         assert "ComfyUI drops them" in res.warnings[0]
-    else:
-        assert res.warnings == ()
+        assert f": {len(dims)} keys " in res.warnings[0]
     assert len(res.dit) == len(dims)
     for t in res.dit:
         down, up, alpha = by_path[t.module]
@@ -210,6 +212,57 @@ def test_every_spelling_of_every_target_resolves(tmp_path, case):
         assert np.array_equal(np.array(t.pair.down), down)
         assert np.array_equal(np.array(t.pair.up), want)
         assert t.pair.alpha == alpha
+
+
+# What ComfyUI v0.41.1 loads of a FLUX.3 klein adapter: the stems of four
+# targets, by GGUF name and by diffusers name, under each prefix, looked
+# up in the key map of comfy.lora.model_lora_keys_unet on the weightless
+# distilled and Base models of the pack. The Base model has no ref_time,
+# and ComfyUI loads none of its spellings.
+COMFY_TARGETS = {
+    "norm_out": ("final_layer.image.adaLN_modulation.1", "norm_out.linear"),
+    "mlp_in": ("single_blocks.0.mlp_in",
+               "single_transformer_blocks.0.ff.linear_in"),
+    "image_cond q": ("content_mode_blocks.image_cond.1.q_proj",
+                     "mode_blocks.image_cond.1.attn.to_q"),
+    "ref_time": ("ref_time_in.in_layer",
+                 "target_timestep_embedder.linear_1"),
+}
+COMFY_LOADS = {
+    ("lora_unet_", "gguf"): True, ("lora_unet_", "diffusers"): False,
+    ("lycoris_", "gguf"): False, ("lycoris_", "diffusers"): False,
+    ("lora_transformer_", "gguf"): False,
+    ("lora_transformer_", "diffusers"): False,
+    ("diffusion_model.", "gguf"): True,
+    ("diffusion_model.", "diffusers"): False,
+    ("model.diffusion_model.", "gguf"): False,
+    ("transformer.", "gguf"): False, ("transformer.", "diffusers"): False,
+    ("", "gguf"): False, ("", "diffusers"): False,
+    ("unet.", "diffusers"): False, ("base_model.model.", "gguf"): False,
+}
+
+
+@pytest.mark.parametrize("header", ["flux3_klein_q4_k_m.header.json",
+                                    "flux3_klein_base_q4_k_m.header.json"])
+def test_the_comfyui_warning_names_every_spelling_comfyui_drops(header):
+    km = lora_map(fp.identify(fixture_view(header)).config)
+    zeros = reader.RawPair("", mx.zeros((1, 4)), mx.zeros((4, 1)), None)
+    for label, names in COMFY_TARGETS.items():
+        for (prefix, which), loads in COMFY_LOADS.items():
+            name = names[which == "diffusers"]
+            stem = prefix + (name.replace(".", "_") if prefix.endswith("_")
+                             else name)
+            raw = reader.RawLora("a.safetensors",
+                                 {stem: dataclasses.replace(zeros, stem=stem)},
+                                 {})
+            if label == "ref_time" and not HEADERS[header]:
+                with pytest.raises(reader.AdapterError):
+                    reader.resolve(raw, km)
+                continue
+            res = reader.resolve(raw, km)
+            assert [t.module for t in res.dit] == [names[0]], stem
+            warned = [w for w in res.warnings if "ComfyUI drops them" in w]
+            assert len(warned) == (0 if loads else 1), stem
 
 
 def _adapter(cfg: dict, seed: int, alpha, paths, names: str) -> dict:
