@@ -408,10 +408,12 @@ class Cases:
         enc = kinds(log, "vae_encode")
         shapes = [e["shape"] for e in enc]
         # reference-1.png is 512 wide and 768 high, reference-2.png square.
-        self.check("each reference encoded once, in order", len(shapes) == 2 and shapes[0][1] > shapes[0][2]
-                   and shapes[1][1] == shapes[1][2], shapes)
+        # The references are found by shape, whatever order they encode in.
+        tall = [s for s in shapes if s[1] > s[2]]
+        square = [s for s in shapes if s[1] == s[2]]
+        self.check("each reference encoded once", len(shapes) == 2 and len(tall) == len(square) == 1, shapes)
         steps = kinds(log, "step")
-        lat = [[1, 128, h // 16, w // 16] for _, h, w, _ in shapes]
+        lat = [[1, 128, h // 16, w // 16] for _, h, w, _ in tall + square]
         self.check("steps", len(steps) == 2, len(steps))
         self.check("every row carries both references in order",
                    all(e["ref_shapes"] == [lat] * e["rows"] for e in steps), [e["ref_shapes"] for e in steps][:1])
