@@ -311,6 +311,12 @@ def build(config: dict):
     return Flux2KleinDiT(config)
 
 
+def lora_map(config: dict):
+    from .lora_map import lora_map as build_map
+
+    return build_map(config)
+
+
 def synth_config(view: HeaderView) -> dict:
     """The keys of the official transformer/config.json, from shapes and
     constants."""
@@ -387,6 +393,7 @@ FAMILY = Family(
     synth_config=synth_config,
     constants=CONSTANTS,
     build=build,
+    lora_map=lora_map,
     # The q and k norm scales, F32 in the file, stay fp32: the norm then
     # runs in fp32 and rounds once with the rotation.
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),

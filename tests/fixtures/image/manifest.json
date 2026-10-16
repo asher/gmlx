@@ -211,5 +211,13 @@
     "file": "vae/diffusion_pytorch_model.safetensors",
     "size": 168120878,
     "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+  },
+  "flux2_klein_diffusers_names.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "transformer/diffusion_pytorch_model.safetensors",
+    "size": 7751109744,
+    "sha256": "9f29f9edcfdae452a653ffb51a534ca4decd389952c225724ff3b94042612a6e",
+    "sha256_source": "The hub's LFS record of the file whose header the fixture's names and shapes come from. The base 4B file has the same names and shapes."
   }
 }

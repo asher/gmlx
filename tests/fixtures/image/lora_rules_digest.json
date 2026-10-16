@@ -1,0 +1,330 @@
+{
+ "files": {
+  "Comfy-Org__Krea-2/loras/krea2_kidsdrawing.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "05608533205af7ff059372d79733ab5f913fa651df9c28ae17bb649650de7b4c",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "036abd21c5f559728feb945d0d67dcb90588df7983e4c87c3df325f57aa1a498",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 0,
+     "sha256": "6b9ef1fcba9823e5ab3f528d783c95a05a8de56704792c6615add37ac00cdc7b",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 1,
+     "sha256": "bca2fd92b251597f7c6b8434ac3012c8d55039838329b3990695dfed40fa0abb",
+     "warned": 1
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 1,
+     "sha256": "2335e1f6e0f3db2494277851b774dae01d02513eca4267bc53a98c06da02b10a",
+     "warned": 1
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 1,
+     "sha256": "e587c4a74282b2eca819b003dbf69c2847317885fe4708458e812c66020437c1",
+     "warned": 1
+    }
+   },
+   "size": 469291992
+  },
+  "Limbicnation__pixel-art-lora/pytorch_lora_weights.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "df661b30f5a62edfb08689392bf7bbd1cd1fd960d24eb41e34fc45e49c49ecfc",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "134b49448bcb0fb2f06aa955fbb362e9a1f8e798c1a35c4ae727ecd9924df0ce",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "a87ed5378e420dde4dec37a2118b1dfae38c596e624dbbb604ca95c325960051",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "65819b18f8ff3a653e80f38a78c56215b1cedafe7be6ac2f0c958f302b6f0f0e",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "f16068b68e19a94fb9077bd4e35b93eaec764e6580d969ac905ff3579edac865",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "c5c17742b411495bc9d7b37721d3b335ddb86bd48593c6f4c0072ce12603b4fb",
+     "warned": 0
+    }
+   },
+   "size": 325280664
+  },
+  "bdsqlsz__qinglong_DetailedEyes_Z-Image/qinglong_detailedeye_z-image.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "f51f08cc6d88616853f83f63b8031726769095437aa744f98b661b010bcfc4ce",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "3f8e1046b99a6a8819a5e2b7d803c428b444ac99238785a8603255c6327eb859",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "3e4c81999f2fd9ee44129ca2e12fc3b0d7404484c7ce0bb93fd58a459fab3143",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "3022f8bb7ef5cae82719b3821f522624f7b2e3dd995b923d726aafd06ea71b13",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "5b8cd6a4797a5b816230e1b4c2cb4d5370658fc1a596814cda85fda2b684be6d",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 0,
+     "sha256": "86a54d35785d4b21ae0c37d694fb757a535e1d4d24862335a31cd449c98972d5",
+     "warned": 2
+    }
+   },
+   "size": 381587708
+  },
+  "mikkoph__mikkoani-klein4b/klein4b-mikkoani.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "7c616ff97c070aa4325a9dbd0c0371a1b0b35a0e1f3bbfa4519834d6e78d838a",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "dcfc6ee15270773c2ee3a500eeb64624bb522e909c542b12579434ddd92a5054",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "0904c9aa004b3719949705889bde32f304554f8719fcedc6059c78429bae69c9",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "f3287c0718ef989c21261da0f34caf292dcdc640e69dab582644921292b8f254",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "c7c02f6d329fff1cf045d8f9ef737ea6e6cd20605f6b521b30b313a9bae1aef9",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "fa1b4fc2e11aab553be8fbab9282fda7c330d91483d303690e1b617d22d70462",
+     "warned": 0
+    }
+   },
+   "size": 92436112
+  },
+  "ostris__sketch_to_image_klein_4b/sketch_to_image_klein_4b.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "b4330013ed4f84e68caf48ad66295086a3e01a4cbd9b8409d1e0b4a6c7789540",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "a2263832579dcd9e3f73d21919b200b128b99c3e082ded785f9dd24cda19d9cf",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "4314afe89b8a7d5fe5a8f721331343bff6f0b65dbfd12fde2be10f6b2f4bf444",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "18dd69239a47a594e9cecc724d011135bb74bfef0475e8b53721326cbcfbd7ec",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "770ec3aaaab43bd335ec13fda2d12f3fd5f611d24e9e4fc581dc62f539cdeea8",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "d5ad6f057ec8a15a257dd9f45e0eb3f0ef033de473ed3b0f37ca01bf68f890ef",
+     "warned": 0
+    }
+   },
+   "size": 92426712
+  },
+  "ostris__z_image_turbo_childrens_drawings/z_image_turbo_childrens_drawings.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "d04d3971f853b6335d72835bf482dd5698903e5d25e8a2439da43875b225be43",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "f2d4a53cbd4c89958091aacd30a8bd71c4c29e076b2df33252d273299e5fa935",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "d484134b689930e1a1dd89ec62904e91fefaeed5c20bdf4192a92d041112bce6",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "2faa109ddb36dc172f8994bfc52521728523fce1637eeb0793617bed21323daf",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "8e8bb8ef73b13e3e88290785406fa75a54d94a2674ca6317797c9b55fbcd63a5",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 0,
+     "sha256": "a27736f05f84c94a05058afa4d7088759a990cc47f2fed6a74fd4692a3db3bb4",
+     "warned": 0
+    }
+   },
+   "size": 170128264
+  },
+  "suayptalha__Z-Image-Turbo-Realism-LoRA/pytorch_lora_weights.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "8075bc4c858dab04c650b6b14d4859ddfac4dc42178cf7c4a33b8f6ba606a7cd",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "66cef56c277fb0ff926630f56252a2d2e38d8b90080ada5559bf3b5566e0d5b7",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "7a54fe543382130a53cbf650f62ab1769778a838ec51a783e498be97d7c5efda",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "122850429658c2da29bc871b46b5e35082020aca4cea6c3def86b3276da35c35",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "sha256": "92239fd51a6ab4a842427d728441b91d37b0fd539fe8b64af5a278648ac3f571",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 0,
+     "sha256": "961e8771718bd7344409d5a59b42de57fad913b0750c90800efa5d25cb5f6f8d",
+     "warned": 0
+    }
+   },
+   "size": 85094800
+  }
+ },
+ "source": "the spelling and file digests of test_image_lora_rules_unchanged.py, from the reader before LoraKeyMap.comfy_stems",
+ "spellings": {
+  "flux3_klein": {
+   "cases": 14080,
+   "refused": 3478,
+   "sha256": "e53e6b35a727fd3e74b38a3c95665876bd71f5b27199abf49d861ceb938a6123",
+   "warned": 9510
+  },
+  "flux3_klein base": {
+   "cases": 14080,
+   "refused": 3550,
+   "sha256": "6567e198a5cede421e2e575ed4275e2cd8dfd26a56643470d319a08742d9a391",
+   "warned": 9446
+  },
+  "krea2": {
+   "cases": 12400,
+   "refused": 2320,
+   "sha256": "9dfb2ea32797e5a4d311eaffa36cff70889c42bd3f26e212630255021dd27c09",
+   "warned": 1184
+  },
+  "qwen_image21": {
+   "cases": 6720,
+   "refused": 1968,
+   "sha256": "bc7c3e65ad7fc41c4f0b73c703deb88bd1fbc93655d638ea39283e9c94ee4a69",
+   "warned": 0
+  },
+  "qwen_image21 unfused": {
+   "cases": 6720,
+   "refused": 2544,
+   "sha256": "3348b856d8e8a7595c472f0401593d43f1526d6cee25de5962022bad3de7cc47",
+   "warned": 0
+  },
+  "z_image": {
+   "cases": 13460,
+   "refused": 6710,
+   "sha256": "9e8b01ac09abcd445722481a2bdcdaca0379ad17fda87740c09c8df562e236af",
+   "warned": 556
+  }
+ }
+}

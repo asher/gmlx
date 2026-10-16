@@ -185,7 +185,11 @@ class LoraKeyMap:
     the up rows of a pair on such a target are swapped back.
     ``comfy_prefixes``, when set, are the only stem prefixes under which
     ComfyUI finds the family's targets, and only those that are not
-    ``diffusers_only``: ComfyUI drops every other spelling."""
+    ``diffusers_only``: ComfyUI drops every other spelling.
+    ``comfy_stems``, when not None, is every DiT stem that ComfyUI's key
+    map reads for the family, and ComfyUI drops every other stem;
+    ``comfy_reads`` says which stems those are, for the warning. None
+    keeps the prefix rules above."""
     family: str
     title: str
     targets: Mapping
@@ -195,6 +199,8 @@ class LoraKeyMap:
     absent: Mapping = field(default_factory=dict)
     swapped: frozenset = frozenset()
     comfy_prefixes: tuple = ()
+    comfy_stems: frozenset | None = None
+    comfy_reads: str = ""
 
 
 @dataclass(frozen=True)
@@ -776,6 +782,8 @@ def _comfy_drops(stem: str, name: str, underscored: bool,
                  keymap: LoraKeyMap) -> bool:
     """Whether ComfyUI's key map lacks the DiT stem ``stem`` of target
     ``name``."""
+    if keymap.comfy_stems is not None:
+        return stem not in keymap.comfy_stems
     if keymap.comfy_prefixes:
         if name in keymap.diffusers_only:
             return True
@@ -852,7 +860,13 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             f"adapter header that is not their rank ({_listed(scaled)}). "
             "gmlx applies it as the diffusers loader does, and ComfyUI "
             "does not read the header, so the image differs from ComfyUI's")
-    if dropped and keymap.comfy_prefixes:
+    if dropped and keymap.comfy_stems is not None:
+        warnings.append(
+            f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
+            f"does not read for {keymap.title} ({_listed(dropped)}). "
+            f"ComfyUI reads {keymap.comfy_reads}. gmlx applies them and "
+            "ComfyUI drops them, so the image differs from ComfyUI's")
+    elif dropped and keymap.comfy_prefixes:
         warnings.append(
             f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
             f"does not read for {keymap.title} ({_listed(dropped)}). "
