@@ -71,6 +71,8 @@ class Flux3Config:
     eps: float
     flow_map: bool
     image_rope_scale: float
+    # A latent pixel is one token: the DiT has no patch of its own.
+    patch: int = 1
 
     @classmethod
     def from_dict(cls, c: dict) -> "Flux3Config":
@@ -393,6 +395,12 @@ class Flux3KleinDiT(nn.Module):
         final = chunks(self.final_layer["image"].adaLN_modulation[1],
                        vec["image"], 2)
         return StepModulation(early=early, single=single, final=final)
+
+    def references(self, latents) -> References:
+        """The reference latents (B, C, h, w), in the order of their
+        images, as the tokens and ids the DiT takes, with the image rope
+        scale of the config."""
+        return References.of(list(latents), self.cfg.image_rope_scale)
 
     def caption(self, feats: mx.array, taps: dict | None = None) -> Caption:
         """The text tokens of features (B, L, text dim) after txt_in."""

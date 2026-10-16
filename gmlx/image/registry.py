@@ -65,6 +65,19 @@ class StepParts:
 
 
 @dataclass(frozen=True)
+class LoopRules:
+    """Where a family's reference sampling loop rounds, when it does not
+    run in float32 throughout. ``noise`` is the dtype the initial noise
+    is rounded to; the latents stay float32 across the steps. With
+    ``act_update`` the guided velocity and the Euler product take the
+    DiT's activation dtype, each op rounded to it as the reference's
+    tensors of that dtype are, and only the sum with the latents runs in
+    float32."""
+    noise: str | None = None
+    act_update: bool = False
+
+
+@dataclass(frozen=True)
 class EditParts:
     """How a family conditions on reference images.
 
@@ -118,6 +131,7 @@ class Family:
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
     edit: EditParts | None = None      # None takes no reference images
+    loop: LoopRules | None = None      # None runs the loop in float32
     # Tensors a converter may store flattened with their shape under
     # comfy.gguf.orig_shape, which the load restores.
     reshaped: tuple = ()

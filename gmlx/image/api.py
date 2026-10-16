@@ -711,26 +711,32 @@ def _table_id(pipe: ImagePipeline, patch_table) -> str:
 
 
 def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
-                 patch_table=None) -> mx.array:
+                 patch_table=None, target=None) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
-    Outside a ``state_scope`` the conditionings of the call are its
-    scope."""
+    ``target`` is the sigma the step goes to, likewise, which a flow map
+    DiT takes and every other DiT refuses. Outside a ``state_scope`` the
+    conditionings of the call are its scope."""
     table = _table_id(pipe, patch_table)
     x = mx.array(latents).astype(mx.float32)
     if x.ndim != 4:
         raise ValueError(f"latents must be (B, C, H, W), not {x.shape}")
     b = x.shape[0]
-    sig = np.asarray(sigma, np.float32).reshape(-1)
-    if sig.size not in (1, b):
-        raise ValueError(f"{sig.size} sigmas for {b} rows")
-    sig = np.broadcast_to(sig, (b,))
+
+    def per_row(v, what):
+        a = np.asarray(v, np.float32).reshape(-1)
+        if a.size not in (1, b):
+            raise ValueError(f"{a.size} {what} for {b} rows")
+        return np.broadcast_to(a, (b,))
+
+    sig = per_row(sigma, "sigmas")
+    tgt = None if target is None else per_row(target, "targets")
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
     with state_scope(pipe, rows):
-        out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table)
-               for i in range(b)]
+        out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table,
+                    None if tgt is None else tgt[i]) for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
 
@@ -900,17 +906,32 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
 
 
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
-         cond: Conditioning, table) -> mx.array:
+         cond: Conditioning, table, target=None) -> mx.array:
+    """One row. A DiT that takes reference images gets the tokens of the
+    conditioning's reference latents from its ``references``, and a flow
+    map the ``target`` its modulation reads."""
     dit = pipe.dit
     if pipe.family.step is not None:
+        if target is not None:
+            raise ValueError(f"the {pipe.family.title} DiT takes no target "
+                             f"time")
         return _parts_row(pipe, pipe.family.step, x, sigma, cond, table)
+    kw = {}
+    if cond.ref_latents:
+        if not hasattr(dit, "references"):
+            raise ValueError(f"the {pipe.family.title} DiT takes no "
+                             f"reference images")
+        kw["refs"] = dit.references([mx.array(z)[None]
+                                     for z in cond.ref_latents])
     if not (hasattr(dit, "modulation") and hasattr(dit, "caption")):
+        if target is not None:
+            kw["target"] = np.reshape(np.float32(target), (1,))
         return _under(pipe, table, lambda: dit(
-            x, np.reshape(sigma, (1,)), cond.features[None]))
-    mod = _modulation(pipe, sigma, table)
+            x, np.reshape(sigma, (1,)), cond.features[None], **kw))
+    mod = _modulation(pipe, sigma, table, target)
     caption = _caption(pipe, cond, table)
     return _under(pipe, table, lambda: dit(
-        x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption))
+        x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption, **kw))
 
 
 def _memo(cache: ByteLRU, key, make):
@@ -927,11 +948,18 @@ def _memo(cache: ByteLRU, key, make):
     return hit
 
 
-def _modulation(pipe: ImagePipeline, sigma: np.float32, table):
+def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None):
+    """The modulation of ``sigma``, and of ``target`` for a flow map, kept
+    under their float32 bits and the patch table."""
     s = np.float32(sigma)
-    return _memo(pipe.modulations, (s.tobytes(), table),
+    if target is None:
+        return _memo(pipe.modulations, (s.tobytes(), table),
+                     lambda: _under(pipe, table, lambda: pipe.dit.modulation(
+                         np.reshape(s, (1,)), 1)))
+    t = np.float32(target)
+    return _memo(pipe.modulations, (s.tobytes(), table, t.tobytes()),
                  lambda: _under(pipe, table, lambda: pipe.dit.modulation(
-                     np.reshape(s, (1,)), 1)))
+                     np.reshape(s, (1,)), 1, np.reshape(t, (1,)))))
 
 
 def _caption(pipe: ImagePipeline, cond: Conditioning, table):
@@ -942,10 +970,20 @@ def _caption(pipe: ImagePipeline, cond: Conditioning, table):
     return _memo(pipe.captions, (cond.key, table), make)
 
 
-def guide(v_pos: mx.array, v_neg: mx.array, cfg: float) -> mx.array:
-    """``neg + cfg * (pos - neg)`` in float32; 1.0 means no guidance."""
+def guide(v_pos: mx.array, v_neg: mx.array, cfg: float,
+          dtype: mx.Dtype | None = None) -> mx.array:
+    """``neg + cfg * (pos - neg)`` in float32; 1.0 means no guidance.
+    With ``dtype`` each of the three ops runs in float32 and rounds to
+    ``dtype``, as a reference's ops on tensors of that dtype do."""
     pos, neg = v_pos.astype(mx.float32), v_neg.astype(mx.float32)
-    return neg + mx.array(cfg, mx.float32) * (pos - neg)
+    g = mx.array(np.float32(cfg), mx.float32)
+    if dtype is None or dtype == mx.float32:
+        return neg + g * (pos - neg)
+
+    def r(a):
+        return a.astype(dtype).astype(mx.float32)
+
+    return r(neg + r(g * r(pos - neg)))
 
 
 def _latent_mask(mask, shape: tuple, scale: int) -> mx.array:
@@ -980,13 +1018,24 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     it comes from ``seed``, else from a random seed. The batch is that of
     ``init_latents``, else of ``noise``, else 1. ``sampler`` is
     ``euler`` or ``uni_pc_bh2``, and the model sees the schedule's sigmas
-    either way. ``plan`` is the memory plan of the request: where it
-    runs one row at a time, a guided step evaluates the positive velocity
-    before it runs the negative row, and the two give the latents of a
-    step that evaluates both together."""
+    either way. A flow map DiT also takes the sigma each step goes to,
+    and samples with euler and no guidance. A family with loop rules
+    rounds as its reference loop does. ``plan`` is the memory plan of the
+    request: where it runs one row at a time, a guided step evaluates the
+    positive velocity before it runs the negative row, and the two give
+    the latents of a step that evaluates both together."""
     patch_table = _table_id(pipe, patch_table)
     if cfg is None:
         cfg = pipe.defaults.cfg
+    flow_map = bool(getattr(pipe.dit.cfg, "flow_map", False))
+    if flow_map and cfg != 1.0:
+        raise ValueError(f"the {pipe.family.title} {pipe.variant} DiT is a "
+                         f"flow map, which samples without guidance: drop "
+                         f"cfg {cfg}")
+    if flow_map and sampler != "euler":
+        raise ValueError(f"the {pipe.family.title} {pipe.variant} DiT is a "
+                         f"flow map, which samples with euler only, not "
+                         f"{sampler}")
     if cfg != 1.0 and neg is None:
         raise ValueError(f"cfg {cfg} needs a negative conditioning")
     unit = pipe.size_multiple
@@ -1034,22 +1083,32 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     noise = mx.array(noise).astype(mx.float32)
     if tuple(noise.shape) != shape:
         raise ValueError(f"noise {tuple(noise.shape)} does not match {shape}")
+    rules = pipe.family.loop
+    if rules is not None and rules.noise is not None:
+        noise = noise.astype(getattr(mx, rules.noise)).astype(mx.float32)
+    act = (pipe.dit.act_dtype
+           if rules is not None and rules.act_update else None)
     m = None if mask is None else _latent_mask(mask, shape, pipe.vae_scale)
 
     x = noise if init is None else noised(s[0], noise, init)
-    smp = make_sampler(sampler, s)
+    smp = (make_sampler(sampler, s, product=act)
+           if act is not None and sampler == "euler"
+           else make_sampler(sampler, s))
     one_row = plan is not None and plan.rows == 1
     scope = state_scope(pipe, [cond] if cfg == 1.0 else [cond, neg])
     with memfit.bounded_cache(), scope:
         for i in range(smp.steps):
             if should_stop is not None and should_stop():
                 raise SampleStopped(i, x)
-            v = denoise_step(pipe, x, s[i], cond, patch_table=patch_table)
+            to = s[i + 1] if flow_map else None
+            v = denoise_step(pipe, x, s[i], cond, patch_table=patch_table,
+                             target=to)
             if cfg != 1.0:
                 if one_row:
                     mx.eval(v)
                 v = guide(v, denoise_step(pipe, x, s[i], neg,
-                                          patch_table=patch_table), cfg)
+                                          patch_table=patch_table,
+                                          target=to), cfg, act)
             x = smp.step(x, v, i)
             if m is not None:
                 x = inpaint_blend(x, m, noised(s[i + 1], noise, init))

@@ -1,0 +1,188 @@
+{
+ "schema": 1,
+ "name": "selftest_flux3_klein_loop",
+ "check": 6,
+ "family": "flux3_klein",
+ "script": "scripts/image_oracle/check6_flux3_klein.py",
+ "argv": [
+  "check6_flux3_klein.py",
+  "--reference",
+  "src",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "stub": {
+   "latent": [
+    4,
+    6
+   ],
+   "channels": 8,
+   "text": [
+    3,
+    2
+   ],
+   "text_dim": 4
+  },
+  "seed": 6,
+  "reference_commit": "45e57c9fb06f9751cdced29a65c5d2171003be05",
+  "alpha": 6.93,
+  "velocity": "bf16((table[step] + text[0, 0]) - latents) per sample, the text of that sample",
+  "latents": "after every step, (steps, C, h, w) float32"
+ },
+ "results": {
+  "distilled": {
+   "steps": 16,
+   "prompts": [
+    "plain"
+   ],
+   "guidance": null
+  },
+  "base": {
+   "steps": 50,
+   "prompts": [
+    "",
+    "plain"
+   ],
+   "guidance": 3.5
+  }
+ },
+ "tolerances": {},
+ "notes": [
+  "Pipeline.generate on the stub DiT with the stand-in encoder, autoencoder and noise of the real run"
+ ],
+ "created": "2026-10-15T23:49:50Z",
+ "npz": "selftest_flux3_klein_loop.npz",
+ "tensors": {
+  "base_latents": {
+   "shape": [
+    50,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "1f5c392b556944e1cf46c15e9eda1f6a6f7372d10959a3f59b3f352a5ccecab0"
+  },
+  "base_schedule": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "1cc9f423bb873f42c2884f2613378fd37379b2d16bf9b42a35a2b1a36a5f279a"
+  },
+  "base_table": {
+   "shape": [
+    50,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "0fc85da0879f15b11b994dd62f68ec165c914210fa7e2494c9a6e48a91e8e50d"
+  },
+  "base_times": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "49ef2b7ec36cff65edd9685e10c60e4ae5a5528a140d17078fb7c24cd1965612"
+  },
+  "distilled_latents": {
+   "shape": [
+    16,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "34173cd650df00250892e79344a06dbf55f72973ec7b2f57978680db1c74cd20"
+  },
+  "distilled_schedule": {
+   "shape": [
+    17
+   ],
+   "dtype": "float32",
+   "sha256": "47b2e4ea9acca305918cff60d25537c22e5c04a3fa66ce06a8dd05f0a461f462"
+  },
+  "distilled_table": {
+   "shape": [
+    16,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "0b3dfde0094807c9854809e37e508cb4c175c4a83913f31f0a446de11498eb60"
+  },
+  "distilled_times": {
+   "shape": [
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "376fa2e898b2a38feaea154d41bdd33e90ae6e991f1e41ad12205e2ad325c140"
+  },
+  "features": {
+   "shape": [
+    3,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "c436b618bcda94abec0e6f5f466f3b63b8fe982f5ec527f7dd7016a8193597fe"
+  },
+  "features_empty": {
+   "shape": [
+    2,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "efe20b9ca0d4325f45d0e9c42b49ef117e0d81c51b2fe4027e65908cc03057fc"
+  },
+  "noise": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "fe4bf9fbc6608cac5cac72839fd25a4cfcca44704bb1c98c8e3fbf1d9a67194b"
+  }
+ }
+}

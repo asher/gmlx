@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family
+from gmlx.image.registry import ConstantsRow, Family, LoopRules, SamplingRow
 
 TITLE = "FLUX.3 klein"
 # The input modes in the order their tokens take inside a sample, and the
@@ -92,6 +92,22 @@ CONSTANTS = ConstantsRow(
     repo="black-forest-labs/flux-3-image-klein",
     revision="8454017f9ebaada30c998fccd9f67a80c7580f68",
 )
+
+# The defaults of MODELS in src/flux3/pipeline.py: Base at 50 steps with
+# guidance 3.5, which is gmlx's cfg, as the reference guides by
+# u + guidance * (c - u); the distilled flow map at 16 steps and no
+# guidance. The schedule is the family's own, at alpha for both.
+_BFL = ("github.com/black-forest-labs/flux-3-image-klein",
+        "45e57c9fb06f9751cdced29a65c5d2171003be05")
+SAMPLING = {
+    "distilled": SamplingRow(16, 1.0, 6.93, *_BFL),
+    "base": SamplingRow(50, 3.5, 6.93, *_BFL),
+}
+
+# The loop of src/flux3/sampling.py: the noise rounded to bf16 and the
+# latents kept in fp32 across the steps, the velocity, its guidance and
+# the step's product in bf16, and the sum in fp32.
+LOOP = LoopRules(noise="bfloat16", act_update=True)
 
 # The encoder of the reference: Qwen3-VL-4B-Instruct, the hidden states
 # of eight layers stacked per token, the prompt in the chat template and
@@ -325,4 +341,6 @@ FAMILY = Family(
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),
     encoder=encoder,
     schedule=schedule,
+    sampling=SAMPLING,
+    loop=LOOP,
 )
