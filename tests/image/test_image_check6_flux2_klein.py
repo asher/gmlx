@@ -318,10 +318,10 @@ def _time_inner_unrounded(mp, pipe):
 # The schedule of a 512 image, where the run is at 1024.
 OTHER_TOKENS = 1024
 
-# Wrong runs the exact gate must fail, by the kind of the 4B files: the
-# fault, the steps it runs (all with None), whether the unconditional row
-# is the prompt's, and the token count of the schedule (the image's with
-# None).
+# Wrong runs the exact gate must fail, by variant, at 4B and 9B, whose
+# schedules and times at a size are the same: the fault, the steps it
+# runs (all with None), whether the unconditional row is the prompt's,
+# and the token count of the schedule (the image's with None).
 EXACT_FAULTS = {
     "distilled": {
         "time embedding without its inner rounding":
@@ -362,8 +362,8 @@ def test_check6_exact_at_1024(pipes, request, monkeypatch, kind):
                 "tensors in fp32", got, gate))
     assert finite and sorted(got) == sorted(gate)
     over = {k: v for k, v in got.items() if v > EXACT_REL_L2}
-    for name, (apply, stop, neg, tokens) in EXACT_FAULTS.get(kind,
-                                                             {}).items():
+    faults = EXACT_FAULTS[variant_of(kind)]
+    for name, (apply, stop, neg, tokens) in faults.items():
         with monkeypatch.context() as mp:
             # The memos of the clean run would hand the fault its
             # modulations and its caption.
