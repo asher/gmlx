@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
 # _flux2_mu and _flux2 follow compute_empirical_mu and get_schedule of
 # src/flux2/sampling.py of BFL's FLUX.2 reference at commit 50fe516
-# (Apache-2.0).
+# (Apache-2.0; see licenses/flux2-LICENSE).
 # SPDX-FileCopyrightText: Copyright 2026 Qwen-Image Team and The HuggingFace Team
 # _qwen_image21 follows calculate_shift of diffusers'
 # src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py and the
 # exponential shift and terminal stretch of
 # src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py at
-# e0abab83 (Apache-2.0).
+# e0abab83 (Apache-2.0; see licenses/diffusers-LICENSE).
 """The schedules of the variants whose sigmas follow the image size, as
 the gmlx server's status names them under ``sampling.schedule``, in
 float32 numpy as gmlx's own sampler forms them. It imports neither torch

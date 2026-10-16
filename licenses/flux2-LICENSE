@@ -26,6 +26,8 @@ source.
   encode_image_refs in src/flux2/sampling.py.
 - gmlx/image/schedule.py: flux2_mu and flux2_sigmas, from
   compute_empirical_mu and get_schedule in src/flux2/sampling.py.
+- gmlx/comfyui_pack/schedules.py: _flux2_mu and _flux2, the same
+  schedule in numpy for the node pack.
 - tests/image/test_image_check3_flux2_klein.py: schedule, a transcription
   of get_schedule and compute_empirical_mu in src/flux2/sampling.py with
   their constants.
