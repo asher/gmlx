@@ -116,6 +116,25 @@ def test_the_time_embedding_follows_the_bf16_pipeline(t, t1000):
         assert not np.array_equal(got, _embedded(unrounded))
 
 
+def test_the_reference_tokens_run_in_the_activation_dtype(tiny):
+    """float32 reference latents enter the image_cond stream as the bf16
+    of the activations, as the image's latents do: the step is the step
+    on the bf16 tokens."""
+    weights, cfg = tiny
+    arrays, _, _ = _case(TINY)
+    model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
+    lat, feats, refs, sigma, target = fg.inputs(model, arrays)
+    # The fixture's tokens hold bf16 values; these hold more bits.
+    refs = fm.References(refs.tokens * (1 + 2.0 ** -12) + 1e-3, refs.ids)
+    assert refs.tokens.dtype == mx.float32
+    rounded = fm.References(refs.tokens.astype(mx.bfloat16), refs.ids)
+    assert not mx.array_equal(rounded.tokens.astype(mx.float32),
+                              refs.tokens).item()
+    got = model(lat, sigma, feats, target=target, refs=refs)
+    want = model(lat, sigma, feats, target=target, refs=rounded)
+    assert mx.array_equal(got, want).item()
+
+
 def test_the_step_parts_give_the_step(tiny):
     weights, cfg = tiny
     arrays, _, _ = _case(TINY)
