@@ -16,13 +16,18 @@ source.
   Klein9BParams in src/flux2/model.py, the defaults of the 9B rows of
   FLUX2_MODEL_INFO in src/flux2/util.py and the Qwen3-8B encoder of
   load_qwen3_embedder in src/flux2/text_encoder.py.
+- gmlx/image/families/flux2_klein_9b_kv/family.py: the defaults of the
+  flux.2-klein-9b-kv row of FLUX2_MODEL_INFO in src/flux2/util.py.
+- gmlx/image/families/flux2_klein_9b_kv/step.py: the step of
+  denoise_cached in src/flux2/sampling.py, in the parts a pipeline caches.
 - gmlx/image/families/flux2_klein/edit.py: the preparation of reference
   images of encode_image_refs and default_prep, with cap_min_pixels,
   cap_pixels and center_crop_to_multiple_of_x, in src/flux2/sampling.py.
 - gmlx/image/families/flux2_klein/model.py: the Flux2 forward,
-  DoubleStreamBlock, SingleStreamBlock, SelfAttention, SiLUActivation,
-  Modulation, LastLayer, MLPEmbedder, QKNorm, timestep_embedding and rope
-  of src/flux2/model.py, and the token ids of prc_img, prc_txt and
+  forward_kv_extract and forward_kv_cached, DoubleStreamBlock,
+  SingleStreamBlock, SelfAttention, SiLUActivation, Modulation, LastLayer,
+  MLPEmbedder, QKNorm, causal_attn_fn, timestep_embedding and rope of
+  src/flux2/model.py, and the token ids of prc_img, prc_txt and
   encode_image_refs in src/flux2/sampling.py.
 - gmlx/image/schedule.py: flux2_mu and flux2_sigmas, from
   compute_empirical_mu and get_schedule in src/flux2/sampling.py.

@@ -21,8 +21,8 @@ curl -s localhost:8080/internal/image-steps/v1/capabilities
 
 The answer gives the contract and the oldest client it serves, the gmlx
 version, the wire container and dtypes, the families, the step conventions,
-the patch kinds, and the limits: the largest tensor and adapter upload, the
-most rows in one step, and the most runs held at once.
+the patch kinds, the features, and the limits: the largest tensor and
+adapter upload, the most rows in one step, and the most runs held at once.
 
 ## A sampling run
 
@@ -102,6 +102,16 @@ prefix state of each of its conditionings between steps, and the
 `X-Gmlx-Prefix-Cache` header of a step answers `hit` or `miss`.
 `X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
 time less it is the transport time.
+
+A step with `ref_cache: true`, on a server whose features list
+`ref_cache`, runs as ComfyUI's `Flux KV Cache` node does on FLUX.2 klein
+9B KV. The first step of the run on a conditioning with reference latents
+runs the references at time zero, keeps their keys and values in every
+block, and returns the output of that step. The later steps of the run on
+that conditioning run the image and the text alone, and read those keys
+and values. The header answers `hit` on those steps, and the end of the
+run drops the keys and values. A step with `ref_cache` and no run gets
+400, as does one on a DiT that keeps no such cache.
 
 A run that sits idle for 120 seconds ends within a few seconds after, and
 lets the model go. The server holds at most 32 runs, and a begin past that
