@@ -5,13 +5,17 @@ scripts/image_oracle/check3_flux2_klein.py --self-test, with two
 reference images and with text alone, in fp32 at a fixed bound and in
 bf16 at twice the oracle's own gap. The step parts that a pipeline
 memoizes give the step they stand in for. Each wrong model of FAULTS
-misses the fp32 bound.
+misses the fp32 bound. The reference pass and the step on its cache, the
+cached pass of FLUX.2 klein 9B KV, against BFL's denoise_cached with
+--self-test --kv, by the same rules.
 
 The fp32 rows read the reference's time embedding, so they measure the
 model. gmlx's own embedding is held apart: the reference's fp32 exp is an
 ulp off the correctly rounded one at some frequencies, which moves one
 bf16 entry of the embedding at some times, 0.73 among them."""
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 import mlx.core as mx
 import numpy as np
@@ -277,6 +281,81 @@ def test_float16_is_refused(tiny):
     model = fg.tiny_model(weights, cfg)
     with pytest.raises(ImageDtypeError, match="float16"):
         model.act_dtype = mx.float16
+
+
+KV = "selftest_flux2_klein_tiny_kv"
+
+
+@contextmanager
+def _kv_time(arrays: dict):
+    """The model reads the reference's time embedding at the two times of
+    the cached pass, and its own at time zero, which every rule embeds
+    exactly."""
+    real = fm.time_embedding
+    at = {float(arrays["sigma"]): arrays["in.time_in"],
+          float(arrays["sigma2"]): arrays["in.time_in2"]}
+
+    def time_embedding(t, dim):
+        t = float(np.reshape(np.asarray(t, np.float32), (-1,))[0])
+        return real(t, dim) if t == 0.0 else mx.array(at[t][:1])
+
+    fm.time_embedding = time_embedding
+    try:
+        yield
+    finally:
+        fm.time_embedding = real
+
+
+def _kv_pass(model, arrays: dict, mod=None):
+    """gmlx's cached pass on the fixture: the reference pass, under
+    ``mod`` when given, then the step at each time on its cache. Returns
+    the cache and the two velocities."""
+    feats = mx.array(arrays["features"])[None]
+    refs = model.references([mx.array(arrays[f"refs.{i}"])
+                             for i in range(2)])
+    cache = model.reference_pass(refs, mod=mod)
+    vel = [model(mx.array(arrays[lat]), np.reshape(arrays[s], (1,)), feats,
+                 cache=cache)
+           for lat, s in (("latents", "sigma"), ("latents2", "sigma2"))]
+    return cache, [np.array(v) for v in vel]
+
+
+def test_the_cached_pass_is_the_references_in_fp32(tiny):
+    """The reference pass and the step on its cache against BFL's
+    forward_kv_extract, the first step of denoise_cached, which runs the
+    reference tokens in the step under causal attention, and against its
+    forward_kv_cached at a later time: each block's K and V and both
+    velocities within TOL, where the reference rows at the step's time in
+    place of time zero miss it."""
+    weights, cfg = tiny
+    arrays, _ = committed_fixture(KV)
+    model = fg.tiny_model(weights, cfg)
+    with mx.stream(mx.cpu), _kv_time(arrays):
+        cache, (v0, v1) = _kv_pass(model, arrays)
+        got = {"velocity_extract": fg.rel(v0, arrays["velocity_extract"]),
+               "velocity_cached": fg.rel(v1, arrays["velocity_cached"])}
+        for i in range(len(cache.k)):
+            for kv, a in (("k", cache.k[i]), ("v", cache.v[i])):
+                got[f"kv.{i}.{kv}"] = fg.rel(np.array(a),
+                                             arrays[f"kv.{i}.{kv}"])
+        worst = max(got, key=got.get)
+        print(f"flux2 tiny cached pass fp32: {len(got)} measures, worst "
+              f"{got[worst]:.2e} at {worst}")
+        assert got[worst] < TOL, got
+        at_step = model.modulation(np.reshape(arrays["sigma"], (1,)), 1)
+        _, (bad, _) = _kv_pass(model, arrays, mod=at_step)
+    assert fg.rel(bad, arrays["velocity_extract"]) > 100 * TOL
+
+
+def test_the_cached_pass_in_bf16_is_inside_the_bf16_tolerances(tiny):
+    """On gmlx's own time embedding, as a request runs."""
+    weights, cfg = tiny
+    arrays, m = committed_fixture(KV)
+    model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
+    _, (v0, v1) = _kv_pass(model, arrays)
+    for name, v in (("extract", v0), ("cached", v1)):
+        rel = fg.rel(v, arrays[f"velocity_{name}"])
+        assert rel <= m["tolerances"][f"velocity_{name}"]["rel_l2"], name
 
 
 def test_wrong_configs_are_refused(tiny):

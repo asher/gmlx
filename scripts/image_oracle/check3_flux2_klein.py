@@ -82,6 +82,8 @@ TINY = {"in_channels": 8, "context_in_dim": 24, "hidden_size": 64,
         "use_guidance_embed": False}
 TINY_CASE = {"latent": (4, 6), "refs": ((2, 3), (2, 2)), "text": 10,
              "sigma": 0.73}
+# The time of the cached step of the tiny model's cached pass.
+KV_SIGMA2 = 0.41
 
 
 def reference(path: Path):
@@ -492,6 +494,109 @@ def self_test(torch, fm, sampling, commit: str, a) -> int:
     return 0
 
 
+def kv_call(torch, sampling, model, lat, feats, refs, sigma, mode,
+            cache=None) -> tuple:
+    """One step of the reference's denoise_cached: forward_kv_extract with
+    the reference tokens, which returns the cache, or forward_kv_cached on
+    ``cache``. Returns the velocity, the cache and the inputs."""
+    dtype = oracle.torch_dtype(mode)
+    ins = case_inputs(torch, sampling, lat, feats, [], mode)
+    t_vec = torch.full((1,), sigma, dtype=torch.bfloat16)
+    common = dict(x=ins["x"], x_ids=ins["x_ids"], timesteps=t_vec,
+                  ctx=ins["ctx"], ctx_ids=ins["ctx_ids"], guidance=None)
+    # The first embedding time_in takes is the step's, the second, in the
+    # extract, that of the references' time zero.
+    emb = []
+    hook = model.time_in.register_forward_pre_hook(
+        lambda _m, args: emb.append(args[0]))
+    try:
+        if cache is None:
+            t_off = [(REF_T + REF_T * t).view(-1)
+                     for t in torch.arange(0, len(refs))]
+            toks, ids = sampling.listed_prc_img(
+                [torch.from_numpy(r[0]).to(torch.bfloat16) for r in refs],
+                t_coord=t_off)
+            out, cache = model.forward_kv_extract(
+                **common, x_seq_concat=torch.cat(toks)[None].to(dtype),
+                x_seq_concat_ids=torch.cat(ids)[None])
+        else:
+            out = model.forward_kv_cached(**common, kv_cache=cache)
+    finally:
+        hook.remove()
+    ins["time_in"] = emb[0]
+    _, c, h, w = lat.shape
+    return oracle.to_numpy(out[0]).T.reshape(1, c, h, w), cache, ins
+
+
+def kv_cache_arrays(cache: dict) -> dict:
+    """The cache's K and V by block, in the order of the blocks:
+    ``kv.<i>.k`` and ``kv.<i>.v``, (1, heads, R, head dim)."""
+    blocks = [*cache["double_blocks"], *cache["single_blocks"]]
+    out = {}
+    for i, b in enumerate(blocks):
+        out[f"kv.{i}.k"] = oracle.to_numpy(b["k_ref"])
+        out[f"kv.{i}.v"] = oracle.to_numpy(b["v_ref"])
+    return out
+
+
+def kv_self_test(torch, fm, sampling, commit: str, a) -> int:
+    """The tiny model of --self-test through the reference's cached pass:
+    the extract step at the case's time with both reference images, and a
+    cached step on other latents at another time, in fp32 and bf16."""
+    params = fm.Flux2Params(**TINY)
+    state = tiny_state(torch, fm, params, a.seed)
+    rng = np.random.default_rng(a.seed + 1)
+    c = TINY["in_channels"]
+    h, w = TINY_CASE["latent"]
+    lat = seeded(torch, rng, (1, c, h, w))
+    feats = seeded(torch, rng, (TINY_CASE["text"], TINY["context_in_dim"]),
+                   2.0)
+    refs = [seeded(torch, rng, (1, c, rh, rw))
+            for rh, rw in TINY_CASE["refs"]]
+    lat2 = seeded(torch, np.random.default_rng(a.seed + 2), (1, c, h, w))
+    sigma, sigma2 = TINY_CASE["sigma"], KV_SIGMA2
+    st = {k: torch.from_numpy(v) for k, v in state.items()}
+    fx = fixtures.FixtureWriter("selftest_flux2_klein_tiny_kv", check=3,
+                                family="flux2_klein", script=SCRIPT)
+    fx.inputs.update({"config": tiny_config(), "case": TINY_CASE,
+                      "seed": a.seed, "reference_commit": commit,
+                      "refs": len(refs), "sigma2": sigma2})
+    fx.note("the weights are in selftest_flux2_klein_tiny_weights by GGUF "
+            "name in torch order; the latents, features and references are "
+            "those of selftest_flux2_klein_tiny")
+    fx.add("latents", lat)
+    fx.add("latents2", lat2)
+    fx.add("features", feats)
+    for i, r in enumerate(refs):
+        fx.add(f"refs.{i}", r)
+    fx.add("sigma", np.float32(sigma))
+    fx.add("sigma2", np.float32(sigma2))
+    for mode in ("fp32", "bf16"):
+        model = plain_build(torch, fm, params, st, mode)
+        oracle.emulate_bf16_matmul(mode == "bf16")
+        v0, cache, ins0 = kv_call(torch, sampling, model, lat, feats, refs,
+                                  sigma, mode)
+        v1, _, ins1 = kv_call(torch, sampling, model, lat2, feats, refs,
+                              sigma2, mode, cache)
+        oracle.emulate_bf16_matmul(False)
+        tag = "" if mode == "fp32" else "_bf16"
+        fx.add(f"velocity_extract{tag}", v0)
+        fx.add(f"velocity_cached{tag}", v1)
+        if mode == "fp32":
+            fx.add("in.time_in", oracle.to_numpy(ins0["time_in"]))
+            fx.add("in.time_in2", oracle.to_numpy(ins1["time_in"]))
+            for k, v in kv_cache_arrays(cache).items():
+                fx.add(k, v)
+    for name in ("extract", "cached"):
+        gap = fixtures.compare(fx.arrays[f"velocity_{name}_bf16"],
+                               fx.arrays[f"velocity_{name}"])
+        fx.results[f"velocity_{name}_bf16_vs_fp32"] = gap
+        fx.tolerances[f"velocity_{name}"] = {"rel_l2": 2 * gap["rel_l2"]}
+    fx.tolerances["rule"] = RULE
+    print(f"[check3] wrote {fx.write()}", flush=True)
+    return 0
+
+
 def rope_fixture(torch, fm, commit: str) -> None:
     """The reference's RoPE tables of a klein head, four axes of 32 at
     theta 2000, at the positions of small grids and up to 4095, where an
@@ -540,11 +645,17 @@ def main(argv=None) -> int:
                     "check3_flux2_klein or check3_flux2_klein_9b by the "
                     "width when unset")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--kv", action="store_true",
+                    help="the reference's cached pass, denoise_cached, of "
+                    "FLUX.2 klein 9B KV; with --self-test, that of the "
+                    "tiny model alone")
     a = ap.parse_args(argv)
     torch = oracle.setup()
     oracle.set_dequant(a.dequant)
     fm, sampling = reference(a.reference.expanduser())
     commit = a.reference_commit
+    if a.self_test and a.kv:
+        return kv_self_test(torch, fm, sampling, commit, a)
     if a.self_test:
         return self_test(torch, fm, sampling, commit, a)
     if a.dit is None:

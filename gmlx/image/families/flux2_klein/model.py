@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
 # Ported from BFL's FLUX.2 reference at commit 50fe516: the Flux2 forward,
-# DoubleStreamBlock, SingleStreamBlock, SelfAttention, SiLUActivation,
-# Modulation, LastLayer, MLPEmbedder, QKNorm, timestep_embedding and rope
-# of src/flux2/model.py, and the token ids of prc_img, prc_txt and
+# forward_kv_extract and forward_kv_cached, DoubleStreamBlock,
+# SingleStreamBlock, SelfAttention, SiLUActivation, Modulation, LastLayer,
+# MLPEmbedder, QKNorm, causal_attn_fn, timestep_embedding and rope of
+# src/flux2/model.py, and the token ids of prc_img, prc_txt and
 # encode_image_refs in src/flux2/sampling.py, and modified for gmlx
 # (Apache-2.0; see licenses/flux2-LICENSE).
 """FLUX.2 klein DiT module tree and forward.
@@ -40,6 +41,17 @@ RoPE has four axes of 32 dims at theta 2000. An image token sits at (0,
 row, column, 0), a token of reference image i at (10 + 10 i, row, column,
 0), and a text token at (0, 0, 0, position). The tables follow the
 reference's fp32 arithmetic.
+
+FLUX.2 klein 9B KV is trained so that the reference tokens attend only to
+each other, under the modulation of time zero. Their keys and values then
+depend on the references alone. ``reference_pass`` runs the reference
+tokens through every block once, and keeps each block's K and V after
+RoPE. Every step of the edit then runs the image and the text alone, and
+each block's queries read the cached K and V after the image's keys, as
+BFL's ``denoise_cached`` does from its first step on. ComfyUI's Flux KV
+Cache node instead runs the first step with the reference tokens in it,
+at time zero, their queries over every key, and caches their K and V
+from that step, which ``extract`` gives.
 """
 
 from __future__ import annotations
@@ -50,9 +62,10 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from gmlx.image import ops, pacing
+from gmlx.image import ops, pacing, ref_cache
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.ops.products import own, precise
+from gmlx.image.ref_cache import RefCache
 
 # The time axis of reference image i is REF_T * (1 + i).
 REF_T = 10
@@ -179,6 +192,11 @@ def tokens(latents: mx.array) -> mx.array:
     return latents.reshape(b, c, h * w).transpose(0, 2, 1)
 
 
+def _batch(x: mx.array, b: int) -> mx.array:
+    """Rows (1 or B, L, D) broadcast to the batch ``b``."""
+    return x if x.shape[0] == b else mx.broadcast_to(x, (b, *x.shape[1:]))
+
+
 class RMSNorm(nn.Module):
     """The reference's q and k norm: its scale is the weight itself, and
     it runs in fp32 inside ``ops.qk_norm_rope``."""
@@ -286,17 +304,39 @@ class DoubleBlock(nn.Module):
             rows: mx.array) -> mx.array:
         return gated_out(lin, x, gate, rows)
 
+    def stream_qkv(self, attn: SelfAttention, x: mx.array, mod: tuple,
+                   rope: tuple) -> tuple:
+        """q, k and v of one stream under its modulation ``mod``."""
+        shift, scale, _ = mod[0]
+        return self.qkv(attn, self.adaln(x, shift, scale), *rope)
+
+    def stream_out(self, attn: SelfAttention, mlp: list, x: mx.array,
+                   mod: tuple, rows: mx.array) -> mx.array:
+        """One stream after its attention rows: the gated projection, then
+        the gated feed-forward."""
+        (_, _, gate), (shift2, scale2, gate2) = mod
+        x = self.out(attn.proj, x, gate, rows)
+        return self.out(mlp[2], x, gate2, self.hidden(
+            mlp, self.adaln(x, shift2, scale2)))
+
     def __call__(self, img: mx.array, txt: mx.array, mod_img: tuple,
-                 mod_txt: tuple, rope_img: tuple, rope_txt: tuple) -> tuple:
+                 mod_txt: tuple, rope_img: tuple, rope_txt: tuple,
+                 cached: tuple | None = None) -> tuple:
+        """The block over both streams. ``cached`` holds the K and V of
+        rows that are no part of either stream, which every query reads
+        after the image's keys."""
         (i_shift, i_scale, i_gate), (i_shift2, i_scale2, i_gate2) = mod_img
         (t_shift, t_scale, t_gate), (t_shift2, t_scale2, t_gate2) = mod_txt
         qi, ki, vi = self.qkv(self.img_attn,
                               self.adaln(img, i_shift, i_scale), *rope_img)
         qt, kt, vt = self.qkv(self.txt_attn,
                               self.adaln(txt, t_shift, t_scale), *rope_txt)
-        o = ops.sdpa(mx.concatenate([qt, qi], axis=2),
-                     mx.concatenate([kt, ki], axis=2),
-                     mx.concatenate([vt, vi], axis=2))
+        if cached is None:
+            k = mx.concatenate([kt, ki], axis=2)
+            v = mx.concatenate([vt, vi], axis=2)
+        else:
+            k, v = ref_cache.join([kt, ki], [vt, vi], *cached)
+        o = ops.sdpa(mx.concatenate([qt, qi], axis=2), k, v)
         b, n_txt = txt.shape[0], txt.shape[1]
         o = o.transpose(0, 2, 1, 3).reshape(b, o.shape[2], -1)
         img = self.out(self.img_attn.proj, img, i_gate, o[:, n_txt:])
@@ -306,6 +346,42 @@ class DoubleBlock(nn.Module):
         txt = self.out(self.txt_mlp[2], txt, t_gate2, self.hidden(
             self.txt_mlp, self.adaln(txt, t_shift2, t_scale2)))
         return img, txt
+
+    def reference(self, ref: mx.array, mod: tuple, rope: tuple) -> tuple:
+        """The reference rows through the image stream's weights, their
+        queries over their own keys alone. Returns the rows, and their k
+        and v."""
+        q, k, v = self.stream_qkv(self.img_attn, ref, mod, rope)
+        o = ops.sdpa(q, k, v)
+        o = o.transpose(0, 2, 1, 3).reshape(ref.shape[0], ref.shape[1], -1)
+        return self.stream_out(self.img_attn, self.img_mlp, ref, mod, o), k, v
+
+    def extract(self, img: mx.array, txt: mx.array, ref: mx.array,
+                mods: tuple, ropes: tuple) -> tuple:
+        """The block over the text, the image and the reference rows, the
+        reference rows through the image stream's weights under their own
+        modulation, every query over every key in that order. ``mods``
+        and ``ropes`` are those of the image, the text and the references.
+        Returns the image, the text and the reference rows, and the k and
+        v of the reference rows."""
+        mod_img, mod_txt, mod_ref = mods
+        rope_img, rope_txt, rope_ref = ropes
+        qi, ki, vi = self.stream_qkv(self.img_attn, img, mod_img, rope_img)
+        qr, kr, vr = self.stream_qkv(self.img_attn, ref, mod_ref, rope_ref)
+        qt, kt, vt = self.stream_qkv(self.txt_attn, txt, mod_txt, rope_txt)
+        o = ops.sdpa(mx.concatenate([qt, qi, qr], axis=2),
+                     mx.concatenate([kt, ki, kr], axis=2),
+                     mx.concatenate([vt, vi, vr], axis=2))
+        b, n_txt, n_img = txt.shape[0], txt.shape[1], img.shape[1]
+        o = o.transpose(0, 2, 1, 3).reshape(b, o.shape[2], -1)
+        at = n_txt + n_img
+        img = self.stream_out(self.img_attn, self.img_mlp, img, mod_img,
+                              o[:, n_txt:at])
+        ref = self.stream_out(self.img_attn, self.img_mlp, ref, mod_ref,
+                              o[:, at:])
+        txt = self.stream_out(self.txt_attn, self.txt_mlp, txt, mod_txt,
+                              o[:, :n_txt])
+        return img, txt, ref, kr, vr
 
 
 class SingleBlock(nn.Module):
@@ -334,18 +410,56 @@ class SingleBlock(nn.Module):
         return gated_out(self.linear2, x, gate,
                          mx.concatenate([rows, hid], axis=-1))
 
-    def __call__(self, x: mx.array, mod: tuple, cos: mx.array,
-                 sin: mx.array) -> mx.array:
-        shift, scale, gate = mod
+    def parts(self, x: mx.array, mod: tuple, cos: mx.array,
+              sin: mx.array) -> tuple:
+        """q, k and v of rows ``x`` under ``mod``, each (B, H, L, D), and
+        the feed-forward's half of linear1's output."""
+        shift, scale, _ = mod
         y = self.linear1(self.adaln(x, shift, scale))
         d3 = 3 * self.dim
         q, k, v = heads(y[..., :d3], self.heads, self.head_dim)
         q, k = qk(self.norm, q, k, cos, sin, self.eps)
-        o = ops.sdpa(q, k, v.transpose(0, 2, 1, 3))
+        return q, k, v.transpose(0, 2, 1, 3), y[..., d3:]
+
+    def finish(self, x: mx.array, mod: tuple, o: mx.array,
+               mlp: mx.array) -> mx.array:
+        """Rows ``x`` after their attention output ``o`` (B, H, L, D)."""
         b, n = x.shape[0], x.shape[1]
         rows = o.transpose(0, 2, 1, 3).reshape(b, n, -1)
-        a, g = mx.split(y[..., d3:], 2, axis=-1)
-        return self.out(x, gate, rows, ops.swiglu(a, g))
+        a, g = mx.split(mlp, 2, axis=-1)
+        return self.out(x, mod[2], rows, ops.swiglu(a, g))
+
+    def run(self, x: mx.array, mod: tuple, cos: mx.array, sin: mx.array,
+            cached: tuple | None = None) -> tuple:
+        """The block over rows ``x``, and their k and v. ``cached`` holds
+        the K and V of rows that are no part of ``x``, which every query
+        reads after the keys of ``x``."""
+        q, k, v, mlp = self.parts(x, mod, cos, sin)
+        if cached is None:
+            o = ops.sdpa(q, k, v)
+        else:
+            o = ops.sdpa(q, *ref_cache.join([k], [v], *cached))
+        return self.finish(x, mod, o, mlp), k, v
+
+    def __call__(self, x: mx.array, mod: tuple, cos: mx.array,
+                 sin: mx.array, cached: tuple | None = None) -> mx.array:
+        return self.run(x, mod, cos, sin, cached)[0]
+
+    def extract(self, x: mx.array, ref: mx.array, mods: tuple,
+                ropes: tuple) -> tuple:
+        """The block over the joint rows ``x`` and the reference rows, each
+        under its own modulation, every query over every key, the
+        reference rows' last. ``mods`` and ``ropes`` are those of the joint
+        and the reference rows, a rope a (cos, sin) pair. Returns both
+        outputs, and the k and v of the reference rows."""
+        qx, kx, vx, hx = self.parts(x, mods[0], *ropes[0])
+        qr, kr, vr, hr = self.parts(ref, mods[1], *ropes[1])
+        o = ops.sdpa(mx.concatenate([qx, qr], axis=2),
+                     mx.concatenate([kx, kr], axis=2),
+                     mx.concatenate([vx, vr], axis=2))
+        n = x.shape[1]
+        return (self.finish(x, mods[0], o[:, :, :n], hx),
+                self.finish(ref, mods[1], o[:, :, n:], hr), kr, vr)
 
 
 class MLPEmbedder(nn.Module):
@@ -501,17 +615,65 @@ class Flux2KleinDiT(nn.Module):
             taps["txt_in"] = x
         return Caption(x)
 
-    def __call__(self, latents: mx.array, sigma, feats: mx.array | None,
-                 taps: dict | None = None, *,
-                 refs: References | None = None,
-                 mod: StepModulation | None = None,
-                 caption: Caption | None = None) -> mx.array:
-        """Velocity (B, C, h, w) fp32 for latents (B, C, h, w) at
-        ``sigma``, with text features (B, L, text dim) and the tokens of
-        any reference images. ``mod`` and ``caption``, from
-        ``modulation`` and ``caption``, stand in for the work they hold.
-        ``taps`` collects the output of every block by module path, a
-        double block's as ``<path>.img`` and ``<path>.txt``."""
+    def reference_modulation(self) -> StepModulation:
+        """The modulation of reference rows that run at time zero. Every
+        time rule embeds time zero alike, as cosines of one and sines of
+        zero."""
+        return self.modulation(np.zeros(1, np.float32), 1)
+
+    def reference_pass(self, refs: References, taps: dict | None = None, *,
+                       mod: StepModulation | None = None) -> RefCache:
+        """Each block's K and V of the reference tokens after RoPE, as the
+        tokens give them at time zero when their queries read their own
+        keys alone, which every step of a cached edit reads. The tokens
+        run through the image stream of the double blocks, then through
+        the single blocks. Each block is evaluated as it finishes, so one
+        evaluation holds the work of one block. ``mod`` stands in for
+        ``reference_modulation``. ``taps`` collects the reference rows
+        after every block as ``ref.<path>``."""
+        cfg = self.cfg
+        if mod is None:
+            mod = self.reference_modulation()
+        x = self.img_in(refs.tokens.astype(self.act_dtype))
+        if taps is not None:
+            taps["ref.img_in"] = x
+        rope = rope_tables(np.asarray(refs.ids, np.float32), cfg.axes_dims,
+                           cfg.theta)
+        keys, values = [], []
+        for i, blk in enumerate(self.double_blocks):
+            x, k, v = blk.reference(x, mod.img, rope)
+            mx.eval(x, k, v)
+            pacing.point()
+            keys.append(k)
+            values.append(v)
+            if taps is not None:
+                taps[f"ref.double_blocks.{i}"] = x
+        last = len(self.single_blocks) - 1
+        for i, blk in enumerate(self.single_blocks):
+            y, k, v = blk.run(x, mod.single, *rope)
+            # The last block's rows feed no block: its K and V are all a
+            # step reads of it.
+            mx.eval(*((y, k, v) if i < last or taps is not None else (k, v)))
+            pacing.point()
+            keys.append(k)
+            values.append(v)
+            x = y
+            if taps is not None:
+                taps[f"ref.single_blocks.{i}"] = x
+        return RefCache(tuple(keys), tuple(values))
+
+    def extract(self, latents: mx.array, sigma, feats: mx.array | None,
+                taps: dict | None = None, *, refs: References,
+                mod: StepModulation | None = None,
+                caption: Caption | None = None) -> tuple:
+        """The velocity of a step whose reference tokens join it at time
+        zero with their queries over every key, as the image's are, and
+        each block's K and V of the reference tokens after RoPE. ComfyUI's
+        Flux KV Cache node runs the first step of an edit so and keeps
+        those K and V for every later step of its sampling, which reads
+        them as ``cache``. Takes what ``__call__`` takes, and ``taps``
+        collects the reference rows after every block as ``ref.<path>``
+        too."""
         b, _, h, w = latents.shape
         cfg = self.cfg
         act = self.act_dtype
@@ -521,9 +683,81 @@ class Flux2KleinDiT(nn.Module):
             if feats is None:
                 raise ValueError("pass text features or their caption")
             caption = self.caption(feats, taps)
-        txt = caption.rows
-        if txt.shape[0] != b:
-            txt = mx.broadcast_to(txt, (b, *txt.shape[1:]))
+        rmod = self.reference_modulation()
+        txt = _batch(caption.rows, b)
+        img = self.img_in(tokens(latents).astype(act))
+        ref = self.img_in(_batch(refs.tokens, b).astype(act))
+        ids, r_ids = image_ids(h, w), np.asarray(refs.ids, np.float32)
+        t_ids = text_ids(txt.shape[1])
+        rope_img = rope_tables(ids, cfg.axes_dims, cfg.theta)
+        rope_txt = rope_tables(t_ids, cfg.axes_dims, cfg.theta)
+        rope_ref = rope_tables(r_ids, cfg.axes_dims, cfg.theta)
+        keys, values = [], []
+        for i, blk in enumerate(self.double_blocks):
+            img, txt, ref, k, v = blk.extract(
+                img, txt, ref, (mod.img, mod.txt, rmod.img),
+                (rope_img, rope_txt, rope_ref))
+            pacing.point(img, txt, ref, k, v, *keys, *values)
+            keys.append(k)
+            values.append(v)
+            if taps is not None:
+                taps[f"double_blocks.{i}.img"] = img
+                taps[f"double_blocks.{i}.txt"] = txt
+                taps[f"ref.double_blocks.{i}"] = ref
+        n_txt = txt.shape[1]
+        joint = mx.concatenate([txt, img], axis=1)
+        rope_joint = rope_tables(np.concatenate([t_ids, ids]), cfg.axes_dims,
+                                 cfg.theta)
+        for i, blk in enumerate(self.single_blocks):
+            joint, ref, k, v = blk.extract(joint, ref, (mod.single,
+                                                        rmod.single),
+                                           (rope_joint, rope_ref))
+            pacing.point(joint, ref, k, v, *keys, *values)
+            keys.append(k)
+            values.append(v)
+            if taps is not None:
+                taps[f"single_blocks.{i}"] = joint
+                taps[f"ref.single_blocks.{i}"] = ref
+        out = self.final_layer(joint[:, n_txt:], *mod.final)
+        if taps is not None:
+            taps["final_layer"] = out
+        c = out.shape[-1]
+        vel = out.transpose(0, 2, 1).reshape(b, c, h, w).astype(mx.float32)
+        return vel, RefCache(tuple(keys), tuple(values))
+
+    def __call__(self, latents: mx.array, sigma, feats: mx.array | None,
+                 taps: dict | None = None, *,
+                 refs: References | None = None,
+                 mod: StepModulation | None = None,
+                 caption: Caption | None = None,
+                 cache: RefCache | None = None) -> mx.array:
+        """Velocity (B, C, h, w) fp32 for latents (B, C, h, w) at
+        ``sigma``, with text features (B, L, text dim) and the tokens of
+        any reference images. ``mod`` and ``caption``, from
+        ``modulation`` and ``caption``, stand in for the work they hold.
+        ``cache``, from ``reference_pass`` or ``extract``, holds the K and
+        V of reference tokens in place of the tokens: each block's
+        queries read them after the image's keys. ``taps`` collects the
+        output of every block by module path, a double block's as
+        ``<path>.img`` and ``<path>.txt``."""
+        b, _, h, w = latents.shape
+        cfg = self.cfg
+        act = self.act_dtype
+        if cache is not None:
+            if refs is not None:
+                raise ValueError("pass the reference tokens or their cache, "
+                                 "not both")
+            if len(cache.k) != cfg.depth + cfg.depth_single:
+                raise ValueError(f"the cache holds {len(cache.k)} blocks, and "
+                                 f"the DiT has "
+                                 f"{cfg.depth + cfg.depth_single}")
+        if mod is None:
+            mod = self.modulation(sigma, b)
+        if caption is None:
+            if feats is None:
+                raise ValueError("pass text features or their caption")
+            caption = self.caption(feats, taps)
+        txt = _batch(caption.rows, b)
         x = tokens(latents)
         ids = image_ids(h, w)
         n_img = x.shape[1]
@@ -540,7 +774,11 @@ class Flux2KleinDiT(nn.Module):
         rope_img = rope_tables(ids, cfg.axes_dims, cfg.theta)
         rope_txt = rope_tables(t_ids, cfg.axes_dims, cfg.theta)
         for i, blk in enumerate(self.double_blocks):
-            img, txt = blk(img, txt, mod.img, mod.txt, rope_img, rope_txt)
+            if cache is None:
+                img, txt = blk(img, txt, mod.img, mod.txt, rope_img, rope_txt)
+            else:
+                img, txt = blk(img, txt, mod.img, mod.txt, rope_img, rope_txt,
+                               cached=(cache.k[i], cache.v[i]))
             pacing.point(img, txt)
             if taps is not None:
                 taps[f"double_blocks.{i}.img"] = img
@@ -550,7 +788,12 @@ class Flux2KleinDiT(nn.Module):
         cos, sin = rope_tables(np.concatenate([t_ids, ids]), cfg.axes_dims,
                                cfg.theta)
         for i, blk in enumerate(self.single_blocks):
-            joint = blk(joint, mod.single, cos, sin)
+            if cache is None:
+                joint = blk(joint, mod.single, cos, sin)
+            else:
+                j = cfg.depth + i
+                joint = blk(joint, mod.single, cos, sin,
+                            cached=(cache.k[j], cache.v[j]))
             pacing.point(joint)
             if taps is not None:
                 taps[f"single_blocks.{i}"] = joint
