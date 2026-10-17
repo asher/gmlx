@@ -77,6 +77,10 @@ VELOCITY = {**{c: f"check3_flux2_klein{t}" for c, t in _VELOCITY.items()},
             **{f"9b {c}": f"check3_flux2_klein_9b{t}"
                for c, t in _VELOCITY.items()},
             "kv distilled": "check3_flux2_klein_9b_kv_1024"}
+# The time embedding and the exact gate hold the sinusoid and the model's
+# arithmetic, which the KV step without references shares with 9B, so they
+# run on the 4B and 9B fixtures.
+PLAIN_ROWS = {c: n for c, n in ROWS.items() if not c.startswith("kv ")}
 # The cached pass of KV edits, and the references of each.
 KV_EDITS = {"kv r1": "check3_flux2_klein_9b_kv_r1_512",
             "kv r1 1024": "check3_flux2_klein_9b_kv_r1_1024",
@@ -208,7 +212,8 @@ def test_the_manifests_follow_the_rule():
         for k, g in rows["results"]["rows_bf16_vs_fp32"].items():
             assert rows["tolerances"][k]["rel_l2"] == 2 * g["rel_l2"], k
             assert g["teacher_forced"] == fg.forced_row(k), k
-        fg.exact_tols(rows)
+        if name in PLAIN_ROWS.values():
+            fg.exact_tols(rows)
     for case, name in KV_EDITS.items():
         m = _manifest(name)
         ins = m["inputs"]
@@ -261,12 +266,6 @@ def test_check3_velocity_at_1024(dits, case):
           f"{tol['rel_l2']:.2e}, cosine {cos:.6f} floor "
           f"{tol['cosine_min']:.6f}")
     assert rel <= tol["rel_l2"] and cos >= tol["cosine_min"]
-
-
-# The time embedding and the exact gate hold the sinusoid and the model's
-# arithmetic, which the KV step without references shares with 9B, so they
-# run on the 4B and 9B fixtures.
-PLAIN_ROWS = {c: n for c, n in ROWS.items() if not c.startswith("kv ")}
 
 
 @pytest.mark.integration
