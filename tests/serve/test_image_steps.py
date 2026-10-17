@@ -177,6 +177,17 @@ def test_capabilities_answer_without_the_version_header(host):
     assert caps["wire"]["container"] == "safetensors"
 
 
+def test_every_image_family_has_a_comfyui_row_and_convention():
+    """ComfyUI support is required of every image model, so a family
+    without a step contract row fails here, not as a 500 at its first
+    status call."""
+    from gmlx.image.registry import families
+
+    names = {f.name for f in families()}
+    assert names - set(steps.COMFY) == set()
+    assert names - set(steps.CONVENTIONS["comfy"]) == set()
+
+
 @pytest.mark.parametrize("value, match", [
     (None, "has no X-Gmlx-Steps-Contract header"),
     ("2.0", "Upgrade the gmlx server"),
