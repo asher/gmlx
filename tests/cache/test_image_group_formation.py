@@ -53,6 +53,7 @@ def _language_model(model_type, text):
     ("gemma4_unified", {"use_bidirectional_attention": None}, 8),
     ("glm5_next", None, 8),
     ("muse_glimmer", None, 8),
+    ("muse_spark", None, 8),
     ("qwen3_5", None, 8),
     # DSv4 VL attends bidirectionally inside an image block, and its
     # pooled caches get groups of one from the apc_pooling gate

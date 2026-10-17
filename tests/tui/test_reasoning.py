@@ -682,6 +682,76 @@ def test_muse_glimmer_eom_returns_to_answer_without_a_self_header(chunk):
     assert answer == "firstsecond"
 
 
+# --- muse-spark commentary ----------------------------------------------------
+#
+# Spark adds a "to=commentary" recipient: a user-visible aside that ends at
+# <|eom|> like reasoning does. llama.cpp's muse-spark parser reads it as
+# content and joins it to the final answer with no separator.
+
+_SPARK = (
+    " to=self<|message|>Thinking.<|eom|>"
+    "<|start|>assistant to=commentary<|message|>Working on it.<|eom|>"
+    "<|start|>assistant to=user<|message|>Hello!<|eot|>"
+)
+_SPARK_TOOL = (
+    " to=self<|message|>Need the weather.<|eom|>"
+    "<|start|>assistant to=commentary<|message|>Let me look that up.<|eom|>"
+    "<|start|>assistant to=get_weather<|message|>"
+    "<atem:function_calls>\n<atem:invoke name=\"get_weather\">\n"
+    '<atem:parameter name="city">Paris</atem:parameter>\n'
+    "</atem:invoke>\n</atem:function_calls><|eot|>"
+)
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_spark_commentary_is_answer_text(chunk):
+    reason, answer = _segment_header(_SPARK, chunk=chunk)
+    assert reason == "Thinking."
+    assert answer == "Working on it.Hello!"
+    for frag in ("<|", "|>", "to=", "commentary", "message"):
+        assert frag not in reason + answer
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_spark_commentary_before_any_reasoning(chunk):
+    text = (" to=commentary<|message|>Hello, world!\nWhat's up?<|eom|>"
+            "<|start|>assistant to=self<|message|>Now think.<|eom|>"
+            "<|start|>assistant to=user<|message|>Done!<|eot|>")
+    reason, answer = _segment_header(text, chunk=chunk)
+    assert reason == "Now think."
+    assert answer == "Hello, world!\nWhat's up?Done!"
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_spark_commentary_then_tool_call(chunk):
+    reason, answer = _segment_header(_SPARK_TOOL, chunk=chunk)
+    assert reason == "Need the weather."
+    assert answer.startswith("Let me look that up.<atem:function_calls>")
+    assert "to=get_weather" not in answer
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_atem_tool_named_like_self_is_not_reasoning(chunk):
+    """Only the exact "self" recipient is reasoning. A tool whose name starts
+    with "self" is a tool call."""
+    text = (" to=self_check<|message|><atem:function_calls>"
+            "<atem:invoke name=\"self_check\"></atem:invoke>"
+            "</atem:function_calls><|eot|>")
+    reason, answer = _segment_header(text, chunk=chunk)
+    assert reason == ""
+    assert answer.startswith("<atem:function_calls>")
+
+
+def test_split_harmony_reply_reads_spark_commentary_as_content():
+    from gmlx.tui.reasoning import split_harmony_reply
+
+    assert split_harmony_reply(_SPARK, start_in_header=True) == (
+        "Thinking.", "Working on it.Hello!")
+    # Truncated inside the commentary aside: what arrived is content.
+    capped = " to=self<|message|>x<|eom|><|start|>assistant to=commentary<|message|>Wor"
+    assert split_harmony_reply(capped, start_in_header=True) == ("x", "Wor")
+
+
 def test_undefined_sentinel_renders_like_an_absent_variable():
     """The install_template_default_thinking sentinel must be
     indistinguishable from a truly absent variable to the template gates

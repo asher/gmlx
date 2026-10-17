@@ -10,6 +10,8 @@ MoE split + architectural ``.scale`` claims, and the universal skip/fail edges.
 
 from __future__ import annotations
 
+import pytest
+
 
 from gmlx.load.remap import parse_gguf_name, RemapDecision  # noqa: E402
 
@@ -1569,3 +1571,54 @@ def test_muse_glimmer_globals_resolve():
     assert d("muse-glimmer", "token_embd.weight").hf_name == "model.embed_tokens.weight"
     assert d("muse-glimmer", "output_norm.weight").hf_name == "model.norm.weight"
     assert d("muse-glimmer", "output.weight").hf_name == "lm_head.weight"
+
+
+# muse-spark: every tensor is claimed by the MUSE_SPARK block, all passthrough.
+_MUSE_SPARK_ROWS = (
+    ("token_embd.weight", "model.embed_tokens.weight"),
+    ("output_norm.weight", "model.norm.weight"),
+    ("output.weight", "lm_head.weight"),
+    ("blk.3.attn_norm.weight", "model.layers.3.input_layernorm.weight"),
+    ("blk.3.attn_q.weight", "model.layers.3.self_attn.q_proj.weight"),
+    ("blk.3.attn_k.weight", "model.layers.3.self_attn.k_proj.weight"),
+    ("blk.3.attn_v.weight", "model.layers.3.self_attn.v_proj.weight"),
+    ("blk.3.attn_output.weight", "model.layers.3.self_attn.o_proj.weight"),
+    ("blk.3.attn_q_norm.weight", "model.layers.3.self_attn.q_norm.weight"),
+    ("blk.3.attn_k_norm.weight", "model.layers.3.self_attn.k_norm.weight"),
+    ("blk.3.attn_gate.weight", "model.layers.3.self_attn.gate_proj.weight"),
+    ("blk.3.attn_resid_alpha.weight", "model.layers.3.attn_resid_alpha"),
+    ("blk.3.attn_resid_beta.weight", "model.layers.3.attn_resid_beta"),
+    ("blk.3.ffn_norm.weight", "model.layers.3.post_attention_layernorm.weight"),
+    ("blk.3.ffn_gate_inp.weight", "model.layers.3.mlp.gate.weight"),
+    ("blk.3.exp_probs_b.bias", "model.layers.3.mlp.e_score_correction_bias"),
+    ("blk.3.ffn_latent_down.weight", "model.layers.3.mlp.latent_down.weight"),
+    ("blk.3.ffn_pre_exp_norm.weight", "model.layers.3.mlp.pre_exp_norm.weight"),
+    ("blk.3.ffn_gate_exps.weight", "model.layers.3.mlp.switch_mlp.gate_proj.weight"),
+    ("blk.3.ffn_up_exps.weight", "model.layers.3.mlp.switch_mlp.up_proj.weight"),
+    ("blk.3.ffn_down_exps.weight", "model.layers.3.mlp.switch_mlp.down_proj.weight"),
+    ("blk.3.ffn_post_exp_norm.weight", "model.layers.3.mlp.post_exp_norm.weight"),
+    ("blk.3.ffn_latent_up.weight", "model.layers.3.mlp.latent_up.weight"),
+    ("blk.3.post_ffw_norm.weight", "model.layers.3.mlp.post_ffw_norm.weight"),
+    ("blk.3.ffn_resid_alpha.weight", "model.layers.3.ffn_resid_alpha"),
+    ("blk.3.ffn_resid_beta.weight", "model.layers.3.ffn_resid_beta"),
+)
+
+
+@pytest.mark.parametrize("gguf, hf", _MUSE_SPARK_ROWS)
+def test_muse_spark_rows(gguf, hf):
+    r = d("muse-spark", gguf)
+    assert r.kind == MAP and r.hf_name == hf, (gguf, r.reason)
+    # No qk permute (traditional rope) and no Gemma +1 unbake.
+    assert r.transform == "passthrough"
+
+
+def test_muse_spark_claims_every_row_before_the_canonical_map():
+    from gmlx.load.remap import ARCH_PRIORITY_OVERRIDES
+
+    claimed = ARCH_PRIORITY_OVERRIDES["MUSE_SPARK"]
+    for gguf, _hf in _MUSE_SPARK_ROWS:
+        assert any(p.match(gguf) for p, _t, _x in claimed), gguf
+
+
+def test_muse_spark_unknown_tensor_fails():
+    assert d("muse-spark", "blk.0.not_a_muse_spark_tensor.weight").kind == FAIL

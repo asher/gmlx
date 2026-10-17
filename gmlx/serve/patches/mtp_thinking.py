@@ -60,7 +60,7 @@ class _HookCarrier:
 
 
 def _build_hook(rg, args, input_ids):
-    from gmlx.gen.thinking_budget import make_mtp_finish_hook
+    from gmlx.gen.thinking_budget import make_mtp_finish_hook, prompt_tail_ids
 
     from .chat_behavior import _prompt_opens_thinking_tokens
 
@@ -75,7 +75,8 @@ def _build_hook(rg, args, input_ids):
         budget=args.thinking_budget,
         start_in_thinking=start_in,
         start_token=getattr(args, "thinking_start_token", None),
-        end_token=getattr(args, "thinking_end_token", None))
+        end_token=getattr(args, "thinking_end_token", None),
+        prompt_ids=prompt_tail_ids(input_ids))
 
 
 def _install_defer(cls) -> None:

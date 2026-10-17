@@ -21,6 +21,14 @@ from gmlx.load.vlm import UnsupportedVLMError, resolve_vlm_model_type
     ("muse-glimmer", {"clip.projector_type": "muse-glimmer"}, "muse_glimmer"),
     ("muse-glimmer", {"clip.vision.projector_type": "muse-glimmer"},
      "muse_glimmer"),
+    # The Spark mmproj carries the Glimmer vision projector and an audio one.
+    ("muse-spark", {"clip.vision.projector_type": "muse-glimmer",
+                    "clip.audio.projector_type": "muse-spark-audio"},
+     "muse_spark"),
+    ("muse-spark", {"clip.vision.projector_type": "muse-glimmer"},
+     "muse_spark"),
+    ("muse-spark", {"clip.audio.projector_type": "muse-spark-audio"},
+     "muse_spark"),
     ("deepseek2", {"clip.projector_type": "kimik25"}, "kimi_k25"),
     ("deepseek4", {"clip.projector_type": "deepseek4v"}, "deepseek_v4_vl"),
     ("qwen3vl", {"clip.projector_type": "qwen3vl_merger"}, "qwen3_vl"),
@@ -78,3 +86,8 @@ def test_the_qwen3vl_container_takes_only_the_qwen3vl_text_arch():
     mm = {"clip.projector_type": "qwen3vl_merger"}
     assert resolve_vlm_model_type("qwen3", mm) == "qwen3_5"
     assert resolve_vlm_model_type("qwen3moe", mm) == "qwen3_5"
+
+
+def test_muse_spark_with_a_foreign_projector_is_refused():
+    with pytest.raises(UnsupportedVLMError, match="muse-spark"):
+        resolve_vlm_model_type("muse-spark", {"clip.projector_type": "kimik25"})

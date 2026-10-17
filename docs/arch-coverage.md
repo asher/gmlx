@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 43 GGUF architectures to model types, and 42 of them load end-to-end
+gmlx maps 44 GGUF architectures to model types, and 43 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -53,6 +53,7 @@ family, backend, status and caveat:
 | `minimax-m3` | minimax_m3 | mlx-lm | loadable | Without indexer tensors or an indexer sidecar file, a GGUF runs dense. Its output is exact to 2048 tokens and degrades beyond that. |
 | `mistral3` | llama | mlx-lm | loadable |  |
 | `muse-glimmer` | muse | mlx-lm | loadable |  |
+| `muse-spark` | muse | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `nemotron_h_moe` | nemotron | mlx-lm | loadable |  |
 | `phi3` | phi3 | mlx-lm | loadable | Pass hf_source for the 128K long-context variants. |
 | `qwen2` | qwen2 | mlx-lm | loadable |  |

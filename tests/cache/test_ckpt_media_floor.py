@@ -111,12 +111,13 @@ def _image_prompt(image: int) -> list:
 
 
 @pytest.mark.parametrize("model_type,text", [
-    ("gemma4", {}), ("glm5_next", None), ("muse_glimmer", None)])
+    ("gemma4", {}), ("glm5_next", None), ("muse_glimmer", None),
+    ("muse_spark", None)])
 def test_guards_without_media_ids_keep_the_full_schedule(
         model_type, text, monkeypatch):
-    """Causal gemma-4, glm5_next and muse_glimmer guards see no image id,
-    so an image prompt keeps every boundary, those inside the image
-    included."""
+    """Causal gemma-4, glm5_next, muse_glimmer and muse_spark guards see no
+    image id, so an image prompt keeps every boundary, those inside the
+    image included."""
     install_media_token_ids()
     model = _model(model_type, text)
     ids = _image_prompt(int(model.config.image_token_id))

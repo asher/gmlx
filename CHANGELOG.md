@@ -12,6 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 - `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
   output repeats it, which speeds up edits and quotes.
+- Muse Spark (GGUF arch `muse-spark`), with reasoning effort intents, tool calls
+  and image and audio input through its `--mmproj` companion.
 
 ### Changed
 
@@ -21,6 +23,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   several requests.
 - Requires mlx-kquant 0.5.1. With it, speculative decoding on Qwen3.5 to 3.8
   runs faster on NAX GPUs (M5).
+- With `--stream-experts`, a prompt that uses most of a layer's experts
+  prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
 
 ### Fixed
 
@@ -36,13 +40,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MTP on Qwen3.8-Flash-Next refused to load on a Mac whose GPU buffer limit
   is smaller than the model's per-layer embedding table.
 - gpt-oss gave wrong tokens on a Mac it does not fit, and with
-  `--stream-experts` or a CPU placement.
+  `--stream-experts` or a CPU placement. The batch tests now cover both
+  `GMLX_NATIVE_FP` layouts, `wire` and `packed`.
 - `gmlx list` names the family of an image entry whose `family` is spelled
   `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
 - `gmlx rm` keeps a file that another model names through a symlink, where it
   deleted the file as unused.
-  `--stream-experts` or a CPU placement. The batch tests now cover both
-  `GMLX_NATIVE_FP` layouts, `wire` and `packed`.
+- With `--stream-experts`, greedy output no longer changes with the arena size
+  that free memory allows at load.
+- On Muse Glimmer, the thinking budget now applies in `run`, `chat` and
+  `serve`, and `response_format` constrains only the final answer.
 
 ## [0.5.0] - 2026-10-12
 

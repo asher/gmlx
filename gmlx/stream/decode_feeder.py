@@ -455,6 +455,12 @@ class DecodeFeeder:
         self._routed_log: list | None = (
             [] if self._routed_log_path else None)
 
+        # Split-rule decisions of the wrapper's token split (see
+        # note_split_rule).
+        self._rule_split = 0
+        self._rule_ring = 0
+        self._rule_ahead = 0
+
         # Lossy-lever accounting (shed_misses + the wrapper's layer shed).
         self._shed_n = 0
         self._shed_mass = 0.0
@@ -538,6 +544,20 @@ class DecodeFeeder:
 
     def covers(self, li: int) -> bool:
         return li in self._layers
+
+    def slot_count(self, li: int) -> int:
+        """Slots in the layer's arena buffer now: the expert axis that the
+        kernels see on an arena call."""
+        return self._slots.get(li, 0)
+
+    def note_split_rule(self, split: bool, ahead: bool = False) -> None:
+        """Count one split-rule decision for the -v summary. ``ahead``:
+        the ring had already started the layer's read."""
+        if split:
+            self._rule_split += 1
+        else:
+            self._rule_ring += 1
+            self._rule_ahead += int(ahead)
 
     def can_stage_smaller(self, li: int) -> bool:
         """True when a stage() refusal was a slot-count overflow that a
@@ -1777,6 +1797,11 @@ class DecodeFeeder:
             print(
                 f"[stream] decode feeder bytes read: "
                 f"{getattr(self, '_bytes_read', 0) / 1e9:.1f} GB")
+        if getattr(self, "_rule_split", 0) or getattr(self, "_rule_ring", 0):
+            print(
+                f"[stream] arena split rule: {self._rule_split} layer calls "
+                f"split, {self._rule_ring} took the prefill ring "
+                f"({self._rule_ahead} already staged ahead)")
         if getattr(self, "_seeded", 0):
             print(
                 f"[stream] decode feeder seeded {self._seeded} experts "

@@ -154,6 +154,12 @@ class ThinkingAwareLogitsProcessor:
     tokens. This wrapper keeps the wrapped processor inactive until it observes
     the configured thinking end token, then lets the wrapped processor constrain
     the next sampled token as the first token of the final answer.
+
+    gmlx: the wrapper waits for the whole end marker, and for a format whose
+    answer has a header of its own (ATEM), for that header: the <|eom|> that
+    ends reasoning also ends commentary and tool calls. ``prompt_ids`` gives
+    the prompt's last tokens, so a header the prompt begins completes on the
+    generated rest.
     """
 
     def __init__(
@@ -163,13 +169,16 @@ class ThinkingAwareLogitsProcessor:
         thinking_start_token: str = "<think>",
         thinking_end_token: str = "</think>",
         enable_thinking: bool = False,
+        prompt_ids=None,
     ) -> None:
+        # gmlx: gate on the whole answer opener, see the class docstring.
+        from gmlx.gen.thinking_budget import AnswerGate, answer_opener_seqs
+
         self.processor = processor
         self.tokenizer = tokenizer
         self.thinking_start_token = thinking_start_token
         self.thinking_end_token = thinking_end_token
         self.enable_thinking = enable_thinking
-        self._active = not enable_thinking
         self._active_context: list[int] = []
 
         self.thinking_start_token_id = tokenizer.encode(
@@ -178,6 +187,13 @@ class ThinkingAwareLogitsProcessor:
         self.thinking_end_token_id = tokenizer.encode(
             thinking_end_token, add_special_tokens=False
         )[-1]
+        seqs = answer_opener_seqs(tokenizer, thinking_start_token, thinking_end_token)
+        self._prompt_ids = [int(t) for t in (prompt_ids or ())][-16:]
+        self.answer_gate = AnswerGate(seqs, self._prompt_ids)
+        self._n_seen = None
+        self._active = not enable_thinking or (
+            bool(self._prompt_ids) and self.answer_gate.opened()
+        )
 
     def clone(self) -> "ThinkingAwareLogitsProcessor":
         processor = (
@@ -191,22 +207,22 @@ class ThinkingAwareLogitsProcessor:
             thinking_start_token=self.thinking_start_token,
             thinking_end_token=self.thinking_end_token,
             enable_thinking=self.enable_thinking,
+            prompt_ids=self._prompt_ids,
         )
 
     def reset(self):
-        self._active = not self.enable_thinking
+        self.answer_gate = self.answer_gate.restart(self._prompt_ids)
+        self._n_seen = None
+        self._active = not self.enable_thinking or (
+            bool(self._prompt_ids) and self.answer_gate.opened()
+        )
         self._active_context = []
         if hasattr(self.processor, "reset"):
             self.processor.reset()
 
-    def _activate_if_thinking_done(self, token_id: int) -> bool:
-        if self._active:
-            return False
-        if token_id == self.thinking_end_token_id:
-            self._active = True
-            self._active_context = []
-            return True
-        return False
+    def _activate(self) -> None:
+        self._active = True
+        self._active_context = []
 
     def _delegate_process_last_token(
         self, last_token: int, logits: mx.array
@@ -219,30 +235,38 @@ class ThinkingAwareLogitsProcessor:
 
     def process_last_token(self, last_token: int, logits: mx.array) -> mx.array:
         if not self._active:
-            activated = self._activate_if_thinking_done(last_token)
-            if not activated:
+            if not self.answer_gate.feed(last_token):
                 return logits
-            return self._delegate_process_last_token(last_token, logits)
-
+            self._activate()
         return self._delegate_process_last_token(last_token, logits)
 
-    def _last_token_from_input_ids(self, input_ids: mx.array) -> int | None:
+    def _observe_context(self, input_ids: mx.array) -> bool:
+        """Feed the tokens ``input_ids`` adds since the last call. The decode
+        loops pass the growing context: on the first call the prompt (or its
+        last token), then one more token each step."""
+        gate = self.answer_gate
         if input_ids.ndim == 0:
-            return int(input_ids.item())
-        if input_ids.ndim == 1:
-            if input_ids.shape[0] == 0:
-                return None
-            return int(input_ids[-1].item())
-        if input_ids.shape[-1] == 0:
-            return None
-        return int(input_ids.reshape(-1, input_ids.shape[-1])[0, -1].item())
+            return gate.feed(int(input_ids.item()))
+        if input_ids.size == 0:
+            return False
+        row = input_ids.reshape(-1, input_ids.shape[-1])[0]
+        n = row.shape[0]
+        if self._n_seen is None:
+            # Prompt tokens. The seed already holds a shorter tail.
+            self._n_seen = n
+            if n >= gate.keep or not self._prompt_ids:
+                gate.tail = [int(t) for t in row[-gate.keep :].tolist()]
+            return gate.opened()
+        new = row[max(self._n_seen, n - gate.keep) :].tolist()
+        self._n_seen = n
+        return gate.advance(new) is not None
 
     def __call__(self, input_ids: mx.array, logits: mx.array) -> mx.array:
         if self._active:
             return self.processor(input_ids, logits)
 
-        token_id = self._last_token_from_input_ids(input_ids)
-        if token_id is not None and self._activate_if_thinking_done(token_id):
+        if self._observe_context(input_ids):
+            self._activate()
             return self.processor(input_ids, logits)
 
         return logits

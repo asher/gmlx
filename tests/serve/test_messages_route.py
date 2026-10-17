@@ -58,6 +58,7 @@ _TEMPLATES = {
     "kimi-k2.5": ("kimi_k25", "kimi_k25_template.jinja"),
     "kimi-k3": ("kimi_k3", "kimi_k3_template.jinja"),
     "mistral3": ("mistral3", "mistral3_template.jinja"),
+    "muse-spark": ("muse_spark", "muse_spark_template.jinja"),
 }
 # Templates the Messages cases above do not take: Mistral 7B v0.3 takes
 # nine-character call ids only.
@@ -136,6 +137,7 @@ def _route(monkeypatch):
     for name in ("extract_text_from_content",
                  "_normalize_instruction_messages"):
         monkeypatch.setattr(_OPENAI, name, getattr(_OPENAI, name))
+    # The vendored table lacks the DeepSeek rows (the loader adds them).
     for row in ("deepseek_v4_vl", "deepseek_v41_vl"):
         monkeypatch.setitem(_PROMPT_UTILS.MODEL_CONFIG, row,
                             _PROMPT_UTILS.MessageFormat.LIST_WITH_IMAGE_FIRST)
@@ -267,10 +269,11 @@ _VISION = {
     "mistral3": ("mistral3", "mistral3_template.jinja", "[IMG]"),
     "glm-5.3": ("glm5_next", "glm5_template.jinja", "<|begin_of_image|>"),
     "muse": ("muse_glimmer", "muse_template.jinja", "<|patch|>"),
+    "muse-spark": ("muse_spark", "muse_spark_template.jinja", "<|patch|>"),
 }
 # The templates that show an image in a tool turn.
-_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "muse", "qwen3.5",
-                 "qwen3.6", "qwen3.8")
+_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "muse", "muse-spark",
+                 "qwen3.5", "qwen3.6", "qwen3.8")
 
 
 def test_the_tool_image_types_are_the_checked_ones():

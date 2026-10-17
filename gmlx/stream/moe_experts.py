@@ -398,10 +398,11 @@ _INLINE_SWAPS = {
 
 # Blocks whose forward calls back into _apply_expert_controls when a control
 # attr is set: the hunyuan renorm patch, the two fused decode blocks
-# (modules.py) and the gmlx-owned kimi-k3 latent MoE, whose projections and
-# mix seam make a call-back safer than a forward swap.
+# (modules.py) and the gmlx-owned kimi-k3 and muse-spark latent MoEs, whose
+# projections and mix seam make a call-back safer than a forward swap.
 _CALLBACK_BLOCKS = (
     "_NormTopKMoE", "_FusedKQuantMoeBlock", "_FusedGptOssMLPBlock", "KimiK3MoE",
+    "MuseSparkMoE",
 )
 
 

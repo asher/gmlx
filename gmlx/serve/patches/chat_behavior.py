@@ -11,6 +11,12 @@ import os
 
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.gen.thinking_budget import (
+    marker_ids,
+    prompt_opens_block,
+    prompt_tail_ids,
+    seq_thinking_budget_criteria_cls,
+)
 from gmlx.upstream.patching import link, wrapped_with
 
 from ._common import (
@@ -306,21 +312,17 @@ _TBUDGET_FLAG = "_kq_gguf_thinking_budget_fix"
 
 
 def _armed_thinking_budget_criteria_cls():
-    """Subclass of mlx-vlm's criteria that decouples 'armed' (counting + forced
-    close, gated on enable_thinking) from 'starts inside a block' (in_thinking).
-    Built lazily so importing this module never imports mlx-vlm."""
-    from gmlx._vendor.mlx_vlm.utils import ThinkingBudgetCriteria
+    """The criteria class the budget fix builds: mlx-vlm's, with each marker
+    matched on all of its tokens and the start state ('starts inside a
+    block') kept apart from the gates ('armed', on enable_thinking)."""
+    return seq_thinking_budget_criteria_cls()
 
-    class _ArmedThinkingBudgetCriteria(ThinkingBudgetCriteria):
-        def __init__(self, *args, prompt_open_thinking=False, **kw):
-            super().__init__(*args, **kw)  # sets in_thinking = enable_thinking
-            self._prompt_open = bool(prompt_open_thinking)
-            self.in_thinking = self._prompt_open
-        def reset_thinking_state(self):
-            super().reset_thinking_state()
-            self.in_thinking = self._prompt_open
 
-    return _ArmedThinkingBudgetCriteria
+def _thinking_marker_seqs(rg, args) -> tuple[tuple, tuple]:
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    start = args.thinking_start_token or gen.DEFAULT_THINKING_START_TOKEN
+    end = args.thinking_end_token or gen.DEFAULT_THINKING_END_TOKEN
+    return marker_ids(rg.tokenizer, start), marker_ids(rg.tokenizer, end)
 
 
 def _prompt_opens_thinking_tokens(rg, args, input_ids) -> bool:
@@ -329,21 +331,14 @@ def _prompt_opens_thinking_tokens(rg, args, input_ids) -> bool:
     mlx-vlm's ``_prompt_has_open_thinking`` (which returns False whenever
     ``enable_thinking`` is off - and the server default is off - so it misses
     pre-fill models whose template opened <think> regardless of the flag, exactly
-    the case an explicit budget must cap)."""
+    the case an explicit budget must cap). Markers match on all their tokens."""
     if input_ids is None:
         return False
-    start_id, end_id = rg._thinking_token_ids(args)
+    start_seq, end_seq = _thinking_marker_seqs(rg, args)
     toks = input_ids.flatten().tolist() if hasattr(input_ids, "flatten") \
         else list(input_ids)
-    try:
-        last_start = len(toks) - 1 - toks[::-1].index(start_id)
-    except ValueError:
-        return False
-    try:
-        last_end = len(toks) - 1 - toks[::-1].index(end_id)
-    except ValueError:
-        last_end = -1
-    return last_start > last_end
+    return prompt_opens_block(toks, start_seq, end_seq)
+
 
 
 def install_thinking_budget_fix() -> None:
@@ -376,6 +371,7 @@ def install_thinking_budget_fix() -> None:
             thinking_start_token=start,
             enable_thinking=True,             # arm the gates regardless of origin
             prompt_open_thinking=prompt_open,  # but only start inside if pre-filled
+            prompt_ids=prompt_tail_ids(input_ids),
         )
 
     _make_thinking_budget_criteria.__dict__[_TBUDGET_FLAG] = True
@@ -484,7 +480,7 @@ def install_stream_thinking_seed() -> None:
                 self.in_thinking = _prompt_tail_opens_thinking(
                     prompt, self.open_close_markers)
                 if prompt.rstrip().endswith("<|start|>assistant"):
-                    # harmony (gpt-oss) and ATEM (Muse Glimmer): the state
+                    # harmony (gpt-oss) and ATEM (Muse models): the state
                     # machine's open/close pairs cannot express channel or
                     # recipient routing, so the stream splits through the
                     # REPL's marker filter instead. Both prompts stop
@@ -549,7 +545,7 @@ def install_stream_thinking_seed() -> None:
                 "<|start|>assistant")
             if text and ("<|channel|>" in text or (in_header
                                                    and "<|message|>" in text)):
-                # harmony (gpt-oss) and ATEM (Muse Glimmer): the stock splitter
+                # harmony (gpt-oss) and ATEM (Muse models): the stock splitter
                 # knows none of these markers and returns the raw markup as
                 # content, which the model's own chat template rejects with a
                 # 500 once a client sends the reply back as history. ATEM emits

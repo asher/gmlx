@@ -591,3 +591,83 @@ def test_valid_expert_ids_replaces_out_of_range_rows(capsys):
     assert out is not bad and out.dtype == mx.uint32
     assert np.array(out).tolist() == ids.tolist()
     assert "layer 3: router found no expert for 1 token(s)" in capsys.readouterr().err
+
+
+def _spark_block():
+    from gmlx.models.muse_spark.model import ModelArgs, MuseSparkMoE
+
+    args = ModelArgs(
+        model_type="muse_spark",
+        hidden_size=48,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        vocab_size=32,
+        layer_types=["sliding_attention"],
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=64,
+        moe_latent_size=32,
+    )
+    block = MuseSparkMoE(args)
+    block.switch_mlp = _kquant_glu()
+    return block
+
+
+def test_muse_spark_block_hooked_via_callback(monkeypatch):
+    """MuseSparkMoE routes with an inline plain-Linear top-k, so _install
+    targets the block itself and its forward calls back into
+    _apply_expert_controls after selection. The top-k override reads the
+    int on the block."""
+    from gmlx.stream.moe_experts import _hook_target
+
+    mx.random.seed(8)
+    block = _spark_block()
+    assert _hook_target(block) is block
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    x = mx.random.normal((1, 5, 48))
+    mx.eval(block.parameters())
+    ref = np.array(block(x))
+
+    install_expert_streaming(model)
+    base = np.array(block(x))
+    # Streamed experts run on the CPU stream and differ from the GPU
+    # reference by about one bf16 ulp. The per-expert norm brings outputs to
+    # unit scale, so the bound is relative.
+    assert np.abs(base - ref).max() <= 3e-2 * np.abs(ref).max()
+    assert install_moe_expert_probe(model) == 1
+    probe = block._kq_expert_probe
+    out = np.array(block(x))
+    assert np.allclose(out, base, atol=1e-5)  # probe is lossless
+    probe._flush()
+    assert probe._buckets["prefill"].tokens == 5
+
+    assert install_moe_expert_mass(model, 1e-6) == 1
+    rec = _SwitchRecorder(block.switch_mlp)
+    block.switch_mlp = rec
+    out = np.array(block(x))
+    assert out.shape == ref.shape
+    low = rec.seen[-1]
+    assert low.shape == (1, 5, 2)
+    for t in range(low.shape[1]):
+        assert len(set(low[0, t].tolist())) == 1  # collapsed to top-1
+
+
+def test_muse_spark_top_k_override_hits_the_block(monkeypatch):
+    mx.random.seed(9)
+    block = _spark_block()
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+    assert install_moe_experts_override(model, 1) == 1
+    assert block.num_experts_per_tok == 1
+    rec = _SwitchRecorder(block.switch_mlp)
+    block.switch_mlp = rec
+    mx.eval(block(mx.random.normal((1, 3, 48))))
+    assert rec.seen[-1].shape == (1, 3, 1)

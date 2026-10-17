@@ -29,7 +29,7 @@ import mlx_kquant as kq
 from . import loadlog, rope_scaling, rope_swap
 from .dtypes import activation_dtype, activation_dtype_name, dtype_name
 from gmlx.device import cpu_default_device, metal_info, metal_value
-from gmlx.envflags import env_bool, env_choice, env_int
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
 from gmlx.gen.prefill_tail import install_prefill_tail
@@ -200,7 +200,8 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
-    if mt == "muse_glimmer":
+    if mt in ("muse_glimmer", "muse_spark"):
+        # Muse Spark calls tools in the same ATEM format.
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
 
         muse_glimmer_tools.ensure_registered()
@@ -303,6 +304,30 @@ def _arena_split_max_tokens() -> int:
     page-cache gather. 0 disables. Above the cap, the whole-layer prefill
     paths win back their sequential pipelining."""
     return env_int("GMLX_ARENA_SPLIT_MAX_TOKENS", 256)
+
+
+def _arena_split_max_share() -> float:
+    """Largest share of a layer's experts that a call may route to and
+    still take the arena token split when the prefill ring can serve it.
+    The split reads at least the routed union, one expert at a time, in
+    step with the compute. Later pieces read again what earlier pieces
+    evicted. The ring reads the whole layer once, in sequence, ahead of the
+    compute. Past about half the layer the split reads as many bytes as the
+    ring at a lower rate. 1 or more always splits."""
+    return env_float("GMLX_ARENA_SPLIT_MAX_SHARE", 0.5)
+
+
+def _split_beats_ring(union: int, n_experts: int) -> bool:
+    """The split rule for a call whose routing reaches ``union`` of the
+    layer's ``n_experts`` experts."""
+    share = _arena_split_max_share()
+    return share >= 1.0 or n_experts <= 0 or union <= share * n_experts
+
+
+def _arena_row_kernels() -> bool:
+    """Multi-token arena calls run the per-row expert kernels, so that the
+    result does not depend on the arena's slot count."""
+    return env_bool("GMLX_ARENA_ROW_KERNELS", True)
 
 
 
@@ -890,6 +915,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # tests/models/test_hy_v4_model.py cross-checks against this row.
     "hy_v4": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
               ".mlp.gate.weight", ".weights_proj."),
+    # muse_spark: sigmoid top-8-of-256 routing with a selection bias is
+    # near-tie-heavy, and the residual alpha/beta scale every layer's stream.
+    # Kept in step with the model class's cast_predicate.
+    "muse_spark": (".mlp.gate.weight", ".e_score_correction_bias",
+                   "_resid_alpha", "_resid_beta"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -903,6 +933,9 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
     # Vision only - the text tower's bf16 holds 16k parity.
     "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
+    # muse_spark carries the same tower. Its audio weights are exact in bf16,
+    # so the audio encoder takes the plain cast and gives the same output.
+    "muse_spark": ("vision_tower.", "vision_adapter.", "vision_projection."),
     "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 

@@ -1490,14 +1490,20 @@ class ResponseGenerator:
             args.frequency_context_size,
         )
         if args.logits_processors is not None:
+            from gmlx.gen.thinking_budget import has_answer_header, prompt_tail_ids
+
             request_processors = args.logits_processors
             already_closed = (
                 input_ids is not None
                 and self._prompt_thinking_already_closed(args, input_ids)
             )
-            if args.enable_thinking and not already_closed:
+            # gmlx: an answer with a header of its own (ATEM) is gated on that
+            # header in every request, thinking or not.
+            if has_answer_header(args.thinking_start_token) or (
+                args.enable_thinking and not already_closed
+            ):
                 request_processors = self._wrap_processors_until_thinking_done(
-                    args, request_processors
+                    args, request_processors, prompt_tail_ids(input_ids)
                 )
             processors.extend(request_processors)
         return processors
@@ -1552,6 +1558,7 @@ class ResponseGenerator:
         self,
         args: GenerationArguments,
         processors: List[Callable[[mx.array, mx.array], mx.array]],
+        prompt_ids: Optional[List[int]] = None,
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
         thinking_start_token = args.thinking_start_token or DEFAULT_THINKING_START_TOKEN
         thinking_end_token = args.thinking_end_token or DEFAULT_THINKING_END_TOKEN
@@ -1562,6 +1569,7 @@ class ResponseGenerator:
                 thinking_start_token=thinking_start_token,
                 thinking_end_token=thinking_end_token,
                 enable_thinking=True,
+                prompt_ids=prompt_ids,
             )
             for processor in processors
         ]

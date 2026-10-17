@@ -12,9 +12,11 @@ to read raw:
   * harmony models (gpt-oss): ``<|channel|>analysis<|message|>`` ... ``<|end|>``
     for reasoning, ``<|start|>assistant<|channel|>final<|message|>`` ... for the
     answer (``commentary`` channels carry tool preludes - treated as reasoning).
-  * Onyx ATEM (Muse Glimmer): the routing is a recipient in the message header,
-    ``<|start|>assistant to=self<|message|>`` ... ``<|eom|>`` for reasoning and
-    ``to=user`` (or a tool name) for everything else. The prompt ends at
+  * Onyx ATEM (Muse Glimmer, Muse Spark): the routing is a recipient in the
+    message header, ``<|start|>assistant to=self<|message|>`` ... ``<|eom|>``
+    for reasoning and ``to=user`` (or a tool name) for everything else. Muse
+    Spark's ``to=commentary`` aside also ends at ``<|eom|>`` and is answer
+    text, as llama.cpp's muse-spark parser reads it. The prompt ends at
     ``<|start|>assistant``, so the first header arrives without its opener -
     seed with ``start_in_header=True``.
   * Gemma-style ``<|channel>thought`` ... ``<channel|>`` (as detokenized).
@@ -63,11 +65,11 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     ("<|start|>", _DROP),
     ("<|call|>", _DROP),
     ("<|end|>", _DROP),
-    # Onyx ATEM (Muse Glimmer): no channel marker - the recipient lives in the
-    # header that "<|start|>assistant" opens and "<|message|>" closes, so the
-    # routing is decided in _close_header. "<|eom|>" ends one message of a
-    # multi-message turn; the next header re-decides, and until it arrives the
-    # safe assumption is answer.
+    # Onyx ATEM (Muse Glimmer, Muse Spark): no channel marker - the
+    # recipient lives in the header that "<|start|>assistant" opens and
+    # "<|message|>" closes, so the routing is decided in _close_header.
+    # "<|eom|>" ends one message of a multi-message turn; the next header
+    # re-decides, and until it arrives the safe assumption is answer.
     ("<|eom|>", _ANSWER),
     ("<|eot|>", _DROP),
     # gemma-style channel (as detokenized - note the lopsided pipes).
@@ -108,7 +110,7 @@ _MARKERS: tuple[tuple[str, str], ...] = (
 _HEADER_PREFIXES = ("<|channel|>", "<|start|>assistant")
 
 # ATEM's reasoning recipient. "self" is the only recipient that is not
-# user-visible; "user" and tool namespaces are answer-side.
+# user-visible; "user", "commentary" and tool namespaces are answer-side.
 _SELF_RECIPIENT = "to=self"
 
 
@@ -188,7 +190,7 @@ class ReasoningFilter:
         already routed), and an ATEM answer/tool header must leave a mode that
         "<|eom|>" or the initial state already set."""
         self._swallow = False
-        if _SELF_RECIPIENT in self._header:
+        if self._header.strip() == _SELF_RECIPIENT:
             self.mode = _REASON
         self._header = ""
 
@@ -269,9 +271,10 @@ def split_harmony_reply(text: str, *,
     reply back as history. This runs the same state machine the chat REPL
     streams through, so both surfaces classify identically: analysis and
     commentary channels (tool preludes included) become reasoning, the final
-    channel becomes content, and a reply truncated inside analysis returns
-    all-reasoning with empty content (the convention the truncated-thinking
-    handling already uses for think-tag models).
+    channel becomes content (as does an ATEM commentary message), and a
+    reply truncated inside analysis returns all-reasoning with empty content
+    (the convention the truncated-thinking handling already uses for
+    think-tag models).
 
     ``start_in_header`` seeds the ATEM case, where the generation prompt ends
     mid-header at ``<|start|>assistant`` and the reply opens with ``

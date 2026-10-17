@@ -8,6 +8,7 @@ that mimic mlx-lm's contract: ``tokens`` is the full accumulated sequence
 """
 
 import mlx.core as mx
+import pytest
 
 from gmlx.gen.thinking_budget import (
     MTPFinishThinking,
@@ -683,6 +684,41 @@ def test_muse_glimmer_closed_reasoning_message_is_not_open():
     assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())
 
 
+def test_muse_spark_think_pair_resolves_from_its_template():
+    from pathlib import Path
+
+    from gmlx.gen.thinking_budget import _template_think_pair
+
+    class _SparkTok:
+        chat_template = (Path(__file__).parents[1] / "fixtures"
+                         / "muse_spark_template.jinja").read_text()
+
+    assert _template_think_pair(_SparkTok()) == (
+        "<|start|>assistant to=self<|message|>", "<|eom|>")
+
+
+def test_commentary_close_before_reasoning_keeps_the_budget_armed():
+    """Muse Spark can send a to=commentary message first. Its <|eom|> is the
+    reasoning end marker too, but it closes no reasoning block, so the
+    reasoning that follows is still capped."""
+    p = ThinkingBudgetProcessor(
+        end_seq=(END,), forced_ids=[NL, END], budget=2, start_seq=(START,),
+        start_in_thinking=False,
+    )
+    forced = _run(p, [50, 51, END, START, 60, 61, 62, 63], prompt=(1, 2, 3))
+    assert not p.done
+    assert NL in forced and END in forced
+    assert p._spent
+
+
+def test_mtp_hook_commentary_close_before_reasoning_keeps_it_armed():
+    h = _mtp_hook(start_in_thinking=False, budget=1)
+    for t in (50, END, START, 60, 61):
+        h.observe(t)
+    assert not h.done and h.in_thinking
+    assert h.take_forced() is not None
+
+
 # --- MTPFinishThinking (^T on the owned MTP rounds) --------------------------
 
 def _mtp_hook(**kw):
@@ -853,3 +889,152 @@ def test_make_mtp_finish_hook_budget_variants():
     h0 = make_mtp_finish_hook(_WrapTok(), budget=0)
     assert h0.forced_ids == [NL, END] and h0.skip_ids == [NL, END]
     assert make_mtp_finish_hook(_WrapTok(), budget=-1) is None
+
+
+# --- ATEM (Muse Spark, Muse Glimmer) with the real token ids -----------------
+#
+# The reasoning message opens with five tokens, <|start|> assistant " to"
+# "=self" <|message|>, and closes with one, <|eom|>. A Spark commentary message
+# ends with the same <|eom|>. The generation prompt stops after "assistant",
+# and mlx-lm hands the processor only that last prompt token.
+
+import atem_tokens as at  # noqa: E402
+
+from gmlx.gen.thinking_budget import BUDGET_WRAP_PHRASE  # noqa: E402
+
+_ATEM_PROMPT = "<|start|>user<|message|>hi<|eot|><|start|>assistant"
+_REASON = " to=self<|message|>Thinking hard about it now.<|eom|>"
+_COMMENTARY = ("<|start|>assistant to=commentary<|message|>"
+               "Working on it.<|eom|>")
+_ANSWER = "<|start|>assistant to=user<|message|>Hello world foo bar<|eot|>"
+_ATEM_VOCAB = 202048
+
+
+def _one_hot_id(out):
+    """The forced id when ``out`` is a one-hot row, else None. An EOS ban
+    row also holds very negative entries, so count the open entries."""
+    row = out[0]
+    n_open = int(mx.sum(row > -1e8).item())
+    return int(mx.argmax(row).item()) if n_open == 1 else None
+
+
+def _atem_run(p, script, after, *, close_at=None, tok=None):
+    """Replay a decode the way mlx-lm drives a processor. The model writes
+    ``script`` until the processor forces a close, then writes ``after``.
+    ``close_at`` presses ^T after that many generated tokens. Returns the
+    emitted text."""
+    tok = tok or at.AtemTokenizer()
+    tokens = [tok.encode(_ATEM_PROMPT)[-1]]
+    src = iter(tok.encode(script))
+    emitted = []
+    logits = mx.zeros((1, _ATEM_VOCAB))
+    out = p(mx.array(tokens), logits)
+    while len(emitted) < 300:
+        if close_at is not None and len(emitted) == close_at:
+            p.request_close()
+        forced = _one_hot_id(out)
+        if forced is not None:
+            if src is not None:
+                src = None
+                rest = iter(tok.encode(after))
+            tid = forced
+        else:
+            tid = next(src if src is not None else rest, None)
+            if tid is None:
+                break
+        emitted.append(tid)
+        tokens.append(tid)
+        out = p(mx.array(tokens), logits)
+    return tok.decode(emitted)
+
+
+def test_the_fixture_tokenizer_matches_the_real_one():
+    tok = at.AtemTokenizer()
+    for text, real in at.TABLE["encodings"].items():
+        assert tok.encode(text) == real, text
+
+
+@pytest.mark.parametrize("template", ["spark", "glimmer"])
+def test_atem_markers_resolve_to_their_real_ids(template):
+    start, end = _thinking_token_seqs(at.AtemTokenizer(template))
+    assert start == (200022, 140680, 328, 19669, 200023)
+    assert end == (200007,)
+
+
+@pytest.mark.parametrize("template", ["spark", "glimmer"])
+def test_atem_budget_caps_reasoning_only(template):
+    tok = at.AtemTokenizer(template)
+    p = make_thinking_budget_processor(
+        tok, 3, start_in_thinking=prompt_opens_thinking(
+            _ATEM_PROMPT, tokenizer=tok))
+    rest = _COMMENTARY + _ANSWER
+    text = _atem_run(p, _REASON + rest, rest, tok=tok)
+    # Three reasoning tokens pass, the fourth trips the cap, and the close
+    # is the wrap phrase and the whole end marker. Commentary and answer
+    # then run untouched.
+    assert text == (" to=self<|message|>Thinking hard about"
+                    + BUDGET_WRAP_PHRASE + "<|eom|>" + rest)
+    assert p._spent and not p.done
+
+
+def test_atem_budget_is_spent_on_reasoning_after_commentary():
+    """A commentary message first: its <|eom|> closes nothing, so the
+    reasoning after it is still capped."""
+    p = make_thinking_budget_processor(at.AtemTokenizer(), 3,
+                                       start_in_thinking=False)
+    head = " to=commentary<|message|>Hello world<|eom|><|start|>assistant"
+    text = _atem_run(p, head + _REASON + _ANSWER, _ANSWER)
+    assert text == (head + " to=self<|message|>Thinking hard about"
+                    + BUDGET_WRAP_PHRASE + "<|eom|>" + _ANSWER)
+
+
+def test_atem_reasoning_under_budget_closes_naturally():
+    p = make_thinking_budget_processor(at.AtemTokenizer(), 100,
+                                       start_in_thinking=False)
+    script = _REASON + _COMMENTARY + _ANSWER
+    assert _atem_run(p, script, "") == script
+    assert p.done and not p._spent
+
+
+def test_atem_finish_key_closes_the_reasoning():
+    from gmlx.gen.thinking_budget import _SKIP_WRAP_PHRASE
+
+    p = make_thinking_budget_processor(at.AtemTokenizer(), None,
+                                       start_in_thinking=False,
+                                       interruptible=True)
+    rest = _COMMENTARY + _ANSWER
+    # ^T after five tokens takes effect on the next step's logits.
+    text = _atem_run(p, _REASON + rest, rest, close_at=5)
+    assert text == (" to=self<|message|>Thinking hard" + _SKIP_WRAP_PHRASE
+                    + "<|eom|>" + rest)
+
+
+def test_atem_mtp_hook_counts_reasoning_only():
+    tok = at.AtemTokenizer()
+    h = make_mtp_finish_hook(tok, budget=3,
+                             prompt_ids=tok.encode(_ATEM_PROMPT))
+    for t in tok.encode(" to=self<|message|>Thinking hard"):
+        h.observe(t)
+    assert h.in_thinking and h.count == 3
+    assert h.take_forced() is None
+    h.observe(tok.encode(" about")[0])
+    forced = h.take_forced()
+    assert forced is not None and forced[-1] == 200007
+    for t in forced:
+        h.observe(t)
+    for t in tok.encode(_COMMENTARY + _ANSWER):
+        h.observe(t)
+        assert h.take_forced() is None
+    assert not h.in_thinking and not h.done
+
+
+def test_atem_mtp_hook_commentary_close_keeps_it_armed():
+    tok = at.AtemTokenizer()
+    h = make_mtp_finish_hook(tok, budget=2,
+                             prompt_ids=tok.encode(_ATEM_PROMPT))
+    for t in tok.encode(" to=commentary<|message|>Hello world<|eom|>"
+                        "<|start|>assistant to=self<|message|>Thinking hard"
+                        " about"):
+        h.observe(t)
+    assert not h.done and h.in_thinking
+    assert h.take_forced() is not None

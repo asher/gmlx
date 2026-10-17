@@ -76,15 +76,15 @@ _IN_PLACE_IMAGES = frozenset((
     "qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl", "qwen3_vl_moe",
     "qwen3_omni_moe",
     "kimi_k25", "deepseek_v4_vl", "deepseek_v41_vl", "muse_glimmer",
-    "glm5_next", "mistral3", "pixtral",
+    "muse_spark", "glm5_next", "mistral3", "pixtral",
 ))
 # Image items as the client and the stock rebuild write them.
 _IMAGE_ITEMS = ("image", "image_url", "input_image")
 # The model types whose chat template renders an image item of a tool
 # message in that tool turn.
 _TOOL_IMAGES = frozenset((
-    "qwen3_5", "qwen3_5_moe", "kimi_k25", "muse_glimmer", "glm5_next",
-    "gemma4_unified",
+    "qwen3_5", "qwen3_5_moe", "kimi_k25", "muse_glimmer", "muse_spark",
+    "glm5_next", "gemma4_unified",
 ))
 
 
@@ -265,9 +265,9 @@ def _decode_tool_arguments(msgs: list) -> None:
     """Decode ``tool_calls[*].function.arguments`` from the OpenAI wire form
     (a JSON string) into a mapping, in place.
 
-    Muse Glimmer's ATEM template raises outright on a string - "a JSON string
-    cannot be parsed in the HF jinja sandbox" - so a client replaying its own
-    tool turn would 500 on render. Undecodable arguments become an empty
+    The Muse Glimmer and Muse Spark ATEM templates raise outright on a
+    string, since the jinja sandbox cannot parse JSON, so a client replaying
+    its own tool turn would 500 on render. Undecodable arguments become an empty
     mapping, the same fallback the retirement mirror uses
     (``retire_key.assistant_message_from_reply``).
     """
@@ -356,7 +356,7 @@ def install_faithful_history() -> None:
                     if (isinstance(m, dict) and "thinking" not in m
                             and m.get("reasoning_content")):
                         msgs[i] = {**m, "thinking": m["reasoning_content"]}
-            elif cfg.get("model_type") == "muse_glimmer":
+            elif cfg.get("model_type") in ("muse_glimmer", "muse_spark"):
                 _decode_tool_arguments(msgs)
             if return_messages:
                 return msgs

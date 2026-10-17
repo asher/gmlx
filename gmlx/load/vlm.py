@@ -77,6 +77,17 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # Mistral Pixtral: a plain-float Pixtral ViT (2-D RoPE, RMSNorm, SiLU MLP)
         # + a 2-layer GELU projector onto a Mistral-Nemo (llama-arch) text tower.
         return "pixtral"
+    if llm_arch == "muse-spark":
+        # Meta Muse Spark: the Muse Glimmer vision tower and the
+        # muse-spark-audio waveform encoder, both in one mmproj, onto the
+        # muse-spark text tower (gmlx.models.muse_spark.vlm_model).
+        audio = _mm(mm_meta, "clip.audio.projector_type")
+        if proj == "muse-glimmer" or audio == "muse-spark-audio":
+            return "muse_spark"
+        raise UnsupportedVLMError(
+            f"mmproj projectors {proj!r} / {audio!r} on LLM arch 'muse-spark' "
+            "are not supported (only 'muse-glimmer' vision and "
+            "'muse-spark-audio' audio)")
     if proj == "muse-glimmer":
         # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
         # adapter onto the muse-glimmer text tower. Both halves are vendored
@@ -327,6 +338,43 @@ def _muse_glimmer_vision_name(name: str):
     if tgt is None:
         return None
     return f"vision_tower.layers.{bid}.{tgt}.{leaf}", False
+
+
+# Muse Spark audio: the waveform encoder onto
+# gmlx.models.muse_spark.audio.AudioModel, by clip.cpp's loader for
+# PROJECTOR_TYPE_MUSE_SPARK_AUDIO. The stage patch embedders are
+# a.patch.<stage>. The conv blocks count across stages as a.conv1d.<block>
+# and a.blk.<block>.
+_MUSE_SPARK_AUDIO_SUB = {
+    ("patch", ""): "patches.{i}.proj",
+    ("patch", "norm"): "patches.{i}.norm",
+    ("conv1d", ""): "blocks.{i}.conv",
+    ("conv1d", "norm"): "blocks.{i}.conv_norm",
+    ("blk", "ffn_up"): "blocks.{i}.mlp.fc1",
+    ("blk", "ffn_down"): "blocks.{i}.mlp.fc2",
+}
+_MUSE_SPARK_AUDIO_TOP = {
+    "a.pre_ln.weight": "audio_tower.norm.weight",
+    "mm.a.fc.weight": "audio_tower.proj.weight",
+    "mm.a.fc.bias": "audio_tower.proj.bias",
+    "a.post_ln.weight": "audio_tower.post_norm.weight",
+}
+
+
+def _muse_spark_audio_name(name: str) -> str | None:
+    """Map an mmproj ``a.*`` / ``mm.a.*`` tensor to its muse_spark audio
+    path, or None to skip."""
+    hit = _MUSE_SPARK_AUDIO_TOP.get(name)
+    if hit is not None:
+        return hit
+    parts = name.split(".")
+    if parts[0] != "a" or len(parts) not in (4, 5) or not parts[2].isdigit():
+        return None
+    sub = parts[3] if len(parts) == 5 else ""
+    tgt = _MUSE_SPARK_AUDIO_SUB.get((parts[1], sub))
+    if tgt is None:
+        return None
+    return f"audio_tower.{tgt.format(i=parts[2])}.{parts[-1]}"
 
 
 # Kimi-K2.5/K2.7 MoonViT tower onto mlx_vlm.models.kimi_k25. A SigLIP-so400m
@@ -909,9 +957,19 @@ def remap_vision_arrays(
             out[hf] = mx.transpose(arr, (0, 2, 3, 1)) if is_patch else arr
         return out, skipped, vis_kqmeta
 
-    if model_type == "muse_glimmer":
+    if model_type in ("muse_glimmer", "muse_spark"):
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            if model_type == "muse_spark" and _is_audio_tensor(name):
+                ahf = _muse_spark_audio_name(name) if with_audio else None
+                if ahf is None:
+                    skipped.append(name)
+                elif ahf.endswith(".conv.weight"):
+                    # GGUF [C, 1, K] depthwise kernel -> [C, K].
+                    out[ahf] = arr.reshape(arr.shape[0], arr.shape[-1])
+                else:
+                    out[ahf] = arr
                 continue
             res = _muse_glimmer_vision_name(name)
             if res is None:
@@ -1620,6 +1678,91 @@ def _synthesize_muse_glimmer_vlm_config(
     return config
 
 
+# Samples per second the muse-spark-audio encoder reads: a clip.cpp arch
+# constant (hparams.audio_sample_rate), not GGUF metadata.
+MUSE_SPARK_AUDIO_RATE = 24000
+
+
+def _synthesize_muse_spark_audio_config(mm_meta: dict,
+                                        mm_shapes: dict | None) -> dict:
+    """The muse-spark-audio encoder from ``clip.audio.*``. The per-stage MLP
+    widths have no metadata key, so they are read off each stage's first
+    ``a.blk.<block>.ffn_up.weight``."""
+    def ints(key):
+        v = mm_meta.get(key)
+        if not isinstance(v, (list, tuple)) or not v:
+            raise ValueError(f"mmproj GGUF is missing required metadata {key!r}")
+        return [int(x) for x in v]
+
+    widths = ints("clip.audio.hidden_sizes")
+    patches = ints("clip.audio.patch_sizes")
+    depths = ints("clip.audio.depths")
+    if not len(widths) == len(patches) == len(depths):
+        raise ValueError(
+            "muse-spark-audio mmproj: hidden_sizes, patch_sizes and depths "
+            "differ in length")
+    if sum(depths) != _mm_int(mm_meta, "clip.audio.block_count"):
+        raise ValueError(
+            "muse-spark-audio mmproj: the depths do not add up to "
+            "clip.audio.block_count")
+    ffn, block = [], 0
+    for width, depth in zip(widths, depths):
+        shape = (mm_shapes or {}).get(f"a.blk.{block}.ffn_up.weight")
+        ffn.append(_other_dim(shape, width) if shape else 4 * width)
+        block += depth
+    audio: dict = {
+        "model_type": "muse_spark_audio",
+        "hidden_sizes": widths,
+        "patch_sizes": patches,
+        "depths": depths,
+        "intermediate_sizes": ffn,
+        "conv_kernel_size": _mm_int(mm_meta, "clip.audio.conv_kernel_size"),
+        "projection_dim": _mm_int(mm_meta, "clip.audio.projection_dim"),
+        "sample_rate": MUSE_SPARK_AUDIO_RATE,
+    }
+    eps = _mm(mm_meta, "clip.audio.attention.layer_norm_epsilon")
+    if eps is not None:
+        audio["rms_norm_eps"] = float(eps)
+    return audio
+
+
+def _synthesize_muse_spark_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict, mm_shapes: dict | None = None,
+) -> dict:
+    """Muse Spark VLM config: the muse-spark text synth, the Muse Glimmer
+    vision tower when the mmproj has one, and the muse-spark-audio encoder
+    when it has one."""
+    config: dict = {
+        "model_type": "muse_spark",
+        "text_config": text_config,
+        "vision_config": None,
+        "audio_config": None,
+        "vocab_size": int(text_config.get("vocab_size", 202048)),
+    }
+    hidden = int(text_config["hidden_size"])
+    if mm_meta.get("clip.has_vision_encoder", True):
+        glimmer = _synthesize_muse_glimmer_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
+        config["vision_config"] = glimmer["vision_config"]
+        for key in ("image_token_id", "image_token_index"):
+            if key in glimmer:
+                config[key] = glimmer[key]
+    if mm_meta.get("clip.has_audio_encoder"):
+        config["audio_config"] = _synthesize_muse_spark_audio_config(
+            mm_meta, mm_shapes)
+        audio_id = _gguf_token_id(llm_meta, "<|audio|>")
+        if audio_id is not None:
+            config["audio_token_id"] = audio_id
+    for name in ("vision_config", "audio_config"):
+        tower = config[name]
+        if tower is not None and tower["projection_dim"] != hidden:
+            raise ValueError(
+                f"mmproj {name.split('_')[0]} projection width "
+                f"{tower['projection_dim']} does not match the muse-spark "
+                f"hidden size {hidden}")
+    return config
+
+
 def _synthesize_glm5next_vlm_config(
     text_config: dict, mm_meta: dict, llm_meta: dict,
     mm_shapes: dict | None = None,
@@ -1822,6 +1965,10 @@ def synthesize_vlm_config(
 
     if model_type == "muse_glimmer":
         return _synthesize_muse_glimmer_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type == "muse_spark":
+        return _synthesize_muse_spark_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "glm5_next":
@@ -2035,6 +2182,8 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
 # model needs.
 _OWNED_VLM_REGISTRARS = {
     "muse_glimmer": ("gmlx.models.muse_glimmer.tools",),
+    # Muse Spark calls tools in the same ATEM format.
+    "muse_spark": ("gmlx.models.muse_glimmer.tools",),
     "qwen4_exp": ("gmlx.models.qwen4_exp.vlm_model",),
     "glm5_next": ("gmlx.models.glm5_next.vlm_model",),
     "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
@@ -2131,6 +2280,9 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
         return _synthesize_pixtral_processor(tokenizer, mm_meta)
     if model_type == "muse_glimmer":
         return _synthesize_muse_glimmer_processor(tokenizer, mm_meta)
+    if model_type == "muse_spark":
+        return _synthesize_muse_glimmer_processor(
+            tokenizer, mm_meta, audio=bool(mm_meta.get("clip.has_audio_encoder")))
     if model_type == "glm5_next":
         return _synthesize_glm5next_processor(tokenizer, mm_meta)
     if model_type == "deepseek_v4_vl":
@@ -2719,7 +2871,39 @@ class _MuseGlimmerGgufImageProcessor(ImageProcessingMixin):
         return {"pixel_values": padded, "image_sizes": sizes}
 
 
-def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
+class _MuseSparkAudioFeatureExtractor:
+    """Muse Spark audio preprocessing: the raw mono waveform, zero padded to
+    a whole number of embeddings (mtmd-audio.cpp,
+    ``mtmd_audio_preprocessor_muse_spark_audio``). mlx-vlm's
+    ``prepare_inputs`` resamples every clip to ``sampling_rate`` first."""
+
+    model_input_names = ["input_features", "input_features_mask"]
+
+    def __init__(self, sampling_rate: int, samples_per_token: int):
+        self.sampling_rate = int(sampling_rate)
+        self.samples_per_token = int(samples_per_token)
+
+    def tokens(self, n_samples: int) -> int:
+        """Embeddings a clip of ``n_samples`` samples occupies."""
+        return -(-int(n_samples) // self.samples_per_token)
+
+    def __call__(self, clips) -> dict:
+        import numpy as np
+
+        waves = [np.asarray(c, dtype=np.float32).reshape(-1) for c in clips]
+        counts = [self.tokens(len(w)) for w in waves]
+        width = max(counts, default=0)
+        features = np.zeros((len(waves), width * self.samples_per_token),
+                            dtype=np.float32)
+        mask = np.zeros((len(waves), width), dtype=bool)
+        for i, (w, n) in enumerate(zip(waves, counts)):
+            features[i, : len(w)] = w
+            mask[i, :n] = True
+        return {"input_features": features, "input_features_mask": mask}
+
+
+def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict, *,
+                                       audio: bool = False):
     """Build the Muse Glimmer processor from the GGUFs alone - no HF download.
 
     mlx-vlm has no processor for this family either, so the marker expansion
@@ -2730,6 +2914,12 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
 
     The 4096-soft-token cap is a clip.cpp arch constant
     (``set_limit_image_tokens(1, 4096)``), not GGUF metadata.
+
+    With ``audio`` (Muse Spark), the processor also takes audio clips. The
+    template emits one ``<|audio|>`` per clip, and each becomes
+    ``<|soft_audio_start|>``, one ``<|audio|>`` per embedding and
+    ``<|soft_audio_end|>``, as mtmd brackets the muse-spark-audio
+    embeddings.
     """
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
@@ -2741,7 +2931,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
         drops_duplicate_bos,
     )
 
-    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
+    # An audio-only Spark mmproj still gets an image processor, and the
+    # model refuses the images.
+    patch_size = (_mm_int(mm_meta, "clip.vision.patch_size")
+                  if mm_meta.get("clip.has_vision_encoder", True) else 14)
     merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
     image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
     image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
@@ -2819,11 +3012,69 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
                 list(self.tokenizer.model_input_names)
                 + list(self.image_processor.model_input_names)))
 
+    class MuseSparkProcessor(MuseGlimmerProcessor):
+        # transformers reads the *_class hints off the class itself.
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        audio_token = "<|audio|>"
+        audio_start_token = "<|soft_audio_start|>"
+        audio_end_token = "<|soft_audio_end|>"
+        supports_multiple_audio = True
+
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, audio=None, **kwargs):
+            if audio is None or len(audio) == 0:
+                return super().__call__(images=images, text=text, **kwargs)
+            if not isinstance(audio, (list, tuple)):
+                audio = [audio]
+            if isinstance(text, str):
+                text = [text]
+            fe = self.feature_extractor
+            if text is not None:
+                text = self._expand_audio(
+                    text, [fe.tokens(len(a)) for a in audio])
+            out = super().__call__(images=images, text=text, **kwargs)
+            out.update(to_mlx(fe(audio)))
+            return out
+
+        def _expand_audio(self, texts, counts):
+            """Replace each ``<|audio|>`` with its clip's token block, clips
+            consumed in order across the batch."""
+            out, index = [], 0
+            for sample in texts:
+                parts = sample.split(self.audio_token)
+                rebuilt = parts[0]
+                for part in parts[1:]:
+                    if index < len(counts):
+                        rebuilt += (self.audio_start_token
+                                    + self.audio_token * counts[index]
+                                    + self.audio_end_token)
+                        index += 1
+                    else:
+                        rebuilt += self.audio_token
+                    rebuilt += part
+                out.append(rebuilt)
+            return out
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                super().model_input_names
+                + self.feature_extractor.model_input_names))
+
     # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
-    setattr(MuseGlimmerProcessor, KWARGS_REACH_TOKENIZER, True)
-    processor = MuseGlimmerProcessor(
+    cls = MuseSparkProcessor if audio else MuseGlimmerProcessor
+    setattr(cls, KWARGS_REACH_TOKENIZER, True)
+    processor = cls(
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
+    if audio:
+        import math
+
+        per = math.prod(int(x) for x in mm_meta["clip.audio.patch_sizes"])
+        processor.feature_extractor = _MuseSparkAudioFeatureExtractor(
+            MUSE_SPARK_AUDIO_RATE, per)
 
 
     return _attach_streaming_helpers(processor, tokenizer)

@@ -255,6 +255,28 @@ FAMILIES: dict[str, dict] = {
             "reasoning-xhigh": {"chat_template_kwargs": {"reasoning_strength": "xhigh"}},
         },
     },
+    # Muse Spark: the sampling values are the GGUF's own general.sampling.*.
+    # The chat template's reasoning_effort takes low/medium/high/xhigh,
+    # defaults to xhigh and raises on any other value. The reasoning message
+    # uses Glimmer's to=self header. A to=commentary message also ends at
+    # <|eom|>, but it is content.
+    "muse-spark": {
+        "label": "Muse Spark",
+        "arches": ("muse-spark",),
+        "base": {"sampling": {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": 64,
+            "thinking_start_token": "<|start|>assistant to=self<|message|>",
+            "thinking_end_token": "<|eom|>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+            "reasoning-xhigh": {"chat_template_kwargs": {"reasoning_effort": "xhigh"}},
+        },
+    },
     # Llama 3.x generation_config (t=0.6/top_p=0.9); SmolLM3 card matches
     # closely enough to share.
     "llama": {

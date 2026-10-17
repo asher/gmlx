@@ -114,6 +114,8 @@ _OWNED = {
                    ("model.layers.1.block_sparse_moe.shared_experts.up_proj", "blk.1.ffn_up_shexp.weight", IN)],
     "muse-glimmer": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),
                      ("model.layers.1.mlp.up_proj", "blk.1.ffn_up.weight", IN)],
+    "muse-spark": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),
+                   ("model.layers.1.mlp.latent_down", "blk.1.ffn_latent_down.weight", IN)],
     "qwen4exp": [("model.layers.0.linear_attn.in_proj_qkv", "blk.0.attn_qkv.weight", IN),
                  ("model.layers.1.mlp.shared_expert_gate", "blk.1.ffn_gate_inp_shexp.weight", 1)],
 }

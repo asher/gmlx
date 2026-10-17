@@ -20,12 +20,14 @@ from gmlx.load.loader import (
     _STREAM_PREFETCH_MIN_TOKENS,
     _STREAMING_PREFILL_STEP,
     _STREAMING_PREFILL_STEP_BY_MODEL_TYPE,
+    _arena_row_kernels,
     _arena_split_max_tokens,
     _arena_stage_max_tokens,
     _kq_expert_gpu_ok,
     _lookahead_default,
     _phase_token,
     _resolve_feeder_defaults,
+    _split_beats_ring,
     _stream_gpu_tokens,
     _switch_num_experts,
     moe_streaming_active,
@@ -308,7 +310,11 @@ def install_expert_streaming(
     under the budget streams as with ``force_stream``, and one over it
     takes the budget-keyed ladder (table first) as without the flag.
     """
-    from gmlx.load.modules import switch_layer_types
+    from gmlx.load.modules import (
+        glu_unsorted_call,
+        stock_glu_calls,
+        switch_layer_types,
+    )
 
     _, glu_types = switch_layer_types()
 
@@ -469,6 +475,10 @@ def install_expert_streaming(
             # miss-shed; it strips them before forwarding and applies
             # the shed mix python-side.
             _fwd_scores = bool(getattr(cls, "_kq_mix_scores", False))
+            # A base whose forward is the stock SwitchGLU body sorts wide
+            # calls, and the sorted gathers pick a kernel by the arena's
+            # slot count. Its multi-token arena calls run unsorted instead.
+            _stock_body = cls.__call__ in stock_glu_calls()
 
             class _CPUOffload(cls):
                 _kq_scores_sink = True
@@ -494,12 +504,14 @@ def install_expert_streaming(
                         )
                     )
                     n_tokens = indices.size // indices.shape[-1]
+                    in_split = getattr(self, "_kq_in_split", False)
                     pf = getattr(self, "_kq_prefetcher", None)
                     fdr = getattr(self, "_kq_feeder", None)
                     dfr = getattr(self, "_kq_decode_feeder", None)
                     small = n_tokens <= _arena_stage_max_tokens()
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
+                    routed_ids = None
                     ph = _PHASE
                     if ph is not None:
                         _phase_token(
@@ -530,6 +542,7 @@ def install_expert_streaming(
                         and gt._route_shed is not None
                         and cpu_only
                         and n_tokens == 1
+                        and not in_split
                         and dfr is not None
                         and dfr.covers(self._kq_li)
                     )
@@ -539,9 +552,7 @@ def install_expert_streaming(
                         # path included: boundary detection and the
                         # adaptive hot-set refresh live here.
                         gt.on_layer_entry(
-                            self._kq_li,
-                            None if getattr(self, "_kq_in_split", False)
-                            else getattr(self, "_kq_miss_shed", None))
+                            self._kq_li, getattr(self, "_kq_miss_shed", None))
                     if (
                         gt_live
                         and scores_arg is not None
@@ -586,7 +597,8 @@ def install_expert_streaming(
                             return y
                         finally:
                             self._kq_cpu_only = True
-                    if la is not None and cpu_only and n_tokens == 1:
+                    if (la is not None and cpu_only and n_tokens == 1
+                            and not in_split):
                         # Decode only: prefill prestage would fault the
                         # cold arena while the ring holds the wired budget.
                         # Lookahead: run the NEXT MoE layer's router on this
@@ -625,7 +637,10 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
-                        if n_tokens == 1:
+                        if n_tokens == 1 and not in_split:
+                            # A one-token piece of a split is prefill work:
+                            # wiring here would release the prefill ring
+                            # in the middle of a pass.
                             dfr.ensure_wired()
                         if ph is not None:
                             ph["ev_wire"] = ph.get("ev_wire", 0.0) + (
@@ -635,7 +650,7 @@ def install_expert_streaming(
                         # leaf would return a mixed rank-3 output next to a
                         # clean leaf's per-expert rank-4 - the reassembly
                         # concatenate cannot take both.
-                        ms = (None if getattr(self, "_kq_in_split", False)
+                        ms = (None if in_split
                               else getattr(self, "_kq_miss_shed", None))
                         sc_f32 = None
                         if (ms is not None and scores_arg is not None
@@ -655,6 +670,7 @@ def install_expert_streaming(
                             ph.setdefault("miss_hist", []).append(
                                 (self._kq_li, dfr._lookups - dfr._hits))
                         ids, indices = _valid_expert_ids(self, indices)
+                        routed_ids = ids
                         shed_args = None
                         shed_mix = None
                         if sc_f32 is not None:
@@ -715,15 +731,32 @@ def install_expert_streaming(
                             # and let the fused kq kernels run
                             if shed_args is not None:
                                 args = shed_args
+                            # kq takes a GEMM when rows / experts >= 4,
+                            # and the experts here are the arena's slots.
+                            # Narrower calls, such as verify batches, pick
+                            # the same kernel at any arena size.
+                            rows = _arena_row_kernels() and (
+                                in_split
+                                or n_tokens > 1
+                                and n_tokens * indices.shape[-1]
+                                >= 4 * dfr.slot_count(self._kq_li))
                             self._kq_cpu_only = False
+                            if rows:
+                                object.__setattr__(
+                                    self, "_kq_arena_rows", True)
                             try:
                                 t3 = (time.perf_counter()
                                       if ph is not None else 0.0)
                                 with dfr.swapped(self._kq_li):
                                     with mx.stream(mx.gpu):
-                                        y = super().__call__(
-                                            x, mx.array(slots),
-                                            *args, **kwargs)
+                                        if (rows and _stock_body
+                                                and not args and not kwargs):
+                                            y = glu_unsorted_call(
+                                                self, x, mx.array(slots))
+                                        else:
+                                            y = super().__call__(
+                                                x, mx.array(slots),
+                                                *args, **kwargs)
                                         if (shed_mix is not None
                                                 and y.ndim == x.ndim + 1):
                                             y = (y * shed_mix[..., None]).sum(
@@ -735,14 +768,44 @@ def install_expert_streaming(
                                 return y
                             finally:
                                 self._kq_cpu_only = True
-                    if (
+                                if rows:
+                                    object.__setattr__(
+                                        self, "_kq_arena_rows", False)
+                    split = (
                         dfr is not None
                         and cpu_only
                         and 1 < n_tokens <= _arena_split_max_tokens()
                         and not kwargs
                         and dfr.covers(self._kq_li)
                         and dfr.can_stage_smaller(self._kq_li)
+                    )
+                    if (
+                        split
+                        and not in_split
+                        and fdr is not None
+                        and n_tokens >= _STREAM_PREFETCH_MIN_TOKENS
+                        and fdr.covers(self._kq_li)
+                        and (not small or fdr.ring_live())
                     ):
+                        # The prefill ring can serve this call too. Split
+                        # only when the routed union is a small share of
+                        # the layer (see _arena_split_max_share). A small
+                        # call takes the ring only while the ring holds its
+                        # slots. A rebuild after decode takes arena room.
+                        ahead = fdr.staged_ahead(self._kq_li)
+                        if ahead:
+                            # The ring is already reading the whole layer.
+                            split = False
+                        else:
+                            if routed_ids is None:
+                                mx.eval(indices)
+                                routed_ids, indices = _valid_expert_ids(
+                                    self, indices)
+                            split = _split_beats_ring(
+                                int(np.unique(routed_ids).size),
+                                _switch_num_experts(self))
+                        dfr.note_split_rule(split, ahead)
+                    if split:
                         # The chunk routes more distinct experts than the
                         # arena has slots (stage refused above, or the chunk
                         # is over the stage-size gate and was never tried).
@@ -768,8 +831,6 @@ def install_expert_streaming(
                         if sliceable:
                             half = n_tokens // 2
                             parts = []
-                            prev_split = getattr(
-                                self, "_kq_in_split", False)
                             object.__setattr__(
                                 self, "_kq_in_split", True)
                             try:
@@ -791,7 +852,7 @@ def install_expert_streaming(
                                     mx.eval(parts[-1])
                             finally:
                                 object.__setattr__(
-                                    self, "_kq_in_split", prev_split)
+                                    self, "_kq_in_split", in_split)
                             return mx.concatenate(parts, axis=ax)
                     wedged = dfr is not None and dfr.wedged_at(self._kq_li)
                     if wedged and dfr.has_dead(self._kq_li):

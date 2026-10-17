@@ -274,6 +274,21 @@ class PrefillFeeder:
         page-cache path."""
         return li in self._layers and not self._wedged
 
+    def ring_live(self) -> bool:
+        """True while the ring holds its slots. Decode releases them, and
+        the next ring call allocates them again."""
+        return bool(self._slots) and not self._wedged
+
+    def staged_ahead(self, li: int) -> bool:
+        """True when an earlier layer of the current pass started the
+        whole-layer read of layer ``li``."""
+        return (
+            self._last_li is not None
+            and li > self._last_li
+            and li in self._ready
+            and self.covers(li)
+        )
+
     def _drain_staging(self) -> bool:
         """Wait for the staging in flight, within one timeout for all of
         it. False when a stage outlived it: the ring is then out of

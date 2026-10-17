@@ -128,7 +128,7 @@ def test_thinking_rows_are_unconstrained_until_the_end_marker():
     proc = ThinkingAwareLogitsProcessor(_proc(), TOK, enable_thinking=True)
     g = _rows([proc]).grammar
     assert isinstance(g, SpecGrammar)
-    assert not g.active and g.end_id == END_THINK
+    assert not g.active and g.gate.seqs == ((END_THINK,),)
     assert g.masks([BAD, BAD]) is None
     masks = g.masks([BAD, END_THINK, DIGITS[3]])
     assert (masks[:2] == -1).all()

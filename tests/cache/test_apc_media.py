@@ -22,8 +22,10 @@ from gmlx.load.config_synth import synthesize_config
 from test_config_synth import (
     _GLM5NEXT_SHAPES,
     _MUSE_GLIMMER_SHAPES,
+    _MUSE_SPARK_SHAPES,
     _glm5next_meta,
     _muse_glimmer_meta,
+    _muse_spark_meta,
 )
 
 
@@ -95,10 +97,13 @@ def _gemma4_config(model_type: str, **text) -> dict:
 
 
 def _synth_config(model_type: str) -> dict:
-    """The loader's config for a tiny glm5_next or muse_glimmer pair."""
+    """The loader's config for a tiny glm5_next, muse_glimmer or muse_spark
+    pair."""
     meta, shapes = {"glm5_next": (_glm5next_meta(), _GLM5NEXT_SHAPES),
                     "muse_glimmer": (_muse_glimmer_meta(),
-                                     _MUSE_GLIMMER_SHAPES)}[model_type]
+                                     _MUSE_GLIMMER_SHAPES),
+                    "muse_spark": (_muse_spark_meta(),
+                                   _MUSE_SPARK_SHAPES)}[model_type]
     hidden = synthesize_config(meta, shapes)["hidden_size"]
     clip = {
         "clip.vision.block_count": 1,
@@ -137,6 +142,7 @@ def _model(model_type: str, text: dict | None):
     ("gemma4_unified", {"use_bidirectional_attention": None}, False),
     ("glm5_next", None, False),
     ("muse_glimmer", None, False),
+    ("muse_spark", None, False),
 ])
 def test_language_model_guard_sees_the_container_ids_with_bidirectional_attention(
         model_type, text, mirrored):
@@ -247,7 +253,8 @@ def test_restored_image_prompt_matches_a_cold_prefill(
 
 
 @pytest.mark.parametrize("model_type,text", [
-    ("gemma4", {}), ("glm5_next", None), ("muse_glimmer", None)])
+    ("gemma4", {}), ("glm5_next", None), ("muse_glimmer", None),
+    ("muse_spark", None)])
 def test_causal_models_reuse_a_block_prefix_inside_an_image(model_type, text):
     """With causal attention an image column sees only earlier columns in
     a one-pass prefill too, so a block prefix that ends inside the image

@@ -155,6 +155,10 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
             def covers(self, li):
                 return True
 
+            def slot_count(self, li):
+                return 1 << 16
+
+
             def stage(self, li, ids):
                 self.stage_calls.append(li)
                 return ids.astype(np.uint32) if self.fits else None
@@ -238,6 +242,28 @@ def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
     with feeder.prefill_call(modules[0][0], 0):
         for kind in _KINDS:
             assert _slot_expert(feeder, 0, kind, 1) == _expert_bytes(0, kind, 1)
+    assert feeder._error is None
+
+
+def test_staged_ahead_and_ring_live(monkeypatch, tmp_path):
+    """The arena split rule reads these. A whole-layer call starts the
+    next layer's read, which counts as staged ahead in its own pass only.
+    A partial call starts no read ahead."""
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
+    assert feeder.ring_live()
+    assert not feeder.staged_ahead(1)
+    with feeder.prefill_partial_call(modules[0][0], 0, [1]):
+        pass
+    assert not feeder.staged_ahead(1)
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    assert feeder.staged_ahead(1)
+    assert not feeder.staged_ahead(0) and not feeder.staged_ahead(2)
+    feeder.release_slots()
+    assert not feeder.ring_live() and not feeder.staged_ahead(1)
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    assert feeder.ring_live() and feeder.staged_ahead(1)
     assert feeder._error is None
 
 

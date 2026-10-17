@@ -192,7 +192,8 @@ def _softmax_select(mod):
 
 
 _SIGMOID_BIAS_BLOCKS = (
-    "MiniMaxSparseMoeBlock", "MiniMaxM3SparseMoeBlock", "KimiK3MoE")
+    "MiniMaxSparseMoeBlock", "MiniMaxM3SparseMoeBlock", "KimiK3MoE",
+    "MuseSparkMoE")
 # qwen4_exp's SparseMoeBlock is deliberately absent: its softmax seam fits,
 # but prestage measured 13-16% slower there (expert reads outlast layer
 # compute, so reads never finish ahead of need).

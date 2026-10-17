@@ -508,6 +508,53 @@ def test_muse_glimmer_template_heuristic_also_lands_on_eot():
     assert _MUSE_EOM not in tok._gguf_eos_token_ids
 
 
+# Muse Spark keeps Glimmer's stop rules and adds a to=commentary message,
+# which also ends on <|eom|>. The turn goes on after it, so <|eom|> must stay
+# out of the stop set. The template is the one the GGUF ships.
+_SPARK_SPECIALS = ["<|begin_of_text|>", "<|end_of_text|>",
+                   "<|finetune_right_pad|>", "<|eom|>", "<|eot|>",
+                   "<|start|>", "<|message|>"]
+_SPARK_EOM, _SPARK_EOT = 3, 4
+
+
+def _spark_meta() -> dict:
+    from pathlib import Path
+
+    toks = _SPARK_SPECIALS + _ALPHABET + _MERGED
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "muse_spark_template.jinja").read_text()
+    return {
+        "general.architecture": "muse-spark",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "gpt-4o",
+        "tokenizer.ggml.tokens": toks,
+        "tokenizer.ggml.merges": _MERGES,
+        "tokenizer.ggml.token_type":
+            [3] * len(_SPARK_SPECIALS) + [1] * (len(toks) - len(_SPARK_SPECIALS)),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.ggml.padding_token_id": 2,
+        "tokenizer.chat_template": template,
+    }
+
+
+def test_muse_spark_stop_set_keeps_eot_and_not_eom():
+    # The real header: eos <|end_of_text|> 200001, eot_token_id <|eot|>
+    # 200008, and no eom key for <|eom|> 200007.
+    meta = _spark_meta()
+    meta["tokenizer.ggml.eot_token_id"] = _SPARK_EOT
+    tok = load_tokenizer_from_gguf(meta, "muse-spark")
+    assert 1 in tok._gguf_eos_token_ids
+    assert _SPARK_EOT in tok._gguf_eos_token_ids
+    assert _SPARK_EOM not in tok._gguf_eos_token_ids
+
+
+def test_muse_spark_template_heuristic_also_lands_on_eot():
+    tok = load_tokenizer_from_gguf(_spark_meta(), "muse-spark")
+    assert _SPARK_EOT in tok._gguf_eos_token_ids
+    assert _SPARK_EOM not in tok._gguf_eos_token_ids
+
+
 # add_eos_token: a post-processor appends EOS on the raw path (parity with
 # llama.cpp), bypassed on the chat path (add_special_tokens=False) so a template
 # carrying its own EOS never doubles up - symmetric with add_bos_token.

@@ -470,6 +470,10 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
             def covers(self, li):
                 return True
 
+            def slot_count(self, li):
+                return 1 << 16
+
+
             def stage(self, li, ids):
                 self.stage_calls.append((li, ids.copy()))
                 if self.overflow:
@@ -545,6 +549,10 @@ def test_arena_call_lifts_cpu_pin(monkeypatch):
 
             def covers(self, li):
                 return True
+
+            def slot_count(self, li):
+                return 1 << 16
+
 
             def stage(self, li, ids):
                 return None if self.overflow else ids.astype(np.uint32)
@@ -1426,6 +1434,10 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
 
         def covers(self, li):
             return True
+
+        def slot_count(self, li):
+            return 1 << 16
+
 
         def shed_misses(self, li, ids, scores, keep_mass):
             self.shed_calls.append((li, ids.copy(), scores.copy(), keep_mass))

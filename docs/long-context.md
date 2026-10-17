@@ -82,7 +82,7 @@ flags refuses.
 | `llama` | |
 | `minimax-m2`, `minimax-m3` | |
 | `mistral3` | |
-| `muse-glimmer` | Only the sliding window layers rotate, and they keep a plain rope, so the flags change only the reported context. |
+| `muse-glimmer`, `muse-spark` | Only the sliding window layers rotate, and they keep a plain rope, so the flags change only the reported context. |
 | `qwen2`, `qwen2moe` | |
 | `qwen3`, `qwen3moe`, `qwen3next` | |
 | `qwen35`, `qwen35moe`, `qwen3vl`, `qwen3vlmoe` | The vision tower's text model scales too. |
