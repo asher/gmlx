@@ -57,6 +57,10 @@ def test_generate_latents_equal_sample_with_the_seed_noise(gguf_index,
 
     dit, enc, vae = _files(gguf_index)
     lat, png = tmp_path / "lat.npz", tmp_path / "a.png"
+    # A DiT that an earlier module loaded can sit in a reference cycle,
+    # and the CLI's load gate measures its memory as taken.
+    gc.collect()
+    mx.clear_cache()
     assert umbrella_main([
         "image", "generate", dit, "--encoder", enc, "--vae", vae,
         "--prompt", PROMPT, "--size", f"{SIZE}x{SIZE}", "--seed", str(SEED),
