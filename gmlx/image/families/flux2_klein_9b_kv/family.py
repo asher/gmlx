@@ -46,8 +46,9 @@ VARIANTS = {
 # The defaults of flux.2-klein-9b-kv, 4 steps and guidance 1, are those of
 # the distilled 9B.
 SAMPLING = {"distilled": klein.SAMPLING["distilled"]}
-# KV has no checkpoint that takes guidance.
-UNGUIDED = {"distilled": ""}
+# KV has no checkpoint that takes guidance, so a file of no known identity
+# samples without it too.
+UNGUIDED = {"distilled": "", "unknown": ""}
 
 # The states of other conditionings a pipeline holds beside those of the
 # request it runs. One 1024 x 1024 reference holds 2 GiB.

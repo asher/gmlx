@@ -1,9 +1,10 @@
 """The FLUX.2 klein registry rows: the 4B files and the 9B told apart,
 each refused by name by the row of the other size, FLUX.2 klein 9B KV
-told apart from the 9B by its weights, the VAE sources, the config against the official
-transformer/config.json of the four checkpoints (check 1), the variant
-from the identity hash, relatives refused with the reason, and the line
-between FLUX.2 klein and the other FLUX models. CPU-only.
+told apart from the 9B by its weights, the VAE sources, the config
+against the official transformer/config.json of the four checkpoints
+(check 1), the variant from the identity hash, relatives refused with
+the reason, and the line between FLUX.2 klein and the other FLUX models.
+CPU-only.
 Header fixtures hold names, shapes and codecs, no weights. The rows on
 the real files read their headers and the identity tensor, and skip
 without them."""
@@ -417,8 +418,8 @@ def test_a_kv_file_is_taken_by_the_kv_row(monkeypatch, img_in, mark, variant):
     assert (got.family.name, got.variant) == ("flux2_klein_9b_kv", variant)
     assert got.family.sampling_row(variant) is f2.SAMPLING["distilled"]
     with pytest.raises(api.RequestRefusal) as e:
-        api.check_guidance(got.family, "distilled", 4.0)
-    assert str(e.value) == ("the FLUX.2 klein 9B KV distilled DiT samples "
+        api.check_guidance(got.family, got.variant, 4.0)
+    assert str(e.value) == (f"the FLUX.2 klein 9B KV {variant} DiT samples "
                             "without guidance: drop guidance 4")
     assert _refused(view, family="flux2_klein_9b") == (
         "this is a FLUX.2 klein 9B KV GGUF, not a FLUX.2 klein 9B one")
