@@ -348,6 +348,6 @@ def test_qwen_image_runs_the_users_prompt_file_and_encodes_its_rewrite(
     assert turn["system_prompt"] == ("Rewrite the prompt. Think, then answer "
                                      "with JSON.")
     assert (turn["presence_penalty"], turn["template_kwargs"]) == (
-        1.5, {"enable_thinking": False})
+        0.0, {"enable_thinking": False})
     assert ("encode", "A red bicycle with a wicker basket leans against a "
             "weathered brick wall in soft afternoon light.") in cli.events
