@@ -681,15 +681,18 @@ async def encode(request: Request):
         else:
             chat_hold = None
         try:
+            typed = (text,) if revised else ()
             got = await _on_worker(do_encode, served, revised or text,
                                    [i[..., :3] for i in images], borrow,
-                                   want_refs)
+                                   want_refs, *typed)
         finally:
             if chat_hold is not None:
                 chat_hold.release()
     finally:
         hold.release()
     out = {"cond": got["cond"]}
+    if "typed" in got:
+        out["cond_typed"] = got["typed"]
     for i, z in enumerate(got["refs"]):
         out[f"ref_{i}"] = z
     body = write(out)
@@ -706,6 +709,7 @@ async def encode(request: Request):
                   "num_tokens": int(got["cond"].shape[1])}
     if revised:
         fields_out["revised_prompt"] = revised
+        fields_out["cond_typed"] = hashes["cond_typed"]
     return _container(out, fields_out)
 
 

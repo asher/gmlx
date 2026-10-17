@@ -171,7 +171,8 @@ class StepsClient:
                    for i, im in enumerate(images)}
         got, fields, _ = self.container("encode", tensors,
                                         {"model": model, "text": text})
-        self._uploaded.update([fields["cond"], *fields["ref_latents"]])
+        self._uploaded.update([fields["cond"], *fields["ref_latents"],
+                               *filter(None, [fields.get("cond_typed")])])
         return fields, got
 
     def put(self, a, *, kind: str = "tensors") -> str:

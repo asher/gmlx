@@ -903,13 +903,15 @@ def table_id(body: bytes) -> str:
 
 
 def encode(served, text: str, images: list, borrow=None,
-           ref_latents: bool = True) -> dict:
+           ref_latents: bool = True, typed: str | None = None) -> dict:
     """Encode ``text``, with reference images (H, W, 3) uint8 for a family
     that edits, on the image worker. Each image keeps its own area, so a
     client that sizes its references feeds the encoder and its VAE the
     same pixels. Returns the conditioning features f32 (1, L, D), the
     reference latents in model space (1, C, h, w), none when
-    ``ref_latents`` is false, and the image slots."""
+    ``ref_latents`` is false, and the image slots. ``typed``, the prompt
+    as typed beside an upsampled ``text``, adds its features as
+    ``typed``."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -934,7 +936,7 @@ def encode(served, text: str, images: list, borrow=None,
                 for im in images[:edit.max_refs + 1]])
         except ValueError as e:
             raise StepError(400, str(e)) from None
-    cond, _ = _encode(served, text, None, refs, borrow)
+    cond, other = _encode(served, text, typed, refs, borrow)
     enc = pipe.encoder
     if enc is not None and enc.owned and not enc.released and \
             not served.plan.keep_encoder:
@@ -954,9 +956,13 @@ def encode(served, text: str, images: list, borrow=None,
     feats = feats[None]
     lats = [z.astype(mx.float32)[None] for z in cond.ref_latents] \
         if ref_latents else []
-    mx.eval(feats, *lats)
-    return {"cond": _host(feats), "refs": [_host(z) for z in lats],
-            "image_slots": slots}
+    extra = [] if other is None else [other.features.astype(mx.float32)[None]]
+    mx.eval(feats, *lats, *extra)
+    got = {"cond": _host(feats), "refs": [_host(z) for z in lats],
+           "image_slots": slots}
+    if extra:
+        got["typed"] = _host(extra[0])
+    return got
 
 
 def _host(a):
