@@ -219,7 +219,8 @@ FLUX2_KLEIN_9B_STEP = StepFit(base=3.05 * GiB, k=2.9, row_k=0.5)
 # 512 and 2048, and four at 1536, each with 512 text rows. The cache holds
 # exactly its arithmetic bytes, 2 GiB for a 1024 pixel reference. A step
 # reads 2.54 GiB at 512 pixels and 6.56 at 2048, and the references add
-# at most 0.16 GiB to a step of their size. The 9B's Q4_K_M file reads
+# at most 0.54 GiB to a step of their size, at 512 pixels with a 1024
+# pixel reference. The 9B's Q4_K_M file reads
 # 0.31 GiB more than its Q8_0 one at the same size, and each fit leaves
 # 0.25 GiB above every cell with that added: a step base of 3.1 GiB and a
 # slope of 2.6, and a pass base of 1.75 GiB and a slope of 1.3 over the

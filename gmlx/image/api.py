@@ -391,8 +391,8 @@ def _flat(params):
 
 
 def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
-    """Rows a conditioning puts before the image rows: its text rows,
-    where the family's prefix holds them, and the tokens of its reference
+    """Rows of a conditioning that the family's prefix holds: its text
+    rows, where the prefix holds them, and the tokens of its reference
     latents."""
     p = pipe.dit.cfg.patch
     if cond.pending:
