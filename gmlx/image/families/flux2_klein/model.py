@@ -47,8 +47,11 @@ each other, under the modulation of time zero. Their keys and values then
 depend on the references alone. ``reference_pass`` runs the reference
 tokens through every block once, and keeps each block's K and V after
 RoPE. Every step of the edit then runs the image and the text alone, and
-each block's queries read the cached K and V beside their own keys, as
-BFL's ``denoise_cached`` does from its first step on.
+each block's queries read the cached K and V after the image's keys, as
+BFL's ``denoise_cached`` does from its first step on. ComfyUI's Flux KV
+Cache node instead runs the first step with the reference tokens in it,
+at time zero, their queries over every key, and caches their K and V
+from that step, which ``extract`` gives.
 """
 
 from __future__ import annotations
@@ -360,6 +363,33 @@ class DoubleBlock(nn.Module):
         o = o.transpose(0, 2, 1, 3).reshape(ref.shape[0], ref.shape[1], -1)
         return self.stream_out(self.img_attn, self.img_mlp, ref, mod, o), k, v
 
+    def extract(self, img: mx.array, txt: mx.array, ref: mx.array,
+                mods: tuple, ropes: tuple) -> tuple:
+        """The block over the text, the image and the reference rows, the
+        reference rows through the image stream's weights under their own
+        modulation, every query over every key in that order. ``mods``
+        and ``ropes`` are those of the image, the text and the references.
+        Returns the image, the text and the reference rows, and the k and
+        v of the reference rows."""
+        mod_img, mod_txt, mod_ref = mods
+        rope_img, rope_txt, rope_ref = ropes
+        qi, ki, vi = self.stream_qkv(self.img_attn, img, mod_img, rope_img)
+        qr, kr, vr = self.stream_qkv(self.img_attn, ref, mod_ref, rope_ref)
+        qt, kt, vt = self.stream_qkv(self.txt_attn, txt, mod_txt, rope_txt)
+        o = ops.sdpa(mx.concatenate([qt, qi, qr], axis=2),
+                     mx.concatenate([kt, ki, kr], axis=2),
+                     mx.concatenate([vt, vi, vr], axis=2))
+        b, n_txt, n_img = txt.shape[0], txt.shape[1], img.shape[1]
+        o = o.transpose(0, 2, 1, 3).reshape(b, o.shape[2], -1)
+        at = n_txt + n_img
+        img = self.stream_out(self.img_attn, self.img_mlp, img, mod_img,
+                              o[:, n_txt:at])
+        ref = self.stream_out(self.img_attn, self.img_mlp, ref, mod_ref,
+                              o[:, at:])
+        txt = self.stream_out(self.txt_attn, self.txt_mlp, txt, mod_txt,
+                              o[:, :n_txt])
+        return img, txt, ref, kr, vr
+
 
 class SingleBlock(nn.Module):
     """One block of the joint tokens: a modulated norm feeds one product of
@@ -421,6 +451,22 @@ class SingleBlock(nn.Module):
     def __call__(self, x: mx.array, mod: tuple, cos: mx.array,
                  sin: mx.array, cached: tuple | None = None) -> mx.array:
         return self.run(x, mod, cos, sin, cached)[0]
+
+    def extract(self, x: mx.array, ref: mx.array, mods: tuple,
+                ropes: tuple) -> tuple:
+        """The block over the joint rows ``x`` and the reference rows, each
+        under its own modulation, every query over every key, the
+        reference rows' last. ``mods`` and ``ropes`` are those of the joint
+        and the reference rows, a rope a (cos, sin) pair. Returns both
+        outputs, and the k and v of the reference rows."""
+        qx, kx, vx, hx = self.parts(x, mods[0], *ropes[0])
+        qr, kr, vr, hr = self.parts(ref, mods[1], *ropes[1])
+        o = ops.sdpa(mx.concatenate([qx, qr], axis=2),
+                     mx.concatenate([kx, kr], axis=2),
+                     mx.concatenate([vx, vr], axis=2))
+        n = x.shape[1]
+        return (self.finish(x, mods[0], o[:, :, :n], hx),
+                self.finish(ref, mods[1], o[:, :, n:], hr), kr, vr)
 
 
 class MLPEmbedder(nn.Module):
@@ -625,6 +671,81 @@ class Flux2KleinDiT(nn.Module):
                 taps[f"ref.single_blocks.{i}"] = x
         return RefCache(tuple(keys), tuple(values))
 
+    def ref_cache_bytes(self, latents) -> int:
+        """Bytes of the cache that ``reference_pass`` or ``extract`` keeps
+        of reference latents (C, h, w)."""
+        cfg = self.cfg
+        n = sum((int(z.shape[-2]) // cfg.patch) * (int(z.shape[-1])
+                                                    // cfg.patch)
+                for z in latents)
+        return ref_cache.cache_bytes(cfg.depth + cfg.depth_single, n,
+                                     cfg.dim, self.act_dtype.size)
+
+    def extract(self, latents: mx.array, sigma, feats: mx.array | None,
+                taps: dict | None = None, *, refs: References,
+                mod: StepModulation | None = None,
+                caption: Caption | None = None) -> tuple:
+        """The velocity of a step whose reference tokens join it at time
+        zero with their queries over every key, as the image's are, and
+        each block's K and V of the reference tokens after RoPE. ComfyUI's
+        Flux KV Cache node runs the first step of an edit so and keeps
+        those K and V for every later step of its sampling, which reads
+        them as ``cache``. Takes what ``__call__`` takes, and ``taps``
+        collects the reference rows after every block as ``ref.<path>``
+        too."""
+        b, _, h, w = latents.shape
+        cfg = self.cfg
+        act = self.act_dtype
+        if mod is None:
+            mod = self.modulation(sigma, b)
+        if caption is None:
+            if feats is None:
+                raise ValueError("pass text features or their caption")
+            caption = self.caption(feats, taps)
+        rmod = self.reference_modulation()
+        txt = _batch(caption.rows, b)
+        img = self.img_in(tokens(latents).astype(act))
+        ref = self.img_in(_batch(refs.tokens, b).astype(act))
+        ids, r_ids = image_ids(h, w), np.asarray(refs.ids, np.float32)
+        t_ids = text_ids(txt.shape[1])
+        rope_img = rope_tables(ids, cfg.axes_dims, cfg.theta)
+        rope_txt = rope_tables(t_ids, cfg.axes_dims, cfg.theta)
+        rope_ref = rope_tables(r_ids, cfg.axes_dims, cfg.theta)
+        keys, values = [], []
+        for i, blk in enumerate(self.double_blocks):
+            img, txt, ref, *kv = blk.extract(
+                img, txt, ref, (mod.img, mod.txt, rmod.img),
+                (rope_img, rope_txt, rope_ref))
+            k, v = _kept(*kv)
+            pacing.point(img, txt, ref, k, v, *keys, *values)
+            keys.append(k)
+            values.append(v)
+            if taps is not None:
+                taps[f"double_blocks.{i}.img"] = img
+                taps[f"double_blocks.{i}.txt"] = txt
+                taps[f"ref.double_blocks.{i}"] = ref
+        n_txt = txt.shape[1]
+        joint = mx.concatenate([txt, img], axis=1)
+        rope_joint = rope_tables(np.concatenate([t_ids, ids]), cfg.axes_dims,
+                                 cfg.theta)
+        for i, blk in enumerate(self.single_blocks):
+            joint, ref, *kv = blk.extract(joint, ref, (mod.single,
+                                                       rmod.single),
+                                          (rope_joint, rope_ref))
+            k, v = _kept(*kv)
+            pacing.point(joint, ref, k, v, *keys, *values)
+            keys.append(k)
+            values.append(v)
+            if taps is not None:
+                taps[f"single_blocks.{i}"] = joint
+                taps[f"ref.single_blocks.{i}"] = ref
+        out = self.final_layer(joint[:, n_txt:], *mod.final)
+        if taps is not None:
+            taps["final_layer"] = out
+        c = out.shape[-1]
+        vel = out.transpose(0, 2, 1).reshape(b, c, h, w).astype(mx.float32)
+        return vel, RefCache(tuple(keys), tuple(values))
+
     def __call__(self, latents: mx.array, sigma, feats: mx.array | None,
                  taps: dict | None = None, *,
                  refs: References | None = None,
@@ -635,7 +756,7 @@ class Flux2KleinDiT(nn.Module):
         ``sigma``, with text features (B, L, text dim) and the tokens of
         any reference images. ``mod`` and ``caption``, from
         ``modulation`` and ``caption``, stand in for the work they hold.
-        ``cache``, from ``reference_pass``, holds the K and
+        ``cache``, from ``reference_pass`` or ``extract``, holds the K and
         V of reference tokens in place of the tokens: each block's
         queries read them after the image's keys. ``taps`` collects the
         output of every block by module path, a double block's as

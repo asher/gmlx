@@ -608,6 +608,9 @@ class PeakRow:
                                     # the rows of every step, else 0
     prices_prompt: bool = True      # a plan that knows the prompt prices
                                     # its text rows, else the family's most
+    joined: str = ""                # the row of the family's step run whole,
+                                    # its reference tokens joined to the
+                                    # rows, when its own step runs in parts
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:
@@ -703,7 +706,8 @@ PEAKS = {
     # FLUX.2 klein 9B KV joins the 512 text rows to the image rows in every
     # block, as the 9B does, and caches the K and V of the reference
     # tokens in all 32 blocks, which every step joins to its own. The
-    # encoder is the 9B's.
+    # encoder is the 9B's. Its step run whole, the reference tokens joined
+    # to the rows, is the 9B's step, at the 9B's shapes.
     "flux2_klein_9b_kv": PeakRow(token_px=16, row_multiple=1,
                                  caption_rows=512,
                                  width=3 * 4096 + 2 * 12288 + 12288,
@@ -714,8 +718,15 @@ PEAKS = {
                                  prefill=FLUX2_KLEIN_9B_KV_PREFILL,
                                  encode_row_bytes=3 * 4096 * 4,
                                  encode_base=int(0.32 * GiB),
-                                 prices_prompt=False),
+                                 prices_prompt=False,
+                                 joined="flux2_klein_9b"),
 }
+
+def joined_family(family: str) -> str:
+    """The row that prices a step of ``family`` run whole, with the tokens
+    of its references joined to its rows."""
+    return PEAKS[family].joined or family
+
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
           "staged load", "shed held states")

@@ -23,9 +23,9 @@ from .client import GmlxRefusal, StepClient
 _CARRIED = (torch.float32, torch.float16, torch.bfloat16)
 # The families whose final modulation the server holds in the order that a
 # swap of the up rows' halves gives, checked against ComfyUI's own model
-# by the pack's FLUX.2 klein LoRA test. The 9B checkpoints share the 4B
-# LoRA map.
-SWAPS_HALVES = frozenset({"flux2_klein", "flux2_klein_9b"})
+# by the pack's FLUX.2 klein LoRA test. The 9B and KV checkpoints share the
+# 4B LoRA map.
+SWAPS_HALVES = frozenset({"flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"})
 
 
 def adapter_kind(adapter) -> str:

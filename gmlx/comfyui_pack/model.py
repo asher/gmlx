@@ -32,7 +32,7 @@ import comfy.utils
 from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
                      set_interrupt_check, tensor_hash)
 from .compat import comfyui_version
-from .patcher import CPU, GmlxBinding, GmlxModelPatcher
+from .patcher import CPU, KV_METHOD, KV_PATCHES, GmlxBinding, GmlxModelPatcher
 
 log = logging.getLogger("gmlx")
 
@@ -213,7 +213,7 @@ class RemoteForward:
         self.memo: dict = {}
         self.calls = collections.deque(maxlen=512)
 
-    def _check(self, control, to: dict, kwargs: dict):
+    def _check(self, control, to: dict, kwargs: dict, kv: bool = False):
         if control is not None:
             _refuse("ControlNet control")
         for k in sorted(REFUSED):
@@ -236,13 +236,17 @@ class RemoteForward:
             _refuse(f"the DiT input {k!r}")
         if kwargs.get("ref_latents") and not self.b.edit_capable:
             _refuse(f"reference latents on {self.b.model_id!r}, which takes none")
-        method = kwargs.get("ref_latents_method")
-        if (kwargs.get("ref_latents") and self.ref_method is not None and method is not None
-                and method != self.ref_method):
+        # The method in force: the call's, else the DiT's default, which the
+        # Flux KV Cache node sets for its sampling.
+        params = getattr(self.base_model.diffusion_model, "params", None)
+        method = kwargs.get("ref_latents_method") or getattr(params, "default_ref_method", None)
+        want = KV_METHOD[1] if kv else self.ref_method
+        if kwargs.get("ref_latents") and self.ref_method is not None and method != want:
             hits = _upstream_names()
             where = f"; upstream node(s): {', '.join(hits)}" if hits else ""
+            under = " under the Flux KV Cache node" if kv else ""
             raise GmlxRefusal(f"gmlx: {self.b.model_id!r} places its reference latents by the "
-                              f"{self.ref_method!r} method, and this call asks for {method!r}{where}")
+                              f"{want!r} method{under}, and this call asks for {method!r}{where}")
         cache = to.get("qwen_image21_cache") or {}
         if cache.get("dtype", "default") not in ("default", None):
             raise GmlxRefusal(f"gmlx: a {cache['dtype']} prefix cache is not supported on a "
@@ -324,7 +328,11 @@ class RemoteForward:
     def __call__(self, x, timesteps, context=None, control=None, transformer_options={}, **kwargs):
         t0 = time.perf_counter()
         to = transformer_options or {}
-        prefix_cache = self._check(control, to, kwargs)
+        patcher = getattr(self.base_model, "current_patcher", None)
+        kv = getattr(patcher, "gmlx_ref_cache", frozenset())
+        if kv and kv != KV_PATCHES:
+            _refuse("part of the Flux KV Cache node's patches")
+        prefix_cache = self._check(control, to, kwargs, bool(kv))
         sigmas = self._schedule(to)
         # A latent format with a frame axis, such as Krea 2's, gives one frame.
         framed = x.ndim == 5 and x.shape[2] == 1
@@ -332,7 +340,6 @@ class RemoteForward:
             x = x[:, :, 0]
         if x.ndim != 4:
             raise GmlxError(f"gmlx: latents of shape {tuple(x.shape)} are not (B, C, h, w)")
-        patcher = getattr(self.base_model, "current_patcher", None)
         run = getattr(patcher, "gmlx_run", None)
         table = getattr(patcher, "gmlx_table_id", None)
         if patcher is not None and getattr(patcher, "gmlx", None) is not None:
@@ -343,6 +350,9 @@ class RemoteForward:
             client.ensure_tensor(t, h)
         fields = {"model": self.b.model_id, "run": run, "convention": "comfy",
                   "patch_table": table, "rows": rows}
+        if kv and kwargs.get("ref_latents"):
+            # The server keeps the references' K and V of the run's first step.
+            fields["ref_cache"] = True
         xs = x.float()
         ts = timesteps.float().reshape(-1)
         t1 = time.perf_counter()

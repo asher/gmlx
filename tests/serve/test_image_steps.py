@@ -171,8 +171,8 @@ def test_capabilities_answer_without_the_version_header(host):
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
     assert caps["families"] == ["flux2_klein", "flux2_klein_9b",
-                                "flux3_klein", "krea2", "qwen_image21",
-                                "z_image"]
+                                "flux2_klein_9b_kv", "flux3_klein", "krea2",
+                                "qwen_image21", "z_image"]
     assert caps["conventions"] == ["comfy", "reference"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -381,10 +381,10 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
     # velocity back, so every convention maps the identity. Its FLUX.2
-    # forward alone embeds the fp32 time, at both sizes.
+    # forward alone embeds the fp32 time, at both sizes and on KV.
     for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
-    for fam in ("flux2_klein", "flux2_klein_9b"):
+    for fam in ("flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention(
             time="fp32")
     # The reference convention is comfy's on the reference time rule.
@@ -669,6 +669,21 @@ def f2pipe():
     return _on_worker(build)
 
 
+@pytest.fixture(scope="module")
+def kvpipe():
+    """The tiny FLUX.2 klein DiT of the check 3 self-test on the KV row,
+    whose own step runs in parts."""
+    def build():
+        import flux2_gates as fg
+        from oracle_fixture import committed_fixture
+
+        weights, m = committed_fixture("selftest_flux2_klein_tiny_weights")
+        return api.ImagePipeline(
+            dit=fg.tiny_model(weights, m["inputs"]["config"]),
+            family=get_family("flux2_klein_9b_kv"), variant="distilled")
+    return _on_worker(build)
+
+
 def _f2_cond(feats, *refs, key="k"):
     return api.Conditioning(mx.array(feats[0]), key, ref_latents=tuple(
         mx.array(r[0]) for r in refs))
@@ -709,6 +724,90 @@ def test_a_flux2_step_is_the_core_step_with_and_without_references(
     two = c.step("f2d", None, np.concatenate([x, x]), [0.75, 0.75],
                  rows + with_ref)
     assert np.array_equal(two[1:], out)
+    assert host.held == 0
+
+
+def test_a_kv_edit_under_comfyuis_kv_cache_node_extracts_once_a_run(
+        host, kvpipe):
+    """Without ComfyUI's Flux KV Cache node a KV step runs whole, its
+    references at the step's time. Under the node the first step of a run
+    runs them at time zero and keeps their K and V, which the later steps
+    of the run read. The step caches count them until the run ends."""
+    from gmlx.serve import image_service
+
+    _serve(host, "kv", kvpipe)
+    c = _client()
+    rng = np.random.default_rng(12)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x0, x1 = noise_from_seed(5, F3_SHAPE), noise_from_seed(6, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
+
+    def want():
+        m = kvpipe.dit
+        f, refs = mx.array(feats), m.references([mx.array(ref)])
+        s0, s1 = np.full(1, 0.75, np.float32), np.full(1, 0.5, np.float32)
+        m0, m1 = m.modulation(s0, 1, "fp32"), m.modulation(s1, 1, "fp32")
+        v0, kv = m.extract(mx.array(x0), s0, f, refs=refs, mod=m0)
+        return [np.array(v) for v in (
+            m(mx.array(x0), s0, f, refs=refs, mod=m0), v0,
+            m(mx.array(x1), s1, f, mod=m1, cache=kv))]
+    plain, v0, v1 = _on_worker(want)
+    try:
+        assert np.array_equal(c.step("kv", None, x0, [0.75], [row]), plain)
+        run = c.begin("kv")
+        assert np.array_equal(
+            c.step("kv", run, x0, [0.75], [row], ref_cache=True), v0)
+        (held,) = steps.STATE.runs[run].ref_cache.values()
+        caches = steps.STATE.tensors.bytes + steps.STATE.adapters.bytes
+        assert image_service._steps_cache_bytes() == caches + held.nbytes
+        assert held.nbytes == kvpipe.dit.ref_cache_bytes([ref[0]])
+        assert np.array_equal(
+            c.step("kv", run, x1, [0.5], [row], ref_cache=True), v1)
+        c.end(run)
+        assert image_service._steps_cache_bytes() == caches
+    finally:
+        kvpipe.captions.clear()
+    assert host.held == 0
+
+
+def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
+        host, kvpipe, monkeypatch):
+    """The first step of a run under the Flux KV Cache node runs whole, as
+    the 9B's step of its rows, and keeps the K and V of its references.
+    Its plan prices both, to the byte."""
+    from gmlx.serve import image_service
+
+    _serve(host, "kv", kvpipe)
+    served = host.served["kv"]
+    c = _client()
+    rng = np.random.default_rng(14)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 64, 64)).astype(np.float32)
+    row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
+    x = np.zeros(F3_SHAPE, np.float32)
+    w, h = routes._px(served, "latent", *F3_SHAPE[2:])
+    scale = kvpipe.vae_scale
+    run = c.begin("kv")
+    cache = image_service._fit_args(kvpipe, served, 1 << 50, 1.0)[
+        "cache_bytes"] + kvpipe.dit.ref_cache_bytes([ref[0]])
+    terms = dict(family="flux2_klein_9b", caption_tokens=None,
+                 prefix_rows=None, prefix_shared=False, prefix_other=0,
+                 prefix_bound=0, prefix_held=0, ref_sizes=[],
+                 step_refs=[(64 * scale, 64 * scale)], cache_bytes=cache)
+    price = _least_budget(served, h, w, 1.0, terms)
+    assert _least_budget(served, h, w, 1.0, {
+        **terms, "cache_bytes": cache - 1}) < price
+    step = lambda: c.step("kv", run, x, [0.75], [row],  # noqa: E731
+                          ref_cache=True)
+    try:
+        host.budget_bytes = price - 1
+        _refused_by_its_plan(monkeypatch, step)
+        host.budget_bytes = price
+        _reaches_the_dit(monkeypatch, step)
+    finally:
+        host.budget_bytes = None
+        c.end(run)
     assert host.held == 0
 
 

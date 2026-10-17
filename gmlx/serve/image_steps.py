@@ -62,7 +62,8 @@ MAX_RUNS = 32
 MAX_ROWS = 16
 MAX_TENSOR_BYTES = 1 << 30
 MAX_ADAPTER_BYTES = 1 << 30
-FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae")
+FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
+            "ref_cache")
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ CONVENTIONS = {
     "comfy": {"z_image": Convention(), "qwen_image21": Convention(),
               "krea2": Convention(), "flux2_klein": Convention(time="fp32"),
               "flux2_klein_9b": Convention(time="fp32"),
+              "flux2_klein_9b_kv": Convention(time="fp32"),
               "flux3_klein": Convention()},
 }
 # Under "reference" a step reads the timestep and returns its output as
@@ -107,12 +109,17 @@ COMFY = {
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16,
                             "space": "model"}},
-    # ComfyUI builds the 9B checkpoints as its Flux2 too, at the width and
-    # depth its detection reads from the weights.
+    # ComfyUI builds the 9B and KV checkpoints as its Flux2 too, at the
+    # width and depth its detection reads from the weights.
     "flux2_klein_9b": {"model_class": "Flux2", "image_model": "flux2",
                        "latent": {"channels": 128, "stride": 16, "patch": 1},
                        "vae": {"channels_out": 3, "stride": 16,
                                "space": "model"}},
+    "flux2_klein_9b_kv": {"model_class": "Flux2", "image_model": "flux2",
+                          "latent": {"channels": 128, "stride": 16,
+                                     "patch": 1},
+                          "vae": {"channels_out": 3, "stride": 16,
+                                  "space": "model"}},
     "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16,
@@ -240,6 +247,7 @@ class Run:
     cache_hits: int = 0
     conds: set = field(default_factory=set)         # keys, to shed at end
     cond_objs: dict = field(default_factory=dict)   # the run's state scope
+    ref_cache: dict = field(default_factory=dict)   # denoise_step's, per run
 
 
 class StepsState:
@@ -362,6 +370,7 @@ class StepsState:
                 return
         run.ended = True
         run.gen += 1
+        run.ref_cache = {}
         # The hold's release drops its entry, so the states are shed first.
         if run.conds:
             served = getattr(getattr(run.hold, "_entry", None), "pipeline",
@@ -496,6 +505,7 @@ def _qwen_image21_rule(fam) -> dict:
 # Qwen-Image 2.1's dynamic shift with its scheduler's constants.
 SIZE_SCHEDULES = {"flux2_klein": lambda fam: {"rule": "flux2"},
                   "flux2_klein_9b": lambda fam: {"rule": "flux2"},
+                  "flux2_klein_9b_kv": lambda fam: {"rule": "flux2"},
                   "qwen_image21": _qwen_image21_rule}
 
 
@@ -776,9 +786,11 @@ def step_pacer(run: Run | None, gen: int):
 
 
 def run_step(served, x, sigmas, conds, table, run, gen,
-             targets=None, time_rule: str = "reference") -> tuple:
+             targets=None, time_rule: str = "reference",
+             ref_cache: bool = False) -> tuple:
     """One ``denoise_step`` over the rows on the image worker, to the
-    ``targets`` of a flow map DiT, on the DiT's ``time_rule``. Returns
+    ``targets`` of a flow map DiT, on the DiT's ``time_rule``, and with
+    ``ref_cache`` on the run's cache of reference K and V. Returns
     (velocity f32 evaluated, forward seconds, prefix cache answer)."""
     import mlx.core as mx
 
@@ -788,11 +800,13 @@ def run_step(served, x, sigmas, conds, table, run, gen,
     pipe = served.pipe
     if run is not None and (run.gen != gen or run.ended):
         raise StepInterrupted()
-    cache = _prefix_answer(pipe, conds, table, x.shape[2:])
+    held = run.ref_cache if ref_cache else None
+    cache = (_ref_answer(conds, held) if held is not None
+             else _prefix_answer(pipe, conds, table, x.shape[2:], time_rule))
     t0 = time.perf_counter()
     with paced(step_pacer(run, gen)):
         v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table,
-                             target=targets, time=time_rule)
+                             target=targets, time=time_rule, ref_cache=held)
         v = v.astype(mx.float32)
         mx.eval(v)
     # Without chat the step is one evaluation, which an interrupt or an end
@@ -802,10 +816,11 @@ def run_step(served, x, sigmas, conds, table, run, gen,
     return v, time.perf_counter() - t0, cache
 
 
-def _prefix_answer(pipe, conds, table, size) -> str:
+def _prefix_answer(pipe, conds, table, size,
+                   time_rule: str = "reference") -> str:
     from gmlx.image import api
 
-    if pipe.family.step is None:
+    if pipe.family.step is None or time_rule != "reference":
         return "none"
     if any(not c.key for c in conds):
         return "off"
@@ -813,6 +828,17 @@ def _prefix_answer(pipe, conds, table, size) -> str:
     keys = [api._state_key(pipe, c, tid, size) for c in conds]
     return "hit" if all(pipe.captions.peek(k) is not None
                         for k in keys) else "miss"
+
+
+def _ref_answer(conds, held: dict) -> str:
+    """The cache answer of a step on a run's reference K and V: "hit" when
+    the run holds them for every row with references."""
+    from gmlx.image import api
+
+    refs = [c for c in conds if c.ref_latents]
+    if not refs:
+        return "none"
+    return "hit" if all(api._ident(c) in held for c in refs) else "miss"
 
 
 def define_table(served, body: dict, adapters: _Bytes) -> str:

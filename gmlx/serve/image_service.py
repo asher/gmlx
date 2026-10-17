@@ -105,10 +105,14 @@ def configure_caches(settings) -> None:
 
 
 def _steps_cache_bytes() -> int:
-    """What the step routes' caches hold now."""
+    """What the step routes' caches hold now, the reference K and V of
+    their runs too."""
     from .image_steps import STATE
 
-    return STATE.tensors.bytes + STATE.adapters.bytes
+    with STATE.lock:
+        runs = list(STATE.runs.values())
+    return (STATE.tensors.bytes + STATE.adapters.bytes
+            + sum(c.nbytes for r in runs for c in r.ref_cache.values()))
 
 
 def cache_bytes() -> tuple:
@@ -1197,22 +1201,26 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 
 def size_fits(served: ServedImage, width: int, height: int, budget, *,
               cfg: float = 1.0, init: bool = False, conds=None,
-              patch_table=None) -> bool:
+              patch_table=None, joined: bool = False,
+              building: int = 0) -> bool:
     """Whether the memory plan of an image of ``width`` x ``height`` on
     ``served`` fits ``budget``, as the image routes plan a request. The
     step routes ask it before a step, a VAE decode and a VAE encode. The
     conditionings of a step, ``conds``, are priced as ``plan_request``
-    prices them: their text rows, a prefix and the reference latents. A
-    plan that fits only with the held states of other conditionings shed
-    sheds them."""
+    prices them: their text rows, a prefix and the reference latents, or
+    by ``plan_terms``'s ``joined`` rule. ``building`` is the bytes of
+    reference K and V the step keeps. A plan that fits only with the held
+    states of other conditionings shed sheds them."""
     from gmlx.image import api, memfit
 
     if budget is None:
         return True
     args = _fit_args(served.pipe, served, budget, cfg)
+    args["cache_bytes"] += int(building)
     if conds:
         args.update(api.plan_terms(served.pipe, conds, height=int(height),
-                                   width=int(width), patch_table=patch_table))
+                                   width=int(width), patch_table=patch_table,
+                                   joined=joined))
     try:
         plan = memfit.plan_memory(height=int(height), width=int(width),
                                   init_image=init, _hint=False, **args)

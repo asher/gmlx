@@ -503,6 +503,20 @@ async def step(request: Request):
         if conv is None:
             raise StepError(400, f"convention {fields.get('convention')!r} "
                             f"has no adapter for {fam}")
+        ref_cache = fields.get("ref_cache", False)
+        if not isinstance(ref_cache, bool):
+            raise StepError(400, "ref_cache is true or false")
+        title = served.pipe.family.title
+        parts = served.pipe.family.step is not None
+        if ref_cache and run is None:
+            raise StepError(400, "a step on a cache of reference K and V "
+                            "names its run, whose end drops the cache")
+        if ref_cache and not hasattr(served.pipe.dit, "extract"):
+            raise StepError(400, f"the {title} DiT keeps no cache of "
+                            "reference K and V")
+        if ref_cache and parts and conv.time == "reference":
+            raise StepError(400, f"the {title} DiT caches its references "
+                            "by itself under the reference convention")
         table = None
         try:
             table = _table(served, fields.get("patch_table"))
@@ -541,9 +555,20 @@ async def step(request: Request):
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             # The plan of the rows as they are: their text, a prefix and
-            # the reference latents each step runs.
+            # the reference latents each step runs. A step in parts runs
+            # whole under another time rule, and a step on the run's cache
+            # keeps the K and V of references it has none of yet.
+            building = {}
+            if ref_cache:
+                for c in conds:
+                    i = api._ident(c)
+                    if c.ref_latents and i not in run.ref_cache:
+                        building[i] = served.pipe.dit.ref_cache_bytes(
+                            c.ref_latents)
             if not size_fits(served, w_px, h_px, budget, cfg=guided,
-                             conds=conds, patch_table=table):
+                             conds=conds, patch_table=table,
+                             joined=parts and conv.time != "reference",
+                             building=sum(building.values())):
                 raise StepError(400, f"a step of {w_px}x{h_px} pixels with "
                                 "the references of its rows does not fit in "
                                 "memory beside the models now loaded")
@@ -561,7 +586,8 @@ async def step(request: Request):
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
-                                           gen, targets, conv.time)
+                                           gen, targets, conv.time,
+                                           ref_cache)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work)

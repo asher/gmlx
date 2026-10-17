@@ -55,6 +55,10 @@ COMFY = {
                        "latent": {"channels": 128, "stride": 16, "patch": 1},
                        "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
                        "context": ("txt_in.weight", 1)},
+    "flux2_klein_9b_kv": {"model_class": "Flux2", "image_model": "flux2",
+                          "latent": {"channels": 128, "stride": 16, "patch": 1},
+                          "vae": {"channels_out": 3, "stride": 16, "space": "model"},
+                          "edit": True, "context": ("txt_in.weight", 1)},
     "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
@@ -84,6 +88,9 @@ MODELS = {
                                                         "sigmas": None, "schedule": FLUX2_RULE}),
     "flux-2-klein-base-9b": ("flux2_klein_9b", "base", {"steps": 50, "cfg": 4.0, "shift": 1.0,
                                                         "sigmas": None, "schedule": FLUX2_RULE}),
+    "flux-2-klein-9b-kv": ("flux2_klein_9b_kv", "distilled",
+                           {"steps": 4, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                            "schedule": FLUX2_RULE}),
     "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93,
                                                   "sigmas": None, "schedule": None}),
     "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93,
@@ -276,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                 **contract, "gmlx_version": st.gmlx_version,
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
-                "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae"],
+                "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
@@ -512,6 +519,7 @@ class Handler(BaseHTTPRequestHandler):
                              for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
+                 ref_cache=req.get("ref_cache", False),
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
                  fields=sorted(req), tensors=sorted(tensors), targets=targets,
                  sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)])

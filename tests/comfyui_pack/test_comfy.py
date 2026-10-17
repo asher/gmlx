@@ -45,6 +45,7 @@ ZID, QID, QTID = "z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo"
 KID = "krea-2-turbo"
 F2ID, F2BID = "flux-2-klein", "flux-2-klein-base"
 F29ID, F29BID = "flux-2-klein-9b", "flux-2-klein-base-9b"
+F29KID = "flux-2-klein-9b-kv"
 F3ID, F3BID = "flux-3-klein", "flux-3-klein-base"
 STEPS = 4
 LORAS = tempfile.mkdtemp(prefix="gmlx-pack-loras-")
@@ -537,7 +538,8 @@ class Refusals(Base):
         patches = {"diffusion_model.final_layer.adaLN_modulation.1.weight": [
             (1.0, LoRA(set(), (up, down, 1.0, None, None, None)), 1.0, None,
              comfy.utils.swap_scale_shift)]}
-        self.assertEqual(P.patches.SWAPS_HALVES, {"flux2_klein", "flux2_klein_9b"})
+        self.assertEqual(P.patches.SWAPS_HALVES, {"flux2_klein", "flux2_klein_9b",
+                                                  "flux2_klein_9b_kv"})
         for family in sorted(P.patches.SWAPS_HALVES):
             table, tensors = P.patches.build_table(F2ID, patches, family=family)
             (e,) = table["entries"]
@@ -712,6 +714,32 @@ class Sampling(Base):
                 self.assertEqual({tuple(s["num_tokens"]) for s in steps}, {(512,) * rows})
                 self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(rows, 128, 4, 4)})
                 self.assertEqual(tuple(out.shape), (1, 128, 4, 4))
+                self.assertTrue(bool(torch.isfinite(out).all()))
+
+    def test_a_kv_edit_under_the_flux_kv_cache_node_steps_on_the_runs_cache(self):
+        """ComfyUI's Flux KV Cache node on a gmlx model patches nothing in
+        ComfyUI: each step of an edit under it asks the server for the run's
+        cache of reference K and V, under the reference method the node sets,
+        and an edit without the node does not."""
+        from comfy_extras.nodes_flux import FluxKVCache
+        import node_helpers
+
+        m = self.model(F29KID)
+        (kv,) = FluxKVCache.execute(m).result
+        self.assertNotIn("patches", kv.model_options["transformer_options"])
+        ref = torch.zeros(1, 128, 2, 2)
+        pos = node_helpers.conditioning_set_values(
+            self.cond(F29KID, "a red bicycle"), {"reference_latents": [ref]}, append=True)
+        for model, cached in ((kv, True), (m, False)):
+            with self.subTest(cached=cached):
+                self.stub.reset()
+                with torch.inference_mode():
+                    out = self.sample(model, F29KID, cfg=1.0, pos=pos)
+                steps = self.stub.events("step")
+                self.assertEqual(len(steps), STEPS)
+                self.assertEqual({s["ref_cache"] for s in steps}, {cached})
+                self.assertEqual({tuple(s["refs"]) for s in steps}, {(1,)})
+                self.assertEqual(len({s["run"] for s in steps}), 1)
                 self.assertTrue(bool(torch.isfinite(out).all()))
 
     @needs_flux3
@@ -1151,7 +1179,7 @@ class Widgets(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_loaders_list_the_server_models_default_first(self):
-        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F3ID, F3BID]
+        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F29KID, F3ID, F3BID]
         for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
             node = P.NODE_CLASS_MAPPINGS[name]
             req = node.INPUT_TYPES()["required"]
@@ -1170,7 +1198,8 @@ class Widgets(unittest.TestCase):
             os.environ.pop("GMLX_DEFAULT_IMAGE_MODEL")
             self.probed()
             names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
-            self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F29ID, F29BID, F3ID, F3BID])
+            self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F29ID, F29BID, F29KID,
+                                     F3ID, F3BID])
             self.assertEqual(opts["default"], KID)
         finally:
             stub.close()
