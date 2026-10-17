@@ -640,9 +640,10 @@ gmlx pull qwen-image --quant Q5_K_M
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 `krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,
-`flux-2-klein-base-9b`, `flux-3-klein` or `flux-3-klein-base`, pulls its
-DiT, text encoder and VAE, checks the VAE against its published sha256,
-packs it to GGUF, and adds an `image_models` entry. The quants default to
+`flux-2-klein-base-9b`, `flux-2-klein-9b-kv`, `flux-3-klein` or
+`flux-3-klein-base`, pulls its DiT, text encoder and VAE, checks the VAE
+against its published sha256, packs it to GGUF, and adds an
+`image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder already on disk is used
 again when its weights match. On a Mac where no DiT of the model makes an
 image, such as a 9B model on 16 GB, `pull` downloads nothing, names the
@@ -656,8 +657,9 @@ autoencoder, such as an earlier F32 pack of the FLUX.2 VAE, and the plan
 names the pack it reuses.
 [Models and quants](images.md#models-and-quants) has the quants for each
 Mac. `pull` prints each model's license before it downloads, and the
-license of `flux-2-klein-9b` and `flux-2-klein-base-9b` allows
-non-commercial use only, as [Licenses](images.md#licenses) says.
+license of `flux-2-klein-9b`, `flux-2-klein-base-9b` and
+`flux-2-klein-9b-kv` allows non-commercial use only, as
+[Licenses](images.md#licenses) says.
 
 Of several encoders on disk, `pull` takes the quant for this Mac first,
 then a chat model, then the file nearest the DiT. A chat model taken as
@@ -1098,10 +1100,11 @@ and names the `--ref-size` that image needs.
 
 `bench` loads the model once and, for each size, runs `--warmup` images
 untimed and then `--runs` timed ones. Each run starts with empty
-conditioning caches and times the prompt encoding, every step, the decode
-and the whole image, with the peak of MLX memory. The summary gives the
-load time of each part, the first step apart from the median and mean of
-the rest, and the medians of the other phases.
+conditioning caches and times the prompt encoding, with the reference
+images of an edit, every step, the decode and the whole image, with the
+peak of MLX memory. The summary gives the load time of each part, the
+first step apart from the median and mean of the rest, and the medians of
+the other phases.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1112,7 +1115,8 @@ the rest, and the medians of the other phases.
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
 | `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
 | `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
-| `--sizes LIST` | The entry's `defaults.size`, else the variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
+| `--ref PATH` | None | Time an edit from this reference image, as in `generate`. Repeat the flag for several. On FLUX.2 klein and FLUX.3 klein, whose encoders read the prompt alone. Not with `--via-steps`. |
+| `--sizes LIST` | The entry's `defaults.size`, else the variant's size, or the size the references give an edit | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. |
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |

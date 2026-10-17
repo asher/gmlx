@@ -65,7 +65,9 @@ def test_the_tested_comfyui_runs_every_family_the_pack_serves():
 # The README title of each family the step contract serves.
 TITLES = {"z_image": "Z-Image", "qwen_image21": "Qwen-Image 2.1",
           "krea2": "Krea 2", "flux2_klein": "FLUX.2 klein",
-          "flux2_klein_9b": "FLUX.2 klein 9B", "flux3_klein": "FLUX.3 klein"}
+          "flux2_klein_9b": "FLUX.2 klein 9B",
+          "flux2_klein_9b_kv": "FLUX.2 klein 9B KV",
+          "flux3_klein": "FLUX.3 klein"}
 
 
 def _served_families() -> set:
@@ -120,7 +122,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 9
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 10
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -200,6 +202,7 @@ _WIDGETS = {
     "VAEEncode": [],
     "ReferenceLatent": [],
     "GetImageSize": [],
+    "FluxKVCache": [],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 
