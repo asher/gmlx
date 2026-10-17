@@ -123,17 +123,28 @@ def after_thinking(reply: str) -> str | None:
     final channels, Gemma's thought channel, and ATEM headers that start
     with ``<|start|>assistant``. A reply that closes a thinking block it
     never opened, as when the chat template opened it, is read from inside
-    that block. None when the reply ends in its reasoning with no answer,
-    as when it ran out of tokens there; a reply with no reasoning is all
-    answer."""
+    that block. None when the reply ends in its reasoning, as when it ran
+    out of tokens there; a reply with no reasoning is all answer."""
     spans, mode = _spans(reply, thinking=True)
     if mode != "reason":
         return "".join(t for t, m in spans if m == "answer")
     spans, mode = _spans(reply, thinking=False)
-    answer = "".join(t for t, m in spans if m == "answer")
-    if mode == "reason" and not answer.strip():
+    if mode == "reason":
         return None
-    return answer
+    return "".join(t for t, m in spans if m == "answer")
+
+
+def reply_lead(rendered, tokenizer=None) -> str:
+    """What the rendered chat prompt opened that the reply goes on from
+    without writing it, so ``after_thinking`` reads the reply whole: the
+    ATEM header ``<|start|>assistant`` when the prompt ends at it, or the
+    open think tag of a thinking block the prompt opens."""
+    from gmlx.gen.thinking_budget import prompt_open_think_tag
+    from gmlx.tui.reasoning import prompt_opens_header
+
+    if prompt_opens_header(rendered):
+        return "<|start|>assistant"
+    return prompt_open_think_tag(rendered, tokenizer=tokenizer) or ""
 
 
 def plain(reply: str) -> str | None:

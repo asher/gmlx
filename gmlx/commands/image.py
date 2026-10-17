@@ -545,8 +545,8 @@ def run_upsampler(path: str, family, prompt: str, log,
 
     import gmlx.load.loadlog as loadlog
     from gmlx.gen.generation import generate
-    from gmlx.gen.thinking_budget import prompt_open_think_tag
-    from gmlx.image.upsample import UpsampleError, system_prompt, upsample
+    from gmlx.image.upsample import (UpsampleError, reply_lead,
+                                     system_prompt, upsample)
     from gmlx.load.loader import load_model
     from gmlx.serve.capacity import working_set_bytes
     from gmlx.serve.memory import resolve_cache_limit
@@ -586,13 +586,13 @@ def run_upsampler(path: str, family, prompt: str, log,
                              max_tokens=req.max_tokens, temp=req.temperature,
                              presence_penalty=req.presence_penalty,
                              template_kwargs=kwargs, verbose=False)
-            # A template that opens the thinking block in the prompt leaves
-            # its tag out of the reply, which the parser reads it by.
+            # A template that opens the thinking block or the message
+            # header in the prompt leaves its marker out of the reply, which
+            # the parser reads it by.
             rendered = tok.apply_chat_template(
                 list(req.messages), tokenize=False, add_generation_prompt=True,
                 **kwargs)
-            return (prompt_open_think_tag(rendered, tokenizer=tok) or "") + (
-                reply)
+            return reply_lead(rendered, tokenizer=tok) + reply
 
         try:
             caption = upsample(family, prompt, chat, name=f"--upsampler {name}",

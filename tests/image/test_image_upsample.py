@@ -189,6 +189,16 @@ def test_a_reply_in_a_channel_format_gives_its_answer(reply):
         caption=CAPTION)) == CAPTION
 
 
+@pytest.mark.parametrize("reply", [
+    "Sure, here is a rewrite.\n<think>\nThe user wants",
+    "A t-shirt printed with the text <think> in bold.",
+    "A poster reading <|channel|> in bold letters..."])
+def test_a_reply_that_ends_in_reasoning_is_an_error(reply):
+    fam = get_family("flux3_klein")
+    with pytest.raises(upsample.UpsampleError, match="no caption within"):
+        upsample.upsample(fam, "x", lambda req: reply)
+
+
 def test_an_empty_reply_is_an_error_not_the_typed_prompt():
     fam = get_family("flux3_klein")
     assert upsample.upsample(fam, "x", lambda req: f"  {CAPTION}\n") == CAPTION
@@ -218,7 +228,8 @@ def cli(tmp_path, monkeypatch):
     # ``fam`` is the family the DiT identifies as, and ``reply`` what the
     # upsampler writes.
     rec = SimpleNamespace(events=[], turns=[], model=None,
-                          fam=get_family("flux3_klein"), reply=f" {CAPTION}\n")
+                          fam=get_family("flux3_klein"), reply=f" {CAPTION}\n",
+                          rendered=None)
 
     class Model:
         pass
@@ -229,7 +240,7 @@ def cli(tmp_path, monkeypatch):
         rec.events.append("upsampler")
         tok = SimpleNamespace(
             chat_template="{% if enable_thinking %}{% endif %}",
-            apply_chat_template=lambda messages, **kw: (
+            apply_chat_template=lambda messages, **kw: rec.rendered or (
                 "<think>\n" if kw.get("enable_thinking") else ""))
         return model, None, tok
 
@@ -371,6 +382,19 @@ def test_qwen_image_without_a_prompt_file_refuses_and_names_qwens(
             "fetches it") in err
     assert ("no such file" in err) == bool(given)
     assert "upsampler" not in cli.events
+
+
+def test_an_atem_reply_that_starts_mid_header_gives_its_caption(
+        cli, tmp_path):
+    from gmlx.commands.cli import umbrella_main
+
+    # With thinking off, the prompt ends at the header the reply finishes.
+    cli.rendered = "<|start|>user<|message|>a red bicycle<|eot|><|start|>assistant"
+    cli.reply = f" to=user<|message|>{CAPTION}<|eot|>"
+    assert umbrella_main(cli.base + [
+        "--prompt", "a red bicycle", "--upsampler", cli.files["writer.gguf"],
+        "--output", str(tmp_path / "a.png")]) == 0
+    assert ("encode", CAPTION) in cli.events
 
 
 def test_qwen_image_runs_the_users_prompt_file_and_encodes_its_rewrite(

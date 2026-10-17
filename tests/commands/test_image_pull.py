@@ -616,6 +616,20 @@ def test_a_pull_leaves_the_users_own_system_prompt_in_a_flat_dir(
     assert m.upsample_prompt is None and m.vae.endswith(Q.vae_pack)
 
 
+def test_a_pull_leaves_a_dangling_link_at_the_prompt_path(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    link = root / "Qwen__Qwen-Image-2.1-PE-T2I" / Q.prompt_file
+    link.parent.mkdir()
+    link.symlink_to(root / "elsewhere.txt")
+    got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys,
+                                       fetch_fails=False)
+    assert link.is_symlink() and not link.exists()
+    assert all(repo != Q.prompt_repo for repo, _f, _r in got)
+    assert f"warning: {link} is not the upsampler prompt" in err
+    assert _cfg(cfg).image_models["qwen-image"].upsample_prompt is None
+
+
 def test_a_prompt_download_of_another_digest_never_lands(
         lib, monkeypatch, capsys):
     root, cfg = lib

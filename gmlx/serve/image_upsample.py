@@ -207,11 +207,12 @@ def _chat_in_context(up: str, req, stop) -> str:
                 500, f"the upsampler {up!r} has no room in its context{room} "
                 f"for its system prompt and {req.max_tokens} caption tokens: "
                 f"{e}", err_type="server_error") from e
-        from gmlx.gen.thinking_budget import prompt_open_think_tag
+        from gmlx.image.upsample import reply_lead
 
-        # A template that opens the thinking block in the prompt leaves its
-        # tag out of the reply, which the parser reads it by.
-        text = [prompt_open_think_tag(prompt) or ""]
+        # A template that opens the thinking block or the message header in
+        # the prompt leaves its marker out of the reply, which the parser
+        # reads it by.
+        text = [reply_lead(prompt)]
         for tok in token_iter:
             if stop is not None and stop.is_set():
                 raise JobStopped(timed_out=False)

@@ -269,14 +269,15 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
     if r.prompt_repo:
         d = _dest(r.prompt_repo, base_dir, nest)
         dest = os.path.join(d, r.prompt_file)
-        if not os.path.isfile(dest):
+        if not os.path.lexists(dest):
             size = _repo_sizes(r.prompt_repo, r.prompt_revision, sizes).get(
                 r.prompt_file)
             plan.parts.append(Part(
                 "prompt", r.prompt_file, dest, repo=r.prompt_repo,
                 files=(r.prompt_file,), root=d, revision=r.prompt_revision,
                 size=size, need=_remaining(dest, size), optional=True))
-        elif catalog.sha256_file(dest) == r.prompt_sha256:
+        elif os.path.isfile(dest) and \
+                catalog.sha256_file(dest) == r.prompt_sha256:
             plan.parts.append(Part("prompt", r.prompt_file, dest,
                                    size=os.path.getsize(dest), need=0,
                                    optional=True))
@@ -563,7 +564,7 @@ def _fetch_prompt(plan: Plan, part: Part) -> str:
                 f"the download has sha256 {sha}, and {r.prompt_file} of "
                 f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
                 f"{r.prompt_sha256}")
-        if os.path.exists(part.path):
+        if os.path.lexists(part.path):
             raise remote.RemoteError(f"{part.path} appeared during the pull")
         os.replace(got, part.path)
     finally:
