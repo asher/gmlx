@@ -15,7 +15,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein
   9B and FLUX.2 klein Base 9B GGUFs, licensed for non-commercial use only.
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein
-  9B KV GGUFs, which edit from reference images in about half the 9B's time.
+  9B KV GGUFs, which edit from two 1024x1024 references in about half the 9B's time.
 - `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
   output repeats it, which speeds up edits and quotes.
 - Muse Spark (GGUF arch `muse-spark`), with reasoning effort intents, tool calls

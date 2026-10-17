@@ -206,11 +206,10 @@ encoder, and their license allows non-commercial use only, as
 FLUX.2 klein 9B KV is a version of FLUX.2 klein 9B made for faster edits.
 Its reference images attend to each other alone, at time zero, so the
 first step of an edit computes their keys and values in every block, and
-the later steps reuse them and run the image and the prompt alone. On the
-M5 Max listed under [Methodology](benchmarks.md#methodology), a 1024x1024
-edit from two 1024x1024 references in 4 steps takes 16.6 seconds with the
-Q8_0 DiT, against 32.3 seconds on FLUX.2 klein 9B. Without reference
-images it runs as FLUX.2 klein 9B does.
+the later steps reuse them and run the image and the prompt alone. A
+1024x1024 edit from two 1024x1024 references takes about half the time it
+takes on FLUX.2 klein 9B. Without reference images it runs as FLUX.2
+klein 9B does.
 
 `pull` takes the DiT at the quant for your Mac's memory, and the text
 encoder at Q8_0. A Mac takes the column of the largest class its memory
