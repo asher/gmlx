@@ -114,12 +114,12 @@
   "velocity_cached": {
    "rel_l2": 0.016104068323868185
   },
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the time vector, modulations and embeddings and for the velocity"
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of each velocity of the cached pass and of each block's reference K and V"
  },
  "notes": [
   "the weights are in selftest_flux2_klein_tiny_weights by GGUF name in torch order; the latents, features and references are those of selftest_flux2_klein_tiny"
  ],
- "created": "2026-10-17T05:42:35Z",
+ "created": "2026-10-17T06:53:33Z",
  "npz": "selftest_flux2_klein_tiny_kv.npz",
  "tensors": {
   "features": {

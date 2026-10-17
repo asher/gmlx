@@ -317,8 +317,10 @@ def main(argv=None) -> int:
     if len(enc.kept) != len(case):
         raise SystemExit(f"error: {len(enc.kept)} reference encodes")
     # The size of the first reference as prepared beside the others.
-    first, _ = prepared(sampling, pil(srcs[case[0]]),
-                        limits["one" if len(case) == 1 else "several"])
+    first, err = prepared(sampling, pil(srcs[case[0]]),
+                          limits["one" if len(case) == 1 else "several"])
+    if first is None:
+        raise SystemExit(f"error: the reference refuses {case[0]}: {err}")
     height, width = first.shape[:2]
     h, w = height // 16, width // 16
     c = c3.params_of(fm, state).in_channels

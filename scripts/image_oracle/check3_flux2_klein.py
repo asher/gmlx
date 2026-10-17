@@ -673,7 +673,7 @@ def kv_self_test(torch, fm, sampling, commit: str, a) -> int:
                                fx.arrays[f"velocity_{name}"])
         fx.results[f"velocity_{name}_bf16_vs_fp32"] = gap
         fx.tolerances[f"velocity_{name}"] = {"rel_l2": 2 * gap["rel_l2"]}
-    fx.tolerances["rule"] = RULE
+    fx.tolerances["rule"] = KV_RULE
     print(f"[check3] wrote {fx.write()}", flush=True)
     return 0
 
