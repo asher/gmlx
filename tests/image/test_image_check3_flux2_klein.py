@@ -3,7 +3,7 @@ of the gmlx DiT, row by row, against BFL's reference DiT on the same GGUF,
 under three gates, for the distilled and the Base 4B checkpoints, and
 under the product and exact gates for the distilled and the Base 9B
 checkpoints, with the site gate at 9B on the distilled case with a
-reference.
+reference, and under the product gate for FLUX.2 klein 9B KV.
 
 scripts/image_oracle/check3_flux2_klein.py writes the fixtures. Each step
 is the first of the sampler, at time 1, where seeded normal latents are on
@@ -27,9 +27,18 @@ floor that the manifest records. The site gate holds each op of every
 block and each linear leaf on the path a request takes to the stock op in
 float32 on the same input, within 2 n u (flux2_gates.py).
 
+KV runs its text to image step as these cases do. Its edits are the
+reference's cached pass: the first step reads the references at time
+zero, attending to each other alone, and the step after reads their
+cached K and V. gmlx runs them through the KV row's step: the reference
+pass of the conditioning, then the step at each time on that state. The
+velocity of each step, and the reference K and V of four blocks, stay
+within twice the oracle's own bf16 against fp32 gap. The references in
+the step at the image's time, as the 9B step reads them, miss the gate.
+
 The rows need the FLUX.2 klein GGUFs under KQUANT_TEST_GGUF_DIR and the
 fixtures under GMLX_IMAGE_FIXTURES. They skip until both are there. The
-9B rows declare a Mac of 24 GB.
+9B and KV rows declare a Mac of 24 GB.
 """
 from __future__ import annotations
 
@@ -62,15 +71,24 @@ _VELOCITY = {"distilled": "_1024", "distilled r1": "_r1_1024",
 # The cases of each size: the 9B fixture names carry _9b after the
 # family's.
 ROWS = {**{c: f"check3_flux2_klein{t}" for c, t in _ROWS.items()},
-        **{f"9b {c}": f"check3_flux2_klein_9b{t}" for c, t in _ROWS.items()}}
+        **{f"9b {c}": f"check3_flux2_klein_9b{t}" for c, t in _ROWS.items()},
+        "kv distilled": "check3_flux2_klein_9b_kv_512"}
 VELOCITY = {**{c: f"check3_flux2_klein{t}" for c, t in _VELOCITY.items()},
             **{f"9b {c}": f"check3_flux2_klein_9b{t}"
-               for c, t in _VELOCITY.items()}}
+               for c, t in _VELOCITY.items()},
+            "kv distilled": "check3_flux2_klein_9b_kv_1024"}
+# The cached pass of KV edits, and the references of each.
+KV_EDITS = {"kv r1": "check3_flux2_klein_9b_kv_r1_512",
+            "kv r1 1024": "check3_flux2_klein_9b_kv_r1_1024",
+            "kv r4": "check3_flux2_klein_9b_kv_r4_512"}
+KV_REFS = {"kv r1": 1, "kv r1 1024": 1, "kv r4": 4}
 DITS = {("4b", "distilled"): "flux-2-klein-4b-Q4_K_M.gguf",
         ("4b", "base"): "flux-2-klein-base-4b-Q4_K_M.gguf",
         ("9b", "distilled"): "flux-2-klein-9b-Q4_K_M.gguf",
-        ("9b", "base"): "flux-2-klein-base-9b-Q4_K_M.gguf"}
-FAMILIES = {"4b": "flux2_klein", "9b": "flux2_klein_9b"}
+        ("9b", "base"): "flux-2-klein-base-9b-Q4_K_M.gguf",
+        ("kv", "distilled"): "Flux-2-Klein-9B-KV-Q8_0.gguf"}
+FAMILIES = {"4b": "flux2_klein", "9b": "flux2_klein_9b",
+            "kv": "flux2_klein_9b_kv"}
 STEPS = {"distilled": 4, "base": 50}
 REFERENCE_COMMIT = "50fe5162777813d869182b139e83b10743caef15"
 # The case that runs every stream, and the site gate's cases.
@@ -79,15 +97,15 @@ SITES = {FULL: None, f"9b {FULL}": None}
 
 
 def size_variant(case: str) -> tuple[str, str]:
-    """(size, variant) of a case."""
-    size = "9b" if case.startswith("9b ") else "4b"
-    return size, case.removeprefix("9b ").split()[0]
+    """(size, variant) of a case: 4b, 9b or kv."""
+    size = case.split()[0] if case.startswith(("9b ", "kv ")) else "4b"
+    return size, case.removeprefix(f"{size} ").split()[0]
 
 
 def cases(table: dict) -> list:
-    """The cases of ``table``, the 9B ones on a Mac of 24 GB."""
+    """The cases of ``table``, the 9B and KV ones on a Mac of 24 GB."""
     return [pytest.param(c, marks=pytest.mark.host_gb(24))
-            if c.startswith("9b ") else c for c in table]
+            if c.startswith(("9b ", "kv ")) else c for c in table]
 
 
 # SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.
@@ -191,6 +209,24 @@ def test_the_manifests_follow_the_rule():
             assert rows["tolerances"][k]["rel_l2"] == 2 * g["rel_l2"], k
             assert g["teacher_forced"] == fg.forced_row(k), k
         fg.exact_tols(rows)
+    for case, name in KV_EDITS.items():
+        m = _manifest(name)
+        ins = m["inputs"]
+        assert m["files"]["dit"]["name"] == DITS["kv", "distilled"], name
+        assert m["family"] == FAMILIES["kv"], name
+        assert ins["reference_commit"] == REFERENCE_COMMIT, name
+        times = schedule(STEPS["distilled"], (ins["size"] // 16) ** 2)
+        assert (ins["step"], ins["step2"]) == (0, 1), name
+        assert ins["sigma"] == pytest.approx(times[0], abs=1e-6)
+        assert ins["sigma2"] == pytest.approx(times[1], abs=1e-6)
+        assert (ins["text_rows"], ins["refs"]) == (512, KV_REFS[case])
+        res, tol = m["results"], m["tolerances"]
+        for step in ("extract", "cached"):
+            gap = res[f"velocity_{step}_bf16_vs_fp32"]
+            assert tol[f"velocity_{step}"]["rel_l2"] == 2 * gap["rel_l2"]
+            assert gap["rel_l2"] < 0.06, (name, step, gap)
+        for k, g in res.get("kv_bf16_vs_fp32", {}).items():
+            assert tol[k]["rel_l2"] == 2 * g["rel_l2"], k
 
 
 @pytest.mark.integration
@@ -240,6 +276,89 @@ def test_check3_own_time_embedding(case):
     assert n <= 2 and ulps <= 1.0, (n, ulps)
 
 
+# KV edits.
+
+def _kv_conditioning(arrays: dict):
+    from gmlx.image.conditioning import Conditioning
+
+    refs = tuple(mx.array(arrays[f"refs.{i}"][0])
+                 for i in range(fg.n_refs(arrays)))
+    return Conditioning(mx.array(arrays["features"]), "check3 flux2 kv",
+                        ref_latents=refs)
+
+
+def _kv_step(model, arrays: dict, cond, state, lat: str, sigma: str):
+    from gmlx.image.families.flux2_klein_9b_kv import step
+
+    t = arrays[sigma].reshape(())
+    return fg._np(step.forward(model, mx.array(arrays[lat]), t, cond, state,
+                               step.modulation(model, t)))
+
+
+def kv_measures(model, arrays: dict) -> dict:
+    """The KV row's step against the fixture's cached pass: (relative L2,
+    cosine) of the velocity at the first step and of the step after on
+    the state, and the relative L2 of each reference K and V the fixture
+    holds."""
+    from gmlx.image.families.flux2_klein_9b_kv import step
+
+    cond = _kv_conditioning(arrays)
+    state = step.conditioning(model, cond)
+    got = {}
+    for name, lat, sigma in (("extract", "latents", "sigma"),
+                             ("cached", "latents2", "sigma2")):
+        v = _kv_step(model, arrays, cond, state, lat, sigma)
+        want = arrays[f"velocity_{name}"]
+        got[f"velocity_{name}"] = (fg.rel(v, want), fx.cosine(v, want))
+    for k in arrays:
+        if k.startswith("kv."):
+            _, i, kind = k.split(".")
+            kept = getattr(state.refs, kind)[int(i)]
+            got[k] = (fg.rel(fg._np(kept), arrays[k]), None)
+    return got
+
+
+def kv_missed(got: dict, m: dict) -> dict:
+    out = {}
+    for k, (rel, cos) in got.items():
+        tol = m["tolerances"][k]
+        if not rel <= tol["rel_l2"] or (cos is not None
+                                        and not cos >= tol["cosine_min"]):
+            out[k] = (rel, cos, tol)
+    return out
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("case", cases(KV_EDITS))
+def test_check3_kv_cached_pass(dits, case):
+    """The first step and the step after on its state, and the reference
+    K and V, within their gates. For one reference at 512 the references
+    in the step at the image's time, as the 9B step reads them, miss the
+    gate of the first step."""
+    arrays, m = fixture(_manifest(KV_EDITS[case])["name"])
+    model, _ = dits(m)
+    got = kv_measures(model, arrays)
+    share = {k: rel / m["tolerances"][k]["rel_l2"]
+             for k, (rel, _) in got.items()}
+    top = max(share, key=share.get)
+    print(f"flux2 check3 kv {case}: " + ", ".join(
+        f"{k} {got[k][0]:.2e} ({share[k]:.2f} of its gate)"
+        for k in ("velocity_extract", "velocity_cached"))
+        + f"; {len(got)} measures, the largest share {share[top]:.2f} at "
+        f"{top}")
+    out = kv_missed(got, m)
+    if case == "kv r1":
+        lat, feats, refs, sigma = fg.inputs(model, arrays)
+        plain = fg._np(model(lat, sigma, feats, refs=refs,
+                             mod=model.modulation(sigma, 1)))
+        bad = fg.rel(plain, arrays["velocity_extract"])
+        gate = m["tolerances"]["velocity_extract"]["rel_l2"]
+        print(f"flux2 check3 kv {case}, the references at the image's "
+              f"time: {bad:.2e}, {bad / gate:.1f} times the gate")
+        assert bad > gate, bad
+    assert not out, out
+
+
 # The exact gate.
 
 def _shift_scale_swapped(mp, model):
@@ -285,8 +404,13 @@ EXACT_FAULTS = {"shift and scale swapped": _shift_scale_swapped,
                 "text on the first axis": _text_on_the_first_axis}
 
 
+# The exact gate holds the model's arithmetic, which the KV step without
+# references shares with 9B, so it runs on the 4B and 9B files.
+EXACT_ROWS = {c: n for c, n in ROWS.items() if not c.startswith("kv ")}
+
+
 @pytest.mark.integration
-@pytest.mark.parametrize("case", cases(ROWS))
+@pytest.mark.parametrize("case", cases(EXACT_ROWS))
 def test_check3_exact_gate_at_512(dits, request, monkeypatch, case):
     """Every teacher-forced row within EXACT_TOL of the oracle in its
     arithmetic, the free rows and the velocity within the fixture's gates
