@@ -306,11 +306,13 @@ def test_row_flag_off_by_env(monkeypatch):
 def test_stock_body_arena_rows_skip_the_sort(monkeypatch):
     """A 40-token call has 80 routed rows, past the stock body's sort gate.
     Served from the arena, it takes the unsorted body and matches the
-    sorted reference."""
+    sorted reference. The reference runs on the CPU stream: on the GPU the
+    sorted body takes a GEMM, which may run fp32 at TF32."""
     glu = _cpu_glu()
     x = mx.random.normal((1, 40, 16))
     inds = _cpu_inds(40)
-    ref = SwitchGLU.__call__(glu, x, inds)
+    with mx.stream(mx.cpu):
+        ref = SwitchGLU.__call__(glu, x, inds)
     mx.eval(ref)
 
     def no_sort(*a, **k):

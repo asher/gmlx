@@ -3,7 +3,8 @@
 # Ported from BFL's FLUX.3 klein reference at commit 45e57c9: the
 # constants of src/flux3/dit.py, src/flux3/pipeline.py and
 # src/flux3/text_encoder.py, and the tensor names and shapes of the DiT of
-# src/flux3/dit.py, and modified for gmlx (Apache-2.0; see
+# src/flux3/dit.py, and at commit bfc8889 the upsampler's system prompt and
+# sampling of src/flux3/pup.py, and modified for gmlx (Apache-2.0; see
 # licenses/flux-3-image-klein-LICENSE).
 """FLUX.3 klein fingerprint, constants, config synthesis and the hooks of
 its registry row.
@@ -31,7 +32,7 @@ import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import (ConstantsRow, EditParts, Family, LoopRules,
-                                 SamplingRow)
+                                 SamplingRow, UpsampleParts)
 
 TITLE = "FLUX.3 klein"
 # The input modes in the order their tokens take inside a sample, and the
@@ -338,6 +339,26 @@ REFERENCES = ConstantsRow(
 )
 
 
+# The upsampler of src/flux3/pup.py for a prompt without references, run
+# on a chat model of the user's choice: the t2i prompt that BFL publishes
+# for other models, shipped unmodified, with the typed prompt as the user
+# turn, greedy decoding of at most 3584 tokens and thinking off. pup.py
+# sets a presence penalty of 1.5 for BFL's own fine-tune and its own
+# prompts; a stock chat model runs this prompt without one.
+UPSAMPLE = UpsampleParts(
+    prompts="pup_prompts_external_vlm.json",
+    sha256="361bb6e081d50e54a3dee9abf26327436a9386c83465f881c7848989232028be",
+    key="t2i",
+    max_tokens=3584,
+    temperature=0.0,
+    presence_penalty=0.0,
+    thinking="off",
+    repo="github.com/black-forest-labs/flux-3-image-klein",
+    revision="bfc8889a4497f846416f253a3972a1941ac698b9",
+    suggested="Qwen3.5-9B",
+)
+
+
 def _prepare_all(images):
     from .edit import prepare
 
@@ -371,4 +392,5 @@ FAMILY = Family(
     loop=LOOP,
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],
                    prepare_all=_prepare_all, size=_size),
+    upsample=UPSAMPLE,
 )

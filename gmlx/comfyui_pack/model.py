@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import functools
 import logging
 import time
 
@@ -31,6 +32,7 @@ import comfy.utils
 
 from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
                      set_interrupt_check, tensor_hash)
+from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
 from .patcher import CPU, KV_METHOD, KV_PATCHES, GmlxBinding, GmlxModelPatcher
 
@@ -108,7 +110,24 @@ def build_weightless(manifest: dict, model_class: str):
     model.device = CPU
     if hasattr(model.diffusion_model, "preprocess_conds"):
         _conditioning_on_server(model)
+    _typed_for_edits_and_negatives(model)
     return model, cfg
+
+
+def _typed_for_edits_and_negatives(model) -> None:
+    """When the server upsampled a prompt, an edit, whose conditioning
+    carries reference latents, and a negative sample on the prompt as
+    typed."""
+    extra_conds = model.extra_conds
+
+    @functools.wraps(extra_conds)
+    def pick_prompt(**kwargs):
+        tp = kwargs.pop(TYPED, None)
+        if isinstance(tp, TypedPrompt) and tp.holds(kwargs.get("cross_attn")) and (
+                kwargs.get("reference_latents") or kwargs.get("prompt_type") == "negative"):
+            kwargs["cross_attn"] = tp.typed
+        return extra_conds(**kwargs)
+    model.extra_conds = pick_prompt
 
 
 def _conditioning_on_server(model) -> None:
@@ -128,6 +147,7 @@ def _conditioning_on_server(model) -> None:
         return
     extra_conds = model.extra_conds
 
+    @functools.wraps(extra_conds)
     def keep_conditioning(**kwargs):
         dm.flow_map = True
         try:

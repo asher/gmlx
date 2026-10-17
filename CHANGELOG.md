@@ -8,6 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- FLUX.3 klein rewrites each prompt with a chat model of your choice before
+  encoding it, set as the entry's `upsampler` or by `--upsampler`.
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein

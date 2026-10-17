@@ -76,6 +76,7 @@ has the fix.
 
 - [Call it from an app](#call-it-from-an-app)
 - [Use a LoRA](#use-a-lora)
+- [Prompt upsampling](#prompt-upsampling)
 - [ComfyUI](#comfyui)
 - [Models and quants](#models-and-quants)
 - [Licenses](#licenses)
@@ -162,6 +163,61 @@ layers. List that one in the entry's `adapters`, where both halves apply.
 LoHa, LoKr, DoRA and the other kinds that are not plain LoRA pairs are
 refused by name, as is a LoRA of another model. ComfyUI takes LoRAs as
 [LoRAs](comfyui.md#loras) describes.
+
+## Prompt upsampling
+
+FLUX.3 klein and FLUX.3 klein Base were trained on long, detailed
+captions, not on the short prompts people type. Prompt upsampling turns
+your prompt into such a caption before the text encoder reads it: a chat
+model rewrites it with the system prompt that Black Forest Labs publishes
+for this, and the image follows the caption. A FLUX.3 klein prompt sent as
+typed gives weaker images.
+
+Qwen3.5-9B writes captions close to those of BFL's own upsampler, and
+its Q6_K GGUF is a good choice. Any chat model of your configuration can
+write them. Add it under `models`, and name it as the `upsampler` of the
+image model's entry:
+
+```yaml
+models:
+  qwen3.5-9b:
+    path: Qwen3.5-9B-Q6_K.gguf
+image_models:
+  flux-3-klein:
+    path: flux3_image_klein_sd-Q4_K_M.gguf
+    encoder: Qwen3-VL-4B-Instruct-Q8_0.gguf
+    vae: flux2-vae-BF16.gguf
+    upsampler: qwen3.5-9b
+```
+
+With an upsampler set, each prompt is rewritten:
+
+- `gmlx image generate flux-3-klein` loads the chat model, writes the
+  caption, and unloads the chat model before the image model loads.
+  `--upsampler` names a chat model, a GGUF or a `models` id, for one run.
+- `gmlx serve` writes the caption with the chat model, which loads and
+  unloads as it does for a chat request, and returns the caption as
+  `revised_prompt` with the image. A request with the same prompt and
+  another seed reuses the caption. With the
+  [prompt cache](config.md#prompt-cache) on, a new prompt reuses the
+  system prompt's prefill. The first caption also loads the chat model,
+  which `pin: true` on its `models` entry keeps loaded.
+- The ComfyUI pack rewrites the prompt of its text encode node, and
+  ComfyUI's log shows the caption.
+
+The chat model writes the same caption for the same prompt. The PNG keeps
+the caption beside your prompt. A prompt with reference images or an
+init image runs as typed, and the negative prompt is never rewritten. In ComfyUI the text
+encode node does not see the references of an edit, so the server also
+encodes the prompt as typed, and the pack samples an edit and a negative
+prompt on that encoding.
+
+To run a prompt as typed, pass `--no-upsample`, send
+`"prompt_upsampling": false` in the request, or set `upsample: false` on
+the entry, which a request with `"prompt_upsampling": true` turns back on.
+Without an upsampler, FLUX.3 klein runs each prompt as typed and prints a
+warning that names the `upsampler` setting and Qwen3.5-9B, unless the
+entry has `upsample: false`.
 
 ## ComfyUI
 

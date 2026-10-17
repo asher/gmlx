@@ -26,6 +26,16 @@ source.
   BatchNorm and its inverse in AutoEncoder.encode and AutoEncoder.decode
   of src/flux3/autoencoder.py.
 
+At commit bfc8889a4497f846416f253a3972a1941ac698b9 of the same reference,
+under the same license:
+
+- gmlx/image/families/flux3_klein/pup_prompts_external_vlm.json: the
+  upsampler's system prompts, src/flux3/pup_prompts_external_vlm.json,
+  shipped unmodified.
+- gmlx/image/families/flux3_klein/family.py: the upsampler's chat turn
+  for a prompt without references and its sampling, of Upsampler in
+  src/flux3/pup.py.
+
 flux-3-image-klein is distributed under the Apache License 2.0:
 
 

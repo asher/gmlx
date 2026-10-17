@@ -1330,6 +1330,27 @@ def test_encode_with_refs_false_skips_the_reference_latents(host, monkeypatch):
     assert r.status_code == 400 and "refs" in r.text
 
 
+def test_an_upsampled_encode_also_answers_the_prompt_as_typed(host, monkeypatch):
+    """A client that adds the references after the encode, as ComfyUI
+    does, gets the typed prompt's conditioning beside the caption's."""
+    seen = []
+    cond, typed = _features(), _features() + 1.0
+
+    def encode(served, text, images, borrow=None, ref_latents=True, also=None):
+        seen.append((text, also))
+        return {"cond": cond, "refs": [], "image_slots": [], "typed": typed}
+
+    monkeypatch.setattr(steps, "encode", encode)
+    monkeypatch.setattr(host, "revise", lambda model, text, requested, has_refs:
+                        "a caption of " + text, raising=False)
+    fields, got = _client().encode("zit", "a cat")
+    assert seen == [("a caption of a cat", "a cat")]
+    assert fields["revised_prompt"] == "a caption of a cat"
+    assert np.array_equal(got["cond_typed"], typed)
+    assert fields["cond_typed"] == array_hash(typed) != fields["cond"]
+    assert fields["cond_typed"] in steps.STATE.tensors
+
+
 def _stub_step_encode(monkeypatch):
     """steps.encode on the Qwen-Image 2.1 family's reference rules with the
     text encoder and the VAE stubbed. Returns the served model, the

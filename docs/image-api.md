@@ -47,7 +47,8 @@ model, and no context figures.
 | `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
 | `seed` | The seed of the first image, random without it. |
 | `guidance` | [Guidance](glossary.md#guidance), 1 to 30. 1 turns it off. |
-| `negative_prompt` | What to steer away from, read when `guidance` is above 1. |
+| `negative_prompt` | What to steer away from, read when `guidance` is above 1. It is never rewritten. |
+| `prompt_upsampling` | `false` runs the prompt as typed on an entry with an [upsampler](images.md#prompt-upsampling), and `true` rewrites it on one with `upsample: false`. |
 | `sampler` | [Sampler](glossary.md#sampler), `euler` or `uni_pc_bh2`. |
 | `scheduler` | `default` only, the model's own schedule. |
 | `strength` | How far an edit or a variation departs from its image, from 0.01 to 1. |
@@ -72,6 +73,11 @@ their default steps at every `quality`.
 ignored, and the log names them in a warning. The server writes no file
 that a request names, so `output_path`, `output_dir` and `response_format:
 "path"` get 400.
+
+On an entry with an [upsampler](images.md#prompt-upsampling), each
+image of the answer carries the caption the prompt was rewritten to as
+`revised_prompt`, as does a stream's `completed` event. An edit or a
+variation runs its prompt as typed and ignores `prompt_upsampling`.
 
 ## Edits and variations
 
@@ -152,6 +158,9 @@ for event in stream:
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |
+| `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
+| The upsampler writes an empty caption | 500 `server_error` |
+| The upsampler's context has no room for its system prompt and caption | 500 `server_error` naming the upsampler |
 | More requests waiting than [`image.max_queue`](config.md#image-requests) | 429 with `Retry-After` |
 | The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |
 | The job waits for its turn, or for one step, longer than [`token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) | 504, and the log marks the request `timeout` |

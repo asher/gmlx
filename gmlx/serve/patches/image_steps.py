@@ -56,6 +56,13 @@ class ServeHost:
 
         return residency.acquire_image_model(model)
 
+    def revise(self, model, text, requested, has_refs):
+        """The upsampler's caption of ``text``, or None to encode it as
+        typed."""
+        from ..image_upsample import revise
+
+        return revise(model, text, requested, has_refs, resolve=self.resolve)
+
     def models(self) -> dict:
         return serving.image_models()
 
@@ -618,7 +625,7 @@ async def step(request: Request):
 
 
 async def encode(request: Request):
-    from ..image_service import decode_image
+    from ..image_service import ImageRequestError, decode_image
     from ..image_steps import STATE, StepError
     from ..image_steps import encode as do_encode
     from ..image_wire import CONTENT_TYPE, read, write
@@ -646,6 +653,17 @@ async def encode(request: Request):
     want_refs = fields.get("refs", True)
     if not isinstance(want_refs, bool):
         raise StepError(400, "refs is true or false")
+    requested = fields.get("prompt_upsampling")
+    if requested is not None and not isinstance(requested, bool):
+        raise StepError(400, "prompt_upsampling is true or false")
+    revise = getattr(SETTINGS.host, "revise", None)
+    revised = None
+    if revise is not None:
+        try:
+            revised = await asyncio.to_thread(
+                revise, fields.get("model"), text, requested, bool(images))
+        except ImageRequestError as e:
+            raise StepError(e.status, str(e)) from None
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
@@ -663,15 +681,18 @@ async def encode(request: Request):
         else:
             chat_hold = None
         try:
-            got = await _on_worker(do_encode, served, text,
+            typed = (text,) if revised else ()
+            got = await _on_worker(do_encode, served, revised or text,
                                    [i[..., :3] for i in images], borrow,
-                                   want_refs)
+                                   want_refs, *typed)
         finally:
             if chat_hold is not None:
                 chat_hold.release()
     finally:
         hold.release()
     out = {"cond": got["cond"]}
+    if "typed" in got:
+        out["cond_typed"] = got["typed"]
     for i, z in enumerate(got["refs"]):
         out[f"ref_{i}"] = z
     body = write(out)
@@ -686,6 +707,9 @@ async def encode(request: Request):
                                   for i in range(len(got["refs"]))],
                   "image_slots": got["image_slots"],
                   "num_tokens": int(got["cond"].shape[1])}
+    if revised:
+        fields_out["revised_prompt"] = revised
+        fields_out["cond_typed"] = hashes["cond_typed"]
     return _container(out, fields_out)
 
 

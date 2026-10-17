@@ -120,6 +120,31 @@ class EditParts:
         return self.encode is None
 
 
+@dataclass(frozen=True)
+class UpsampleParts:
+    """How a chat model rewrites a family's typed prompt into the caption
+    its DiT was trained on, before the encoder reads it.
+
+    ``prompts`` is a JSON file in the family's package, shipped as its
+    source wrote it, with its ``sha256`` pinned, and ``key`` the system
+    prompt in it for a prompt without reference images. The typed prompt
+    is the user turn as it is. The reply is decoded with ``temperature``,
+    at most ``max_tokens`` tokens, ``presence_penalty`` and the chat
+    model's thinking switch at ``thinking``, as ``repo`` at ``revision``
+    does. ``suggested`` names the chat model to set when none is.
+    """
+    prompts: str
+    sha256: str
+    key: str
+    max_tokens: int
+    temperature: float
+    presence_penalty: float
+    thinking: str
+    repo: str
+    revision: str
+    suggested: str = ""
+
+
 # The image limits: the pixels and the longer side of the largest image a
 # served request asks for, and of the size an edit without one takes.
 MAX_PIXELS = 2048 * 2048
@@ -191,6 +216,8 @@ class Family:
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
     edit: EditParts | None = None      # None takes no reference images
+    # None runs the prompt as typed, with no upsampler to rewrite it.
+    upsample: UpsampleParts | None = None
     loop: LoopRules | None = None      # None runs the loop in float32
     # Tensors a converter may store flattened with their shape under
     # comfy.gguf.orig_shape, which the load restores.

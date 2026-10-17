@@ -166,6 +166,15 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--negative-prompt", default=None, metavar="TEXT",
                    help="The negative prompt, used when --guidance is not "
                         "1 (default empty).")
+    up = p.add_mutually_exclusive_group()
+    up.add_argument("--upsampler", default=None, metavar="GGUF",
+                    help="The chat model that rewrites the prompt before it "
+                         "is encoded, on a family that takes prompt "
+                         "upsampling (FLUX.3 klein): a GGUF, or a models: id "
+                         "of the config (default: the entry's upsampler). "
+                         "A prompt with --ref or --init-image runs as typed.")
+    up.add_argument("--no-upsample", action="store_true",
+                    help="Run the prompt as typed, without the upsampler.")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
                         "on Qwen-Image 2.1 (default: the init image's, else "
@@ -454,6 +463,125 @@ def _from_config(a) -> None:
         a.encoder_mmproj = rm.encoder_mmproj
     if rm.adapters:
         a.adapter = list(rm.adapters) + list(a.adapter or ())
+    if hasattr(a, "upsampler") and a.upsampler is None:
+        if not rm.upsample:
+            a.no_upsample = True
+        elif rm.upsampler:
+            a.upsampler = rm.upsampler
+
+
+def _upsampler_path(a) -> str:
+    """The GGUF of --upsampler: the file, or the models: entry of that id
+    in the config."""
+    import gmlx.config as cfgmod
+
+    if os.path.isfile(os.path.expanduser(a.upsampler)):
+        return os.path.expanduser(a.upsampler)
+    path = (os.path.expanduser(a.config) if getattr(a, "config", None)
+            else next((str(c) for c in cfgmod.default_config_paths()
+                       if os.path.exists(c)), None))
+    where = f"in {path}" if path and os.path.exists(path) else "(no config)"
+    if path is not None and os.path.exists(path):
+        try:
+            cfg = cfgmod.load_config(path)
+            if a.upsampler in cfg.models:
+                return cfgmod.resolve_path(cfg.models[a.upsampler].path,
+                                           cfg.model_dirs)
+        except cfgmod.ConfigError as e:
+            raise FileNotFoundError(f"--upsampler {a.upsampler}: {e}") from None
+    raise FileNotFoundError(f"--upsampler {a.upsampler}: no such file, and "
+                            f"no models: id of that name {where}")
+
+
+def _upsample(a, family, prompt: str, refs, log) -> str | None:
+    """The caption the upsampler writes for ``prompt``, or None when it
+    runs as typed, as a prompt with an image input does."""
+    if family.upsample is None:
+        if a.upsampler is not None:
+            log(f"note: the upsampler is unused, since {family.title} "
+                "takes no prompt upsampling, and is not loaded")
+        return None
+    if a.no_upsample or not prompt.strip():
+        return None
+    if refs or a.init_image is not None:
+        if a.upsampler is not None:
+            flag = "--ref" if refs else "--init-image"
+            log(f"note: a prompt with {flag} runs as typed, and the "
+                "upsampler is not loaded")
+        return None
+    if a.upsampler is None:
+        log(f"warning: {family.title} expects its prompts upsampled; set "
+            f"--upsampler to a {family.upsample.suggested} GGUF or its "
+            "models: id, or upsampler on the image_models entry, or pass "
+            "--no-upsample")
+        return None
+    a.upsampler = _upsampler_path(a)
+    return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json)
+
+
+def run_upsampler(path: str, family, prompt: str, log,
+                  quiet: bool = False) -> str:
+    """Load the chat model at ``path``, write the caption of ``prompt``,
+    and release the model before returning. ``quiet`` keeps the load's
+    lines off stdout."""
+    import gc
+
+    import mlx.core as mx
+
+    import gmlx.load.loadlog as loadlog
+    from gmlx.gen.generation import generate
+    from gmlx.image.upsample import UpsampleError, system_prompt, upsample
+    from gmlx.load.loader import load_model
+    from gmlx.serve.capacity import working_set_bytes
+    from gmlx.serve.memory import resolve_cache_limit
+    from gmlx.tui.reasoning import map_thinking_controls
+
+    from .tool_preflight import check_or_exit
+
+    # About 3 characters a token, which overcounts English.
+    ctx = (len(system_prompt(family)) + len(prompt)) // 3 + (
+        family.upsample.max_tokens)
+    def stdout():
+        return (contextlib.redirect_stdout(sys.stderr) if quiet
+                else contextlib.nullcontext())
+
+    with stdout():
+        check_or_exit(path, ctx_tokens=ctx)
+    limit, _ = resolve_cache_limit(None, [path], working_set_bytes() or 0.0)
+    prev = None if limit is None else mx.set_cache_limit(limit)
+    name = os.path.basename(path)
+    t0 = time.perf_counter()
+    try:
+        with stdout(), loadlog.load_ui(False, path):
+            model, _config, tok = load_model(path)
+        template = getattr(tok, "chat_template", None)
+        if template is None:
+            raise _Usage(f"--upsampler {name}: the model has no chat "
+                         "template, so it cannot take the upsampler's "
+                         "system prompt")
+
+        def chat(req):
+            kwargs = map_thinking_controls(
+                {}, req.thinking, None, template,
+                warn=lambda msg: log(f"[upsample] {msg}"))
+            return generate(model, tok, req.user, system_prompt=req.system,
+                            max_tokens=req.max_tokens, temp=req.temperature,
+                            presence_penalty=req.presence_penalty,
+                            template_kwargs=kwargs, verbose=False)
+
+        try:
+            caption = upsample(family, prompt, chat, name=f"--upsampler {name}")
+        except UpsampleError as e:
+            raise _Usage(str(e)) from None
+    finally:
+        model = tok = None
+        gc.collect()
+        mx.clear_cache()
+        if prev is not None:
+            mx.set_cache_limit(prev)
+    log(f"[image] prompt upsampled by {name} in "
+        f"{time.perf_counter() - t0:.1f} s, {len(caption.split())} words")
+    return caption
 
 
 def _check_files(a) -> None:
@@ -683,6 +811,8 @@ def _generate(a) -> int:
                      f"multiples of {stride}")
     mask = read_mask(a.mask, (width, height)) if a.mask else None
     text_only = edit is not None and edit.text_only
+    revised = _upsample(a, fam, prompt, refs, log)
+    text = revised or prompt
     mmproj = a.encoder_mmproj if refs and not text_only else None
     if a.encoder_mmproj is not None and not refs:
         log("note: --encoder-mmproj is unused without --ref, and is not "
@@ -712,14 +842,14 @@ def _generate(a) -> int:
         adapters=_adapter_bytes(a), init_image=init is not None,
         mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
         variant=a.variant, prompts=() if refs and not text_only else (
-            [prompt] + ([] if cfg == 1.0 else [a.negative_prompt or ""])))
+            [text] + ([] if cfg == 1.0 else [a.negative_prompt or ""])))
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
 
     def encode(pipe):
         # The VAE encodes the references after the encoder's release.
         t0 = time.perf_counter()
-        cond = api.encode_text(pipe, prompt, images=refs, ref_latents=False)
+        cond = api.encode_text(pipe, text, images=refs, ref_latents=False)
         neg = None if cfg == 1.0 else api.encode_text(
             pipe, a.negative_prompt or "", images=refs, ref_latents=False)
         return cond, neg, time.perf_counter() - t0
@@ -759,11 +889,15 @@ def _generate(a) -> int:
              "vae": os.path.basename(a.vae)}
     if mmproj is not None:
         files["mmproj"] = os.path.basename(mmproj)
+    if revised is not None:
+        files["upsampler"] = os.path.basename(a.upsampler)
     # scheduler None is the variant's own schedule, as in the bench record.
     settings = {"prompt": prompt, "seed": seed, "steps": steps,
                 "size": f"{width}x{height}", "sampler": a.sampler,
                 "scheduler": None, "guidance": cfg, "count": a.count,
                 "adapters": adapters}
+    if revised is not None:
+        settings["revised_prompt"] = revised
     if cfg != 1.0:
         settings["negative_prompt"] = a.negative_prompt or ""
     if alpha:

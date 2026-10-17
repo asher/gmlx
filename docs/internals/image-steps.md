@@ -93,6 +93,11 @@ with sides a multiple of 32, and an image outside that area gets 400. An
 encode with `refs: false` leaves out the VAE latents of its reference
 images, for a client that encodes them with a VAE of its own.
 
+An encode that upsamples the prompt returns the caption as
+`revised_prompt` and its conditioning as `cond`, and the prompt as typed
+as `cond_typed`. A client that adds reference images after the encode,
+as ComfyUI does, samples an edit and a negative on `cond_typed`.
+
 ## Steps and runs
 
 A step names its conditionings and its patch table by hash. When the

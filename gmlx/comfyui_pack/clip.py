@@ -33,6 +33,34 @@ _WEIGHTED = re.compile(r"\([^()]*:\s*-?[0-9.]+\s*\)")
 _SPACE_FOR_EMPTY = frozenset({"qwen_image", "qwen_image21", "krea2", "flux3_klein"})
 
 
+# The conditioning key of the prompt as typed beside an upsampled one.
+TYPED = "gmlx_typed"
+
+
+class TypedPrompt:
+    """The conditioning of a caption and that of the prompt as typed. The
+    text encode node sees no reference images, so the model samples an
+    edit and a negative on the typed one."""
+
+    __slots__ = ("caption", "typed")
+
+    def __init__(self, caption: torch.Tensor, typed: torch.Tensor):
+        self.caption = caption
+        self.typed = typed
+
+    def holds(self, cond) -> bool:
+        """Whether ``cond`` is still the caption, which a node such as
+        ConditioningZeroOut or ConditioningConcat replaces."""
+        c = self.caption
+        return cond is c or (isinstance(cond, torch.Tensor) and cond.shape == c.shape
+                             and torch.equal(cond.to(c.device, c.dtype), c))
+
+
+def _batched(t: torch.Tensor) -> torch.Tensor:
+    t = t.float()
+    return t[None] if t.ndim == 2 else t
+
+
 class _StubEncoder(torch.nn.Module):
     """A text encoder with no weights; ComfyUI reads its options and state dict."""
 
@@ -141,13 +169,16 @@ class GmlxCLIP(comfy.sd.CLIP):
         if p.get("prevent_empty_text") and text == "" and self.gmlx_family in _SPACE_FOR_EMPTY:
             text = " "
         out, fields = self.gmlx_client.encode(self.gmlx_model, text, images)
-        cond = out["cond"].float()
-        if cond.ndim == 2:
-            cond = cond[None]
+        if fields.get("revised_prompt"):
+            log.info("gmlx: the server encoded the upsampled prompt: %s",
+                     fields["revised_prompt"])
+        cond = _batched(out["cond"])
         if return_dict:
             d = {"cond": cond, "pooled_output": None}
             if images and fields.get("image_slots"):
                 d["image_slots"] = [int(s) for s in fields["image_slots"]]
+            if "cond_typed" in out:
+                d[TYPED] = TypedPrompt(cond, _batched(out["cond_typed"]))
             self.add_hooks_to_dict(d)
             return d
         if return_pooled:
