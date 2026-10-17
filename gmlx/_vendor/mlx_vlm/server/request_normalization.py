@@ -215,17 +215,10 @@ def _build_gen_args(
             DEFAULT_REPETITION_CONTEXT_SIZE,
         ),
         presence_penalty=getattr(request, "presence_penalty", None),
-        presence_context_size=_request_field_or_default(
-            request,
-            "presence_context_size",
-            DEFAULT_REPETITION_CONTEXT_SIZE,
-        ),
+        # gmlx: None counts the whole output.
+        presence_context_size=getattr(request, "presence_context_size", None),
         frequency_penalty=getattr(request, "frequency_penalty", None),
-        frequency_context_size=_request_field_or_default(
-            request,
-            "frequency_context_size",
-            DEFAULT_REPETITION_CONTEXT_SIZE,
-        ),
+        frequency_context_size=getattr(request, "frequency_context_size", None),
         max_denoising_steps=_request_field_or_default(
             request, "max_denoising_steps", None
         ),

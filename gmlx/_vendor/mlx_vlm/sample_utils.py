@@ -6,6 +6,9 @@ from typing import Callable, Dict, List, Optional
 
 import mlx.core as mx
 
+# gmlx: presence and frequency penalties count the generated tokens only.
+from gmlx.gen.penalties import OutputPenalty
+
 
 def make_sampler(
     temp: float = 0.0,
@@ -94,9 +97,9 @@ def make_logits_processors(
     repetition_penalty: Optional[float] = None,
     repetition_context_size: Optional[int] = 20,
     presence_penalty: Optional[float] = None,
-    presence_context_size: Optional[int] = 20,
+    presence_context_size: Optional[int] = None,  # gmlx: whole output
     frequency_penalty: Optional[float] = None,
-    frequency_context_size: Optional[int] = 20,
+    frequency_context_size: Optional[int] = None,  # gmlx: whole output
 ):
     """
     Make logits processors for use with ``generate_step``.
@@ -108,13 +111,15 @@ def make_logits_processors(
           consider for repetition penalty. Default: ``20``.
         presence_penalty (float, optional): An additive penalty to reduce
           repeating tokens.
-        presence_context_size (int, optional): The number of tokens to consider
-          for the presence penalty. Default: ``20``.
+        presence_context_size (int, optional): The number of last generated
+          tokens to consider for the presence penalty. ``None`` or ``0``
+          considers every generated token. Default: ``None``.
         frequency_penalty (float, optional): An additive penalty to reduce
           repeating tokens. The tokens are penalized proportionally to their
           frequency.
-        frequency_context_size (int, optional): The number of tokens to consider
-          for the frequency penalty. Default: ``20``.
+        frequency_context_size (int, optional): The number of last generated
+          tokens to consider for the frequency penalty. ``None`` or ``0``
+          considers every generated token. Default: ``None``.
         logit_bias (dictionary, optional): Additive logit bias.
 
     Returns:
@@ -420,59 +425,51 @@ def make_repetition_penalty(penalty: float, context_size: int = 20):
     return repetition_penalty_processor
 
 
-def make_presence_penalty(penalty: float, context_size: int = 20):
+def make_presence_penalty(penalty: float, context_size: Optional[int] = None):
     """
     Make a presence penalty processor.
 
     Corresponds to the OpenAI option with the same name. Namely, subtracts
     ``penalty`` from a logit if the token has occurred at least once in the
-    ``context_size`` previous tokens.
+    ``context_size`` last generated tokens, or in any generated token
+    when ``context_size`` is ``None`` or ``0``. Prompt tokens are never
+    penalized.
 
     Args:
         penalty (float): The presence penalty to be applied.
-        context_size (int): The number of previous tokens to use.
-            Default: ``20``.
+        context_size (int, optional): The number of last generated
+            tokens to use, or ``None`` for all of them. Default: ``None``.
 
     Returns:
         Callable[[mx.array, List[int]], mx.array]
     """
-
-    def presence_penalty_processor(tokens, logits):
-        if len(tokens) > 0:
-            tokens = tokens[-context_size:]
-            logits[:, tokens] -= penalty
-        return logits
-
-    return presence_penalty_processor
+    # gmlx: the generated tokens only, the whole output by default.
+    return OutputPenalty(penalty, context_size)
 
 
-def make_frequency_penalty(penalty: float, context_size: int = 20):
+def make_frequency_penalty(penalty: float, context_size: Optional[int] = None):
     """
     Make a frequency penalty processor.
 
     Corresponds to the OpenAI option with the same name. Namely, subtracts
     ``penalty`` from a logit for every time that the token has occurred in the
-    ``context_size`` previous tokens.
+    ``context_size`` last generated tokens, or in any generated token
+    when ``context_size`` is ``None`` or ``0``. Prompt tokens are never
+    penalized.
 
     The difference with the presence penalty is that the more often a token
     occurs the more it will be penalized.
 
     Args:
         penalty (float): The frequency penalty to be applied.
-        context_size (int): The number of previous tokens to use.
-            Default: ``20``.
+        context_size (int, optional): The number of last generated
+            tokens to use, or ``None`` for all of them. Default: ``None``.
 
     Returns:
         Callable[[mx.array, List[int]], mx.array]
     """
-
-    def frequency_penalty_processor(tokens, logits):
-        if len(tokens) > 0:
-            tokens = tokens[-context_size:]
-            logits = logits.at[:, tokens].subtract(penalty)
-        return logits
-
-    return frequency_penalty_processor
+    # gmlx: the generated tokens only, the whole output by default.
+    return OutputPenalty(penalty, context_size, frequency=True)
 
 
 def top_p_sampling(logits: mx.array, top_p: float, temperature: float) -> mx.array:

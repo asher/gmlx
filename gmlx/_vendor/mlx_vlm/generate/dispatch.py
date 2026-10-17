@@ -436,8 +436,9 @@ def parse_arguments():
     parser.add_argument(
         "--presence-context-size",
         type=int,
-        default=DEFAULT_REPETITION_CONTEXT_SIZE,
-        help="Number of recent generated tokens used for presence penalty.",
+        default=None,  # gmlx: whole output
+        help="Number of recent generated tokens used for presence penalty, "
+        "default all of them.",
     )
     parser.add_argument(
         "--frequency-penalty",
@@ -448,8 +449,9 @@ def parse_arguments():
     parser.add_argument(
         "--frequency-context-size",
         type=int,
-        default=DEFAULT_REPETITION_CONTEXT_SIZE,
-        help="Number of recent generated tokens used for frequency penalty.",
+        default=None,  # gmlx: whole output
+        help="Number of recent generated tokens used for frequency penalty, "
+        "default all of them.",
     )
     parser.add_argument("--chat", action="store_true", help="Chat in multi-turn style.")
     parser.add_argument(

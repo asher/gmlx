@@ -753,8 +753,14 @@ def _generate_over(
         suppressed_eos,
     )
 
+    from .penalties import OutputPenalty
+
     if over_logits_processors is None:
         over_logits_processors = logits_processors
+    # Phase 2's context starts at its bridge, so its penalties count afresh.
+    over_logits_processors = [
+        p.clone() if isinstance(p, OutputPenalty) else p
+        for p in over_logits_processors or ()]
     real_eos = set(getattr(tokenizer, "eos_token_ids", None) or [])
     cache = make_prompt_cache(model, max_kv_size=max_kv_size)
 

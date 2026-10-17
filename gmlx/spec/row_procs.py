@@ -7,7 +7,10 @@ A verify forward scores several positions at once, so ``SpecRowProcessors``
 runs the same chain, in the same order, at every position: position j gets
 the committed context plus the drafts ahead of it. The walk then samples
 the target from the processed logits, so every emitted token has the
-distribution plain decode gives it, whatever the drafter proposed.
+distribution plain decode gives it, whatever the drafter proposed. The
+positions run in order, as the presence and frequency penalties count each
+draft as they reach it and take refused ones back on the next round
+(``gmlx.gen.penalties``).
 
 Processors that the stock ``ThinkingAwareLogitsProcessor`` wraps stay off
 until its answer gate opens (the thinking end marker, or the answer header
