@@ -455,13 +455,13 @@ PROMPT_FILE = "system_prompt.txt"
 # that gmlx does not read, so the image keeps the size the request asks
 # for. The turn has no presence penalty. Qwen's rewriter samples under
 # vLLM at temperature 1 with thinking on and a presence penalty of 1.5
-# over the whole output; the one gmlx samples with penalises the tokens
-# of a 20 token window that starts in the chat template, so 1.5 here is
-# another penalty, and with none the captions came out clean. gmlx
-# decodes greedily, so the same prompt writes the same caption.
-# Thinking is off: on Qwen's prompt a stock Qwen3.5-9B thinks past 8192
-# tokens, and without thinking it writes the JSON in a few hundred. A
-# model that thinks anyway has its thinking block skipped.
+# over the whole output. The presence penalty in gmlx penalizes only
+# the tokens of a 20 token window that starts in the chat template, so
+# 1.5 here is another penalty, and with none the captions came out
+# clean. gmlx decodes greedily, so the same prompt writes the same
+# caption. Thinking is off: on Qwen's prompt a stock Qwen3.5-9B thinks
+# past 8192 tokens, and without thinking it writes the JSON in a few
+# hundred. A model that thinks anyway has its thinking block skipped.
 UPSAMPLE = UpsampleParts(
     prompts=None,
     sha256="",

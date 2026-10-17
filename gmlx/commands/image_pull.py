@@ -9,9 +9,10 @@ encoder. The rest downloads after a summary of files, sizes and free disk.
 The VAE comes as safetensors from its source repository, is checked
 against the recipe's sha256, packed to GGUF and checked again, and the
 source is deleted unless ``--keep-source``. For a family that ships no
-upsampler prompt, the pull also fetches the one its recipe pins, checked
-against its sha256, and the entry names it as ``upsample_prompt``; a
-fetch that fails leaves the entry without it. The entry is then added
+upsampler prompt, the pull also fetches the one its recipe pins, checks
+its sha256 before it lands, and the entry names it as
+``upsample_prompt``. A fetch that fails, or a file of another digest
+already at its path, which stays as it is, leaves the entry without it. The entry is then added
 under ``image_models:`` in the server config.
 """
 from __future__ import annotations
