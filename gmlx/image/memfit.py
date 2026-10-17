@@ -81,7 +81,7 @@ from __future__ import annotations
 import math
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 GiB = 1 << 30
@@ -252,6 +252,16 @@ FLUX2_KLEIN_9B_KV_PREFILL = StepFit(base=1.75 * GiB, k=1.5)
 FLUX2_KLEIN_9B_KV_REF_BUILD = StepFit(base=2.45 * GiB, k=1.9)
 FLUX2_KLEIN_9B_KV_REF_READ = StepFit(base=3.1 * GiB, k=2.6, read_k=1.2,
                                      read_cap=0.75 * GiB)
+
+# The FLUX.2 klein 9B KV step run whole, the reference tokens joined to its
+# rows at the step's time, as ComfyUI runs it without the Flux KV Cache
+# node. The cells are the plain steps of the node cells above, on the Q8_0
+# file, and 1024 pixels with two 1024 pixel references on the Q4_K_M file,
+# which reads 0.16 GiB less than the Q8_0 file there. The 9B's step leaves
+# 0.21 GiB above the Q8_0 cell of two references. Its slope with a base of
+# 3.1 GiB leaves 0.25 GiB above every cell, the least at that one, and the
+# second row of a guided step takes the 9B's slope.
+FLUX2_KLEIN_9B_KV_JOINED = StepFit(base=3.1 * GiB, k=2.9, row_k=0.5)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
@@ -631,9 +641,11 @@ class PeakRow:
     prices_prompt: bool = True      # a plan that knows the prompt prices
                                     # its text rows, else the family's most
     # The row of the family's step run whole, its reference tokens joined to
-    # the rows, when its own step runs in parts. It names a row and prices
-    # nothing itself.
+    # the rows, when its own step runs in parts. It names a row, and
+    # ``joined_step`` is the family's own fit of that step in place of the
+    # step of that row.
     joined: str = field(default="", repr=False)
+    joined_step: StepFit | None = field(default=None, repr=False)
     # The steps under ComfyUI's Flux KV Cache node, less the K and V of the
     # references: the first, from the formula of its rows with the
     # reference tokens joined, which keeps those K and V, and a later one,
@@ -736,7 +748,7 @@ PEAKS = {
     # block, as the 9B does, and caches the K and V of the reference
     # tokens in all 32 blocks, which every step joins to its own. The
     # encoder is the 9B's. Its step run whole, the reference tokens joined
-    # to the rows, is the 9B's step, at the 9B's shapes.
+    # to the rows, runs at the 9B's shapes, at its own fit.
     "flux2_klein_9b_kv": PeakRow(token_px=16, row_multiple=1,
                                  caption_rows=512,
                                  width=3 * 4096 + 2 * 12288 + 12288,
@@ -749,14 +761,17 @@ PEAKS = {
                                  encode_base=int(0.32 * GiB),
                                  prices_prompt=False,
                                  joined="flux2_klein_9b",
+                                 joined_step=FLUX2_KLEIN_9B_KV_JOINED,
                                  ref_build=FLUX2_KLEIN_9B_KV_REF_BUILD,
                                  ref_read=FLUX2_KLEIN_9B_KV_REF_READ),
 }
 
-def joined_family(family: str) -> str:
+def joined_row(family: str) -> PeakRow:
     """The row that prices a step of ``family`` run whole, with the tokens
     of its references joined to its rows."""
-    return PEAKS[family].joined or family
+    own = PEAKS[family]
+    row = PEAKS[own.joined or family]
+    return replace(row, step=own.joined_step) if own.joined_step else row
 
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
@@ -1038,8 +1053,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 ref_px: int = 0, prefix_rows=None,
                 prefix_shared: bool = False, prefix_other: int = 0,
                 prefix_bound: int = 0, prefix_held: int = 0,
-                held_in=None, ref_cache: str = "", cache_bytes: int = 0,
-                tile: int = TILE_PX, init_image: bool = False,
+                held_in=None, ref_cache: str = "", joined: bool = False,
+                cache_bytes: int = 0, tile: int = TILE_PX,
+                init_image: bool = False,
                 ref_sizes=(), step_refs=None, vae_price=None,
                 load_peak: int = 0, load_parts=None,
                 budget: float | None = None, overcommit: bool | None = None,
@@ -1094,7 +1110,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     references, which the prefix cache term counts for every row of
     ``prefix_rows``. "read" is a later step, at the row's ``ref_read``
     fit, which reads those K and V from ``cache_bytes`` beside the image
-    rows.
+    rows. ``joined`` prices the step of a family in parts run whole, the
+    reference tokens joined to its rows, by its ``joined_row``.
 
     ``load_peak`` is what the load of the parts holds over what stays
     resident, as ``load_transient`` gives it from their headers. With it
@@ -1107,7 +1124,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     encoder then, whose halves of them the encode runs under.
     """
     try:
-        row = PEAKS[family]
+        row = joined_row(family) if joined else PEAKS[family]
     except KeyError:
         known = ", ".join(sorted(PEAKS))
         raise ValueError(f"no memory row for image family {family!r}; "
@@ -1348,10 +1365,10 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 encoder_owned=encoder_owned, caption_tokens=caption_tokens,
                 text_tokens=text_tokens, prefix_other=prefix_other,
                 prefix_bound=prefix_bound, prefix_held=prefix_held,
-                held_in=held_in, ref_cache=ref_cache, cache_bytes=cache_bytes,
-                tile=tile, init_image=init_image, vae_price=vae_price,
-                load_peak=load_peak, load_parts=load_parts, budget=budget,
-                **kw)
+                held_in=held_in, ref_cache=ref_cache, joined=joined,
+                cache_bytes=cache_bytes, tile=tile, init_image=init_image,
+                vae_price=vae_price, load_peak=load_peak,
+                load_parts=load_parts, budget=budget, **kw)
 
         hint += _ref_hint(fits, sizes, row.prefix.min_ref_px)
     raise ImageMemoryError(

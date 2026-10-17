@@ -487,8 +487,7 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
     elif parts is not None and joined:
         # No step sheds a state then, so the bound is all the cache holds.
         held = pipe.captions.bytes
-        terms.update(family=memfit.joined_family(pipe.family.name),
-                     prefix_rows=None, prefix_shared=False,
+        terms.update(joined=True, prefix_rows=None, prefix_shared=False,
                      prefix_other=held, prefix_bound=held,
                      prefix_held=held)
     elif parts is not None:

@@ -1,7 +1,8 @@
 {
- "what": "FLUX.2 klein 9B KV Q8_0 (QuantStack Flux-2-Klein-9B-KV-Q8_0) steps on ComfyUI's time rule, on an M5 Max, one fresh process per cell, the DiT loaded alone, under the bounded cache, with random features of text_rows rows and random reference latents of refs images of ref_px pixels, unguided. Each phase is the footprint over the settled process: plain_gib a step with the reference tokens joined at its time, build_gib the first step under the Flux KV Cache node, which keeps the K and V of the references, and read_gib a later step on them, the two less cache_gib, the bytes of those K and V.",
+ "what": "FLUX.2 klein 9B KV (QuantStack Flux-2-Klein-9B-KV, the Q8_0 file and the Q4_K_M file as dit names) steps on ComfyUI's time rule, on an M5 Max, one fresh process per cell, the DiT loaded alone, under the bounded cache, with random features of text_rows rows and random reference latents of refs images of ref_px pixels, unguided. Each phase is the footprint over the settled process: plain_gib a step with the reference tokens joined at its time, build_gib the first step under the Flux KV Cache node, which keeps the K and V of the references, and read_gib a later step on them, the two less cache_gib, the bytes of those K and V.",
  "cells": [
   {
+   "dit": "Q8_0",
    "size": 256,
    "text_rows": 512,
    "refs": 1,
@@ -12,6 +13,7 @@
    "read_gib": 2.0895
   },
   {
+   "dit": "Q8_0",
    "size": 512,
    "text_rows": 512,
    "refs": 1,
@@ -22,6 +24,7 @@
    "read_gib": 2.4878
   },
   {
+   "dit": "Q8_0",
    "size": 1024,
    "text_rows": 512,
    "refs": 1,
@@ -32,6 +35,7 @@
    "read_gib": 3.7855
   },
   {
+   "dit": "Q8_0",
    "size": 1024,
    "text_rows": 512,
    "refs": 1,
@@ -42,6 +46,7 @@
    "read_gib": 3.5461
   },
   {
+   "dit": "Q8_0",
    "size": 1024,
    "text_rows": 512,
    "refs": 1,
@@ -52,6 +57,7 @@
    "read_gib": 3.7175
   },
   {
+   "dit": "Q8_0",
    "size": 1024,
    "text_rows": 512,
    "refs": 2,
@@ -62,6 +68,7 @@
    "read_gib": 3.6729
   },
   {
+   "dit": "Q8_0",
    "size": 1024,
    "text_rows": 512,
    "refs": 4,
@@ -72,6 +79,7 @@
    "read_gib": 3.9543
   },
   {
+   "dit": "Q8_0",
    "size": 1024,
    "text_rows": 512,
    "refs": 10,
@@ -82,6 +90,7 @@
    "read_gib": 6.1451
   },
   {
+   "dit": "Q8_0",
    "size": 1536,
    "text_rows": 512,
    "refs": 4,
@@ -92,6 +101,7 @@
    "read_gib": 5.2587
   },
   {
+   "dit": "Q8_0",
    "size": 2048,
    "text_rows": 512,
    "refs": 1,
@@ -102,6 +112,7 @@
    "read_gib": 6.4468
   },
   {
+   "dit": "Q8_0",
    "size": 2048,
    "text_rows": 512,
    "refs": 4,
@@ -112,6 +123,7 @@
    "read_gib": 6.6615
   },
   {
+   "dit": "Q8_0",
    "size": 2048,
    "text_rows": 512,
    "refs": 10,
@@ -120,6 +132,17 @@
    "plain_gib": 16.6382,
    "build_gib": 11.5993,
    "read_gib": 7.0739
+  },
+  {
+   "dit": "Q4_K_M",
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 2,
+   "ref_px": 1024,
+   "cache_gib": 4.0,
+   "plain_gib": 6.0863,
+   "build_gib": 2.7041,
+   "read_gib": 3.4672
   }
  ]
 }

@@ -1145,15 +1145,20 @@ FLUX2_9B_KV_NODE_CELLS = QWEN_CELLS.with_name(
 
 
 def test_the_flux2_9b_kv_steps_under_the_node_cover_every_measured_cell():
-    """The steps of the KV Q8_0 file under ComfyUI's Flux KV Cache node:
-    256 to 2048 pixels, one to ten references of 256 to 1536 pixels. The
-    K and V the first step keeps are exactly those of the reference tokens
-    in 32 blocks. That step and a later one on its K and V each leave ROOM
-    above the cells with the 9B's Q4_K_M gap added."""
+    """The steps of the KV Q8_0 file on ComfyUI's time rule: 256 to 2048
+    pixels, one to ten references of 256 to 1536 pixels, and of the Q4_K_M
+    file at 1024 pixels with two 1024 pixel references. The K and V the
+    first step under the Flux KV Cache node keeps are exactly those of the
+    reference tokens in 32 blocks. That step and a later one on its K and
+    V each leave ROOM above the cells, the Q8_0 ones with the 9B's Q4_K_M
+    gap added. A step without the node, the reference tokens joined at its
+    time, leaves ROOM above the cells of both files as they read."""
     row = memfit.PEAKS["flux2_klein_9b_kv"]
+    joined = memfit.joined_row("flux2_klein_9b_kv")
     cells = json.loads(FLUX2_9B_KV_NODE_CELLS.read_text())["cells"]
+    assert {c["dit"] for c in cells} == {"Q8_0", "Q4_K_M"}
     gap = _q4_gap()
-    rooms: dict = {"build": [], "read": []}
+    rooms: dict = {"build": [], "read": [], "plain": []}
     for c in cells:
         refs = c["refs"] * (c["ref_px"] // 16) ** 2
         assert abs(row.prefix.cache_bytes(refs, 2)
@@ -1163,9 +1168,12 @@ def test_the_flux2_9b_kv_steps_under_the_node_cover_every_measured_cell():
         priced = {"build": row.ref_build.bytes(
                       (image + refs) * row.width * 2),
                   "read": row.ref_read.bytes(
-                      step, 1, row.prefix.join_bytes(refs, 2))}
+                      step, 1, row.prefix.join_bytes(refs, 2)),
+                  "plain": joined.step.bytes(
+                      (image + refs) * joined.width * 2)}
         for k, v in priced.items():
-            rooms[k].append(v - c[f"{k}_gib"] * GiB - gap)
+            more = gap if k != "plain" and c["dit"] == "Q8_0" else 0
+            rooms[k].append(v - c[f"{k}_gib"] * GiB - more)
     for k, room in rooms.items():
         assert ROOM <= min(room) <= 0.35 * GiB, k
 
