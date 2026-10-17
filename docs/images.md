@@ -227,9 +227,11 @@ default sets the entry's default size to 512x512, and a pull with another
 `--quant` sets none. Of Krea 2, gmlx runs Turbo, and it refuses a Krea 2
 Raw GGUF by name.
 
-No FLUX.2 klein 9B DiT that `pull` takes makes an image on 16 GB: there
-it takes the Q4_K_M DiT, and `image generate` and the server refuse each
-request with the memory it needs. On 24 GB the Q4_K_M DiT makes a
+No FLUX.2 klein 9B DiT that `pull` takes makes an image on 16 GB, so
+there a pull of either 9B model downloads nothing and names 24 GB, the
+smallest Mac that runs one. With `--quant` it takes that DiT, and
+`image generate` and the server refuse each request with the memory it
+needs. On 24 GB the Q4_K_M DiT makes a
 1024x1024 image from up to four 1024x1024 references, and a Q8_0 one from
 one at most.
 

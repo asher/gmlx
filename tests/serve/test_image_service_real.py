@@ -47,9 +47,9 @@ def _file(root, name: str, near: str | None = None) -> str:
     return paths[0]
 
 
-# The class defaults that make no image: no FLUX.2 klein 9B DiT the
-# recipes pull fits the 16 GB class, as catalog.DEFAULT_QUANTS says.
-NO_IMAGE = {("flux-2-klein-9b", 16), ("flux-2-klein-base-9b", 16)}
+# The class defaults that make no image, as catalog.NO_IMAGE records them.
+NO_IMAGE = {(n, gb) for n, classes in catalog.NO_IMAGE.items()
+            for gb in classes}
 
 
 @pytest.mark.parametrize("name, gb", [

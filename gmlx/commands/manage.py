@@ -1188,7 +1188,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     img = ap.add_argument_group("image models")
     img.add_argument("--quant", default=None, metavar="QUANT",
                      help="The DiT quant, such as Q4_K_M or Q8_0 (default: "
-                          "the one for this Mac's memory).")
+                          "the one for this Mac's memory). Without it, a "
+                          "pull on a Mac where no DiT of the model makes an "
+                          "image downloads nothing.")
     img.add_argument("--encoder-quant", default=None, metavar="QUANT",
                      help="The text encoder quant (default: the one for this "
                           "Mac's memory). A matching encoder on disk is used "

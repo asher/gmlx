@@ -2,7 +2,8 @@
 
 ``RECIPES`` names each pullable image model: its DiT repository and quants,
 its text encoder (and vision tower), its VAE source and the licenses.
-``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class.
+``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class,
+and ``NO_IMAGE`` the classes where none of them makes an image.
 ``classify`` and ``scan`` find the image files on disk by their weights:
 DiTs by their fingerprint, VAEs by their family and source digest, and
 encoders and vision towers by the identity digests of their spec.
@@ -257,7 +258,8 @@ DEFAULT_QUANTS = {
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # No FLUX.2 klein 9B DiT these recipes pull makes an image in the 16 GB
     # class: a Q4_K_M step at 256 pixels needs 8.91 GiB of its 8.55. The
-    # 16 GB row names the smallest, and the memory plan of a request there
+    # 16 GB row names the smallest, which a pull takes there only when the
+    # quant is given (NO_IMAGE), and the memory plan of a request there
     # refuses it. On 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to
     # four 1024 pixel references with the encoder released, and Base runs
     # its two guided rows one at a time. A Q8_0 DiT fits there only with
@@ -274,6 +276,24 @@ DEFAULT_QUANTS = {
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-3-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+}
+
+
+# The memory classes where no DiT a recipe pulls makes an image. A pull
+# there refuses unless the quant is given, and names the least class that
+# makes one.
+NO_IMAGE = {"flux-2-klein-9b": frozenset({16}),
+            "flux-2-klein-base-9b": frozenset({16})}
+
+
+# The output matrix of each encoder file a recipe pulls that has one, from
+# its header. The load reads and drops it, so a pull counts it as the
+# memory plan of the file on disk does before the file is there. The 4B
+# encoders tie it to the embedding and have none.
+ENCODER_OUTPUT_BYTES = {
+    "Qwen3-8B-Q8_0.gguf": 661_225_472,
+    "Qwen3-VL-8B-Instruct-Q8_0.gguf": 661_225_472,
+    "Qwen3-VL-8B-Instruct-Q4_K_M.gguf": 510_504_960,
 }
 
 
@@ -314,6 +334,18 @@ def memory_class(ram_bytes: int | None) -> int:
 def default_quants(r: Recipe, ram_bytes: int | None) -> tuple[str, str]:
     """(DiT quant, encoder quant) the recipe pulls on this Mac."""
     return DEFAULT_QUANTS[r.name][memory_class(ram_bytes)]
+
+
+def makes_image(r: Recipe, cls: int) -> bool:
+    """Whether a DiT the recipe pulls makes an image in memory class
+    ``cls``."""
+    return cls not in NO_IMAGE.get(r.name, ())
+
+
+def least_class(r: Recipe) -> int:
+    """The smallest memory class in which a DiT the recipe pulls makes an
+    image."""
+    return min(c for c in MEMORY_CLASSES if makes_image(r, c))
 
 
 def default_size(r: Recipe, ram_bytes: int | None,

@@ -384,8 +384,24 @@ def test_the_fit_line_says_when_the_parts_fit_in_stages(lib, monkeypatch,
     assert manage.cmd_pull(["qwen-image", "--config", str(cfg)]) == 1
     out = capsys.readouterr().out
     assert "which are more than this Mac's 16 GB RAM" in out
-    assert ("in stages, the encoder alone and then the DiT and the VAE, they "
-            "need 9.0 GB at most, which fit this Mac's 16 GB RAM") in out
+    assert ("in stages, the encoder alone and then the DiT and the VAE, a "
+            "1024x1024 image needs 8.2 GB at its peak, which fits the 8.5 GB "
+            "working budget of this Mac's 16 GB RAM") in out
+
+
+def test_a_9b_pull_on_16_gb_refuses_and_names_24_gb(lib, monkeypatch,
+                                                   capsys):
+    """No 9B DiT the recipe pulls makes an image on 16 GB, so a bare pull
+    there downloads nothing and names the class that runs one."""
+    _, cfg = lib
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes", lambda: 16 << 30)
+    got = _downloads(monkeypatch)
+    assert manage.cmd_pull(["flux-2-klein-9b", "--config", str(cfg)]) == 1
+    assert got == []
+    err = capsys.readouterr().err
+    assert ("no FLUX.2 klein 9B DiT that gmlx pulls makes an image on a 16 "
+            "GB Mac; the smallest Mac that runs one has 24 GB. Pass --quant "
+            "to pull one anyway") in err
 
 
 def test_the_disk_check_counts_the_packed_vae_beside_its_source(
@@ -673,7 +689,7 @@ F32_PACK = "flux2-vae-F32.gguf"
 F32_SHA = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
 
 
-def _shared_pull(lib, monkeypatch, name, ram_gb=32):
+def _shared_pull(lib, monkeypatch, name, ram_gb=32, args=()):
     root, cfg = lib
     r = catalog.recipe(name)
     monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
@@ -694,7 +710,7 @@ def _shared_pull(lib, monkeypatch, name, ram_gb=32):
         packed.append((src, kw))
 
     monkeypatch.setattr(vae_pkg, "pack_vae", pack)
-    assert manage.cmd_pull([name, "--config", str(cfg)]) == 0
+    assert manage.cmd_pull([name, "--config", str(cfg), *args]) == 0
     return got, packed, _cfg(cfg).image_models.get(name)
 
 
@@ -779,9 +795,12 @@ def test_a_flux2_9b_pull_takes_unsloths_dit_qwen3_8b_and_bfls_vae(
         lib, monkeypatch, capsys, r, ram_gb, quant):
     """The 9B recipes pull unsloth's 9B DiT, Qwen3-8B and the FLUX.2
     autoencoder of the 4B repo, and print the FLUX Non-Commercial License
-    with its terms."""
+    with its terms. On 16 GB, where none makes an image, it takes the
+    quant given."""
     root, cfg = lib
-    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb)
+    given = not catalog.makes_image(r, catalog.memory_class(ram_gb << 30))
+    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb,
+                                  ("--quant", quant) if given else ())
     assert catalog.DEFAULT_QUANTS[r.name][catalog.memory_class(
         ram_gb << 30)] == (quant, "Q8_0")
     base = r.variant == "base"

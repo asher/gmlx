@@ -644,7 +644,12 @@ An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 DiT, text encoder and VAE, checks the VAE against its published sha256,
 packs it to GGUF, and adds an `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder already on disk is used
-again when its weights match. A VAE GGUF on disk packed from the recipe's
+again when its weights match. On a Mac where no DiT of the model makes an
+image, such as a 9B model on 16 GB, `pull` downloads nothing, names the
+smallest Mac that runs one, and takes a DiT only when `--quant` names it.
+When the three parts do not fit the Mac's memory together, or an image
+does not fit at all, the plan gives the peak of an image at the entry's
+size, as `image generate` plans it. A VAE GGUF on disk packed from the recipe's
 source is used again. Without one, a pack from another source serves when
 it is labeled for the family or for one that decodes with the same
 autoencoder, such as an earlier F32 pack of the FLUX.2 VAE, and the plan
@@ -670,7 +675,7 @@ names the encoder file and the vision tower that `pull` adds.
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |
 | `--json` | Off | Emit each verdict as JSON before downloading. |
-| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. |
+| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. Without it, a pull on a Mac where no DiT of the model makes an image downloads nothing. |
 | `--encoder-quant QUANT` | The one for this Mac's memory | Image models: download the text encoder at this quant. Without it, a matching encoder on disk is used at any quant. |
 | `--only PARTS` | All three | Image models: pull only these parts, a comma list of `dit`, `encoder` and `vae`. |
 | `--keep-source` | Off | Image models: keep the safetensors VAE after packing it. |

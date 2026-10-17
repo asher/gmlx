@@ -38,6 +38,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A streamed image request refused while it ran, such as one too large for
   memory, got a server error frame where the same request unstreamed got a 400.
+- The `gmlx pull` plan of an image model could say its parts fit in stages
+  when `image generate` then refused the image, as it counted file bytes alone.
 - A DFlash drafter that took speculation back up after a batch shrank within
   the width cap drafted from stale context, so almost no draft was accepted.
 - A sampled request whose structured output allowed fewer tokens than its

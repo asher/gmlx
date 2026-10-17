@@ -319,18 +319,21 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
                     else "")
             print(f"  the three parts: {_gb(total)}{load}, which {where} "
                   f"this Mac's {_gb(ram, 0)} RAM")
-        # Generate and serve load the encoder alone, encode and release
-        # it, then load the DiT and the VAE, when the parts do not fit.
-        staged = max(sum(p.size or 0 for p in plan.parts
-                         if p.role in ("encoder", "mmproj")),
-                     sum(p.size or 0 for p in plan.parts
-                         if p.role in ("dit", "vae")) + cast)
-        later = {FIT_FITS: "fit", FIT_TIGHT: "are tight on"}.get(
-            classify_fit(staged, ram) or "")
-        if fit != FIT_FITS and later and staged < total + cast:
-            print(f"  in stages, the encoder alone and then the DiT and the "
-                  f"VAE, they need {_gb(staged)} at most, which {later} "
-                  f"this Mac's {_gb(ram, 0)} RAM")
+        # An image at the entry's size, priced as generate prices it, which
+        # loads the encoder alone, encodes and releases it, then loads the
+        # DiT and the VAE, when the parts do not fit together.
+        image = _image_plan(plan, ram)
+        if image is not None:
+            size, mp = image
+            within = (f"the {_gb(int(mp.budget))} working budget of this "
+                      f"Mac's {_gb(ram, 0)} RAM")
+            if not mp.fits:
+                print(f"  a {size} image needs {_gb(mp.peak)} at its peak, "
+                      f"more than {within}, and image generate refuses it")
+            elif mp.staged_load and fit != FIT_FITS:
+                print(f"  in stages, the encoder alone and then the DiT and "
+                      f"the VAE, a {size} image needs {_gb(mp.peak)} at its "
+                      f"peak, which fits {within}")
     if plan.size:
         print(f"  the entry gets defaults.size {plan.size}, the largest image "
               f"this DiT makes on a {plan.memory_class} GB Mac")
@@ -338,6 +341,95 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
     vae = f"; VAE {r.vae_license}" if r.vae_license else ""
     print(f"  license: {r.title} {r.license}{note} ({r.license_url}); "
           f"encoder {r.encoder_license}{vae}")
+
+
+_PACK_ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
+
+
+def _image_plan(plan: Plan, ram: int):
+    """(size, memory plan) of a text to image request at the entry's size
+    on a Mac with ``ram`` bytes of RAM, as ``image generate`` plans it at
+    the family's longest prompt: from the headers of the parts on disk,
+    and from the file bytes of those a pull downloads. None when the
+    family has no defaults or this chip runs it in no dtype."""
+    from types import SimpleNamespace
+
+    from gmlx.image import memfit
+    from gmlx.image.api import _header_bytes, sampler_defaults
+    from gmlx.image.dtypes import ImageDtypeError, image_activation, vae_dtype
+    from gmlx.serve.capacity import ram_budget_bytes
+
+    from .image_preflight import (dit_transient, load_transient,
+                                  quant_cast_bytes)
+
+    r = plan.recipe
+    row = sampler_defaults(r.family, r.variant)
+    if row is None or r.family not in memfit.PEAKS:
+        return None
+    try:
+        act = image_activation(r.family)
+    except ImageDtypeError:
+        return None
+    part = {p.role: p for p in plan.parts}
+
+    def held(role: str, read):
+        """``read`` of the part's file on disk, or None for a part that
+        downloads or whose header does not read, which its bytes price."""
+        p = part.get(role)
+        if p is None or p.download or not p.path or not os.path.isfile(
+                p.path):
+            return None
+        try:
+            return read(p.path)
+        except Exception:                      # noqa: BLE001 - advisory
+            return None
+
+    got = held("dit", lambda f: (_header_bytes(f, "dit"),
+                                 dit_transient(f, act.dit)))
+    if got:
+        dit_b, cast = got
+    else:
+        dit_b = part["dit"].size or 0
+        cast = int(memfit.LOAD_ROOM * quant_cast_bytes(
+            plan.dit_quant, dit_b, r.family))
+    got = held("encoder", lambda f: (_header_bytes(f, "encoder"),
+                                     load_transient(f, None, None)))
+    if got:
+        enc_b, enc_load = got
+    else:
+        whole = part["encoder"].size or 0
+        out = min(whole, catalog.ENCODER_OUTPUT_BYTES.get(
+            part["encoder"].name, 0))
+        view = SimpleNamespace(tensors={
+            n: SimpleNamespace(nbytes=b, shape=(), codec="F32")
+            for n, b in (("weights", whole - out), ("output.weight", out))})
+        enc_b = memfit.file_bytes(view, skip=("output.weight",))
+        enc_load = memfit.load_transient(view, None, None)
+    got = held("vae", lambda f: (_header_bytes(f, "vae"),
+                                 load_transient(None, f, None)))
+    if got:
+        vae_b, vae_load = got
+    else:
+        # The pack keeps the dtype of its source, which its name gives.
+        tag = os.path.splitext(r.vae_pack)[0].rsplit("-", 1)[-1].upper()
+        packed = r.vae_bytes or part["vae"].size or 0
+        view = SimpleNamespace(shapes={
+            "vae": (packed // _PACK_ITEMSIZE.get(tag, 2),)})
+        vae_b = memfit.vae_bytes(view, vae_dtype().size)
+        vae_load = memfit.load_transient(None, view, None)
+    w, h = row.size
+    if plan.size:
+        w, h = (int(v) for v in plan.size.lower().split("x"))
+    try:
+        mp = memfit.plan_memory(
+            dit_b, enc_b, vae_b, family=r.family, height=h, width=w,
+            cfg=row.cfg, dtype=act.dit, vae_dtype=act.vae,
+            load_peak=max(enc_load, vae_load, cast),
+            load_parts=(enc_load, max(vae_load, cast)),
+            budget=ram_budget_bytes(ram), overcommit=False)
+    except memfit.ImageMemoryError as e:
+        mp = e.plan
+    return None if mp is None or mp.budget is None else (f"{w}x{h}", mp)
 
 
 def _cast(plan: Plan) -> int:
@@ -554,6 +646,18 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             return 2
     dit_q = next(h for h in r.dit_quants if h.upper() == dit_q.upper())
     enc_q = next(h for h in r.encoder_quants if h.upper() == enc_q.upper())
+    cls = catalog.memory_class(ram)
+    if not a.quant and not catalog.makes_image(r, cls):
+        least = catalog.least_class(r)
+        msg = (f"no {r.title} DiT that gmlx pulls makes an image on a {cls} "
+               f"GB Mac; the smallest Mac that runs one has {least} GB. Pass "
+               "--quant to pull one anyway")
+        if a.json:
+            print(json.dumps({"recipe": r.name, "error": msg,
+                              "memory_class": cls, "least_class": least},
+                             indent=2))
+        print(f"error: {msg}", file=sys.stderr)
+        return 1
 
     cfg_path = _config_path(a)
     cfg = None
@@ -580,7 +684,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                      roots=roots, base_dir=base_dir, nest=nest, cfg=cfg,
                      ram=ram)
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
-        catalog.default_quants(r, ram)
+        catalog.default_quants(r, ram) and catalog.makes_image(r, cls)
     plan.size = catalog.default_size(r, ram, plan.dit_quant)
     need = _need(plan)
     free = manage._disk_free(base_dir)
