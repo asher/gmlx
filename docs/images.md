@@ -208,9 +208,9 @@ With an upsampler set, each prompt is rewritten:
 The chat model writes the same caption for the same prompt. The PNG keeps
 the caption beside your prompt. A prompt with reference images runs as
 typed, and the negative prompt is never rewritten. In ComfyUI the text
-encode node does not see the references of an edit, so the pack rewrites
-an edit's instruction too: edit there with an entry that has
-`upsample: false`.
+encode node does not see the references of an edit, so the server also
+encodes the prompt as typed, and the pack samples an edit and a negative
+prompt on that encoding.
 
 To run a prompt as typed, pass `--no-upsample`, send
 `"prompt_upsampling": false` in the request, or set `upsample: false` on

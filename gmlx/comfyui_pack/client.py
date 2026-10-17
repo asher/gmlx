@@ -546,8 +546,9 @@ class StepClient:
             if s != 200:
                 self._fail(s, d, "the text encode")
             out, fields = unpack(d)
-        if fields.get("cond"):
-            self.known_tensors.add(fields["cond"])
+        for k in ("cond", "cond_typed"):
+            if fields.get(k):
+                self.known_tensors.add(fields[k])
         for h in fields.get("ref_latents") or []:
             self.known_tensors.add(h)
         return out, fields
