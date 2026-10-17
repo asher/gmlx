@@ -224,6 +224,8 @@ other layer adds its delta on stock ops.
 | `GMLX_PREFILL_RING_SLOTS` | Layer slots in the prefill ring. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the arena. The default is `2`. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call, in tokens, that the arena serves by reading only its routed experts. The default is `64`. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call, in tokens, that the arena splits when its routed set exceeds the arena. The default is `256`, and `0` disables splitting. |
+| `GMLX_ARENA_SPLIT_MAX_SHARE` | Largest share of a layer's experts that a split call of 32 tokens or more may use. Above it, the prefill ring serves the call. The default is `0.5`. |
+| `GMLX_ARENA_ROW_KERNELS=0` | Let multi-token arena calls pick expert kernels by width. The output then depends on the arena size. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights and the decode arena into the Metal residency set. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models with the decode feeder. |

@@ -38,13 +38,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MTP on Qwen3.8-Flash-Next refused to load on a Mac whose GPU buffer limit
   is smaller than the model's per-layer embedding table.
 - gpt-oss gave wrong tokens on a Mac it does not fit, and with
-  `--stream-experts` or a CPU placement.
+  `--stream-experts` or a CPU placement. The batch tests now cover both
+  `GMLX_NATIVE_FP` layouts, `wire` and `packed`.
 - `gmlx list` names the family of an image entry whose `family` is spelled
   `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
 - `gmlx rm` keeps a file that another model names through a symlink, where it
   deleted the file as unused.
-  `--stream-experts` or a CPU placement. The batch tests now cover both
-  `GMLX_NATIVE_FP` layouts, `wire` and `packed`.
+- With `--stream-experts`, a prompt that uses most of a layer's experts
+  prefills faster, and the output no longer depends on the arena size.
+  `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
 
 ## [0.5.0] - 2026-10-12
 

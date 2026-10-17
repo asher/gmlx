@@ -81,6 +81,24 @@ def _glu_block_call(glu, x, indices):
     return SwitchGLU.__call__(glu, x, indices)
 
 
+def stock_glu_calls() -> tuple:
+    """The SwitchGLU forwards that ``glu_unsorted_call`` reproduces."""
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+    return (SwitchGLU.__call__,)
+
+
+def glu_unsorted_call(glu, x, indices):
+    """The mlx-lm ``SwitchGLU`` body without the sort. Each row takes its
+    own gathered matvec at every width, so a row's result does not depend
+    on the other rows or on the expert count of the stack."""
+    x = mx.expand_dims(x, (-2, -3))
+    x_up = glu.up_proj(x, indices)
+    x_gate = glu.gate_proj(x, indices)
+    y = glu.down_proj(glu.activation(x_up, x_gate), indices)
+    return y.squeeze(-2)
+
+
 class NativeFPSwitchLinear(nn.Module):
     """MoE expert linear backed by an MLX native-fp codec (mxfp4 / nvfp4).
 
@@ -187,6 +205,28 @@ def _kq_fused_device_ok(*mods) -> bool:
         if getattr(m, "_kq_cpu_only", False):
             return False
     return mx.default_device() != mx.cpu
+
+
+# mlx-kquant picks the GLU gather kernel by call size, and each kernel
+# rounds differently. Under 2**16 output rows (N * k * t) at K >= 512 it
+# splits K over 16 lanes instead of 8. For q6_k and q8_0 the dedupe kernels
+# of t = 2..8 use the generic code, not the tuned code.
+_KQ_GLU_WIDE_ROWS = 1 << 16
+_KQ_GLU_WIDE_MIN_K = 512
+_KQ_DEDUP_MAX_T = 8
+_KQ_TUNED_CODECS = ("q6_k", "q8_0")
+
+
+def _kq_row_floor(glu, k: int, d_in: int) -> int:
+    """Fewest rows at which the fused GLU gather of ``glu`` runs the same
+    kernel as at every larger width."""
+    floor = 2
+    n = glu.gate_proj.weight.shape[1]
+    if d_in >= _KQ_GLU_WIDE_MIN_K:
+        floor = max(floor, -(-_KQ_GLU_WIDE_ROWS // (n * k)))
+    if glu.gate_proj.kquant_type in _KQ_TUNED_CODECS:
+        floor = max(floor, _KQ_DEDUP_MAX_T + 1)
+    return floor
 
 
 # Fused-MoE decode: capability probe
@@ -633,7 +673,11 @@ def _make_fused_kquant(base_cls, caps):
         the shared expert rides the gathers as one extra slot with mix
         weight 1. Contract with the stamping caller: a mixed return
         consumed the shared expert; the stamped fallback returns unmixed
-        (skipping the epilogue below) and the caller mixes + adds it."""
+        (skipping the epilogue below) and the caller mixes + adds it.
+
+        ``_kq_arena_rows`` (set by the streaming wrapper on multi-token
+        arena calls) selects the per-row kernels at every width, see
+        ``_fused_rows``."""
 
         _kq_mix_scores = _has_mix_ns
 
@@ -642,7 +686,8 @@ def _make_fused_kquant(base_cls, caps):
             and any subclass that owns its own forward (the LoRA wrap)."""
             return (
                 _FUSED_MOE_ENABLED
-                and indices.size < 64
+                and (indices.size < 64
+                     or getattr(self, "_kq_arena_rows", False))
                 and x.dtype in (mx.bfloat16, mx.float16)
                 and not self.training
                 and _kq_fused_device_ok(self)
@@ -746,14 +791,39 @@ def _make_fused_kquant(base_cls, caps):
                 h, down.weight, down.kquant_type, idx, **dkw, **lkw)
             return y.reshape(t, k, y.shape[-1])
 
+        def _fused_rows(self, x, idx):
+            """Unmixed ``(t, k, N)`` through kernels that give each row
+            the same result at every call width. The GLU gather changes
+            its kernel below a row count, so short calls get copies of
+            row 0 up to that count. The down gather has one kernel at
+            every width. The score-mixed down gather does not, so the mix
+            stays outside."""
+            t, k = idx.shape
+            xf = x.reshape(t, x.shape[-1])
+            pad = _kq_row_floor(self, k, xf.shape[-1]) - t
+            if pad > 0:
+                xf = mx.concatenate(
+                    [xf, mx.broadcast_to(xf[:1], (pad, xf.shape[-1]))])
+                idx = mx.concatenate(
+                    [idx, mx.broadcast_to(idx[:1], (pad, k))])
+            y = self._fused_down(self._fused_h(xf, idx), idx)
+            return y[:t] if pad > 0 else y
+
         def __call__(self, x, indices, scores=None):
+            rows = getattr(self, "_kq_arena_rows", False)
             if self._fused_ok(x, indices):
                 k = indices.shape[-1]
                 idx = indices.reshape(indices.size // k, k)
-                y = self._fused_down(self._fused_h(x, idx, scores), idx, scores)
+                if rows:
+                    y = self._fused_rows(x, idx)
+                else:
+                    y = self._fused_down(
+                        self._fused_h(x, idx, scores), idx, scores)
                 if y.ndim == 2:      # mixed in the kernel: (t, N)
                     return y.reshape(*indices.shape[:-1], y.shape[-1])
                 y = y.reshape(*indices.shape, y.shape[-1])
+            elif rows:
+                y = glu_unsorted_call(self, x, indices)
             else:
                 y = self._kq_prefill_gate_up(x, indices, scores)
                 if y is None:

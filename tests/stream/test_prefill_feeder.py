@@ -241,6 +241,28 @@ def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
     assert feeder._error is None
 
 
+def test_staged_ahead_and_ring_live(monkeypatch, tmp_path):
+    """The arena split rule reads these. A whole-layer call starts the
+    next layer's read, which counts as staged ahead in its own pass only.
+    A partial call starts no read ahead."""
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
+    assert feeder.ring_live()
+    assert not feeder.staged_ahead(1)
+    with feeder.prefill_partial_call(modules[0][0], 0, [1]):
+        pass
+    assert not feeder.staged_ahead(1)
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    assert feeder.staged_ahead(1)
+    assert not feeder.staged_ahead(0) and not feeder.staged_ahead(2)
+    feeder.release_slots()
+    assert not feeder.ring_live() and not feeder.staged_ahead(1)
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    assert feeder.ring_live() and feeder.staged_ahead(1)
+    assert feeder._error is None
+
+
 def test_ring_slots_are_wired_for_the_pass(monkeypatch, tmp_path):
     """The ring wires at allocation, like the arena, and unwires before
     its buffers drop."""

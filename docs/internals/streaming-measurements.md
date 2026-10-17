@@ -158,7 +158,9 @@ token already finds them. After a prompt too short for the ring, the arena
 starts empty and fills within a few dozen tokens. When a multi-token call,
 such as the prefill of the next chat turn, routes to more experts than the
 arena holds, the feeder splits the call and still serves it from the
-arena.
+arena. A call that routes to more than half of a layer's experts reads
+about the whole layer, so it takes the prefill ring when the ring can
+serve it.
 
 `--stream-fast-disk auto` tests the drive at load. On a drive of about
 5 GB/s or faster, the decode feeder reads predicted experts at normal disk
