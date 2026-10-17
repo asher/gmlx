@@ -17,8 +17,9 @@ the last. The time embedding without its inner bf16 rounding, the
 schedule of another image size, and Base with the prompt as its
 unconditional row each fail it. The bf16 run at 1024 must stay finite,
 and its readings print as a share of the 512 gate of each step, as the
-manifest records them. The wrong runs are of the 4B files, and the 9B
-cases declare a Mac of 24 GB.
+manifest records them. The wrong runs at 512 are of the 4B files, those
+of the exact run at 1024 of the 4B and the 9B files, and the 9B cases
+declare a Mac of 24 GB.
 
 Skipped unless the manifests of scripts/image_oracle/check6_flux2_klein.py
 are committed, GMLX_IMAGE_FIXTURES holds their arrays and

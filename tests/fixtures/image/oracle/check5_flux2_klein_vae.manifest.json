@@ -8,8 +8,6 @@
   "check5_flux3_klein_vae.py",
   "--vae",
   "diffusion_pytorch_model.safetensors",
-  "--family",
-  "flux2_klein",
   "--sizes",
   "512",
   "1024"
@@ -201,7 +199,8 @@
   }
  },
  "notes": [
-  "The file holds bfloat16 weights, which the fp32 and float64 runs read upcast. The bf16 VAE is a bfloat16 copy with its BatchNorm statistics kept float32."
+  "The file holds bfloat16 weights, which the fp32 and float64 runs read upcast. The bf16 VAE is a bfloat16 copy with its BatchNorm statistics kept float32.",
+  "The run took no --family and recorded flux3_klein, the script's one label then. The family was corrected to flux2_klein afterwards, without a new run: the arrays are those of the FLUX.2 klein 4B VAE."
  ],
  "created": "2026-10-16T19:02:48Z",
  "npz": "check5_flux2_klein_vae.npz",

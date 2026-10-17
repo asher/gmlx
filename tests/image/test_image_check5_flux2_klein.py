@@ -196,10 +196,12 @@ def test_a_bare_pack_takes_the_label_the_help_and_the_cli_page_name(
 
 
 def test_the_manifest_names_the_family_it_was_written_for():
-    """FLUX.3's oracle script writes FLUX.2's fixture with --family."""
+    """FLUX.3's oracle script wrote FLUX.2's fixture before it took
+    --family, and the manifest notes the family corrected after the run."""
     m = committed(NAME)
     assert m["family"] == FAMILY
-    assert m["argv"][m["argv"].index("--family") + 1] == FAMILY
+    assert "--family" not in m["argv"]
+    assert any("corrected to flux2_klein" in n for n in m["notes"])
     assert committed(F32_NAME)["family"] == OTHER
 
 
