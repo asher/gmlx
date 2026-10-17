@@ -197,18 +197,20 @@ def _loose_field(answer: str, name: str) -> str | None:
 def _field_values(answer: str, name: str):
     """The values ``name`` may have in ``answer``, best first: its string
     in each JSON object, last object first, then the string a loose read
-    finds, then the answer itself."""
+    finds, then, for an answer with no object in it, the answer itself."""
     for obj in _objects(answer):
         yield obj.get(name)
     yield _loose_field(answer, name)
-    yield answer
+    if "{" not in answer:
+        yield answer
 
 
 def json_field(name: str):
     """A parser that takes the string ``name`` from the last JSON object
     after the thinking block that has one. An object that strict JSON
-    does not read gives it by a loose read, and a reply with neither is
-    the caption as written."""
+    does not read gives it by a loose read. A reply with no object in it
+    is the caption as written, and one with an object but no string
+    ``name`` in it has no caption."""
     def parse(reply: str) -> str | None:
         answer = after_thinking(reply)
         if answer is None:

@@ -126,6 +126,21 @@ def test_qwen_image_takes_rewritten_prompt_from_the_json_after_thinking():
         system=rewrite) == "A red bicycle."
 
 
+@pytest.mark.parametrize("answer", [
+    '{"rewritten_prompt": "A red bicycle leans against a wall, and a red',
+    '{"rewritten_prompt": "", "wh_ratio": "3:2"}',
+    '{"rewritten_prompt": null}',
+    '{"prompt": "A red bicycle."}',
+    "{'rewritten_prompt': 'A red bicycle.'}"])
+def test_a_qwen_image_object_without_the_field_is_an_error(answer):
+    # A reply cut off in its JSON never reaches the encoder as raw JSON.
+    fam = get_family("qwen_image21")
+    with pytest.raises(upsample.UpsampleError,
+                       match="a reply with no caption in it"):
+        upsample.upsample(fam, "a red bicycle", lambda req:
+                          f"</think>\n{answer}", system="own prompt")
+
+
 def test_qwen_image_reads_a_rewritten_prompt_with_unescaped_quotes():
     fam = get_family("qwen_image21")
     reply = ('</think>\n```json\n{"rewritten_prompt": "a sign that reads '
@@ -146,6 +161,16 @@ def test_a_thinking_block_in_another_spelling_is_skipped():
     assert upsample.upsample(fam, "x", lambda req: reply) == CAPTION
     with pytest.raises(upsample.UpsampleError, match="no caption within"):
         upsample.upsample(fam, "x", lambda req: "<mm:think>\nThe user")
+
+
+def test_z_image_takes_revised_prompt_or_the_reply_as_written():
+    fam = get_family("z_image")
+    block = '```json\n{"revised_prompt": "A red bicycle."}\n```'
+    assert upsample.upsample(fam, "x", lambda req: block) == "A red bicycle."
+    # As the Space reads it, a reply whose braces hold no revised_prompt
+    # is the caption.
+    sign = "A neon sign that reads {OPEN} above a red bicycle."
+    assert upsample.upsample(fam, "x", lambda req: sign) == sign
 
 
 def test_an_empty_reply_is_an_error_not_the_typed_prompt():
