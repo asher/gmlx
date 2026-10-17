@@ -46,6 +46,14 @@ other sizes the fixture holds the inputs and the velocities.
       --reference-commit <sha> --dit flux-2-klein-4b-Q4_K_M.gguf \\
       --sizes 512 --refs 1
 
+With --kv the file is FLUX.2 klein 9B KV. A size without references is
+the step above. With --refs N a fixture holds the reference's cached
+pass, denoise_cached: forward_kv_extract with the references at the time
+of --step, then forward_kv_cached on other seeded latents at the time of
+the next step, each velocity in fp32 and bf16 with the gap between them,
+and, for a size in --rows, the reference K and V of the blocks of
+KV_BLOCKS in float32 with the gap of each.
+
 --self-test writes a tiny model of the reference class on random weights,
 so the gmlx side can check its conventions on the CPU.
 """
@@ -84,6 +92,14 @@ TINY_CASE = {"latent": (4, 6), "refs": ((2, 3), (2, 2)), "text": 10,
              "sigma": 0.73}
 # The time of the cached step of the tiny model's cached pass.
 KV_SIGMA2 = 0.41
+# The registry family of a KV file and the tag its fixture names carry.
+KV_FAMILY = ("flux2_klein_9b_kv", "_9b_kv")
+# The blocks whose reference K and V a KV fixture holds, in the order of
+# the blocks: the first and the last double block and single block of 9B.
+KV_BLOCKS = (0, 7, 8, 31)
+KV_RULE = ("tolerance = 2 x the oracle's own bf16 against fp32 relative L2 "
+           "of each velocity of the cached pass and of each block's "
+           "reference K and V")
 
 
 def reference(path: Path):
@@ -528,15 +544,80 @@ def kv_call(torch, sampling, model, lat, feats, refs, sigma, mode,
     return oracle.to_numpy(out[0]).T.reshape(1, c, h, w), cache, ins
 
 
-def kv_cache_arrays(cache: dict) -> dict:
+def kv_cache_arrays(cache: dict, keep=None) -> dict:
     """The cache's K and V by block, in the order of the blocks:
-    ``kv.<i>.k`` and ``kv.<i>.v``, (1, heads, R, head dim)."""
+    ``kv.<i>.k`` and ``kv.<i>.v``, (1, heads, R, head dim), of the blocks
+    in ``keep``, or of every block."""
     blocks = [*cache["double_blocks"], *cache["single_blocks"]]
     out = {}
     for i, b in enumerate(blocks):
+        if keep is not None and i not in keep:
+            continue
         out[f"kv.{i}.k"] = oracle.to_numpy(b["k_ref"])
         out[f"kv.{i}.v"] = oracle.to_numpy(b["v_ref"])
     return out
+
+
+def kv_case(torch, sampling, models: dict, lat, lat2, feats, refs, sigma,
+            sigma2, rows: bool, name: str, inputs: dict, files: dict,
+            family: str) -> None:
+    """The reference's cached pass in fp32 and bf16 written as fixture
+    ``name`` of ``family``: the extract step at ``sigma`` on ``lat`` with
+    the references, then a cached step at ``sigma2`` on ``lat2``. With
+    ``rows`` the fixture holds the reference K and V of KV_BLOCKS."""
+    fx = fixtures.FixtureWriter(name, check=3, family=family, script=SCRIPT)
+    fx.inputs.update(inputs)
+    for role, path in files.items():
+        fx.add_file(role, path)
+    fx.add("latents", lat)
+    fx.add("latents2", lat2)
+    fx.add("features", feats)
+    for i, r in enumerate(refs):
+        fx.add(f"refs.{i}", r)
+    fx.add("sigma", np.float32(sigma))
+    fx.add("sigma2", np.float32(sigma2))
+    kv, times = {}, {}
+    for mode in ("fp32", "bf16"):
+        t0 = time.perf_counter()
+        oracle.emulate_bf16_matmul(mode == "bf16")
+        try:
+            v0, cache, ins0 = kv_call(torch, sampling, models[mode], lat,
+                                      feats, refs, sigma, mode)
+            v1, _, ins1 = kv_call(torch, sampling, models[mode], lat2,
+                                  feats, refs, sigma2, mode, cache)
+        finally:
+            oracle.emulate_bf16_matmul(False)
+        times[f"{mode}_s"] = round(time.perf_counter() - t0, 1)
+        tag = "" if mode == "fp32" else "_bf16"
+        fx.add(f"velocity_extract{tag}", v0)
+        fx.add(f"velocity_cached{tag}", v1)
+        if rows:
+            kv[mode] = kv_cache_arrays(cache, KV_BLOCKS)
+        if mode == "fp32":
+            fx.add("in.time_in", oracle.to_numpy(ins0["time_in"]))
+            fx.add("in.time_in2", oracle.to_numpy(ins1["time_in"]))
+        del cache
+    gaps = {}
+    for k, a in kv.get("fp32", {}).items():
+        fx.add(k, a)
+        gaps[k] = fixtures.compare(kv["bf16"][k], a)
+        fx.tolerances[k] = {"rel_l2": 2 * gaps[k]["rel_l2"]}
+    if gaps:
+        fx.results["kv_bf16_vs_fp32"] = gaps
+    for step in ("extract", "cached"):
+        gap = fixtures.compare(fx.arrays[f"velocity_{step}_bf16"],
+                               fx.arrays[f"velocity_{step}"])
+        fx.results[f"velocity_{step}_bf16_vs_fp32"] = gap
+        fx.tolerances[f"velocity_{step}"] = {
+            "rel_l2": 2 * gap["rel_l2"],
+            "cosine_min": 1 - 4 * (1 - gap["cosine"])}
+    fx.results["times"] = times
+    fx.tolerances["rule"] = KV_RULE
+    path = fx.write()
+    print(f"[check3] {name}: velocity bf16 vs fp32 rel L2 extract "
+          f"{fx.results['velocity_extract_bf16_vs_fp32']['rel_l2']:.3e}, "
+          f"cached {fx.results['velocity_cached_bf16_vs_fp32']['rel_l2']:.3e}"
+          f", {times}, wrote {path}", flush=True)
 
 
 def kv_self_test(torch, fm, sampling, commit: str, a) -> int:
@@ -646,8 +727,9 @@ def main(argv=None) -> int:
                     "width when unset")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--kv", action="store_true",
-                    help="the reference's cached pass, denoise_cached, of "
-                    "FLUX.2 klein 9B KV; with --self-test, that of the "
+                    help="--dit is FLUX.2 klein 9B KV, whose cases with "
+                    "references run the reference's cached pass, "
+                    "denoise_cached; with --self-test, that pass of the "
                     "tiny model alone")
     a = ap.parse_args(argv)
     torch = oracle.setup()
@@ -665,6 +747,10 @@ def main(argv=None) -> int:
     models = {m: build(torch, fm, state, m) for m in ("fp32", "bf16")}
     params = params_of(fm, state)
     family, size_tag = family_of(params)
+    if a.kv:
+        if size_tag != "_9b":
+            raise SystemExit("--kv takes a FLUX.2 klein 9B KV file")
+        family, size_tag = KV_FAMILY
     base_name = a.name or f"check3_flux2_klein{size_tag}"
     print(f"[check3] loaded {a.dit.name} in "
           f"{time.perf_counter() - t0:.1f}s, codecs {census}, width "
@@ -696,6 +782,22 @@ def main(argv=None) -> int:
                               "both modes",
                   "reference_commit": commit, "gguf_codecs": census}
         tag = f"_r{a.refs}" if a.refs else ""
+        if a.kv and refs:
+            # The cached step reads other latents at the next step's time.
+            sigma2 = float(schedule[a.step + 1])
+            lat2 = seeded(torch, srng, (1, c, n, n))
+            inputs.update(
+                sigma2=sigma2, step2=a.step + 1,
+                latents2="seeded normal after the references, rounded to "
+                         "bf16",
+                kv_blocks=list(KV_BLOCKS) if size in a.rows else [],
+                kv_pass="denoise_cached: forward_kv_extract at sigma on "
+                        "latents with the references, then "
+                        "forward_kv_cached at sigma2 on latents2")
+            kv_case(torch, sampling, models, lat, lat2, feats, refs, sigma,
+                    sigma2, size in a.rows, f"{base_name}{tag}_{size}",
+                    inputs, {"dit": a.dit}, family)
+            continue
         run_case(torch, sampling, models, lat, feats, refs, sigma,
                  size in a.rows, f"{base_name}{tag}_{size}", inputs,
                  {"dit": a.dit}, [], family=family)
