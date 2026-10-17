@@ -2,13 +2,14 @@
 caption a family's DiT was trained on, before ``encode_text`` reads it.
 
 ``chat_request`` builds the chat turn from the family's ``UpsampleParts``:
-its system prompt, the typed prompt as the user turn, and its sampling.
-``upsample`` sends it through ``chat``, the generation a surface supplies,
-and returns the caption. The rewrite runs outside the pipeline, so the
-encoder, its conditioning cache and the DiT see a prompt as they always
-do. It never runs on the image encoder, which has no output head. The
-negative prompt is not rewritten, and a prompt with reference images
-runs as typed.
+its system prompt, or the one in a file the user gives, the typed prompt
+as the user turn, and its sampling. ``upsample`` sends it through
+``chat``, the generation a surface supplies, and returns the caption the
+family's parser takes from the reply. The rewrite runs outside the
+pipeline, so the encoder, its conditioning cache and the DiT see a prompt
+as they always do. It never runs on the image encoder, which has no
+output head. The negative prompt is not rewritten, and a prompt with
+reference images runs as typed.
 """
 
 from __future__ import annotations
@@ -16,13 +17,15 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
+import re
 from dataclasses import dataclass
 from importlib import resources
 
 
 class UpsampleError(RuntimeError):
-    """The upsampler gave no caption, or its prompt file is not the one
-    gmlx ships."""
+    """The upsampler gave no caption, or a system prompt is missing or is
+    not the one gmlx ships."""
 
 
 @dataclass(frozen=True)
@@ -46,47 +49,152 @@ class ChatRequest:
 
 
 @functools.lru_cache(maxsize=None)
-def _prompt_file(family_name: str, name: str, sha256: str) -> dict:
-    data = (resources.files(f"gmlx.image.families.{family_name}") / name
-            ).read_bytes()
+def _shipped(package: str, name: str, sha256: str, key: str | None) -> str:
+    data = (resources.files(package) / name).read_bytes()
     got = hashlib.sha256(data).hexdigest()
     if got != sha256:
-        raise UpsampleError(f"{name} of {family_name} has sha256 {got}, not "
+        raise UpsampleError(f"{name} of {package} has sha256 {got}, not "
                             f"the {sha256} gmlx ships; reinstall gmlx")
-    return json.loads(data)
+    return json.loads(data)[key] if key is not None else data.decode("utf-8")
 
 
-def system_prompt(family) -> str:
-    """The system prompt of ``family`` for a prompt without references."""
+def read_prompt_file(path: str, family=None) -> str:
+    """The system prompt in the text file at ``path``, without the blank
+    lines and spaces around it. For a family that ships none, the error
+    a missing file raises says where to get one."""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            text = f.read().strip()
+    except FileNotFoundError:
+        needs = getattr(getattr(family, "upsample", None), "needs", "")
+        raise UpsampleError(f"upsample prompt {path}: no such file"
+                            + (f". {needs}" if needs else "")) from None
+    except (OSError, UnicodeDecodeError) as e:
+        raise UpsampleError(f"upsample prompt {path}: {e}") from None
+    if not text:
+        raise UpsampleError(f"upsample prompt {path} is empty")
+    return text
+
+
+def system_prompt(family, path: str | None = None) -> str:
+    """The system prompt of ``family`` for a prompt without references:
+    the one in the file at ``path``, else the one gmlx ships. A family
+    that ships none needs ``path``."""
     parts = family.upsample
-    return _prompt_file(family.name, parts.prompts, parts.sha256)[parts.key]
+    if path:
+        return read_prompt_file(path, family)
+    if parts.prompts is None:
+        raise UpsampleError(parts.needs)
+    return _shipped(parts.package, parts.prompts, parts.sha256, parts.key)
 
 
-def chat_request(family, prompt: str) -> ChatRequest:
-    """The chat turn that rewrites ``prompt`` for ``family``."""
+def chat_request(family, prompt: str, system: str | None = None
+                 ) -> ChatRequest:
+    """The chat turn that rewrites ``prompt`` for ``family`` under
+    ``system``, by default the system prompt gmlx ships."""
     parts = family.upsample
     if parts is None:
         raise ValueError(f"{family.title} has no prompt upsampling")
+    if system is None:
+        system = system_prompt(family)
+    user = prompt
+    if parts.slot and parts.slot in system:
+        # The typed prompt goes in the system prompt, and the user turn is
+        # the single space its source sends.
+        system, user = system.replace(parts.slot, prompt), " "
     return ChatRequest(
-        messages=({"role": "system", "content": system_prompt(family)},
-                  {"role": "user", "content": prompt}),
+        messages=({"role": "system", "content": system},
+                  {"role": "user", "content": user}),
         max_tokens=parts.max_tokens, temperature=parts.temperature,
         presence_penalty=parts.presence_penalty, thinking=parts.thinking)
 
 
-def upsample(family, prompt: str, chat, *, name: str = "the upsampler") -> str:
-    """The caption ``chat(request)`` writes for ``prompt``, stripped.
-    ``name`` names the chat model in the error an empty reply raises."""
-    caption = (chat(chat_request(family, prompt)) or "").strip()
+def after_thinking(reply: str) -> str | None:
+    """The answer of ``reply`` after its thinking block, or None when the
+    block never closes, as when the reply ran out of tokens in it. A
+    reply without one is all answer."""
+    if "</think>" in reply:
+        return reply.rsplit("</think>", 1)[1]
+    if "<think>" in reply:
+        return None
+    return reply
+
+
+def plain(reply: str) -> str | None:
+    """The caption of a reply that is the caption."""
+    answer = after_thinking(reply)
+    return None if answer is None else answer.strip()
+
+
+def paragraph(reply: str) -> str | None:
+    """The one paragraph a reply writes after its thinking block. A line
+    before or after it, such as a heading, is shorter than the paragraph,
+    so the longest one is taken."""
+    answer = after_thinking(reply)
+    if answer is None:
+        return None
+    paras = [" ".join(p.split()) for p in re.split(r"\n\s*\n", answer)]
+    paras = [p for p in paras if p]
+    return max(paras, key=len) if paras else None
+
+
+def _objects(text: str) -> list:
+    """Each JSON object in ``text``, last first."""
+    dec = json.JSONDecoder()
+    found = []
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _end = dec.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+    return found[::-1]
+
+
+def json_field(name: str):
+    """A parser that takes the string ``name`` from the last JSON object
+    after the thinking block that has one."""
+    def parse(reply: str) -> str | None:
+        answer = after_thinking(reply)
+        if answer is None:
+            return None
+        for obj in _objects(answer):
+            value = obj.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+    return parse
+
+
+def upsample(family, prompt: str, chat, *, name: str = "the upsampler",
+             system: str | None = None) -> str:
+    """The caption ``chat(request)`` writes for ``prompt``, as the
+    family's parser takes it from the reply. ``name`` names the chat
+    model in the error a reply without a caption raises."""
+    parts = family.upsample
+    reply = chat(chat_request(family, prompt, system)) or ""
+    caption = (parts.parse or plain)(reply)
     if not caption:
-        raise UpsampleError(f"{name} wrote an empty caption for this prompt; "
-                            "run it without prompt upsampling, or set "
-                            "another upsampler")
+        if not reply.strip():
+            what = "an empty caption"
+        elif after_thinking(reply) is None:
+            what = f"no caption within {parts.max_tokens} tokens"
+        else:
+            what = "a reply with no caption in it"
+        raise UpsampleError(f"{name} wrote {what} for this prompt; run it "
+                            "without prompt upsampling, or set another "
+                            "upsampler")
     return caption
 
 
-def cache_key(upsampler, family, prompt: str) -> tuple:
+def cache_key(upsampler, family, prompt: str, system: str | None = None
+              ) -> tuple:
     """What a caption depends on: the upsampler, as a hashable that tells
-    one chat model from another, the system prompt and the typed prompt.
-    Decoding is greedy, so the seed is not in it."""
-    return (upsampler, family.upsample.sha256, family.upsample.key, prompt)
+    one chat model from another, the family's turn and parser, the
+    system prompt by its sha256, and the typed prompt. Decoding is
+    greedy, so the seed is not in it."""
+    if system is None:
+        system = system_prompt(family)
+    digest = hashlib.sha256(system.encode("utf-8")).hexdigest()
+    return (upsampler, family.upsample, digest, prompt)

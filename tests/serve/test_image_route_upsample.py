@@ -43,7 +43,7 @@ def server(monkeypatch):
         id="flux3", path="/flux3.gguf", family=None, variant=None,
         defaults={}, adapters=(), vae="/vae.gguf", encoder="/enc.gguf",
         encoder_model=None, encoder_mmproj=None, encoder_release="auto",
-        upsampler="writer", upsample=True)
+        upsampler="writer", upsample=True, upsample_prompt=None)
     monkeypatch.setattr(bridge_vlm, "resolve_image_request",
                         lambda field: (spec.path, spec))
     writer = SimpleNamespace(load_signature=lambda: ("/writer.gguf",),
@@ -141,6 +141,7 @@ def server(monkeypatch):
         pipe=pipe, spec=spec,
         plan=SimpleNamespace(staged=True, keep_encoder=False, cfg=4.0))
     rec.served = served
+    rec.spec = spec
     return rec
 
 
@@ -188,6 +189,27 @@ def test_a_rerun_with_a_new_seed_writes_no_caption_and_loads_no_encoder(
     assert server.seeds == [1, 2]
 
 
+def test_the_entrys_prompt_file_replaces_the_shipped_one_and_its_captions(
+        server, tmp_path):
+    """Captions are keyed by the file's content: an edit to it writes a
+    new caption, and the old prompt's caption is not reused."""
+    own = tmp_path / "rewrite.txt"
+    own.write_text("Describe the scene in one long sentence.\n")
+    server.spec.upsample_prompt = str(own)
+    _request(server, {"prompt": "a red bicycle", "seed": 1})
+    _request(server, {"prompt": "a red bicycle", "seed": 2})
+    own.write_text("Describe the scene in two long sentences.\n")
+    _request(server, {"prompt": "a red bicycle", "seed": 3})
+    assert server.events.count("chat") == 2
+    assert [m[0]["content"] for m in server.messages] == [
+        "Describe the scene in one long sentence.",
+        "Describe the scene in two long sentences."]
+    server.spec.upsample_prompt = None
+    _request(server, {"prompt": "a red bicycle", "seed": 4})
+    assert server.messages[-1][0]["content"] == system_prompt(
+        get_family("flux3_klein"))
+
+
 def test_an_upsampler_with_too_small_a_context_is_a_server_error(server):
     """The typed prompt is not the cause, so the answer is no 400 on it."""
     server.too_long = True
@@ -199,8 +221,10 @@ def test_an_upsampler_with_too_small_a_context_is_a_server_error(server):
 
 
 def test_an_edit_ignores_prompt_upsampling_on_every_family():
+    import dataclasses
+
     spec = SimpleNamespace(id="qwen", upsampler=None, upsample=True)
-    fam = get_family("qwen_image21")
+    fam = dataclasses.replace(get_family("qwen_image21"), upsample=None)
     assert image_upsample.upsampler_for(spec, fam, True, True) is None
     with pytest.raises(svc.ImageRequestError, match="takes no prompt"):
         image_upsample.upsampler_for(spec, fam, True, False)

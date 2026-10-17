@@ -125,24 +125,35 @@ class UpsampleParts:
     """How a chat model rewrites a family's typed prompt into the caption
     its DiT was trained on, before the encoder reads it.
 
-    ``prompts`` is a JSON file in the family's package, shipped as its
-    source wrote it, with its ``sha256`` pinned, and ``key`` the system
-    prompt in it for a prompt without reference images. The typed prompt
-    is the user turn as it is. The reply is decoded with ``temperature``,
-    at most ``max_tokens`` tokens, ``presence_penalty`` and the chat
-    model's thinking switch at ``thinking``, as ``repo`` at ``revision``
-    does. ``suggested`` names the chat model to set when none is.
+    ``prompts`` is a file in ``package``, shipped as its source wrote it,
+    with its ``sha256`` pinned: a JSON file whose ``key`` holds the
+    system prompt for a prompt without reference images, or a text file
+    that is the system prompt when ``key`` is None. ``prompts`` None
+    ships no system prompt, and ``needs`` is the refusal that says where
+    to get one. The typed prompt is the user turn as it is, or, when the
+    system prompt holds ``slot``, takes its place there. The reply is
+    decoded with ``temperature``, at most ``max_tokens`` tokens,
+    ``presence_penalty`` and the chat model's thinking switch at
+    ``thinking``, as ``repo`` at ``revision`` does, and ``parse`` turns
+    it into the caption, or None when it holds none. ``suggested`` names
+    the chat model to set when none is, and ``expected`` warns when none
+    is set.
     """
-    prompts: str
+    prompts: str | None
     sha256: str
-    key: str
+    key: str | None
     max_tokens: int
     temperature: float
     presence_penalty: float
     thinking: str
     repo: str
     revision: str
+    package: str = ""
     suggested: str = ""
+    expected: bool = False
+    parse: Callable | None = None
+    slot: str = ""
+    needs: str = ""
 
 
 # The image limits: the pixels and the longer side of the largest image a

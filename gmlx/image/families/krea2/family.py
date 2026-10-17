@@ -22,11 +22,14 @@ from __future__ import annotations
 # variant and the scheduler values are those of diffusers'
 # src/diffusers/pipelines/krea2/pipeline_krea2.py and
 # src/diffusers/modular_pipelines/krea2/ at commit e0abab83 (Apache-2.0; see
-# licenses/diffusers-LICENSE).
+# licenses/diffusers-LICENSE). The upsampler's system prompt is
+# docs/expansion.txt of github.com/krea-ai/krea-2 at commit db3984f, with
+# its use in docs/prompting.md (Apache-2.0; see licenses/krea-2-LICENSE).
 
+from gmlx.image import upsample
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
-                                 VariantRow)
+                                 UpsampleParts, VariantRow)
 
 _B0 = "blocks.0."
 _T0 = "txtfusion.layerwise_blocks.0."
@@ -281,6 +284,28 @@ def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
     return krea2_sigmas(steps, CONSTANTS.values["turbo_mu"])
 
 
+# The optional upsampler of docs/prompting.md, on a chat model of the
+# user's choice: docs/expansion.txt as the system prompt, shipped
+# unmodified, and the typed prompt as the user turn. The prompt asks for
+# a thinking block, then one paragraph, so thinking is on and the caption
+# is that paragraph. Krea names no sampling; gmlx decodes greedily, so
+# the same prompt writes the same caption, with room for the thinking.
+UPSAMPLE = UpsampleParts(
+    prompts="expansion.txt",
+    sha256="2a5c24a3a83e9d415d4679a4e1853ddf056bd0329f3af315b27ed72b6ad9c2f0",
+    key=None,
+    max_tokens=6144,
+    temperature=0.0,
+    presence_penalty=0.0,
+    thinking="on",
+    repo="github.com/krea-ai/krea-2",
+    revision="db3984fbc6e13b34c0064990fc2d95ac64d00058",
+    package=__package__,
+    suggested="Qwen3.5-9B",
+    parse=upsample.paragraph,
+)
+
+
 FAMILY = Family(
     name="krea2",
     title="Krea 2",
@@ -307,4 +332,5 @@ FAMILY = Family(
     encoder=encoder,
     schedule=schedule,
     reshaped=(PROJECTOR,),
+    upsample=UPSAMPLE,
 )

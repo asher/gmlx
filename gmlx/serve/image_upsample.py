@@ -4,9 +4,11 @@
 typed prompt, or None when the prompt runs as typed. The caption comes
 from the server's own chat generation on the upsampler, a ``models:``
 entry acquired from the residency pool as a chat request acquires it.
-A bounded table maps (upsampler, system prompt, typed prompt) to the
-caption: decoding is greedy, so a rerun with another seed writes the
-same caption, skips the rewrite, and finds its conditioning cached.
+A bounded table maps (upsampler, the family's turn, the system prompt
+by its sha256, typed prompt) to the caption: decoding is greedy, so a rerun with another seed writes the
+same caption, skips the rewrite, and finds its conditioning cached. The
+entry's ``upsample_prompt`` file is read on each request, so an edit to
+it writes new captions.
 """
 
 from __future__ import annotations
@@ -81,7 +83,8 @@ def upsampler_for(spec, family, requested: bool | None,
             raise _bad(f"prompt_upsampling needs an upsampler: set "
                        f"upsampler to a models: id on the image_models entry "
                        f"{spec.id!r}", "prompt_upsampling")
-        if spec.id not in _WARNED and getattr(spec, "upsample", True):
+        if family.upsample.expected and spec.id not in _WARNED and \
+                getattr(spec, "upsample", True):
             _WARNED.add(spec.id)
             _log.warning("image model %r: %s expects its prompts upsampled; "
                          "set upsampler on its image_models entry to the "
@@ -102,7 +105,8 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     model field that does not resolve, or a file that is no image model,
     returns None, so the image model's own acquire refuses it. ``stop``
     is a threading.Event that ends the rewrite between tokens."""
-    from gmlx.image.upsample import UpsampleError, cache_key, upsample
+    from gmlx.image.upsample import (UpsampleError, cache_key, system_prompt,
+                                     upsample)
 
     from .image_service import ImageRequestError
     from .image_steps import family_of
@@ -117,15 +121,16 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     up = upsampler_for(spec, family, requested, has_refs)
     if up is None:
         return None
-    key = cache_key(_upsampler_identity(up), family, prompt)
-    caption = CAPTIONS.get(key)
-    if caption is not None:
-        return caption
     t0 = time.monotonic()
     try:
+        system = system_prompt(family, getattr(spec, "upsample_prompt", None))
+        key = cache_key(_upsampler_identity(up), family, prompt, system)
+        caption = CAPTIONS.get(key)
+        if caption is not None:
+            return caption
         caption = upsample(family, prompt,
                            lambda req: _chat(up, req, stop),
-                           name=f"the upsampler {up!r}")
+                           name=f"the upsampler {up!r}", system=system)
     except UpsampleError as e:
         raise ImageRequestError(500, str(e), err_type="server_error") from e
     CAPTIONS.put(key, caption)

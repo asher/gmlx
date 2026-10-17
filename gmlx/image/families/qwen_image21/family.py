@@ -18,9 +18,11 @@ from __future__ import annotations
 # src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py at e0abab83
 # (Apache-2.0; see licenses/diffusers-LICENSE).
 
+from gmlx.image import upsample
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import (ConstantsRow, EditParts, Family,
-                                 SamplingRow, StepParts, VariantRow)
+                                 SamplingRow, StepParts, UpsampleParts,
+                                 VariantRow)
 
 _B0 = "transformer_blocks.0."
 
@@ -442,6 +444,38 @@ def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
         max_shift=c["max_shift"], terminal=c["shift_terminal"])
 
 
+# Where to get the rewriter prompt Qwen publishes, which is under a
+# license gmlx does not ship.
+PROMPT_REPO = "Qwen/Qwen-Image-2.1-PE-T2I"
+PROMPT_FILE = "system_prompt.txt"
+
+# The optional upsampler, on the system prompt of a file the user gives:
+# gmlx ships none. Qwen's rewriter thinks, then answers with a JSON
+# object whose rewritten_prompt is the caption, beside an aspect ratio
+# that gmlx does not read, so the image keeps the size the request asks
+# for. Thinking is on, with the presence penalty of 1.5 Qwen's text to
+# image rewriter samples with, and gmlx decodes greedily, so the same
+# prompt writes the same caption.
+UPSAMPLE = UpsampleParts(
+    prompts=None,
+    sha256="",
+    key=None,
+    max_tokens=8192,
+    temperature=0.0,
+    presence_penalty=1.5,
+    thinking="on",
+    repo=f"huggingface.co/{PROMPT_REPO}",
+    revision="f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+    suggested="Qwen3.5-9B",
+    parse=upsample.json_field("rewritten_prompt"),
+    needs=("Qwen-Image 2.1 ships no upsampler prompt: set upsample_prompt "
+           "on its image_models entry, or pass --upsample-prompt, to a text "
+           f"file. Qwen publishes one as {PROMPT_FILE} in the Hugging Face "
+           f"repository {PROMPT_REPO}, under the Qwen Research License, for "
+           "non-commercial use only, and `gmlx pull qwen-image` fetches it"),
+)
+
+
 FAMILY = Family(
     name="qwen_image21",
     title="Qwen-Image 2.1",
@@ -468,4 +502,5 @@ FAMILY = Family(
                    min_area=REFERENCES.values["min_area"],
                    prepare=_prepare, token_ids=_edit_ids,
                    encode=_edit_encode, template_id=_edit_template_id),
+    upsample=UPSAMPLE,
 )
