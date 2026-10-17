@@ -2,7 +2,11 @@
 """The arena token split rule. A multi-token call that the prefill ring can
 also serve takes the split only when its routed union is a small share of
 the layer's experts. Otherwise it takes the ring, which reads the whole
-layer once. Pure CPU: a stock SwitchGLU behind stub feeders."""
+layer once. A stock SwitchGLU behind stub feeders. The streamed paths run
+on the GPU stream, so the reference runs there too, through the body the
+path runs. A reference on the default device, which may be the CPU, or
+through the sorted GEMM, which may run fp32 at TF32, differs by far more
+than the tolerance."""
 from __future__ import annotations
 
 import contextlib
@@ -13,6 +17,7 @@ import pytest
 
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 from gmlx.load.loader import _split_beats_ring
+from gmlx.load.modules import glu_unsorted_call
 from gmlx.stream.expert_streaming import install_expert_streaming
 
 E, TOPK = 16, 2
@@ -112,11 +117,17 @@ def _inds(t, n_experts):
     return mx.array(ids.astype(np.uint32))
 
 
-def _check(glu, t, n_experts):
+def _check(glu, t, n_experts, rows):
+    """``rows``: the arena serves the call with the unsorted per-row body.
+    Otherwise the ring runs the stock body."""
     x = mx.random.normal((1, t, 16))
     inds = _inds(t, n_experts)
-    ref = SwitchGLU.__call__(glu, x, inds)
     y = glu(x, inds)
+    with mx.stream(mx.gpu):
+        if rows:
+            ref = glu_unsorted_call(glu, x, inds)
+        else:
+            ref = SwitchGLU.__call__(glu, x, inds)
     mx.eval(ref, y)
     assert mx.allclose(ref, y, atol=1e-5, rtol=1e-5)
 
@@ -138,7 +149,7 @@ def test_rule_thresholds(monkeypatch):
 
 def test_small_union_splits():
     arena, ring = _Arena(slots=4), _Ring()
-    _check(_glu(arena, ring), 128, 4)
+    _check(_glu(arena, ring), 128, 4, rows=True)
     assert arena.rule == [(True, False)]
     assert arena.leaves == [64, 64]
     assert ring.whole == 0
@@ -146,7 +157,7 @@ def test_small_union_splits():
 
 def test_near_full_union_takes_the_ring():
     arena, ring = _Arena(slots=4), _Ring()
-    _check(_glu(arena, ring), 128, E)
+    _check(_glu(arena, ring), 128, E, rows=False)
     assert arena.rule == [(False, False)]
     assert arena.leaves == []
     assert ring.whole == 1
@@ -154,21 +165,21 @@ def test_near_full_union_takes_the_ring():
 
 def test_layer_staged_ahead_takes_the_ring():
     arena, ring = _Arena(slots=4), _Ring(ahead={3})
-    _check(_glu(arena, ring), 128, 4)
+    _check(_glu(arena, ring), 128, 4, rows=False)
     assert arena.rule == [(False, True)]
     assert ring.whole == 1
 
 
 def test_small_call_takes_the_partial_ring_while_live():
     arena, ring = _Arena(slots=4), _Ring(live=True)
-    _check(_glu(arena, ring), 40, E)
+    _check(_glu(arena, ring), 40, E, rows=False)
     assert arena.rule == [(False, False)]
     assert ring.partial == 1
 
 
 def test_small_call_splits_once_the_ring_is_released():
     arena, ring = _Arena(slots=4), _Ring(live=False)
-    _check(_glu(arena, ring), 40, E)
+    _check(_glu(arena, ring), 40, E, rows=True)
     assert arena.rule == []
     assert arena.leaves and ring.partial == 0
 
@@ -176,7 +187,7 @@ def test_small_call_splits_once_the_ring_is_released():
 @pytest.mark.parametrize("t", [2, 16, 31])
 def test_verify_widths_keep_the_split(t):
     arena, ring = _Arena(slots=4), _Ring(live=True)
-    _check(_glu(arena, ring), t, E)
+    _check(_glu(arena, ring), t, E, rows=True)
     assert arena.rule == []
     assert ring.whole == ring.partial == 0
 
@@ -184,6 +195,6 @@ def test_verify_widths_keep_the_split(t):
 def test_share_one_restores_the_split(monkeypatch):
     monkeypatch.setenv("GMLX_ARENA_SPLIT_MAX_SHARE", "1")
     arena, ring = _Arena(slots=4), _Ring()
-    _check(_glu(arena, ring), 128, E)
+    _check(_glu(arena, ring), 128, E, rows=True)
     assert arena.rule == [(True, False)]
     assert ring.whole == 0
