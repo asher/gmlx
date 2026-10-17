@@ -1094,6 +1094,95 @@ def test_a_thinner_flux2_9b_row_misses_a_measured_cell():
     assert _flux3_room(alone, two) < ROOM
 
 
+FLUX2_9B_KV_CELLS = QWEN_CELLS.with_name("flux2_klein_9b_kv_cells.json")
+
+
+def _q4_gap() -> float:
+    """What a 9B Q4_K_M step reads above a Q8_0 one of its size, which
+    the KV row adds to its Q8_0 cells."""
+    cells = json.loads(FLUX2_9B_CELLS.read_text())["cells"]
+    q8 = {c["size"]: max(c["steps_gib"]) for c in cells
+          if c.get("dit") == "Q8_0"}
+    q4 = {c["size"]: max(c["steps_gib"]) for c in cells
+          if "dit" not in c and not c["guided"] and not c.get("refs")}
+    return max(q4[n] - q8[n] for n in q8) * GiB
+
+
+def _kv_room(row, c: dict, gap: float) -> tuple:
+    """Bytes the KV row leaves above a cell's step and above its
+    reference pass, each read less the cache and with ``gap`` added."""
+    image = memfit.image_rows(row, c["size"], c["size"], None)
+    _, step, prefill = memfit.prefix_terms(row, image, 512, c["refs"],
+                                           c["ref_px"], 2)
+    return (row.step.bytes(step) - max(c["steps_gib"]) * GiB - gap,
+            row.prefill.bytes(prefill) - c["prefill_gib"] * GiB - gap)
+
+
+def test_the_flux2_9b_kv_row_covers_every_measured_cell():
+    """The KV cells on its Q8_0 file: sizes to 2048 pixels without
+    references, and one to four references of 512 to 1536 pixels. The
+    cache of a request is exactly the K and V of its reference tokens in
+    32 blocks, and the step and the reference pass each leave ROOM above
+    the cells of the Q4_K_M file, the Q8_0 reading and the 9B's gap."""
+    row = memfit.PEAKS["flux2_klein_9b_kv"]
+    assert (row.step, row.prefill) == (memfit.FLUX2_KLEIN_9B_KV_STEP,
+                                       memfit.FLUX2_KLEIN_9B_KV_PREFILL)
+    assert row.width == 49152 and not row.ref_token_px
+    cells = json.loads(FLUX2_9B_KV_CELLS.read_text())["cells"]
+    assert {c["size"] for c in cells if not c["refs"]} == {512, 1024, 1536,
+                                                           2048}
+    assert {(c["refs"], c["ref_px"]) for c in cells if c["refs"]} == {
+        (1, 512), (1, 1024), (2, 1024), (4, 1024), (1, 1536)}
+    gap = _q4_gap()
+    assert 0.25 * GiB < gap < 0.35 * GiB
+    for c in cells:
+        cache, _, _ = memfit.prefix_terms(row, 0, 512, c["refs"],
+                                          c["ref_px"], 2)
+        caption = 512 * 4096 * 2
+        assert abs(cache + caption - c["state_gib"] * GiB) < 1e-4 * GiB
+    steps, passes = zip(*(_kv_room(row, c, gap) for c in cells))
+    passes = [r for r, c in zip(passes, cells) if c["refs"]]
+    for room in (steps, passes):
+        assert min(room) >= ROOM
+        assert min(room) <= 0.35 * GiB and max(room) <= 1.25 * GiB
+
+
+def test_a_thinner_flux2_9b_kv_row_misses_a_measured_cell():
+    row = memfit.PEAKS["flux2_klein_9b_kv"]
+    cells = json.loads(FLUX2_9B_KV_CELLS.read_text())["cells"]
+    gap = _q4_gap()
+
+    def worst(which: int, **change) -> float:
+        thin = dataclasses.replace(row, **{
+            f: dataclasses.replace(getattr(row, f), **change)
+            for f in (("step", "prefill")[which],)})
+        return min(_kv_room(thin, c, gap)[which] for c in cells
+                   if which == 0 or c["refs"])
+
+    for which in (0, 1):
+        assert worst(which) >= ROOM
+        assert worst(which, base=getattr(
+            row, ("step", "prefill")[which]).base - 0.1 * GiB) < ROOM
+    assert worst(0, k=row.step.k - 0.3) < ROOM
+    assert worst(1, k=row.prefill.k - 0.3) < ROOM
+
+
+def test_a_kv_edit_counts_each_reference_and_names_the_count_that_fits():
+    """Each 1024 pixel reference holds 2 GiB of cache for the request. On
+    a budget that holds two, a request with four is refused with the
+    largest count that fits."""
+    kw = dict(family="flux2_klein_9b_kv", height=1024, width=1024,
+              ref_px=1024, budget=20 * GiB, overcommit=False)
+    dit = 10 * GiB
+    one, two = (plan_memory(dit, 0, 0, refs=n, **kw) for n in (1, 2))
+    assert two.terms["prefix_cache"] - one.terms["prefix_cache"] == 2 * GiB
+    assert two.fits
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        plan_memory(dit, 0, 0, refs=4, **kw)
+    assert "the largest that fit are 2 of the 4 reference images" in str(
+        e.value)
+
+
 def test_the_flux2_9b_encode_term_covers_every_measured_encode():
     """An encode of Qwen3-8B is 512 rows of three 4096 wide float32 states
     whatever the prompt."""
