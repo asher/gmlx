@@ -277,14 +277,16 @@ def test_the_negative_row_of_a_guided_flux2_base_edit_takes_the_references(
         z.shape for z in cond.ref_latents] == [(128, 16, 16)]
 
 
-@pytest.mark.parametrize("budget_gib, shed", [(16, True), (32, False)])
+@pytest.mark.parametrize("budget_gib, shed, levers", [
+    (14, True, ("tiled decode",)), (16, True, ()), (32, False, ())])
 def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
-        monkeypatch, budget_gib, shed):
+        monkeypatch, budget_gib, shed, levers):
     """A FLUX.2 klein 9B KV edit with four 1024 pixel references leaves
     the K and V of its references held, 8 GiB by the family's own state
     size. The next request runs its encode with them only when its plan
     counts them and fits: on a budget that does not hold them beside it,
-    they go before the encode."""
+    they go before the encode. They never change the levers the request
+    takes, which are those it takes with nothing held."""
     from gmlx.image.conditioning import Conditioning
     from gmlx.image.memfit import GiB
 
@@ -308,8 +310,10 @@ def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
         return text, None
 
     real_plan = api.plan_request
+    calls = []
 
     def plan_request(*a, **k):
+        calls.append((a, k))
         plans.append(real_plan(*a, **k))
         return plans[-1]
 
@@ -331,3 +335,6 @@ def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
     assert seen == [0 if shed else held]
     assert plan.terms["prefix_held"] == seen[0] and plan.fits
     assert plan.phases["encode"] >= seen[0] + plan.terms["dit"]
+    pipe.captions.clear()
+    (a, k), = calls
+    assert plan.levers == real_plan(*a, **k).levers == levers

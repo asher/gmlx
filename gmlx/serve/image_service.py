@@ -115,6 +115,16 @@ def _steps_cache_bytes() -> int:
             + sum(c.nbytes for r in runs for c in r.ref_cache.values()))
 
 
+def _live_conds() -> set:
+    """The keys of the conditionings of the step routes' runs, whose
+    states a shed takes after those of finished work."""
+    from .image_steps import STATE
+
+    with STATE.lock:
+        runs = list(STATE.runs.values())
+    return {k for r in runs for k in r.conds}
+
+
 def cache_bytes() -> tuple:
     """(tensor, adapter) bytes each cache of an image model may hold."""
     return _CACHE_BYTES["tensor"], _CACHE_BYTES["adapter"]
@@ -1115,25 +1125,33 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
 
 
 def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
-               init: bool, budget) -> None:
-    """Shed the conditioning states of earlier requests before the encode
-    of a request that does not fit with them. The request's own plan
-    counts what stays."""
+               init: bool, budget, prompts=()) -> None:
+    """Shed the conditioning states a request does not fit beside before
+    its encode, as few as its plan names: those of finished work first,
+    then those of the step routes' runs, and those of its own
+    conditionings, of ``prompts`` with ``refs``, last. The request's own
+    plan counts what stays."""
     from gmlx.image import api, memfit
 
     pipe = served.pipe
     if budget is None or pipe.family.step is None or not pipe.captions.bytes:
         return
+    own = set()
+    if pipe.encoder is not None:
+        # The keys read the tokenizer alone, which a released encoder keeps.
+        own = {api._cond_key(pipe, p, refs) for p in prompts}
     sizes = [(r.height, r.width) for r in refs]
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
+    args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
+                                pipe.captions.keys(lambda k: k[0] in own))
     try:
-        plan = memfit.plan_memory(
-            height=size[1], width=size[0], init_image=init, ref_sizes=sizes,
-            _hint=False, **_fit_args(pipe, served, budget, cfg,
-                                     tower=_tower(pipe, sizes)))
+        plan = memfit.plan_memory(height=size[1], width=size[0],
+                                  init_image=init, ref_sizes=sizes,
+                                  _hint=False, **args)
     except memfit.ImageMemoryError:
         return
-    if plan.shed_states:
-        api.shed_states(pipe)
+    if plan.shed_bytes:
+        api.shed_states(pipe, plan.shed_bytes, own, _live_conds())
 
 
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
@@ -1201,33 +1219,42 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 
 def size_fits(served: ServedImage, width: int, height: int, budget, *,
               cfg: float = 1.0, init: bool = False, conds=None,
-              patch_table=None, joined: bool = False,
-              building: int = 0) -> bool:
+              patch_table=None, joined: bool = False, ref_cache=None,
+              building: int = 0, held_in=None, hint: bool = False) -> bool:
     """Whether the memory plan of an image of ``width`` x ``height`` on
     ``served`` fits ``budget``, as the image routes plan a request. The
-    step routes ask it before a step, a VAE decode and a VAE encode. The
-    conditionings of a step, ``conds``, are priced as ``plan_request``
-    prices them: their text rows, a prefix and the reference latents, or
-    by ``plan_terms``'s ``joined`` rule. ``building`` is the bytes of
-    reference K and V the step keeps. A plan that fits only with the held
-    states of other conditionings shed sheds them."""
+    step routes ask it before a step, a VAE decode and a VAE encode, and
+    ``held_in`` names the phase each runs, which alone counts the held
+    conditioning states. The conditionings of a step, ``conds``, are
+    priced as ``plan_request`` prices them: their text rows, a prefix and
+    the reference latents, or by ``plan_terms``'s ``joined`` and
+    ``ref_cache`` rules. ``building`` is the bytes of reference K and V
+    the step keeps, on a family whose row does not count them itself. A
+    plan that does not fit with the held states sheds the bytes it names,
+    the states of the step's own conditionings last. With ``hint`` a plan
+    that does not fit raises its ImageMemoryError, which names what fits."""
     from gmlx.image import api, memfit
 
     if budget is None:
         return True
     args = _fit_args(served.pipe, served, budget, cfg)
-    args["cache_bytes"] += int(building)
     if conds:
         args.update(api.plan_terms(served.pipe, conds, height=int(height),
                                    width=int(width), patch_table=patch_table,
-                                   joined=joined))
+                                   joined=joined, ref_cache=ref_cache))
+    if args.get("ref_cache") != "build":
+        args["cache_bytes"] += int(building)
     try:
         plan = memfit.plan_memory(height=int(height), width=int(width),
-                                  init_image=init, _hint=False, **args)
+                                  init_image=init, held_in=held_in,
+                                  _hint=hint, **args)
     except memfit.ImageMemoryError:
+        if hint:
+            raise
         return False
-    if plan.shed_states:
-        api.shed_states(served.pipe, conds or ())
+    if plan.shed_bytes:
+        api.shed_states(served.pipe, plan.shed_bytes, conds or (),
+                        _live_conds())
     return plan.fits
 
 
@@ -1467,7 +1494,8 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             mask = mask_from_image(req.mask, (width, height))
 
     table, adapters = _adapter_table(served, req.adapters, model_dirs)
-    _make_room(served, cfg, size, refs, init is not None, budget)
+    _make_room(served, cfg, size, refs, init is not None, budget,
+               [prompt] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()
     cond, neg = _encode(served, prompt, neg_text, refs, borrow)
     plan = api.plan_request(
@@ -1475,7 +1503,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
         conds=[cond] if neg is None else [cond, neg], patch_table=table,
         init_image=init is not None,
         keep_encoder=served.plan.keep_encoder, budget=budget,
-        overcommit=budget is None)
+        overcommit=budget is None, live=_live_conds())
     enc = pipe.encoder
     if enc is not None and enc.owned and not enc.released and (
             not served.plan.keep_encoder or plan.release_encoder):

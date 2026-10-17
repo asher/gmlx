@@ -128,9 +128,11 @@ nothing.
 A step, a VAE decode and a VAE encode take the size limits of the OpenAI
 routes: an image over 2048x2048 pixels or with a side over 4096 gets 413,
 as does a VAE pass of more than 16 images. One whose memory plan does not
-fit beside the models loaded gets 400. The VAE routes decode and encode
-the images of a batch one at a time. `capabilities` gives the largest
-tensor and adapter upload, which are the
+fit beside the models loaded gets 400. The message of a step names the
+largest term of its plan and, where the plan keeps the keys and values of
+the reference latents, how many of them fit. The VAE routes decode and
+encode the images of a batch one at a time. `capabilities` gives the
+largest tensor and adapter upload, which are the
 [`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) and
 [`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) caches.
 Each image model books those two caches while the step routes are on.

@@ -444,7 +444,8 @@ def _states(conds) -> list:
 
 
 def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
-               patch_table=None, joined: bool = False) -> dict:
+               patch_table=None, joined: bool = False,
+               ref_cache: dict | None = None) -> dict:
     """The ``memfit.plan_memory`` arguments that the conditionings of a
     request set, as ``plan_request`` passes them: the text rows of a
     family whose plan prices the prompt, the prefix rows of each
@@ -457,7 +458,11 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
     those of the step routes do, is priced by their shapes.
     ``joined`` prices the step of a family in parts as it runs whole,
     under a time rule other than the reference's: the family's joined
-    row, with every state the cache holds kept beside it."""
+    row, with every state the cache holds kept beside it. ``ref_cache``
+    is that of ``denoise_step`` for a step that runs on one. On a family
+    whose row prices those steps, the rows whose K and V it holds read
+    them, and the others build their own; the caller counts what it holds
+    already. Other families price the step as without it."""
     states = _states(conds)
     terms = dict(
         caption_tokens=(_text_rows(states)
@@ -469,7 +474,17 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
         ref_sizes=_ref_sizes(states),
         step_refs=_step_refs(states, pipe.vae_scale))
     parts = pipe.family.step
-    if parts is not None and joined:
+    if ref_cache is not None and memfit.prices_ref_cache(pipe.family.name):
+        # No step sheds a state then, so the bound is all the cache holds.
+        held = pipe.captions.bytes
+        build = [c for i, c in enumerate(states)
+                 if c.ref_latents and _ref_key(c, i) not in ref_cache]
+        terms.update(prefix_rows=[_prefix_rows(pipe, c)
+                                  for c in build or states] or None,
+                     prefix_shared=False, prefix_other=held,
+                     prefix_bound=held, prefix_held=held,
+                     ref_cache="build" if build else "read")
+    elif parts is not None and joined:
         # No step sheds a state then, so the bound is all the cache holds.
         held = pipe.captions.bytes
         terms.update(family=memfit.joined_family(pipe.family.name),
@@ -493,7 +508,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
                  cfg: float | None = None, caption_tokens: int | None = None,
                  conds=None, patch_table=None, init_image: bool = False,
                  keep_encoder: bool = False, budget: float | None = None,
-                 overcommit: bool | None = None) -> memfit.MemoryPlan:
+                 overcommit: bool | None = None,
+                 live=()) -> memfit.MemoryPlan:
     """The memory plan of one request on this pipeline: its weights, an
     encoder still resident, the caches it holds, and the phase peaks.
     ``conds`` is the request's conditioning, or the positive and the
@@ -510,8 +526,10 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     image's.
     The VAE passes are priced for the VAE this pipeline loaded, on its
     conv path, and ``vae_decode`` and ``vae_encode`` run them as the plan
-    they are given says. A plan that fits only with the held states of
-    other conditionings shed sheds them here, before the request runs.
+    they are given says. A plan that does not fit with the conditioning
+    states held sheds the bytes it names here, before the request runs, by
+    the order of ``shed_states``, ``live`` the keys of the conditionings
+    of work still running.
     Raises ImageMemoryError when no lever makes it fit."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
@@ -543,19 +561,27 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
         cache_bytes=caches, init_image=init_image, vae_price=price,
         budget=budget, overcommit=overcommit, **terms)
-    if plan.shed_states:
-        shed_states(pipe, _states(conds))
+    if plan.shed_bytes:
+        shed_states(pipe, plan.shed_bytes, _states(conds), live)
     return plan
 
 
-def shed_states(pipe: ImagePipeline, conds=()) -> None:
-    """Shed every held conditioning state but those of ``conds``. A
-    request does so before it runs when its plan takes the lever "shed
-    held states". The states are a cache: shedding one changes the speed
-    of a later request that would read it, never a result."""
-    keep = {_ident(c) for c in conds}
-    pipe.captions.shed_others(
-        set(pipe.captions.keys(lambda k: k[:3] in keep)), 0)
+def shed_states(pipe: ImagePipeline, nbytes: int, own=(), live=()) -> int:
+    """Shed held conditioning states until ``nbytes`` of them are gone:
+    those of finished work first, then those of ``live``, the work still
+    running, and those of ``own``, the request's, last, the least recently
+    used first within each. ``own`` and ``live`` hold conditionings or
+    their keys. A request does so before it runs when its plan names the
+    bytes. The states are a cache: shedding one changes the speed of a
+    later request that would read it, never a result. Returns the bytes
+    shed."""
+    def keys(conds) -> set:
+        return {c if isinstance(c, str) else c.key for c in conds}
+
+    mine, busy = keys(own), keys(live)
+    return pipe.captions.shed_by(
+        int(nbytes), lambda k: 2 if k[0] in mine else 1 if k[0] in busy
+        else 0)
 
 
 def references(pipe: ImagePipeline, images, *,

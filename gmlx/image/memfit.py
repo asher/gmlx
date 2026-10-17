@@ -231,6 +231,28 @@ FLUX2_KLEIN_9B_STEP = StepFit(base=3.05 * GiB, k=2.9, row_k=0.5)
 FLUX2_KLEIN_9B_KV_STEP = StepFit(base=3.1 * GiB, k=2.6)
 FLUX2_KLEIN_9B_KV_PREFILL = StepFit(base=1.75 * GiB, k=1.5)
 
+# The FLUX.2 klein 9B KV Q8_0 steps under ComfyUI's Flux KV Cache node,
+# measured as the family's own, less the bytes of the K and V of the
+# references. The cells are in
+# tests/fixtures/image/memfit/flux2_klein_9b_kv_node_cells.json: 256 to
+# 2048 pixels, one to ten references of 256 to 1536 pixels, each with 512
+# text rows. The first step reads 2.02 GiB at 256 pixels and 11.60 at 2048
+# with ten 1024 pixel references, the most reference rows a request
+# takes, against 16.64 for the same step with the reference tokens joined
+# at its time, which the 9B's row prices. Above the cache bound it reads
+# 2.2 to 2.3 times the formula of its joined rows. A base of 2.45 GiB and
+# a slope of 1.9 leave 0.25 GiB above every cell with the 9B's Q4_K_M gap
+# added, the least at 256 pixels. A later step reads 2.09 GiB at 256
+# pixels and 7.07 at 2048 with ten references. The family's own step
+# prices every cell with room except ten 1024 pixel references at 1024
+# pixels, which read 6.15 GiB against 6.00: the K and V of the
+# references that each block joins weigh the most there. 1.2 times those
+# of one block, at most 0.75 GiB, over the family's step leaves 0.25 GiB
+# above every cell, the least at that cell.
+FLUX2_KLEIN_9B_KV_REF_BUILD = StepFit(base=2.45 * GiB, k=1.9)
+FLUX2_KLEIN_9B_KV_REF_READ = StepFit(base=3.1 * GiB, k=2.6, read_k=1.2,
+                                     read_cap=0.75 * GiB)
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -612,6 +634,12 @@ class PeakRow:
     # the rows, when its own step runs in parts. It names a row and prices
     # nothing itself.
     joined: str = field(default="", repr=False)
+    # The steps under ComfyUI's Flux KV Cache node, less the K and V of the
+    # references: the first, from the formula of its rows with the
+    # reference tokens joined, which keeps those K and V, and a later one,
+    # from the step formula with them joined in each block.
+    ref_build: StepFit | None = field(default=None, repr=False)
+    ref_read: StepFit | None = field(default=None, repr=False)
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:
@@ -720,7 +748,9 @@ PEAKS = {
                                  encode_row_bytes=3 * 4096 * 4,
                                  encode_base=int(0.32 * GiB),
                                  prices_prompt=False,
-                                 joined="flux2_klein_9b"),
+                                 joined="flux2_klein_9b",
+                                 ref_build=FLUX2_KLEIN_9B_KV_REF_BUILD,
+                                 ref_read=FLUX2_KLEIN_9B_KV_REF_READ),
 }
 
 def joined_family(family: str) -> str:
@@ -730,16 +760,21 @@ def joined_family(family: str) -> str:
 
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
-          "staged load", "shed held states")
+          "staged load")
 
 
 class ImageMemoryError(RuntimeError):
     """An image request or VAE pass that does not fit the working budget.
-    ``plan`` is the request's MemoryPlan, or None for a VAE pass."""
+    ``plan`` is the request's MemoryPlan, or None for a VAE pass, and
+    ``hint`` what the message advises: the largest term and what makes it
+    smaller, and for a request with reference images the most of them
+    that fit."""
 
-    def __init__(self, message: str, plan: "MemoryPlan | None" = None):
+    def __init__(self, message: str, plan: "MemoryPlan | None" = None,
+                 hint: str = ""):
         super().__init__(message)
         self.plan = plan
+        self.hint = hint
 
 
 @dataclass(frozen=True)
@@ -755,8 +790,8 @@ class MemoryPlan:
     notes: tuple = field(default=())
     tiled_encode: bool = False      # the VAE encode of an init image
     staged_load: bool = False       # the encoder goes before the DiT loads
-    shed_states: bool = False       # the held prefix states of other
-                                    # conditionings go before the request
+    shed_bytes: int = 0             # bytes of held prefix states that go
+                                    # before the request runs
 
     @property
     def peak(self) -> int:
@@ -922,6 +957,15 @@ def prefix_text_rows(family: str, text: int) -> int:
         row.prefix.text_rows(text))
 
 
+def prices_ref_cache(family: str) -> bool:
+    """Whether the row of ``family`` prices the steps under ComfyUI's Flux
+    KV Cache node, whose first step keeps the K and V of the references
+    and whose later steps read them."""
+    row = PEAKS.get(family)
+    return (row is not None and row.ref_build is not None
+            and row.ref_read is not None)
+
+
 def prices_prompt(family: str) -> bool:
     """Whether a plan of ``family`` that knows the prompt prices its text
     rows, where one that does not prices the family's most."""
@@ -994,7 +1038,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 ref_px: int = 0, prefix_rows=None,
                 prefix_shared: bool = False, prefix_other: int = 0,
                 prefix_bound: int = 0, prefix_held: int = 0,
-                cache_bytes: int = 0,
+                held_in=None, ref_cache: str = "", cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
                 ref_sizes=(), step_refs=None, vae_price=None,
                 load_peak: int = 0, load_parts=None,
@@ -1036,9 +1080,21 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     part of the prefix cache term. ``prefix_held`` is the bytes of every
     prefix state the cache holds as the request starts, its own and the
     other conditionings'. They stay until its first step, so the phases
-    before it count them. A plan that does not fit with them takes the
-    lever "shed held states" first: the states of other conditionings go
-    before the request runs, and ``shed_states`` says so.
+    before it count them. ``held_in`` names the phases whose peaks count
+    the held states, every phase when None: a caller that runs one phase
+    of a request names that one. The levers are those of the plan with no
+    state held, so held states never change how the request runs. When
+    the plan does not fit with them, ``shed_bytes`` is the least of them
+    that must go first, and the plan counts the rest.
+
+    ``ref_cache`` prices a step under ComfyUI's Flux KV Cache node on a
+    family whose prefix holds reference tokens alone. "build" is the first
+    step: its rows run whole with the reference tokens joined, at the
+    row's ``ref_build`` fit, and each row keeps the K and V of its own
+    references, which the prefix cache term counts for every row of
+    ``prefix_rows``. "read" is a later step, at the row's ``ref_read``
+    fit, which reads those K and V from ``cache_bytes`` beside the image
+    rows.
 
     ``load_peak`` is what the load of the parts holds over what stays
     resident, as ``load_transient`` gives it from their headers. With it
@@ -1107,8 +1163,23 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
     read = (0 if row.prefix is None
             else row.prefix.join_bytes(max(mine), act))
-    kept = min(int(prefix_other), max(0, int(prefix_bound) - own))
-    terms["prefix_cache"] = own + kept
+    if ref_cache not in ("", "build", "read"):
+        raise ValueError(f"ref_cache is 'build' or 'read', not {ref_cache!r}")
+    if ref_cache and (row.prefix is None or not prices_ref_cache(family)):
+        raise ValueError(f"the {family} row prices no cache of reference "
+                         f"K and V")
+    if ref_cache == "build":
+        own = sum(row.prefix.cache_bytes(n, act) for n in given or mine)
+    elif ref_cache == "read":
+        own = 0
+
+    def step_peak(b: int) -> int:
+        if ref_cache == "build":
+            return row.ref_build.bytes((rows + max(mine)) * row.width * act,
+                                       b)
+        if ref_cache == "read":
+            return row.ref_read.bytes(step_one, b, read)
+        return row.step_peak(step_one, prefill, b, read)
     def price(op: str, tiled: bool, h: int = height, w: int = width) -> int:
         kw = dict(family=family, itemsize=vsize, tile=tile)
         kw.update({k: v for k, v in ((vae_price or {}).get(op) or {}).items()
@@ -1138,67 +1209,79 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                    + (row.encode_tower_bytes if slots else 0))
 
     def build(b: int, release: bool, tiled: bool, levers: tuple,
-              staged: bool = False, shed: bool = False) -> MemoryPlan:
+              staged: bool = False, shed: int | None = None) -> MemoryPlan:
+        """The plan with these levers. ``shed`` None holds no state, and
+        a number holds what stays of the held states once that many bytes
+        of them go, those of other conditionings first."""
         t = dict(terms)
-        if shed:
-            t["prefix_cache"] = own
-        # The held states stay through the phases before the first step.
-        pre = max(0, int(prefix_held) - (int(prefix_other) if shed else 0))
+        pre = kept = 0
+        if shed is not None:
+            pre = max(0, int(prefix_held) - shed)
+            kept = min(max(0, int(prefix_other) - shed),
+                       max(0, int(prefix_bound) - own))
+        t["prefix_cache"] = own + kept
         t["prefix_held"] = pre
-        t["step_peak"] = row.step_peak(step_one, prefill, b, read)
+
+        def counts(phase: str, n: int) -> int:
+            return n if held_in is None or phase in held_in else 0
+
+        t["step_peak"] = step_peak(b)
         t["decode_peak"] = decode[tiled]
         t["encode_peak"] = int(encode_peak)
         resident = sum(t[n] for n in ("dit", "encoder", "vae", "mmproj",
                                       "adapters", "caches"))
         # An owned encoder that is released takes its mmproj with it.
         later = resident - (t["encoder"] + t["mmproj"] if release else 0)
-        # The prefix states stay in their cache until the request ends.
-        held = later + t["prefix_cache"]
         phases = {}
         if staged:
             # The encoder loads, encodes and goes, and the DiT and the VAE
             # load after it.
             first = sum(t[n] for n in ("encoder", "mmproj", "adapters",
-                                       "caches")) + pre
+                                       "caches"))
             t["load_encoder_peak"], t["load_peak"] = (
                 int(v) + STAGE_ROOM for v in load_parts)
-            phases["load_encoder"] = first + t["load_encoder_peak"]
-            phases["encode"] = first + t["encode_peak"]
-            phases["load"] = later + pre + t["load_peak"]
+            phases["load_encoder"] = (first + counts("load_encoder", pre)
+                                      + t["load_encoder_peak"])
+            phases["encode"] = first + counts("encode", pre) + t[
+                "encode_peak"]
+            phases["load"] = later + counts("load", pre) + t["load_peak"]
         else:
             if load_peak:
                 t["load_peak"] = int(load_peak)
-                phases["load"] = resident + pre + t["load_peak"]
-            phases["encode"] = resident + pre + t["encode_peak"]
+                phases["load"] = resident + counts("load", pre) + t[
+                    "load_peak"]
+            phases["encode"] = resident + counts("encode", pre) + t[
+                "encode_peak"]
         tiled_init = False
         if encodes:
             # A tiled encode is the whole one, so it is a choice by what
             # its phase holds and no lever. Every image above one tile
-            # runs in tiles when a whole pass of one does not fit.
-            before = later + max(t["prefix_cache"], pre)
+            # runs in tiles when a whole pass of one does not fit with no
+            # state held.
             forced = budget is not None and any(
-                before + whole > budget for auto, whole, cut in encodes
+                later + own + whole > budget for auto, whole, cut in encodes
                 if cut is not None and not auto)
-            peaks = [cut if cut is not None and (own or forced) else whole
-                     for own, whole, cut in encodes]
-            tiled_init = any(cut is not None and (own or forced)
-                             for own, _, cut in encodes)
+            peaks = [cut if cut is not None and (auto or forced) else whole
+                     for auto, whole, cut in encodes]
+            tiled_init = any(cut is not None and (auto or forced)
+                             for auto, _, cut in encodes)
             t["init_peak"] = max(peaks)
-            phases["init"] = before + t["init_peak"]
-        phases["denoise"] = held + t["step_peak"]
-        phases["decode"] = held + t["decode_peak"]
+            phases["init"] = later + max(own + counts("init", kept),
+                                         counts("init", pre)) + t["init_peak"]
+        # The prefix states stay in their cache until the request ends.
+        phases["denoise"] = later + own + counts("denoise", kept) + t[
+            "step_peak"]
+        phases["decode"] = later + own + counts("decode", kept) + t[
+            "decode_peak"]
         fits = budget is None or max(phases.values()) <= budget
         return MemoryPlan(terms=t, phases=phases, budget=budget, rows=b,
                           release_encoder=release, tiled_decode=tiled,
                           levers=levers, fits=fits, tiled_encode=tiled_init,
-                          staged_load=staged, shed_states=shed)
+                          staged_load=staged, shed_bytes=shed or 0)
 
     b = 2 if guided and batch_rows else 1
     plan = build(b, False, auto_tiled, ())
     steps = []
-    if prefix_other:
-        # The states of other conditionings are of no use to the request.
-        steps.append(("shed held states", dict(shed=True)))
     if b == 2:
         steps.append(("sequential rows", dict(b=1)))
     if encoder_owned and (terms["encoder"] or terms["mmproj"]):
@@ -1208,8 +1291,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     if load_parts is not None and encoder_owned and (terms["encoder"]
                                                      or terms["mmproj"]):
         steps.append(("staged load", dict(staged=True, release=True)))
-    state = dict(b=b, release=False, tiled=auto_tiled, staged=False,
-                 shed=False)
+    state = dict(b=b, release=False, tiled=auto_tiled, staged=False)
     applied: tuple = ()
     for name, change in steps:
         if plan.fits:
@@ -1217,9 +1299,18 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         state.update(change)
         applied += (name,)
         plan = build(state["b"], state["release"], state["tiled"], applied,
-                     state["staged"], state["shed"])
+                     state["staged"])
     if plan.fits or overcommit:
-        return plan
+        # The held states on top of the plan, less the fewest bytes of them
+        # that let it fit. With all of them gone it is the plan above.
+        args = (state["b"], state["release"], state["tiled"], applied,
+                state["staged"])
+        lo, hi = 0, max(int(prefix_held), int(prefix_other))
+        if budget is not None and plan.fits:
+            while lo < hi:
+                mid = (lo + hi) // 2
+                lo, hi = (lo, mid) if build(*args, mid).fits else (mid + 1, hi)
+        return build(*args, lo if plan.fits else hi)
     hint = _largest(plan.terms)
     if not encoder_owned and (terms["encoder"] or terms["mmproj"]):
         hint += ("; the encoder is not released in this request and stays "
@@ -1257,7 +1348,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 encoder_owned=encoder_owned, caption_tokens=caption_tokens,
                 text_tokens=text_tokens, prefix_other=prefix_other,
                 prefix_bound=prefix_bound, prefix_held=prefix_held,
-                cache_bytes=cache_bytes,
+                held_in=held_in, ref_cache=ref_cache, cache_bytes=cache_bytes,
                 tile=tile, init_image=init_image, vae_price=vae_price,
                 load_peak=load_peak, load_parts=load_parts, budget=budget,
                 **kw)
@@ -1265,7 +1356,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         hint += _ref_hint(fits, sizes, row.prefix.min_ref_px)
     raise ImageMemoryError(
         f"image request does not fit: {plan.describe()}. {hint}. "
-        "GMLX_OVERCOMMIT=1 overrides.", plan)
+        "GMLX_OVERCOMMIT=1 overrides.", plan, hint)
 
 
 REF_GRID_PX = 32            # reference sides and sizes step by this

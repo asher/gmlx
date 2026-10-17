@@ -254,10 +254,12 @@ def _served(hold):
 
 
 def _check_size(hold, width: int, height: int, *, what: str,
-                cfg: float = 1.0, init: bool = False):
+                cfg: float = 1.0, init: bool = False, phase: str):
     """Refuse a step or a VAE pass over the size limits of the image
     routes with 413, and one whose memory plan does not fit beside the
-    models loaded with 400. Returns the budget it planned against."""
+    models loaded with 400. ``phase`` is the phase of the plan the call
+    runs, which alone counts the held conditioning states. Returns the
+    budget it planned against."""
     from ..image_service import MAX_PIXELS, MAX_SIDE, size_fits
     from ..image_steps import StepError
 
@@ -268,7 +270,7 @@ def _check_size(hold, width: int, height: int, *, what: str,
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if not size_fits(_served(hold), width, height, budget, cfg=cfg,
-                     init=init):
+                     init=init, held_in=(phase,)):
         raise StepError(400, f"{what} of {width}x{height} pixels does not "
                         "fit in memory beside the models now loaded")
     return budget
@@ -496,7 +498,8 @@ async def step(request: Request):
         served = _served(hold)
         w_px, h_px = _px(served, "latent", *x_w.shape[2:])
         guided = 2.0 if len(rows) > 1 else 1.0
-        budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided)
+        budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided,
+                             phase="denoise")
         _check_refs(served, rows)
         fam = served.pipe.family.name
         conv = CONVENTIONS.get(fields.get("convention", "comfy"), {}).get(fam)
@@ -547,7 +550,7 @@ async def step(request: Request):
             # thread that made them.
             import mlx.core as mx
 
-            from gmlx.image import api
+            from gmlx.image import api, memfit
 
             from ..image_service import size_fits
             from ..image_steps import _host, conditioning
@@ -566,13 +569,18 @@ async def step(request: Request):
                     if c.ref_latents and k not in run.ref_cache:
                         building[k] = served.pipe.dit.ref_cache_bytes(
                             c.ref_latents)
-            if not size_fits(served, w_px, h_px, budget, cfg=guided,
-                             conds=conds, patch_table=table,
-                             joined=parts and conv.time != "reference",
-                             building=sum(building.values())):
+            try:
+                size_fits(served, w_px, h_px, budget, cfg=guided,
+                          conds=conds, patch_table=table,
+                          joined=parts and conv.time != "reference",
+                          ref_cache=run.ref_cache if ref_cache else None,
+                          building=sum(building.values()),
+                          held_in=("denoise",), hint=True)
+            except memfit.ImageMemoryError as e:
                 raise StepError(400, f"a step of {w_px}x{h_px} pixels with "
                                 "the references of its rows does not fit in "
-                                "memory beside the models now loaded")
+                                "memory beside the models now loaded. "
+                                f"{e.hint}") from None
             scope = conds
             if run is not None:
                 # The run's conditionings keep their states between its
@@ -695,7 +703,7 @@ async def vae_decode(request: Request):
     try:
         served = _served(hold)
         _check_size(hold, *_px(served, "vae", *lat.shape[2:]),
-                    what="a VAE decode")
+                    what="a VAE decode", phase="decode")
         img = await _on_worker(do_decode, served, lat,
                                bool(fields.get("alpha")))
     finally:
@@ -718,7 +726,7 @@ async def vae_encode(request: Request):
     try:
         served = _served(hold)
         _check_size(hold, int(img.shape[2]), int(img.shape[1]),
-                    what="a VAE encode", init=True)
+                    what="a VAE encode", init=True, phase="init")
         lat = await _on_worker(do_encode, served, img)
     finally:
         hold.release()

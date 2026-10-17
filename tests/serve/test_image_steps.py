@@ -800,9 +800,14 @@ def test_each_row_of_a_kv_step_under_the_node_keeps_its_own_cache(
 
 def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
         host, kvpipe, monkeypatch):
-    """The first step of a run under the Flux KV Cache node runs whole, as
-    the 9B's step of its rows, and keeps the K and V of its references.
-    Its plan prices both, to the byte."""
+    """The first step of a run under the Flux KV Cache node runs whole, the
+    reference tokens joined to its rows, and keeps the K and V of its
+    references. Its plan prices the step by the KV row's fit of that step
+    and the K and V it keeps, to the byte, and its refusal names what
+    fits."""
+    import re
+
+    from gmlx.image import memfit
     from gmlx.serve import image_service
 
     _serve(host, "kv", kvpipe)
@@ -814,22 +819,34 @@ def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
     row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
     x = np.zeros(F3_SHAPE, np.float32)
     w, h = routes._px(served, "latent", *F3_SHAPE[2:])
-    scale = kvpipe.vae_scale
-    run = c.begin("kv")
-    cache = image_service._fit_args(kvpipe, served, 1 << 50, 1.0)[
-        "cache_bytes"] + kvpipe.dit.ref_cache_bytes([ref[0]])
-    terms = dict(family="flux2_klein_9b", caption_tokens=None,
-                 prefix_rows=None, prefix_shared=False, prefix_other=0,
-                 prefix_bound=0, prefix_held=0, ref_sizes=[],
-                 step_refs=[(64 * scale, 64 * scale)], cache_bytes=cache)
+    p, scale = kvpipe.dit.cfg.patch, kvpipe.vae_scale
+    terms = dict(caption_tokens=None, prefix_rows=[(64 // p) ** 2],
+                 prefix_shared=False, prefix_other=0, prefix_bound=0,
+                 prefix_held=0, ref_sizes=[],
+                 step_refs=[(64 * scale, 64 * scale)], ref_cache="build")
     price = _least_budget(served, h, w, 1.0, terms)
-    assert _least_budget(served, h, w, 1.0, {
-        **terms, "cache_bytes": cache - 1}) < price
+
+    def plan(budget):
+        args = image_service._fit_args(kvpipe, served, budget, 1.0)
+        return memfit.plan_memory(height=h, width=w, held_in=("denoise",),
+                                  **{**args, **terms})
+
+    kv, act = memfit.PEAKS["flux2_klein_9b_kv"], kvpipe.dit.act_dtype.size
+    t = plan(price).terms
+    assert t["prefix_cache"] == kv.prefix.cache_bytes((64 // p) ** 2, act)
+    assert t["step_peak"] == kv.ref_build.bytes(
+        (memfit.image_rows(kv, h, w, None) + (64 // p) ** 2) * kv.width * act)
+    with pytest.raises(memfit.ImageMemoryError) as refused:
+        plan(price - 1)
+    hint = refused.value.hint
+    assert hint.startswith("The largest term is") and (
+        "of the 1 reference images" in hint)
+    run = c.begin("kv")
     step = lambda: c.step("kv", run, x, [0.75], [row],  # noqa: E731
                           ref_cache=True)
     try:
         host.budget_bytes = price - 1
-        _refused_by_its_plan(monkeypatch, step)
+        _refused_by_its_plan(monkeypatch, step, re.escape(hint))
         host.budget_bytes = price
         _reaches_the_dit(monkeypatch, step)
     finally:
@@ -1495,14 +1512,15 @@ def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
 
     seen = []
     monkeypatch.setattr(image_service, "size_fits",
-                        lambda served, w, h, budget, cfg=1.0, init=False:
-                        seen.append(init) or False)
+                        lambda served, w, h, budget, cfg=1.0, init=False,
+                        held_in=None: seen.append((init, held_in)) or False)
     for path, tensors in (
             ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)}),
             ("vae/decode", {"latents": np.zeros((1, 4, 4, 6), np.float32)})):
         r = _put_container(path, tensors, {"model": "zit"})
         assert r.status_code == 400, r.text
-    assert seen == [True, False]
+    # Each counts the held states in the phase it runs alone.
+    assert seen == [(True, ("init",)), (False, ("decode",))]
 
 
 def _bare_and_full(served, h, w, **full):
@@ -1518,17 +1536,18 @@ def _bare_and_full(served, h, w, **full):
                                     **args, **full).peak
 
 
-def _refused_by_its_plan(monkeypatch, call) -> None:
-    """``call`` is refused by the plan of its rows before the DiT runs. A
-    step the plan lets through stops at the DiT, whose forward on these
-    references would take gigabytes."""
+def _refused_by_its_plan(monkeypatch, call, hint: str = "") -> None:
+    """``call`` is refused by the plan of its rows before the DiT runs,
+    with ``hint`` after the refusal. A step the plan lets through stops at
+    the DiT, whose forward on these references would take gigabytes."""
     def reached(*a, **k):
         raise AssertionError("the step reached the DiT")
 
     with monkeypatch.context() as m:
         m.setattr(steps, "run_step", reached)
         with pytest.raises(StepsClientError, match="with the references of "
-                           "its rows does not fit in memory"):
+                           "its rows does not fit in memory beside the "
+                           f"models now loaded. {hint}"):
             call()
 
 
@@ -1759,6 +1778,7 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
     rows."""
     from lora_fixtures import make_pair
 
+    from gmlx.image import memfit
     from gmlx.serve import image_service
 
     c = _client()
@@ -1774,9 +1794,12 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
     seen = []
 
     def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
-                  patch_table=None, joined=False, building=0):
+                  patch_table=None, joined=False, ref_cache=None, building=0,
+                  held_in=None, hint=False):
         seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
-        return conds is None
+        if conds is not None:
+            raise memfit.ImageMemoryError("refused", None, "a hint")
+        return True
 
     monkeypatch.setattr(image_service, "size_fits", size_fits)
     import qwen_tiny as qt

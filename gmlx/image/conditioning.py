@@ -205,6 +205,20 @@ class ByteLRU:
                 held -= n
                 self._bytes -= n
 
+    def shed_by(self, nbytes: int, rank) -> int:
+        """Drop entries until ``nbytes`` are gone, the lowest ``rank`` of
+        their key first and the least recently used first within a rank.
+        Returns the bytes dropped."""
+        with self._lock:
+            gone = 0
+            for k in sorted(self._items, key=rank):
+                if gone >= nbytes:
+                    break
+                n = self._items.pop(k)[1]
+                self._bytes -= n
+                gone += n
+            return gone
+
     def drop_where(self, match) -> None:
         """Drop the entries whose value ``match`` takes."""
         with self._lock:

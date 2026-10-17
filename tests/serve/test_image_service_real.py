@@ -115,3 +115,50 @@ def test_serve_refuses_the_16_gb_default_above_its_documented_size(
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     with pytest.raises(memfit.ImageMemoryError, match="1024x1024 image"):
         image_service.entry_plan(spec)
+
+
+def test_the_kv_edit_workflow_fits_the_24_gb_class(gguf_dir, monkeypatch):
+    """The FLUX.2 klein 9B KV edit workflow of the ComfyUI pack on the
+    24 GB class default: a 1024x1024 image from two 1024x1024 references
+    under the Flux KV Cache node. Its first step, which keeps the K and V
+    of both references, and a later step on them each fit the working
+    budget beside the entry's parts, with the tensor caches at their share
+    and no adapter, as the workflow loads none."""
+    from gmlx.image import api
+    from gmlx.image.dtypes import image_activation
+
+    name, gb = "flux-2-klein-9b-kv", 24
+    r = catalog.RECIPES[name]
+    dq, eq = catalog.DEFAULT_QUANTS[name][gb]
+    spec = ResolvedImageModel(
+        id=name, path=_file(gguf_dir, r.dit_name(dq)),
+        vae=_file(gguf_dir, r.vae_pack),
+        encoder=_file(gguf_dir, r.encoder_name(eq)), encoder_model=None,
+        encoder_mmproj=None, family=None, adapters=(), defaults={},
+        encoder_release="auto", pin=False, ttl_s=None)
+    budget = _class_budget(gb)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    entry = image_service.entry_plan(spec)
+    tensor, adapter = image_service.cache_bytes()
+    caches = int((2 * tensor + image_service._CACHE_BYTES["steps"] - adapter)
+                 * entry.cache_share)
+    act = image_activation("flux2_klein_9b_kv")
+    row = memfit.PEAKS["flux2_klein_9b_kv"]
+    refs = 2 * (1024 // row.prefix.token_px) ** 2
+    held = row.prefix.cache_bytes(refs, act.dit.size)
+    for step, cache in (("build", caches), ("read", caches + held)):
+        plan = memfit.plan_memory(
+            api._header_bytes(spec.path, "dit"),
+            (api._header_bytes(spec.encoder, "encoder")
+             if entry.keep_encoder else 0),
+            api._header_bytes(spec.vae, "vae"),
+            family="flux2_klein_9b_kv", height=1024, width=1024,
+            dtype=act.dit, vae_dtype=act.vae, encoder_owned=False,
+            prefix_rows=[refs], step_refs=[(1024, 1024)] * 2,
+            ref_cache=step, cache_bytes=cache, budget=budget,
+            overcommit=False)
+        print(f"{name} {gb} GB {dq}, the {step} step: "
+              f"{plan.peak / memfit.GiB:.2f} of "
+              f"{budget / memfit.GiB:.2f} GiB")
+        assert plan.fits

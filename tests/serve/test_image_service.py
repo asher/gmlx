@@ -621,7 +621,7 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
     seen = []
     monkeypatch.setattr(memfit, "plan_memory", lambda **kw: seen.append(
         kw["cache_bytes"]) or SimpleNamespace(fits=kw["height"] < 512,
-                                              shed_states=False))
+                                              shed_bytes=0))
     monkeypatch.setattr(image_steps.STATE.tensors, "_bytes", 5)
     monkeypatch.setattr(image_steps.STATE.adapters, "_bytes", 7)
     held = SimpleNamespace(bytes=100)
