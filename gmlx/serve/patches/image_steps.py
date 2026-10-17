@@ -293,13 +293,9 @@ def _check_refs(served, rows) -> None:
 def _px(served, part: str, h: int, w: int) -> tuple:
     """(width, height) in pixels of latents (h, w) in the model's latent
     space (``part`` "latent") or the VAE's (``part`` "vae")."""
-    from ..image_steps import COMFY, StepError
+    from ..image_steps import COMFY
 
-    facts = COMFY.get(served.pipe.family.name)
-    if facts is None:
-        raise StepError(400, f"{served.pipe.family.title} has no step "
-                        "contract adapter")
-    stride = int(facts[part]["stride"])
+    stride = int(COMFY[served.pipe.family.name][part]["stride"])
     return int(w) * stride, int(h) * stride
 
 

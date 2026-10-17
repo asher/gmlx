@@ -191,10 +191,10 @@ prompt and a higher `cfg`. FLUX.2 klein places its reference images by the
 (`FluxKontextMultiReferenceLatentMethod`) set to another method is refused
 with the node's name.
 
-The FLUX.2 klein 9B models, whose license allows non-commercial use only,
-run on the command line and on the server's image routes, but not in
-ComfyUI: a gmlx loader that names one stops with
-`FLUX.2 klein 9B has no step contract adapter`.
+The FLUX.2 klein 9B models take the same nodes and workflows with
+`flux-2-klein-9b` or `flux-2-klein-base-9b` in `model_name`, and read
+their prompt with the Qwen3-8B GGUF on the server. They need a Mac with
+24 GB or more, and their license allows non-commercial use only.
 
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
@@ -209,7 +209,7 @@ stock nodes work with a gmlx model and what runs where.
 
 ## The example workflows
 
-ComfyUI's template browser lists seven workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists eight workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -220,6 +220,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `qwen-image-2.1-edit-two-references` | A Qwen-Image 2.1 edit from two reference images, through `TextEncodeQwenImage21` | `gmlx pull qwen-image`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-2-klein-t2i` | FLUX.2 klein text to image at 1024x1024 in 4 steps, through `Flux2Scheduler` and `SamplerCustomAdvanced` | `gmlx pull flux-2-klein` |
 | `flux-2-klein-edit-two-references` | A FLUX.2 klein edit from two reference images, through `ReferenceLatent` | `gmlx pull flux-2-klein`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `flux-2-klein-9b-t2i` | FLUX.2 klein 9B text to image at 1024x1024 in 4 steps, the same graph on the 9B model | `gmlx pull flux-2-klein-9b`, and a Mac with 24 GB or more |
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 

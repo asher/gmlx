@@ -170,8 +170,9 @@ def test_capabilities_answer_without_the_version_header(host):
     assert r.status_code == 200
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
-    assert caps["families"] == ["flux2_klein", "flux3_klein", "krea2",
-                                "qwen_image21", "z_image"]
+    assert caps["families"] == ["flux2_klein", "flux2_klein_9b",
+                                "flux3_klein", "krea2", "qwen_image21",
+                                "z_image"]
     assert caps["conventions"] == ["comfy", "reference"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -380,11 +381,12 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
     # velocity back, so every convention maps the identity. Its FLUX.2
-    # forward alone embeds the fp32 time.
+    # forward alone embeds the fp32 time, at both sizes.
     for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
-    assert steps.CONVENTIONS["comfy"]["flux2_klein"] == steps.Convention(
-        time="fp32")
+    for fam in ("flux2_klein", "flux2_klein_9b"):
+        assert steps.CONVENTIONS["comfy"][fam] == steps.Convention(
+            time="fp32")
     # The reference convention is comfy's on the reference time rule.
     assert steps.CONVENTIONS["reference"] == {
         fam: dataclasses.replace(c, time="reference")
@@ -580,18 +582,23 @@ def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
     assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
 
 
-def test_flux2_klein_9b_has_no_step_contract_adapter(monkeypatch):
-    """The step contract carries the 4B checkpoints of FLUX.2 klein, which
-    check 8 ran through ComfyUI. A 9B model is refused by name, and the
-    capabilities list no 9B family."""
+def test_the_flux2_9b_status_names_comfyuis_flux2_as_4b_does(
+        host, f2pipe, monkeypatch):
+    """The step contract carries the 9B checkpoints of FLUX.2 klein, which
+    check 8 ran through ComfyUI, as ComfyUI's Flux2 on model space latents
+    and the size rule of the 4B schedule."""
     monkeypatch.setattr(steps, "family_of", lambda spec: (
         get_family("flux2_klein_9b"), "distilled"))
-    with pytest.raises(steps.StepError) as e:
-        steps.status(SimpleNamespace(id="f2n", path="x.gguf"), False)
-    assert (e.value.status, str(e.value)) == (
-        400, "FLUX.2 klein 9B has no step contract adapter")
-    assert "flux2_klein_9b" not in steps.COMFY
-    assert "flux2_klein_9b" not in steps.CONVENTIONS["comfy"]
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "f2n", f2pipe)
+    st = _client().status("f2n")
+    assert st["family"] == "flux2_klein_9b"
+    assert st["comfy"] == {"model_class": "Flux2", "image_model": "flux2"}
+    assert st["edit_capable"]
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+    assert st["sampling"] == {"steps": 4, "cfg": 1.0, "shift": 1.0,
+                              "sigmas": None, "schedule": {"rule": "flux2"}}
 
 
 def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,

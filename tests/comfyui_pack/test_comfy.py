@@ -44,6 +44,7 @@ C = P.client
 ZID, QID, QTID = "z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo"
 KID = "krea-2-turbo"
 F2ID, F2BID = "flux-2-klein", "flux-2-klein-base"
+F29ID, F29BID = "flux-2-klein-9b", "flux-2-klein-base-9b"
 F3ID, F3BID = "flux-3-klein", "flux-3-klein-base"
 STEPS = 4
 LORAS = tempfile.mkdtemp(prefix="gmlx-pack-loras-")
@@ -56,6 +57,8 @@ LORA_F3_KEYS = {f"diffusion_model.{s}.weight" for s in
 LORA_F2 = "flux2-test-lora.safetensors"
 LORA_F2_KEYS = {f"diffusion_model.{s}.weight" for s in
                 support.write_flux2_lora(os.path.join(LORAS, LORA_F2), support.manifest("flux2_klein"))}
+LORA_F29 = "flux2-9b-test-lora.safetensors"
+support.write_flux2_lora(os.path.join(LORAS, LORA_F29), support.manifest("flux2_klein_9b"))
 # FLUX.3 came to ComfyUI after the pinned checkout; there its models are
 # refused by name.
 HAS_FLUX3 = hasattr(comfy.supported_models, "Flux3")
@@ -251,7 +254,7 @@ class Weightless(Base):
         self.assertIn("QwenImage21", str(e.exception))
 
     def test_flux2_builds_on_meta_and_reads_the_reference_rule_of_its_dit(self):
-        for mid in (F2ID, F2BID):
+        for mid, depths in ((F2ID, (5, 20)), (F2BID, (5, 20)), (F29ID, (8, 24)), (F29BID, (8, 24))):
             with self.subTest(mid):
                 gc.collect()
                 r0 = rss()
@@ -261,7 +264,7 @@ class Weightless(Base):
                 uc = m.model.model_config.unet_config
                 self.assertEqual(type(m.model.model_config).__name__, "Flux2")
                 self.assertEqual((uc["guidance_embed"], uc["depth"], uc["depth_single_blocks"]),
-                                 (False, 5, 20))
+                                 (False, *depths))
                 f = m.model.diffusion_model.forward
                 self.assertEqual((f.reads_guidance, f.ref_method, f.flow_map), (False, "index", False))
                 self.assertTrue(all(p.device.type == "meta" for p in m.model.parameters()))
@@ -534,10 +537,11 @@ class Refusals(Base):
         patches = {"diffusion_model.final_layer.adaLN_modulation.1.weight": [
             (1.0, LoRA(set(), (up, down, 1.0, None, None, None)), 1.0, None,
              comfy.utils.swap_scale_shift)]}
-        self.assertEqual(P.patches.SWAPS_HALVES, {"flux2_klein"})
-        table, tensors = P.patches.build_table(F2ID, patches, family="flux2_klein")
-        (e,) = table["entries"]
-        self.assertTrue(torch.equal(tensors[e["patches"][0]["up"]], torch.cat([up[32:], up[:32]])))
+        self.assertEqual(P.patches.SWAPS_HALVES, {"flux2_klein", "flux2_klein_9b"})
+        for family in sorted(P.patches.SWAPS_HALVES):
+            table, tensors = P.patches.build_table(F2ID, patches, family=family)
+            (e,) = table["entries"]
+            self.assertTrue(torch.equal(tensors[e["patches"][0]["up"]], torch.cat([up[32:], up[:32]])))
         for family in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
             with self.subTest(family), self.assertRaises(C.GmlxRefusal) as err:
                 P.patches.build_table("m", patches, family=family)
@@ -1147,7 +1151,7 @@ class Widgets(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_loaders_list_the_server_models_default_first(self):
-        want = [QID, ZID, QTID, KID, F2ID, F2BID, F3ID, F3BID]
+        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F3ID, F3BID]
         for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
             node = P.NODE_CLASS_MAPPINGS[name]
             req = node.INPUT_TYPES()["required"]
@@ -1166,7 +1170,7 @@ class Widgets(unittest.TestCase):
             os.environ.pop("GMLX_DEFAULT_IMAGE_MODEL")
             self.probed()
             names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
-            self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F3ID, F3BID])
+            self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F29ID, F29BID, F3ID, F3BID])
             self.assertEqual(opts["default"], KID)
         finally:
             stub.close()
@@ -1256,6 +1260,9 @@ class AgainstComfyGGUF(Base):
 
     def test_flux2_unet_config_and_patches_equal_comfyui_gguf(self):
         self.against("GMLX_TEST_FLUX2_GGUF", F2ID, LORA_F2)
+
+    def test_flux2_9b_unet_config_and_patches_equal_comfyui_gguf(self):
+        self.against("GMLX_TEST_FLUX2_9B_GGUF", F29ID, LORA_F29)
 
     @needs_flux3
     def test_flux3_unet_config_and_patches_equal_comfyui_gguf(self):

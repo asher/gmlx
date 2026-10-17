@@ -79,6 +79,7 @@ class Convention:
 CONVENTIONS = {
     "comfy": {"z_image": Convention(), "qwen_image21": Convention(),
               "krea2": Convention(), "flux2_klein": Convention(time="fp32"),
+              "flux2_klein_9b": Convention(time="fp32"),
               "flux3_klein": Convention()},
 }
 # Under "reference" a step reads the timestep and returns its output as
@@ -106,6 +107,12 @@ COMFY = {
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16,
                             "space": "model"}},
+    # ComfyUI builds the 9B checkpoints as its Flux2 too, at the width and
+    # depth its detection reads from the weights.
+    "flux2_klein_9b": {"model_class": "Flux2", "image_model": "flux2",
+                       "latent": {"channels": 128, "stride": 16, "patch": 1},
+                       "vae": {"channels_out": 3, "stride": 16,
+                               "space": "model"}},
     "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16,
@@ -449,9 +456,7 @@ def status(spec, resident: bool, plan=None) -> dict:
     from gmlx.image.dtypes import image_activation
 
     fam, variant = family_of(spec)
-    facts = COMFY.get(fam.name)
-    if facts is None:
-        raise StepError(400, f"{fam.title} has no step contract adapter")
+    facts = COMFY[fam.name]
     from gmlx.image.api import _header_bytes
 
     mem = {"dit_bytes": _header_bytes(spec.path, "dit"),
@@ -490,6 +495,7 @@ def _qwen_image21_rule(fam) -> dict:
 # family's own schedule does: FLUX.2 klein's of get_schedule, and
 # Qwen-Image 2.1's dynamic shift with its scheduler's constants.
 SIZE_SCHEDULES = {"flux2_klein": lambda fam: {"rule": "flux2"},
+                  "flux2_klein_9b": lambda fam: {"rule": "flux2"},
                   "qwen_image21": _qwen_image21_rule}
 
 

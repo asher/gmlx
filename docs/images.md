@@ -165,8 +165,7 @@ refused by name, as is a LoRA of another model. ComfyUI takes LoRAs as
 ## ComfyUI
 
 [ComfyUI](comfyui.md) builds image workflows from nodes in a browser. The
-gmlx node pack runs these image models in it, on the gmlx server, all but
-the FLUX.2 klein 9B models.
+gmlx node pack runs these image models in it, on the gmlx server.
 
 ## Models and quants
 
