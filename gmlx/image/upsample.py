@@ -110,12 +110,17 @@ def chat_request(family, prompt: str, system: str | None = None
 
 
 def after_thinking(reply: str) -> str | None:
-    """The answer of ``reply`` after its thinking block, or None when the
-    block never closes, as when the reply ran out of tokens in it. A
-    reply without one is all answer."""
-    if "</think>" in reply:
-        return reply.rsplit("</think>", 1)[1]
-    if "<think>" in reply:
+    """The answer of ``reply`` after its thinking block, in any of the
+    think tag spellings gmlx knows, or None when the block never closes,
+    as when the reply ran out of tokens in it. A reply without one is all
+    answer."""
+    from gmlx.gen.thinking_budget import _THINK_PAIRS
+
+    cut = max(((reply.rfind(end), end) for _start, end in _THINK_PAIRS),
+              key=lambda found: found[0])
+    if cut[0] != -1:
+        return reply[cut[0] + len(cut[1]):]
+    if any(start in reply for start, _end in _THINK_PAIRS):
         return None
     return reply
 

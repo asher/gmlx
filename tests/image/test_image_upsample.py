@@ -140,6 +140,14 @@ def test_qwen_image_reads_a_rewritten_prompt_with_unescaped_quotes():
         'a sign that reads "OPEN" on a door')
 
 
+def test_a_thinking_block_in_another_spelling_is_skipped():
+    fam = get_family("flux3_klein")
+    reply = f"<mm:think>\nThe user wants a bike.\n</mm:think>\n{CAPTION}\n"
+    assert upsample.upsample(fam, "x", lambda req: reply) == CAPTION
+    with pytest.raises(upsample.UpsampleError, match="no caption within"):
+        upsample.upsample(fam, "x", lambda req: "<mm:think>\nThe user")
+
+
 def test_an_empty_reply_is_an_error_not_the_typed_prompt():
     fam = get_family("flux3_klein")
     assert upsample.upsample(fam, "x", lambda req: f"  {CAPTION}\n") == CAPTION
