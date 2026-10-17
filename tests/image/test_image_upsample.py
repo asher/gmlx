@@ -38,7 +38,7 @@ CAPTION = "A red bicycle leans against a weathered brick wall."
      None, (0.0, 1024, 0.0, "off")),
     ("krea2", "krea2", "expansion.txt",
      "2a5c24a3a83e9d415d4679a4e1853ddf056bd0329f3af315b27ed72b6ad9c2f0",
-     None, (0.0, 6144, 0.0, "on")),
+     None, (0.0, 2048, 0.0, "off")),
 ])
 def test_the_chat_turn_is_the_sources_t2i_turn(family, package, name, sha256,
                                                 key, sampling):
@@ -78,7 +78,7 @@ def test_krea_2_takes_the_paragraph_after_the_thinking_block():
     assert got.endswith("falls across the cobblestones.")
     # A reply that runs out of tokens while it thinks holds no paragraph.
     with pytest.raises(upsample.UpsampleError,
-                       match="no caption within 6144 tokens"):
+                       match="no caption within 2048 tokens"):
         upsample.upsample(fam, "a red bicycle", lambda req:
                           "<think>\nThe user wants a red bicycle. Style")
 
@@ -149,7 +149,9 @@ def cli(tmp_path, monkeypatch):
         rec.model = weakref.ref(model)
         rec.events.append("upsampler")
         tok = SimpleNamespace(
-            chat_template="{% if enable_thinking %}{% endif %}")
+            chat_template="{% if enable_thinking %}{% endif %}",
+            apply_chat_template=lambda messages, **kw: (
+                "<think>\n" if kw.get("enable_thinking") else ""))
         return model, None, tok
 
     def generate(model, tok, prompt, **kw):
@@ -308,6 +310,6 @@ def test_qwen_image_runs_the_users_prompt_file_and_encodes_its_rewrite(
     assert turn["system_prompt"] == ("Rewrite the prompt. Think, then answer "
                                      "with JSON.")
     assert (turn["presence_penalty"], turn["template_kwargs"]) == (
-        1.5, {"enable_thinking": True})
+        1.5, {"enable_thinking": False})
     assert ("encode", "A red bicycle with a wicker basket leans against a "
             "weathered brick wall in soft afternoon light.") in cli.events
