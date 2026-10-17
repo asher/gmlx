@@ -974,8 +974,8 @@ def test_only_the_flux2_specs_cast_qkv():
             specs[fam.name] = te.encoder_spec(fam)
         except te.ImageModelError:
             continue
-    assert {n for n, s in specs.items() if s.fp32_qkv} == {"flux2_klein",
-                                                           "flux2_klein_9b"}
+    assert {n for n, s in specs.items() if s.fp32_qkv} == {
+        "flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"}
     assert len(specs) > 2
 
 

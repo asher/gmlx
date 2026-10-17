@@ -111,6 +111,7 @@ VAES = {
     "flux3_klein": _FLUX2_AE,
     "flux2_klein": _FLUX2_AE,
     "flux2_klein_9b": _FLUX2_AE,
+    "flux2_klein_9b_kv": _FLUX2_AE,
 }
 
 

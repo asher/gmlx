@@ -17,9 +17,10 @@ the 4B row then reads and refuses by name where it should.
 FLUX.2 klein 9B KV, which samples its reference images through a cache
 of their keys and values, has the names and shapes of the 9B files and
 other weights. Its published GGUFs carry no metadata of their own, so
-it is refused by two of its tensors: the identity hash of the image
-input projection, and the hash of one q norm scale, which a converter
-keeps in float32.
+two of its tensors tell it apart: the identity hash of the image input
+projection, and the hash of one q norm scale, which a converter keeps
+in float32. Its own row comes before this one and takes it, and this
+row refuses a KV file given to it by name.
 """
 
 from __future__ import annotations
@@ -63,18 +64,11 @@ VARIANTS = {
 }
 
 KV_TITLE = f"{TITLE} KV"
-KV_REFUSAL = (f"this is a {KV_TITLE} GGUF, which gmlx image does not "
-              f"support: it samples its reference images through a cache "
-              f"of their keys and values. {TITLE} and base 9B are the 9B "
-              f"checkpoints it runs")
 # The identity hash of KV's image input projection, BF16 in every GGUF of
 # QuantStack/FLUX.2-Klein-9B-KV-GGUF at f4b7b4b0,
 # vantagewithai/FLUX.2-klein-9b-kv-GGUF at 28216d4b and
 # biali/FLUX.2-klein-9b-kv-GGUF at 994cdaa7 read.
-REFUSED = {
-    "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706":
-        KV_REFUSAL,
-}
+KV_HASH = "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706"
 # A q norm scale whose bf16 bits differ between KV and both 9B
 # checkpoints, F32 in every file read: the hash of KV's.
 KV_MARK = "double_blocks.0.img_attn.norm.query_norm.scale"
@@ -113,14 +107,21 @@ def encoder():
                                ENCODER_IDENTITY_SOURCE)
 
 
+def is_kv(view: HeaderView) -> bool:
+    """Whether a 9B file holds the KV weights, by either of its two
+    tensors."""
+    return (fp.weight_identity(view, klein.IDENTITY_TENSORS) == KV_HASH
+            or fp.weight_identity(view, (KV_MARK,)) == KV_MARK_HASH)
+
+
 def fingerprint(view: HeaderView) -> Match | Refusal | None:
     if klein.flux_model(view) != TITLE:
         return None
     refusal = klein.relative_refusal(view, SIZE)
     if refusal is not None:
         return refusal
-    if fp.weight_identity(view, (KV_MARK,)) == KV_MARK_HASH:
-        return Refusal(KV_REFUSAL)
+    if is_kv(view):
+        return Refusal(f"this is a {KV_TITLE} GGUF, not a {TITLE} one")
     return Match()
 
 
@@ -132,7 +133,8 @@ def lora_map(config: dict):
 FAMILY = Family(
     name="flux2_klein_9b",
     title=TITLE,
-    # Before the FLUX.2 klein row, which then reads every other FLUX file.
+    # After the FLUX.2 klein 9B KV row, which takes the KV files, and
+    # before the FLUX.2 klein row, which then reads every other FLUX file.
     order=24,
     arch_strings=klein.FAMILY.arch_strings,
     shared_arch_strings=klein.FAMILY.shared_arch_strings,
@@ -146,7 +148,6 @@ FAMILY = Family(
     encoder=encoder,
     identity_tensors=klein.IDENTITY_TENSORS,
     variants=VARIANTS,
-    refused=REFUSED,
     sampling=klein.SAMPLING,
     unguided=klein.UNGUIDED,
     schedule=klein.schedule,

@@ -101,7 +101,8 @@ def test_every_family_has_a_vae_row():
     for price in (memfit.vae_peak, memfit.vae_tiling):
         with pytest.raises(ValueError, match="no VAE memory row for image "
                            "family 'flux'; known: flux2_klein, "
-                           "flux2_klein_9b, flux3_klein, krea2, qwen_image21, "
+                           "flux2_klein_9b, flux2_klein_9b_kv, flux3_klein, "
+                           "krea2, qwen_image21, "
                            "z_image"):
             price("decode", 512, 512, family="flux", itemsize=2)
 
@@ -138,8 +139,10 @@ def _official_vaes() -> dict:
     out = {"z_image": flux1_ae.Flux1AEConfig(latent_channels=16, **flux),
            "flux3_klein": flux2_ae.Flux2AEConfig(latent_channels=32, **flux),
            "krea2": qm.OFFICIAL, "qwen_image21": mem.OFFICIAL}
-    # FLUX.2 klein at both sizes reads the autoencoder FLUX.3 klein reads.
+    # FLUX.2 klein at both sizes and KV read the autoencoder FLUX.3 klein
+    # reads.
     out["flux2_klein"] = out["flux2_klein_9b"] = out["flux3_klein"]
+    out["flux2_klein_9b_kv"] = out["flux3_klein"]
     assert set(out) == set(reader.VAES)
     return out
 

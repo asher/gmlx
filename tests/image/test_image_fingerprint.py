@@ -26,12 +26,14 @@ def _refused(view, **kw) -> str:
 
 def test_families_sort_by_order_and_name():
     assert [f.name for f in families()] == ["z_image", "krea2",
-                                            "qwen_image21", "flux2_klein_9b",
-                                            "flux2_klein", "flux3_klein"]
+                                            "qwen_image21",
+                                            "flux2_klein_9b_kv",
+                                            "flux2_klein_9b", "flux2_klein",
+                                            "flux3_klein"]
     assert get_family("z_image").title == "Z-Image"
     with pytest.raises(ValueError, match="known: z_image, krea2, qwen_image21, "
-                                         "flux2_klein_9b, flux2_klein, "
-                                         "flux3_klein"):
+                                         "flux2_klein_9b_kv, flux2_klein_9b, "
+                                         "flux2_klein, flux3_klein"):
         get_family("flux")
     assert is_image_arch("lumina2") and is_image_arch("qwen_image")
     assert is_image_arch("krea2")

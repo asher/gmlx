@@ -228,7 +228,7 @@ def test_the_9b_recipes_carry_the_flux_non_commercial_license(
         assert r.dit_name(q) in rows[variant].files
 
 
-KLEIN = ("flux3_klein", "flux2_klein", "flux2_klein_9b")
+KLEIN = ("flux3_klein", "flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv")
 
 
 @pytest.mark.parametrize("label", KLEIN)

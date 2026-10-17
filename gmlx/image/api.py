@@ -101,13 +101,14 @@ def check_steps(family, variant: str, steps: int) -> None:
 
 def check_guidance(family, variant: str, cfg: float) -> None:
     """Refuse guidance on a variant the family declares distilled to
-    sample without it, naming the variant that takes it."""
+    sample without it, naming the variant that takes it, if any."""
     other = family.unguided.get(variant)
     if other is not None and cfg != 1.0:
+        alt = (f", or run the {family.title} {other} checkpoint, which "
+               f"takes guidance" if other else "")
         raise RequestRefusal(
             f"the {family.title} {variant} DiT samples without guidance: "
-            f"drop guidance {cfg:g}, or run the {family.title} {other} "
-            f"checkpoint, which takes guidance")
+            f"drop guidance {cfg:g}{alt}")
 
 
 def check_sampling(family, variant: str, flow_map: bool, cfg: float,
@@ -390,8 +391,9 @@ def _flat(params):
 
 
 def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
-    """Rows a conditioning puts before the image rows: its text rows and
-    the tokens of its reference latents."""
+    """Rows a conditioning puts before the image rows: its text rows,
+    where the family's prefix holds them, and the tokens of its reference
+    latents."""
     p = pipe.dit.cfg.patch
     if cond.pending:
         px = pipe.vae_scale * p
@@ -399,7 +401,8 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
     else:
         refs = sum((int(r.shape[-2]) // p) * (int(r.shape[-1]) // p)
                    for r in cond.ref_latents)
-    return int(cond.features.shape[0]) - len(cond.image_slots) + refs
+    text = int(cond.features.shape[0]) - len(cond.image_slots)
+    return memfit.prefix_text_rows(pipe.family.name, text) + refs
 
 
 def _text_rows(states) -> int | None:

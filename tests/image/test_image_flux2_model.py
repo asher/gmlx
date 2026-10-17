@@ -348,11 +348,20 @@ def test_the_cached_pass_is_the_references_in_fp32(tiny):
 
 
 def test_the_cached_pass_in_bf16_is_inside_the_bf16_tolerances(tiny):
-    """On gmlx's own time embedding, as a request runs."""
+    """Through the step of the FLUX.2 klein 9B KV row on gmlx's own time
+    embedding, as a request runs."""
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+
     weights, cfg = tiny
     arrays, m = committed_fixture(KV)
     model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
-    _, (v0, v1) = _kv_pass(model, arrays)
+    pipe = api.ImagePipeline(dit=model, family=get_family("flux2_klein_9b_kv"),
+                             variant="distilled")
+    cond = Conditioning(mx.array(arrays["features"]), "kv", ref_latents=tuple(
+        mx.array(arrays[f"refs.{i}"][0]) for i in range(2)))
+    v0, v1 = (np.array(api.denoise_step(pipe, arrays[lat], arrays[s], cond))
+              for lat, s in (("latents", "sigma"), ("latents2", "sigma2")))
     for name, v in (("extract", v0), ("cached", v1)):
         rel = fg.rel(v, arrays[f"velocity_{name}"])
         assert rel <= m["tolerances"][f"velocity_{name}"]["rel_l2"], name

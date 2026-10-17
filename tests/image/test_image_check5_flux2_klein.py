@@ -44,7 +44,7 @@ pytestmark = pytest.mark.host_gb(16)
 FAMILY = "flux2_klein"
 OTHER = "flux3_klein"
 # Every family that decodes with the FLUX.2 autoencoder.
-KLEIN = (FAMILY, OTHER, "flux2_klein_9b")
+KLEIN = (FAMILY, OTHER, "flux2_klein_9b", "flux2_klein_9b_kv")
 NAME = "check5_flux2_klein_vae"
 F32_NAME = "check5_flux3_klein_vae"
 TINY = "selftest_flux3_klein_vae_tiny"

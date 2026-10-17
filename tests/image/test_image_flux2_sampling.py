@@ -122,11 +122,13 @@ def test_only_flux2_klein_keeps_its_latents_in_the_activation_dtype():
                                              act_update=True,
                                              act_latents=True)
     assert rules["flux2_klein_9b"] is rules["flux2_klein"]
+    assert rules["flux2_klein_9b_kv"] is rules["flux2_klein"]
     assert rules["flux3_klein"] == LoopRules(noise="bfloat16",
                                              act_update=True)
     assert all(r is None or not r.act_latents
                for n, r in rules.items()
-               if n not in ("flux2_klein", "flux2_klein_9b"))
+               if n not in ("flux2_klein", "flux2_klein_9b",
+                            "flux2_klein_9b_kv"))
 
 
 def test_an_fp32_run_keeps_fp32_latents(loop):

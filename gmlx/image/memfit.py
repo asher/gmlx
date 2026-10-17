@@ -210,6 +210,11 @@ FLUX2_KLEIN_4B_STEP = StepFit(base=2.62 * GiB, k=3.3, row_k=1.0)
 # of 0.5, which leaves 0.74 GiB or more above every guided cell.
 FLUX2_KLEIN_9B_STEP = StepFit(base=3.05 * GiB, k=2.9, row_k=0.5)
 
+# One FLUX.2 klein 9B KV step and reference pass. Provisional, the 9B
+# step's, until measured.
+FLUX2_KLEIN_9B_KV_STEP = FLUX2_KLEIN_9B_STEP
+FLUX2_KLEIN_9B_KV_PREFILL = FLUX2_KLEIN_9B_STEP
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -507,10 +512,11 @@ VAE_ROWS = {
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED,
         overlap=128, scale=8),
 }
-# FLUX.2 klein at both sizes reads the file the FLUX.3 klein row was
-# measured on.
+# FLUX.2 klein at both sizes and KV read the file the FLUX.3 klein row
+# was measured on.
 VAE_ROWS["flux2_klein"] = VAE_ROWS["flux3_klein"]
 VAE_ROWS["flux2_klein_9b"] = VAE_ROWS["flux3_klein"]
+VAE_ROWS["flux2_klein_9b_kv"] = VAE_ROWS["flux3_klein"]
 
 
 @dataclass(frozen=True)
@@ -528,10 +534,19 @@ class PrefixRow:
     min_ref_px: int = 0             # the smallest reference size, the side
                                     # of the square of a reference's area
 
+    def text_rows(self, text: int) -> int:
+        """Prefix rows of ``text`` text rows."""
+        return text
+
     def rows(self, text: int, refs: int, ref_px: int) -> int:
         """Prefix rows of one conditioning with ``text`` text rows and
         ``refs`` square references of ``ref_px`` pixels."""
-        return text + refs * (ref_px // self.token_px) ** 2
+        return self.text_rows(text) + refs * (ref_px // self.token_px) ** 2
+
+    def encoder_rows(self, rows: int, text: int) -> int:
+        """Image rows the encoder runs beside ``text`` text rows for a
+        prefix of ``rows`` rows."""
+        return (rows - text) // self.slot_tokens
 
     def cache_bytes(self, rows: int, itemsize: int) -> int:
         return 2 * self.blocks * rows * self.dim * itemsize
@@ -539,6 +554,19 @@ class PrefixRow:
     def join_bytes(self, rows: int, itemsize: int) -> int:
         """K and V of one block over ``rows`` joined rows."""
         return 2 * rows * self.dim * itemsize
+
+
+@dataclass(frozen=True)
+class ReferenceRow(PrefixRow):
+    """A prefix of reference latent tokens alone, whose K and V a family
+    caches per conditioning. The text rows join the image rows in every
+    step, and the encoder reads the prompt alone."""
+
+    def text_rows(self, text: int) -> int:
+        return 0
+
+    def encoder_rows(self, rows: int, text: int) -> int:
+        return 0
 
 
 @dataclass(frozen=True)
@@ -656,6 +684,21 @@ PEAKS = {
                               encode_row_bytes=3 * 4096 * 4,
                               encode_base=int(0.32 * GiB), ref_token_px=16,
                               prices_prompt=False),
+    # FLUX.2 klein 9B KV joins the 512 text rows to the image rows in every
+    # block, as the 9B does, and caches the K and V of the reference
+    # tokens in all 32 blocks, which every step joins to its own. The
+    # encoder is the 9B's.
+    "flux2_klein_9b_kv": PeakRow(token_px=16, row_multiple=1,
+                                 caption_rows=512,
+                                 width=3 * 4096 + 2 * 12288 + 12288,
+                                 step=FLUX2_KLEIN_9B_KV_STEP,
+                                 prefix=ReferenceRow(blocks=32, dim=4096,
+                                                     token_px=16,
+                                                     min_ref_px=64),
+                                 prefill=FLUX2_KLEIN_9B_KV_PREFILL,
+                                 encode_row_bytes=3 * 4096 * 4,
+                                 encode_base=int(0.32 * GiB),
+                                 prices_prompt=False),
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
@@ -841,6 +884,14 @@ def load_transient(encoder=None, vae=None, mmproj=None) -> int:
     return int(LOAD_ROOM * max(head, copies))
 
 
+def prefix_text_rows(family: str, text: int) -> int:
+    """Rows of ``text`` text rows in the prefix a family caches: all of
+    them, unless its prefix holds reference tokens alone."""
+    row = PEAKS.get(family)
+    return text if row is None or row.prefix is None else (
+        row.prefix.text_rows(text))
+
+
 def prices_prompt(family: str) -> bool:
     """Whether a plan of ``family`` that knows the prompt prices its text
     rows, where one that does not prices the family's most."""
@@ -1012,7 +1063,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                            * (int(w) // row.prefix.token_px)
                            for h, w in ref_sizes)
         # The image rows the encoder runs beside the text.
-        slots = (counted - text) // row.prefix.slot_tokens
+        slots = row.prefix.encoder_rows(counted, text)
     given = [] if prefix_rows is None else [int(n) for n in prefix_rows]
     mine = (given + [counted] * conds)[:conds]
     per = [prefix_row_terms(row, rows, n, act) for n in mine]

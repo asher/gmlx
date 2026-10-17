@@ -175,7 +175,8 @@ class Family:
     refused: dict = field(default_factory=dict)
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
     # variant -> the variant that takes guidance, for a variant distilled
-    # to sample without it, which then refuses guidance by name.
+    # to sample without it, which then refuses guidance by name; "" when
+    # no variant of the family takes guidance.
     unguided: dict = field(default_factory=dict)
     # The sampling row of a variant without one, such as a file whose
     # identity matches no row; None leaves it without defaults.
