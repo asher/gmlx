@@ -541,9 +541,12 @@ def test_the_qwen_recipe_takes_the_vision_tower_beside_its_encoder(
             in capsys.readouterr().out)
 
 
-def _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails):
+def _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails,
+                      fetched_sha=Q.prompt_sha256):
     """A bare Qwen-Image pull with Qwen's rewriter prompt fetched, or its
-    fetch failing. Returns the downloads, stdout and stderr."""
+    fetch failing. A prompt file already at its path reads as another
+    digest, and a fetched one as ``fetched_sha``. Returns the downloads,
+    stdout and stderr."""
     root, cfg = lib
     monkeypatch.setattr(catalog, "scan", lambda *a, **k: [])
     got = _downloads(monkeypatch)
@@ -552,11 +555,18 @@ def _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails):
     def download(repo, filename, revision, dest_dir):
         if repo == Q.prompt_repo and fetch_fails:
             raise remote.RemoteError("offline")
+        # As the real download, a finished file is never fetched again.
+        assert not os.path.exists(os.path.join(dest_dir, filename))
         return fetch(repo, filename, revision, dest_dir)
 
+    def sha(p):
+        if not p.endswith(Q.prompt_file):
+            return Q.vae_sha256
+        with open(p, "rb") as f:
+            return fetched_sha if f.read() == b"x" * 10 else "0" * 64
+
     monkeypatch.setattr(manage, "_hf_download", download)
-    monkeypatch.setattr(catalog, "sha256_file", lambda p: (
-        Q.prompt_sha256 if p.endswith(Q.prompt_file) else Q.vae_sha256))
+    monkeypatch.setattr(catalog, "sha256_file", sha)
     monkeypatch.setattr(catalog, "vae_identity",
                         lambda p: ("qwen_image21", Q.vae_sha256))
     import gmlx.image.vae as vae_pkg
@@ -586,6 +596,29 @@ def test_a_qwen_image_pull_whose_prompt_fetch_fails_registers_without_it(
     assert "the upsampler prompt was not fetched" in err
     m = _cfg(cfg).image_models["qwen-image"]
     assert m.upsample_prompt is None and m.vae.endswith(Q.vae_pack)
+
+
+@pytest.mark.parametrize("fetched_sha", [Q.prompt_sha256, "f" * 64])
+def test_a_qwen_image_pull_fetches_a_prompt_of_another_digest_again(
+        lib, monkeypatch, capsys, fetched_sha):
+    root, cfg = lib
+    path = root / "Qwen__Qwen-Image-2.1-PE-T2I" / Q.prompt_file
+    path.parent.mkdir()
+    path.write_bytes(b"an older copy")
+    got, out, err = _qwen_prompt_pull(lib, monkeypatch, capsys,
+                                      fetch_fails=False,
+                                      fetched_sha=fetched_sha)
+    assert (Q.prompt_repo, Q.prompt_file, Q.prompt_revision) in got
+    assert f"{path} is not the one of {Q.prompt_revision[:8]}" in out
+    assert path.read_bytes() == b"x" * 10
+    m = _cfg(cfg).image_models["qwen-image"]
+    if fetched_sha == Q.prompt_sha256:
+        assert m.upsample_prompt == f"{path.parent.name}/{Q.prompt_file}"
+    else:
+        # A fetched copy of another digest too is the user's to delete.
+        assert f"{path} has sha256 {fetched_sha}" in err
+        assert "; delete it" in err
+        assert m.upsample_prompt is None
 
 
 def test_krea_2_packs_a_vae_without_config(lib, monkeypatch, capsys):

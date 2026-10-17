@@ -45,6 +45,7 @@ class Part:
     wanted: bool = True             # inside --only
     note: str | None = None         # a line the plan prints under it
     optional: bool = False          # a failed fetch leaves the pull whole
+    replace: bool = False           # the download replaces a file at path
 
     @property
     def download(self) -> bool:
@@ -263,8 +264,8 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
             need=None if need is None else need + cfg_size), dest)
 
     # The upsampler prompt, in the folder of its repository as the other
-    # parts are. A file there of another digest stays as it is, and the
-    # entry does not name it.
+    # parts are. The file there is the pull's own, so one of another
+    # digest is fetched again over it.
     if r.prompt_repo:
         d = _dest(r.prompt_repo, base_dir, nest)
         dest = os.path.join(d, r.prompt_file)
@@ -280,9 +281,14 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
                                    size=os.path.getsize(dest), need=0,
                                    optional=True))
         else:
-            plan.notes.append(f"{dest} is not the upsampler prompt of "
-                              f"{r.prompt_repo} at {r.prompt_revision[:8]}, "
-                              "so the entry does not name it")
+            size = _repo_sizes(r.prompt_repo, r.prompt_revision, sizes).get(
+                r.prompt_file)
+            plan.parts.append(Part(
+                "prompt", r.prompt_file, dest, repo=r.prompt_repo,
+                files=(r.prompt_file,), root=d, revision=r.prompt_revision,
+                size=size, need=size, optional=True, replace=True,
+                note=f"{dest} is not the one of {r.prompt_revision[:8]}, "
+                "and the download replaces it"))
 
     for p in plan.parts:
         role = {"mmproj": "encoder", "prompt": "dit"}.get(p.role, p.role)
@@ -546,7 +552,7 @@ def _check_prompt(r: catalog.Recipe, path: str) -> None:
         raise remote.RemoteError(
             f"{path} has sha256 {sha}, and {r.prompt_file} of "
             f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
-            f"{r.prompt_sha256}")
+            f"{r.prompt_sha256}; delete it")
 
 
 def _entry_id(r: catalog.Recipe, plan: Plan, cfg) -> str:
@@ -799,6 +805,9 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
         if not (part.download and part.wanted):
             continue
         try:
+            if part.replace:
+                # A finished file is never downloaded again.
+                os.remove(part.path)
             got = _fetch(plan, part)
             if part.role == "vae":
                 _pack(plan, part, got, keep_source=a.keep_source)
