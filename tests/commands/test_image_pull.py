@@ -541,6 +541,53 @@ def test_the_qwen_recipe_takes_the_vision_tower_beside_its_encoder(
             in capsys.readouterr().out)
 
 
+def _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails):
+    """A bare Qwen-Image pull with Qwen's rewriter prompt fetched, or its
+    fetch failing. Returns the downloads, stdout and stderr."""
+    root, cfg = lib
+    monkeypatch.setattr(catalog, "scan", lambda *a, **k: [])
+    got = _downloads(monkeypatch)
+    fetch = manage._hf_download
+
+    def download(repo, filename, revision, dest_dir):
+        if repo == Q.prompt_repo and fetch_fails:
+            raise remote.RemoteError("offline")
+        return fetch(repo, filename, revision, dest_dir)
+
+    monkeypatch.setattr(manage, "_hf_download", download)
+    monkeypatch.setattr(catalog, "sha256_file", lambda p: (
+        Q.prompt_sha256 if p.endswith(Q.prompt_file) else Q.vae_sha256))
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: ("qwen_image21", Q.vae_sha256))
+    import gmlx.image.vae as vae_pkg
+    monkeypatch.setattr(vae_pkg, "pack_vae", lambda src, dst, **kw: open(
+        dst, "wb").write(b"g"))
+    assert manage.cmd_pull(["qwen-image", "--config", str(cfg)]) == 0
+    out, err = capsys.readouterr()
+    return got, out, err
+
+
+def test_a_qwen_image_pull_fetches_qwens_rewriter_prompt_for_the_entry(
+        lib, monkeypatch, capsys):
+    _root, cfg = lib
+    got, out, _err = _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails=False)
+    assert (Q.prompt_repo, Q.prompt_file, Q.prompt_revision) in got
+    assert ("license: the upsampler prompt system_prompt.txt of "
+            "Qwen/Qwen-Image-2.1-PE-T2I, the Qwen Research License, "
+            "non-commercial use only") in out
+    m = _cfg(cfg).image_models["qwen-image"]
+    assert m.upsample_prompt == "Qwen__Qwen-Image-2.1-PE-T2I/system_prompt.txt"
+
+
+def test_a_qwen_image_pull_whose_prompt_fetch_fails_registers_without_it(
+        lib, monkeypatch, capsys):
+    _root, cfg = lib
+    _got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails=True)
+    assert "the upsampler prompt was not fetched" in err
+    m = _cfg(cfg).image_models["qwen-image"]
+    assert m.upsample_prompt is None and m.vae.endswith(Q.vae_pack)
+
+
 def test_krea_2_packs_a_vae_without_config(lib, monkeypatch, capsys):
     root, cfg = lib
     K = catalog.RECIPES["krea-2-turbo"]

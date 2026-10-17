@@ -8,8 +8,11 @@ configured chat model that is the encoder becomes the entry's shared
 encoder. The rest downloads after a summary of files, sizes and free disk.
 The VAE comes as safetensors from its source repository, is checked
 against the recipe's sha256, packed to GGUF and checked again, and the
-source is deleted unless ``--keep-source``. The entry is then added under
-``image_models:`` in the server config.
+source is deleted unless ``--keep-source``. For a family that ships no
+upsampler prompt, the pull also fetches the one its recipe pins, checked
+against its sha256, and the entry names it as ``upsample_prompt``; a
+fetch that fails leaves the entry without it. The entry is then added
+under ``image_models:`` in the server config.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from gmlx.image import catalog
 
 PARTS = ("dit", "encoder", "vae")
 _ROLE = {"dit": "DiT", "encoder": "text encoder", "mmproj": "vision tower",
-         "vae": "VAE"}
+         "vae": "VAE", "prompt": "upsampler prompt"}
 
 
 @dataclass
@@ -41,6 +44,7 @@ class Part:
     chat_id: str | None = None      # the configured chat model it is
     wanted: bool = True             # inside --only
     note: str | None = None         # a line the plan prints under it
+    optional: bool = False          # a failed fetch leaves the pull whole
 
     @property
     def download(self) -> bool:
@@ -57,6 +61,7 @@ class Plan:
     default: bool = True            # the quants of the memory class
     blocked: list = field(default_factory=list)  # parts whose path is taken
     size: str | None = None         # the defaults.size the entry gets
+    notes: list = field(default_factory=list)  # lines the plan ends with
 
     def part(self, role: str) -> Part | None:
         return next((p for p in self.parts if p.role == role), None)
@@ -257,8 +262,30 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
             size=None if size is None else size + cfg_size,
             need=None if need is None else need + cfg_size), dest)
 
+    # The upsampler prompt, in the folder of its repository as the other
+    # parts are. A file there of another digest stays as it is, and the
+    # entry does not name it.
+    if r.prompt_repo:
+        d = _dest(r.prompt_repo, base_dir, nest)
+        dest = os.path.join(d, r.prompt_file)
+        if not os.path.isfile(dest):
+            size = _repo_sizes(r.prompt_repo, r.prompt_revision, sizes).get(
+                r.prompt_file)
+            plan.parts.append(Part(
+                "prompt", r.prompt_file, dest, repo=r.prompt_repo,
+                files=(r.prompt_file,), root=d, revision=r.prompt_revision,
+                size=size, need=_remaining(dest, size), optional=True))
+        elif catalog.sha256_file(dest) == r.prompt_sha256:
+            plan.parts.append(Part("prompt", r.prompt_file, dest,
+                                   size=os.path.getsize(dest), need=0,
+                                   optional=True))
+        else:
+            plan.notes.append(f"{dest} is not the upsampler prompt of "
+                              f"{r.prompt_repo} at {r.prompt_revision[:8]}, "
+                              "so the entry does not name it")
+
     for p in plan.parts:
-        role = "encoder" if p.role == "mmproj" else p.role
+        role = {"mmproj": "encoder", "prompt": "dit"}.get(p.role, p.role)
         p.wanted = role in only
     return plan
 
@@ -270,7 +297,7 @@ def _gb(n: int | None, digits: int = 1) -> str:
 
 
 def _combined(plan: Plan) -> int | None:
-    sizes = [p.size for p in plan.parts]
+    sizes = [p.size for p in plan.parts if p.role != "prompt"]
     if any(s is None for s in sizes):
         return None
     return sum(sizes)  # type: ignore[arg-type]
@@ -337,10 +364,17 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
     if plan.size:
         print(f"  the entry gets defaults.size {plan.size}, the largest image "
               f"this DiT makes on a {plan.memory_class} GB Mac")
+    for n in plan.notes:
+        print(f"  {n}")
     note = f", {r.license_note}" if r.license_note else ""
     vae = f"; VAE {r.vae_license}" if r.vae_license else ""
     print(f"  license: {r.title} {r.license}{note} ({r.license_url}); "
           f"encoder {r.encoder_license}{vae}")
+    prompt = plan.part("prompt")
+    if prompt is not None and prompt.download and prompt.wanted:
+        print(f"  license: the upsampler prompt {r.prompt_file} of "
+              f"{r.prompt_repo}, {r.prompt_license} "
+              f"({r.prompt_license_url})")
 
 
 _PACK_ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
@@ -448,7 +482,7 @@ def _cast(plan: Plan) -> int:
 def _need(plan: Plan) -> int | None:
     total = 0
     for p in plan.parts:
-        if not (p.download and p.wanted):
+        if not (p.download and p.wanted) or (p.optional and p.need is None):
             continue
         if p.need is None:
             return None
@@ -506,6 +540,15 @@ def _pack(plan: Plan, part: Part, got: list, *, keep_source: bool) -> str:
     return part.path
 
 
+def _check_prompt(r: catalog.Recipe, path: str) -> None:
+    sha = catalog.sha256_file(path)
+    if sha != r.prompt_sha256:
+        raise remote.RemoteError(
+            f"{path} has sha256 {sha}, and {r.prompt_file} of "
+            f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
+            f"{r.prompt_sha256}")
+
+
 def _entry_id(r: catalog.Recipe, plan: Plan, cfg) -> str:
     taken = set(cfg.models) | set(cfg.aliases) | set(cfg.assistants)
     if r.name not in taken and r.name not in cfg.image_models:
@@ -532,6 +575,9 @@ def _entry(plan: Plan, cfg) -> dict:
     if mm is not None and not enc.chat_id:
         out["encoder_mmproj"] = _rel(mm.path, dirs)
     out["vae"] = _rel(plan.part("vae").path, dirs)
+    prompt = plan.part("prompt")
+    if prompt is not None and not prompt.download:
+        out["upsample_prompt"] = _rel(prompt.path, dirs)
     if plan.size:
         out["defaults"] = {"size": plan.size}
     return out
@@ -562,6 +608,8 @@ def register(plan: Plan, cfg_path: str) -> str | None:
     roots = [os.path.abspath(os.path.expanduser(os.path.expandvars(d)))
              for d in cfg.model_dirs]
     for p in plan.parts:
+        if p.optional and p.download:
+            continue
         ap = os.path.abspath(p.path)
         if p.chat_id is None and not any(
                 ap == r or ap.startswith(r + os.sep) for r in roots):
@@ -571,7 +619,7 @@ def register(plan: Plan, cfg_path: str) -> str | None:
     old = _registered(plan, cfg)
     if old is not None:
         print(f"{plan.recipe.name} is already configured as {old}")
-        return None
+        return _name_prompt(plan, cfg, cfg_path, old)
     iid = _entry_id(plan.recipe, plan, cfg)
     entry = _entry(plan, cfg)
     set_default = not cfg.defaults.image_model
@@ -598,6 +646,26 @@ def register(plan: Plan, cfg_path: str) -> str | None:
     edit_config_yaml(cfg_path, mutate)
     print(f"registered {iid} in {cfg_path}"
           + (" (the image default)" if set_default else ""))
+    return iid
+
+
+def _name_prompt(plan: Plan, cfg, cfg_path: str, iid: str) -> str | None:
+    """Name the fetched upsampler prompt on the entry ``iid`` that has
+    none. Returns ``iid`` when it did."""
+    from gmlx.config import edit_config_yaml
+    from gmlx.load.discovery import _rel
+
+    prompt = plan.part("prompt")
+    if prompt is None or prompt.download or \
+            cfg.image_models[iid].upsample_prompt:
+        return None
+    rel = _rel(prompt.path, cfg.model_dirs)
+
+    def mutate(doc):
+        doc["image_models"][iid]["upsample_prompt"] = rel
+
+    edit_config_yaml(cfg_path, mutate)
+    print(f"set upsample_prompt of {iid} to {rel} in {cfg_path}")
     return iid
 
 
@@ -698,6 +766,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             "license_note": r.license_note or None,
             "encoder_license": r.encoder_license,
             "vae_license": r.vae_license or None,
+            "prompt_license": r.prompt_license or None,
             "parts": [{"role": p.role, "name": p.name, "path": p.path,
                        "size_bytes": p.size, "download": p.download
                        and p.wanted, "on_disk": not p.download,
@@ -733,16 +802,22 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
             got = _fetch(plan, part)
             if part.role == "vae":
                 _pack(plan, part, got, keep_source=a.keep_source)
+            if part.role == "prompt":
+                _check_prompt(r, part.path)
             part.repo = None
             part.need = 0
             if part.size is None or part.role != "vae":
                 part.size = os.path.getsize(part.path)
         except (remote.RemoteError, OSError, ValueError) as e:
+            if part.optional:
+                print(f"warning: the {_ROLE[part.role]} was not fetched, so "
+                      f"the entry does not name it: {e}", file=sys.stderr)
+                continue
             print(f"error: {part.role} failed: {e}", file=sys.stderr)
             return 1
         print(f"  {part.role}: {part.path}", flush=True)
 
-    missing = [p.role for p in plan.parts if p.download]
+    missing = [p.role for p in plan.parts if p.download and not p.optional]
     if missing:
         print(f"not registered: {', '.join(missing)} not on disk yet; "
               f"`gmlx pull {r.name}` fetches the rest", file=sys.stderr)
