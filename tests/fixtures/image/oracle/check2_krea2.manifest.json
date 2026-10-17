@@ -93,61 +93,63 @@
  },
  "results": {
   "bf16_vs_fp32_plain": {
-   "rel_l2": 0.010774379973786606,
-   "token_cosine_min": 0.999734016379737,
+   "rel_l2": 0.010757301009925498,
+   "token_cosine_min": 0.9996794634301444,
    "worst_token": 29
   },
   "bf16_vs_fp32_empty": {
-   "rel_l2": 0.018908368113602237,
-   "token_cosine_min": 0.999726437880724,
-   "worst_token": 3
+   "rel_l2": 0.022579539577013065,
+   "token_cosine_min": 0.9991686807814586,
+   "worst_token": 2
   },
   "bf16_vs_fp32_non_ascii": {
-   "rel_l2": 0.011917093336829583,
-   "token_cosine_min": 0.9997476082496803,
+   "rel_l2": 0.011323564105340796,
+   "token_cosine_min": 0.9997927884976834,
    "worst_token": 40
   },
   "bf16_vs_fp32_long": {
-   "rel_l2": 0.010095176733751574,
-   "token_cosine_min": 0.99840026942934,
+   "rel_l2": 0.010045001030807098,
+   "token_cosine_min": 0.9969202927206706,
    "worst_token": 387
   },
   "seconds": {
    "plain": {
     "fp32": 2.8,
-    "bf16": 4.9
+    "bf16": 5.1
    },
    "empty": {
     "fp32": 2.8,
-    "bf16": 4.9
+    "bf16": 5.1
    },
    "non_ascii": {
     "fp32": 2.8,
-    "bf16": 5.1
+    "bf16": 5.2
    },
    "long": {
     "fp32": 2.8,
-    "bf16": 5.0
+    "bf16": 5.1
    }
   }
  },
  "tolerances": {
   "rel_l2": {
-   "plain": 0.02154875994757321,
-   "empty": 0.037816736227204474,
-   "non_ascii": 0.023834186673659167,
-   "long": 0.02019035346750315
+   "plain": 0.021514602019850997,
+   "empty": 0.04515907915402613,
+   "non_ascii": 0.022647128210681593,
+   "long": 0.020090002061614196
   },
   "token_cosine_min": {
-   "plain": 0.9989360655189481,
-   "empty": 0.9989057515228961,
-   "non_ascii": 0.9989904329987214,
-   "long": 0.9936010777173601
+   "plain": 0.9987178537205774,
+   "empty": 0.9966747231258344,
+   "non_ascii": 0.9991711539907335,
+   "long": 0.9876811708826825
   },
   "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt"
  },
- "notes": [],
- "created": "2026-10-10T06:44:37Z",
+ "notes": [
+  "The bf16 model is the float32 one cast to bfloat16, with its rotary frequencies left in float32."
+ ],
+ "created": "2026-10-16T18:15:03Z",
  "npz": "check2_krea2.npz",
  "tensors": {
   "features_empty": {
@@ -164,7 +166,7 @@
     30720
    ],
    "dtype": "float32",
-   "sha256": "c22faead016fb62041f2ad75b04233817d8d79359c249e713ba3a0284b14498f"
+   "sha256": "042c8f141637eef2a0d989279757079f2ac9317ffab87899ab4817fb0103e067"
   },
   "features_long": {
    "shape": [
@@ -180,7 +182,7 @@
     30720
    ],
    "dtype": "float32",
-   "sha256": "12c17769be1fe420f8ca8de3f45d6a7bf2d222aeb12f63c9d1f7f0446597915c"
+   "sha256": "c89124c31cb45921a3bba2b29daee14446f17a62079f047c3916f3ff53c1e21d"
   },
   "features_non_ascii": {
    "shape": [
@@ -196,7 +198,7 @@
     30720
    ],
    "dtype": "float32",
-   "sha256": "675f65546cc96789740e2e22399639d9db7e3b67aa01a2bf76bb792e47f8b320"
+   "sha256": "f0ab9d723a195363d599dbacfc109fc29fab205cd14e5efc7a365f589ba222ae"
   },
   "features_plain": {
    "shape": [
@@ -212,7 +214,7 @@
     30720
    ],
    "dtype": "float32",
-   "sha256": "de95c7b6368ba2a8bf8cc3b538a0bb804b9b339549edbf7c09749ed439264d32"
+   "sha256": "e4560c619473f6146d28f17285d94dbb840f5c5d64ffdee84f18cab55b03b0cd"
   },
   "ids_empty": {
    "shape": [

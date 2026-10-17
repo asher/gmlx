@@ -169,10 +169,11 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
                         "on Qwen-Image 2.1 (default: the init image's, else "
-                        "on FLUX.3 klein the first reference's, else the "
-                        "entry's defaults.size, else the variant's). On "
-                        "FLUX.3 klein without it, the image of one reference "
-                        "is cropped to that reference's own aspect.")
+                        "on FLUX.2 klein and FLUX.3 klein the first "
+                        "reference's, else the entry's defaults.size, else "
+                        "the variant's). On FLUX.3 klein without it, the "
+                        "image of one reference is cropped to that "
+                        "reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
@@ -195,13 +196,13 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--ref", action="append", default=None, metavar="PATH",
                    help="Edit from this reference image. Repeat the flag for "
                         "several, in the order the prompt names them. Needs "
-                        "--encoder-mmproj, except on FLUX.3 klein, whose "
-                        "encoder reads the prompt alone.")
+                        "--encoder-mmproj, except on FLUX.2 klein and FLUX.3 "
+                        "klein, whose encoders read the prompt alone.")
     p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
                    help="Resize each reference to about N x N pixels at its "
-                        "own aspect ratio (default 1024). FLUX.3 klein sizes "
-                        "its references by its own rule and takes no "
-                        "--ref-size.")
+                        "own aspect ratio (default 1024). FLUX.2 klein and "
+                        "FLUX.3 klein size their references by their own "
+                        "rules and take no --ref-size.")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",
@@ -659,9 +660,13 @@ def _generate(a) -> int:
     stride = _stride(fam)
     refs = _references(a, fam)
     edit = fam.edit
-    # A family that sizes a request by its references names that size.
-    ref_size = (edit.size(refs) if refs and edit is not None
-                and edit.size is not None else None)
+    # A family that sizes a request by its references names that size,
+    # scaled into the image limits.
+    ref_size = None
+    if a.size is None and a.init_image is None:
+        from gmlx.image.registry import edit_size
+
+        ref_size = edit_size(fam, refs, stride)
     init = crop = None
     if a.init_image is not None:
         init = read_image(a.init_image, a.size, stride)
@@ -849,10 +854,15 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
     _add_adapter_flag(p)
     p.add_argument("--prompt", default=BENCH_PROMPT,
                    help="The prompt (default a fixed bench prompt).")
+    p.add_argument("--ref", action="append", default=None, metavar="PATH",
+                   help="Time an edit from this reference image. Repeat the "
+                        "flag for several. On FLUX.2 klein and FLUX.3 klein, "
+                        "whose encoders read the prompt alone.")
     p.add_argument("--sizes", type=_sizes, default=None, metavar="LIST",
                    help="Comma-separated sizes such as 1024x1024,2048x2048 "
                         "(default: the entry's defaults.size, else the "
-                        "variant's size).")
+                        "variant's size, or the size the references give an "
+                        "edit).")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--guidance", type=float, default=None, metavar="CFG",
@@ -913,27 +923,36 @@ def _file_bytes(path: str) -> int:
 
 def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
               cfg: float, sampler: str, seed: int, patch_table=None,
-              clock=time.perf_counter):
+              refs=(), clock=time.perf_counter):
     """One timed image from empty conditioning caches: encode, every step,
-    decode and the whole image in seconds, with MLX's peak memory. The
-    pairs and built tables of ``patch_table`` stay loaded between runs,
-    as the weights do."""
+    decode and the whole image in seconds, with MLX's peak memory. An edit
+    encodes its prepared ``refs`` with the VAE after the prompt, and the
+    encode time counts both. The pairs and built tables of
+    ``patch_table`` stay loaded between runs, as the weights do."""
     import mlx.core as mx
 
     from gmlx.image import api
 
-    for cache in (pipe.conditionings, pipe.captions, pipe.modulations):
+    for cache in (pipe.conditionings, pipe.captions, pipe.modulations,
+                  pipe.reference_latents):
         cache.clear()
     mx.reset_peak_memory()
     t0 = clock()
-    cond = api.encode_text(pipe, prompt)
-    neg = None if cfg == 1.0 else api.encode_text(pipe, "")
+    cond = api.encode_text(pipe, prompt, images=refs, ref_latents=False)
+    neg = None if cfg == 1.0 else api.encode_text(pipe, "", images=refs,
+                                                  ref_latents=False)
     mx.eval(cond.features, *(() if neg is None else (neg.features,)))
-    t_enc = clock()
+    text_s = clock() - t0
     # A bench keeps the encoder, which every run encodes with.
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
                             conds=[cond] if neg is None else [cond, neg],
                             patch_table=patch_table, keep_encoder=True)
+    t_ref = clock()
+    if refs:
+        cond = api.encode_references(pipe, cond, plan=plan)
+        neg = None if neg is None else api.encode_references(pipe, neg,
+                                                             plan=plan)
+    t_enc = clock()
     marks = [t_enc]
     x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height, width=width,
                    steps=steps, seed=seed, sampler=sampler,
@@ -943,7 +962,7 @@ def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
     img = api.vae_decode(pipe, x, plan=plan)
     mx.eval(img)
     t_end = clock()
-    return {"encode_s": t_enc - t0,
+    return {"encode_s": text_s + t_enc - t_ref,
             "step_s": [b - a for a, b in zip(marks, marks[1:])],
             "decode_s": t_end - t_dec, "image_s": t_end - t0,
             "peak_bytes": int(mx.get_peak_memory())}
@@ -977,12 +996,26 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
         mx.eval(*feats)
         return [np.array(f) for f in feats]
 
+    # The loop rounds where the family's reference loop does, as sample
+    # does: the noise, the guided velocity and the Euler product, and the
+    # latents held between steps.
+    rules = pipe.family.loop
+    act = (pipe.dit.act_dtype
+           if rules is not None and rules.act_update else None)
+    held = (pipe.dit.act_dtype
+            if rules is not None and rules.act_latents else mx.float32)
+
     def schedule():
-        token_px = pipe.vae_scale * pipe.dit.cfg.patch
-        s = pipe.sigmas(steps, (height // token_px) * (width // token_px))
+        s = api.image_sigmas(pipe, steps, height, width)
         shape = (1, pipe.dit.cfg.in_channels, height // pipe.vae_scale,
                  width // pipe.vae_scale)
-        return np.asarray(s, np.float32), make_sampler(sampler, s), shape
+        noise = mx.array(noise_from_seed(seed, shape))
+        if rules is not None and rules.noise is not None:
+            noise = noise.astype(getattr(mx, rules.noise)).astype(mx.float32)
+        smp = (make_sampler(sampler, s, product=act)
+               if act is not None and sampler == "euler"
+               else make_sampler(sampler, s))
+        return np.asarray(s, np.float32), smp, np.array(noise)
 
     work(start)
     t0 = clock()
@@ -990,19 +1023,25 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
     rows = [[{"cond": client.put(f), "num_tokens": int(f.shape[1])}]
             for f in feats]
     t_enc = clock()
-    sigmas, smp, shape = work(schedule)
+    sigmas, smp, noise = work(schedule)
 
     def update(x, v, i):
-        return work(lambda: np.array(smp.step(mx.array(x), mx.array(v), i)))
+        def run():
+            y = smp.step(mx.array(x), mx.array(v), i)
+            return np.array(y.astype(held).astype(mx.float32))
+        return work(run)
+
+    def combine(pos, neg, g):
+        return work(lambda: np.array(api.guide(mx.array(pos), mx.array(neg),
+                                               g, act)))
 
     marks = [t_enc]
     first = len(client.records)
     run = client.begin(model)
     try:
-        x = client.sample(model, noise_from_seed(seed, shape), sigmas,
-                          rows[0], cfg=cfg,
+        x = client.sample(model, noise, sigmas, rows[0], cfg=cfg,
                           neg_rows=rows[1] if len(rows) > 1 else None,
-                          run=run, update=update,
+                          run=run, update=update, combine=combine,
                           on_step=lambda i, _x: marks.append(clock()))
     finally:
         client.end(run)
@@ -1067,8 +1106,10 @@ def _bench(a) -> int:
 
     if a.via_steps and a.adapter:
         raise _Usage("--via-steps times the base model; drop --adapter")
+    if a.via_steps and a.ref:
+        raise _Usage("--via-steps times text to image; drop --ref")
     a.init_image = a.mask = None
-    a.ref = a.ref_size = a.encoder_mmproj = None
+    a.ref_size = a.encoder_mmproj = None
     _check_files(a)
     _vet_adapters(a)
     if a.json_out is not None:
@@ -1082,9 +1123,17 @@ def _bench(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     a.strength = None
     steps, cfg, _ = _settings(a, ident, defaults)
+    stride = _stride(fam)
+    if a.ref and fam.edit is not None and not fam.edit.text_only:
+        raise _Usage(f"--ref: the {fam.title} encoder reads the references "
+                     "with its vision tower, which bench does not load")
+    refs = _references(a, fam)
+    if refs and not a.sizes:
+        from gmlx.image.registry import edit_size
+
+        a.sizes = [s for s in [edit_size(fam, refs, stride)] if s]
     sizes = a.sizes or [getattr(a, "entry_size", None) or (
         defaults.size if defaults else (1024, 1024))]
-    stride = _stride(fam)
     for w, h in sizes:
         if w % stride or h % stride:
             raise _Usage(f"--sizes {w}x{h}: width and height must be "
@@ -1093,6 +1142,7 @@ def _bench(a) -> int:
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
                           keep_encoder=True, variant=a.variant,
+                          refs=[(r.height, r.width) for r in refs],
                           prompts=[a.prompt] + ([] if cfg == 1.0 else [""]))
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
@@ -1110,7 +1160,7 @@ def _bench(a) -> int:
                         variant=a.variant, log=log)
         table, adapters = _load_adapters(a, pipe, log)
         records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table,
-                               adapters, log)
+                               adapters, log, refs=refs)
     lines = "".join(json.dumps(r) + "\n" for r in records)
     if a.json:
         sys.stdout.write(lines)
@@ -1129,11 +1179,13 @@ def _steps_client(a, pipe):
     host = loop.OneModelHost(mid, pipe, {"dit": a.model, "encoder": a.encoder,
                                          "vae": a.vae})
     with loop.serve(host) as base:
-        yield StepsClient(http_transport(base)), mid
+        # The reference convention embeds the time as the direct run does,
+        # so the latents of the two compare equal.
+        yield StepsClient(http_transport(base), convention="reference"), mid
 
 
 def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
-                 log, client=None, mid: str = "") -> list:
+                 log, client=None, mid: str = "", refs=()) -> list:
     import mlx.core as mx
     import numpy as np
 
@@ -1156,7 +1208,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                   sampler=a.sampler, seed=a.seed)
         transport = {"mode": "direct", "overhead_ms_median": None}
         if client is None:
-            kw["patch_table"] = table
+            kw.update(patch_table=table, refs=refs)
             for _ in range(a.warmup):
                 bench_run(pipe, a.prompt, **kw)
             runs = [bench_run(pipe, a.prompt, **kw) for _ in range(a.runs)]
@@ -1182,7 +1234,13 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                             "sampler": a.sampler, "scheduler": None,
                             "guidance": cfg, "batch": 1,
                             "adapters": adapters,
-                            "seed": a.seed, "prompt": a.prompt},
+                            "seed": a.seed, "prompt": a.prompt,
+                            **({"refs": [
+                                {"file": os.path.basename(p),
+                                 "size": f"{r.width}x{r.height}",
+                                 "sha256": _file_sha256(p)}
+                                for p, r in zip(a.ref, refs)]}
+                               if refs else {})},
                "runs": runs, "summary": bench_summary(runs,
                                                       pipe.load_seconds),
                "transport": transport}
@@ -1221,9 +1279,11 @@ def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
                         "and the file records that.")
     p.add_argument("--family", default=None, metavar="NAME",
                    help="The image family whose VAE this is, such as "
-                        "z-image, qwen-image-2.1, krea-2 or flux-3-klein "
-                        "(default: the one family whose VAE the file "
-                        "fills).")
+                        "z-image, qwen-image-2.1, krea-2, flux-3-klein or "
+                        "flux-2-klein (default: the family whose VAE the "
+                        "file fills, and flux3_klein for the FLUX.2 "
+                        "autoencoder, whose pack serves every klein "
+                        "family).")
     p.add_argument("--source-repo", default="unknown", metavar="ID",
                    help="Record this repository as the source (default "
                         "unknown).")

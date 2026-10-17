@@ -10,10 +10,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein
+  4B and FLUX.2 klein Base 4B GGUFs, with edits from up to 10 reference images.
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein
+  9B and FLUX.2 klein Base 9B GGUFs, licensed for non-commercial use only.
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein
+  9B KV GGUFs, which edit from two 1024x1024 references in about half the
+  9B's time.
 - `context_copy: true` or `GMLX_CONTEXT_COPY=1` drafts from the prompt when the
   output repeats it, which speeds up edits and quotes.
 - Muse Spark (GGUF arch `muse-spark`), with reasoning effort intents, tool calls
   and image and audio input through its `--mmproj` companion.
+- An image LoRA whose PEFT header sets `use_rslora` loads, scaled as PEFT
+  scales it, where it was refused.
 
 ### Changed
 
@@ -25,9 +34,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs faster on NAX GPUs (M5).
 - With `--stream-experts`, a prompt that uses most of a layer's experts
   prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
+- `gmlx pull` of an image model reuses a VAE GGUF on disk packed for its
+  family from another source, and names it, where it downloaded the VAE again.
 
 ### Fixed
 
+- A streamed image request refused while it ran, such as one too large for
+  memory, got a server error frame where the same request unstreamed got a 400.
+- The `gmlx pull` plan of an image model could say its parts fit in stages
+  when `image generate` then refused the image, as it counted file bytes alone.
 - A DFlash drafter that took speculation back up after a batch shrank within
   the width cap drafted from stale context, so almost no draft was accepted.
 - A sampled request whose structured output allowed fewer tokens than its
@@ -52,6 +67,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `serve`, and `response_format` constrains only the final answer.
 - `gmlx launch` could miss a SIGTERM or SIGHUP on a busy Mac, so a stop or a
   closed terminal did not end the session until the client exited.
+- `gmlx Sigmas` in ComfyUI gave Qwen-Image 2.1 ComfyUI's simple schedule. It
+  takes the image's width and height and gives the schedule of that size.
+- An image request that failed on an internal error got a 400 and left no
+  trace in the log. It gets a 500, and the server logs its trace.
 
 ## [0.5.0] - 2026-10-12
 

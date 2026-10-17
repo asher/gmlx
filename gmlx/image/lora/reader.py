@@ -16,9 +16,10 @@ A pair is scaled by its alpha over its rank. The alpha is the pair's
 diffusers' ``save_lora_weights`` wrote has no alpha tensors: its header
 holds the PEFT config of each component under ``lora_adapter_metadata``,
 and ``header_configs`` reads the rank and the alpha of every pair from it.
-A config field that would change the delta in another way is refused by
-name. An alpha that is not finite and a factor with a value that is not
-finite are refused at the read.
+A rank-stabilized config scales a pair by its alpha over the square root
+of its rank, as PEFT does. A config field that would change the delta in
+another way is refused by name. An alpha that is not finite and a factor
+with a value that is not finite are refused at the read.
 """
 
 from __future__ import annotations
@@ -112,7 +113,7 @@ DIT_COMPONENT, TEXT_COMPONENT = "transformer", "text_encoder"
 # Config fields that give the rank and the alpha of a pair and the
 # modules that have one.
 _HEADER_READ = frozenset({"r", "lora_alpha", "rank_pattern", "alpha_pattern",
-                          "target_modules", "exclude_modules"})
+                          "target_modules", "exclude_modules", "use_rslora"})
 # Config fields that leave the delta of a stored pair as it is: settings
 # of training and of initialization, and labels.
 _HEADER_INERT = frozenset({
@@ -125,7 +126,6 @@ _HEADER_INERT = frozenset({
 # the refusal names.
 _HEADER_REFUSED = {
     "use_dora": "DoRA",
-    "use_rslora": "rank-stabilized LoRA",
     "lora_bias": "LoRA with a bias",
     "bias": "LoRA with trained base biases",
     "use_qalora": "QALoRA",
@@ -185,7 +185,11 @@ class LoraKeyMap:
     the up rows of a pair on such a target are swapped back.
     ``comfy_prefixes``, when set, are the only stem prefixes under which
     ComfyUI finds the family's targets, and only those that are not
-    ``diffusers_only``: ComfyUI drops every other spelling."""
+    ``diffusers_only``: ComfyUI drops every other spelling.
+    ``comfy_stems``, when not None, is every DiT stem that ComfyUI's key
+    map reads for the family, and ComfyUI drops every other stem;
+    ``comfy_reads`` says which stems those are, for the warning. None
+    keeps the prefix rules above."""
     family: str
     title: str
     targets: Mapping
@@ -195,6 +199,8 @@ class LoraKeyMap:
     absent: Mapping = field(default_factory=dict)
     swapped: frozenset = frozenset()
     comfy_prefixes: tuple = ()
+    comfy_stems: frozenset | None = None
+    comfy_reads: str = ""
 
 
 @dataclass(frozen=True)
@@ -278,13 +284,16 @@ def _first(rows: tuple, name: str, default):
 class HeaderConfig:
     """The LoRA config of one component from a file's header: the rank
     and the alpha of its pairs, the patterns that give some modules
-    another rank or alpha, and the modules that it names."""
+    another rank or alpha, the modules that it names, and whether its
+    pairs are rank-stabilized, scaled by the alpha over the square root
+    of the rank."""
     rank: int
     alpha: float
     rank_pattern: tuple = ()
     alpha_pattern: tuple = ()
     targets: object = None
     excluded: object = None
+    rslora: bool = False
 
     def of(self, name: str) -> tuple[int, float]:
         """(rank, alpha) of the module ``name``: those of the first
@@ -310,7 +319,8 @@ def _header_config(path: str, comp: str, fields: dict) -> HeaderConfig:
             raise UnsupportedAdapterError(
                 f"{where} sets {comp}.{name}, a field gmlx image does not "
                 "read. It reads r, lora_alpha, rank_pattern, alpha_pattern, "
-                "target_modules and exclude_modules", "adapter header")
+                "target_modules, exclude_modules and use_rslora",
+                "adapter header")
         raise UnsupportedAdapterError(
             f"{where} sets {comp}.{name} to {value!r}, which makes this "
             f"{kind}. gmlx image does not apply it. It applies plain LoRA "
@@ -327,6 +337,10 @@ def _header_config(path: str, comp: str, fields: dict) -> HeaderConfig:
                         f"{where}: {comp}.target_modules")
     if targets is None:
         raise AdapterError(f"{where} gives no {comp}.target_modules")
+    rslora = fields.get("use_rslora") or False
+    if rslora is not False and rslora is not True:
+        raise AdapterError(f"{where} gives {comp}.use_rslora as {rslora!r}, "
+                           "which is neither true nor false")
     return HeaderConfig(
         rank=int(rank), alpha=float(alpha),
         rank_pattern=tuple((p, int(v)) for p, v in _patterns(
@@ -336,7 +350,8 @@ def _header_config(path: str, comp: str, fields: dict) -> HeaderConfig:
                                 f"{where}: {comp}.alpha_pattern", _number),
         targets=targets,
         excluded=_selector(fields.get("exclude_modules"),
-                           f"{where}: {comp}.exclude_modules"))
+                           f"{where}: {comp}.exclude_modules"),
+        rslora=rslora)
 
 
 def header_configs(metadata: Mapping | None,
@@ -348,12 +363,13 @@ def header_configs(metadata: Mapping | None,
     The diffusers loader passes the fields of a component to PEFT's
     ``LoraConfig`` in place of what it reads from the tensors. Of those
     fields gmlx applies ``r``, ``lora_alpha``, ``rank_pattern`` and
-    ``alpha_pattern``, which scale a pair by its alpha over its rank, and
+    ``alpha_pattern``, which scale a pair by its alpha over its rank, or
+    over the square root of its rank when ``use_rslora`` is set, and
     holds every pair to ``target_modules`` and ``exclude_modules``. A
     field that changes the delta in another way and is set raises
-    ``UnsupportedAdapterError`` by its name: ``use_rslora``,
-    ``use_dora``, ``lora_bias``, ``bias``, ``fan_in_fan_out`` and the
-    others of ``_HEADER_REFUSED``. So does a field gmlx does not know,
+    ``UnsupportedAdapterError`` by its name: ``use_dora``,
+    ``lora_bias``, ``bias``, ``fan_in_fan_out`` and the others of
+    ``_HEADER_REFUSED``. So does a field gmlx does not know,
     when it is set. An entry gmlx cannot read raises ``AdapterError``."""
     raw = (metadata or {}).get(HEADER_ENTRY)
     if not raw:
@@ -400,29 +416,41 @@ def _header_covers(path: str, configs: Mapping, comp: str, name: str,
 
 
 def _under_header(path: str, configs: Mapping, comp: str, name: str,
-                  pair: RawPair) -> tuple[RawPair, bool]:
+                  pair: RawPair) -> tuple[RawPair, bool, float | None]:
     """``pair`` with the alpha that the header gives the module ``name``
-    of component ``comp``, and whether that alpha is not the pair's rank.
-    A pair without an alpha tensor takes the header's. Raises
-    ``AdapterError`` for a pair whose rank is not the header's, and for
-    an alpha tensor that is not the header's alpha in the tensor's
-    dtype."""
+    of component ``comp``, whether its scale is not the one ComfyUI gives
+    it, which reads no header, and for a rank-stabilized config the
+    factor of the one over the other. A pair without an alpha tensor
+    takes the header's. A rank-stabilized pair is scaled by the alpha
+    over the square root of its rank, and carries the alpha times that
+    root. Raises ``AdapterError`` for a pair whose rank is not the
+    header's, and for an alpha tensor that is not the header's alpha in
+    the tensor's dtype."""
     cfg = _header_covers(path, configs, comp, name, pair.stem)
     if cfg is None:
-        return pair, False
+        return pair, False, None
     rank, alpha = cfg.of(name)
     if rank != pair.rank:
         raise AdapterError(
             f"{path}: {pair.stem} has rank {pair.rank}, and the adapter "
             f"header gives {name} the rank {rank}")
-    if pair.alpha is None:
-        return replace(pair, alpha=alpha), alpha != rank
-    same = mx.array(alpha, pair.alpha_dtype or mx.float32).astype(mx.float32)
-    if float(same.item()) != pair.alpha:
-        raise AdapterError(
-            f"{path}: {pair.stem} has an alpha tensor of {pair.alpha:g}, "
-            f"and the adapter header gives {name} the alpha {alpha:g}")
-    return pair, False
+    if pair.alpha is not None:
+        same = mx.array(alpha, pair.alpha_dtype or mx.float32).astype(
+            mx.float32)
+        if float(same.item()) != pair.alpha:
+            raise AdapterError(
+                f"{path}: {pair.stem} has an alpha tensor of "
+                f"{pair.alpha:g}, and the adapter header gives {name} the "
+                f"alpha {alpha:g}")
+    if not cfg.rslora:
+        if pair.alpha is None:
+            return replace(pair, alpha=alpha), alpha != rank, None
+        return pair, False, None
+    ours = alpha / math.sqrt(rank)
+    comfy = 1.0 if pair.alpha is None else pair.alpha / rank
+    moved = ours != comfy
+    factor = (ours / comfy if comfy else math.inf) if moved else None
+    return replace(pair, alpha=alpha * math.sqrt(rank)), moved, factor
 
 
 # The key part PEFT writes two places before the end, as
@@ -776,6 +804,8 @@ def _comfy_drops(stem: str, name: str, underscored: bool,
                  keymap: LoraKeyMap) -> bool:
     """Whether ComfyUI's key map lacks the DiT stem ``stem`` of target
     ``name``."""
+    if keymap.comfy_stems is not None:
+        return stem not in keymap.comfy_stems
     if keymap.comfy_prefixes:
         if name in keymap.diffusers_only:
             return True
@@ -788,6 +818,14 @@ def _comfy_drops(stem: str, name: str, underscored: bool,
 
 def is_text_stem(stem: str) -> bool:
     return stem.startswith(TEXT_DOTTED + TEXT_UNDERSCORE)
+
+
+def _factors(values: list) -> str:
+    """The distinct factors of ``values``, the first few, for a warning."""
+    got = sorted(set(values))
+    shown = [f"{v:.4g}" for v in got[:_LISTED]]
+    more = len(got) - len(shown)
+    return " or ".join(shown) + (f" and {more} more" if more else "")
 
 
 def _halves_swapped(pair: RawPair) -> RawPair:
@@ -815,16 +853,18 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
     under = _underscore_index(keymap.targets)
     text_under = _underscore_index(keymap.text_targets)
     dit, text, unmatched, dropped, other, scaled = [], [], [], [], [], []
+    stable: list = []
     for stem, pair in raw.pairs.items():
         if is_text_stem(stem):
             path = _text_target(stem, keymap, text_under)
             if path is None:
                 unmatched.append(stem)
                 continue
-            pair, moved = _under_header(raw.path, configs, TEXT_COMPONENT,
-                                        path, pair)
+            pair, moved, factor = _under_header(
+                raw.path, configs, TEXT_COMPONENT, path, pair)
             text.append(Target(path, None, pair))
             scaled += [stem] * moved
+            stable += [factor] * (factor is not None)
             continue
         hit = _dit_target(stem, keymap.targets, under)
         if hit is None:
@@ -834,12 +874,13 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             continue
         name, underscored = hit
         module, band = keymap.targets[name]
-        pair, moved = _under_header(raw.path, configs, DIT_COMPONENT, name,
-                                    pair)
+        pair, moved, factor = _under_header(raw.path, configs,
+                                            DIT_COMPONENT, name, pair)
         if name in keymap.swapped:
             pair = _halves_swapped(pair)
         dit.append(Target(module, band, pair))
         scaled += [stem] * moved
+        stable += [factor] * (factor is not None)
         if _comfy_drops(stem, name, underscored, keymap):
             dropped.append(stem)
     skipped = _need_targets(raw.path, keymap, len(raw.pairs),
@@ -851,8 +892,18 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             f"{raw.path}: {len(scaled)} pairs take an alpha from the "
             f"adapter header that is not their rank ({_listed(scaled)}). "
             "gmlx applies it as the diffusers loader does, and ComfyUI "
-            "does not read the header, so the image differs from ComfyUI's")
-    if dropped and keymap.comfy_prefixes:
+            "does not read the header, so the image differs from ComfyUI's"
+            + (f". The header makes {len(stable)} of them rank-stabilized, "
+               "scaled by the alpha over the square root of the rank, and "
+               f"gmlx applies those at {_factors(stable)} times the "
+               "strength that ComfyUI gives them" if stable else ""))
+    if dropped and keymap.comfy_stems is not None:
+        warnings.append(
+            f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
+            f"does not read for {keymap.title} ({_listed(dropped)}). "
+            f"ComfyUI reads {keymap.comfy_reads}. gmlx applies them and "
+            "ComfyUI drops them, so the image differs from ComfyUI's")
+    elif dropped and keymap.comfy_prefixes:
         warnings.append(
             f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
             f"does not read for {keymap.title} ({_listed(dropped)}). "

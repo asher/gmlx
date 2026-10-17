@@ -700,6 +700,74 @@ def test_bench_via_steps_gives_the_latents_of_sample(env, capsys, guidance,
     assert STATE.runs == {}
 
 
+@pytest.mark.parametrize("family, variant, guidance", [
+    ("flux2_klein", "distilled", []),
+    ("flux2_klein", "base", ["--guidance", "3"]),
+    ("flux3_klein", "distilled", []),
+    ("flux3_klein", "base", ["--guidance", "3"])])
+def test_bench_via_steps_gives_the_latents_of_sample_on_klein(
+        env, capsys, monkeypatch, family, variant, guidance):
+    """ComfyUI's FLUX.2 forward embeds the fp32 time and the direct run
+    BFL's bf16 time, so the bench steps on the reference convention. The
+    loops of both klein families round the noise, the guided velocity and
+    the Euler product to bf16, FLUX.2's the latents too, as BFL's do, and
+    the bench's loop rounds where they do."""
+    import flux2_gates
+    import flux3_gates
+    from oracle_fixture import committed_fixture
+
+    weights, m = committed_fixture(f"selftest_{family}_tiny_weights")
+    fam = get_family(family)
+
+    def tiny():
+        cfg = m["inputs"]["config"]
+        if family == "flux2_klein":
+            return flux2_gates.tiny_model(weights, cfg, act=mx.bfloat16)
+        return flux3_gates.tiny_model(weights, cfg, act=mx.bfloat16,
+                                      flow_map=variant == "distilled")
+
+    def load(dit, *, text_encoder=None, vae=None, log=print, **kw):
+        pipe = api.ImagePipeline(
+            dit=tiny(), family=fam, variant=variant, vae=object(),
+            load_seconds={"dit": 0.0}, log=log)
+        pipe.decoded, pipe.encoded_images = [], []
+        env.pipes.append(pipe)
+        return pipe
+
+    # The prompt and the empty negative prompt have features of their own.
+    rng = np.random.default_rng(7)
+    feats = {neg: rng.standard_normal((10, 24)).astype(np.float32)
+             for neg in (False, True)}
+    monkeypatch.setattr(api, "load", load)
+    monkeypatch.setattr(api, "encode_text", lambda pipe, prompt, **k:
+                        api.Conditioning(mx.array(feats[prompt == ""]),
+                                         f"f2:{prompt}"))
+    view = SimpleNamespace(tensors={
+        "a": SimpleNamespace(shape=(4, 4), codec="Q4_K")})
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=fam, view=view, variant=variant,
+                            config={}))
+    latents = []
+    real = cmd.bench_run_steps
+
+    def spy(*a, **k):
+        rec, x = real(*a, **k)
+        latents.append(x)
+        return rec, x
+
+    monkeypatch.setattr(cmd, "bench_run_steps", spy)
+    rc = umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "96x64", "--steps", "3", "--runs", "1", "--warmup", "0",
+        "--seed", "5", "--via-steps", "--json", *guidance])
+    io = capsys.readouterr()
+    assert rc == 0, io.err
+    t = json.loads(io.out)["transport"]
+    assert t["mode"] == "steps" and t["equal_to_direct"] is True
+    assert len(latents) == 1 and latents[0].shape == (1, 8, 4, 6)
+    assert np.isfinite(latents[0]).all()
+
+
 def test_bench_via_steps_refuses_adapters(env, capsys):
     assert umbrella_main(["image", "bench"] + env.base[2:] + [
         "--via-steps", "--adapter", "a.safetensors"]) == 2
@@ -1721,8 +1789,7 @@ def test_the_reference_flags_complete_as_files():
         assert _complete(["image", "generate", "x.gguf", flag, ""]) == \
             ["::files"]
     assert "--ref-size" in flags
-    assert "--ref" not in [c.split("\t")[0]
-                           for c in _complete(["image", "bench", "-"])]
+    assert _complete(["image", "bench", "x.gguf", "--ref", ""]) == ["::files"]
 
 
 def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
@@ -1781,3 +1848,144 @@ def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
     assert re.search(r"; the largest that fit are \d of the 2 reference "
                      r"images at this reference area, or all 2 at a "
                      r"reference area of \d+ x \d+ px\. ", str(e.value))
+
+
+# FLUX.2 klein.
+
+@pytest.fixture
+def flux2_edit(env, monkeypatch, tmp_path):
+    """The env on the FLUX.2 klein family, of the variant ``env.variant``
+    names, over a DiT that reads the references and keeps the prompt
+    tokens and the reference count of each row it runs. A reference's
+    latents are zeros of its token grid."""
+    import dataclasses
+
+    state = _edit_env(env, monkeypatch, tmp_path,
+                      get_family("flux2_klein").edit)
+    fam = get_family("flux2_klein")
+    state.rows = []
+
+    class Dit:
+        cfg = SimpleNamespace(in_channels=4, patch=1, flow_map=False)
+        act_dtype = mx.float32
+
+        def references(self, latents):
+            return [np.array(z) for z in latents]
+
+        def __call__(self, latents, sigma, cap_feats, refs=None):
+            state.rows.append((int(cap_feats.shape[1]),
+                               0 if refs is None else len(refs)))
+            return mx.zeros_like(latents)
+
+    def load(dit, *, text_encoder=None, vae=None, mmproj=None, log=print,
+             **kw):
+        state.loads.append(mmproj)
+        pipe = api.ImagePipeline(dit=Dit(), family=fam, variant=state.variant,
+                                 encoder=_OwnedEncoder(), vae=object(),
+                                 load_seconds={"dit": 0.0}, log=log)
+        pipe.decoded, pipe.encoded_images = [], []
+        state.pipes.append(pipe)
+        return pipe
+
+    def encode_references(pipe, cond, *, plan=None):
+        state.calls.append(("vae", cond.refs, plan, pipe.encoder.released))
+        return dataclasses.replace(cond, ref_latents=tuple(
+            mx.zeros((4, r.height // 16, r.width // 16)) for r in cond.refs))
+
+    def decode(pipe, x, tiled=None, alpha=False, plan=None):
+        b, _, h, w = x.shape
+        return mx.zeros((b, h * 16, w * 16, 3))
+
+    view = state.view = SimpleNamespace(tensors={})
+    monkeypatch.setattr(api, "load", load)
+    monkeypatch.setattr(api, "encode_references", encode_references)
+    monkeypatch.setattr(api, "vae_decode", decode)
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(family=fam, view=view,
+                                                  variant=state.variant,
+                                                  config={}))
+    state.variant = "distilled"
+    return state
+
+
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_a_distilled_flux2_dit_refuses_guidance_before_the_loads(
+        flux2_edit, tmp_path, capsys, command):
+    """BFL fixes the guidance of the distilled checkpoints at 1, and the
+    refusal names Base as the checkpoint that takes guidance, before the
+    memory preflight and before any file loads."""
+    if command == "generate":
+        args = flux2_edit.base + ["--prompt", "p", "--size", "32x32",
+                                  "--output", str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + flux2_edit.base[2:] + ["--sizes",
+                                                           "32x32"]
+    assert umbrella_main(args + ["--guidance", "4"]) == 1
+    assert ("the FLUX.2 klein distilled DiT samples without guidance: drop "
+            "guidance 4, or run the FLUX.2 klein base checkpoint, which "
+            "takes guidance") in capsys.readouterr().err
+    assert flux2_edit.checks == [] and flux2_edit.pipes == []
+    assert umbrella_main(args + ["--guidance", "1"]) == 0
+    flux2_edit.variant = "base"
+    assert umbrella_main(args + ["--guidance", "4"]) == 0
+
+
+def test_both_rows_of_a_guided_flux2_base_edit_take_the_references(
+        flux2_edit, tmp_path):
+    """Base guides the prompt's row by the empty prompt's, and each row of
+    every step runs with the references, as the reference's denoise_cfg
+    gives img_cond_seq to both."""
+    flux2_edit.variant = "base"
+    assert umbrella_main(flux2_edit.base + [
+        "--prompt", "make it red", "--negative-prompt", "blurry", "--size",
+        "32x32", "--steps", "3", "--ref", flux2_edit.refs[0], "--output",
+        str(tmp_path / "o.png")]) == 0
+    refs = flux2_edit.calls[0][2]
+    assert len(refs) == 1
+    assert [c[:3] for c in flux2_edit.calls] == [
+        ("encode", "make it red", refs), ("encode", "blurry", refs),
+        ("vae", refs, flux2_edit.plan), ("vae", refs, flux2_edit.plan)]
+    # The prompt's row and the negative prompt's, each with the reference.
+    assert flux2_edit.rows == [(11, 1), (6, 1)] * 3
+
+
+def test_a_bench_edit_encodes_its_references_in_every_run(flux2_edit,
+                                                          tmp_path):
+    """An edit bench times every run from its references: each run encodes
+    them after the prompt, each step runs with them, and the record names
+    them."""
+    out = tmp_path / "bench.jsonl"
+    assert umbrella_main(["image", "bench"] + flux2_edit.base[2:] + [
+        "--sizes", "32x32", "--steps", "2", "--runs", "2", "--warmup", "0",
+        "--ref", flux2_edit.refs[0], "--json-out", str(out)]) == 0
+    kinds = [c[0] for c in flux2_edit.calls]
+    assert kinds == ["encode", "vae"] * 2
+    assert [n for _, n in flux2_edit.rows] == [1] * 4
+    rec = json.loads(out.read_text())
+    assert [r["file"] for r in rec["settings"]["refs"]] == ["a.png"]
+
+
+@pytest.mark.parametrize("family, sizes, want", [
+    ("flux2_klein", [(5000, 625)], "4096x512"),
+    ("flux2_klein", [(512, 64)], "512x64"),
+    ("flux3_klein", [(8192, 128), (512, 512)], "4096x64")])
+def test_an_unsized_edit_scales_a_thin_first_reference_into_the_limits(
+        env, monkeypatch, tmp_path, capsys, family, sizes, want):
+    """The size the first prepared reference gives an edit without one is
+    scaled into the limits of a served request, as serve scales it. A
+    size given is kept."""
+    from PIL import Image
+
+    e = _edit_env(env, monkeypatch, tmp_path, get_family(family).edit)
+    refs = []
+    for i, (w, h) in enumerate(sizes):
+        p = tmp_path / f"r{i}.png"
+        Image.fromarray(np.zeros((h, w, 3), np.uint8)).save(p)
+        refs += ["--ref", str(p)]
+    args = e.base + ["--prompt", "p", *refs, "--output",
+                     str(tmp_path / "o.png"), "--json"]
+    assert umbrella_main(args) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec["settings"]["size"] == want
+    assert umbrella_main(args + ["--size", "64x48"]) == 0
+    assert json.loads(capsys.readouterr().out)["settings"]["size"] == "64x48"

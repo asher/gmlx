@@ -262,9 +262,9 @@ default, or unload chat models with [`POST /unload`](api.md#endpoints).
 `gmlx pull` refuses an image model on an M1 or M2 Mac before it downloads
 anything, and `--force` downloads the files anyway. The models run in
 bfloat16, which M1 and M2 chips lack. On those Macs `gmlx image generate`
-and the server refuse Qwen-Image 2.1, Krea 2 and FLUX.3 klein with
-`needs bfloat16, which the M1 chip lacks`. Z-Image-Turbo can run in
-float16, as the next entry describes.
+and the server refuse Qwen-Image 2.1, Krea 2, FLUX.2 klein and FLUX.3
+klein with `needs bfloat16, which the M1 chip lacks`. Z-Image-Turbo can
+run in float16, as the next entry describes.
 
 ### `runs in float16 on the M1 chip, which misses the reference checks`
 
@@ -316,9 +316,22 @@ file that the message names, and pull again.
 ### `is a flow map, which samples without guidance: drop cfg ...` or `is a flow map, which samples with euler only, not ...`
 
 FLUX.3 klein is distilled to sample without guidance and with the `euler`
-sampler alone. Leave out `--guidance` and `--sampler`, or the request's
-`guidance` and `sampler`, or set them to 1 and `euler`. FLUX.3 klein Base
-takes other values of both.
+sampler alone. Leave out `--guidance` and `--sampler`, the request's
+`guidance` and `sampler`, and the entry's `defaults.guidance` and
+`defaults.sampler`, or set them to 1 and `euler`. FLUX.3 klein Base takes
+other values of both.
+
+### `distilled DiT samples without guidance: drop guidance ...`
+
+FLUX.2 klein is distilled to sample without guidance. Leave out
+`--guidance`, the request's `guidance` and the entry's
+`defaults.guidance`, or set them to 1. FLUX.2 klein Base takes guidance.
+
+### `has a side under 64` or `is wider or taller than 8 to 1`
+
+FLUX.2 klein takes a reference image whose sides are 64 pixels or more,
+and whose long side is at most 8 times its short side. The message names
+the image and its size. Crop or resize that image into those limits.
 
 ### `gmlx image does not apply` or `is not a ... adapter`
 
@@ -330,7 +343,10 @@ model. [Use a LoRA](images.md#use-a-lora) says which LoRAs work.
 The LoRA loads in `gmlx image`, and ComfyUI's LoraLoader skips its keys,
 so ComfyUI makes the image without it. A FLUX.3 klein LoRA trained with
 diffusers is one: ComfyUI reads FLUX.3 keys only in the GGUF names, under
-`lora_unet_` or `diffusion_model.`.
+`lora_unet_` or `diffusion_model.`. A FLUX.2 klein LoRA in diffusers names
+that trains the modulation layers or the time embedder is another:
+ComfyUI has no diffusers name for those layers, so it drops those pairs
+and applies the rest.
 
 ### `has text encoder layers; set it on the image model's adapters instead`
 

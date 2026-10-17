@@ -18,7 +18,8 @@ starting value, 0.999.
 The bf16 run computes each linear product as a float32 GEMM over the
 bfloat16 operands, rounded once to bfloat16, since torch's CPU bfloat16
 GEMM is single threaded. That differs from a native bfloat16 GEMM with
-float32 accumulation only in summation order.
+float32 accumulation only in summation order. The bf16 copy keeps its
+rotary frequencies in fp32, as a model loaded in bf16 keeps them.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check2_z_image.py --encoder Qwen3-4B-Q4_K_M.gguf \\
@@ -138,6 +139,9 @@ def load_encoder(torch, a):
         torch_dtype=torch.float32, device_map="cpu",
         local_files_only=True).eval()
     te16 = copy.deepcopy(te).to(torch.bfloat16).eval()
+    # A model loaded in bf16 keeps its rotary frequencies in fp32, which
+    # the cast rounds.
+    te16.rotary_emb.inv_freq = te.rotary_emb.inv_freq.clone()
     for m, want in ((te, torch.float32), (te16, torch.bfloat16)):
         where = {str(p.device) for p in m.parameters()}
         kinds = {p.dtype for p in m.parameters()}
@@ -305,7 +309,7 @@ def main(argv=None) -> int:
         config_revision=a.config_revision,
         encoder="transformers Qwen3Model from GGUF through its legacy loader,"
         " gguf-py float32 dequantization; the bf16 model is a bfloat16 copy "
-        "of the float32 one")
+        "of the float32 one, with its rotary frequencies left in float32")
     fx.results.update(
         oracle={"device": "cpu", "threads": torch.get_num_threads(),
                 "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 "

@@ -1,0 +1,640 @@
+{
+ "id": "5efbf8ec-929e-5c3d-a03c-882302466d73",
+ "revision": 0,
+ "last_node_id": 14,
+ "last_link_id": 13,
+ "nodes": [
+  {
+   "id": 14,
+   "type": "Note",
+   "pos": [
+    -440,
+    80
+   ],
+   "size": [
+    400,
+    400
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "title": "gmlx nodes: install",
+   "properties": {},
+   "widgets_values": [
+    "These gmlx nodes run the image model on a gmlx server on your Mac (Apple Silicon, M3 or newer). Flux2Scheduler gives FLUX.2 klein's schedule for the image size, so keep its width and height those of the latent. FLUX.2 klein 9B needs a Mac with 24 GB or more, and its license allows non-commercial use only.\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx pull flux-2-klein-9b\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
+   ],
+   "color": "#432",
+   "bgcolor": "#653"
+  },
+  {
+   "id": 1,
+   "type": "GmlxModelLoader",
+   "pos": [
+    0,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      3
+     ]
+    }
+   ],
+   "title": "gmlx Model Loader",
+   "properties": {
+    "Node name for S&R": "GmlxModelLoader"
+   },
+   "widgets_values": [
+    "flux-2-klein-9b",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 2,
+   "type": "GmlxCLIPLoader",
+   "pos": [
+    0,
+    250
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      1
+     ]
+    }
+   ],
+   "title": "gmlx CLIP Loader",
+   "properties": {
+    "Node name for S&R": "GmlxCLIPLoader"
+   },
+   "widgets_values": [
+    "flux-2-klein-9b",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 3,
+   "type": "GmlxVAELoader",
+   "pos": [
+    0,
+    420
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      12
+     ]
+    }
+   ],
+   "title": "gmlx VAE Loader",
+   "properties": {
+    "Node name for S&R": "GmlxVAELoader"
+   },
+   "widgets_values": [
+    "flux-2-klein-9b",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 4,
+   "type": "CLIPTextEncode",
+   "pos": [
+    340,
+    80
+   ],
+   "size": [
+    400,
+    160
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      2,
+      4
+     ]
+    }
+   ],
+   "title": "Positive prompt",
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode"
+   },
+   "widgets_values": [
+    "A lighthouse on a rocky coast at dawn, waves breaking on the rocks, soft golden light, photograph"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "ConditioningZeroOut",
+   "pos": [
+    340,
+    280
+   ],
+   "size": [
+    300,
+    30
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "link": 2
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      5
+     ]
+    }
+   ],
+   "title": "Negative (unused at cfg 1)",
+   "properties": {
+    "Node name for S&R": "ConditioningZeroOut"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 6,
+   "type": "EmptyFlux2LatentImage",
+   "pos": [
+    340,
+    360
+   ],
+   "size": [
+    300,
+    110
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      10
+     ]
+    }
+   ],
+   "title": "Empty latent",
+   "properties": {
+    "Node name for S&R": "EmptyFlux2LatentImage"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    1
+   ]
+  },
+  {
+   "id": 7,
+   "type": "Flux2Scheduler",
+   "pos": [
+    340,
+    510
+   ],
+   "size": [
+    300,
+    110
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "SIGMAS",
+     "type": "SIGMAS",
+     "links": [
+      9
+     ]
+    }
+   ],
+   "title": "Schedule",
+   "properties": {
+    "Node name for S&R": "Flux2Scheduler"
+   },
+   "widgets_values": [
+    4,
+    1024,
+    1024
+   ]
+  },
+  {
+   "id": 8,
+   "type": "RandomNoise",
+   "pos": [
+    780,
+    80
+   ],
+   "size": [
+    300,
+    90
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "NOISE",
+     "type": "NOISE",
+     "links": [
+      6
+     ]
+    }
+   ],
+   "title": "Noise",
+   "properties": {
+    "Node name for S&R": "RandomNoise"
+   },
+   "widgets_values": [
+    42,
+    "fixed"
+   ]
+  },
+  {
+   "id": 9,
+   "type": "KSamplerSelect",
+   "pos": [
+    780,
+    210
+   ],
+   "size": [
+    300,
+    60
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "SAMPLER",
+     "type": "SAMPLER",
+     "links": [
+      8
+     ]
+    }
+   ],
+   "title": "Sampler",
+   "properties": {
+    "Node name for S&R": "KSamplerSelect"
+   },
+   "widgets_values": [
+    "euler"
+   ]
+  },
+  {
+   "id": 10,
+   "type": "CFGGuider",
+   "pos": [
+    780,
+    310
+   ],
+   "size": [
+    300,
+    100
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 3
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 4
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 5
+    }
+   ],
+   "outputs": [
+    {
+     "name": "GUIDER",
+     "type": "GUIDER",
+     "links": [
+      7
+     ]
+    }
+   ],
+   "title": "Guider",
+   "properties": {
+    "Node name for S&R": "CFGGuider"
+   },
+   "widgets_values": [
+    1.0
+   ]
+  },
+  {
+   "id": 11,
+   "type": "SamplerCustomAdvanced",
+   "pos": [
+    1120,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "noise",
+     "type": "NOISE",
+     "link": 6
+    },
+    {
+     "name": "guider",
+     "type": "GUIDER",
+     "link": 7
+    },
+    {
+     "name": "sampler",
+     "type": "SAMPLER",
+     "link": 8
+    },
+    {
+     "name": "sigmas",
+     "type": "SIGMAS",
+     "link": 9
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 10
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "LATENT",
+     "links": [
+      11
+     ]
+    },
+    {
+     "name": "denoised_output",
+     "type": "LATENT",
+     "links": []
+    }
+   ],
+   "title": "Sample",
+   "properties": {
+    "Node name for S&R": "SamplerCustomAdvanced"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 12,
+   "type": "VAEDecode",
+   "pos": [
+    1460,
+    80
+   ],
+   "size": [
+    210,
+    50
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 11
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 12
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      13
+     ]
+    }
+   ],
+   "title": "VAE Decode",
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 13,
+   "type": "SaveImage",
+   "pos": [
+    1460,
+    170
+   ],
+   "size": [
+    420,
+    470
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 13
+    }
+   ],
+   "outputs": [],
+   "title": "Save Image",
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "gmlx/flux-2-klein-9b"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   2,
+   0,
+   4,
+   0,
+   "CLIP"
+  ],
+  [
+   2,
+   4,
+   0,
+   5,
+   0,
+   "CONDITIONING"
+  ],
+  [
+   3,
+   1,
+   0,
+   10,
+   0,
+   "MODEL"
+  ],
+  [
+   4,
+   4,
+   0,
+   10,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   5,
+   5,
+   0,
+   10,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   6,
+   8,
+   0,
+   11,
+   0,
+   "NOISE"
+  ],
+  [
+   7,
+   10,
+   0,
+   11,
+   1,
+   "GUIDER"
+  ],
+  [
+   8,
+   9,
+   0,
+   11,
+   2,
+   "SAMPLER"
+  ],
+  [
+   9,
+   7,
+   0,
+   11,
+   3,
+   "SIGMAS"
+  ],
+  [
+   10,
+   6,
+   0,
+   11,
+   4,
+   "LATENT"
+  ],
+  [
+   11,
+   11,
+   0,
+   12,
+   0,
+   "LATENT"
+  ],
+  [
+   12,
+   3,
+   0,
+   12,
+   1,
+   "VAE"
+  ],
+  [
+   13,
+   12,
+   0,
+   13,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.75,
+   "offset": [
+    480,
+    40
+   ]
+  }
+ },
+ "version": 0.4
+}

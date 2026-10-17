@@ -83,7 +83,7 @@
   "template": "tokenizer.apply_chat_template, add_generation_prompt=True, enable_thinking=True",
   "padding": "max_length 512, right, masked",
   "config_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
-  "encoder": "transformers Qwen3Model from GGUF through its legacy loader, gguf-py float32 dequantization; the bf16 model is a bfloat16 copy of the float32 one"
+  "encoder": "transformers Qwen3Model from GGUF through its legacy loader, gguf-py float32 dequantization; the bf16 model is a bfloat16 copy of the float32 one, with its rotary frequencies left in float32"
  },
  "results": {
   "oracle": {
@@ -135,28 +135,28 @@
   },
   "bf16_vs_fp32": {
    "plain": {
-    "rel_l2": 0.010895698965534991,
-    "cosine": 0.9999860148882215,
+    "rel_l2": 0.010904591653558074,
+    "cosine": 0.9999869740577002,
     "max_abs": 152.9033203125,
-    "token_cosine_min": 0.9996531978097521
+    "token_cosine_min": 0.9996042693980746
    },
    "empty": {
-    "rel_l2": 0.010907148225127004,
-    "cosine": 0.9999903319274931,
+    "rel_l2": 0.010935165636526273,
+    "cosine": 0.9999900417465841,
     "max_abs": 152.9033203125,
-    "token_cosine_min": 0.9997101500097612
+    "token_cosine_min": 0.9996042693980746
    },
    "non_ascii": {
-    "rel_l2": 0.01097607485385548,
-    "cosine": 0.9999844282695636,
+    "rel_l2": 0.010938011696113012,
+    "cosine": 0.9999847101288731,
     "max_abs": 152.9033203125,
-    "token_cosine_min": 0.9997101500097612
+    "token_cosine_min": 0.9996042693980746
    },
    "long": {
-    "rel_l2": 0.010273015374210085,
-    "cosine": 0.99996126762898,
+    "rel_l2": 0.010108721313616514,
+    "cosine": 0.9999638808623529,
     "max_abs": 152.9033203125,
-    "token_cosine_min": 0.9990977976370308
+    "token_cosine_min": 0.9996042693980746
    }
   },
   "unpadded_vs_padded": {
@@ -186,22 +186,22 @@
    }
   },
   "seconds": {
-   "load_s": 17.8,
+   "load_s": 15.2,
    "plain": {
-    "fp32_s": 5.4,
-    "bf16_s": 9.3
+    "fp32_s": 2.5,
+    "bf16_s": 4.8
    },
    "empty": {
-    "fp32_s": 6.2,
-    "bf16_s": 10.3
+    "fp32_s": 2.5,
+    "bf16_s": 4.8
    },
    "non_ascii": {
-    "fp32_s": 6.7,
-    "bf16_s": 11.2
+    "fp32_s": 2.5,
+    "bf16_s": 4.9
    },
    "long": {
-    "fp32_s": 6.8,
-    "bf16_s": 12.9
+    "fp32_s": 2.5,
+    "bf16_s": 5.0
    }
   }
  },
@@ -212,17 +212,17 @@
    "token_cosine_min": 0.999
   },
   "rel_l2": {
-   "plain": 0.021791397931069982,
-   "empty": 0.021814296450254008,
-   "non_ascii": 0.02195214970771096,
-   "long": 0.02054603074842017
+   "plain": 0.021809183307116148,
+   "empty": 0.021870331273052546,
+   "non_ascii": 0.021876023392226024,
+   "long": 0.020217442627233028
   },
   "token_cosine_min": 0.999
  },
  "notes": [
   "The unpadded rows run at batch 1 with no mask, as gmlx encodes a prompt. Their gap to the padded reference is rounding only, since a causal layer never reads a later pad."
  ],
- "created": "2026-10-01T00:48:58Z",
+ "created": "2026-10-16T18:17:56Z",
  "npz": "check2_z_image.npz",
  "tensors": {
   "ids_empty": {
@@ -259,7 +259,7 @@
     2560
    ],
    "dtype": "float32",
-   "sha256": "9e2508a7a8ddab9ae25b9e98e132d3b83b34c989d29dcd31f0331527a1b4f422"
+   "sha256": "2361ecce93dfb27f2d6740b3a865778e853ab94d4228d16f2f2bbc3b87914619"
   },
   "tap_bf16_long": {
    "shape": [
@@ -267,7 +267,7 @@
     2560
    ],
    "dtype": "float32",
-   "sha256": "a1aeb955a4a125ffa13121108c23b745e0bec0b89eaed96f18aa0d898086792f"
+   "sha256": "2304a03e9c258dffb7ea7e71379419275dbb5c40048bc43458a7bfda16f84382"
   },
   "tap_bf16_non_ascii": {
    "shape": [
@@ -275,7 +275,7 @@
     2560
    ],
    "dtype": "float32",
-   "sha256": "6a75b1b3981c0901cd5d9a42508b6d83d5921ed825a59a8882ef27735f04d971"
+   "sha256": "c2482f743579a3666805c0aeef4fda1c5d58cf3679acd24d40435393b3de6799"
   },
   "tap_bf16_plain": {
    "shape": [
@@ -283,7 +283,7 @@
     2560
    ],
    "dtype": "float32",
-   "sha256": "612b762a521164ac933643046f0ef77ddd50a52bdb05041bc88cb2c7f781dec3"
+   "sha256": "e916de9a6d4f29979ec365790be755d838b8f09b12b9ee34415e9e79052417f0"
   },
   "tap_empty": {
    "shape": [

@@ -21,8 +21,8 @@ curl -s localhost:8080/internal/image-steps/v1/capabilities
 
 The answer gives the contract and the oldest client it serves, the gmlx
 version, the wire container and dtypes, the families, the step conventions,
-the patch kinds, and the limits: the largest tensor and adapter upload, the
-most rows in one step, and the most runs held at once.
+the patch kinds, the features, and the limits: the largest tensor and
+adapter upload, the most rows in one step, and the most runs held at once.
 
 ## A sampling run
 
@@ -63,6 +63,10 @@ that the body hashes to the name in the path.
 | `POST vae/decode`, `POST vae/encode` | VAE decode and encode in the VAE's own latent space |
 | `POST runs/begin`, `POST runs/{run}/end`, `POST interrupt` | Hold a model for a sampling run, end the run, stop its step in flight |
 
+A model's status gives, under `sampling.schedule`, the rule and the
+constants of its schedule when that schedule follows the image size,
+as on FLUX.2 klein and Qwen-Image 2.1, and null on any other.
+
 ## Bodies and hashes
 
 Tensors travel as a safetensors container with content type
@@ -99,6 +103,18 @@ prefix state of each of its conditionings between steps, and the
 `X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
 time less it is the transport time.
 
+A step with `ref_cache: true`, on a server whose features list
+`ref_cache`, runs as ComfyUI's `Flux KV Cache` node does on FLUX.2 klein
+9B KV. On the first step of the run, each row with reference latents runs
+its references at time zero and keeps their keys and values in every
+block, and the step returns its output. The keys and values of a
+reference depend on the latents of the row, so each row keeps its own,
+under its conditioning and its place in the step's rows. Each later
+step of the run takes the image and the text of each row alone, and reads
+the keys and values of that row. The header answers `hit` on those steps,
+and the end of the run drops the keys and values. A step with `ref_cache`
+and no run gets 400, as does one on a DiT that keeps no such cache.
+
 A run that sits idle for 120 seconds ends within a few seconds after, and
 lets the model go. The server holds at most 32 runs, and a begin past that
 gets 429. An interrupt names its run and takes effect at the next step:
@@ -112,9 +128,11 @@ nothing.
 A step, a VAE decode and a VAE encode take the size limits of the OpenAI
 routes: an image over 2048x2048 pixels or with a side over 4096 gets 413,
 as does a VAE pass of more than 16 images. One whose memory plan does not
-fit beside the models loaded gets 400. The VAE routes decode and encode
-the images of a batch one at a time. `capabilities` gives the largest
-tensor and adapter upload, which are the
+fit beside the models loaded gets 400. The message of a step names the
+largest term of its plan and, where the plan keeps the keys and values of
+the reference latents, how many of them fit. The VAE routes decode and
+encode the images of a batch one at a time. `capabilities` gives the
+largest tensor and adapter upload, which are the
 [`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) and
 [`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) caches.
 Each image model books those two caches while the step routes are on.
@@ -133,7 +151,10 @@ the jobs of the OpenAI routes, and share the GPU with chat in the same way.
 `gmlx image bench --via-steps` runs each step through these routes on a
 loopback port of its own process. The prompt is encoded in the process and
 uploaded by hash, each step is one request, and the latents move between
-steps in the bench with its sampler.
+steps in the bench with its sampler. Its steps take the `reference`
+convention, which embeds the time as `sample` does. The ComfyUI pack's
+steps take `comfy`, which embeds the time as ComfyUI's forward does, and
+for FLUX.2 klein that is the fp32 time.
 
 The record's transport is `steps`. It holds the median per step of the
 request's wall time less the forward time the server reports, and

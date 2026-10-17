@@ -4,7 +4,8 @@
 The loaders give a stock MODEL, CLIP and VAE whose work runs on a gmlx
 server, so stock sampler, LoRA, conditioning and image nodes compose with
 them. ``GmlxSigmas`` gives the schedule a model variant was distilled to,
-for the custom sampler nodes.
+or the schedule of the image size for a variant whose schedule follows
+it, for the custom sampler nodes.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import torch
 
 import comfy.samplers
 
-from . import discovery
+from . import discovery, schedules
 from .client import GmlxError, GmlxRefusal, get_client
 from .clip import GmlxCLIP
 from .model import load_model
@@ -90,9 +91,12 @@ class GmlxVAELoader(_Loader):
         return (GmlxVAE(client, name, status),)
 
 
-def variant_sigmas(model, steps: int = 0, denoise: float = 1.0) -> torch.Tensor:
+def variant_sigmas(model, steps: int = 0, denoise: float = 1.0, width: int = 0,
+                   height: int = 0) -> torch.Tensor:
     """The sigmas of a gmlx model's variant: the fixed schedule it was
-    distilled to, or ComfyUI's simple schedule over the variant's steps."""
+    distilled to, the schedule of a ``width`` by ``height`` image for a
+    variant whose schedule follows the image size, or ComfyUI's simple
+    schedule over the variant's steps."""
     b = getattr(model, "gmlx", None)
     if b is None:
         raise GmlxRefusal("gmlx: GmlxSigmas takes a MODEL from the gmlx model loader")
@@ -107,10 +111,22 @@ def variant_sigmas(model, steps: int = 0, denoise: float = 1.0) -> torch.Tensor:
         keep = n if denoise >= 1.0 else max(1, round(n * denoise))
         return sig[-(keep + 1):]
     steps = steps or int(sampling.get("steps") or 20)
+    try:
+        sized = schedules.size_sigmas(b.status, b.model_id, steps, denoise,
+                                      int(width or 0), int(height or 0))
+    except ValueError as e:
+        raise GmlxRefusal(str(e) if str(e).startswith("gmlx:")
+                          else f"gmlx: {b.model_id!r}: {e}") from None
+    if sized is not None:
+        return torch.from_numpy(sized.copy())
     total = steps if denoise >= 1.0 else int(steps / max(denoise, 1e-4))
     sig = comfy.samplers.calculate_sigmas(model.get_model_object("model_sampling"), "simple",
                                           total).cpu()
     return sig[-(steps + 1):]
+
+
+_SIZE_TIP = ("The image's width or height in pixels, which the schedule of FLUX.2 klein "
+             "and Qwen-Image 2.1 follows. 0 gives none.")
 
 
 class GmlxSigmas:
@@ -120,19 +136,26 @@ class GmlxSigmas:
             "model": ("MODEL",),
             "steps": ("INT", {"default": 0, "min": 0, "max": 1000,
                               "tooltip": "0 uses the variant's own step count."}),
-            "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})}}
+            "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})},
+            "optional": {
+                "width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 16,
+                                  "tooltip": _SIZE_TIP}),
+                "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 16,
+                                   "tooltip": _SIZE_TIP})}}
 
     RETURN_TYPES = ("SIGMAS", "FLOAT")
     RETURN_NAMES = ("sigmas", "cfg")
     FUNCTION = "get_sigmas"
     CATEGORY = CATEGORY
     DESCRIPTION = ("The schedule of a gmlx model's variant, for SamplerCustom. A variant "
-                   "distilled to fixed sigmas samples on those.")
+                   "distilled to fixed sigmas samples on those, and one whose schedule "
+                   "follows the image size, such as FLUX.2 klein, on that of width and "
+                   "height.")
 
-    def get_sigmas(self, model, steps=0, denoise=1.0):
+    def get_sigmas(self, model, steps=0, denoise=1.0, width=0, height=0):
         b = getattr(model, "gmlx", None)
         cfg = float(((b.status.get("sampling") or {}).get("cfg")) or 1.0) if b else 1.0
-        return (variant_sigmas(model, steps, denoise), cfg)
+        return (variant_sigmas(model, steps, denoise, width, height), cfg)
 
 
 class GmlxServerStatus(_Loader):

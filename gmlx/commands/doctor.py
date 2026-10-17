@@ -239,7 +239,7 @@ def check_image(cfg):
         vae = rp(m.vae)
         if vae is not None and vae.endswith(".gguf"):
             v = catalog.vae_identity(vae)
-            if v is None or v[0] != fam:
+            if v is None or fam not in catalog.vae_families(v[0]):
                 bad.append(f"{iid}: the VAE is not the {fam} VAE")
         shared = cfg.models.get(m.encoder)
         enc = rp(shared.path if shared is not None else m.encoder)

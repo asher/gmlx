@@ -47,6 +47,9 @@ source.
   exponential time shift and stretch_shift_to_terminal of
   src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py, in
   numpy with the reference's order of casts.
+- gmlx/comfyui_pack/schedules.py: _qwen_image21, the same schedule in
+  numpy for the node pack, under the Apache-2.0 header alone, as the
+  pack is.
 
 diffusers is distributed under the Apache License 2.0:
 

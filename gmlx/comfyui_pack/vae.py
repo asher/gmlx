@@ -2,8 +2,8 @@
 """A ComfyUI VAE that encodes and decodes on the gmlx server.
 
 It sets the attributes stock nodes read and sends latents in the space
-ComfyUI's LATENT carries, the raw VAE space or, for FLUX.3, the DiT's own
-model space, and images as (B, H, W, C) floats in [0, 1]. The server tiles
+ComfyUI's LATENT carries, the raw VAE space or, for FLUX.2 and FLUX.3, the
+DiT's own model space, and images as (B, H, W, C) floats in [0, 1]. The server tiles
 large images itself, so the tiled calls are the plain ones.
 """
 

@@ -769,8 +769,8 @@ def _pair_images(classified, chat, used_ids: set, images,
         if c.kind == "image-vae":
             got = catalog.vae_identity(c.path)
             if got is not None:
-                vaes.append(catalog.ImageFile(c.path, "vae", got[0],
-                                              sha256=got[1]))
+                vaes += [catalog.ImageFile(c.path, "vae", f, sha256=got[1])
+                         for f in catalog.vae_families(got[0])]
     chat_ids = {os.path.abspath(m.path): m.id for m in chat}
     towered = {m.id for m in chat if m.mmproj} | set(tower_ids)
     chat_ids.update({os.path.abspath(p): i for p, i in encoder_ids.items()})

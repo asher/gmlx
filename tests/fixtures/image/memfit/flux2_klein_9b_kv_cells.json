@@ -1,0 +1,174 @@
+{
+ "what": "FLUX.2 klein 9B KV Q8_0 (QuantStack Flux-2-Klein-9B-KV-Q8_0), on an M5 Max, one fresh process per cell, the DiT loaded alone, under the bounded cache, with random features of text_rows rows and random reference latents of refs images of ref_px pixels, unguided. prefill_gib is the footprint of the reference pass over the settled process less the bytes of the state it builds, state_gib; steps_gib is that of each of three steps of api.sample on the held state, less the state.",
+ "cells": [
+  {
+   "size": 512,
+   "text_rows": 512,
+   "refs": 0,
+   "ref_px": 0,
+   "state_gib": 0.0039,
+   "prefill_gib": 0.1671,
+   "steps_gib": [
+    2.5379,
+    2.5382,
+    2.5383
+   ]
+  },
+  {
+   "size": 512,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 1024,
+   "state_gib": 2.0039,
+   "prefill_gib": 1.6472,
+   "steps_gib": [
+    3.0754,
+    2.8914,
+    2.5865
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 0,
+   "ref_px": 0,
+   "state_gib": 0.0039,
+   "prefill_gib": 0.164,
+   "steps_gib": [
+    3.6478,
+    3.3982,
+    3.3098
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 512,
+   "state_gib": 0.5039,
+   "prefill_gib": 1.0418,
+   "steps_gib": [
+    3.7148,
+    3.1662,
+    3.1663
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 1024,
+   "state_gib": 2.0039,
+   "prefill_gib": 1.6123,
+   "steps_gib": [
+    3.7488,
+    3.0484,
+    3.0491
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 1536,
+   "state_gib": 4.5039,
+   "prefill_gib": 2.0555,
+   "steps_gib": [
+    3.7972,
+    3.0651,
+    3.0652
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 2,
+   "ref_px": 1024,
+   "state_gib": 4.0039,
+   "prefill_gib": 2.0892,
+   "steps_gib": [
+    3.8085,
+    3.0677,
+    3.0678
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 4,
+   "ref_px": 1024,
+   "state_gib": 8.0039,
+   "prefill_gib": 3.0187,
+   "steps_gib": [
+    3.5174,
+    3.3218,
+    3.322
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 10,
+   "ref_px": 1024,
+   "state_gib": 20.0039,
+   "prefill_gib": 6.7926,
+   "steps_gib": [
+    4.6011,
+    3.9072,
+    3.9596
+   ]
+  },
+  {
+   "size": 1536,
+   "text_rows": 512,
+   "refs": 0,
+   "ref_px": 0,
+   "state_gib": 0.0039,
+   "prefill_gib": 0.168,
+   "steps_gib": [
+    5.1885,
+    5.105,
+    5.1051
+   ]
+  },
+  {
+   "size": 1536,
+   "text_rows": 512,
+   "refs": 4,
+   "ref_px": 1024,
+   "state_gib": 8.0039,
+   "prefill_gib": 3.0586,
+   "steps_gib": [
+    5.3776,
+    5.5268,
+    5.5671
+   ]
+  },
+  {
+   "size": 2048,
+   "text_rows": 512,
+   "refs": 0,
+   "ref_px": 0,
+   "state_gib": 0.0039,
+   "prefill_gib": 0.1677,
+   "steps_gib": [
+    6.5213,
+    6.5378,
+    6.5616
+   ]
+  },
+  {
+   "size": 2048,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 1024,
+   "state_gib": 2.0039,
+   "prefill_gib": 1.6473,
+   "steps_gib": [
+    6.4489,
+    6.457,
+    6.4572
+   ]
+  }
+ ]
+}

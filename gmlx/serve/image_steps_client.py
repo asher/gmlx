@@ -99,9 +99,10 @@ class StepRecord:
 
 class StepsClient:
     def __init__(self, transport, *, version: str | None = None,
-                 clock=time.perf_counter):
+                 convention: str = "comfy", clock=time.perf_counter):
         self.transport = transport
         self.version = version or f"{CONTRACT[0]}.{CONTRACT[1]}"
+        self.convention = convention
         self.clock = clock
         self.records: list[StepRecord] = []
         self._uploaded: set = set()
@@ -200,15 +201,18 @@ class StepsClient:
 
     def step(self, model: str, run: str | None, x, timestep, rows: list,
              patch_table: str | None = None,
-             sample_sigmas=None) -> np.ndarray:
+             sample_sigmas=None, ref_cache: bool = False) -> np.ndarray:
         """The model output for latents ``x`` (B, C, h, w) at ``timestep``
-        under convention comfy, one row dict per batch row.
+        under the client's convention, one row dict per batch row.
         ``sample_sigmas`` is the schedule the sampler runs on, which a flow
-        map DiT reads its target times from. Records the times of the
-        call."""
+        map DiT reads its target times from. ``ref_cache`` steps on the
+        run's cache of reference K and V, as ComfyUI's Flux KV Cache node
+        samples. Records the times of the call."""
         t = np.asarray(timestep, np.float32).reshape(-1)
-        fields = {"model": model, "run": run, "convention": "comfy",
+        fields = {"model": model, "run": run, "convention": self.convention,
                   "patch_table": patch_table, "rows": rows}
+        if ref_cache:
+            fields["ref_cache"] = True
         tensors = {"x": np.ascontiguousarray(x, np.float32), "timestep": t}
         if sample_sigmas is not None:
             tensors["sample_sigmas"] = np.asarray(sample_sigmas,
@@ -225,10 +229,11 @@ class StepsClient:
     def sample(self, model: str, noise, sigmas, rows: list, *,
                cfg: float = 1.0, neg_rows: list | None = None,
                patch_table: str | None = None, run: str | None = None,
-               update=None, on_step=None) -> np.ndarray:
+               update=None, combine=None, on_step=None) -> np.ndarray:
         """Sample from ``noise`` (B, C, h, w) over ``sigmas`` with one step
         request per sigma. With ``cfg`` other than 1 each request carries
-        the negative rows after the positive ones and the client guides.
+        the negative rows after the positive ones and the client guides
+        with ``combine(pos, neg, cfg)``, by default ``guide``.
         ``update(x, v, i)`` moves ``x`` from ``sigmas[i]`` to
         ``sigmas[i + 1]``; the default is Euler in float32, as
         ``gmlx.image.samplers.Euler`` computes it. Each request carries the
@@ -246,7 +251,7 @@ class StepsClient:
             ts = np.full((len(step_rows),), s[i], np.float32)
             out = self.step(model, run, xin, ts, step_rows, patch_table,
                             sample_sigmas=s)
-            v = guide(out[:b], out[b:], cfg) if guided else out
+            v = (combine or guide)(out[:b], out[b:], cfg) if guided else out
             x = update(x, v, i) if update is not None else euler(x, v, s, i)
             if on_step is not None:
                 on_step(i, x)

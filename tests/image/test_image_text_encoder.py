@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import mlx.core as mx
+import mlx.nn as nn
 
 from image_fixtures import FIXTURES, load_json
 
@@ -561,6 +562,50 @@ def test_the_flux3_spec_pads_as_the_reference_does():
     assert spec.template_id != krea.template_id
 
 
+_FLUX2_TEMPLATE = "flux2_klein_chat_template.jinja"
+
+
+@pytest.mark.parametrize("prompt", _PROMPTS)
+def test_the_flux2_template_is_the_official_render_with_thinking_off(prompt):
+    """FLUX.2 klein's reference renders the Qwen3 chat template of the
+    official tokenizer on one user turn with the generation prompt and
+    enable_thinking False. That template is Z-Image's, byte for byte."""
+    from jinja2.ext import loopcontrols
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    text = (FIXTURES / _FLUX2_TEMPLATE).read_text()
+    assert text == (FIXTURES / _TEMPLATE).read_text()
+    env = ImmutableSandboxedEnvironment(
+        trim_blocks=True, lstrip_blocks=True, extensions=[loopcontrols])
+    want = env.from_string(text).render(
+        messages=[{"role": "user", "content": prompt}],
+        add_generation_prompt=True, enable_thinking=False)
+    assert te.render(te.encoder_spec("flux2_klein"), prompt) == want
+    row = load_json("manifest.json")[_FLUX2_TEMPLATE]
+    assert row["repo"] == "black-forest-labs/FLUX.2-klein-4B"
+    assert len(row["revision"]) == 40
+
+
+def test_the_flux2_spec_pads_as_the_reference_does():
+    from gmlx.image.families.flux2_klein import family as ff
+
+    spec = te.encoder_spec("flux2_klein")
+    assert (spec.arch, spec.model_type, spec.hidden, spec.layers) == (
+        "qwen3", "qwen3", 2560, 36)
+    assert spec.tap_layers == (9, 18, 27) and spec.stack
+    # Every prompt fills 512 rows, its own and the pads.
+    assert spec.pad_multiple == spec.max_tokens == 512
+    assert (spec.pad_id, spec.pad_position) == (151643, None)
+    assert spec.drop == 0 and spec.activation == "float32"
+    assert spec.identity_source == ff.ENCODER_IDENTITY_SOURCE
+    assert [te.pad_rows(spec, n) for n in (1, 33, 511, 512)] == [
+        511, 479, 1, 0]
+    assert te.rows_at_most(spec, "a cat") == 512
+    # The same encoder weights as Z-Image's, in another template.
+    assert spec.identity == te.Z_IMAGE.identity
+    assert spec.template_id != te.Z_IMAGE.template_id
+
+
 def test_pad_rows_reach_the_next_multiple_under_the_cap():
     spec = _spec(pad_multiple=8, pad_id=0)
     assert [te.pad_rows(spec, n) for n in (1, 3, 8, 9, 15, 16)] == [
@@ -576,11 +621,17 @@ def test_pad_rows_reach_the_next_multiple_under_the_cap():
     ids = {s.template_id for s in (
         _spec(), spec, dataclasses.replace(spec, pad_multiple=4),
         dataclasses.replace(spec, pad_id=1),
-        dataclasses.replace(spec, pad_position=0))}
-    assert len(ids) == 5
-    # A spec with no pads keeps the key it had before pads existed.
+        dataclasses.replace(spec, pad_position=0),
+        dataclasses.replace(spec, pad_position=None))}
+    assert len(ids) == 6
+    # A spec with no pads keeps the key it had before pads existed, and a
+    # spec with pads at one position the key it had before pads at their
+    # own indices existed.
     assert _spec().template_id == dataclasses.replace(
         _spec(), pad_id=0, pad_position=3).template_id
+    flux3 = te.encoder_spec("flux3_klein")
+    assert flux3.template_id == hashlib.sha256(
+        (flux3.template + "\x00stack\x00pad=80,151643,1").encode()).hexdigest()
 
 
 @pytest.mark.parametrize("family", ["z_image", "krea2", "qwen_image21",
@@ -691,6 +742,57 @@ def test_pad_rows_are_the_reference_forward_of_the_padded_prompt():
         assert not _close(g, w, tol=1e-2)
 
 
+def test_pad_rows_at_their_own_indices_are_the_reference_forward(
+        monkeypatch):
+    """With no pad position each pad row runs at its own index, reading
+    the real keys alone, as FLUX.2 klein's reference runs them. The pad
+    rows then differ, and pads at one position or read as causal tokens
+    are another forward."""
+    m, _ = _tiny_qwen3()
+    ids, pad, pad_id = [3, 17, 42, 5, 99, 1, 64], 5, 9
+    n = len(ids)
+    seq = ids + [pad_id] * pad
+    allowed = np.tril(np.ones((n + pad, n + pad), bool))
+    allowed[:, n:] = False
+    layers = (1, 4)
+    want = _np_forward(m, seq, range(n + pad), allowed, layers)
+    got = _cpu_tap(m, ids, layers=layers, pad=pad, pad_id=pad_id,
+                   pad_position=None)
+    for g, w in zip(got, want):
+        assert g.shape == (1, n + pad, 64)
+        assert _close(g, w)
+        spread = np.linalg.norm(w[n + 1:] - w[n], axis=1) / np.linalg.norm(
+            w[n])
+        assert spread.min() > 1e-3
+    for wrong in (_np_forward(m, seq, list(range(n)) + [n] * pad, allowed,
+                              (4,)),
+                  _np_forward(m, seq, range(n + pad),
+                              np.tril(np.ones((n + pad, n + pad), bool)),
+                              (4,))):
+        assert not _close(got[1], wrong[0], tol=1e-2)
+    # The real rows are the plain tap's, and one token runs with its pads.
+    (plain,) = _cpu_tap(m, ids, layers=(4,))
+    real = np.array(got[1][0, :n], np.float64)
+    ref = np.array(plain[0], np.float64)
+    assert np.linalg.norm(real - ref) / np.linalg.norm(ref) < 1e-5
+    (one,) = _cpu_tap(m, [7], layers=(2,), pad=2, pad_id=9,
+                      pad_position=None)
+    want = _np_forward(m, [7, 9, 9], [0, 1, 2],
+                       np.array([[1, 0, 0], [1, 0, 0], [1, 0, 0]], bool),
+                       (2,))[0]
+    assert _close(one, want)
+    with pytest.raises(ValueError, match="pad id"):
+        _cpu_tap(m, ids, layers=(3,), pad=2, pad_position=None)
+    # No rope is swapped for pads at their own indices.
+    def swapped(*_a, **_k):
+        raise AssertionError("pad_rope ran")
+
+    monkeypatch.setattr(te, "pad_rope", swapped)
+    te.tap(m, [3, 17], layers=(1,), pad=2, pad_id=9, pad_position=None)
+    with pytest.raises(AssertionError, match="pad_rope ran"):
+        te.tap(m, [3, 17], layers=(1,), pad=2, pad_id=9)
+
+
 def test_the_real_rows_of_a_padded_tap_are_the_tap_of_the_prompt():
     m, _ = _tiny_qwen3()
     ids = [3, 17, 42, 5]
@@ -745,6 +847,138 @@ def test_a_padded_tap_restores_the_ropes_and_refuses_a_block_without_one():
     te.tap(m, [3, 17], layers=(4,))
 
 
+class _Bf16Product(nn.Module):
+    """A product that returns bfloat16 whatever its input, as a Q8_0
+    KQuantLinear does on a float32 input."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def __call__(self, x):
+        return self.inner(x).astype(mx.bfloat16)
+
+
+class _Float32Product(nn.Module):
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def __call__(self, x):
+        return self.inner(x).astype(mx.float32)
+
+
+def _bf16_products(m):
+    """The tiny model as a quantized file loads: bf16 weights, so bf16
+    norm scales, and products that return bf16."""
+    m.set_dtype(mx.bfloat16)
+    for b in m.model.layers:
+        for o, names in ((b.self_attn, ("q_proj", "k_proj", "v_proj",
+                                        "o_proj")),
+                         (b.mlp, ("gate_proj", "up_proj", "down_proj"))):
+            for name in names:
+                setattr(o, name, _Bf16Product(getattr(o, name)))
+
+
+def test_fp32_qkv_runs_the_qk_norm_rope_and_attention_in_float32(
+        monkeypatch):
+    from gmlx._vendor.mlx_lm.models import qwen3
+
+    m, _ = _tiny_qwen3()
+    _bf16_products(m)
+    seen = []
+    sdpa = qwen3.scaled_dot_product_attention
+
+    def spy(q, k, v, **kw):
+        seen.append((q.dtype, k.dtype, v.dtype))
+        return sdpa(q, k, v, **kw)
+
+    monkeypatch.setattr(qwen3, "scaled_dot_product_attention", spy)
+    products = [[getattr(b.self_attn, n) for n in te._QKV]
+                for b in m.model.layers]
+    ids = [3, 17, 42, 5]
+    kw = dict(layers=(2, 4), activation="float32", pad=3, pad_id=9,
+              pad_position=None)
+    plain = te.tap(m, ids, **kw)
+    assert len(seen) == 4 and set(seen) == {(mx.bfloat16,) * 3}
+    seen.clear()
+    cast = te.tap(m, ids, fp32_qkv=True, **kw)
+    assert len(seen) == 4 and set(seen) == {(mx.float32,) * 3}
+    assert all(getattr(b.self_attn, n) is p
+               for b, ps in zip(m.model.layers, products)
+               for n, p in zip(te._QKV, ps))
+    for a, b in zip(plain, cast):
+        assert a.dtype == b.dtype == mx.float32
+        assert not mx.array_equal(a, b).item()
+    # The cast tap is the tap of a model whose q, k and v products return
+    # float32 after their own rounding, and the other products are as
+    # they were.
+    for b in m.model.layers:
+        for n in te._QKV:
+            setattr(b.self_attn, n, _Float32Product(getattr(b.self_attn, n)))
+    for a, b in zip(cast, te.tap(m, ids, **kw)):
+        assert mx.array_equal(a, b).item()
+    # The products are restored after a tap that raises, and a block with
+    # no products to cast swaps none.
+    m2, _ = _tiny_qwen3()
+    before = [[getattr(b.self_attn, n) for n in te._QKV]
+              for b in m2.model.layers]
+
+    def same():
+        return all(getattr(b.self_attn, n) is p
+                   for b, ps in zip(m2.model.layers, before)
+                   for n, p in zip(te._QKV, ps))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with te.float32_qkv(m2):
+            assert all(isinstance(b.self_attn.q_proj, te._Float32Out)
+                       for b in m2.model.layers)
+            raise RuntimeError("boom")
+    assert same()
+
+    class _NoAttention:
+        def __call__(self, x, mask, cache):
+            return x
+
+    keep = m2.model.layers[2]
+    m2.model.layers[2] = _NoAttention()
+    with pytest.raises(TypeError, match="_NoAttention has no self_attn"):
+        te.tap(m2, ids, layers=(4,), fp32_qkv=True)
+    m2.model.layers[2] = keep
+    assert same()
+
+
+def test_an_encoding_casts_qkv_only_when_its_spec_says():
+    m, _ = _tiny_qwen3()
+    _bf16_products(m)
+    tok = _CharTokenizer()
+    spec = _spec(tap=(1, 3), stack=True, pad_multiple=8, pad_id=9,
+                 max_tokens=24, pad_position=None)
+    got = {}
+    for flag in (False, True):
+        s = dataclasses.replace(spec, fp32_qkv=flag)
+        enc = te.EncoderHandle(m, tok, s, owned=False).encode("ab")
+        want = te.tap(m, list(enc.ids), layers=(1, 3), pad=enc.pads,
+                      pad_id=9, pad_position=None, fp32_qkv=flag)
+        assert mx.array_equal(enc.features,
+                              mx.concatenate([w[0] for w in want], -1)).item()
+        assert enc.template_id == spec.template_id
+        got[flag] = enc.features
+    assert not mx.array_equal(got[False], got[True]).item()
+
+
+def test_only_the_flux2_specs_cast_qkv():
+    specs = {}
+    for fam in registry.families():
+        try:
+            specs[fam.name] = te.encoder_spec(fam)
+        except te.ImageModelError:
+            continue
+    assert {n for n, s in specs.items() if s.fp32_qkv} == {
+        "flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"}
+    assert len(specs) > 2
+
+
 def test_an_encoding_keeps_its_pad_rows():
     m, _ = _tiny_qwen3()
     tok = _CharTokenizer()
@@ -763,3 +997,11 @@ def test_an_encoding_keeps_its_pad_rows():
                                            max_tokens=24),
                              owned=False).encode("ab")
     assert plain.pads == 0 and plain.features.shape == (n, 2 * 64)
+    # Pads at their own indices reach the tap with the spec's rule.
+    each = dataclasses.replace(spec, pad_position=None)
+    got = te.EncoderHandle(m, tok, each, owned=False).encode("ab")
+    want = te.tap(m, list(got.ids), layers=(1, 3), pad=got.pads, pad_id=9,
+                  pad_position=None)
+    assert got.pads == 16 - n and got.template_id == each.template_id
+    assert mx.array_equal(got.features,
+                          mx.concatenate([w[0] for w in want], -1)).item()

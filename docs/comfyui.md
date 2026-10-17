@@ -172,9 +172,53 @@ each image. FLUX.3 klein samples at `cfg` 1 with `euler`, so its negative
 can be a `Conditioning Zero Out` of the positive. FLUX.3 klein Base takes a
 negative prompt and a higher `cfg`.
 
+FLUX.2 klein reads its prompt the same way, with the Qwen3-4B GGUF on the
+server. Its workflows take the three gmlx loaders with `flux-2-klein` or
+`flux-2-klein-base` in `model_name`, `Empty Flux 2 Latent` for the image's
+size, and `Flux2Scheduler` for the sigmas, which `SamplerCustomAdvanced`
+samples on with a `CFGGuider` and a `KSamplerSelect`. `Flux2Scheduler`
+gives the schedule FLUX.2 klein is made for, which follows the image size,
+so give it the latent's width and height. The schedulers of `KSampler` run
+on another schedule. An edit scales each reference image to one megapixel
+with `Scale Image to Total Pixels` (`ImageScaleToTotalPixels`), encodes it
+with a `VAE Encode`, and puts it on the prompt and on the negative with a
+`Set Reference Latent` (`ReferenceLatent`). A `Get Image Size` of the
+first scaled image gives `Empty Flux 2 Latent` and `Flux2Scheduler` their
+width and height. FLUX.2 klein samples at `cfg` 1, so its negative can be a
+`Conditioning Zero Out` of the positive. FLUX.2 klein Base takes a negative
+prompt and a higher `cfg`. FLUX.2 klein places its reference images by the
+`index` method, and an `Edit Model Reference Method`
+(`FluxKontextMultiReferenceLatentMethod`) set to another method is refused
+with the node's name.
+
+The FLUX.2 klein 9B models take the same nodes and workflows with
+`flux-2-klein-9b` or `flux-2-klein-base-9b` in `model_name`, and read
+their prompt with the Qwen3-8B GGUF on the server. They need a Mac with
+24 GB or more, and their license allows non-commercial use only.
+
+FLUX.2 klein 9B KV takes the same nodes and workflows with
+`flux-2-klein-9b-kv` in `model_name`. Put ComfyUI's `Flux KV Cache`
+(`FluxKVCache`) between `gmlx Model Loader` and the guider. The first step
+of an edit then keeps the keys and values of the reference images on the
+server, and the later steps reuse them, so they run faster. Without the
+node, every step runs the reference images again. FLUX.2 klein 9B KV needs
+a Mac with 24 GB or more, and its license allows non-commercial use only.
+
+Krea 2 Turbo reads its prompt with the Qwen3-VL-4B-Instruct GGUF on the
+server. Its workflow, `krea-2-turbo-t2i`, takes the three gmlx loaders with
+`krea-2-turbo` in `model_name`, `EmptySD3LatentImage` for the image's size,
+and `BasicScheduler` for the sigmas, which `SamplerCustomAdvanced` samples
+on with a `CFGGuider` and a `KSamplerSelect`. Krea 2 Turbo samples at `cfg`
+1, so its negative can be a `Conditioning Zero Out` of the positive. No
+Krea 2 quant fits a 1024x1024 image on a Mac with 16 GB, so set the latent
+to 512x512 there.
+
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
-`SamplerCustomAdvanced`, though `KSampler` works on every model.
+`SamplerCustomAdvanced`, though `KSampler` works on every model. The
+schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size, so
+on those `gmlx Sigmas` takes the image's `width` and `height` and stops
+without them.
 `gmlx Server Status` shows whether a model is loaded, the memory it holds
 and the gmlx version of the nodes. The
 [ComfyUI reference](comfyui-reference.md#how-the-work-is-shared) says which
@@ -182,7 +226,7 @@ stock nodes work with a gmlx model and what runs where.
 
 ## The example workflows
 
-ComfyUI's template browser lists five workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists ten workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -191,6 +235,11 @@ with the commands that install the gmlx nodes and pull its model.
 | `z-image-turbo-t2i` | Z-Image-Turbo text to image at 1024x1024 in 8 steps | Nothing beyond the model |
 | `z-image-turbo-lora-t2i` | The same through a stock `LoraLoader` | A Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or another picked in the node |
 | `qwen-image-2.1-edit-two-references` | A Qwen-Image 2.1 edit from two reference images, through `TextEncodeQwenImage21` | `gmlx pull qwen-image`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `krea-2-turbo-t2i` | Krea 2 Turbo text to image at 1024x1024 in 8 steps, through `BasicScheduler` and `SamplerCustomAdvanced` | `gmlx pull krea-2-turbo`, and on a Mac with 16 GB a 512x512 latent |
+| `flux-2-klein-t2i` | FLUX.2 klein text to image at 1024x1024 in 4 steps, through `Flux2Scheduler` and `SamplerCustomAdvanced` | `gmlx pull flux-2-klein` |
+| `flux-2-klein-edit-two-references` | A FLUX.2 klein edit from two reference images, through `ReferenceLatent` | `gmlx pull flux-2-klein`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `flux-2-klein-9b-t2i` | FLUX.2 klein 9B text to image at 1024x1024 in 4 steps, the same graph on the 9B model | `gmlx pull flux-2-klein-9b`, and a Mac with 24 GB or more |
+| `flux-2-klein-9b-kv-edit-two-references` | A FLUX.2 klein 9B KV edit from two reference images, through `ReferenceLatent` and `Flux KV Cache` | `gmlx pull flux-2-klein-9b-kv`, a Mac with 24 GB or more, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 

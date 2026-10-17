@@ -1,0 +1,176 @@
+{
+ "schema": 1,
+ "name": "check3_flux2_klein_1024",
+ "check": 3,
+ "family": "flux2_klein",
+ "script": "scripts/image_oracle/check3_flux2_klein.py",
+ "argv": [
+  "check3_flux2_klein.py",
+  "--reference",
+  "src",
+  "--reference-commit",
+  "50fe5162777813d869182b139e83b10743caef15",
+  "--dit",
+  "flux-2-klein-4b-Q4_K_M.gguf",
+  "--sizes",
+  "512",
+  "1024",
+  "--rows",
+  "512"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "flux-2-klein-4b-Q4_K_M.gguf",
+   "size": 2604311104,
+   "sha256": "0b25d143c8469b342bc5af3bce92b783bf6b0636d285f7b2f75e38af63af9a15"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "sigma": 1.0,
+  "step": 0,
+  "schedule": "get_schedule(4, 4096)",
+  "seed": 1024,
+  "latents": "seeded normal, rounded to bf16",
+  "features": "seeded normal, std 4.0, rounded to bf16",
+  "text_rows": 512,
+  "refs": 0,
+  "ref_size": 0,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "bf16 as the reference's denoise fills it, in both modes",
+  "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
+  "gguf_codecs": {
+   "F32": 60,
+   "Q5_K": 30,
+   "Q4_K": 50,
+   "BF16": 9
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.026728408429329907,
+   "cosine": 0.9996452850845854,
+   "max_abs": 0.14870575070381165
+  },
+  "times": {
+   "fp32_s": 20.6,
+   "bf16_s": 102.7
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.053456816858659814,
+   "cosine_min": 0.9985811403383416
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the time vector, modulations and embeddings and for the velocity"
+ },
+ "notes": [],
+ "created": "2026-10-16T12:02:19Z",
+ "npz": "check3_flux2_klein_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    512,
+    7680
+   ],
+   "dtype": "float32",
+   "sha256": "3482cc3e89168264731155ce529cc5ff9299b09f9e6ade75b1a420d631896802"
+  },
+  "ids.image": {
+   "shape": [
+    4096,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "e0fd52cd4061c2c0d3094706675d76769012c61ad3e12de6ed0464ff4cd3a971"
+  },
+  "ids.text": {
+   "shape": [
+    512,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "914a4d07f258895514e1b52023c57a677aa4925531d34e54831414224030a0f8"
+  },
+  "in.time_in": {
+   "shape": [
+    1,
+    256
+   ],
+   "dtype": "float32",
+   "sha256": "cbacd50d6ddae5179d08ae5986820a7baaecca4b2a9962dd856fc80aa62707e4"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "2ce0f3a03885ff5202f83cc448e3caeafce143ff69753702eb39499c5466df80"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c28f7b5ec8105b2046f4c1ac015adb2356edf0c17d3d70ce71279d692a01b0b8"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "0902c84c046853560c50b8041aeb1cc8aec9b355d1fd4ed4d09a28b1f97c387c"
+  }
+ }
+}

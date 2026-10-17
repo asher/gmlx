@@ -1,19 +1,20 @@
 # Image generation
 
 gmlx makes images from a text prompt, and edits images you give it, with
-the Z-Image-Turbo, Qwen-Image 2.1, Krea 2 Turbo and FLUX.3 klein models.
-You can run them
-from the command line, call them from an app through the OpenAI image API,
-or use them in [ComfyUI](comfyui.md). Image generation came with gmlx 0.5
-and needs a Mac with an M3 chip or newer and 16 GB of memory or more.
+the Z-Image-Turbo, Qwen-Image 2.1, Krea 2 Turbo, FLUX.2 klein and FLUX.3
+klein models. You can run them from the command line, call them from an
+app through the OpenAI image API, or use them in [ComfyUI](comfyui.md).
+Image generation came with gmlx 0.5 and needs a Mac with an M3 chip or
+newer and 16 GB of memory or more.
 [An M1 or M2](troubleshooting.md#needs-an-m3-or-newer) runs only
 Z-Image-Turbo, in float16, when you allow it.
 
 ## Choose a model
 
-Every model runs on 16 GB. `pull` downloads the quant that suits your
-Mac's memory, so the download is larger on a Mac with more. The image size
-is the one you get when you ask for none.
+Every model runs on 16 GB but the FLUX.2 klein 9B models, which need
+24 GB. `pull` downloads the quant that suits your Mac's memory, so
+the download is larger on a Mac with more. The image size is the one you
+get when you ask for none.
 
 | Model | Download, 16 GB Mac | Download, 24 GB Mac | Image size | License |
 |-------|---------------------|---------------------|------------|---------|
@@ -21,8 +22,13 @@ is the one you get when you ask for none.
 | `qwen-image-turbo` | 14.4 GB | 17.5 GB | 1024x1024 | Research and evaluation only |
 | `qwen-image` | 14.4 GB | 17.6 GB | 1024x1024 | Research and evaluation only |
 | `krea-2-turbo` | 9.8 GB | 14.1 GB | 512x512 on 16 GB, else 1024x1024 | Free commercial use under $1M of yearly revenue |
-| `flux-3-klein` | 8.0 GB | 10.7 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
-| `flux-3-klein-base` | 8.0 GB | 10.7 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
+| `flux-2-klein` | 6.6 GB | 8.1 GB | 1024x1024 | Apache 2.0, any use |
+| `flux-2-klein-base` | 6.6 GB | 8.1 GB | 1024x1024 | Apache 2.0, any use |
+| `flux-2-klein-9b` | Needs 24 GB | 13.8 GB | 1024x1024 | Non-commercial only |
+| `flux-2-klein-base-9b` | Needs 24 GB | 13.8 GB | 1024x1024 | Non-commercial only |
+| `flux-2-klein-9b-kv` | Needs 24 GB | 13.6 GB | 1024x1024 | Non-commercial only |
+| `flux-3-klein` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
+| `flux-3-klein-base` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 
 Start with Z-Image-Turbo: it is the fastest, as
 [Benchmarks](benchmarks.md#image-generation) shows, and its license allows
@@ -170,6 +176,11 @@ gmlx node pack runs these image models in it, on the gmlx server.
 | `qwen-image` | Qwen-Image 2.1 | 40 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `qwen-image-turbo` | Qwen-Image 2.1 Turbo | 8 | From up to 10 reference images | Qwen3-VL-8B-Instruct, with its mmproj |
 | `krea-2-turbo` | Krea 2 Turbo | 8 | From one image | Qwen3-VL-4B-Instruct |
+| `flux-2-klein` | FLUX.2 klein 4B | 4, with guidance 1 only | From up to 10 reference images | Qwen3-4B |
+| `flux-2-klein-base` | FLUX.2 klein Base 4B | 50 | From up to 10 reference images | Qwen3-4B |
+| `flux-2-klein-9b` | FLUX.2 klein 9B, non-commercial | 4, with guidance 1 only | From up to 10 reference images | Qwen3-8B |
+| `flux-2-klein-base-9b` | FLUX.2 klein Base 9B, non-commercial | 50 | From up to 10 reference images | Qwen3-8B |
+| `flux-2-klein-9b-kv` | FLUX.2 klein 9B KV, non-commercial | 4, with guidance 1 only | From up to 10 reference images | Qwen3-8B |
 | `flux-3-klein` | FLUX.3 klein | 16, with the `euler` sampler and guidance 1 only | From up to 10 reference images | Qwen3-VL-4B-Instruct |
 | `flux-3-klein-base` | FLUX.3 klein Base | 50 | From up to 10 reference images | Qwen3-VL-4B-Instruct |
 
@@ -180,6 +191,25 @@ images without the encoder's vision tower, so it edits with the encoder
 file alone. FLUX.3 klein and Krea 2
 Turbo use the same Qwen3-VL-4B-Instruct file, and `pull` downloads it once
 for both.
+
+FLUX.2 klein is distilled to sample without guidance too, so a request or
+a flag that sets another guidance is refused, and it samples with `euler`
+or `uni_pc_bh2`. FLUX.2 klein Base takes guidance. FLUX.2 klein also
+edits with the encoder file alone, since its encoder reads the prompt and
+the VAE encodes the reference images. FLUX.2 klein 4B and Z-Image-Turbo
+use the same Qwen3-4B file, and FLUX.2 klein at both sizes and FLUX.3
+klein decode with the same VAE, so `pull` downloads each once. The 9B
+models run the 4B models' steps and edit rules, with Qwen3-8B as the text
+encoder, and their license allows non-commercial use only, as
+[Licenses](#licenses) says.
+
+FLUX.2 klein 9B KV is a version of FLUX.2 klein 9B made for faster edits.
+Its reference images attend to each other alone, at time zero, so the
+first step of an edit computes their keys and values in every block, and
+the later steps reuse them and run the image and the prompt alone. A
+1024x1024 edit from two 1024x1024 references takes about half the time it
+takes on FLUX.2 klein 9B. Without reference images it runs as FLUX.2
+klein 9B does.
 
 `pull` takes the DiT at the quant for your Mac's memory, and the text
 encoder at Q8_0. A Mac takes the column of the largest class its memory
@@ -192,6 +222,11 @@ holds. `--quant` and `--encoder-quant` pick others, and
 | `qwen-image` | Q4_K_M | Q8_0 | Q8_0 | F16 |
 | `qwen-image-turbo` | AD-Q4_K | Q8_0 | BF16 | BF16 |
 | `krea-2-turbo` | Q3_K_M | Q6_K | Q8_0 | Q8_0 |
+| `flux-2-klein` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
+| `flux-2-klein-base` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
+| `flux-2-klein-9b` | None fits | Q4_K_M | Q8_0 | Q8_0 |
+| `flux-2-klein-base-9b` | None fits | Q4_K_M | Q8_0 | Q8_0 |
+| `flux-2-klein-9b-kv` | None fits | Q4_K_M | Q8_0 | Q8_0 |
 | `flux-3-klein` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
 | `flux-3-klein-base` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
 
@@ -199,6 +234,16 @@ No Krea 2 quant fits a 1024x1024 image on 16 GB, so a pull of the 16 GB
 default sets the entry's default size to 512x512, and a pull with another
 `--quant` sets none. Of Krea 2, gmlx runs Turbo, and it refuses a Krea 2
 Raw GGUF by name.
+
+No FLUX.2 klein 9B DiT that `pull` takes makes an image on 16 GB, so
+there a pull of a 9B model downloads nothing and names 24 GB, the
+smallest Mac that runs one. With `--quant` it takes that DiT, and
+`image generate` and the server refuse each request with the memory it
+needs. On 24 GB the Q4_K_M DiT makes a
+1024x1024 image from up to four 1024x1024 references, and a Q8_0 one from
+one at most. FLUX.2 klein 9B KV keeps the keys and values of its
+references, so on 24 GB its Q4_K_M DiT takes up to two 1024x1024
+references and its Q8_0 DiT none, and on 32 GB its Q8_0 DiT takes two.
 
 ## Licenses
 
@@ -208,8 +253,11 @@ Raw GGUF by name.
 | Qwen-Image 2.1 | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a license from Qwen. |
 | Qwen-Image 2.1 Turbo | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) | Research and evaluation only. Commercial use needs a license from Qwen. |
 | Krea 2 Turbo | [Krea 2 Community License](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf) | Free commercial use for a company, affiliates counted, under $1M of revenue in the last twelve months. A deployment must filter what it makes. |
+| FLUX.2 klein 4B, FLUX.2 klein Base 4B | [Apache 2.0](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/blob/main/LICENSE.md) | Any, under the license's terms |
+| FLUX.2 klein 9B, FLUX.2 klein Base 9B | [FLUX Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md) | Non-commercial use only, on the terms below |
+| FLUX.2 klein 9B KV | [FLUX Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv/blob/main/LICENSE) | Non-commercial use only, on the terms below |
 | FLUX.3 klein, FLUX.3 klein Base | [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md) | Non-commercial, and commercial use of the images under $5M of yearly revenue, on the terms below |
-| Qwen3-4B, Qwen3-VL-8B-Instruct, Qwen3-VL-4B-Instruct | Apache 2.0 | Any, under the license's terms |
+| Qwen3-4B, Qwen3-8B, Qwen3-VL-8B-Instruct, Qwen3-VL-4B-Instruct | Apache 2.0 | Any, under the license's terms |
 
 Under the [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md),
 a user whose yearly revenue, affiliates counted, is under $5M may use
@@ -217,11 +265,23 @@ FLUX.3 klein images commercially with content filters or a review of each
 image for unlawful or infringing content before it is shared, and with a
 disclosure that the image is made with AI where the law requires one.
 Other commercial use of FLUX.3 klein needs a license from Black Forest
-Labs. gmlx has no content filter of its own, so a deployment that a
-license asks to filter adds its own.
+Labs.
+
+Under the [FLUX Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md),
+FLUX.2 klein 9B, FLUX.2 klein Base 9B and FLUX.2 klein 9B KV may be used
+for non-commercial purposes only, as the license defines them, with
+content filters or a review of each image for unlawful or infringing
+content before it is shared, and with a disclosure that the image is made
+with AI where the law requires one. Commercial use of them needs a license
+from Black Forest Labs.
+
+gmlx has no content filter of its own, so a deployment that a license
+asks to filter adds its own.
 
 The GGUF files are quantized by unsloth, the Qwen-Image 2.1 Turbo files by
-AtomicChat, the Krea 2 Turbo files by Abiray and the FLUX.3 klein files by
-realrebelai, under the same licenses. The Krea 2 VAE comes from Comfy-Org's
-Krea 2 repository, and the FLUX.3 klein VAE, the FLUX.2 VAE, from
-Comfy-Org's FLUX.2 dev repository.
+AtomicChat, the Krea 2 Turbo files by Abiray, the FLUX.2 klein 9B KV files
+by QuantStack and the FLUX.3 klein files by realrebelai, under the same
+licenses. The Krea 2 VAE comes from Comfy-Org's Krea 2 repository. The
+FLUX.2 VAE, which FLUX.2 klein at both sizes and FLUX.3 klein decode with,
+comes from Black Forest Labs' FLUX.2 klein 4B repository, under Apache
+2.0. The 9B repositories hold the same file.

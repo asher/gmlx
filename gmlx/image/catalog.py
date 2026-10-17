@@ -2,7 +2,8 @@
 
 ``RECIPES`` names each pullable image model: its DiT repository and quants,
 its text encoder (and vision tower), its VAE source and the licenses.
-``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class.
+``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class,
+and ``NO_IMAGE`` the classes where none of them makes an image.
 ``classify`` and ``scan`` find the image files on disk by their weights:
 DiTs by their fingerprint, VAEs by their family and source digest, and
 encoders and vision towers by the identity digests of their spec.
@@ -48,6 +49,8 @@ class Recipe:
     vae_bytes: int = 0                # the packed VAE's size, for a fit
     aliases: tuple = ()
     license_note: str = ""            # what the license allows, if limited
+    vae_license: str = ""             # the VAE's license, when it has its
+                                      # own
 
     def dit_name(self, quant: str) -> str:
         return self.dit_file.format(quant=quant)
@@ -73,19 +76,50 @@ _KREA2_LICENSE = ("https://cdn.jsdelivr.net/gh/krea-ai/krea-2@"
 _KREA2_NOTE = ("free commercial use only under $1M annual revenue, "
                "affiliates counted, and a deployer must filter content")
 
-# FLUX.3 klein's VAE is the FLUX.2 autoencoder, which Comfy-Org's FLUX.2
-# repository holds in the diffusers layout and without a config.json. Both
-# checkpoints share the encoder file of Krea 2.
+# The FLUX.2 autoencoder, which FLUX.2 klein and FLUX.3 klein decode with:
+# BFL's file in the FLUX.2 klein 4B repository, BF16 in the diffusers
+# layout with its config.json, packed in its own dtype. One pack serves the
+# six recipes.
+_FLUX2_VAE = dict(
+    vae_repo="black-forest-labs/FLUX.2-klein-4B",
+    vae_revision="e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    vae_file="vae/diffusion_pytorch_model.safetensors",
+    vae_config="vae/config.json",
+    vae_sha256="ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+    vae_pack="flux2-vae-BF16.gguf", vae_license="apache-2.0",
+    vae_bytes=168_114_016)
+
+# FLUX.2 klein 4B: unsloth's GGUFs of BFL's checkpoints, conditioned on
+# Qwen3-4B, the encoder file of Z-Image.
+_FLUX2 = dict(
+    family="flux2_klein", dit_quants=("Q4_K_M", "Q8_0"),
+    encoder_repo="unsloth/Qwen3-4B-GGUF", encoder_file="Qwen3-4B-{quant}.gguf",
+    encoder_quants=("Q8_0",), **_FLUX2_VAE,
+    license="apache-2.0", encoder_license="apache-2.0",
+    encoder_bytes=4_280_405_792)
+
+# FLUX.2 klein 9B: unsloth's GGUFs of BFL's checkpoints, conditioned on
+# Qwen3-8B, under the FLUX Non-Commercial License. Its VAE is the 4B
+# repository's file, which the 9B repositories hold too.
+_FLUX2_9B = dict(
+    family="flux2_klein_9b", dit_quants=("Q4_K_M", "Q8_0"),
+    encoder_repo="unsloth/Qwen3-8B-GGUF", encoder_file="Qwen3-8B-{quant}.gguf",
+    encoder_quants=("Q8_0",), **_FLUX2_VAE,
+    license="flux-non-commercial-license",
+    # LICENSE.md 2.b and 2.e.
+    license_note=("non-commercial use only, with content filters or a review "
+                  "of each image for unlawful or infringing content before it "
+                  "is shared, and a disclosure that it is made with AI where "
+                  "the law requires one"),
+    encoder_license="apache-2.0", encoder_bytes=8_709_519_168)
+
+# Both FLUX.3 klein checkpoints share the encoder file of Krea 2.
 _FLUX3 = dict(
     family="flux3_klein", dit_repo="realrebelai/FLUX-3-Image-Klein_GGUFs",
     dit_quants=("Q4_K_M", "Q8_0"),
     encoder_repo=_KREA2_ENCODER,
     encoder_file="Qwen3-VL-4B-Instruct-{quant}.gguf", encoder_quants=("Q8_0",),
-    vae_repo="Comfy-Org/flux2-dev",
-    vae_revision="ed33133cd56476eac818c0943b6f9419b3e4a3a1",
-    vae_file="split_files/vae/flux2-vae.safetensors", vae_config="",
-    vae_sha256="d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
-    vae_pack="flux2-vae-F32.gguf",
+    **_FLUX2_VAE,
     license="flux-kommunity",
     license_url="https://huggingface.co/black-forest-labs/flux-3-image-klein/"
                 "blob/main/LICENSE.md",
@@ -95,8 +129,7 @@ _FLUX3 = dict(
                   "filters or a review of each image for unlawful or "
                   "infringing content before it is shared, and a disclosure "
                   "that it is made with AI where the law requires one"),
-    encoder_license="apache-2.0",
-    encoder_bytes=4_280_406_816, vae_bytes=336_205_920)
+    encoder_license="apache-2.0", encoder_bytes=4_280_406_816)
 
 RECIPES = {r.name: r for r in (
     Recipe(
@@ -169,6 +202,39 @@ RECIPES = {r.name: r for r in (
         license_note=_KREA2_NOTE, encoder_license="apache-2.0",
         encoder_bytes=4_280_406_816, vae_bytes=253_807_712),
     Recipe(
+        name="flux-2-klein", title="FLUX.2 klein", variant="distilled",
+        dit_repo="unsloth/FLUX.2-klein-4B-GGUF",
+        dit_file="flux-2-klein-4b-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/"
+                    "blob/main/LICENSE.md", **_FLUX2),
+    Recipe(
+        name="flux-2-klein-base", title="FLUX.2 klein Base", variant="base",
+        dit_repo="unsloth/FLUX.2-klein-base-4B-GGUF",
+        dit_file="flux-2-klein-base-4b-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/"
+                    "FLUX.2-klein-base-4B/blob/main/LICENSE.md", **_FLUX2),
+    Recipe(
+        name="flux-2-klein-9b", title="FLUX.2 klein 9B", variant="distilled",
+        dit_repo="unsloth/FLUX.2-klein-9B-GGUF",
+        dit_file="flux-2-klein-9b-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/"
+                    "blob/main/LICENSE.md", **_FLUX2_9B),
+    Recipe(
+        name="flux-2-klein-base-9b", title="FLUX.2 klein Base 9B",
+        variant="base", dit_repo="unsloth/FLUX.2-klein-base-9B-GGUF",
+        dit_file="flux-2-klein-base-9b-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/"
+                    "FLUX.2-klein-base-9B/blob/main/LICENSE.md", **_FLUX2_9B),
+    # QuantStack's GGUFs of BFL's KV checkpoint, whose LICENSE is the text
+    # of the 9B's LICENSE.md.
+    Recipe(
+        name="flux-2-klein-9b-kv", title="FLUX.2 klein 9B KV",
+        variant="distilled", dit_repo="QuantStack/FLUX.2-Klein-9B-KV-GGUF",
+        dit_file="Flux-2-Klein-9B-KV-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/"
+                    "FLUX.2-klein-9b-kv/blob/main/LICENSE",
+        **dict(_FLUX2_9B, family="flux2_klein_9b_kv")),
+    Recipe(
         name="flux-3-klein", title="FLUX.3 klein", variant="distilled",
         dit_file="DISTILLED/flux3_image_klein_sd-{quant}.gguf", **_FLUX3),
     Recipe(
@@ -191,6 +257,36 @@ DEFAULT_QUANTS = {
     # the staged load. Q8_0 needs the 32 GB class.
     "krea-2-turbo": {16: ("Q3_K_M", "Q8_0"), 24: ("Q6_K", "Q8_0"),
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # On 16 GB a Q4_K_M FLUX.2 klein DiT makes a 1024 pixel image from up
+    # to two 1024 pixel references with the encoder released, and Base runs
+    # its two guided rows one at a time. A Q8_0 DiT fits there only with
+    # the staged load and a tiled decode, and takes no reference.
+    "flux-2-klein": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                     32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    "flux-2-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
+                          32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # No FLUX.2 klein 9B DiT these recipes pull makes an image in the 16 GB
+    # class: a Q4_K_M step at 256 pixels needs 8.91 GiB of its 8.55. The
+    # 16 GB row names the smallest, which a pull takes there only when the
+    # quant is given (NO_IMAGE), and the memory plan of a request there
+    # refuses it. On 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to
+    # four 1024 pixel references with the encoder released, and Base runs
+    # its two guided rows one at a time. A Q8_0 DiT fits there only with
+    # the staged load and a tiled decode, and from one reference, so it
+    # takes the 32 GB class, with the encoder released.
+    "flux-2-klein-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
+                        32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    "flux-2-klein-base-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
+                             32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # KV keeps the keys and values of its references, so an edit takes more
+    # memory than on the 9B. As on the 9B, no DiT makes an image in the
+    # 16 GB class: a Q4_K_M request at 512 pixels needs 9.01 GiB of 8.55. On
+    # 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to two 1024 pixel
+    # references with the encoder released, and a Q8_0 DiT makes no 1024
+    # pixel edit. On 32 GB a Q8_0 DiT takes up to two of them, and a Q4_K_M
+    # DiT four.
+    "flux-2-klein-9b-kv": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
+                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A Q8_0 DiT fits a 1024 pixel image from the 24 GB class up, with the
     # encoder released on 24 GB, where Base also runs its two guided rows
     # one at a time.
@@ -198,6 +294,25 @@ DEFAULT_QUANTS = {
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-3-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+}
+
+
+# The memory classes where no DiT a recipe pulls makes an image. A pull
+# there refuses unless the quant is given, and names the least class that
+# makes one.
+NO_IMAGE = {"flux-2-klein-9b": frozenset({16}),
+            "flux-2-klein-base-9b": frozenset({16}),
+            "flux-2-klein-9b-kv": frozenset({16})}
+
+
+# The output matrix of each encoder file a recipe pulls that has one, from
+# its header. The load reads and drops it, so a pull counts it as the
+# memory plan of the file on disk does before the file is there. The 4B
+# encoders tie it to the embedding and have none.
+ENCODER_OUTPUT_BYTES = {
+    "Qwen3-8B-Q8_0.gguf": 661_225_472,
+    "Qwen3-VL-8B-Instruct-Q8_0.gguf": 661_225_472,
+    "Qwen3-VL-8B-Instruct-Q4_K_M.gguf": 510_504_960,
 }
 
 
@@ -238,6 +353,18 @@ def memory_class(ram_bytes: int | None) -> int:
 def default_quants(r: Recipe, ram_bytes: int | None) -> tuple[str, str]:
     """(DiT quant, encoder quant) the recipe pulls on this Mac."""
     return DEFAULT_QUANTS[r.name][memory_class(ram_bytes)]
+
+
+def makes_image(r: Recipe, cls: int) -> bool:
+    """Whether a DiT the recipe pulls makes an image in memory class
+    ``cls``."""
+    return cls not in NO_IMAGE.get(r.name, ())
+
+
+def least_class(r: Recipe) -> int:
+    """The smallest memory class in which a DiT the recipe pulls makes an
+    image."""
+    return min(c for c in MEMORY_CLASSES if makes_image(r, c))
 
 
 def default_size(r: Recipe, ram_bytes: int | None,
@@ -321,6 +448,17 @@ def vae_identity(path: str) -> tuple[str, str | None] | None:
     return str(fam), (str(sha) if sha else None)
 
 
+def vae_families(label: str) -> tuple:
+    """The families a VAE packed for the family ``label`` serves:
+    ``label`` first, then each family that decodes with the same
+    autoencoder, as FLUX.2 klein and FLUX.3 klein do."""
+    from .vae.reader import VAES
+
+    row = VAES.get(label)
+    return (label, *(f for f, r in VAES.items()
+                     if row is not None and r is row and f != label))
+
+
 def _shape_matches(kv: dict, spec) -> bool:
     arch = kv.get("general.architecture")
     return (arch == spec.arch
@@ -396,7 +534,8 @@ def classify(path: str, *, families: tuple | None = None) -> list:
     kind = str(kv.get("general.type") or "").lower()
     if kind == "vae" or arch == "autoencoder":
         got = vae_identity(path)
-        return [ImageFile(path, "vae", got[0], sha256=got[1])] if got else []
+        return [ImageFile(path, "vae", f, sha256=got[1])
+                for f in vae_families(got[0])] if got else []
     if kind == "mmproj" or arch == "clip":
         return [ImageFile(path, "mmproj", f) for f in names
                 if mmproj_matches(path, f)]

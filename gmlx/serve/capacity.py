@@ -110,6 +110,14 @@ def working_budget_bytes() -> float | None:
     return None if ws is None else ceiling_bytes(ws)
 
 
+def ram_budget_bytes(ram: float) -> float:
+    """The working budget of a Mac with ``ram`` bytes of RAM: Metal's
+    recommended working set there, 2/3 of the RAM and 3/4 from 64 GB, less
+    the margin, and never closer to the RAM than the reserve."""
+    ws = ram * (3 / 4 if ram >= 64 << 30 else 2 / 3)
+    return min(ws * (1.0 - margin()), ram - reserve_bytes(ram))
+
+
 def classify_weight_share(size_bytes: int, ram_bytes: int) -> str:
     """memfit's fit classes, derived here: fits / tight / over
     (boundaries inclusive on the safe side, matching memfit)."""

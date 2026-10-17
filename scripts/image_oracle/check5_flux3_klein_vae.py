@@ -32,6 +32,12 @@ full resolution activation and keeps them, 5.7 GiB at 512 pixels in fp32,
 so a run at 512 and 1024 pixels with float64 peaked at 32.8 GiB on an M5
 Max, and the oracle runs no larger size.
 
+FLUX.2 klein reads the same autoencoder, which gmlx pulls from BFL's
+FLUX.2 klein 4B repository in BF16. ``--vae`` that file, ``--config`` a
+copy of that repository, ``--name check5_flux2_klein_vae`` and
+``--family flux2_klein`` write its fixture, the fp32 and float64 runs
+reading the bf16 weights upcast.
+
 --self-test builds the class at a tiny config with seeded weights and
 BatchNorm statistics, which the fixture holds by diffusers name, and runs
 one 48x64 image through it.
@@ -230,7 +236,7 @@ def write(torch, a, name, vae32, sizes, files, argv, extra, notes,
           results_extra=None) -> int:
     vaes, vae64 = _modes(torch, vae32)
     fx = fixtures.FixtureWriter(
-        name, check=5, family="flux3_klein",
+        name, check=5, family=a.family,
         script=f"scripts/image_oracle/{Path(__file__).name}", argv=argv)
     for role, path in files.items():
         fx.add_file(role, path)
@@ -408,6 +414,10 @@ def main(argv=None) -> int:
     ap.add_argument("--sizes", type=int, nargs="*", default=[512, 1024],
                     help="square sizes in pixels, encoded and decoded")
     ap.add_argument("--name", default=NAME)
+    ap.add_argument("--family", choices=("flux3_klein", "flux2_klein"),
+                    default="flux3_klein",
+                    help="the family the manifest records, which reads the "
+                         "autoencoder")
     ap.add_argument("--self-test", action="store_true",
                     help="write the tiny random model fixture and stop")
     ap.add_argument("--out", type=Path,
@@ -428,9 +438,11 @@ def main(argv=None) -> int:
     extra = {"source_dtypes": dtypes, "config_revision": a.config_revision,
              "load": "AutoencoderKLFlux2.from_config(vae/config.json), "
              "then the file strict, in float32"}
+    held = ("bfloat16 weights, which the fp32 and float64 runs read "
+            "upcast" if "torch.bfloat16" in dtypes else "float32 weights")
     results_extra, bfl, notes = {}, None, [
-        "The file holds float32 weights. The bf16 VAE is a bfloat16 copy "
-        "with its BatchNorm statistics kept float32."]
+        f"The file holds {held}. The bf16 VAE is a bfloat16 copy with its "
+        "BatchNorm statistics kept float32."]
     if a.original is not None:
         files["vae_original"] = a.original
         bfl_state = None
@@ -456,8 +468,8 @@ def main(argv=None) -> int:
     del state
     return write(
         torch, a, a.name, vae32, [(s, s) for s in a.sizes], files,
-        [Path(__file__).name, "--vae", a.vae.name, "--sizes",
-         *map(str, a.sizes)],
+        [Path(__file__).name, "--vae", a.vae.name, "--family", a.family,
+         "--sizes", *map(str, a.sizes)],
         extra, notes, STARTING, RULE, bfl=bfl, results_extra=results_extra)
 
 

@@ -98,9 +98,9 @@ The recording runs at true speed, with a 27B model in a local server.
 - Embeddings, rerank, speech-to-text and text-to-speech on the same server,
   for a local RAG and voice stack. See
   [Speech, embeddings and rerank](https://asher.github.io/gmlx/services.html).
-- Image generation from Z-Image, Qwen-Image 2.1, Krea 2 Turbo and FLUX.3
-  klein GGUFs, on the command line, on the OpenAI image routes and in
-  ComfyUI. It needs an M3 chip or newer. See
+- Image generation from Z-Image, Qwen-Image 2.1, Krea 2 Turbo, FLUX.2 klein
+  and FLUX.3 klein GGUFs, on the command line, on the OpenAI image routes
+  and in ComfyUI. It needs an M3 chip or newer. See
   [Image generation](https://asher.github.io/gmlx/images.html).
 - A decision API at `/v1/systemone` that returns a probability for each
   answer to yes-or-no, choice and score questions about a text. See
