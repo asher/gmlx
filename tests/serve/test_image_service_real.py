@@ -19,12 +19,8 @@ pytestmark = pytest.mark.integration
 
 
 def _class_budget(gb: int) -> float:
-    """The working budget of a Mac of ``gb`` GB: Metal's working set, 2/3
-    of RAM and 3/4 from 64 GB, less the margin, and never closer to RAM
-    than the reserve."""
-    ram = gb << 30
-    ws = ram * (3 / 4 if gb >= 64 else 2 / 3)
-    return min(ws * (1 - capacity.margin()), ram - capacity.reserve_bytes(ram))
+    """The working budget of a Mac of ``gb`` GB."""
+    return capacity.ram_budget_bytes(gb << 30)
 
 
 @functools.lru_cache(maxsize=1)
