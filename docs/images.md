@@ -198,7 +198,10 @@ With an upsampler set, each prompt is rewritten:
 - `gmlx serve` writes the caption with the chat model, which loads and
   unloads as it does for a chat request, and returns the caption as
   `revised_prompt` with the image. A request with the same prompt and
-  another seed reuses the caption.
+  another seed reuses the caption. With the
+  [prompt cache](config.md#prompt-cache) on, a new prompt reuses the
+  system prompt's prefill. The first caption also loads the chat model,
+  which `pin: true` on its `models` entry keeps loaded.
 - The ComfyUI pack rewrites the prompt of its text encode node, and
   ComfyUI's log shows the caption.
 
