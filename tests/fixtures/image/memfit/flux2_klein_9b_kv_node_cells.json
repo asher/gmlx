@@ -135,6 +135,28 @@
   },
   {
    "dit": "Q4_K_M",
+   "size": 512,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 512,
+   "cache_gib": 0.5,
+   "plain_gib": 3.0882,
+   "build_gib": 2.4477,
+   "read_gib": 2.5668
+  },
+  {
+   "dit": "Q4_K_M",
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 1,
+   "ref_px": 1024,
+   "cache_gib": 2.0,
+   "plain_gib": 4.7148,
+   "build_gib": 2.2619,
+   "read_gib": 3.4107
+  },
+  {
+   "dit": "Q4_K_M",
    "size": 1024,
    "text_rows": 512,
    "refs": 2,
