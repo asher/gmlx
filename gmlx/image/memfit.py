@@ -214,20 +214,22 @@ FLUX2_KLEIN_9B_STEP = StepFit(base=3.05 * GiB, k=2.9, row_k=0.5)
 # reference pass that builds the cache, measured as the 9B's, less the
 # bytes of the cache. The cells are in
 # tests/fixtures/image/memfit/flux2_klein_9b_kv_cells.json: 512 to 2048
-# pixels without references, one to four 1024 pixel references at 1024,
-# one of 512 and one of 1536 pixels at 1024, one 1024 pixel reference at
-# 512 and 2048, and four at 1536, each with 512 text rows. The cache holds
-# exactly its arithmetic bytes, 2 GiB for a 1024 pixel reference. A step
-# reads 2.54 GiB at 512 pixels and 6.56 at 2048, and the references add
-# at most 0.54 GiB to a step of their size, at 512 pixels with a 1024
-# pixel reference. The 9B's Q4_K_M file reads
-# 0.31 GiB more than its Q8_0 one at the same size, and each fit leaves
-# 0.25 GiB above every cell with that added: a step base of 3.1 GiB and a
-# slope of 2.6, and a pass base of 1.75 GiB and a slope of 1.3 over the
-# formula bytes of the reference rows. The pass reads 1.04 GiB at one 512
-# pixel reference and 3.06 at four of 1024 pixels.
+# pixels without references, one, two, four and ten 1024 pixel references
+# at 1024, one of 512 and one of 1536 pixels at 1024, one 1024 pixel
+# reference at 512 and 2048, and four at 1536, each with 512 text rows.
+# Ten references of 1024 pixels are the most reference rows a request
+# takes. The cache holds exactly its arithmetic bytes, 2 GiB for a 1024
+# pixel reference. A step reads 2.54 GiB at 512 pixels and 6.56 at 2048,
+# and the references add at most 0.95 GiB to a step of their size, at
+# 1024 pixels with ten references. The 9B's Q4_K_M file reads 0.31 GiB
+# more than its Q8_0 one at the same size, and each fit leaves 0.25 GiB
+# above every cell with that added: a step base of 3.1 GiB and a slope of
+# 2.6, and a pass base of 1.75 GiB and a slope of 1.5 over the formula
+# bytes of the reference rows. The pass reads 1.04 GiB at one 512 pixel
+# reference, 3.06 at four of 1024 pixels and 6.79 at ten, where it leaves
+# the least room.
 FLUX2_KLEIN_9B_KV_STEP = StepFit(base=3.1 * GiB, k=2.6)
-FLUX2_KLEIN_9B_KV_PREFILL = StepFit(base=1.75 * GiB, k=1.3)
+FLUX2_KLEIN_9B_KV_PREFILL = StepFit(base=1.75 * GiB, k=1.5)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.

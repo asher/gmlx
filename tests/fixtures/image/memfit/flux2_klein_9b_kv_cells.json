@@ -106,6 +106,19 @@
    ]
   },
   {
+   "size": 1024,
+   "text_rows": 512,
+   "refs": 10,
+   "ref_px": 1024,
+   "state_gib": 20.0039,
+   "prefill_gib": 6.7926,
+   "steps_gib": [
+    4.6011,
+    3.9072,
+    3.9596
+   ]
+  },
+  {
    "size": 1536,
    "text_rows": 512,
    "refs": 0,

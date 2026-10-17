@@ -1120,7 +1120,7 @@ def _kv_room(row, c: dict, gap: float) -> tuple:
 
 def test_the_flux2_9b_kv_row_covers_every_measured_cell():
     """The KV cells on its Q8_0 file: sizes to 2048 pixels without
-    references, and one to four references of 512 to 1536 pixels. The
+    references, and one to ten references of 512 to 1536 pixels. The
     cache of a request is exactly the K and V of its reference tokens in
     32 blocks, and the step and the reference pass each leave ROOM above
     the cells of the Q4_K_M file, the Q8_0 reading and the 9B's gap."""
