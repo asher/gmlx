@@ -365,6 +365,8 @@ def _response_body(req, result, urls) -> dict:
             import base64
 
             data.append({"b64_json": base64.b64encode(blob).decode("ascii")})
+        if req.revised_prompt:
+            data[-1]["revised_prompt"] = req.revised_prompt
     return {"created": int(time.time()), "data": data,
             "background": ("transparent" if req.background == "transparent"
                            else "opaque"),
@@ -424,6 +426,11 @@ def make_endpoint(route: str):
         timeout_s = gen.get_token_queue_timeout()
 
         def prepare():
+            from ..image_upsample import revise
+
+            req.revised_prompt = revise(
+                req.model, req.prompt, req.prompt_upsampling,
+                req.route != "generations", stop=stop)
             hold = residency.acquire_image_model(req.model)
             holds.append(hold)
             served = hold._entry.pipeline
@@ -460,6 +467,14 @@ def make_endpoint(route: str):
             _log_aux_request(path, req.model or None, started,
                              status="refused", error=str(e))
             return _from_request_error(path, e)
+        except JobStopped:
+            stop.set()
+            watcher.cancel()
+            release()
+            STATE.leave()
+            _log_aux_request(path, req.model or None, started,
+                             status="cancelled")
+            return Response(status_code=499)
         except HTTPException as e:
             stop.set()
             watcher.cancel()
@@ -615,6 +630,8 @@ def make_endpoint(route: str):
                 body = {"type": f"{event_prefix}.completed",
                         "created_at": int(time.time()), "usage": result.usage,
                         **common}
+                if req.revised_prompt:
+                    body["revised_prompt"] = req.revised_prompt
                 urls = store_urls(result)
                 if urls is not None:
                     body["url"] = urls[0]

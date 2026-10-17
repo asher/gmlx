@@ -141,6 +141,9 @@ class GmlxCLIP(comfy.sd.CLIP):
         if p.get("prevent_empty_text") and text == "" and self.gmlx_family in _SPACE_FOR_EMPTY:
             text = " "
         out, fields = self.gmlx_client.encode(self.gmlx_model, text, images)
+        if fields.get("revised_prompt"):
+            log.info("gmlx: the server encoded the upsampled prompt: %s",
+                     fields["revised_prompt"])
         cond = out["cond"].float()
         if cond.ndim == 2:
             cond = cond[None]

@@ -554,6 +554,11 @@ class ImageRequest:
     ignored: set = field(default_factory=set)
     # The references of a family that prepares them together, with crop.
     refs: Any = None
+    # The request's prompt_upsampling, None when it gives none, and the
+    # caption the upsampler wrote for the prompt, None when it runs as
+    # typed.
+    prompt_upsampling: bool | None = None
+    revised_prompt: str | None = None
 
 
 def default_model_field(model) -> str:
@@ -607,6 +612,11 @@ def _bool(fields: dict, name: str) -> bool:
     if text in ("false", "0"):
         return False
     raise _bad(f"{name} must be true or false", name)
+
+
+def _opt_bool(fields: dict, name: str) -> bool | None:
+    v = fields.get(name)
+    return None if v is None or v == "" else _bool(fields, name)
 
 
 def _choice(fields: dict, name: str, allowed, default: str) -> str:
@@ -731,7 +741,11 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         stream=_bool(fields, "stream"),
         partial_images=_int(fields, "partial_images", 0, MAX_PARTIALS) or 0,
         adapters=_adapters(fields.get("adapters")),
+        prompt_upsampling=_opt_bool(fields, "prompt_upsampling"),
     )
+    if route != "generations" and req.prompt_upsampling:
+        # A prompt with reference images runs as typed.
+        req.ignored.add("prompt_upsampling")
     if req.stream and req.n > 1:
         raise _bad("stream with n above 1 is not supported; the stream "
                    "events carry no image index", "n")
@@ -1496,10 +1510,11 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             mask = mask_from_image(req.mask, (width, height))
 
     table, adapters = _adapter_table(served, req.adapters, model_dirs)
+    text = req.revised_prompt or prompt
     _make_room(served, cfg, size, refs, init is not None, budget,
-               [prompt] + ([] if neg_text is None else [neg_text]))
+               [text] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()
-    cond, neg = _encode(served, prompt, neg_text, refs, borrow)
+    cond, neg = _encode(served, text, neg_text, refs, borrow)
     plan = api.plan_request(
         pipe, height=height, width=width, cfg=cfg,
         conds=[cond] if neg is None else [cond, neg], patch_table=table,
@@ -1545,6 +1560,8 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
                 "sampler": sampler, "guidance": cfg,
                 "model": os.path.basename(served.spec.path),
                 "adapters": adapters}
+        if req.revised_prompt:
+            meta["revised_prompt"] = req.revised_prompt
 
     def finish(x) -> np.ndarray:
         from gmlx.commands.image import to_uint8
