@@ -854,10 +854,15 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
     _add_adapter_flag(p)
     p.add_argument("--prompt", default=BENCH_PROMPT,
                    help="The prompt (default a fixed bench prompt).")
+    p.add_argument("--ref", action="append", default=None, metavar="PATH",
+                   help="Time an edit from this reference image. Repeat the "
+                        "flag for several. On FLUX.2 klein and FLUX.3 klein, "
+                        "whose encoders read the prompt alone.")
     p.add_argument("--sizes", type=_sizes, default=None, metavar="LIST",
                    help="Comma-separated sizes such as 1024x1024,2048x2048 "
                         "(default: the entry's defaults.size, else the "
-                        "variant's size).")
+                        "variant's size, or the size the references give an "
+                        "edit).")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
     p.add_argument("--guidance", type=float, default=None, metavar="CFG",
@@ -918,27 +923,36 @@ def _file_bytes(path: str) -> int:
 
 def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
               cfg: float, sampler: str, seed: int, patch_table=None,
-              clock=time.perf_counter):
+              refs=(), clock=time.perf_counter):
     """One timed image from empty conditioning caches: encode, every step,
-    decode and the whole image in seconds, with MLX's peak memory. The
-    pairs and built tables of ``patch_table`` stay loaded between runs,
-    as the weights do."""
+    decode and the whole image in seconds, with MLX's peak memory. An edit
+    encodes its prepared ``refs`` with the VAE after the prompt, and the
+    encode time counts both. The pairs and built tables of
+    ``patch_table`` stay loaded between runs, as the weights do."""
     import mlx.core as mx
 
     from gmlx.image import api
 
-    for cache in (pipe.conditionings, pipe.captions, pipe.modulations):
+    for cache in (pipe.conditionings, pipe.captions, pipe.modulations,
+                  pipe.reference_latents):
         cache.clear()
     mx.reset_peak_memory()
     t0 = clock()
-    cond = api.encode_text(pipe, prompt)
-    neg = None if cfg == 1.0 else api.encode_text(pipe, "")
+    cond = api.encode_text(pipe, prompt, images=refs, ref_latents=False)
+    neg = None if cfg == 1.0 else api.encode_text(pipe, "", images=refs,
+                                                  ref_latents=False)
     mx.eval(cond.features, *(() if neg is None else (neg.features,)))
-    t_enc = clock()
+    text_s = clock() - t0
     # A bench keeps the encoder, which every run encodes with.
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
                             conds=[cond] if neg is None else [cond, neg],
                             patch_table=patch_table, keep_encoder=True)
+    t_ref = clock()
+    if refs:
+        cond = api.encode_references(pipe, cond, plan=plan)
+        neg = None if neg is None else api.encode_references(pipe, neg,
+                                                             plan=plan)
+    t_enc = clock()
     marks = [t_enc]
     x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height, width=width,
                    steps=steps, seed=seed, sampler=sampler,
@@ -948,7 +962,7 @@ def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
     img = api.vae_decode(pipe, x, plan=plan)
     mx.eval(img)
     t_end = clock()
-    return {"encode_s": t_enc - t0,
+    return {"encode_s": text_s + t_enc - t_ref,
             "step_s": [b - a for a, b in zip(marks, marks[1:])],
             "decode_s": t_end - t_dec, "image_s": t_end - t0,
             "peak_bytes": int(mx.get_peak_memory())}
@@ -1092,8 +1106,10 @@ def _bench(a) -> int:
 
     if a.via_steps and a.adapter:
         raise _Usage("--via-steps times the base model; drop --adapter")
+    if a.via_steps and a.ref:
+        raise _Usage("--via-steps times text to image; drop --ref")
     a.init_image = a.mask = None
-    a.ref = a.ref_size = a.encoder_mmproj = None
+    a.ref_size = a.encoder_mmproj = None
     _check_files(a)
     _vet_adapters(a)
     if a.json_out is not None:
@@ -1107,9 +1123,17 @@ def _bench(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     a.strength = None
     steps, cfg, _ = _settings(a, ident, defaults)
+    stride = _stride(fam)
+    if a.ref and fam.edit is not None and not fam.edit.text_only:
+        raise _Usage(f"--ref: the {fam.title} encoder reads the references "
+                     "with its vision tower, which bench does not load")
+    refs = _references(a, fam)
+    if refs and not a.sizes:
+        from gmlx.image.registry import edit_size
+
+        a.sizes = [s for s in [edit_size(fam, refs, stride)] if s]
     sizes = a.sizes or [getattr(a, "entry_size", None) or (
         defaults.size if defaults else (1024, 1024))]
-    stride = _stride(fam)
     for w, h in sizes:
         if w % stride or h % stride:
             raise _Usage(f"--sizes {w}x{h}: width and height must be "
@@ -1118,6 +1142,7 @@ def _bench(a) -> int:
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
                           keep_encoder=True, variant=a.variant,
+                          refs=[(r.height, r.width) for r in refs],
                           prompts=[a.prompt] + ([] if cfg == 1.0 else [""]))
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
@@ -1135,7 +1160,7 @@ def _bench(a) -> int:
                         variant=a.variant, log=log)
         table, adapters = _load_adapters(a, pipe, log)
         records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table,
-                               adapters, log)
+                               adapters, log, refs=refs)
     lines = "".join(json.dumps(r) + "\n" for r in records)
     if a.json:
         sys.stdout.write(lines)
@@ -1160,7 +1185,7 @@ def _steps_client(a, pipe):
 
 
 def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
-                 log, client=None, mid: str = "") -> list:
+                 log, client=None, mid: str = "", refs=()) -> list:
     import mlx.core as mx
     import numpy as np
 
@@ -1183,7 +1208,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                   sampler=a.sampler, seed=a.seed)
         transport = {"mode": "direct", "overhead_ms_median": None}
         if client is None:
-            kw["patch_table"] = table
+            kw.update(patch_table=table, refs=refs)
             for _ in range(a.warmup):
                 bench_run(pipe, a.prompt, **kw)
             runs = [bench_run(pipe, a.prompt, **kw) for _ in range(a.runs)]
@@ -1209,7 +1234,13 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                             "sampler": a.sampler, "scheduler": None,
                             "guidance": cfg, "batch": 1,
                             "adapters": adapters,
-                            "seed": a.seed, "prompt": a.prompt},
+                            "seed": a.seed, "prompt": a.prompt,
+                            **({"refs": [
+                                {"file": os.path.basename(p),
+                                 "size": f"{r.width}x{r.height}",
+                                 "sha256": _file_sha256(p)}
+                                for p, r in zip(a.ref, refs)]}
+                               if refs else {})},
                "runs": runs, "summary": bench_summary(runs,
                                                       pipe.load_seconds),
                "transport": transport}

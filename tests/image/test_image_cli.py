@@ -1789,8 +1789,7 @@ def test_the_reference_flags_complete_as_files():
         assert _complete(["image", "generate", "x.gguf", flag, ""]) == \
             ["::files"]
     assert "--ref-size" in flags
-    assert "--ref" not in [c.split("\t")[0]
-                           for c in _complete(["image", "bench", "-"])]
+    assert _complete(["image", "bench", "x.gguf", "--ref", ""]) == ["::files"]
 
 
 def test_the_preflight_counts_the_mmproj_and_the_references(monkeypatch):
@@ -1948,6 +1947,22 @@ def test_both_rows_of_a_guided_flux2_base_edit_take_the_references(
         ("vae", refs, flux2_edit.plan), ("vae", refs, flux2_edit.plan)]
     # The prompt's row and the negative prompt's, each with the reference.
     assert flux2_edit.rows == [(11, 1), (6, 1)] * 3
+
+
+def test_a_bench_edit_encodes_its_references_in_every_run(flux2_edit,
+                                                          tmp_path):
+    """An edit bench times every run from its references: each run encodes
+    them after the prompt, each step runs with them, and the record names
+    them."""
+    out = tmp_path / "bench.jsonl"
+    assert umbrella_main(["image", "bench"] + flux2_edit.base[2:] + [
+        "--sizes", "32x32", "--steps", "2", "--runs", "2", "--warmup", "0",
+        "--ref", flux2_edit.refs[0], "--json-out", str(out)]) == 0
+    kinds = [c[0] for c in flux2_edit.calls]
+    assert kinds == ["encode", "vae"] * 2
+    assert [n for _, n in flux2_edit.rows] == [1] * 4
+    rec = json.loads(out.read_text())
+    assert [r["file"] for r in rec["settings"]["refs"]] == ["a.png"]
 
 
 @pytest.mark.parametrize("family, sizes, want", [
