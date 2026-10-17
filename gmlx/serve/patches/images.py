@@ -14,6 +14,7 @@ an ``img`` tag sends no header, so the 32 byte token is the capability.
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
 import json
 import logging
@@ -328,6 +329,10 @@ def _borrow_for(spec):
             try:
                 return fn()
             finally:
+                # The handle without its model names the states of a later
+                # request, which a shed before its encode keeps last.
+                served_pipe.keys_encoder = copy.copy(served_pipe.encoder)
+                served_pipe.keys_encoder.model = None
                 served_pipe.encoder = None
 
         def steps(engine_rg, should_stop):

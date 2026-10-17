@@ -179,6 +179,9 @@ class ImagePipeline:
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
+    # A borrowed encoder's last handle without its model, whose tokenizer
+    # names the conditionings between borrows.
+    keys_encoder: object | None = None
 
     @property
     def vae_scale(self) -> int:
@@ -625,12 +628,14 @@ def references(pipe: ImagePipeline, images, *,
                  for r in images)
 
 
-def _cond_key(pipe: ImagePipeline, prompt: str, refs: tuple) -> str:
+def _cond_key(pipe: ImagePipeline, prompt: str, refs: tuple,
+              enc=None) -> str:
     """The cache key of the conditioning of ``prompt`` with ``refs``. It
     reads the encoder's tokenizer alone, which a released encoder keeps.
     On a family whose encoder reads the prompt alone it is the key of the
-    text."""
-    enc = pipe.encoder
+    text. ``enc`` is the encoder whose keys it names, the pipeline's by
+    default."""
+    enc = enc or pipe.encoder
     edit = pipe.family.edit
     if refs and edit is not None and not edit.text_only:
         return conditioning_key(

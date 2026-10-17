@@ -1137,9 +1137,11 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
     if budget is None or pipe.family.step is None or not pipe.captions.bytes:
         return
     own = set()
-    if pipe.encoder is not None:
-        # The keys read the tokenizer alone, which a released encoder keeps.
-        own = {api._cond_key(pipe, p, refs) for p in prompts}
+    enc = pipe.encoder or pipe.keys_encoder
+    if enc is not None:
+        # The keys read the tokenizer alone, which a released encoder and
+        # a borrowed one's last handle keep.
+        own = {api._cond_key(pipe, p, refs, enc) for p in prompts}
     sizes = [(r.height, r.width) for r in refs]
     args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
     args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
