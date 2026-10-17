@@ -220,9 +220,19 @@ def kinds(log: list, kind: str) -> list:
 
 
 class Cases:
-    def __init__(self, s: Session, stub: Stub, stub2: Stub, work: str, targets: int):
+    def __init__(self, s: Session, stub: Stub, stub2: Stub, work: str, targets: int, stub3: Stub):
         self.s, self.stub, self.stub2, self.work, self.targets = s, stub, stub2, work, targets
+        self.stub3 = stub3
         self.results: list = []
+
+    def server(self, wf: dict, upsample: bool) -> Stub:
+        """The stub a workflow runs on: the upsampling one points its loaders there."""
+        if not upsample:
+            return self.stub
+        for node in wf.values():
+            if node["class_type"].startswith("Gmlx"):
+                node["inputs"]["server_url"] = self.stub3.url
+        return self.stub3
 
     def check(self, name: str, ok: bool, detail):
         self.results[-1]["checks"].append({"check": name, "ok": bool(ok), "detail": detail})
@@ -230,6 +240,7 @@ class Cases:
     async def case(self, name: str, fn):
         self.results.append({"case": name, "checks": []})
         self.stub.reset()
+        self.stub3.reset()
         try:
             await fn()
         except Exception:  # noqa: BLE001: a broken case is recorded and the rest still run
@@ -374,14 +385,15 @@ class Cases:
         self.results[-1]["latent_sha256"] = self.latent_qwen
         self.results[-1]["x_shape"] = steps[0]["x_shape"] if steps else None
 
-    async def flux3_t2i(self):
+    async def flux3_t2i(self, upsample=False):
         wf = workflow("flux-3-klein-t2i.json")
         wf["7"]["inputs"].update(width=256, height=192)
         wf["8"]["inputs"]["steps"] = 3
         wf["11"] = {"class_type": "SaveLatent", "inputs": {"samples": ["8", 0],
                                                            "filename_prefix": "latents/flux3-t2i"}}
+        stub = self.server(wf, upsample)
         r = await self.s.run(wf)
-        log = self.stub.log()
+        log = stub.log()
         self.check("success", r["status"] == "success", r.get("error"))
         enc = kinds(log, "encode")
         self.check("one encode of the prompt", [e["text"] for e in enc] == [wf["5"]["inputs"]["text"]],
@@ -395,15 +407,20 @@ class Cases:
         self.check("steps carry the schedule", all(e["sample_sigmas"] for e in steps), None)
         self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
         self.check("latent saved", latent_sha(self.work, "latents/flux3-t2i") is not None, None)
+        if upsample:
+            conds = {h for e in steps for h in e["conds"]}
+            self.check("the steps sample on the caption", enc and conds == {enc[0]["cond"]},
+                       [conds, enc[:1]])
 
-    async def flux3_edit(self):
+    async def flux3_edit(self, upsample=False):
         wf = workflow("flux-3-klein-edit-two-references.json")
         wf["8"]["inputs"]["resolution.megapixels"] = 0.25
         wf["9"]["inputs"]["steps"] = 2
         wf["12"] = {"class_type": "SaveLatent", "inputs": {"samples": ["9", 0],
                                                            "filename_prefix": "latents/flux3-edit"}}
+        stub = self.server(wf, upsample)
         r = await self.s.run(wf)
-        log = self.stub.log()
+        log = stub.log()
         self.check("success", r["status"] == "success", r.get("error"))
         enc = kinds(log, "vae_encode")
         shapes = [e["shape"] for e in enc]
@@ -422,6 +439,12 @@ class Cases:
                    [e["x_shape"] for e in steps][:1])
         self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
         self.check("latent saved", latent_sha(self.work, "latents/flux3-edit") is not None, None)
+        if upsample:
+            text = kinds(log, "encode")
+            conds = {h for e in steps for h in e["conds"]}
+            self.check("the steps sample on the instruction as typed",
+                       text and text[0]["cond_typed"] and conds == {text[0]["cond_typed"]},
+                       [conds, text[:1]])
 
     async def flux2_t2i(self):
         wf = workflow("flux-2-klein-t2i.json")
@@ -540,6 +563,7 @@ async def amain(a) -> dict:
         os.path.join(work, "input", "reference-2.png"))
     stub = Stub("--step-delay-ms", str(a.step_delay_ms))
     stub2 = Stub("--contract", "2.0")
+    stub3 = Stub("--upsample")
     env = dict(os.environ, GMLX_BASE_URL=stub.url, GMLX_COMFY_SETTINGS=os.path.join(work, "none.json"),
                PYTHONUNBUFFERED="1")
     env.pop("GMLX_API_KEY", None)
@@ -553,7 +577,7 @@ async def amain(a) -> dict:
             out["startup_s"] = round(time.monotonic() - t0, 2)
             async with http.get(comfy.url + "/system_stats") as r:
                 out["system"] = (await r.json()).get("system", {})
-            c = Cases(s, stub, stub2, work, targets)
+            c = Cases(s, stub, stub2, work, targets, stub3)
             await c.case("zimage t2i with a stock LoraLoader", c.t2i)
             await c.case("same graph, new seed: nothing uploaded again", c.rerun)
             await c.case("new LoRA strength: one new table", c.strength_change)
@@ -583,6 +607,9 @@ async def amain(a) -> dict:
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)
+                await c.case("flux-3-klein t2i, upsampled", lambda: c.flux3_t2i(True))
+                await c.case("flux-3-klein edit, upsampled: the instruction as typed",
+                             lambda: c.flux3_edit(True))
             else:
                 out["skipped"] = ["flux-3-klein t2i", "flux-3-klein edit with two references"]
             out["cases"] = c.results
@@ -592,6 +619,7 @@ async def amain(a) -> dict:
         comfy.close()
         stub.close()
         stub2.close()
+        stub3.close()
         shutil.rmtree(work, ignore_errors=True)
     out["passed"] = sum(1 for x in out["cases"] if x.get("ok"))
     out["failed"] = [x["case"] for x in out["cases"] if not x.get("ok")]

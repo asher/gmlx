@@ -430,8 +430,10 @@ def upsample_checks(rep: Report, base: str, model: str, log_path: str,
 
     def encode_step():
         steps = StepsClient(http_transport(base))
-        fields, _ = steps.encode(model, PROMPT)
+        fields, got = steps.encode(model, PROMPT)
         assert fields.get("revised_prompt") == made["caption"], fields
+        assert fields["cond_typed"] != fields["cond"], fields
+        assert got["cond_typed"].shape[-1] == got["cond"].shape[-1]
         assert rewrites() == 1, rewrites()
         return f"cond {fields['cond'][:12]}, {fields['num_tokens']} tokens"
 

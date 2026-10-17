@@ -1140,6 +1140,51 @@ class ClipAndVae(Base):
             zvae.get_sd()
 
 
+@needs_flux3
+class Upsampled(Base):
+    """A server that upsamples the prompt of a text encode, which sees no
+    reference images: an edit and a typed negative sample on the prompt as
+    typed, and a plain prompt on the caption."""
+    stub_args = ("--upsample",)
+
+    def setUp(self):
+        super().setUp()
+        self.clip = P.nodes.GmlxCLIPLoader().load(F3ID, self.stub.url, False)[0]
+
+    def encode(self, text):
+        (c,) = comfy_nodes.CLIPTextEncode().encode(self.clip, text)
+        return c, next(e for e in self.stub.events("encode") if e["text"] == text)
+
+    def sampled(self, pos, neg, latent, cfg):
+        self.stub.reset()
+        with torch.inference_mode():
+            comfy_nodes.common_ksampler(self.model(F3ID), 1, 2, cfg, "euler", "simple", pos, neg, latent)
+        return {h for s in self.stub.events("step") for h in s["conds"]}
+
+    def test_a_plain_prompt_samples_on_the_caption(self):
+        pos, e = self.encode("a lighthouse")
+        (neg,) = comfy_nodes.ConditioningZeroOut().zero_out(pos)
+        got = self.sampled(pos, neg, {"samples": torch.zeros(1, 128, 4, 4)}, 1.0)
+        self.assertEqual(got, {e["cond"]})
+
+    def test_an_edit_samples_on_the_prompt_as_typed(self):
+        from comfy_extras.nodes_edit_model import ReferenceMultiLatent
+        vae = P.nodes.GmlxVAELoader().load(F3ID, self.stub.url, False)[0]
+        pos, e = self.encode("make it blue")
+        (neg,) = comfy_nodes.ConditioningZeroOut().zero_out(pos)
+        pos, neg, latent = ReferenceMultiLatent.execute(
+            pos, {"resolution": "keep resolution"}, neg, vae, {"image1": torch.rand(1, 64, 64, 3)})[:3]
+        got = self.sampled(pos, neg, latent, 1.0)
+        self.assertNotEqual(e["cond"], e["cond_typed"])
+        self.assertEqual(got, {e["cond_typed"]})
+
+    def test_a_typed_negative_samples_on_the_prompt_as_typed(self):
+        pos, ep = self.encode("a lighthouse")
+        neg, en = self.encode("blurry")
+        got = self.sampled(pos, neg, {"samples": torch.zeros(1, 128, 4, 4)}, 2.0)
+        self.assertEqual(got, {ep["cond"], en["cond_typed"]})
+
+
 class Widgets(unittest.TestCase):
     """The loaders list the server's image models, the default first, and
     show the address they use; a name the server lacks is refused with its

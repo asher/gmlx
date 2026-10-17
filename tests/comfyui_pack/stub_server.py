@@ -171,6 +171,7 @@ class State:
         self.delay = a.step_delay_ms / 1000.0
         self.cond_tokens = a.cond_tokens
         self.default_model = a.default_model
+        self.upsample = a.upsample
         self.manifests = load_manifests()
         self.tensors: dict = {}
         self.adapters: dict = {}
@@ -445,9 +446,17 @@ class Handler(BaseHTTPRequestHandler):
         if images and not COMFY[fam]["edit"]:
             return self._err(400, "this family takes no reference images")
         n = int(req.get("num_tokens") or st.cond_tokens)
-        rng = np.random.default_rng(int(hashlib.sha256(req["text"].encode()).hexdigest()[:8], 16))
-        cond = (rng.standard_normal((1, n, st.context_dim(fam)), dtype=np.float32) * 0.5)
-        out = {"cond": cond}
+
+        def features(text):
+            rng = np.random.default_rng(int(hashlib.sha256(text.encode()).hexdigest()[:8], 16))
+            return rng.standard_normal((1, n, st.context_dim(fam)), dtype=np.float32) * 0.5
+
+        revised = None
+        if st.upsample and not images and req.get("prompt_upsampling") is not False:
+            revised = "a caption of: " + req["text"]
+        out = {"cond": features(revised or req["text"])}
+        if revised:
+            out["cond_typed"] = features(req["text"])
         stride, ch = COMFY[fam]["latent"]["stride"], COMFY[fam]["latent"]["channels"]
         want_refs = req.get("refs", True)
         for i, im in enumerate(images if want_refs else []):
@@ -458,9 +467,12 @@ class Handler(BaseHTTPRequestHandler):
             a = np.ascontiguousarray(a)
             hashes[k] = thash("F32", a.shape, a.tobytes())
             st.tensors[hashes[k]] = ("F32", list(a.shape), a)
-        fields = {"cond": hashes["cond"], "ref_latents": [hashes[k] for k in out if k != "cond"],
+        fields = {"cond": hashes["cond"], "ref_latents": [hashes[k] for k in out if k.startswith("ref_")],
                   "image_slots": [2 + 3 * i for i in range(len(images))], "num_tokens": n}
-        st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs)
+        if revised:
+            fields.update(revised_prompt=revised, cond_typed=hashes["cond_typed"])
+        st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
+                 cond=hashes["cond"], cond_typed=hashes.get("cond_typed"))
         self._send(200, write_body(out, fields), ctype=CONTENT_TYPE)
 
     def _step(self, body, t0):
@@ -513,7 +525,7 @@ class Handler(BaseHTTPRequestHandler):
         fwd = (time.perf_counter() - tf) * 1000
         st.event(kind="step", run=rid, model=req["model"], rows=len(rows), x_shape=x[1], x_dtype=x[0],
                  timestep=[float(v) for v in t], convention=req.get("convention"),
-                 num_tokens=[r.get("num_tokens") for r in rows],
+                 num_tokens=[r.get("num_tokens") for r in rows], conds=[r["cond"] for r in rows],
                  refs=[len(r.get("ref_latents") or []) for r in rows],
                  ref_shapes=[[list(st.tensors[h][1]) for h in r.get("ref_latents") or []]
                              for r in rows],
@@ -581,6 +593,8 @@ def main():
     ap.add_argument("--no-contract-field", action="store_true")
     ap.add_argument("--cond-tokens", type=int, default=32)
     ap.add_argument("--default-model", default=None)
+    ap.add_argument("--upsample", action="store_true",
+                    help="encode a prompt without images as a caption, as an upsampler does")
     serve(ap.parse_args())
 
 
