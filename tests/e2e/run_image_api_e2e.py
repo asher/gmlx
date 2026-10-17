@@ -9,10 +9,15 @@ client sees. ``--with-chat`` keeps a chat stream decoding while each family
 generates, and ``--memguard`` runs ``memguard.py`` beside the server.
 ``--measure`` instead times chat decode and a 1024x1024 image, each
 alone and beside the other, and the time to the first byte of a streamed
-image. Writes a Markdown and a JSON report.
+image. ``--upsample`` gives FLUX.3 klein the ``--upsampler`` chat model and
+runs the prompt upsampling checks in place of its family checks: through
+``gmlx image generate`` on the entry before the server starts, then the
+images route and the step contract's encode. Writes a Markdown and a JSON
+report.
 
     python tests/e2e/run_image_api_e2e.py --out DIR [--with-chat] [--memguard]
     python tests/e2e/run_image_api_e2e.py --measure --out DIR
+    python tests/e2e/run_image_api_e2e.py --family flux --upsample --out DIR
 
 Not ``test_``-prefixed: it loads real models on the GPU.
 """
@@ -62,6 +67,8 @@ DEFAULTS = {
                                "Qwen3-4B-Q8_0.gguf"),
     "f2_vae": os.path.join(_GGUF, "black-forest-labs__FLUX.2-klein-4B",
                            "flux2-vae-BF16.gguf"),
+    "upsampler": os.path.join(_GGUF, "unsloth__Qwen3.5-9B-MTP-GGUF",
+                              "Qwen3.5-9B-Q6_K.gguf"),
 }
 FAMILIES = (("z", "z-image-turbo"), ("qwen", "qwen-image"),
             ("flux", "flux-3-klein"), ("flux2", "flux-2-klein"))
@@ -83,6 +90,8 @@ def missing_files(a) -> list:
     server starts."""
     keys = ["chat"] + [k for k in DEFAULTS for f in CHOICES[a.family]
                        if k.startswith(PREFIX[f])]
+    if a.upsample:
+        keys.append("upsampler")
     out = []
     for k in keys:
         path = getattr(a, k)
@@ -113,6 +122,9 @@ def _config(a) -> dict:
         # The encoder reads the prompt alone: no vision tower.
         image_models["flux-3-klein"] = {
             "path": a.f_dit, "encoder": a.f_encoder, "vae": a.f_vae}
+        if a.upsample:
+            models["upsampler"] = {"path": a.upsampler}
+            image_models["flux-3-klein"]["upsampler"] = "upsampler"
     if "flux2" in families:
         # The encoder reads the prompt alone: no vision tower.
         image_models["flux-2-klein"] = {
@@ -121,7 +133,8 @@ def _config(a) -> dict:
             "image_models": image_models,
             "server": {"defaults": {"model": "chat",
                                     "image_model": next(iter(image_models))},
-                       "image": {"url_ttl_s": 600}}}
+                       "image": {"url_ttl_s": 600,
+                                 "embed_metadata": bool(a.upsample)}}}
 
 
 def _decode(b64: str):
@@ -328,6 +341,122 @@ def family_checks(rep: Report, base: str, model: str, family: str, log_path: str
         rep.check(f"{tag} chat decode in flight", chat_done)
 
 
+def cli_upsample_check(rep: Report, a, cfg_path: str, model: str,
+                       out: dict) -> None:
+    """``gmlx image generate`` on the entry, which loads its upsampler,
+    writes the caption and releases the upsampler before the image model
+    loads."""
+    def run():
+        png = os.path.join(a.out, "cli.png")
+        got = subprocess.run(
+            [a.python, "-c", "import sys; from gmlx.commands.cli import "
+             "umbrella_main; sys.exit(umbrella_main(sys.argv[1:]))",
+             "image", "generate", model, "--config", cfg_path, "--prompt",
+             PROMPT, "--size", "512x512", "--seed", "21", "--output", png,
+             "--json"], capture_output=True, text=True, timeout=1800)
+        with open(os.path.join(a.out, "cli.log"), "w") as f:
+            f.write(got.stderr)
+        assert got.returncode == 0, got.stderr[-2000:]
+        rec = json.loads(got.stdout)
+        caption = rec["settings"]["revised_prompt"]
+        assert caption and caption != PROMPT
+        assert rec["model"]["upsampler"] == os.path.basename(a.upsampler)
+        from PIL import Image
+
+        meta = json.loads(Image.open(png).text["gmlx"])
+        assert meta["revised_prompt"] == caption
+        line = next(ln for ln in got.stderr.splitlines()
+                    if "prompt upsampled by" in ln)
+        out.update(cli_caption=caption, cli_line=line)
+        return line
+
+    rep.check("upsample image generate", run)
+
+
+def upsample_checks(rep: Report, base: str, model: str, log_path: str,
+                    out: dict) -> None:
+    """Prompt upsampling on the images route and the step encode: the
+    caption comes back as revised_prompt and lands in the PNG, a rerun
+    with a new seed writes no new caption, and an edit and the off switch
+    run the prompt as typed."""
+    import httpx
+    from openai import OpenAI
+
+    from gmlx.serve.image_steps_client import StepsClient, http_transport
+
+    client = OpenAI(base_url=base + "/v1", api_key="none", timeout=900)
+    size = "512x512"
+    made: dict = {}
+
+    def rewrites() -> int:
+        return open(log_path).read().count("prompt upsampled by")
+
+    def first():
+        t0 = time.perf_counter()
+        r = client.images.generate(model=model, prompt=PROMPT, size=size,
+                                   extra_body={"seed": 21})
+        secs = time.perf_counter() - t0
+        caption = r.data[0].revised_prompt
+        assert caption and caption != PROMPT, caption
+        assert rewrites() == 1, rewrites()
+        png = base64.b64decode(r.data[0].b64_json)
+        meta = json.loads(_decode(r.data[0].b64_json).text["gmlx"])
+        assert (meta["prompt"], meta["revised_prompt"]) == (PROMPT, caption)
+        made.update(caption=caption, png=png, first_s=secs)
+        out.update(prompt=PROMPT, caption=caption, first_request_s=secs,
+                   cli_caption_equal=out.get("cli_caption") == caption)
+        return f"{len(caption.split())} words in {secs:.1f}s"
+
+    def rerun():
+        t0 = time.perf_counter()
+        r = client.images.generate(model=model, prompt=PROMPT, size=size,
+                                   extra_body={"seed": 22})
+        secs = time.perf_counter() - t0
+        assert r.data[0].revised_prompt == made["caption"]
+        assert rewrites() == 1, "the rerun wrote a new caption"
+        assert base64.b64decode(r.data[0].b64_json) != made["png"]
+        out["rerun_s"] = secs
+        return f"same caption, {secs:.1f}s against {made['first_s']:.1f}s"
+
+    def stream():
+        body = None
+        with httpx.stream("POST", base + "/v1/images/generations", timeout=900,
+                          json={"model": model, "prompt": PROMPT, "size": size,
+                                "stream": True, "seed": 23}) as r:
+            for line in r.iter_lines():
+                if line.startswith("data: ") and "completed" in line:
+                    body = json.loads(line[6:])
+        assert body and body["revised_prompt"] == made["caption"], body
+
+    def encode_step():
+        steps = StepsClient(http_transport(base))
+        fields, _ = steps.encode(model, PROMPT)
+        assert fields.get("revised_prompt") == made["caption"], fields
+        assert rewrites() == 1, rewrites()
+        return f"cond {fields['cond'][:12]}, {fields['num_tokens']} tokens"
+
+    def off():
+        r = client.images.generate(model=model, prompt=PROMPT, size=size,
+                                   extra_body={"seed": 24,
+                                               "prompt_upsampling": False})
+        assert r.data[0].revised_prompt is None
+        assert rewrites() == 1, rewrites()
+
+    def edit():
+        r = client.images.edit(model=model, image=("a.png", made["png"],
+                                                   "image/png"),
+                               prompt="the same scene in snow", size=size)
+        assert r.data[0].revised_prompt is None
+        assert rewrites() == 1, rewrites()
+
+    rep.check("upsample generations", first)
+    rep.check("upsample rerun with a new seed", rerun)
+    rep.check("upsample stream completed event", stream)
+    rep.check("upsample step encode", encode_step)
+    rep.check("upsample prompt_upsampling false", off)
+    rep.check("upsample edit runs as typed", edit)
+
+
 def _chat_window(base: str, max_tokens: int, state: dict) -> None:
     """A streamed chat completion that records the time of each content
     chunk in ``state["times"]`` until ``state["stop"]`` is set."""
@@ -441,6 +570,10 @@ def main() -> int:
                     help="serve the Z-Image encoder as a chat model and share it")
     ap.add_argument("--memguard", action="store_true",
                     help="run memguard.py beside the server")
+    ap.add_argument("--upsample", action="store_true",
+                    help="give FLUX.3 klein the --upsampler chat model and run "
+                         "the prompt upsampling checks in place of its family "
+                         "checks")
     ap.add_argument("--measure", action="store_true",
                     help="time chat decode beside an image job and the first "
                          "byte of a streamed image, with Z-Image only")
@@ -469,6 +602,9 @@ def main() -> int:
     log_path = os.path.join(a.out, "server.log")
     rep = Report()
     result: dict = {"config": _config(a)}
+    if a.upsample and "flux" in CHOICES[a.family]:
+        result["upsample"] = {}
+        cli_upsample_check(rep, a, cfg_path, "flux-3-klein", result["upsample"])
     try:
         with ServerProc(["--config", cfg_path], log_path=log_path, port=port,
                         python=a.python) as srv:
@@ -482,9 +618,14 @@ def main() -> int:
                 result["measurements"] = m
             else:
                 for family, model in FAMILIES:
-                    if family in CHOICES[a.family]:
-                        family_checks(rep, base, model, family, log_path,
-                                      a.with_chat)
+                    if family not in CHOICES[a.family]:
+                        continue
+                    if family == "flux" and a.upsample:
+                        upsample_checks(rep, base, model, log_path,
+                                        result["upsample"])
+                        continue
+                    family_checks(rep, base, model, family, log_path,
+                                  a.with_chat)
     finally:
         if guard is not None:
             guard.terminate()

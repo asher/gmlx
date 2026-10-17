@@ -539,15 +539,18 @@ def run_upsampler(path: str, family, prompt: str, log,
     # About 3 characters a token, which overcounts English.
     ctx = (len(system_prompt(family)) + len(prompt)) // 3 + (
         family.upsample.max_tokens)
-    check_or_exit(path, ctx_tokens=ctx)
+    def stdout():
+        return (contextlib.redirect_stdout(sys.stderr) if quiet
+                else contextlib.nullcontext())
+
+    with stdout():
+        check_or_exit(path, ctx_tokens=ctx)
     limit, _ = resolve_cache_limit(None, [path], working_set_bytes() or 0.0)
     prev = None if limit is None else mx.set_cache_limit(limit)
     name = os.path.basename(path)
     t0 = time.perf_counter()
     try:
-        out = contextlib.redirect_stdout(sys.stderr) if quiet else (
-            contextlib.nullcontext())
-        with out, loadlog.load_ui(False, path):
+        with stdout(), loadlog.load_ui(False, path):
             model, _config, tok = load_model(path)
         template = getattr(tok, "chat_template", None)
         if template is None:
