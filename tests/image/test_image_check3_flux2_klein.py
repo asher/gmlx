@@ -263,8 +263,14 @@ def test_check3_velocity_at_1024(dits, case):
     assert rel <= tol["rel_l2"] and cos >= tol["cosine_min"]
 
 
+# The time embedding and the exact gate hold the sinusoid and the model's
+# arithmetic, which the KV step without references shares with 9B, so they
+# run on the 4B and 9B fixtures.
+PLAIN_ROWS = {c: n for c, n in ROWS.items() if not c.startswith("kv ")}
+
+
 @pytest.mark.integration
-@pytest.mark.parametrize("case", cases(ROWS))
+@pytest.mark.parametrize("case", cases(PLAIN_ROWS))
 def test_check3_own_time_embedding(case):
     """gmlx's own time embedding against the reference's: equal, or one
     entry one bf16 ulp off where the reference's fp32 exp is an ulp off
@@ -404,13 +410,8 @@ EXACT_FAULTS = {"shift and scale swapped": _shift_scale_swapped,
                 "text on the first axis": _text_on_the_first_axis}
 
 
-# The exact gate holds the model's arithmetic, which the KV step without
-# references shares with 9B, so it runs on the 4B and 9B files.
-EXACT_ROWS = {c: n for c, n in ROWS.items() if not c.startswith("kv ")}
-
-
 @pytest.mark.integration
-@pytest.mark.parametrize("case", cases(EXACT_ROWS))
+@pytest.mark.parametrize("case", cases(PLAIN_ROWS))
 def test_check3_exact_gate_at_512(dits, request, monkeypatch, case):
     """Every teacher-forced row within EXACT_TOL of the oracle in its
     arithmetic, the free rows and the velocity within the fixture's gates

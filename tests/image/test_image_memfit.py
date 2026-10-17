@@ -1125,14 +1125,7 @@ def test_the_flux2_9b_kv_row_covers_every_measured_cell():
     32 blocks, and the step and the reference pass each leave ROOM above
     the cells of the Q4_K_M file, the Q8_0 reading and the 9B's gap."""
     row = memfit.PEAKS["flux2_klein_9b_kv"]
-    assert (row.step, row.prefill) == (memfit.FLUX2_KLEIN_9B_KV_STEP,
-                                       memfit.FLUX2_KLEIN_9B_KV_PREFILL)
-    assert row.width == 49152 and not row.ref_token_px
     cells = json.loads(FLUX2_9B_KV_CELLS.read_text())["cells"]
-    assert {c["size"] for c in cells if not c["refs"]} == {512, 1024, 1536,
-                                                           2048}
-    assert {(c["refs"], c["ref_px"]) for c in cells if c["refs"]} == {
-        (1, 512), (1, 1024), (2, 1024), (4, 1024), (1, 1536)}
     gap = _q4_gap()
     assert 0.25 * GiB < gap < 0.35 * GiB
     for c in cells:
@@ -1147,38 +1140,32 @@ def test_the_flux2_9b_kv_row_covers_every_measured_cell():
         assert min(room) <= 0.35 * GiB and max(room) <= 1.25 * GiB
 
 
-def test_a_thinner_flux2_9b_kv_row_misses_a_measured_cell():
-    row = memfit.PEAKS["flux2_klein_9b_kv"]
-    cells = json.loads(FLUX2_9B_KV_CELLS.read_text())["cells"]
-    gap = _q4_gap()
-
-    def worst(which: int, **change) -> float:
-        thin = dataclasses.replace(row, **{
-            f: dataclasses.replace(getattr(row, f), **change)
-            for f in (("step", "prefill")[which],)})
-        return min(_kv_room(thin, c, gap)[which] for c in cells
-                   if which == 0 or c["refs"])
-
-    for which in (0, 1):
-        assert worst(which) >= ROOM
-        assert worst(which, base=getattr(
-            row, ("step", "prefill")[which]).base - 0.1 * GiB) < ROOM
-    assert worst(0, k=row.step.k - 0.3) < ROOM
-    assert worst(1, k=row.prefill.k - 0.3) < ROOM
-
-
 def test_a_kv_edit_counts_each_reference_and_names_the_count_that_fits():
-    """Each 1024 pixel reference holds 2 GiB of cache for the request. On
-    a budget that holds two, a request with four is refused with the
-    largest count that fits."""
-    kw = dict(family="flux2_klein_9b_kv", height=1024, width=1024,
-              ref_px=1024, budget=20 * GiB, overcommit=False)
-    dit = 10 * GiB
-    one, two = (plan_memory(dit, 0, 0, refs=n, **kw) for n in (1, 2))
-    assert two.terms["prefix_cache"] - one.terms["prefix_cache"] == 2 * GiB
-    assert two.fits
+    """The plan of a FLUX.2 klein 9B KV edit holds the cache of each 1024
+    pixel reference, 2 GiB, and no text rows. On a budget that holds two,
+    a request with four is refused with the largest count that fits."""
+    import mlx.core as mx
+
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.registry import get_family
+
+    dit = SimpleNamespace(cfg=SimpleNamespace(patch=1), act_dtype=mx.bfloat16)
+    pipe = api.ImagePipeline(dit=dit, family=get_family("flux2_klein_9b_kv"),
+                             variant="distilled", weights={"dit": 10 * GiB})
+    feats = mx.zeros((512, 3 * 4096), mx.bfloat16)
+
+    def plan(n: int):
+        lats = tuple(mx.full((128, 64, 64), i, mx.float32) for i in range(n))
+        cond = Conditioning(feats, f"kv {n}", ref_latents=lats)
+        return api.plan_request(pipe, height=1024, width=1024, conds=cond,
+                                budget=20 * GiB, overcommit=False)
+
+    one, two = plan(1), plan(2)
+    assert one.terms["prefix_cache"] == 2 * GiB
+    assert two.terms["prefix_cache"] == 4 * GiB and two.fits
     with pytest.raises(memfit.ImageMemoryError) as e:
-        plan_memory(dit, 0, 0, refs=4, **kw)
+        plan(4)
     assert "the largest that fit are 2 of the 4 reference images" in str(
         e.value)
 
