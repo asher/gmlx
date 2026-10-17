@@ -1141,13 +1141,16 @@ def test_the_flux2_9b_kv_row_covers_every_measured_cell():
 
 
 def test_a_kv_edit_counts_each_reference_and_names_the_count_that_fits():
-    """The plan of a FLUX.2 klein 9B KV edit holds the cache of each 1024
-    pixel reference, 2 GiB, and no text rows. On a budget that holds two,
-    a request with four is refused with the largest count that fits."""
+    """The plan of a FLUX.2 klein 9B KV edit, made as an edit request
+    makes it before the VAE encodes its references, holds the cache of
+    each 1024 pixel reference, 2 GiB, and no text rows. On a budget that
+    holds two, a request with four is refused with the largest count that
+    fits."""
     import mlx.core as mx
+    import numpy as np
 
     from gmlx.image import api
-    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.conditioning import Conditioning, Reference
     from gmlx.image.registry import get_family
 
     dit = SimpleNamespace(cfg=SimpleNamespace(patch=1), act_dtype=mx.bfloat16)
@@ -1156,8 +1159,9 @@ def test_a_kv_edit_counts_each_reference_and_names_the_count_that_fits():
     feats = mx.zeros((512, 3 * 4096), mx.bfloat16)
 
     def plan(n: int):
-        lats = tuple(mx.full((128, 64, 64), i, mx.float32) for i in range(n))
-        cond = Conditioning(feats, f"kv {n}", ref_latents=lats)
+        refs = tuple(Reference(np.full((1024, 1024, 4), i, np.uint8))
+                     for i in range(n))
+        cond = Conditioning(feats, f"kv {n}", refs=refs)
         return api.plan_request(pipe, height=1024, width=1024, conds=cond,
                                 budget=20 * GiB, overcommit=False)
 
