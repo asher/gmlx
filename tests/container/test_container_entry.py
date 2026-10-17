@@ -711,13 +711,19 @@ def test_a_copy_whose_hangup_came_first_never_starts(entry):
         _stop(main)
 
 
+# The stand-in clients wait on a signal wakeup fd, not signal.pause(): a
+# signal that lands just before pause() blocks would wait for the next one.
 CLIENT = """
 import os, signal, subprocess, sys
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(9))
 signal.signal(signal.SIGINT, lambda *a: sys.exit(8))
 child = subprocess.Popen(["sleep", "60"])
+wake = os.pipe()
+os.set_blocking(wake[1], False)
+signal.set_wakeup_fd(wake[1])
 print(os.getpid(), os.getpgrp(), child.pid, flush=True)
-signal.pause()
+while True:
+    os.read(wake[0], 512)
 """
 
 
@@ -761,14 +767,17 @@ def test_the_lock_never_reaches_the_client(entry, session_dir):
 # A client that takes a second to exit after SIGHUP, as a client that saves
 # its state would.
 SLOW_HUP = """
-import signal, sys, time
+import os, signal, sys, time
 def hup(*a):
     time.sleep(1)
     sys.exit(4)
 signal.signal(signal.SIGHUP, hup)
+wake = os.pipe()
+os.set_blocking(wake[1], False)
+signal.set_wakeup_fd(wake[1])
 print("joined", flush=True)
 while True:
-    signal.pause()
+    os.read(wake[0], 512)
 """
 STOPPED = "[launch] the session ended in another terminal, so this copy of {} stopped.\n"
 
@@ -873,9 +882,12 @@ def term(*a):
     time.sleep(3)
     sys.exit(9)
 signal.signal(signal.SIGTERM, term)
+wake = os.pipe()
+os.set_blocking(wake[1], False)
+signal.set_wakeup_fd(wake[1])
 print(os.getpid(), flush=True)
 while True:
-    signal.pause()
+    os.read(wake[0], 512)
 """
 
 

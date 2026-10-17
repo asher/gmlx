@@ -395,10 +395,13 @@ _CHILD = textwrap.dedent("""
         rows, cols = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))[:2]
         os.write(report, f"size {rows} {cols}\\n".encode())
     signal.signal(signal.SIGWINCH, size)
+    wake = os.pipe()
+    os.set_blocking(wake[1], False)
+    signal.set_wakeup_fd(wake[1])           # signal.pause() can miss a signal
     os.write(report, f"leader {os.getsid(0) == os.getpid()} "
                      f"foreground {os.tcgetpgrp(0) == os.getpgrp()}\\n".encode())
     while True:
-        signal.pause()
+        os.read(wake[0], 512)
 """)
 
 
