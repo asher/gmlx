@@ -192,6 +192,13 @@ def tokens(latents: mx.array) -> mx.array:
     return latents.reshape(b, c, h * w).transpose(0, 2, 1)
 
 
+def _kept(k: mx.array, v: mx.array) -> tuple:
+    """K and V a cache keeps, each in a buffer of its own. A block's v is
+    a view of its fused product, three to nine times its size, which a
+    view in the cache would keep whole."""
+    return mx.contiguous(k), mx.contiguous(v)
+
+
 def _batch(x: mx.array, b: int) -> mx.array:
     """Rows (1 or B, L, D) broadcast to the batch ``b``."""
     return x if x.shape[0] == b else mx.broadcast_to(x, (b, *x.shape[1:]))
@@ -641,7 +648,8 @@ class Flux2KleinDiT(nn.Module):
                            cfg.theta)
         keys, values = [], []
         for i, blk in enumerate(self.double_blocks):
-            x, k, v = blk.reference(x, mod.img, rope)
+            x, *kv = blk.reference(x, mod.img, rope)
+            k, v = _kept(*kv)
             mx.eval(x, k, v)
             pacing.point()
             keys.append(k)
@@ -650,7 +658,8 @@ class Flux2KleinDiT(nn.Module):
                 taps[f"ref.double_blocks.{i}"] = x
         last = len(self.single_blocks) - 1
         for i, blk in enumerate(self.single_blocks):
-            y, k, v = blk.run(x, mod.single, *rope)
+            y, *kv = blk.run(x, mod.single, *rope)
+            k, v = _kept(*kv)
             # The last block's rows feed no block: its K and V are all a
             # step reads of it.
             mx.eval(*((y, k, v) if i < last or taps is not None else (k, v)))
@@ -694,9 +703,10 @@ class Flux2KleinDiT(nn.Module):
         rope_ref = rope_tables(r_ids, cfg.axes_dims, cfg.theta)
         keys, values = [], []
         for i, blk in enumerate(self.double_blocks):
-            img, txt, ref, k, v = blk.extract(
+            img, txt, ref, *kv = blk.extract(
                 img, txt, ref, (mod.img, mod.txt, rmod.img),
                 (rope_img, rope_txt, rope_ref))
+            k, v = _kept(*kv)
             pacing.point(img, txt, ref, k, v, *keys, *values)
             keys.append(k)
             values.append(v)
@@ -709,9 +719,10 @@ class Flux2KleinDiT(nn.Module):
         rope_joint = rope_tables(np.concatenate([t_ids, ids]), cfg.axes_dims,
                                  cfg.theta)
         for i, blk in enumerate(self.single_blocks):
-            joint, ref, k, v = blk.extract(joint, ref, (mod.single,
-                                                        rmod.single),
-                                           (rope_joint, rope_ref))
+            joint, ref, *kv = blk.extract(joint, ref, (mod.single,
+                                                       rmod.single),
+                                          (rope_joint, rope_ref))
+            k, v = _kept(*kv)
             pacing.point(joint, ref, k, v, *keys, *values)
             keys.append(k)
             values.append(v)

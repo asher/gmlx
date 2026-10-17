@@ -367,6 +367,27 @@ def test_the_cached_pass_in_bf16_is_inside_the_bf16_tolerances(tiny):
         assert rel <= m["tolerances"][f"velocity_{name}"]["rel_l2"], name
 
 
+def test_the_cache_holds_its_own_bytes_alone(tiny):
+    """A cached K or V that is a view of its block's fused product keeps
+    the product whole, which the plan of a request does not count."""
+    import gc
+
+    weights, cfg = tiny
+    arrays, _ = committed_fixture(KV)
+    model = fg.tiny_model(weights, cfg, act=mx.bfloat16)
+    refs = model.references([mx.array(arrays[f"refs.{i}"])
+                             for i in range(2)])
+    mod = model.reference_modulation()
+    mx.eval(refs.tokens, mod.arrays())
+    gc.collect()
+    mx.clear_cache()
+    before = mx.get_active_memory()
+    cache = model.reference_pass(refs, mod=mod)
+    gc.collect()
+    mx.clear_cache()
+    assert mx.get_active_memory() - before == cache.nbytes
+
+
 def test_wrong_configs_are_refused(tiny):
     _, cfg = tiny
     with pytest.raises(ValueError, match="sum to the head dim"):
