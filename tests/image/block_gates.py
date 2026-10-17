@@ -77,6 +77,7 @@ from contextlib import contextmanager
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from oracle_fixture import fx
 
@@ -330,14 +331,23 @@ def stock_ops_only():
 
 
 def _rerun(request, tag: str, env: dict) -> None:
+    """Rerun this test in a child process with ``env`` set. A child that
+    skips, as one without the model's GGUF does, skips this test with
+    its reason."""
     r = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
-         request.node.nodeid], cwd=request.config.rootpath,
-        env=dict(os.environ, **env), capture_output=True, text=True)
+        [sys.executable, "-m", "pytest", "-q", "-s", "-rs", "-p",
+         "no:cacheprovider", request.node.nodeid],
+        cwd=request.config.rootpath, env=dict(os.environ, **env),
+        capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if tag in line:
             print(line[line.index(tag):])
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    if " passed" not in r.stdout:
+        skips = [line.split(": ", 1)[-1] for line in r.stdout.splitlines()
+                 if line.startswith("SKIPPED")]
+        if skips:
+            pytest.skip(skips[0])
     assert " passed" in r.stdout, r.stdout[-2000:]
 
 
