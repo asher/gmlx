@@ -1,0 +1,346 @@
+{
+ "schema": 1,
+ "name": "check6_flux2_klein_9b_base_512",
+ "check": 6,
+ "family": "flux2_klein_9b",
+ "script": "scripts/image_oracle/check6_flux2_klein.py",
+ "argv": [
+  "check6_flux2_klein.py",
+  "--reference",
+  "src",
+  "--reference-commit",
+  "50fe5162777813d869182b139e83b10743caef15",
+  "--features",
+  "check2_flux2_klein_9b.npz",
+  "--dit",
+  "flux-2-klein-base-9b-Q4_K_M.gguf",
+  "--variant",
+  "base",
+  "--sizes",
+  "512",
+  "1024",
+  "--bf16",
+  "512"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "flux-2-klein-base-9b-Q4_K_M.gguf",
+   "size": 5909829920,
+   "sha256": "70395338f2cb3647b6a259d3cc60e42d9adf0bbbc56a5ae95338389c1c8bb497"
+  },
+  "features": {
+   "name": "check2_flux2_klein_9b.npz",
+   "size": 251726222,
+   "sha256": "e2897d71cfc6833e10b8376fbc65ff568e9e548baca8cf0de0b1be9b76b8e5ff"
+  }
+ },
+ "inputs": {
+  "size": 512,
+  "variant": "base",
+  "model_info": "flux.2-klein-base-9b",
+  "steps": 50,
+  "guidance": 4.0,
+  "seed": 6,
+  "bf16": true,
+  "kept_steps": [
+   1,
+   2,
+   5,
+   10,
+   25
+  ],
+  "refs": 0,
+  "tokens": 1024,
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); the CLI's noise is bf16, so it is rounded",
+  "features": "check2_flux2_klein float32 features_plain, and features_empty for Base, rounded to bf16",
+  "latents": "(1, 128, size / 16, size / 16) float32 in the gmlx layout, after the step",
+  "times": "the bf16 time the DiT saw at each step, as float32",
+  "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
+  "gguf_codecs": {
+   "F32": 80,
+   "Q5_K": 36,
+   "Q4_K": 76,
+   "BF16": 9
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "run": {
+   "fp32_s": 1546.7,
+   "fp32_median_step_s": 28.39,
+   "rows": [
+    2
+   ],
+   "bf16_s": 3307.4,
+   "latents_bf16_vs_fp32": {
+    "rel_l2": 0.10668582428619854,
+    "cosine": 0.9943145447125882,
+    "max_abs": 3.1383776664733887
+   },
+   "bf16_vs_fp32_by_step": [
+    0.0017243435529660453,
+    0.0031485277693192944,
+    0.004286746484600772,
+    0.0052194666334447574,
+    0.0059683640792007305,
+    0.006544523898786098,
+    0.007217969568916699,
+    0.007926427433627913,
+    0.008548538972897616,
+    0.009159656575006005,
+    0.009753293174709798,
+    0.010274298193144153,
+    0.010782367730929944,
+    0.011265031927857777,
+    0.01168178829589296,
+    0.012047487366832334,
+    0.012403251824634837,
+    0.012732686891647887,
+    0.013015213405706444,
+    0.01325992941677805,
+    0.01347483303505835,
+    0.013696600555869734,
+    0.013934593723944047,
+    0.01416563575376838,
+    0.014405951287371049,
+    0.014696052725893178,
+    0.015018670299519898,
+    0.01538044016731413,
+    0.015815094488162394,
+    0.016259668084925273,
+    0.016837705809357964,
+    0.017506946476921113,
+    0.01837087538390169,
+    0.01944655272368162,
+    0.020825273808689825,
+    0.02249391437785903,
+    0.024748256665568406,
+    0.0275564425678921,
+    0.03093889384490189,
+    0.03484582107546584,
+    0.03962054257566823,
+    0.04521810014425549,
+    0.0520228946784891,
+    0.059887295001473564,
+    0.06843893163328665,
+    0.07770292085671543,
+    0.08701464676181708,
+    0.09549547114528244,
+    0.10246362739167358,
+    0.10668582428619854
+   ]
+  }
+ },
+ "tolerances": {
+  "latents_rel_l2": 0.21337164857239707,
+  "by_step_rel_l2": [
+   0.0034486871059320905,
+   0.006297055538638589,
+   0.008573492969201544,
+   0.010438933266889515,
+   0.011936728158401461,
+   0.013089047797572195,
+   0.014435939137833398,
+   0.015852854867255826,
+   0.017097077945795233,
+   0.01831931315001201,
+   0.019506586349419597,
+   0.020548596386288306,
+   0.02156473546185989,
+   0.022530063855715553,
+   0.02336357659178592,
+   0.02409497473366467,
+   0.024806503649269673,
+   0.025465373783295775,
+   0.026030426811412887,
+   0.0265198588335561,
+   0.0269496660701167,
+   0.027393201111739467,
+   0.027869187447888095,
+   0.02833127150753676,
+   0.028811902574742098,
+   0.029392105451786357,
+   0.030037340599039796,
+   0.03076088033462826,
+   0.03163018897632479,
+   0.032519336169850546,
+   0.03367541161871593,
+   0.035013892953842225,
+   0.03674175076780338,
+   0.03889310544736324,
+   0.04165054761737965,
+   0.04498782875571806,
+   0.04949651333113681,
+   0.0551128851357842,
+   0.06187778768980378,
+   0.06969164215093168,
+   0.07924108515133646,
+   0.09043620028851097,
+   0.1040457893569782,
+   0.11977459000294713,
+   0.1368778632665733,
+   0.15540584171343086,
+   0.17402929352363417,
+   0.19099094229056487,
+   0.20492725478334717,
+   0.21337164857239707
+  ],
+  "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated"
+ },
+ "notes": [],
+ "created": "2026-10-16T22:30:28Z",
+ "npz": "check6_flux2_klein_9b_base_512.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    512,
+    12288
+   ],
+   "dtype": "float32",
+   "sha256": "358044c890dcd4d9d2e7169de8e86383ebd5ec0d80c21cd8facf551e53355cb9"
+  },
+  "features_empty": {
+   "shape": [
+    512,
+    12288
+   ],
+   "dtype": "float32",
+   "sha256": "af6f63852bdc6dd3b99e1f72947943eb715d66f01f4fd837cb22a442fb782b9e"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "25bbc755bfd671b26cc10630a2842d7b330e62950eb7604e91360c65e72cb7d4"
+  },
+  "latents_bf16": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "36795ceb72de4e7fa439d1b560f90aae413f076d7d4c8868466f20a5b0c66c8a"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "69047b3641163a5d6e774163ba5193a056fa523bf370e1aa45e180ca86db1c96"
+  },
+  "latents_step10": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "e484c0387abc7027482006d97394ff47d1cff4e56930166637d1d7c919525133"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "a768c14d17e1c7a5785b2e8812887f676719f9e758cf0a0e96bf7e832bfe00e2"
+  },
+  "latents_step25": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "8d404efbae6362c4735f12af42db6758afe45c3a880b0bd566cb9b8e1822a6af"
+  },
+  "latents_step5": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "5201a0324d2bee0c701f71fdf42abd120c69a7d0eff7523414870c72074345db"
+  },
+  "noise": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d614e8f6414c19a6e58b7af3fb3e7e866a4c21c40c780bf93ece8c4f09d875de"
+  },
+  "schedule": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "b06c419e92b1d7be976ddd5c97842251f3a9fd71bdd912881d8d8c0d5c66cecd"
+  },
+  "times": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "6f3b5a1e298be3799cf4dd9a1713581c89162c18f0f4a7b2d34273c084c50760"
+  }
+ }
+}
