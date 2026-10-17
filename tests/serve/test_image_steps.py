@@ -1615,7 +1615,8 @@ def test_a_guided_qwen_step_is_priced_at_both_prefix_states_to_the_byte(
     terms = dict(caption_tokens=9,
                  prefix_rows=[9 + 2 * (64 // p) ** 2] * 2,
                  prefix_shared=False, prefix_other=pipe.captions.bytes,
-                 prefix_bound=pipe.family.step.state_bytes, ref_sizes=[],
+                 prefix_bound=pipe.family.step.state_bytes,
+                 prefix_held=pipe.captions.bytes, ref_sizes=[],
                  step_refs=[(64 * scale, 64 * scale)] * 2)
     conds = _on_worker(lambda: [steps.conditioning(
         r, steps.STATE.tensors, "qwen_image21") for r in rows])

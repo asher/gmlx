@@ -718,7 +718,7 @@ PEAKS = {
 }
 
 LEVERS = ("sequential rows", "release the encoder", "tiled decode",
-          "staged load")
+          "staged load", "shed held states")
 
 
 class ImageMemoryError(RuntimeError):
@@ -743,6 +743,8 @@ class MemoryPlan:
     notes: tuple = field(default=())
     tiled_encode: bool = False      # the VAE encode of an init image
     staged_load: bool = False       # the encoder goes before the DiT loads
+    shed_states: bool = False       # the held prefix states of other
+                                    # conditionings go before the request
 
     @property
     def peak(self) -> int:
@@ -979,7 +981,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 text_tokens: int | None = None, refs: int = 0,
                 ref_px: int = 0, prefix_rows=None,
                 prefix_shared: bool = False, prefix_other: int = 0,
-                prefix_bound: int = 0, cache_bytes: int = 0,
+                prefix_bound: int = 0, prefix_held: int = 0,
+                cache_bytes: int = 0,
                 tile: int = TILE_PX, init_image: bool = False,
                 ref_sizes=(), step_refs=None, vae_price=None,
                 load_peak: int = 0, load_parts=None,
@@ -1018,7 +1021,12 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     state is held once. A cache of prefix states that holds
     ``prefix_other`` bytes of other conditionings sheds them to
     ``prefix_bound`` as the request's states come in, and what stays is
-    part of the prefix cache term.
+    part of the prefix cache term. ``prefix_held`` is the bytes of every
+    prefix state the cache holds as the request starts, its own and the
+    other conditionings'. They stay until its first step, so the phases
+    before it count them. A plan that does not fit with them takes the
+    lever "shed held states" first: the states of other conditionings go
+    before the request runs, and ``shed_states`` says so.
 
     ``load_peak`` is what the load of the parts holds over what stays
     resident, as ``load_transient`` gives it from their headers. With it
@@ -1087,8 +1095,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     step_one, prefill = max(p[1] for p in per), max(p[2] for p in per)
     read = (0 if row.prefix is None
             else row.prefix.join_bytes(max(mine), act))
-    terms["prefix_cache"] = own + min(int(prefix_other),
-                                      max(0, int(prefix_bound) - own))
+    kept = min(int(prefix_other), max(0, int(prefix_bound) - own))
+    terms["prefix_cache"] = own + kept
     def price(op: str, tiled: bool, h: int = height, w: int = width) -> int:
         kw = dict(family=family, itemsize=vsize, tile=tile)
         kw.update({k: v for k, v in ((vae_price or {}).get(op) or {}).items()
@@ -1118,8 +1126,13 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                    + (row.encode_tower_bytes if slots else 0))
 
     def build(b: int, release: bool, tiled: bool, levers: tuple,
-              staged: bool = False) -> MemoryPlan:
+              staged: bool = False, shed: bool = False) -> MemoryPlan:
         t = dict(terms)
+        if shed:
+            t["prefix_cache"] = own
+        # The held states stay through the phases before the first step.
+        pre = max(0, int(prefix_held) - (int(prefix_other) if shed else 0))
+        t["prefix_held"] = pre
         t["step_peak"] = row.step_peak(step_one, prefill, b, read)
         t["decode_peak"] = decode[tiled]
         t["encode_peak"] = int(encode_peak)
@@ -1134,42 +1147,46 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
             # The encoder loads, encodes and goes, and the DiT and the VAE
             # load after it.
             first = sum(t[n] for n in ("encoder", "mmproj", "adapters",
-                                       "caches"))
+                                       "caches")) + pre
             t["load_encoder_peak"], t["load_peak"] = (
                 int(v) + STAGE_ROOM for v in load_parts)
             phases["load_encoder"] = first + t["load_encoder_peak"]
             phases["encode"] = first + t["encode_peak"]
-            phases["load"] = later + t["load_peak"]
+            phases["load"] = later + pre + t["load_peak"]
         else:
             if load_peak:
                 t["load_peak"] = int(load_peak)
-                phases["load"] = resident + t["load_peak"]
-            phases["encode"] = resident + t["encode_peak"]
+                phases["load"] = resident + pre + t["load_peak"]
+            phases["encode"] = resident + pre + t["encode_peak"]
         tiled_init = False
         if encodes:
             # A tiled encode is the whole one, so it is a choice by what
             # its phase holds and no lever. Every image above one tile
             # runs in tiles when a whole pass of one does not fit.
+            before = later + max(t["prefix_cache"], pre)
             forced = budget is not None and any(
-                held + whole > budget for own, whole, cut in encodes
-                if cut is not None and not own)
+                before + whole > budget for auto, whole, cut in encodes
+                if cut is not None and not auto)
             peaks = [cut if cut is not None and (own or forced) else whole
                      for own, whole, cut in encodes]
             tiled_init = any(cut is not None and (own or forced)
                              for own, _, cut in encodes)
             t["init_peak"] = max(peaks)
-            phases["init"] = held + t["init_peak"]
+            phases["init"] = before + t["init_peak"]
         phases["denoise"] = held + t["step_peak"]
         phases["decode"] = held + t["decode_peak"]
         fits = budget is None or max(phases.values()) <= budget
         return MemoryPlan(terms=t, phases=phases, budget=budget, rows=b,
                           release_encoder=release, tiled_decode=tiled,
                           levers=levers, fits=fits, tiled_encode=tiled_init,
-                          staged_load=staged)
+                          staged_load=staged, shed_states=shed)
 
     b = 2 if guided and batch_rows else 1
     plan = build(b, False, auto_tiled, ())
     steps = []
+    if prefix_other:
+        # The states of other conditionings are of no use to the request.
+        steps.append(("shed held states", dict(shed=True)))
     if b == 2:
         steps.append(("sequential rows", dict(b=1)))
     if encoder_owned and (terms["encoder"] or terms["mmproj"]):
@@ -1179,7 +1196,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     if load_parts is not None and encoder_owned and (terms["encoder"]
                                                      or terms["mmproj"]):
         steps.append(("staged load", dict(staged=True, release=True)))
-    state = dict(b=b, release=False, tiled=auto_tiled, staged=False)
+    state = dict(b=b, release=False, tiled=auto_tiled, staged=False,
+                 shed=False)
     applied: tuple = ()
     for name, change in steps:
         if plan.fits:
@@ -1187,7 +1205,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         state.update(change)
         applied += (name,)
         plan = build(state["b"], state["release"], state["tiled"], applied,
-                     state["staged"])
+                     state["staged"], state["shed"])
     if plan.fits or overcommit:
         return plan
     hint = _largest(plan.terms)
@@ -1207,7 +1225,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 vae_dtype=vae_dtype, batch_rows=batch_rows,
                 encoder_owned=encoder_owned, caption_tokens=caption_tokens,
                 text_tokens=text_tokens, prefix_other=prefix_other,
-                prefix_bound=prefix_bound, cache_bytes=cache_bytes,
+                prefix_bound=prefix_bound, prefix_held=prefix_held,
+                cache_bytes=cache_bytes,
                 tile=tile, init_image=init_image, vae_price=vae_price,
                 load_peak=load_peak, load_parts=load_parts, budget=budget,
                 **kw)

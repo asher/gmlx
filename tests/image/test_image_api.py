@@ -612,7 +612,7 @@ def test_each_lever_has_a_budget_that_forces_it(pipe):
     last of them the refusal, which names every term in GiB."""
     kw = _small(pipe)
     G = memfit.GiB
-    rows, release, tiles, _ = memfit.LEVERS
+    rows, release, tiles = memfit.LEVERS[:3]
     free = api.plan_request(pipe, budget=100 * G, **kw)
     assert free.levers == () and free.rows == 2
     assert free.terms["mmproj"] == G // 2 and free.peak == free.phases[

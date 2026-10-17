@@ -620,13 +620,15 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
 
     seen = []
     monkeypatch.setattr(memfit, "plan_memory", lambda **kw: seen.append(
-        kw["cache_bytes"]) or SimpleNamespace(fits=kw["height"] < 512))
+        kw["cache_bytes"]) or SimpleNamespace(fits=kw["height"] < 512,
+                                              shed_states=False))
     monkeypatch.setattr(image_steps.STATE.tensors, "_bytes", 5)
     monkeypatch.setattr(image_steps.STATE.adapters, "_bytes", 7)
     held = SimpleNamespace(bytes=100)
     pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
                            weights={"dit": 1, "vae": 1}, adapters=held,
-                           tables=held, family=SimpleNamespace(name="z_image"),
+                           tables=held,
+                           family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True))
     assert image_service.size_fits(served, 64, 64, 1 << 30)
@@ -639,7 +641,8 @@ def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
     held = SimpleNamespace(bytes=0)
     pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
                            weights={"dit": 1, "vae": 1}, adapters=held,
-                           tables=held, family=SimpleNamespace(name="z_image"),
+                           tables=held,
+                           family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
     served = SimpleNamespace(pipe=pipe, plan=_plan(
         staged=True, keep_encoder=False, encoder_bytes=5, mmproj_bytes=7,
@@ -845,7 +848,8 @@ def _fit_served(monkeypatch, fits_px: int):
     pipe = SimpleNamespace(
         encoder=None, dit=SimpleNamespace(act_dtype="bfloat16"),
         weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb,
-        family=SimpleNamespace(name="z_image", edit=None, title="Z-Image"),
+        family=SimpleNamespace(name="z_image", edit=None, title="Z-Image",
+                               step=None),
         vae=None, conditionings=nb, modulations=nb, size_multiple=16)
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
         keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"))

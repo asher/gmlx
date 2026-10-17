@@ -163,6 +163,12 @@ class ByteLRU:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
 
+    def keys(self, match) -> list:
+        """The keys that ``match`` takes, the least recently used first.
+        The order of use does not change."""
+        with self._lock:
+            return [key for key in self._items if match(key)]
+
     def newest(self, match):
         """The most recently used key that ``match`` takes, or None. The
         order of use does not change."""

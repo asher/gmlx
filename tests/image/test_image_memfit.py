@@ -253,7 +253,7 @@ def test_levers_apply_in_order(z_view, monkeypatch):
         return _z(z_view, height=2048, width=2048, cfg=3.0,
                   budget=gib * GiB, **kw).levers
 
-    rows, release, tiled, _ = memfit.LEVERS
+    rows, release, tiled = memfit.LEVERS[:3]
     assert levers(20.0) == ()
     assert levers(17.0) == (rows,)
     assert levers(14.0) == (rows, release)
@@ -372,7 +372,7 @@ def test_the_release_of_the_encoder_frees_its_mmproj(q_view):
 def test_each_qwen_lever_has_a_budget_that_forces_it(q_view):
     """The plan's order on Qwen-Image 2.1: sequential rows, release of the
     encoder, tiled decode, and then the refusal."""
-    rows, release, tiled, _ = memfit.LEVERS
+    rows, release, tiled = memfit.LEVERS[:3]
     mmproj = GiB // 2
 
     def plan(budget, **kw):

@@ -1078,11 +1078,17 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
               tower: bool = False) -> dict:
     """The plan_memory arguments of a request on ``served``. A staged
     entry's request loads its encoder alone, with the vision tower when
-    ``tower`` says it has reference images."""
+    ``tower`` says it has reference images. The conditioning states the
+    pipeline holds are other conditionings' until the request names its
+    own."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
-    staged = {}
+    staged, states = {}, {}
+    if pipe.family.step is not None:
+        held = pipe.captions.bytes
+        states = dict(prefix_other=held, prefix_held=held,
+                      prefix_bound=pipe.family.step.state_bytes)
     if getattr(served.plan, "staged", False):
         plan = served.plan
         staged = dict(
@@ -1101,7 +1107,29 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
                            and not served.plan.keep_encoder),
         cache_bytes=(pipe.conditionings.bytes + pipe.modulations.bytes
                      + _steps_cache_bytes()),
-        budget=budget, overcommit=False) | staged
+        budget=budget, overcommit=False) | staged | states
+
+
+def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
+               init: bool, budget) -> None:
+    """Shed the conditioning states of earlier requests before the encode
+    of a request that does not fit with them. The request's own plan
+    counts what stays."""
+    from gmlx.image import api, memfit
+
+    pipe = served.pipe
+    if budget is None or pipe.family.step is None or not pipe.captions.bytes:
+        return
+    sizes = [(r.height, r.width) for r in refs]
+    try:
+        plan = memfit.plan_memory(
+            height=size[1], width=size[0], init_image=init, ref_sizes=sizes,
+            _hint=False, **_fit_args(pipe, served, budget, cfg,
+                                     tower=_tower(pipe, sizes)))
+    except memfit.ImageMemoryError:
+        return
+    if plan.shed_states:
+        api.shed_states(pipe)
 
 
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
@@ -1174,7 +1202,9 @@ def size_fits(served: ServedImage, width: int, height: int, budget, *,
     ``served`` fits ``budget``, as the image routes plan a request. The
     step routes ask it before a step, a VAE decode and a VAE encode. The
     conditionings of a step, ``conds``, are priced as ``plan_request``
-    prices them: their text rows, a prefix and the reference latents."""
+    prices them: their text rows, a prefix and the reference latents. A
+    plan that fits only with the held states of other conditionings shed
+    sheds them."""
     from gmlx.image import api, memfit
 
     if budget is None:
@@ -1184,10 +1214,13 @@ def size_fits(served: ServedImage, width: int, height: int, budget, *,
         args.update(api.plan_terms(served.pipe, conds, height=int(height),
                                    width=int(width), patch_table=patch_table))
     try:
-        return memfit.plan_memory(height=int(height), width=int(width),
-                                  init_image=init, _hint=False, **args).fits
+        plan = memfit.plan_memory(height=int(height), width=int(width),
+                                  init_image=init, _hint=False, **args)
     except memfit.ImageMemoryError:
         return False
+    if plan.shed_states:
+        api.shed_states(served.pipe, conds or ())
+    return plan.fits
 
 
 def _ensure_encoder(served: ServedImage, tower: bool = True) -> None:
@@ -1426,6 +1459,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             mask = mask_from_image(req.mask, (width, height))
 
     table, adapters = _adapter_table(served, req.adapters, model_dirs)
+    _make_room(served, cfg, size, refs, init is not None, budget)
     t0 = time.perf_counter()
     cond, neg = _encode(served, prompt, neg_text, refs, borrow)
     plan = api.plan_request(

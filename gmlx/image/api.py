@@ -449,8 +449,9 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
     request set, as ``plan_request`` passes them: the text rows of a
     family whose plan prices the prompt, the prefix rows of each
     conditioning and whether the two of a guided request are one, the
-    prefix states of other conditionings a cache holds and its bound, the
-    reference images the VAE encodes, and the references each step runs.
+    prefix states of other conditionings a cache holds and its bound,
+    every state it holds, the reference images the VAE encodes, and the
+    references each step runs.
     ``conds`` is one Conditioning or several, as ``plan_request`` takes
     them, and a conditioning whose references came as latents alone, as
     those of the step routes do, is priced by their shapes."""
@@ -473,7 +474,8 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
         held = sum(pipe.captions.nbytes(key) for key in {
             _state_key(pipe, c, table, size) for c in states if c.key})
         terms.update(prefix_other=pipe.captions.bytes - held,
-                     prefix_bound=parts.state_bytes)
+                     prefix_bound=parts.state_bytes,
+                     prefix_held=pipe.captions.bytes)
     return terms
 
 
@@ -498,8 +500,9 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     image's.
     The VAE passes are priced for the VAE this pipeline loaded, on its
     conv path, and ``vae_decode`` and ``vae_encode`` run them as the plan
-    they are given says. Raises ImageMemoryError when no lever makes it
-    fit."""
+    they are given says. A plan that fits only with the held states of
+    other conditionings shed sheds them here, before the request runs.
+    Raises ImageMemoryError when no lever makes it fit."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
@@ -517,7 +520,7 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
 
         price = {op: tiling.price_args(pipe.vae, op, 1)
                  for op in ("decode", "encode")}
-    return memfit.plan_memory(
+    plan = memfit.plan_memory(
         pipe.weights.get("dit", 0),
         pipe.weights.get("encoder", 0) if resident else 0,
         pipe.weights.get("vae", 0),
@@ -530,6 +533,19 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
         cache_bytes=caches, init_image=init_image, vae_price=price,
         budget=budget, overcommit=overcommit, **terms)
+    if plan.shed_states:
+        shed_states(pipe, _states(conds))
+    return plan
+
+
+def shed_states(pipe: ImagePipeline, conds=()) -> None:
+    """Shed every held conditioning state but those of ``conds``. A
+    request does so before it runs when its plan takes the lever "shed
+    held states". The states are a cache: shedding one changes the speed
+    of a later request that would read it, never a result."""
+    keep = {_ident(c) for c in conds}
+    pipe.captions.shed_others(
+        set(pipe.captions.keys(lambda k: k[:3] in keep)), 0)
 
 
 def references(pipe: ImagePipeline, images, *,

@@ -275,3 +275,59 @@ def test_the_negative_row_of_a_guided_flux2_base_edit_takes_the_references(
     assert neg.refs == cond.refs == refs
     assert [z.shape for z in neg.ref_latents] == [
         z.shape for z in cond.ref_latents] == [(128, 16, 16)]
+
+
+@pytest.mark.parametrize("budget_gib, shed", [(16, True), (32, False)])
+def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
+        monkeypatch, budget_gib, shed):
+    """A FLUX.2 klein 9B KV edit with four 1024 pixel references leaves
+    the K and V of its references held, 8 GiB by the family's own state
+    size. The next request runs its encode with them only when its plan
+    counts them and fits: on a budget that does not hold them beside it,
+    they go before the encode."""
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.memfit import GiB
+
+    dit = SimpleNamespace(cfg=SimpleNamespace(patch=1, dim=4096, depth=8,
+                                              depth_single=24),
+                          act_dtype=mx.bfloat16)
+    pipe = api.ImagePipeline(dit=dit, family=get_family("flux2_klein_9b_kv"),
+                             variant="distilled",
+                             weights={"dit": int(9.3 * GiB)})
+    edit = Conditioning(mx.zeros((512, 3 * 4096)), "edit", ref_latents=tuple(
+        mx.full((128, 64, 64), float(i)) for i in range(4)))
+    held = pipe.family.step.state_size(dit, edit)
+    assert held == 512 * 4096 * 2 + 8 * GiB
+    pipe.captions.put(api._state_key(pipe, edit, api._table_id(pipe, None),
+                                     (64, 64)), None, held, shed=False)
+    seen, plans = [], []
+    text = Conditioning(mx.zeros((512, 3 * 4096)), "next")
+
+    def encode(*a, **k):
+        seen.append(pipe.captions.bytes)
+        return text, None
+
+    real_plan = api.plan_request
+
+    def plan_request(*a, **k):
+        plans.append(real_plan(*a, **k))
+        return plans[-1]
+
+    monkeypatch.setattr(svc, "_encode", encode)
+    monkeypatch.setattr(api, "plan_request", plan_request)
+    monkeypatch.setattr(api, "sample", lambda *a, **k: mx.zeros(
+        (1, 128, 64, 64)))
+    monkeypatch.setattr(api, "vae_decode", lambda *a, **k: mx.zeros(
+        (1, 1024, 1024, 3)))
+    served = SimpleNamespace(
+        pipe=pipe, adapters=(),
+        spec=SimpleNamespace(id="kv", path="/kv.gguf", defaults={},
+                             encoder=None, encoder_model=None),
+        plan=SimpleNamespace(keep_encoder=True, cfg=1.0, size=(1024, 1024)))
+    req = svc.parse_request("generations", {"prompt": "x"})
+    svc.run_job(served, req, size=(1024, 1024), budget=budget_gib * GiB,
+                stop=threading.Event())
+    (plan,) = plans
+    assert seen == [0 if shed else held]
+    assert plan.terms["prefix_held"] == seen[0] and plan.fits
+    assert plan.phases["encode"] >= seen[0] + plan.terms["dit"]
