@@ -12,8 +12,9 @@ source is deleted unless ``--keep-source``. For a family that ships no
 upsampler prompt, the pull also fetches the one its recipe pins, checks
 its sha256 before it lands, and the entry names it as
 ``upsample_prompt``. A fetch that fails, or a file of another digest
-already at its path, which stays as it is, leaves the entry without it. The entry is then added
-under ``image_models:`` in the server config.
+already at its path, which stays as it is, leaves a new entry without it,
+and an entry that already names the file keeps it. The entry is then
+added under ``image_models:`` in the server config.
 """
 from __future__ import annotations
 

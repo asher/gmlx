@@ -251,11 +251,12 @@ image_models:
 The reply is read without its reasoning, as the family's own system prompt
 asks for it: the caption as written on FLUX.3 klein and FLUX.2 klein, the
 last paragraph on Krea 2, `rewritten_prompt` of a JSON object on
-Qwen-Image 2.1, or the reply as written when it holds no JSON object, and
-the caption as written, or `revised_prompt` of a JSON block, on Z-Image.
-A Qwen-Image reply with a JSON object but no `rewritten_prompt` in it,
-such as one cut off at the token limit, is an error. On Z-Image, a `{prompt}` in your file is replaced by
-the typed prompt. Your file should ask for the same form.
+Qwen-Image 2.1, or the reply as written when it has no `{`, and the
+caption as written, or `revised_prompt` of a JSON block, on Z-Image. A
+Qwen-Image reply with a `{` but no `rewritten_prompt` in it, such as one
+cut off at the token limit, is an error. On Z-Image, a `{prompt}` in your
+file is replaced by the typed prompt. Your file should ask for the same
+form.
 
 ### Qwen-Image 2.1 rewriter prompt
 
@@ -266,10 +267,11 @@ allows non-commercial use only. gmlx does not ship it.
 `gmlx pull qwen-image` downloads it next to the model's other files, says
 its license, and names it as the entry's `upsample_prompt`, so setting an
 `upsampler` is all that is left to do. A file of that name already there
-that is not Qwen's, such as your own prompt, stays as it is: the pull
-leaves the entry without it and says to move or delete it. Without the file, a Qwen-Image
-request with an upsampler set is refused with a message that says where to
-get it. The rewrite keeps the image size you ask for; the aspect ratio in
+that is not Qwen's, such as your own prompt, stays as it is, and the pull
+says to move or delete it. A new entry then goes without it, and an entry
+that already names the file keeps naming it, as the warning says. Without
+the file, a Qwen-Image request with an upsampler set is refused with a
+message that says where to get it. The rewrite keeps the image size you ask for; the aspect ratio in
 Qwen's reply is not used.
 
 ## ComfyUI
