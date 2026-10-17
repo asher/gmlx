@@ -143,14 +143,15 @@ def plain(reply: str) -> str | None:
 
 
 def paragraph(reply: str) -> str | None:
-    """The paragraph a reply ends with after its thinking block. Lines
-    before it, such as a heading or reasoning written out of the block,
-    are not the caption."""
+    """The last paragraph with letters in it that a reply writes after its
+    thinking block. Lines before it, such as a heading or reasoning written
+    out of the block, are not the caption, nor is a rule such as ``---``
+    after it."""
     answer = after_thinking(reply)
     if answer is None:
         return None
     paras = [" ".join(p.split()) for p in re.split(r"\n\s*\n", answer)]
-    paras = [p for p in paras if p]
+    paras = [p for p in paras if any(c.isalpha() for c in p)]
     return paras[-1] if paras else None
 
 
@@ -173,14 +174,19 @@ _ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
 
 
 def _unescape(text: str) -> str:
-    """``text`` with the JSON string escapes read, and a backslash before
-    any other character kept as it is."""
+    """``text`` with the JSON string escapes read, a surrogate pair as the
+    one character it spells, and a backslash before any other character
+    kept as it is."""
     def one(m):
-        c = m.group(1)
+        if m.group(2):
+            hi, lo = int(m.group(1), 16), int(m.group(2), 16)
+            return chr(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
+        c = m.group(3)
         if c.startswith("u"):
             return chr(int(c[1:], 16))
         return _ESCAPES.get(c, m.group(0))
-    return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", one, text, flags=re.S)
+    return re.sub(r"\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})"
+                  r"|\\(u[0-9a-fA-F]{4}|.)", one, text, flags=re.S | re.I)
 
 
 def _loose_field(answer: str, name: str) -> str | None:

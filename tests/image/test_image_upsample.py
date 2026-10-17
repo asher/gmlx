@@ -94,6 +94,9 @@ def test_krea_2_takes_the_paragraph_after_the_thinking_block():
         fam, "a red bicycle", lambda req:
         f"{reasoning}\n\nA red bicycle against a brick wall.\n") == (
         "A red bicycle against a brick wall.")
+    # A rule after the caption is not one.
+    assert upsample.upsample(fam, "a red bicycle", lambda req:
+                             "A red bicycle.\n\n---\n") == "A red bicycle."
     # A reply that runs out of tokens while it thinks holds no paragraph.
     with pytest.raises(upsample.UpsampleError,
                        match="no caption within 2048 tokens"):
@@ -149,6 +152,9 @@ def test_qwen_image_reads_a_rewritten_prompt_with_unescaped_quotes():
     got = upsample.upsample(fam, "a sign", lambda req: reply,
                             system="own prompt")
     assert got == 'a sign that reads "OPEN" on a door,\nin red'
+    emoji = '{"rewritten_prompt": "a "SALE" sign \\ud83d\\ude00", "x": 1}'
+    assert upsample.upsample(fam, "a sign", lambda req: emoji,
+                             system="own prompt") == 'a "SALE" sign \U0001f600'
     last = '{"rewritten_prompt": "a sign that reads "OPEN" on a door"}'
     assert upsample.upsample(fam, "a sign", lambda req: last,
                              system="own prompt") == (
