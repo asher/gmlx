@@ -575,7 +575,7 @@ def test_the_server_names_a_size_rule_for_each_family_whose_schedule_follows_the
                     needs = True
             got = steps.sampling(fam, variant)["schedule"]
             assert (got is not None) == needs, (name, variant, got)
-    assert set(steps.SIZE_SCHEDULES) == {"flux2_klein", "qwen_image21"}
+    assert set(steps.SIZE_SCHEDULES) == {"flux2_klein", "flux2_klein_9b", "qwen_image21"}
 
 
 @pytest.mark.parametrize("family, variant", [("flux2_klein", "distilled"),
