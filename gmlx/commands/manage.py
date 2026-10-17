@@ -1107,11 +1107,12 @@ config and served immediately. Refuses an unloadable GGUF unless --force.
 
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
 krea-2-turbo, flux-2-klein, flux-2-klein-base, flux-2-klein-9b,
-flux-2-klein-base-9b, flux-3-klein, flux-3-klein-base) pulls the DiT, its text
-encoder and its VAE, uses the parts your model folders already hold,
-and adds the model under image_models: in the config. It prints the
-model's license before it downloads. The license of flux-2-klein-9b and
-flux-2-klein-base-9b allows non-commercial use only.
+flux-2-klein-base-9b, flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base)
+pulls the DiT, its text encoder and its VAE, uses the parts your model
+folders already hold, and adds the model under image_models: in the config.
+It prints the model's license before it downloads. The license of
+flux-2-klein-9b, flux-2-klein-base-9b and flux-2-klein-9b-kv allows
+non-commercial use only.
 """
 
 _PULL_EXAMPLES = """\
@@ -1160,8 +1161,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "ref's repo. An image model name (z-image-turbo, "
                          "qwen-image, qwen-image-turbo, krea-2-turbo, "
                          "flux-2-klein, flux-2-klein-base, flux-2-klein-9b, "
-                         "flux-2-klein-base-9b, flux-3-klein, "
-                         "flux-3-klein-base) "
+                         "flux-2-klein-base-9b, flux-2-klein-9b-kv, "
+                         "flux-3-klein, flux-3-klein-base) "
                          "pulls the model with its text encoder and VAE. See "
                          "the examples below.")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",

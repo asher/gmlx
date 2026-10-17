@@ -225,6 +225,15 @@ RECIPES = {r.name: r for r in (
         dit_file="flux-2-klein-base-9b-{quant}.gguf",
         license_url="https://huggingface.co/black-forest-labs/"
                     "FLUX.2-klein-base-9B/blob/main/LICENSE.md", **_FLUX2_9B),
+    # QuantStack's GGUFs of BFL's KV checkpoint, whose LICENSE is the text
+    # of the 9B's LICENSE.md.
+    Recipe(
+        name="flux-2-klein-9b-kv", title="FLUX.2 klein 9B KV",
+        variant="distilled", dit_repo="QuantStack/FLUX.2-Klein-9B-KV-GGUF",
+        dit_file="Flux-2-Klein-9B-KV-{quant}.gguf",
+        license_url="https://huggingface.co/black-forest-labs/"
+                    "FLUX.2-klein-9b-kv/blob/main/LICENSE",
+        **dict(_FLUX2_9B, family="flux2_klein_9b_kv")),
     Recipe(
         name="flux-3-klein", title="FLUX.3 klein", variant="distilled",
         dit_file="DISTILLED/flux3_image_klein_sd-{quant}.gguf", **_FLUX3),
@@ -269,6 +278,15 @@ DEFAULT_QUANTS = {
                         32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-2-klein-base-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                              32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # KV keeps the keys and values of its references, so an edit takes more
+    # memory than on the 9B. As on the 9B, no DiT makes an image in the
+    # 16 GB class: a Q4_K_M request at 512 pixels needs 9.01 GiB of 8.55. On
+    # 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to two 1024 pixel
+    # references with the encoder released, and a Q8_0 DiT makes no 1024
+    # pixel edit. On 32 GB a Q8_0 DiT takes up to two of them, and a Q4_K_M
+    # DiT four.
+    "flux-2-klein-9b-kv": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
+                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A Q8_0 DiT fits a 1024 pixel image from the 24 GB class up, with the
     # encoder released on 24 GB, where Base also runs its two guided rows
     # one at a time.
@@ -283,7 +301,8 @@ DEFAULT_QUANTS = {
 # there refuses unless the quant is given, and names the least class that
 # makes one.
 NO_IMAGE = {"flux-2-klein-9b": frozenset({16}),
-            "flux-2-klein-base-9b": frozenset({16})}
+            "flux-2-klein-base-9b": frozenset({16}),
+            "flux-2-klein-9b-kv": frozenset({16})}
 
 
 # The output matrix of each encoder file a recipe pulls that has one, from

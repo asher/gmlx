@@ -37,6 +37,8 @@ def test_a_recipe_resolves_by_name_or_alias():
         "flux-2-klein-base-9b"
     assert catalog.recipe_for("flux2_klein_9b", "unknown").name == \
         "flux-2-klein-9b"
+    assert catalog.recipe_for("flux2_klein_9b_kv", "distilled").name == \
+        "flux-2-klein-9b-kv"
 
 
 @pytest.mark.parametrize("gb, cls", [(8, 16), (16, 16), (18, 16), (24, 24),
@@ -167,7 +169,8 @@ def test_the_klein_recipes_share_bfls_bf16_flux2_autoencoder():
     revision, with its config, packed in its own dtype under an
     Apache-2.0 license line."""
     names = ("flux-2-klein", "flux-2-klein-base", "flux-2-klein-9b",
-             "flux-2-klein-base-9b", "flux-3-klein", "flux-3-klein-base")
+             "flux-2-klein-base-9b", "flux-2-klein-9b-kv", "flux-3-klein",
+             "flux-3-klein-base")
     rows = {(r.vae_repo, r.vae_revision, r.vae_file, r.vae_config,
              r.vae_sha256, r.vae_pack, r.vae_license, r.vae_bytes)
             for r in map(catalog.recipe, names)}
@@ -198,13 +201,17 @@ NON_COMMERCIAL = ("non-commercial use only, with content filters or a review "
                   "the law requires one")
 
 
-@pytest.mark.parametrize("name, variant, repo, folder", [
-    ("flux-2-klein-9b", "distilled", "unsloth/FLUX.2-klein-9B-GGUF",
-     "FLUX.2-klein-9B"),
-    ("flux-2-klein-base-9b", "base", "unsloth/FLUX.2-klein-base-9B-GGUF",
-     "FLUX.2-klein-base-9B")])
+@pytest.mark.parametrize("name, family, variant, repo, license", [
+    ("flux-2-klein-9b", "flux2_klein_9b", "distilled",
+     "unsloth/FLUX.2-klein-9B-GGUF", "FLUX.2-klein-9B/blob/main/LICENSE.md"),
+    ("flux-2-klein-base-9b", "flux2_klein_9b", "base",
+     "unsloth/FLUX.2-klein-base-9B-GGUF",
+     "FLUX.2-klein-base-9B/blob/main/LICENSE.md"),
+    ("flux-2-klein-9b-kv", "flux2_klein_9b_kv", "distilled",
+     "QuantStack/FLUX.2-Klein-9B-KV-GGUF",
+     "FLUX.2-klein-9b-kv/blob/main/LICENSE")])
 def test_the_9b_recipes_carry_the_flux_non_commercial_license(
-        name, variant, repo, folder):
+        name, family, variant, repo, license):
     """The 9B checkpoints are under the FLUX Non-Commercial License, and
     the recipes say so, as Qwen-Image 2.1's do. They condition on the
     Qwen3-8B Q8_0 GGUF, Apache-2.0, and pull the DiT of the row of their
@@ -212,17 +219,15 @@ def test_the_9b_recipes_carry_the_flux_non_commercial_license(
     from gmlx.image.registry import get_family
 
     r = catalog.recipe(name)
-    assert (r.family, r.variant, r.dit_repo) == ("flux2_klein_9b", variant,
-                                                 repo)
+    assert (r.family, r.variant, r.dit_repo) == (family, variant, repo)
     assert r.license == "flux-non-commercial-license"
     assert r.license_note == NON_COMMERCIAL
-    assert r.license_url == (f"https://huggingface.co/black-forest-labs/"
-                             f"{folder}/blob/main/LICENSE.md")
+    assert r.license_url == f"https://huggingface.co/black-forest-labs/{license}"
     assert (r.encoder_repo, r.encoder_name("Q8_0"), r.encoder_quants) == (
         "unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q8_0.gguf", ("Q8_0",))
     assert (r.encoder_license, r.encoder_bytes) == ("apache-2.0",
                                                     8_709_519_168)
-    rows = {v.name: v for v in get_family("flux2_klein_9b").variants.values()}
+    rows = {v.name: v for v in get_family(family).variants.values()}
     assert rows[variant].repo == r.dit_repo
     for q in r.dit_quants:
         assert r.dit_name(q) in rows[variant].files
@@ -252,7 +257,8 @@ def test_a_pack_of_the_flux2_autoencoder_serves_every_klein_family(
     assert {g for g in got if g[2] == vae} == {("vae", f, vae) for f in KLEIN}
     monkeypatch.setattr(image_pull, "_repo_sizes", lambda *a: {})
     for name in ("flux-2-klein", "flux-2-klein-base", "flux-2-klein-9b",
-                 "flux-2-klein-base-9b", "flux-3-klein", "flux-3-klein-base"):
+                 "flux-2-klein-base-9b", "flux-2-klein-9b-kv", "flux-3-klein",
+                 "flux-3-klein-base"):
         plan = image_pull.plan_pull(
             catalog.recipe(name), dit_quant="Q8_0", encoder_quant="Q8_0",
             encoder_quant_given=False, only=image_pull.PARTS,

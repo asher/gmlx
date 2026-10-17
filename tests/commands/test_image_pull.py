@@ -658,6 +658,9 @@ def _shared_scan(roots, *, recursive=True, families=None):
                 elif f.startswith("flux-2-klein-9b-"):
                     out.append(catalog.ImageFile(p, "dit", "flux2_klein_9b",
                                                  "distilled"))
+                elif f.startswith("Flux-2-Klein-9B-KV-"):
+                    out.append(catalog.ImageFile(p, "dit", "flux2_klein_9b_kv",
+                                                 "distilled"))
                 elif f.startswith("Krea-2-Turbo-"):
                     out.append(catalog.ImageFile(p, "dit", "krea2", "turbo"))
                 elif f.startswith("Qwen3-VL-4B-Instruct-"):
@@ -666,8 +669,8 @@ def _shared_scan(roots, *, recursive=True, families=None):
                 elif f.startswith("Qwen3-4B-"):
                     out.append(catalog.ImageFile(p, "encoder", "flux2_klein"))
                 elif f.startswith("Qwen3-8B-"):
-                    out.append(catalog.ImageFile(p, "encoder",
-                                                 "flux2_klein_9b"))
+                    out += [catalog.ImageFile(p, "encoder", fam)
+                            for fam in ("flux2_klein_9b", "flux2_klein_9b_kv")]
                 elif f == F.vae_pack:
                     label = _PACKED_FOR.get(p, "flux3_klein")
                     out += [catalog.ImageFile(p, "vae", fam,
@@ -786,39 +789,44 @@ def test_a_flux2_pull_takes_unsloths_dit_qwen3_4b_and_bfls_vae(
 
 F9 = catalog.RECIPES["flux-2-klein-9b"]
 F9B = catalog.RECIPES["flux-2-klein-base-9b"]
+F9KV = catalog.RECIPES["flux-2-klein-9b-kv"]
+# The DiT file stem and the license path in BFL's repo of each 9B recipe.
+NINE = {"flux-2-klein-9b": ("flux-2-klein-9b", "FLUX.2-klein-9B/blob/main/"
+                            "LICENSE.md"),
+        "flux-2-klein-base-9b": ("flux-2-klein-base-9b",
+                                 "FLUX.2-klein-base-9B/blob/main/LICENSE.md"),
+        "flux-2-klein-9b-kv": ("Flux-2-Klein-9B-KV",
+                               "FLUX.2-klein-9b-kv/blob/main/LICENSE")}
 
 
 @pytest.mark.parametrize("r, ram_gb, quant", [
     (F9, 32, "Q8_0"), (F9, 24, "Q4_K_M"), (F9, 16, "Q4_K_M"),
-    (F9B, 64, "Q8_0"), (F9B, 24, "Q4_K_M")])
+    (F9B, 64, "Q8_0"), (F9B, 24, "Q4_K_M"), (F9KV, 24, "Q4_K_M")])
 def test_a_flux2_9b_pull_takes_unsloths_dit_qwen3_8b_and_bfls_vae(
         lib, monkeypatch, capsys, r, ram_gb, quant):
-    """The 9B recipes pull unsloth's 9B DiT, Qwen3-8B and the FLUX.2
-    autoencoder of the 4B repo, and print the FLUX Non-Commercial License
-    with its terms. On 16 GB, where none makes an image, it takes the
-    quant given."""
+    """The 9B recipes pull the 9B DiT (unsloth's, and QuantStack's for KV),
+    Qwen3-8B and the FLUX.2 autoencoder of the 4B repo, and print the FLUX
+    Non-Commercial License with its terms. On 16 GB, where none makes an
+    image, it takes the quant given."""
     root, cfg = lib
     given = not catalog.makes_image(r, catalog.memory_class(ram_gb << 30))
     got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb,
                                   ("--quant", quant) if given else ())
     assert catalog.DEFAULT_QUANTS[r.name][catalog.memory_class(
         ram_gb << 30)] == (quant, "Q8_0")
-    base = r.variant == "base"
-    stem = "flux-2-klein-base-9b" if base else "flux-2-klein-9b"
+    stem, lic = NINE[r.name]
     assert (r.dit_repo, f"{stem}-{quant}.gguf", "main") in got
     assert ("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q8_0.gguf", "main") in got
-    _bfls_vae(root, r, got, packed, m, "flux2_klein_9b")
+    _bfls_vae(root, r, got, packed, m, r.family)
     assert m.path == f"{r.dit_repo.replace('/', '__')}/{stem}-{quant}.gguf"
     assert m.encoder == "unsloth__Qwen3-8B-GGUF/Qwen3-8B-Q8_0.gguf"
     assert m.encoder_mmproj is None
-    repo = "FLUX.2-klein-base-9B" if base else "FLUX.2-klein-9B"
     assert (f"license: {r.title} flux-non-commercial-license, non-commercial "
             "use only, with content filters or a review of each image for "
             "unlawful or infringing content before it is shared, and a "
             "disclosure that it is made with AI where the law requires one "
-            f"(https://huggingface.co/black-forest-labs/{repo}/blob/main/"
-            "LICENSE.md); encoder apache-2.0; VAE apache-2.0"
-            in capsys.readouterr().out)
+            f"(https://huggingface.co/black-forest-labs/{lic}); encoder "
+            "apache-2.0; VAE apache-2.0" in capsys.readouterr().out)
 
 
 def test_a_flux2_9b_pull_takes_the_vae_a_4b_pull_packed(lib, monkeypatch):
