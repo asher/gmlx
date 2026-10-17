@@ -10,8 +10,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - FLUX.3 klein rewrites each prompt with a chat model of your choice before
   encoding it, set as the entry's `upsampler` or by `--upsampler`.
-- FLUX.2 klein, Krea 2 and Qwen-Image 2.1 take an `upsampler` too, and
-  `upsample_prompt` sets your own system prompt for any family.
+- FLUX.2 klein, Krea 2, Z-Image and Qwen-Image 2.1 take an `upsampler` too,
+  and `upsample_prompt` sets your own system prompt for any family.
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.3 klein
   and FLUX.3 klein Base GGUFs, with edits from up to 10 reference images.
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run FLUX.2 klein

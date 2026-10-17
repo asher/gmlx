@@ -179,6 +179,7 @@ most with short prompts and with text in the image.
 | FLUX.3 klein, FLUX.3 klein Base | Ships with gmlx, from Black Forest Labs |
 | FLUX.2 klein, all sizes and variants | Ships with gmlx, from Black Forest Labs |
 | Krea 2 | Ships with gmlx, from Krea |
+| Z-Image, Z-Image-Turbo | Ships with gmlx, from the Z-Image-Turbo demo of Tongyi-MAI |
 | Qwen-Image 2.1, Qwen-Image 2.1 Turbo | Your own file, as [Qwen-Image 2.1](#qwen-image-21-rewriter-prompt) describes |
 
 Qwen3.5-9B writes captions close to those of BFL's own FLUX.3 upsampler,
@@ -249,8 +250,10 @@ image_models:
 
 The reply is read as the family's own system prompt asks for it: the
 caption as written on FLUX.3 klein and FLUX.2 klein, the paragraph after
-the thinking block on Krea 2, and `rewritten_prompt` of a JSON object on
-Qwen-Image 2.1. Your file should ask for the same form.
+the thinking block on Krea 2, `rewritten_prompt` of a JSON object on
+Qwen-Image 2.1, and the caption as written, or `revised_prompt` of a JSON
+block, on Z-Image. On Z-Image, a `{prompt}` in your file is replaced by
+the typed prompt. Your file should ask for the same form.
 
 ### Qwen-Image 2.1 rewriter prompt
 
@@ -379,7 +382,8 @@ from Black Forest Labs.
 
 The system prompts gmlx ships for [prompt upsampling](#prompt-upsampling)
 are under Apache 2.0, from Black Forest Labs' flux-3-image-klein and flux2
-repositories and Krea's krea-2 repository. Qwen's rewriter prompt, which
+repositories, Krea's krea-2 repository and Tongyi-MAI's Z-Image-Turbo
+Space. Qwen's rewriter prompt, which
 `gmlx pull qwen-image` downloads, is under the Qwen Research License, for
 non-commercial use only.
 

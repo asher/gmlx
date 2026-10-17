@@ -39,6 +39,11 @@ CAPTION = "A red bicycle leans against a weathered brick wall."
     ("krea2", "krea2", "expansion.txt",
      "2a5c24a3a83e9d415d4679a4e1853ddf056bd0329f3af315b27ed72b6ad9c2f0",
      None, (0.0, 2048, 0.0, "off")),
+    # The typed prompt goes in the {prompt} slot, and the user turn is a
+    # space, as the Space's app.py sends them.
+    ("z_image", "z_image", "pe_prompt_template.txt",
+     "36bdd888b953e9b7a8237dab55bee145a44e96e92e8f6e81a6e4d433a401a0b6",
+     None, (0.0, 2048, 0.0, "off")),
 ])
 def test_the_chat_turn_is_the_sources_t2i_turn(family, package, name, sha256,
                                                 key, sampling):
@@ -47,10 +52,13 @@ def test_the_chat_turn_is_the_sources_t2i_turn(family, package, name, sha256,
             ).read_bytes()
     assert hashlib.sha256(data).hexdigest() == sha256
     system = json.loads(data)[key] if key else data.decode("utf-8")
+    user = "a red bicycle"
+    if "{prompt}" in system:
+        system, user = system.replace("{prompt}", user), " "
     req = upsample.chat_request(fam, "a red bicycle")
     assert req.messages == (
         {"role": "system", "content": system},
-        {"role": "user", "content": "a red bicycle"})
+        {"role": "user", "content": user})
     assert (req.temperature, req.max_tokens, req.presence_penalty,
             req.thinking) == sampling
 

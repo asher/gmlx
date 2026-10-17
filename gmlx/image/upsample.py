@@ -167,6 +167,17 @@ def json_field(name: str):
     return parse
 
 
+def field_or_plain(name: str):
+    """A parser that takes the string ``name`` from a JSON object of the
+    reply, as ``json_field`` does, and the reply itself as the caption
+    when no object has one."""
+    field = json_field(name)
+
+    def parse(reply: str) -> str | None:
+        return field(reply) or plain(reply)
+    return parse
+
+
 def upsample(family, prompt: str, chat, *, name: str = "the upsampler",
              system: str | None = None) -> str:
     """The caption ``chat(request)`` writes for ``prompt``, as the
