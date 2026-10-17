@@ -109,11 +109,11 @@ A step with `ref_cache: true`, on a server whose features list
 its references at time zero and keeps their keys and values in every
 block, and the step returns its output. The keys and values of a
 reference depend on the latents of the row, so each row keeps its own,
-under its conditioning and its place in the step's rows. The later steps
-of the run run the image and the text of each row alone, and read the
-keys and values of that row. The header answers `hit` on those steps, and
-the end of the run drops the keys and values. A step with `ref_cache` and
-no run gets 400, as does one on a DiT that keeps no such cache.
+under its conditioning and its place in the step's rows. Each later
+step of the run takes the image and the text of each row alone, and reads
+the keys and values of that row. The header answers `hit` on those steps,
+and the end of the run drops the keys and values. A step with `ref_cache`
+and no run gets 400, as does one on a DiT that keeps no such cache.
 
 A run that sits idle for 120 seconds ends within a few seconds after, and
 lets the model go. The server holds at most 32 runs, and a begin past that
