@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import functools
 import logging
 import time
 
@@ -119,6 +120,7 @@ def _typed_for_edits_and_negatives(model) -> None:
     typed."""
     extra_conds = model.extra_conds
 
+    @functools.wraps(extra_conds)
     def pick_prompt(**kwargs):
         tp = kwargs.pop(TYPED, None)
         if isinstance(tp, TypedPrompt) and tp.holds(kwargs.get("cross_attn")) and (
@@ -145,6 +147,7 @@ def _conditioning_on_server(model) -> None:
         return
     extra_conds = model.extra_conds
 
+    @functools.wraps(extra_conds)
     def keep_conditioning(**kwargs):
         dm.flow_map = True
         try:
