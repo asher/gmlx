@@ -17,11 +17,9 @@ import mlx.core as mx
 @dataclass(frozen=True)
 class RefCache:
     """Each block's K and V of the cached rows after RoPE, (1, heads, R,
-    head dim), in the order of the blocks. ``built_for`` names what the
-    rows were built from, so a step can refuse a cache of other rows."""
+    head dim), in the order of the blocks."""
     k: tuple
     v: tuple
-    built_for: tuple = ()
 
     def arrays(self) -> list:
         return [*self.k, *self.v]
