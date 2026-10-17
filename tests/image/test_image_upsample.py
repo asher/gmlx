@@ -110,12 +110,24 @@ def test_qwen_image_takes_rewritten_prompt_from_the_json_after_thinking():
                             system=rewrite)
     assert got == ("A red bicycle with a wicker basket leans against a "
                    "weathered brick wall in soft afternoon light.")
-    # A reply whose JSON does not parse is an error, not the typed prompt.
-    with pytest.raises(upsample.UpsampleError,
-                       match="a reply with no caption in it"):
-        upsample.upsample(fam, "a red bicycle", lambda req:
-                          '</think>\n{"rewritten_prompt": "A red bi',
-                          system=rewrite)
+    # A reply with no JSON object is the caption as written.
+    assert upsample.upsample(
+        fam, "a red bicycle", lambda req: "</think>\nA red bicycle.\n",
+        system=rewrite) == "A red bicycle."
+
+
+def test_qwen_image_reads_a_rewritten_prompt_with_unescaped_quotes():
+    fam = get_family("qwen_image21")
+    reply = ('</think>\n```json\n{"rewritten_prompt": "a sign that reads '
+             '"OPEN" on a door,\\nin red", "wh_ratio": "3:2", '
+             '"ratio_follow": ""}\n```\n')
+    got = upsample.upsample(fam, "a sign", lambda req: reply,
+                            system="own prompt")
+    assert got == 'a sign that reads "OPEN" on a door,\nin red'
+    last = '{"rewritten_prompt": "a sign that reads "OPEN" on a door"}'
+    assert upsample.upsample(fam, "a sign", lambda req: last,
+                             system="own prompt") == (
+        'a sign that reads "OPEN" on a door')
 
 
 def test_an_empty_reply_is_an_error_not_the_typed_prompt():

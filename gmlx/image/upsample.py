@@ -152,15 +152,63 @@ def _objects(text: str) -> list:
     return found[::-1]
 
 
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+            "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _unescape(text: str) -> str:
+    """``text`` with the JSON string escapes read, and a backslash before
+    any other character kept as it is."""
+    def one(m):
+        c = m.group(1)
+        if c.startswith("u"):
+            return chr(int(c[1:], 16))
+        return _ESCAPES.get(c, m.group(0))
+    return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", one, text, flags=re.S)
+
+
+def _loose_field(answer: str, name: str) -> str | None:
+    """The string ``name`` of the last object in ``answer`` that strict
+    JSON does not read, as when the model leaves the quotes around text in
+    the image unescaped: from the opening quote after the key and its
+    colon to the quote before the next key, or with no key after it, to
+    the last quote before the object's closing brace."""
+    keys = list(re.finditer(r'"%s"\s*:\s*"' % re.escape(name), answer))
+    if not keys:
+        return None
+    start = keys[-1].end()
+    nxt = re.compile(r'"\s*,\s*"\w+"\s*:').search(answer, start)
+    if nxt:
+        return _unescape(answer[start:nxt.start()])
+    close = answer.rfind("}", start)
+    if close == -1:
+        return None
+    end = answer.rfind('"', start, close)
+    if end == -1:
+        return None
+    return _unescape(answer[start:end])
+
+
+def _field_values(answer: str, name: str):
+    """The values ``name`` may have in ``answer``, best first: its string
+    in each JSON object, last object first, then the string a loose read
+    finds, then the answer itself."""
+    for obj in _objects(answer):
+        yield obj.get(name)
+    yield _loose_field(answer, name)
+    yield answer
+
+
 def json_field(name: str):
     """A parser that takes the string ``name`` from the last JSON object
-    after the thinking block that has one."""
+    after the thinking block that has one. An object that strict JSON
+    does not read gives it by a loose read, and a reply with neither is
+    the caption as written."""
     def parse(reply: str) -> str | None:
         answer = after_thinking(reply)
         if answer is None:
             return None
-        for obj in _objects(answer):
-            value = obj.get(name)
+        for value in _field_values(answer, name):
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
