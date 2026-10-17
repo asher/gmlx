@@ -9,8 +9,9 @@ for Base the empty prompt's before them, through batched_prc_txt, the
 noise in bf16 through batched_prc_img, get_schedule(steps, image tokens),
 and sampling.denoise for a distilled checkpoint or sampling.denoise_cfg
 for Base. Steps and guidance are the defaults of FLUX2_MODEL_INFO in
-src/flux2/util.py for the variant of --variant at the file's size. No
-reference images.
+src/flux2/util.py for the variant of --variant at the file's size, or
+with --kv those of FLUX.2 klein 9B KV, whose run without references is
+the same path. No reference images.
 
 The features are those of --features, the check 2 oracle's float32
 features of the plain prompt and of the empty prompt, rounded to bf16 as
@@ -102,11 +103,17 @@ def reference(path: Path):
     return model, sampling, util
 
 
-def model_info(util, fm, state, variant: str) -> dict:
-    """The FLUX2_MODEL_INFO row of the file's size and the variant."""
+def model_info(util, fm, state, variant: str, kv: bool = False) -> dict:
+    """The FLUX2_MODEL_INFO row of the file's size and the variant, or
+    with ``kv`` that of FLUX.2 klein 9B KV."""
     size = "4b" if c3.params_of(fm, state).hidden_size == 3072 else "9b"
     key = (f"flux.2-klein-{size}" if variant == "distilled"
            else f"flux.2-klein-base-{size}")
+    if kv:
+        if (size, variant) != ("9b", "distilled"):
+            raise SystemExit("error: --kv takes a FLUX.2 klein 9B KV file "
+                             "of the distilled variant")
+        key = "flux.2-klein-9b-kv"
     row = util.FLUX2_MODEL_INFO[key]
     if row["guidance_distilled"] != (variant == "distilled"):
         raise SystemExit(f"error: {key} is not {variant}")
@@ -123,13 +130,18 @@ class Recorded:
         self.latents, self.times, self.rows, self.marks = [], [], [], []
 
     def __call__(self, **kw):
+        return self.model(**self.record(kw))
+
+    def record(self, kw: dict) -> dict:
+        """Keeps the call's latents, time, rows and moment, and returns
+        its arguments with the time in bf16."""
         t = kw["timesteps"].to(self.torch.bfloat16)
         kw["timesteps"] = t
         self.latents.append(oracle.to_numpy(kw["x"][0, :self.n_img]))
         self.times.append(float(t[0].float()))
         self.rows.append(int(kw["x"].shape[0]))
         self.marks.append(time.perf_counter())
-        return self.model(**kw)
+        return kw
 
 
 def to_tokens(lat: np.ndarray) -> np.ndarray:
@@ -279,9 +291,12 @@ def main(argv=None) -> int:
     ap.add_argument("--dequant", choices=oracle.DEQUANT, default="exact")
     ap.add_argument("--name", help="fixture name before the size, "
                     f"{NAME} or {NAME}_base by the variant, with _9b after "
-                    f"{NAME} for a 9B file, when unset")
+                    f"{NAME} for a 9B file and _9b_kv with --kv, when "
+                    "unset")
     ap.add_argument("--out", type=Path,
                     help="fixture directory (default $GMLX_IMAGE_FIXTURES)")
+    ap.add_argument("--kv", action="store_true",
+                    help="--dit is FLUX.2 klein 9B KV")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args(argv)
     torch = oracle.setup()
@@ -300,7 +315,7 @@ def main(argv=None) -> int:
     variant = a.variant
     t0 = time.perf_counter()
     state, census = c3.gguf_state(torch, a.dit)
-    info = model_info(util, fm, state, variant)
+    info = model_info(util, fm, state, variant, a.kv)
     modes = ("fp32", "bf16") if a.bf16 else ("fp32",)
     models = {m: c3.build(torch, fm, state, m) for m in modes}
     print(f"[check6] loaded {a.dit.name} ({variant}, {info['key']}) in "
@@ -310,7 +325,8 @@ def main(argv=None) -> int:
     keep = [k for k in (KEEP[variant] if a.keep is None else a.keep)
             if k < steps]
     feats = load_features(torch, a.features)
-    family, size_tag = c3.family_of(c3.params_of(fm, state))
+    family, size_tag = (c3.KV_FAMILY if a.kv
+                        else c3.family_of(c3.params_of(fm, state)))
     name = a.name or (f"{NAME}{size_tag}" if variant == "distilled"
                       else f"{NAME}{size_tag}_base")
     c = c3.params_of(fm, state).in_channels

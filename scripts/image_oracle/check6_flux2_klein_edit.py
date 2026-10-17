@@ -12,7 +12,13 @@ img_cond_seq and img_cond_seq_ids, the size the first prepared reference's
 (gmlx's default; the CLI's match_image_size takes the source's own size,
 and its default is 1360 x 768). The DiT's input is kept at every call, so
 the fixture holds the reference tokens and ids the DiT read, and the
-encode is kept in float32 before encode_image_refs rounds it to bf16.
+encode of each reference is kept in float32 before encode_image_refs
+rounds it to bf16.
+
+With --kv the file is FLUX.2 klein 9B KV and the run is the CLI's for it,
+denoise_cached: forward_kv_extract with the references at the first
+step, forward_kv_cached on their cache at every later step. --sources
+names the references of the run, CASE when unset.
 
 The oracle environment has no torchvision. default_prep reads it for
 ToTensor alone, so a stand-in gives ToTensor's result for an RGB image:
@@ -162,10 +168,31 @@ class Kept(c6.Recorded):
         return super().__call__(**kw)
 
 
+class KVKept(Kept):
+    """Kept for denoise_cached, which calls the DiT's forward_kv_extract
+    with the references at the first step and forward_kv_cached after.
+    Each call is kept as Recorded keeps one, with its kind."""
+
+    def __init__(self, torch, model, n_img: int):
+        super().__init__(torch, model, n_img)
+        self.kinds = []
+
+    def forward_kv_extract(self, **kw):
+        self.kinds.append("extract")
+        self.ref_tokens = oracle.to_numpy(kw["x_seq_concat"][0].float())
+        self.ref_ids = oracle.to_numpy(kw["x_seq_concat_ids"][0])
+        return self.model.forward_kv_extract(**self.record(kw))
+
+    def forward_kv_cached(self, **kw):
+        self.kinds.append("cached")
+        return self.model.forward_kv_cached(**self.record(kw))
+
+
 def generate(torch, sampling, model, variant: str, feats: dict,
              noise: np.ndarray, steps: int, guidance: float, dtype,
-             ref_tokens, ref_ids):
-    """c6.generate with the references after the image tokens."""
+             ref_tokens, ref_ids, kv: bool = False):
+    """c6.generate with the references after the image tokens, or with
+    ``kv`` through denoise_cached."""
     _, _, h, w = noise.shape
     prompt = torch.from_numpy(feats[c6.PROMPT][None].copy()).to(
         torch.bfloat16)
@@ -178,8 +205,10 @@ def generate(torch, sampling, model, variant: str, feats: dict,
     randn = torch.from_numpy(noise.copy()).to(torch.bfloat16)
     x, x_ids = sampling.batched_prc_img(randn)
     timesteps = sampling.get_schedule(steps, x.shape[1])
-    rec = Kept(torch, model, x.shape[1])
+    rec = (KVKept if kv else Kept)(torch, model, x.shape[1])
     run = sampling.denoise if variant == "distilled" else sampling.denoise_cfg
+    if kv:
+        run = sampling.denoise_cached
     t0 = time.perf_counter()
     out = run(rec, x.to(dtype), x_ids, ctx.to(dtype), ctx_ids,
               timesteps=timesteps, guidance=guidance,
@@ -188,6 +217,9 @@ def generate(torch, sampling, model, variant: str, feats: dict,
     if len(rec.latents) != steps:
         raise SystemExit(f"error: {len(rec.latents)} DiT calls for {steps} "
                          f"steps")
+    if kv and rec.kinds != ["extract"] + ["cached"] * (steps - 1):
+        raise SystemExit(f"error: the cached pass made the calls "
+                         f"{rec.kinds}")
     if not np.array_equal(c6.to_latents(rec.latents[0], h, w),
                           oracle.to_numpy(randn)):
         raise SystemExit("error: the first latents are not the noise "
@@ -220,7 +252,13 @@ def main(argv=None) -> int:
                          "unset")
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--dequant", choices=oracle.DEQUANT, default="exact")
-    ap.add_argument("--name", default=NAME)
+    ap.add_argument("--kv", action="store_true",
+                    help="--dit is FLUX.2 klein 9B KV")
+    ap.add_argument("--sources", nargs="+", choices=tuple(SOURCES),
+                    help="the references of the run, in order; CASE when "
+                         "unset")
+    ap.add_argument("--name", help=f"fixture name, {NAME} when unset, or "
+                    "check6_flux2_klein_9b_kv_edit_r<references> with --kv")
     ap.add_argument("--out", type=Path,
                     help="fixture directory (default $GMLX_IMAGE_FIXTURES)")
     a = ap.parse_args(argv)
@@ -237,7 +275,7 @@ def main(argv=None) -> int:
     ae.load_state_dict(load_file(str(a.autoencoder)), strict=True)
     ae = ae.float().eval()
     state, census = c3.gguf_state(torch, a.dit)
-    info = c6.model_info(util, fm, state, a.variant)
+    info = c6.model_info(util, fm, state, a.variant, a.kv)
     modes = ("fp32",) if a.no_bf16 else ("fp32", "bf16")
     models = {m: c3.build(torch, fm, state, m) for m in modes}
     print(f"[edit] loaded {a.dit.name} ({a.variant}, {info['key']}) and the "
@@ -247,8 +285,11 @@ def main(argv=None) -> int:
     guidance = info["guidance"]
     keep = [k for k in c6.KEEP[a.variant] if k < steps]
     feats = c6.load_features(torch, a.features)
-    fx = fixtures.FixtureWriter(a.name, check=6, family="flux2_klein",
-                                script=SCRIPT)
+    case = tuple(a.sources or CASE)
+    family = c3.KV_FAMILY[0] if a.kv else "flux2_klein"
+    name = a.name or (f"check6_flux2_klein_9b_kv_edit_r{len(case)}" if a.kv
+                      else NAME)
+    fx = fixtures.FixtureWriter(name, check=6, family=family, script=SCRIPT)
     fx.add_file("dit", a.dit)
     fx.add_file("autoencoder", a.autoencoder)
     fx.add_file("features", a.features)
@@ -272,11 +313,13 @@ def main(argv=None) -> int:
     enc = Encodes(ae)
     with OnCPU(torch), torch.no_grad():
         ref_tokens, ref_ids = sampling.encode_image_refs(
-            enc, [pil(srcs[k]) for k in CASE])
-    if len(enc.kept) != len(CASE):
+            enc, [pil(srcs[k]) for k in case])
+    if len(enc.kept) != len(case):
         raise SystemExit(f"error: {len(enc.kept)} reference encodes")
-    first = preps[f"one_{CASE[0]}"]["size"] if len(CASE) == 1 else None
-    width, height = first
+    # The size of the first reference as prepared beside the others.
+    first, _ = prepared(sampling, pil(srcs[case[0]]),
+                        limits["one" if len(case) == 1 else "several"])
+    height, width = first.shape[:2]
     h, w = height // 16, width // 16
     c = c3.params_of(fm, state).in_channels
     noise = np.random.Generator(np.random.PCG64(a.seed)).standard_normal(
@@ -284,18 +327,26 @@ def main(argv=None) -> int:
     fx.add("noise", noise)
     fx.add("ref_tokens", oracle.to_numpy(ref_tokens[0].float()))
     fx.add("ref_ids", oracle.to_numpy(ref_ids[0]))
-    lat = enc.kept[0]
-    if lat.shape != (1, c, h, w):
-        raise SystemExit(f"error: reference latents {lat.shape}")
-    rounded = oracle.to_numpy(torch.from_numpy(lat).to(torch.bfloat16).float())
-    if not np.array_equal(c6.to_latents(oracle.to_numpy(
-            ref_tokens[0].float()), h, w), rounded):
-        raise SystemExit("error: the tokens are not the encode in bf16")
-    fx.add("ref_latents_0", lat)
+    if enc.kept[0].shape != (1, c, h, w):
+        raise SystemExit(f"error: reference latents {enc.kept[0].shape}")
+    tokens = oracle.to_numpy(ref_tokens[0].float())
+    start = 0
+    for i, lat in enumerate(enc.kept):
+        _, _, rh, rw = lat.shape
+        rounded = oracle.to_numpy(
+            torch.from_numpy(lat).to(torch.bfloat16).float())
+        if not np.array_equal(c6.to_latents(
+                tokens[start:start + rh * rw], rh, rw), rounded):
+            raise SystemExit(f"error: the tokens of reference {i} are not "
+                             "its encode in bf16")
+        start += rh * rw
+        fx.add(f"ref_latents_{i}", lat)
+    if start != tokens.shape[0]:
+        raise SystemExit("error: reference tokens past the encodes")
     oracle.emulate_bf16_matmul(False)
     after, times, secs, schedule, rec = generate(
         torch, sampling, models["fp32"], a.variant, feats, noise, steps,
-        guidance, torch.float32, ref_tokens, ref_ids)
+        guidance, torch.float32, ref_tokens, ref_ids, a.kv)
     c6.check_times(torch, schedule, times)
     if not (np.array_equal(rec.ref_tokens, oracle.to_numpy(
             ref_tokens[0].float()))
@@ -306,7 +357,7 @@ def main(argv=None) -> int:
     fx.add("latents", after[-1])
     for k in keep:
         fx.add(f"latents_step{k}", after[k - 1])
-    row = {"sources": list(CASE), "size": [width, height],
+    row = {"sources": list(case), "size": [width, height],
            "fp32_s": round(float(secs.sum()), 1)}
     print(f"[edit] {width}x{height}, fp32 {row['fp32_s']} s", flush=True)
     if "bf16" in models:
@@ -314,7 +365,7 @@ def main(argv=None) -> int:
         try:
             after16, times16, secs16, _, _ = generate(
                 torch, sampling, models["bf16"], a.variant, feats, noise,
-                steps, guidance, torch.bfloat16, ref_tokens, ref_ids)
+                steps, guidance, torch.bfloat16, ref_tokens, ref_ids, a.kv)
         finally:
             oracle.emulate_bf16_matmul(False)
         if not np.array_equal(times16, times):
@@ -337,7 +388,8 @@ def main(argv=None) -> int:
         run=row)
     fx.inputs.update(
         variant=a.variant, model_info=info["key"], steps=steps,
-        guidance=guidance, seed=a.seed, kept_steps=keep, case=list(CASE),
+        guidance=guidance, seed=a.seed, kept_steps=keep, case=list(case),
+        kv=a.kv,
         sources=SOURCES, limits=limits, bf16="bf16" in models,
         noise="numpy Generator(PCG64(seed)).standard_normal(shape, "
               "dtype=float32), NCHW, (1, 128, height / 16, width / 16) of "
