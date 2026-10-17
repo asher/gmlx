@@ -173,6 +173,16 @@ def test_z_image_takes_revised_prompt_or_the_reply_as_written():
     assert upsample.upsample(fam, "x", lambda req: sign) == sign
 
 
+@pytest.mark.parametrize("reply", [
+    "<|channel>thought\nThe user wants a bike.<channel|>{caption}",
+    "<|channel|>analysis<|message|>The user wants a bike.<|end|>"
+    "<|start|>assistant<|channel|>final<|message|>{caption}<|return|>"])
+def test_a_reply_in_a_channel_format_gives_its_answer(reply):
+    fam = get_family("flux3_klein")
+    assert upsample.upsample(fam, "x", lambda req: reply.format(
+        caption=CAPTION)) == CAPTION
+
+
 def test_an_empty_reply_is_an_error_not_the_typed_prompt():
     fam = get_family("flux3_klein")
     assert upsample.upsample(fam, "x", lambda req: f"  {CAPTION}\n") == CAPTION

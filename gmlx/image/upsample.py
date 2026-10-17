@@ -109,20 +109,31 @@ def chat_request(family, prompt: str, system: str | None = None
         presence_penalty=parts.presence_penalty, thinking=parts.thinking)
 
 
-def after_thinking(reply: str) -> str | None:
-    """The answer of ``reply`` after its thinking block, in any of the
-    think tag spellings gmlx knows, or None when the block never closes,
-    as when the reply ran out of tokens in it. A reply without one is all
-    answer."""
-    from gmlx.gen.thinking_budget import _THINK_PAIRS
+def _spans(reply: str, thinking: bool):
+    from gmlx.tui.reasoning import ReasoningFilter
 
-    cut = max(((reply.rfind(end), end) for _start, end in _THINK_PAIRS),
-              key=lambda found: found[0])
-    if cut[0] != -1:
-        return reply[cut[0] + len(cut[1]):]
-    if any(start in reply for start, _end in _THINK_PAIRS):
+    filt = ReasoningFilter(start_in_thinking=thinking)
+    spans = filt.feed(reply) + filt.flush()
+    return spans, filt.mode
+
+
+def after_thinking(reply: str) -> str | None:
+    """The answer of ``reply`` without its reasoning, as the chat terminal
+    reads it: think tags in each spelling it knows, harmony analysis and
+    final channels, Gemma's thought channel, and ATEM headers that start
+    with ``<|start|>assistant``. A reply that closes a thinking block it
+    never opened, as when the chat template opened it, is read from inside
+    that block. None when the reply ends in its reasoning with no answer,
+    as when it ran out of tokens there; a reply with no reasoning is all
+    answer."""
+    spans, mode = _spans(reply, thinking=True)
+    if mode != "reason":
+        return "".join(t for t, m in spans if m == "answer")
+    spans, mode = _spans(reply, thinking=False)
+    answer = "".join(t for t, m in spans if m == "answer")
+    if mode == "reason" and not answer.strip():
         return None
-    return reply
+    return answer
 
 
 def plain(reply: str) -> str | None:
