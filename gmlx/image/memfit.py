@@ -608,9 +608,10 @@ class PeakRow:
                                     # the rows of every step, else 0
     prices_prompt: bool = True      # a plan that knows the prompt prices
                                     # its text rows, else the family's most
-    joined: str = ""                # the row of the family's step run whole,
-                                    # its reference tokens joined to the
-                                    # rows, when its own step runs in parts
+    # The row of the family's step run whole, its reference tokens joined to
+    # the rows, when its own step runs in parts. It names a row and prices
+    # nothing itself.
+    joined: str = field(default="", repr=False)
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:

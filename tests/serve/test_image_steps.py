@@ -1747,7 +1747,7 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
     seen = []
 
     def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
-                  patch_table=None):
+                  patch_table=None, joined=False, building=0):
         seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
         return conds is None
 
