@@ -36,7 +36,8 @@ def server(monkeypatch):
     from gmlx.serve import bridge_vlm, image_steps
 
     fam = get_family("flux3_klein")
-    rec = SimpleNamespace(events=[], requests=[], messages=[], seeds=[])
+    rec = SimpleNamespace(events=[], requests=[], messages=[], seeds=[],
+                          too_long=False)
     cached: set = set()
     spec = SimpleNamespace(
         id="flux3", path="/flux3.gguf", family=None, variant=None,
@@ -45,8 +46,11 @@ def server(monkeypatch):
         upsampler="writer", upsample=True)
     monkeypatch.setattr(bridge_vlm, "resolve_image_request",
                         lambda field: (spec.path, spec))
+    writer = SimpleNamespace(load_signature=lambda: ("/writer.gguf",),
+                             adapter=None, chat_template_kwargs={},
+                             thinking=None)
     monkeypatch.setattr(bridge_vlm, "resolve_request_model",
-                        lambda field, **k: ("/writer.gguf", None))
+                        lambda field, **k: ("/writer.gguf", writer))
     monkeypatch.setattr(image_steps, "family_of", lambda s: (fam, "base"))
     monkeypatch.setattr(image_upsample, "CAPTIONS",
                         image_upsample._Captions(4))
@@ -68,6 +72,11 @@ def server(monkeypatch):
     class Engine:
         def generate(self, prompt, args):
             rec.events.append("chat")
+            if rec.too_long:
+                gen = importlib.import_module(
+                    "gmlx._vendor.mlx_vlm.server.generation")
+                raise gen.PromptTooLongError("Request needs 13536 context "
+                                             "tokens, but MAX_KV_SIZE is 8192.")
             toks = [SimpleNamespace(text=t, finish_reason=None)
                     for t in ("  ", CAPTION, "\n")]
             toks[-1].finish_reason = "stop"
@@ -177,3 +186,21 @@ def test_a_rerun_with_a_new_seed_writes_no_caption_and_loads_no_encoder(
     assert req.revised_prompt == CAPTION
     assert server.events == [("encode", CAPTION), ("encode", "blurry")]
     assert server.seeds == [1, 2]
+
+
+def test_an_upsampler_with_too_small_a_context_is_a_server_error(server):
+    """The typed prompt is not the cause, so the answer is no 400 on it."""
+    server.too_long = True
+    with pytest.raises(svc.ImageRequestError) as e:
+        _request(server, {"prompt": "a red bicycle", "seed": 1})
+    assert (e.value.status, e.value.err_type, e.value.param) == (
+        500, "server_error", None)
+    assert "the upsampler 'writer' has no room in its context" in str(e.value)
+
+
+def test_an_edit_ignores_prompt_upsampling_on_every_family():
+    spec = SimpleNamespace(id="qwen", upsampler=None, upsample=True)
+    fam = get_family("qwen_image21")
+    assert image_upsample.upsampler_for(spec, fam, True, True) is None
+    with pytest.raises(svc.ImageRequestError, match="takes no prompt"):
+        image_upsample.upsampler_for(spec, fam, True, False)

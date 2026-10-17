@@ -85,8 +85,8 @@ def upsample(family, prompt: str, chat, *, name: str = "the upsampler") -> str:
     return caption
 
 
-def cache_key(upsampler: str, family, prompt: str) -> tuple:
-    """What a caption depends on: the upsampler, the system prompt and the
-    typed prompt. Decoding is greedy, so the seed is not in it."""
-    return (str(upsampler), family.upsample.sha256, family.upsample.key,
-            prompt)
+def cache_key(upsampler, family, prompt: str) -> tuple:
+    """What a caption depends on: the upsampler, as a hashable that tells
+    one chat model from another, the system prompt and the typed prompt.
+    Decoding is greedy, so the seed is not in it."""
+    return (upsampler, family.upsample.sha256, family.upsample.key, prompt)

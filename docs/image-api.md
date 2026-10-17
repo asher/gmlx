@@ -77,7 +77,7 @@ that a request names, so `output_path`, `output_dir` and `response_format:
 On an entry with an [upsampler](images.md#prompt-upsampling), each
 image of the answer carries the caption the prompt was rewritten to as
 `revised_prompt`, as does a stream's `completed` event. An edit or a
-variation runs its prompt as typed.
+variation runs its prompt as typed and ignores `prompt_upsampling`.
 
 ## Edits and variations
 
@@ -160,6 +160,7 @@ for event in stream:
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | The upsampler writes an empty caption | 500 `server_error` |
+| The upsampler's context has no room for its system prompt and caption | 500 `server_error` naming the upsampler |
 | More requests waiting than [`image.max_queue`](config.md#image-requests) | 429 with `Retry-After` |
 | The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |
 | The job waits for its turn, or for one step, longer than [`token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) | 504, and the log marks the request `timeout` |

@@ -65,13 +65,15 @@ def upsampler_for(spec, family, requested: bool | None,
     entry cannot run."""
     from .image_service import _bad
 
+    if has_refs:
+        return None
     if family.upsample is None:
         if requested:
             raise _bad(f"{family.title} takes no prompt upsampling; send "
                        "the request without prompt_upsampling",
                        "prompt_upsampling")
         return None
-    if has_refs or requested is False:
+    if requested is False:
         return None
     upsampler = getattr(spec, "upsampler", None)
     if upsampler is None:
@@ -79,7 +81,7 @@ def upsampler_for(spec, family, requested: bool | None,
             raise _bad(f"prompt_upsampling needs an upsampler: set "
                        f"upsampler to a models: id on the image_models entry "
                        f"{spec.id!r}", "prompt_upsampling")
-        if spec.id not in _WARNED:
+        if spec.id not in _WARNED and getattr(spec, "upsample", True):
             _WARNED.add(spec.id)
             _log.warning("image model %r: %s expects its prompts upsampled; "
                          "set upsampler on its image_models entry to the "
@@ -115,7 +117,7 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     up = upsampler_for(spec, family, requested, has_refs)
     if up is None:
         return None
-    key = cache_key(_upsampler_path(up), family, prompt)
+    key = cache_key(_upsampler_identity(up), family, prompt)
     caption = CAPTIONS.get(key)
     if caption is not None:
         return caption
@@ -132,14 +134,22 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     return caption
 
 
-def _upsampler_path(up: str) -> str:
+def _upsampler_identity(up: str) -> tuple:
+    """What tells one chat model of the pool from another: the load
+    signature of its resolved entry, its adapter and its template
+    controls. A config reload that changes any of them writes new
+    captions."""
     from .residency import _http_from_resolver_error
 
     try:
-        return serving.resolve_request_model(up)[0]
+        spec = serving.resolve_request_model(up)[1]
     except (serving.ModelNotFound, serving.ModelFileMissing,
             serving.UnknownProfile, serving.NoModelSpecified) as e:
         raise (_http_from_resolver_error(e) or e) from e
+    kwargs = getattr(spec, "chat_template_kwargs", None) or {}
+    return (spec.load_signature(), getattr(spec, "adapter", None),
+            tuple(sorted((k, repr(v)) for k, v in kwargs.items())),
+            repr(getattr(spec, "thinking", None)))
 
 
 def _chat(up: str, req, stop) -> str:
@@ -186,9 +196,12 @@ def _chat_in_context(up: str, req, stop) -> str:
         try:
             _ctx, token_iter = rg.generate(prompt, args=gen_args)
         except gen_mod.PromptTooLongError as e:
+            limit = gen_mod.get_configured_context_limit()
+            room = f" of {limit} tokens" if limit else ""
             raise ImageRequestError(
-                400, f"the upsampler {up!r} cannot take this prompt: {e}",
-                param="prompt") from e
+                500, f"the upsampler {up!r} has no room in its context{room} "
+                f"for its system prompt and {req.max_tokens} caption tokens: "
+                f"{e}", err_type="server_error") from e
         text = []
         for tok in token_iter:
             if stop is not None and stop.is_set():
