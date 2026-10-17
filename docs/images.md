@@ -206,8 +206,8 @@ With an upsampler set, each prompt is rewritten:
   ComfyUI's log shows the caption.
 
 The chat model writes the same caption for the same prompt. The PNG keeps
-the caption beside your prompt. A prompt with reference images runs as
-typed, and the negative prompt is never rewritten. In ComfyUI the text
+the caption beside your prompt. A prompt with reference images or an
+init image runs as typed, and the negative prompt is never rewritten. In ComfyUI the text
 encode node does not see the references of an edit, so the server also
 encodes the prompt as typed, and the pack samples an edit and a negative
 prompt on that encoding.
@@ -216,7 +216,8 @@ To run a prompt as typed, pass `--no-upsample`, send
 `"prompt_upsampling": false` in the request, or set `upsample: false` on
 the entry, which a request with `"prompt_upsampling": true` turns back on.
 Without an upsampler, FLUX.3 klein runs each prompt as typed and prints a
-warning that names the `upsampler` setting and Qwen3.5-9B.
+warning that names the `upsampler` setting and Qwen3.5-9B, unless the
+entry has `upsample: false`.
 
 ## ComfyUI
 

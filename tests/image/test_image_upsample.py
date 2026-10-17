@@ -168,3 +168,24 @@ def test_without_an_upsampler_the_cli_warns_and_runs_the_prompt_as_typed(
                                      "--output", str(tmp_path / "b.png")]) == 0
     assert "expects" not in capsys.readouterr().out
     assert "upsampler" not in cli.events
+
+
+def test_an_img2img_prompt_runs_as_typed_and_loads_no_upsampler(
+        cli, tmp_path, monkeypatch, capsys):
+    import mlx.core as mx
+    from PIL import Image
+
+    from gmlx.commands.cli import umbrella_main
+    from gmlx.image import api
+
+    init = tmp_path / "init.png"
+    Image.new("RGB", (32, 32), (90, 120, 200)).save(init)
+    monkeypatch.setattr(api, "vae_encode", lambda pipe, x, plan=None:
+                        mx.zeros((1, 128, 2, 2)))
+    assert umbrella_main(cli.base + [
+        "--prompt", "the same scene at night", "--init-image", str(init),
+        "--upsampler", cli.files["writer.gguf"],
+        "--output", str(tmp_path / "a.png")]) == 0
+    assert "--init-image runs as typed" in capsys.readouterr().out
+    assert "upsampler" not in cli.events
+    assert ("encode", "the same scene at night") in cli.events

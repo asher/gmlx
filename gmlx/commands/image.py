@@ -172,7 +172,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                          "is encoded, on a family that takes prompt "
                          "upsampling (FLUX.3 klein): a GGUF, or a models: id "
                          "of the config (default: the entry's upsampler). "
-                         "A prompt with --ref runs as typed.")
+                         "A prompt with --ref or --init-image runs as typed.")
     up.add_argument("--no-upsample", action="store_true",
                     help="Run the prompt as typed, without the upsampler.")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
@@ -463,11 +463,11 @@ def _from_config(a) -> None:
         a.encoder_mmproj = rm.encoder_mmproj
     if rm.adapters:
         a.adapter = list(rm.adapters) + list(a.adapter or ())
-    if hasattr(a, "upsampler") and a.upsampler is None and rm.upsampler:
-        if rm.upsample:
-            a.upsampler = rm.upsampler
-        else:
+    if hasattr(a, "upsampler") and a.upsampler is None:
+        if not rm.upsample:
             a.no_upsample = True
+        elif rm.upsampler:
+            a.upsampler = rm.upsampler
 
 
 def _upsampler_path(a) -> str:
@@ -495,18 +495,19 @@ def _upsampler_path(a) -> str:
 
 def _upsample(a, family, prompt: str, refs, log) -> str | None:
     """The caption the upsampler writes for ``prompt``, or None when it
-    runs as typed."""
+    runs as typed, as a prompt with an image input does."""
     if family.upsample is None:
         if a.upsampler is not None:
             log(f"note: the upsampler is unused, since {family.title} "
                 "takes no prompt upsampling, and is not loaded")
         return None
-    if a.no_upsample:
+    if a.no_upsample or not prompt.strip():
         return None
-    if refs:
+    if refs or a.init_image is not None:
         if a.upsampler is not None:
-            log("note: a prompt with --ref runs as typed, and the upsampler "
-                "is not loaded")
+            flag = "--ref" if refs else "--init-image"
+            log(f"note: a prompt with {flag} runs as typed, and the "
+                "upsampler is not loaded")
         return None
     if a.upsampler is None:
         log(f"warning: {family.title} expects its prompts upsampled; set "
