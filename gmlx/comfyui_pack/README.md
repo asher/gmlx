@@ -40,11 +40,12 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has eight graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has nine graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
 - `qwen-image-2.1-edit-two-references.json`: Qwen-Image 2.1 editing with two reference images through the stock `TextEncodeQwenImage21` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
+- `krea-2-turbo-t2i.json`: Krea 2 Turbo text to image through the stock `BasicScheduler`, `CFGGuider` and `SamplerCustomAdvanced`. It makes 1024x1024, and on a Mac with 16 GB set the latent to 512x512.
 - `flux-2-klein-t2i.json`: FLUX.2 klein text to image through the stock `Flux2Scheduler`, `CFGGuider` and `SamplerCustomAdvanced`. `Flux2Scheduler` gives the schedule FLUX.2 klein samples on, which follows the image size, so keep its width and height those of the latent.
 - `flux-2-klein-edit-two-references.json`: FLUX.2 klein editing with two reference images, each encoded by `VAEEncode` and put on the prompt and its zeroed negative by the stock `ReferenceLatent`. The first reference sets the image size. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
 - `flux-2-klein-9b-t2i.json`: FLUX.2 klein 9B text to image, the same graph on the 9B model. It needs a Mac with 24 GB or more.

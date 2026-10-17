@@ -209,7 +209,7 @@ stock nodes work with a gmlx model and what runs where.
 
 ## The example workflows
 
-ComfyUI's template browser lists eight workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists nine workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -218,6 +218,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `z-image-turbo-t2i` | Z-Image-Turbo text to image at 1024x1024 in 8 steps | Nothing beyond the model |
 | `z-image-turbo-lora-t2i` | The same through a stock `LoraLoader` | A Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or another picked in the node |
 | `qwen-image-2.1-edit-two-references` | A Qwen-Image 2.1 edit from two reference images, through `TextEncodeQwenImage21` | `gmlx pull qwen-image`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `krea-2-turbo-t2i` | Krea 2 Turbo text to image at 1024x1024 in 8 steps, through `BasicScheduler` and `SamplerCustomAdvanced` | `gmlx pull krea-2-turbo`, and on a Mac with 16 GB a 512x512 latent |
 | `flux-2-klein-t2i` | FLUX.2 klein text to image at 1024x1024 in 4 steps, through `Flux2Scheduler` and `SamplerCustomAdvanced` | `gmlx pull flux-2-klein` |
 | `flux-2-klein-edit-two-references` | A FLUX.2 klein edit from two reference images, through `ReferenceLatent` | `gmlx pull flux-2-klein`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-2-klein-9b-t2i` | FLUX.2 klein 9B text to image at 1024x1024 in 4 steps, the same graph on the 9B model | `gmlx pull flux-2-klein-9b`, and a Mac with 24 GB or more |

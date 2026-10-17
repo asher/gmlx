@@ -120,7 +120,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 8
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 9
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -191,6 +191,7 @@ _WIDGETS = {
     # A dynamic combo: the option, then the inputs of that option.
     "ReferenceMultiLatent": ["resolution", "resolution.megapixels"],
     "Flux2Scheduler": ["steps", "width", "height"],
+    "BasicScheduler": ["scheduler", "steps", "denoise"],
     "RandomNoise": ["noise_seed", "control_after_generate"],
     "KSamplerSelect": ["sampler_name"],
     "CFGGuider": ["cfg"],
