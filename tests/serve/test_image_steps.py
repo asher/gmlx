@@ -802,9 +802,9 @@ def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
         host, kvpipe, monkeypatch):
     """The first step of a run under the Flux KV Cache node runs whole, the
     reference tokens joined to its rows, and keeps the K and V of its
-    references. Its plan prices the step by the KV row's fit of that step
-    and the K and V it keeps, to the byte, and its refusal names what
-    fits."""
+    references. Its plan prices the step by the larger of the KV row's
+    fits of that step and of a later one on those K and V, and the K and V
+    it keeps, to the byte, and its refusal names what fits."""
     import re
 
     from gmlx.image import memfit
@@ -832,10 +832,13 @@ def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
                                   **{**args, **terms})
 
     kv, act = memfit.PEAKS["flux2_klein_9b_kv"], kvpipe.dit.act_dtype.size
+    image, refs = memfit.image_rows(kv, h, w, None), (64 // p) ** 2
+    _, later, _ = memfit.prefix_row_terms(kv, image, refs, act)
     t = plan(price).terms
-    assert t["prefix_cache"] == kv.prefix.cache_bytes((64 // p) ** 2, act)
-    assert t["step_peak"] == kv.ref_build.bytes(
-        (memfit.image_rows(kv, h, w, None) + (64 // p) ** 2) * kv.width * act)
+    assert t["prefix_cache"] == kv.prefix.cache_bytes(refs, act)
+    assert t["step_peak"] == max(
+        kv.ref_build.bytes((image + refs) * kv.width * act),
+        kv.ref_read.bytes(later, 1, kv.prefix.join_bytes(refs, act)))
     with pytest.raises(memfit.ImageMemoryError) as refused:
         plan(price - 1)
     hint = refused.value.hint

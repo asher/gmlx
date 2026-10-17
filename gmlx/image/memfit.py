@@ -1109,8 +1109,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     row's ``ref_build`` fit, and each row keeps the K and V of its own
     references, which the prefix cache term counts for every row of
     ``prefix_rows``. "read" is a later step, at the row's ``ref_read``
-    fit, which reads those K and V from ``cache_bytes`` beside the image
-    rows. ``joined`` prices the step of a family in parts run whole, the
+    fit, which reads those K and V beside the image rows. ``cache_bytes``
+    holds them then, and the plan counts them in the prefix cache term
+    as the request's. The first step is priced at the larger of the two
+    fits, so a run whose first step fits fits its later steps.
+    ``joined`` prices the step of a family in parts run whole, the
     reference tokens joined to its rows, by its ``joined_row``.
 
     ``load_peak`` is what the load of the parts holds over what stays
@@ -1185,18 +1188,26 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     if ref_cache and (row.prefix is None or not prices_ref_cache(family)):
         raise ValueError(f"the {family} row prices no cache of reference "
                          f"K and V")
-    if ref_cache == "build":
+    if ref_cache:
+        # The K and V of each row's own references are the request's, in
+        # the prefix cache term. A later step takes them out of
+        # ``cache_bytes``.
         own = sum(row.prefix.cache_bytes(n, act) for n in given or mine)
-    elif ref_cache == "read":
-        own = 0
+        if ref_cache == "read":
+            cache_bytes = max(0, int(cache_bytes) - own)
+            terms["caches"] = cache_bytes
 
     def step_peak(b: int) -> int:
+        if not ref_cache:
+            return row.step_peak(step_one, prefill, b, read)
+        # The later steps read the K and V the first one keeps, so the
+        # first step fits only where they fit too.
+        peak = row.ref_read.bytes(step_one, b, read)
         if ref_cache == "build":
-            return row.ref_build.bytes((rows + max(mine)) * row.width * act,
-                                       b)
-        if ref_cache == "read":
-            return row.ref_read.bytes(step_one, b, read)
-        return row.step_peak(step_one, prefill, b, read)
+            peak = max(peak, row.ref_build.bytes(
+                (rows + max(mine)) * row.width * act, b))
+        return peak
+
     def price(op: str, tiled: bool, h: int = height, w: int = width) -> int:
         kw = dict(family=family, itemsize=vsize, tile=tile)
         kw.update({k: v for k, v in ((vae_price or {}).get(op) or {}).items()
@@ -1358,6 +1369,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                               int(n) - full + tokens(some)
                               if int(n) >= full else int(n)
                               for n in prefix_rows])
+            # A later step's K and V are the request's, out of
+            # ``cache_bytes``: fewer of them start a run again.
             return _replan(
                 dit, encoder, vae, mmproj, adapters, family=family,
                 height=height, width=width, cfg=cfg, dtype=dtype,
@@ -1365,8 +1378,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 encoder_owned=encoder_owned, caption_tokens=caption_tokens,
                 text_tokens=text_tokens, prefix_other=prefix_other,
                 prefix_bound=prefix_bound, prefix_held=prefix_held,
-                held_in=held_in, ref_cache=ref_cache, joined=joined,
-                cache_bytes=cache_bytes, tile=tile, init_image=init_image,
+                held_in=held_in, ref_cache=ref_cache and "build",
+                joined=joined, cache_bytes=cache_bytes, tile=tile,
+                init_image=init_image,
                 vae_price=vae_price, load_peak=load_peak,
                 load_parts=load_parts, budget=budget, **kw)
 

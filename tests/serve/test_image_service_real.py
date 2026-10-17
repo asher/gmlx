@@ -162,3 +162,50 @@ def test_the_kv_edit_workflow_fits_the_24_gb_class(gguf_dir, monkeypatch):
               f"{plan.peak / memfit.GiB:.2f} of "
               f"{budget / memfit.GiB:.2f} GiB")
         assert plan.fits
+
+
+@pytest.mark.parametrize("refs", [1, 2])
+def test_a_kv_run_whose_first_step_fits_fits_its_later_steps(
+        gguf_dir, monkeypatch, refs):
+    """A run under the Flux KV Cache node on the 24 GB class default DiT,
+    1024x1024 from 1024x1024 references, as the step route plans its
+    steps. At the least budget its first step fits, a later step on the
+    K and V that step keeps fits too, so a run is never refused partway."""
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.registry import get_family
+
+    name = "flux-2-klein-9b-kv"
+    r = catalog.RECIPES[name]
+    dq, _ = catalog.DEFAULT_QUANTS[name][24]
+    dit, vae = _file(gguf_dir, r.dit_name(dq)), _file(gguf_dir, r.vae_pack)
+    pipe = api.ImagePipeline(
+        dit=SimpleNamespace(cfg=SimpleNamespace(patch=1),
+                            act_dtype=mx.bfloat16),
+        family=get_family("flux2_klein_9b_kv"), variant="distilled",
+        weights={"dit": api._header_bytes(dit, "dit"),
+                 "vae": api._header_bytes(vae, "vae")})
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
+        keep_encoder=False, staged=False))
+    cond = Conditioning(mx.zeros((512, 3 * 4096)), "run", ref_latents=tuple(
+        mx.zeros((128, 64, 64)) for _ in range(refs)))
+    row = memfit.PEAKS["flux2_klein_9b_kv"]
+    held = {"bytes": 0}
+    monkeypatch.setattr(image_service, "_steps_cache_bytes",
+                        lambda: held["bytes"])
+
+    def step(budget: int, cache: dict) -> bool:
+        return image_service.size_fits(
+            served, 1024, 1024, budget, conds=[cond], joined=True,
+            ref_cache=cache, held_in=("denoise",))
+
+    lo, hi = 0, 64 << 30
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if step(mid, {}) else (mid + 1, hi)
+    held["bytes"] = row.prefix.cache_bytes(refs * 64 * 64, 2)
+    assert step(lo, {api._ref_key(cond, 0): None})
