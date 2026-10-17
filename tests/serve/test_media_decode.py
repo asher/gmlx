@@ -7,8 +7,11 @@ from __future__ import annotations
 import base64
 import importlib
 import io
+import json
 import os
 import struct
+import subprocess
+import sys
 import threading
 import tracemalloc
 import wave
@@ -115,13 +118,22 @@ def installed(monkeypatch):
 
 # Audio
 
-@pytest.mark.parametrize("declare_length", [True, False])
-def test_flac_silence_is_refused_before_a_large_decode(installed, monkeypatch,
-                                                       declare_length):
-    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
-    # 100 blocks: 1.3 KiB that decodes to 6.5 million samples.
-    data = flac_silence(100, declare_length=declare_length)
-    assert len(data) < 2048
+_ONE_BLOCK = flac_silence(1)
+
+
+def _warm_audio_reader() -> None:
+    """Read a one block clip, so that a traced read after it holds the
+    decode alone. The first read imports miniaudio, and the interpreter's
+    interned-string table can grow by megabytes during that import,
+    depending on how many strings the process interned before it."""
+    samples, _ = _AUDIO_IO.read(io.BytesIO(_ONE_BLOCK))
+    assert len(samples) == 65535
+
+
+def _refused_read_peak(data: bytes) -> tuple[MediaRefused, int]:
+    """The refusal of ``data`` and the traced peak of its read, which
+    imports nothing."""
+    loaded = set(sys.modules)
     tracemalloc.start()
     try:
         with pytest.raises(MediaRefused) as err:
@@ -129,12 +141,90 @@ def test_flac_silence_is_refused_before_a_large_decode(installed, monkeypatch,
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert str(err.value) == (
+    assert set(sys.modules) - loaded == set()
+    return err.value, peak
+
+
+@pytest.mark.parametrize("declare_length", [True, False])
+def test_flac_silence_is_refused_before_a_large_decode(installed, monkeypatch,
+                                                       declare_length):
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
+    # 100 blocks: 1.3 KiB that decodes to 6.5 million samples.
+    data = flac_silence(100, declare_length=declare_length)
+    assert len(data) < 2048
+    _warm_audio_reader()
+    err, peak = _refused_read_peak(data)
+    assert str(err) == (
         "audio decodes to more than 1,048,576 samples, the limit for one audio clip, "
         "which is 2 minutes at 8,000 Hz with 1 channel. Send a shorter clip, or split "
         "the recording.")
     # The decode stopped near the limit: 2 MiB of samples, not 13 MiB.
     assert peak < 6 << 20
+
+
+# A child with the interned-string table on the verge of growing at the
+# first audio read. "learn" interns new strings until the table grows by
+# more than the bound and prints the count; a count N interns N - 128 of
+# them, then traces the warm-up and the refused read.
+_VERGE = r"""
+import importlib.util, json, sys, tracemalloc
+
+spec = importlib.util.spec_from_file_location("media_decode_tests", sys.argv[1])
+t = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(t)
+t.mg._allow_urls = False
+t.media_sinks.install()
+t.mg.AUDIO_MAX_SAMPLES = 1 << 20
+data = t.flac_silence(100)
+assert "miniaudio" not in sys.modules, "the first audio read no longer imports miniaudio"
+keep = []
+
+
+def pad(n):
+    tracemalloc.start()
+    last, grew = tracemalloc.get_traced_memory()[0], None
+    for i in range(n):
+        keep.append(sys.intern(f"_media_pad_{i}"))
+        now = tracemalloc.get_traced_memory()[0]
+        if now - last > 6 << 20:
+            grew = i
+            break
+        last = now
+    tracemalloc.stop()
+    return grew
+
+
+if sys.argv[2] == "learn":
+    print(json.dumps({"grew": pad(1 << 20)}))
+else:
+    grew = pad(int(sys.argv[2]) - 128)
+    tracemalloc.start()
+    t._warm_audio_reader()
+    warm = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    err, peak = t._refused_read_peak(data)
+    print(json.dumps({"grew": grew, "warm": warm, "peak": peak}))
+"""
+
+
+def test_the_refused_read_leaves_the_interned_table_growth_to_the_warm_up():
+    """The flac silence test traced 8 MB against its 6 MiB bound in some
+    collections: the interned-string table grew by 7.7 MB while the first
+    audio read imported miniaudio. A child puts the table on the verge of
+    that growth at the first read. The warm-up takes the growth, and the
+    refused read stays under the bound."""
+    def child(arg):
+        r = subprocess.run([sys.executable, "-c", _VERGE, __file__, arg],
+                           capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, PYTHONHASHSEED="0"))
+        assert r.returncode == 0, r.stderr[-4000:]
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    grew = child("learn")["grew"]
+    assert grew is not None
+    got = child(str(grew))
+    assert got["grew"] is None
+    assert got["peak"] < 6 << 20
+    assert got["warm"] > 6 << 20
 
 
 def test_chat_audio_refusal_is_a_400_of_the_generation_routes(installed, monkeypatch):

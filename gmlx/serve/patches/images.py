@@ -14,6 +14,7 @@ an ``img`` tag sends no header, so the 32 byte token is the capability.
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
 import json
 import logging
@@ -328,6 +329,10 @@ def _borrow_for(spec):
             try:
                 return fn()
             finally:
+                # The handle without its model names the states of a later
+                # request, which a shed before its encode keeps last.
+                served_pipe.keys_encoder = copy.copy(served_pipe.encoder)
+                served_pipe.keys_encoder.model = None
                 served_pipe.encoder = None
 
         def steps(engine_rg, should_stop):
@@ -562,6 +567,8 @@ def make_endpoint(route: str):
                 finish("timeout" if e.timed_out else "cancelled")
             elif isinstance(e, ImageRequestError):
                 finish("refused", error=str(e))
+            elif (refusal := _job_refusal(e)) is not None:
+                finish("refused", error=refusal[2])
             else:
                 _log.error("%s: image job failed", path, exc_info=e)
                 finish("failed", error=type(e).__name__)
@@ -603,13 +610,7 @@ def make_endpoint(route: str):
                             "type": "timeout", "message": "the image job timed out"}})
                     return
                 except Exception as e:  # noqa: BLE001 - an error frame, then close
-                    status = 400 if isinstance(e, ImageRequestError) else 500
-                    yield _sse("error", {"error": {
-                        "type": ("invalid_request_error" if status == 400
-                                 else "server_error"),
-                        "message": (str(e) if status == 400 else
-                                    f"{path} failed ({type(e).__name__}); "
-                                    "see the server log")}})
+                    yield _sse("error", _stream_error(path, e))
                     return
                 body = {"type": f"{event_prefix}.completed",
                         "created_at": int(time.time()), "usage": result.usage,
@@ -643,20 +644,52 @@ def _retrieved(f) -> None:
         f.exception()
 
 
-def _job_failure(path: str, e: Exception, finish) -> JSONResponse:
+def _job_refusal(e: Exception) -> tuple | None:
+    """``(message, param, logged error)`` of an error a job raised that
+    refuses the request, which both paths answer as a 400, or None for a
+    job that failed. A refusal is one of the types gmlx raises for a bad
+    request: a plan that does not fit, a primitive's RequestRefusal, or an
+    adapter the request names that does not load. Any other error, a
+    ValueError among them, is the server's."""
+    from gmlx.image.lora.reader import AdapterError
     from gmlx.image.memfit import ImageMemoryError
+    from gmlx.image.refusal import RequestRefusal
 
     if isinstance(e, ImageMemoryError):
-        finish("refused", error="ImageMemoryError")
-        return _error(path, 400, str(e), param="size")
-    if isinstance(e, ValueError):
-        # The primitives refuse a request they cannot run by name.
-        finish("refused", error=str(e))
-        return _error(path, 400, str(e))
+        return str(e), "size", "ImageMemoryError"
+    if isinstance(e, (RequestRefusal, AdapterError)):
+        return str(e), None, str(e)
+    return None
+
+
+def _job_failure(path: str, e: Exception, finish) -> JSONResponse:
+    refusal = _job_refusal(e)
+    if refusal is not None:
+        message, param, logged = refusal
+        finish("refused", error=logged)
+        return _error(path, 400, message, param=param)
     finish("failed", error=type(e).__name__)
     _log.error("%s: image job failed", path, exc_info=e)
     return _error(path, 500, f"{path} failed ({type(e).__name__}); see the "
                   "server log", err_type="server_error")
+
+
+def _stream_error(path: str, e: Exception) -> dict:
+    """The error frame of a streamed job that raised ``e``: the error the
+    non-streamed path answers with."""
+    from ..image_service import ImageRequestError
+
+    if isinstance(e, ImageRequestError):
+        return _error_content(path, e.status, e.err_type, str(e),
+                              param=e.param, code=e.code)
+    refusal = _job_refusal(e)
+    if refusal is not None:
+        message, param, _ = refusal
+        return _error_content(path, 400, "invalid_request_error", message,
+                              param=param, code=None)
+    return _error_content(path, 500, "server_error",
+                          f"{path} failed ({type(e).__name__}); see the "
+                          "server log", param=None, code=None)
 
 
 async def file_endpoint(name: str):

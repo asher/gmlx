@@ -130,29 +130,29 @@
  },
  "results": {
   "bf16_vs_fp32_plain": {
-   "rel_l2": 0.007822406730904214,
-   "token_cosine_min": 0.999748968477626,
-   "worst_token": 27
+   "rel_l2": 0.00786274229546384,
+   "token_cosine_min": 0.9997946677914857,
+   "worst_token": 20
   },
   "bf16_vs_fp32_empty": {
-   "rel_l2": 0.007953722124583123,
-   "token_cosine_min": 0.9998159694562012,
+   "rel_l2": 0.007945563645181536,
+   "token_cosine_min": 0.9997163054454107,
    "worst_token": 4
   },
   "bf16_vs_fp32_non_ascii": {
-   "rel_l2": 0.007817399699833538,
-   "token_cosine_min": 0.999885160397759,
-   "worst_token": 42
+   "rel_l2": 0.0078097172356746715,
+   "token_cosine_min": 0.999865123045158,
+   "worst_token": 40
   },
   "bf16_vs_fp32_long": {
-   "rel_l2": 0.008882231532171245,
-   "token_cosine_min": 0.9950630473877229,
-   "worst_token": 625
+   "rel_l2": 0.007960977419229163,
+   "token_cosine_min": 0.9979840969987929,
+   "worst_token": 390
   },
   "bf16_vs_fp32_eighty": {
-   "rel_l2": 0.007791383823938165,
-   "token_cosine_min": 0.9998381816927617,
-   "worst_token": 76
+   "rel_l2": 0.007789555375257415,
+   "token_cosine_min": 0.9998847400959485,
+   "worst_token": 78
   },
   "pad_rows_rel_l2_to_the_first": {
    "plain": 0.0,
@@ -175,8 +175,8 @@
     "bf16": 0.9
    },
    "long": {
-    "fp32": 3.1,
-    "bf16": 7.7
+    "fp32": 3.2,
+    "bf16": 8.4
    },
    "eighty": {
     "fp32": 0.7,
@@ -186,23 +186,25 @@
  },
  "tolerances": {
   "rel_l2": {
-   "plain": 0.01564481346180843,
-   "empty": 0.015907444249166246,
-   "non_ascii": 0.015634799399667075,
-   "long": 0.01776446306434249,
-   "eighty": 0.01558276764787633
+   "plain": 0.01572548459092768,
+   "empty": 0.015891127290363072,
+   "non_ascii": 0.015619434471349343,
+   "long": 0.015921954838458326,
+   "eighty": 0.01557911075051483
   },
   "token_cosine_min": {
-   "plain": 0.9989958739105038,
-   "empty": 0.9992638778248049,
-   "non_ascii": 0.999540641591036,
-   "long": 0.9802521895508916,
-   "eighty": 0.9993527267710469
+   "plain": 0.9991786711659429,
+   "empty": 0.9988652217816427,
+   "non_ascii": 0.9994604921806318,
+   "long": 0.9919363879951715,
+   "eighty": 0.9995389603837941
   },
   "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt"
  },
- "notes": [],
- "created": "2026-10-15T21:24:21Z",
+ "notes": [
+  "The bf16 model is the float32 one cast to bfloat16, with its rotary frequencies left in float32."
+ ],
+ "created": "2026-10-16T18:13:50Z",
  "npz": "check2_flux3_klein.npz",
  "tensors": {
   "features_eighty": {
@@ -219,7 +221,7 @@
     20480
    ],
    "dtype": "float32",
-   "sha256": "2c15bedb799007cdb11348956f8256717646eb61372735abc6cd71ebfc1199ab"
+   "sha256": "034742d5a42a20b04a74890b549b70fa2bdf7edab4afb28208831f3770578837"
   },
   "features_empty": {
    "shape": [
@@ -235,7 +237,7 @@
     20480
    ],
    "dtype": "float32",
-   "sha256": "4d173cbcff5fcca397dc181eb3a0731c20e7ec54243629560c3c080e9cbd8949"
+   "sha256": "16f3971afc7d694e5452ae5c79e0eed51f4ab5931cd343fcf309e8ebf0e19355"
   },
   "features_long": {
    "shape": [
@@ -251,7 +253,7 @@
     20480
    ],
    "dtype": "float32",
-   "sha256": "1d45080c4a7c1617b7d94182a2f012720c60818bbf6238bc1ee1f41468d8a504"
+   "sha256": "4647501ea7558355c01b849c19222679725e27a0eaa1d692dfd5ccd656c72bb0"
   },
   "features_non_ascii": {
    "shape": [
@@ -267,7 +269,7 @@
     20480
    ],
    "dtype": "float32",
-   "sha256": "241b8b1e81492784430986e0b23a6c6b697f20d9a0f4559a2e39594e8dc0b3e4"
+   "sha256": "51397d1f09eed7952d6ad7b11cc33d00ca00342a7349ce038c7402da7a2cb7a8"
   },
   "features_plain": {
    "shape": [
@@ -283,7 +285,7 @@
     20480
    ],
    "dtype": "float32",
-   "sha256": "6967afa1e794124bee844b0198d9938f8a4c6c943890affdd8b5407b7d2d4a76"
+   "sha256": "b20b15f478f519cc2f9a18e794a8b97a22a0759273b02dcc4db93a02d815b586"
   },
   "ids_cap": {
    "shape": [

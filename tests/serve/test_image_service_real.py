@@ -1,7 +1,8 @@
 """The quants ``gmlx pull`` takes on each memory class, priced by serve
 on the real headers: the entry plan admits the class default of every
 recipe at that class's working budget, at the ``defaults.size`` the pull
-writes on that class. Header reads only. Skipped unless KQUANT_TEST_GGUF_DIR holds
+writes on that class, and refuses the defaults that make no image there.
+Header reads only. Skipped unless KQUANT_TEST_GGUF_DIR holds
 the files under their published names."""
 from __future__ import annotations
 
@@ -18,12 +19,8 @@ pytestmark = pytest.mark.integration
 
 
 def _class_budget(gb: int) -> float:
-    """The working budget of a Mac of ``gb`` GB: Metal's working set, 2/3
-    of RAM and 3/4 from 64 GB, less the margin, and never closer to RAM
-    than the reserve."""
-    ram = gb << 30
-    ws = ram * (3 / 4 if gb >= 64 else 2 / 3)
-    return min(ws * (1 - capacity.margin()), ram - capacity.reserve_bytes(ram))
+    """The working budget of a Mac of ``gb`` GB."""
+    return capacity.ram_budget_bytes(gb << 30)
 
 
 @functools.lru_cache(maxsize=1)
@@ -46,8 +43,14 @@ def _file(root, name: str, near: str | None = None) -> str:
     return paths[0]
 
 
-@pytest.mark.parametrize("gb", catalog.MEMORY_CLASSES)
-@pytest.mark.parametrize("name", sorted(catalog.RECIPES))
+# The class defaults that make no image, as catalog.NO_IMAGE records them.
+NO_IMAGE = {(n, gb) for n, classes in catalog.NO_IMAGE.items()
+            for gb in classes}
+
+
+@pytest.mark.parametrize("name, gb", [
+    (n, gb) for n in sorted(catalog.RECIPES) for gb in catalog.MEMORY_CLASSES
+    if (n, gb) not in NO_IMAGE])
 def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
                                                    name, gb):
     r = catalog.RECIPES[name]
@@ -74,6 +77,26 @@ def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
           f"{plan.cache_share:.2f}")
 
 
+@pytest.mark.parametrize("name, gb", sorted(NO_IMAGE))
+def test_serve_refuses_the_class_default_that_makes_no_image(
+        gguf_dir, monkeypatch, name, gb):
+    """Not even a 256x256 image of a 9B default fits the 16 GB class."""
+    r = catalog.RECIPES[name]
+    dq, eq = catalog.DEFAULT_QUANTS[name][gb]
+    spec = ResolvedImageModel(
+        id=name, path=_file(gguf_dir, r.dit_name(dq)),
+        vae=_file(gguf_dir, r.vae_pack),
+        encoder=_file(gguf_dir, r.encoder_name(eq)), encoder_model=None,
+        encoder_mmproj=None, family=None, adapters=(),
+        defaults={"size": "256x256"}, encoder_release="auto", pin=False,
+        ttl_s=None)
+    budget = _class_budget(gb)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    with pytest.raises(memfit.ImageMemoryError, match="256x256 image"):
+        image_service.entry_plan(spec)
+
+
 @pytest.mark.parametrize("name", sorted(
     n for n in catalog.RECIPES if 16 in catalog.DEFAULT_SIZES.get(n, {})))
 def test_serve_refuses_the_16_gb_default_above_its_documented_size(
@@ -92,3 +115,97 @@ def test_serve_refuses_the_16_gb_default_above_its_documented_size(
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     with pytest.raises(memfit.ImageMemoryError, match="1024x1024 image"):
         image_service.entry_plan(spec)
+
+
+def test_the_kv_edit_workflow_fits_the_24_gb_class(gguf_dir, monkeypatch):
+    """The FLUX.2 klein 9B KV edit workflow of the ComfyUI pack on the
+    24 GB class default: a 1024x1024 image from two 1024x1024 references
+    under the Flux KV Cache node. Its first step, which keeps the K and V
+    of both references, and a later step on them each fit the working
+    budget beside the entry's parts, with the tensor caches at their share
+    and no adapter, as the workflow loads none."""
+    from gmlx.image import api
+    from gmlx.image.dtypes import image_activation
+
+    name, gb = "flux-2-klein-9b-kv", 24
+    r = catalog.RECIPES[name]
+    dq, eq = catalog.DEFAULT_QUANTS[name][gb]
+    spec = ResolvedImageModel(
+        id=name, path=_file(gguf_dir, r.dit_name(dq)),
+        vae=_file(gguf_dir, r.vae_pack),
+        encoder=_file(gguf_dir, r.encoder_name(eq)), encoder_model=None,
+        encoder_mmproj=None, family=None, adapters=(), defaults={},
+        encoder_release="auto", pin=False, ttl_s=None)
+    budget = _class_budget(gb)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    entry = image_service.entry_plan(spec)
+    tensor, adapter = image_service.cache_bytes()
+    caches = int((2 * tensor + image_service._CACHE_BYTES["steps"] - adapter)
+                 * entry.cache_share)
+    act = image_activation("flux2_klein_9b_kv")
+    row = memfit.PEAKS["flux2_klein_9b_kv"]
+    refs = 2 * (1024 // row.prefix.token_px) ** 2
+    held = row.prefix.cache_bytes(refs, act.dit.size)
+    for step, cache in (("build", caches), ("read", caches + held)):
+        plan = memfit.plan_memory(
+            api._header_bytes(spec.path, "dit"),
+            (api._header_bytes(spec.encoder, "encoder")
+             if entry.keep_encoder else 0),
+            api._header_bytes(spec.vae, "vae"),
+            family="flux2_klein_9b_kv", height=1024, width=1024,
+            dtype=act.dit, vae_dtype=act.vae, encoder_owned=False,
+            prefix_rows=[refs], step_refs=[(1024, 1024)] * 2,
+            ref_cache=step, cache_bytes=cache, budget=budget,
+            overcommit=False)
+        print(f"{name} {gb} GB {dq}, the {step} step: "
+              f"{plan.peak / memfit.GiB:.2f} of "
+              f"{budget / memfit.GiB:.2f} GiB")
+        assert plan.fits
+
+
+@pytest.mark.parametrize("refs", [1, 2])
+def test_a_kv_run_whose_first_step_fits_fits_its_later_steps(
+        gguf_dir, monkeypatch, refs):
+    """A run under the Flux KV Cache node on the 24 GB class default DiT,
+    1024x1024 from 1024x1024 references, as the step route plans its
+    steps. At the least budget its first step fits, a later step on the
+    K and V that step keeps fits too, so a run is never refused partway."""
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.registry import get_family
+
+    name = "flux-2-klein-9b-kv"
+    r = catalog.RECIPES[name]
+    dq, _ = catalog.DEFAULT_QUANTS[name][24]
+    dit, vae = _file(gguf_dir, r.dit_name(dq)), _file(gguf_dir, r.vae_pack)
+    pipe = api.ImagePipeline(
+        dit=SimpleNamespace(cfg=SimpleNamespace(patch=1),
+                            act_dtype=mx.bfloat16),
+        family=get_family("flux2_klein_9b_kv"), variant="distilled",
+        weights={"dit": api._header_bytes(dit, "dit"),
+                 "vae": api._header_bytes(vae, "vae")})
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
+        keep_encoder=False, staged=False))
+    cond = Conditioning(mx.zeros((512, 3 * 4096)), "run", ref_latents=tuple(
+        mx.zeros((128, 64, 64)) for _ in range(refs)))
+    row = memfit.PEAKS["flux2_klein_9b_kv"]
+    held = {"bytes": 0}
+    monkeypatch.setattr(image_service, "_steps_cache_bytes",
+                        lambda: held["bytes"])
+
+    def step(budget: int, cache: dict) -> bool:
+        return image_service.size_fits(
+            served, 1024, 1024, budget, conds=[cond], joined=True,
+            ref_cache=cache, held_in=("denoise",))
+
+    lo, hi = 0, 64 << 30
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if step(mid, {}) else (mid + 1, hi)
+    held["bytes"] = row.prefix.cache_bytes(refs * 64 * 64, 2)
+    assert step(lo, {api._ref_key(cond, 0): None})

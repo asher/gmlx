@@ -1,0 +1,178 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "flux-2-klein",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxModelLoader",
+    "_meta": {
+      "title": "gmlx Model Loader"
+    }
+  },
+  "2": {
+    "inputs": {
+      "model_name": "flux-2-klein",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxCLIPLoader",
+    "_meta": {
+      "title": "gmlx CLIP Loader"
+    }
+  },
+  "3": {
+    "inputs": {
+      "model_name": "flux-2-klein",
+      "server_url": "http://127.0.0.1:8080",
+      "start_server": true
+    },
+    "class_type": "GmlxVAELoader",
+    "_meta": {
+      "title": "gmlx VAE Loader"
+    }
+  },
+  "4": {
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": "A lighthouse on a rocky coast at dawn, waves breaking on the rocks, soft golden light, photograph"
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive prompt"
+    }
+  },
+  "5": {
+    "inputs": {
+      "conditioning": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "Negative (unused at cfg 1)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty latent"
+    }
+  },
+  "7": {
+    "inputs": {
+      "steps": 4,
+      "width": 1024,
+      "height": 1024
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Schedule"
+    }
+  },
+  "8": {
+    "inputs": {
+      "noise_seed": 42
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Noise"
+    }
+  },
+  "9": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "10": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "cfg": 1.0
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "Guider"
+    }
+  },
+  "11": {
+    "inputs": {
+      "noise": [
+        "8",
+        0
+      ],
+      "guider": [
+        "10",
+        0
+      ],
+      "sampler": [
+        "9",
+        0
+      ],
+      "sigmas": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sample"
+    }
+  },
+  "12": {
+    "inputs": {
+      "samples": [
+        "11",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "13": {
+    "inputs": {
+      "images": [
+        "12",
+        0
+      ],
+      "filename_prefix": "gmlx/flux-2-klein"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

@@ -43,7 +43,7 @@ class Contract(unittest.TestCase):
         s, _, d = self.c.request("GET", C.PREFIX + "/models", versioned=False)
         self.assertEqual(s, 400)
         self.assertIn(b"X-Gmlx-Steps-Contract", d)
-        self.assertEqual(len(self.c.models()), 6)
+        self.assertEqual(len(self.c.models()), 11)
 
     def test_status_and_manifest(self):
         st = self.c.status("z-image-turbo")

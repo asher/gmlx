@@ -458,13 +458,16 @@ def block_names(model) -> dict:
 
 @contextmanager
 def step_sites(model, sites: dict, routed: dict | None = None,
-               heads: dict | None = None, skipped: set | None = None):
+               heads: dict | None = None, built=None,
+               skipped: set | None = None):
     """Fill ``sites`` with a reading for every op of every block and every
     call of a linear leaf while steps run: key to (relative L2, gate).
     ``routed`` takes the mlx-kquant op of each site a kernel route ran,
     ``heads`` the place of the worst head row of each q and k site.
-    ``skipped`` takes the path of a leaf called on a float32 input, which
-    runs in float32 and has no site."""
+    ``built`` is the built table of the patch table the step runs under,
+    from ``install.build_table`` in the block form, and gives the exact
+    side each leaf's delta. ``skipped`` takes the path of a leaf called on
+    a float32 input, which runs in float32 and has no site."""
     import mlx_kquant as kq
 
     from gmlx.image import ops
@@ -478,14 +481,32 @@ def step_sites(model, sites: dict, routed: dict | None = None,
     counts: dict = {}
     calls: dict = {}
     ran: list = []
-    paths = {id(m): p for p, m in install.modules(model).items()
-             if install.linear_dims(m) is not None}
+    # Under a patch table a path holds the leaf's ImageLoRALinear.
+    held = {p: m for p, m in install.modules(model).items()
+            if install.linear_dims(m) is not None}
+    paths = {id(m): p for p, m in held.items()}
+
+    def factors(mod):
+        g = None if built is None else built.get(paths.get(id(mod)))
+        return None if g is None else (g.a_t.astype(f), g.b_t.astype(f))
 
     def exact_leaf(mod, x32):
-        codec = getattr(mod, "kquant_type", None)
-        w = mod["weight"].astype(f) if codec is None else \
-            kq.dequantize(mod["weight"], mod["scales"], codec, f)
-        return x32 @ w.T
+        """The leaf's product in float32 on its dequantized weight, with
+        its delta."""
+        base = getattr(mod, "base", mod)
+        codec = getattr(base, "kquant_type", None)
+        w = base["weight"].astype(f) if codec is None else \
+            kq.dequantize(base["weight"], base["scales"], codec, f)
+        y = x32 @ w.T
+        fac = factors(mod)
+        if fac is not None:
+            y = y + (x32 @ fac[0]) @ fac[1]
+        return y
+
+    def delta_rounds(*mods) -> int:
+        """The roundings the leaves' deltas add on the stock ops: two
+        products each."""
+        return sum(2 for m in mods if factors(m) is not None)
 
     def read(op, got, want, rounds, by_head=False):
         key = (cur[-1], "step", op)
@@ -575,7 +596,7 @@ def step_sites(model, sites: dict, routed: dict | None = None,
                 return epilogues.swiglu(a, b)
 
             key = read("glu", y, want, bg.KERNEL_ROUNDINGS["glu"] if kernel
-                       else OP_ROUNDINGS["glu"])
+                       else OP_ROUNDINGS["glu"] + delta_rounds(blk.mlp_in))
             if kernel:
                 if routed is not None:
                     routed[key] = bg.KERNEL_OPS["glu"]
@@ -609,7 +630,8 @@ def step_sites(model, sites: dict, routed: dict | None = None,
                                                 s)
 
             key = read("out", y, want, 2 * each if fused
-                       else OP_ROUNDINGS["out"])
+                       else OP_ROUNDINGS["out"]
+                       + delta_rounds(blk.attn_out, blk.mlp_out))
             if fused:
                 if routed is not None:
                     routed[key] = "quantized_matmul_residual"
@@ -637,14 +659,19 @@ def step_sites(model, sites: dict, routed: dict | None = None,
                 return y
             with mx.stream(mx.cpu):
                 r = qg._rel_l2(y, exact_leaf(mod, x.astype(f)))
-            rounds = 1
-            if "lora" in ran[before:]:
+            rounds = 1 + delta_rounds(mod)
+            kernel = "lora" in ran[before:]
+            if kernel:
                 rounds = bg.KERNEL_ROUNDINGS["lora"]
             leaf_site(path, r, 2 * rounds * qg.SITE_UNIT)
+            if kernel and routed is not None:
+                routed[(path, calls[path])] = bg.KERNEL_OPS["lora"]
             return y
         return run
 
-    leaf_types = {type(m) for m in install.linear_leaves(model).values()}
+    # A leaf under a patch table is read at its ImageLoRALinear, which
+    # calls its base inside.
+    leaf_types = {type(m) for m in held.values()}
     hooks = [(fm.Block, "__call__", within),
              (fm.Block, "adaln", adaln), (fm.Block, "hidden", hidden),
              (fm.Block, "out", out_op),

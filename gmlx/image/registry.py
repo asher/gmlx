@@ -68,13 +68,15 @@ class StepParts:
 class LoopRules:
     """Where a family's reference sampling loop rounds, when it does not
     run in float32 throughout. ``noise`` is the dtype the initial noise
-    is rounded to; the latents stay float32 across the steps. With
-    ``act_update`` the guided velocity and the Euler product take the
-    DiT's activation dtype, each op rounded to it as the reference's
-    tensors of that dtype are, and only the sum with the latents runs in
-    float32."""
+    is rounded to. With ``act_update`` the guided velocity and the Euler
+    product take the DiT's activation dtype, each op rounded to it as the
+    reference's tensors of that dtype are, and the sum with the latents
+    runs in float32. The latents stay float32 across the steps, unless
+    ``act_latents`` rounds them to the activation dtype after each step,
+    as a reference that keeps its latents in that dtype does."""
     noise: str | None = None
     act_update: bool = False
+    act_latents: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,7 @@ class EditParts:
     a tuple with ``crop``, the (left, top, right, bottom) box the output
     is cropped to when the request gives no size, or None. ``size(refs)``
     is then the (width, height) of a request with references and no
-    size of its own.
+    size of its own, which ``edit_size`` scales into the image limits.
     """
     max_refs: int
     area: int = 0
@@ -116,6 +118,43 @@ class EditParts:
     def text_only(self) -> bool:
         """Whether the encoder reads the prompt without the images."""
         return self.encode is None
+
+
+# The image limits: the pixels and the longer side of the largest image a
+# served request asks for, and of the size an edit without one takes.
+MAX_PIXELS = 2048 * 2048
+MAX_SIDE = 4096
+
+
+def fit_size(width: int, height: int, unit: int) -> tuple:
+    """(width, height) scaled down at its shape to the largest size in the
+    image limits, each side floored to a multiple of ``unit``. A side
+    that floors to nothing is 0."""
+    scale = min(1.0, (MAX_PIXELS / (width * height)) ** 0.5,
+                MAX_SIDE / max(width, height))
+    return (int(width * scale) // unit * unit,
+            int(height * scale) // unit * unit)
+
+
+def edit_size(family, refs, unit: int) -> tuple | None:
+    """(width, height) of an edit of ``family`` with the prepared ``refs``
+    and no size of its own: the size the family gives them, scaled into
+    the image limits on the ``unit`` grid when it is past them. None for
+    a family without that rule. Raises ValueError when a side scales to
+    nothing."""
+    edit = family.edit
+    if not refs or edit is None or edit.size is None:
+        return None
+    w, h = edit.size(refs)
+    if w * h <= MAX_PIXELS and max(w, h) <= MAX_SIDE:
+        return w, h
+    fit = fit_size(w, h, unit)
+    if min(fit) <= 0:
+        raise ValueError(
+            f"the first reference sizes the edit at {w}x{h}, which keeps "
+            f"no side of {unit} pixels in the limit of {MAX_PIXELS} pixels "
+            f"(2048x2048) and a side of {MAX_SIDE}: give the edit a size")
+    return fit
 
 
 @dataclass(frozen=True)
@@ -135,6 +174,10 @@ class Family:
     # hash -> why gmlx image refuses a file of known weights
     refused: dict = field(default_factory=dict)
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
+    # variant -> the variant that takes guidance, for a variant distilled
+    # to sample without it, which then refuses guidance by name; "" when
+    # no variant of the family takes guidance.
+    unguided: dict = field(default_factory=dict)
     # The sampling row of a variant without one, such as a file whose
     # identity matches no row; None leaves it without defaults.
     unknown_variant: str | None = None

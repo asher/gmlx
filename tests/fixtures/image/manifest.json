@@ -119,6 +119,14 @@
     "sha256": "0b25d143c8469b342bc5af3bce92b783bf6b0636d285f7b2f75e38af63af9a15",
     "kv_kept": "general.architecture"
   },
+  "flux2_klein_4b_q8_0.header.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
+    "file": "flux-2-klein-4b-Q8_0.gguf",
+    "size": 4300644928,
+    "sha256": "24a812e8f9b640e21c784164ea48571d8017ca22873696f4badeeabb006d509c",
+    "kv_kept": "general.architecture"
+  },
   "flux2_klein_9b_q4_k_m.header.json": {
     "repo": "unsloth/FLUX.2-klein-9B-GGUF",
     "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
@@ -126,6 +134,77 @@
     "size": 5909829920,
     "sha256": "5489463ed96056b0bb5472abb5d1bba7055e48d574e37877acb43b407465e26f",
     "kv_kept": "general.architecture"
+  },
+  "flux2_klein_9b_q8_0.header.json": {
+    "repo": "unsloth/FLUX.2-klein-9B-GGUF",
+    "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
+    "file": "flux-2-klein-9b-Q8_0.gguf",
+    "size": 9978304800,
+    "sha256": "dfa8908dd58c5af6479b944f80558e226ee40a8fe0903729309e8d1b98fe5297",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_9b_kv_q4_k_m.header.json": {
+    "repo": "QuantStack/FLUX.2-Klein-9B-KV-GGUF",
+    "revision": "f4b7b4b0750b7b5cd112f9cc6e386a2ded10061f",
+    "file": "Flux-2-Klein-9B-KV-Q4_K_M.gguf",
+    "size": 5716891936,
+    "sha256": "022f9d41814e24f5ca70d4b40cc6c1d50ead4097de1845e45b232ff53278e956",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_4b_f16.header.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66",
+    "file": "flux-2-klein-4b-F16.gguf",
+    "size": 7751115328,
+    "sha256": "c814dc08a07e3a6203547183eae8299835d32dc002fe0c24e1d02b4f2af649da",
+    "kv_kept": "general.architecture"
+  },
+  "flux2_klein_img_in_identity.json": {
+    "repo": "unsloth/FLUX.2-klein-4B-GGUF and unsloth/FLUX.2-klein-base-4B-GGUF",
+    "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66 and 5fd6513800b1f13016fab83600b392a35f29d56d",
+    "file": "img_in.weight of every .gguf, by HTTP range reads",
+    "note": "each file's size is in the fixture; the hashes are of the tensor's bf16 bits"
+  },
+  "flux2_klein_9b_identity.json": {
+    "repo": "unsloth/FLUX.2-klein-9B-GGUF, unsloth/FLUX.2-klein-base-9B-GGUF, QuantStack/FLUX.2-Klein-9B-KV-GGUF, vantagewithai/FLUX.2-klein-9b-kv-GGUF and biali/FLUX.2-klein-9b-kv-GGUF",
+    "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079, 069a5df5ba8b7fe9f3355c8d4800486983ee8eb6, f4b7b4b0750b7b5cd112f9cc6e386a2ded10061f, 28216d4b901c5dda4574faef78c10eb941b746ab and 994cdaa73ffd792e3d52f8d933b990c54c9e407c",
+    "file": "img_in.weight of every .gguf of the unsloth repos and of the KV files read, and double_blocks.0.img_attn.norm.query_norm.scale of one Q4_K_M file of each repo, by HTTP range reads",
+    "note": "each file's size is in the fixture; the hashes are of the tensors' bf16 bits"
+  },
+  "flux2_klein_4b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "transformer/config.json",
+    "size": 541,
+    "sha256": "09733c74a3da6d17dd0a0472a091a8950c7c6935889c32c16cc800ede05029de"
+  },
+  "flux2_klein_base_4b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+    "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+    "file": "transformer/config.json",
+    "size": 531,
+    "sha256": "c8a88c1433f24e52c01f46766c9f519e76d91d1c00bfb43fe0db2e4ed3c84d70"
+  },
+  "flux2_klein_9b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-9B",
+    "revision": "92196c8e11f7b6cf2b7493e037d8c5345c559216",
+    "file": "transformer/config.json",
+    "size": 542,
+    "sha256": "e82d0d325aff03c3b3b33a1634c47a5f88867478f53071b9c9a39c99010c5d46"
+  },
+  "flux2_klein_base_9b_transformer_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-base-9B",
+    "revision": "32773329fbe7e81a90ef971740e8ba4b0364ecf3",
+    "file": "transformer/config.json",
+    "size": 532,
+    "sha256": "e32797b28b9e4ab31712e7b341f81c31e059be5db39f3d74fbbeaa168eb36edd"
+  },
+  "flux2_klein_chat_template.jinja": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "tokenizer/chat_template.jinja",
+    "size": 4168,
+    "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
   },
   "flux3_klein_config.json": {
     "repo": "black-forest-labs/flux-3-image-klein",
@@ -169,5 +248,36 @@
     "file": "vae/config.json",
     "size": 808,
     "sha256": "66564b3cd3f3f3ce5ce3cd4df72f1de883b242c7f338e27d420fe5ddcb0a6ed9"
+  },
+  "flux2_klein_vae.header.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "vae/diffusion_pytorch_model.safetensors",
+    "size": 168120878,
+    "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+  },
+  "flux2_klein_vae_config.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "vae/config.json",
+    "size": 821,
+    "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948"
+  },
+  "flux2_klein_diffusers_names.json": {
+    "repo": "black-forest-labs/FLUX.2-klein-4B",
+    "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "file": "transformer/diffusion_pytorch_model.safetensors",
+    "size": 7751109744,
+    "sha256": "9f29f9edcfdae452a653ffb51a534ca4decd389952c225724ff3b94042612a6e",
+    "sha256_source": "The hub's LFS record of the file whose header the fixture's names and shapes come from. The base 4B file has the same names and shapes."
+  },
+  "flux2_klein_pixel_art_lora.header.json": {
+    "repo": "Limbicnation/pixel-art-lora",
+    "revision": "0ac8e5c3400af68228811edc324721e25fc26777",
+    "file": "pytorch_lora_weights.safetensors",
+    "size": 325280664,
+    "sha256": "72ac6e652196cd9f450d4d3256d197978d3fa690e22dc21361d3bd4fb4e8250e",
+    "license": "apache-2.0",
+    "sha256_source": "The hub's LFS record of the file whose header the fixture holds, which the downloaded file matches."
   }
 }

@@ -1,0 +1,202 @@
+{
+ "schema": 1,
+ "name": "selftest_flux2_klein_loop",
+ "check": 6,
+ "family": "flux2_klein",
+ "script": "scripts/image_oracle/check6_flux2_klein.py",
+ "argv": [
+  "check6_flux2_klein.py",
+  "--reference",
+  "src",
+  "--reference-commit",
+  "50fe5162777813d869182b139e83b10743caef15",
+  "--self-test",
+  "--out",
+  "oracle"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "stub": {
+   "latent": [
+    4,
+    6
+   ],
+   "channels": 8,
+   "text": 5,
+   "text_dim": 4,
+   "steps": {
+    "distilled": 4,
+    "base": 6
+   }
+  },
+  "seed": 6,
+  "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
+  "tokens": 24,
+  "velocity": "bf16((table[step] + ctx[s, 0, 0]) - latents) per sample s, its own text",
+  "latents": "after every step, (steps, C, h, w) float32"
+ },
+ "results": {
+  "distilled": {
+   "steps": 4,
+   "guidance": 1.0,
+   "rows": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "model_info": "flux.2-klein-4b"
+  },
+  "base": {
+   "steps": 6,
+   "guidance": 4.0,
+   "rows": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "model_info": "flux.2-klein-base-4b"
+  }
+ },
+ "tolerances": {},
+ "notes": [
+  "the CLI's text to image path on the stub DiT, the latents in bf16, sampling.denoise for distilled and denoise_cfg for Base with the empty prompt's text in row 0"
+ ],
+ "created": "2026-10-16T12:56:07Z",
+ "npz": "selftest_flux2_klein_loop.npz",
+ "tensors": {
+  "base_latents": {
+   "shape": [
+    6,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "8b8d8762ac5f6f89638471869ce8224accc790a1376b97c5a17c8f26ffa487bd"
+  },
+  "base_schedule": {
+   "shape": [
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "720287ff925997176bbff07c3adda0e2c247d81a9a0d285e7f8f8423818dc60c"
+  },
+  "base_table": {
+   "shape": [
+    6,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "e87c788e8099a412e365636a00e16da84c2617aeeede8cc4059378c70f88bdbd"
+  },
+  "base_times": {
+   "shape": [
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "0971ced007a4b41604d83275a6daffecef6492da347ef4dced6162d5f669801f"
+  },
+  "distilled_latents": {
+   "shape": [
+    4,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "10697066fcf36e2f6891a186ad53215afddadfbedfa25bc9b854d0cc508985dd"
+  },
+  "distilled_schedule": {
+   "shape": [
+    5
+   ],
+   "dtype": "float32",
+   "sha256": "5a5708866b27d97358c5756eb0a6ef58a10b838e4092ee306628d8f81504a3bb"
+  },
+  "distilled_table": {
+   "shape": [
+    4,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "8391cdca1f61c2f6719fcb21e2b0f1a22ff026f765252044d0e02b7dfc60e5cc"
+  },
+  "distilled_times": {
+   "shape": [
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "b7c86084180ff734740e668f26e68f42f2797c79d4302fe1385d003ff95f9318"
+  },
+  "features": {
+   "shape": [
+    5,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "b675dffd6b0ac13494fb49606655382d67851baec6d1cc698972726634654e66"
+  },
+  "features_empty": {
+   "shape": [
+    5,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "37c22c80bda198fbc5517a0d1f3f07c99bab4d9aab492b3ed087c51acd40df0b"
+  },
+  "noise": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "fe4bf9fbc6608cac5cac72839fd25a4cfcca44704bb1c98c8e3fbf1d9a67194b"
+  }
+ }
+}

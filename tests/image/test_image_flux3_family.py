@@ -1,7 +1,8 @@
 """The FLUX.3 klein registry row: both publishers' files, Base, the config
 against the official config.json and transformer/config.json (check 1),
-relatives refused with the reason, and the FLUX.1 and FLUX.2 files that
-share the flux label refused by name. CPU-only. Header fixtures hold
+relatives refused with the reason, the FLUX.1 and FLUX.2 dev files that
+share the flux label refused by name, and the FLUX.2 klein files left to
+their own row. CPU-only. Header fixtures hold
 names, shapes and codecs, no weights."""
 from __future__ import annotations
 
@@ -92,8 +93,7 @@ def test_the_config_fixtures_are_the_official_files_in_bytes():
 
 def test_the_header_fixtures_are_pinned():
     manifest = load_json("manifest.json")
-    for name, n in ((DISTILLED, 359), (ABIRAY, 359), (BASE, 357),
-                    (FLUX2_4B, 149), (FLUX2_9B, 201)):
+    for name, n in ((DISTILLED, 359), (ABIRAY, 359), (BASE, 357)):
         d = load_json(name)
         assert d["n_tensors"] == len(d["tensors"]) == n
         assert len(manifest[name]["revision"]) == 40
@@ -113,13 +113,13 @@ def test_the_encoder_constants_follow_the_reference_code():
 @pytest.mark.parametrize("name,title", [(FLUX2_4B, "FLUX.2 klein 4B"),
                                         (FLUX2_9B, "FLUX.2 klein 9B")])
 @pytest.mark.parametrize("arch", ["flux", None])
-def test_flux2_klein_is_refused_by_name(name, title, arch):
+def test_flux2_klein_given_as_flux3_is_refused_by_name(name, title, arch):
     view = fixture_view(name, kv={"general.architecture": arch} if arch
                         else {})
-    want = (f"this is a {title} GGUF, which gmlx image does not support; "
-            "FLUX.3 klein is the FLUX model it runs")
-    assert _refused(view) == want
-    assert _refused(view, family="flux3_klein") == want
+    assert fp.identify(view).family.name == (
+        "flux2_klein_9b" if title.endswith("9B") else "flux2_klein")
+    assert _refused(view, family="flux3_klein") == (
+        f"this is a {title} GGUF, not a FLUX.3 klein one")
 
 
 def _bfl(txt_in: tuple, img_in: tuple, *extra: str) -> fp.HeaderView:
@@ -136,12 +136,15 @@ def _bfl(txt_in: tuple, img_in: tuple, *extra: str) -> fp.HeaderView:
     (_bfl((4096, 3072), (64, 3072), "double_blocks.0.img_mod.lin.weight"),
      "FLUX.1"),
     (_bfl((15360, 6144), (128, 6144), "double_stream_modulation_img.lin.weight"),
+     "FLUX.2 dev"),
+    (_bfl((5120, 5120), (128, 5120), "double_stream_modulation_img.lin.weight"),
      "FLUX.2"),
-], ids=["flux1", "flux2 dev"])
+], ids=["flux1", "flux2 dev", "flux2 other"])
 def test_the_older_flux_models_are_refused_by_name(view, name):
-    assert _refused(view) == (
-        f"this is a {name} GGUF, which gmlx image does not support; "
-        "FLUX.3 klein is the FLUX model it runs")
+    want = (f"this is a {name} GGUF, which gmlx image does not support; "
+            "FLUX.2 klein and FLUX.3 klein are the FLUX models it runs")
+    assert _refused(view) == want
+    assert _refused(view, family="flux3_klein") == want
 
 
 def test_another_model_in_the_flux1_names_keeps_the_generic_refusal():
@@ -212,7 +215,7 @@ def test_a_label_of_another_layout_is_refused():
 @pytest.mark.parametrize("name", [DISTILLED, BASE])
 def test_no_other_family_takes_a_flux3_file(name):
     view = fixture_view(name)
-    for other in ("z_image", "krea2", "qwen_image21"):
+    for other in ("z_image", "krea2", "qwen_image21", "flux2_klein"):
         fam = get_family(other)
         assert fam.fingerprint(fp.strip_prefix(view, fam.strip_prefixes)) \
             is None, other
@@ -225,17 +228,19 @@ def test_flux3_takes_no_file_of_another_family(name):
 
 
 def _scan(name, arch):
-    """A shard scan of a header fixture as the header-only read gives it."""
+    """A shard scan of a header fixture, or of a view, as the header-only
+    read gives it."""
     from types import SimpleNamespace
 
+    view = fixture_view(name) if isinstance(name, str) else name
     return SimpleNamespace(
         path="x.gguf", data_offset=0, kv={"general.architecture": arch},
         tensors=[SimpleNamespace(name=n, shape=t.shape, type_name=t.codec,
                                  offset=0, nbytes=0)
-                 for n, t in fixture_view(name).tensors.items()])
+                 for n, t in view.tensors.items()])
 
 
-def test_pull_names_a_flux3_file_by_its_tensors_and_refuses_flux2():
+def test_pull_names_each_flux_file_by_its_tensors_and_refuses_flux1():
     from gmlx.commands import manage
     from gmlx.load import remote
 
@@ -243,12 +248,15 @@ def test_pull_names_a_flux3_file_by_its_tensors_and_refuses_flux2():
     assert manage._image_role(report, None) == (None, None)
     assert manage._image_role(report, [_scan(DISTILLED, "flux")]) == (
         "dit", "flux3_klein")
-    scan = _scan(FLUX2_4B, "flux")
+    assert manage._image_role(report, [_scan(FLUX2_4B, "flux")]) == (
+        "dit", "flux2_klein")
+    scan = _scan(_bfl((4096, 3072), (64, 3072),
+                      "double_blocks.0.img_mod.lin.weight"), "flux")
     assert manage._image_role(report, [scan]) == (None, None)
     v = manage._verdict(remote.parse_ref("hf:o/r/m.gguf"), report,
                         size_bytes=1 << 30, scans=[scan])
     assert v["image"] is None and not v["usable"]
     assert v["arch_error"] == (
-        "an image GGUF gmlx does not load: this is a FLUX.2 klein 4B GGUF, "
-        "which gmlx image does not support; FLUX.3 klein is the FLUX model "
-        "it runs")
+        "an image GGUF gmlx does not load: this is a FLUX.1 GGUF, which gmlx "
+        "image does not support; FLUX.2 klein and FLUX.3 klein are the FLUX "
+        "models it runs")

@@ -164,6 +164,11 @@ def test_quality_steps_come_from_the_family_table():
 GB = 1024**3
 
 
+def _ident(family, variant, **config):
+    """What identify_dit returns, with the config flags a test gives."""
+    return SimpleNamespace(family=family, variant=variant, config=config)
+
+
 def _spec(**kw):
     base = dict(id="zit", path="/dit.gguf", family=None, variant=None,
                 defaults={},
@@ -185,8 +190,7 @@ def plan_stubs(monkeypatch):
     fam = get_family("z_image")
     state = SimpleNamespace(budget=100 * GB, checked=[], planned=[])
     monkeypatch.setattr(loader, "identify_dit",
-                        lambda path, **k: SimpleNamespace(family=fam,
-                                                     variant="turbo"))
+                        lambda path, **k: _ident(fam, "turbo"))
     monkeypatch.setattr(api, "sampler_defaults",
                         lambda *a: SimpleNamespace(size=(1024, 1024), cfg=1.0))
     monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 1)
@@ -217,8 +221,8 @@ def test_an_entry_of_unknown_krea_2_weights_needs_its_variant(
 
     asked = []
     monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
-        asked.append(variant) or SimpleNamespace(
-            family=get_family("krea2"), variant=variant or "unknown")))
+        asked.append(variant) or _ident(get_family("krea2"),
+                                        variant or "unknown")))
     with pytest.raises(ImageModelError,
                        match="image model 'k2': .*--variant turbo"):
         image_service.entry_plan(_spec(id="k2"))
@@ -314,15 +318,15 @@ def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
     from gmlx.image.registry import get_family
 
     q = get_family("qwen_image21")
-    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
-        family=q, variant="turbo"))
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, **k: _ident(q, "turbo"))
     plan = image_service.entry_plan(_spec(defaults={"steps": 8}))
     assert plan.variant == "turbo"
     with pytest.raises(ImageModelError, match="defaults.steps: Qwen-Image "
                        "2.1 turbo runs 8 steps"):
         image_service.entry_plan(_spec(defaults={"steps": 20}))
-    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: SimpleNamespace(
-        family=q, variant="unknown"))
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, **k: _ident(q, "unknown"))
     assert image_service.entry_plan(_spec(defaults={"steps": 20}))
 
 
@@ -345,6 +349,115 @@ def test_a_request_on_turbo_takes_only_its_own_step_count(variant, steps,
                        match="runs 8 steps") as e:
         image_service.check_family(req, served)
     assert e.value.param == "steps"
+
+
+@pytest.mark.parametrize("variant,guidance,default,refused", [
+    ("distilled", None, 1.0, False), ("distilled", 1.0, 1.0, False),
+    ("distilled", 4.0, 1.0, True), ("distilled", None, 4.0, True),
+    ("base", 4.0, 4.0, False), ("base", None, 1.0, False)])
+def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
+                                                    default, refused):
+    from gmlx.image.registry import get_family
+
+    fam = get_family("flux2_klein")
+    served = SimpleNamespace(pipe=SimpleNamespace(family=fam, variant=variant),
+                             spec=SimpleNamespace(id="f2"),
+                             plan=SimpleNamespace(cfg=default))
+    req = image_service.parse_request("generations", {
+        "prompt": "p", **({} if guidance is None else {"guidance": guidance})})
+    if not refused:
+        image_service.check_family(req, served)
+        return
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.check_family(req, served)
+    assert e.value.param == "guidance" and e.value.status == 400
+    assert str(e.value) == (
+        "guidance: the FLUX.2 klein distilled DiT samples without guidance: "
+        f"drop guidance {guidance or default:g}, or run the FLUX.2 klein "
+        "base checkpoint, which takes guidance")
+
+
+def _flux3_served(flow_map: bool, cfg: float = 1.0, defaults=None):
+    from gmlx.image.registry import get_family
+
+    return SimpleNamespace(
+        pipe=SimpleNamespace(
+            family=get_family("flux3_klein"),
+            variant="distilled" if flow_map else "base",
+            dit=SimpleNamespace(cfg=SimpleNamespace(flow_map=flow_map))),
+        spec=SimpleNamespace(id="f3", defaults=defaults),
+        plan=SimpleNamespace(cfg=cfg))
+
+
+@pytest.mark.parametrize("fields,default,param", [
+    ({"guidance": 3.5}, 1.0, "guidance"), ({}, 3.5, "guidance"),
+    ({"sampler": "uni_pc_bh2"}, 1.0, "sampler")])
+def test_a_flux3_flow_map_request_is_refused_before_its_job(fields, default,
+                                                           param):
+    """The rules api.sample holds for a flow map DiT refuse the request in
+    check_family, so a streamed request gets its 400 before the stream."""
+    req = image_service.parse_request("generations", {"prompt": "p",
+                                                      **fields})
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.check_family(req, _flux3_served(True, cfg=default))
+    assert e.value.param == param and e.value.status == 400
+    assert str(e.value).startswith(
+        f"{param}: the FLUX.3 klein distilled DiT is a flow map")
+    # Base is no flow map: it takes guidance and any sampler.
+    image_service.check_family(req, _flux3_served(False, cfg=default))
+
+
+def test_a_flux3_flow_map_takes_the_sampler_of_its_entry_defaults():
+    req = image_service.parse_request("generations", {"prompt": "p"})
+    with pytest.raises(image_service.ImageRequestError, match="euler only"):
+        image_service.check_family(req, _flux3_served(
+            True, defaults={"sampler": "uni_pc_bh2"}))
+    image_service.check_family(req, _flux3_served(True))
+
+
+def test_a_distilled_flux2_entry_refuses_a_guidance_default(plan_stubs,
+                                                            monkeypatch):
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    fam = get_family("flux2_klein")
+    for variant in ("distilled", "base"):
+        monkeypatch.setattr(loader, "identify_dit", lambda path, _v=variant,
+                            **k: _ident(fam, _v))
+        assert image_service.entry_plan(_spec(defaults={"guidance": 1.0}))
+    assert image_service.entry_plan(_spec(defaults={"guidance": 4.0}))
+    monkeypatch.setattr(loader, "identify_dit",
+                        lambda path, **k: _ident(fam, "distilled"))
+    with pytest.raises(ImageModelError, match="defaults.guidance: the FLUX.2 "
+                       "klein distilled DiT samples without guidance: drop "
+                       "guidance 4, or run the FLUX.2 klein base checkpoint"):
+        image_service.entry_plan(_spec(defaults={"guidance": 4.0}))
+
+
+@pytest.mark.parametrize("defaults,name", [
+    ({"guidance": 3.5}, "guidance"), ({"sampler": "uni_pc_bh2"}, "sampler")])
+def test_a_flow_map_entry_refuses_a_guidance_or_sampler_default(
+        plan_stubs, monkeypatch, defaults, name):
+    """A FLUX.3 klein flow map entry with a default it cannot sample with
+    is refused at load, as a distilled FLUX.2 klein guidance default is."""
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    fam = get_family("flux3_klein")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        fam, "distilled", flow_map=True))
+    with pytest.raises(ImageModelError, match=(
+            f"image model 'zit': defaults.{name}: the FLUX.3 klein distilled "
+            "DiT is a flow map")):
+        image_service.entry_plan(_spec(defaults=defaults))
+    assert image_service.entry_plan(_spec(defaults={"guidance": 1.0,
+                                                    "sampler": "euler"}))
+    # Base is no flow map: it takes both defaults.
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        fam, "base", flow_map=False))
+    assert image_service.entry_plan(_spec(defaults=defaults))
 
 
 def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
@@ -507,13 +620,15 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
 
     seen = []
     monkeypatch.setattr(memfit, "plan_memory", lambda **kw: seen.append(
-        kw["cache_bytes"]) or SimpleNamespace(fits=kw["height"] < 512))
+        kw["cache_bytes"]) or SimpleNamespace(fits=kw["height"] < 512,
+                                              shed_bytes=0))
     monkeypatch.setattr(image_steps.STATE.tensors, "_bytes", 5)
     monkeypatch.setattr(image_steps.STATE.adapters, "_bytes", 7)
     held = SimpleNamespace(bytes=100)
     pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
                            weights={"dit": 1, "vae": 1}, adapters=held,
-                           tables=held, family=SimpleNamespace(name="z_image"),
+                           tables=held,
+                           family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True))
     assert image_service.size_fits(served, 64, 64, 1 << 30)
@@ -526,7 +641,8 @@ def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
     held = SimpleNamespace(bytes=0)
     pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
                            weights={"dit": 1, "vae": 1}, adapters=held,
-                           tables=held, family=SimpleNamespace(name="z_image"),
+                           tables=held,
+                           family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
     served = SimpleNamespace(pipe=pipe, plan=_plan(
         staged=True, keep_encoder=False, encoder_bytes=5, mmproj_bytes=7,
@@ -675,7 +791,7 @@ def test_a_failed_vae_load_releases_the_encoder_it_loaded(monkeypatch):
     from gmlx.image.registry import get_family
 
     fam = get_family("z_image")
-    ident = SimpleNamespace(family=fam, variant="turbo")
+    ident = _ident(fam, "turbo")
     enc = _Encoder()
     monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 0)
     monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: ident)
@@ -732,7 +848,8 @@ def _fit_served(monkeypatch, fits_px: int):
     pipe = SimpleNamespace(
         encoder=None, dit=SimpleNamespace(act_dtype="bfloat16"),
         weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb,
-        family=SimpleNamespace(name="z_image", edit=None, title="Z-Image"),
+        family=SimpleNamespace(name="z_image", edit=None, title="Z-Image",
+                               step=None),
         vae=None, conditionings=nb, modulations=nb, size_multiple=16)
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
         keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"))
@@ -858,12 +975,35 @@ def test_several_flux3_references_are_cropped_and_the_first_sizes_it():
     assert image_service.target_size(req, served) == (96, 64)
 
 
-@pytest.mark.parametrize("width, refused", [(4096, False), (4112, True),
-                                            (20000, True)])
-def test_a_thin_first_flux3_reference_meets_the_side_limit(width, refused):
-    """Each of several references keeps its shape, so the size the first
-    gives a request without one is held to the limits of a size asked
-    for."""
+@pytest.mark.parametrize("family, images, ref, want", [
+    ("flux3_klein", [(128, 8192), (512, 512)], (8192, 128), (4096, 64)),
+    ("flux3_klein", [(30, 4096), (512, 512)], (4096, 16), (4096, 16)),
+    ("flux2_klein", [(625, 5000)], (4992, 624), (4096, 512)),
+    # The example of image-api.md and cli.md.
+    ("flux2_klein", [(1000, 8000)], (5712, 704), (4096, 496)),
+    ("flux2_klein", [(64, 512)], (512, 64), (512, 64))])
+def test_an_unsized_edit_scales_a_thin_first_reference_into_the_limits(
+        family, images, ref, want):
+    """Each reference can keep its shape, so the size the first gives a
+    request without one is scaled into the limits of a size asked for,
+    as the first image of a family without that rule is. A size the
+    request gives is kept."""
+    import numpy as np
+
+    served = _edit_served(family, mmproj=False)
+    req = _edit_req(1)
+    req.images = [np.zeros(s + (3,), np.uint8) for s in images]
+    image_service.check_family(req, served)
+    assert (req.refs[0].width, req.refs[0].height) == ref
+    assert image_service.target_size(req, served) == want
+    sized = _edit_req(1, size="512x512")
+    sized.images = req.images
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (512, 512)
+
+
+@pytest.mark.parametrize("width", [4112, 20000])
+def test_a_first_reference_too_thin_to_scale_is_refused(width):
     import numpy as np
 
     served = _edit_served("flux3_klein", mmproj=False)
@@ -872,18 +1012,23 @@ def test_a_thin_first_flux3_reference_meets_the_side_limit(width, refused):
                   np.zeros((512, 512, 3), np.uint8)]
     image_service.check_family(req, served)
     assert (req.refs[0].width, req.refs[0].height) == (width, 16)
-    if not refused:
-        assert image_service.target_size(req, served) == (width, 16)
-        return
     with pytest.raises(image_service.ImageRequestError,
-                       match=f"the first image sizes the request at "
-                             f"{width}x16, over the limit") as e:
+                       match=f"the first reference sizes the edit at "
+                             f"{width}x16, which keeps no side of 16 "
+                             f"pixels") as e:
         image_service.target_size(req, served)
     assert e.value.param == "size" and e.value.status == 400
-    sized = _edit_req(1, size="512x512")
-    sized.images = req.images
-    image_service.check_family(sized, served)
-    assert image_service.target_size(sized, served) == (512, 512)
+
+
+def test_the_canvas_of_one_padded_flux3_reference_is_in_the_limits():
+    """The output of one padded reference is cropped by a box on its
+    canvas, so the canvas is never scaled: its rule keeps it in the
+    limits."""
+    from gmlx.image.families.flux3_klein.family import REFERENCES
+    from gmlx.image.registry import MAX_PIXELS, MAX_SIDE
+
+    r = REFERENCES.values
+    assert r["match_max_pixels"] <= MAX_PIXELS and r["max_side"] <= MAX_SIDE
 
 
 def test_a_flux3_reference_the_rules_refuse_is_named():

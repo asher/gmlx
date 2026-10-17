@@ -26,6 +26,20 @@ from .patches import sync_table
 NOMINAL_SIZE = 64 << 20
 # Free memory reported to the sampler, so it batches rows whenever shapes allow.
 FREE_MEMORY = 1 << 50
+# The patches of ComfyUI's Flux KV Cache node, which a step on the server's
+# cache of reference K and V stands in for, and the reference method it sets.
+KV_PATCHES = frozenset({"attn1_patch", "post_input"})
+KV_METHOD = ("diffusion_model.params.default_ref_method", "index_timestep_zero")
+
+
+def kv_patch(patch, name: str) -> bool:
+    """Whether ``patch`` is the Flux KV Cache node's patch ``name``."""
+    if name == "attn1_patch":
+        cls = type(patch)
+        return cls.__name__ == "KV_Attn_Input" and cls.__module__.endswith("nodes_flux")
+    if name == "post_input":
+        return getattr(patch, "__qualname__", "").startswith("FluxKVCache.")
+    return False
 
 
 @dataclass
@@ -58,6 +72,7 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
     gmlx_table_id: str | None = None
     gmlx_synced_uuid = None
     gmlx_run: str | None = None
+    gmlx_ref_cache: frozenset = frozenset()
 
     def __init__(self, model, load_device, offload_device, size=0,
                  weight_inplace_update=False, fast_disk=False):
@@ -69,6 +84,7 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
         n.gmlx = self.gmlx
         n.gmlx_table_id = self.gmlx_table_id
         n.gmlx_synced_uuid = self.gmlx_synced_uuid
+        n.gmlx_ref_cache = self.gmlx_ref_cache
         return n
 
     def is_dynamic(self):
@@ -90,7 +106,7 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
         b = self.gmlx
         if force:
             b.client.forget()
-        self.gmlx_table_id = sync_table(b.client, b.model_id, self.patches)
+        self.gmlx_table_id = sync_table(b.client, b.model_id, self.patches, b.family)
         self.gmlx_synced_uuid = self.patches_uuid
         b.events.append({"kind": "sync", "table": self.gmlx_table_id})
         return self.gmlx_table_id
@@ -167,7 +183,15 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
 
     # Registrations for what runs inside the DiT forward.
 
+    def _ref_cache_served(self) -> bool:
+        caps = getattr(self.gmlx.client, "capabilities", None) or {}
+        return "ref_cache" in (caps.get("features") or ())
+
     def set_model_patch(self, patch, name):
+        # The Flux KV Cache node's patches become a step on the server's cache.
+        if kv_patch(patch, name) and self._ref_cache_served():
+            self.gmlx_ref_cache = self.gmlx_ref_cache | {name}
+            return
         refuse(f"the model patch {name!r}")
 
     def set_model_patch_replace(self, patch, name, block_name, number, transformer_index=None):
@@ -183,6 +207,8 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
         refuse(f"a weight wrapper on {name}")
 
     def add_object_patch(self, name, obj):
+        if (name, obj) == KV_METHOD and self.gmlx_ref_cache == KV_PATCHES:
+            return super().add_object_patch(name, obj)
         if name == "diffusion_model" or name.startswith("diffusion_model."):
             refuse(f"an object patch on {name}")
         return super().add_object_patch(name, obj)

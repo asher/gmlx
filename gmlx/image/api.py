@@ -56,6 +56,7 @@ from . import memfit
 from .conditioning import (ByteLRU, Conditioning, Reference, array_bytes,
                            conditioning_key)
 from .ops import kq_routes
+from .refusal import RequestRefusal
 from .registry import Family
 from .samplers import (img2img_start, inpaint_blend, make_sampler, noised,
                        noise_from_seed)
@@ -93,22 +94,37 @@ def check_steps(family, variant: str, steps: int) -> None:
     """Refuse a step count a variant with a fixed schedule does not run."""
     n = fixed_steps(family, variant)
     if n is not None and int(steps) != n:
-        raise ValueError(
+        raise RequestRefusal(
             f"{family.title} {variant} runs {n} steps, the schedule it was "
             f"distilled to, not {steps}")
 
 
+def check_guidance(family, variant: str, cfg: float) -> None:
+    """Refuse guidance on a variant the family declares distilled to
+    sample without it, naming the variant that takes it, if any."""
+    other = family.unguided.get(variant)
+    if other is not None and cfg != 1.0:
+        alt = (f", or run the {family.title} {other} checkpoint, which "
+               f"takes guidance" if other else "")
+        raise RequestRefusal(
+            f"the {family.title} {variant} DiT samples without guidance: "
+            f"drop guidance {cfg:g}{alt}")
+
+
 def check_sampling(family, variant: str, flow_map: bool, cfg: float,
                    sampler: str = "euler") -> None:
-    """Refuse guidance and samplers a flow map DiT does not sample with.
-    ``flow_map`` is the flag of the DiT's config, which its header
-    gives."""
+    """Refuse guidance and samplers a flow map DiT does not sample with,
+    and guidance on a variant distilled to sample without it. ``flow_map``
+    is the flag of the DiT's config, which its header gives."""
+    check_guidance(family, variant, cfg)
     if flow_map and cfg != 1.0:
-        raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
-                         f"which samples without guidance: drop cfg {cfg}")
+        raise RequestRefusal(f"the {family.title} {variant} DiT is a flow "
+                             f"map, which samples without guidance: drop "
+                             f"cfg {cfg}")
     if flow_map and sampler != "euler":
-        raise ValueError(f"the {family.title} {variant} DiT is a flow map, "
-                         f"which samples with euler only, not {sampler}")
+        raise RequestRefusal(f"the {family.title} {variant} DiT is a flow "
+                             f"map, which samples with euler only, not "
+                             f"{sampler}")
 
 
 def _canonical_table(entries: tuple) -> str:
@@ -163,6 +179,9 @@ class ImagePipeline:
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
+    # A borrowed encoder's last handle without its model, whose tokenizer
+    # names the conditionings between borrows.
+    keys_encoder: object | None = None
 
     @property
     def vae_scale(self) -> int:
@@ -375,8 +394,9 @@ def _flat(params):
 
 
 def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
-    """Rows a conditioning puts before the image rows: its text rows and
-    the tokens of its reference latents."""
+    """Rows of a conditioning that the family's prefix holds: its text
+    rows, where the prefix holds them, and the tokens of its reference
+    latents."""
     p = pipe.dit.cfg.patch
     if cond.pending:
         px = pipe.vae_scale * p
@@ -384,7 +404,8 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
     else:
         refs = sum((int(r.shape[-2]) // p) * (int(r.shape[-1]) // p)
                    for r in cond.ref_latents)
-    return int(cond.features.shape[0]) - len(cond.image_slots) + refs
+    text = int(cond.features.shape[0]) - len(cond.image_slots)
+    return memfit.prefix_text_rows(pipe.family.name, text) + refs
 
 
 def _text_rows(states) -> int | None:
@@ -426,16 +447,25 @@ def _states(conds) -> list:
 
 
 def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
-               patch_table=None) -> dict:
+               patch_table=None, joined: bool = False,
+               ref_cache: dict | None = None) -> dict:
     """The ``memfit.plan_memory`` arguments that the conditionings of a
     request set, as ``plan_request`` passes them: the text rows of a
     family whose plan prices the prompt, the prefix rows of each
     conditioning and whether the two of a guided request are one, the
-    prefix states of other conditionings a cache holds and its bound, the
-    reference images the VAE encodes, and the references each step runs.
+    prefix states of other conditionings a cache holds and its bound,
+    every state it holds, the reference images the VAE encodes, and the
+    references each step runs.
     ``conds`` is one Conditioning or several, as ``plan_request`` takes
     them, and a conditioning whose references came as latents alone, as
-    those of the step routes do, is priced by their shapes."""
+    those of the step routes do, is priced by their shapes.
+    ``joined`` prices the step of a family in parts as it runs whole,
+    under a time rule other than the reference's: the family's joined
+    row, with every state the cache holds kept beside it. ``ref_cache``
+    is that of ``denoise_step`` for a step that runs on one. On a family
+    whose row prices those steps, the rows whose K and V it holds read
+    them, and the others build their own; the caller counts what it holds
+    already. Other families price the step as without it."""
     states = _states(conds)
     terms = dict(
         caption_tokens=(_text_rows(states)
@@ -447,7 +477,23 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
         ref_sizes=_ref_sizes(states),
         step_refs=_step_refs(states, pipe.vae_scale))
     parts = pipe.family.step
-    if parts is not None:
+    if ref_cache is not None and memfit.prices_ref_cache(pipe.family.name):
+        # No step sheds a state then, so the bound is all the cache holds.
+        held = pipe.captions.bytes
+        build = [c for i, c in enumerate(states)
+                 if c.ref_latents and _ref_key(c, i) not in ref_cache]
+        terms.update(prefix_rows=[_prefix_rows(pipe, c)
+                                  for c in build or states] or None,
+                     prefix_shared=False, prefix_other=held,
+                     prefix_bound=held, prefix_held=held,
+                     ref_cache="build" if build else "read")
+    elif parts is not None and joined:
+        # No step sheds a state then, so the bound is all the cache holds.
+        held = pipe.captions.bytes
+        terms.update(joined=True, prefix_rows=None, prefix_shared=False,
+                     prefix_other=held, prefix_bound=held,
+                     prefix_held=held)
+    elif parts is not None:
         # The states of a step in parts are the plan's prefix cache term.
         # Those of this request count there once, held already or not.
         table = _table_id(pipe, patch_table)
@@ -455,7 +501,8 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
         held = sum(pipe.captions.nbytes(key) for key in {
             _state_key(pipe, c, table, size) for c in states if c.key})
         terms.update(prefix_other=pipe.captions.bytes - held,
-                     prefix_bound=parts.state_bytes)
+                     prefix_bound=parts.state_bytes,
+                     prefix_held=pipe.captions.bytes)
     return terms
 
 
@@ -463,7 +510,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
                  cfg: float | None = None, caption_tokens: int | None = None,
                  conds=None, patch_table=None, init_image: bool = False,
                  keep_encoder: bool = False, budget: float | None = None,
-                 overcommit: bool | None = None) -> memfit.MemoryPlan:
+                 overcommit: bool | None = None,
+                 live=()) -> memfit.MemoryPlan:
     """The memory plan of one request on this pipeline: its weights, an
     encoder still resident, the caches it holds, and the phase peaks.
     ``conds`` is the request's conditioning, or the positive and the
@@ -480,8 +528,11 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     image's.
     The VAE passes are priced for the VAE this pipeline loaded, on its
     conv path, and ``vae_decode`` and ``vae_encode`` run them as the plan
-    they are given says. Raises ImageMemoryError when no lever makes it
-    fit."""
+    they are given says. A plan that does not fit with the conditioning
+    states held sheds the bytes it names here, before the request runs, by
+    the order of ``shed_states``, ``live`` the keys of the conditionings
+    of work still running.
+    Raises ImageMemoryError when no lever makes it fit."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
@@ -499,7 +550,7 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
 
         price = {op: tiling.price_args(pipe.vae, op, 1)
                  for op in ("decode", "encode")}
-    return memfit.plan_memory(
+    plan = memfit.plan_memory(
         pipe.weights.get("dit", 0),
         pipe.weights.get("encoder", 0) if resident else 0,
         pipe.weights.get("vae", 0),
@@ -512,6 +563,27 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
         cache_bytes=caches, init_image=init_image, vae_price=price,
         budget=budget, overcommit=overcommit, **terms)
+    if plan.shed_bytes:
+        shed_states(pipe, plan.shed_bytes, _states(conds), live)
+    return plan
+
+
+def shed_states(pipe: ImagePipeline, nbytes: int, own=(), live=()) -> int:
+    """Shed held conditioning states until ``nbytes`` of them are gone:
+    those of finished work first, then those of ``live``, the work still
+    running, and those of ``own``, the request's, last, the least recently
+    used first within each. ``own`` and ``live`` hold conditionings or
+    their keys. A request does so before it runs when its plan names the
+    bytes. The states are a cache: shedding one changes the speed of a
+    later request that would read it, never a result. Returns the bytes
+    shed."""
+    def keys(conds) -> set:
+        return {c if isinstance(c, str) else c.key for c in conds}
+
+    mine, busy = keys(own), keys(live)
+    return pipe.captions.shed_by(
+        int(nbytes), lambda k: 2 if k[0] in mine else 1 if k[0] in busy
+        else 0)
 
 
 def references(pipe: ImagePipeline, images, *,
@@ -532,21 +604,23 @@ def references(pipe: ImagePipeline, images, *,
     if edit is None:
         if not images:
             return ()
-        raise ValueError(f"{pipe.family.title} takes no reference images")
+        raise RequestRefusal(f"{pipe.family.title} takes no reference "
+                             "images")
     if len(images) > edit.max_refs:
-        raise ValueError(
+        raise RequestRefusal(
             f"{pipe.family.title} takes at most {edit.max_refs} reference "
             f"images, and the request has {len(images)}")
     if edit.prepare_all is not None:
         if area is not None:
-            raise ValueError(f"{pipe.family.title} sizes its references by "
-                             "its own rule, and takes no reference area")
+            raise RequestRefusal(f"{pipe.family.title} sizes its references "
+                                 "by its own rule, and takes no reference "
+                                 "area")
         if images and all(isinstance(r, Reference) for r in images):
             return tuple(images)
         return edit.prepare_all(images)
     area = edit.area if area is None else int(area)
     if not edit.min_area <= area <= edit.area:
-        raise ValueError(
+        raise RequestRefusal(
             f"a reference area of {area} pixels is outside "
             f"{edit.min_area} to {edit.area}, which {pipe.family.title} "
             "takes")
@@ -554,12 +628,14 @@ def references(pipe: ImagePipeline, images, *,
                  for r in images)
 
 
-def _cond_key(pipe: ImagePipeline, prompt: str, refs: tuple) -> str:
+def _cond_key(pipe: ImagePipeline, prompt: str, refs: tuple,
+              enc=None) -> str:
     """The cache key of the conditioning of ``prompt`` with ``refs``. It
     reads the encoder's tokenizer alone, which a released encoder keeps.
     On a family whose encoder reads the prompt alone it is the key of the
-    text."""
-    enc = pipe.encoder
+    text. ``enc`` is the encoder whose keys it names, the pipeline's by
+    default."""
+    enc = enc or pipe.encoder
     edit = pipe.family.edit
     if refs and edit is not None and not edit.text_only:
         return conditioning_key(
@@ -800,12 +876,40 @@ def _table_id(pipe: ImagePipeline, patch_table) -> str:
 
 
 def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
-                 patch_table=None, target=None) -> mx.array:
+                 patch_table=None, target=None,
+                 time: str = "reference",
+                 ref_cache: dict | None = None) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
     ``target`` is the sigma the step goes to, likewise, which a flow map
-    DiT takes and every other DiT refuses. Outside a ``state_scope`` the
-    conditionings of the call are its scope."""
+    DiT takes and every other DiT refuses. ``time`` names how the DiT
+    embeds the time, one of its ``time_rules``: "reference", the rule
+    gmlx samples on, which every DiT takes. Outside a ``state_scope`` the
+    conditionings of the call are its scope.
+
+    A family whose step runs in parts runs it whole under any other time
+    rule: the tokens of the reference latents join the rows of the step
+    at the step's time. ``ref_cache`` is a dict the caller keeps for one
+    sampling. With it, the first step of each row with reference latents
+    runs them at time zero with their queries over every key, and keeps
+    each block's K and V of them in ``ref_cache``, and the later steps of
+    the row read those K and V in place of the tokens. The K and V of a
+    reference depend on the row's latents, so each row keeps its own,
+    under its conditioning and its place in the call. That is how
+    ComfyUI's Flux KV Cache node samples. A family whose step runs in
+    parts takes ``ref_cache`` under another time rule than the reference's
+    only."""
+    if time not in getattr(pipe.dit, "time_rules", ("reference",)):
+        raise ValueError(f"the {pipe.family.title} DiT has no time rule "
+                         f"{time!r}")
+    if ref_cache is not None:
+        if not hasattr(pipe.dit, "extract"):
+            raise ValueError(f"the {pipe.family.title} DiT keeps no cache "
+                             f"of reference K and V")
+        if pipe.family.step is not None and time == "reference":
+            raise ValueError(f"the {pipe.family.title} DiT caches its "
+                             f"references by itself under the reference's "
+                             f"time rule")
     table = _table_id(pipe, patch_table)
     x = mx.array(latents).astype(mx.float32)
     if x.ndim != 4:
@@ -825,13 +929,21 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
     with state_scope(pipe, rows):
         out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table,
-                    None if tgt is None else tgt[i]) for i in range(b)]
+                    None if tgt is None else tgt[i], time, ref_cache, i)
+               for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
 
 class StateScopeError(RuntimeError):
     """A state scope asked for inside an open scope of other
     conditionings."""
+
+
+def _ref_key(cond: Conditioning, row: int) -> tuple:
+    """The key of the K and V of a row's references in the ``ref_cache``
+    of ``denoise_step``: the conditioning and the row's place in the
+    call."""
+    return (_ident(cond), row)
 
 
 def _ident(cond: Conditioning) -> tuple:
@@ -995,12 +1107,21 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
 
 
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
-         cond: Conditioning, table, target=None) -> mx.array:
+         cond: Conditioning, table, target=None,
+         time: str = "reference", ref_cache: dict | None = None,
+         row: int = 0) -> mx.array:
     """One row. A DiT that takes reference images gets the tokens of the
     conditioning's reference latents from its ``references``, and a flow
-    map the ``target`` its modulation reads."""
+    map the ``target`` its modulation reads. A time rule other than the
+    reference's reaches the DiT through its modulation, and a family whose
+    step runs in parts runs it whole then. ``ref_cache`` is that of
+    ``denoise_step``, and ``row`` the row's place in its call."""
     dit = pipe.dit
-    if pipe.family.step is not None:
+    modulated = hasattr(dit, "modulation") and hasattr(dit, "caption")
+    if time != "reference" and not modulated:
+        raise ValueError(f"the {pipe.family.title} DiT takes the time rule "
+                         f"{time!r} through no modulation")
+    if pipe.family.step is not None and time == "reference":
         if target is not None:
             raise ValueError(f"the {pipe.family.title} DiT takes no target "
                              f"time")
@@ -1011,17 +1132,41 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         if not hasattr(dit, "references"):
             raise ValueError(f"the {pipe.family.title} DiT takes no "
                              f"reference images")
-        kw["refs"] = dit.references([mx.array(z)[None]
-                                     for z in cond.ref_latents])
-    if not (hasattr(dit, "modulation") and hasattr(dit, "caption")):
+        refs = dit.references([mx.array(z)[None] for z in cond.ref_latents])
+        if ref_cache is not None:
+            return _cached_row(pipe, x, sigma, cond, table, time, refs,
+                               ref_cache, _ref_key(cond, row))
+        kw["refs"] = refs
+    if not modulated:
         if target is not None:
             kw["target"] = np.reshape(np.float32(target), (1,))
         return _under(pipe, table, lambda: dit(
             x, np.reshape(sigma, (1,)), cond.features[None], **kw))
-    mod = _modulation(pipe, sigma, table, target)
+    mod = _modulation(pipe, sigma, table, target, time)
     caption = _caption(pipe, cond, table)
     return _under(pipe, table, lambda: dit(
         x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption, **kw))
+
+
+def _cached_row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
+                cond: Conditioning, table, time: str, refs,
+                ref_cache: dict, key: tuple) -> mx.array:
+    """A row with reference latents under the ``ref_cache`` of
+    ``denoise_step``: the first step of the row extracts the K and V of
+    its references under ``key``, and every later one reads them."""
+    dit = pipe.dit
+    mod = _modulation(pipe, sigma, table, None, time)
+    caption = _caption(pipe, cond, table)
+    s = np.reshape(sigma, (1,))
+    held = ref_cache.get(key)
+    if held is not None:
+        return _under(pipe, table, lambda: dit(
+            x, s, None, mod=mod, caption=caption, cache=held))
+    v, held = _under(pipe, table, lambda: dit.extract(
+        x, s, None, refs=refs, mod=mod, caption=caption))
+    mx.eval(v, *held.arrays())
+    ref_cache[key] = held
+    return v
 
 
 def _memo(cache: ByteLRU, key, make):
@@ -1038,10 +1183,18 @@ def _memo(cache: ByteLRU, key, make):
     return hit
 
 
-def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None):
+def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
+                time: str = "reference"):
     """The modulation of ``sigma``, and of ``target`` for a flow map, kept
-    under their float32 bits and the patch table."""
+    under their float32 bits and the patch table, and under the time rule
+    when it is not the reference's."""
     s = np.float32(sigma)
+    if time != "reference":
+        if target is not None:
+            raise ValueError("a flow map takes the reference's time rule")
+        return _memo(pipe.modulations, (s.tobytes(), table, "time", time),
+                     lambda: _under(pipe, table, lambda: pipe.dit.modulation(
+                         np.reshape(s, (1,)), 1, time=time)))
     if target is None:
         return _memo(pipe.modulations, (s.tobytes(), table),
                      lambda: _under(pipe, table, lambda: pipe.dit.modulation(
@@ -1095,6 +1248,21 @@ def _latent_mask(mask, shape: tuple, scale: int) -> mx.array:
     return mx.array(m)
 
 
+def image_tokens(pipe: ImagePipeline, height: int, width: int) -> int:
+    """The DiT tokens of the image a request makes, without the tokens of
+    its references."""
+    token_px = pipe.vae_scale * pipe.dit.cfg.patch
+    return (height // token_px) * (width // token_px)
+
+
+def image_sigmas(pipe: ImagePipeline, steps: int, height: int,
+                 width: int) -> np.ndarray:
+    """The schedule of ``steps`` for an image of ``height`` by ``width``.
+    A dynamic shift reads the image's own tokens, as the reference
+    pipelines do, and never those of the references of an edit."""
+    return pipe.sigmas(steps, image_tokens(pipe, height, width))
+
+
 def sample(pipe: ImagePipeline, cond: Conditioning, *,
            neg: Conditioning | None = None, cfg: float | None = None,
            height: int, width: int, steps: int | None = None,
@@ -1126,14 +1294,13 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         raise ValueError(f"height and width must be positive multiples of "
                          f"{unit}, not {height}x{width}")
     if not 0.0 < denoise <= 1.0:
-        raise ValueError(f"denoise must lie in (0, 1], not {denoise}")
+        raise RequestRefusal(f"denoise must lie in (0, 1], not {denoise}")
     if init_latents is None and (denoise < 1.0 or mask is not None):
         raise ValueError("denoise below 1 and mask need init_latents")
 
     if sigmas is None:
-        token_px = pipe.vae_scale * pipe.dit.cfg.patch
-        s = pipe.sigmas(pipe.defaults.steps if steps is None else steps,
-                        (height // token_px) * (width // token_px))
+        s = image_sigmas(pipe, pipe.defaults.steps if steps is None
+                         else steps, height, width)
     else:
         s = check_sigmas(sigmas)
         if steps is not None and steps != len(s) - 1:
@@ -1144,7 +1311,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         init = mx.array(init_latents).astype(mx.float32)
         s = s[img2img_start(len(s) - 1, denoise):]
         if len(s) < 2:
-            raise ValueError(f"denoise {denoise} leaves no step")
+            raise RequestRefusal(f"denoise {denoise} leaves no step")
 
     if init is not None:
         b = init.shape[0]
@@ -1171,6 +1338,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         noise = noise.astype(getattr(mx, rules.noise)).astype(mx.float32)
     act = (pipe.dit.act_dtype
            if rules is not None and rules.act_update else None)
+    held = (pipe.dit.act_dtype
+            if rules is not None and rules.act_latents else mx.float32)
     m = None if mask is None else _latent_mask(mask, shape, pipe.vae_scale)
 
     x = noise if init is None else noised(s[0], noise, init)
@@ -1195,6 +1364,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             x = smp.step(x, v, i)
             if m is not None:
                 x = inpaint_blend(x, m, noised(s[i + 1], noise, init))
+            if held != mx.float32:
+                x = x.astype(held).astype(mx.float32)
             mx.eval(x)
             if on_step is not None:
                 on_step(i, x)
@@ -1230,7 +1401,8 @@ def vae_decode(pipe: ImagePipeline, latents, *, tiled: bool | None = None,
     the bytes it leaves for the pass."""
     vae = _need_vae(pipe)
     if alpha and vae.config.out_channels != 4:
-        raise ValueError(f"the {pipe.family.title} VAE has no alpha channel")
+        raise RequestRefusal(f"the {pipe.family.title} VAE has no alpha "
+                             "channel")
     from .vae import tiling
 
     tiled, free = _vae_pass(plan, "decode", tiled)

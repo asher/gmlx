@@ -22,7 +22,10 @@ same conditioning. The exact gate runs the step in the oracle's fp32
 arithmetic in a child process and holds the teacher-forced rows to
 EXACT_TOL, and the free rows and the velocity to the gates from the
 floors the manifest records; each wrong table of ``wrong_tables`` must
-miss it. The delta half runs on the CPU in test_image_flux3_lora_map.py.
+miss it. The site gate holds each op of every block and each linear leaf
+under the adapter in the diffusers names, the adapted leaves with their
+delta, to the stock op in float32 on the same input. The delta half runs
+on the CPU in test_image_flux3_lora_map.py.
 
 Skipped unless the manifest is committed, GMLX_IMAGE_FIXTURES holds its
 arrays and KQUANT_TEST_GGUF_DIR the DiT GGUF."""
@@ -36,6 +39,7 @@ import numpy as np
 import pytest
 
 import flux3_gates as fg
+import qwen_gates as qg
 from block_gates import exact_process, rerun_exact
 from image_fixtures import fixture_view, image_dits
 from lora_fixtures import DIALECTS, write_adapter
@@ -339,3 +343,95 @@ def test_check7_exact_gate_at_512(synthetic, pipe, tmp_path, request):
     print(f"{label}: the weakest wrong table is {weakest[1]} at "
           f"{weakest[0]:.0f} of the gate")
     assert not over, over
+
+
+# The site gate, in the diffusers names.
+
+SITE = "diffusers diffusers"
+
+
+def table_sites(pipe, arrays: dict, tid: str) -> tuple:
+    """The sites of one free-running production step under the table
+    ``tid``, read against the exact ops with the table's delta."""
+    from gmlx.image.lora import install
+
+    built = install.build_table(pipe, tid, pipe.dit.act_dtype, "block")
+    sites, routed, heads, skipped = {}, {}, {}, set()
+    prev = install.activate(pipe, tid)
+    try:
+        with fg.step_sites(pipe.dit, sites, routed=routed, heads=heads,
+                           built=built, skipped=skipped):
+            vel = fg.free_rows(pipe.dit, arrays)["velocity"]
+    finally:
+        install.restore(pipe, prev)
+    return sites, routed, skipped, vel
+
+
+def _site_setup(synthetic, pipe, tmp):
+    from gmlx.image import api
+
+    arrays, m = synthetic
+    entries = _entries(_adapter(pipe, tmp, SITE), m["inputs"]["strength"])
+    return arrays, m, entries, api.define_patch_table(pipe, entries)
+
+
+@pytest.mark.integration
+def test_check7_site_gate_at_512(synthetic, pipe, tmp_path):
+    """Every op of every block and every linear leaf a step calls under
+    the adapter's table, each adapted leaf with its delta, is within its
+    site gate of the stock op in float32 on the same input, and that
+    run's velocity passes the product gate."""
+    arrays, m, entries, tid = _site_setup(synthetic, pipe, tmp_path)
+    sites, routed, skipped, vel = table_sites(pipe, arrays, tid)
+    missing = fg.missing_ops(pipe.dit, sites, routed, skipped=skipped)
+    assert not missing, missing
+    adapted = {p for p, _, _ in entries}
+    assert len(adapted) == m["inputs"]["lora_pairs"]
+    # An adapted leaf is held to the count of a leaf under its adapter, or
+    # to the lora op's own.
+    held = {k[0] for k, (_, g) in sites.items() if len(k) == 2
+            and g >= 2 * 3 * qg.SITE_UNIT}
+    assert adapted - skipped <= held, sorted(adapted - skipped - held)[:4]
+    lora_on = sum(v == "quantized_matmul_lora" for v in routed.values())
+    print(f"flux3 check7 sites: {len(adapted)} adapted leaves, {lora_on} "
+          f"calls on the lora op, leaves on a float32 input "
+          f"{sorted(skipped)}")
+    worst = qg.worst_by_op(sites)
+    print(f"flux3 check7 sites: {len(sites)} readings, the largest over its "
+          "gate by op: "
+          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items())))
+    over = qg.over_gate(sites)
+    assert not over, over
+    rel = fg.rel(vel, arrays["velocity"])
+    assert rel <= m["tolerances"]["velocity"]["rel_l2"], rel
+
+
+@pytest.mark.integration
+def test_check7_a_leaf_that_drops_its_delta_fails_the_site_gate(
+        synthetic, pipe, tmp_path, monkeypatch):
+    """The adapter's leaves of its middle single block run their base
+    product alone: their sites read the table's delta as error, and no
+    other leaf moves past its gate."""
+    from gmlx.image.lora import install
+
+    arrays, _, entries, tid = _site_setup(synthetic, pipe, tmp_path)
+    blocks = sorted({b for p, _, _ in entries
+                     if (b := _single(p)) is not None})
+    mid = blocks[len(blocks) // 2]
+    dropped = {p for p, _, _ in entries if _single(p) == mid}
+    real = install.ImageLoRALinear.__call__
+
+    def call(self, x):
+        return self.base(x) if self._path in dropped else real(self, x)
+
+    monkeypatch.setattr(install.ImageLoRALinear, "__call__", call)
+    sites, _, _, _ = table_sites(pipe, arrays, tid)
+    over = qg.over_gate(sites)
+    leaves = {k[0] for k in over if len(k) == 2}
+    low = min(sites[k][0] / sites[k][1] for k in sites
+              if len(k) == 2 and k[0] in dropped)
+    print(f"flux3 check7 sites, single block {mid}'s deltas dropped: "
+          f"{len(over)} readings over the gate, {len(leaves)} of "
+          f"{len(dropped)} dropped leaves, the least at {low:.1f} of its "
+          "gate")
+    assert len(dropped) == 6 and leaves == dropped, sorted(dropped - leaves)

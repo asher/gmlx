@@ -27,6 +27,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+# The largest image a request makes: its pixels and its longer side.
+from gmlx.image.registry import MAX_PIXELS, MAX_SIDE
+
 from .subservice import SingleWorker
 
 _log = logging.getLogger(__name__)
@@ -102,10 +105,24 @@ def configure_caches(settings) -> None:
 
 
 def _steps_cache_bytes() -> int:
-    """What the step routes' caches hold now."""
+    """What the step routes' caches hold now, the reference K and V of
+    their runs too."""
     from .image_steps import STATE
 
-    return STATE.tensors.bytes + STATE.adapters.bytes
+    with STATE.lock:
+        runs = list(STATE.runs.values())
+    return (STATE.tensors.bytes + STATE.adapters.bytes
+            + sum(c.nbytes for r in runs for c in r.ref_cache.values()))
+
+
+def _live_conds() -> set:
+    """The keys of the conditionings of the step routes' runs, whose
+    states a shed takes after those of finished work."""
+    from .image_steps import STATE
+
+    with STATE.lock:
+        runs = list(STATE.runs.values())
+    return {k for r in runs for k in r.conds}
 
 
 def cache_bytes() -> tuple:
@@ -160,7 +177,8 @@ def entry_plan(spec) -> EntryPlan:
     model, a family the config does not name, and an entry that cannot
     hold one image of its default size in the working budget."""
     from gmlx.image import memfit
-    from gmlx.image.api import _header_bytes, check_steps, sampler_defaults
+    from gmlx.image.api import (_header_bytes, check_sampling, check_steps,
+                                sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
 
@@ -193,6 +211,15 @@ def entry_plan(spec) -> EntryPlan:
     cfg = (spec.defaults or {}).get("guidance")
     if cfg is None:
         cfg = defaults.cfg if defaults is not None else 1.0
+    flow_map = bool(ident.config.get("flow_map"))
+    sampler = (spec.defaults or {}).get("sampler") or "euler"
+    for name, args in (("guidance", (float(cfg),)),
+                       ("sampler", (1.0, sampler))):
+        try:
+            check_sampling(fam, ident.variant, flow_map, *args)
+        except ValueError as e:
+            raise ImageModelError(
+                f"image model {spec.id!r}: defaults.{name}: {e}") from None
     act = image_activation(fam.name)
     tensor_cache, adapter_cache = cache_bytes()
     own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
@@ -469,9 +496,6 @@ RESPONSE_FORMATS = ("b64_json", "url")
 MAX_N = 10
 MAX_PARTIALS = 3
 MAX_REFS = 16
-# The largest image a request makes: its pixels and its longer side.
-MAX_PIXELS = 2048 * 2048
-MAX_SIDE = 4096
 # Model names an OpenAI client sends that mean the default image model.
 _ALIAS_PREFIXES = ("gpt-image-", "dall-e-", "chatgpt-image")
 # Accepted and ignored, with one warning line.
@@ -949,7 +973,10 @@ def _stride(pipe) -> int:
 def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     """(width, height) of the request: its size, else the size the family
     gives its prepared references, else the first image's for an edit or
-    a variation, else the entry's default."""
+    a variation, else the entry's default. A size the request does not
+    give is scaled into the image limits."""
+    from gmlx.image.registry import edit_size
+
     pipe = served.pipe
     unit = _stride(pipe)
     if req.size is not None:
@@ -959,14 +986,12 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
                        f"of {unit}", "size")
         return w, h
     if req.refs and req.mask is None and pipe.family.edit.size is not None:
-        w, h = pipe.family.edit.size(req.refs)
-        # Several references are each kept at their own shape, so a thin
-        # first one can give a size past the limits of a size asked for.
-        if not _in_limits((w, h)):
-            raise _bad(f"the first image sizes the request at {w}x{h}, over "
-                       f"the limit of {MAX_PIXELS} pixels (2048x2048) and a "
-                       f"side of {MAX_SIDE}: pass a size", "size")
-        return w, h
+        # Each reference of a request can keep its own shape, so a thin
+        # first one gives a size that is scaled into the limits.
+        try:
+            return edit_size(pipe.family, req.refs, unit)
+        except ValueError as e:
+            raise _bad(str(e), "size") from None
     if req.images:
         h, w = req.images[0].shape[:2]
         # A large image gives the largest size of its shape in the limits.
@@ -1000,10 +1025,13 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     """Refuse what the family cannot do: transparency without an alpha
     VAE, a step count other than the one a variant with a fixed schedule
     runs, more images than an edit takes, and edits without a vision
-    tower. The references of a family that prepares them together are
-    prepared here into ``req.refs``, and an image its rules refuse gets
-    a 400 that names it."""
-    from gmlx.image.api import fixed_steps
+    tower, and guidance on a variant distilled to sample without it or on
+    a flow map DiT, and a flow map's sampler other than euler, the rules
+    of ``api.check_sampling``, which ``api.sample`` holds too. The
+    references of a family that prepares them together are prepared here
+    into ``req.refs``, and an image its rules refuse gets a 400 that
+    names it."""
+    from gmlx.image.api import check_sampling, fixed_steps
 
     pipe = served.pipe
     fam = pipe.family
@@ -1011,6 +1039,19 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if n is not None and req.steps is not None and req.steps != n:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
+    dit_cfg = getattr(getattr(pipe, "dit", None), "cfg", None)
+    flow_map = bool(getattr(dit_cfg, "flow_map", False))
+    if flow_map or pipe.variant in fam.unguided:
+        try:
+            check_sampling(fam, pipe.variant, flow_map, _guided(req, served))
+        except ValueError as e:
+            raise _bad(f"guidance: {e}", "guidance") from None
+        defaults = getattr(served.spec, "defaults", None) or {}
+        sampler = req.sampler or defaults.get("sampler") or "euler"
+        try:
+            check_sampling(fam, pipe.variant, flow_map, 1.0, sampler)
+        except ValueError as e:
+            raise _bad(f"sampler: {e}", "sampler") from None
     if req.background == "transparent":
         from gmlx.image.vae.reader import VAES
 
@@ -1051,11 +1092,17 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
               tower: bool = False) -> dict:
     """The plan_memory arguments of a request on ``served``. A staged
     entry's request loads its encoder alone, with the vision tower when
-    ``tower`` says it has reference images."""
+    ``tower`` says it has reference images. The conditioning states the
+    pipeline holds are other conditionings' until the request names its
+    own."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
-    staged = {}
+    staged, states = {}, {}
+    if pipe.family.step is not None:
+        held = pipe.captions.bytes
+        states = dict(prefix_other=held, prefix_held=held,
+                      prefix_bound=pipe.family.step.state_bytes)
     if getattr(served.plan, "staged", False):
         plan = served.plan
         staged = dict(
@@ -1074,7 +1121,39 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
                            and not served.plan.keep_encoder),
         cache_bytes=(pipe.conditionings.bytes + pipe.modulations.bytes
                      + _steps_cache_bytes()),
-        budget=budget, overcommit=False) | staged
+        budget=budget, overcommit=False) | staged | states
+
+
+def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
+               init: bool, budget, prompts=()) -> None:
+    """Shed the conditioning states a request does not fit beside before
+    its encode, as few as its plan names: those of finished work first,
+    then those of the step routes' runs, and those of its own
+    conditionings, of ``prompts`` with ``refs``, last. The request's own
+    plan counts what stays."""
+    from gmlx.image import api, memfit
+
+    pipe = served.pipe
+    if budget is None or pipe.family.step is None or not pipe.captions.bytes:
+        return
+    own = set()
+    enc = pipe.encoder or pipe.keys_encoder
+    if enc is not None:
+        # The keys read the tokenizer alone, which a released encoder and
+        # a borrowed one's last handle keep.
+        own = {api._cond_key(pipe, p, refs, enc) for p in prompts}
+    sizes = [(r.height, r.width) for r in refs]
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
+    args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
+                                pipe.captions.keys(lambda k: k[0] in own))
+    try:
+        plan = memfit.plan_memory(height=size[1], width=size[0],
+                                  init_image=init, ref_sizes=sizes,
+                                  _hint=False, **args)
+    except memfit.ImageMemoryError:
+        return
+    if plan.shed_bytes:
+        api.shed_states(pipe, plan.shed_bytes, own, _live_conds())
 
 
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
@@ -1142,12 +1221,20 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 
 def size_fits(served: ServedImage, width: int, height: int, budget, *,
               cfg: float = 1.0, init: bool = False, conds=None,
-              patch_table=None) -> bool:
+              patch_table=None, joined: bool = False, ref_cache=None,
+              building: int = 0, held_in=None, hint: bool = False) -> bool:
     """Whether the memory plan of an image of ``width`` x ``height`` on
     ``served`` fits ``budget``, as the image routes plan a request. The
-    step routes ask it before a step, a VAE decode and a VAE encode. The
-    conditionings of a step, ``conds``, are priced as ``plan_request``
-    prices them: their text rows, a prefix and the reference latents."""
+    step routes ask it before a step, a VAE decode and a VAE encode, and
+    ``held_in`` names the phase each runs, which alone counts the held
+    conditioning states. The conditionings of a step, ``conds``, are
+    priced as ``plan_request`` prices them: their text rows, a prefix and
+    the reference latents, or by ``plan_terms``'s ``joined`` and
+    ``ref_cache`` rules. ``building`` is the bytes of reference K and V
+    the step keeps, on a family whose row does not count them itself. A
+    plan that does not fit with the held states sheds the bytes it names,
+    the states of the step's own conditionings last. With ``hint`` a plan
+    that does not fit raises its ImageMemoryError, which names what fits."""
     from gmlx.image import api, memfit
 
     if budget is None:
@@ -1155,12 +1242,22 @@ def size_fits(served: ServedImage, width: int, height: int, budget, *,
     args = _fit_args(served.pipe, served, budget, cfg)
     if conds:
         args.update(api.plan_terms(served.pipe, conds, height=int(height),
-                                   width=int(width), patch_table=patch_table))
+                                   width=int(width), patch_table=patch_table,
+                                   joined=joined, ref_cache=ref_cache))
+    if args.get("ref_cache") != "build":
+        args["cache_bytes"] += int(building)
     try:
-        return memfit.plan_memory(height=int(height), width=int(width),
-                                  init_image=init, _hint=False, **args).fits
+        plan = memfit.plan_memory(height=int(height), width=int(width),
+                                  init_image=init, held_in=held_in,
+                                  _hint=hint, **args)
     except memfit.ImageMemoryError:
+        if hint:
+            raise
         return False
+    if plan.shed_bytes:
+        api.shed_states(served.pipe, plan.shed_bytes, conds or (),
+                        _live_conds())
+    return plan.fits
 
 
 def _ensure_encoder(served: ServedImage, tower: bool = True) -> None:
@@ -1399,6 +1496,8 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             mask = mask_from_image(req.mask, (width, height))
 
     table, adapters = _adapter_table(served, req.adapters, model_dirs)
+    _make_room(served, cfg, size, refs, init is not None, budget,
+               [prompt] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()
     cond, neg = _encode(served, prompt, neg_text, refs, borrow)
     plan = api.plan_request(
@@ -1406,7 +1505,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
         conds=[cond] if neg is None else [cond, neg], patch_table=table,
         init_image=init is not None,
         keep_encoder=served.plan.keep_encoder, budget=budget,
-        overcommit=budget is None)
+        overcommit=budget is None, live=_live_conds())
     enc = pipe.encoder
     if enc is not None and enc.owned and not enc.released and (
             not served.plan.keep_encoder or plan.release_encoder):
@@ -1426,8 +1525,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             timeout_s and time.monotonic() - last[0] > timeout_s)
 
     denoise = 1.0 if strength is None else float(strength)
-    token_px = pipe.vae_scale * pipe.dit.cfg.patch
-    sigmas = pipe.sigmas(steps, (height // token_px) * (width // token_px))
+    sigmas = api.image_sigmas(pipe, steps, height, width)
     if init_latents is not None:
         sigmas = sigmas[img2img_start(len(sigmas) - 1, denoise):]
     run_steps = len(sigmas) - 1
@@ -1497,7 +1595,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
         del x
         mx.clear_cache()
 
-    tokens = (height // token_px) * (width // token_px)
+    tokens = api.image_tokens(pipe, height, width)
     text_tokens = int(cond.features.shape[0]) - len(cond.image_slots) + (
         0 if neg is None else int(neg.features.shape[0]) - len(neg.image_slots))
     image_tokens = 0

@@ -639,13 +639,27 @@ gmlx pull qwen-image --quant Q5_K_M
 ```
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
-`krea-2-turbo`, `flux-3-klein` or `flux-3-klein-base`, pulls its DiT, text
-encoder and VAE, checks the VAE
-against its published sha256, packs it to GGUF, and adds an `image_models`
-entry. The quants default to
-the ones for this Mac's memory, and an encoder or VAE already on disk is
-used again when its weights match.
-[Models and quants](images.md#models-and-quants) has the quants for each Mac.
+`krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,
+`flux-2-klein-base-9b`, `flux-2-klein-9b-kv`, `flux-3-klein` or
+`flux-3-klein-base`, pulls its DiT, text encoder and VAE, checks the VAE
+against its published sha256, packs it to GGUF, and adds an
+`image_models` entry. The quants default to
+the ones for this Mac's memory, and an encoder already on disk is used
+again when its weights match. On a Mac where no DiT of the model makes an
+image, such as a 9B model on 16 GB, `pull` downloads nothing, names the
+smallest Mac that runs one, and takes a DiT only when `--quant` names it.
+When the three parts do not fit the Mac's memory together, or an image
+does not fit at all, the plan gives the peak of an image at the entry's
+size, as `image generate` plans it. A VAE GGUF on disk packed from the recipe's
+source is used again. Without one, a pack from another source serves when
+it is labeled for the family or for one that decodes with the same
+autoencoder, such as an earlier F32 pack of the FLUX.2 VAE, and the plan
+names the pack it reuses.
+[Models and quants](images.md#models-and-quants) has the quants for each
+Mac. `pull` prints each model's license before it downloads, and the
+license of `flux-2-klein-9b`, `flux-2-klein-base-9b` and
+`flux-2-klein-9b-kv` allows non-commercial use only, as
+[Licenses](images.md#licenses) says.
 
 Of several encoders on disk, `pull` takes the quant for this Mac first,
 then a chat model, then the file nearest the DiT. A chat model taken as
@@ -663,7 +677,7 @@ names the encoder file and the vision tower that `pull` adds.
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |
 | `--json` | Off | Emit each verdict as JSON before downloading. |
-| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. |
+| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. Without it, a pull on a Mac where no DiT of the model makes an image downloads nothing. |
 | `--encoder-quant QUANT` | The one for this Mac's memory | Image models: download the text encoder at this quant. Without it, a matching encoder on disk is used at any quant. |
 | `--only PARTS` | All three | Image models: pull only these parts, a comma list of `dit`, `encoder` and `vae`. |
 | `--keep-source` | Off | Image models: keep the safetensors VAE after packing it. |
@@ -958,10 +972,17 @@ the weights load.
 | Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
 | Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
 | FLUX.3 klein | Qwen3-VL-4B-Instruct, its text GGUF | The FLUX.2 autoencoder | 16 steps and guidance 1. Base: 50 steps and guidance 3.5. |
+| FLUX.2 klein | Qwen3-4B | The FLUX.2 autoencoder | 4 steps and guidance 1, which is the only guidance it takes. Base: 50 steps and guidance 4. |
+| FLUX.2 klein 9B | Qwen3-8B | The FLUX.2 autoencoder | The same as FLUX.2 klein's. Its license allows non-commercial use only. |
 
 FLUX.3 klein Base shares the distilled model's architecture, encoder and
 VAE, and gmlx tells the two apart by their tensors. The distilled model
 runs any step count on its own schedule.
+
+FLUX.2 klein Base and the distilled model are told apart the same way,
+at both sizes. The distilled model refuses `--guidance` other than 1 before any file
+loads, as BFL's command line does, and names Base as the checkpoint that
+takes guidance.
 
 Qwen-Image 2.1 Turbo shares the base model's architecture, encoder and VAE.
 gmlx tells the two apart by their weights. Turbo samples on the eight sigmas
@@ -985,9 +1006,10 @@ multiple of 32, and a reference keeps its alpha channel. The text encoder
 reads the references through its vision tower, which `--encoder-mmproj`
 loads from the encoder's mmproj GGUF, and the VAE encodes them. `--size`
 sets the size of the output, which defaults to the entry's `defaults.size`
-or the variant's, and not to a reference's. The fit check counts the references, and a request that does
-not fit is refused before any model loads. Z-Image and Krea 2 take no
-reference images, and `--ref` exits 2 on them.
+or the variant's, and not to a reference's. The fit check counts the
+references, and a request that does not fit is refused before any model
+loads. Z-Image and Krea 2 take no reference images, and `--ref` exits 2 on
+them.
 
 `--ref` gives FLUX.3 klein up to 10 reference images too. Its text encoder
 reads the prompt alone, so it needs no `--encoder-mmproj`, and the VAE
@@ -995,17 +1017,33 @@ encodes the references for the DiT. A single reference is scaled down to
 at most the area of 2048x2048 pixels and padded out to sides that are
 multiples of 16. Of several, each is scaled down to at most the area of
 1024x1024 and cropped to sides that are multiples of 16. Without `--size`
-the output has the first reference's size, and the output of a single
-reference is cropped back to the scaled image. FLUX.3 klein sizes its
-references by this rule, and `--ref-size` exits 2 on it.
+the output has the first reference's size as prepared, scaled into 4096
+pixels a side and 2048x2048 pixels at its shape when it is past them, and
+the output of a single reference is cropped back to the scaled image.
+FLUX.3 klein sizes its references by this rule, and `--ref-size` exits 2
+on it.
+
+`--ref` gives FLUX.2 klein up to 10 reference images as well, read as
+FLUX.3 klein reads them, with no `--encoder-mmproj`. A single reference is
+scaled down to at most the area of 2024x2024 pixels, and each of several
+to at most the area of 1024x1024. Each is then cropped to sides that are
+multiples of 16, around the center. A reference needs sides of at least 64
+pixels, and neither side more than 8 times the other. Without `--size` the
+output has the first reference's size as prepared, scaled into the same
+limits, and it is not cropped back, so an 8000x1000 reference, prepared at
+5712x704, gives a 4096x496 output. `--ref-size` exits 2 on FLUX.2 klein
+too.
 
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
-kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
-follows the path after a colon and defaults to 1, and it may be negative.
-Repeat the flag to stack adapters, whose deltas add. A LoHa, LoKr, DoRA,
-full-weight or Tucker LoCon file is refused by name from its header, before
-any model loads. So is a file for another model family or one with keys
+kohya, diffusers, PEFT and OneTrainer key spellings are read. The rank and
+alpha in a diffusers file's PEFT header scale each pair as the diffusers
+loader scales it, rank-stabilized LoRA included. ComfyUI does not read that
+header, so such a file runs at another strength there, and gmlx warns of
+it. The strength follows the path after a colon and defaults to 1, and it
+may be negative. Repeat the flag to stack adapters, whose deltas add. A
+LoHa, LoKr, DoRA, full-weight or Tucker LoCon file is refused by name from
+its header, before any model loads. So is a file for another model family or one with keys
 that match no module of the DiT, which its GGUF header names. An adapter's
 text encoder pairs are applied to the text encoder at the same strength.
 
@@ -1030,7 +1068,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
-| `--size WxH` | The init image's, else a FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
+| `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
@@ -1038,7 +1076,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
 | `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
-| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1 and FLUX.3 klein. Repeat the flag for up to 10 images, in the order the prompt names them. |
+| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1, FLUX.2 klein and FLUX.3 klein. Repeat the flag for up to 10 images, in the order the prompt names them. |
 | `--ref-size N` | `1024` | On Qwen-Image 2.1, resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |
 | `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
@@ -1062,10 +1100,11 @@ and names the `--ref-size` that image needs.
 
 `bench` loads the model once and, for each size, runs `--warmup` images
 untimed and then `--runs` timed ones. Each run starts with empty
-conditioning caches and times the prompt encoding, every step, the decode
-and the whole image, with the peak of MLX memory. The summary gives the
-load time of each part, the first step apart from the median and mean of
-the rest, and the medians of the other phases.
+conditioning caches and times the prompt encoding, with the reference
+images of an edit, every step, the decode and the whole image, with the
+peak of MLX memory. The summary gives the load time of each part, the
+first step apart from the median and mean of the rest, and the medians of
+the other phases.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1076,7 +1115,8 @@ the rest, and the medians of the other phases.
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
 | `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
 | `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
-| `--sizes LIST` | The entry's `defaults.size`, else the variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
+| `--ref PATH` | None | Time an edit from this reference image, as in `generate`. Repeat the flag for several. FLUX.2 klein and FLUX.3 klein only, without `--via-steps`. |
+| `--sizes LIST` | The entry's `defaults.size`, else the variant's size, or the size the references give an edit | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. |
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
@@ -1108,12 +1148,15 @@ It packs the VAE of each image family: the FLUX.1 autoencoder for
 `z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
 official file is F32 and stays F32, the Qwen-Image autoencoder for
 `krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`,
-whose Comfy-Org `flux2-vae.safetensors` is F32 and needs no config. It
-packs from that file's layout or from the original one of BFL's
-`ae.safetensors`. The family follows from the tensor names and
-shapes. A file that fills none of them is refused with what it holds, for
-example another family's VAE under `--family`, or a video VAE of the same
-layout.
+`flux2_klein` and `flux2_klein_9b`. BFL's FLUX.2 klein 4B file of that
+autoencoder is BF16 with its config, and the Comfy-Org
+`flux2-vae.safetensors` is F32 and needs no config. It packs from that
+layout or from the original one of BFL's `ae.safetensors`. The family
+follows from the tensor names and shapes. A pack of the FLUX.2
+autoencoder without `--family` is labeled `flux3_klein`, and a pack of it
+serves every klein family whichever one it names. A file that fills none
+of them is refused with what it holds, for example another family's VAE
+under `--family`, or a video VAE of the same layout.
 
 A Qwen-Image 2.1 file may leave out its `time_conv` tensors, which one
 image never reads. The places where the video layout halves time come
@@ -1131,7 +1174,7 @@ and a `--source-config` that is not one is refused.
 | `SRC`, positional | Required | Pack this safetensors VAE. |
 | `--out FILE.gguf` | Required | Write the GGUF here. |
 | `--dtype f32/f16/bf16` | The source dtype | Store every tensor in this dtype. A narrower dtype is not lossless, and the file records that. |
-| `--family NAME` | The family the file fills | Pack the VAE of this image family, such as `z-image`, `qwen-image-2.1`, `krea-2` or `flux-3-klein`. |
+| `--family NAME` | The family the file fills, `flux3_klein` for the FLUX.2 autoencoder | Pack the VAE of this image family, such as `z-image`, `qwen-image-2.1`, `krea-2`, `flux-3-klein` or `flux-2-klein`. |
 | `--source-repo ID` | `unknown` | Record this repository as the source. |
 | `--source-revision REV` | `unknown` | Record this revision of the source repository. |
 | `--source-config FILE` | `config.json` beside `SRC`, when it is a VAE config | Record this VAE config. |

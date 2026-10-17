@@ -57,7 +57,9 @@ def _sha256_file(path: str) -> str:
 
 
 def _family(header, family: str | None) -> str:
-    names = [family] if family else sorted(VAES)
+    # A VAE that several families read, as FLUX.3 klein and FLUX.2 klein
+    # read the FLUX.2 autoencoder, packs for the first row that names it.
+    names = [family] if family else list(VAES)
     errors = []
     for name in names:
         try:
@@ -106,7 +108,7 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
              dtype: str | None = None, overwrite: bool = False) -> PackReport:
     """Pack the safetensors VAE ``src`` into the GGUF ``dst``.
 
-    ``family`` defaults to the one family whose VAE the file fills.
+    ``family`` defaults to the first family whose VAE the file fills.
     ``dtype`` is None for the source dtype, or "F32", "F16" or "BF16".
     """
     src, dst = str(src), str(dst)

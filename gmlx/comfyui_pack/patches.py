@@ -6,7 +6,11 @@ the gmlx MODEL, which keeps ComfyUI's tuples in ``patches``:
 ``(strength_patch, adapter, strength_model, offset, function)`` per weight
 key. A table entry carries the key, the offset as a band, and the adapter
 pairs by hash with their strengths. Plain LoRA pairs are applied; every
-other kind is refused by name.
+other kind is refused by name. ComfyUI's key map swaps the two halves of
+the rows of a diffusers ``norm_out.linear`` pair's product, through
+``swap_scale_shift``; such a pair goes with the halves of its up rows
+swapped, which gives the same product, on a family in ``SWAPS_HALVES``
+alone, and is refused by name on any other.
 """
 
 from __future__ import annotations
@@ -17,6 +21,11 @@ from .client import GmlxRefusal, StepClient
 
 # Adapter dtypes the contract carries; anything else goes as f32.
 _CARRIED = (torch.float32, torch.float16, torch.bfloat16)
+# The families whose final modulation the server holds in the order that a
+# swap of the up rows' halves gives, checked against ComfyUI's own model
+# by the pack's FLUX.2 klein LoRA test. The 9B and KV checkpoints share the
+# 4B LoRA map.
+SWAPS_HALVES = frozenset({"flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"})
 
 
 def adapter_kind(adapter) -> str:
@@ -48,6 +57,18 @@ def _carried(t: torch.Tensor) -> torch.Tensor:
     return t if t.dtype in _CARRIED else t.float()
 
 
+def _swaps_halves(function) -> bool:
+    """Whether ``function`` is ComfyUI's ``swap_scale_shift``."""
+    import comfy.utils
+
+    return function is not None and function is getattr(comfy.utils, "swap_scale_shift", None)
+
+
+def _swap_halves(t: torch.Tensor) -> torch.Tensor:
+    first, second = t.chunk(2, dim=0)
+    return torch.cat([second, first], dim=0)
+
+
 def _alpha(a):
     if a is None:
         return None
@@ -56,11 +77,12 @@ def _alpha(a):
     return float(a)
 
 
-def build_table(model_id: str, patches: dict, client: StepClient | None = None):
-    """``(table, tensors)`` for ComfyUI ``patches``: the table body, or None
-    when there are none, and the adapter matrices by hash. With a client,
-    pairs the server does not hold are uploaded. Raises :class:`GmlxRefusal`
-    for a patch kind the step contract does not apply."""
+def build_table(model_id: str, patches: dict, client: StepClient | None = None, *,
+                family: str):
+    """``(table, tensors)`` for ComfyUI ``patches`` on a model of ``family``:
+    the table body, or None when there are none, and the adapter matrices by
+    hash. With a client, pairs the server does not hold are uploaded. Raises
+    :class:`GmlxRefusal` for a patch kind the step contract does not apply."""
     from .client import tensor_hash
 
     groups: dict = {}
@@ -72,15 +94,22 @@ def build_table(model_id: str, patches: dict, client: StepClient | None = None):
             if kind != "lora":
                 raise GmlxRefusal(f"gmlx: {kind} on {key} is not supported on a gmlx model; "
                                   "only plain LoRA pairs apply")
-            if function is not None:
+            swap = offset is None and _swaps_halves(function)
+            if function is not None and not swap:
                 raise GmlxRefusal(f"gmlx: a patch function on {key} is not supported on a "
                                   "gmlx model")
+            if swap and family not in SWAPS_HALVES:
+                raise GmlxRefusal(f"gmlx: ComfyUI swaps the halves of the product on {key} "
+                                  "(swap_scale_shift), which a gmlx model takes on FLUX.2 "
+                                  f"klein alone, not on {family}")
             if float(strength_model) != 1.0:
                 raise GmlxRefusal(f"gmlx: a model strength of {strength_model} on {key} "
                                   "scales the base weight, which a gmlx model does not do")
             if float(strength) == 0.0:
                 continue
             up, down = _carried(adapter.weights[0]), _carried(adapter.weights[1])
+            if swap:
+                up = _swap_halves(up)
             if client is not None:
                 hu, hd = client.ensure_adapter(up), client.ensure_adapter(down)
             else:
@@ -97,13 +126,13 @@ def build_table(model_id: str, patches: dict, client: StepClient | None = None):
     return {"model": model_id, "entries": entries}, tensors
 
 
-def sync_table(client: StepClient, model_id: str, patches: dict) -> str | None:
+def sync_table(client: StepClient, model_id: str, patches: dict, family: str) -> str | None:
     """Upload what the server lacks and define the table. Returns its id,
     or None with no patches. A 409 for adapters the server dropped
     uploads them again and retries once."""
     from .client import GmlxMissing
 
-    table, tensors = build_table(model_id, patches, client)
+    table, tensors = build_table(model_id, patches, client, family=family)
     if table is None:
         return None
     try:

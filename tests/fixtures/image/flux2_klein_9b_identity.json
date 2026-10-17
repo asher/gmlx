@@ -1,0 +1,257 @@
+{
+ "_note": "img_in.weight of every GGUF of the two unsloth FLUX.2 klein 9B repos by HTTP range reads: its codec and the sha256 of its bf16 bits, as gmlx.image.fingerprint.weight_identity forms it over the identity tensors. kv: the same for the FLUX.2 klein 9B KV GGUFs read. marker: the codec and hash of double_blocks.0.img_attn.norm.query_norm.scale in one Q4_K_M file of each checkpoint",
+ "repos": {
+  "unsloth/FLUX.2-klein-9B-GGUF": {
+   "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
+   "files": {
+    "flux-2-klein-9b-BF16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 18157197600
+    },
+    "flux-2-klein-9b-F16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 18157197600
+    },
+    "flux-2-klein-9b-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 3980450080
+    },
+    "flux-2-klein-9b-Q3_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 4769503520
+    },
+    "flux-2-klein-9b-Q3_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 4689287456
+    },
+    "flux-2-klein-9b-Q4_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 5616228640
+    },
+    "flux-2-klein-9b-Q4_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 6161488160
+    },
+    "flux-2-klein-9b-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 5909829920
+    },
+    "flux-2-klein-9b-Q4_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 5834332448
+    },
+    "flux-2-klein-9b-Q5_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 6706747680
+    },
+    "flux-2-klein-9b-Q5_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 7252007200
+    },
+    "flux-2-klein-9b-Q5_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 7018699040
+    },
+    "flux-2-klein-9b-Q5_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 6938482976
+    },
+    "flux-2-klein-9b-Q6_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 7865424160
+    },
+    "flux-2-klein-9b-Q8_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "a0b63c325bcf9b105b2afae179dacda5f1b0836294d808cc05ea056b25d9e3d4",
+     "size": 9978304800
+    }
+   }
+  },
+  "unsloth/FLUX.2-klein-base-9B-GGUF": {
+   "revision": "069a5df5ba8b7fe9f3355c8d4800486983ee8eb6",
+   "files": {
+    "flux-2-klein-base-9b-BF16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 18157197600
+    },
+    "flux-2-klein-base-9b-F16.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 18157197600
+    },
+    "flux-2-klein-base-9b-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 3980450080
+    },
+    "flux-2-klein-base-9b-Q3_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 4769503520
+    },
+    "flux-2-klein-base-9b-Q3_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 4689287456
+    },
+    "flux-2-klein-base-9b-Q4_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 5616228640
+    },
+    "flux-2-klein-base-9b-Q4_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 6161488160
+    },
+    "flux-2-klein-base-9b-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 5909829920
+    },
+    "flux-2-klein-base-9b-Q4_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 5834332448
+    },
+    "flux-2-klein-base-9b-Q5_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 6706747680
+    },
+    "flux-2-klein-base-9b-Q5_1.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 7252007200
+    },
+    "flux-2-klein-base-9b-Q5_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 7018699040
+    },
+    "flux-2-klein-base-9b-Q5_K_S.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 6938482976
+    },
+    "flux-2-klein-base-9b-Q6_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 7865424160
+    },
+    "flux-2-klein-base-9b-Q8_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "8df447f8fdd62769e91bc34e322b6e37ac22d12c258c9e93591b54a9dba12f15",
+     "size": 9978304800
+    }
+   }
+  }
+ },
+ "kv": {
+  "QuantStack/FLUX.2-Klein-9B-KV-GGUF": {
+   "revision": "f4b7b4b0750b7b5cd112f9cc6e386a2ded10061f",
+   "files": {
+    "Flux-2-Klein-9B-KV-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 5716891936
+    },
+    "Flux-2-Klein-9B-KV-Q8_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 9978304800
+    },
+    "Flux-2-Klein-9B-KV-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 3571505440
+    }
+   }
+  },
+  "vantagewithai/FLUX.2-klein-9b-kv-GGUF": {
+   "revision": "28216d4b901c5dda4574faef78c10eb941b746ab",
+   "files": {
+    "flux-2-klein-9b-kv-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 5903538464
+    },
+    "flux-2-klein-9b-kv-Q8_0.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 9883932960
+    },
+    "flux-2-klein-9b-kv-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 4500543776
+    }
+   }
+  },
+  "biali/FLUX.2-klein-9b-kv-GGUF": {
+   "revision": "994cdaa73ffd792e3d52f8d933b990c54c9e407c",
+   "files": {
+    "flux-2-klein-9b-kv-Q2_K.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 4500543776
+    },
+    "flux-2-klein-9b-kv-Q3_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 5140175136
+    },
+    "flux-2-klein-9b-kv-Q4_K_M.gguf": {
+     "img_in.weight": "BF16",
+     "sha256": "41fe24e358863ebf78a373b480dce63ca4866a19396cb86f1fc6039c9c219706",
+     "size": 5903538464
+    }
+   }
+  }
+ },
+ "marker": {
+  "tensor": "double_blocks.0.img_attn.norm.query_norm.scale",
+  "files": {
+   "unsloth/FLUX.2-klein-9B-GGUF/flux-2-klein-9b-Q4_K_M.gguf": {
+    "revision": "fde8634245fe6b749a221c25b34672b5b8fbd079",
+    "codec": "F32",
+    "sha256": "dcb81aa7d727e939ed260834b0fdf7b10cc52c93f85f705256e92bf6ce25e5ef"
+   },
+   "unsloth/FLUX.2-klein-base-9B-GGUF/flux-2-klein-base-9b-Q4_K_M.gguf": {
+    "revision": "069a5df5ba8b7fe9f3355c8d4800486983ee8eb6",
+    "codec": "F32",
+    "sha256": "cc007bdec97933d0a920d18d735dfc833fbba23cfd3b84c331686eea8bd13d12"
+   },
+   "QuantStack/FLUX.2-Klein-9B-KV-GGUF/Flux-2-Klein-9B-KV-Q4_K_M.gguf": {
+    "revision": "f4b7b4b0750b7b5cd112f9cc6e386a2ded10061f",
+    "codec": "F32",
+    "sha256": "c8732255f8c1de5c691671d452cee78cca57e2bbd429f0d7074b72907d6650c6"
+   },
+   "vantagewithai/FLUX.2-klein-9b-kv-GGUF/flux-2-klein-9b-kv-Q4_K_M.gguf": {
+    "revision": "28216d4b901c5dda4574faef78c10eb941b746ab",
+    "codec": "F32",
+    "sha256": "c8732255f8c1de5c691671d452cee78cca57e2bbd429f0d7074b72907d6650c6"
+   },
+   "biali/FLUX.2-klein-9b-kv-GGUF/flux-2-klein-9b-kv-Q4_K_M.gguf": {
+    "revision": "994cdaa73ffd792e3d52f8d933b990c54c9e407c",
+    "codec": "F32",
+    "sha256": "c8732255f8c1de5c691671d452cee78cca57e2bbd429f0d7074b72907d6650c6"
+   }
+  }
+ }
+}

@@ -1,0 +1,617 @@
+{
+ "files": {
+  "Comfy-Org__Krea-2/loras/krea2_kidsdrawing.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "bcd73b3fabe0819b8db67ab696f53fe9cf473ad6b4c13490e97ffb8ac4191f26",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "fced27296d5dbfa9bb9abbaadbdbc8bbd841a1feed1a9835da83df5aa6bda409",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 0,
+     "refused_kinds": [],
+     "sha256": "6b9ef1fcba9823e5ab3f528d783c95a05a8de56704792c6615add37ac00cdc7b",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 1,
+     "refused_kinds": [
+      [
+       "UnmatchedKeysError",
+       ""
+      ]
+     ],
+     "sha256": "7ceb25fcbb7b3f6d48b3c554d2dea22e512ebfcc170f78f2ea6abb8430e9cf57",
+     "warned": 1
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 1,
+     "refused_kinds": [
+      [
+       "UnmatchedKeysError",
+       ""
+      ]
+     ],
+     "sha256": "f0fbd35c7c4c772c24c0815acca29d86af321a5584e00867325990ac229923bb",
+     "warned": 1
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 1,
+     "refused_kinds": [
+      [
+       "UnmatchedKeysError",
+       ""
+      ]
+     ],
+     "sha256": "2d0cd826174e4742e3c8adf8087c64d473de859fff4a95849191e8b2ab8f0e1e",
+     "warned": 1
+    }
+   },
+   "rslora": false,
+   "size": 469291992
+  },
+  "Limbicnation__pixel-art-lora/pytorch_lora_weights.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "UnsupportedAdapterError",
+       "rank-stabilized LoRA"
+      ]
+     ],
+     "sha256": "a65dfd57311f6f95e4e83fc4168e88fe9b8854573f2615f2d7487c6abb1ca2c1",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "UnsupportedAdapterError",
+       "rank-stabilized LoRA"
+      ]
+     ],
+     "sha256": "145ba4a7dcf0e757932b5446880b8c309fb8fe07ffaf6634088ede2a9dde5d50",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "UnsupportedAdapterError",
+       "rank-stabilized LoRA"
+      ]
+     ],
+     "sha256": "e73fa38d01b2c9b32248ae94460b4f76c8c8aa6a82a8381b1fb93da4f2147886",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "UnsupportedAdapterError",
+       "rank-stabilized LoRA"
+      ]
+     ],
+     "sha256": "f81ed0df44dc1c0cc074264b41bcca2e052769f5b8c7b4b2a8778df902d53a92",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "UnsupportedAdapterError",
+       "rank-stabilized LoRA"
+      ]
+     ],
+     "sha256": "6cd1c0a28faa7f27c1c3d41a16832fcfad6057b37944431f2be32aee1ab4efb5",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "UnsupportedAdapterError",
+       "rank-stabilized LoRA"
+      ]
+     ],
+     "sha256": "cdd55c019a7ae17a0e93c61b5edac32f0f76ad1186dfdd9d9bfa1e6df1e3f2db",
+     "warned": 0
+    }
+   },
+   "rslora": true,
+   "size": 325280664
+  },
+  "bdsqlsz__qinglong_DetailedEyes_Z-Image/qinglong_detailedeye_z-image.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "55ea1a2d8909b30b7f5de48dd49c797860b8017ef2e58f2624a0b2b3bfdd544a",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "5a16d4f242035c5b7220c9738838d023bed2ba77092fbc0572bef564766b1304",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "6c1c2ec4c2924f460eea4aa15d4b75815fcf52e9babd39bcb1ec8e584e80dbcb",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "873c5e14b56e1ebc68708a215ca41873b21a351894fa2dbe972c6087fa22336c",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "afe0eedd59908d9b7a11e48f67f5e5697b471a364c05a68a3c4d1c985fcb2e67",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 0,
+     "refused_kinds": [],
+     "sha256": "86a54d35785d4b21ae0c37d694fb757a535e1d4d24862335a31cd449c98972d5",
+     "warned": 2
+    }
+   },
+   "rslora": false,
+   "size": 381587708
+  },
+  "mikkoph__mikkoani-klein4b/klein4b-mikkoani.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "9ab21a306f510dadf00adde40b7ae33f7be72aaf517e25e784db94b0c77ec7fb",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "6c42f79259ce8f3bf4999c6bdd2117bd01c2d77fffe302e065b9fa1aa64ac48b",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "ad578334a003c7bd44852fc596706bc6c9f255fb384223c1cafa0f21487c19f5",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "df11e3fd941a31f34d167ff26dc0f62ed642b7d9a5855b9e79829c40f1da7f60",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "df52fa1bb09fba95bd9a7709a862baadb632ae0e0102dd77e0da8c83b7158c07",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "a38b46dc8280ba4126074bbcf59681b3c2eef3eca5cdbdd792a75b749b6a3b86",
+     "warned": 0
+    }
+   },
+   "rslora": false,
+   "size": 92436112
+  },
+  "ostris__sketch_to_image_klein_4b/sketch_to_image_klein_4b.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "b3c5a8e40933e4ce1942c22f82868e7f0b755c23ce9a8c7731219361eb6b247d",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "81883203334c24b369fd16e42487922064fe14918bc757f245e4301e4971019d",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "bee12e638818ea91c1d8245915c81692a7af818d3591403baf8ed5e2e46e29de",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "f03d2963e59151e928a54c9329b12bd52fef6e1cc840b0dd19ecec87e350ed0f",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "2cfba1038ab26de6f15c33793d61184b57798a3eece18908bc8c1fcf5ffecd77",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "ab8480b6cfeb80d2e49875c850952e2c7f76c3223b245cabbb4ba1bb87d13e28",
+     "warned": 0
+    }
+   },
+   "rslora": false,
+   "size": 92426712
+  },
+  "ostris__z_image_turbo_childrens_drawings/z_image_turbo_childrens_drawings.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "0bb9b9b8a2cec117e1f4c3efaa67dabe803bce1d2de4f60ca81d76c2df799838",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "27f1c6e6ac9201d1f3796d4ff6691a2eaa7bf31a93f8a39de0a597c40c05f5b7",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "d5c8475925ecb5ba5fe664c94dd3ec40726ac197ea456ea46f1bf175215dbf4e",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "c6a523d406ed64bec85b74025bc6cc014f493bac52e78c760d80d0c162dc1fcf",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "a772b7e5702adb5887ba82fdd3e34b8594fa8eed875655f35fad0fb55788f839",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 0,
+     "refused_kinds": [],
+     "sha256": "a27736f05f84c94a05058afa4d7088759a990cc47f2fed6a74fd4692a3db3bb4",
+     "warned": 0
+    }
+   },
+   "rslora": false,
+   "size": 170128264
+  },
+  "suayptalha__Z-Image-Turbo-Realism-LoRA/pytorch_lora_weights.safetensors": {
+   "maps": {
+    "flux3_klein": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "bb7064ae2ae16332e45545e741fd032fbd01947baccbedc7f2d96244bcbdf7b4",
+     "warned": 0
+    },
+    "flux3_klein base": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "9fb84d861359af9cecac0c4795caa8b8c3fb26cfd1ce1a73d8ce56f0c3108075",
+     "warned": 0
+    },
+    "krea2": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "70ce137ed013673a4b71133971a979ef17ed8bae6450be4cceeb3773687c1265",
+     "warned": 0
+    },
+    "qwen_image21": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "5b65e6644db629b0c98dadf235c30724db1f6031eed130c743dd2aaf522b97f2",
+     "warned": 0
+    },
+    "qwen_image21 unfused": {
+     "cases": 2,
+     "refused": 2,
+     "refused_kinds": [
+      [
+       "AdapterFamilyError",
+       ""
+      ]
+     ],
+     "sha256": "afe1a88b8e827108481eda3cd144e37994504627c4d408fd279d1645ac6a0db4",
+     "warned": 0
+    },
+    "z_image": {
+     "cases": 2,
+     "refused": 0,
+     "refused_kinds": [],
+     "sha256": "961e8771718bd7344409d5a59b42de57fad913b0750c90800efa5d25cb5f6f8d",
+     "warned": 0
+    }
+   },
+   "rslora": false,
+   "size": 85094800
+  }
+ },
+ "source": "the spelling and file digests of test_image_lora_rules_unchanged.py, from the reader before LoraKeyMap.comfy_stems",
+ "spellings": {
+  "flux3_klein": {
+   "cases": 14080,
+   "refused": 3478,
+   "refused_kinds": [
+    [
+     "AdapterFamilyError",
+     ""
+    ],
+    [
+     "UnmatchedKeysError",
+     ""
+    ]
+   ],
+   "sha256": "1f8090057ef31736bef9499bf39b5f4bd794a61b3e0c78d7d28a37c2eb230a00",
+   "warned": 9510
+  },
+  "flux3_klein base": {
+   "cases": 14080,
+   "refused": 3550,
+   "refused_kinds": [
+    [
+     "AdapterFamilyError",
+     ""
+    ],
+    [
+     "UnmatchedKeysError",
+     ""
+    ]
+   ],
+   "sha256": "4400f73f02768916fe73348cbadf763cad4a699a58fd456fe019d441e431d2e3",
+   "warned": 9446
+  },
+  "krea2": {
+   "cases": 12400,
+   "refused": 2320,
+   "refused_kinds": [
+    [
+     "AdapterFamilyError",
+     ""
+    ]
+   ],
+   "sha256": "39338cceedaa04a315fdac3dd96d78871907bd4ab4a37e5471fc369329e94485",
+   "warned": 1184
+  },
+  "qwen_image21": {
+   "cases": 6720,
+   "refused": 1968,
+   "refused_kinds": [
+    [
+     "AdapterFamilyError",
+     ""
+    ]
+   ],
+   "sha256": "cc2758fde7b62a2982503042da29ca4bf37b046508cbffb55f7e8bef52cb8dac",
+   "warned": 0
+  },
+  "qwen_image21 unfused": {
+   "cases": 6720,
+   "refused": 2544,
+   "refused_kinds": [
+    [
+     "AdapterFamilyError",
+     ""
+    ],
+    [
+     "UnmatchedKeysError",
+     ""
+    ]
+   ],
+   "sha256": "be794c3acb3102673b3636e440a593afc90e0f94ad8f577fd4c29c132eb7e3dc",
+   "warned": 0
+  },
+  "z_image": {
+   "cases": 13460,
+   "refused": 6710,
+   "refused_kinds": [
+    [
+     "AdapterFamilyError",
+     ""
+    ]
+   ],
+   "sha256": "2dd55f6f68725c1489b18e4180869117f7cd6a655990b7cbc2bcfba6c97a77d4",
+   "warned": 556
+  }
+ }
+}

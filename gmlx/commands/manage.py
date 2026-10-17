@@ -1106,9 +1106,13 @@ a second quant). Files landing under a model_dirs root are registered in the
 config and served immediately. Refuses an unloadable GGUF unless --force.
 
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
-krea-2-turbo, flux-3-klein, flux-3-klein-base) pulls the DiT, its text
-encoder and its VAE, uses the parts your model folders already hold,
-and adds the model under image_models: in the config.
+krea-2-turbo, flux-2-klein, flux-2-klein-base, flux-2-klein-9b,
+flux-2-klein-base-9b, flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base)
+pulls the DiT, its text encoder and its VAE, uses the parts your model
+folders already hold, and adds the model under image_models: in the config.
+It prints the model's license before it downloads. The license of
+flux-2-klein-9b, flux-2-klein-base-9b and flux-2-klein-9b-kv allows
+non-commercial use only.
 """
 
 _PULL_EXAMPLES = """\
@@ -1156,6 +1160,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "Additional bare filenames are fetched from the first "
                          "ref's repo. An image model name (z-image-turbo, "
                          "qwen-image, qwen-image-turbo, krea-2-turbo, "
+                         "flux-2-klein, flux-2-klein-base, flux-2-klein-9b, "
+                         "flux-2-klein-base-9b, flux-2-klein-9b-kv, "
                          "flux-3-klein, flux-3-klein-base) "
                          "pulls the model with its text encoder and VAE. See "
                          "the examples below.")
@@ -1183,7 +1189,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     img = ap.add_argument_group("image models")
     img.add_argument("--quant", default=None, metavar="QUANT",
                      help="The DiT quant, such as Q4_K_M or Q8_0 (default: "
-                          "the one for this Mac's memory).")
+                          "the one for this Mac's memory). Without it, a "
+                          "pull on a Mac where no DiT of the model makes an "
+                          "image downloads nothing.")
     img.add_argument("--encoder-quant", default=None, metavar="QUANT",
                      help="The text encoder quant (default: the one for this "
                           "Mac's memory). A matching encoder on disk is used "

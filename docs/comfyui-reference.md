@@ -74,7 +74,8 @@ ComfyUI sees each gmlx model as its own model class, so its stock nodes
 for that model work too, such as `ModelSamplingAuraFlow` and
 `TextEncodeQwenImage21`. The prompt nodes of the example workflows are
 ComfyUI's `CLIP Text Encode (Prompt)`, and the latent node is its
-`EmptySD3LatentImage`, or its `EmptyFlux2LatentImage` for FLUX.3 klein.
+`EmptySD3LatentImage`, or its `EmptyFlux2LatentImage` for FLUX.2 klein and
+FLUX.3 klein.
 
 The sampler, the noise, the guidance and the schedule run in ComfyUI. Each
 call to the model is one request to the gmlx server, which runs the DiT,
@@ -104,10 +105,18 @@ that names it:
 - Hook keyframes and scheduled CLIP hooks.
 - A quantized Qwen-Image 2.1 prefix cache: `QwenImage21Cache` with a dtype
   other than the default.
+- A FLUX.2 klein reference method other than `index`, such as `offset`
+  from `FluxKontextMultiReferenceLatentMethod`, but for the
+  `index_timestep_zero` method that `Flux KV Cache` sets.
 - LoHa, LoKr, GLoRA, OFT, BOFT and DoRA files, LoRAs with a mid tensor,
   model merges, and any node that scales the model's own weights.
 - Saving a gmlx model, text encoder or VAE with the checkpoint save nodes,
   since ComfyUI holds no weights for them.
+
+`Flux KV Cache` on FLUX.2 klein 9B KV is not refused. The server keeps the
+keys and values of the reference images of each row of the batch from the
+first step of a run, the later steps of the run reuse those of each row,
+and the end of the run drops them.
 
 A refusal from a node's own setup shows on that node. A refusal during
 sampling shows on the sampler and names the node upstream that caused it.

@@ -163,6 +163,12 @@ class ByteLRU:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
 
+    def keys(self, match) -> list:
+        """The keys that ``match`` takes, the least recently used first.
+        The order of use does not change."""
+        with self._lock:
+            return [key for key in self._items if match(key)]
+
     def newest(self, match):
         """The most recently used key that ``match`` takes, or None. The
         order of use does not change."""
@@ -198,6 +204,20 @@ class ByteLRU:
                 n = self._items.pop(k)[1]
                 held -= n
                 self._bytes -= n
+
+    def shed_by(self, nbytes: int, rank) -> int:
+        """Drop entries until ``nbytes`` are gone, the lowest ``rank`` of
+        their key first and the least recently used first within a rank.
+        Returns the bytes dropped."""
+        with self._lock:
+            gone = 0
+            for k in sorted(self._items, key=rank):
+                if gone >= nbytes:
+                    break
+                n = self._items.pop(k)[1]
+                self._bytes -= n
+                gone += n
+            return gone
 
     def drop_where(self, match) -> None:
         """Drop the entries whose value ``match`` takes."""

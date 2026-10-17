@@ -62,6 +62,38 @@ def test_the_tested_comfyui_runs_every_family_the_pack_serves():
     assert "FLUX.3 klein needs ComfyUI 0.41 or newer" in page
 
 
+# The README title of each family the step contract serves.
+TITLES = {"z_image": "Z-Image", "qwen_image21": "Qwen-Image 2.1",
+          "krea2": "Krea 2", "flux2_klein": "FLUX.2 klein",
+          "flux2_klein_9b": "FLUX.2 klein 9B",
+          "flux2_klein_9b_kv": "FLUX.2 klein 9B KV",
+          "flux3_klein": "FLUX.3 klein"}
+
+
+def _served_families() -> set:
+    tree = ast.parse((_ROOT / "gmlx" / "serve" / "image_steps.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and \
+                [getattr(t, "id", None) for t in node.targets] == ["COMFY"]:
+            return set(ast.literal_eval(node.value))
+    raise AssertionError("no COMFY table in gmlx/serve/image_steps.py")
+
+
+def test_the_readme_lists_every_family_the_pack_serves_with_its_parity_rows():
+    """Each family of the step contract is in the README's families list
+    and has a row in the step table and the final image table."""
+    assert set(TITLES) == _served_families()
+    text = (_PACK / "README.md").read_text()
+    families = text.split("Supported model families:", 1)[1].split("\n## ", 1)[0]
+    parity = text.split("### Parity with the stock loaders", 1)[1]
+    step, final = parity.split("The final image check", 1)
+    for fam, title in TITLES.items():
+        assert f"\n- {title}" in families, fam
+        for name, table in (("step", step), ("final image", final)):
+            assert any(ln.startswith(f"| {title}") for ln in table.splitlines()), \
+                (fam, name)
+
+
 def _pack_files() -> list[str]:
     out = []
     for p in sorted(_PACK.rglob("*")):
@@ -90,7 +122,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 5
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 10
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -160,6 +192,17 @@ _WIDGETS = {
     "EmptyFlux2LatentImage": ["width", "height", "batch_size"],
     # A dynamic combo: the option, then the inputs of that option.
     "ReferenceMultiLatent": ["resolution", "resolution.megapixels"],
+    "Flux2Scheduler": ["steps", "width", "height"],
+    "BasicScheduler": ["scheduler", "steps", "denoise"],
+    "RandomNoise": ["noise_seed", "control_after_generate"],
+    "KSamplerSelect": ["sampler_name"],
+    "CFGGuider": ["cfg"],
+    "SamplerCustomAdvanced": [],
+    "ImageScaleToTotalPixels": ["upscale_method", "megapixels", "resolution_steps"],
+    "VAEEncode": [],
+    "ReferenceLatent": [],
+    "GetImageSize": [],
+    "FluxKVCache": [],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 
@@ -167,7 +210,7 @@ _FRONTEND_ONLY = {"control_after_generate", "upload"}
 def to_api(ui: dict) -> dict:
     """The API-format prompt of a UI-format graph, as ComfyUI's frontend
     queues it: Note nodes drop out, links become [node id, slot] pairs and
-    widget values take their input names."""
+    widget values take their input names, but for a widget a link feeds."""
     links = {lk[0]: lk for lk in ui["links"]}
     out = {}
     for n in ui["nodes"]:
@@ -182,7 +225,7 @@ def to_api(ui: dict) -> dict:
         values = n.get("widgets_values", [])
         assert len(values) == len(names), (n["type"], values)
         for name, value in zip(names, values):
-            if name not in _FRONTEND_ONLY:
+            if name not in _FRONTEND_ONLY and name not in inputs:
                 inputs[name] = value
         out[str(n["id"])] = {"inputs": inputs, "class_type": n["type"],
                              "_meta": {"title": n.get("title", n["type"])}}

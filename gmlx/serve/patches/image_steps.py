@@ -254,10 +254,12 @@ def _served(hold):
 
 
 def _check_size(hold, width: int, height: int, *, what: str,
-                cfg: float = 1.0, init: bool = False):
+                cfg: float = 1.0, init: bool = False, phase: str):
     """Refuse a step or a VAE pass over the size limits of the image
     routes with 413, and one whose memory plan does not fit beside the
-    models loaded with 400. Returns the budget it planned against."""
+    models loaded with 400. ``phase`` is the phase of the plan the call
+    runs, which alone counts the held conditioning states. Returns the
+    budget it planned against."""
     from ..image_service import MAX_PIXELS, MAX_SIDE, size_fits
     from ..image_steps import StepError
 
@@ -268,7 +270,7 @@ def _check_size(hold, width: int, height: int, *, what: str,
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if not size_fits(_served(hold), width, height, budget, cfg=cfg,
-                     init=init):
+                     init=init, held_in=(phase,)):
         raise StepError(400, f"{what} of {width}x{height} pixels does not "
                         "fit in memory beside the models now loaded")
     return budget
@@ -293,13 +295,9 @@ def _check_refs(served, rows) -> None:
 def _px(served, part: str, h: int, w: int) -> tuple:
     """(width, height) in pixels of latents (h, w) in the model's latent
     space (``part`` "latent") or the VAE's (``part`` "vae")."""
-    from ..image_steps import COMFY, StepError
+    from ..image_steps import COMFY
 
-    facts = COMFY.get(served.pipe.family.name)
-    if facts is None:
-        raise StepError(400, f"{served.pipe.family.title} has no step "
-                        "contract adapter")
-    stride = int(facts[part]["stride"])
+    stride = int(COMFY[served.pipe.family.name][part]["stride"])
     return int(w) * stride, int(h) * stride
 
 
@@ -500,13 +498,28 @@ async def step(request: Request):
         served = _served(hold)
         w_px, h_px = _px(served, "latent", *x_w.shape[2:])
         guided = 2.0 if len(rows) > 1 else 1.0
-        budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided)
+        budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided,
+                             phase="denoise")
         _check_refs(served, rows)
         fam = served.pipe.family.name
         conv = CONVENTIONS.get(fields.get("convention", "comfy"), {}).get(fam)
         if conv is None:
             raise StepError(400, f"convention {fields.get('convention')!r} "
                             f"has no adapter for {fam}")
+        ref_cache = fields.get("ref_cache", False)
+        if not isinstance(ref_cache, bool):
+            raise StepError(400, "ref_cache is true or false")
+        title = served.pipe.family.title
+        parts = served.pipe.family.step is not None
+        if ref_cache and run is None:
+            raise StepError(400, "a step on a cache of reference K and V "
+                            "names its run, whose end drops the cache")
+        if ref_cache and not hasattr(served.pipe.dit, "extract"):
+            raise StepError(400, f"the {title} DiT keeps no cache of "
+                            "reference K and V")
+        if ref_cache and parts and conv.time == "reference":
+            raise StepError(400, f"the {title} DiT caches its references "
+                            "by itself under the reference convention")
         table = None
         try:
             table = _table(served, fields.get("patch_table"))
@@ -537,7 +550,7 @@ async def step(request: Request):
             # thread that made them.
             import mlx.core as mx
 
-            from gmlx.image import api
+            from gmlx.image import api, memfit
 
             from ..image_service import size_fits
             from ..image_steps import _host, conditioning
@@ -545,12 +558,29 @@ async def step(request: Request):
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             # The plan of the rows as they are: their text, a prefix and
-            # the reference latents each step runs.
-            if not size_fits(served, w_px, h_px, budget, cfg=guided,
-                             conds=conds, patch_table=table):
+            # the reference latents each step runs. A step in parts runs
+            # whole under another time rule, and a step on the run's cache
+            # keeps the K and V of references it has none of yet, one copy
+            # a row.
+            building = {}
+            if ref_cache:
+                for i, c in enumerate(conds):
+                    k = api._ref_key(c, i)
+                    if c.ref_latents and k not in run.ref_cache:
+                        building[k] = served.pipe.dit.ref_cache_bytes(
+                            c.ref_latents)
+            try:
+                size_fits(served, w_px, h_px, budget, cfg=guided,
+                          conds=conds, patch_table=table,
+                          joined=parts and conv.time != "reference",
+                          ref_cache=run.ref_cache if ref_cache else None,
+                          building=sum(building.values()),
+                          held_in=("denoise",), hint=True)
+            except memfit.ImageMemoryError as e:
                 raise StepError(400, f"a step of {w_px}x{h_px} pixels with "
                                 "the references of its rows does not fit in "
-                                "memory beside the models now loaded")
+                                "memory beside the models now loaded. "
+                                f"{e.hint}") from None
             scope = conds
             if run is not None:
                 # The run's conditionings keep their states between its
@@ -565,7 +595,8 @@ async def step(request: Request):
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
-                                           gen, targets)
+                                           gen, targets, conv.time,
+                                           ref_cache)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work)
@@ -672,7 +703,7 @@ async def vae_decode(request: Request):
     try:
         served = _served(hold)
         _check_size(hold, *_px(served, "vae", *lat.shape[2:]),
-                    what="a VAE decode")
+                    what="a VAE decode", phase="decode")
         img = await _on_worker(do_decode, served, lat,
                                bool(fields.get("alpha")))
     finally:
@@ -695,7 +726,7 @@ async def vae_encode(request: Request):
     try:
         served = _served(hold)
         _check_size(hold, int(img.shape[2]), int(img.shape[1]),
-                    what="a VAE encode", init=True)
+                    what="a VAE encode", init=True, phase="init")
         lat = await _on_worker(do_encode, served, img)
     finally:
         hold.release()

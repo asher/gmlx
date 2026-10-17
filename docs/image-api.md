@@ -30,8 +30,8 @@ curl -s localhost:8080/v1/images/generations \
 
 Each route also answers without the `/v1` prefix. In `/v1/models` an image
 model has `"image": true`, its `family` and `variant`, and `edit: true` when
-it edits from reference images: FLUX.3 klein always, and Qwen-Image 2.1
-when the entry has its encoder's vision tower. It carries
+it edits from reference images: FLUX.2 klein and FLUX.3 klein always, and
+Qwen-Image 2.1 when the entry has its encoder's vision tower. It carries
 `resident`, `pinned` and `default`, where `default` marks the default image
 model, and no context figures.
 
@@ -43,7 +43,7 @@ model, and no context figures.
 | `model` | An image model id. `default`, no model, and a name that starts with `gpt-image-`, `dall-e-` or `chatgpt-image` take the default image model. |
 | `n` | Images to make, 1 to 10, at seeds `seed`, `seed` plus 1 and so on. |
 | `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. |
-| `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. FLUX.3 klein runs its default steps at each. |
+| `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. |
 | `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
 | `seed` | The seed of the first image, random without it. |
 | `guidance` | [Guidance](glossary.md#guidance), 1 to 30. 1 turns it off. |
@@ -65,7 +65,8 @@ The default image model is the one that
 [`server.defaults.image_model`](config.md#serverdefaultsimage_model) names,
 or the only one. Another name that is no image model gets 404. A `quality`
 of `high` runs the model's own steps, and `auto` the steps of the entry's
-`defaults`, or else the model's own.
+`defaults`, or else the model's own. FLUX.2 klein and FLUX.3 klein run
+their default steps at every `quality`.
 
 `moderation`, `style`, `input_fidelity` and `user` are accepted and
 ignored, and the log names them in a warning. The server writes no file
@@ -85,6 +86,7 @@ GIF.
 |-------|-------|------------|
 | Z-Image, Krea 2 | One image, which the result starts from at `strength`, 0.6 by default. More images get 400. | The image with an empty prompt, at the default `strength` |
 | Qwen-Image 2.1 | Up to 10 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
+| FLUX.2 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
 | FLUX.3 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
 
 Without `size`, the result takes the size of the first image, cut down to
@@ -96,9 +98,20 @@ FLUX.3 klein scales a single reference down to at most the area of
 several, it scales each down to at most the area of 1024x1024 and crops it
 to sides that are multiples of 16. Without `size` the result has the size
 of the first reference as prepared, and the result of a single reference is
-cropped back to the scaled image. When that size is past the size limits,
-as from a first reference of 20000x30 pixels among several, the request
-gets 400 and needs a `size`.
+cropped back to the scaled image. A size past the limits of 4096 pixels a
+side and 2048x2048 pixels is scaled into them at its shape, so a first
+reference of 8192x128 pixels among several gives a 4096x64 result. When a
+side scales to less than 16 pixels, as from a first reference of 20000x30
+pixels among several, the request gets 400 and needs a `size`.
+
+FLUX.2 klein scales a single reference down to at most the area of
+2024x2024 pixels, and each of several to at most the area of 1024x1024.
+It then crops each to sides that are multiples of 16, around the center.
+A reference needs sides of at least 64 pixels, and neither side more than
+8 times the other. Without `size` the result has the size of the first
+reference as prepared, scaled into the same limits, and is not cropped
+back. A 500x300 image gives a 496x288 result, and an 8000x1000 image,
+prepared at 5712x704, gives a 4096x496 result.
 
 ## URL responses
 
@@ -138,6 +151,7 @@ for event in stream:
 | A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
+| A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |
 | More requests waiting than [`image.max_queue`](config.md#image-requests) | 429 with `Retry-After` |
 | The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |
 | The job waits for its turn, or for one step, longer than [`token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) | 504, and the log marks the request `timeout` |

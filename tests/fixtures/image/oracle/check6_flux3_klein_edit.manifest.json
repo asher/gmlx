@@ -68,7 +68,7 @@
   "features": {
    "name": "check2_flux3_klein.npz",
    "size": 157437070,
-   "sha256": "fc087b917e2c1614738e24f9b0ba467bae4882efeeb02798264ac1e94c601bea"
+   "sha256": "cf38d06f13f1907955be37d7691919b750b8e5b7984a02b32aa1828f2264f25a"
   }
  },
  "inputs": {
@@ -371,7 +371,9 @@
   ],
   "rule": "latents after a kept step and after the last: relative L2 at twice the oracle's own bf16 against fp32 relative L2 after that step, on the run's own size"
  },
- "notes": [],
+ "notes": [
+  "files.features is check2_flux3_klein.npz as recalibrated with fp32 rotary frequencies in its bf16 run; the fp32 features this run read are bit equal to those of the file it ran on."
+ ],
  "created": "2026-10-16T04:07:57Z",
  "npz": "check6_flux3_klein_edit.npz",
  "tensors": {

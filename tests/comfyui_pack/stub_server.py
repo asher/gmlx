@@ -45,21 +45,56 @@ COMFY = {
               "latent": {"channels": 16, "stride": 8, "patch": 2},
               "vae": {"channels_out": 3, "stride": 8}, "edit": False,
               "context": ("txtfusion.layerwise_blocks.0.prenorm.scale", 0, 12)},
-    # FLUX.3's LATENT is the DiT's model space, which its VAE routes carry.
+    # FLUX.2's and FLUX.3's LATENT is the DiT's model space, which their VAE
+    # routes carry.
+    "flux2_klein": {"model_class": "Flux2", "image_model": "flux2",
+                    "latent": {"channels": 128, "stride": 16, "patch": 1},
+                    "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
+                    "context": ("txt_in.weight", 1)},
+    "flux2_klein_9b": {"model_class": "Flux2", "image_model": "flux2",
+                       "latent": {"channels": 128, "stride": 16, "patch": 1},
+                       "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
+                       "context": ("txt_in.weight", 1)},
+    "flux2_klein_9b_kv": {"model_class": "Flux2", "image_model": "flux2",
+                          "latent": {"channels": 128, "stride": 16, "patch": 1},
+                          "vae": {"channels_out": 3, "stride": 16, "space": "model"},
+                          "edit": True, "context": ("txt_in.weight", 1)},
     "flux3_klein": {"model_class": "Flux3", "image_model": "flux3",
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
                     "context": ("txt_in.weight", 1)},
 }
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
+# The schedule rules of the server's status, for the families whose
+# schedule follows the image size.
+QWEN21_RULE = {"rule": "qwen_image21", "base_len": 256, "max_len": 8192, "base_shift": 0.5,
+               "max_shift": 0.9, "terminal": 0.02}
+FLUX2_RULE = {"rule": "flux2"}
 MODELS = {
-    "z-image-turbo": ("z_image", "turbo", {"steps": 8, "cfg": 1.0, "shift": 3.0, "sigmas": None}),
-    "qwen-image-2.1": ("qwen_image21", "base", {"steps": 40, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
+    "z-image-turbo": ("z_image", "turbo", {"steps": 8, "cfg": 1.0, "shift": 3.0, "sigmas": None,
+                                           "schedule": None}),
+    "qwen-image-2.1": ("qwen_image21", "base", {"steps": 40, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                                                "schedule": QWEN21_RULE}),
     "qwen-image-2.1-turbo": ("qwen_image21", "turbo",
-                             {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": TURBO_SIGMAS}),
-    "krea-2-turbo": ("krea2", "turbo", {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": None}),
-    "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93, "sigmas": None}),
-    "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93, "sigmas": None}),
+                             {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": TURBO_SIGMAS,
+                              "schedule": None}),
+    "krea-2-turbo": ("krea2", "turbo", {"steps": 8, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                                        "schedule": None}),
+    "flux-2-klein": ("flux2_klein", "distilled", {"steps": 4, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                                                  "schedule": FLUX2_RULE}),
+    "flux-2-klein-base": ("flux2_klein", "base", {"steps": 50, "cfg": 4.0, "shift": 1.0,
+                                                  "sigmas": None, "schedule": FLUX2_RULE}),
+    "flux-2-klein-9b": ("flux2_klein_9b", "distilled", {"steps": 4, "cfg": 1.0, "shift": 1.0,
+                                                        "sigmas": None, "schedule": FLUX2_RULE}),
+    "flux-2-klein-base-9b": ("flux2_klein_9b", "base", {"steps": 50, "cfg": 4.0, "shift": 1.0,
+                                                        "sigmas": None, "schedule": FLUX2_RULE}),
+    "flux-2-klein-9b-kv": ("flux2_klein_9b_kv", "distilled",
+                           {"steps": 4, "cfg": 1.0, "shift": 1.0, "sigmas": None,
+                            "schedule": FLUX2_RULE}),
+    "flux-3-klein": ("flux3_klein", "distilled", {"steps": 16, "cfg": 1.0, "shift": 6.93,
+                                                  "sigmas": None, "schedule": None}),
+    "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93,
+                                                  "sigmas": None, "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
@@ -248,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                 **contract, "gmlx_version": st.gmlx_version,
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
-                "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae"],
+                "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
@@ -484,6 +519,7 @@ class Handler(BaseHTTPRequestHandler):
                              for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
+                 ref_cache=req.get("ref_cache", False),
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
                  fields=sorted(req), tensors=sorted(tensors), targets=targets,
                  sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)])

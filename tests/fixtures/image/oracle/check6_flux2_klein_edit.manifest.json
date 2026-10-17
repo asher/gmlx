@@ -1,0 +1,517 @@
+{
+ "schema": 1,
+ "name": "check6_flux2_klein_edit",
+ "check": 6,
+ "family": "flux2_klein",
+ "script": "scripts/image_oracle/check6_flux2_klein_edit.py",
+ "argv": [
+  "check6_flux2_klein_edit.py",
+  "--reference",
+  "src",
+  "--reference-commit",
+  "50fe5162777813d869182b139e83b10743caef15",
+  "--dit",
+  "flux-2-klein-4b-Q4_K_M.gguf",
+  "--variant",
+  "distilled",
+  "--autoencoder",
+  "ae.safetensors",
+  "--features",
+  "check2_flux2_klein.npz"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "flux-2-klein-4b-Q4_K_M.gguf",
+   "size": 2604311104,
+   "sha256": "0b25d143c8469b342bc5af3bce92b783bf6b0636d285f7b2f75e38af63af9a15"
+  },
+  "autoencoder": {
+   "name": "ae.safetensors",
+   "size": 336211292,
+   "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+  },
+  "features": {
+   "name": "check2_flux2_klein.npz",
+   "size": 157354382,
+   "sha256": "207834c4c3c183edee80e865e3c8f6c445654fbb29862589f0778673b4c43613"
+  }
+ },
+ "inputs": {
+  "prepared": {
+   "one_wide": {
+    "size": [
+     592,
+     400
+    ]
+   },
+   "one_square": {
+    "size": [
+     400,
+     400
+    ]
+   },
+   "one_large": {
+    "size": [
+     2336,
+     1744
+    ]
+   },
+   "one_odd": {
+    "size": [
+     1024,
+     768
+    ]
+   },
+   "one_narrow": {
+    "size": [
+     512,
+     64
+    ]
+   },
+   "one_small": {
+    "error": "Skipping due to minimal sidelength underschritten h 40 w 64"
+   },
+   "one_long": {
+    "error": "Skipping due to maximal ar overschritten h 64 w 513"
+   },
+   "several_wide": {
+    "size": [
+     592,
+     400
+    ]
+   },
+   "several_large": {
+    "size": [
+     1168,
+     880
+    ]
+   },
+   "several_many": {
+    "size": [
+     1280,
+     800
+    ]
+   },
+   "several_odd": {
+    "size": [
+     1024,
+     768
+    ]
+   }
+  },
+  "variant": "distilled",
+  "model_info": "flux.2-klein-4b",
+  "steps": 4,
+  "guidance": 1.0,
+  "seed": 6,
+  "kept_steps": [
+   1,
+   2,
+   3
+  ],
+  "case": [
+   "wide"
+  ],
+  "sources": {
+   "wide": [
+    600,
+    400,
+    3
+   ],
+   "square": [
+    400,
+    400,
+    4
+   ],
+   "large": [
+    2400,
+    1800,
+    3
+   ],
+   "many": [
+    1600,
+    1000,
+    3
+   ],
+   "odd": [
+    1031,
+    777,
+    3
+   ],
+   "narrow": [
+    512,
+    64,
+    3
+   ],
+   "small": [
+    64,
+    40,
+    3
+   ],
+   "long": [
+    513,
+    64,
+    3
+   ]
+  },
+  "limits": {
+   "one": 4096576,
+   "several": 1048576
+  },
+  "bf16": true,
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, (1, 128, height / 16, width / 16) of the first prepared reference; the CLI's noise is bf16, so it is rounded",
+  "sources_rule": "numpy Generator(PCG64(seed)) in SOURCES order: gradients, 12 rectangles, normal noise of 6, and a random alpha for 4 channels",
+  "ref_tokens": "encode_image_refs' bf16 tokens as float32, (L, 128)",
+  "ref_ids": "encode_image_refs' ids, (L, 4)",
+  "ref_latents": "the float32 encode of each reference, (1, 128, height / 16, width / 16), before encode_image_refs rounds its tokens to bf16",
+  "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
+  "gguf_codecs": {
+   "F32": 60,
+   "Q5_K": 30,
+   "Q4_K": 50,
+   "BF16": 9
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding",
+   "autoencoder": "float32"
+  },
+  "run": {
+   "sources": [
+    "wide"
+   ],
+   "size": [
+    592,
+    400
+   ],
+   "fp32_s": 39.4,
+   "bf16_s": 121.0,
+   "latents_bf16_vs_fp32": {
+    "rel_l2": 0.05705238677869343,
+    "cosine": 0.9983726746169832,
+    "max_abs": 1.1833462715148926
+   },
+   "bf16_vs_fp32_by_step": [
+    0.002194774105633942,
+    0.004565392234670243,
+    0.014565087264044641,
+    0.05705238677869343
+   ]
+  }
+ },
+ "tolerances": {
+  "by_step_rel_l2": [
+   0.004389548211267884,
+   0.009130784469340486,
+   0.029130174528089282,
+   0.11410477355738687
+  ],
+  "rule": "latents after a kept step and after the last: relative L2 at twice the oracle's own bf16 against fp32 relative L2 after that step, on the run's own size"
+ },
+ "notes": [],
+ "created": "2026-10-16T15:24:31Z",
+ "npz": "check6_flux2_klein_edit.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    512,
+    7680
+   ],
+   "dtype": "float32",
+   "sha256": "d826e5b160e0d8ed351f4fa73c61332506de8c02987d73ab1a215b694316469e"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "f0bb066d3c278211c4254c330b93e10d15b80a99ef4cc9a8f3682e75c6ad6009"
+  },
+  "latents_bf16": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "dedf9531301e820a99d3f058d68fd78511ff8dca75e6d870c122f0cdf18de7d7"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "e10e95293ecfcf6a95ac6c92ebf87b15fb64cc478ba5c2e8dde846bfe2bd3d6f"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "4d6ec58c13ed7b1bd59097dfb3782405f06344f4ec2f0c50c47187fe10b8ad5e"
+  },
+  "latents_step3": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "fda492cbde61cb484cd05e99293fd761de369de5a889d40cd2b37d7ef09e1b6e"
+  },
+  "noise": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "f1b56c835aacdae6d32e4f7c475ca533495b555b7cc09634a49af0991f9a14a7"
+  },
+  "prepared_one_large": {
+   "shape": [
+    1744,
+    2336,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "40909525a370d662ad1e9f717703b0d36ce6bf40b07e15634845336ae483f636"
+  },
+  "prepared_one_narrow": {
+   "shape": [
+    64,
+    512,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "e6ce8e812d779a9227fc36b067eb3082e17c1af7cfd64c93b5857450572979c7"
+  },
+  "prepared_one_odd": {
+   "shape": [
+    768,
+    1024,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "29b92ee0f1b487c0d986c0157f28cdb39da2dd39c9e2d8e86bf56344d9b02163"
+  },
+  "prepared_one_square": {
+   "shape": [
+    400,
+    400,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "3a639096e3202f623cba7d6d807ad843600dc2bd67b599117415fc751e7fb869"
+  },
+  "prepared_one_wide": {
+   "shape": [
+    400,
+    592,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "350274f340353614bf98ebddb387809359b027677b754288d99e589d22259863"
+  },
+  "prepared_several_large": {
+   "shape": [
+    880,
+    1168,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "07693d147f34e7348974987aa665f6e01861faec9614dbf3d9ef42b89e0a5741"
+  },
+  "prepared_several_many": {
+   "shape": [
+    800,
+    1280,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "c502e237d28035842e33d451437c2ebfaa5f58bcfbf377dfe385df237240d205"
+  },
+  "prepared_several_odd": {
+   "shape": [
+    768,
+    1024,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "29b92ee0f1b487c0d986c0157f28cdb39da2dd39c9e2d8e86bf56344d9b02163"
+  },
+  "prepared_several_wide": {
+   "shape": [
+    400,
+    592,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "350274f340353614bf98ebddb387809359b027677b754288d99e589d22259863"
+  },
+  "ref_ids": {
+   "shape": [
+    925,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "5e0d4890ce626788ee9a441770b5baf846c8ecaf5af9f1ca22a8a43ab4e082ec"
+  },
+  "ref_latents_0": {
+   "shape": [
+    1,
+    128,
+    25,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "4a67675f16738a5e210985825ad3f0cc6be79e8c04fea2a92277518f69235bba"
+  },
+  "ref_tokens": {
+   "shape": [
+    925,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "52cda1e7f76c68717a7e738854a2fdc452f6e0368d2d49fef5d0f6c6066e5f86"
+  },
+  "schedule": {
+   "shape": [
+    5
+   ],
+   "dtype": "float32",
+   "sha256": "46e03699ff1f86e70294a441e3c3d0b13165a3369e54280d7d53dc104308e548"
+  },
+  "source_large": {
+   "shape": [
+    1800,
+    2400,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "068e72306f1324aadefca43e9f14a3bc1a66f18faefacc684595be557b9c14dd"
+  },
+  "source_long": {
+   "shape": [
+    64,
+    513,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "292ba25b082fe4f5b6c77ae9314b1e2c6f21c741fb6a8a457f86367a8304a35e"
+  },
+  "source_many": {
+   "shape": [
+    1000,
+    1600,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "1ffa0102994f59a6507f3afd9d241c94727a6de1abe22e9a0a2bf7aeae135417"
+  },
+  "source_narrow": {
+   "shape": [
+    64,
+    512,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "e6ce8e812d779a9227fc36b067eb3082e17c1af7cfd64c93b5857450572979c7"
+  },
+  "source_odd": {
+   "shape": [
+    777,
+    1031,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "634557786f931f5b26799300cbc3cc03fba166702f4939b05426403a2758f4ed"
+  },
+  "source_small": {
+   "shape": [
+    40,
+    64,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "4e53117237dcc7b7a5c088e080b747007c35b4bc520f02d385c27b5a1fccf2ea"
+  },
+  "source_square": {
+   "shape": [
+    400,
+    400,
+    4
+   ],
+   "dtype": "uint8",
+   "sha256": "cb75bc8006d262b351b324bc92cf68d6db365eeb6f649177c052ca03754de317"
+  },
+  "source_wide": {
+   "shape": [
+    400,
+    600,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "a8d722626e69e4c389e62ee2435b2f7fb15125ebfa437504adea0f85ef6ed991"
+  },
+  "times": {
+   "shape": [
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "6c45c9fe05e6716c8be5b5a02baa7175435c41c4e36988dc547e4eec7b14d116"
+  }
+ }
+}

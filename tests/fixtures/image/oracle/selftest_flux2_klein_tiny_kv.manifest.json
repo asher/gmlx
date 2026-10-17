@@ -1,0 +1,320 @@
+{
+ "schema": 1,
+ "name": "selftest_flux2_klein_tiny_kv",
+ "check": 3,
+ "family": "flux2_klein",
+ "script": "scripts/image_oracle/check3_flux2_klein.py",
+ "argv": [
+  "check3_flux2_klein.py",
+  "--reference",
+  "src",
+  "--reference-commit",
+  "50fe5162777813d869182b139e83b10743caef15",
+  "--self-test",
+  "--kv"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "config": {
+   "attention_head_dim": 16,
+   "axes_dims_rope": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "eps": 1e-06,
+   "guidance_embeds": false,
+   "in_channels": 8,
+   "joint_attention_dim": 24,
+   "mlp_ratio": 3.0,
+   "num_attention_heads": 4,
+   "num_layers": 2,
+   "num_single_layers": 2,
+   "out_channels": null,
+   "patch_size": 1,
+   "rope_theta": 2000,
+   "timestep_guidance_channels": 256
+  },
+  "case": {
+   "latent": [
+    4,
+    6
+   ],
+   "refs": [
+    [
+     2,
+     3
+    ],
+    [
+     2,
+     2
+    ]
+   ],
+   "text": 10,
+   "sigma": 0.73
+  },
+  "seed": 0,
+  "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
+  "refs": 2,
+  "sigma2": 0.41
+ },
+ "results": {
+  "velocity_extract_bf16_vs_fp32": {
+   "rel_l2": 0.006478074834638888,
+   "cosine": 0.999980561742737,
+   "max_abs": 0.023137271404266357
+  },
+  "velocity_cached_bf16_vs_fp32": {
+   "rel_l2": 0.008052034161934092,
+   "cosine": 0.9999681952670947,
+   "max_abs": 0.02198481559753418
+  }
+ },
+ "tolerances": {
+  "velocity_extract": {
+   "rel_l2": 0.012956149669277776
+  },
+  "velocity_cached": {
+   "rel_l2": 0.016104068323868185
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of each velocity of the cached pass and of each block's reference K and V"
+ },
+ "notes": [
+  "the weights are in selftest_flux2_klein_tiny_weights by GGUF name in torch order; the latents, features and references are those of selftest_flux2_klein_tiny"
+ ],
+ "created": "2026-10-17T06:53:33Z",
+ "npz": "selftest_flux2_klein_tiny_kv.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    10,
+    24
+   ],
+   "dtype": "float32",
+   "sha256": "266f8fc9fef4b1ceddb650a2aea642fb520784c50439535366e924e013a4e372"
+  },
+  "in.time_in": {
+   "shape": [
+    1,
+    256
+   ],
+   "dtype": "float32",
+   "sha256": "5ca568a959a2467ebedb33adad8652492de1aef351cbc6b7d876d272126ebf1f"
+  },
+  "in.time_in2": {
+   "shape": [
+    1,
+    256
+   ],
+   "dtype": "float32",
+   "sha256": "02126e0ef87074d67f79c825613b804a96c1f11a763caf3089714c40aa699b0f"
+  },
+  "kv.0.k": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "57cbc4176bdcac7a4de640ecd932a81e3b78cc79929f216654878fd4ec08e694"
+  },
+  "kv.0.v": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "aea59fd8a5adb221d1c80b92355e51cc5322fb18326721aa3c6d3abb46575aa7"
+  },
+  "kv.1.k": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "389679947c7c07ef2e7b6739d4e3a16b8d4ef30e6f52855e7cf10f8135c9d8ff"
+  },
+  "kv.1.v": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "463bbbd2d65424e5cdbe09f43b5ab6a4a1ee4d1b8aa28c7f4631b3e29b54e47e"
+  },
+  "kv.2.k": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "119038862e8da69156446623e05fc89d82d6faefcdf5ff0b4b2cf55a7eae5dbb"
+  },
+  "kv.2.v": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "e53e492df9ce86ee3a241eea7eb959736a1aa18af28e27497973df55241bdb6b"
+  },
+  "kv.3.k": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "54c40540aaa6f4c3c603990be5f9c0d8e62c50126faa7c566df3816ed8f3cc15"
+  },
+  "kv.3.v": {
+   "shape": [
+    1,
+    4,
+    10,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "cd20f7251e19ac299d84ced17d3669d78bfd42b15b37df831f29f29e15be700b"
+  },
+  "latents": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "7d0aefea8d2160266e2a288916d22681bf085288383a2ca5041be76b90993927"
+  },
+  "latents2": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "30eec295cab9f3f6d750ebe3e681c93a3a545334773c721be502f69e4fbeaf29"
+  },
+  "refs.0": {
+   "shape": [
+    1,
+    8,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "339f6a068dc369b279d76fd1fd7c7d8de6a6842a29295bb51f1c4d9d9a7a1705"
+  },
+  "refs.1": {
+   "shape": [
+    1,
+    8,
+    2,
+    2
+   ],
+   "dtype": "float32",
+   "sha256": "d7e5124b8838c3d04593e36e54928a990d84fd76a63583a6aa1be5b22f234369"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "86c887cea8c0b376b06f829ed68d9d51c2a186f1f504370fe2e3352d6c5bd181"
+  },
+  "sigma2": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "3a0681da7f696b5b704d65161c8039e2cfffc17cfdbedf247b13667cd83bb5db"
+  },
+  "velocity_cached": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "7e6137fb744e6fe3a68f3b69fc3dcb0c61d79d0f87211536c8731cbe0aab3052"
+  },
+  "velocity_cached_bf16": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "156982021944687e8e5982b0dca9c93e39e90d93768e78e50ff22bcd7efa7e94"
+  },
+  "velocity_extract": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "4658c2134b31aa79d8f92efa74f3140ca9ad128a5a51c2bfdcaa43d45720f18d"
+  },
+  "velocity_extract_bf16": {
+   "shape": [
+    1,
+    8,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "96de54ca20532620ecb26809d3a00afc0407c9f2814810b40f2538856afc2c92"
+  }
+ }
+}

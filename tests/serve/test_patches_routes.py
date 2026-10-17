@@ -608,11 +608,12 @@ def test_keep_and_unload_take_an_image_model(monkeypatch):
 
 @pytest.mark.parametrize("family,tower,edit", [
     ("qwen_image21", None, False), ("qwen_image21", "/mm.gguf", True),
-    ("flux3_klein", None, True), ("z_image", "/mm.gguf", False)])
+    ("flux3_klein", None, True), ("flux2_klein", None, True),
+    ("z_image", "/mm.gguf", False)])
 def test_a_models_entry_edits_with_the_vision_tower_its_family_needs(
         monkeypatch, tmp_path, family, tower, edit):
-    """Qwen-Image edits with its tower, FLUX.3 klein's encoder reads the
-    prompt alone, and Z-Image takes no references."""
+    """Qwen-Image edits with its tower, the encoders of FLUX.3 klein and
+    FLUX.2 klein read the prompt alone, and Z-Image takes no references."""
     from types import SimpleNamespace
 
     from gmlx.image import loader

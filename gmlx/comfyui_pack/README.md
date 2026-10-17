@@ -10,6 +10,10 @@ Supported model families:
 - Z-Image (Z-Image-Turbo), text to image.
 - Qwen-Image 2.1 and Qwen-Image 2.1 Turbo, text to image and editing with up to 10 reference images.
 - Krea 2 Turbo, text to image.
+- FLUX.2 klein 4B and FLUX.2 klein Base 4B, text to image and editing with up to 10 reference images.
+- FLUX.2 klein 9B and FLUX.2 klein Base 9B, text to image and editing with up to 10 reference images. Their license allows non-commercial use only.
+- FLUX.2 klein 9B KV, text to image and editing with up to 10 reference images, where the stock `Flux KV Cache` node makes the steps after the first reuse the keys and values of the references. Its license allows non-commercial use only.
+- FLUX.3 klein and FLUX.3 klein Base, text to image and editing with up to 10 reference images, on ComfyUI 0.41 or newer.
 
 ## Install
 
@@ -37,11 +41,16 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has five graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has ten graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
 - `qwen-image-2.1-edit-two-references.json`: Qwen-Image 2.1 editing with two reference images through the stock `TextEncodeQwenImage21` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
+- `krea-2-turbo-t2i.json`: Krea 2 Turbo text to image through the stock `BasicScheduler`, `CFGGuider` and `SamplerCustomAdvanced`. It makes 1024x1024, and on a Mac with 16 GB set the latent to 512x512.
+- `flux-2-klein-t2i.json`: FLUX.2 klein text to image through the stock `Flux2Scheduler`, `CFGGuider` and `SamplerCustomAdvanced`. `Flux2Scheduler` gives the schedule FLUX.2 klein samples on, which follows the image size, so keep its width and height those of the latent.
+- `flux-2-klein-edit-two-references.json`: FLUX.2 klein editing with two reference images, each encoded by `VAEEncode` and put on the prompt and its zeroed negative by the stock `ReferenceLatent`. The first reference sets the image size. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
+- `flux-2-klein-9b-t2i.json`: FLUX.2 klein 9B text to image, the same graph on the 9B model. It needs a Mac with 24 GB or more.
+- `flux-2-klein-9b-kv-edit-two-references.json`: FLUX.2 klein 9B KV editing with two reference images, the FLUX.2 klein edit graph on the KV model with the stock `Flux KV Cache` node between the model loader and the guider. The first step keeps the keys and values of the references, and the later steps reuse them. It needs a Mac with 24 GB or more.
 - `flux-3-klein-t2i.json`: FLUX.3 klein text to image through the stock `EmptyFlux2LatentImage`. It needs ComfyUI 0.41 or newer.
 - `flux-3-klein-edit-two-references.json`: FLUX.3 klein editing with two reference images through the stock `ReferenceMultiLatent` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.41 or newer.
 
@@ -66,7 +75,7 @@ The loaders start the server with the `gmlx` command that `gmlx comfyui install`
 ### LoRA
 
 Stock `LoraLoader` and `LoraLoaderModelOnly` work. The pack sends each LoRA's matrices to the server once and then refers to them by hash, so changing a strength or stacking LoRAs costs one small request.
-Plain LoRA pairs are applied, including those ComfyUI maps onto a band of a fused weight.
+Plain LoRA pairs are applied, including those ComfyUI maps onto a band of a fused weight, and on FLUX.2 klein the diffusers `norm_out.linear` pair whose halves ComfyUI swaps. A swapped pair on any other family is refused by name.
 LoHa, LoKr, GLoRA, OFT, BOFT, DoRA, LoRAs with a mid tensor, model merges and `strength_model` values other than 1 on a patch are refused by name.
 The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 
@@ -74,7 +83,8 @@ The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 
 Some variants, such as Qwen-Image 2.1 Turbo, are distilled to a fixed list of sigmas.
 `gmlx Sigmas` outputs that list and the variant's cfg; connect them to `SamplerCustom` or `SamplerCustomAdvanced` with any stock sampler.
-For a variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
+The schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size. On those, give `gmlx Sigmas` the image's `width` and `height`, and it outputs the schedule gmlx samples that image on. Without them it stops, and for FLUX.2 klein it names the stock `Flux2Scheduler`, which gives the same schedule.
+For any other variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
 `KSampler` with its own scheduler still works on every variant; it samples on ComfyUI's schedule instead.
 
 ### What runs where
@@ -90,6 +100,7 @@ Anything that would run inside the DiT forward in ComfyUI is refused with an err
 - hook keyframes and scheduled CLIP hooks;
 - a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default).
 
+The stock `Flux KV Cache` node on FLUX.2 klein 9B KV is not refused: the server keeps the keys and values of the references of each row of the batch from the first step of a run, the later steps of the run reuse those of each row, and the end of the run drops them.
 A refusal from a node's own setup is reported on that node. A refusal during sampling is reported on the sampler and names the node upstream that caused it.
 Saving a gmlx MODEL, CLIP or VAE with the checkpoint save nodes is refused, since ComfyUI holds no weights for them.
 
@@ -110,7 +121,7 @@ That runs the wire, client and in-process ComfyUI suites on the cpu device, then
 
 ### Parity with the stock loaders
 
-Three checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo and for Krea 2 Turbo, and ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set. They need the model files and both loaders, so they are not part of `run_tests.py`.
+Seven checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, and ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set. They need the model files and both loaders, so they are not part of `run_tests.py`.
 
 The step check is the gate. The stock model in bf16 samples and records, at each step, the latent it is fed and the denoised output it returns. The gmlx MODEL and the stock model in fp32 are then fed the same latents and sigmas. At every step the relative L2 of the gmlx output from the stock bf16 output must be at most 1.5 times that of the stock fp32 output, or at most 2e-2 where that is larger. A fixed 2e-2 cannot hold on its own: the stock fp32 output is 0.11 from the stock bf16 output at the first step of Z-Image Turbo.
 
@@ -119,8 +130,17 @@ The step check is the gate. The stock model in bf16 samples and records, at each
 | Z-Image Turbo | 1024x1024, 8 steps, stock LoRA loader | 0.115 | 0.111 | 1.14 | pass |
 | Qwen-Image 2.1 | 512x512, 30 steps, cfg 4, two references | 0.106 | 0.113 | 1.27 | pass |
 | Krea 2 Turbo | 1024x1024, 8 steps, cfg 1 | 0.055 | 0.095 | 0.72 | pass |
+| FLUX.2 klein 4B | 512x512, 4 steps, cfg 1, `Flux2Scheduler` | 0.037 | 0.041 | 1.20 | pass |
+| FLUX.2 klein 9B | 512x512, 4 steps, cfg 1, `Flux2Scheduler` | 0.093 | 0.075 | 1.23 | pass |
+| FLUX.2 klein 9B | 512x512, 4 steps, cfg 1, `Flux2Scheduler`, stock LoRA loader | 0.090 | 0.091 | 1.13 | pass |
+| FLUX.2 klein 9B | 512x512, 4 steps, cfg 1, `Flux2Scheduler`, one reference | 0.020 | 0.019 | 1.05 | pass |
+| FLUX.2 klein 9B KV | 512x512, 4 steps, cfg 1, `Flux2Scheduler`, `Flux KV Cache` | 0.076 | 0.063 | 1.21 | pass |
+| FLUX.2 klein 9B KV | 512x512, 4 steps, cfg 1, `Flux2Scheduler`, `Flux KV Cache`, one reference | 0.017 | 0.016 | 1.07 | pass |
+| FLUX.3 klein | 512x512, 16 steps, cfg 1 | 0.022 | 0.058 | 1.17 | pass |
+| FLUX.3 klein | 512x512, 16 steps, cfg 1, stock LoRA loader | 0.029 | 0.081 | 1.24 | pass |
+| FLUX.3 klein | 512x512, 16 steps, cfg 1, one reference | 0.017 | 0.018 | 1.26 | pass |
 
-On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1 and Krea 2 checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
+On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2, FLUX.2 klein and FLUX.3 klein checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
 
 The final image check is reported beside it: the gmlx image must be at least as close to the stock fp32 image as the stock bf16 image is, within 6 dB.
 
@@ -129,8 +149,19 @@ The final image check is reported beside it: the gmlx image must be at least as 
 | Z-Image Turbo, 1024x1024, 8 steps | 25.25 dB | 20.30 dB | pass |
 | Qwen-Image 2.1, 256x256, 30 steps, cfg 4, two references | 19.99 dB | 16.68 dB | pass |
 | Krea 2 Turbo, 1024x1024, 8 steps | 21.61 dB | 22.10 dB | pass |
+| FLUX.2 klein 4B, 512x512, 4 steps | 25.49 dB | 27.58 dB | pass |
+| FLUX.2 klein 9B, 512x512, 4 steps | 26.23 dB | 28.08 dB | pass |
+| FLUX.2 klein 9B, 512x512, 4 steps, stock LoRA loader | 28.33 dB | 24.48 dB | pass |
+| FLUX.2 klein 9B, 512x512, 4 steps, one reference | 47.24 dB | 46.53 dB | pass |
+| FLUX.2 klein 9B KV, 512x512, 4 steps, `Flux KV Cache` | 30.60 dB | 30.04 dB | pass |
+| FLUX.2 klein 9B KV, 512x512, 4 steps, `Flux KV Cache`, one reference | 48.23 dB | 47.01 dB | pass |
+| FLUX.3 klein, 512x512, 16 steps | 33.50 dB | 32.96 dB | pass |
+| FLUX.3 klein, 512x512, 16 steps, stock LoRA loader | 32.57 dB | 32.29 dB | pass |
+| FLUX.3 klein, 512x512, 16 steps, one reference | 50.41 dB | 49.28 dB | pass |
 
 A fault planted in the Z-Image step convention shows why the step check is the gate. With the velocity sign dropped, the worst step ratio is 188 and the final image reads 8.35 dB. With the timestep read 3% low, the worst step ratio is 7.1, while the final image reads 13.49 dB against a bound of 14.30 dB and fails by only 0.8 dB, so a smaller timestep fault would pass the final image check.
+
+On FLUX.2 klein 9B KV both models run under `Flux KV Cache`. A pack that leaves the cache off on the server, and so runs the references at each step's time as ComfyUI does without the node, fails the edit check with a worst step ratio of 18.0 and a final image of 23.73 dB against a bound of 41.01 dB.
 
 ## License
 

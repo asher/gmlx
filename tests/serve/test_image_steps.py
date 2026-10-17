@@ -134,14 +134,14 @@ def _http(**kw):
     return TestClient(_APP.app, base_url="http://127.0.0.1", **kw)
 
 
-def _client(http=None) -> StepsClient:
+def _client(http=None, **kw) -> StepsClient:
     http = http or _http()
 
     def call(method, path, body, headers):
         r = http.request(method, path, content=body, headers=headers)
         return r.status_code, {k.lower(): v for k, v in r.headers.items()}, \
             r.content
-    return StepsClient(call)
+    return StepsClient(call, **kw)
 
 
 def _features(seed=0, n=5):
@@ -170,9 +170,10 @@ def test_capabilities_answer_without_the_version_header(host):
     assert r.status_code == 200
     caps = r.json()
     assert caps["contract"] == {"major": 1, "minor": 0}
-    assert caps["families"] == ["flux3_klein", "krea2", "qwen_image21",
-                                "z_image"]
-    assert caps["conventions"] == ["comfy"]
+    assert caps["families"] == ["flux2_klein", "flux2_klein_9b",
+                                "flux2_klein_9b_kv", "flux3_klein", "krea2",
+                                "qwen_image21", "z_image"]
+    assert caps["conventions"] == ["comfy", "reference"]
     assert caps["wire"]["container"] == "safetensors"
 
 
@@ -379,9 +380,17 @@ def test_num_tokens_and_an_attention_mask_trim_the_cond(host, pipe):
 def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
     # ComfyUI hands every family sigma as the timestep and wants the
-    # velocity back, so every convention is the identity.
+    # velocity back, so every convention maps the identity. Its FLUX.2
+    # forward alone embeds the fp32 time, at both sizes and on KV.
     for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
+    for fam in ("flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"):
+        assert steps.CONVENTIONS["comfy"][fam] == steps.Convention(
+            time="fp32")
+    # The reference convention is comfy's on the reference time rule.
+    assert steps.CONVENTIONS["reference"] == {
+        fam: dataclasses.replace(c, time="reference")
+        for fam, c in steps.CONVENTIONS["comfy"].items()}
     monkeypatch.setitem(steps.CONVENTIONS["comfy"], "z_image",
                         steps.Convention(scale=-1.0, shift=1.0, sign=-1.0))
     c = _client()
@@ -573,18 +582,42 @@ def test_the_flux3_status_names_comfyuis_flux3_on_model_space_latents(
     assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
 
 
+def test_the_flux2_9b_status_names_comfyuis_flux2_as_4b_does(
+        host, f2pipe, monkeypatch):
+    """The step contract carries the 9B checkpoints of FLUX.2 klein, which
+    check 8 ran through ComfyUI, as ComfyUI's Flux2 on model space latents
+    and the size rule of the 4B schedule."""
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("flux2_klein_9b"), "distilled"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "f2n", f2pipe)
+    st = _client().status("f2n")
+    assert st["family"] == "flux2_klein_9b"
+    assert st["comfy"] == {"model_class": "Flux2", "image_model": "flux2"}
+    assert st["edit_capable"]
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+    assert st["sampling"] == {"steps": 4, "cfg": 1.0, "shift": 1.0,
+                              "sigmas": None, "schedule": {"rule": "flux2"}}
+
+
 def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
                                                          monkeypatch):
     """ComfyUI's FLUX.3 latents are the model's: the routes hand them to
     the core VAE passes as they are, where the other families map them
     to and from the VAE's own space."""
-    def no_map(_z):
-        raise AssertionError("FLUX.3 latents are mapped to no other space")
+    _model_space_vae_routes(host, fpipes[True], "f3d", monkeypatch)
 
-    pipe = dataclasses.replace(fpipes[True], vae=SimpleNamespace(
+
+def _model_space_vae_routes(host, pipe, mid, monkeypatch):
+    def no_map(_z):
+        raise AssertionError(f"{pipe.family.title} latents are mapped to no "
+                             "other space")
+
+    pipe = dataclasses.replace(pipe, vae=SimpleNamespace(
         config=SimpleNamespace(in_channels=3), to_model_space=no_map,
         to_vae_space=no_map))
-    _serve(host, "f3d", pipe)
+    _serve(host, mid, pipe)
     seen = []
 
     def decode(p, z, *, alpha=False, **kw):
@@ -597,13 +630,13 @@ def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
     monkeypatch.setattr(api, "vae_encode", lambda p, img, **kw: mx.array(
         lat[:1]))
     c = _client()
-    got, _, _ = c.container("vae/decode", {"latents": lat}, {"model": "f3d"})
+    got, _, _ = c.container("vae/decode", {"latents": lat}, {"model": mid})
     assert got["image"].shape == (2, 32, 48, 3)
     assert [z.shape for z in seen] == [(1, 128, 2, 3)] * 2
     assert np.array_equal(np.concatenate(seen), lat)
     got, _, _ = c.container("vae/encode",
                             {"image": np.zeros((1, 32, 48, 3), np.float32)},
-                            {"model": "f3d"})
+                            {"model": mid})
     assert np.array_equal(got["latents"], lat[:1])
 
 
@@ -613,6 +646,315 @@ def test_flow_targets_follow_comfyuis_rule():
         0.75, 0.5, 0.0, 0.0, 0.0, 0.0]
     # A tie goes to the first of the two nearest, as torch's argmin does.
     assert steps.flow_targets(s, [0.625]) == [0.5]
+
+
+
+
+# FLUX.2 klein: ComfyUI's Flux2 forward takes sigma as the timestep,
+# embeds it in fp32 and returns the native velocity, reads the reference
+# latents of a row in its order, and its VAE routes carry model-space
+# latents, as FLUX.3's do.
+
+@pytest.fixture(scope="module")
+def f2pipe():
+    """The tiny FLUX.2 klein DiT of the check 3 self-test."""
+    def build():
+        import flux2_gates as fg
+        from oracle_fixture import committed_fixture
+
+        weights, m = committed_fixture("selftest_flux2_klein_tiny_weights")
+        return api.ImagePipeline(
+            dit=fg.tiny_model(weights, m["inputs"]["config"]),
+            family=get_family("flux2_klein"), variant="distilled")
+    return _on_worker(build)
+
+
+@pytest.fixture(scope="module")
+def kvpipe():
+    """The tiny FLUX.2 klein DiT of the check 3 self-test on the KV row,
+    whose own step runs in parts."""
+    def build():
+        import flux2_gates as fg
+        from oracle_fixture import committed_fixture
+
+        weights, m = committed_fixture("selftest_flux2_klein_tiny_weights")
+        return api.ImagePipeline(
+            dit=fg.tiny_model(weights, m["inputs"]["config"]),
+            family=get_family("flux2_klein_9b_kv"), variant="distilled")
+    return _on_worker(build)
+
+
+def _f2_cond(feats, *refs, key="k"):
+    return api.Conditioning(mx.array(feats[0]), key, ref_latents=tuple(
+        mx.array(r[0]) for r in refs))
+
+
+def _f2_velocity(pipe, x, sigma, cond, table=None, time="fp32"):
+    return _on_worker(lambda: np.array(api.denoise_step(
+        pipe, mx.array(x), sigma, cond, patch_table=table, time=time)))
+
+
+def test_a_flux2_step_is_the_core_step_with_and_without_references(
+        host, f2pipe):
+    """Each step equals denoise_step at the timestep as sigma on the fp32
+    time rule, with no schedule read, with a reference and with two rows.
+    At 0.75 the reference's rule embeds 752, the bf16 of 750, and the
+    step embeds 750."""
+    _serve(host, "f2d", f2pipe)
+    c = _client()
+    rng = np.random.default_rng(7)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    rows = _rows(c, feats)
+    for t in SIGMAS[:-1]:
+        for sched in (None, SIGMAS):
+            out = c.step("f2d", None, x, [t], rows, sample_sigmas=sched)
+            assert np.array_equal(out, _f2_velocity(
+                f2pipe, x, t, _f2_cond(feats))), t
+    with_ref = [{"cond": rows[0]["cond"], "ref_latents": [c.put(ref)]}]
+    assert not np.array_equal(c.step("f2d", None, x, [0.75], rows),
+                              _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats),
+                                           time="reference"))
+    out = c.step("f2d", None, x, [0.75], with_ref)
+    assert np.array_equal(out, _f2_velocity(f2pipe, x, 0.75,
+                                            _f2_cond(feats, ref)))
+    assert not np.array_equal(out, _f2_velocity(f2pipe, x, 0.75,
+                                                _f2_cond(feats)))
+    two = c.step("f2d", None, np.concatenate([x, x]), [0.75, 0.75],
+                 rows + with_ref)
+    assert np.array_equal(two[1:], out)
+    assert host.held == 0
+
+
+def test_a_kv_edit_under_comfyuis_kv_cache_node_extracts_once_a_run(
+        host, kvpipe):
+    """Without ComfyUI's Flux KV Cache node a KV step runs whole, its
+    references at the step's time. Under the node the first step of a run
+    runs them at time zero and keeps their K and V, which the later steps
+    of the run read. The step caches count them until the run ends."""
+    from gmlx.serve import image_service
+
+    _serve(host, "kv", kvpipe)
+    c = _client()
+    rng = np.random.default_rng(12)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x0, x1 = noise_from_seed(5, F3_SHAPE), noise_from_seed(6, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
+
+    def want():
+        m = kvpipe.dit
+        f, refs = mx.array(feats), m.references([mx.array(ref)])
+        s0, s1 = np.full(1, 0.75, np.float32), np.full(1, 0.5, np.float32)
+        m0, m1 = m.modulation(s0, 1, "fp32"), m.modulation(s1, 1, "fp32")
+        v0, kv = m.extract(mx.array(x0), s0, f, refs=refs, mod=m0)
+        return [np.array(v) for v in (
+            m(mx.array(x0), s0, f, refs=refs, mod=m0), v0,
+            m(mx.array(x1), s1, f, mod=m1, cache=kv))]
+    plain, v0, v1 = _on_worker(want)
+    try:
+        assert np.array_equal(c.step("kv", None, x0, [0.75], [row]), plain)
+        run = c.begin("kv")
+        assert np.array_equal(
+            c.step("kv", run, x0, [0.75], [row], ref_cache=True), v0)
+        (held,) = steps.STATE.runs[run].ref_cache.values()
+        caches = steps.STATE.tensors.bytes + steps.STATE.adapters.bytes
+        assert image_service._steps_cache_bytes() == caches + held.nbytes
+        assert held.nbytes == kvpipe.dit.ref_cache_bytes([ref[0]])
+        assert np.array_equal(
+            c.step("kv", run, x1, [0.5], [row], ref_cache=True), v1)
+        c.end(run)
+        assert image_service._steps_cache_bytes() == caches
+    finally:
+        kvpipe.captions.clear()
+    assert host.held == 0
+
+
+def test_each_row_of_a_kv_step_under_the_node_keeps_its_own_cache(
+        host, kvpipe):
+    """The K and V of a reference depend on the latents of the row, as in
+    ComfyUI, whose cache keeps the batch axis. Two rows on one
+    conditioning keep two caches, and the second row of a step gets what
+    it gets alone."""
+    _serve(host, "kv", kvpipe)
+    c = _client()
+    rng = np.random.default_rng(15)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x0, x1 = noise_from_seed(5, F3_SHAPE), noise_from_seed(6, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
+    try:
+        one, two = c.begin("kv"), c.begin("kv")
+        alone = c.step("kv", one, x1, [0.75], [row], ref_cache=True)
+        both = c.step("kv", two, np.concatenate([x0, x1]), [0.75],
+                      [row, row], ref_cache=True)
+        assert np.array_equal(both[1:], alone)
+        assert len(steps.STATE.runs[two].ref_cache) == 2
+        c.end(one)
+        c.end(two)
+    finally:
+        kvpipe.captions.clear()
+    assert host.held == 0
+
+
+def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
+        host, kvpipe, monkeypatch):
+    """The first step of a run under the Flux KV Cache node runs whole, the
+    reference tokens joined to its rows, and keeps the K and V of its
+    references. Its plan prices the step by the larger of the KV row's
+    fits of that step and of a later one on those K and V, and the K and V
+    it keeps, to the byte, and its refusal names what fits."""
+    import re
+
+    from gmlx.image import memfit
+    from gmlx.serve import image_service
+
+    _serve(host, "kv", kvpipe)
+    served = host.served["kv"]
+    c = _client()
+    rng = np.random.default_rng(14)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 64, 64)).astype(np.float32)
+    row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
+    x = np.zeros(F3_SHAPE, np.float32)
+    w, h = routes._px(served, "latent", *F3_SHAPE[2:])
+    p, scale = kvpipe.dit.cfg.patch, kvpipe.vae_scale
+    terms = dict(caption_tokens=None, prefix_rows=[(64 // p) ** 2],
+                 prefix_shared=False, prefix_other=0, prefix_bound=0,
+                 prefix_held=0, ref_sizes=[],
+                 step_refs=[(64 * scale, 64 * scale)], ref_cache="build")
+    price = _least_budget(served, h, w, 1.0, terms)
+
+    def plan(budget):
+        args = image_service._fit_args(kvpipe, served, budget, 1.0)
+        return memfit.plan_memory(height=h, width=w, held_in=("denoise",),
+                                  **{**args, **terms})
+
+    kv, act = memfit.PEAKS["flux2_klein_9b_kv"], kvpipe.dit.act_dtype.size
+    image, refs = memfit.image_rows(kv, h, w, None), (64 // p) ** 2
+    _, later, _ = memfit.prefix_row_terms(kv, image, refs, act)
+    t = plan(price).terms
+    assert t["prefix_cache"] == kv.prefix.cache_bytes(refs, act)
+    assert t["step_peak"] == max(
+        kv.ref_build.bytes((image + refs) * kv.width * act),
+        kv.ref_read.bytes(later, 1, kv.prefix.join_bytes(refs, act)))
+    with pytest.raises(memfit.ImageMemoryError) as refused:
+        plan(price - 1)
+    hint = refused.value.hint
+    assert hint.startswith("The largest term is") and (
+        "of the 1 reference images" in hint)
+    run = c.begin("kv")
+    step = lambda: c.step("kv", run, x, [0.75], [row],  # noqa: E731
+                          ref_cache=True)
+    try:
+        host.budget_bytes = price - 1
+        _refused_by_its_plan(monkeypatch, step, re.escape(hint))
+        host.budget_bytes = price
+        _reaches_the_dit(monkeypatch, step)
+    finally:
+        host.budget_bytes = None
+        c.end(run)
+    assert host.held == 0
+
+
+def test_a_flux2_loop_on_the_reference_convention_gives_the_latents_of_sample(
+        host, f2pipe):
+    """The reference convention embeds the bf16 time of BFL's rule, as
+    sample does. Comfy's fp32 time gives other latents. The noise is in
+    bf16, as FLUX.2's loop rounds it, and the tiny DiT runs in float32,
+    so the rest of the loop takes no rounding."""
+    _serve(host, "f2d", f2pipe)
+    feats = np.random.default_rng(7).standard_normal(
+        (1, 10, 24)).astype(np.float32)
+    noise = np.array(mx.array(noise_from_seed(3, F3_SHAPE)).astype(
+        mx.bfloat16).astype(mx.float32))
+
+    def direct():
+        return np.array(api.sample(
+            f2pipe, _f2_cond(feats, key="f2-direct"), height=64, width=96,
+            noise=mx.array(noise), sigmas=SIGMAS))
+    want = _on_worker(direct)
+    got = {}
+    for conv in ("reference", "comfy"):
+        c = _client(convention=conv)
+        got[conv] = c.sample("f2d", noise, SIGMAS, _rows(c, feats))
+    assert np.isfinite(want).all()
+    assert np.array_equal(got["reference"], want)
+    assert not np.array_equal(got["comfy"], want)
+    assert host.held == 0
+
+
+def test_a_flux2_step_takes_its_references_in_the_order_of_the_row(
+        host, f2pipe):
+    _serve(host, "f2d", f2pipe)
+    c = _client()
+    rng = np.random.default_rng(11)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    a = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    b = rng.standard_normal((1, 8, 3, 2)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"],
+           "ref_latents": [c.put(a), c.put(b)]}
+    out = c.step("f2d", None, x, [0.75], [row])
+    want = _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats, a, b, key=""))
+    assert np.array_equal(out, want)
+    assert not np.array_equal(out, _f2_velocity(
+        f2pipe, x, 0.75, _f2_cond(feats, b, a, key="")))
+    assert host.held == 0
+
+
+def test_a_flux2_table_on_comfyuis_native_keys_steps_as_the_core_table(
+        host, f2pipe):
+    """ComfyUI names a FLUX.2 pair by the GGUF name under diffusion_model.,
+    a diffusers q, k or v pair as a band of the fused qkv, and the core
+    table of those keys gives the same step."""
+    from lora_fixtures import make_pair
+
+    _serve(host, "f2d", f2pipe)
+    c = _client()
+    rng = np.random.default_rng(10)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    x = noise_from_seed(5, F3_SHAPE)
+    plain = _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats))
+    for name, band, (dout, din) in (
+            ("double_blocks.0.img_attn.qkv", [0, 64, 64], (64, 64)),
+            ("double_blocks.1.txt_attn.qkv", None, (192, 64)),
+            ("single_blocks.0.linear1", None, (576, 64)),
+            ("txt_in", None, (64, 24))):
+        down, up, _ = make_pair(rng, dout, din, 2)
+        tid = c.define_table("f2d", {"entries": [{
+            "key": f"diffusion_model.{name}.weight", "band": band,
+            "patches": [{"up": c.put(up, kind="adapters"),
+                         "down": c.put(down, kind="adapters"), "alpha": 2.0,
+                         "strength": 0.8}]}]})
+        core = steps.STATE.tables_of("f2d", f2pipe)[tid]
+        out = c.step("f2d", None, x, [0.75], _rows(c, feats),
+                     patch_table=tid)
+        want = _f2_velocity(f2pipe, x, 0.75, _f2_cond(feats), core)
+        assert np.array_equal(out, want), name
+        assert not np.array_equal(out, plain), name
+
+
+def test_the_flux2_status_names_comfyuis_flux2_on_model_space_latents(
+        host, f2pipe, monkeypatch):
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("flux2_klein"), "distilled"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "f2d", f2pipe)
+    st = _client().status("f2d")
+    assert st["comfy"] == {"model_class": "Flux2", "image_model": "flux2"}
+    assert st["edit_capable"]
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+    assert st["sampling"] == {"steps": 4, "cfg": 1.0, "shift": 1.0,
+                              "sigmas": None, "schedule": {"rule": "flux2"}}
+
+
+def test_the_flux2_vae_routes_carry_model_space_latents(host, f2pipe,
+                                                         monkeypatch):
+    """ComfyUI's FLUX.2 latents are the model's, as FLUX.3's are."""
+    _model_space_vae_routes(host, f2pipe, "f2d", monkeypatch)
 
 
 # Patch tables.
@@ -889,6 +1231,7 @@ def test_status_carries_the_turbo_sampling_schedule(host, monkeypatch):
     assert st["latent"] == {"channels": 64, "stride": 16, "patch": 1}
     assert st["sampling"]["sigmas"] == [*map(float, row.sigmas), 0.0]
     assert st["sampling"]["steps"] == len(st["sampling"]["sigmas"]) - 1
+    assert st["sampling"]["schedule"] is None
     assert st["memory"]["dit_bytes"] == 7
     assert st["edit_capable"]
     # Z-Image Turbo samples on its family schedule, which has no fixed
@@ -896,6 +1239,7 @@ def test_status_carries_the_turbo_sampling_schedule(host, monkeypatch):
     z = c.status("zit")
     assert z["comfy"]["model_class"] == "ZImage"
     assert z["sampling"]["sigmas"] is None and z["sampling"]["steps"] == 8
+    assert z["sampling"]["schedule"] is None
     assert not z["edit_capable"]
     # Krea 2 Turbo: ComfyUI's Krea2 class on 16 channel latents at 8x, in
     # 2x2 patches, an RGB VAE, 8 steps on its family schedule, no guidance.
@@ -1046,14 +1390,17 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
         assert e.value.status == 400
 
 
-def test_a_flux3_step_encode_takes_the_prompt_and_no_images(monkeypatch):
-    """FLUX.3 klein's encoder reads the prompt alone, and its steps take
-    the reference latents of the VAE route, so images on the encode are
-    refused by that rule."""
+@pytest.mark.parametrize("fam, title", [("flux2_klein", "FLUX.2 klein"),
+                                        ("flux3_klein", "FLUX.3 klein")])
+def test_a_klein_step_encode_takes_the_prompt_and_no_images(monkeypatch, fam,
+                                                            title):
+    """The FLUX.2 and FLUX.3 klein encoders read the prompt alone, and
+    their steps take the reference latents of the VAE route, so images on
+    the encode are refused by that rule."""
     served, seen, _ = _stub_step_encode(monkeypatch)
-    served.pipe.family = get_family("flux3_klein")
+    served.pipe.family = get_family(fam)
     img = np.zeros((256, 256, 3), np.uint8)
-    with pytest.raises(steps.StepError, match="the FLUX.3 klein encoder "
+    with pytest.raises(steps.StepError, match=f"the {title} encoder "
                        "reads the prompt alone; a step takes the reference "
                        "latents the VAE route encodes") as e:
         _on_worker(lambda: steps.encode(served, "a", [img]))
@@ -1168,14 +1515,15 @@ def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
 
     seen = []
     monkeypatch.setattr(image_service, "size_fits",
-                        lambda served, w, h, budget, cfg=1.0, init=False:
-                        seen.append(init) or False)
+                        lambda served, w, h, budget, cfg=1.0, init=False,
+                        held_in=None: seen.append((init, held_in)) or False)
     for path, tensors in (
             ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)}),
             ("vae/decode", {"latents": np.zeros((1, 4, 4, 6), np.float32)})):
         r = _put_container(path, tensors, {"model": "zit"})
         assert r.status_code == 400, r.text
-    assert seen == [True, False]
+    # Each counts the held states in the phase it runs alone.
+    assert seen == [(True, ("init",)), (False, ("decode",))]
 
 
 def _bare_and_full(served, h, w, **full):
@@ -1191,17 +1539,18 @@ def _bare_and_full(served, h, w, **full):
                                     **args, **full).peak
 
 
-def _refused_by_its_plan(monkeypatch, call) -> None:
-    """``call`` is refused by the plan of its rows before the DiT runs. A
-    step the plan lets through stops at the DiT, whose forward on these
-    references would take gigabytes."""
+def _refused_by_its_plan(monkeypatch, call, hint: str = "") -> None:
+    """``call`` is refused by the plan of its rows before the DiT runs,
+    with ``hint`` after the refusal. A step the plan lets through stops at
+    the DiT, whose forward on these references would take gigabytes."""
     def reached(*a, **k):
         raise AssertionError("the step reached the DiT")
 
     with monkeypatch.context() as m:
         m.setattr(steps, "run_step", reached)
         with pytest.raises(StepsClientError, match="with the references of "
-                           "its rows does not fit in memory"):
+                           "its rows does not fit in memory beside the "
+                           f"models now loaded. {hint}"):
             call()
 
 
@@ -1414,7 +1763,8 @@ def test_a_guided_qwen_step_is_priced_at_both_prefix_states_to_the_byte(
     terms = dict(caption_tokens=9,
                  prefix_rows=[9 + 2 * (64 // p) ** 2] * 2,
                  prefix_shared=False, prefix_other=pipe.captions.bytes,
-                 prefix_bound=pipe.family.step.state_bytes, ref_sizes=[],
+                 prefix_bound=pipe.family.step.state_bytes,
+                 prefix_held=pipe.captions.bytes, ref_sizes=[],
                  step_refs=[(64 * scale, 64 * scale)] * 2)
     conds = _on_worker(lambda: [steps.conditioning(
         r, steps.STATE.tensors, "qwen_image21") for r in rows])
@@ -1431,6 +1781,7 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
     rows."""
     from lora_fixtures import make_pair
 
+    from gmlx.image import memfit
     from gmlx.serve import image_service
 
     c = _client()
@@ -1446,9 +1797,12 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
     seen = []
 
     def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
-                  patch_table=None):
+                  patch_table=None, joined=False, ref_cache=None, building=0,
+                  held_in=None, hint=False):
         seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
-        return conds is None
+        if conds is not None:
+            raise memfit.ImageMemoryError("refused", None, "a hint")
+        return True
 
     monkeypatch.setattr(image_service, "size_fits", size_fits)
     import qwen_tiny as qt
