@@ -2144,6 +2144,29 @@ def test_a_third_signal_leaves_the_terminal_as_it_was(fake_container, tmp_path):
     assert b"exit 137 restored" in out, out
 
 
+def test_a_signal_another_thread_takes_wakes_the_wait():
+    """The handler runs while the child runs, also when the signal reaches
+    a thread other than the main one. The same holds for a signal that
+    lands just before the wait starts."""
+    idle = threading.Event()
+    other = threading.Thread(target=idle.wait, daemon=True)
+    other.start()                         # the only thread that takes SIGUSR1
+    child: list[subprocess.Popen] = []
+    saved = signal.signal(signal.SIGUSR1, lambda signum, frame: child[0].kill())
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+    try:
+        child.append(subprocess.Popen(["sh", "-c", "kill -USR1 $PPID; exec sleep 30"]))
+        assert session._wait_child(child[0]) == -signal.SIGKILL
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
+        signal.signal(signal.SIGUSR1, saved)
+        idle.set()
+        for c in child:
+            if c.poll() is None:
+                c.kill()
+                c.wait()
+
+
 # The terminal takes these, as the shell would, while a typed key does not
 # wait: no line editing, no echo.
 _WAITING_INPUT = textwrap.dedent("""

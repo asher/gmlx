@@ -50,6 +50,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that free memory allows at load.
 - On Muse Glimmer, the thinking budget now applies in `run`, `chat` and
   `serve`, and `response_format` constrains only the final answer.
+- `gmlx launch` could miss a SIGTERM or SIGHUP on a busy Mac, so a stop or a
+  closed terminal did not end the session until the client exited.
 
 ## [0.5.0] - 2026-10-12
 

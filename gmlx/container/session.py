@@ -19,6 +19,7 @@ import json
 import os
 import re
 import secrets
+import select
 import shlex
 import shutil
 import signal
@@ -920,6 +921,35 @@ class TeardownAbandoned(BaseException):
     the remaining steps are skipped."""
 
 
+def _wait_child(child: subprocess.Popen) -> int:
+    """Wait for ``child`` and return its exit code. A signal always wakes
+    the wait, so its handler runs at once. ``child.wait()`` alone blocks in
+    ``waitpid``, and a signal that lands just before that call then waits
+    for the child to exit. Call it from the main thread."""
+    wake_r, wake_w = os.pipe()
+    done_r, done_w = os.pipe()
+    os.set_blocking(wake_w, False)
+
+    def wait() -> None:
+        try:
+            child.wait()
+            with contextlib.suppress(OSError):
+                os.write(done_w, b".")
+        finally:
+            os.close(done_w)
+
+    old = signal.set_wakeup_fd(wake_w, warn_on_full_buffer=False)
+    try:
+        threading.Thread(target=wait, daemon=True).start()
+        while done_r not in select.select([wake_r, done_r], [], [])[0]:
+            os.read(wake_r, 512)
+    finally:
+        signal.set_wakeup_fd(old)
+        for fd in (wake_r, wake_w, done_r):
+            os.close(fd)
+    return child.wait()
+
+
 class _Signals:
     """Signal handling while ``container run`` runs.
 
@@ -1278,6 +1308,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             raise cli.ContainerError(f"cannot start `container run` "
                                      f"({e.strerror or e}).") from None
         signals.child = child
+        if signals.count >= 3:            # a third signal came during the start
+            child.kill()
         if relay is not None:
             relay.start()
         if on_start is not None:
@@ -1307,7 +1339,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
                 child.stdout, None, spec.web_port, None, log, None, None, output_max))
             reader.start()
-        rc = child.wait()
+        rc = _wait_child(child)
         signals.done.set()
         if relay is not None:
             relay.close()
@@ -1692,7 +1724,7 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str,
                 relay.start()
             if len(hangups) > 1:          # a second signal came during the start
                 kill()
-            code = child[0].wait()
+            code = _wait_child(child[0])
         finally:
             if relay is not None:
                 relay.close()
