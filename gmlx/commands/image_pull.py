@@ -45,7 +45,6 @@ class Part:
     wanted: bool = True             # inside --only
     note: str | None = None         # a line the plan prints under it
     optional: bool = False          # a failed fetch leaves the pull whole
-    replace: bool = False           # the download replaces a file at path
 
     @property
     def download(self) -> bool:
@@ -264,8 +263,8 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
             need=None if need is None else need + cfg_size), dest)
 
     # The upsampler prompt, in the folder of its repository as the other
-    # parts are. The file there is the pull's own, so one of another
-    # digest is fetched again over it.
+    # parts are. A file there of another digest is the user's: it stays as
+    # it is, and the entry does not name it.
     if r.prompt_repo:
         d = _dest(r.prompt_repo, base_dir, nest)
         dest = os.path.join(d, r.prompt_file)
@@ -281,16 +280,10 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
                                    size=os.path.getsize(dest), need=0,
                                    optional=True))
         else:
-            size = _repo_sizes(r.prompt_repo, r.prompt_revision, sizes).get(
-                r.prompt_file)
-            plan.parts.append(Part(
-                "prompt", r.prompt_file, dest, repo=r.prompt_repo,
-                files=(r.prompt_file,), root=d, revision=r.prompt_revision,
-                size=size, need=size, optional=True, replace=True,
-                note=f"{dest} is not the one of {r.prompt_revision[:8]}, "
-                "and the download replaces it"))
+            plan.blocked.append(Part("prompt", r.prompt_file, dest,
+                                     repo=r.prompt_repo, optional=True))
 
-    for p in plan.parts:
+    for p in plan.parts + plan.blocked:
         role = {"mmproj": "encoder", "prompt": "dit"}.get(p.role, p.role)
         p.wanted = role in only
     return plan
@@ -546,13 +539,65 @@ def _pack(plan: Plan, part: Part, got: list, *, keep_source: bool) -> str:
     return part.path
 
 
-def _check_prompt(r: catalog.Recipe, path: str) -> None:
-    sha = catalog.sha256_file(path)
-    if sha != r.prompt_sha256:
-        raise remote.RemoteError(
-            f"{path} has sha256 {sha}, and {r.prompt_file} of "
-            f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
-            f"{r.prompt_sha256}; delete it")
+def _fetch_prompt(plan: Plan, part: Part) -> str:
+    """Download the upsampler prompt into a folder of its own beside its
+    path, check its sha256 there, and move it into place, so a copy of
+    another digest never lands on the path."""
+    import shutil
+    import tempfile
+
+    from gmlx.commands import manage
+
+    r = plan.recipe
+    os.makedirs(os.path.dirname(part.path), exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=".gmlx-pull-", dir=os.path.dirname(
+        part.path))
+    try:
+        print(f"downloading {part.repo}/{r.prompt_file}", file=sys.stderr)
+        got = manage._hf_download(part.repo, r.prompt_file, part.revision,
+                                  tmp)
+        sha = catalog.sha256_file(got)
+        if sha != r.prompt_sha256:
+            raise remote.RemoteError(
+                f"the download has sha256 {sha}, and {r.prompt_file} of "
+                f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
+                f"{r.prompt_sha256}")
+        if os.path.exists(part.path):
+            raise remote.RemoteError(f"{part.path} appeared during the pull")
+        os.replace(got, part.path)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return part.path
+
+
+def _naming(cfg, path: str) -> list:
+    """The image entries whose upsample_prompt is the file at ``path``,
+    on disk or not: a relative one under any of the model_dirs."""
+    if cfg is None:
+        return []
+
+    def expand(p):
+        return os.path.expanduser(os.path.expandvars(p))
+
+    ap = os.path.abspath(path)
+    out = []
+    for iid, m in cfg.image_models.items():
+        if not m.upsample_prompt:
+            continue
+        p = expand(m.upsample_prompt)
+        where = [p] if os.path.isabs(p) else [
+            os.path.join(expand(d), p) for d in cfg.model_dirs]
+        if ap in map(os.path.abspath, where):
+            out.append(iid)
+    return out
+
+
+def _unnamed(cfg, path: str) -> str:
+    """What a missing or unread upsampler prompt leaves of the entry."""
+    ids = _naming(cfg, path)
+    if ids:
+        return f"{', '.join(ids)} still names {path}"
+    return "the entry does not name it"
 
 
 def _entry_id(r: catalog.Recipe, plan: Plan, cfg) -> str:
@@ -784,7 +829,12 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     # The plan goes to stdout and the download lines to stderr: a pipe or a
     # file gets the plan and its license line first.
     sys.stdout.flush()
-    blocked = [p for p in plan.blocked if p.wanted]
+    for p in plan.blocked:
+        if p.optional and p.wanted:
+            print(f"warning: {p.path} is not the {_ROLE[p.role]} of {p.repo} "
+                  f"at {r.prompt_revision[:8]}, so {_unnamed(cfg, p.path)}; "
+                  "move or delete it, and pull again", file=sys.stderr)
+    blocked = [p for p in plan.blocked if p.wanted and not p.optional]
     if blocked:
         for p in blocked:
             print(f"error: {p.path} is not the {r.title} {_ROLE[p.role]}, "
@@ -805,14 +855,12 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
         if not (part.download and part.wanted):
             continue
         try:
-            if part.replace:
-                # A finished file is never downloaded again.
-                os.remove(part.path)
-            got = _fetch(plan, part)
+            if part.role == "prompt":
+                _fetch_prompt(plan, part)
+            else:
+                got = _fetch(plan, part)
             if part.role == "vae":
                 _pack(plan, part, got, keep_source=a.keep_source)
-            if part.role == "prompt":
-                _check_prompt(r, part.path)
             part.repo = None
             part.need = 0
             if part.size is None or part.role != "vae":
@@ -820,7 +868,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
         except (remote.RemoteError, OSError, ValueError) as e:
             if part.optional:
                 print(f"warning: the {_ROLE[part.role]} was not fetched, so "
-                      f"the entry does not name it: {e}", file=sys.stderr)
+                      f"{_unnamed(cfg, part.path)}: {e}", file=sys.stderr)
                 continue
             print(f"error: {part.role} failed: {e}", file=sys.stderr)
             return 1
