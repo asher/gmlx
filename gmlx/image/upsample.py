@@ -127,15 +127,15 @@ def plain(reply: str) -> str | None:
 
 
 def paragraph(reply: str) -> str | None:
-    """The one paragraph a reply writes after its thinking block. A line
-    before or after it, such as a heading, is shorter than the paragraph,
-    so the longest one is taken."""
+    """The paragraph a reply ends with after its thinking block. Lines
+    before it, such as a heading or reasoning written out of the block,
+    are not the caption."""
     answer = after_thinking(reply)
     if answer is None:
         return None
     paras = [" ".join(p.split()) for p in re.split(r"\n\s*\n", answer)]
     paras = [p for p in paras if p]
-    return max(paras, key=len) if paras else None
+    return paras[-1] if paras else None
 
 
 def _objects(text: str) -> list:

@@ -287,12 +287,12 @@ def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
 # The optional upsampler of docs/prompting.md, on a chat model of the
 # user's choice: docs/expansion.txt as the system prompt, shipped
 # unmodified, and the typed prompt as the user turn. The prompt asks for
-# a thinking block, then one paragraph, and the caption is that
-# paragraph. Krea names no sampling; gmlx decodes greedily, so the same
-# prompt writes the same caption. Thinking is off: Qwen3.5-9B writes a
-# paragraph of the same kind in a few seconds, where with thinking on it
-# thinks for up to 5000 tokens first. A model that thinks anyway has its
-# thinking block skipped.
+# a thinking block, then one paragraph, and the caption is the last
+# paragraph of the reply. Krea names no sampling; gmlx decodes greedily,
+# so the same prompt writes the same caption. Thinking is off: Qwen3.5-9B
+# writes a paragraph of the same kind in a few seconds, where with
+# thinking on it thinks for up to 5000 tokens first. A model that thinks
+# anyway has its thinking block skipped.
 UPSAMPLE = UpsampleParts(
     prompts="expansion.txt",
     sha256="2a5c24a3a83e9d415d4679a4e1853ddf056bd0329f3af315b27ed72b6ad9c2f0",

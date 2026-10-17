@@ -84,6 +84,16 @@ def test_krea_2_takes_the_paragraph_after_the_thinking_block():
     got = upsample.upsample(fam, "a red bicycle", lambda req: KREA_REPLY)
     assert got.startswith("A red city bicycle with a black leather saddle")
     assert got.endswith("falls across the cobblestones.")
+    # Reasoning written out of the thinking block is not the caption,
+    # though it runs longer.
+    reasoning = ("Step 1: the subject is a bicycle, red, with nothing else "
+                 "implied by the request.\nStep 2: a documentary photo "
+                 "serves a plain request best, so the style is a photo.\n"
+                 "Step 3: a side view shows the whole frame of the bike.")
+    assert upsample.upsample(
+        fam, "a red bicycle", lambda req:
+        f"{reasoning}\n\nA red bicycle against a brick wall.\n") == (
+        "A red bicycle against a brick wall.")
     # A reply that runs out of tokens while it thinks holds no paragraph.
     with pytest.raises(upsample.UpsampleError,
                        match="no caption within 2048 tokens"):
