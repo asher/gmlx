@@ -557,13 +557,14 @@ async def step(request: Request):
             # The plan of the rows as they are: their text, a prefix and
             # the reference latents each step runs. A step in parts runs
             # whole under another time rule, and a step on the run's cache
-            # keeps the K and V of references it has none of yet.
+            # keeps the K and V of references it has none of yet, one copy
+            # a row.
             building = {}
             if ref_cache:
-                for c in conds:
-                    i = api._ident(c)
-                    if c.ref_latents and i not in run.ref_cache:
-                        building[i] = served.pipe.dit.ref_cache_bytes(
+                for i, c in enumerate(conds):
+                    k = api._ref_key(c, i)
+                    if c.ref_latents and k not in run.ref_cache:
+                        building[k] = served.pipe.dit.ref_cache_bytes(
                             c.ref_latents)
             if not size_fits(served, w_px, h_px, budget, cfg=guided,
                              conds=conds, patch_table=table,

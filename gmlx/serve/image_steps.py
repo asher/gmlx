@@ -835,10 +835,10 @@ def _ref_answer(conds, held: dict) -> str:
     the run holds them for every row with references."""
     from gmlx.image import api
 
-    refs = [c for c in conds if c.ref_latents]
+    refs = [api._ref_key(c, i) for i, c in enumerate(conds) if c.ref_latents]
     if not refs:
         return "none"
-    return "hit" if all(api._ident(c) in held for c in refs) else "miss"
+    return "hit" if all(k in held for k in refs) else "miss"
 
 
 def define_table(served, body: dict, adapters: _Bytes) -> str:

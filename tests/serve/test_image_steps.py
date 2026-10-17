@@ -771,6 +771,33 @@ def test_a_kv_edit_under_comfyuis_kv_cache_node_extracts_once_a_run(
     assert host.held == 0
 
 
+def test_each_row_of_a_kv_step_under_the_node_keeps_its_own_cache(
+        host, kvpipe):
+    """The K and V of a reference depend on the latents of the row, as in
+    ComfyUI, whose cache keeps the batch axis. Two rows on one
+    conditioning keep two caches, and the second row of a step gets what
+    it gets alone."""
+    _serve(host, "kv", kvpipe)
+    c = _client()
+    rng = np.random.default_rng(15)
+    feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+    ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+    x0, x1 = noise_from_seed(5, F3_SHAPE), noise_from_seed(6, F3_SHAPE)
+    row = {"cond": _rows(c, feats)[0]["cond"], "ref_latents": [c.put(ref)]}
+    try:
+        one, two = c.begin("kv"), c.begin("kv")
+        alone = c.step("kv", one, x1, [0.75], [row], ref_cache=True)
+        both = c.step("kv", two, np.concatenate([x0, x1]), [0.75],
+                      [row, row], ref_cache=True)
+        assert np.array_equal(both[1:], alone)
+        assert len(steps.STATE.runs[two].ref_cache) == 2
+        c.end(one)
+        c.end(two)
+    finally:
+        kvpipe.captions.clear()
+    assert host.held == 0
+
+
 def test_a_kv_edit_step_under_the_node_is_priced_with_the_cache_it_keeps(
         host, kvpipe, monkeypatch):
     """The first step of a run under the Flux KV Cache node runs whole, as
