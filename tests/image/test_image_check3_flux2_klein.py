@@ -2,7 +2,8 @@
 of the gmlx DiT, row by row, against BFL's reference DiT on the same GGUF,
 under three gates, for the distilled and the Base 4B checkpoints, and
 under the product and exact gates for the distilled and the Base 9B
-checkpoints.
+checkpoints, with the site gate at 9B on the distilled case with a
+reference.
 
 scripts/image_oracle/check3_flux2_klein.py writes the fixtures. Each step
 is the first of the sampler, at time 1, where seeded normal latents are on
@@ -72,8 +73,9 @@ DITS = {("4b", "distilled"): "flux-2-klein-4b-Q4_K_M.gguf",
 FAMILIES = {"4b": "flux2_klein", "9b": "flux2_klein_9b"}
 STEPS = {"distilled": 4, "base": 50}
 REFERENCE_COMMIT = "50fe5162777813d869182b139e83b10743caef15"
-# The case that runs every stream.
+# The case that runs every stream, and the site gate's cases.
 FULL = "distilled r1"
+SITES = {FULL: None, f"9b {FULL}": None}
 
 
 def size_variant(case: str) -> tuple[str, str]:
@@ -338,12 +340,13 @@ def site_line(label: str, sites: dict, routed: dict) -> str:
 
 
 @pytest.mark.integration
-def test_check3_site_gate_at_512(dits):
+@pytest.mark.parametrize("case", cases(SITES))
+def test_check3_site_gate_at_512(dits, case):
     """Every op of every block and every linear leaf a step calls on the
     path a request takes is within its site gate of the stock op in
     float32 on the same input, and that run's velocity passes the
-    product gate."""
-    arrays, m = _rows(FULL)
+    product gate, at 4B and at 9B."""
+    arrays, m = _rows(case)
     model, _ = dits(m)
     sites, routed, heads, skipped, vel = _sites(model, arrays)
     missing = fg.missing_ops(model, sites, routed, skipped=skipped)
@@ -355,9 +358,9 @@ def test_check3_site_gate_at_512(dits):
     assert {k for k, v in routed.items() if v == "qk_norm_rope"} == (
         qk if on else set())
     assert set(qg.head_sites(sites)) == qk
-    print(site_line("flux2 check3 sites 512", sites, routed))
-    print("flux2 check3 sites 512, q and k: "
-          + qg.qk_reading(sites, routed, heads))
+    label = f"flux2 check3 sites 512 {size_variant(case)[0]}"
+    print(site_line(label, sites, routed))
+    print(f"{label}, q and k: " + qg.qk_reading(sites, routed, heads))
     over = qg.over_gate(sites)
     assert not over, over
     rel = fg.rel(vel, arrays["velocity"])
