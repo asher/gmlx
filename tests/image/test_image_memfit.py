@@ -1145,7 +1145,8 @@ def test_a_kv_edit_counts_each_reference_and_names_the_count_that_fits():
     makes it before the VAE encodes its references, holds the cache of
     each 1024 pixel reference, 2 GiB, and no text rows. On a budget that
     holds two, a request with four is refused with the largest count that
-    fits."""
+    fits, and so is a step whose four come as latents alone, as the step
+    routes send them."""
     import mlx.core as mx
     import numpy as np
 
@@ -1158,20 +1159,25 @@ def test_a_kv_edit_counts_each_reference_and_names_the_count_that_fits():
                              variant="distilled", weights={"dit": 10 * GiB})
     feats = mx.zeros((512, 3 * 4096), mx.bfloat16)
 
-    def plan(n: int):
-        refs = tuple(Reference(np.full((1024, 1024, 4), i, np.uint8))
-                     for i in range(n))
-        cond = Conditioning(feats, f"kv {n}", refs=refs)
+    def plan(n: int, latents: bool = False):
+        if latents:
+            cond = Conditioning(feats, f"kv {n}", ref_latents=tuple(
+                mx.full((128, 64, 64), i, mx.float32) for i in range(n)))
+        else:
+            cond = Conditioning(feats, f"kv {n}", refs=tuple(
+                Reference(np.full((1024, 1024, 4), i, np.uint8))
+                for i in range(n)))
         return api.plan_request(pipe, height=1024, width=1024, conds=cond,
                                 budget=20 * GiB, overcommit=False)
 
     one, two = plan(1), plan(2)
     assert one.terms["prefix_cache"] == 2 * GiB
     assert two.terms["prefix_cache"] == 4 * GiB and two.fits
-    with pytest.raises(memfit.ImageMemoryError) as e:
-        plan(4)
-    assert "the largest that fit are 2 of the 4 reference images" in str(
-        e.value)
+    for latents in (False, True):
+        with pytest.raises(memfit.ImageMemoryError) as e:
+            plan(4, latents)
+        assert "the largest that fit are 2 of the 4 reference images" in str(
+            e.value), latents
 
 
 def test_the_flux2_9b_encode_term_covers_every_measured_encode():

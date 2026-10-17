@@ -1212,13 +1212,32 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     if not encoder_owned and (terms["encoder"] or terms["mmproj"]):
         hint += ("; the encoder is not released in this request and stays "
                  "resident")
-    sizes = ([(ref_px, ref_px)] * refs if refs
-             else [(int(h), int(w)) for h, w in ref_sizes])
+    # References that came as latents alone, as those of a step do, are
+    # the step's: the VAE encodes none of them.
+    latents = not refs and not ref_sizes and bool(step_refs)
+    sizes = ([(ref_px, ref_px)] * refs if refs else [
+        (int(h), int(w)) for h, w in (step_refs if latents else ref_sizes)])
     if _hint and sizes and row.prefix is not None and budget is not None:
+        def tokens(hw) -> int:
+            p = row.prefix.token_px
+            return sum((h // p) * (w // p) for h, w in hw)
+
         def fits(k: int, scale: float) -> bool:
-            kw = dict(refs=k, ref_px=_scaled(ref_px, scale)) if refs else dict(
-                ref_sizes=[(_scaled(h, scale), _scaled(w, scale))
-                           for h, w in sizes[:k]])
+            some = [(_scaled(h, scale), _scaled(w, scale))
+                    for h, w in sizes[:k]]
+            if refs:
+                kw = dict(refs=k, ref_px=_scaled(ref_px, scale))
+            elif not latents:
+                kw = dict(ref_sizes=some)
+            else:
+                # A conditioning whose rows hold the references takes the
+                # fewer or smaller ones in their place.
+                full = tokens(sizes)
+                kw = dict(step_refs=some, prefix_shared=prefix_shared,
+                          prefix_rows=None if prefix_rows is None else [
+                              int(n) - full + tokens(some)
+                              if int(n) >= full else int(n)
+                              for n in prefix_rows])
             return _replan(
                 dit, encoder, vae, mmproj, adapters, family=family,
                 height=height, width=width, cfg=cfg, dtype=dtype,
