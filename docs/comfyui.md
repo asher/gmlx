@@ -196,6 +196,15 @@ The FLUX.2 klein 9B models take the same nodes and workflows with
 their prompt with the Qwen3-8B GGUF on the server. They need a Mac with
 24 GB or more, and their license allows non-commercial use only.
 
+Krea 2 Turbo reads its prompt with the Qwen3-VL-4B-Instruct GGUF on the
+server. Its workflow, `krea-2-turbo-t2i`, takes the three gmlx loaders with
+`krea-2-turbo` in `model_name`, `EmptySD3LatentImage` for the image's size,
+and `BasicScheduler` for the sigmas, which `SamplerCustomAdvanced` samples
+on with a `CFGGuider` and a `KSamplerSelect`. Krea 2 Turbo samples at `cfg`
+1, so its negative can be a `Conditioning Zero Out` of the positive. No
+Krea 2 quant fits a 1024x1024 image on a Mac with 16 GB, so set the latent
+to 512x512 there.
+
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
 `SamplerCustomAdvanced`, though `KSampler` works on every model. The
