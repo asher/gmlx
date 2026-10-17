@@ -692,7 +692,9 @@ class Flux2KleinDiT(nn.Module):
         those K and V for every later step of its sampling, which reads
         them as ``cache``. Takes what ``__call__`` takes, and ``taps``
         collects the reference rows after every block as ``ref.<path>``
-        too."""
+        too. Each block is evaluated as it finishes, as in
+        ``reference_pass``: a K or V of one evaluation over every block
+        would hold its block's fused product until the end."""
         b, _, h, w = latents.shape
         cfg = self.cfg
         act = self.act_dtype
@@ -717,7 +719,8 @@ class Flux2KleinDiT(nn.Module):
                 img, txt, ref, (mod.img, mod.txt, rmod.img),
                 (rope_img, rope_txt, rope_ref))
             k, v = _kept(*kv)
-            pacing.point(img, txt, ref, k, v, *keys, *values)
+            mx.eval(img, txt, ref, k, v)
+            pacing.point()
             keys.append(k)
             values.append(v)
             if taps is not None:
@@ -733,7 +736,8 @@ class Flux2KleinDiT(nn.Module):
                                                        rmod.single),
                                           (rope_joint, rope_ref))
             k, v = _kept(*kv)
-            pacing.point(joint, ref, k, v, *keys, *values)
+            mx.eval(joint, ref, k, v)
+            pacing.point()
             keys.append(k)
             values.append(v)
             if taps is not None:
