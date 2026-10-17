@@ -999,9 +999,10 @@ multiple of 32, and a reference keeps its alpha channel. The text encoder
 reads the references through its vision tower, which `--encoder-mmproj`
 loads from the encoder's mmproj GGUF, and the VAE encodes them. `--size`
 sets the size of the output, which defaults to the entry's `defaults.size`
-or the variant's, and not to a reference's. The fit check counts the references, and a request that does
-not fit is refused before any model loads. Z-Image and Krea 2 take no
-reference images, and `--ref` exits 2 on them.
+or the variant's, and not to a reference's. The fit check counts the
+references, and a request that does not fit is refused before any model
+loads. Z-Image and Krea 2 take no reference images, and `--ref` exits 2 on
+them.
 
 `--ref` gives FLUX.3 klein up to 10 reference images too. Its text encoder
 reads the prompt alone, so it needs no `--encoder-mmproj`, and the VAE
