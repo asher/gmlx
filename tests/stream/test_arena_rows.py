@@ -67,6 +67,9 @@ class _Arena:
     def covers(self, li):
         return True
 
+    def slot_count(self, li):
+        return self.slots
+
     def can_stage_smaller(self, li):
         return True
 
@@ -244,7 +247,12 @@ def test_row_flag_on_multi_token_arena_calls_not_on_decode():
     glu(mx.random.normal((1, 1, 16)), _cpu_inds(1))
     assert glu.flags == [False]
     assert arena.wired == 1
+    # 8 routed rows on 8 slots: no GEMM at any arena size, so a verify
+    # batch this wide keeps the width-picked kernels.
     glu(mx.random.normal((1, 4, 16)), _cpu_inds(4))
+    assert glu.flags[-1] is False
+    # 32 routed rows reach the GEMM gate of 4 rows per slot.
+    glu(mx.random.normal((1, 16, 16)), _cpu_inds(16))
     assert glu.flags[-1] is True
     assert glu._kq_arena_rows is False  # reset after the call
 
@@ -262,11 +270,36 @@ def test_row_flag_on_one_token_split_pieces():
     assert glu._kq_in_split is False
 
 
+class _LookaheadSpy:
+    def __init__(self):
+        self.calls = 0
+
+    def on_call(self, x, indices):
+        self.calls += 1
+        return None
+
+
+def test_lookahead_skips_one_token_split_pieces():
+    """A split piece is prefill work: it must not prestage, and a latent
+    MoE block hands it no full-width router input."""
+    glu = _cpu_glu(_Recording)
+    arena = _Arena(glu, slots=2)
+    spy = _LookaheadSpy()
+    object.__setattr__(glu, "_kq_decode_feeder", arena)
+    object.__setattr__(glu, "_kq_lookahead", spy)
+    inds = mx.arange(8, dtype=mx.uint32).reshape(1, 4, 2)
+    mx.eval(glu(mx.random.normal((1, 4, 16)), inds))
+    assert arena.leaves == [1, 1, 1, 1]
+    assert spy.calls == 0
+    mx.eval(glu(mx.random.normal((1, 1, 16)), _cpu_inds(1)))
+    assert spy.calls == 1
+
+
 def test_row_flag_off_by_env(monkeypatch):
     monkeypatch.setenv("GMLX_ARENA_ROW_KERNELS", "0")
     glu = _cpu_glu(_Recording)
     object.__setattr__(glu, "_kq_decode_feeder", _Arena(glu, slots=8))
-    glu(mx.random.normal((1, 4, 16)), _cpu_inds(4))
+    glu(mx.random.normal((1, 16, 16)), _cpu_inds(16))
     assert glu.flags == [False]
 
 

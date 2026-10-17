@@ -33,6 +33,9 @@ class _Arena:
     def can_stage_smaller(self, li):
         return True
 
+    def slot_count(self, li):
+        return self.slots
+
     def wedged_at(self, li):
         return False
 

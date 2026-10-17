@@ -155,6 +155,10 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
             def covers(self, li):
                 return True
 
+            def slot_count(self, li):
+                return 1 << 16
+
+
             def stage(self, li, ids):
                 self.stage_calls.append(li)
                 return ids.astype(np.uint32) if self.fits else None

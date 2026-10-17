@@ -23,6 +23,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   several requests.
 - Requires mlx-kquant 0.5.1. With it, speculative decoding on Qwen3.5 to 3.8
   runs faster on NAX GPUs (M5).
+- With `--stream-experts`, a prompt that uses most of a layer's experts
+  prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
 
 ### Fixed
 
@@ -44,9 +46,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `qwen-image-2.1`, and `list --edit` keeps it, as `/v1/models` does.
 - `gmlx rm` keeps a file that another model names through a symlink, where it
   deleted the file as unused.
-- With `--stream-experts`, a prompt that uses most of a layer's experts
-  prefills faster, and the output no longer depends on the arena size.
-  `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
+- With `--stream-experts`, greedy output no longer changes with the arena size
+  that free memory allows at load.
+- On Muse Glimmer, the thinking budget now applies in `run`, `chat` and
+  `serve`, and `response_format` constrains only the final answer.
 
 ## [0.5.0] - 2026-10-12
 

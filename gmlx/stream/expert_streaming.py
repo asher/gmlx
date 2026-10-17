@@ -597,7 +597,8 @@ def install_expert_streaming(
                             return y
                         finally:
                             self._kq_cpu_only = True
-                    if la is not None and cpu_only and n_tokens == 1:
+                    if (la is not None and cpu_only and n_tokens == 1
+                            and not in_split):
                         # Decode only: prefill prestage would fault the
                         # cold arena while the ring holds the wired budget.
                         # Lookahead: run the NEXT MoE layer's router on this
@@ -730,8 +731,15 @@ def install_expert_streaming(
                             # and let the fused kq kernels run
                             if shed_args is not None:
                                 args = shed_args
-                            rows = ((n_tokens > 1 or in_split)
-                                    and _arena_row_kernels())
+                            # kq takes a GEMM when rows / experts >= 4,
+                            # and the experts here are the arena's slots.
+                            # Narrower calls, such as verify batches, pick
+                            # the same kernel at any arena size.
+                            rows = _arena_row_kernels() and (
+                                in_split
+                                or n_tokens > 1
+                                and n_tokens * indices.shape[-1]
+                                >= 4 * dfr.slot_count(self._kq_li))
                             self._kq_cpu_only = False
                             if rows:
                                 object.__setattr__(
