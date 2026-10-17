@@ -510,8 +510,9 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
         return None
     if a.upsampler is None:
         log(f"warning: {family.title} expects its prompts upsampled; set "
-            "--upsampler to a chat GGUF or a models: id, or upsampler on "
-            "its image_models entry, or pass --no-upsample")
+            f"--upsampler to a {family.upsample.suggested} GGUF or its "
+            "models: id, or upsampler on the image_models entry, or pass "
+            "--no-upsample")
         return None
     a.upsampler = _upsampler_path(a)
     return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json)

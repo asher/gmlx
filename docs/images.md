@@ -173,8 +173,10 @@ model rewrites it with the system prompt that Black Forest Labs publishes
 for this, and the image follows the caption. A FLUX.3 klein prompt sent as
 typed gives weaker images.
 
-Any chat model of your configuration can write the caption. Add it under
-`models`, and name it as the `upsampler` of the image model's entry:
+Qwen3.5-9B writes captions close to those of BFL's own upsampler, and
+its Q6_K GGUF is a good choice. Any chat model of your configuration can
+write them. Add it under `models`, and name it as the `upsampler` of the
+image model's entry:
 
 ```yaml
 models:
@@ -211,7 +213,7 @@ To run a prompt as typed, pass `--no-upsample`, send
 `"prompt_upsampling": false` in the request, or set `upsample: false` on
 the entry, which a request with `"prompt_upsampling": true` turns back on.
 Without an upsampler, FLUX.3 klein runs each prompt as typed and prints a
-warning that names the `upsampler` setting.
+warning that names the `upsampler` setting and Qwen3.5-9B.
 
 ## ComfyUI
 

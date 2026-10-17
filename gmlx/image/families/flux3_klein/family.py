@@ -355,6 +355,7 @@ UPSAMPLE = UpsampleParts(
     thinking="off",
     repo="github.com/black-forest-labs/flux-3-image-klein",
     revision="bfc8889a4497f846416f253a3972a1941ac698b9",
+    suggested="Qwen3.5-9B",
 )
 
 

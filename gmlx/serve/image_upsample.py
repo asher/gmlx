@@ -82,8 +82,9 @@ def upsampler_for(spec, family, requested: bool | None,
         if spec.id not in _WARNED:
             _WARNED.add(spec.id)
             _log.warning("image model %r: %s expects its prompts upsampled; "
-                         "set upsampler to a chat model id on its "
-                         "image_models entry", spec.id, family.title)
+                         "set upsampler on its image_models entry to the "
+                         "models: id of a %s GGUF", spec.id, family.title,
+                         family.upsample.suggested)
         return None
     if requested is None and not getattr(spec, "upsample", True):
         return None

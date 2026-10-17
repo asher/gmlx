@@ -160,7 +160,7 @@ def test_without_an_upsampler_the_cli_warns_and_runs_the_prompt_as_typed(
 
     assert umbrella_main(cli.base + ["--prompt", "a red bicycle",
                                      "--output", str(tmp_path / "a.png")]) == 0
-    assert "expects its prompts upsampled" in capsys.readouterr().out
+    assert "set --upsampler to a Qwen3.5-9B GGUF" in capsys.readouterr().out
     assert ("encode", "a red bicycle") in cli.events
     del cli.events[:]
     assert umbrella_main(cli.base + ["--prompt", "a red bicycle",

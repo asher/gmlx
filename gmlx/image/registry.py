@@ -131,7 +131,7 @@ class UpsampleParts:
     is the user turn as it is. The reply is decoded with ``temperature``,
     at most ``max_tokens`` tokens, ``presence_penalty`` and the chat
     model's thinking switch at ``thinking``, as ``repo`` at ``revision``
-    does.
+    does. ``suggested`` names the chat model to set when none is.
     """
     prompts: str
     sha256: str
@@ -142,6 +142,7 @@ class UpsampleParts:
     thinking: str
     repo: str
     revision: str
+    suggested: str = ""
 
 
 # The image limits: the pixels and the longer side of the largest image a
