@@ -198,6 +198,32 @@ class Session:
         res["messages"] = sorted(set(res["messages"]))
         return res
 
+    async def run_queued(self, prompts: list, timeout=300.0) -> list:
+        """Queue every prompt at once, then wait for each to end."""
+        pids = []
+        for p in prompts:
+            async with self.http.post(self.c.url + "/prompt",
+                                      json={"prompt": p, "client_id": self.client_id}) as r:
+                pids.append((await r.json())["prompt_id"])
+        res = {pid: {"prompt_id": pid, "status": None} for pid in pids}
+        while any(r["status"] is None for r in res.values()):
+            msg = await self.ws.receive(timeout=timeout)
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    continue
+                raise RuntimeError(f"websocket closed: {msg.type}")
+            d = json.loads(msg.data)
+            data = d.get("data") or {}
+            r = res.get(data.get("prompt_id"))
+            if r is None:
+                continue
+            if d.get("type") == "execution_success":
+                r["status"] = "success"
+            elif d.get("type") == "execution_error":
+                r["status"] = "error"
+                r["error"] = data.get("exception_message")
+        return [res[pid] for pid in pids]
+
     async def interrupt(self):
         async with self.http.post(self.c.url + "/interrupt", json={}) as r:
             await r.read()
@@ -439,6 +465,23 @@ class Cases:
                    {"got": got, "want": want})
         self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
 
+    async def moss_queued(self):
+        """A prompt queued behind the running one, with other single_layers,
+        changes neither run: each takes the skips of its own graph."""
+        a = workflow("moss-image-t2i.json")
+        a["6"]["inputs"].update(width=64, height=48)
+        a["9"]["inputs"].update(steps=2, seed=7)
+        b = copy.deepcopy(a)
+        b["9"]["inputs"]["seed"] = 8
+        b["8"]["inputs"]["single_layers"] = "21"
+        ra, rb = await self.s.run_queued([a, b])
+        self.check("the running prompt", ra["status"] == "success", ra.get("error"))
+        self.check("the queued prompt", rb["status"] == "success", rb.get("error"))
+        steps = kinds(self.stub.log(), "step")
+        self.check("each run skips its own blocks",
+                   [e["skip"] for e in steps] == [None, [22]] * 2 + [None, [21]] * 2,
+                   [e["skip"] for e in steps])
+
     async def flux3_edit(self, upsample=False):
         wf = workflow("flux-3-klein-edit-two-references.json")
         wf["8"]["inputs"]["resolution.megapixels"] = 0.25
@@ -632,6 +675,7 @@ async def amain(a) -> dict:
             await c.case("FluxKontextMultiReferenceLatentMethod refused on flux-2-klein, naming it",
                          c.flux2_reference_method)
             await c.case("moss-image t2i under SkipLayerGuidanceDiTSimple", c.moss_t2i)
+            await c.case("moss-image: a prompt queued behind the running one", c.moss_queued)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)

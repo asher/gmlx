@@ -67,6 +67,7 @@ NAMES = (
     ("comfy.utils", "state_dict_prefix_replace"),
     ("comfy.utils", "set_attr"),
     ("comfy.weight_adapter", "LoRAAdapter"),
+    ("execution", "PromptQueue.get_current_queue_volatile"),
 )
 
 # Arguments the pack passes by name to a ComfyUI signature.

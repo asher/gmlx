@@ -1214,17 +1214,15 @@ class MossImage(Base):
     with the OpenMOSS plugin's settings, its LoRA key map, and block 22 left
     out of the negative pass under SkipLayerGuidanceDiTSimple."""
 
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(P.model.LAST_PROMPT.clear)
-
     def running(self, graph: dict):
-        """The pack sees ``graph`` as the prompt whose KSampler runs."""
+        """The pack sees ``graph`` as the prompt whose KSampler runs, as
+        ComfyUI's queue holds it."""
         from unittest import mock
-        P.model.LAST_PROMPT.clear()
-        P.model.LAST_PROMPT.update(graph)
+        item = (0, "p1", graph["prompt"], {}, ["9"], [])
+        queue = types.SimpleNamespace(get_current_queue_volatile=lambda: ([item], []))
         fake = types.SimpleNamespace(PromptServer=types.SimpleNamespace(
-            instance=types.SimpleNamespace(last_node_id="9")))
+            instance=types.SimpleNamespace(last_node_id="9", last_prompt_id="p1",
+                                           prompt_queue=queue)))
         return mock.patch.dict(sys.modules, {"server": fake})
 
     def slg(self, model, single="22", double="", start=0.0, end=1.0):

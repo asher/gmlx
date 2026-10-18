@@ -63,7 +63,6 @@ IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "Ski
                       "TomePatchModel", "FreeU", "FreeU_V2", "ScaleROPE",
                       "FluxKontextMultiReferenceLatentMethod"}
 
-LAST_PROMPT: dict = {}
 STRICT_KEYS = False
 # The node whose skips of single blocks on the negative pass a step takes
 # as its skip set, on the families whose DiT skips blocks.
@@ -189,34 +188,30 @@ def walk_back(prompt: dict, node_id: str, classes: set) -> list:
     return sorted(hits, key=lambda s: (len(s), s))
 
 
-def register_prompt_handler() -> bool:
-    """Keep the last submitted graph, so a forward-time refusal can name the
-    node upstream of the sampler that caused it."""
+def _running() -> tuple:
+    """``(graph, node id)`` of the prompt that runs: the queue's running
+    item of the server's last prompt id, else its only running item, and
+    the node the server says runs. ``({}, None)`` when none is known. A
+    prompt queued behind it is not read: ComfyUI hands the on_prompt
+    handlers each prompt when it is queued, not when it runs."""
     try:
         import server
-        inst = getattr(server.PromptServer, "instance", None)
-        if inst is None:
-            return False
-
-        def on_prompt(json_data):
-            LAST_PROMPT.clear()
-            LAST_PROMPT.update(json_data if isinstance(json_data, dict) else {})
-            return json_data
-
-        inst.add_on_prompt_handler(on_prompt)
-        return True
+        inst = server.PromptServer.instance
+        running, _ = inst.prompt_queue.get_current_queue_volatile()
+        pid = getattr(inst, "last_prompt_id", None)
+        sid = getattr(inst, "last_node_id", None)
     except Exception:  # noqa: BLE001: best effort; the refusal still names the cause
-        return False
+        return {}, None
+    items = [it for it in running if it[1] == pid] or (running if len(running) == 1 else [])
+    graph = items[0][2] if items else None
+    if not isinstance(graph, dict) or sid is None:
+        return {}, None
+    return graph, sid
 
 
 def _upstream_names() -> list:
-    try:
-        import server
-        sid = getattr(server.PromptServer.instance, "last_node_id", None)
-    except Exception:  # noqa: BLE001
-        return []
-    prompt = LAST_PROMPT.get("prompt") or {}
-    if sid is None or not prompt:
+    prompt, sid = _running()
+    if not prompt:
         return []
     return [f"{n} ({prompt[n]['class_type']})" for n in walk_back(prompt, sid, IN_FORWARD_CLASSES)]
 
@@ -229,13 +224,8 @@ def _layers(text) -> list:
 def _slg_inputs() -> tuple:
     """``(node id, inputs)`` of the SkipLayerGuidanceDiTSimple node upstream
     of the running sampler. Refuses none and two that differ."""
-    try:
-        import server
-        sid = getattr(server.PromptServer.instance, "last_node_id", None)
-    except Exception:  # noqa: BLE001
-        sid = None
-    prompt = LAST_PROMPT.get("prompt") or {}
-    hits = walk_back(prompt, sid, {SLG_NODE}) if sid is not None else []
+    prompt, sid = _running()
+    hits = walk_back(prompt, sid, {SLG_NODE}) if prompt else []
     if not hits:
         _refuse("transformer_options['patches_replace'] on single blocks, from a node other "
                 f"than {SLG_NODE},")
