@@ -279,13 +279,14 @@ def _image_refusal(report: remote.HeaderReport,
     return word if labeled else None
 
 
-def _image_companion_bytes(family: str | None) -> int | None:
-    """Bytes of the default encoder (with its vision tower) and VAE of an
-    image family, for the combined figure."""
-    from gmlx.image.catalog import RECIPES
+def _image_companion_bytes(family: str | None,
+                           ram: int | None) -> int | None:
+    """Bytes of the encoder (with its vision tower) and VAE a pull of an
+    image family takes on this Mac, for the combined figure."""
+    from gmlx.image.catalog import RECIPES, companion_bytes
     for r in RECIPES.values():
         if r.family == family:
-            return r.encoder_bytes + r.vae_bytes
+            return companion_bytes(r, ram)
     return None
 
 
@@ -315,9 +316,11 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         from gmlx.image.dtypes import chip_refusal
         from gmlx.image.registry import get_family
         chip_error = chip_refusal(image_family, get_family(image_family).title)
+    from gmlx.load.memfit import classify_fit, total_ram_bytes
+    ram = total_ram_bytes()
     combined = None
     if image == "dit" and size_bytes:
-        extra = _image_companion_bytes(image_family)
+        extra = _image_companion_bytes(image_family, ram)
         # The load gate counts the 16-bit tensors the DiT casts too.
         cast = 0
         if scans and image_family:
@@ -335,8 +338,6 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     from gmlx.load.preflight import hadamard_fold_error
     fold_err = hadamard_fold_error(report.arch, report.hadamard)
     runs = report.loadable_codecs and arch_ok and fold_err is None
-    from gmlx.load.memfit import classify_fit, total_ram_bytes
-    ram = total_ram_bytes()
     return {
         "ref": ref.raw,
         "kind": ref.kind,

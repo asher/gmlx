@@ -505,3 +505,17 @@ def test_a_flux2_pull_takes_the_z_image_encoder_and_the_klein_vae_on_disk(
 def test_a_32_gb_mac_pulls_qwen_image_at_q8_0_since_its_f16_load_does_not_fit():
     assert catalog.default_quants(catalog.RECIPES["qwen-image"],
                                   32 << 30) == ("Q8_0", "Q8_0")
+
+
+def test_each_class_default_encoder_has_its_own_size():
+    """A recipe whose class defaults take more than one encoder quant has
+    each file in ENCODER_BYTES, so the fit of a DiT prices the one its
+    class pulls."""
+    for r in catalog.RECIPES.values():
+        names = {r.encoder_name(catalog.DEFAULT_QUANTS[r.name][c][1])
+                 for c in catalog.MEMORY_CLASSES}
+        if len(names) > 1:
+            assert names <= set(catalog.ENCODER_BYTES), r.name
+    m = catalog.RECIPES["moss-image"]
+    assert catalog.companion_bytes(m, 16 << 30) == 5_680_522_464 + m.vae_bytes
+    assert catalog.companion_bytes(m, 64 << 30) == m.encoder_bytes + m.vae_bytes

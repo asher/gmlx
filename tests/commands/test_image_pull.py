@@ -1169,6 +1169,26 @@ def test_an_image_dit_skips_the_chat_arch_gate_and_fits_with_its_parts():
     assert v["usable"] and v["arch_error"] is None
 
 
+@pytest.mark.parametrize("ram_gb, enc", [(16, 5_680_522_464),
+                                         (32, 9_527_502_048)])
+def test_a_moss_image_dit_fits_with_the_encoder_its_class_pulls(
+        monkeypatch, ram_gb, enc):
+    """The fit of a DiT counts the encoder quant the pull takes on this
+    Mac: Qwen3.5-9B Q4_K_M on 16 GB, Q8_0 above."""
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
+                        lambda: ram_gb << 30)
+    ref = remote.parse_ref(
+        "hf:realrebelai/MOSS-Image_GGUFs/MOSS-Image-SFT-Q6_K.gguf")
+    v = manage._verdict(ref, _report("moss_image"), size_bytes=4_553_650_496)
+    assert v["image_family"] == "moss_image"
+    assert v["combined_bytes"] == 4_553_650_496 + enc + M.vae_bytes
+    if ram_gb == 16:
+        assert v["fit"] == "fits"
+        assert manage._image_fit_note(v) == (
+            "9.8 GB with its text encoder and VAE, fits on this Mac's "
+            "16 GB RAM")
+
+
 @pytest.mark.parametrize("gen, chip", [(13, "M1"), (14, "M2")])
 def test_a_dit_this_chip_does_not_run_is_refused_by_name(monkeypatch, capsys,
                                                          gen, chip):

@@ -376,6 +376,21 @@ ENCODER_OUTPUT_BYTES = {
 }
 
 
+# Encoder files a class default pulls other than the one encoder_bytes
+# sizes, by name.
+ENCODER_BYTES = {
+    "Qwen3.5-9B-Q4_K_M.gguf": 5_680_522_464,
+    "Qwen3.5-9B-Q8_0.gguf": 9_527_502_048,
+}
+
+
+def companion_bytes(r: Recipe, ram_bytes: int | None) -> int:
+    """Bytes of the encoder (with its vision tower) and the VAE that a
+    pull of ``r`` takes on this Mac, at the class's encoder quant."""
+    name = r.encoder_name(default_quants(r, ram_bytes)[1])
+    return ENCODER_BYTES.get(name, r.encoder_bytes) + r.vae_bytes
+
+
 # The image size an entry pulled with the class default DiT gets in its
 # defaults, where that DiT makes images smaller than the family's size.
 DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}}
