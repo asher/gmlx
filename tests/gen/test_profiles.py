@@ -122,6 +122,16 @@ def test_gpt_oss_reasoning_intents():
     assert hi["sampling"] == base["sampling"]
 
 
+def test_nemotron_intents():
+    base = profiles.groups_for("nemotron")
+    off = profiles.groups_for("nemotron", "instruct")
+    assert off["chat_template_kwargs"] == {"enable_thinking": False}
+    assert off["sampling"] == base["sampling"]
+    med = profiles.groups_for("nemotron", "reasoning-medium")
+    assert med["chat_template_kwargs"] == {"medium_effort": True}
+    assert profiles.groups_for("nemotron", "reasoning-high") == base
+
+
 def test_kimi_reasoning_intents_and_thinking_tokens():
     base = profiles.groups_for("kimi")
     assert base["sampling"]["temperature"] == 1.0
