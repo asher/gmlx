@@ -465,6 +465,12 @@ def find_mtp_companion(
     parent = os.path.dirname(ap)
     folders = [parent, os.path.join(parent, "MTP"),
                os.path.join(os.path.dirname(parent), "MTP")]
+    return _pick_drafter(folders, arches, ap)
+
+
+def _pick_drafter(folders, arches: tuple, ap: str) -> str | None:
+    """The best drafter GGUF of ``arches`` in ``folders``: earlier arches
+    win, then earlier folders, then the lexically first name."""
     best: tuple[int, str] | None = None
     for folder in dict.fromkeys(folders):
         try:
@@ -489,6 +495,49 @@ def find_mtp_companion(
             if rank == 0:
                 return p
     return best[1] if best else None
+
+
+def find_sibling_drafter(
+    path: str,
+    drafter_arch: str | tuple,
+) -> str | None:
+    """Path of a drafter GGUF in the sibling repo of ``path``'s repo that
+    carries a drafter marker (``<repo>-LiLiCorr-GGUF`` beside
+    ``<repo>-GGUF``), or ``None``. Covers the ``<org>__<repo>`` local layout
+    and the Hugging Face cache. A target with a native MTP head keeps it, so
+    this returns ``None`` for one."""
+    meta = header_meta(path)
+    if meta and meta.get("mtp"):
+        return None
+    arches = (drafter_arch,) if isinstance(drafter_arch, str) else tuple(drafter_arch)
+    ap = os.path.abspath(os.path.expanduser(path))
+    return _pick_drafter(_sibling_drafter_folders(ap), arches, ap)
+
+
+def _sibling_drafter_folders(ap: str) -> list:
+    parts = os.path.normpath(ap).split(os.sep)
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i].startswith("models--"):
+            root = os.sep.join(parts[:i])
+            out = []
+            for repo in _marked_repo_names(parts[i]):
+                snaps = os.path.join(root, repo, "snapshots")
+                try:
+                    revs = sorted(os.listdir(snaps))
+                except OSError:
+                    continue
+                out += [os.path.join(snaps, r) for r in revs]
+            return out
+    parent = os.path.dirname(ap)
+    return [os.path.join(os.path.dirname(parent), repo)
+            for repo in _marked_repo_names(os.path.basename(parent))]
+
+
+def _marked_repo_names(repo: str) -> list:
+    """``repo`` with each drafter marker before its ``-GGUF`` suffix."""
+    m = re.search(r"-gguf$", repo, re.IGNORECASE)
+    stem, suffix = (repo[:m.start()], repo[m.start():]) if m else (repo, "")
+    return [f"{stem}-{marker}{suffix}" for marker in _SIBLING_DRAFTER_MARKERS]
 
 
 def fill_families(cfg) -> None:
@@ -1294,7 +1343,9 @@ def _configured_in_dir(dirpath: str, configured) -> list:
 # A drafter repo named for its target's repo plus one of these markers
 # (NVIDIA's ``<repo>-LiLiCorr-GGUF`` beside ``<repo>-GGUF``) pairs with the
 # models of that repo wherever the scan found them.
-_SIBLING_DRAFTER_MARKER_RE = re.compile(r"-lilicorr(?=-gguf$|$)", re.IGNORECASE)
+_SIBLING_DRAFTER_MARKERS = ("LiLiCorr",)
+_SIBLING_DRAFTER_MARKER_RE = re.compile(
+    "-(?:" + "|".join(_SIBLING_DRAFTER_MARKERS) + ")(?=-gguf$|$)", re.IGNORECASE)
 
 
 def _repo_name(path: str) -> str:

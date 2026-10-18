@@ -839,20 +839,27 @@ def _sibling_drafter(gguf_path: str) -> str | None:
 
 def _companion_drafter(gguf_path: str) -> str | None:
     """The companion drafter of a companion-only family
-    (``MTP_COMPANION_AUTO_MODEL_TYPES``), which auto-enables MTP on the text
-    path and VLM text-only MTP alike. The loader re-resolves the same path
-    when draft_gguf_path is not given. Narrower than :func:`_sibling_drafter`
-    on purpose: qwen3_5's native head wins over a sidecar, so a DFlash2
-    companion stays explicit ``--draft-gguf``. Header-cache peeks only."""
+    (``MTP_COMPANION_AUTO_MODEL_TYPES``), or the drafter in a marked sibling
+    repo of a target with no native head (``<repo>-LiLiCorr-GGUF``). Either
+    auto-enables MTP on the text path and VLM text-only MTP alike. The loader
+    re-resolves the same path when draft_gguf_path is not given. Narrower
+    than :func:`_sibling_drafter` on purpose: qwen3_5's native head wins over
+    a sidecar, so a DFlash2 companion stays explicit ``--draft-gguf``.
+    Header-cache peeks only."""
     try:
         import gmlx.load.arch_table as arch_table
         import gmlx.load.config_synth as config_synth
-        from gmlx.load.discovery import find_mtp_companion, header_meta
+        from gmlx.load.discovery import (
+            find_mtp_companion,
+            find_sibling_drafter,
+            header_meta,
+        )
 
         meta = header_meta(gguf_path)
         mt = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get((meta or {}).get("arch") or "")
         if mt not in arch_table.MTP_COMPANION_AUTO_MODEL_TYPES:
-            return None
+            arches = arch_table.drafter_arches(mt) if mt else ()
+            return find_sibling_drafter(gguf_path, arches) if arches else None
         return find_mtp_companion(gguf_path, arch_table.drafter_arches(mt))
     except Exception:
         return None

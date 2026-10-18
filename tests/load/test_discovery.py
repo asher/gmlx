@@ -1223,3 +1223,49 @@ def test_repo_name_reads_both_layouts():
         "/hf/models--nvidia--X-LiLiCorr-GGUF/snapshots/abc/X.gguf"
     ) == "nvidia__x-gguf"
     assert disc._sibling_drafter_repo("/m/nvidia__X-GGUF/X.gguf") is None
+
+
+def _bolt_pair(target_dir, drafter_dir, monkeypatch, *, mtp=False):
+    target_dir.mkdir(parents=True)
+    drafter_dir.mkdir(parents=True)
+    target = target_dir / "Bolt.gguf"
+    drafter = drafter_dir / "Bolt-LiLiCorr.gguf"
+    for p in (target, drafter):
+        p.write_bytes(b"GGUF")
+    metas = {str(target): {"arch": "nemotron_h_moe", "kind": "model", "mtp": mtp},
+             str(drafter): {"arch": "dflash", "kind": "drafter"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    return str(target), str(drafter)
+
+
+def test_sibling_drafter_in_the_local_layout(tmp_path, monkeypatch):
+    target, drafter = _bolt_pair(tmp_path / "nvidia__Bolt-GGUF",
+                                 tmp_path / "nvidia__Bolt-LiLiCorr-GGUF",
+                                 monkeypatch)
+    assert disc.find_sibling_drafter(target, ("dflash",)) == drafter
+    assert disc.find_mtp_companion(target, ("dflash",)) is None
+
+
+def test_sibling_drafter_in_the_hf_cache(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    target, drafter = _bolt_pair(
+        hub / "models--nvidia--Bolt-GGUF" / "snapshots" / "r1",
+        hub / "models--nvidia--Bolt-LiLiCorr-GGUF" / "snapshots" / "r2",
+        monkeypatch)
+    assert disc.find_sibling_drafter(target, ("dflash",)) == drafter
+
+
+def test_sibling_drafter_leaves_a_native_head_alone(tmp_path, monkeypatch):
+    target, _ = _bolt_pair(tmp_path / "nvidia__Lightning-GGUF",
+                           tmp_path / "nvidia__Lightning-LiLiCorr-GGUF",
+                           monkeypatch, mtp=True)
+    assert disc.find_sibling_drafter(target, ("dflash",)) is None
+
+
+def test_run_auto_enables_the_sibling_drafter(tmp_path, monkeypatch):
+    from gmlx.commands import cli
+
+    target, drafter = _bolt_pair(tmp_path / "nvidia__Bolt-GGUF",
+                                 tmp_path / "nvidia__Bolt-LiLiCorr-GGUF",
+                                 monkeypatch)
+    assert cli._companion_drafter(target) == drafter
