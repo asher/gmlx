@@ -42,6 +42,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
 - `gmlx pull` of an image model reuses a VAE GGUF on disk packed for its
   family from another source, and names it, where it downloaded the VAE again.
+- `presence_penalty` and `frequency_penalty` count every generated token, as
+  vLLM does, where they counted the last 20 tokens, the prompt's included.
 
 ### Fixed
 
@@ -81,8 +83,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   takes the image's width and height and gives the schedule of that size.
 - An image request that failed on an internal error got a 400 and left no
   trace in the log. It gets a 500, and the server logs its trace.
-- `presence_penalty` and `frequency_penalty` count every generated token, as
-  vLLM does, where they counted the last 20 tokens, the prompt's included.
 
 ## [0.5.0] - 2026-10-12
 
