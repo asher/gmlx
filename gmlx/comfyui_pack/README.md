@@ -10,6 +10,7 @@ Supported model families:
 - Z-Image (Z-Image-Turbo), text to image.
 - Qwen-Image 2.1 and Qwen-Image 2.1 Turbo, text to image and editing with up to 10 reference images.
 - Krea 2 Turbo, text to image.
+- MOSS-Image and MOSS-Image Base, text to image. The pack runs them on Apple GPUs without the OpenMOSS ComfyUI plugin or the ComfyUI-MOSS-GGUF bridge.
 - FLUX.2 klein 4B and FLUX.2 klein Base 4B, text to image and editing with up to 10 reference images.
 - FLUX.2 klein 9B and FLUX.2 klein Base 9B, text to image and editing with up to 10 reference images. Their license allows non-commercial use only.
 - FLUX.2 klein 9B KV, text to image and editing with up to 10 reference images, where the stock `Flux KV Cache` node makes the steps after the first reuse the keys and values of the references. Its license allows non-commercial use only.
@@ -41,12 +42,13 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has ten graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has eleven graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
 - `qwen-image-2.1-edit-two-references.json`: Qwen-Image 2.1 editing with two reference images through the stock `TextEncodeQwenImage21` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
 - `krea-2-turbo-t2i.json`: Krea 2 Turbo text to image through the stock `BasicScheduler`, `CFGGuider` and `SamplerCustomAdvanced`. It makes 1024x1024, and on a Mac with 16 GB set the latent to 512x512.
+- `moss-image-t2i.json`: MOSS-Image text to image in 50 steps at cfg 3, through the stock `ModelSamplingSD3` at shift 5 and `SkipLayerGuidanceDiTSimple`, which leaves block 22 out of the negative pass, as the OpenMOSS workflow does. `KSampler` samples on ComfyUI's `sgm_uniform` schedule, not on the release's schedule that gmlx samples on.
 - `flux-2-klein-t2i.json`: FLUX.2 klein text to image through the stock `Flux2Scheduler`, `CFGGuider` and `SamplerCustomAdvanced`. `Flux2Scheduler` gives the schedule FLUX.2 klein samples on, which follows the image size, so keep its width and height those of the latent.
 - `flux-2-klein-edit-two-references.json`: FLUX.2 klein editing with two reference images, each encoded by `VAEEncode` and put on the prompt and its zeroed negative by the stock `ReferenceLatent`. The first reference sets the image size. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
 - `flux-2-klein-9b-t2i.json`: FLUX.2 klein 9B text to image, the same graph on the 9B model. It needs a Mac with 24 GB or more.
@@ -98,9 +100,11 @@ Anything that would run inside the DiT forward in ComfyUI is refused with an err
 - attention overrides, RoPE options (`ScaleROPE`), weight wrappers and diffusion model wrappers;
 - ControlNet;
 - hook keyframes and scheduled CLIP hooks;
-- a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default).
+- a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default);
+- a MOSS-Image conditioning that masks some of its text rows, such as one from a text encoder other than `gmlx CLIP Loader`.
 
 The stock `Flux KV Cache` node on FLUX.2 klein 9B KV is not refused: the server keeps the keys and values of the references of each row of the batch from the first step of a run, the later steps of the run reuse those of each row, and the end of the run drops them.
+The stock `SkipLayerGuidanceDiTSimple` node on MOSS-Image is not refused when it names `single_layers` alone, with `start_percent` 0 and `end_percent` 1: the server leaves those blocks out of the negative pass of each step. It is refused with `double_layers`, another window, a linked widget or a block MOSS-Image lacks, and on any other model.
 A refusal from a node's own setup is reported on that node. A refusal during sampling is reported on the sampler and names the node upstream that caused it.
 Saving a gmlx MODEL, CLIP or VAE with the checkpoint save nodes is refused, since ComfyUI holds no weights for them.
 
