@@ -273,11 +273,12 @@ FLUX2_KLEIN_9B_KV_JOINED = StepFit(base=3.1 * GiB, k=2.9, row_k=0.5)
 # pixel cells of 80 text rows has a slope of 5.1, raised 10 percent to
 # 5.6. The base is 0.25 GiB above every cell, the 256 pixel cell with
 # 4096 text rows the closest, and the 2048 pixel cell with 80 is priced
-# 1.46 GiB above its reading. A guided step, at 512 to 1536 pixels with
-# 80 text rows and 1024 with 4096, holds both passes: at 1024 pixels with
-# 4096 rows it reads 4.18 GiB against 3.28 unguided, and a second row of
-# slope 1.0 prices it under its reading. Its slope of 2.0 leaves 0.31 GiB
-# above that cell, the closest guided one.
+# 1.46 GiB above its reading. A guided step, at 512 to 2048 pixels with
+# 80 text rows and at 1024 and 2048 with 4096, holds both passes: at 1024
+# pixels with 4096 rows it reads 4.18 GiB against 3.28 unguided, and a
+# second row of slope 1.0 prices it under its reading. Its slope of 2.0
+# leaves 0.31 GiB above that cell, the closest guided one, and 0.38 and
+# 0.50 above the 2048 pixel cells.
 MOSS_IMAGE_STEP = StepFit(base=1.64 * GiB, k=5.6, row_k=2.0)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:

@@ -911,7 +911,7 @@ def test_a_short_prompt_plan_covers_every_measured_cell(family):
     row = memfit.PEAKS[family]
     cells = _short_cells(family)
     assert len(cells) == {"z_image": 3, "krea2": 3, "qwen_image21": 79,
-                          "flux3_klein": 13, "moss_image": 10}[family]
+                          "flux3_klein": 13, "moss_image": 11}[family]
     room = [_short_room(family, c) for c in cells]
 
     def formula(c, caption):
@@ -977,7 +977,7 @@ def _moss_room(row, c: dict) -> float:
 
 def test_the_moss_row_covers_every_measured_step():
     """Sizes to 2048 pixels with 80 and 4096 text rows, and one with 640,
-    and guided steps to 1536 pixels. A text row reads more than an image
+    and guided steps to 2048 pixels. A text row reads more than an image
     row, so the cells of the most text sit closest to the line."""
     row = memfit.PEAKS["moss_image"]
     assert row.step is memfit.MOSS_IMAGE_STEP
@@ -988,7 +988,8 @@ def test_the_moss_row_covers_every_measured_step():
                                           2048}
     assert {c["text_rows"] for c in cells} == {80, 640, 4096}
     guided = [(c["size"], c["text_rows"]) for c in cells if c["guided"]]
-    assert guided == [(512, 80), (1024, 80), (1536, 80), (1024, 4096)]
+    assert guided == [(512, 80), (1024, 80), (1536, 80), (1024, 4096),
+                      (2048, 80), (2048, 4096)]
     room = [_moss_room(row, c) for c in cells]
     assert min(room) >= ROOM
     assert min(room) <= 0.35 * GiB and max(room) <= 1.5 * GiB
