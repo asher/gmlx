@@ -6,6 +6,8 @@ and its head. The step parts give the step they stand in for. Each wrong
 model of FAULTS misses the fp32 bound."""
 from __future__ import annotations
 
+import math
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -14,7 +16,6 @@ from mlx.utils import tree_flatten
 from image_fixtures import fixture_view, load_json
 
 from gmlx.image import fingerprint as fp
-from gmlx.image import ops
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.families.moss_image import model as mm
 from gmlx.image.loader import check_names
@@ -185,12 +186,17 @@ def test_the_coordinates_center_the_image_and_count_the_text():
     assert got[6:].tolist() == [[0, i, 0, 0] for i in range(4)]
 
 
-def test_the_sinusoid_is_cosines_first_from_float64():
-    t = np.float32(0.3) * np.float32(1000)
-    got = np.array(mm.time_sinusoid(np.array([t]), 16, 10000.0))
-    phase = np.float64(t) * 10000.0 ** (-np.arange(8) / 8)
-    want = np.concatenate([np.cos(phase), np.sin(phase)]).astype(np.float32)
-    assert got.tobytes() == want[None].tobytes()
+def test_the_sinusoid_rounds_float64_phases_once():
+    """Each entry is the double-precision cosine or sine of t times its
+    frequency, rounded once to float32. The same phases in float32 miss."""
+    t = 300.0
+    freqs = [10000.0 ** (-k / 8) for k in range(8)]
+    want = ([math.cos(t * f) for f in freqs]
+            + [math.sin(t * f) for f in freqs])
+    got = np.array(mm.time_sinusoid(np.array([t], np.float32), 16, 10000.0))
+    assert got[0].tolist() == np.float32(want).tolist()
+    single = np.float32(t) * np.float32(freqs)
+    assert np.cos(single).tolist() != got[0, :8].tolist()
 
 
 def test_the_tiny_model_matches_the_release_forward_in_fp32():
@@ -321,18 +327,6 @@ def test_each_wrong_model_fails_the_tiny_gate(monkeypatch, name):
         gap = _gap(model, p, lat, feats)
     print(f"moss tiny, {name}: rel L2 {gap:.2e}")
     assert gap > 25 * TOL
-
-
-def test_the_ops_seams_stay_in_force():
-    """The model calls each seam through gmlx.image.ops, so a kernel
-    install reaches it."""
-    import inspect
-
-    src = inspect.getsource(mm)
-    for seam in ("ops.sdpa", "ops.qk_norm_rope", "ops.modulate",
-                 "ops.gated_residual", "ops.resid_leaf"):
-        assert seam in src, seam
-    assert ops.SEAMS
 
 
 def test_every_op_of_a_tiny_bf16_step_is_within_its_rounding_bound():

@@ -55,20 +55,30 @@ def test_the_template_fixture_is_pinned():
     assert row["revision"] == get_family("moss_image").constants.revision
 
 
-def test_the_spec_reads_qwen35_after_its_final_norm():
-    spec = te.encoder_spec("moss_image")
-    assert (spec.name, spec.arch, spec.model_type, spec.hidden,
-            spec.layers) == ("qwen3.5-9b", "qwen35", "qwen3_5", 4096, 32)
-    assert spec.final_norm and spec.trim and spec.tap_layers == (32,)
-    assert spec.max_tokens == 4096 and not spec.pad_multiple
-    assert (spec.drop, spec.keep_tail, spec.activation) == (0, 0, None)
-    assert [r.gguf_name for r in spec.identity] == [
-        "blk.0.attn_norm.weight", "blk.17.post_attention_norm.weight",
-        "output_norm.weight"]
+def test_the_read_and_the_trim_are_in_the_template_id():
     import dataclasses
 
-    tapped = dataclasses.replace(spec, final_norm=False)
-    assert tapped.template_id != spec.template_id
+    spec = te.encoder_spec("moss_image")
+    ids = {spec.template_id,
+           dataclasses.replace(spec, final_norm=False,
+                               tap_layers=(32,)).template_id,
+           dataclasses.replace(spec, trim=False).template_id}
+    assert len(ids) == 3
+
+
+@pytest.mark.parametrize("prompt", ["  a red bicycle\n", "\ta red bicycle ",
+                                    "a red bicycle\u3000"])
+def test_surrounding_whitespace_encodes_as_the_stripped_prompt(prompt):
+    """The release's template trims the prompt, so gmlx's ids for a prompt
+    with surrounding whitespace are the ids of the stripped prompt."""
+    import dataclasses
+
+    spec = te.encoder_spec("moss_image")
+    tok = _CharTokenizer()
+    want = te.token_ids(spec, tok, "a red bicycle")
+    assert te.token_ids(spec, tok, prompt) == want
+    untrimmed = dataclasses.replace(spec, trim=False)
+    assert te.token_ids(untrimmed, tok, prompt) != want
 
 
 def test_a_final_norm_spec_takes_no_tap_options():

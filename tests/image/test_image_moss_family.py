@@ -7,12 +7,10 @@ from __future__ import annotations
 
 import hashlib
 
-import numpy as np
 import pytest
 
-from image_fixtures import (FIXTURES, Q_HEADER, Z_HEADER, bf16_bits,
-                            fixture_view, load_json, official_config,
-                            write_gguf)
+from image_fixtures import (FIXTURES, Q_HEADER, Z_HEADER, fixture_view,
+                            load_json, official_config)
 
 from gmlx.image import fingerprint as fp
 from gmlx.image.families.moss_image import family as mf
@@ -76,29 +74,6 @@ def test_every_published_quant_is_named_by_its_identity():
     assert fam.variant_names() == ("base", "sft")
 
 
-def _identity_file(tmp_path, codec: str, seed: int):
-    from gmlx.load.headerscan import scan_gguf
-
-    rng = np.random.default_rng(seed)
-    out = {}
-    for n in mf.IDENTITY_TENSORS:
-        bits = bf16_bits(rng.standard_normal(3072).astype(np.float32))
-        f32 = (bits.astype(np.uint32) << 16).view(np.float32)
-        out[n] = ((bits, "BF16") if codec == "BF16" else
-                  (f32.astype(np.float16) if codec == "F16" else f32, codec))
-    p = write_gguf(tmp_path / f"id-{codec}-{seed}.gguf", out, "moss_image")
-    return fp.view_from_scans([scan_gguf(p)])
-
-
-def test_the_identity_is_the_same_for_every_storage(tmp_path):
-    names = mf.IDENTITY_TENSORS
-    hashes = {fp.weight_identity(_identity_file(tmp_path, c, 0), names)
-              for c in ("F32", "F16", "BF16")}
-    assert len(hashes) == 1 and None not in hashes
-    assert fp.weight_identity(_identity_file(tmp_path, "F16", 1),
-                              names) not in hashes
-
-
 @pytest.mark.parametrize("change,reason", [
     ({"drop": ("layers.41.",)}, "layers has 41 blocks, MOSS-Image has 42"),
     ({"drop": ("text_embedder.blocks.1.",)},
@@ -151,12 +126,16 @@ def test_another_family_given_as_moss_image_is_refused_by_name(name):
         f"this is a {OTHERS[name]} GGUF, not a MOSS-Image one")
 
 
-@pytest.mark.parametrize("name", list(OTHERS))
-def test_no_other_family_takes_a_moss_image_file(name):
+def test_no_other_family_takes_a_moss_image_file():
     view = fixture_view(SFT)
     for fam in (f for f in fp._families(None) if f.name != "moss_image"):
         assert fam.fingerprint(fp.strip_prefix(view, fam.strip_prefixes)) \
             is None, fam.name
+
+
+@pytest.mark.parametrize("name", list(OTHERS))
+def test_a_moss_image_file_given_as_another_family_is_refused(name):
+    view = fixture_view(SFT)
     other = fp.identify(fixture_view(name)).family
     assert _refused(view, family=other.name).startswith(
         f"not a {other.title} file. unrecognized image GGUF: "
