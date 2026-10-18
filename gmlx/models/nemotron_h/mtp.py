@@ -28,13 +28,14 @@ Two conventions differ from the GLM/DeepSeek nextn families:
 The trunk is the owned ``nemotron_h.model`` classes; the backbone
 subclass only adds the verify-time Mamba2 sink. Verify rollback is
 two-part (the glm5_next recurrent precedent): the attention KV leaves trim,
-and the Mamba2 layers replay the accepted prefix from the recorded
-pre-verify (conv, ssm) state - ``ArraysCache`` state entries are replaced,
-not mutated, so the recorded pre-arrays stay valid.
+and the Mamba2 layers rerun their scan over the accepted prefix from the
+recorded pre-verify (conv, ssm) state and SSM inputs - ``ArraysCache``
+state entries are replaced, not mutated, so the recorded pre-arrays stay
+valid.
 
-Correctness is drafter-independent: the verify walk emits the target's own
-greedy/sampled tokens, so the drafter affects speed (acceptance), never
-output. The losslessness gate is the greedy A/B vs plain decode.
+The verify forward runs batched, as llama.cpp does. Its M>1 kernels round
+differently from decode, so greedy output can split from plain decode at a
+near-tie logit; otherwise the drafter affects speed, never output.
 """
 
 from __future__ import annotations
@@ -77,8 +78,9 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
 
     The loop is the stock ``NemotronHModel.__call__`` with one addition:
     when ``mamba_sink`` is given, each Mamba block records its cache, the
-    pre-update (conv, ssm) state arrays, and its own input, so
-    :func:`rollback_verify_sink` can rewind to the accepted prefix.
+    pre-update (conv, ssm) state arrays, its input, conv window and SSM
+    inputs, so :func:`rollback_verify_sink` can rewind to the accepted
+    prefix.
     """
 
     @property
@@ -93,14 +95,10 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
         cache: Optional[Any] = None,
         mamba_sink: Optional[list] = None,
         capture: Optional[tuple] = None,
-        exact: bool = True,
         input_embeddings: Optional[mx.array] = None,
     ):
         """``capture`` is ``(layer_ids, out)``: the raw output of each listed
-        layer is appended to ``out`` in layer order (the DFlash seam).
-        ``exact`` off runs a sinked verify batched, as llama.cpp does: the
-        block drafters verify 8 positions, where stepping every layer costs
-        8 decode steps."""
+        layer is appended to ``out`` in layer order (the DFlash seam)."""
         hidden_states = (self.embeddings(inputs) if input_embeddings is None
                          else input_embeddings)
         capture_ids, captured = capture if capture is not None else ((), None)
@@ -127,21 +125,11 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
                 # The mixer replaces c[0]/c[1] (conv, ssm) rather than
                 # mutating them, so holding the pre-call arrays is a
                 # zero-copy snapshot.
-                mamba_sink.append({
-                    "layer": layer, "cache": c,
-                    "pre": (c[0], c[1]),
-                    "inputs": hidden_states, "mask": mask, "exact": exact,
-                })
-                if exact:
-                    hidden_states = _mamba_stepwise(layer, hidden_states, mask, c)
-                else:
-                    hidden_states = layer(hidden_states, mask=mask, cache=c)
-            elif mamba_sink is not None and not exact:
-                hidden_states = layer(hidden_states, mask=mask, cache=c)
-            elif mamba_sink is not None and layer.block_type == "*" and c is not None:
-                hidden_states = _attn_stepwise(layer, hidden_states, c)
-            elif mamba_sink is not None and layer.block_type == "E":
-                hidden_states = _moe_rowgate(layer, hidden_states)
+                entry = {"layer": layer, "cache": c, "pre": (c[0], c[1]),
+                         "inputs": hidden_states, "mask": mask}
+                mamba_sink.append(entry)
+                hidden_states = layer(hidden_states, mask=mask, cache=c,
+                                      record=entry)
             else:
                 hidden_states = layer(hidden_states, mask=mask, cache=c)
             if i in capture_ids:
@@ -150,72 +138,23 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
         return self.norm_f(hidden_states)
 
 
-def _mamba_stepwise(layer, x: mx.array, mask, cache) -> mx.array:
-    """Mamba block one position at a time: ``ssm_update`` runs T=1 on the
-    sequential kernel and T>1 through the segsum scan, whose rounding
-    differs. Stepping keeps verify and replay bit-identical to decode."""
-    T = int(x.shape[1])
-    if T <= 1:
-        return layer(x, mask=mask, cache=cache)
-    outs = []
-    for t in range(T):
-        m = mask[:, t:t + 1] if isinstance(mask, mx.array) else mask
-        outs.append(layer(x[:, t:t + 1], mask=m, cache=cache))
-    return mx.concatenate(outs, axis=1)
-
-
-def _attn_stepwise(layer, x: mx.array, cache) -> mx.array:
-    """Attention block one position at a time: SDPA's qL=1 and qL>1 kernels
-    round differently. A qL=1 causal step over full history needs no mask;
-    rollback stays trim-based."""
-    T = int(x.shape[1])
-    if T <= 1:
-        return layer(x, mask=None, cache=cache)
-    outs = []
-    for t in range(T):
-        outs.append(layer(x[:, t:t + 1], mask=None, cache=cache))
-    return mx.concatenate(outs, axis=1)
-
-
-def _moe_rowgate(layer, x: mx.array) -> mx.array:
-    """MoE block with the router gate run per row: the gate matmul's
-    M=1-vs-M>1 rounding shifts scores enough to flip near-tie argmaxes
-    downstream. switch_mlp and shared_experts are M-invariant and stay
-    batched (stock ``NemotronHMoE.__call__`` body otherwise)."""
-    moe = layer.mixer
-    if getattr(moe, "moe_latent_size", None) is not None:
-        outs = [layer(x[:, t:t + 1]) for t in range(int(x.shape[1]))]
-        return mx.concatenate(outs, axis=1)
-    xn = layer.norm(x)
-    pairs = [moe.gate(xn[:, t:t + 1]) for t in range(int(xn.shape[1]))]
-    inds = mx.concatenate([p[0] for p in pairs], axis=1)
-    scores = mx.concatenate([p[1] for p in pairs], axis=1)
-    y = moe.switch_mlp(xn, inds)
-    y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
-    if moe.config.n_shared_experts is not None:
-        y = y + moe.shared_experts(xn)
-    return x + y
-
-
 def rollback_verify_sink(sink: list, n: int) -> None:
-    """Rewind the Mamba2 caches after an MTP verify forward over S positions
-    to the state after its first ``n`` (the accepted prefix): restore the
-    recorded pre-verify (conv, ssm) state, then replay the block over the
-    accepted prefix. O(n <= block) per layer; the attention KV leaves are
-    trimmed by the caller. The replay runs the way the verify ran: stepped
-    position-wise for an exact verify (see :func:`_mamba_stepwise`), so the
-    rewound state is bit-identical to a plain decode over the accepted
-    tokens, else batched."""
+    """Rewind the Mamba2 caches after a verify forward over S positions to
+    the state after its first ``n`` (the accepted prefix): restore the
+    recorded pre-verify (conv, ssm) state, then rerun the scan over the
+    prefix's recorded SSM inputs. A layer whose cache tracks per-row lengths
+    records none and replays the whole block. The attention KV leaves are
+    trimmed by the caller."""
     for e in sink:
         cache = e["cache"]
         cache[0], cache[1] = e["pre"]
+        if "ssm_inputs" in e:
+            e["layer"].mixer.replay_prefix(e, n, cache, e["mask"])
+            continue
         mask = e["mask"]
         if isinstance(mask, mx.array):
             mask = mask[:, :n]
-        if e.get("exact", True):
-            _mamba_stepwise(e["layer"], e["inputs"][:, :n], mask, cache)
-        else:
-            e["layer"](e["inputs"][:, :n], mask=mask, cache=cache)
+        e["layer"](e["inputs"][:, :n], mask=mask, cache=cache)
 
 
 class NemotronHSpecLM(nh.Model):
@@ -253,7 +192,7 @@ class NemotronHSpecLM(nh.Model):
                                  input_embeddings=input_embeddings)
         caps: list = []
         hidden = self.backbone(inputs, cache=cache, mamba_sink=mamba_sink,
-                               capture=(ids, caps), exact=False,
+                               capture=(ids, caps),
                                input_embeddings=input_embeddings)
         if len(caps) != len(ids):
             raise RuntimeError(

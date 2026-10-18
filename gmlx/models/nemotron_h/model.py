@@ -172,6 +172,7 @@ class NemotronHMamba2Mixer(nn.Module):
         conv_input: mx.array,
         cache: Optional[ArraysCache],
         mask: Optional[mx.array],
+        record: Optional[dict] = None,
     ) -> mx.array:
         if mask is not None:
             conv_input = mx.where(mask[..., None], conv_input, 0)
@@ -193,6 +194,8 @@ class NemotronHMamba2Mixer(nn.Module):
                 cache[0] = mx.take_along_axis(padded_input, positions, axis=1)
             else:
                 cache[0] = padded_input[:, -n_keep:, :]
+                if record is not None:
+                    record["conv_window"] = padded_input
         else:
             padded_input = mx.pad(
                 conv_input, [(0, 0), (self.conv_kernel_size - 1, 0), (0, 0)]
@@ -241,8 +244,10 @@ class NemotronHMamba2Mixer(nn.Module):
         hidden_states: mx.array,
         mask: Optional[mx.array],
         cache: Optional[ArraysCache] = None,
+        record: Optional[dict] = None,
     ) -> mx.array:
-
+        """``record`` (a dict) receives the conv window and the SSM inputs
+        :meth:`replay_prefix` needs to rewind ``cache``."""
         projected = self.in_proj(hidden_states)
 
         gate, conv_input, dt = mx.split(
@@ -250,7 +255,7 @@ class NemotronHMamba2Mixer(nn.Module):
             [self.intermediate_size, self.intermediate_size + self.conv_dim],
             axis=-1,
         )
-        conv_output = self._conv(conv_input, cache, mask)
+        conv_output = self._conv(conv_input, cache, mask, record)
         hidden_states_ssm, B, C = mx.split(
             conv_output,
             [
@@ -259,11 +264,24 @@ class NemotronHMamba2Mixer(nn.Module):
             ],
             axis=-1,
         )
+        if record is not None and "conv_window" in record:
+            record["ssm_inputs"] = (hidden_states_ssm, B, C, dt)
         y = self._ssm(hidden_states_ssm, B, C, dt, cache, mask)
         if cache:
             cache.advance(y.shape[1])
         y = self.norm(y, gate)
         return self.out_proj(y)
+
+    def replay_prefix(self, record: dict, n: int, cache: ArraysCache,
+                      mask: Optional[mx.array]) -> None:
+        """Set ``cache``, holding the state before a recorded call, to the
+        state after the call's first ``n`` positions. Only the scan runs."""
+        n_keep = self.conv_kernel_size - 1
+        cache[0] = mx.contiguous(record["conv_window"][:, n:n + n_keep])
+        x, B, C, dt = (a[:, :n] for a in record["ssm_inputs"])
+        if isinstance(mask, mx.array):
+            mask = mask[:, :n]
+        self._ssm(x, B, C, dt, cache, mask)
 
 
 class NemotronHAttention(nn.Module):
@@ -483,9 +501,13 @@ class NemotronHBlock(nn.Module):
         x,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        record: Optional[dict] = None,
     ):
         hidden_states = self.norm(x)
-        if self.block_type == "M" or self.block_type == "*":
+        if self.block_type == "M":
+            hidden_states = self.mixer(hidden_states, mask=mask, cache=cache,
+                                       record=record)
+        elif self.block_type == "*":
             hidden_states = self.mixer(hidden_states, mask=mask, cache=cache)
         else:
             hidden_states = self.mixer(hidden_states)

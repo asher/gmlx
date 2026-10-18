@@ -57,6 +57,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family from another source, and names it, where it downloaded the VAE again.
 - `presence_penalty` and `frequency_penalty` count every generated token, as
   vLLM does, where they counted the last 20 tokens, the prompt's included.
+- MTP speculative decoding on Nemotron 3.5 checks each draft in one batched
+  forward, as llama.cpp does, and runs faster. Greedy output can now differ
+  from plain decoding where two tokens tie.
 
 ### Fixed
 

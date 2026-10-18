@@ -235,12 +235,14 @@ def test_capture_packs_trunk_and_layers():
         rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize("capture", [None, [0, 2]], ids=["mtp", "dflash"])
 @pytest.mark.parametrize("accepted", [0, 2, 4])
-def test_batched_verify_rollback_matches_a_fresh_prefix(accepted):
-    # The DFlash verify runs batched; rolling back to the accepted prefix
-    # must leave the caches as running that prefix would.
+def test_batched_verify_rollback_matches_a_fresh_prefix(accepted, capture):
+    # The verify runs batched; rolling back to the accepted prefix must
+    # leave the caches as running that prefix would.
     model = _tiny_target(2)
-    model.set_dflash_capture([0, 2])
+    if capture:
+        model.set_dflash_capture(capture)
     prompt = mx.array([[1, 5, 9, 2]])
     block = mx.array([[7, 3, 8, 6, 4]])
     cache = model.make_cache()
@@ -254,6 +256,30 @@ def test_batched_verify_rollback_matches_a_fresh_prefix(accepted):
     np.testing.assert_allclose(
         _np(model(nxt, cache=cache).logits), _np(model(nxt, cache=ref).logits),
         rtol=5e-3, atol=5e-3)
+
+
+def test_rollback_reruns_only_the_scan():
+    model = _tiny_target(3)
+    cache = model.make_cache()
+    model(mx.array([[1, 5, 9, 2]]), cache=cache)
+    _, _, sink = model.speculative_verify_hidden(mx.array([[7, 3, 8, 6]]), cache)
+    mx.eval(sink[0]["ssm_inputs"])
+    want = model.make_cache()
+    model(mx.array([[1, 5, 9, 2]]), cache=want)
+    model(mx.array([[7, 3]]), cache=want)
+
+    def refuse(*_):
+        raise AssertionError("rollback read a projection")
+
+    for e in sink:
+        e["layer"].mixer.in_proj = refuse
+        e["layer"].mixer.out_proj = refuse
+    model.rollback_speculative_cache(cache, sink, 1, 4)
+    for got, ref in zip(cache, want):
+        if got is None or not hasattr(got, "cache"):
+            continue
+        for g, r in zip(got.cache, ref.cache):
+            np.testing.assert_allclose(_np(g), _np(r), rtol=2e-3, atol=2e-3)
 
 
 # The real header's names and shapes (GGUF order), at tiny width.
