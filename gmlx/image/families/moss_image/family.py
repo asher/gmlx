@@ -257,6 +257,12 @@ def build(config: dict):
     return MossImageDiT(config)
 
 
+def lora_map(config: dict):
+    from .lora_map import lora_map as build_map
+
+    return build_map(config)
+
+
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
     """The release's snapped schedule of ``steps``, the same for every
     image size and variant."""
@@ -276,6 +282,7 @@ FAMILY = Family(
     synth_config=synth_config,
     constants=CONSTANTS,
     build=build,
+    lora_map=lora_map,
     encoder=encoder,
     # The release builds the bands from constants and ignores the stored
     # ones; the file's copy keeps its float32 values.
