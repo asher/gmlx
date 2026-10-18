@@ -6,6 +6,12 @@ The states are read after a fixed layer and before the final norm. ``tap``
 walks the loaded model's own layer list and stops there. It changes and
 subclasses no class of the model.
 
+A family whose reference reads the last hidden state after the final
+norm, as MOSS-Image reads Qwen3.5, sets ``final_norm``. Its features come
+from the decoder stack's own call with no cache, which builds the masks
+of its attention and recurrent layers, and not from ``tap``, whose block
+calls pass the one causal mask that only attention layers take.
+
 Each prompt is rendered into the family's fixed template, which the family
 owns and never reads from the GGUF chat template, and truncated to the
 family's token cap. It is encoded alone at batch 1 with no padding, so the
@@ -95,6 +101,24 @@ class EncoderSpec:
     fp32_qkv: bool = False           # q, k and v cast to float32 after
                                      # their products, for the qk norm,
                                      # the rotary and the attention
+    final_norm: bool = False         # the features are the text model's
+                                     # output after its final norm, from
+                                     # its own call; tap_layers is (layers,)
+    trim: bool = False               # the prompt loses its leading and
+                                     # trailing whitespace, as a chat
+                                     # template's trim filter takes it
+
+    def __post_init__(self):
+        if not self.final_norm:
+            return
+        if tuple(self.tap_layers) != (self.layers,):
+            raise ValueError(f"{self.name} reads after the final norm, so "
+                             f"its tap is after layer {self.layers} alone")
+        if (self.drop or self.stack or self.pad_multiple or self.fp32_qkv
+                or self.activation is not None):
+            raise ValueError(f"{self.name} reads after the final norm, "
+                             "which takes no dropped rows, stacked taps, "
+                             "pads, float32 qkv or activation dtype")
 
     @property
     def template_id(self) -> str:
@@ -111,6 +135,10 @@ class EncoderSpec:
             where = ("each" if self.pad_position is None
                      else self.pad_position)
             text += f"\x00pad={self.pad_multiple},{self.pad_id},{where}"
+        if self.final_norm:
+            text += "\x00final_norm"
+        if self.trim:
+            text += "\x00trim"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -174,11 +202,14 @@ def encoder_spec(family) -> EncoderSpec:
 
 
 def render(spec: EncoderSpec, prompt: str) -> str:
-    """The prompt in the family template. An empty prompt is rendered as
-    the spec's ``empty`` text."""
+    """The prompt in the family template, without its leading and
+    trailing whitespace for a spec that trims. An empty prompt is rendered
+    as the spec's ``empty`` text."""
     head, sep, tail = spec.template.partition("{}")
     if not sep:
         raise ValueError(f"template of {spec.name} has no prompt slot")
+    if spec.trim:
+        prompt = prompt.strip()
     return head + (prompt or spec.empty) + tail
 
 
@@ -226,12 +257,19 @@ def rows_at_most(spec: EncoderSpec, prompt: str) -> int:
     return max(0, n - spec.drop) + pad_rows(spec, n)
 
 
-def _text_stack(model):
-    """The embedding and the decoder layer list of a loaded text model,
-    or of the language model of a multimodal one."""
+def _inner(model):
+    """The decoder stack of a loaded text model, or of the language model
+    of a multimodal one."""
     inner = getattr(model, "model", None)
     if inner is None:
         inner = getattr(getattr(model, "language_model", None), "model", None)
+    return inner
+
+
+def _text_stack(model):
+    """The embedding and the decoder layer list of a loaded text model,
+    or of the language model of a multimodal one."""
+    inner = _inner(model)
     embed = getattr(inner, "embed_tokens", None)
     layers = getattr(inner, "layers", None)
     if embed is None or layers is None:
@@ -296,6 +334,24 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
             row = mx.broadcast_to(v[:, n:], (1, pad, v.shape[-1]))
             out[k] = mx.concatenate([v[:, :n], row], axis=1)
     return [out[k] for k in layers]
+
+
+def final_hidden(model, ids) -> mx.array:
+    """The output (1, L, hidden) of the decoder stack after its final
+    norm, for one prompt's token ids, from the stack's own call at batch 1
+    with no cache. The call builds its attention and recurrent masks, and
+    each of the three rotary axes takes the ids' indices, the positions
+    of a text prompt. The call of the wrapping language model is not
+    used: it keeps the positions of its last call, which a resident chat
+    model needs for its own next one."""
+    inner = _inner(model)
+    if inner is None or not callable(inner):
+        raise TypeError(f"{type(model).__name__} has no decoder stack to "
+                        "call")
+    n = len(ids)
+    x = mx.array(np.asarray(ids, np.int32).reshape(1, -1))
+    pos = mx.tile(mx.arange(n)[None, None], (3, 1, 1))
+    return inner(x, position_ids=pos)
 
 
 class _Float32Out:
@@ -637,10 +693,14 @@ class EncoderHandle:
         ids = token_ids(spec, self.tokenizer, prompt)
         pads = pad_rows(spec, len(ids))
         with vision_rope(self.model, spec):
-            hidden = tap(self.model, ids, layers=spec.tap_layers,
-                         activation=spec.activation, pad=pads,
-                         pad_id=spec.pad_id, pad_position=spec.pad_position,
-                         fp32_qkv=spec.fp32_qkv)
+            if spec.final_norm:
+                hidden = [final_hidden(self.model, ids)]
+            else:
+                hidden = tap(self.model, ids, layers=spec.tap_layers,
+                             activation=spec.activation, pad=pads,
+                             pad_id=spec.pad_id,
+                             pad_position=spec.pad_position,
+                             fp32_qkv=spec.fp32_qkv)
             mx.eval(hidden)
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
                        template_id=spec.template_id,

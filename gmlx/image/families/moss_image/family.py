@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright 2026 OpenMOSS Team
 # Ported from OpenMOSS-Team/MOSS-Image-SFT at revision fc5de0d5: the
 # tensor names and shapes of MOSSImageTransformer in
-# pipeline_moss_image.py and the constants of that file and of
-# transformer/config.json, and modified for gmlx (Apache-2.0; see
-# licenses/MOSS-Image-LICENSE).
-"""MOSS-Image fingerprint, constants and config synthesis.
+# pipeline_moss_image.py, the constants of that file and of
+# transformer/config.json, and the prompt template of
+# tokenizer/chat_template.jinja with the token cap of the pipeline, and
+# modified for gmlx (Apache-2.0; see licenses/MOSS-Image-LICENSE).
+"""MOSS-Image fingerprint, constants, config synthesis and text encoder.
 
 Shapes are GGUF order, input dim first. The file's tensor names are the
 training names of the release's MOSSImageTransformer, and the rule takes
@@ -196,6 +197,48 @@ def synth_config(view: HeaderView) -> dict:
     }
 
 
+# The prompt template is the release's chat_template.jinja rendered for
+# one user turn with the generation prompt and thinking on, and the cap is
+# the release pipeline's max_sequence_length.
+ENCODER_TEMPLATE = ("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+                    "<think>\n")
+ENCODER_MAX_TOKENS = 4096
+ENCODER_IDENTITY = (
+    ("blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight",
+     "622011779892c5d8a3fceb52c4b9dccdb4aee84d1c49099080b2b06e215e7421"),
+    ("blk.17.post_attention_norm.weight",
+     "model.layers.17.post_attention_layernorm.weight",
+     "18afbd19c59b5fcc7e6b7c483a53bcb6ddf8d7d34cba0986a28f0a5a96944b1d"),
+    ("output_norm.weight", "model.norm.weight",
+     "451aeaff886b5580361ec7a79cd90278494f0e4d2c4645bfb5482416018785ba"),
+)
+ENCODER_IDENTITY_SOURCE = (
+    "unsloth/Qwen3.5-9B-GGUF at 3885219b6810b007914f3a7950a8d1b469d598a5")
+
+
+def encoder():
+    """The text encoder of the family: Qwen3.5-9B read after its final
+    norm, as the release reads last_hidden_state, on the chat template of
+    one user turn with thinking on, which trims the prompt. Each prompt
+    runs alone at its own length, with no pad rows."""
+    from gmlx.image.text_encoder import EncoderSpec, IdentityTensor
+
+    return EncoderSpec(
+        name="qwen3.5-9b",
+        arch="qwen35",
+        model_type="qwen3_5",
+        hidden=4096,
+        layers=32,
+        tap_layers=(32,),
+        template=ENCODER_TEMPLATE,
+        max_tokens=ENCODER_MAX_TOKENS,
+        identity=tuple(IdentityTensor(*row) for row in ENCODER_IDENTITY),
+        identity_source=ENCODER_IDENTITY_SOURCE,
+        final_norm=True,
+        trim=True,
+    )
+
+
 def build(config: dict):
     from .model import MossImageDiT
 
@@ -212,6 +255,7 @@ FAMILY = Family(
     synth_config=synth_config,
     constants=CONSTANTS,
     build=build,
+    encoder=encoder,
     # The release builds the bands from constants and ignores the stored
     # ones; the file's copy keeps its float32 values.
     fp32_keep=("rope.bands",),

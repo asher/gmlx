@@ -7,7 +7,9 @@ source.
 
 - gmlx/image/families/moss_image/family.py: the tensor names and shapes
   of MOSSImageTransformer in pipeline_moss_image.py, its RMSNorm eps and
-  timestep constants, and the config of transformer/config.json.
+  timestep constants, the config of transformer/config.json, and the
+  prompt template of tokenizer/chat_template.jinja for one user turn with
+  thinking on and the token cap of MOSSImagePipeline.encode_prompt.
 - gmlx/image/families/moss_image/model.py: the DiT of
   pipeline_moss_image.py (its joint and text blocks, the situ
   feed-forward, the text projection, the RoPE bands and coordinates, the

@@ -301,5 +301,12 @@
     "revision": "4f21f583c9213eb2230a09e9b33bfa86605aecf2",
     "file": "the identity tensors of every MOSS-Image .gguf, by HTTP range reads",
     "note": "each file size is from the hub listing at the revision"
+  },
+  "moss_image_chat_template.jinja": {
+    "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+    "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+    "file": "tokenizer/chat_template.jinja",
+    "size": 7756,
+    "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
   }
 }
