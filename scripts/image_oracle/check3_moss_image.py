@@ -257,9 +257,13 @@ def teacher_forced(torch, model16, cap32: Capture) -> dict:
 
 
 def run_case(torch, models: dict, lat, feats, sigma, rows: bool, name: str,
-             inputs: dict, files: dict, notes: list) -> dict:
-    """One step in fp32 and bf16 written as fixture ``name``."""
-    fx = fixtures.FixtureWriter(name, check=3, family=FAMILY, script=SCRIPT)
+             inputs: dict, files: dict, notes: list, *, check: int = 3,
+             script: str = SCRIPT, more=None) -> dict:
+    """One step in fp32 and bf16 written as fixture ``name``. ``more``,
+    when given, is called with the writer and the velocities before the
+    write."""
+    fx = fixtures.FixtureWriter(name, check=check, family=FAMILY,
+                                script=script)
     fx.inputs.update(inputs)
     for role, path in files.items():
         fx.add_file(role, path)
@@ -310,6 +314,8 @@ def run_case(torch, models: dict, lat, feats, sigma, rows: bool, name: str,
             for k in r32 if k.startswith("layers.")}
     fx.results["times"] = times
     fx.tolerances["rule"] = RULE
+    if more is not None:
+        more(fx, vel)
     path = fx.write()
     print(f"[check3] {name}: velocity bf16 vs fp32 rel L2 "
           f"{gap['rel_l2']:.3e}, {times}, wrote {path}", flush=True)
