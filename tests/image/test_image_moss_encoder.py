@@ -108,30 +108,48 @@ class _CharTokenizer:
         return [ord(c) % 120 for c in text]
 
 
-def _tiny_qwen35():
+_TINY = dict(model_type="qwen3_5", hidden_size=64, intermediate_size=128,
+             linear_num_value_heads=4, linear_num_key_heads=2,
+             linear_key_head_dim=32, linear_value_head_dim=32,
+             linear_conv_kernel_dim=4, num_hidden_layers=4,
+             num_attention_heads=4, rms_norm_eps=1e-6, vocab_size=128,
+             num_key_value_heads=2, max_position_embeddings=2048,
+             tie_word_embeddings=True, head_dim=32,
+             rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
+                              "rope_theta": 100000,
+                              "partial_rotary_factor": 0.25},
+             full_attention_interval=4, kv_head_layout="tiled")
+
+
+def _built(m):
+    mx.eval(m.parameters())
+    m.eval()
+    return m
+
+
+def _tiny_text():
+    """The class the text loader builds for a qwen35 GGUF."""
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import Model, ModelArgs
+
+    mx.random.seed(5)
+    return _built(Model(ModelArgs.from_dict(dict(_TINY))))
+
+
+def _tiny_multimodal():
+    """The language model of a Qwen3.5 load with its vision tower, which a
+    resident chat model may be."""
     from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
     from gmlx.models.qwen35.owned import OwnedQwen3_5LanguageModel
 
-    cfg = TextConfig(
-        model_type="qwen3_5", hidden_size=64, intermediate_size=128,
-        linear_num_value_heads=4, linear_num_key_heads=2,
-        linear_key_head_dim=32, linear_value_head_dim=32,
-        linear_conv_kernel_dim=4, num_hidden_layers=4,
-        num_attention_heads=4, rms_norm_eps=1e-6, vocab_size=128,
-        num_key_value_heads=2, max_position_embeddings=2048,
-        tie_word_embeddings=True, head_dim=32,
-        rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
-                         "rope_theta": 100000,
-                         "partial_rotary_factor": 0.25},
-        full_attention_interval=4, kv_head_layout="tiled")
     top = SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2),
                           image_token_id=124, video_token_id=125,
                           vision_start_token_id=126)
     mx.random.seed(5)
-    m = OwnedQwen3_5LanguageModel(cfg, top)
-    mx.eval(m.parameters())
-    m.eval()
-    return m
+    return _built(OwnedQwen3_5LanguageModel(TextConfig(**_TINY), top))
+
+
+_BUILDS = pytest.mark.parametrize("build", [_tiny_text, _tiny_multimodal],
+                                  ids=["text", "multimodal"])
 
 
 def _spec():
@@ -141,23 +159,30 @@ def _spec():
                                layers=4, tap_layers=(4,), identity=())
 
 
+def _logits(m, ids):
+    """The chat path's prefill of ``ids`` on a fresh cache."""
+    out = m(mx.array([ids]), cache=m.make_cache())
+    return getattr(out, "logits", out)
+
+
 @_NEEDS_GPU
-def test_the_read_equals_the_chat_prefill_of_the_stack():
-    """The stack's call with no cache gives what the chat path's prefill
-    gives with a fresh cache: the same masks, positions and float32
-    recurrent state."""
-    m = _tiny_qwen35()
+@_BUILDS
+def test_the_read_is_the_chat_prefill_before_its_output_head(build):
+    """The features, through the tied output head, give the logits of the
+    chat path's prefill: the same masks, positions and recurrent state."""
+    m = build()
     ids = te.token_ids(_spec(), _CharTokenizer(), "a red bicycle")
     got = te.final_hidden(m, ids)
-    x = mx.array([ids])
-    want = m.model(x, cache=m.make_cache())
     assert got.shape == (1, len(ids), 64)
-    assert mx.allclose(got, want, atol=1e-5, rtol=1e-5).item()
+    head = te._inner(m).embed_tokens.as_linear
+    assert mx.allclose(head(got), _logits(m, ids), atol=1e-4,
+                       rtol=1e-4).item()
 
 
 @_NEEDS_GPU
-def test_an_encoding_is_the_final_norm_of_the_last_layer():
-    m = _tiny_qwen35()
+@_BUILDS
+def test_an_encoding_is_the_final_norm_of_the_last_layer(build, monkeypatch):
+    m = build()
     tok = _CharTokenizer()
     spec = _spec()
     enc = te.EncoderHandle(m, tok, spec, owned=False).encode("a red bicycle")
@@ -165,21 +190,19 @@ def test_an_encoding_is_the_final_norm_of_the_last_layer():
     assert ids == te.token_ids(spec, tok, "a red bicycle")
     assert enc.features.shape == (len(ids), 64) and enc.pads == 0
     assert enc.template_id == spec.template_id
-    want = te.final_hidden(m, ids)[0]
-    assert mx.array_equal(enc.features, want).item()
-    sink: list = []
-    rows = m.model(mx.array([ids]), cache=m.make_cache(),
-                   capture_layer_ids=[3], hidden_sink=sink)
-    assert mx.allclose(rows[0], want, atol=1e-5, rtol=1e-5).item()
+    assert mx.array_equal(enc.features, te.final_hidden(m, ids)[0]).item()
     # The last layer's output before the norm is not the read.
-    assert not mx.allclose(sink[0][0], want, atol=1e-2).item()
+    monkeypatch.setattr(te._inner(m), "norm", lambda h: h)
+    before = te.final_hidden(m, ids)[0]
+    assert not mx.allclose(before, enc.features, atol=1e-2).item()
 
 
 @_NEEDS_GPU
 def test_a_read_leaves_a_resident_models_positions_alone():
-    """A borrowed chat model keeps the positions of its last call for its
-    next one, and an encoding through it does not touch them."""
-    m = _tiny_qwen35()
+    """A borrowed multimodal chat model keeps the positions of its last
+    call for its next one, and an encoding through it does not touch
+    them."""
+    m = _tiny_multimodal()
     held = mx.arange(7)[None, None]
     m._position_ids, m._rope_deltas = held, mx.zeros((1, 1))
     deltas = m._rope_deltas
@@ -201,3 +224,22 @@ def test_the_unsloth_file_passes_the_header_and_identity_checks(
     te.check_encoder_file(view, spec)
     assert te.file_identity(view, spec) == {
         r.gguf_name: r.sha256 for r in spec.identity}
+
+
+@_NEEDS_GPU
+@_BUILDS
+def test_the_identity_reads_the_loaded_norms(build):
+    """The identity of a loaded encoder, which a borrowed chat model is
+    checked by, reads its norms under either class."""
+    import dataclasses
+    import hashlib
+
+    import numpy as np
+
+    m = build()
+    row = te.IdentityTensor("output_norm.weight", "model.norm.weight", "")
+    spec = dataclasses.replace(_spec(), identity=(row,))
+    bits = np.array(te._inner(m).norm.weight.astype(mx.bfloat16).view(
+        mx.uint16))
+    assert te.model_identity(m, spec) == {
+        "output_norm.weight": hashlib.sha256(bits.tobytes()).hexdigest()}

@@ -8,9 +8,9 @@ subclasses no class of the model.
 
 A family whose reference reads the last hidden state after the final
 norm, as MOSS-Image reads Qwen3.5, sets ``final_norm``. Its features come
-from the decoder stack's own call with no cache, which builds the masks
-of its attention and recurrent layers, and not from ``tap``, whose block
-calls pass the one causal mask that only attention layers take.
+from the decoder stack's own call on a fresh cache, which builds the
+masks of its attention and recurrent layers, and not from ``tap``, whose
+block calls pass the one causal mask that only attention layers take.
 
 Each prompt is rendered into the family's fixed template, which the family
 owns and never reads from the GGUF chat template, and truncated to the
@@ -339,19 +339,23 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
 def final_hidden(model, ids) -> mx.array:
     """The output (1, L, hidden) of the decoder stack after its final
     norm, for one prompt's token ids, from the stack's own call at batch 1
-    with no cache. The call builds its attention and recurrent masks, and
-    each of the three rotary axes takes the ids' indices, the positions
-    of a text prompt. The call of the wrapping language model is not
-    used: it keeps the positions of its last call, which a resident chat
-    model needs for its own next one."""
+    on a fresh cache, as a chat prefill starts. The call builds its
+    attention and recurrent masks, and the positions of a text prompt
+    start at 0. The call of the wrapping language model is not used: it
+    applies the output head, and a multimodal one keeps the positions of
+    its last call, which a resident chat model needs for its own next
+    one."""
     inner = _inner(model)
     if inner is None or not callable(inner):
         raise TypeError(f"{type(model).__name__} has no decoder stack to "
                         "call")
-    n = len(ids)
+    owner = model if hasattr(model, "make_cache") else getattr(
+        model, "language_model", None)
+    make_cache = getattr(owner, "make_cache", None)
+    if make_cache is None:
+        raise TypeError(f"{type(model).__name__} makes no cache")
     x = mx.array(np.asarray(ids, np.int32).reshape(1, -1))
-    pos = mx.tile(mx.arange(n)[None, None], (3, 1, 1))
-    return inner(x, position_ids=pos)
+    return inner(x, cache=make_cache())
 
 
 class _Float32Out:
@@ -485,11 +489,15 @@ def vision_rope(model, spec: EncoderSpec):
 
 
 def _model_param(model, path: str):
-    obj = model
-    for part in path.split("."):
-        obj = obj[int(part)] if part.isdigit() else getattr(obj, part, None)
+    """The tensor at ``path`` in a loaded model. A path under ``model.``
+    starts at the decoder stack, which a multimodal or wrapped text model
+    holds under its language model."""
+    head, _, rest = path.partition(".")
+    obj = _inner(model) if head == "model" else getattr(model, head, None)
+    for part in rest.split(".") if rest else ():
         if obj is None:
-            return None
+            break
+        obj = obj[int(part)] if part.isdigit() else getattr(obj, part, None)
     return obj
 
 
@@ -827,8 +835,10 @@ def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
     check_encoder(model, config, spec, override=True)
     _drop_head(model)
     tower = " with its vision tower" if mmproj is not None else ""
-    log(f"[image] text encoder {spec.name}{tower}, tap after layer "
-        f"{', '.join(str(n) for n in spec.tap_layers)} of {spec.layers}")
+    read = ("read after the final norm" if spec.final_norm else
+            "tap after layer " + ", ".join(str(n) for n in spec.tap_layers)
+            + f" of {spec.layers}")
+    log(f"[image] text encoder {spec.name}{tower}, {read}")
     shards = find_split_shards(path)
     key = (weights_source_key(*shards) if mmproj is None
            else weights_source_key(*shards, mmproj))
