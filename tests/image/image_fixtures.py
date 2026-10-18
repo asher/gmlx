@@ -176,6 +176,34 @@ def tiny_z_model(seed: int = 0):
     return m, {k: np.array(v, np.float64) for k, v in params}
 
 
+TINY_MOSS_CONFIG = {"dim": 64, "ffn_dim": 48, "freq_dim": 16,
+                    "latent_channels": 8, "num_heads": 2, "num_layers": 3,
+                    "rope_base": 10000.0, "text_dim": 16,
+                    "num_text_blocks": 2}
+
+
+def tiny_moss_model(seed: int = 0):
+    """A tiny MOSS-Image DiT of three blocks with random fp32 weights and
+    fp32 activations."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    from gmlx.image.families.moss_image.model import MossImageDiT
+
+    m = MossImageDiT(TINY_MOSS_CONFIG)
+    rng = np.random.default_rng(seed)
+    params = []
+    for k, v in tree_flatten(m.parameters()):
+        a = rng.standard_normal(v.shape) * 0.3
+        if k.endswith(("norm1.weight", "norm2.weight")):
+            a += 1.0
+        params.append((k, mx.array(a.astype(np.float32))))
+    m.load_weights(params)
+    m.act_dtype = mx.float32
+    m.eval()
+    return m
+
+
 # A small Z-Image config that both kernel routes of gmlx.image.ops take:
 # head dim 64 and a 256-wide residual, so a 64x64 latent gives the main
 # layers 1024 image rows.

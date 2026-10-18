@@ -172,7 +172,8 @@ def test_capabilities_answer_without_the_version_header(host):
     assert caps["contract"] == {"major": 1, "minor": 0}
     assert caps["families"] == ["flux2_klein", "flux2_klein_9b",
                                 "flux2_klein_9b_kv", "flux3_klein", "krea2",
-                                "qwen_image21", "z_image"]
+                                "moss_image", "qwen_image21", "z_image"]
+    assert "skip_blocks" in caps["features"]
     assert caps["conventions"] == ["comfy", "reference"]
     assert caps["wire"]["container"] == "safetensors"
 
@@ -379,9 +380,12 @@ def test_num_tokens_and_an_attention_mask_trim_the_cond(host, pipe):
 
 def test_the_convention_maps_the_timestep_and_signs_the_output(
         host, pipe, monkeypatch):
-    # ComfyUI hands every family sigma as the timestep and wants the
-    # velocity back, so every convention maps the identity. Its FLUX.2
-    # forward alone embeds the fp32 time, at both sizes and on KV.
+    # ComfyUI hands every family but MOSS-Image sigma as the timestep and
+    # wants the velocity back, so those conventions map the identity. Its
+    # FLUX.2 forward alone embeds the fp32 time, at both sizes and on KV.
+    # MOSS-Image's model takes sigma times 1000, as the release's does.
+    assert steps.CONVENTIONS["comfy"]["moss_image"] == steps.Convention(
+        scale=0.001)
     for fam in ("z_image", "qwen_image21", "krea2", "flux3_klein"):
         assert steps.CONVENTIONS["comfy"][fam] == steps.Convention()
     for fam in ("flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"):
@@ -400,6 +404,104 @@ def test_the_convention_maps_the_timestep_and_signs_the_output(
     want = _on_worker(lambda: np.array(api.denoise_step(
         pipe, mx.array(x), 0.75, api.Conditioning(mx.array(feats[0]), "k"))))
     assert np.array_equal(out, -want)
+
+
+# MOSS-Image: ComfyUI's timestep is sigma times 1000, and a step leaves
+# out the blocks of its skip, as the negative pass of the release does.
+
+MOSS_SHAPE = (1, 8, 3, 4)               # 48x64 pixels at the stride of 16
+
+
+@pytest.fixture(scope="module")
+def mpipe():
+    def build():
+        from image_fixtures import tiny_moss_model
+
+        return api.ImagePipeline(dit=tiny_moss_model(),
+                                 family=get_family("moss_image"),
+                                 variant="sft")
+    return _on_worker(build)
+
+
+def _moss_velocity(pipe, x, sigma, feats, skip=()):
+    return _on_worker(lambda: np.array(api.denoise_step(
+        pipe, mx.array(x), sigma, api.Conditioning(mx.array(feats[0]), "m"),
+        skip=skip)))
+
+
+@pytest.mark.parametrize("skip", [[], [1], [2, 0]])
+def test_a_moss_step_reads_comfyuis_timestep_and_leaves_out_its_skip(
+        host, mpipe, skip):
+    """A timestep of sigma times 1000 in float32 gives the velocity at
+    sigma bit for bit, and the rows leave out the blocks the step names."""
+    _serve(host, "moss", mpipe)
+    c = _client()
+    feats = _features(4, n=6)
+    x = noise_from_seed(9, MOSS_SHAPE)
+    sigma = np.float32(0.6875)
+    t = np.float32(sigma * np.float32(1000))
+    out = c.step("moss", None, x, [t], _rows(c, feats), skip=skip)
+    want = _moss_velocity(mpipe, x, sigma, feats, tuple(skip))
+    assert np.array_equal(out, want)
+    if skip:
+        assert not np.array_equal(out, _moss_velocity(mpipe, x, sigma, feats))
+
+
+def test_a_moss_guided_loop_with_a_negative_skip_gives_the_latents_of_sample(
+        host, mpipe):
+    _serve(host, "moss", mpipe)
+    c = _client()
+    pos, neg = _features(0, n=6), _features(1, n=4)
+    noise = noise_from_seed(3, MOSS_SHAPE)
+    got = c.sample("moss", noise, SIGMAS, _rows(c, pos), cfg=3.0,
+                   neg_rows=_rows(c, neg), neg_skip=(1,), timestep_scale=1000)
+
+    def direct():
+        x = api.sample(mpipe, api.Conditioning(mx.array(pos[0]), "p"),
+                       neg=api.Conditioning(mx.array(neg[0]), "n"), cfg=3.0,
+                       height=48, width=64, noise=mx.array(noise),
+                       sigmas=SIGMAS, neg_skip=(1,))
+        return np.array(x)
+    assert np.array_equal(got, _on_worker(direct))
+
+
+@pytest.mark.parametrize("model, skip, match", [
+    ("moss", "1", "skip is a list of block indices"),
+    ("moss", [True], "skip is a list of block indices"),
+    ("moss", [1.0], "skip is a list of block indices"),
+    ("moss", [3], r"has blocks 0 to 2, and skip names \[3\]"),
+    ("moss", [-1, 1], r"skip names \[-1\]"),
+    ("zit", [1], "the Z-Image DiT skips no blocks"),
+])
+def test_a_skip_that_names_no_block_of_the_dit_is_refused(host, mpipe, model,
+                                                          skip, match):
+    _serve(host, "moss", mpipe)
+    c = _client()
+    feats = _features(4, n=6)
+    shape = MOSS_SHAPE if model == "moss" else SHAPE
+    with pytest.raises(StepsClientError, match=match):
+        c.container("step", {"x": np.zeros(shape, np.float32),
+                             "timestep": np.array([500.0], np.float32)},
+                    {"model": model, "convention": "comfy",
+                     "rows": _rows(c, feats), "skip": skip})
+    assert host.held == 0
+
+
+def test_the_moss_status_names_the_packs_class_and_its_negative_skip(
+        host, mpipe, monkeypatch):
+    monkeypatch.setattr(steps, "family_of", lambda spec: (
+        get_family("moss_image"), "sft"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    _serve(host, "moss", mpipe)
+    st = _client().status("moss")
+    assert st["comfy"] == {"model_class": "MOSSImage",
+                           "image_model": "moss_image"}
+    assert not st["edit_capable"]
+    assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+    assert st["sampling"] == {"steps": 50, "cfg": 3.0, "shift": 5.0,
+                              "sigmas": None, "schedule": None,
+                              "neg_skip": [22]}
 
 
 # FLUX.3 klein: a flow map reads the time its step goes to from the
@@ -598,7 +700,8 @@ def test_the_flux2_9b_status_names_comfyuis_flux2_as_4b_does(
     assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
     assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
     assert st["sampling"] == {"steps": 4, "cfg": 1.0, "shift": 1.0,
-                              "sigmas": None, "schedule": {"rule": "flux2"}}
+                              "sigmas": None, "schedule": {"rule": "flux2"},
+                              "neg_skip": []}
 
 
 def test_the_flux3_vae_routes_carry_model_space_latents(host, fpipes,
@@ -948,7 +1051,8 @@ def test_the_flux2_status_names_comfyuis_flux2_on_model_space_latents(
     assert st["latent"] == {"channels": 128, "stride": 16, "patch": 1}
     assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
     assert st["sampling"] == {"steps": 4, "cfg": 1.0, "shift": 1.0,
-                              "sigmas": None, "schedule": {"rule": "flux2"}}
+                              "sigmas": None, "schedule": {"rule": "flux2"},
+                              "neg_skip": []}
 
 
 def test_the_flux2_vae_routes_carry_model_space_latents(host, f2pipe,

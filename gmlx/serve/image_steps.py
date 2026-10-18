@@ -63,7 +63,7 @@ MAX_ROWS = 16
 MAX_TENSOR_BYTES = 1 << 30
 MAX_ADAPTER_BYTES = 1 << 30
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
-            "ref_cache")
+            "ref_cache", "skip_blocks")
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,8 @@ CONVENTIONS = {
               "krea2": Convention(), "flux2_klein": Convention(time="fp32"),
               "flux2_klein_9b": Convention(time="fp32"),
               "flux2_klein_9b_kv": Convention(time="fp32"),
-              "flux3_klein": Convention()},
+              "flux3_klein": Convention(),
+              "moss_image": Convention(scale=0.001)},
 }
 # Under "reference" a step reads the timestep and returns its output as
 # under "comfy", and embeds the time by the DiT's reference rule, as a
@@ -124,6 +125,12 @@ COMFY = {
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16,
                             "space": "model"}},
+    # ComfyUI has no MOSS-Image model of its own: the pack registers
+    # MOSSImage, on the FLUX.2 latent format, as the OpenMOSS plugin does.
+    "moss_image": {"model_class": "MOSSImage", "image_model": "moss_image",
+                   "latent": {"channels": 128, "stride": 16, "patch": 1},
+                   "vae": {"channels_out": 3, "stride": 16,
+                           "space": "model"}},
 }
 
 
@@ -520,7 +527,8 @@ def sampling(fam, variant: str) -> dict | None:
     rule = SIZE_SCHEDULES.get(fam.name)
     return {"steps": row.steps, "cfg": row.cfg, "shift": row.shift,
             "sigmas": [*map(float, row.sigmas), 0.0] if row.sigmas else None,
-            "schedule": rule(fam) if rule and not row.sigmas else None}
+            "schedule": rule(fam) if rule and not row.sigmas else None,
+            "neg_skip": [int(i) for i in row.neg_skip]}
 
 
 def _torch_shape(kv: dict, name: str, ne) -> list:
@@ -787,11 +795,12 @@ def step_pacer(run: Run | None, gen: int):
 
 def run_step(served, x, sigmas, conds, table, run, gen,
              targets=None, time_rule: str = "reference",
-             ref_cache: bool = False) -> tuple:
+             ref_cache: bool = False, skip=()) -> tuple:
     """One ``denoise_step`` over the rows on the image worker, to the
-    ``targets`` of a flow map DiT, on the DiT's ``time_rule``, and with
-    ``ref_cache`` on the run's cache of reference K and V. Returns
-    (velocity f32 evaluated, forward seconds, prefix cache answer)."""
+    ``targets`` of a flow map DiT, on the DiT's ``time_rule``, with
+    ``ref_cache`` on the run's cache of reference K and V, and with every
+    row leaving out the blocks of ``skip``. Returns (velocity f32
+    evaluated, forward seconds, prefix cache answer)."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -806,7 +815,8 @@ def run_step(served, x, sigmas, conds, table, run, gen,
     t0 = time.perf_counter()
     with paced(step_pacer(run, gen)):
         v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table,
-                             target=targets, time=time_rule, ref_cache=held)
+                             target=targets, time=time_rule, ref_cache=held,
+                             skip=skip)
         v = v.astype(mx.float32)
         mx.eval(v)
     # Without chat the step is one evaluation, which an interrupt or an end

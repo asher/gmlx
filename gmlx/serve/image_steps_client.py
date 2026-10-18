@@ -202,18 +202,22 @@ class StepsClient:
 
     def step(self, model: str, run: str | None, x, timestep, rows: list,
              patch_table: str | None = None,
-             sample_sigmas=None, ref_cache: bool = False) -> np.ndarray:
+             sample_sigmas=None, ref_cache: bool = False,
+             skip=()) -> np.ndarray:
         """The model output for latents ``x`` (B, C, h, w) at ``timestep``
         under the client's convention, one row dict per batch row.
         ``sample_sigmas`` is the schedule the sampler runs on, which a flow
         map DiT reads its target times from. ``ref_cache`` steps on the
         run's cache of reference K and V, as ComfyUI's Flux KV Cache node
-        samples. Records the times of the call."""
+        samples. Every row leaves out the blocks of ``skip``. Records the
+        times of the call."""
         t = np.asarray(timestep, np.float32).reshape(-1)
         fields = {"model": model, "run": run, "convention": self.convention,
                   "patch_table": patch_table, "rows": rows}
         if ref_cache:
             fields["ref_cache"] = True
+        if skip:
+            fields["skip"] = [int(i) for i in skip]
         tensors = {"x": np.ascontiguousarray(x, np.float32), "timestep": t}
         if sample_sigmas is not None:
             tensors["sample_sigmas"] = np.asarray(sample_sigmas,
@@ -230,11 +234,16 @@ class StepsClient:
     def sample(self, model: str, noise, sigmas, rows: list, *,
                cfg: float = 1.0, neg_rows: list | None = None,
                patch_table: str | None = None, run: str | None = None,
-               update=None, combine=None, on_step=None) -> np.ndarray:
+               update=None, combine=None, on_step=None,
+               neg_skip=(), timestep_scale: float = 1.0) -> np.ndarray:
         """Sample from ``noise`` (B, C, h, w) over ``sigmas`` with one step
         request per sigma. With ``cfg`` other than 1 each request carries
         the negative rows after the positive ones and the client guides
-        with ``combine(pos, neg, cfg)``, by default ``guide``.
+        with ``combine(pos, neg, cfg)``, by default ``guide``. With
+        ``neg_skip``, the blocks the negative pass leaves out, the
+        negative rows go in a request of their own. Each timestep is its
+        sigma times ``timestep_scale`` in float32, the convention's
+        timestep for a family whose convention scales it.
         ``update(x, v, i)`` moves ``x`` from ``sigmas[i]`` to
         ``sigmas[i + 1]``; the default is Euler in float32, as
         ``gmlx.image.samplers.Euler`` computes it. Each request carries the
@@ -247,11 +256,22 @@ class StepsClient:
         if guided and (neg_rows is None or len(neg_rows) != len(rows)):
             raise ValueError("guidance needs one negative row per row")
         step_rows = rows + (neg_rows if guided else [])
+        if neg_skip and not guided:
+            raise ValueError("neg_skip needs guidance: cfg is 1.0")
+        t = (s * np.float32(timestep_scale)).astype(np.float32)
         for i in range(len(s) - 1):
-            xin = np.concatenate([x, x]) if guided else x
-            ts = np.full((len(step_rows),), s[i], np.float32)
-            out = self.step(model, run, xin, ts, step_rows, patch_table,
-                            sample_sigmas=s)
+            if neg_skip:
+                ts = np.full((b,), t[i], np.float32)
+                pos = self.step(model, run, x, ts, rows, patch_table,
+                                sample_sigmas=s)
+                neg = self.step(model, run, x, ts, neg_rows, patch_table,
+                                sample_sigmas=s, skip=neg_skip)
+                out = np.concatenate([pos, neg])
+            else:
+                xin = np.concatenate([x, x]) if guided else x
+                ts = np.full((len(step_rows),), t[i], np.float32)
+                out = self.step(model, run, xin, ts, step_rows, patch_table,
+                                sample_sigmas=s)
             v = (combine or guide)(out[:b], out[b:], cfg) if guided else out
             x = update(x, v, i) if update is not None else euler(x, v, s, i)
             if on_step is not None:
