@@ -54,6 +54,7 @@ import hashlib
 import importlib
 import json
 import os
+import threading
 import unicodedata
 from dataclasses import dataclass
 
@@ -489,14 +490,14 @@ class _Float32RMSNorm(nn.RMSNorm):
         return mx.fast.rms_norm(x, self.weight, self.eps).astype(x.dtype)
 
 
-@contextlib.contextmanager
-def float32_norms(model, norms: dict):
-    """Run an encode with each norm of ``norms`` on its F32 weight, and
-    restore the model's own norms after. An RMSNorm is swapped for one
-    whose output keeps its input dtype; another norm, such as a gated
-    one whose output takes the dtype of its input, keeps its module and
-    gets the weight."""
-    inner = _inner(model)
+# Models whose norms float32_norms has swapped: id of the decoder stack
+# to [entries, norms, swaps]. The first entry swaps, the last exit
+# restores, so nested or interleaved entries leave the model's own.
+_NORM_SWAPS: dict = {}
+_NORM_LOCK = threading.Lock()
+
+
+def _swap_norms(inner, norms: dict) -> list:
     swaps = []
     for where, w in norms.items():
         head, _, attr = where.rpartition(".")
@@ -509,10 +510,47 @@ def float32_norms(model, norms: dict):
     try:
         for obj, attr, _, new in swaps:
             setattr(obj, attr, new)
+    except BaseException:
+        _restore_norms(swaps)
+        raise
+    return swaps
+
+
+def _restore_norms(swaps: list) -> None:
+    for obj, attr, old, _ in reversed(swaps):
+        setattr(obj, attr, old)
+
+
+@contextlib.contextmanager
+def float32_norms(model, norms: dict):
+    """Run an encode with each norm of ``norms`` on its F32 weight, and
+    restore the model's own norms after. An RMSNorm is swapped for one
+    whose output keeps its input dtype; another norm, such as a gated
+    one whose output takes the dtype of its input, keeps its module and
+    gets the weight. An entry while the model is swapped shares the swap,
+    which the last exit restores; one with other norms is refused."""
+    inner = _inner(model)
+    key = id(inner)
+    with _NORM_LOCK:
+        held = _NORM_SWAPS.get(key)
+        if held is None:
+            _NORM_SWAPS[key] = [1, norms, _swap_norms(inner, norms)]
+        elif held[1] is not norms and (
+                held[1].keys() != norms.keys()
+                or any(held[1][k] is not v for k, v in norms.items())):
+            raise RuntimeError("the encoder model already runs on other F32 "
+                               "norms")
+        else:
+            held[0] += 1
+    try:
         yield
     finally:
-        for obj, attr, old, _ in reversed(swaps):
-            setattr(obj, attr, old)
+        with _NORM_LOCK:
+            held = _NORM_SWAPS[key]
+            held[0] -= 1
+            if not held[0]:
+                del _NORM_SWAPS[key]
+                _restore_norms(held[2])
 
 
 class _PadRope:

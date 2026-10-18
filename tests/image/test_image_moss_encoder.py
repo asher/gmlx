@@ -349,6 +349,38 @@ def test_an_encode_on_f32_norms_restores_a_resident_models_norms(build):
     assert mx.array_equal(_logits(m, ids), before).item()
 
 
+
+@_BUILDS
+def test_interleaved_f32_norm_contexts_restore_the_models_own(build):
+    """Two contexts on one model, entered A, B and left A, B, as two
+    encodes on one shared model would be, leave its own norms; F32
+    norms stay in place until the last one leaves."""
+    m = build()
+    m.set_dtype(mx.bfloat16)
+    norms = _f32_of(m)
+    state = _norm_state(m)
+    inner = te._inner(m)
+    a, b = te.float32_norms(m, norms), te.float32_norms(m, norms)
+    a.__enter__()
+    b.__enter__()
+    a.__exit__(None, None, None)
+    assert isinstance(inner.layers[0].input_layernorm, te._Float32RMSNorm)
+    b.__exit__(None, None, None)
+    assert _norm_state(m) == state
+    assert not isinstance(inner.layers[0].input_layernorm,
+                          te._Float32RMSNorm)
+    with te.float32_norms(m, norms):
+        with te.float32_norms(m, norms):
+            pass
+        assert _norm_state(m) != state
+    assert _norm_state(m) == state
+    other = {k: v * 1 for k, v in norms.items()}
+    with te.float32_norms(m, norms):
+        with pytest.raises(RuntimeError, match="other F32 norms"):
+            with te.float32_norms(m, other):
+                pass
+    assert _norm_state(m) == state
+
 @_NEEDS_GPU
 def test_f32_norms_that_are_not_the_models_are_refused(tmp_path, monkeypatch):
     m = _tiny_text()
