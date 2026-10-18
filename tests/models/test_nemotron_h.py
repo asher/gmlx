@@ -267,3 +267,12 @@ def test_synth_rejects_router_past_expert_count():
     shapes["blk.3.ffn_gate_inp.weight"] = [64, 9]
     with pytest.raises(ValueError, match="blk.3.ffn_gate_inp"):
         synthesize_config(_bolt_meta(), tensor_shapes=shapes)
+
+
+def test_synth_eps_falls_back_to_layer_norm_epsilon():
+    # Super VL carries attention.layer_norm_epsilon and no rms eps.
+    meta = _bolt_meta()
+    del meta[f"{ARCH}.attention.layer_norm_rms_epsilon"]
+    meta[f"{ARCH}.attention.layer_norm_epsilon"] = 2e-5
+    config = synthesize_config(meta, tensor_shapes=_bolt_shapes())
+    assert config["layer_norm_epsilon"] == pytest.approx(2e-5)

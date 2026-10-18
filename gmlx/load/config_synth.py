@@ -2426,8 +2426,12 @@ def _synth_mistral3(meta, shapes, config: dict) -> None:
 def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
     arch = "nemotron_h_moe"
 
-    # nemotron_h model uses layer_norm_epsilon (not rms_norm_eps)
+    # nemotron_h model uses layer_norm_epsilon (not rms_norm_eps). As in
+    # llama.cpp, a file with no rms eps (Super VL) takes attention's
+    # layer_norm_epsilon.
     eps = _read_float(meta, f"{arch}.attention.layer_norm_rms_epsilon")
+    if eps is None:
+        eps = _read_float(meta, f"{arch}.attention.layer_norm_epsilon")
     if eps is not None:
         config["layer_norm_epsilon"] = eps
         config.pop("rms_norm_eps", None)
