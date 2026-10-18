@@ -79,6 +79,7 @@ flags refuses.
 | `gpt-oss` | Sliding window layers keep the header's factor 32. |
 | `granite`, `granitehybrid` | |
 | `hy_v3`, `hyv4` | |
+| `k2-horizon` | |
 | `llama` | |
 | `minimax-m2`, `minimax-m3` | |
 | `mistral3` | |
