@@ -1,0 +1,429 @@
+{
+ "schema": 1,
+ "name": "check6_moss_image_512",
+ "check": 6,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check6_moss_image.py",
+ "argv": [
+  "check6_moss_image.py",
+  "--dit",
+  "MOSS-Image-SFT-Q4_K_M.gguf",
+  "--features",
+  "check2_moss_image_q8_0.npz",
+  "--sizes",
+  "512",
+  "--bf16",
+  "512"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "MOSS-Image-SFT-Q4_K_M.gguf",
+   "size": 3702092096,
+   "sha256": "c6dda89c18c0c0897d09ed01a515ee31415c4baea02bb9c2dedbfca66eec50b6"
+  },
+  "pipeline": {
+   "name": "pipeline_moss_image.py",
+   "size": 25060,
+   "sha256": "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+  },
+  "config": {
+   "name": "config.json",
+   "size": 240,
+   "sha256": "3291c3a1c7adc22b8182a0de25ca8ec97474d72715ce84adbab09cc0be24f666"
+  },
+  "scheduler_config": {
+   "name": "scheduler_config.json",
+   "size": 494,
+   "sha256": "707322832cc507dfb8c51c0e0cd04d44ee2d30a9b036b6f3c47d6c17aa71adf0"
+  },
+  "features": {
+   "name": "check2_moss_image_q8_0.npz",
+   "size": 24685072,
+   "sha256": "9f40242fe35edd0fc15bac6a2d42983e6b2d95c016d866e04441b68bbe91e3ef"
+  }
+ },
+ "inputs": {
+  "size": 512,
+  "steps": 50,
+  "steps_run": 50,
+  "blocks": 42,
+  "guidance_scale": 3.0,
+  "uncond_skip_layers": [
+   22
+  ],
+  "negative_prompt": "",
+  "scheduler": {
+   "base_image_seq_len": 256,
+   "base_shift": 0.5,
+   "invert_sigmas": false,
+   "max_image_seq_len": 4096,
+   "max_shift": 1.15,
+   "num_train_timesteps": 1000,
+   "shift": 5.0,
+   "shift_terminal": null,
+   "stochastic_sampling": false,
+   "time_shift_type": "exponential",
+   "training_shift": 1.0,
+   "use_beta_sigmas": false,
+   "use_dynamic_shifting": false,
+   "use_exponential_sigmas": false,
+   "use_karras_sigmas": false
+  },
+  "seed": 6,
+  "features": "check2_moss_image_q8_0 fp32 features",
+  "positive_key": "features_plain",
+  "negative_key": "features_empty",
+  "text_rows": {
+   "positive": 38,
+   "negative": 10
+  },
+  "kept_steps": [
+   1,
+   2,
+   5,
+   10,
+   25
+  ],
+  "gate_size": 512,
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16)",
+  "latents": "(1, 128, size / 16, size / 16) float32 in model space, after the step",
+  "gguf_codecs": {
+   "F16": 210,
+   "Q6_K": 84,
+   "Q4_K": 168,
+   "F32": 1
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding",
+   "timestep": "sigma x 1000 in float32 in both modes",
+   "guidance": "float32 velocities in both modes, as the release casts them"
+  },
+  "steps_run": 50,
+  "fp32_step_s": [
+   14.5,
+   14.5,
+   14.4,
+   14.5,
+   14.4,
+   14.5,
+   14.9,
+   14.8,
+   14.9,
+   14.9,
+   15.2,
+   15.0,
+   14.9,
+   14.8,
+   14.8,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.9,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8,
+   14.8
+  ],
+  "fp32_s": 739.8,
+  "bf16_s": 2170.0,
+  "latents_bf16_vs_fp32": {
+   "rel_l2": 0.45943544097777794,
+   "cosine": 0.8938588930880345,
+   "max_abs": 5.628334999084473
+  },
+  "bf16_vs_fp32_by_step": [
+   0.00017785951800384727,
+   0.00027685391111303373,
+   0.0003971679452805254,
+   0.000495907513443672,
+   0.0006704266772772455,
+   0.0009635333473899233,
+   0.0018884017702458875,
+   0.003630256001871022,
+   0.0057302323636947965,
+   0.0077554798629276955,
+   0.010170772795258439,
+   0.012561981739524034,
+   0.014651559000990749,
+   0.01740407060063074,
+   0.02015506988086763,
+   0.02295971348274425,
+   0.02558256001455884,
+   0.02854916205717846,
+   0.03205157774754117,
+   0.03519681699508832,
+   0.03905007340425514,
+   0.04352978393466403,
+   0.048198543535250556,
+   0.05355951771710164,
+   0.05906839465942481,
+   0.06520537719507057,
+   0.07147137523104004,
+   0.07908587224377753,
+   0.08700295316185488,
+   0.09579588105765836,
+   0.10548439071365853,
+   0.11616841166438577,
+   0.12779969342727338,
+   0.14040115702036549,
+   0.15470843296211922,
+   0.17078583872646225,
+   0.18852639361014067,
+   0.2072039341819995,
+   0.22833139066703506,
+   0.25167838264063064,
+   0.27666427459614973,
+   0.3027972916536381,
+   0.33007675785693313,
+   0.3583554748313851,
+   0.38475211145896104,
+   0.4099225010298654,
+   0.43180320608272776,
+   0.4487728448752057,
+   0.4589628460702799,
+   0.45943544097777794
+  ]
+ },
+ "tolerances": {
+  "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated",
+  "latents_rel_l2": 0.9188708819555559,
+  "step1_rel_l2": 0.00035571903600769455,
+  "step2_rel_l2": 0.0005537078222260675,
+  "step5_rel_l2": 0.001340853354554491,
+  "step10_rel_l2": 0.015510959725855391,
+  "step25_rel_l2": 0.11813678931884962
+ },
+ "notes": [],
+ "created": "2026-10-18T08:21:31Z",
+ "npz": "check6_moss_image_512.npz",
+ "tensors": {
+  "features_negative": {
+   "shape": [
+    10,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "62dc84e4bdef784bf5365091e6b5552df9269755fb2ab41869b6512bdeb85074"
+  },
+  "features_positive": {
+   "shape": [
+    38,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "012ba987671e1c79a361c5a6ce972ffbbb7c47c6a5938268d57b0f63fb345c4e"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "7e9b8ce065ca4d761e6251f3029fcd52312d088f33da62406715c405c4127ad2"
+  },
+  "latents_bf16": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "cb7a8030e9bde907ca0e9ac2562c10d8a091a4bd3cca05c9ba1274ce7bc68adc"
+  },
+  "latents_bf16_step1": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "b842f04987777cae9c56461ba0dd043ab78b5572f8df74183e40eec2208e6206"
+  },
+  "latents_bf16_step10": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "38c3b0af502f32cdee9ba8067b19e2c2b0cb3458a6265332b7848b7c14735cbd"
+  },
+  "latents_bf16_step2": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "6382f3738cb8297e9f7a8869b56183bfcc529aa5b7d37bf6465fc0f725def74a"
+  },
+  "latents_bf16_step25": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "3bb752fb6d748ad2bf34d554fc5a1ce824407c6ed57539a981f97a94ec89abae"
+  },
+  "latents_bf16_step5": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "67c25cf10768fc90ca16e14001119a6f125f313a47cf933cde6dbad7f6a881d2"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "9637fb75aae0c9a568b726979bf2a71d2011a061a5d68ea90b8fe7761901dd31"
+  },
+  "latents_step10": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "8ee84301e3e79f719b3b8421dbedf06519fd53d517d8136d42416dd2fbc69b21"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "fac21d9385a13596034a5b63b2db9ac3b57e21cf4e10c29ebf967a8de07725c0"
+  },
+  "latents_step25": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "34a03149a42c3932b2fdf3f686d3348195c825960138e4a0b2fee0518ff1399a"
+  },
+  "latents_step5": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "bf76779371abb985f84ae46e9b400f25c675390cba953fd7684d6b18319cc499"
+  },
+  "noise": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d614e8f6414c19a6e58b7af3fb3e7e866a4c21c40c780bf93ece8c4f09d875de"
+  },
+  "sigmas": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "be4301af0132c0b628f0d155d50ffab5cd6714691167eee2a160e2b59fcd63a7"
+  },
+  "timesteps": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "e5c8f391f1c3eb29dd3afa3fcef35fd8ab7587fa759579edfa03be23c6a23b9a"
+  }
+ }
+}
