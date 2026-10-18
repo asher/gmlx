@@ -41,7 +41,8 @@ Speculation works with some other features and stays off with others:
 - `--stream-cpu`: `run` and `chat` refuse `--speculative`.
 - The [lossy MoE settings](streaming.md#the-lossy-settings): off, and
   `chat` refuses `--speculative`.
-- `--mmproj`: text turns speculate, and turns with images or audio do not.
+- `--mmproj`: text turns speculate. Turns with images or audio speculate on
+  the server, and decode without it in `run` and `chat`.
 - `--adapter`: the adapted model checks each draft, so the output matches
   plain decoding with the adapter.
 
