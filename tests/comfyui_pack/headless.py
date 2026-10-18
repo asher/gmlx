@@ -412,6 +412,33 @@ class Cases:
             self.check("the steps sample on the caption", enc and conds == {enc[0]["cond"]},
                        [conds, enc[:1]])
 
+    async def moss_t2i(self):
+        """The example workflow: block 22 left out of each negative pass, found
+        by the walk-back from the running KSampler, on ComfyUI's sgm_uniform
+        timesteps after ModelSamplingSD3 at shift 5."""
+        wf = workflow("moss-image-t2i.json")
+        wf["6"]["inputs"].update(width=64, height=48)
+        wf["9"]["inputs"]["steps"] = 2
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt and the empty negative", sorted(e["text"] for e in enc)
+                   == ["", wf["4"]["inputs"]["text"]], [e["text"] for e in enc])
+        steps = kinds(log, "step")
+        self.check("a positive and a negative call a step", len(steps) == 4 and
+                   {e["rows"] for e in steps} == {1}, [e["rows"] for e in steps])
+        self.check("block 22 left out of the negative pass alone",
+                   [e["skip"] for e in steps] == [None, [22]] * 2, [e["skip"] for e in steps])
+        self.check("model space latent", {tuple(e["x_shape"]) for e in steps} == {(1, 128, 3, 4)},
+                   [e["x_shape"] for e in steps][:1])
+        t = np.linspace(1.0, 5 * 0.001 / (1 + 4 * 0.001), 3)[:-1]
+        want = [float(v) * 1000 for v in 5 * t / (1 + 4 * t) for _ in (0, 1)]
+        got = [e["timestep"][0] for e in steps]
+        self.check("timesteps of sgm_uniform at shift 5", np.allclose(got, want, atol=1e-3),
+                   {"got": got, "want": want})
+        self.check("decoded", len(kinds(log, "vae_decode")) == 1, len(kinds(log, "vae_decode")))
+
     async def flux3_edit(self, upsample=False):
         wf = workflow("flux-3-klein-edit-two-references.json")
         wf["8"]["inputs"]["resolution.megapixels"] = 0.25
@@ -604,6 +631,7 @@ async def amain(a) -> dict:
             await c.case("flux-2-klein edit with two references", c.flux2_edit)
             await c.case("FluxKontextMultiReferenceLatentMethod refused on flux-2-klein, naming it",
                          c.flux2_reference_method)
+            await c.case("moss-image t2i under SkipLayerGuidanceDiTSimple", c.moss_t2i)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)

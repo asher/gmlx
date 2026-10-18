@@ -122,7 +122,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 10
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 11
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -203,6 +203,8 @@ _WIDGETS = {
     "ReferenceLatent": [],
     "GetImageSize": [],
     "FluxKVCache": [],
+    "ModelSamplingSD3": ["shift"],
+    "SkipLayerGuidanceDiTSimple": ["double_layers", "single_layers", "start_percent", "end_percent"],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 
