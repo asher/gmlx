@@ -255,13 +255,16 @@ def _header_bytes(path, kind: str) -> int:
 
 
 def load(dit, *, text_encoder=None, vae=None, mmproj=None,
-         encoder_model=None, variant=None, memory: str = "auto",
-         log=print) -> ImagePipeline:
+         encoder_model=None, encoder_gguf=None, variant=None,
+         memory: str = "auto", log=print) -> ImagePipeline:
     """Load an image pipeline from a DiT GGUF, a text encoder GGUF or a
     resident chat model given as ``encoder_model=(model, tokenizer)``, and
-    a VAE. ``mmproj`` is the mmproj GGUF of the text encoder: with it the
-    encoder loads with its vision tower, which a request with reference
-    images needs and a text request does not. With ``memory="auto"`` the
+    a VAE. ``encoder_gguf`` is the GGUF ``encoder_model`` was loaded from:
+    a family whose encode runs on F32 norms (MOSS-Image) reads them from
+    it, and without it runs on the model's own. ``mmproj`` is the mmproj
+    GGUF of the text encoder: with it the encoder loads with its vision
+    tower, which a request with reference images needs and a text request
+    does not. With ``memory="auto"`` the
     weights of all are gated on their header sizes before anything loads;
     ``memory="off"`` skips that gate, and each load still gates its own
     weights."""
@@ -274,6 +277,9 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
         raise ValueError(f"memory must be 'auto' or 'off', not {memory!r}")
     if text_encoder is not None and encoder_model is not None:
         raise ValueError("pass text_encoder or encoder_model, not both")
+    if encoder_gguf is not None and encoder_model is None:
+        raise ValueError("encoder_gguf is the file of encoder_model; pass "
+                         "encoder_model")
     if mmproj is not None and text_encoder is None:
         raise ValueError("an mmproj loads with its text encoder GGUF; pass "
                          "text_encoder")
@@ -309,7 +315,9 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
             # What the tower holds as loaded, which the plan counts.
             weights["mmproj"] = handle.vision_bytes()
     elif encoder_model is not None:
-        handle = _borrowed(encoder_model, spec)
+        handle = _borrowed(encoder_model, spec,
+                           gguf=None if encoder_gguf is None
+                           else str(encoder_gguf))
     seconds["encoder"] = time.perf_counter() - t0
     ae = None
     t0 = time.perf_counter()

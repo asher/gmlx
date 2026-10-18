@@ -831,3 +831,28 @@ def test_sample_takes_the_batch_from_the_noise(pipe):
     with pytest.raises(ValueError, match="does not match"):
         api.sample(pipe, _cond(0.5), height=32, width=64, noise=noise,
                    steps=2)
+
+
+def test_load_passes_the_borrowed_models_gguf_to_its_encoder(monkeypatch):
+    """A borrowed encoder model with its GGUF reads the F32 norms a
+    MOSS-Image encode runs on, as the CLI and serve do."""
+    from gmlx.image import loader
+
+    fam = get_family("moss_image")
+    ident = SimpleNamespace(family=fam, variant=None)
+    monkeypatch.setattr(api, "_header_bytes", lambda p, kind: 0)
+    monkeypatch.setattr(loader, "identify_dit", lambda *a, **k: ident)
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
+        None, SimpleNamespace(identified=ident)))
+    got = []
+
+    def borrowed(pair, spec, gguf=None):
+        got.append((pair, spec.fp32_norms, gguf))
+        raise LookupError("stop")
+
+    monkeypatch.setattr(api, "_borrowed", borrowed)
+    with pytest.raises(LookupError):
+        api.load("d.gguf", encoder_model=(1, 2), encoder_gguf="chat.gguf")
+    assert got == [((1, 2), True, "chat.gguf")]
+    with pytest.raises(ValueError, match="encoder_gguf"):
+        api.load("d.gguf", text_encoder="e.gguf", encoder_gguf="chat.gguf")
