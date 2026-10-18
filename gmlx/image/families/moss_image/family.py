@@ -23,7 +23,9 @@ from __future__ import annotations
 import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
+from gmlx.image import upsample
+from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
+                                  UpsampleParts, VariantRow)
 
 TITLE = "MOSS-Image"
 
@@ -275,6 +277,30 @@ def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
                        CONSTANTS.values["num_train_timesteps"])
 
 
+# The optional upsampler, on a chat model of the user's choice. OpenMOSS
+# ships an agent skill, not a system prompt: skills/moss-image-prompt-
+# enhancer/SKILL.md of github.com/OpenMOSS/MOSS-Image at commit c1355e6
+# (Apache-2.0). caption_prompt.txt is gmlx's own caption-only system
+# prompt, written from the skill's guidance for a caption, with no layout
+# boxes and no tools. The skill names no sampling: gmlx decodes greedily,
+# with no presence penalty and thinking off, as for Krea 2. The reply is
+# the skill's {"caption": ...} object, or the caption as written.
+UPSAMPLE = UpsampleParts(
+    prompts="caption_prompt.txt",
+    sha256="389ce41e0d9f4e11df7f0c078cef7a4af772b7312b19fc7d637e5808345cbba1",
+    key=None,
+    max_tokens=2048,
+    temperature=0.0,
+    presence_penalty=0.0,
+    thinking="off",
+    repo="github.com/OpenMOSS/MOSS-Image",
+    revision="c1355e6b1986dfe8fba3c0455783a05899212342",
+    package=__package__,
+    suggested="Qwen3.5-9B",
+    parse=upsample.json_field("caption"),
+)
+
+
 FAMILY = Family(
     name="moss_image",
     title=TITLE,
@@ -297,4 +323,5 @@ FAMILY = Family(
     unknown_variant="sft",
     schedule=schedule,
     sampling=SAMPLING,
+    upsample=UPSAMPLE,
 )

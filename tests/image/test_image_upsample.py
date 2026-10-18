@@ -44,6 +44,10 @@ CAPTION = "A red bicycle leans against a weathered brick wall."
     ("z_image", "z_image", "pe_prompt_template.txt",
      "36bdd888b953e9b7a8237dab55bee145a44e96e92e8f6e81a6e4d433a401a0b6",
      None, (0.0, 2048, 0.0, "off")),
+    # gmlx's own caption prompt, from the OpenMOSS prompt-enhancer skill.
+    ("moss_image", "moss_image", "caption_prompt.txt",
+     "389ce41e0d9f4e11df7f0c078cef7a4af772b7312b19fc7d637e5808345cbba1",
+     None, (0.0, 2048, 0.0, "off")),
 ])
 def test_the_chat_turn_is_the_sources_t2i_turn(family, package, name, sha256,
                                                 key, sampling):
@@ -178,6 +182,20 @@ def test_z_image_takes_revised_prompt_or_the_reply_as_written():
     sign = "A neon sign that reads {OPEN} above a red bicycle."
     assert upsample.upsample(fam, "x", lambda req: sign) == sign
 
+
+def test_moss_image_takes_the_caption_from_its_json_or_the_reply_as_written():
+    """The caption keeps its paragraphs and the text the image shows;
+    a reply with no object is the caption as written."""
+    fam = get_family("moss_image")
+    caption = ('A bakery storefront under a painted sign that reads "FRESH '
+               'BREAD DAILY".\n\nLoaves fill the window in warm light.')
+    reply = json.dumps({"caption": caption})
+    assert upsample.upsample(fam, "x", lambda req: reply) == caption
+    fenced = "```json\n" + reply + "\n```"
+    assert upsample.upsample(fam, "x", lambda req: fenced) == caption
+    assert upsample.upsample(fam, "x", lambda req: CAPTION) == CAPTION
+    with pytest.raises(upsample.UpsampleError):
+        upsample.upsample(fam, "x", lambda req: '{"layout": []}')
 
 @pytest.mark.parametrize("reply", [
     "<|channel>thought\nThe user wants a bike.<channel|>{caption}",

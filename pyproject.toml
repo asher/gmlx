@@ -182,6 +182,7 @@ include = ["gmlx*"]
 "gmlx.image.families.flux2_klein" = ["system_message_upsampling_t2i.txt"]
 "gmlx.image.families.krea2" = ["expansion.txt"]
 "gmlx.image.families.z_image" = ["pe_prompt_template.txt"]
+"gmlx.image.families.moss_image" = ["caption_prompt.txt"]
 "gmlx.container" = ["files/Containerfile", "guest/gmlx-entry"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt",

@@ -182,7 +182,13 @@ most with short prompts and with text in the image.
 | FLUX.2 klein, all sizes and variants | Ships with gmlx, from Black Forest Labs |
 | Krea 2 | Ships with gmlx, from Krea |
 | Z-Image, Z-Image-Turbo | Ships with gmlx, from the Z-Image-Turbo demo of Tongyi-MAI |
+| MOSS-Image, MOSS-Image Base | Ships with gmlx, written by gmlx from the prompt-enhancer skill of OpenMOSS |
 | Qwen-Image 2.1, Qwen-Image 2.1 Turbo | Your own file, as [Qwen-Image 2.1](#qwen-image-21-rewriter-prompt) describes |
+
+OpenMOSS publishes its prompt enhancer as an agent skill, not a system
+prompt, so gmlx's MOSS-Image prompt follows the skill's rules for a
+caption and writes prose only. It writes no layout boxes, so run a layout
+JSON prompt with `--no-upsample`.
 
 Qwen3.5-9B writes captions close to those of BFL's own FLUX.3 upsampler,
 and its Q6_K GGUF is a good choice for every family. Any chat model of your
@@ -404,7 +410,9 @@ from Black Forest Labs.
 The system prompts gmlx ships for [prompt upsampling](#prompt-upsampling)
 are under Apache 2.0, from Black Forest Labs' flux-3-image-klein and flux2
 repositories, Krea's krea-2 repository and Tongyi-MAI's Z-Image-Turbo
-Space. Qwen's rewriter prompt, which
+Space. The MOSS-Image caption prompt is gmlx's own, written from the
+prompt-enhancer skill of OpenMOSS's MOSS-Image repository, which is under
+Apache 2.0. Qwen's rewriter prompt, which
 `gmlx pull qwen-image` downloads, is under the Qwen Research License, for
 non-commercial use only.
 
