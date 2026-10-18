@@ -2771,10 +2771,9 @@ def install_kquant_modules(model: nn.Module,
         if codec in NATIVE_FP_CODECS:
             # Micro-scaling float codec. The SwitchGLU expert path (gpt-oss,
             # DS-V4) and the absorbed-MLA MultiLinear (Kimi-K3, whose
-            # MXFP4_MOE ftype also quantizes attn_k_b/attn_v_b) are wired.
-            # A native-fp Linear / Embedding would need its own module
-            # (packed) or its own wire Metal leaves; fail loud rather than
-            # mis-dispatch onto the kquant path.
+            # MXFP4_MOE ftype also quantizes attn_k_b/attn_v_b) are wired,
+            # and so is a dense Linear. An Embedding has no native-fp module;
+            # fail loud rather than mis-dispatch onto the kquant path.
             if isinstance(module, _switch_linear_types):
                 n_experts, out_dims, in_dims = module.weight.shape
                 bias = "bias" in module
