@@ -333,3 +333,22 @@ def test_the_ops_seams_stay_in_force():
                  "ops.gated_residual", "ops.resid_leaf"):
         assert seam in src, seam
     assert ops.SEAMS
+
+
+def test_every_op_of_a_tiny_bf16_step_is_within_its_rounding_bound():
+    """The site gate on the tiny model in bf16: each op of each block and
+    each call of a linear leaf against the stock op in float32 on the same
+    input, within 2 n u, and no op or leaf of the step left unread."""
+    import moss_gates as mg
+    import qwen_gates as qg
+
+    model, _ = _tiny(act=mx.bfloat16)
+    model.set_dtype(mx.bfloat16)
+    lat, feats = (mx.array(a) for a in _inputs())
+    sites: dict = {}
+    skipped: set = set()
+    with mg.step_sites(model, sites, skipped=skipped):
+        mx.eval(model(lat, np.reshape(SIGMA, (1,)), feats))
+    assert not mg.missing_ops(model, sites, skipped=skipped)
+    assert not qg.over_gate(sites), qg.over_gate(sites)
+    assert len(qg.op_sites(sites)) == 2 * 9 + 2 * 5
