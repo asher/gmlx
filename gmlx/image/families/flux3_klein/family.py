@@ -342,8 +342,9 @@ REFERENCES = ConstantsRow(
 # The upsampler of src/flux3/pup.py for a prompt without references, run
 # on a chat model of the user's choice: the t2i prompt that BFL publishes
 # for other models, shipped unmodified, with the typed prompt as the user
-# turn, greedy decoding of at most 3584 tokens, the presence penalty of
-# 1.5 that pup.py sets for text to image, and thinking off.
+# turn, greedy decoding of at most 3584 tokens and thinking off. BFL
+# gives no sampling settings for this prompt, so the presence penalty is
+# the 1.5 that pup.py sets for its own fine-tune on text to image.
 UPSAMPLE = UpsampleParts(
     prompts="pup_prompts_external_vlm.json",
     sha256="361bb6e081d50e54a3dee9abf26327436a9386c83465f881c7848989232028be",
