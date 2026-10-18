@@ -914,6 +914,9 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
             raise ValueError(f"the {pipe.family.title} DiT caches its "
                              f"references by itself under the reference's "
                              f"time rule")
+    if any(isinstance(i, bool) or not isinstance(i, numbers.Integral)
+           for i in skip):
+        raise ValueError(f"skip holds block indices, not {list(skip)}")
     skip = tuple(sorted({int(i) for i in skip}))
     if skip and not getattr(pipe.dit, "skips_blocks", False):
         raise ValueError(f"the {pipe.family.title} DiT skips no blocks")

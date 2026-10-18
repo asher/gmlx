@@ -507,3 +507,23 @@ def test_a_dit_that_skips_no_blocks_refuses_a_skip_set():
     lat = mx.array(_inputs()[0])
     with pytest.raises(ValueError, match="DiT skips no blocks"):
         api.denoise_step(pipe, lat, SIGMA, _cond(5, 1), skip=(1,))
+
+
+def test_a_skip_set_of_other_than_block_indices_is_refused():
+    """A fractional block is refused, not cut to the block below it."""
+    from gmlx.image import api
+
+    model, _ = _tiny()
+    pipe = api.ImagePipeline(dit=model, family=get_family("moss_image"),
+                             variant="sft")
+    noise = np.zeros((1, 8, H, W), np.float32)
+    for bad in ((1.5,), (True,), ("1",)):
+        with pytest.raises(ValueError, match="block indices"):
+            with mx.stream(mx.cpu):
+                api.sample(pipe, _cond(5, 1), neg=_cond(3, 2), cfg=3.0,
+                           height=16 * H, width=16 * W, steps=2,
+                           noise=noise, neg_skip=bad)
+    with mx.stream(mx.cpu):
+        api.sample(pipe, _cond(5, 1), neg=_cond(3, 2), cfg=3.0,
+                   height=16 * H, width=16 * W, steps=2, noise=noise,
+                   neg_skip=(np.int64(1),))
