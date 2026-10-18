@@ -1269,3 +1269,31 @@ def test_run_auto_enables_the_sibling_drafter(tmp_path, monkeypatch):
                                  tmp_path / "nvidia__Bolt-LiLiCorr-GGUF",
                                  monkeypatch)
     assert cli._companion_drafter(target) == drafter
+
+
+def _super_vl(tmp_path, monkeypatch, *, mtp=False):
+    target = tmp_path / "Super-VL-Q4_0.gguf"
+    sidecar = tmp_path / "mtp-Super-VL-Q4_0.gguf"
+    for p in (target, sidecar):
+        p.write_bytes(b"GGUF")
+    metas = {str(target): {"arch": "nemotron_h_moe", "kind": "model", "mtp": mtp},
+             str(sidecar): {"arch": "nemotron_h_moe", "kind": "drafter"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    return str(target), str(sidecar)
+
+
+def test_headless_target_takes_its_nextn_sidecar(tmp_path, monkeypatch):
+    # llama.cpp ships Super VL's MTP head as mtp-*.gguf beside the model.
+    from gmlx.commands import cli
+
+    target, sidecar = _super_vl(tmp_path, monkeypatch)
+    arches = ("dflash", "nemotron_h_moe")
+    assert disc.find_headless_drafter(target, arches) == sidecar
+    assert cli._companion_drafter(target) == sidecar
+    # Only a family whose row lists its own arch loads such a sidecar.
+    assert disc.find_headless_drafter(target, ("dflash",)) is None
+
+
+def test_headless_lookup_leaves_a_native_head_alone(tmp_path, monkeypatch):
+    target, _ = _super_vl(tmp_path, monkeypatch, mtp=True)
+    assert disc.find_headless_drafter(target, ("nemotron_h_moe",)) is None

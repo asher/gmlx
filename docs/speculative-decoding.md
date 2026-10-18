@@ -17,9 +17,9 @@ gmlx run model.gguf --bench-depths "0,4096" --speculative  # measure the gain
 Some GGUF files carry a [native head](glossary.md#native-head), a small
 extra layer that drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8 models
 do. `run` and `chat` turn speculation on for these without a flag. DeepSeek-V4,
-Qwen3.8-Flash-Next and Muse Glimmer turn it on the same way when their
-companion drafter sits in the model's folder, or in an `MTP` folder inside
-or beside it. Nemotron 3.5 Bolt turns it on when its LiLiCorr drafter repo,
+Qwen3.8-Flash-Next, Muse Glimmer and Nemotron 3.5 Super VL turn it on the
+same way when their companion drafter sits in the model's folder, or in an
+`MTP` folder inside or beside it. Nemotron 3.5 Bolt turns it on when its LiLiCorr drafter repo,
 `<repo>-LiLiCorr-GGUF`, sits beside the model's repo. Other families, such
 as gemma-4 with its assistant drafter, need `--draft-gguf`.
 

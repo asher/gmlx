@@ -1995,19 +1995,19 @@ def _resolve_companion_drafter(model_type: str | None, gguf_path: str, *, log):
     For model_types in ``arch_table.MTP_COMPANION_AUTO_MODEL_TYPES`` the
     native-head extraction cannot serve the target, so a missing companion
     raises the family error rather than falling into a misleading
-    no-native-head message. Every other family takes the drafter of a marked
-    sibling repo when the target has no native head, else None (drafts come
-    from the in-GGUF head, or an explicit ``--draft-gguf``). Shared by the
-    text and VLM loaders."""
+    no-native-head message. In every other family, a target with no native
+    head takes its NextN sidecar or the drafter of a marked sibling repo;
+    else None (drafts come from the in-GGUF head, or ``--draft-gguf``).
+    Shared by the text and VLM loaders."""
     import gmlx.load.arch_table as arch_table
-    from gmlx.load.discovery import find_mtp_companion, find_sibling_drafter
+    from gmlx.load.discovery import find_headless_drafter, find_mtp_companion
 
     if model_type not in arch_table.MTP_COMPANION_AUTO_MODEL_TYPES:
         arches = arch_table.drafter_arches(model_type) if model_type else ()
-        path = find_sibling_drafter(gguf_path, arches) if arches else None
+        path = find_headless_drafter(gguf_path, arches) if arches else None
         if path is not None:
             loadlog.fact("mtp_companion", os.path.basename(path))
-            log(f"[mtp] sibling drafter autodetected: {path}")
+            log(f"[mtp] companion drafter autodetected: {path}")
         return path
     path = find_mtp_companion(gguf_path, arch_table.drafter_arches(model_type))
     if path is None:

@@ -38,6 +38,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - NVIDIA Nemotron 3.5 Bolt 74B-A9B, with image input through its `--mmproj`
   companion and its LiLiCorr drafter, which gmlx pairs from the sibling
   `-LiLiCorr-GGUF` repo.
+- NVIDIA Nemotron 3.5 Super VL 120B-A12B, with image input through its
+  `--mmproj` companion and an MTP drafter from the `mtp-*.gguf` file beside it.
 - Nemotron models take `@instruct` to turn thinking off, and
   `@reasoning-medium` for a shorter reasoning pass where the template has one.
 

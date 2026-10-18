@@ -514,6 +514,26 @@ def find_sibling_drafter(
     return _pick_drafter(_sibling_drafter_folders(ap), arches, ap)
 
 
+def find_headless_drafter(
+    path: str,
+    drafter_arch: str | tuple,
+) -> str | None:
+    """The drafter of a target with no native MTP head: a NextN sidecar of
+    the target's own arch beside it (the head in its own file, as
+    llama.cpp's ``mtp-*.gguf``) when ``drafter_arch`` lists that arch, else
+    :func:`find_sibling_drafter`. ``None`` for a target with a head."""
+    meta = header_meta(path)
+    if not meta or meta.get("mtp"):
+        return None
+    arches = (drafter_arch,) if isinstance(drafter_arch, str) else tuple(drafter_arch)
+    arch = meta.get("arch")
+    if arch in arches:
+        hit = find_mtp_companion(path, (arch,))
+        if hit is not None:
+            return hit
+    return find_sibling_drafter(path, arches)
+
+
 def _sibling_drafter_folders(ap: str) -> list:
     parts = os.path.normpath(ap).split(os.sep)
     for i in range(len(parts) - 2, -1, -1):
