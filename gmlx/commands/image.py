@@ -1141,6 +1141,7 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
 
     from gmlx.image import api
     from gmlx.image.samplers import make_sampler, noise_from_seed
+    from gmlx.serve.image_steps import CONVENTIONS
     from gmlx.serve.image_steps_loopback import work
 
     def start():
@@ -1195,6 +1196,11 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
         return work(lambda: np.array(api.guide(mx.array(pos), mx.array(neg),
                                                g, act)))
 
+    # The negative pass leaves out the variant's blocks, as sample does,
+    # and each timestep is in the reference convention of the family.
+    row = api.sampler_defaults(pipe.family.name, pipe.variant)
+    neg_skip = row.neg_skip if row is not None and cfg != 1.0 else ()
+    conv = CONVENTIONS["reference"][pipe.family.name]
     marks = [t_enc]
     first = len(client.records)
     run = client.begin(model)
@@ -1202,7 +1208,8 @@ def bench_run_steps(pipe, client, model: str, prompt: str, *, height: int,
         x = client.sample(model, noise, sigmas, rows[0], cfg=cfg,
                           neg_rows=rows[1] if len(rows) > 1 else None,
                           run=run, update=update, combine=combine,
-                          on_step=lambda i, _x: marks.append(clock()))
+                          on_step=lambda i, _x: marks.append(clock()),
+                          neg_skip=neg_skip, timestep_scale=1.0 / conv.scale)
     finally:
         client.end(run)
     t_dec = clock()
