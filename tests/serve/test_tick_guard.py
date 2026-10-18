@@ -232,3 +232,29 @@ def test_metal_oom_still_takes_the_memory_ladder(wrapped, monkeypatch):
     script.append(OOM_ERR)
     tick(gen)
     assert gen.removed == [8]         # largest row retired, as before
+
+
+def test_a_rebuilt_row_penalizes_its_delivered_tokens(wrapped, monkeypatch):
+    from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors
+
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    procs = make_logits_processors(presence_penalty=1.5)
+    gen._unprocessed_sequences[1] = (8, [4, 5, 6], 16, {}, procs, None)
+    gen._generation_batch = FakeGB([7, 8], [1, 3])
+    # The decode loop drives the row's processors as it delivers 21, 22.
+    for history in ([4, 5, 6], [4, 5, 6, 21], [4, 5, 6, 21, 22]):
+        procs[0](tg.mx.array(history), tg.mx.zeros((1, 32)))
+    script.append(([], [resp(7, 11), resp(8, 21)]))
+    script.append(([], [resp(8, 22)]))
+    script.extend([MEM_ERR, MEM_ERR])
+    for _ in range(4):
+        tick(gen)
+    uid, replay, _rem, _kw, lp, _tc = gen._unprocessed_sequences[0]
+    assert uid == 8 and replay == [4, 5, 6, 21, 22]
+    assert lp[0] is not procs[0]
+    # An APC hit prefills only the uncached tail, so the replay's first
+    # call sees just that.
+    out = lp[0](tg.mx.array([22]), tg.mx.zeros((1, 32))).reshape(-1)
+    assert {t: -v for t, v in enumerate(out.tolist()) if v} == {
+        21: 1.5, 22: 1.5}
