@@ -1,0 +1,183 @@
+{
+ "schema": 1,
+ "name": "check4_moss_image",
+ "check": 4,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check4_moss_image.py",
+ "argv": [
+  "check4_moss_image.py"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "pipeline": {
+   "name": "pipeline_moss_image.py",
+   "size": 25060,
+   "sha256": "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+  },
+  "scheduler_config": {
+   "name": "scheduler_config.json",
+   "size": 494,
+   "sha256": "707322832cc507dfb8c51c0e0cd04d44ee2d30a9b036b6f3c47d6c17aa71adf0"
+  }
+ },
+ "inputs": {
+  "steps": [
+   50,
+   28,
+   8,
+   250,
+   1000
+  ],
+  "scheduler": {
+   "base_image_seq_len": 256,
+   "base_shift": 0.5,
+   "invert_sigmas": false,
+   "max_image_seq_len": 4096,
+   "max_shift": 1.15,
+   "num_train_timesteps": 1000,
+   "shift": 5.0,
+   "shift_terminal": null,
+   "stochastic_sampling": false,
+   "time_shift_type": "exponential",
+   "training_shift": 1.0,
+   "use_beta_sigmas": false,
+   "use_dynamic_shifting": false,
+   "use_exponential_sigmas": false,
+   "use_karras_sigmas": false
+  }
+ },
+ "results": {
+  "steps_run": {
+   "50": 50,
+   "28": 28,
+   "8": 8,
+   "250": 246,
+   "1000": 615
+  },
+  "grid_points_off_k_over_total": 386,
+  "grid_max_ulps": 1
+ },
+ "tolerances": {
+  "sigmas": "one float32 ulp each",
+  "count": "exact",
+  "timesteps": "sigma x 1000 in float32",
+  "rule": "each sigma within one float32 ulp of the release's and the same number of steps"
+ },
+ "notes": [],
+ "created": "2026-10-18T06:50:11Z",
+ "npz": "check4_moss_image.npz",
+ "tensors": {
+  "sigmas_1000": {
+   "shape": [
+    616
+   ],
+   "dtype": "float32",
+   "sha256": "a2012a04b4a441b50951f4c5208462cffa733b95098aaf0d8799209640e128be"
+  },
+  "sigmas_250": {
+   "shape": [
+    247
+   ],
+   "dtype": "float32",
+   "sha256": "84744830a7ceff60e557e3c34090e5789608d7bbbab844229e3c9172a3489433"
+  },
+  "sigmas_28": {
+   "shape": [
+    29
+   ],
+   "dtype": "float32",
+   "sha256": "5f8e4e3e53d4314c4c57440c3aaa0cb7d102fecca1679bed6501c6d523d80f42"
+  },
+  "sigmas_50": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "be4301af0132c0b628f0d155d50ffab5cd6714691167eee2a160e2b59fcd63a7"
+  },
+  "sigmas_8": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "c229a57463f3db2e71b9595902f071390567c1a85d6ced85022c95992cdd90d1"
+  },
+  "timesteps_1000": {
+   "shape": [
+    615
+   ],
+   "dtype": "float32",
+   "sha256": "d354cd6b9a3be4e06ac917e1ec3fbb8d036c1d909d5a504d492bbfc53446355d"
+  },
+  "timesteps_250": {
+   "shape": [
+    246
+   ],
+   "dtype": "float32",
+   "sha256": "047edf44585b28115594a25b3333204c17c1a2646e83e214d83b3457b538ec14"
+  },
+  "timesteps_28": {
+   "shape": [
+    28
+   ],
+   "dtype": "float32",
+   "sha256": "7300eb3225f7eb822090f90a06982d0963207f07d24810b28c9b6eb49ae1fa1d"
+  },
+  "timesteps_50": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "e5c8f391f1c3eb29dd3afa3fcef35fd8ab7587fa759579edfa03be23c6a23b9a"
+  },
+  "timesteps_8": {
+   "shape": [
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "933a3da4af0be7f12e536c22fcbb88200dd6b840985fcb2e3ecdd4a95c796125"
+  },
+  "training_grid": {
+   "shape": [
+    1000
+   ],
+   "dtype": "float32",
+   "sha256": "d6f5386fddcf96144952ca78c05ec7620e4194a372c727ebd37dbe1f273d89f9"
+  }
+ }
+}

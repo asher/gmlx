@@ -88,6 +88,9 @@ CONSTANTS = ConstantsRow(
         # The base of the timestep sinusoid's frequencies.
         "time_period": 10000.0,
         "num_train_timesteps": 1000,
+        # scheduler/scheduler_config.json: the shift of the sampling
+        # schedule; training_shift 1.0 leaves the snap grid unshifted.
+        "scheduler_shift": 5.0,
         # The pipeline's image processor: 8 pixels a VAE latent, 2 a patch.
         "vae_scale_factor": 16,
         "size_multiple": 16,
@@ -242,6 +245,15 @@ def build(config: dict):
     return MossImageDiT(config)
 
 
+def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
+    """The release's snapped schedule of ``steps``, the same for every
+    image size and variant."""
+    from gmlx.image.schedule import moss_sigmas
+
+    return moss_sigmas(steps, CONSTANTS.values["scheduler_shift"],
+                       CONSTANTS.values["num_train_timesteps"])
+
+
 FAMILY = Family(
     name="moss_image",
     title=TITLE,
@@ -258,4 +270,5 @@ FAMILY = Family(
     fp32_keep=("rope.bands",),
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
+    schedule=schedule,
 )
