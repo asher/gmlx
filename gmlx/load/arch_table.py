@@ -180,6 +180,9 @@ MTP_DRAFTER_ARCHES = {
     # the HF mtp.* tensors, or the llama.cpp mtp-*.gguf NextN sidecar, which
     # keeps the target's arch.
     "qwen4_exp": ("qwen4exp-mtp", "qwen4exp"),
+    # LiLiCorr DFlash drafters (Nemotron-3.5-Bolt). The in-file NextN head
+    # and the same-arch mtp sidecar need no row.
+    "nemotron_h": ("dflash",),
 }
 
 

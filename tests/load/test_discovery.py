@@ -1172,3 +1172,54 @@ def test_supported_main_arch_with_backbone_field_is_model():
                    "deepseek4.embedding_length_out": 16384},
                   "DeepSeek-V4-Flash-Vision-Exp-UD-IQ3_XXS-00001-of-00004.gguf")
     assert c.kind == "model"
+
+
+def _nemotron_classify(monkeypatch):
+    def _f(path):
+        name = os.path.basename(path)
+        if "LiLiCorr" in name:
+            meta = {"general.architecture": "dflash",
+                    "dflash.embedding_length": 4096}
+        else:
+            meta = {"general.architecture": "nemotron_h_moe",
+                    "nemotron_h_moe.embedding_length": 4096}
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+def test_lilicorr_sibling_repo_pairs_its_target(tmp_path, monkeypatch):
+    # NVIDIA ships the drafter as <repo>-LiLiCorr-GGUF beside <repo>-GGUF,
+    # with no base-model id in its header.
+    _nemotron_classify(monkeypatch)
+    repo = "nvidia__NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+    (tmp_path / f"{repo}-GGUF").mkdir()
+    (tmp_path / f"{repo}-LiLiCorr-GGUF").mkdir()
+    _write(tmp_path / f"{repo}-GGUF", "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf")
+    _write(tmp_path / f"{repo}-LiLiCorr-GGUF",
+           "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf")
+    models = _scan(tmp_path, recursive=True)
+    assert len(models) == 1
+    assert models[0].draft_gguf.endswith("-LiLiCorr.gguf")
+    assert models[0].speculative is True
+
+
+def test_lilicorr_sibling_rule_needs_the_matching_repo(tmp_path, monkeypatch):
+    _nemotron_classify(monkeypatch)
+    (tmp_path / "nvidia__Other-GGUF").mkdir()
+    (tmp_path / "nvidia__Bolt-LiLiCorr-GGUF").mkdir()
+    _write(tmp_path / "nvidia__Other-GGUF", "Other-Q4_K_M.gguf")
+    _write(tmp_path / "nvidia__Bolt-LiLiCorr-GGUF", "Bolt-LiLiCorr.gguf")
+    models = _scan(tmp_path, recursive=True)
+    assert [m.draft_gguf for m in models] == [None]
+
+
+def test_repo_name_reads_both_layouts():
+    assert disc._repo_name("/m/nvidia__X-GGUF/X.gguf") == "nvidia__X-GGUF"
+    assert disc._repo_name(
+        "/hf/models--nvidia--X-LiLiCorr-GGUF/snapshots/abc/X.gguf"
+    ) == "nvidia__X-LiLiCorr-GGUF"
+    assert disc._sibling_drafter_repo(
+        "/hf/models--nvidia--X-LiLiCorr-GGUF/snapshots/abc/X.gguf"
+    ) == "nvidia__x-gguf"
+    assert disc._sibling_drafter_repo("/m/nvidia__X-GGUF/X.gguf") is None

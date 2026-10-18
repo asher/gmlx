@@ -1165,11 +1165,13 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                       f"{dr.path}", file=sys.stderr)
             else:
                 unpaired.append(dr)
-            if dr.declared and (not targets or dr.drafter_kind == "dflash2"):
+            if (dr.declared or _sibling_drafter_repo(dr.path)) and (
+                    not targets or dr.drafter_kind == "dflash2"):
                 cross.append(dr)
 
     # Cross-directory pass: a drafter that declares its base model (a DFlash 2
-    # header does) pairs with that model wherever the scan found it, and a
+    # header does), or sits in a marked sibling repo of its target's, pairs
+    # with that model wherever the scan found it, and a
     # DFlash 2 drafter takes over a target its same-directory DFlash v1
     # sibling claimed above. Declared hits only; the filename rule stays
     # same-directory.
@@ -1289,6 +1291,29 @@ def _configured_in_dir(dirpath: str, configured) -> list:
     return out
 
 
+# A drafter repo named for its target's repo plus one of these markers
+# (NVIDIA's ``<repo>-LiLiCorr-GGUF`` beside ``<repo>-GGUF``) pairs with the
+# models of that repo wherever the scan found them.
+_SIBLING_DRAFTER_MARKER_RE = re.compile(r"-lilicorr(?=-gguf$|$)", re.IGNORECASE)
+
+
+def _repo_name(path: str) -> str:
+    """The repo a GGUF sits in: ``<org>--<repo>`` of an HF cache entry, else
+    its directory's name (the ``<org>__<repo>`` local layout)."""
+    parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
+    for part in reversed(parts[:-1]):
+        if part.startswith("models--"):
+            return part[len("models--"):].replace("--", "__", 1)
+    return parts[-2] if len(parts) > 1 else ""
+
+
+def _sibling_drafter_repo(drafter_path: str) -> str | None:
+    """The target repo a marked drafter repo names, or None."""
+    repo = _repo_name(drafter_path)
+    target = _SIBLING_DRAFTER_MARKER_RE.sub("", repo)
+    return target.lower() if target != repo else None
+
+
 def _target_ids(c: ClassifiedGguf) -> set:
     """Ids a target answers to: its declared base ids plus ``general.name``."""
     ids = set(c.declared)
@@ -1331,6 +1356,11 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
              and not (dr.n_embd and c.n_embd and dr.n_embd != c.n_embd)]
     if not cands:
         return []
+    sibling = _sibling_drafter_repo(dr.path)
+    if sibling is not None:
+        hits = [mc for mc, c in cands if _repo_name(c.path).lower() == sibling]
+        if hits:
+            return hits
     if dr.declared:
         hits = [mc for mc, c in cands if set(dr.declared) & _target_ids(c)]
         if hits:

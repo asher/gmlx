@@ -92,8 +92,16 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
         inputs,
         cache: Optional[Any] = None,
         mamba_sink: Optional[list] = None,
+        capture: Optional[tuple] = None,
+        exact: bool = True,
     ):
+        """``capture`` is ``(layer_ids, out)``: the raw output of each listed
+        layer is appended to ``out`` in layer order (the DFlash seam).
+        ``exact`` off runs a sinked verify batched, as llama.cpp does: the
+        block drafters verify 8 positions, where stepping every layer costs
+        8 decode steps."""
         hidden_states = self.embeddings(inputs)
+        capture_ids, captured = capture if capture is not None else ((), None)
 
         if cache is None:
             cache = [None] * len(self.layers)
@@ -101,7 +109,7 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
         ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
 
         cache_counter = 0
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             if layer.block_type == "M" or layer.block_type == "*":
                 c = cache[cache_counter]
                 cache_counter += 1
@@ -120,15 +128,22 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
                 mamba_sink.append({
                     "layer": layer, "cache": c,
                     "pre": (c[0], c[1]),
-                    "inputs": hidden_states, "mask": mask,
+                    "inputs": hidden_states, "mask": mask, "exact": exact,
                 })
-                hidden_states = _mamba_stepwise(layer, hidden_states, mask, c)
+                if exact:
+                    hidden_states = _mamba_stepwise(layer, hidden_states, mask, c)
+                else:
+                    hidden_states = layer(hidden_states, mask=mask, cache=c)
+            elif mamba_sink is not None and not exact:
+                hidden_states = layer(hidden_states, mask=mask, cache=c)
             elif mamba_sink is not None and layer.block_type == "*" and c is not None:
                 hidden_states = _attn_stepwise(layer, hidden_states, c)
             elif mamba_sink is not None and layer.block_type == "E":
                 hidden_states = _moe_rowgate(layer, hidden_states)
             else:
                 hidden_states = layer(hidden_states, mask=mask, cache=c)
+            if i in capture_ids:
+                captured.append(hidden_states)
 
         return self.norm_f(hidden_states)
 
@@ -185,14 +200,20 @@ def rollback_verify_sink(sink: list, n: int) -> None:
     to the state after its first ``n`` (the accepted prefix): restore the
     recorded pre-verify (conv, ssm) state, then replay the block over the
     accepted prefix. O(n <= block) per layer; the attention KV leaves are
-    trimmed by the caller. The replay steps position-wise like the verify
-    (see :func:`_mamba_stepwise`), so the rewound state is bit-identical to
-    a plain decode over the accepted tokens."""
+    trimmed by the caller. The replay runs the way the verify ran: stepped
+    position-wise for an exact verify (see :func:`_mamba_stepwise`), so the
+    rewound state is bit-identical to a plain decode over the accepted
+    tokens, else batched."""
     for e in sink:
         cache = e["cache"]
         cache[0], cache[1] = e["pre"]
         mask = e["mask"]
-        _mamba_stepwise(e["layer"], e["inputs"][:, :n], mask, cache)
+        if isinstance(mask, mx.array):
+            mask = mask[:, :n]
+        if e.get("exact", True):
+            _mamba_stepwise(e["layer"], e["inputs"][:, :n], mask, cache)
+        else:
+            e["layer"](e["inputs"][:, :n], mask=mask, cache=cache)
 
 
 class NemotronHSpecLM(nh.Model):
@@ -200,9 +221,39 @@ class NemotronHSpecLM(nh.Model):
     engine probes on its target. The backbone is swapped for the sink-aware
     subclass; numerics are byte-identical to stock."""
 
+    _dflash_capture: Optional[tuple] = None
+
     def __init__(self, args):
         super().__init__(args)
         self.backbone = NemotronHSpecBackbone(args)
+
+    def set_dflash_capture(self, layer_ids) -> None:
+        """Arm the DFlash capture: every engine-facing hidden becomes
+        ``[trunk | cap ...]``, the post-norm trunk followed by the raw
+        outputs of ``layer_ids`` in layer order."""
+        # Around nn.Module.__setattr__, which would route a tuple into the
+        # parameter tree.
+        object.__setattr__(self, "_dflash_capture",
+                           tuple(int(i) for i in layer_ids) or None)
+
+    def _dflash_trunk(self, hidden: mx.array) -> mx.array:
+        if self._dflash_capture is None:
+            return hidden
+        # The head is a quantized kernel that reads the buffer directly; a
+        # lazy slice would hand it the packed strides.
+        return mx.contiguous(hidden[..., : int(self.args.hidden_size)])
+
+    def _hidden(self, inputs, cache, mamba_sink=None) -> mx.array:
+        ids = self._dflash_capture
+        if ids is None:
+            return self.backbone(inputs, cache=cache, mamba_sink=mamba_sink)
+        caps: list = []
+        hidden = self.backbone(inputs, cache=cache, mamba_sink=mamba_sink,
+                               capture=(ids, caps), exact=False)
+        if len(caps) != len(ids):
+            raise RuntimeError(
+                f"dflash capture collected {len(caps)} of {len(ids)} layers")
+        return mx.concatenate([hidden, *caps], axis=-1)
 
     @property
     def model(self):
@@ -234,12 +285,13 @@ class NemotronHSpecLM(nh.Model):
         # keyword; the token ids are authoritative (a GGUF text target has
         # no vision features) and shared_kv is never used.
         del inputs_embeds, n_to_process, kwargs
-        hidden = self.backbone(inputs, cache=cache)
-        logits = self.lm_head(hidden)
         if not (return_hidden or return_shared_kv):
             from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
-            return LanguageModelOutput(logits=logits)
+            return LanguageModelOutput(
+                logits=self.lm_head(self.backbone(inputs, cache=cache)))
+        hidden = self._hidden(inputs, cache)
+        logits = self.lm_head(self._dflash_trunk(hidden))
         return _SpecOutput(logits=logits, hidden_states=[hidden])
 
     # --- speculative hooks (owned engine contract) -------------------------
@@ -248,7 +300,7 @@ class NemotronHSpecLM(nh.Model):
     # from-hidden hooks apply no further norm.
 
     def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
-        return self.lm_head(hidden)
+        return self.lm_head(self._dflash_trunk(hidden))
 
     def speculative_argmax_from_hidden(self, hidden: mx.array) -> mx.array:
         return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
@@ -257,7 +309,7 @@ class NemotronHSpecLM(nh.Model):
         """The single verify forward (qL = drafts + 1): backbone only, with
         the Mamba2 rollback sink recorded."""
         sink: list = []
-        hidden = self.backbone(verify_input, cache=prompt_cache, mamba_sink=sink)
+        hidden = self._hidden(verify_input, prompt_cache, mamba_sink=sink)
         return hidden, {}, sink
 
     def rollback_speculative_cache(
