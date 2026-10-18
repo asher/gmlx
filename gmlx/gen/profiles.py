@@ -277,6 +277,20 @@ FAMILIES: dict[str, dict] = {
             "reasoning-xhigh": {"chat_template_kwargs": {"reasoning_effort": "xhigh"}},
         },
     },
+    # IFM/K2-Horizon-36B model card, 2026-10 (generation_config carries no
+    # sampling): t=1.0, top_p=0.95. The template takes reasoning_effort
+    # high/medium/low, defaults to high, and pre-opens a different think
+    # pair for each, so the family sets no markers: the prompt picks them.
+    "k2-horizon": {
+        "label": "K2 Horizon",
+        "arches": ("k2-horizon",),
+        "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        },
+    },
     # Llama 3.x generation_config (t=0.6/top_p=0.9); SmolLM3 card matches
     # closely enough to share.
     "llama": {

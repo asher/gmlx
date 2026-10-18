@@ -1038,3 +1038,81 @@ def test_atem_mtp_hook_commentary_close_keeps_it_armed():
         h.observe(t)
     assert not h.done and h.in_thinking
     assert h.take_forced() is not None
+
+
+# --- K2 Horizon: one think pair per reasoning effort ------------------------
+
+_K2_EFFORTS = ("high", "medium", "low")
+
+
+@pytest.mark.parametrize("effort", _K2_EFFORTS)
+def test_k2_prompt_picks_its_effort_pair(effort):
+    import k2_think_tokens as k2
+
+    from gmlx.gen.thinking_budget import prompt_open_think_tag
+
+    tok = k2.K2Tokenizer()
+    prompt = k2.generation_prompt(effort)
+    start, end = k2.PAIRS[effort]
+    assert prompt_open_think_tag(prompt, tokenizer=tok) == start
+    want = ((k2.PIECES[start],), (k2.PIECES[end],))
+    assert _thinking_token_seqs(tok, prompt=prompt) == want
+    assert _thinking_token_seqs(tok, prompt=tok.encode(prompt)) == want
+
+
+def test_k2_without_a_prompt_takes_the_first_pair():
+    import k2_think_tokens as k2
+
+    _, end = _thinking_token_seqs(k2.K2Tokenizer())
+    assert end == (k2.PIECES["</ifm|think>"],)
+
+
+def _forced_run(processor, prompt_ids, steps, close_at=None):
+    """Decode filler ids; collect every forced id. ``close_at`` requests ^T
+    before that step."""
+    tokens, forced = list(prompt_ids), []
+    for i in range(steps):
+        if i == close_at:
+            processor.request_close()
+        f = _one_hot_id(processor(mx.array(tokens), mx.zeros((1, 260000))))
+        forced.append(f)
+        tokens.append(f if f is not None else 1000 + ord("x"))
+    return [f for f in forced if f is not None]
+
+
+@pytest.mark.parametrize("effort", _K2_EFFORTS)
+def test_k2_budget_close_uses_its_effort_tag(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    prompt = k2.generation_prompt(effort)
+    p = make_thinking_budget_processor(
+        tok, 2, start_in_thinking=prompt_opens_thinking(prompt, tokenizer=tok),
+        prompt=prompt)
+    forced = _forced_run(p, tok.encode(prompt), 200)
+    assert forced[-1] == k2.PIECES[k2.PAIRS[effort][1]]
+
+
+@pytest.mark.parametrize("effort", _K2_EFFORTS)
+def test_k2_finish_key_closes_with_its_effort_tag(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    prompt = k2.generation_prompt(effort)
+    p = make_thinking_budget_processor(
+        tok, None, start_in_thinking=True, interruptible=True, prompt=prompt)
+    forced = _forced_run(p, tok.encode(prompt), 200, close_at=3)
+    assert forced[-1] == k2.PIECES[k2.PAIRS[effort][1]]
+
+
+@pytest.mark.parametrize("effort", _K2_EFFORTS)
+def test_k2_mtp_finish_key_closes_with_its_effort_tag(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    prompt = k2.generation_prompt(effort)
+    close = k2.PIECES[k2.PAIRS[effort][1]]
+    for kw in ({"prompt_ids": tok.encode(prompt)}, {"prompt": prompt}):
+        hook = make_mtp_finish_hook(tok, start_in_thinking=True, **kw)
+        hook.request_close()
+        assert hook.take_forced()[-1] == close

@@ -54,7 +54,13 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 # prompt stops one marker short (at "<|start|>assistant"), so
                 # the block is not prompt-opened and the model emits the whole
                 # header itself.
-                ("<|start|>assistant to=self<|message|>", "<|eom|>"))
+                ("<|start|>assistant to=self<|message|>", "<|eom|>"),
+                # K2 Horizon: one pair per reasoning_effort (high, medium,
+                # low). The template names all three and pre-opens the one
+                # the effort picks, so the prompt decides the pair.
+                ("<ifm|think>", "</ifm|think>"),
+                ("<ifm|think_fast>", "</ifm|think_fast>"),
+                ("<ifm|think_faster>", "</ifm|think_faster>"))
 
 # Forced into the thinking block ahead of the first budget-triggered close.
 # The model must see itself DECIDE to answer: a bare close tag cuts the
@@ -75,25 +81,66 @@ _SKIP_WRAP_PHRASE = (
 )
 
 
+def think_pairs_in(template) -> list:
+    """Every ``_THINK_PAIRS`` spelling ``template`` names, in table order.
+    Most templates name one; K2 Horizon names one per reasoning effort."""
+    if not isinstance(template, str) or not template:
+        return []
+    pairs = [p for p in _THINK_PAIRS if p[0] in template or p[1] in template]
+    # Kimi-K3 builds its markers by macro concatenation ('<|open|>' + tag +
+    # '<|sep|>'), so the literal pair never appears in the template source;
+    # detect the macro call on the 'think' tag instead.
+    if not pairs and "<|open|>" in template and "open_tag('think" in template:
+        pairs = [("<|open|>think<|sep|>", "<|close|>think<|sep|>")]
+    return pairs
+
+
+def template_think_pairs(tokenizer) -> list:
+    """:func:`think_pairs_in` for the tokenizer's chat template."""
+    return think_pairs_in(getattr(tokenizer, "chat_template", None))
+
+
 def _template_think_pair(tokenizer):
     """The ``_THINK_PAIRS`` spelling the model's chat template actually uses,
     or None. The template is authoritative over vocab probing: a vocab can
     carry legacy ``</think>`` entries while the template thinks in another
     spelling (MiniMax-M3 ships both ``</think>`` and ``</mm:think>`` as real
     single tokens but only ever emits the latter), and probing then resolves
-    - and forces - a tag the model treats as ordinary text."""
-    tmpl = getattr(tokenizer, "chat_template", None)
-    if not isinstance(tmpl, str) or not tmpl:
+    - and forces - a tag the model treats as ordinary text. A template that
+    names several pairs gives the first; :func:`prompt_think_pair` picks the
+    one a rendered prompt opens."""
+    pairs = template_think_pairs(tokenizer)
+    return pairs[0] if pairs else None
+
+
+def open_think_pair(text, pairs):
+    """The pair in ``pairs`` whose block ``text`` ends inside (its last start
+    marker not yet closed by a later end marker), or None."""
+    if not isinstance(text, str):
         return None
-    for pair in _THINK_PAIRS:
-        if pair[0] in tmpl or pair[1] in tmpl:
-            return pair
-    # Kimi-K3 builds its markers by macro concatenation ('<|open|>' + tag +
-    # '<|sep|>'), so the literal pair never appears in the template source;
-    # detect the macro call on the 'think' tag instead.
-    if "<|open|>" in tmpl and "open_tag('think" in tmpl:
-        return ("<|open|>think<|sep|>", "<|close|>think<|sep|>")
+    for start, end in pairs:
+        i = text.rfind(start)
+        if i != -1 and i > text.rfind(end):
+            return (start, end)
     return None
+
+
+def prompt_think_pair(prompt, tokenizer):
+    """The template pair a rendered ``prompt`` ends inside, or None.
+    ``prompt`` is the rendered text or its token ids, whose tail is decoded.
+    With K2 Horizon this is the pair the request's reasoning effort chose."""
+    pairs = template_think_pairs(tokenizer)
+    if not pairs or prompt is None:
+        return None
+    if not isinstance(prompt, str):
+        try:
+            ids = prompt.tolist() if hasattr(prompt, "tolist") else list(prompt)
+            while ids and isinstance(ids[0], list):
+                ids = ids[-1]
+            prompt = tokenizer.decode([int(t) for t in ids[-64:]])
+        except Exception:  # noqa: BLE001 - no decodable tail: no pair
+            return None
+    return open_think_pair(prompt, pairs)
 
 
 def prompt_open_think_tag(prompt, start_token: str | None = None,
@@ -113,20 +160,17 @@ def prompt_open_think_tag(prompt, start_token: str | None = None,
     else:
         pairs = [(start_token or "<think>", end_token or "</think>")]
         if tokenizer is not None:
-            tpair = _template_think_pair(tokenizer)
+            tpairs = template_think_pairs(tokenizer)
             s = getattr(tokenizer, "think_start", None)
             e = getattr(tokenizer, "think_end", None)
-            if tpair is not None:
-                pairs = [tpair]
+            if tpairs:
+                pairs = tpairs
             elif s and e:
                 pairs = [(s, e)]
     if pairs == [("<think>", "</think>")]:
         pairs = list(_THINK_PAIRS)
-    for start, end in pairs:
-        i = prompt.rfind(start)
-        if i != -1 and i > prompt.rfind(end):
-            return start
-    return None
+    pair = open_think_pair(prompt, pairs)
+    return pair[0] if pair else None
 
 
 def prompt_opens_thinking(prompt, start_token: str | None = None,
@@ -369,7 +413,8 @@ def _tag_pair_seqs(tokenizer, start_tag, end_tag):
             tuple(int(t) for t in end_ids))
 
 
-def _thinking_token_seqs(tokenizer, start_token=None, end_token=None):
+def _thinking_token_seqs(tokenizer, start_token=None, end_token=None,
+                         prompt=None):
     """``(start_seq, end_seq)`` token-id tuples for the model's thinking
     delimiters, from mlx-lm's ``TokenizerWrapper`` inference (covers ``<think>``,
     ``<longcat_think>``, and the ``<|channel>thought`` / ``<channel|>`` channel
@@ -383,10 +428,17 @@ def _thinking_token_seqs(tokenizer, start_token=None, end_token=None):
     names one of the ``_THINK_PAIRS`` spellings wins over everything except a
     configured ``end_token``: the template is the ground truth for which tags
     the model actually emits (see ``_template_think_pair``), and configured
-    markers are the user's word for a model neither one recognizes."""
+    markers are the user's word for a model neither one recognizes.
+    ``prompt`` (the rendered prompt, text or token ids) picks among the pairs
+    a template names: the one the prompt opens wins."""
     seqs = _tag_pair_seqs(tokenizer, start_token, end_token)
     if seqs is not None:
         return seqs
+    pair = prompt_think_pair(prompt, tokenizer) if end_token is None else None
+    if pair is not None:
+        seqs = _tag_pair_seqs(tokenizer, *pair)
+        if seqs is not None:
+            return seqs
     pair = _template_think_pair(tokenizer)
     if pair is not None:
         seqs = _tag_pair_seqs(tokenizer, *pair)
@@ -704,6 +756,7 @@ def _announce_budget(tokenizer, budget, end_seq) -> None:
 def make_thinking_budget_processor(
     tokenizer, budget, *, start_in_thinking=True, verbose=False,
     eos_floor=True, interruptible=False, start_token=None, end_token=None,
+    prompt=None,
 ):
     """Build a thinking-budget logits processor, or ``None`` if unsupported.
 
@@ -717,6 +770,8 @@ def make_thinking_budget_processor(
     ``<channel|>`` channel format), so the cap is not tied to one spelling.
     ``start_token``/``end_token`` (a family card's or the user's configured
     markers) override that inference for a model it does not recognize.
+    ``prompt`` (the rendered prompt) picks the pair it opens when the
+    template names several, so the close matches the open.
     Returns ``None`` (warning when ``verbose``) when no thinking-end token is
     detected; the caller then generates uncapped. ``budget=0`` force-closes as
     soon as a thinking block opens.
@@ -743,12 +798,12 @@ def make_thinking_budget_processor(
         # probe can't handle must not break plain generation.
         try:
             start_seq, end_seq = _thinking_token_seqs(
-                tokenizer, start_token, end_token)
+                tokenizer, start_token, end_token, prompt)
         except Exception:  # noqa: BLE001
             return None
     else:
         start_seq, end_seq = _thinking_token_seqs(
-            tokenizer, start_token, end_token)
+            tokenizer, start_token, end_token, prompt)
     if not end_seq:
         if verbose and budget is not None:
             print(
@@ -891,7 +946,7 @@ class MTPFinishThinking:
 
 def make_mtp_finish_hook(
     tokenizer, *, budget=None, start_in_thinking=False, verbose=False,
-    start_token=None, end_token=None, prompt_ids=None,
+    start_token=None, end_token=None, prompt_ids=None, prompt=None,
 ):
     """Build the thinking-budget/^T hook for the owned MTP round loop, or
     ``None`` when the model's thinking delimiters can't be resolved (the
@@ -900,12 +955,14 @@ def make_mtp_finish_hook(
     Best-effort by design: a tokenizer the probe can't handle must not break
     MTP decode. ``prompt_ids`` (the prompt's token ids, a list or a 1-D
     array) lets a start marker that the prompt begins complete on the
-    generated tokens."""
+    generated tokens. ``prompt`` (the rendered text, else ``prompt_ids``)
+    picks the pair it opens when the template names several."""
     if budget is not None and budget < 0:
         return None
     try:
         start_seq, end_seq = _thinking_token_seqs(
-            tokenizer, start_token, end_token)
+            tokenizer, start_token, end_token,
+            prompt if prompt is not None else prompt_ids)
     except Exception:  # noqa: BLE001
         return None
     if not end_seq:

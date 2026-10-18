@@ -961,3 +961,24 @@ def test_kimi_templates_keep_the_bare_thinking_switch(name):
     template = (_K2_TEMPLATE.parent / name).read_text()
     assert map_thinking_controls({}, "off", None, template) == \
         {"thinking": False}
+
+
+@pytest.mark.parametrize("effort", ["high", "medium", "low"])
+def test_k2_reply_splits_at_its_effort_close_tag(effort):
+    """The template pre-opens the effort's pair, so generation streams only
+    its close. A tag split across chunks still matches."""
+    import k2_think_tokens as k2
+
+    from gmlx.tui.sessions import split_thinking
+
+    prompt = k2.generation_prompt(effort)
+    assert chat._opens_thinking(prompt)
+    close = k2.PAIRS[effort][1]
+    reason, answer = split_thinking(f"weighing it{close}Hello!", think_open=True)
+    assert (reason, answer) == ("weighing it", "Hello!")
+    rf = ReasoningFilter(start_in_thinking=True)
+    cut = len(close) // 2
+    spans = (rf.feed("weighing it" + close[:cut]) + rf.feed(close[cut:] + "Hi")
+             + rf.flush())
+    assert "".join(t for t, m in spans if m == "reason") == "weighing it"
+    assert "".join(t for t, m in spans if m == "answer") == "Hi"

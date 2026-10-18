@@ -452,6 +452,7 @@ def generate(
             interruptible=True,
             start_token=thinking_start_token,
             end_token=thinking_end_token,
+            prompt=prompt,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
@@ -1401,6 +1402,7 @@ def generate_speculative_owned(
         start_token=thinking_start_token,
         end_token=thinking_end_token,
         prompt_ids=prompt_ids,
+        prompt=prompt,
     )
     set_finish_key_target(hook)
     tic = time.perf_counter()
@@ -1586,6 +1588,7 @@ def _stream_generate_speculative_owned(
         start_token=thinking_start_token,
         end_token=thinking_end_token,
         prompt_ids=prompt_ids,
+        prompt=prompt,
     )
     set_finish_key_target(hook)
     tic = time.perf_counter()

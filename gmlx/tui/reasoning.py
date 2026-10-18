@@ -102,6 +102,14 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     ("<|close|>response<|sep|>", _DROP),
     ("<|close|>message<|sep|>", _DROP),
     ("<|end_of_msg|>", _DROP),
+    # K2 Horizon: one pair per reasoning_effort (high, medium, low). The
+    # template pre-opens the chosen one, so generation streams its close.
+    ("<ifm|think>", _REASON),
+    ("</ifm|think>", _ANSWER),
+    ("<ifm|think_fast>", _REASON),
+    ("</ifm|think_fast>", _ANSWER),
+    ("<ifm|think_faster>", _REASON),
+    ("</ifm|think_faster>", _ANSWER),
 )
 
 # Markers that open a message header - text from here to the closing

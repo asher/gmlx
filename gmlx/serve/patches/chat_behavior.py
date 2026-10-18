@@ -13,9 +13,11 @@ import os
 import gmlx.serve.bridge_vlm as serving
 from gmlx.gen.thinking_budget import (
     marker_ids,
+    open_think_pair,
     prompt_opens_block,
     prompt_tail_ids,
     seq_thinking_budget_criteria_cls,
+    think_pairs_in,
 )
 from gmlx.upstream.patching import link, wrapped_with
 
@@ -166,6 +168,7 @@ def _stash_template_kwargs(args, request, _processor):
     if merged:
         args._kq_template_kwargs = merged
     args._kq_thinking_explicit = thinking_explicit
+    _LAST_GEN_ARGS.set(args)
     return args
 
 
@@ -447,6 +450,29 @@ def _split_thinking_keep_indent(rs, cls, text, start_token, end_token):
 
 _LAST_RENDERED_PROMPT: contextvars.ContextVar = contextvars.ContextVar(
     "kq_last_rendered_prompt", default=None)
+# The request's GenerationArguments, so the render seam can set the think
+# pair its prompt opens (see _adopt_prompt_think_pair).
+_LAST_GEN_ARGS: contextvars.ContextVar = contextvars.ContextVar(
+    "kq_last_gen_args", default=None)
+
+
+def _adopt_prompt_think_pair(args, processor, rendered) -> None:
+    """Set the request's think markers to the pair its rendered prompt opens,
+    when the chat template names several and none is configured. K2 Horizon
+    names one pair per reasoning_effort. The budget criteria, the MTP hook,
+    the stream splitter and the reply split read the markers from ``args``,
+    so each request closes with its own pair."""
+    if args is None or not isinstance(rendered, str):
+        return
+    if (getattr(args, "thinking_start_token", None)
+            or getattr(args, "thinking_end_token", None)):
+        return
+    pairs = think_pairs_in(_model_template_text(processor))
+    if len(pairs) < 2:
+        return
+    pair = open_think_pair(rendered, pairs)
+    if pair is not None:
+        args.thinking_start_token, args.thinking_end_token = pair
 
 
 def _prompt_tail_opens_thinking(text, open_close_markers) -> bool:
@@ -518,6 +544,8 @@ def install_stream_thinking_seed() -> None:
         def apply_chat_template(*a, **kw):
             out = fn(*a, **kw)
             _LAST_RENDERED_PROMPT.set(out if isinstance(out, str) else None)
+            _adopt_prompt_think_pair(
+                _LAST_GEN_ARGS.get(), a[0] if a else kw.get("processor"), out)
             return out
         apply_chat_template.__dict__[_STREAM_SEED_FLAG] = True
         return apply_chat_template

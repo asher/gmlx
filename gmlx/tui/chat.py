@@ -4033,6 +4033,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 interruptible=True,
                 start_token=state.thinking_start_token,
                 end_token=state.thinking_end_token,
+                prompt=prompt if isinstance(prompt, str) else None,
             )
             set_finish_key_target(tbp)
             try:
@@ -4230,6 +4231,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             interruptible=True,
             start_token=state.thinking_start_token,
             end_token=state.thinking_end_token,
+            prompt=prompt_text,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
