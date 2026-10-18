@@ -169,6 +169,11 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # residuals and a latent sigmoid MoE on every layer. Model class owned by
     # gmlx (no mlx-lm class).
     "muse-spark": "muse_spark",
+    # IFM K2 Horizon: GQA with NeoX rope and group RMSNorm, an optional
+    # softplus output gate, and on MoVA models a sigmoid MoE with a shared
+    # expert plus routed value experts in the attention. Model class owned
+    # by gmlx (the mlx-vlm class has none of the group norm, gate or MoVA).
+    "k2-horizon": "k2_horizon",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -1878,6 +1883,95 @@ def _synth_muse_spark(meta, shapes, config: dict) -> None:
     config["moe_latent_size"] = req(_read_int, "moe_latent_size")
     config["routed_scaling_factor"] = req(_read_float, "expert_weights_scale")
     config["norm_topk_prob"] = req(_read_bool, "expert_weights_norm")
+
+
+# k2-horizon (IFM K2 Horizon, dense and MoVA)
+
+# llama.cpp's expert_gating_func values that K2 Horizon accepts.
+_K2_HORIZON_SCORING = {1: "softmax", 2: "sigmoid"}
+
+
+def _synth_k2_horizon(meta, shapes, config: dict) -> None:
+    """Synthesize a k2_horizon config from a 'k2-horizon'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ffn/ctx/eps/head_dim/
+    tie/vocab. This adds the norm groups, the rope dims, the optional output
+    gate and Q/K norm (from tensor presence), and the MoE and MoVA routing.
+    The defaults follow llama.cpp's loader: 0 norm groups means 1, a shared
+    width of 0 means ``n_ff_exp * n_shared``, an unset gating function means
+    sigmoid, and the routing norm and scale are read only when the model
+    has FFN experts. A layer routes when it is at or after
+    ``leading_dense_block_count``; llama.cpp ignores ``moe_every_n_layers``.
+    """
+    arch = "k2-horizon"
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    _require(config.get("rms_norm_eps"), arch=arch,
+             gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")
+    head_dim = req(_read_int, "attention.key_length")
+    value_length = _read_int(meta, f"{arch}.attention.value_length")
+    if value_length is not None and value_length != head_dim:
+        raise NotImplementedError(
+            f"k2-horizon synth: value_length {value_length} differs from "
+            f"key_length {head_dim}; llama.cpp asserts they match.")
+    config["head_dim"] = head_dim
+    config["norm_groups"] = _read_int(
+        meta, f"{arch}.attention.group_norm_groups") or 1
+    rope_dim = _read_int(meta, f"{arch}.rope.dimension_count")
+    if rope_dim is not None and rope_dim != head_dim:
+        config["rope_dim"] = rope_dim
+    config.setdefault("intermediate_size", 0)
+
+    config["attn_output_gate"] = _has_tensor(shapes, "blk.0.attn_gate.weight")
+    config["qk_norm"] = _has_tensor(shapes, "blk.0.attn_q_norm.weight")
+
+    n_experts = _read_int(meta, f"{arch}.expert_count") or 0
+    gating = _read_int(meta, f"{arch}.expert_gating_func") or 0
+    if n_experts > 0:
+        n_ff_exp = req(_first_or_scalar, "expert_feed_forward_length")
+        n_shared = _read_int(meta, f"{arch}.expert_shared_count") or 0
+        n_ff_shexp = _read_int(
+            meta, f"{arch}.expert_shared_feed_forward_length") or 0
+        if n_shared and not n_ff_shexp:
+            n_ff_shexp = n_ff_exp * n_shared
+        config["num_experts"] = n_experts
+        config["num_experts_per_tok"] = req(_read_int, "expert_used_count")
+        config["moe_intermediate_size"] = n_ff_exp
+        config["shared_expert_intermediate_size"] = (
+            n_ff_shexp if n_shared else 0)
+        config["first_k_dense_replace"] = _read_int(
+            meta, f"{arch}.leading_dense_block_count") or 0
+        config["routed_scaling_factor"] = _read_float(
+            meta, f"{arch}.expert_weights_scale") or 0.0
+        config["norm_topk_prob"] = bool(
+            _read_bool(meta, f"{arch}.expert_weights_norm"))
+        gating = gating or 2
+
+    n_values = _read_int(meta, f"{arch}.attention.value_expert_count") or 0
+    n_values_used = _read_int(
+        meta, f"{arch}.attention.value_expert_used_count") or 0
+    if n_values > 0:
+        if not 0 < n_values_used <= n_values:
+            raise ValueError(
+                f"k2-horizon synth: {n_values_used} value experts used of "
+                f"{n_values}; llama.cpp needs 0 < used <= count.")
+        config["num_value_experts"] = n_values
+        config["num_value_experts_per_tok"] = n_values_used
+    elif n_values_used:
+        raise ValueError(
+            "k2-horizon synth: value_expert_used_count is set without "
+            "value_expert_count.")
+
+    if n_experts > 0 or n_values > 0:
+        scoring = _K2_HORIZON_SCORING.get(gating)
+        if scoring is None:
+            raise NotImplementedError(
+                f"k2-horizon synth: {arch}.expert_gating_func {gating} is not "
+                "softmax (1) or sigmoid (2).")
+        config["scoring_func"] = scoring
 
 
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
@@ -3815,6 +3909,7 @@ _SYNTH = {
     "hy_v3": _synth_hy_v3,
     "muse-glimmer": _synth_muse_glimmer,
     "muse-spark": _synth_muse_spark,
+    "k2-horizon": _synth_k2_horizon,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

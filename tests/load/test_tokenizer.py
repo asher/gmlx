@@ -821,3 +821,64 @@ def test_ds4_marker_leaves_reachable_tokens_alone():
     assert tok.encode("He", add_special_tokens=False) == [
         meta["tokenizer.ggml.tokens"].index("He")]
     assert "He" not in tok.get_added_vocab()
+
+
+def test_k2_horizon_pre_full_pattern_override():
+    # The llama3 split with marks, ZWNJ and ZWJ inside letter runs, as the
+    # HF tokenizer.json and llama.cpp's K2_HORIZON pre spell it.
+    from tokenizers import Regex
+    from gmlx.load.tokenizer import K2_HORIZON_PATTERN, _bytelevel_split_patterns
+
+    assert _bytelevel_split_patterns("k2-horizon") == (K2_HORIZON_PATTERN,)
+    split = pre_tokenizers.Split(
+        Regex(K2_HORIZON_PATTERN), behavior="isolated", invert=False)
+    zwnj = "Amy\u200ckhaham"
+    zwj = "a\u200db"
+    virama = "\u0915\u094d\u0937"        # ka, virama (a mark), ssa
+    acute = "e\u0301clair"                 # decomposed e + combining acute
+    text = f"{zwnj} {zwj} {virama} {acute} 1234567 DON'T"
+    pieces = [p for p, _ in split.pre_tokenize_str(text)]
+    assert "".join(pieces) == text
+    assert zwnj in pieces
+    assert " " + zwj in pieces
+    assert " " + virama in pieces
+    assert " " + acute in pieces
+    assert ["123", "456", "7"] == [p for p in pieces if p.isdigit()]
+    assert "'T" in pieces                           # case-insensitive
+
+
+def test_k2_horizon_pre_keeps_nfc():
+    # The HF tokenizer.json normalizes NFC, so the pre keeps the default.
+    from gmlx.load.tokenizer import _build_bytelevel_bpe
+
+    tok = _build_bytelevel_bpe(["a", "b"], [], pre_id="k2-horizon")
+    assert tok.normalizer is not None
+    assert tok.normalizer.normalize_str("e\u0301") == "\u00e9"
+
+
+def test_k2_horizon_turn_end_is_a_stop_by_name():
+    # The template raises on the turn-end heuristic's sentinel render (an
+    # assistant turn with no thinking field), so <|ifm|im_end|> reaches the
+    # stop set only through the name list, as in llama.cpp.
+    from pathlib import Path
+
+    tmpl = (Path(__file__).parents[1] / "fixtures"
+            / "k2_horizon_template.jinja").read_text()
+    specials = ["<|ifm|begin_of_text|>", "<|ifm|endoftext|>",
+                "<|ifm|im_start|>", "<|ifm|im_end|>"]
+    toks = specials + _ALPHABET + _MERGED
+    meta = {
+        "general.architecture": "k2-horizon",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "k2-horizon",
+        "tokenizer.ggml.tokens": toks,
+        "tokenizer.ggml.merges": _MERGES,
+        "tokenizer.ggml.token_type": [3] * len(specials)
+        + [1] * (len(toks) - len(specials)),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.chat_template": tmpl,
+    }
+    tok = load_tokenizer_from_gguf(meta, "k2-horizon")
+    assert tok._gguf_eos_token_ids[0] == 1
+    assert 3 in tok._gguf_eos_token_ids

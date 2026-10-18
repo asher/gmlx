@@ -1622,3 +1622,57 @@ def test_muse_spark_claims_every_row_before_the_canonical_map():
 
 def test_muse_spark_unknown_tensor_fails():
     assert d("muse-spark", "blk.0.not_a_muse_spark_tensor.weight").kind == FAIL
+
+
+# k2-horizon: every tensor is claimed by the K2_HORIZON block, all passthrough.
+_K2_HORIZON_ROWS = (
+    ("token_embd.weight", "model.embed_tokens.weight"),
+    ("output_norm.weight", "model.norm.weight"),
+    ("output.weight", "lm_head.weight"),
+    ("blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight"),
+    ("blk.0.attn_q.weight", "model.layers.0.self_attn.q_proj.weight"),
+    ("blk.0.attn_k.weight", "model.layers.0.self_attn.k_proj.weight"),
+    ("blk.0.attn_v.weight", "model.layers.0.self_attn.v_proj.weight"),
+    ("blk.0.attn_output.weight", "model.layers.0.self_attn.o_proj.weight"),
+    ("blk.0.attn_gate.weight", "model.layers.0.self_attn.gate_proj.weight"),
+    ("blk.0.attn_q_norm.weight", "model.layers.0.self_attn.q_norm.weight"),
+    ("blk.0.attn_k_norm.weight", "model.layers.0.self_attn.k_norm.weight"),
+    ("blk.0.ffn_norm.weight", "model.layers.0.post_attention_layernorm.weight"),
+    ("blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"),
+    ("blk.0.ffn_up.weight", "model.layers.0.mlp.up_proj.weight"),
+    ("blk.0.ffn_down.weight", "model.layers.0.mlp.down_proj.weight"),
+    ("blk.3.attn_v_gate.weight",
+     "model.layers.3.self_attn.value_experts.v_router.weight"),
+    ("blk.3.attn_v_gate.bias",
+     "model.layers.3.self_attn.value_experts.selection_bias"),
+    ("blk.3.attn_v_exps.weight",
+     "model.layers.3.self_attn.value_experts.v_experts.weight"),
+    ("blk.3.ffn_gate_inp.weight", "model.layers.3.mlp.gate.weight"),
+    ("blk.3.exp_probs_b.bias", "model.layers.3.mlp.gate.e_score_correction_bias"),
+    ("blk.3.ffn_gate_exps.weight", "model.layers.3.mlp.switch_mlp.gate_proj.weight"),
+    ("blk.3.ffn_up_exps.weight", "model.layers.3.mlp.switch_mlp.up_proj.weight"),
+    ("blk.3.ffn_down_exps.weight", "model.layers.3.mlp.switch_mlp.down_proj.weight"),
+    ("blk.3.ffn_gate_shexp.weight", "model.layers.3.mlp.shared_experts.gate_proj.weight"),
+    ("blk.3.ffn_up_shexp.weight", "model.layers.3.mlp.shared_experts.up_proj.weight"),
+    ("blk.3.ffn_down_shexp.weight", "model.layers.3.mlp.shared_experts.down_proj.weight"),
+)
+
+
+@pytest.mark.parametrize("gguf, hf", _K2_HORIZON_ROWS)
+def test_k2_horizon_rows(gguf, hf):
+    r = d("k2-horizon", gguf)
+    assert r.kind == MAP and r.hf_name == hf, (gguf, r.reason)
+    # NeoX rope: Q/K pass through un-permuted.
+    assert r.transform == "passthrough"
+
+
+def test_k2_horizon_claims_every_row_before_the_canonical_map():
+    from gmlx.load.remap import ARCH_PRIORITY_OVERRIDES
+
+    claimed = ARCH_PRIORITY_OVERRIDES["K2_HORIZON"]
+    for gguf, _hf in _K2_HORIZON_ROWS:
+        assert any(p.match(gguf) for p, _t, _x in claimed), gguf
+
+
+def test_k2_horizon_unknown_tensor_fails():
+    assert d("k2-horizon", "blk.0.not_a_k2_horizon_tensor.weight").kind == FAIL

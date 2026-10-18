@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 44 GGUF architectures to model types, and 43 of them load end-to-end
+gmlx maps 45 GGUF architectures to model types, and 44 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -47,6 +47,7 @@ family, backend, status and caveat:
 | `hunyuan-moe` | hunyuan | mlx-lm | loadable |  |
 | `hy_v3` | hunyuan | mlx-lm | loadable | Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them. |
 | `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` is refused. |
+| `k2-horizon` | k2-horizon | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `kimi-k3` | kimi | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
 | `llama` | llama | mlx-lm | loadable |  |
 | `minimax-m2` | minimax | mlx-lm | loadable |  |

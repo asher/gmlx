@@ -920,6 +920,13 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # Kept in step with the model class's cast_predicate.
     "muse_spark": (".mlp.gate.weight", ".e_score_correction_bias",
                    "_resid_alpha", "_resid_beta"),
+    # k2_horizon: sigmoid top-8-of-100 FFN routing and the MoVA value
+    # routing pick on scores plus a selection bias, near-tie-heavy, and
+    # llama.cpp routes fp32. The value router weight is quantized on the
+    # wire, so only its F32 bias qualifies. Kept in step with the model
+    # class's cast_predicate.
+    "k2_horizon": (".mlp.gate.weight", ".e_score_correction_bias",
+                   ".selection_bias"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
