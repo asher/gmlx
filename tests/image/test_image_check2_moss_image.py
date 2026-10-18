@@ -64,7 +64,7 @@ def test_the_encoder_is_the_identified_one(handle):
     from gmlx.image import text_encoder as te
 
     spec = handle.spec
-    assert len(handle.model.model.layers) == spec.layers == 32
+    assert len(te._inner(handle.model).layers) == spec.layers == 32
     got = te.model_identity(handle.model, spec)
     assert got == {r.gguf_name: r.sha256 for r in spec.identity}
 
@@ -121,13 +121,17 @@ def test_features_are_within_the_calibrated_tolerance(handle, check2):
 def _layer_read(handle, ids, layer: int, norm: bool) -> np.ndarray:
     """The output of layer ``layer`` (1-based) of the stack, with or
     without the final norm."""
-    inner = handle.model.model
-    x = mx.array([ids])
-    pos = mx.tile(mx.arange(len(ids))[None, None], (3, 1, 1))
-    sink: list = []
-    inner(x, position_ids=pos, capture_layer_ids=[layer - 1],
-          hidden_sink=sink)
-    h = inner.norm(sink[0]) if norm else sink[0]
+    from gmlx.image import text_encoder as te
+
+    inner = te._inner(handle.model)
+    layers, final = inner.layers, inner.norm
+    inner.layers = layers[:layer]
+    if not norm:
+        inner.norm = lambda h: h
+    try:
+        h = te.final_hidden(handle.model, ids)
+    finally:
+        inner.layers, inner.norm = layers, final
     return np.array(h[0].astype(mx.float32))
 
 

@@ -7,18 +7,17 @@ chat template for one user turn, with the generation prompt and thinking
 on, tokenizes it with truncation at 4096 tokens, runs it alone through
 the text model and keeps last_hidden_state: (L, 4096) per prompt, with no
 pad rows. This script runs the same steps on the model that transformers
-builds from the encoder GGUF itself (arch qwen35), which keeps each
-quantized matrix in its GGUF blocks and dequantizes it on every call.
-Before the run, one matrix of each codec is dequantized by transformers
-and by gguf-py, and the two must agree bit for bit in float32, which is
-ggml's arithmetic.
+builds from the encoder GGUF itself (arch qwen35), on the CPU in float32,
+with every quantized tensor dequantized at load by gguf-py in float32,
+which is ggml's arithmetic (``exact_reads``). Before the run, one matrix
+of each codec must agree bit for bit with the parameter that holds it, so
+no transform of the load has changed it.
 
-The bf16 run loads the model again in bfloat16, as the release loads its
-encoder, and each GGUF product then runs as a float32 GEMM over the
-bfloat16 operands with one rounding, as oracle.emulate_bf16_matmul does
-for torch's linear. Each weight is dequantized in float32 and rounded to
-bfloat16 once. The tokenizer is the release's, from --tokenizer, loaded
-as Qwen2Tokenizer, the class the release's model_index.json names. The
+The bf16 run rounds that model to bfloat16 once, as the release loads its
+encoder in bfloat16, and each linear product then runs as a float32 GEMM
+over the bfloat16 operands with one rounding (oracle.emulate_bf16_matmul).
+The tokenizer is the release's, from --tokenizer, loaded as
+Qwen2Tokenizer, the class the release's model_index.json names. The
 manifest records the class and its pre-tokenizer.
 
 The prompts are check 2's common set, plus a Devanagari and a Thai prompt
@@ -34,6 +33,8 @@ cosine of the prompt.
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check2_moss_image.py --encoder Qwen3.5-9B-Q8_0.gguf \\
       --tokenizer <MOSS-Image-SFT>/tokenizer --name check2_moss_image_q8_0
+
+--layers N keeps the first N layers, for a memory ladder.
 """
 
 from __future__ import annotations
@@ -62,87 +63,113 @@ MARKS = {"devanagari": "a temple in \u0928\u092e\u0938\u094d\u0924\u0947 style",
          "thai": "a shop sign that reads \u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35"}
 
 
-def load_encoder(torch, path: Path, mode: str):
-    from transformers import AutoModel
+def exact_reads() -> None:
+    """Every block tensor of the GGUF dequantized by gguf-py in float32,
+    which is ggml's arithmetic, as transformers reads it. transformers
+    5.18 without the ``kernels`` package falls back to a dense load whose
+    unpack step skips this file's tensors and leaves their bytes in the
+    parameters; with the values unpacked here it passes them through."""
+    import gguf
+    import torch
+    from transformers.integrations.gguf import gguf_conversion_mapping as cm
+    from transformers.integrations.gguf import reader as rd
 
-    model = AutoModel.from_pretrained(
-        str(path.parent), gguf_file=path.name, dtype=oracle.torch_dtype(mode),
-        local_files_only=True)
-    return model.eval()
+    native = rd.LazyGgufTensor.__getitem__
+    unpack = cm.Dequantize.convert
+
+    def getitem(self, key):
+        if self.ggml_type in rd._TORCH_DTYPE:
+            return native(self, key)
+        raw = np.copy(self.data).reshape(self.shape)
+        values = gguf.quants.dequantize(
+            raw, gguf.GGMLQuantizationType(self.ggml_type))
+        return torch.from_numpy(np.ascontiguousarray(values, np.float32))
+
+    def convert(self, input_dict, *args, **kwargs):
+        if all((t[0] if isinstance(t, list) else t).dtype != torch.uint8
+               for t in input_dict.values()):
+            return input_dict
+        return unpack(self, input_dict, *args, **kwargs)
+
+    rd.LazyGgufTensor.__getitem__ = getitem
+    cm.Dequantize.convert = convert
 
 
-def gguf_linears(model) -> list:
-    from transformers.integrations.gguf.utils import GgufLinear
+def load_encoder(torch, path: Path, layers: int | None = None):
+    """The text model of the GGUF on the CPU in float32, every quantized
+    tensor dequantized at load. ``layers`` keeps the first N layers, for a
+    memory ladder."""
+    from transformers import AutoConfig, AutoModel
 
-    return [(n, m) for n, m in model.named_modules()
-            if isinstance(m, GgufLinear)]
+    exact_reads()
+    kw: dict = dict(gguf_file=path.name, local_files_only=True)
+    if layers is not None:
+        cfg = AutoConfig.from_pretrained(str(path.parent), **kw)
+        kw.update(num_hidden_layers=layers,
+                  layer_types=list(cfg.layer_types)[:layers])
+    model = AutoModel.from_pretrained(str(path.parent), dtype=torch.float32,
+                                      device_map="cpu", **kw).eval()
+    bad = {(str(p.device), p.dtype) for p in model.parameters()} - {
+        ("cpu", torch.float32)}
+    if bad:
+        raise SystemExit(f"error: the encoder loaded as {sorted(map(str, bad))}"
+                         ", not float32 on the CPU")
+    return model
 
 
-def census(model) -> dict:
+# GGUF tensors the check tries, in order. A parameter holds the first three
+# as they are; the others may come with their heads reordered.
+_KINDS = ("ffn_down", "ffn_gate", "ffn_up", "attn_output", "ssm_out",
+          "ssm_alpha", "ssm_beta", "attn_gate", "attn_qkv")
+
+
+def gguf_codecs(path: Path) -> dict:
+    import gguf
+
     out: dict = {}
-    for _, m in gguf_linears(model):
-        out[int(m.ggml_type)] = out.get(int(m.ggml_type), 0) + 1
+    for t in gguf.GGUFReader(str(path)).tensors:
+        out[t.tensor_type.name] = out.get(t.tensor_type.name, 0) + 1
     return out
 
 
-def check_dequant(torch, model) -> dict:
-    """One matrix of each codec, dequantized by transformers and by
-    gguf-py in float32. Raises unless they agree bit for bit."""
+def check_dequant(model, path: Path, layers: int) -> dict:
+    """For each quantized codec, one matrix of the first ``layers`` blocks
+    dequantized by gguf-py in float32 must be held by a parameter of the
+    same size: bit for bit, or, for a matrix the load reorders by head,
+    as the same multiset of float32 values. Raises when a codec of those
+    blocks has no such parameter. Returns the codec to the GGUF and
+    parameter names and how they matched."""
     import gguf
-    from transformers.integrations.gguf.kernels import dequantize_blocks
 
-    seen: dict = {}
-    for name, m in gguf_linears(model):
-        t = int(m.ggml_type)
-        if t in seen or m.input_permutation is not None:
-            continue
-        rows = m.weight[:8]
-        got = dequantize_blocks(rows, t, rows.shape[0], m.in_features,
-                                torch.float32).numpy()
-        want = gguf.quants.dequantize(rows.numpy(),
-                                      gguf.GGMLQuantizationType(t))
-        want = np.asarray(want, np.float32).reshape(got.shape)
-        if got.tobytes() != want.tobytes():
-            raise SystemExit(f"error: transformers dequantizes {name} "
-                             f"({gguf.GGMLQuantizationType(t).name}) away "
-                             "from gguf-py")
-        seen[t] = name
-    return {gguf.GGMLQuantizationType(t).name: n for t, n in seen.items()}
-
-
-def emulate_bf16_gguf(enable: bool) -> None:
-    """Each GGUF product on bfloat16 rows as a float32 GEMM over the
-    bfloat16 operands, with one rounding of the result. The weight is
-    dequantized in float32 and rounded to bfloat16 once, as a bf16
-    checkpoint holds it."""
-    import torch
-    from transformers.integrations.gguf import utils as gu
-    from transformers.integrations.gguf.kernels import (DEQUANT_CHUNK_ELEMS,
-                                                        dequantize_blocks)
-
-    native = getattr(gu.GgufLinear, "_oracle_native", None)
-    if native is None:
-        native = gu.GgufLinear._oracle_native = gu.GgufLinear._unpack_matmul
-    if not enable:
-        gu.GgufLinear._unpack_matmul = native
-        return
-
-    def unpack(self, flat):
-        if flat.dtype != torch.bfloat16:
-            return native(self, flat)
-        step = max(1, DEQUANT_CHUNK_ELEMS // self.in_features)
-        out = torch.empty(flat.shape[0], self.out_features,
-                          dtype=torch.bfloat16)
-        x = flat.float()
-        for s in range(0, self.out_features, step):
-            rows = self.weight[s:s + step]
-            w = dequantize_blocks(rows, self.ggml_type, rows.shape[0],
-                                  self.in_features, torch.float32)
-            w = w.to(torch.bfloat16).float()
-            out[:, s:s + step] = (x @ w.T).to(torch.bfloat16)
-        return out
-
-    gu.GgufLinear._unpack_matmul = unpack
+    params = [(n, p.detach().numpy()) for n, p in model.named_parameters()]
+    tensors = {t.name: t for t in gguf.GGUFReader(str(path)).tensors}
+    float_types = {"F32", "F16", "BF16"}
+    wanted = {t.tensor_type.name for n, t in tensors.items()
+              if n.startswith(tuple(f"blk.{i}." for i in range(layers)))
+              and t.tensor_type.name not in float_types}
+    done: dict = {}
+    for kind in _KINDS:
+        for i in range(layers):
+            t = tensors.get(f"blk.{i}.{kind}.weight")
+            if t is None or t.tensor_type.name not in wanted - set(done):
+                continue
+            want = np.asarray(gguf.quants.dequantize(t.data, t.tensor_type),
+                              np.float32)
+            same = [n for n, a in params if a.shape == want.shape
+                    and a.tobytes() == want.tobytes()]
+            if same:
+                done[t.tensor_type.name] = [t.name, same[0], "bitwise"]
+                continue
+            flat = np.sort(want, axis=None)
+            same = [n for n, a in params if a.size == want.size
+                    and np.sort(a, axis=None).tobytes() == flat.tobytes()]
+            if same:
+                done[t.tensor_type.name] = [t.name, same[0], "reordered"]
+    missing = wanted - set(done)
+    if missing:
+        raise SystemExit(f"error: no parameter holds a {sorted(missing)} "
+                         "matrix as gguf-py dequantizes it")
+    return done
 
 
 def tokenizer(path: Path):
@@ -183,6 +210,9 @@ def main(argv=None) -> int:
     ap.add_argument("--tokenizer", required=True, type=Path,
                     help="the release's tokenizer folder")
     ap.add_argument("--name", default=NAME)
+    ap.add_argument("--layers", type=int,
+                    help="keep the first N layers, for a memory ladder; the "
+                         "fixture name takes a _<N>l suffix")
     ap.add_argument("--prompts", nargs="*",
                     default=[*PROMPTS, *MARKS])
     ap.add_argument("--prompt", nargs=2, action="append", default=[],
@@ -190,6 +220,8 @@ def main(argv=None) -> int:
                     help="one more prompt by name, such as the prompt of "
                          "check 8's trajectory")
     a = ap.parse_args(argv)
+    if a.layers is not None:
+        a.name = f"{a.name}_{a.layers}l"
     known = {**PROMPTS, **MARKS}
     prompts = {**{k: known[k] for k in a.prompts}, **dict(a.prompt)}
     torch = oracle.setup()
@@ -202,22 +234,26 @@ def main(argv=None) -> int:
               "chat_template.jinja"):
         if (a.tokenizer / f).is_file():
             fx.add_file(f"tokenizer/{f}", a.tokenizer / f)
-    runs, info = {}, {}
+    t0 = time.perf_counter()
+    model = load_encoder(torch, a.encoder, a.layers)
+    layers = model.config.num_hidden_layers
+    info = {"load_s": round(time.perf_counter() - t0, 1), "layers": layers,
+            "gguf_codecs": gguf_codecs(a.encoder),
+            "dequant_checked": check_dequant(model, a.encoder, layers)}
+    print(f"[check2] loaded {layers} layers in {info['load_s']}s, dequant "
+          f"checked {sorted(info['dequant_checked'])}", flush=True)
+    runs = {}
     for mode in ("fp32", "bf16"):
-        t0 = time.perf_counter()
-        model = load_encoder(torch, a.encoder, mode)
-        info[f"{mode}_load_s"] = round(time.perf_counter() - t0, 1)
-        if mode == "fp32":
-            info["dequant_checked"] = check_dequant(torch, model)
-            info["gguf_linears"] = census(model)
-        emulate_bf16_gguf(mode == "bf16")
+        if mode == "bf16":
+            # Parameters only: from_pretrained in bfloat16 keeps the
+            # float32 RoPE buffers.
+            for p in model.parameters():
+                p.data = p.data.to(torch.bfloat16)
         oracle.emulate_bf16_matmul(mode == "bf16")
         runs[mode] = {k: features(torch, model, v) for k, v in ids.items()}
-        print(f"[check2] {mode}: {info[f'{mode}_load_s']}s load, "
+        print(f"[check2] {mode}: "
               f"{ {k: round(r['seconds'], 1) for k, r in runs[mode].items()} }",
               flush=True)
-        del model
-    emulate_bf16_gguf(False)
     oracle.emulate_bf16_matmul(False)
     fx.inputs.update(prompts=prompts, max_sequence_length=MAX_LEN,
                      tokenizer_class=type(tok).__name__,
@@ -247,8 +283,8 @@ def main(argv=None) -> int:
     fx.inputs["rows"] = rows
     fx.results["seconds"] = secs
     fx.tolerances.update(rel_l2=rel, token_cosine_min=cos, rule=RULE)
-    fx.note("The bf16 model is the GGUF loaded again in bfloat16, as the "
-            "release loads its encoder.")
+    fx.note("The bf16 model is the float32 model rounded to bfloat16 once, "
+            "as the release loads its encoder in bfloat16.")
     print(f"[check2] wrote {fx.write()}", flush=True)
     return 0
 
