@@ -1116,3 +1116,46 @@ def test_k2_mtp_finish_key_closes_with_its_effort_tag(effort):
         hook = make_mtp_finish_hook(tok, start_in_thinking=True, **kw)
         hook.request_close()
         assert hook.take_forced()[-1] == close
+
+
+# The 7B closes medium and low blocks with </ifm|think>, not the pair's own
+# close tag.
+@pytest.mark.parametrize("effort", ["medium", "low"])
+def test_k2_alias_close_disarms_the_budget(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    prompt = k2.generation_prompt(effort)
+    p = make_thinking_budget_processor(
+        tok, 4, start_in_thinking=True, prompt=prompt)
+    filler = 1000 + ord("x")
+    tokens = tok.encode(prompt)
+    script = [filler, filler, k2.PIECES["</ifm|think>"]] + [filler] * 20
+    for t in script:
+        assert _one_hot_id(p(mx.array(tokens), mx.zeros((1, 260000)))) is None
+        tokens.append(t)
+    assert p.done and not p.in_thinking
+
+
+@pytest.mark.parametrize("effort", ["medium", "low"])
+def test_k2_alias_close_disarms_the_mtp_hook(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    prompt = k2.generation_prompt(effort)
+    hook = make_mtp_finish_hook(tok, budget=4, start_in_thinking=True,
+                                prompt=prompt)
+    for t in (1000, 1001, k2.PIECES["</ifm|think>"]):
+        hook.observe(t)
+    assert hook.done and not hook.in_thinking
+    hook.request_close()
+    assert hook.take_forced() is None
+
+
+def test_k2_high_close_has_no_alias():
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    p = make_thinking_budget_processor(
+        tok, 4, start_in_thinking=True, prompt=k2.generation_prompt("high"))
+    assert p.alt_end_seqs == ()

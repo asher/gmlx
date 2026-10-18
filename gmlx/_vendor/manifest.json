@@ -1525,7 +1525,7 @@
   "mlx_vlm/server/realtime.py": {"sha256": "942671328088936df3145eb72ba7e6650d0171c22ca17321d79ad113cd0482b9", "status": "codemod", "upstream": "815998c835bd348649779ce480152c48cf8ff770ca53503f1a1c31649668b416"},
   "mlx_vlm/server/request_normalization.py": {"sha256": "38c69ac6dd59534f5b6ad93adf15be145bf299c1aae9af0c9d0216338c006c59", "status": "edited", "upstream": "37eb0727a61eb8a647cf010af20098f388688336d0e9df9f217c2409fc3a00e5"},
   "mlx_vlm/server/reranking.py": {"status": "verbatim", "upstream": "36b03fb077741261696795a3b32bfcae64339d0d50d091ee39f2df4b97343179"},
-  "mlx_vlm/server/responses_state.py": {"sha256": "58919f35ec6bed9a40390ce45e9af28d65dbdf52e166ace2854afd9267167862", "status": "codemod", "upstream": "138184cb972c43c6f48fc104642608add2605180c1682d3cc1dfb0bd408f3657"},
+  "mlx_vlm/server/responses_state.py": {"sha256": "0a195e66a156624c7fc8710c54fb3a782f6a14f7bfa2cd75b59e099e060eebf4", "status": "edited", "upstream": "138184cb972c43c6f48fc104642608add2605180c1682d3cc1dfb0bd408f3657"},
   "mlx_vlm/server/runtime.py": {"status": "verbatim", "upstream": "de80f06d985f98270d7f5d16d2c4e41f1f8ecd69c15c9a819ec8e891ff1f83d2"},
   "mlx_vlm/server/runtime_config.py": {"sha256": "ae05cb5e399e51700340a7ed31e24f7385f5373325e37fe15425ceee5e570b8a", "status": "codemod", "upstream": "cccded87d36ee60bb302be4898b2a674335448e9eb6838584ca797095e1b4c07"},
   "mlx_vlm/server/schemas.py": {"status": "verbatim", "upstream": "80c863e32dd543ca878876e3b183559adfa1a27848d44599ae0852efe74fea68"},

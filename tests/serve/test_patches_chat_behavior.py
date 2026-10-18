@@ -1082,3 +1082,38 @@ def test_single_pair_template_markers_are_left_alone():
         None, proc=proc, render_out="<|im_start|>assistant\n<think>\n")
     assert args.thinking_start_token is None
     assert args.thinking_end_token is None
+
+
+# The 7B closes medium and low blocks with </ifm|think>, not the pair's own
+# close tag.
+@pytest.mark.parametrize("effort", ["medium", "low"])
+def test_k2_alias_close_splits_on_the_server(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    proc = types.SimpleNamespace(chat_template=k2.TEMPLATE, tokenizer=tok)
+    prompt = k2.generation_prompt(effort)
+    args, _ = _k2_request_args(effort, proc=proc, render_out=prompt)
+    start, end = k2.PAIRS[effort]
+    alias = "</ifm|think>"
+
+    assert _APP._split_thinking_text(f"why{alias}Hi", start, end) == ("why", "Hi")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    assert rs._split_thinking(f"why{alias}Hi", start, end) == ("why", "Hi")
+    st = rs.ThinkingStreamState(True, start, end)
+    d1, d2 = st.feed("why</ifm|"), st.feed("think>Hi", last=True)
+    assert (d1.reasoning, d2.reasoning, d2.content) == ("why", None, "Hi")
+
+    rg = types.SimpleNamespace(tokenizer=tok)
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        args.thinking_budget = 6
+        crit = cls._make_thinking_budget_criteria(
+            rg, args, mx.array([tok.encode(prompt)]))
+    finally:
+        cls._make_thinking_budget_criteria = original
+    script = f"ok{alias}" + "the answer is long " * 4
+    assert _atem_serve_run(crit, script, "", tok) == script

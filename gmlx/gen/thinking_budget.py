@@ -62,6 +62,41 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 ("<ifm|think_fast>", "</ifm|think_fast>"),
                 ("<ifm|think_faster>", "</ifm|think_faster>"))
 
+# Other close tags a model ends a pair's block with. The K2 Horizon 7B ends
+# its medium and low blocks with </ifm|think>; MoVA uses each pair's own
+# tag. A close is detected on either, and a forced close writes the pair's
+# own tag.
+_END_ALIASES = {
+    "</ifm|think_fast>": ("</ifm|think>",),
+    "</ifm|think_faster>": ("</ifm|think>",),
+}
+
+
+def end_aliases(end_tag) -> tuple:
+    """The other close tags that end ``end_tag``'s block."""
+    return _END_ALIASES.get(end_tag, ()) if isinstance(end_tag, str) else ()
+
+
+def normalize_end_aliases(text, end_tag):
+    """``text`` with each alias close of ``end_tag`` spelled as ``end_tag``."""
+    if not isinstance(text, str):
+        return text
+    for alias in end_aliases(end_tag):
+        text = text.replace(alias, end_tag)
+    return text
+
+
+def alias_end_seqs(tokenizer, end_seq) -> tuple:
+    """Token ids of each alias close of the pair ``end_seq`` closes."""
+    if not end_seq:
+        return ()
+    try:
+        text = tokenizer.decode(list(end_seq))
+    except Exception:  # noqa: BLE001 - undecodable: no aliases
+        return ()
+    return tuple(s for s in (marker_ids(tokenizer, a)
+                             for a in end_aliases(text)) if s)
+
 # Forced into the thinking block ahead of the first budget-triggered close.
 # The model must see itself DECIDE to answer: a bare close tag cuts the
 # thought mid-sentence, and the unresolved reasoning tends to resume untagged
@@ -274,9 +309,13 @@ def seq_thinking_budget_criteria_cls():
                              thinking_start_token=thinking_start_token, **kw)
             self._start_seq = marker_ids(tokenizer, thinking_start_token)
             self._end_seq = marker_ids(tokenizer, thinking_end_token)
+            self._end_seqs = (self._end_seq,) + tuple(
+                s for s in (marker_ids(tokenizer, a)
+                            for a in end_aliases(thinking_end_token)) if s)
             self._forced_sequence = (self._forced_sequence[:-1]
                                      + list(self._end_seq))
-            self._tail_max = max(len(self._start_seq), len(self._end_seq))
+            self._tail_max = max(len(self._start_seq),
+                                 *(len(s) for s in self._end_seqs))
             keep = self._tail_max - 1
             self._prompt_tail = ([int(t) for t in prompt_ids[-keep:]]
                                  if prompt_ids is not None and keep else [])
@@ -295,7 +334,7 @@ def seq_thinking_budget_criteria_cls():
             if self.enable_thinking and ends_with_seq(self._tail, self._start_seq):
                 self.in_thinking = True
                 return None
-            if ends_with_seq(self._tail, self._end_seq):
+            if any(ends_with_seq(self._tail, s) for s in self._end_seqs):
                 # Also a commentary <|eom|> outside reasoning, where it
                 # changes nothing.
                 self.in_thinking = False
@@ -520,8 +559,10 @@ class ThinkingBudgetProcessor:
         eos_ids=None,
         reclose_ids=None,
         skip_ids=None,
+        alt_end_seqs=(),
     ):
         self.end_seq = tuple(end_seq)
+        self.alt_end_seqs = tuple(tuple(s) for s in alt_end_seqs if s)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.forced_ids = list(forced_ids)
         self.reclose_ids = list(reclose_ids) if reclose_ids else self.forced_ids
@@ -532,7 +573,8 @@ class ThinkingBudgetProcessor:
         self._close_requested = False
         self._baseline = None  # len(tokens) at first call -> skip the prompt
         self._tail: list[int] = []  # last tokens seen, for marker matching
-        self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1)
+        self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1,
+                             *(len(s) for s in self.alt_end_seqs))
         self._forcing = False
         self._forced_idx = 0
         self._force_seq = self.forced_ids
@@ -563,6 +605,10 @@ class ThinkingBudgetProcessor:
     def _tail_is(self, seq) -> bool:
         k = len(seq)
         return k > 0 and len(self._tail) >= k and self._tail[-k:] == list(seq)
+
+    def _tail_closes(self) -> bool:
+        return self._tail_is(self.end_seq) or any(
+            self._tail_is(s) for s in self.alt_end_seqs)
 
     def _seed_tail(self, tokens) -> None:
         """Seed the marker tail from the prompt tokens of the first call.
@@ -609,8 +655,7 @@ class ThinkingBudgetProcessor:
             self._tail.append(int(tokens[-1].item()))
             del self._tail[:-self._tail_max]
             if not self._forcing:
-                if (self._tail_is(self.end_seq)
-                        and not self._outside_block()):
+                if self._tail_closes() and not self._outside_block():
                     self.in_thinking = False
                     if self._landing:
                         self._landing = False  # our own forced close arriving
@@ -824,6 +869,7 @@ def make_thinking_budget_processor(
         eos_ids=_eos_id_list(tokenizer) if eos_floor else [],
         reclose_ids=reclose_ids,
         skip_ids=skip_ids,
+        alt_end_seqs=alias_end_seqs(tokenizer, end_seq),
     )
 
 
@@ -851,8 +897,9 @@ class MTPFinishThinking:
 
     def __init__(self, *, end_seq, skip_ids, reclose_ids, forced_ids=None,
                  budget=None, start_seq=None, start_in_thinking=False,
-                 prompt_ids=None):
+                 prompt_ids=None, alt_end_seqs=()):
         self.end_seq = tuple(end_seq)
+        self.alt_end_seqs = tuple(tuple(s) for s in alt_end_seqs if s)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.skip_ids = list(skip_ids)
         self.reclose_ids = list(reclose_ids)
@@ -865,7 +912,8 @@ class MTPFinishThinking:
         self._spent = False
         self._answer_pending = False
         self._strikes = 0
-        self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1)
+        self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1,
+                             *(len(s) for s in self.alt_end_seqs))
         # The prompt's last tokens, so a start marker that the generation
         # prompt begins (ATEM's "<|start|>assistant") completes on the
         # generated tokens. Never a whole marker, so the prompt itself
@@ -897,7 +945,9 @@ class MTPFinishThinking:
         self._tail.append(int(tok))
         if len(self._tail) > self._tail_max:
             del self._tail[: len(self._tail) - self._tail_max]
-        if self._tail_is(self.end_seq) and not self._outside_block():
+        closes = self._tail_is(self.end_seq) or any(
+            self._tail_is(s) for s in self.alt_end_seqs)
+        if closes and not self._outside_block():
             self.in_thinking = False
             if not self._spent:
                 self.done = True  # natural close - disarm, as on the plain path
@@ -985,6 +1035,7 @@ def make_mtp_finish_hook(
         start_seq=start_seq,
         start_in_thinking=start_in_thinking,
         prompt_ids=prompt_ids,
+        alt_end_seqs=alias_end_seqs(tokenizer, end_seq),
     )
 
 

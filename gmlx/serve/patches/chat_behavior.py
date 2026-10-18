@@ -13,6 +13,7 @@ import os
 import gmlx.serve.bridge_vlm as serving
 from gmlx.gen.thinking_budget import (
     marker_ids,
+    normalize_end_aliases,
     open_think_pair,
     prompt_opens_block,
     prompt_tail_ids,
@@ -429,6 +430,7 @@ def _split_thinking_keep_indent(rs, cls, text, start_token, end_token):
     (upstream body seam-fingerprinted via app._split_thinking_text)."""
     if not text:
         return None, text
+    text = normalize_end_aliases(text, end_token)
     for start_marker, end_marker in cls._build_open_close_markers(
             start_token, end_token):
         start = text.find(start_marker)
