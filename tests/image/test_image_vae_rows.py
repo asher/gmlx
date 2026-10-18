@@ -102,7 +102,7 @@ def test_every_family_has_a_vae_row():
         with pytest.raises(ValueError, match="no VAE memory row for image "
                            "family 'flux'; known: flux2_klein, "
                            "flux2_klein_9b, flux2_klein_9b_kv, flux3_klein, "
-                           "krea2, qwen_image21, "
+                           "krea2, moss_image, qwen_image21, "
                            "z_image"):
             price("decode", 512, 512, family="flux", itemsize=2)
 
@@ -143,6 +143,9 @@ def _official_vaes() -> dict:
     # reads.
     out["flux2_klein"] = out["flux2_klein_9b"] = out["flux3_klein"]
     out["flux2_klein_9b_kv"] = out["flux3_klein"]
+    out["moss_image"] = flux2_ae.Flux2AEConfig(
+        latent_channels=32, decoder_block_out_channels=(96, 192, 384, 384),
+        **flux)
     assert set(out) == set(reader.VAES)
     return out
 

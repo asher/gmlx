@@ -308,5 +308,19 @@
     "file": "tokenizer/chat_template.jinja",
     "size": 7756,
     "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+  },
+  "moss_image_vae.header.json": {
+    "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+    "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+    "file": "vae/diffusion_pytorch_model.safetensors",
+    "size": 249521372,
+    "sha256": "c3bdf94dc67ec69b30ea9fe1fa8340085679cae64d019f7c7e4a9921f1a7f17a"
+  },
+  "moss_image_vae_config.json": {
+    "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+    "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+    "file": "vae/config.json",
+    "size": 838,
+    "sha256": "cc77f3f0ce0357039c71018dc19edaa4fcceb0c2f7488fdc2b9c0580d6baafa1"
   }
 }

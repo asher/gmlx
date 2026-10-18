@@ -19,6 +19,10 @@ channel with the BatchNorm running statistics in eval mode,
 ``(z - mean) / sqrt(var + eps)``. Both maps run in float32, and the
 statistics stay float32 whatever the decode dtype.
 
+The decoder may run narrower than the encoder, as the MOSS-Image one
+does: ``tree_config`` reads its widths from the decoder's shapes, and
+``config_from_shapes`` takes only a decoder as wide as the encoder.
+
 Module paths equal the diffusers tensor names. The original layout, as in
 BFL's ``ae.safetensors``, keeps the quant convs inside the encoder and the
 decoder, and ``flux1_ae.original_name`` maps it.
@@ -57,10 +61,10 @@ class Flux2AEConfig(flux1_ae.Flux1AEConfig):
         return self.patch * self.patch * self.latent_channels
 
 
-def config_from_shapes(shapes: dict) -> Flux2AEConfig | None:
-    """The config from diffusers-named torch shapes, or None when the names
-    are not this autoencoder's: the FLUX.1 tree with both quant convs and
-    the BatchNorm statistics."""
+def tree_config(shapes: dict) -> Flux2AEConfig | None:
+    """The config of the FLUX.1 tree with both quant convs and the
+    BatchNorm statistics, at the decoder widths its shapes give, or None
+    when the names are not that tree's."""
     if any(n not in shapes for n in flux1_ae.FLUX2_MARKS):
         return None
     tree = flux1_ae.tree_config(shapes)
@@ -70,9 +74,18 @@ def config_from_shapes(shapes: dict) -> Flux2AEConfig | None:
     return Flux2AEConfig(
         **{k: getattr(tree, k) for k in (
             "in_channels", "out_channels", "latent_channels",
-            "block_out_channels", "layers_per_block")},
+            "block_out_channels", "layers_per_block",
+            "decoder_block_out_channels")},
         norm_num_groups=CONSTANTS["norm_num_groups"], eps=CONSTANTS["eps"],
         patch=patch[0], bn_eps=CONSTANTS["batch_norm_eps"])
+
+
+def config_from_shapes(shapes: dict) -> Flux2AEConfig | None:
+    """The config from diffusers-named torch shapes, or None when the names
+    are not this autoencoder's: the tree of ``tree_config`` with a decoder
+    as wide as its encoder."""
+    cfg = tree_config(shapes)
+    return None if cfg is None or cfg.decoder_block_out_channels else cfg
 
 
 def expected_unused(cfg: Flux2AEConfig) -> dict:
@@ -82,10 +95,20 @@ def expected_unused(cfg: Flux2AEConfig) -> dict:
 
 
 def config_disagreements(config: dict) -> list:
-    """The fields of a vae/config.json that differ from ``CONSTANTS``. A
-    field the config leaves out is none."""
+    """The fields of a vae/config.json that differ from ``CONSTANTS``, and
+    decoder widths other than the encoder's. A field the config leaves
+    out is none, and so are null decoder widths."""
+    out = constant_disagreements(config, CONSTANTS)
+    dec = config.get("decoder_block_out_channels")
+    if dec is not None and dec != config.get("block_out_channels", dec):
+        out.append("decoder_block_out_channels")
+    return out
+
+
+def constant_disagreements(config: dict, constants: dict) -> list:
+    """The fields of ``config`` that differ from ``constants``."""
     out = []
-    for k, v in CONSTANTS.items():
+    for k, v in constants.items():
         if k not in config:
             continue
         got = config[k]

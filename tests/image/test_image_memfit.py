@@ -576,8 +576,8 @@ class _TinyVae:
 def test_unknown_family_is_refused(z_view):
     with pytest.raises(ValueError, match="known: flux2_klein, "
                                          "flux2_klein_9b, flux2_klein_9b_kv, "
-                                         "flux3_klein, krea2, qwen_image21, "
-                                         "z_image"):
+                                         "flux3_klein, krea2, moss_image, "
+                                         "qwen_image21, z_image"):
         plan_memory(z_view, 0, 0, family="flux", height=8, width=8,
                     budget=1e12, overcommit=False)
 
@@ -831,7 +831,7 @@ def test_a_flux3_request_plan_prices_the_text_rows_of_its_prompt():
     assert p.terms["step_peak"] == step(image + 640)
 
 
-SHORT = ("z_image", "krea2", "qwen_image21", "flux3_klein")
+SHORT = ("z_image", "krea2", "qwen_image21", "flux3_klein", "moss_image")
 
 
 def _short_cells(family: str) -> list[dict]:
@@ -860,7 +860,8 @@ def _short_cells(family: str) -> list[dict]:
                             c["guided"], c["prefill_gib"], c["state_bytes"]))
         return out
     path, short = {"krea2": (KREA2_CELLS, 36),
-                   "flux3_klein": (FLUX3_CELLS, 80)}[family]
+                   "flux3_klein": (FLUX3_CELLS, 80),
+                   "moss_image": (MOSS_CELLS, 80)}[family]
     return [cell(c["size"], c["size"], c["text_rows"], max(c["steps_gib"]),
                  c.get("refs", 0), c.get("ref_px", 0), c["guided"])
             for c in json.loads(path.read_text())["cells"]
@@ -910,7 +911,7 @@ def test_a_short_prompt_plan_covers_every_measured_cell(family):
     row = memfit.PEAKS[family]
     cells = _short_cells(family)
     assert len(cells) == {"z_image": 3, "krea2": 3, "qwen_image21": 79,
-                          "flux3_klein": 13}[family]
+                          "flux3_klein": 13, "moss_image": 7}[family]
     room = [_short_room(family, c) for c in cells]
 
     def formula(c, caption):
@@ -962,6 +963,78 @@ def test_the_flux3_encode_term_covers_every_measured_encode():
     # Without the base the shortest prompt is priced under its reading.
     assert 80 * row.encode_row_bytes * memfit.ENCODE_LIVE < \
         encodes[0]["gib"] * GiB
+
+
+MOSS_CELLS = QWEN_CELLS.with_name("moss_image_cells.json")
+
+
+def _moss_room(row, c: dict) -> float:
+    """Bytes the row's step leaves above the cell's largest step."""
+    rows = memfit.image_rows(row, c["size"], c["size"], c["text_rows"])
+    plan = row.step.bytes(rows * row.width * 2, 2 if c["guided"] else 1)
+    return plan - max(c["steps_gib"]) * GiB
+
+
+def test_the_moss_row_covers_every_measured_step():
+    """Sizes to 2048 pixels with 80 and 4096 text rows, and one with 640.
+    A text row reads more than an image row, so the cells of the most
+    text sit closest to the line."""
+    row = memfit.PEAKS["moss_image"]
+    assert row.step is memfit.MOSS_IMAGE_STEP
+    assert row.width == 24576 and row.caption_rows == row.text_rows == 4096
+    assert memfit.prices_prompt("moss_image")
+    cells = json.loads(MOSS_CELLS.read_text())["cells"]
+    assert {c["size"] for c in cells} == {256, 512, 768, 1024, 1280, 1536,
+                                          2048}
+    assert {c["text_rows"] for c in cells} == {80, 640, 4096}
+    room = [_moss_room(row, c) for c in cells]
+    assert min(room) >= ROOM
+    assert min(room) <= 0.35 * GiB and max(room) <= 1.5 * GiB
+    near = min(cells, key=lambda c: _moss_room(row, c))
+    assert (near["size"], near["text_rows"]) == (256, 4096)
+
+
+def test_a_thinner_moss_row_misses_a_measured_cell():
+    row = memfit.PEAKS["moss_image"]
+    cells = json.loads(MOSS_CELLS.read_text())["cells"]
+
+    def worst(**change) -> float:
+        thin = dataclasses.replace(row, step=dataclasses.replace(
+            row.step, **change))
+        return min(_moss_room(thin, c) for c in cells)
+
+    assert worst() >= ROOM
+    assert worst(base=1.5 * GiB) < ROOM
+    assert worst(k=5.0) < ROOM
+    # FLUX.3 klein's step at MOSS-Image's rows.
+    assert worst(base=memfit.FLUX3_KLEIN_STEP.base,
+                 k=memfit.FLUX3_KLEIN_STEP.k) < ROOM
+    # Without the text rows in the formula the most text is priced under
+    # its reading.
+    alone = dataclasses.replace(row, caption_rows=0)
+    assert min(_moss_room(alone, c) for c in cells) < ROOM
+
+
+def test_the_moss_encode_term_covers_every_measured_encode():
+    """Both encoder files, Q4_K_M and Q8_0, at 80 to 4096 rows."""
+    row = memfit.PEAKS["moss_image"]
+    encodes = json.loads(MOSS_CELLS.read_text())["encode"]
+    assert sorted({e["file"] for e in encodes}) == [
+        "Qwen3.5-9B-Q4_K_M.gguf", "Qwen3.5-9B-Q8_0.gguf"]
+    assert sorted({e["rows"] for e in encodes}) == [80, 640, 2048, 4096]
+    kw = dict(family="moss_image", height=512, width=512,
+              budget=BUDGET_128, overcommit=False)
+    room = []
+    for e in encodes:
+        p = plan_memory(0, ENCODER, 0, caption_tokens=e["rows"], **kw)
+        assert p.terms["encode_peak"] == int(
+            row.encode_base
+            + e["rows"] * row.encode_row_bytes * memfit.ENCODE_LIVE)
+        room.append(p.terms["encode_peak"] - e["gib"] * GiB)
+    assert min(room) >= ROOM
+    # Without the base the shortest prompt is priced under its reading.
+    assert 80 * row.encode_row_bytes * memfit.ENCODE_LIVE < max(
+        e["gib"] for e in encodes if e["rows"] == 80) * GiB
 
 
 FLUX2_CELLS = QWEN_CELLS.with_name("flux2_klein_cells.json")

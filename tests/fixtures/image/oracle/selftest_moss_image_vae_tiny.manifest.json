@@ -1,0 +1,1451 @@
+{
+ "schema": 1,
+ "name": "selftest_moss_image_vae_tiny",
+ "check": 5,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check5_flux3_klein_vae.py",
+ "argv": [
+  "check5_flux3_klein_vae.py",
+  "--self-test",
+  "--family",
+  "moss_image"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "sizes": [
+   [
+    48,
+    64
+   ]
+  ],
+  "seed": 5,
+  "image": "synthetic_image(height, width, seed) of check5_qwen_image21_vae.py, RGB, NCHW in [-1, 1]",
+  "batch_norm_eps": 0.0001,
+  "patch_size": [
+   2,
+   2
+  ],
+  "latents": "Flux2KleinPipeline._patchify_latents of the encoder mean, then (z - running_mean) / sqrt(running_var + batch_norm_eps), in float32 from each mode's mean",
+  "decode_input": "latents * sqrt(running_var + eps) + running_mean, then Flux2KleinPipeline._unpatchify_latents, in float32 from the fp32 latents, cast to the VAE dtype",
+  "decoded": "RGB, NCHW, unclamped as the VAE returns it",
+  "psnr": "on x / 2 + 0.5 clamped to [0, 1], peak 1",
+  "config": {
+   "block_out_channels": [
+    64,
+    64,
+    96
+   ],
+   "layers_per_block": 1,
+   "latent_channels": 32,
+   "norm_num_groups": 32,
+   "down_block_types": [
+    "DownEncoderBlock2D",
+    "DownEncoderBlock2D",
+    "DownEncoderBlock2D"
+   ],
+   "up_block_types": [
+    "UpDecoderBlock2D",
+    "UpDecoderBlock2D",
+    "UpDecoderBlock2D"
+   ],
+   "decoder_block_out_channels": [
+    32,
+    32,
+    64
+   ]
+  },
+  "weights_seed": 29,
+  "weights": "every float tensor by its diffusers name, float16 values the model holds in float32, under weight.<name>",
+  "num_batches_tracked": 0
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 8,
+   "bf16_products": "bf16 operands, float32 conv and linear, one bf16 rounding"
+  },
+  "sizes": {
+   "48x64": {
+    "decode_bf16_vs_fp32": {
+     "rel_l2": 0.01947363446056681,
+     "cosine": 0.9998104814928966,
+     "max_abs": 0.07079541683197021,
+     "psnr_db": 45.56038360250544
+    },
+    "encode_bf16_vs_fp32": {
+     "rel_l2": 0.009809563517454652,
+     "cosine": 0.9999519049812912,
+     "max_abs": 0.057882487773895264
+    },
+    "encode_fp32_vs_fp64": {
+     "rel_l2": 1.1065051661335104e-06,
+     "cosine": 0.9999999999993883,
+     "max_abs": 6.751032908480781e-06
+    },
+    "encode_mean_fp32_vs_fp64": {
+     "rel_l2": 1.4347299566782424e-06,
+     "cosine": 0.9999999999989712,
+     "max_abs": 4.632919846481176e-06
+    },
+    "decode_fp32_vs_fp64": {
+     "rel_l2": 1.8627640518728079e-06,
+     "cosine": 0.9999999999982652,
+     "max_abs": 6.114344247354353e-06
+    },
+    "round_trip_fp32_psnr_db": 8.16128299789587,
+    "latents_std": 0.8618441820144653,
+    "peak_rss_gib": {
+     "encode": 0.4,
+     "decode": 0.4
+    },
+    "seconds": {
+     "fp32_encode_s": 0.0,
+     "bf16_encode_s": 0.0,
+     "fp32_decode_s": 0.0,
+     "bf16_decode_s": 0.0,
+     "float64_decode_s": 0.0
+    }
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "fp32 max abs at 5e-5 on the CPU, for the decode and the model space latents of the encode of the tiny model; bf16 decode PSNR at twice the oracle's own bf16 against fp32 RMS error, its PSNR less 20 log10(2) dB; bf16 encode relative L2, on the model space latents, at twice the oracle's own",
+  "fp32_max_abs": 5e-05,
+  "sizes": {
+   "48x64": {
+    "decode_fp32_max_abs": 5e-05,
+    "decode_bf16_psnr_db": 39.539783689225814,
+    "encode_fp32_max_abs": 5e-05,
+    "encode_bf16_rel_l2": 0.019619127034909305
+   }
+  }
+ },
+ "notes": [
+  "The model is the official class at a tiny config with seeded random weights and statistics, so the numbers say nothing about image quality.",
+  "bn.num_batches_tracked is an int64 scalar the fixture does not hold; its value is inputs.num_batches_tracked."
+ ],
+ "created": "2026-10-18T06:52:10Z",
+ "npz": "selftest_moss_image_vae_tiny.npz",
+ "tensors": {
+  "bn_running_mean": {
+   "shape": [
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "f58e4b1de8eeed57cf9d601df0dd92cb513ec8bbb7cd615b95ee14d97fa5968a"
+  },
+  "bn_running_var": {
+   "shape": [
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "7dd185cb7bdeffe4fcbd4270ff4d06ac267416c8deda633d441465fecbfc53b4"
+  },
+  "decoded_48x64": {
+   "shape": [
+    1,
+    3,
+    48,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "27e76ed533b139380b7728bfd54de29e3a6b7b969504913e06d413a6ec786ff9"
+  },
+  "decoded_bf16_48x64": {
+   "shape": [
+    1,
+    3,
+    48,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "23be0ad5941022848d5e6b99add6e55e734290b932b375b48810eca54c4ec431"
+  },
+  "encode_mean_48x64": {
+   "shape": [
+    1,
+    32,
+    12,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "d056033301fc7f606ff894dc8c4da2b0b7417da19055177731654008399fc8c6"
+  },
+  "encode_mean_bf16_48x64": {
+   "shape": [
+    1,
+    32,
+    12,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "0b9b3909cb3dc96a020f16a835de4baba5a6fb6969a0b772baa45d2753865856"
+  },
+  "image_48x64": {
+   "shape": [
+    1,
+    3,
+    48,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "203924fe2b36a598eb1ea7d9f7cc5e396e02a9dfa119df8cdf152e13af34ddaf"
+  },
+  "latents_48x64": {
+   "shape": [
+    1,
+    128,
+    6,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "e0bd64859cda376d56544d8494d428a7205e5821145e0ada2d0abaa94528f8c8"
+  },
+  "latents_bf16_48x64": {
+   "shape": [
+    1,
+    128,
+    6,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "cc0b5cd6fe80a9dde9784e63a12eb4c0147afe039d8fa3fa790d11ab98b3e3f3"
+  },
+  "weight.bn.running_mean": {
+   "shape": [
+    128
+   ],
+   "dtype": "float16",
+   "sha256": "24394c92b1a4149339460fda5b7d3248f2b35263b287e5002bae0a8b8a7bada5"
+  },
+  "weight.bn.running_var": {
+   "shape": [
+    128
+   ],
+   "dtype": "float16",
+   "sha256": "0bd589ac45faeecb029bffef51ddd280b1548c0d8803cdc6ee3791028996feb0"
+  },
+  "weight.decoder.conv_in.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "5226e31b8aa82f24aa7f0b6c56a8af690a84312fcf91a56258ef9be3f17c2307"
+  },
+  "weight.decoder.conv_in.weight": {
+   "shape": [
+    64,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "b7f676fc0cda3706b91b4d3f63cf1c764a055afb9fcd349d805be23917bf2be7"
+  },
+  "weight.decoder.conv_norm_out.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "d255771a90e1a7b688ae68c42bd56758ec4171f73e84a8863b65f67c152c6e4c"
+  },
+  "weight.decoder.conv_norm_out.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "a3394a45dc83eb4c09183a4ca2a8a59c6f70dfc00508748be82e5f3b0c5dd8ca"
+  },
+  "weight.decoder.conv_out.bias": {
+   "shape": [
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "60c5130ee11b3d1cf70af0c5b5ef2d7541d5b0b73deadb02cbfc4dd37e7579ed"
+  },
+  "weight.decoder.conv_out.weight": {
+   "shape": [
+    3,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "706f17506819712fbcd1b5f83bd3901c6f15aa7b74d1510530e11161d1239632"
+  },
+  "weight.decoder.mid_block.attentions.0.group_norm.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "f3aff01fbe6bb35edad247f69f5caa8dd65757dcb8a9a55f591ae9cdfee326b1"
+  },
+  "weight.decoder.mid_block.attentions.0.group_norm.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "b09d9ad66315727617e7b4b656173e9f2af93aea6ab488b2d2e3e80b1bf1b493"
+  },
+  "weight.decoder.mid_block.attentions.0.to_k.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "269538923575c20e7db9d756d5dcbfc902d96b574ca2fb93b57da2d5b98e6dad"
+  },
+  "weight.decoder.mid_block.attentions.0.to_k.weight": {
+   "shape": [
+    64,
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "ba2066815732d81a0dc981e0eac079e77668a8364bcd7c8031ef395d3c879e0e"
+  },
+  "weight.decoder.mid_block.attentions.0.to_out.0.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "cdf50a57236163a5af0b75ba1c761efb1d0e0631165b1bfd1d3b14ef1bd78084"
+  },
+  "weight.decoder.mid_block.attentions.0.to_out.0.weight": {
+   "shape": [
+    64,
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "9a8870b06cacfeaa8327cc60d68472a4e59f45c5887f6add25fc62bd5aea872b"
+  },
+  "weight.decoder.mid_block.attentions.0.to_q.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "0b25674f9a70457842f499c15ae0ebdb503cc56caf398b3d138332fcab6e70cc"
+  },
+  "weight.decoder.mid_block.attentions.0.to_q.weight": {
+   "shape": [
+    64,
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "28b1657807d3cf030a0aec8cd808ce2a05bb4454e319e42f34b720b0e91456eb"
+  },
+  "weight.decoder.mid_block.attentions.0.to_v.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "dbc223c747165da194dae3f3962a4b0c5ea5bd91736a8346e587442990c2141e"
+  },
+  "weight.decoder.mid_block.attentions.0.to_v.weight": {
+   "shape": [
+    64,
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "86a363c33828050f775df98cd66530d86e4bcdfbe90c90356789aa9499b0f071"
+  },
+  "weight.decoder.mid_block.resnets.0.conv1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "b8f94aa6e3eac15d8b4a1ed4c1f22273747fec6cb40d746cc9ed151c337a4a59"
+  },
+  "weight.decoder.mid_block.resnets.0.conv1.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "e4b3912b81409b4546b405c1d7c8ab3e38c618e9e9c5cb04f350fe9d0b95161a"
+  },
+  "weight.decoder.mid_block.resnets.0.conv2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "eb3e89827e04a7bf584676e092dc129b01a4a5ea8d5d022026fcf7909fdfb2b1"
+  },
+  "weight.decoder.mid_block.resnets.0.conv2.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "1756d6394346010b620034e501d7957628e73272e18a095f091f411be45ed835"
+  },
+  "weight.decoder.mid_block.resnets.0.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "20a0e751e6bbc7299fbd69a3babc59f0bc625adc0b9015a9bae4ed991c6bb9b5"
+  },
+  "weight.decoder.mid_block.resnets.0.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "24a8b02d680ee98371af58511fab58c06e8af4cee469c8f0c0bdb28904338b43"
+  },
+  "weight.decoder.mid_block.resnets.0.norm2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "9bbb00d05afa1465b3d6d32a2fe6fc6c8b8bddbc61a4b8bf336d17e8bc0b06b0"
+  },
+  "weight.decoder.mid_block.resnets.0.norm2.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "17a1d5ff3b69a0cb262d8a164b8b34e0decabd50cad33fd5132d34c778bdd94a"
+  },
+  "weight.decoder.mid_block.resnets.1.conv1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "6aaefdc6bbe9b9b7b1891032a86547f9493b50ef91d9f3a707ba5a1566c338e4"
+  },
+  "weight.decoder.mid_block.resnets.1.conv1.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "70495e4045547789b7bff78039c91a8fa6cc688134c77cdb843e3b643df718ae"
+  },
+  "weight.decoder.mid_block.resnets.1.conv2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "6310378a60ab6817afed2b42cd1084445eb6966187395ff87aa287e054820010"
+  },
+  "weight.decoder.mid_block.resnets.1.conv2.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "7944efb5c67828ff8f7bb4512e91a910a5bc1343c28a8511baba078711971a69"
+  },
+  "weight.decoder.mid_block.resnets.1.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "5ade0854ce503e73316a85fb5b83d17c0a3db2441cae80215337c01a8fd3c8a0"
+  },
+  "weight.decoder.mid_block.resnets.1.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "6274f78bda465c16b50f13dc750c784c358e3f6a41ee11c8b206c44a1d727c44"
+  },
+  "weight.decoder.mid_block.resnets.1.norm2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "b4351388ea2cc86fa82c838e6c161d1fca592ce8da5b053bf79ef01154247d47"
+  },
+  "weight.decoder.mid_block.resnets.1.norm2.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "d03accb609eca0031f16bebbff2519a2af36ae5befda4ef9dd67202d261933cd"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.conv1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "3d2f340cea7362aef47234698aaa4b4992b391e0aa1f6eddb0b9120d2affd81a"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.conv1.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "ef2f699346b4bcffedb65a6edb63195845c619bfbb841a4b17b0a0fcce7e396e"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.conv2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "9f1af729c47582935089ba788a15301a6b13bcf6e200ab48e18cebaeb1acda77"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.conv2.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "aac630f553271eff6bea2db4de500da6feb9ebb96382c9b503cd010c01eccf32"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "190b52e538173ec0518f8cd6d9975325e29fff0984a0b990fc5584d2c206191e"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "c2e4cfa3f8062f8ae3ebff3ce1f343ecba0a6552dd0bce59dd8df752f4e22f52"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.norm2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "8c987f11fff06e20d823912752ef5da821290f139c736b6edb8cba71af6b87b3"
+  },
+  "weight.decoder.up_blocks.0.resnets.0.norm2.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "e5d439320860e9f7a69f858fab18c715fe9b83925c5c9a46d04ad610bef8ba44"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.conv1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "e2ec92aae0f3fb20f2d01d01bee351911ff4dff162d62ea15d116fdd28c4763c"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.conv1.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "49ebc6a22d86a162f29b9b4771681e60f902d6c3266a8630e913960021578300"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.conv2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "8ce285a18f9dcf6cb53cde774d064dba93e78aa63b819ba15d0c4c76fa63e3db"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.conv2.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "fa0973407d5499cafd064869f0c199bbe838581b6ad8ebac5f079471fc833b21"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "da2f2d6b51eb95e38a01502425eda7f5c5c7a40f8c081d5075634edeedb4431e"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "c8ddcea15f8f732943fccf259e8205ad5320297be219a31da8a7c2b7e57094bf"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.norm2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "cde7de3d4e2ea7d7fbdced949eb30b39c5eca49f7176afd2e3cffb46e69281cb"
+  },
+  "weight.decoder.up_blocks.0.resnets.1.norm2.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "709f6599e3f69bc84870668ef499f1a311f086d3dcad8ccbbf98b3ef4392ebf7"
+  },
+  "weight.decoder.up_blocks.0.upsamplers.0.conv.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "42fbed58401908644abac0c14a9c23ebb45450641417be96576bbacdc24a7a02"
+  },
+  "weight.decoder.up_blocks.0.upsamplers.0.conv.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "f3412804e81a811701cd884d8c9665f0c0e719788dba7bb9820bc8c3aaee5e9c"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.conv1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "6a0a6b3f609d4eab12815bf3a86a5a02d667532e2726e616f60b509bf971169c"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.conv1.weight": {
+   "shape": [
+    32,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "9adc00e708433c72b518115b4de703771a54593073c49d919f980139e4b6d7a6"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.conv2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "5d899f88791b764831c9bb4bcaefd9110bf5d8b2490c93c0a412d84b6bf3571b"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.conv2.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "fbf6c4d0fba73d1df8b5371c79c31417a57e95d9cc2bbbe5d60f56f36eb6206b"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.conv_shortcut.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "db041850fca14ade3a36926b4d5b748062e9bbc6506200cdcd97c1ef8c8d7ca1"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.conv_shortcut.weight": {
+   "shape": [
+    32,
+    64,
+    1,
+    1
+   ],
+   "dtype": "float16",
+   "sha256": "45dab7f958f4b719018fb9f5a9fa7e81a2c4643c9703f83720738529bb7b1311"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "6677db810717ca375e2d0159647f56e6082bd024695dbbe8727f1b17939606f2"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "5c180d79bb4d3c9f88382a48426c93a6142532f955619b5ef9a9ddb5f5631dac"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.norm2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "103992a775042e889b1d88b7787dc27e102b7b1eef81fe20363887cca283bc83"
+  },
+  "weight.decoder.up_blocks.1.resnets.0.norm2.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "4e01da7c8e8a74d8644765f888a518ab76ce6c79e9b98750d83c72b5fd5f31c5"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.conv1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "553773f701eedeb67970022ab666f58d8b27a6d4106fbc03b305052b93198d7e"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.conv1.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "68d768d66eb4fa0551c233618b041ee141901418bb2ed9df72b32105006bb2e4"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.conv2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "8b99d4ae287ce38092b78d4aa745590495df249dcf05aa4c6a9026e983dc4cee"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.conv2.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "2ba13048edfce00f1130dcdd0da59656ba1c3a088cb1be7d0a7ee00642e66f89"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.norm1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "0bf667a286390c02baafa6e75e9107161f5a4ded68f39116d021e07a1f9daf37"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.norm1.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "b2e56927bc7b871fc81bea39cdc68858caf4d13fbffda52d93f7868f2cfe888e"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.norm2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "95ea9836cf19c293b469865d5a7987f42b58b591472f8f798436051638c37a2f"
+  },
+  "weight.decoder.up_blocks.1.resnets.1.norm2.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "8d73e62315ff80c971bccd2a34cf025418592c202138678baac7aa172bde9ecc"
+  },
+  "weight.decoder.up_blocks.1.upsamplers.0.conv.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "6e3e19476dd124598276e16fe249fa50706cf45bcab12579085bf7f0bfca4d43"
+  },
+  "weight.decoder.up_blocks.1.upsamplers.0.conv.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "0b077a08b7270c9f0099daa59ab14f52dfd1bb958be108f22d8c7f92e2116586"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.conv1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "5d147dc303b51d56984ab1d025a491c7a4725fadfaf45e8284af6fcf8121680f"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.conv1.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "986d9c3debdfb9c416ebbbb7f5b573c7acde3d1b1f3112deb318f0d728aa1a0a"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.conv2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "4f9b9501d4c547747606e12a69136bc0deabbc6d6f4c67a43cad616968aa3774"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.conv2.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "75e58ba4b2e1b52154a99ecbae1892135c55c8cccb037610f74835ccf05ca581"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.norm1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "e0b6549c0dd40a68c16e0b3910b935abcf1251e46b079371fcbb222668d5a692"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.norm1.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "71e9dc6d03b44aad9892234e392e94152e79c0d380055bc7d5a54f1668c77e86"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.norm2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "f7912e913485ca06fcde3d8daa259b649a5b16800c532a0c86505612b065e0c2"
+  },
+  "weight.decoder.up_blocks.2.resnets.0.norm2.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "e0bca95b0262ee3a39d705d723ec5284044b892822137e2896e4f253f8a2b07d"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.conv1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "eda14c409ca19f3c2da3e1370c79e4bdb5b85aff10e914bd2f7ae26f5d5d1dd5"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.conv1.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "594ac1ece1a90bf22a9b07afc03a96363115f439fb81fb32e2cafc02c589f4e4"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.conv2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "8d1302b2f68c5c545c5cca6cd2aadd1c7a959aeb2210194fbb44dd12293f0895"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.conv2.weight": {
+   "shape": [
+    32,
+    32,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "39d894f98c8f6d19951ab720ac08f5890b37d0c2549f343d6cb6b5245bf81ffd"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.norm1.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "ca706c5dec2d0c5e4507fdd750796c694f5d8c25ecc7a8dd0df5ce2872abdeaf"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.norm1.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "6873e6efaecb622725a4ad7c068de02747b907fe7332facaed53398467b16f09"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.norm2.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "9647f8b7d945df7c3d4938efdee5572e30bfc226c3d789f6c159162af7a1aafa"
+  },
+  "weight.decoder.up_blocks.2.resnets.1.norm2.weight": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "c36788eb61059459e5886cd05b299ca854c3560d290eef9e1bac7f2f54522f37"
+  },
+  "weight.encoder.conv_in.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "080723073d45a4e93b94788fce66eb35b192380c17d38a5a3d87ea71ae0030d3"
+  },
+  "weight.encoder.conv_in.weight": {
+   "shape": [
+    64,
+    3,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "8ecf87dc7eaa3e1f21e14d19ca3fa749dc70b0091ab06f9deed1be04c6548897"
+  },
+  "weight.encoder.conv_norm_out.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "8455101841f142588e4b1b096e546b4d081f9445d29187d8945b49ed4b4e7632"
+  },
+  "weight.encoder.conv_norm_out.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "d217c50e23cb78449c304a5472e7231af70909f3a0746894841e79a4267eef97"
+  },
+  "weight.encoder.conv_out.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "7b7bf0865726da7540fb16f861ce34008c90804868bcfadb00265342df8b5bbb"
+  },
+  "weight.encoder.conv_out.weight": {
+   "shape": [
+    64,
+    96,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "ca0e14c3c8c6c6571476380aa6f22572184f3cf2976cbf6c93566bf4742d33e8"
+  },
+  "weight.encoder.down_blocks.0.downsamplers.0.conv.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "8405977d5c12feb99bc3ffd49de618d3ab6c8b382fa5cbf6e5779be1b8feb7d2"
+  },
+  "weight.encoder.down_blocks.0.downsamplers.0.conv.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "4d7c64468ae55fe76e513e1f2200a9e2e37dcb527a2adb2854c7bb448b825e36"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.conv1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "4f849e2e17cb50e0fd208a9a09175e25e8c3aebca0a9ac1a7551662571147e6a"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.conv1.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "2369c6988e68f277942159a0df6fdd2d7c7508363d933ada00296ce284a77c75"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.conv2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "4c5b62403a01ea9d6f3819776dd9d8e5204d3df96dd45412a6fa6a38af127dc5"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.conv2.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "557b2669346ee0d3893bd61e98dd8b3cc23da775fc6c1eecb4add1ee118d89f3"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "1ba0618152fee497ca7ef4f295ae4767e424fa7052dd27a0f5f5bc764e5d90ec"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "1bba557b5c85a3776b31031d1886d75e6332254fbe2ea0374ceb19d3834f5bc3"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.norm2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "e90a64fb221bcf1cd98f526ce6594a1388481277065d80d39b2a6fb07bad0b52"
+  },
+  "weight.encoder.down_blocks.0.resnets.0.norm2.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "85ab6adfc3c8bfd4a41e7778af61f4ba49035cfd9a6989cfdf8778dbefee5ff4"
+  },
+  "weight.encoder.down_blocks.1.downsamplers.0.conv.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "36723a72341352d70d5122d0fd38d609d22c627b92c85ea488b9f10df94e453e"
+  },
+  "weight.encoder.down_blocks.1.downsamplers.0.conv.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "6ebef730400a405a1ad05b4540a5a5088bc4acd24f03744d295271f869ee492c"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.conv1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "fa1648f42abb49c570ba01c11af3276c32c38a4eb55092fdfafd920f810aabf5"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.conv1.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "02921a311ea603243ba4ab3ac74e1c8f27f78dc9dff0cb502c44b8ba48a20708"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.conv2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "3380ca3d2a1d002241dc9aecbd04b18eb931b9ffa925d633b50b60110862ea35"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.conv2.weight": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "0f30a7b1bc06ab92d861a65e9c5c34b999d7cee752f0e4e6fe1f8fb1b1e73d06"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "d275cf6667180a462096a6f209cc58c453ce495959ada058b450fa455e126a82"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "9ed96dcf9a2aa1a9425eb889ca20e4be88c5cb461054cc6b4bd41d181c98712e"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.norm2.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "81b158e8df409ab27948895abf30d624a67aa33b9d835b42947e7dd3babf247b"
+  },
+  "weight.encoder.down_blocks.1.resnets.0.norm2.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "a4676833ab8fb89cd3e9a2fbf1cc32096a94fce6c067e5f2222f9b230813b100"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.conv1.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "6ae7ff486f4236b55756929755b57902904a48f4b712ac0325079bb6bb22d3ca"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.conv1.weight": {
+   "shape": [
+    96,
+    64,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "47afb6c3ccc617c3c007d9dff9860f85664602e05ab5c0b69dcddb1b166349d4"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.conv2.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "35b3bd75469af2b11d61c16a314a72867e3f22a39548434a8a27da5a3f359daf"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.conv2.weight": {
+   "shape": [
+    96,
+    96,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "1d07002461da962b3b564a98fe2358391f6ac8daa38c3ad4c63906a11847ba56"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.conv_shortcut.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "c013bc68bf8f790fa02d6e3e4a0dfbe81aa7dc3ccf1dc7c42cde4242d2ad2e63"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.conv_shortcut.weight": {
+   "shape": [
+    96,
+    64,
+    1,
+    1
+   ],
+   "dtype": "float16",
+   "sha256": "66cc2d12c2ac8d2155e746a7fa6ef3ec62a4a3c8f8449b88268e79fa49bb31a9"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.norm1.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "c013237c24303f0eef9a694e4b64f1d404094290188b8cabf0a87c8e41dc5219"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.norm1.weight": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "3f73fb9bb55f69f85ebd3e8829986b975e71c11920f473f4fba60e5d512f9f71"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.norm2.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "4ca698233f02fa565946589ed17ff027e54dcca2dc6561a69c184aeb157d86ba"
+  },
+  "weight.encoder.down_blocks.2.resnets.0.norm2.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "3c1baac396a2d8fb6572a0aabf0e4d6fe5910843a7737188b05d65d71d90e613"
+  },
+  "weight.encoder.mid_block.attentions.0.group_norm.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "f0d6254dd4577921ecd38728edc093e57a7b6869e802be166e3b985cd6013cf0"
+  },
+  "weight.encoder.mid_block.attentions.0.group_norm.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "13d3dec4019c69a43d4e9e6c481dd463e922f70550d8afbd15c4ca475d2c9979"
+  },
+  "weight.encoder.mid_block.attentions.0.to_k.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "397a620da5c9a0b7d43bd054f35f107384f646378b01d18fa6d8188cd6352d5d"
+  },
+  "weight.encoder.mid_block.attentions.0.to_k.weight": {
+   "shape": [
+    96,
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "c470e6a68e6da79f20e2a099c2f957c0dbb876843daebe28adb36a344d51f5ed"
+  },
+  "weight.encoder.mid_block.attentions.0.to_out.0.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "947a66f05adc6f56c39dcedb9e9d2f4f1a334c9c139f3313d8bed34a1cb25939"
+  },
+  "weight.encoder.mid_block.attentions.0.to_out.0.weight": {
+   "shape": [
+    96,
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "ead076be670bf9526199abce1c69f98a6497aaee14826ddfbed4d9b81b3459cb"
+  },
+  "weight.encoder.mid_block.attentions.0.to_q.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "6be4ab0e3ddd1914656a1cde202da056a86fd1e88f900632401dc2e8074f2b95"
+  },
+  "weight.encoder.mid_block.attentions.0.to_q.weight": {
+   "shape": [
+    96,
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "4ff17f98c5dbd37fcfa6a6335abaea916921faacba9757b965c85ca43698b3ee"
+  },
+  "weight.encoder.mid_block.attentions.0.to_v.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "9dcdaa3b85adaf2f105c6feb0e3830a8de3c18eb980c7cb93e7c4844ef09bbfa"
+  },
+  "weight.encoder.mid_block.attentions.0.to_v.weight": {
+   "shape": [
+    96,
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "ee975f0729cb7e92d8e5ba641f7a5566f442da9c24144b266a43021a742c6422"
+  },
+  "weight.encoder.mid_block.resnets.0.conv1.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "467e8718acc4b5e9cd853f77ec374b42a22c4d204b22ddf0253249693132a9c5"
+  },
+  "weight.encoder.mid_block.resnets.0.conv1.weight": {
+   "shape": [
+    96,
+    96,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "d32bc61f461694d300f0833631ce69533daaecb3fc7f6aa013fcf6466649da1b"
+  },
+  "weight.encoder.mid_block.resnets.0.conv2.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "7f635b9878bba1dd112c60e6693cbf4565f81779ec8147953b3b8bcdffa886a6"
+  },
+  "weight.encoder.mid_block.resnets.0.conv2.weight": {
+   "shape": [
+    96,
+    96,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "ee862501a8f857b5becc8a894453ff32706ae0e72a249bcb053d1039c31ba4d9"
+  },
+  "weight.encoder.mid_block.resnets.0.norm1.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "3982df40722fc76c4f35751a5835dd9b42f102580b2b8a9d30bdaa6b2746f09d"
+  },
+  "weight.encoder.mid_block.resnets.0.norm1.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "1ac3bdfaadec4b6bb516729ade96929418473de1ec963899e0ce283467616e02"
+  },
+  "weight.encoder.mid_block.resnets.0.norm2.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "b3a90b7ada25b872d8286e130194bcf7bf1cf77ae1e8696359c87fd3a78101e5"
+  },
+  "weight.encoder.mid_block.resnets.0.norm2.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "ed1c0f013f4db40154822511f47d2175881edf31832e881f3b1e9f890ce50780"
+  },
+  "weight.encoder.mid_block.resnets.1.conv1.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "3b36ee6519b86a8fee931b57dfba5f443d0a2ea0d92ca826850e735e9b92903e"
+  },
+  "weight.encoder.mid_block.resnets.1.conv1.weight": {
+   "shape": [
+    96,
+    96,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "05b10b6fc744e61e75d8bbcad086da3d151e499d0a36c07a27473de5d6a07b31"
+  },
+  "weight.encoder.mid_block.resnets.1.conv2.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "1fb4a2d8f87704d6dbc0835f41fc6df283eb7c2f424a7ba1b30fdfd9b4d63827"
+  },
+  "weight.encoder.mid_block.resnets.1.conv2.weight": {
+   "shape": [
+    96,
+    96,
+    3,
+    3
+   ],
+   "dtype": "float16",
+   "sha256": "6774bd546bc5d8545ee6b5f6926d03620ee749b62a999a11459bef25a50a6c80"
+  },
+  "weight.encoder.mid_block.resnets.1.norm1.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "78fff97524a4182a2cc6e638d7ec4b1c9e58120959339542a5ac6fca3a4ed6cd"
+  },
+  "weight.encoder.mid_block.resnets.1.norm1.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "ca5a85fa1fb97601e70418c181dda92d714bfb0926d6e6a1efa742775d795480"
+  },
+  "weight.encoder.mid_block.resnets.1.norm2.bias": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "f722150b43e5c49c8e1b58533b48b69db6e0ba26d3a0baa4e4825fc1b2711fb8"
+  },
+  "weight.encoder.mid_block.resnets.1.norm2.weight": {
+   "shape": [
+    96
+   ],
+   "dtype": "float16",
+   "sha256": "61818da55026e7151a84a32f8926c7e295a9f3c16108efa66f463b170f0c6932"
+  },
+  "weight.post_quant_conv.bias": {
+   "shape": [
+    32
+   ],
+   "dtype": "float16",
+   "sha256": "9b0ac5bff140e62006c2f537d38d8b2d6266c60a866760072dd181f2c6270b51"
+  },
+  "weight.post_quant_conv.weight": {
+   "shape": [
+    32,
+    32,
+    1,
+    1
+   ],
+   "dtype": "float16",
+   "sha256": "2c1a2766c46eec189041f521b390274ac4178ddabd865449fa69e29cee6a773f"
+  },
+  "weight.quant_conv.bias": {
+   "shape": [
+    64
+   ],
+   "dtype": "float16",
+   "sha256": "58a781fc179f6823e2ffdf6eca0797da7efec62964f2f11078a2592d9c100de9"
+  },
+  "weight.quant_conv.weight": {
+   "shape": [
+    64,
+    64,
+    1,
+    1
+   ],
+   "dtype": "float16",
+   "sha256": "7d6b7062b5abd7a93d950025ceac45f6600ccc11eb6fe2871d42a759b8046152"
+  }
+ }
+}
