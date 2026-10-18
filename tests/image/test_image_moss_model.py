@@ -13,7 +13,9 @@ import numpy as np
 import pytest
 from mlx.utils import tree_flatten
 
+import moss_gates as mg
 from image_fixtures import fixture_view, load_json
+from oracle_fixture import committed_fixture
 
 from gmlx.image import fingerprint as fp
 from gmlx.image.dtypes import ImageDtypeError
@@ -207,6 +209,37 @@ def test_the_tiny_model_matches_the_release_forward_in_fp32():
     assert gap < TOL
 
 
+@pytest.fixture(scope="module")
+def release_tiny():
+    """The release's class on random tiny weights, from the oracle's
+    --self-test."""
+    arrays, m = committed_fixture("selftest_moss_image_tiny")
+    weights, wm = committed_fixture("selftest_moss_image_tiny_weights")
+    bands = weights["rope.bands"]
+    return arrays, m, weights, wm["inputs"]["config"], bands
+
+
+def test_the_tiny_model_matches_the_release_class_in_fp32(release_tiny):
+    arrays, _, weights, cfg, bands = release_tiny
+    model = mg.tiny_model(weights, cfg)
+    assert mm.rope_bands(len(bands), cfg["rope_base"]).tobytes() == \
+        bands.tobytes()
+    # The CPU stream keeps fp32 products exact; the GPU's TF32 would not.
+    with mx.stream(mx.cpu):
+        got = mg.measures(model, arrays)
+    worst = max(got, key=got.get)
+    print(f"moss release tiny fp32: {len(got)} measures, worst "
+          f"{got[worst]:.2e} at {worst}")
+    assert got[worst] < TOL, got
+
+
+def test_the_tiny_model_in_bf16_is_inside_the_bf16_tolerances(release_tiny):
+    arrays, m, weights, cfg, _ = release_tiny
+    model = mg.tiny_model(weights, cfg, act=mx.bfloat16)
+    out = mg.missed(mg.measures(model, arrays), m["tolerances"])
+    assert not out, out
+
+
 def test_the_step_parts_give_the_step():
     model, _ = _tiny(act=mx.bfloat16)
     lat, feats = (mx.array(a) for a in _inputs())
@@ -326,6 +359,19 @@ def test_each_wrong_model_fails_the_tiny_gate(monkeypatch, name):
         FAULTS[name](mp)
         gap = _gap(model, p, lat, feats)
     print(f"moss tiny, {name}: rel L2 {gap:.2e}")
+    assert gap > 25 * TOL
+
+
+@pytest.mark.parametrize("name", list(FAULTS))
+def test_each_wrong_model_misses_the_release_class(release_tiny, monkeypatch,
+                                                   name):
+    arrays, _, weights, cfg, _ = release_tiny
+    model = mg.tiny_model(weights, cfg)
+    with monkeypatch.context() as mp, mx.stream(mx.cpu):
+        FAULTS[name](mp)
+        gap = mg.rel(mg.free_rows(model, arrays)["velocity"],
+                     arrays["velocity"])
+    print(f"moss release tiny, {name}: velocity rel L2 {gap:.2e}")
     assert gap > 25 * TOL
 
 
