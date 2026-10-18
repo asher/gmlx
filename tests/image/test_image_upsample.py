@@ -29,7 +29,7 @@ CAPTION = "A red bicycle leans against a weathered brick wall."
 @pytest.mark.parametrize("family, package, name, sha256, key, sampling", [
     ("flux3_klein", "flux3_klein", "pup_prompts_external_vlm.json",
      "361bb6e081d50e54a3dee9abf26327436a9386c83465f881c7848989232028be",
-     "t2i", (0.0, 3584, 0.0, "off")),
+     "t2i", (0.0, 3584, 1.5, "off")),
     ("flux2_klein", "flux2_klein", "system_message_upsampling_t2i.txt",
      "0ad9a42c565716b0a8eb82a442dd4f6cc82d583eb3474f82ccb610c1a29233c7",
      None, (0.0, 1024, 0.0, "off")),
@@ -311,7 +311,7 @@ def test_the_cli_releases_the_upsampler_before_the_encoder_loads(
     assert turn["prompt"] == "a red bicycle"
     assert turn["system_prompt"] == upsample.system_prompt(fam)
     assert (turn["temp"], turn["max_tokens"], turn["presence_penalty"],
-            turn["template_kwargs"]) == (0.0, 3584, 0.0,
+            turn["template_kwargs"]) == (0.0, 3584, 1.5,
                                          {"enable_thinking": False})
     record = json.loads(capsys.readouterr().out)
     assert record["settings"]["revised_prompt"] == CAPTION
@@ -413,6 +413,6 @@ def test_qwen_image_runs_the_users_prompt_file_and_encodes_its_rewrite(
     assert turn["system_prompt"] == ("Rewrite the prompt. Think, then answer "
                                      "with JSON.")
     assert (turn["presence_penalty"], turn["template_kwargs"]) == (
-        0.0, {"enable_thinking": False})
+        1.5, {"enable_thinking": False})
     assert ("encode", "A red bicycle with a wicker basket leans against a "
             "weathered brick wall in soft afternoon light.") in cli.events

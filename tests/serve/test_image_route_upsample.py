@@ -162,7 +162,7 @@ def test_the_server_sends_bfls_turn_and_encodes_the_caption(server):
     (sent,) = server.requests
     assert sent.model == "writer" and sent.stream is False
     assert (sent.temperature, sent.max_tokens, sent.presence_penalty,
-            sent.thinking) == (0.0, 3584, 0.0, "off")
+            sent.thinking) == (0.0, 3584, 1.5, "off")
     fam = get_family("flux3_klein")
     assert server.messages == [[
         {"role": "system", "content": system_prompt(fam)},
