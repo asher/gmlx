@@ -378,6 +378,7 @@ class OpenAIRequest(FlexibleBaseModel):
         None, ge=0, description="Presence penalty context size."
     )
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     frequency_context_size: Optional[int] = Field(
         None, ge=0, description="Frequency penalty context size."
     )
@@ -781,6 +782,7 @@ class VLMRequest(FlexibleBaseModel):
         None, ge=0, description="Presence penalty context size."
     )
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     frequency_context_size: Optional[int] = Field(
         None, ge=0, description="Frequency penalty context size."
     )
@@ -977,6 +979,7 @@ class AnthropicRequest(FlexibleBaseModel):
         None, ge=0, description="Presence penalty context size."
     )
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     frequency_context_size: Optional[int] = Field(
         None, ge=0, description="Frequency penalty context size."
     )

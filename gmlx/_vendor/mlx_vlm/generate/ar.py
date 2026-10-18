@@ -222,6 +222,7 @@ def generate_step(
     verbose: bool = False,
     **kwargs,
 ) -> Generator[Tuple[mx.array, mx.array], None, None]:
+    # gmlx: the docstring gives the generated-token rule of the context sizes.
     """
     A generator producing token ids based on the given prompt from the model.
 

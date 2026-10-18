@@ -1242,8 +1242,10 @@ class APIHandler(BaseHTTPRequestHandler):
         self._validate("repetition_penalty", (float, int), min_val=0)
         self._validate("repetition_context_size", int, min_val=0)
         self._validate("presence_penalty", (float, int))
+        # gmlx: None counts the whole output.
         self._validate("presence_context_size", int, min_val=0, optional=True)
         self._validate("frequency_penalty", (float, int))
+        # gmlx: None counts the whole output.
         self._validate("frequency_context_size", int, min_val=0, optional=True)
         self._validate("logprobs", bool)
         self._validate("top_logprobs", int, min_val=0, max_val=11, whitelist=[-1])

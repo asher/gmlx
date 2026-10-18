@@ -101,6 +101,7 @@ def make_logits_processors(
     frequency_penalty: Optional[float] = None,
     frequency_context_size: Optional[int] = None,  # gmlx: whole output
 ):
+    # gmlx: the docstring gives the generated-token rule of the context sizes.
     """
     Make logits processors for use with ``generate_step``.
 
@@ -426,6 +427,7 @@ def make_repetition_penalty(penalty: float, context_size: int = 20):
 
 
 def make_presence_penalty(penalty: float, context_size: Optional[int] = None):
+    # gmlx: the docstring gives the generated-token rule.
     """
     Make a presence penalty processor.
 
@@ -448,6 +450,7 @@ def make_presence_penalty(penalty: float, context_size: Optional[int] = None):
 
 
 def make_frequency_penalty(penalty: float, context_size: Optional[int] = None):
+    # gmlx: the docstring gives the generated-token rule.
     """
     Make a frequency penalty processor.
 
