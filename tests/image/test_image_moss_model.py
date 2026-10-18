@@ -392,3 +392,23 @@ def test_every_op_of_a_tiny_bf16_step_is_within_its_rounding_bound():
     assert not mg.missing_ops(model, sites, skipped=skipped)
     assert not qg.over_gate(sites), qg.over_gate(sites)
     assert len(qg.op_sites(sites)) == 2 * 9 + 2 * 5
+
+
+def test_the_sampler_runs_the_tiny_model_on_the_snapped_schedule():
+    """api.sample draws noise at the DiT's latent channels and steps
+    through the family's schedule."""
+    from gmlx.image import api
+    from gmlx.image.schedule import moss_sigmas
+
+    model, _ = _tiny()
+    pipe = api.ImagePipeline(dit=model, family=get_family("moss_image"),
+                             variant="sft")
+    seen = []
+    feats = mx.array(_inputs()[1][0])
+    with mx.stream(mx.cpu):
+        x = api.sample(pipe, api.Conditioning(feats), height=16 * H,
+                       width=16 * W, steps=8, cfg=1.0, seed=3,
+                       on_step=lambda i, _: seen.append(i))
+    assert x.shape == (1, 8, H, W)
+    assert bool(mx.all(mx.isfinite(x)).item())
+    assert len(seen) == len(moss_sigmas(8)) - 1

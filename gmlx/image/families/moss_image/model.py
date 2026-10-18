@@ -78,6 +78,11 @@ class MossConfig:
     # A latent pixel is one token: the DiT has no patch of its own.
     patch: int = 1
 
+    @property
+    def in_channels(self) -> int:
+        """Channels of a latent token, the noise the sampler draws."""
+        return self.latent
+
     @classmethod
     def from_dict(cls, c: dict) -> "MossConfig":
         dim, heads = int(c["dim"]), int(c["num_heads"])
