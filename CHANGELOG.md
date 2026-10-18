@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run MOSS-Image
+  and MOSS-Image Base GGUFs, and their LoRAs.
+- The ComfyUI pack runs MOSS-Image without the OpenMOSS plugin, and takes
+  `SkipLayerGuidanceDiTSimple` on it to leave blocks out of the negative pass.
 - FLUX.3 klein rewrites each prompt with a chat model of your choice before
   encoding it, set as the entry's `upsampler` or by `--upsampler`.
 - FLUX.2 klein, Krea 2, Z-Image and Qwen-Image 2.1 take an `upsampler` too,
