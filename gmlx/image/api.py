@@ -224,7 +224,7 @@ class ImagePipeline:
         raise ValueError(f"no schedule for {self.family.title}; pass sigmas")
 
 
-def _borrowed(encoder_model, spec):
+def _borrowed(encoder_model, spec, gguf: str | None = None):
     from .text_encoder import borrow_encoder
 
     if len(encoder_model) == 3:
@@ -233,7 +233,7 @@ def _borrowed(encoder_model, spec):
         model, tokenizer = encoder_model
         args = getattr(model, "args", None)
         config = dict(vars(args)) if args is not None else {}
-    return borrow_encoder(model, tokenizer, config, spec)
+    return borrow_encoder(model, tokenizer, config, spec, gguf=gguf)
 
 
 def _header_bytes(path, kind: str) -> int:

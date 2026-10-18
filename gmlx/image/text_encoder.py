@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import importlib
 import json
@@ -57,6 +58,7 @@ import unicodedata
 from dataclasses import dataclass
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 
 from .fingerprint import ImageModelError, canonical_bf16
@@ -69,6 +71,17 @@ class IdentityTensor:
     gguf_name: str
     model_path: str
     sha256: str
+
+
+# GGUF norm roles of a block and their modules under it, by encoder arch.
+# output_norm is the stack's final norm.
+_NORMS = {
+    "qwen35": (("attn_norm", "input_layernorm"),
+               ("post_attention_norm", "post_attention_layernorm"),
+               ("attn_q_norm", "self_attn.q_norm"),
+               ("attn_k_norm", "self_attn.k_norm"),
+               ("ssm_norm", "linear_attn.norm")),
+}
 
 
 @dataclass(frozen=True)
@@ -107,8 +120,16 @@ class EncoderSpec:
     trim: bool = False               # the prompt loses its leading and
                                      # trailing whitespace, as a chat
                                      # template's trim filter takes it
+    fp32_norms: bool = False         # an encode runs the RMSNorms of the
+                                     # decoder stack on their F32 GGUF
+                                     # weights, each norm's output in its
+                                     # input dtype; the loaded model keeps
+                                     # its own weights
 
     def __post_init__(self):
+        if self.fp32_norms and self.arch not in _NORMS:
+            raise ValueError(f"{self.name}: no F32 norm map for arch "
+                             f"{self.arch!r}")
         if not self.final_norm:
             return
         if tuple(self.tap_layers) != (self.layers,):
@@ -139,6 +160,8 @@ class EncoderSpec:
             text += "\x00final_norm"
         if self.trim:
             text += "\x00trim"
+        if self.fp32_norms:
+            text += "\x00fp32_norms"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -393,6 +416,103 @@ def float32_qkv(model):
         for attn, products in found:
             for name, p in zip(_QKV, products):
                 setattr(attn, name, p)
+
+
+@functools.lru_cache(maxsize=4)
+def _gguf_norms(path: str, arch: str, stamp: tuple) -> tuple:
+    """``(module path, F32 weight)`` of each norm _NORMS maps for ``arch``
+    in the GGUF at ``path``, the path under the decoder stack. ``stamp``
+    is the file's size and mtime, so a changed file reads again."""
+    roles = dict(_NORMS[arch])
+    out = []
+    for name, t in _header_view(path).tensors.items():
+        parts = name.split(".")
+        if name == "output_norm.weight":
+            where = "norm"
+        elif (len(parts) == 4 and parts[0] == "blk" and parts[3] == "weight"
+              and parts[2] in roles):
+            where = f"layers.{parts[1]}.{roles[parts[2]]}"
+        else:
+            continue
+        if t.codec != "F32" or t.path is None:
+            raise EncoderMismatchError(
+                f"{path}: {name} is {t.codec}, not the F32 norm weight the "
+                "encoder reads")
+        fd = os.open(t.path, os.O_RDONLY)
+        try:
+            raw = os.pread(fd, t.nbytes, t.offset)
+        finally:
+            os.close(fd)
+        out.append((where, np.frombuffer(raw, np.float32).copy()))
+    return tuple(out)
+
+
+def _module(inner, where: str):
+    obj = inner
+    for part in where.split("."):
+        if obj is None:
+            break
+        obj = obj[int(part)] if part.isdigit() else getattr(obj, part, None)
+    return obj
+
+
+def read_norms(path: str, model, spec: EncoderSpec) -> dict:
+    """The F32 norm weights of the encoder GGUF at ``path`` by module path
+    under the decoder stack of ``model``. Each must round to the weight
+    the model holds, so they are the model's own norms."""
+    st = os.stat(path)
+    inner = _inner(model)
+    out = {}
+    for where, a in _gguf_norms(os.path.abspath(path), spec.arch,
+                                (st.st_size, st.st_mtime_ns)):
+        mod = _module(inner, where)
+        held = getattr(mod, "weight", None)
+        w = mx.array(a)
+        if (not isinstance(held, mx.array) or held.shape != w.shape
+                or not mx.array_equal(w.astype(held.dtype), held).item()):
+            raise EncoderMismatchError(
+                f"{path}: the norm at {where} is not the loaded encoder's")
+        out[where] = w
+    if not out:
+        raise EncoderMismatchError(f"{path}: no norm weights to read")
+    return out
+
+
+class _Float32RMSNorm(nn.RMSNorm):
+    """An RMSNorm on an F32 weight whose output keeps its input dtype."""
+
+    def __init__(self, weight: mx.array, eps: float):
+        super().__init__(weight.shape[0], eps=eps)
+        self.weight = weight
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.rms_norm(x, self.weight, self.eps).astype(x.dtype)
+
+
+@contextlib.contextmanager
+def float32_norms(model, norms: dict):
+    """Run an encode with each norm of ``norms`` on its F32 weight, and
+    restore the model's own norms after. An RMSNorm is swapped for one
+    whose output keeps its input dtype; another norm, such as a gated
+    one whose output takes the dtype of its input, keeps its module and
+    gets the weight."""
+    inner = _inner(model)
+    swaps = []
+    for where, w in norms.items():
+        head, _, attr = where.rpartition(".")
+        parent = _module(inner, head) if head else inner
+        mod = getattr(parent, attr)
+        if isinstance(mod, nn.RMSNorm):
+            swaps.append((parent, attr, mod, _Float32RMSNorm(w, mod.eps)))
+        else:
+            swaps.append((mod, "weight", mod.weight, w))
+    try:
+        for obj, attr, _, new in swaps:
+            setattr(obj, attr, new)
+        yield
+    finally:
+        for obj, attr, old, _ in reversed(swaps):
+            setattr(obj, attr, old)
 
 
 class _PadRope:
@@ -674,6 +794,9 @@ class EncoderHandle:
         self.weights_owner = weights_owner
         self.dtype_name = spec.activation or _float_dtype(model)
         self.adapters = ""          # text adapter state, in the cache key
+        # F32 norm weights an encode runs on, by module path; see
+        # EncoderSpec.fp32_norms.
+        self.norms: dict = {}
 
     @property
     def released(self) -> bool:
@@ -700,7 +823,9 @@ class EncoderHandle:
         spec = self.spec
         ids = token_ids(spec, self.tokenizer, prompt)
         pads = pad_rows(spec, len(ids))
-        with vision_rope(self.model, spec):
+        norms = (float32_norms(self.model, self.norms) if self.norms
+                 else contextlib.nullcontext())
+        with vision_rope(self.model, spec), norms:
             if spec.final_norm:
                 hidden = [final_hidden(self.model, ids)]
             else:
@@ -842,15 +967,28 @@ def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
     shards = find_split_shards(path)
     key = (weights_source_key(*shards) if mmproj is None
            else weights_source_key(*shards, mmproj))
-    return EncoderHandle(model, tokenizer, spec, owned=True, source_key=key,
-                         weights_owner=owner, processor=processor)
+    handle = EncoderHandle(model, tokenizer, spec, owned=True,
+                           source_key=key, weights_owner=owner,
+                           processor=processor)
+    if spec.fp32_norms:
+        handle.norms = read_norms(path, model, spec)
+    return handle
 
 
 def borrow_encoder(model, tokenizer, config: dict, spec: EncoderSpec, *,
-                   override: bool = False) -> EncoderHandle:
+                   override: bool = False,
+                   gguf: str | None = None) -> EncoderHandle:
     """Wrap a resident chat model as the encoder. It is checked against the
-    spec and never released."""
+    spec and never released. ``gguf`` is the chat model's file, which a
+    spec with F32 norms reads them from; without it an encode runs on the
+    model's own norms."""
     check_encoder(model, config, spec, override=override)
     digests = json.dumps(model_identity(model, spec), sort_keys=True)
-    key = "borrowed:" + hashlib.sha256(digests.encode()).hexdigest()
-    return EncoderHandle(model, tokenizer, spec, owned=False, source_key=key)
+    norms = (read_norms(gguf, model, spec) if spec.fp32_norms and gguf
+             else {})
+    key = "borrowed:" + hashlib.sha256(
+        (digests + ("\x00fp32_norms" if norms else "")).encode()).hexdigest()
+    handle = EncoderHandle(model, tokenizer, spec, owned=False,
+                           source_key=key)
+    handle.norms = norms
+    return handle

@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 from image_fixtures import FIXTURES, load_json
@@ -243,3 +244,157 @@ def test_the_identity_reads_the_loaded_norms(build):
         mx.uint16))
     assert te.model_identity(m, spec) == {
         "output_norm.weight": hashlib.sha256(bits.tobytes()).hexdigest()}
+
+
+# F32 norms.
+
+def test_the_f32_norms_are_moss_images_alone():
+    """Only MOSS-Image encodes on the F32 norm weights; every other
+    family's encoder, and a chat load, runs on the norms as loaded."""
+    from gmlx.image.registry import families
+
+    got = {}
+    for fam in families():
+        try:
+            got[fam.name] = te.encoder_spec(fam).fp32_norms
+        except te.ImageModelError:
+            continue
+    assert {k for k, v in got.items() if v} == {"moss_image"}
+    assert len(got) > 1
+    import dataclasses
+
+    spec = te.encoder_spec("moss_image")
+    assert spec.template_id != dataclasses.replace(
+        spec, fp32_norms=False).template_id
+
+
+def _f32_of(m):
+    """F32 weights for every norm of the tiny bf16 model, each off its
+    bf16 value by less than half a bf16 step, so it rounds to it."""
+    inner = te._inner(m)
+    out = {}
+    for i, b in enumerate(inner.layers):
+        for where in ("input_layernorm", "post_attention_layernorm",
+                      "self_attn.q_norm", "self_attn.k_norm",
+                      "linear_attn.norm"):
+            mod = te._module(b, where)
+            if mod is not None:
+                w = mod.weight.astype(mx.float32)
+                out[f"layers.{i}.{where}"] = w * (1 + 2 ** -11)
+    out["norm"] = inner.norm.weight.astype(mx.float32) * (1 + 2 ** -11)
+    for where, w in out.items():
+        held = te._module(inner, where).weight
+        assert mx.array_equal(w.astype(mx.bfloat16), held).item(), where
+    return out
+
+
+def _norm_state(m):
+    """Every norm module and its weight, by identity."""
+    inner = te._inner(m)
+    mods = [mod for _, mod in inner.named_modules()
+            if "norm" in type(mod).__name__.lower()]
+    return [(id(mod), id(mod.weight)) for mod in mods]
+
+
+@_NEEDS_GPU
+@_BUILDS
+def test_an_encode_on_f32_norms_restores_a_resident_models_norms(build):
+    """A borrowed chat model encodes on the F32 norms and gets its own back
+    after the encode, and after one that raises: its prefill logits are
+    bit for bit what they were."""
+    m = build()
+    m.set_dtype(mx.bfloat16)
+    norms = _f32_of(m)
+    tok = _CharTokenizer()
+    spec = _spec()
+    ids = te.token_ids(spec, tok, "a red bicycle")
+    before, state = _logits(m, ids), _norm_state(m)
+    plain = te.EncoderHandle(m, tok, spec, owned=False).encode("a red bicycle")
+    h = te.EncoderHandle(m, tok, spec, owned=False)
+    h.norms = norms
+    seen = []
+    call = te._Float32RMSNorm.__call__
+
+    def spy(self, x):
+        y = call(self, x)
+        seen.append((x.dtype, y.dtype))
+        return y
+
+    te._Float32RMSNorm.__call__ = spy
+    try:
+        f32 = h.encode("a red bicycle")
+    finally:
+        te._Float32RMSNorm.__call__ = call
+    assert seen and set(seen) == {(mx.bfloat16, mx.bfloat16)}
+    assert f32.features.dtype == plain.features.dtype == mx.bfloat16
+    assert not mx.array_equal(f32.features, plain.features).item()
+    assert _norm_state(m) == state
+    assert mx.array_equal(_logits(m, ids), before).item()
+
+    import gmlx.image.text_encoder as mod
+
+    real = mod.final_hidden
+
+    def boom(model, ids):
+        assert _norm_state(model) != state
+        raise RuntimeError("boom")
+
+    mod.final_hidden = boom
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            h.encode("a red bicycle")
+    finally:
+        mod.final_hidden = real
+    assert _norm_state(m) == state
+    assert mx.array_equal(_logits(m, ids), before).item()
+
+
+@_NEEDS_GPU
+def test_f32_norms_that_are_not_the_models_are_refused(tmp_path, monkeypatch):
+    m = _tiny_text()
+    m.set_dtype(mx.bfloat16)
+    norms = _f32_of(m)
+    rows = tuple((k, np.array(v)) for k, v in norms.items())
+    monkeypatch.setattr(te, "_gguf_norms", lambda *a: rows)
+    p = tmp_path / "enc.gguf"
+    p.write_bytes(b"x")
+    got = te.read_norms(str(p), m, _spec())
+    assert set(got) == set(norms)
+    bad = ((rows[0][0], rows[0][1] * 1.5),) + rows[1:]
+    monkeypatch.setattr(te, "_gguf_norms", lambda *a: bad)
+    with pytest.raises(te.EncoderMismatchError, match="is not the loaded"):
+        te.read_norms(str(p), m, _spec())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", _FILES)
+def test_the_encoder_reads_105_f32_norms_and_a_chat_load_keeps_bf16(
+        name, gguf_index):
+    """The encoder of a real file reads the 81 offset norms and the 24
+    gated norms at F32. The loaded model, and a chat load of the same
+    file, hold every norm in bfloat16."""
+    from gmlx.load.loader import load_model
+
+    spec = te.encoder_spec("moss_image")
+    found = [p for p in gguf_index.get(spec.arch, []) if Path(p).name == name]
+    if not found:
+        pytest.skip(f"no {name} under KQUANT_TEST_GGUF_DIR")
+    h = te.load_encoder(found[0], spec, log=lambda *_: None)
+    try:
+        roles = {}
+        for where, w in h.norms.items():
+            assert w.dtype == mx.float32, where
+            roles.setdefault(where.split(".", 2)[-1], 0)
+            roles[where.split(".", 2)[-1]] += 1
+        assert roles == {"input_layernorm": 32, "post_attention_layernorm": 32,
+                         "self_attn.q_norm": 8, "self_attn.k_norm": 8,
+                         "linear_attn.norm": 24, "norm": 1}
+        chat = load_model(found[0])[0]
+        for where in h.norms:
+            a = te._module(te._inner(h.model), where).weight
+            b = te._module(te._inner(chat), where).weight
+            assert a.dtype == b.dtype == mx.bfloat16, where
+            assert mx.array_equal(a, b).item(), where
+        del chat
+    finally:
+        h.release()

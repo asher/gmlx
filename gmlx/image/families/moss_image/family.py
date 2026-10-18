@@ -232,7 +232,9 @@ def encoder():
     """The text encoder of the family: Qwen3.5-9B read after its final
     norm, as the release reads last_hidden_state, on the chat template of
     one user turn with thinking on, which trims the prompt. Each prompt
-    runs alone at its own length, with no pad rows."""
+    runs alone at its own length, with no pad rows. Its RMSNorms run on
+    their F32 weights from the GGUF, which hold the offset 1 + w, so the
+    encode does not round them to bfloat16."""
     from gmlx.image.text_encoder import EncoderSpec, IdentityTensor
 
     return EncoderSpec(
@@ -248,6 +250,7 @@ def encoder():
         identity_source=ENCODER_IDENTITY_SOURCE,
         final_norm=True,
         trim=True,
+        fp32_norms=True,
     )
 
 
