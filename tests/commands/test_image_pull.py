@@ -742,6 +742,8 @@ FB = catalog.RECIPES["flux-3-klein-base"]
 F2 = catalog.RECIPES["flux-2-klein"]
 F2B = catalog.RECIPES["flux-2-klein-base"]
 K = catalog.RECIPES["krea-2-turbo"]
+M = catalog.RECIPES["moss-image"]
+MB = catalog.RECIPES["moss-image-base"]
 # The family each pack of the FLUX.2 autoencoder names: the pull's.
 _PACKED_FOR: dict = {}
 
@@ -779,6 +781,17 @@ def _shared_scan(roots, *, recursive=True, families=None):
                                                  "distilled"))
                 elif f.startswith("Krea-2-Turbo-"):
                     out.append(catalog.ImageFile(p, "dit", "krea2", "turbo"))
+                elif f.startswith("MOSS-Image-SFT-"):
+                    out.append(catalog.ImageFile(p, "dit", "moss_image",
+                                                 "sft"))
+                elif f.startswith("MOSS-Image-Base-"):
+                    out.append(catalog.ImageFile(p, "dit", "moss_image",
+                                                 "base"))
+                elif f.startswith("Qwen3.5-9B-"):
+                    out.append(catalog.ImageFile(p, "encoder", "moss_image"))
+                elif f == M.vae_pack:
+                    out.append(catalog.ImageFile(p, "vae", "moss_image",
+                                                 sha256=M.vae_sha256))
                 elif f.startswith("Qwen3-VL-4B-Instruct-"):
                     out += [catalog.ImageFile(p, "encoder", fam)
                             for fam in ("krea2", "flux3_klein")]
@@ -1056,6 +1069,66 @@ def test_a_flux3_pull_after_krea_2_shares_its_encoder_file(lib, monkeypatch):
     assert base.encoder == krea.encoder and base.vae == flux.vae
 
 
+@pytest.mark.parametrize("r, ram_gb, quant, enc", [
+    (M, 16, "Q6_K", "Q4_K_M"), (M, 32, "Q8_0", "Q8_0"),
+    (MB, 24, "Q8_0", "Q8_0")])
+def test_a_moss_image_pull_takes_its_class_quants_and_packs_the_release_vae(
+        lib, monkeypatch, capsys, r, ram_gb, quant, enc):
+    """The DiT from realrebelai's repo, Qwen3.5-9B from unsloth's at the
+    class's quant, and the release's float32 VAE with its config.json at
+    the pinned revision, packed in its own dtype."""
+    root, cfg = lib
+    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb)
+    stem = "MOSS-Image-Base" if r.variant == "base" else "MOSS-Image-SFT"
+    assert got == [
+        ("realrebelai/MOSS-Image_GGUFs", f"{stem}-{quant}.gguf", "main"),
+        ("unsloth/Qwen3.5-9B-GGUF", f"Qwen3.5-9B-{enc}.gguf", "main"),
+        ("OpenMOSS-Team/MOSS-Image-SFT",
+         "vae/diffusion_pytorch_model.safetensors", r.vae_revision),
+        ("OpenMOSS-Team/MOSS-Image-SFT", "vae/config.json", r.vae_revision)]
+    ((_src, kw),) = packed
+    assert kw["family"] == "moss_image" and kw.get("dtype") is None
+    assert m.path == f"realrebelai__MOSS-Image_GGUFs/{stem}-{quant}.gguf"
+    assert m.encoder == f"unsloth__Qwen3.5-9B-GGUF/Qwen3.5-9B-{enc}.gguf"
+    assert m.vae == "OpenMOSS-Team__MOSS-Image-SFT/moss-image-vae-F32.gguf"
+    assert m.encoder_mmproj is None and not m.defaults.get("size")
+    assert (f"license: {r.title} apache-2.0 (https://huggingface.co/"
+            f"OpenMOSS-Team/{stem}/blob/main/LICENSE); encoder apache-2.0"
+            in capsys.readouterr().out)
+
+
+def test_a_moss_image_base_pull_after_sft_takes_only_its_dit(lib,
+                                                             monkeypatch):
+    _, _, sft = _shared_pull(lib, monkeypatch, "moss-image")
+    got, packed, base = _shared_pull(lib, monkeypatch, "moss-image-base")
+    assert got == [(MB.dit_repo, "MOSS-Image-Base-Q8_0.gguf", "main")]
+    assert packed == []
+    assert base.encoder == sft.encoder and base.vae == sft.vae
+
+
+@pytest.mark.parametrize("held, ram_gb, args, takes", [
+    ("Q8_0", 16, (), "Q4_K_M"), ("Q8_0", 16, ("--encoder-quant", "Q8_0"), "Q8_0"),
+    ("Q4_K_M", 32, (), "Q4_K_M")])
+def test_a_held_encoder_serves_a_moss_image_pull_where_it_fits(
+        lib, monkeypatch, capsys, held, ram_gb, args, takes):
+    """Another quant on disk serves the pull when an image fits with it.
+    Qwen3.5-9B Q8_0 does not fit a 16 GB Mac, so the pull takes the class's
+    Q4_K_M and says so, unless --encoder-quant asks for the held one."""
+    root, _ = lib
+    d = root / "unsloth__Qwen3.5-9B-GGUF"
+    d.mkdir()
+    with open(d / f"Qwen3.5-9B-{held}.gguf", "wb") as f:
+        f.truncate(catalog.ENCODER_BYTES[f"Qwen3.5-9B-{held}.gguf"])
+    got, _, m = _shared_pull(lib, monkeypatch, "moss-image", ram_gb, args)
+    out = capsys.readouterr().out
+    assert m.encoder == f"unsloth__Qwen3.5-9B-GGUF/Qwen3.5-9B-{takes}.gguf"
+    pulled = (M.encoder_repo, f"Qwen3.5-9B-{takes}.gguf", "main") in got
+    assert pulled == (held != takes)
+    note = ("Qwen3.5-9B-Q8_0.gguf on disk does not fit an image on a 16 GB "
+            "Mac; the pull takes Q4_K_M")
+    assert (note in out) == (held != takes)
+
+
 def test_a_flux3_pull_takes_no_encoder_quant_but_q8_0(lib, capsys):
     root, cfg = lib
     assert manage.cmd_pull(["flux-3-klein", "--encoder-quant", "Q4_K_M",
@@ -1117,6 +1190,26 @@ def test_an_image_dit_skips_the_chat_arch_gate_and_fits_with_its_parts():
     assert v["image"] == "dit" and v["image_family"] == "z_image"
     assert v["combined_bytes"] == (5 << 30) + Z.encoder_bytes + Z.vae_bytes
     assert v["usable"] and v["arch_error"] is None
+
+
+@pytest.mark.parametrize("ram_gb, enc", [(16, 5_680_522_464),
+                                         (32, 9_527_502_048)])
+def test_a_moss_image_dit_fits_with_the_encoder_its_class_pulls(
+        monkeypatch, ram_gb, enc):
+    """The fit of a DiT counts the encoder quant the pull takes on this
+    Mac: Qwen3.5-9B Q4_K_M on 16 GB, Q8_0 above."""
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
+                        lambda: ram_gb << 30)
+    ref = remote.parse_ref(
+        "hf:realrebelai/MOSS-Image_GGUFs/MOSS-Image-SFT-Q6_K.gguf")
+    v = manage._verdict(ref, _report("moss_image"), size_bytes=4_553_650_496)
+    assert v["image_family"] == "moss_image"
+    assert v["combined_bytes"] == 4_553_650_496 + enc + M.vae_bytes
+    if ram_gb == 16:
+        assert v["fit"] == "fits"
+        assert manage._image_fit_note(v) == (
+            "9.8 GB with its text encoder and VAE, fits on this Mac's "
+            "16 GB RAM")
 
 
 @pytest.mark.parametrize("gen, chip", [(13, "M1"), (14, "M2")])

@@ -640,8 +640,8 @@ gmlx pull qwen-image --quant Q5_K_M
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 `krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,
-`flux-2-klein-base-9b`, `flux-2-klein-9b-kv`, `flux-3-klein` or
-`flux-3-klein-base`, pulls its DiT, text encoder and VAE, checks the VAE
+`flux-2-klein-base-9b`, `flux-2-klein-9b-kv`, `flux-3-klein`,
+`flux-3-klein-base`, `moss-image` or `moss-image-base`, pulls its DiT, text encoder and VAE, checks the VAE
 against its published sha256, packs it to GGUF, and adds an
 `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder already on disk is used
@@ -971,6 +971,7 @@ the weights load.
 | Z-Image | Qwen3-4B | The FLUX.1 autoencoder | The variant's steps and guidance. |
 | Qwen-Image 2.1 | Qwen3-VL-8B, its text GGUF | The Qwen-Image 2.1 autoencoder | 40 steps and guidance 1. Turbo: 8 steps and guidance 1. |
 | Krea 2 | Qwen3-VL-4B-Instruct, its text GGUF | The Qwen-Image autoencoder | Turbo: 8 steps and guidance 1. |
+| MOSS-Image | Qwen3.5-9B | The MOSS-Image autoencoder | 50 steps and guidance 3, with block 22 left out of the negative pass. Base: the same. |
 | FLUX.3 klein | Qwen3-VL-4B-Instruct, its text GGUF | The FLUX.2 autoencoder | 16 steps and guidance 1. Base: 50 steps and guidance 3.5. |
 | FLUX.2 klein | Qwen3-4B | The FLUX.2 autoencoder | 4 steps and guidance 1, which is the only guidance it takes. Base: 50 steps and guidance 4. |
 | FLUX.2 klein 9B | Qwen3-8B | The FLUX.2 autoencoder | The same as FLUX.2 klein's. Its license allows non-commercial use only. |
@@ -1008,8 +1009,8 @@ loads from the encoder's mmproj GGUF, and the VAE encodes them. `--size`
 sets the size of the output, which defaults to the entry's `defaults.size`
 or the variant's, and not to a reference's. The fit check counts the
 references, and a request that does not fit is refused before any model
-loads. Z-Image and Krea 2 take no reference images, and `--ref` exits 2 on
-them.
+loads. Z-Image, Krea 2 and MOSS-Image take no reference images, and
+`--ref` exits 2 on them.
 
 `--ref` gives FLUX.3 klein up to 10 reference images too. Its text encoder
 reads the prompt alone, so it needs no `--encoder-mmproj`, and the VAE
@@ -1150,7 +1151,8 @@ and compares every tensor bit for bit before the file replaces `--out`.
 It packs the VAE of each image family: the FLUX.1 autoencoder for
 `z_image`, the Qwen-Image 2.1 autoencoder for `qwen_image21`, whose
 official file is F32 and stays F32, the Qwen-Image autoencoder for
-`krea2`, whose file is BF16, and the FLUX.2 autoencoder for `flux3_klein`,
+`krea2`, whose file is BF16, the MOSS-Image autoencoder for `moss_image`,
+whose file is F32, and the FLUX.2 autoencoder for `flux3_klein`,
 `flux2_klein` and `flux2_klein_9b`. BFL's FLUX.2 klein 4B file of that
 autoencoder is BF16 with its config, and the Comfy-Org
 `flux2-vae.safetensors` is F32 and needs no config. It packs from that

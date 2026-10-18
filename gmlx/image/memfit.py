@@ -263,6 +263,24 @@ FLUX2_KLEIN_9B_KV_REF_READ = StepFit(base=3.1 * GiB, k=2.6, read_k=1.2,
 # second row of a guided step takes the 9B's slope.
 FLUX2_KLEIN_9B_KV_JOINED = StepFit(base=3.1 * GiB, k=2.9, row_k=0.5)
 
+# One MOSS-Image SFT Q4_K_M step through ``api.sample`` under bounded_cache
+# on an M5 Max, in fresh processes, over the settled process. The cells
+# are in tests/fixtures/image/memfit/moss_image_cells.json: 256 to 2048
+# pixels with 80 text rows, 256 to 2048 with 4096, and 1024 with 640. A
+# text row reads more than an image row of the formula: at nearly the
+# same formula a 256 pixel step with 4096 text rows reads 2.50 GiB and a
+# 1024 pixel step with 80 reads 1.57. A line through the 1536 and 2048
+# pixel cells of 80 text rows has a slope of 5.1, raised 10 percent to
+# 5.6. The base is 0.25 GiB above every cell, the 256 pixel cell with
+# 4096 text rows the closest, and the 2048 pixel cell with 80 is priced
+# 1.46 GiB above its reading. A guided step, at 512 to 2048 pixels with
+# 80 text rows and at 1024 and 2048 with 4096, holds both passes: at 1024
+# pixels with 4096 rows it reads 4.18 GiB against 3.28 unguided, and a
+# second row of slope 1.0 prices it under its reading. Its slope of 2.0
+# leaves 0.31 GiB above that cell, the closest guided one, and 0.38 and
+# 0.50 above the 2048 pixel cells.
+MOSS_IMAGE_STEP = StepFit(base=1.64 * GiB, k=5.6, row_k=2.0)
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -514,6 +532,21 @@ def _qwen_image_vae_crop(op: str, config=None) -> int:
     return reach(m.OFFICIAL if config is None else config, op)
 
 
+# MOSS-Image autoencoder decode footprints under bounded_cache on the
+# official file, over the loaded weights, per pixel at its 96 decode
+# channels. Whole square passes at 256, 512, 768 and 1024 pixels on an M5
+# Max, in fresh processes with a cold and a warm pass, two runs each, fit
+# a line in pixels by least squares, as the Qwen-Image 2.1 fits do. The
+# slope is raised 10 percent and the base covers every whole pass plus
+# 0.25 GiB. The kq and exact paths are fit together. The FLUX.1 fits at
+# 96 channels price a whole fp32 decode at 512 pixels at 3.66 GiB, and it
+# added 4.08.
+MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
+                             4: VaeFit(base=3.24 * GiB, k=11.7)},
+                   "winograd": {2: VaeFit(base=2.19 * GiB, k=24.3),
+                                4: VaeFit(base=2.60 * GiB, k=22.5)}}
+
+
 VAE_ROWS = {
     # The FLUX.1 autoencoder.
     "z_image": VaeMemoryRow(
@@ -559,6 +592,22 @@ VAE_ROWS = {
         measured=True, channels={"decode": 128, "encode": 128},
         whole={"decode": VAE_DECODE, "encode": VAE_ENCODE}, tiled=VAE_TILED,
         overlap=128, scale=8),
+    # The MOSS-Image autoencoder: the FLUX.2 one with its decoder at 3/4 of
+    # the encoder's widths. Its whole decode has its own fits, at 96
+    # channels. The encoder is the FLUX.2 one, and the encode and the
+    # tiled passes keep the FLUX.1 fits. Measured on the official file on
+    # an M5 Max, every pass grew the footprint by less than its price: at
+    # 2048 pixels a whole bf16 decode by 10.16 GiB against 16.21, in fp32
+    # by 18.13 against 20.79, a tiled bf16 decode by 6.54 against 7.47, in
+    # fp32 by 11.34 against 12.58, a whole bf16 encode by 8.70 against
+    # 12.23 and a tiled fp32 one by 10.39 against 11.54. Past the passes
+    # the decode fits were made from, the closest was the tiled fp32
+    # decode at 1024 pixels, 4.33 against 4.56. Its tiles overlap by 128
+    # pixels, as the FLUX.2 decoder's do.
+    "moss_image": VaeMemoryRow(
+        measured=True, channels={"decode": 96, "encode": 128},
+        whole={"decode": MOSS_VAE_DECODE, "encode": VAE_ENCODE},
+        tiled=VAE_TILED, overlap=128, scale=8),
 }
 # FLUX.2 klein at both sizes and KV read the file the FLUX.3 klein row
 # was measured on.
@@ -764,6 +813,20 @@ PEAKS = {
                                  joined_step=FLUX2_KLEIN_9B_KV_JOINED,
                                  ref_build=FLUX2_KLEIN_9B_KV_REF_BUILD,
                                  ref_read=FLUX2_KLEIN_9B_KV_REF_READ),
+    # MOSS-Image joins up to 4096 text rows to the image rows in every
+    # block. The MLP's fused gate and up product and its gated half are the
+    # widest outputs: 3072 wide, an 8192 MLP. A plan that knows the prompt
+    # prices its text rows, and one that does not the most. An encode of
+    # the encoder alone, Qwen3.5-9B with its final hidden row of 4096 in
+    # float32, reads over the settled process 0.37 GiB at 80 rows on the
+    # Q4_K_M file and 0.25 on the Q8_0 one, and 1.32 GiB at 4096 rows on
+    # either: a base of 0.62 GiB and the float32 row times ENCODE_LIVE
+    # leave 0.25 GiB above every cell, the Q4_K_M one of 80 rows the
+    # closest.
+    "moss_image": PeakRow(token_px=16, row_multiple=1, caption_rows=4096,
+                          width=2 * 8192 + 8192, step=MOSS_IMAGE_STEP,
+                          encode_row_bytes=4096 * 4,
+                          encode_base=int(0.62 * GiB), text_rows=4096),
 }
 
 def joined_row(family: str) -> PeakRow:

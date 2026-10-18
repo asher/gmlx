@@ -392,8 +392,12 @@ def test_sha256_file_reads_the_whole_file(tmp_path):
 
 def test_every_class_pulls_the_q8_encoder_and_the_largest_the_reference_dit():
     for r in catalog.RECIPES.values():
+        # No 16 GB budget holds the 9.5 GB Q8_0 file of Qwen3.5-9B.
+        small = {16} if r.family == "moss_image" else set()
         assert {catalog.DEFAULT_QUANTS[r.name][c][1]
-                for c in catalog.MEMORY_CLASSES} == {"Q8_0"}
+                for c in catalog.MEMORY_CLASSES if c not in small} == {"Q8_0"}
+        assert {catalog.DEFAULT_QUANTS[r.name][c][1]
+                for c in small} <= {"Q4_K_M"}
         assert catalog.DEFAULT_QUANTS[r.name][64][0] == r.dit_quants[-1]
 
 
@@ -501,3 +505,17 @@ def test_a_flux2_pull_takes_the_z_image_encoder_and_the_klein_vae_on_disk(
 def test_a_32_gb_mac_pulls_qwen_image_at_q8_0_since_its_f16_load_does_not_fit():
     assert catalog.default_quants(catalog.RECIPES["qwen-image"],
                                   32 << 30) == ("Q8_0", "Q8_0")
+
+
+def test_each_class_default_encoder_has_its_own_size():
+    """A recipe whose class defaults take more than one encoder quant has
+    each file in ENCODER_BYTES, so the fit of a DiT prices the one its
+    class pulls."""
+    for r in catalog.RECIPES.values():
+        names = {r.encoder_name(catalog.DEFAULT_QUANTS[r.name][c][1])
+                 for c in catalog.MEMORY_CLASSES}
+        if len(names) > 1:
+            assert names <= set(catalog.ENCODER_BYTES), r.name
+    m = catalog.RECIPES["moss-image"]
+    assert catalog.companion_bytes(m, 16 << 30) == 5_680_522_464 + m.vae_bytes
+    assert catalog.companion_bytes(m, 64 << 30) == m.encoder_bytes + m.vae_bytes

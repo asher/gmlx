@@ -152,6 +152,22 @@ _QWEN_PROMPT = dict(
     prompt_license_url="https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I/"
                        "blob/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b/LICENSE")
 
+# MOSS-Image: realrebelai's GGUFs of OpenMOSS's SFT and Base checkpoints,
+# conditioned on Qwen3.5-9B. Its VAE is the release's file, float32 in the
+# diffusers layout with its config.json, in the SFT repository.
+_MOSS = dict(
+    family="moss_image", dit_repo="realrebelai/MOSS-Image_GGUFs",
+    dit_quants=_K_QUANTS, encoder_repo="unsloth/Qwen3.5-9B-GGUF",
+    encoder_file="Qwen3.5-9B-{quant}.gguf", encoder_quants=("Q4_K_M", "Q8_0"),
+    vae_repo="OpenMOSS-Team/MOSS-Image-SFT",
+    vae_revision="fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+    vae_file="vae/diffusion_pytorch_model.safetensors",
+    vae_config="vae/config.json",
+    vae_sha256="c3bdf94dc67ec69b30ea9fe1fa8340085679cae64d019f7c7e4a9921f1a7f17a",
+    vae_pack="moss-image-vae-F32.gguf",
+    license="apache-2.0", encoder_license="apache-2.0",
+    encoder_bytes=9_527_502_048, vae_bytes=249_514_688)
+
 RECIPES = {r.name: r for r in (
     Recipe(
         name="z-image-turbo", title="Z-Image-Turbo", family="z_image",
@@ -222,6 +238,17 @@ RECIPES = {r.name: r for r in (
         license="krea-2-community", license_url=_KREA2_LICENSE,
         license_note=_KREA2_NOTE, encoder_license="apache-2.0",
         encoder_bytes=4_280_406_816, vae_bytes=253_807_712),
+    Recipe(
+        name="moss-image", title="MOSS-Image", variant="sft",
+        dit_file="MOSS-Image-SFT-{quant}.gguf",
+        license_url="https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT/"
+                    "blob/main/LICENSE",
+        aliases=("moss-image-sft",), **_MOSS),
+    Recipe(
+        name="moss-image-base", title="MOSS-Image Base", variant="base",
+        dit_file="MOSS-Image-Base-{quant}.gguf",
+        license_url="https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/"
+                    "blob/main/LICENSE", **_MOSS),
     Recipe(
         name="flux-2-klein", title="FLUX.2 klein", variant="distilled",
         dit_repo="unsloth/FLUX.2-klein-4B-GGUF",
@@ -308,6 +335,16 @@ DEFAULT_QUANTS = {
     # DiT four.
     "flux-2-klein-9b-kv": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                            32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # A MOSS-Image request at 1024 pixels with guidance on the longest
+    # prompt: on 16 GB the Q8_0 encoder alone needs 9.49 GiB of 8.55, so the
+    # class takes the Q4_K_M encoder, and a Q6_K DiT needs 8.10 GiB with the
+    # staged load, the encoder released and a tiled decode. On 24 GB a Q8_0
+    # DiT with the Q8_0 encoder needs 14.92 GiB of 15.2 with the encoder
+    # released.
+    "moss-image": {16: ("Q6_K", "Q4_K_M"), 24: ("Q8_0", "Q8_0"),
+                   32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    "moss-image-base": {16: ("Q6_K", "Q4_K_M"), 24: ("Q8_0", "Q8_0"),
+                        32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A Q8_0 DiT fits a 1024 pixel image from the 24 GB class up, with the
     # encoder released on 24 GB, where Base also runs its two guided rows
     # one at a time.
@@ -334,7 +371,24 @@ ENCODER_OUTPUT_BYTES = {
     "Qwen3-8B-Q8_0.gguf": 661_225_472,
     "Qwen3-VL-8B-Instruct-Q8_0.gguf": 661_225_472,
     "Qwen3-VL-8B-Instruct-Q4_K_M.gguf": 510_504_960,
+    "Qwen3.5-9B-Q8_0.gguf": 1_080_688_640,
+    "Qwen3.5-9B-Q4_K_M.gguf": 834_355_200,
 }
+
+
+# Encoder files a class default pulls other than the one encoder_bytes
+# sizes, by name.
+ENCODER_BYTES = {
+    "Qwen3.5-9B-Q4_K_M.gguf": 5_680_522_464,
+    "Qwen3.5-9B-Q8_0.gguf": 9_527_502_048,
+}
+
+
+def companion_bytes(r: Recipe, ram_bytes: int | None) -> int:
+    """Bytes of the encoder (with its vision tower) and the VAE that a
+    pull of ``r`` takes on this Mac, at the class's encoder quant."""
+    name = r.encoder_name(default_quants(r, ram_bytes)[1])
+    return ENCODER_BYTES.get(name, r.encoder_bytes) + r.vae_bytes
 
 
 # The image size an entry pulled with the class default DiT gets in its

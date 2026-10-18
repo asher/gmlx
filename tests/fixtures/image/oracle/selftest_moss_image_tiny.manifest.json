@@ -1,0 +1,364 @@
+{
+ "schema": 1,
+ "name": "selftest_moss_image_tiny",
+ "check": 3,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check3_moss_image.py",
+ "argv": [
+  "check3_moss_image.py",
+  "--pipeline",
+  "pipeline_moss_image.py",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "pipeline": {
+   "name": "pipeline_moss_image.py",
+   "size": 25060,
+   "sha256": "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+  }
+ },
+ "inputs": {
+  "config": {
+   "dim": 64,
+   "ffn_dim": 48,
+   "num_heads": 2,
+   "num_layers": 2,
+   "text_dim": 24,
+   "freq_dim": 16,
+   "latent_channels": 8,
+   "rope_base": 10000.0
+  },
+  "case": {
+   "latent": [
+    3,
+    4
+   ],
+   "text": 5,
+   "sigma": 0.6875
+  },
+  "seed": 0
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.010003348221219725,
+   "cosine": 0.9999547055716813,
+   "max_abs": 0.034577369689941406
+  },
+  "rows_bf16_vs_fp32": {
+   "time_embedding": {
+    "rel_l2": 0.0036691585527701353,
+    "cosine": 0.9999932774291955,
+    "max_abs": 0.004172205924987793,
+    "teacher_forced": false
+   },
+   "shared_block_modulation": {
+    "rel_l2": 0.004006088190592911,
+    "cosine": 0.9999920128046587,
+    "max_abs": 0.006873726844787598,
+    "teacher_forced": false
+   },
+   "video_head_modulation": {
+    "rel_l2": 0.0035652210258079416,
+    "cosine": 0.9999936453471964,
+    "max_abs": 0.005121469497680664,
+    "teacher_forced": false
+   },
+   "video_embedder": {
+    "rel_l2": 0.0028313136262487393,
+    "cosine": 0.9999960481839549,
+    "max_abs": 0.01363682746887207,
+    "teacher_forced": false
+   },
+   "text_embedder.proj": {
+    "rel_l2": 0.0028468714726909068,
+    "cosine": 0.9999959910724129,
+    "max_abs": 0.01065206527709961,
+    "teacher_forced": false
+   },
+   "text_embedder.blocks.0": {
+    "rel_l2": 0.006853589186401344,
+    "cosine": 0.999976647456216,
+    "max_abs": 0.04240083694458008,
+    "teacher_forced": true
+   },
+   "text_embedder.blocks.1": {
+    "rel_l2": 0.004318806149963958,
+    "cosine": 0.9999906999949248,
+    "max_abs": 0.025324583053588867,
+    "teacher_forced": true
+   },
+   "layers.0": {
+    "rel_l2": 0.005086596493744148,
+    "cosine": 0.9999872243509609,
+    "max_abs": 0.03275442123413086,
+    "teacher_forced": true
+   },
+   "layers.1": {
+    "rel_l2": 0.004460280136738237,
+    "cosine": 0.9999901163465567,
+    "max_abs": 0.032853126525878906,
+    "teacher_forced": true
+   },
+   "final_linear_video": {
+    "rel_l2": 0.004623934932363783,
+    "cosine": 0.9999893499714667,
+    "max_abs": 0.014683723449707031,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "layers.0": 0.008763644962712492,
+   "layers.1": 0.009593163749995323
+  },
+  "times": {
+   "fp32_s": 0.0,
+   "bf16_s": 0.0,
+   "bf16_teacher_forced_s": 0.0
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.02000669644243945,
+   "cosine_min": 0.9998188222867253
+  },
+  "time_embedding": {
+   "rel_l2": 0.0073383171055402706,
+   "teacher_forced": false
+  },
+  "shared_block_modulation": {
+   "rel_l2": 0.008012176381185822,
+   "teacher_forced": false
+  },
+  "video_head_modulation": {
+   "rel_l2": 0.007130442051615883,
+   "teacher_forced": false
+  },
+  "video_embedder": {
+   "rel_l2": 0.005662627252497479,
+   "teacher_forced": false
+  },
+  "text_embedder.proj": {
+   "rel_l2": 0.0056937429453818135,
+   "teacher_forced": false
+  },
+  "text_embedder.blocks.0": {
+   "rel_l2": 0.013707178372802688,
+   "teacher_forced": true
+  },
+  "text_embedder.blocks.1": {
+   "rel_l2": 0.008637612299927915,
+   "teacher_forced": true
+  },
+  "layers.0": {
+   "rel_l2": 0.010173192987488295,
+   "teacher_forced": true
+  },
+  "layers.1": {
+   "rel_l2": 0.008920560273476473,
+   "teacher_forced": true
+  },
+  "final_linear_video": {
+   "rel_l2": 0.009247869864727566,
+   "teacher_forced": true
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each text block, each block and the head, free running for the other rows and for the velocity"
+ },
+ "notes": [
+  "the weights are in selftest_moss_image_tiny_weights by name in torch order, with the class's rope.bands buffer"
+ ],
+ "created": "2026-10-18T06:29:29Z",
+ "npz": "selftest_moss_image_tiny.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    5,
+    24
+   ],
+   "dtype": "float32",
+   "sha256": "2c535a5350cf5552afff12785b3d2903e7a75212dbf7b2dce0e5ba2a362b25e8"
+  },
+  "final_linear_video": {
+   "shape": [
+    1,
+    12,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "14b7b225469eeab47a3e882551f7d0edb409dd029f650d08fedacf235429cca7"
+  },
+  "in.final_norm_video": {
+   "shape": [
+    1,
+    12,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "0933ea67c94bb65c0aeda55dfd710d470c2deacc790be9739aa8b0046714d085"
+  },
+  "in.layers.0": {
+   "shape": [
+    1,
+    17,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c53accdc6a1b3c24c754829306cda98613a3f4df08185b7d6d9b67a3c8c02936"
+  },
+  "latents": {
+   "shape": [
+    1,
+    8,
+    3,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "7ff9d5a79d8e7811cf664445f8c7cd8d10b0f1085d8e87cccb9dd2b570b016e3"
+  },
+  "layers.0": {
+   "shape": [
+    1,
+    17,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "2c77d84aebfa763451fed9a31e21eb6f3b5256d58b2ecbdcc3a10910b1b1a7d3"
+  },
+  "layers.1": {
+   "shape": [
+    1,
+    17,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "035efc284b22f48f290eb51bf196bdb63cf99ba56dad244f2b37435540d2578d"
+  },
+  "shared_block_modulation": {
+   "shape": [
+    1,
+    384
+   ],
+   "dtype": "float32",
+   "sha256": "ff10a725992f7b92fd2a7608f264d61bd46cbefff0a901dded05e53b3580024a"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "06ebd70f712594b2c876556943aaa43db9d26e9c3f4fa8fcfe39e589eae9940c"
+  },
+  "text_embedder.blocks.0": {
+   "shape": [
+    1,
+    5,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "a0e8825ba49f5ecf0b2cf1b6198c77148a09995517b11ce56cc1d39d8dc76829"
+  },
+  "text_embedder.blocks.1": {
+   "shape": [
+    1,
+    5,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "ae39e2d2f91929b0c860ca37b11f0d771cecf9805f736c9c801407113759ded7"
+  },
+  "text_embedder.proj": {
+   "shape": [
+    1,
+    5,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "e6ffd67fe945d607763342c4ffb234e11800be098379df32a31f81a763349de5"
+  },
+  "time_embedding": {
+   "shape": [
+    1,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "67d6cc97267b3b5b5346a6e071956a800947439ac840a7e125c173ee775ab4a0"
+  },
+  "timestep": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "723b6da32a396adc2f865ec9e3980269bc9bd75f0fc1d8a7fdb7cb3267df19dd"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    8,
+    3,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "5fb3bfd69a944260535d536ddef3cb0d76f5bc5ce273a9e131fd35d02684dfac"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    8,
+    3,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "4cbd19c2078e989802c68dcf88794f57f4883838f14d67c1e6ef1b9b79208128"
+  },
+  "video_embedder": {
+   "shape": [
+    1,
+    12,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "e718ef43813a5e225ff3913f6ad08aeed88f0c32f6ae429fe98803daaee2ea14"
+  },
+  "video_head_modulation": {
+   "shape": [
+    1,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "4307fd53c812ae6a56f4b87ce4d39a6e05864bf3ed52e764bbaeae29dc5d8973"
+  }
+ }
+}

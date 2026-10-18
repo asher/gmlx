@@ -18,6 +18,8 @@ scheduler config is not published.
 
 from __future__ import annotations
 
+import numbers
+
 # The prompt template, the encoder layers, the timestep shift of each
 # variant and the scheduler values are those of diffusers'
 # src/diffusers/pipelines/krea2/pipeline_krea2.py and
@@ -55,6 +57,7 @@ _COUNTS = (("blocks", 28), ("txtfusion.layerwise_blocks", 2),
 # The projector over the encoder layers: (layers, 1), or the layers alone
 # in a file that flattened it.
 PROJECTOR = "txtfusion.projector.weight"
+ORIG_SHAPE = "comfy.gguf.orig_shape." + PROJECTOR
 # The two matrices of the final layer that one converter writes and the
 # reference model does not read.
 LAST_MLP = ("last.up.weight", "last.down.weight")
@@ -160,12 +163,18 @@ def _projector_layers(view: HeaderView) -> int | None:
 def projector_shape(view: HeaderView) -> tuple | None:
     """The torch shape a flattened projector is stored with, from its
     ``comfy.gguf.orig_shape`` key, or None when the file keeps the
-    shape."""
-    raw = view.kv.get("comfy.gguf.orig_shape." + PROJECTOR)
+    shape or the key is not a list of integers."""
+    raw = view.kv.get(ORIG_SHAPE)
     s = view.shape(PROJECTOR)
-    if raw is None or s is None or len(s) != 1:
+    if raw is None or s is None or len(s) != 1 or not _integers(raw):
         return None
     return tuple(int(v) for v in raw)
+
+
+def _integers(raw) -> bool:
+    return isinstance(raw, (list, tuple)) and all(
+        isinstance(v, numbers.Integral) and not isinstance(v, bool)
+        for v in raw)
 
 
 def layout(view: HeaderView) -> str:
@@ -184,10 +193,14 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
     if n != 12:
         diffs.append(f"{PROJECTOR} is {view.shape(PROJECTOR)}, Krea 2 has "
                      "(12, 1)")
-    orig = projector_shape(view)
-    if len(view.shape(PROJECTOR) or ()) == 1 and orig != (1, 12):
+    flat = len(view.shape(PROJECTOR) or ()) == 1
+    raw = view.kv.get(ORIG_SHAPE)
+    if flat and raw is not None and not _integers(raw):
+        diffs.append(f"{PROJECTOR} is flattened, and its stored shape "
+                     f"{raw!r} is not a list of integers")
+    elif flat and projector_shape(view) != (1, 12):
         diffs.append(f"{PROJECTOR} is flattened, and its stored shape is "
-                     f"{orig}, not (1, 12)")
+                     f"{projector_shape(view)}, not (1, 12)")
     diffs += [f"{g} has {view.count(g)} blocks, Krea 2 has {c}"
               for g, c in _COUNTS if view.count(g) != c]
     if sum(view.has(t) for t in LAST_MLP) == 1:

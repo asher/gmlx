@@ -477,6 +477,28 @@ def _table(served, tid):
     return core
 
 
+def _skip(served, raw) -> tuple:
+    """The blocks a step's rows leave out, zero-based, from its ``skip``
+    field."""
+    from ..image_steps import StepError
+
+    if not isinstance(raw, list) or any(
+            isinstance(i, bool) or not isinstance(i, int) for i in raw):
+        raise StepError(400, "skip is a list of block indices")
+    if not raw:
+        return ()
+    dit = served.pipe.dit
+    title = served.pipe.family.title
+    if not getattr(dit, "skips_blocks", False):
+        raise StepError(400, f"the {title} DiT skips no blocks")
+    n = len(dit.layers)
+    bad = sorted({i for i in raw if not 0 <= i < n})
+    if bad:
+        raise StepError(400, f"the {title} DiT has blocks 0 to {n - 1}, "
+                        f"and skip names {bad}")
+    return tuple(sorted(set(raw)))
+
+
 async def step(request: Request):
     from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE, Missing,
                                StepError, flow_targets, row_hashes, run_step)
@@ -527,6 +549,10 @@ async def step(request: Request):
         if ref_cache and parts and conv.time == "reference":
             raise StepError(400, f"the {title} DiT caches its references "
                             "by itself under the reference convention")
+        skip = _skip(served, fields.get("skip", []))
+        if skip and ref_cache:
+            raise StepError(400, "a step on a cache of reference K and V "
+                            "skips no blocks")
         table = None
         try:
             table = _table(served, fields.get("patch_table"))
@@ -538,7 +564,8 @@ async def step(request: Request):
 
         ts = np.broadcast_to(np.asarray(t_w.numpy(), np.float32).reshape(-1),
                              (len(rows),))
-        sig = [float(conv.scale * t + conv.shift) for t in ts]
+        # In float64, so a scaled timestep gives back its time in float32.
+        sig = [conv.scale * float(t) + conv.shift for t in ts]
         targets = None
         if getattr(served.pipe.dit.cfg, "flow_map", False):
             # The schedule is in the client's timestep convention.
@@ -548,7 +575,7 @@ async def step(request: Request):
                                 "a flow map: a step body holds "
                                 "sample_sigmas, the schedule the client "
                                 "samples on")
-            targets = [float(conv.scale * t + conv.shift)
+            targets = [conv.scale * float(t) + conv.shift
                        for t in flow_targets(s_w.numpy(), ts)]
         gen = run.gen if run is not None else 0
 
@@ -603,7 +630,7 @@ async def step(request: Request):
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
                                            gen, targets, conv.time,
-                                           ref_cache)
+                                           ref_cache, skip)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work)

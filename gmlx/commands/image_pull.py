@@ -805,9 +805,28 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                      encoder_quant_given=bool(a.encoder_quant), only=only,
                      roots=roots, base_dir=base_dir, nest=nest, cfg=cfg,
                      ram=ram)
+    plan.size = catalog.default_size(r, ram, plan.dit_quant)
+    enc = plan.part("encoder")
+    if (enc is not None and not enc.download and not a.encoder_quant
+            and plan.encoder_quant != enc_q and ram
+            and catalog.makes_image(r, cls)):
+        # Another quant on disk serves, unless no image fits with it and
+        # one fits with the class's own.
+        image = _image_plan(plan, ram)
+        if image is not None and not image[1].fits:
+            own = plan_pull(r, dit_quant=dit_q, encoder_quant=enc_q,
+                            encoder_quant_given=True, only=only,
+                            roots=roots, base_dir=base_dir, nest=nest,
+                            cfg=cfg, ram=ram)
+            own.size = plan.size
+            fits = _image_plan(own, ram)
+            if fits is not None and fits[1].fits:
+                own.part("encoder").note = (
+                    f"{enc.name} on disk does not fit an image on a {cls} "
+                    f"GB Mac; the pull takes {enc_q}")
+                plan = own
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
         catalog.default_quants(r, ram) and catalog.makes_image(r, cls)
-    plan.size = catalog.default_size(r, ram, plan.dit_quant)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:

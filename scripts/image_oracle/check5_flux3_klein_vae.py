@@ -32,6 +32,12 @@ full resolution activation and keeps them, 5.7 GiB at 512 pixels in fp32,
 so a run at 512 and 1024 pixels with float64 peaked at 32.8 GiB on an M5
 Max, and the oracle runs no larger size.
 
+MOSS-Image reads the FLUX.2 autoencoder with a narrower decoder, from
+OpenMOSS-Team/MOSS-Image-SFT: ``--family moss_image``, ``--config`` a
+copy of that repository and ``--name check5_moss_image_vae`` write its
+fixture. Its pipeline decodes through the same BatchNorm inverse and 2x2
+unpack, which the script checks.
+
 FLUX.2 klein reads the same autoencoder, which gmlx pulls from BFL's
 FLUX.2 klein 4B repository in BF16. ``--vae`` that file, ``--config`` a
 copy of that repository, ``--name check5_flux2_klein_vae`` and
@@ -40,7 +46,8 @@ reading the bf16 weights upcast.
 
 --self-test builds the class at a tiny config with seeded weights and
 BatchNorm statistics, which the fixture holds by diffusers name, and runs
-one 48x64 image through it.
+one 48x64 image through it; with ``--family moss_image`` the tiny decoder
+is narrower than its encoder.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 16 \\
       check5_flux3_klein_vae.py --config <repo dir> --vae flux2-vae.safetensors \\
@@ -79,6 +86,12 @@ TINY = {"block_out_channels": [32, 32, 64], "layers_per_block": 1,
         "latent_channels": 32, "norm_num_groups": 32,
         "down_block_types": ["DownEncoderBlock2D"] * 3,
         "up_block_types": ["UpDecoderBlock2D"] * 3}
+# MOSS-Image's autoencoder: the same tree with a decoder narrower than the
+# encoder at every level.
+TINY_MOSS = {**TINY, "block_out_channels": [64, 64, 96],
+             "decoder_block_out_channels": [32, 32, 64]}
+TINY_NAMES = {"flux3_klein": TINY_NAME,
+              "moss_image": "selftest_moss_image_vae_tiny"}
 TINY_SEED = 29
 # The BatchNorm's batch count, an int64 training counter no forward reads.
 COUNT = "bn.num_batches_tracked"
@@ -101,6 +114,18 @@ def pipeline_maps():
         Flux2KleinPipeline as P
 
     return P._patchify_latents, P._unpatchify_latents
+
+
+def same_maps_as_moss(torch) -> None:
+    """MOSSImagePipeline decodes the inverse of the BatchNorm and then
+    unpacks channel c * 4 + dy * 2 + dx to pixel (2y + dy, 2x + dx), which
+    is a pixel shuffle by 2. The FLUX.2 klein pipeline's unpatchify must
+    be that map, so the fixture holds for MOSS-Image."""
+    _, unpatchify = pipeline_maps()
+    z = torch.randn(2, 128, 3, 5, dtype=torch.float64)
+    if not torch.equal(unpatchify(z), torch.nn.functional.pixel_shuffle(z, 2)):
+        raise SystemExit("error: the FLUX.2 klein unpatchify is not "
+                         "MOSS-Image's pixel shuffle")
 
 
 def _stats(torch, vae):
@@ -303,7 +328,10 @@ def tiny_weights(torch, vae) -> dict:
 def self_test(torch, a) -> int:
     from diffusers import AutoencoderKLFlux2
 
-    vae32 = AutoencoderKLFlux2(**TINY).eval()
+    if a.family not in TINY_NAMES:
+        raise SystemExit(f"error: no tiny model for {a.family}")
+    tiny = TINY_MOSS if a.family == "moss_image" else TINY
+    vae32 = AutoencoderKLFlux2(**tiny).eval()
     weights = tiny_weights(torch, vae32)
     state = vae32.state_dict()
     state.update({k: torch.from_numpy(v.astype(np.float32))
@@ -311,9 +339,10 @@ def self_test(torch, a) -> int:
     vae32.load_state_dict(state, strict=True)
     tracked = int(vae32.bn.num_batches_tracked)
     return write(
-        torch, a, TINY_NAME, vae32.float().eval(), [TINY_SIZE], {},
-        [Path(__file__).name, "--self-test"],
-        {"config": TINY, "weights_seed": TINY_SEED,
+        torch, a, TINY_NAMES[a.family], vae32.float().eval(), [TINY_SIZE],
+        {}, [Path(__file__).name, "--self-test"]
+        + (["--family", a.family] if a.family != "flux3_klein" else []),
+        {"config": tiny, "weights_seed": TINY_SEED,
          "weights": "every float tensor by its diffusers name, float16 "
          "values the model holds in float32, under weight.<name>",
          "num_batches_tracked": tracked},
@@ -414,7 +443,8 @@ def main(argv=None) -> int:
     ap.add_argument("--sizes", type=int, nargs="*", default=[512, 1024],
                     help="square sizes in pixels, encoded and decoded")
     ap.add_argument("--name", default=NAME)
-    ap.add_argument("--family", choices=("flux3_klein", "flux2_klein"),
+    ap.add_argument("--family",
+                    choices=("flux3_klein", "flux2_klein", "moss_image"),
                     default="flux3_klein",
                     help="the family the manifest records, which reads the "
                          "autoencoder")
@@ -424,6 +454,8 @@ def main(argv=None) -> int:
                     help="fixture directory (default $GMLX_IMAGE_FIXTURES)")
     a = ap.parse_args(argv)
     torch = oracle.setup()
+    if a.family == "moss_image":
+        same_maps_as_moss(torch)
     if a.self_test:
         return self_test(torch, a)
     if None in (a.config, a.vae):

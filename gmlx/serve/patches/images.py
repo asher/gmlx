@@ -307,6 +307,12 @@ def _borrow_for(spec):
     app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
     app_mod.get_cached_model(spec.encoder_model)
+    # The chat model's file, which an encoder with F32 norms reads them
+    # from.
+    from gmlx.serve import bridge_vlm
+
+    rm = bridge_vlm._RESOLVED_MODELS.get(spec.encoder_model)
+    gguf = getattr(rm, "path", None)
     guard = runtime.response_generator
     rg = getattr(guard, "_rg", guard)
     hold = getattr(guard, "_hold", None)
@@ -325,7 +331,7 @@ def _borrow_for(spec):
             # steps; the encode is one step.
             served_pipe.encoder = api._borrowed(
                 (_text_model(engine_rg.model), engine_rg.tokenizer),
-                encoder_spec(served_pipe.family))
+                encoder_spec(served_pipe.family), gguf=gguf)
             try:
                 return fn()
             finally:

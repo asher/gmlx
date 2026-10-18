@@ -5,6 +5,7 @@ record, and the refusals with their exit codes. The loader, the VAE and the
 fit check are replaced. CPU."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -766,6 +767,53 @@ def test_bench_via_steps_gives_the_latents_of_sample_on_klein(
     assert t["mode"] == "steps" and t["equal_to_direct"] is True
     assert len(latents) == 1 and latents[0].shape == (1, 8, 4, 6)
     assert np.isfinite(latents[0]).all()
+
+
+def test_bench_via_steps_on_moss_image_skips_the_negative_blocks_of_sample(
+        env, capsys, monkeypatch):
+    """A guided MOSS-Image step leaves the variant's blocks out of its
+    negative pass, so the bench sends the negative rows apart, with that
+    skip, and gives the latents of sample."""
+    from image_fixtures import tiny_moss_model
+
+    fam = get_family("moss_image")
+    real_defaults = api.sampler_defaults
+
+    def defaults(family, variant):
+        d = real_defaults(family, variant)
+        return dataclasses.replace(d, neg_skip=(1,)) if d else d
+
+    def load(dit, *, text_encoder=None, vae=None, log=print, **kw):
+        pipe = api.ImagePipeline(
+            dit=tiny_moss_model(), family=fam, variant="sft", vae=object(),
+            load_seconds={"dit": 0.0}, log=log)
+        pipe.decoded, pipe.encoded_images = [], []
+        env.pipes.append(pipe)
+        return pipe
+
+    rng = np.random.default_rng(7)
+    feats = {neg: rng.standard_normal((6 - 2 * neg, 16)).astype(np.float32)
+             for neg in (False, True)}
+    monkeypatch.setattr(api, "sampler_defaults", defaults)
+    monkeypatch.setattr(api, "load", load)
+    monkeypatch.setattr(api, "encode_text", lambda pipe, prompt, **k:
+                        api.Conditioning(mx.array(feats[prompt == ""]),
+                                         f"moss:{prompt}"))
+    view = SimpleNamespace(tensors={
+        "a": SimpleNamespace(shape=(4, 4), codec="Q4_K")})
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=fam, view=view, variant="sft",
+                            config={}))
+    rc = umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "64x48", "--steps", "3", "--runs", "1", "--warmup", "0",
+        "--seed", "5", "--via-steps", "--json", "--guidance", "3"])
+    io = capsys.readouterr()
+    assert rc == 0, io.err
+    rec = json.loads(io.out)
+    assert rec["transport"]["equal_to_direct"] is True
+    # Two requests a step: the positive row, then the negative one.
+    assert [len(r["transport_ms"]) for r in rec["runs"]] == [6]
 
 
 def test_bench_via_steps_refuses_adapters(env, capsys):

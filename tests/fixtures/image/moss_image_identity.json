@@ -1,0 +1,228 @@
+{
+ "_note": "The identity tensors video_embedder.bias, final_norm_video.weight and time_embedding.0.bias of every MOSS-Image GGUF of the repository, by HTTP range reads: their codecs and the sha256 of their bf16 bits, as gmlx.image.fingerprint.weight_identity forms it",
+ "repo": "realrebelai/MOSS-Image_GGUFs",
+ "revision": "4f21f583c9213eb2230a09e9b33bfa86605aecf2",
+ "files": {
+  "MOSS-Image-SFT-Q2_K.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 2252894528
+  },
+  "MOSS-Image-SFT-Q3_K_L.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 3070390592
+  },
+  "MOSS-Image-SFT-Q3_K_M.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 2891084096
+  },
+  "MOSS-Image-SFT-Q3_K_S.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 2695704896
+  },
+  "MOSS-Image-SFT-Q4_K_M.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 3702092096
+  },
+  "MOSS-Image-SFT-Q4_K_S.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 3464245568
+  },
+  "MOSS-Image-SFT-Q5_K_M.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 4114968896
+  },
+  "MOSS-Image-SFT-Q5_K_S.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 3921948992
+  },
+  "MOSS-Image-SFT-Q6_K.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 4553650496
+  },
+  "MOSS-Image-SFT-Q8_0.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60",
+   "n_tensors": 463,
+   "size": 5705576768
+  },
+  "MOSS-Image-Base-Q2_K.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 2252894528
+  },
+  "MOSS-Image-Base-Q3_K_L.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 3070390592
+  },
+  "MOSS-Image-Base-Q3_K_M.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 2891084096
+  },
+  "MOSS-Image-Base-Q3_K_S.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 2695704896
+  },
+  "MOSS-Image-Base-Q4_K_M.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 3702092096
+  },
+  "MOSS-Image-Base-Q4_K_S.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 3464245568
+  },
+  "MOSS-Image-Base-Q5_K_M.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 4114968896
+  },
+  "MOSS-Image-Base-Q5_K_S.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 3921948992
+  },
+  "MOSS-Image-Base-Q6_K.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 4553650496
+  },
+  "MOSS-Image-Base-Q8_0.gguf": {
+   "identity_codecs": [
+    "F16",
+    "F16",
+    "F16"
+   ],
+   "sha256": "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626",
+   "n_tensors": 463,
+   "size": 5705576768
+  }
+ },
+ "rope_bands": {
+  "note": "rope.bands of MOSS-Image-SFT-Q4_K_M.gguf and MOSS-Image-Base-Q4_K_M.gguf, F32, as uint32 bits",
+  "bits": [
+   1065353216,
+   1058010522,
+   1050798235,
+   1043732615,
+   1036831949,
+   1030116802,
+   1023510243,
+   1016180025,
+   1008981770,
+   1001931932,
+   995049016,
+   988353832,
+   981668463,
+   974350870,
+   967166816,
+   960132947
+  ]
+ }
+}

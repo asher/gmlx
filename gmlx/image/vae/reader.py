@@ -35,7 +35,8 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 from ..fingerprint import ImageModelError
-from . import flux1_ae, flux2_ae, qwen_image21_vae, qwen_image_vae
+from . import (flux1_ae, flux2_ae, moss_image_ae, qwen_image21_vae,
+               qwen_image_vae)
 from .conv import conv_path, set_conv_path
 
 STRIP_PREFIXES = ("vae.", "first_stage_model.")
@@ -112,6 +113,14 @@ VAES = {
     "flux2_klein": _FLUX2_AE,
     "flux2_klein_9b": _FLUX2_AE,
     "flux2_klein_9b_kv": _FLUX2_AE,
+    # The FLUX.2 autoencoder with a narrower decoder; a FLUX.2 tree with
+    # other decoder widths is its relative.
+    "moss_image": VaeRow(
+        "the MOSS-Image autoencoder", moss_image_ae.config_from_shapes,
+        flux2_ae.Flux2AE, 32, _own_space, flux2_ae.expected_unused,
+        relative=moss_image_ae.relative,
+        config_disagreements=moss_image_ae.config_disagreements,
+        fp32_keep=flux2_ae.BN_STATS),
 }
 
 

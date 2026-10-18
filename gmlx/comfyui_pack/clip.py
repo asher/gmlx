@@ -28,8 +28,9 @@ _WEIGHTED = re.compile(r"\([^()]*:\s*-?[0-9.]+\s*\)")
 # The families whose stock ComfyUI tokenizer encodes an empty prompt as a
 # space under prevent_empty_text: QwenImageTokenizer, and Qwen3VLTokenizer
 # under Qwen-Image 2.1, Krea 2 and FLUX.3. ZImageTokenizer ignores the
-# option, and FLUX.2's KleinTokenizer applies its chat template first, so
-# the prompt it encodes is never empty.
+# option, and FLUX.2's KleinTokenizer and the MOSSImageTokenizer of the
+# OpenMOSS plugin apply their chat template first, so the prompt they
+# encode is never empty.
 _SPACE_FOR_EMPTY = frozenset({"qwen_image", "qwen_image21", "krea2", "flux3_klein"})
 
 

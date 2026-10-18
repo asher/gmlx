@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run MOSS-Image
+  and MOSS-Image Base GGUFs, and their LoRAs.
+- The ComfyUI pack runs MOSS-Image without the OpenMOSS plugin, and takes
+  `SkipLayerGuidanceDiTSimple` on it to leave blocks out of the negative pass.
+- MOSS-Image takes an `upsampler`, on a caption prompt gmlx writes from the
+  OpenMOSS prompt-enhancer skill.
 - FLUX.3 klein rewrites each prompt with a chat model of your choice before
   encoding it, set as the entry's `upsampler` or by `--upsampler`.
 - FLUX.2 klein, Krea 2, Z-Image and Qwen-Image 2.1 take an `upsampler` too,
@@ -53,6 +59,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--chat-template` as invalid Jinja.
 - `--thinking off` was silently ignored on a model with no thinking switch
   when its template has the word thinking in its text. It now warns.
+- A Krea 2 GGUF whose stored projector shape is not a list of integers
+  crashed the load. It is refused with the reason.
 - A streamed image request refused while it ran, such as one too large for
   memory, got a server error frame where the same request unstreamed got a 400.
 - The `gmlx pull` plan of an image model could say its parts fit in stages

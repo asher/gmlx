@@ -1,0 +1,369 @@
+{
+ "schema": 1,
+ "name": "check2_moss_image_q4_k_m",
+ "check": 2,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check2_moss_image.py",
+ "argv": [
+  "check2_moss_image.py",
+  "--encoder",
+  "Qwen3.5-9B-Q4_K_M.gguf",
+  "--tokenizer",
+  "tok-check2",
+  "--name",
+  "check2_moss_image_q4_k_m"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "encoder": {
+   "name": "Qwen3.5-9B-Q4_K_M.gguf",
+   "size": 5680522464,
+   "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+  },
+  "tokenizer/tokenizer.json": {
+   "name": "tokenizer.json",
+   "size": 19989325,
+   "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+  },
+  "tokenizer/tokenizer_config.json": {
+   "name": "tokenizer_config.json",
+   "size": 1123,
+   "sha256": "bee8eba30f0eb4af73c0fe2cd06d0f89b657d7819941c438157ec42f7c80ea87"
+  },
+  "tokenizer/chat_template.jinja": {
+   "name": "chat_template.jinja",
+   "size": 7756,
+   "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+  }
+ },
+ "inputs": {
+  "prompts": {
+   "plain": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+   "empty": "",
+   "non_ascii": "Un caf\u00e9 \u00e0 Montr\u00e9al en hiver, \u7a93\u8fba\u3067\u5bdd\u3066\u3044\u308b\u732b, \u4e00\u676f\u62ff\u94c1\u548c\u4e00\u672c\u4e66, \u0441\u043d\u0435\u0433 \u0437\u0430 \u043e\u043a\u043d\u043e\u043c, \ud83d\udc31\u2615",
+   "long": "A narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow.",
+   "devanagari": "a temple in \u0928\u092e\u0938\u094d\u0924\u0947 style",
+   "thai": "a shop sign that reads \u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35"
+  },
+  "max_sequence_length": 4096,
+  "tokenizer_class": "Qwen2Tokenizer",
+  "pre_tokenizer": {
+   "type": "Sequence",
+   "pretokenizers": [
+    {
+     "type": "Split",
+     "pattern": {
+      "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+     },
+     "behavior": "Isolated",
+     "invert": false
+    },
+    {
+     "type": "ByteLevel",
+     "add_prefix_space": false,
+     "trim_offsets": true,
+     "use_regex": false
+    }
+   ]
+  },
+  "read": "last_hidden_state, after the final norm",
+  "template": "the tokenizer's chat template, one user turn, add_generation_prompt and enable_thinking",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "load_s": 10.9,
+  "layers": 32,
+  "gguf_codecs": {
+   "Q6_K": 22,
+   "F32": 177,
+   "Q4_K": 132,
+   "Q5_K": 48,
+   "Q8_0": 48
+  },
+  "dequant_checked": {
+   "Q6_K": [
+    "blk.0.ffn_down.weight",
+    "layers.0.mlp.down_proj.weight",
+    "bitwise"
+   ],
+   "Q4_K": [
+    "blk.4.ffn_down.weight",
+    "layers.4.mlp.down_proj.weight",
+    "bitwise"
+   ],
+   "Q5_K": [
+    "blk.0.ssm_out.weight",
+    "layers.0.linear_attn.out_proj.weight",
+    "reordered"
+   ],
+   "Q8_0": [
+    "blk.0.ssm_alpha.weight",
+    "layers.0.linear_attn.in_proj_a.weight",
+    "reordered"
+   ]
+  },
+  "rows": {
+   "plain": 38,
+   "empty": 10,
+   "non_ascii": 42,
+   "long": 624,
+   "devanagari": 19,
+   "thai": 20
+  }
+ },
+ "results": {
+  "bf16_vs_fp32_plain": {
+   "rel_l2": 0.012346841173235992,
+   "token_cosine_min": 0.9995899942390147,
+   "worst_token": 27
+  },
+  "bf16_vs_fp32_empty": {
+   "rel_l2": 0.018317916206891317,
+   "token_cosine_min": 0.9995983465301802,
+   "worst_token": 8
+  },
+  "bf16_vs_fp32_non_ascii": {
+   "rel_l2": 0.013902518842580282,
+   "token_cosine_min": 0.9995989687731079,
+   "worst_token": 29
+  },
+  "bf16_vs_fp32_long": {
+   "rel_l2": 0.07516326836164329,
+   "token_cosine_min": 0.15338572738806555,
+   "worst_token": 288
+  },
+  "bf16_vs_fp32_devanagari": {
+   "rel_l2": 0.014019624674789555,
+   "token_cosine_min": 0.9996527201627962,
+   "worst_token": 16
+  },
+  "bf16_vs_fp32_thai": {
+   "rel_l2": 0.015967255207340315,
+   "token_cosine_min": 0.9995678070456726,
+   "worst_token": 15
+  },
+  "seconds": {
+   "plain": {
+    "fp32": 10.6,
+    "bf16": 14.2
+   },
+   "empty": {
+    "fp32": 9.8,
+    "bf16": 13.8
+   },
+   "non_ascii": {
+    "fp32": 10.1,
+    "bf16": 14.3
+   },
+   "long": {
+    "fp32": 17.2,
+    "bf16": 20.2
+   },
+   "devanagari": {
+    "fp32": 13.8,
+    "bf16": 13.9
+   },
+   "thai": {
+    "fp32": 13.9,
+    "bf16": 13.9
+   }
+  }
+ },
+ "tolerances": {
+  "rel_l2": {
+   "plain": 0.024693682346471985,
+   "empty": 0.03663583241378263,
+   "non_ascii": 0.027805037685160565,
+   "long": 0.15032653672328658,
+   "devanagari": 0.02803924934957911,
+   "thai": 0.03193451041468063
+  },
+  "token_cosine_min": {
+   "plain": 0.9983599769560589,
+   "empty": 0.9983933861207208,
+   "non_ascii": 0.9983958750924318,
+   "long": -2.386457090447738,
+   "devanagari": 0.9986108806511846,
+   "thai": 0.9982712281826904
+  },
+  "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt"
+ },
+ "notes": [
+  "The bf16 model is the float32 model rounded to bfloat16 once, as the release loads its encoder in bfloat16."
+ ],
+ "created": "2026-10-18T06:11:14Z",
+ "npz": "check2_moss_image_q4_k_m.npz",
+ "tensors": {
+  "features_devanagari": {
+   "shape": [
+    19,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "5085e4297a91d3ef38b2bc58692b5b4c5fc4e227f1040b69cb0b51bde2353e6c"
+  },
+  "features_devanagari_bf16": {
+   "shape": [
+    19,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "b504d750a438e683aeabd34cc250b69c04ad28f4fe6a13860511ab9d8a9d1ddf"
+  },
+  "features_empty": {
+   "shape": [
+    10,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "b3f950d323d51789c0645b413da9174e355ea9149f751b01305b8513b6cea527"
+  },
+  "features_empty_bf16": {
+   "shape": [
+    10,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "b8d599ca06534d47d6c728b9b6f876018dd6723ab19ab7890a3ae29c4bef84da"
+  },
+  "features_long": {
+   "shape": [
+    624,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "f5458b1a5812c960fc3c62ff974e40a66d34b7bc98b5db6125e2ac6d1bf35fa8"
+  },
+  "features_long_bf16": {
+   "shape": [
+    624,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "cac750035ccf95c1e7cdbaa61b949f02ba0961e216ca3c28bc22f8d02ad235a3"
+  },
+  "features_non_ascii": {
+   "shape": [
+    42,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "d3d274436148eac1dbb85c148dc198d913c83944c043ad61d4b345277041eabc"
+  },
+  "features_non_ascii_bf16": {
+   "shape": [
+    42,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "561b98bbea742ccad14d43c9770b2c601e55014de2ed7fbea29b59ddcd290f82"
+  },
+  "features_plain": {
+   "shape": [
+    38,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "27d8b0c99bd9aa5ab204445ec70e964d6b941f45e21b14ed19e06db3dfeebead"
+  },
+  "features_plain_bf16": {
+   "shape": [
+    38,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "e958b65033f6337dfb48f72315da46103962425503d813f4a80a89a2965f509e"
+  },
+  "features_thai": {
+   "shape": [
+    20,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "1b9150b2d813eb9f436aca5ca01dd0bcb7ab1aa885fa65fb9ecd6160b85786b7"
+  },
+  "features_thai_bf16": {
+   "shape": [
+    20,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "43b37ec566747e83e6892b1b3c2d7f2e37b83d73c2978bc68f3e2cde966b9e1f"
+  },
+  "ids_devanagari": {
+   "shape": [
+    19
+   ],
+   "dtype": "int64",
+   "sha256": "1b35cfdb055d4709b7c0519682280d3c0daf5f0165459e7ca5bab60f40f78608"
+  },
+  "ids_empty": {
+   "shape": [
+    10
+   ],
+   "dtype": "int64",
+   "sha256": "791228b9554afb37320a489dae5451fafa841df6222f4c55607ce44d12af5e70"
+  },
+  "ids_long": {
+   "shape": [
+    624
+   ],
+   "dtype": "int64",
+   "sha256": "fdb2a8d4b0d78d2f68a1f8f038fde8e7ce1945c533f90e2e9aaa59d5a6a1b36a"
+  },
+  "ids_non_ascii": {
+   "shape": [
+    42
+   ],
+   "dtype": "int64",
+   "sha256": "17df73bdc62a885d1fdc32d051008cc7f16dad4fb06d2988de2e1b97549a529b"
+  },
+  "ids_plain": {
+   "shape": [
+    38
+   ],
+   "dtype": "int64",
+   "sha256": "8ea803ffe864ccf67c051ca49f80e2c1bfd70e5fec38b4e92945b2ed02ec9078"
+  },
+  "ids_thai": {
+   "shape": [
+    20
+   ],
+   "dtype": "int64",
+   "sha256": "dea36020e8f7a8d56545f8c6fbb877d98470d76e9ecadeb4c7885927439f722a"
+  }
+ }
+}

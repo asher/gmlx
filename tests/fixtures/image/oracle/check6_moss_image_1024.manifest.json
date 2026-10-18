@@ -1,0 +1,322 @@
+{
+ "schema": 1,
+ "name": "check6_moss_image_1024",
+ "check": 6,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check6_moss_image.py",
+ "argv": [
+  "check6_moss_image.py",
+  "--dit",
+  "MOSS-Image-SFT-Q4_K_M.gguf",
+  "--features",
+  "check2_moss_image_q8_0.npz",
+  "--sizes",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "MOSS-Image-SFT-Q4_K_M.gguf",
+   "size": 3702092096,
+   "sha256": "c6dda89c18c0c0897d09ed01a515ee31415c4baea02bb9c2dedbfca66eec50b6"
+  },
+  "pipeline": {
+   "name": "pipeline_moss_image.py",
+   "size": 25060,
+   "sha256": "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+  },
+  "config": {
+   "name": "config.json",
+   "size": 240,
+   "sha256": "3291c3a1c7adc22b8182a0de25ca8ec97474d72715ce84adbab09cc0be24f666"
+  },
+  "scheduler_config": {
+   "name": "scheduler_config.json",
+   "size": 494,
+   "sha256": "707322832cc507dfb8c51c0e0cd04d44ee2d30a9b036b6f3c47d6c17aa71adf0"
+  },
+  "features": {
+   "name": "check2_moss_image_q8_0.npz",
+   "size": 24685072,
+   "sha256": "9f40242fe35edd0fc15bac6a2d42983e6b2d95c016d866e04441b68bbe91e3ef"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "steps": 50,
+  "steps_run": 50,
+  "blocks": 42,
+  "guidance_scale": 3.0,
+  "uncond_skip_layers": [
+   22
+  ],
+  "negative_prompt": "",
+  "scheduler": {
+   "base_image_seq_len": 256,
+   "base_shift": 0.5,
+   "invert_sigmas": false,
+   "max_image_seq_len": 4096,
+   "max_shift": 1.15,
+   "num_train_timesteps": 1000,
+   "shift": 5.0,
+   "shift_terminal": null,
+   "stochastic_sampling": false,
+   "time_shift_type": "exponential",
+   "training_shift": 1.0,
+   "use_beta_sigmas": false,
+   "use_dynamic_shifting": false,
+   "use_exponential_sigmas": false,
+   "use_karras_sigmas": false
+  },
+  "seed": 6,
+  "features": "check2_moss_image_q8_0 fp32 features",
+  "positive_key": "features_plain",
+  "negative_key": "features_empty",
+  "text_rows": {
+   "positive": 38,
+   "negative": 10
+  },
+  "kept_steps": [
+   1,
+   2,
+   5,
+   10,
+   25
+  ],
+  "gate_size": 512,
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16)",
+  "latents": "(1, 128, size / 16, size / 16) float32 in model space, after the step",
+  "gguf_codecs": {
+   "F16": 210,
+   "Q6_K": 84,
+   "Q4_K": 168,
+   "F32": 1
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "dequant": "exact",
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding",
+   "timestep": "sigma x 1000 in float32 in both modes",
+   "guidance": "float32 velocities in both modes, as the release casts them"
+  },
+  "steps_run": 50,
+  "fp32_step_s": [
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.8,
+   56.8,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.8,
+   56.8,
+   56.9,
+   56.9,
+   56.9,
+   56.8,
+   56.9,
+   56.9,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.8,
+   56.8,
+   56.9,
+   56.9,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.9,
+   56.8,
+   56.8,
+   56.8,
+   56.8,
+   56.9,
+   56.9,
+   56.8,
+   56.9,
+   56.9,
+   56.9,
+   56.9,
+   56.8,
+   56.9
+  ],
+  "fp32_s": 2842.5,
+  "gmlx_exact_floor": {
+   "1": 9.279319125239364e-08,
+   "2": 9.760845017376464e-08,
+   "5": 1.1916169760375085e-07,
+   "10": 2.3503868223467442e-07,
+   "25": 2.20891604645722e-05,
+   "50": 0.0015016736002878234
+  }
+ },
+ "tolerances": {
+  "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated; the exact gate of a step is the larger of exact_rel_l2 and twice gmlx_exact_floor, the exact run from the noise moved one float32 ulp against the exact run, measured by tests/image/test_image_check6_moss_image.py on an M5 Max",
+  "exact_rel_l2": 0.001,
+  "exact_by_step": {
+   "1": 0.001,
+   "2": 0.001,
+   "5": 0.001,
+   "10": 0.001,
+   "25": 0.001,
+   "50": 0.0030033472005756468
+  }
+ },
+ "notes": [
+  "gmlx_exact_floor and exact_by_step were added from the gmlx exact run on the release's schedule bit for bit; the oracle wrote the rest"
+ ],
+ "created": "2026-10-18T09:08:55Z",
+ "npz": "check6_moss_image_1024.npz",
+ "tensors": {
+  "features_negative": {
+   "shape": [
+    10,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "62dc84e4bdef784bf5365091e6b5552df9269755fb2ab41869b6512bdeb85074"
+  },
+  "features_positive": {
+   "shape": [
+    38,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "012ba987671e1c79a361c5a6ce972ffbbb7c47c6a5938268d57b0f63fb345c4e"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "7a9f8c5e58bdbe9913ef6c19429277b43d171e6102ac51d8db86e182d0194904"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "0193ffaec2e5b60137ac5ff93dc8c8dd705f13aa521f76de996337bda76872d4"
+  },
+  "latents_step10": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "6aae656f153d6d8f081ddcca6b54b542aec6d3c420655ffe4b8cec8e2c8c098e"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "8e47d4a1b37f99516577e6afec3d34304a242bee50f0f1cdac41d4c173886eae"
+  },
+  "latents_step25": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "b99aa95a3fad21b63329fc4cf49057e1d6467ee1c6fe8b30f2e85126f3700410"
+  },
+  "latents_step5": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "1aee320fc8ecc75a669d1dbf89ff3189c45193d3759519915ce1148acc21cb34"
+  },
+  "noise": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "bcd95295bb6b6d4f2030450a235b4f3e631d78cfeabead17132ec18138429b6a"
+  },
+  "sigmas": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "be4301af0132c0b628f0d155d50ffab5cd6714691167eee2a160e2b59fcd63a7"
+  },
+  "timesteps": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "e5c8f391f1c3eb29dd3afa3fcef35fd8ab7587fa759579edfa03be23c6a23b9a"
+  }
+ }
+}

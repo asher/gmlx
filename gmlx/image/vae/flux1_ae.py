@@ -13,7 +13,9 @@ Module paths equal the diffusers tensor names, and activations are
 channels last (B, H, W, C). Channels per level are [128, 256, 512, 512],
 each down block has two resnets and each up block three, the mid block is
 a resnet, one attention head of 512 and a resnet, and there are no quant
-convs. GroupNorm is the owned contiguous-group wrapper.
+convs. GroupNorm is the owned contiguous-group wrapper. ``tree_config``
+reads the decoder's widths from its shapes, for a decoder narrower than
+the encoder.
 
 ``original_name`` maps the original FLUX.1 layout, as in ``ae.safetensors``,
 to diffusers names, and the FLUX.2 one, which keeps its quant convs inside
@@ -58,6 +60,13 @@ class Flux1AEConfig:
     eps: float
     scaling_factor: float = 1.0     # model space is (z - shift) * scaling
     shift_factor: float = 0.0
+    decoder_block_out_channels: tuple = ()  # () when the encoder's
+
+    @property
+    def decoder_channels(self) -> tuple:
+        """Channels per level of the decoder, from the full resolution
+        side."""
+        return self.decoder_block_out_channels or self.block_out_channels
 
     @property
     def scale(self) -> int:
@@ -69,10 +78,12 @@ def config_from_shapes(shapes: dict) -> Flux1AEConfig | None:
     """The config from diffusers-named torch shapes, or None when the names
     are not this autoencoder's. A tree with both quant convs and the
     BatchNorm statistics is the FLUX.2 autoencoder's; with some of them it
-    is this one's with tensors the load does not expect."""
+    is this one's with tensors the load does not expect. The decoder is as
+    wide as the encoder."""
     if all(n in shapes for n in FLUX2_MARKS):
         return None
-    return tree_config(shapes)
+    cfg = tree_config(shapes)
+    return None if cfg is None or cfg.decoder_block_out_channels else cfg
 
 
 # Tensors the FLUX.1 autoencoder lacks and the FLUX.2 one has.
@@ -98,6 +109,15 @@ def tree_config(shapes: dict) -> Flux1AEConfig | None:
         if s is None or len(s) != 4:
             return None
         chans.append(int(s[0]))
+    # Up block i of diffusers counts from the latent side.
+    if _count(shapes, r"decoder\.up_blocks\.(\d+)\.") != levels:
+        return None
+    dec = []
+    for i in reversed(range(levels)):
+        s = shapes.get(f"decoder.up_blocks.{i}.resnets.0.conv1.weight")
+        if s is None or len(s) != 4:
+            return None
+        dec.append(int(s[0]))
     return Flux1AEConfig(
         in_channels=int(shapes["encoder.conv_in.weight"][1]),
         out_channels=int(shapes["decoder.conv_out.weight"][0]),
@@ -106,6 +126,7 @@ def tree_config(shapes: dict) -> Flux1AEConfig | None:
         layers_per_block=per_block,
         norm_num_groups=CONSTANTS["norm_num_groups"],
         eps=CONSTANTS["eps"],
+        decoder_block_out_channels=() if dec == chans else tuple(dec),
     )
 
 
@@ -344,7 +365,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, cfg: Flux1AEConfig):
         super().__init__()
-        ch = tuple(reversed(cfg.block_out_channels))
+        ch = tuple(reversed(cfg.decoder_channels))
         g, eps = cfg.norm_num_groups, cfg.eps
         self.conv_in = Conv2d(cfg.latent_channels, ch[0], 3, padding=1)
         self.mid_block = MidBlock(ch[0], g, eps)
@@ -398,6 +419,8 @@ class Flux1AE(nn.Module):
 
     def channels(self, op: str) -> int:
         """Channels at full resolution in ``op``, "decode" or "encode"."""
+        if op == "decode":
+            return self.config.decoder_channels[0]
         return self.config.block_out_channels[0]
 
     def decode(self, z: mx.array) -> mx.array:

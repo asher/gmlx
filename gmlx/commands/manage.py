@@ -279,13 +279,14 @@ def _image_refusal(report: remote.HeaderReport,
     return word if labeled else None
 
 
-def _image_companion_bytes(family: str | None) -> int | None:
-    """Bytes of the default encoder (with its vision tower) and VAE of an
-    image family, for the combined figure."""
-    from gmlx.image.catalog import RECIPES
+def _image_companion_bytes(family: str | None,
+                           ram: int | None) -> int | None:
+    """Bytes of the encoder (with its vision tower) and VAE a pull of an
+    image family takes on this Mac, for the combined figure."""
+    from gmlx.image.catalog import RECIPES, companion_bytes
     for r in RECIPES.values():
         if r.family == family:
-            return r.encoder_bytes + r.vae_bytes
+            return companion_bytes(r, ram)
     return None
 
 
@@ -315,9 +316,11 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         from gmlx.image.dtypes import chip_refusal
         from gmlx.image.registry import get_family
         chip_error = chip_refusal(image_family, get_family(image_family).title)
+    from gmlx.load.memfit import classify_fit, total_ram_bytes
+    ram = total_ram_bytes()
     combined = None
     if image == "dit" and size_bytes:
-        extra = _image_companion_bytes(image_family)
+        extra = _image_companion_bytes(image_family, ram)
         # The load gate counts the 16-bit tensors the DiT casts too.
         cast = 0
         if scans and image_family:
@@ -335,8 +338,6 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     from gmlx.load.preflight import hadamard_fold_error
     fold_err = hadamard_fold_error(report.arch, report.hadamard)
     runs = report.loadable_codecs and arch_ok and fold_err is None
-    from gmlx.load.memfit import classify_fit, total_ram_bytes
-    ram = total_ram_bytes()
     return {
         "ref": ref.raw,
         "kind": ref.kind,
@@ -1107,9 +1108,10 @@ config and served immediately. Refuses an unloadable GGUF unless --force.
 
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
 krea-2-turbo, flux-2-klein, flux-2-klein-base, flux-2-klein-9b,
-flux-2-klein-base-9b, flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base)
-pulls the DiT, its text encoder and its VAE, uses the parts your model
-folders already hold, and adds the model under image_models: in the config.
+flux-2-klein-base-9b, flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base,
+moss-image, moss-image-base) pulls the DiT, its text encoder and its VAE,
+uses the parts your model folders already hold, and adds the model under
+image_models: in the config.
 It prints the model's license before it downloads. The license of
 flux-2-klein-9b, flux-2-klein-base-9b and flux-2-klein-9b-kv allows
 non-commercial use only.
@@ -1162,7 +1164,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "qwen-image, qwen-image-turbo, krea-2-turbo, "
                          "flux-2-klein, flux-2-klein-base, flux-2-klein-9b, "
                          "flux-2-klein-base-9b, flux-2-klein-9b-kv, "
-                         "flux-3-klein, flux-3-klein-base) "
+                         "flux-3-klein, flux-3-klein-base, moss-image, "
+                         "moss-image-base) "
                          "pulls the model with its text encoder and VAE. See "
                          "the examples below.")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",

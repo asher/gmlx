@@ -67,7 +67,7 @@ TITLES = {"z_image": "Z-Image", "qwen_image21": "Qwen-Image 2.1",
           "krea2": "Krea 2", "flux2_klein": "FLUX.2 klein",
           "flux2_klein_9b": "FLUX.2 klein 9B",
           "flux2_klein_9b_kv": "FLUX.2 klein 9B KV",
-          "flux3_klein": "FLUX.3 klein"}
+          "flux3_klein": "FLUX.3 klein", "moss_image": "MOSS-Image"}
 
 
 def _served_families() -> set:
@@ -93,6 +93,29 @@ def test_the_readme_lists_every_family_the_pack_serves_with_its_parity_rows():
             assert any(ln.startswith(f"| {title}") for ln in table.splitlines()), \
                 (fam, name)
 
+
+
+def test_the_moss_image_step_rows_sit_under_headers_that_name_their_cells():
+    """MOSS-Image reads its step distances from stock fp32 against the
+    larger of the stock bf16 and in-process gmlx ones, so its rows sit in
+    a table of their own whose headers name both."""
+    parity = (_PACK / "README.md").read_text().split(
+        "### Parity with the stock loaders", 1)[1]
+    step = parity.split("The final image check", 1)[0]
+    header = None
+    rows = []
+    for ln in step.splitlines():
+        if ln.startswith("| Model |"):
+            header = ln
+        elif ln.startswith("| MOSS-Image |"):
+            rows.append((header, ln))
+    assert rows
+    for header, row in rows:
+        assert header is not None
+        cols = [c.strip() for c in header.strip("|").split("|")]
+        assert "gmlx in process, same step" in cols, header
+        assert "stock bf16, same step" in cols, header
+        assert len(row.strip("|").split("|")) == len(cols), row
 
 def _pack_files() -> list[str]:
     out = []
@@ -122,7 +145,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 10
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 11
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -203,6 +226,8 @@ _WIDGETS = {
     "ReferenceLatent": [],
     "GetImageSize": [],
     "FluxKVCache": [],
+    "ModelSamplingSD3": ["shift"],
+    "SkipLayerGuidanceDiTSimple": ["double_layers", "single_layers", "start_percent", "end_percent"],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 

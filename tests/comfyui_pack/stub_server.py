@@ -63,7 +63,13 @@ COMFY = {
                     "latent": {"channels": 128, "stride": 16, "patch": 1},
                     "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": True,
                     "context": ("txt_in.weight", 1)},
+    "moss_image": {"model_class": "MOSSImage", "image_model": "moss_image",
+                   "latent": {"channels": 128, "stride": 16, "patch": 1},
+                   "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
+                   "context": ("text_embedder.proj.weight", 1)},
 }
+# The families whose DiT leaves out the blocks a step names.
+SKIPS = {"moss_image"}
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
 # The schedule rules of the server's status, for the families whose
 # schedule follows the image size.
@@ -95,6 +101,8 @@ MODELS = {
                                                   "sigmas": None, "schedule": None}),
     "flux-3-klein-base": ("flux3_klein", "base", {"steps": 50, "cfg": 3.5, "shift": 6.93,
                                                   "sigmas": None, "schedule": None}),
+    "moss-image": ("moss_image", "sft", {"steps": 50, "cfg": 3.0, "shift": 5.0, "sigmas": None,
+                                         "schedule": None, "neg_skip": [22]}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
@@ -284,7 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 **contract, "gmlx_version": st.gmlx_version,
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
-                "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache"],
+                "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
+                             "skip_blocks"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
@@ -498,6 +507,10 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             st.event(kind="step_missing", run=rid, missing=len(set(missing)))
             return self._err(409, "not held", missing=sorted(set(missing)))
+        skip = req.get("skip")
+        if skip is not None and (MODELS[req["model"]][0] not in SKIPS or not isinstance(skip, list)
+                                 or not all(isinstance(i, int) for i in skip)):
+            return self._err(400, f"{req['model']!r} skips no blocks")
         sched = tensors.get("sample_sigmas")
         targets = None
         if st.flow_map(req["model"]):
@@ -531,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                              for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
-                 ref_cache=req.get("ref_cache", False),
+                 ref_cache=req.get("ref_cache", False), skip=skip,
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
                  fields=sorted(req), tensors=sorted(tensors), targets=targets,
                  sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)])

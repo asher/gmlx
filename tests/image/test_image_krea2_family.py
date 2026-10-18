@@ -48,6 +48,18 @@ def test_the_raw_file_stores_the_projector_flattened():
     assert fixture_view(TURBO).shape(kf.PROJECTOR) == (12, 1)
 
 
+def test_a_stored_shape_that_is_not_integers_is_refused():
+    """A flattened projector whose stored shape is not a list of integers
+    is refused with the reason, not a crash."""
+    kv = {**load_json(RAW)["kv"], kf.ORIG_SHAPE: ["1", "twelve"]}
+    view = fixture_view(RAW, kv=kv)
+    reason = (f"{kf.PROJECTOR} is flattened, and its stored shape "
+              "['1', 'twelve'] is not a list of integers")
+    for kw in ({}, {"family": "krea2"}):
+        msg = _refused(view, **kw)
+        assert "Krea 2 relative" in msg and reason in msg, kw
+
+
 def test_a_file_without_the_final_mlp_is_the_plain_layout():
     got = fp.identify(fixture_view(RAW, drop=kf.LAST_MLP))
     assert got.layout == "plain" and not got.config["last_mlp"]

@@ -10,6 +10,7 @@ Supported model families:
 - Z-Image (Z-Image-Turbo), text to image.
 - Qwen-Image 2.1 and Qwen-Image 2.1 Turbo, text to image and editing with up to 10 reference images.
 - Krea 2 Turbo, text to image.
+- MOSS-Image and MOSS-Image Base, text to image. The pack runs them on Apple GPUs without the OpenMOSS ComfyUI plugin or the ComfyUI-MOSS-GGUF bridge.
 - FLUX.2 klein 4B and FLUX.2 klein Base 4B, text to image and editing with up to 10 reference images.
 - FLUX.2 klein 9B and FLUX.2 klein Base 9B, text to image and editing with up to 10 reference images. Their license allows non-commercial use only.
 - FLUX.2 klein 9B KV, text to image and editing with up to 10 reference images, where the stock `Flux KV Cache` node makes the steps after the first reuse the keys and values of the references. Its license allows non-commercial use only.
@@ -41,12 +42,13 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has ten graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has eleven graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
 - `qwen-image-2.1-edit-two-references.json`: Qwen-Image 2.1 editing with two reference images through the stock `TextEncodeQwenImage21` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
 - `krea-2-turbo-t2i.json`: Krea 2 Turbo text to image through the stock `BasicScheduler`, `CFGGuider` and `SamplerCustomAdvanced`. It makes 1024x1024, and on a Mac with 16 GB set the latent to 512x512.
+- `moss-image-t2i.json`: MOSS-Image text to image in 50 steps at cfg 3, through the stock `ModelSamplingSD3` at shift 5 and `SkipLayerGuidanceDiTSimple`, which leaves block 22 out of the negative pass, as the OpenMOSS workflow does. `KSampler` samples on ComfyUI's `sgm_uniform` schedule, not on the release's schedule that gmlx samples on.
 - `flux-2-klein-t2i.json`: FLUX.2 klein text to image through the stock `Flux2Scheduler`, `CFGGuider` and `SamplerCustomAdvanced`. `Flux2Scheduler` gives the schedule FLUX.2 klein samples on, which follows the image size, so keep its width and height those of the latent.
 - `flux-2-klein-edit-two-references.json`: FLUX.2 klein editing with two reference images, each encoded by `VAEEncode` and put on the prompt and its zeroed negative by the stock `ReferenceLatent`. The first reference sets the image size. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images.
 - `flux-2-klein-9b-t2i.json`: FLUX.2 klein 9B text to image, the same graph on the 9B model. It needs a Mac with 24 GB or more.
@@ -98,9 +100,11 @@ Anything that would run inside the DiT forward in ComfyUI is refused with an err
 - attention overrides, RoPE options (`ScaleROPE`), weight wrappers and diffusion model wrappers;
 - ControlNet;
 - hook keyframes and scheduled CLIP hooks;
-- a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default).
+- a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default);
+- a MOSS-Image conditioning that masks some of its text rows, such as one from a text encoder other than `gmlx CLIP Loader`.
 
 The stock `Flux KV Cache` node on FLUX.2 klein 9B KV is not refused: the server keeps the keys and values of the references of each row of the batch from the first step of a run, the later steps of the run reuse those of each row, and the end of the run drops them.
+The stock `SkipLayerGuidanceDiTSimple` node on MOSS-Image is not refused when it names `single_layers` alone, with `start_percent` 0 and `end_percent` 1: the server leaves those blocks out of the negative pass of each step. It is refused with `double_layers`, another window, a linked widget or a block MOSS-Image lacks, and on any other model.
 A refusal from a node's own setup is reported on that node. A refusal during sampling is reported on the sampler and names the node upstream that caused it.
 Saving a gmlx MODEL, CLIP or VAE with the checkpoint save nodes is refused, since ComfyUI holds no weights for them.
 
@@ -121,7 +125,7 @@ That runs the wire, client and in-process ComfyUI suites on the cpu device, then
 
 ### Parity with the stock loaders
 
-Seven checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, and ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set. They need the model files and both loaders, so they are not part of `run_tests.py`.
+Eight checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set, and for MOSS-Image the OpenMOSS ComfyUI plugin with the ComfyUI-MOSS-GGUF bridge on ComfyUI's cpu device. They need the model files and both loaders, so they are not part of `run_tests.py`.
 
 The step check is the gate. The stock model in bf16 samples and records, at each step, the latent it is fed and the denoised output it returns. The gmlx MODEL and the stock model in fp32 are then fed the same latents and sigmas. At every step the relative L2 of the gmlx output from the stock bf16 output must be at most 1.5 times that of the stock fp32 output, or at most 2e-2 where that is larger. A fixed 2e-2 cannot hold on its own: the stock fp32 output is 0.11 from the stock bf16 output at the first step of Z-Image Turbo.
 
@@ -140,7 +144,14 @@ The step check is the gate. The stock model in bf16 samples and records, at each
 | FLUX.3 klein | 512x512, 16 steps, cfg 1, stock LoRA loader | 0.029 | 0.081 | 1.24 | pass |
 | FLUX.3 klein | 512x512, 16 steps, cfg 1, one reference | 0.017 | 0.018 | 1.26 | pass |
 
-On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2, FLUX.2 klein and FLUX.3 klein checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
+On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2, FLUX.2 klein, FLUX.3 klein and MOSS-Image checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
+
+The MOSS-Image check runs at 256x256 with the stock model on ComfyUI's cpu device, so its stock bf16 output comes from CPU torch arithmetic, a bf16 path the pack never takes. Its rows, in the table below, read from the stock fp32 output instead: the gmlx distance from it must be at most 1.5 times the larger of the stock bf16 distance and the distance of gmlx sampling in process, without ComfyUI, on the same latents and sigmas, or at most 2e-2. The gmlx MODEL equals the in-process run bit for bit at every step, and the in-process distance is the larger at every step, at the median 1.55 times the stock bf16 one in text to image and 1.58 times with the LoRA. With block 22 kept in the negative pass, the worst step reads 3.7 and 3.6 times its gate.
+
+| Model | Graph | gmlx from stock fp32, worst step | gmlx in process, same step | stock bf16, same step | Worst ratio to in process | Worst ratio to stock bf16 | Result |
+|---|---|---|---|---|---|---|---|
+| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass | 0.099 | 0.099 | 0.037 | 1.00 | 2.69 | pass |
+| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, stock LoRA loader | 0.064 | 0.064 | 0.036 | 1.00 | 2.16 | pass |
 
 The final image check is reported beside it: the gmlx image must be at least as close to the stock fp32 image as the stock bf16 image is, within 6 dB.
 
@@ -158,6 +169,8 @@ The final image check is reported beside it: the gmlx image must be at least as 
 | FLUX.3 klein, 512x512, 16 steps | 33.50 dB | 32.96 dB | pass |
 | FLUX.3 klein, 512x512, 16 steps, stock LoRA loader | 32.57 dB | 32.29 dB | pass |
 | FLUX.3 klein, 512x512, 16 steps, one reference | 50.41 dB | 49.28 dB | pass |
+| MOSS-Image, 256x256, 50 steps, cfg 3 | 29.75 dB | 27.44 dB | pass |
+| MOSS-Image, 256x256, 50 steps, cfg 3, stock LoRA loader | 36.86 dB | 35.15 dB | pass |
 
 A fault planted in the Z-Image step convention shows why the step check is the gate. With the velocity sign dropped, the worst step ratio is 188 and the final image reads 8.35 dB. With the timestep read 3% low, the worst step ratio is 7.1, while the final image reads 13.49 dB against a bound of 14.30 dB and fails by only 0.8 dB, so a smaller timestep fault would pass the final image check.
 

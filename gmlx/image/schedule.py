@@ -16,6 +16,10 @@
 # flux2_mu and flux2_sigmas follow compute_empirical_mu and get_schedule of
 # src/flux2/sampling.py of BFL's FLUX.2 reference at commit 50fe516
 # (Apache-2.0; see licenses/flux2-LICENSE).
+# SPDX-FileCopyrightText: Copyright 2026 OpenMOSS Team
+# moss_sigmas follows MOSSImageScheduler.set_timesteps of
+# pipeline_moss_image.py in OpenMOSS-Team/MOSS-Image-SFT at revision
+# fc5de0d5 (Apache-2.0; see licenses/MOSS-Image-LICENSE).
 """Sigma schedules, computed on the host in numpy with float32 results.
 
 A schedule is part of a family's numerics, so it must equal the reference
@@ -42,6 +46,13 @@ fixed for Turbo and of the image token count otherwise, with no stretch.
 FLUX.3 klein's reference forms ``torch.linspace(1.0, 0.0, n + 1)`` in
 float32, which ends at zero, and applies the static shift with its alpha,
 the same for every image size.
+
+MOSS-Image's reference shifts a float32 linspace statically and snaps
+each sigma to the training grid ``k / 1000``, which can leave fewer steps
+than asked for. It forms that grid with a float32 linspace too, from 1
+to ``1 / 1000``, and ``moss_sigmas`` forms the same one. ``k / 1000``
+rounded once differs from it by one ulp at 386 points, and would break a
+tie between two points the other way.
 
 FLUX.2 klein's reference forms the same float32 linspace and shifts it
 exponentially by a mu of the image token count and the step count. It
@@ -222,6 +233,28 @@ def flux2_sigmas(steps: int, tokens: int) -> np.ndarray:
     with np.errstate(divide="ignore"):
         d = _F32(1) / t - _F32(1)
         return ((_F32(1) / (e + d)) * e).astype(_F32)
+
+
+def moss_sigmas(steps: int, shift: float = 5.0,
+                train_steps: int = 1000) -> np.ndarray:
+    """MOSS-Image sigmas: the static shift of a linspace from 1 to
+    ``shift / (train_steps + shift - 1)``, each snapped to the nearest
+    point of the grid ``k / train_steps``, k = 1 to ``train_steps``, the
+    lower one on a tie, with consecutive repeats dropped and a final zero.
+    A schedule can have fewer than ``steps`` steps. The grid is the
+    reference's float32 linspace from 1 to ``1 / train_steps``, reversed.
+    """
+    if steps < 1:
+        raise RequestRefusal(f"steps must be at least 1, not {steps}")
+    v = linspace_f32(1.0, shift / (train_steps + shift - 1), steps)
+    s = shift_static(v, shift)
+    grid = linspace_f32(1.0, 1.0 / train_steps, train_steps)[::-1]
+    hi = np.minimum(np.searchsorted(grid, s, side="left"), train_steps - 1)
+    lo = np.maximum(hi - 1, 0)
+    pick = np.where(np.abs(s - grid[lo]) <= np.abs(grid[hi] - s), lo, hi)
+    snapped = grid[pick]
+    keep = np.concatenate([[True], snapped[1:] != snapped[:-1]])
+    return np.append(snapped[keep], _F32(0)).astype(_F32)
 
 
 def check_sigmas(sigmas) -> np.ndarray:

@@ -6,6 +6,12 @@ The states are read after a fixed layer and before the final norm. ``tap``
 walks the loaded model's own layer list and stops there. It changes and
 subclasses no class of the model.
 
+A family whose reference reads the last hidden state after the final
+norm, as MOSS-Image reads Qwen3.5, sets ``final_norm``. Its features come
+from the decoder stack's own call on a fresh cache, which builds the
+masks of its attention and recurrent layers, and not from ``tap``, whose
+block calls pass the one causal mask that only attention layers take.
+
 Each prompt is rendered into the family's fixed template, which the family
 owns and never reads from the GGUF chat template, and truncated to the
 family's token cap. It is encoded alone at batch 1 with no padding, so the
@@ -43,14 +49,17 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import importlib
 import json
 import os
+import threading
 import unicodedata
 from dataclasses import dataclass
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 
 from .fingerprint import ImageModelError, canonical_bf16
@@ -63,6 +72,17 @@ class IdentityTensor:
     gguf_name: str
     model_path: str
     sha256: str
+
+
+# GGUF norm roles of a block and their modules under it, by encoder arch.
+# output_norm is the stack's final norm.
+_NORMS = {
+    "qwen35": (("attn_norm", "input_layernorm"),
+               ("post_attention_norm", "post_attention_layernorm"),
+               ("attn_q_norm", "self_attn.q_norm"),
+               ("attn_k_norm", "self_attn.k_norm"),
+               ("ssm_norm", "linear_attn.norm")),
+}
 
 
 @dataclass(frozen=True)
@@ -95,6 +115,32 @@ class EncoderSpec:
     fp32_qkv: bool = False           # q, k and v cast to float32 after
                                      # their products, for the qk norm,
                                      # the rotary and the attention
+    final_norm: bool = False         # the features are the text model's
+                                     # output after its final norm, from
+                                     # its own call; tap_layers is (layers,)
+    trim: bool = False               # the prompt loses its leading and
+                                     # trailing whitespace, as a chat
+                                     # template's trim filter takes it
+    fp32_norms: bool = False         # an encode runs the RMSNorms of the
+                                     # decoder stack on their F32 GGUF
+                                     # weights, each norm's output in its
+                                     # input dtype; the loaded model keeps
+                                     # its own weights
+
+    def __post_init__(self):
+        if self.fp32_norms and self.arch not in _NORMS:
+            raise ValueError(f"{self.name}: no F32 norm map for arch "
+                             f"{self.arch!r}")
+        if not self.final_norm:
+            return
+        if tuple(self.tap_layers) != (self.layers,):
+            raise ValueError(f"{self.name} reads after the final norm, so "
+                             f"its tap is after layer {self.layers} alone")
+        if (self.drop or self.stack or self.pad_multiple or self.fp32_qkv
+                or self.activation is not None):
+            raise ValueError(f"{self.name} reads after the final norm, "
+                             "which takes no dropped rows, stacked taps, "
+                             "pads, float32 qkv or activation dtype")
 
     @property
     def template_id(self) -> str:
@@ -111,6 +157,12 @@ class EncoderSpec:
             where = ("each" if self.pad_position is None
                      else self.pad_position)
             text += f"\x00pad={self.pad_multiple},{self.pad_id},{where}"
+        if self.final_norm:
+            text += "\x00final_norm"
+        if self.trim:
+            text += "\x00trim"
+        if self.fp32_norms:
+            text += "\x00fp32_norms"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -174,11 +226,14 @@ def encoder_spec(family) -> EncoderSpec:
 
 
 def render(spec: EncoderSpec, prompt: str) -> str:
-    """The prompt in the family template. An empty prompt is rendered as
-    the spec's ``empty`` text."""
+    """The prompt in the family template, without its leading and
+    trailing whitespace for a spec that trims. An empty prompt is rendered
+    as the spec's ``empty`` text."""
     head, sep, tail = spec.template.partition("{}")
     if not sep:
         raise ValueError(f"template of {spec.name} has no prompt slot")
+    if spec.trim:
+        prompt = prompt.strip()
     return head + (prompt or spec.empty) + tail
 
 
@@ -226,12 +281,19 @@ def rows_at_most(spec: EncoderSpec, prompt: str) -> int:
     return max(0, n - spec.drop) + pad_rows(spec, n)
 
 
-def _text_stack(model):
-    """The embedding and the decoder layer list of a loaded text model,
-    or of the language model of a multimodal one."""
+def _inner(model):
+    """The decoder stack of a loaded text model, or of the language model
+    of a multimodal one."""
     inner = getattr(model, "model", None)
     if inner is None:
         inner = getattr(getattr(model, "language_model", None), "model", None)
+    return inner
+
+
+def _text_stack(model):
+    """The embedding and the decoder layer list of a loaded text model,
+    or of the language model of a multimodal one."""
+    inner = _inner(model)
     embed = getattr(inner, "embed_tokens", None)
     layers = getattr(inner, "layers", None)
     if embed is None or layers is None:
@@ -298,6 +360,28 @@ def tap(model, ids, *, layers: tuple, activation: str | None = None,
     return [out[k] for k in layers]
 
 
+def final_hidden(model, ids) -> mx.array:
+    """The output (1, L, hidden) of the decoder stack after its final
+    norm, for one prompt's token ids, from the stack's own call at batch 1
+    on a fresh cache, as a chat prefill starts. The call builds its
+    attention and recurrent masks, and the positions of a text prompt
+    start at 0. The call of the wrapping language model is not used: it
+    applies the output head, and a multimodal one keeps the positions of
+    its last call, which a resident chat model needs for its own next
+    one."""
+    inner = _inner(model)
+    if inner is None or not callable(inner):
+        raise TypeError(f"{type(model).__name__} has no decoder stack to "
+                        "call")
+    owner = model if hasattr(model, "make_cache") else getattr(
+        model, "language_model", None)
+    make_cache = getattr(owner, "make_cache", None)
+    if make_cache is None:
+        raise TypeError(f"{type(model).__name__} makes no cache")
+    x = mx.array(np.asarray(ids, np.int32).reshape(1, -1))
+    return inner(x, cache=make_cache())
+
+
 class _Float32Out:
     """A product whose output is cast to float32."""
 
@@ -333,6 +417,140 @@ def float32_qkv(model):
         for attn, products in found:
             for name, p in zip(_QKV, products):
                 setattr(attn, name, p)
+
+
+@functools.lru_cache(maxsize=4)
+def _gguf_norms(path: str, arch: str, stamp: tuple) -> tuple:
+    """``(module path, F32 weight)`` of each norm _NORMS maps for ``arch``
+    in the GGUF at ``path``, the path under the decoder stack. ``stamp``
+    is the file's size and mtime, so a changed file reads again."""
+    roles = dict(_NORMS[arch])
+    out = []
+    for name, t in _header_view(path).tensors.items():
+        parts = name.split(".")
+        if name == "output_norm.weight":
+            where = "norm"
+        elif (len(parts) == 4 and parts[0] == "blk" and parts[3] == "weight"
+              and parts[2] in roles):
+            where = f"layers.{parts[1]}.{roles[parts[2]]}"
+        else:
+            continue
+        if t.codec != "F32" or t.path is None:
+            raise EncoderMismatchError(
+                f"{path}: {name} is {t.codec}, not the F32 norm weight the "
+                "encoder reads")
+        fd = os.open(t.path, os.O_RDONLY)
+        try:
+            raw = os.pread(fd, t.nbytes, t.offset)
+        finally:
+            os.close(fd)
+        out.append((where, np.frombuffer(raw, np.float32).copy()))
+    return tuple(out)
+
+
+def _module(inner, where: str):
+    obj = inner
+    for part in where.split("."):
+        if obj is None:
+            break
+        obj = obj[int(part)] if part.isdigit() else getattr(obj, part, None)
+    return obj
+
+
+def read_norms(path: str, model, spec: EncoderSpec) -> dict:
+    """The F32 norm weights of the encoder GGUF at ``path`` by module path
+    under the decoder stack of ``model``. Each must round to the weight
+    the model holds, so they are the model's own norms."""
+    st = os.stat(path)
+    inner = _inner(model)
+    out = {}
+    for where, a in _gguf_norms(os.path.abspath(path), spec.arch,
+                                (st.st_size, st.st_mtime_ns)):
+        mod = _module(inner, where)
+        held = getattr(mod, "weight", None)
+        w = mx.array(a)
+        if (not isinstance(held, mx.array) or held.shape != w.shape
+                or not mx.array_equal(w.astype(held.dtype), held).item()):
+            raise EncoderMismatchError(
+                f"{path}: the norm at {where} is not the loaded encoder's")
+        out[where] = w
+    if not out:
+        raise EncoderMismatchError(f"{path}: no norm weights to read")
+    return out
+
+
+class _Float32RMSNorm(nn.RMSNorm):
+    """An RMSNorm on an F32 weight whose output keeps its input dtype."""
+
+    def __init__(self, weight: mx.array, eps: float):
+        super().__init__(weight.shape[0], eps=eps)
+        self.weight = weight
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.rms_norm(x, self.weight, self.eps).astype(x.dtype)
+
+
+# Models whose norms float32_norms has swapped: id of the decoder stack
+# to [entries, norms, swaps]. The first entry swaps, the last exit
+# restores, so nested or interleaved entries leave the model's own.
+_NORM_SWAPS: dict = {}
+_NORM_LOCK = threading.Lock()
+
+
+def _swap_norms(inner, norms: dict) -> list:
+    swaps = []
+    for where, w in norms.items():
+        head, _, attr = where.rpartition(".")
+        parent = _module(inner, head) if head else inner
+        mod = getattr(parent, attr)
+        if isinstance(mod, nn.RMSNorm):
+            swaps.append((parent, attr, mod, _Float32RMSNorm(w, mod.eps)))
+        else:
+            swaps.append((mod, "weight", mod.weight, w))
+    try:
+        for obj, attr, _, new in swaps:
+            setattr(obj, attr, new)
+    except BaseException:
+        _restore_norms(swaps)
+        raise
+    return swaps
+
+
+def _restore_norms(swaps: list) -> None:
+    for obj, attr, old, _ in reversed(swaps):
+        setattr(obj, attr, old)
+
+
+@contextlib.contextmanager
+def float32_norms(model, norms: dict):
+    """Run an encode with each norm of ``norms`` on its F32 weight, and
+    restore the model's own norms after. An RMSNorm is swapped for one
+    whose output keeps its input dtype; another norm, such as a gated
+    one whose output takes the dtype of its input, keeps its module and
+    gets the weight. An entry while the model is swapped shares the swap,
+    which the last exit restores; one with other norms is refused."""
+    inner = _inner(model)
+    key = id(inner)
+    with _NORM_LOCK:
+        held = _NORM_SWAPS.get(key)
+        if held is None:
+            _NORM_SWAPS[key] = [1, norms, _swap_norms(inner, norms)]
+        elif held[1] is not norms and (
+                held[1].keys() != norms.keys()
+                or any(held[1][k] is not v for k, v in norms.items())):
+            raise RuntimeError("the encoder model already runs on other F32 "
+                               "norms")
+        else:
+            held[0] += 1
+    try:
+        yield
+    finally:
+        with _NORM_LOCK:
+            held = _NORM_SWAPS[key]
+            held[0] -= 1
+            if not held[0]:
+                del _NORM_SWAPS[key]
+                _restore_norms(held[2])
 
 
 class _PadRope:
@@ -429,11 +647,15 @@ def vision_rope(model, spec: EncoderSpec):
 
 
 def _model_param(model, path: str):
-    obj = model
-    for part in path.split("."):
-        obj = obj[int(part)] if part.isdigit() else getattr(obj, part, None)
+    """The tensor at ``path`` in a loaded model. A path under ``model.``
+    starts at the decoder stack, which a multimodal or wrapped text model
+    holds under its language model."""
+    head, _, rest = path.partition(".")
+    obj = _inner(model) if head == "model" else getattr(model, head, None)
+    for part in rest.split(".") if rest else ():
         if obj is None:
-            return None
+            break
+        obj = obj[int(part)] if part.isdigit() else getattr(obj, part, None)
     return obj
 
 
@@ -610,6 +832,9 @@ class EncoderHandle:
         self.weights_owner = weights_owner
         self.dtype_name = spec.activation or _float_dtype(model)
         self.adapters = ""          # text adapter state, in the cache key
+        # F32 norm weights an encode runs on, by module path; see
+        # EncoderSpec.fp32_norms.
+        self.norms: dict = {}
 
     @property
     def released(self) -> bool:
@@ -636,11 +861,17 @@ class EncoderHandle:
         spec = self.spec
         ids = token_ids(spec, self.tokenizer, prompt)
         pads = pad_rows(spec, len(ids))
-        with vision_rope(self.model, spec):
-            hidden = tap(self.model, ids, layers=spec.tap_layers,
-                         activation=spec.activation, pad=pads,
-                         pad_id=spec.pad_id, pad_position=spec.pad_position,
-                         fp32_qkv=spec.fp32_qkv)
+        norms = (float32_norms(self.model, self.norms) if self.norms
+                 else contextlib.nullcontext())
+        with vision_rope(self.model, spec), norms:
+            if spec.final_norm:
+                hidden = [final_hidden(self.model, ids)]
+            else:
+                hidden = tap(self.model, ids, layers=spec.tap_layers,
+                             activation=spec.activation, pad=pads,
+                             pad_id=spec.pad_id,
+                             pad_position=spec.pad_position,
+                             fp32_qkv=spec.fp32_qkv)
             mx.eval(hidden)
         return TextTap(ids=tuple(ids), hidden=tuple(hidden),
                        template_id=spec.template_id,
@@ -767,20 +998,35 @@ def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
     check_encoder(model, config, spec, override=True)
     _drop_head(model)
     tower = " with its vision tower" if mmproj is not None else ""
-    log(f"[image] text encoder {spec.name}{tower}, tap after layer "
-        f"{', '.join(str(n) for n in spec.tap_layers)} of {spec.layers}")
+    read = ("read after the final norm" if spec.final_norm else
+            "tap after layer " + ", ".join(str(n) for n in spec.tap_layers)
+            + f" of {spec.layers}")
+    log(f"[image] text encoder {spec.name}{tower}, {read}")
     shards = find_split_shards(path)
     key = (weights_source_key(*shards) if mmproj is None
            else weights_source_key(*shards, mmproj))
-    return EncoderHandle(model, tokenizer, spec, owned=True, source_key=key,
-                         weights_owner=owner, processor=processor)
+    handle = EncoderHandle(model, tokenizer, spec, owned=True,
+                           source_key=key, weights_owner=owner,
+                           processor=processor)
+    if spec.fp32_norms:
+        handle.norms = read_norms(path, model, spec)
+    return handle
 
 
 def borrow_encoder(model, tokenizer, config: dict, spec: EncoderSpec, *,
-                   override: bool = False) -> EncoderHandle:
+                   override: bool = False,
+                   gguf: str | None = None) -> EncoderHandle:
     """Wrap a resident chat model as the encoder. It is checked against the
-    spec and never released."""
+    spec and never released. ``gguf`` is the chat model's file, which a
+    spec with F32 norms reads them from; without it an encode runs on the
+    model's own norms."""
     check_encoder(model, config, spec, override=override)
     digests = json.dumps(model_identity(model, spec), sort_keys=True)
-    key = "borrowed:" + hashlib.sha256(digests.encode()).hexdigest()
-    return EncoderHandle(model, tokenizer, spec, owned=False, source_key=key)
+    norms = (read_norms(gguf, model, spec) if spec.fp32_norms and gguf
+             else {})
+    key = "borrowed:" + hashlib.sha256(
+        (digests + ("\x00fp32_norms" if norms else "")).encode()).hexdigest()
+    handle = EncoderHandle(model, tokenizer, spec, owned=False,
+                           source_key=key)
+    handle.norms = norms
+    return handle
