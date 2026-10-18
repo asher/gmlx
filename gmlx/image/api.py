@@ -70,6 +70,7 @@ class SamplerDefaults:
     shift: float
     size: tuple = (1024, 1024)      # width, height
     strength: float = 0.6           # img2img denoise, as diffusers sets it
+    neg_skip: tuple = ()            # blocks the negative pass skips
 
 
 def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
@@ -80,7 +81,8 @@ def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
     row = get_family(family).sampling_row(variant)
     if row is None:
         return None
-    return SamplerDefaults(steps=row.steps, cfg=row.cfg, shift=row.shift)
+    return SamplerDefaults(steps=row.steps, cfg=row.cfg, shift=row.shift,
+                           neg_skip=tuple(row.neg_skip))
 
 
 def fixed_steps(family, variant: str) -> int | None:
@@ -878,7 +880,8 @@ def _table_id(pipe: ImagePipeline, patch_table) -> str:
 def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
                  patch_table=None, target=None,
                  time: str = "reference",
-                 ref_cache: dict | None = None) -> mx.array:
+                 ref_cache: dict | None = None,
+                 skip=()) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
     ``target`` is the sigma the step goes to, likewise, which a flow map
@@ -898,7 +901,8 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     under its conditioning and its place in the call. That is how
     ComfyUI's Flux KV Cache node samples. A family whose step runs in
     parts takes ``ref_cache`` under another time rule than the reference's
-    only."""
+    only. ``skip`` holds blocks, zero-based, that every row of the call
+    leaves out, for a DiT that skips blocks."""
     if time not in getattr(pipe.dit, "time_rules", ("reference",)):
         raise ValueError(f"the {pipe.family.title} DiT has no time rule "
                          f"{time!r}")
@@ -910,6 +914,9 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
             raise ValueError(f"the {pipe.family.title} DiT caches its "
                              f"references by itself under the reference's "
                              f"time rule")
+    skip = tuple(sorted({int(i) for i in skip}))
+    if skip and not getattr(pipe.dit, "skips_blocks", False):
+        raise ValueError(f"the {pipe.family.title} DiT skips no blocks")
     table = _table_id(pipe, patch_table)
     x = mx.array(latents).astype(mx.float32)
     if x.ndim != 4:
@@ -929,7 +936,8 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
     with state_scope(pipe, rows):
         out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table,
-                    None if tgt is None else tgt[i], time, ref_cache, i)
+                    None if tgt is None else tgt[i], time, ref_cache, i,
+                    skip)
                for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
@@ -1109,15 +1117,17 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
          cond: Conditioning, table, target=None,
          time: str = "reference", ref_cache: dict | None = None,
-         row: int = 0) -> mx.array:
+         row: int = 0, skip: tuple = ()) -> mx.array:
     """One row. A DiT that takes reference images gets the tokens of the
     conditioning's reference latents from its ``references``, and a flow
     map the ``target`` its modulation reads. A time rule other than the
     reference's reaches the DiT through its modulation, and a family whose
     step runs in parts runs it whole then. ``ref_cache`` is that of
-    ``denoise_step``, and ``row`` the row's place in its call."""
+    ``denoise_step``, and ``row`` the row's place in its call. ``skip``
+    reaches the DiT only when it holds a block."""
     dit = pipe.dit
     modulated = hasattr(dit, "modulation") and hasattr(dit, "caption")
+    kw = {"skip": skip} if skip else {}
     if time != "reference" and not modulated:
         raise ValueError(f"the {pipe.family.title} DiT takes the time rule "
                          f"{time!r} through no modulation")
@@ -1125,15 +1135,19 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         if target is not None:
             raise ValueError(f"the {pipe.family.title} DiT takes no target "
                              f"time")
+        if skip:
+            raise ValueError(f"the {pipe.family.title} step parts skip no "
+                             f"blocks")
         return _parts_row(pipe, pipe.family.step, x, sigma, cond, table)
     _need_latents(pipe, cond)
-    kw = {}
     if cond.ref_latents:
         if not hasattr(dit, "references"):
             raise ValueError(f"the {pipe.family.title} DiT takes no "
                              f"reference images")
         refs = dit.references([mx.array(z)[None] for z in cond.ref_latents])
         if ref_cache is not None:
+            if skip:
+                raise ValueError("a cached reference row skips no blocks")
             return _cached_row(pipe, x, sigma, cond, table, time, refs,
                                ref_cache, _ref_key(cond, row))
         kw["refs"] = refs
@@ -1269,7 +1283,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
            seed: int | None = None, noise=None, sampler: str = "euler",
            sigmas=None, init_latents=None, denoise: float = 1.0, mask=None,
            patch_table=None, on_step=None, should_stop=None,
-           plan=None) -> mx.array:
+           plan=None, neg_skip=None) -> mx.array:
     """Sample latents for ``cond``. With ``init_latents`` the run is
     img2img from strength ``denoise``, and a ``mask`` (1 where the image
     changes) makes it inpainting. ``noise`` is (B, C, H, W) float32, else
@@ -1281,10 +1295,17 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     rounds as its reference loop does. ``plan`` is the memory plan of the
     request: where it runs one row at a time, a guided step evaluates the
     positive velocity before it runs the negative row, and the two give
-    the latents of a step that evaluates both together."""
+    the latents of a step that evaluates both together. ``neg_skip`` holds
+    the blocks the negative pass of a guided step skips, the variant's
+    sampling row's when None."""
     patch_table = _table_id(pipe, patch_table)
     if cfg is None:
         cfg = pipe.defaults.cfg
+    if neg_skip is None:
+        row = sampler_defaults(pipe.family.name, pipe.variant)
+        neg_skip = () if row is None or cfg == 1.0 else row.neg_skip
+    elif neg_skip and cfg == 1.0:
+        raise ValueError("neg_skip needs guidance: cfg is 1.0")
     flow_map = bool(getattr(pipe.dit.cfg, "flow_map", False))
     check_sampling(pipe.family, pipe.variant, flow_map, cfg, sampler)
     if cfg != 1.0 and neg is None:
@@ -1360,7 +1381,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
                     mx.eval(v)
                 v = guide(v, denoise_step(pipe, x, s[i], neg,
                                           patch_table=patch_table,
-                                          target=to), cfg, act)
+                                          target=to, skip=neg_skip),
+                          cfg, act)
             x = smp.step(x, v, i)
             if m is not None:
                 x = inpaint_blend(x, m, noised(s[i + 1], noise, init))

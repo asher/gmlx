@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family, VariantRow
+from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
 
 TITLE = "MOSS-Image"
 
@@ -109,6 +109,18 @@ _SFT = VariantRow("sft", _REPO, _REVISION,
                   tuple(f"MOSS-Image-SFT-{q}.gguf" for q in _QUANTS))
 _BASE = VariantRow("base", _REPO, _REVISION,
                    tuple(f"MOSS-Image-Base-{q}.gguf" for q in _QUANTS))
+# The release's sampling for both variants: 50 steps at guidance 3,
+# which is gmlx's cfg, as MOSSImagePipeline guides by u + g (c - u), with
+# block 22 left out of the negative pass. SFT from the pipeline's defaults
+# and README at the constants' revision, Base from the user guide.
+SAMPLING = {
+    "sft": SamplingRow(50, 3.0, 5.0, "OpenMOSS-Team/MOSS-Image-SFT",
+                       "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+                       neg_skip=(22,)),
+    "base": SamplingRow(50, 3.0, 5.0, "github.com/OpenMOSS/MOSS-Image",
+                        "c1355e6b1986dfe8fba3c0455783a05899212342",
+                        neg_skip=(22,)),
+}
 VARIANTS = {
     "96b09d61487460c3f321abd04a71a2ca989025150226ca1c30be7a57c0d86c60": _SFT,
     "22e89962212b91739f15827592163257e8717b26870e57d446e48846259c2626": _BASE,
@@ -271,4 +283,5 @@ FAMILY = Family(
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     schedule=schedule,
+    sampling=SAMPLING,
 )

@@ -314,6 +314,9 @@ class Caption:
 
 
 class MossImageDiT(nn.Module):
+    # A guided step can leave blocks out of its negative pass.
+    skips_blocks = True
+
     def __init__(self, config: dict):
         super().__init__()
         cfg = MossConfig.from_dict(config)
@@ -403,12 +406,18 @@ class MossImageDiT(nn.Module):
     def __call__(self, latents: mx.array, sigma, feats: mx.array | None,
                  taps: dict | None = None, *,
                  mod: StepModulation | None = None,
-                 caption: Caption | None = None) -> mx.array:
+                 caption: Caption | None = None, skip=()) -> mx.array:
         """Velocity (B, C, H, W) fp32 for latents (B, C, H, W) at
         ``sigma``, with text features (B, L, text dim). ``mod`` and
         ``caption``, from ``modulation`` and ``caption``, stand in for
-        the work they hold. ``taps`` collects the output of every block by
-        module path."""
+        the work they hold. The blocks in ``skip``, zero-based, are left
+        out. ``taps`` collects the output of every block by module
+        path."""
+        skip = frozenset(int(i) for i in skip)
+        if any(not 0 <= i < len(self.layers) for i in skip):
+            raise ValueError(f"MOSS-Image skips blocks 0 to "
+                             f"{len(self.layers) - 1}, not "
+                             f"{sorted(skip)}")
         b, c, h, w = latents.shape
         if mod is None:
             mod = self.modulation(sigma, b)
@@ -426,6 +435,8 @@ class MossImageDiT(nn.Module):
         x = mx.concatenate([img, txt], axis=1)
         cos, sin = self.rope_tables(h, w, txt.shape[1])
         for i, blk in enumerate(self.layers):
+            if i in skip:
+                continue
             x = blk(x, mod.blocks, cos, sin)
             pacing.point(x)
             if taps is not None:

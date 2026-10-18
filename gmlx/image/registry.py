@@ -31,7 +31,8 @@ class SamplingRow:
     steps, as (level, steps) pairs; the variant's own steps are high.
     ``sigmas`` is a fixed schedule without its final zero, for a variant
     distilled to it: such a variant runs that many steps and no other
-    count."""
+    count. ``neg_skip`` holds the blocks, zero-based, that the negative
+    pass of a guided step skips."""
     steps: int
     cfg: float
     shift: float
@@ -39,6 +40,7 @@ class SamplingRow:
     revision: str
     quality: tuple = ()
     sigmas: tuple = ()
+    neg_skip: tuple = ()
 
 
 @dataclass(frozen=True)

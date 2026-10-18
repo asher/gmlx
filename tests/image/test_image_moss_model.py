@@ -106,8 +106,9 @@ def _attend(q, k, v, rope, qn, kn, heads):
     return np.einsum("hqk,khd->qhd", s, v).reshape(n, -1)
 
 
-def reference(p, lat, sigma, feats, heads=2):
-    """Velocity (B, C, H, W) float64 of the release's forward."""
+def reference(p, lat, sigma, feats, heads=2, skip=()):
+    """Velocity (B, C, H, W) float64 of the release's forward, the blocks
+    of ``skip`` left out."""
     b, c, h, w = lat.shape
     t = np.float64(np.float32(sigma) * np.float32(1000))
     half = 8
@@ -137,6 +138,8 @@ def reference(p, lat, sigma, feats, heads=2):
         tok = lat[j].reshape(c, h * w).T.astype(np.float64)
         z = np.concatenate([_lin(p, "video_embedder", tok), x])
         for i in range(len([k for k in p if k.endswith("proj.o.weight")])):
+            if i in skip:
+                continue
             pre = f"layers.{i}."
             sa, ca, ga, sf, cf, gf = mod
             y = _rms(z, p[pre + "norm1.weight"]) * (1 + ca) + sa
@@ -412,3 +415,95 @@ def test_the_sampler_runs_the_tiny_model_on_the_snapped_schedule():
     assert x.shape == (1, 8, H, W)
     assert bool(mx.all(mx.isfinite(x)).item())
     assert len(seen) == len(moss_sigmas(8)) - 1
+
+
+def test_a_skipped_block_is_left_out_as_the_release_leaves_it():
+    model, p = _tiny()
+    lat, feats = _inputs()
+    with mx.stream(mx.cpu):
+        got = np.array(model(mx.array(lat), np.reshape(SIGMA, (1,)),
+                             mx.array(feats), skip=(1,)), np.float64)
+    want = reference(p, lat, SIGMA, feats, skip=(1,))
+    whole = reference(p, lat, SIGMA, feats)
+    rel = lambda a, b: np.linalg.norm(a - b) / np.linalg.norm(b)  # noqa: E731
+    assert rel(got, want) < TOL
+    assert rel(whole, want) > 25 * TOL
+    with pytest.raises(ValueError, match="skips blocks 0 to 1"):
+        model(mx.array(lat), np.reshape(SIGMA, (1,)), mx.array(feats),
+              skip=(2,))
+
+
+def _cond(rows: int, seed: int):
+    from gmlx.image import api
+
+    rng = np.random.default_rng(seed)
+    f = rng.standard_normal((rows, 24)).astype(np.float32)
+    return api.Conditioning(mx.array(f), f"moss-{rows}-{seed}")
+
+
+def test_a_guided_run_skips_the_blocks_in_its_negative_pass_alone():
+    """Each pass runs at its own text rows, the negative pass without the
+    blocks of neg_skip, and the two combine in float32 by the guide of
+    the release."""
+    from gmlx.image import api
+    from gmlx.image.schedule import moss_sigmas
+
+    model, _ = _tiny()
+    pipe = api.ImagePipeline(dit=model, family=get_family("moss_image"),
+                             variant="sft")
+    pos, neg = _cond(5, 1), _cond(3, 2)
+    noise = np.random.default_rng(4).standard_normal(
+        (1, 8, H, W)).astype(np.float32)
+    s = moss_sigmas(4)
+
+    def by_hand(skip):
+        x = mx.array(noise)
+        for i in range(len(s) - 1):
+            sig = np.reshape(s[i], (1,))
+            vp = model(x, sig, pos.features[None])
+            vn = model(x, sig, neg.features[None], skip=skip)
+            v = api.guide(vp, vn, 3.0)
+            x = x + (float(s[i + 1]) - float(s[i])) * v
+        return np.array(x)
+
+    def run(**kw):
+        return np.array(api.sample(pipe, pos, neg=neg, cfg=3.0,
+                                   height=16 * H, width=16 * W, steps=4,
+                                   noise=noise, **kw))
+
+    with mx.stream(mx.cpu):
+        skipped, plain = run(neg_skip=(1,)), run(neg_skip=())
+        want, want_plain = by_hand((1,)), by_hand(())
+    assert np.allclose(skipped, want, atol=1e-5)
+    assert np.allclose(plain, want_plain, atol=1e-5)
+    assert np.abs(skipped - plain).max() > 1e-2
+    with pytest.raises(ValueError, match="neg_skip needs guidance"):
+        api.sample(pipe, pos, cfg=1.0, height=16 * H, width=16 * W,
+                   steps=4, noise=noise, neg_skip=(1,))
+
+
+def test_both_variants_guide_at_3_with_block_22_left_out_of_the_negative():
+    from gmlx.image import api
+
+    for variant in ("sft", "base"):
+        d = api.sampler_defaults("moss_image", variant)
+        assert (d.steps, d.cfg, d.neg_skip) == (50, 3.0, (22,))
+
+
+def test_a_dit_that_skips_no_blocks_refuses_a_skip_set():
+    from gmlx.image import api
+
+    model, _ = _tiny()
+
+    class Plain:
+        cfg = model.cfg
+        act_dtype = mx.float32
+
+        def __call__(self, *a, **k):
+            return model(*a, **k)
+
+    pipe = api.ImagePipeline(dit=Plain(), family=get_family("moss_image"),
+                             variant="sft")
+    lat = mx.array(_inputs()[0])
+    with pytest.raises(ValueError, match="DiT skips no blocks"):
+        api.denoise_step(pipe, lat, SIGMA, _cond(5, 1), skip=(1,))
