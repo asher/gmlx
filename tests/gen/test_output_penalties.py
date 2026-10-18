@@ -7,12 +7,15 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 from gmlx._vendor.mlx_lm import sample_utils as lm_sampling
+from gmlx._vendor.mlx_lm.generate import generate_step, speculative_generate_step
 from gmlx._vendor.mlx_vlm import sample_utils as vlm_sampling
 from gmlx._vendor.mlx_vlm.generate import ar
 from gmlx._vendor.mlx_vlm.server import schemas
 from pydantic import ValidationError
 
 from gmlx.spec.row_procs import SpecRowProcessors
+
+from test_copy_fixes import _tiny_llama
 
 V = 64
 PROMPT = [7, 8, 9]
@@ -158,3 +161,27 @@ def test_batched_rows_count_only_their_own_output():
     out = [batch._step()[0] for _ in range(30)]
     assert [t[0] for t in out] == list(range(30))
     assert [t[1] for t in out] == list(range(1, 31))
+
+
+def test_a_drafter_with_a_narrower_vocab_shares_the_penalties():
+    # mlx-lm runs the same processors on the drafter's 56-wide logits and
+    # the target's 64-wide ones, over a history that holds target tokens
+    # the drafter cannot emit.
+    target, _ = _tiny_llama(64, seed=0)
+    drafter, _ = _tiny_llama(56, seed=1)
+    prompt = mx.array([3, 9, 27, 40], dtype=mx.int32)
+
+    def greedy(logprobs):
+        return mx.argmax(logprobs, axis=-1)
+
+    def procs():
+        return lm_sampling.make_logits_processors(presence_penalty=4.0)
+
+    plain = [int(t) for t, _ in generate_step(
+        prompt, target, max_tokens=24, sampler=greedy,
+        logits_processors=procs())]
+    spec = [int(t) for t, _, _ in speculative_generate_step(
+        prompt, target, drafter, num_draft_tokens=3, max_tokens=24,
+        sampler=greedy, logits_processors=procs())]
+    assert spec == plain
+    assert len(set(plain)) == len(plain) and max(plain) >= 56
