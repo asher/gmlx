@@ -846,6 +846,7 @@ def run_gen(opts: GenOptions) -> int:
         ex = ThreadPoolExecutor(max_workers=opts.concurrency)
         queue = iter(todo)
         pending: set = set()
+        order: dict = {}
         with open(out, "a", encoding="utf-8") as ofh:
             try:
                 # twice the concurrency is in flight at a time, refilled as
@@ -856,11 +857,15 @@ def run_gen(opts: GenOptions) -> int:
                         item = next(queue, None)
                         if item is None:
                             break
-                        pending.add(ex.submit(work, *item))
+                        fut = ex.submit(work, *item)
+                        order[fut] = item[0]
+                        pending.add(fut)
                     if not pending:
                         break
                     finished, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    for fut in finished:
+                    # replies that land in one wake are written in prompt
+                    # order, so an interrupt keeps every earlier reply
+                    for fut in sorted(finished, key=order.pop):
                         try:
                             i, r, c = fut.result()
                         except Exception as e:  # noqa: BLE001 - one bad request never ends the run
