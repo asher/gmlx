@@ -117,8 +117,25 @@ def gguf_state(torch, path: Path, blocks: int | None):
     return out, census, bands
 
 
+_TYPED: dict = {}
+
+
+def typed(dtype):
+    """A GGUFParameter whose ``dtype`` reads as the compute dtype. The
+    class casts each block's input to ``proj["q"].weight.dtype``, which on
+    the stored bytes would be uint8."""
+    from diffusers.quantizers.gguf.utils import GGUFParameter
+
+    if dtype not in _TYPED:
+        _TYPED[dtype] = type(f"GGUFParameter_{dtype}".replace(".", "_"),
+                             (GGUFParameter,),
+                             {"dtype": property(lambda self: dtype)})
+    return _TYPED[dtype]
+
+
 def build(torch, rel, state: dict, config: dict, mode: str):
-    """The class on ``state``, quantized leaves as GGUFLinear."""
+    """The class on ``state``, quantized leaves as GGUFLinear over a view
+    of the stored bytes typed for the mode."""
     from accelerate import init_empty_weights
     from diffusers.quantizers.gguf.utils import (GGUFParameter,
                                                  _replace_with_gguf_linear)
@@ -134,7 +151,9 @@ def build(torch, rel, state: dict, config: dict, mode: str):
     for name, v in state.items():
         owner, _, leaf = name.rpartition(".")
         mod = model.get_submodule(owner)
-        if not isinstance(v, GGUFParameter):
+        if isinstance(v, GGUFParameter):
+            v = typed(dtype)(v.as_tensor(), quant_type=v.quant_type)
+        else:
             v = torch.nn.Parameter(v.to(dtype), requires_grad=False)
         mod._parameters[leaf] = v
     assert not any(p.is_meta for p in model.parameters())
