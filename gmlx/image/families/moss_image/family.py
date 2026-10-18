@@ -282,6 +282,9 @@ FAMILY = Family(
     fp32_keep=("rope.bands",),
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
+    # A file of neither release, as a fine-tune, samples as SFT: both
+    # releases guide alike, block 22 left out of the negative pass.
+    unknown_variant="sft",
     schedule=schedule,
     sampling=SAMPLING,
 )

@@ -171,3 +171,17 @@ def test_a_file_no_family_takes_keeps_the_generic_refusal():
     assert mf.fingerprint(view) is None
     assert _refused(view, family="moss_image").startswith(
         "not a MOSS-Image file. unrecognized image GGUF")
+
+
+def test_a_file_of_no_known_variant_samples_as_sft():
+    """A file whose identity tensors match neither release, here a header
+    with no data to hash, samples with the SFT row: 50 steps at guidance
+    3, block 22 left out of the negative pass, as both releases do."""
+    from gmlx.image import api
+
+    got = fp.identify(fixture_view(SFT))
+    assert got.variant == "unknown"
+    assert got.family.unknown_variant == "sft"
+    d = api.sampler_defaults("moss_image", got.variant)
+    assert d is not None
+    assert (d.steps, d.cfg, d.shift, d.neg_skip) == (50, 3.0, 5.0, (22,))
