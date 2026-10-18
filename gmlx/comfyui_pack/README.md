@@ -143,12 +143,15 @@ The step check is the gate. The stock model in bf16 samples and records, at each
 | FLUX.3 klein | 512x512, 16 steps, cfg 1 | 0.022 | 0.058 | 1.17 | pass |
 | FLUX.3 klein | 512x512, 16 steps, cfg 1, stock LoRA loader | 0.029 | 0.081 | 1.24 | pass |
 | FLUX.3 klein | 512x512, 16 steps, cfg 1, one reference | 0.017 | 0.018 | 1.26 | pass |
-| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, distances from stock fp32 | 0.099 | 0.099 | 1.00 | pass |
-| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, stock LoRA loader, distances from stock fp32 | 0.064 | 0.064 | 1.00 | pass |
 
 On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2, FLUX.2 klein, FLUX.3 klein and MOSS-Image checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
 
-The MOSS-Image check runs at 256x256 with the stock model on ComfyUI's cpu device, so its stock bf16 output comes from CPU torch arithmetic, a bf16 path the pack never takes. Its rows read from the stock fp32 output instead: the gmlx distance from it must be at most 1.5 times the larger of the stock bf16 distance and the distance of gmlx sampling in process, without ComfyUI, on the same latents and sigmas, or at most 2e-2. The gmlx MODEL equals the in-process run bit for bit at every step, and the in-process distance is the larger at every step, at the median 1.55 times the stock bf16 one in text to image and 1.58 times with the LoRA. With block 22 kept in the negative pass, the worst step reads 3.7 and 3.6 times its gate.
+The MOSS-Image check runs at 256x256 with the stock model on ComfyUI's cpu device, so its stock bf16 output comes from CPU torch arithmetic, a bf16 path the pack never takes. Its rows, in the table below, read from the stock fp32 output instead: the gmlx distance from it must be at most 1.5 times the larger of the stock bf16 distance and the distance of gmlx sampling in process, without ComfyUI, on the same latents and sigmas, or at most 2e-2. The gmlx MODEL equals the in-process run bit for bit at every step, and the in-process distance is the larger at every step, at the median 1.55 times the stock bf16 one in text to image and 1.58 times with the LoRA. With block 22 kept in the negative pass, the worst step reads 3.7 and 3.6 times its gate.
+
+| Model | Graph | gmlx from stock fp32, worst step | gmlx in process, same step | stock bf16, same step | Worst ratio to in process | Worst ratio to stock bf16 | Result |
+|---|---|---|---|---|---|---|---|
+| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass | 0.099 | 0.099 | 0.037 | 1.00 | 2.69 | pass |
+| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, stock LoRA loader | 0.064 | 0.064 | 0.036 | 1.00 | 2.16 | pass |
 
 The final image check is reported beside it: the gmlx image must be at least as close to the stock fp32 image as the stock bf16 image is, within 6 dB.
 
