@@ -90,7 +90,7 @@ GIF.
 
 | Model | Edits | Variations |
 |-------|-------|------------|
-| Z-Image, Krea 2 | One image, which the result starts from at `strength`, 0.6 by default. More images get 400. | The image with an empty prompt, at the default `strength` |
+| Z-Image, Krea 2, MOSS-Image | One image, which the result starts from at `strength`, 0.6 by default. More images get 400. | The image with an empty prompt, at the default `strength` |
 | Qwen-Image 2.1 | Up to 10 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
 | FLUX.2 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
 | FLUX.3 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
