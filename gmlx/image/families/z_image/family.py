@@ -6,8 +6,15 @@ shape, so the variant comes from the identity hash.
 
 from __future__ import annotations
 
+# The upsampler's system prompt is prompt_template of pe.py in the
+# Hugging Face Space Tongyi-MAI/Z-Image-Turbo at revision 768cb50, with its
+# use in app.py of that Space. pe.py carries no license header; the
+# Space's card gives apache-2.0 (see licenses/z-image-turbo-space-LICENSE).
+
+from gmlx.image import upsample
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
+from gmlx.image.registry import (ConstantsRow, Family, SamplingRow,
+                                 UpsampleParts, VariantRow)
 
 _REQUIRED = (
     ("cap_embedder.1.weight", (2560, 3840)),
@@ -165,6 +172,31 @@ def lora_map(config: dict):
     return build_map(config)
 
 
+# The optional prompt enhancer of the Space's app.py, on a chat model of
+# the user's choice: the Chinese system prompt of pe.py, shipped as its
+# string, with the typed prompt in its {prompt} slot and a single space as
+# the user turn, as app.py sends them. The reply is the caption, or the
+# revised_prompt of a JSON block in it, as app.py reads it. The Space
+# samples its hosted model at temperature 0.7; gmlx decodes greedily, so
+# the same prompt writes the same caption, with thinking off, since the
+# prompt asks for the final description and nothing else.
+UPSAMPLE = UpsampleParts(
+    prompts="pe_prompt_template.txt",
+    sha256="36bdd888b953e9b7a8237dab55bee145a44e96e92e8f6e81a6e4d433a401a0b6",
+    key=None,
+    max_tokens=2048,
+    temperature=0.0,
+    presence_penalty=0.0,
+    thinking="off",
+    repo="huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo",
+    revision="768cb50d847cdbba97c89533ae976be69cf5a5b8",
+    package=__package__,
+    suggested="Qwen3.5-9B",
+    parse=upsample.field_or_plain("revised_prompt"),
+    slot="{prompt}",
+)
+
+
 FAMILY = Family(
     name="z_image",
     title="Z-Image",
@@ -180,4 +212,5 @@ FAMILY = Family(
     variants=VARIANTS,
     sampling=SAMPLING,
     lora_map=lora_map,
+    upsample=UPSAMPLE,
 )

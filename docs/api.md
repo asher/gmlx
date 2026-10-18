@@ -135,7 +135,11 @@ and their `*_context_size` companions, `enable_thinking`,
 `thinking_budget`, and the OpenAI `reasoning` and `reasoning_effort`
 controls. The three chat routes ignore `n`, `user`, `parallel_tool_calls`
 and `metadata`: they return one choice, and the template decides how many
-tool calls to make. The other fields differ by route:
+tool calls to make. `presence_penalty` and `frequency_penalty` count every
+token generated so far and never the prompt, as vLLM and SGLang do.
+`presence_context_size` or `frequency_context_size` set to N counts only the
+last N generated tokens, and 0 or no value counts all of them. The other
+fields differ by route:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|

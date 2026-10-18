@@ -186,9 +186,9 @@ class Model(nn.Module):
         repetition_penalty: Optional[float] = None,
         repetition_context_size: Optional[int] = 20,
         presence_penalty: Optional[float] = None,
-        presence_context_size: Optional[int] = 20,
+        presence_context_size: Optional[int] = None,  # gmlx: whole output
         frequency_penalty: Optional[float] = None,
-        frequency_context_size: Optional[int] = 20,
+        frequency_context_size: Optional[int] = None,  # gmlx: whole output
         **kwargs,
     ):
         """Generate Thinker tokens while retaining the Talker accept-layer hidden.

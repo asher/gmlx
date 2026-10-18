@@ -373,12 +373,14 @@ class OpenAIRequest(FlexibleBaseModel):
         None, description="Repetition penalty context size."
     )
     presence_penalty: Optional[float] = Field(None, description="Presence penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     presence_context_size: Optional[int] = Field(
-        None, description="Presence penalty context size."
+        None, ge=0, description="Presence penalty context size."
     )
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     frequency_context_size: Optional[int] = Field(
-        None, description="Frequency penalty context size."
+        None, ge=0, description="Frequency penalty context size."
     )
     logit_bias: Optional[Any] = Field(None, description="Logit bias dict.")
     enable_thinking: Optional[bool] = Field(
@@ -775,12 +777,14 @@ class VLMRequest(FlexibleBaseModel):
         None, description="Repetition penalty context size."
     )
     presence_penalty: Optional[float] = Field(None, description="Presence penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     presence_context_size: Optional[int] = Field(
-        None, description="Presence penalty context size."
+        None, ge=0, description="Presence penalty context size."
     )
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     frequency_context_size: Optional[int] = Field(
-        None, description="Frequency penalty context size."
+        None, ge=0, description="Frequency penalty context size."
     )
     logit_bias: Optional[Any] = Field(None, description="Logit bias dict.")
     enable_thinking: Optional[bool] = Field(
@@ -970,12 +974,14 @@ class AnthropicRequest(FlexibleBaseModel):
         None, description="Repetition penalty context size."
     )
     presence_penalty: Optional[float] = Field(None, description="Presence penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     presence_context_size: Optional[int] = Field(
-        None, description="Presence penalty context size."
+        None, ge=0, description="Presence penalty context size."
     )
     frequency_penalty: Optional[float] = Field(None, description="Frequency penalty.")
+    # gmlx: None or 0 counts every generated token, N the last N.
     frequency_context_size: Optional[int] = Field(
-        None, description="Frequency penalty context size."
+        None, ge=0, description="Frequency penalty context size."
     )
     logit_bias: Optional[Any] = Field(None, description="Logit bias dict.")
     enable_thinking: Optional[bool] = None

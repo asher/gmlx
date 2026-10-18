@@ -54,8 +54,9 @@ from oracle_fixture import ORACLE, committed, fixture, fx
 
 import mlx.core as mx
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
+# Each row loads local model files, so it runs on this Mac
+# (tests/host_box.py).
+pytestmark = pytest.mark.integration
 
 NAME = "check6_qwen_image21"
 

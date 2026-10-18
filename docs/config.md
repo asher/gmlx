@@ -271,7 +271,8 @@ entries.
 | <a id="image_modelsfamily"></a>`family` | detected | The image family, such as `z-image`, `qwen-image-2.1` or `flux-3-klein`. A file of another family is refused at load. |
 | <a id="image_modelsvariant"></a>`variant` | detected | The DiT's variant, such as `turbo`, for a file whose weights match no known variant. A Krea 2 file of unknown weights needs `variant: turbo` to load. |
 | <a id="image_modelsadapters"></a>`adapters` | none | LoRA files applied to every request, each a path or `{path, strength}` with strength 1 by default |
-| <a id="image_modelsupsampler"></a>`upsampler` | none | The `models` id of the chat model that rewrites each FLUX.3 klein prompt, as [Prompt upsampling](images.md#prompt-upsampling) describes |
+| <a id="image_modelsupsampler"></a>`upsampler` | none | The `models` id of the chat model that rewrites each prompt, as [Prompt upsampling](images.md#prompt-upsampling) describes |
+| <a id="image_modelsupsample_prompt"></a>`upsample_prompt` | the family's | A text file with the system prompt for the `upsampler`, found in `model_dirs` when relative. Qwen-Image 2.1 needs one, which `gmlx pull qwen-image` fetches |
 | <a id="image_modelsupsample"></a>`upsample` | `true` | Rewrite prompts with the `upsampler`. `false` runs them as typed, unless a request sends `prompt_upsampling: true`. |
 | <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`) and `negative_prompt` |
 | <a id="image_modelsencoder_release"></a>`encoder_release` | `auto` | Release the text encoder after each encode: `always`, `never`, or `auto`, which keeps it while the whole model fits in 80 percent of the working budget |

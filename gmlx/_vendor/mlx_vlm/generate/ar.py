@@ -189,9 +189,9 @@ def generate_step(
     repetition_penalty: Optional[float] = None,
     repetition_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE,
     presence_penalty: Optional[float] = None,
-    presence_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE,
+    presence_context_size: Optional[int] = None,  # gmlx: whole output
     frequency_penalty: Optional[float] = None,
-    frequency_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE,
+    frequency_context_size: Optional[int] = None,  # gmlx: whole output
     top_p: float = DEFAULT_TOP_P,
     min_p: float = DEFAULT_MIN_P,
     top_k: int = DEFAULT_TOP_K,
@@ -222,6 +222,7 @@ def generate_step(
     verbose: bool = False,
     **kwargs,
 ) -> Generator[Tuple[mx.array, mx.array], None, None]:
+    # gmlx: the docstring gives the generated-token rule of the context sizes.
     """
     A generator producing token ids based on the given prompt from the model.
 
@@ -238,12 +239,12 @@ def generate_step(
           consider for repetition penalty.
         presence_penalty (float, optional): Additive penalty for tokens that
           already appeared in recent generated context.
-        presence_context_size (int, optional): The number of tokens to
-          consider for presence penalty.
+        presence_context_size (int, optional): The number of last generated
+          tokens to consider for presence penalty, or None for all of them.
         frequency_penalty (float, optional): Additive penalty scaled by token
           frequency in recent generated context.
-        frequency_context_size (int, optional): The number of tokens to
-          consider for frequency penalty.
+        frequency_context_size (int, optional): The number of last generated
+          tokens to consider for frequency penalty, or None for all of them.
         top_p (float, optional): Nucleus sampling, higher means model considers
           more less likely words.
         min_p (float, optional): Minimum probability threshold relative to the

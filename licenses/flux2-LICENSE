@@ -39,6 +39,13 @@ source.
 - tests/image/test_image_flux2_edit.py: _official, a transcription of
   cap_min_pixels, cap_pixels and center_crop_to_multiple_of_x in
   src/flux2/sampling.py on sizes.
+- gmlx/image/families/flux2_klein/system_message_upsampling_t2i.txt: the
+  string SYSTEM_MESSAGE_UPSAMPLING_T2I of src/flux2/system_messages.py,
+  the upsampler's system prompt for a prompt without references,
+  unmodified.
+- gmlx/image/families/flux2_klein/family.py: the upsampler's chat turn
+  of scripts/cli.py, the system message and the typed prompt as the user
+  turn.
 
 flux2 is distributed under the Apache License 2.0:
 

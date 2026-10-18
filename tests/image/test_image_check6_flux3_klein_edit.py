@@ -141,9 +141,7 @@ def _encode_gate(pipe) -> tuple:
     return "rel L2", float(t["encode_bf16_rel_l2"])
 
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
 @pytest.mark.integration
-@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", CASES)
 def test_reference_latents_of_the_vae_against_the_oracle(check6, pipe, case):
     from gmlx.image import api
@@ -197,7 +195,6 @@ def _gates(m, case: str) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", CASES)
 def test_check6_edit_latents_from_the_conditioning_of_the_oracle(
         check6, pipe, case):
@@ -213,7 +210,6 @@ def test_check6_edit_latents_from_the_conditioning_of_the_oracle(
 
 
 @pytest.mark.integration
-@pytest.mark.host_gb(16)
 def test_check6_edit_fails_with_the_references_in_the_other_order(check6,
                                                                   pipe):
     arrays, m = check6

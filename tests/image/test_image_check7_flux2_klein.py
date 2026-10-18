@@ -54,14 +54,12 @@ import numpy as np
 import pytest
 
 import flux2_gates as fg
+import host_box
 import qwen_gates as qg
 from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from lora_fixtures import write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
-
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
 
 ENV = "GMLX_TEST_LORA_DIR"
 # id: (the check 3 fixture of the adapter's checkpoint, the pairs the
@@ -120,7 +118,7 @@ _TMP: list = []
 
 
 @functools.lru_cache(maxsize=None)
-def _file(aid: str) -> str:
+def _find(aid: str) -> str:
     """The adapter file under GMLX_TEST_LORA_DIR, checked by sha256, or
     the synthetic adapter written from its fixture."""
     if aid == "synthetic":
@@ -139,6 +137,13 @@ def _file(aid: str) -> str:
                 pytest.fail(f"{p} is not the file the oracle read")
             return str(p)
     pytest.skip(f"{want['name']} is not under {ENV}")
+
+
+def _file(aid: str) -> str:
+    # Outside the cache, so each test that reads the file sees this Mac.
+    path = _find(aid)
+    host_box.real_files()
+    return path
 
 
 # The float tensors the exact gate's process put in float32, by DiT path.

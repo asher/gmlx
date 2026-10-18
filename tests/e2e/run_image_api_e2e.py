@@ -9,15 +9,16 @@ client sees. ``--with-chat`` keeps a chat stream decoding while each family
 generates, and ``--memguard`` runs ``memguard.py`` beside the server.
 ``--measure`` instead times chat decode and a 1024x1024 image, each
 alone and beside the other, and the time to the first byte of a streamed
-image. ``--upsample`` gives FLUX.3 klein the ``--upsampler`` chat model and
-runs the prompt upsampling checks in place of its family checks: through
-``gmlx image generate`` on the entry before the server starts, then the
-images route and the step contract's encode. Writes a Markdown and a JSON
-report.
+image. ``--upsample`` gives FLUX.3 klein and FLUX.2 klein the
+``--upsampler`` chat model and runs the prompt upsampling checks in place
+of their family checks: through ``gmlx image generate`` on the entry
+before the server starts, then the images route and the step contract's
+encode. Writes a Markdown and a JSON report.
 
     python tests/e2e/run_image_api_e2e.py --out DIR [--with-chat] [--memguard]
     python tests/e2e/run_image_api_e2e.py --measure --out DIR
     python tests/e2e/run_image_api_e2e.py --family flux --upsample --out DIR
+    python tests/e2e/run_image_api_e2e.py --family flux2 --upsample --out DIR
 
 Not ``test_``-prefixed: it loads real models on the GPU.
 """
@@ -72,6 +73,8 @@ DEFAULTS = {
 }
 FAMILIES = (("z", "z-image-turbo"), ("qwen", "qwen-image"),
             ("flux", "flux-3-klein"), ("flux2", "flux-2-klein"))
+# The families --upsample gives the upsampler, by --family choice.
+UPSAMPLED = ("flux", "flux2")
 # The --family choices: each family, both of the first two, and all four.
 CHOICES = {"z": ("z",), "qwen": ("qwen",), "flux": ("flux",),
            "flux2": ("flux2",), "both": ("z", "qwen"),
@@ -122,13 +125,15 @@ def _config(a) -> dict:
         # The encoder reads the prompt alone: no vision tower.
         image_models["flux-3-klein"] = {
             "path": a.f_dit, "encoder": a.f_encoder, "vae": a.f_vae}
-        if a.upsample:
-            models["upsampler"] = {"path": a.upsampler}
-            image_models["flux-3-klein"]["upsampler"] = "upsampler"
     if "flux2" in families:
         # The encoder reads the prompt alone: no vision tower.
         image_models["flux-2-klein"] = {
             "path": a.f2_dit, "encoder": a.f2_encoder, "vae": a.f2_vae}
+    if a.upsample:
+        models["upsampler"] = {"path": a.upsampler}
+        for family, model in FAMILIES:
+            if family in UPSAMPLED and family in families:
+                image_models[model]["upsampler"] = "upsampler"
     return {"models": models,
             "image_models": image_models,
             "server": {"defaults": {"model": "chat",
@@ -347,14 +352,14 @@ def cli_upsample_check(rep: Report, a, cfg_path: str, model: str,
     writes the caption and releases the upsampler before the image model
     loads."""
     def run():
-        png = os.path.join(a.out, "cli.png")
+        png = os.path.join(a.out, f"cli-{model}.png")
         got = subprocess.run(
             [a.python, "-c", "import sys; from gmlx.commands.cli import "
              "umbrella_main; sys.exit(umbrella_main(sys.argv[1:]))",
              "image", "generate", model, "--config", cfg_path, "--prompt",
              PROMPT, "--size", "512x512", "--seed", "21", "--output", png,
              "--json"], capture_output=True, text=True, timeout=1800)
-        with open(os.path.join(a.out, "cli.log"), "w") as f:
+        with open(os.path.join(a.out, f"cli-{model}.log"), "w") as f:
             f.write(got.stderr)
         assert got.returncode == 0, got.stderr[-2000:]
         rec = json.loads(got.stdout)
@@ -370,7 +375,7 @@ def cli_upsample_check(rep: Report, a, cfg_path: str, model: str,
         out.update(cli_caption=caption, cli_line=line)
         return line
 
-    rep.check("upsample image generate", run)
+    rep.check(f"{model} upsample image generate", run)
 
 
 def upsample_checks(rep: Report, base: str, model: str, log_path: str,
@@ -388,8 +393,11 @@ def upsample_checks(rep: Report, base: str, model: str, log_path: str,
     size = "512x512"
     made: dict = {}
 
+    start = open(log_path).read().count("prompt upsampled by")
+
     def rewrites() -> int:
-        return open(log_path).read().count("prompt upsampled by")
+        """The captions the server wrote in these checks."""
+        return open(log_path).read().count("prompt upsampled by") - start
 
     def first():
         t0 = time.perf_counter()
@@ -451,12 +459,13 @@ def upsample_checks(rep: Report, base: str, model: str, log_path: str,
         assert r.data[0].revised_prompt is None
         assert rewrites() == 1, rewrites()
 
-    rep.check("upsample generations", first)
-    rep.check("upsample rerun with a new seed", rerun)
-    rep.check("upsample stream completed event", stream)
-    rep.check("upsample step encode", encode_step)
-    rep.check("upsample prompt_upsampling false", off)
-    rep.check("upsample edit runs as typed", edit)
+    for name, fn in (("generations", first),
+                     ("rerun with a new seed", rerun),
+                     ("stream completed event", stream),
+                     ("step encode", encode_step),
+                     ("prompt_upsampling false", off),
+                     ("edit runs as typed", edit)):
+        rep.check(f"{model} upsample {name}", fn)
 
 
 def _chat_window(base: str, max_tokens: int, state: dict) -> None:
@@ -573,9 +582,9 @@ def main() -> int:
     ap.add_argument("--memguard", action="store_true",
                     help="run memguard.py beside the server")
     ap.add_argument("--upsample", action="store_true",
-                    help="give FLUX.3 klein the --upsampler chat model and run "
-                         "the prompt upsampling checks in place of its family "
-                         "checks")
+                    help="give FLUX.3 klein and FLUX.2 klein the --upsampler "
+                         "chat model and run the prompt upsampling checks in "
+                         "place of their family checks")
     ap.add_argument("--measure", action="store_true",
                     help="time chat decode beside an image job and the first "
                          "byte of a streamed image, with Z-Image only")
@@ -604,9 +613,11 @@ def main() -> int:
     log_path = os.path.join(a.out, "server.log")
     rep = Report()
     result: dict = {"config": _config(a)}
-    if a.upsample and "flux" in CHOICES[a.family]:
-        result["upsample"] = {}
-        cli_upsample_check(rep, a, cfg_path, "flux-3-klein", result["upsample"])
+    result["upsample"] = {}
+    for family, model in FAMILIES:
+        if a.upsample and family in UPSAMPLED and family in CHOICES[a.family]:
+            cli_upsample_check(rep, a, cfg_path, model,
+                               result["upsample"].setdefault(model, {}))
     try:
         with ServerProc(["--config", cfg_path], log_path=log_path, port=port,
                         python=a.python) as srv:
@@ -622,9 +633,9 @@ def main() -> int:
                 for family, model in FAMILIES:
                     if family not in CHOICES[a.family]:
                         continue
-                    if family == "flux" and a.upsample:
+                    if family in UPSAMPLED and a.upsample:
                         upsample_checks(rep, base, model, log_path,
-                                        result["upsample"])
+                                        result["upsample"][model])
                         continue
                     family_checks(rep, base, model, family, log_path,
                                   a.with_chat)

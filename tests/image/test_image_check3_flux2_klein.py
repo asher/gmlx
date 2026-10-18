@@ -37,8 +37,8 @@ within twice the oracle's own bf16 against fp32 gap. The references in
 the step at the image's time, as the 9B step reads them, miss the gate.
 
 The rows need the FLUX.2 klein GGUFs under KQUANT_TEST_GGUF_DIR and the
-fixtures under GMLX_IMAGE_FIXTURES. They skip until both are there. The
-9B and KV rows declare a Mac of 24 GB.
+fixtures under GMLX_IMAGE_FIXTURES. They skip until both are there, and
+run on this Mac.
 """
 from __future__ import annotations
 
@@ -60,9 +60,6 @@ from gmlx.image import loader as image_loader
 from gmlx.image import ops
 from gmlx.image.families.flux2_klein import model as fm
 from gmlx.image.ops import kq_routes
-
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
 
 _ROWS = {"distilled": "_512", "distilled r1": "_r1_512", "base": "_base_512",
          "base r1": "_base_r1_512", "distilled step 1": "_s1_512"}
@@ -107,9 +104,8 @@ def size_variant(case: str) -> tuple[str, str]:
 
 
 def cases(table: dict) -> list:
-    """The cases of ``table``, the 9B and KV ones on a Mac of 24 GB."""
-    return [pytest.param(c, marks=pytest.mark.host_gb(24))
-            if c.startswith(("9b ", "kv ")) else c for c in table]
+    """The cases of ``table``."""
+    return list(table)
 
 
 # SPDX-FileCopyrightText: Copyright 2025 Black Forest Labs, Inc.

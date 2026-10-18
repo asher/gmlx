@@ -341,6 +341,7 @@ def test_pixels_normalize_with_the_reference_constants():
     assert np.allclose(row[196:392], (127 / 255 - 0.5) / 0.5)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not os.path.exists(MMPROJ), reason="local mmproj absent")
 def test_real_mmproj_remaps_onto_the_tower():
     from gmlx.load.wire import load_gguf_wire_bytes

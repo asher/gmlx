@@ -149,7 +149,8 @@ _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload",
 _IMAGE_MODEL_KEYS = frozenset({"path", "family", "variant", "encoder",
                                "encoder_mmproj", "vae", "adapters",
                                "defaults", "encoder_release", "pin",
-                               "ttl_s", "upsampler", "upsample"})
+                               "ttl_s", "upsampler", "upsample",
+                               "upsample_prompt"})
 _IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
                                   "negative_prompt"})
 _IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
@@ -617,7 +618,8 @@ class ImageModelCfg:
     every request, and ``defaults`` the request defaults the entry sets
     over its family's. ``upsampler`` is the chat model id that rewrites
     the prompt of a family that takes prompt upsampling, by default while
-    ``upsample`` is on."""
+    ``upsample`` is on, and ``upsample_prompt`` a text file whose system
+    prompt it takes in place of the family's."""
     id: str
     path: str
     encoder: str
@@ -632,6 +634,7 @@ class ImageModelCfg:
     variant: str | None = None      # None => from the weights
     upsampler: str | None = None
     upsample: bool = True
+    upsample_prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1219,7 +1222,10 @@ class ResolvedImageModel:
     the encoder GGUF, or None when ``encoder_model`` names the chat model
     the entry shares; ``encoder_mmproj`` is the vision tower that comes
     with either. ``upsampler`` is the chat model id of the entry's prompt
-    upsampling, which runs by default while ``upsample`` is on."""
+    upsampling, which runs by default while ``upsample`` is on, and
+    ``upsample_prompt`` the file of its system prompt, resolved where it
+    exists and as written where it does not, so a missing file fails the
+    rewrite and not the entry."""
     id: str
     path: str
     vae: str
@@ -1235,6 +1241,7 @@ class ResolvedImageModel:
     variant: str | None = None
     upsampler: str | None = None
     upsample: bool = True
+    upsample_prompt: str | None = None
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
@@ -2086,7 +2093,19 @@ def resolve_image_model(image_id: str, cfg: ServerCfg) -> ResolvedImageModel:
                        for a, st in m.adapters),
         defaults=dict(m.defaults), encoder_release=m.encoder_release,
         pin=bool(m.pin), ttl_s=ttl_s, variant=m.variant,
-        upsampler=m.upsampler, upsample=m.upsample)
+        upsampler=m.upsampler, upsample=m.upsample,
+        upsample_prompt=_prompt_path(m.upsample_prompt, dirs))
+
+
+def _prompt_path(p: str | None, dirs: list[str]) -> str | None:
+    """An entry's ``upsample_prompt``: the file under ``model_dirs`` as a
+    model path resolves, or the expanded path when there is none."""
+    if p is None:
+        return None
+    try:
+        return resolve_path(p, dirs)
+    except ConfigError:
+        return os.path.expanduser(os.path.expandvars(p))
 
 
 def env_for(resolved: ResolvedModel) -> dict[str, str]:
@@ -2733,7 +2752,8 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
         if not isinstance(raw.get(key), str) or not raw[key]:
             raise ConfigError(f"{where} needs `{key}` (keys present: "
                               f"{sorted(raw)})")
-    for key in ("family", "variant", "encoder_mmproj", "upsampler"):
+    for key in ("family", "variant", "encoder_mmproj", "upsampler",
+                "upsample_prompt"):
         if raw.get(key) is not None and not isinstance(raw[key], str):
             raise ConfigError(f"{where}.{key}: expected a string, got "
                               f"{raw[key]!r}")
@@ -2757,6 +2777,7 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
                                        raw.get("defaults")),
         encoder_release=release, pin=bool(raw.get("pin", False)),
         upsampler=raw.get("upsampler") or None, upsample=upsample,
+        upsample_prompt=raw.get("upsample_prompt") or None,
         # As in `models`: an explicit null never unloads.
         ttl_s=(0.0 if "ttl_s" in raw and raw["ttl_s"] is None
                else _coerce_num("ttl_s", raw.get("ttl_s"), float,

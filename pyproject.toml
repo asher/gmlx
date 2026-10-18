@@ -179,6 +179,9 @@ include = ["gmlx*"]
 [tool.setuptools.package-data]
 "gmlx.models.deepseek_v41" = ["chat_template.jinja"]
 "gmlx.image.families.flux3_klein" = ["pup_prompts_external_vlm.json"]
+"gmlx.image.families.flux2_klein" = ["system_message_upsampling_t2i.txt"]
+"gmlx.image.families.krea2" = ["expansion.txt"]
+"gmlx.image.families.z_image" = ["pe_prompt_template.txt"]
 "gmlx.container" = ["files/Containerfile", "guest/gmlx-entry"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt",

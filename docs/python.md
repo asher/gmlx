@@ -85,7 +85,7 @@ Sampling:
 | `xtc_probability` / `xtc_threshold` | `0.0` | XTC sampling, on when the probability is above 0. |
 | `repetition_penalty` | `0.0` | Repetition penalty over the last tokens. `0.0` turns it off. |
 | `repetition_context_size` | `20` | How many recent tokens the repetition penalty looks at. |
-| `presence_penalty` / `frequency_penalty` | `0.0` | OpenAI-style penalties. |
+| `presence_penalty` / `frequency_penalty` | `0.0` | OpenAI-style penalties over every generated token, never the prompt. |
 | `logit_bias` | `None` | A `{token_id: bias}` dict added to the logits. |
 | `stop` | `None` | Strings that end generation. The match is trimmed. |
 

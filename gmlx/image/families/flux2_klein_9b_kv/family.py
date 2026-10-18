@@ -115,4 +115,5 @@ FAMILY = Family(
     schedule=klein.schedule,
     loop=klein.LOOP,
     edit=klein.FAMILY.edit,
+    upsample=klein.UPSAMPLE,
 )

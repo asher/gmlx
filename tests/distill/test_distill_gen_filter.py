@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from concurrent.futures import ALL_COMPLETED
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1127,13 +1128,21 @@ def test_gen_sidecar_totals_survive_an_interrupted_run(tmp_path, stub_server, mo
     out = tmp_path / "corpus.jsonl"
     opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, concurrency=1)
     real = gen.reply_row
+    real_wait = gen.wait
 
     def interrupt_on_b(r, c, seed):
         if r["id"] == "b":
             raise KeyboardInterrupt
         return real(r, c, seed)
 
+    def both_landed(fs, **kw):
+        # both replies land in one wake, as on a slow runner, and the
+        # finished set yields b first
+        done, rest = real_wait(fs, return_when=ALL_COMPLETED)
+        return sorted(done, key=lambda f: -f.result()[0]), rest
+
     monkeypatch.setattr(gen, "reply_row", interrupt_on_b)
+    monkeypatch.setattr(gen, "wait", both_landed)
     with pytest.raises(KeyboardInterrupt):
         gen.run_gen(opts)
     assert [r["id"] for r in _rows(out)] == ["a"]

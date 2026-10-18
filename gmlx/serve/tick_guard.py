@@ -200,6 +200,18 @@ def _fail_row_permanently(gen, st: _TickState, uid, err: str) -> None:
                          exc_info=True)
 
 
+def _resumed_processors(lp, committed):
+    """The row's processors for its replay. The replay's prompt ends with
+    the delivered tokens, so the presence and frequency penalties start
+    afresh from them."""
+    from gmlx.gen.penalties import OutputPenalty
+
+    if not lp:
+        return lp
+    return [p.resumed(committed) if isinstance(p, OutputPenalty) else p
+            for p in lp]
+
+
 def _rebuild_row(gen, st: _TickState, uid) -> None:
     row = st.ledger.get(uid)
     gen.remove(uid)
@@ -216,7 +228,8 @@ def _rebuild_row(gen, st: _TickState, uid) -> None:
             return
     replay = row.prompt_ids + row.committed
     gen._unprocessed_sequences.insert(
-        0, (uid, replay, remaining, row.kwargs, row.lp, row.tc))
+        0, (uid, replay, remaining, row.kwargs,
+            _resumed_processors(row.lp, row.committed), row.tc))
     st.rebuilt.add(uid)
     _log.warning("[tick-guard] row %s retired and requeued: replaying "
                  "%d prompt + %d delivered tokens", uid,

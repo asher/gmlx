@@ -166,17 +166,26 @@ refused by name, as is a LoRA of another model. ComfyUI takes LoRAs as
 
 ## Prompt upsampling
 
-FLUX.3 klein and FLUX.3 klein Base were trained on long, detailed
-captions, not on the short prompts people type. Prompt upsampling turns
-your prompt into such a caption before the text encoder reads it: a chat
-model rewrites it with the system prompt that Black Forest Labs publishes
-for this, and the image follows the caption. A FLUX.3 klein prompt sent as
-typed gives weaker images.
+Prompt upsampling turns your prompt into a long, detailed caption before
+the text encoder reads it: a chat model of your choice rewrites it with a
+system prompt written for that image model, and the image follows the
+caption. FLUX.3 klein and FLUX.3 klein Base were trained on such captions,
+not on the short prompts people type, and a prompt sent as typed gives
+weaker images. On the other families the rewrite is optional, and helps
+most with short prompts and with text in the image.
 
-Qwen3.5-9B writes captions close to those of BFL's own upsampler, and
-its Q6_K GGUF is a good choice. Any chat model of your configuration can
-write them. Add it under `models`, and name it as the `upsampler` of the
-image model's entry:
+| Family | System prompt |
+|---|---|
+| FLUX.3 klein, FLUX.3 klein Base | Ships with gmlx, from Black Forest Labs |
+| FLUX.2 klein, all sizes and variants | Ships with gmlx, from Black Forest Labs |
+| Krea 2 | Ships with gmlx, from Krea |
+| Z-Image, Z-Image-Turbo | Ships with gmlx, from the Z-Image-Turbo demo of Tongyi-MAI |
+| Qwen-Image 2.1, Qwen-Image 2.1 Turbo | Your own file, as [Qwen-Image 2.1](#qwen-image-21-rewriter-prompt) describes |
+
+Qwen3.5-9B writes captions close to those of BFL's own FLUX.3 upsampler,
+and its Q6_K GGUF is a good choice for every family. Any chat model of your
+configuration can write them. Add it under `models`, and name it as the
+`upsampler` of the image model's entry:
 
 ```yaml
 models:
@@ -207,17 +216,63 @@ With an upsampler set, each prompt is rewritten:
 
 The chat model writes the same caption for the same prompt. The PNG keeps
 the caption beside your prompt. A prompt with reference images or an
-init image runs as typed, and the negative prompt is never rewritten. In ComfyUI the text
-encode node does not see the references of an edit, so the server also
-encodes the prompt as typed, and the pack samples an edit and a negative
-prompt on that encoding.
+init image runs as typed, and the negative prompt is never rewritten. In
+ComfyUI the text encode node does not see the references of an edit, so
+the server also encodes the prompt as typed, and the pack samples an edit
+and a negative prompt on that encoding.
 
 To run a prompt as typed, pass `--no-upsample`, send
 `"prompt_upsampling": false` in the request, or set `upsample: false` on
 the entry, which a request with `"prompt_upsampling": true` turns back on.
 Without an upsampler, FLUX.3 klein runs each prompt as typed and prints a
 warning that names the `upsampler` setting and Qwen3.5-9B, unless the
-entry has `upsample: false`.
+entry has `upsample: false`. The other families run it as typed without a
+warning.
+
+### Your own system prompt
+
+`upsample_prompt` on an entry names a text file whose system prompt the
+upsampler takes in place of the family's, and `--upsample-prompt FILE`
+does the same for one `gmlx image generate` run. A relative path is found
+in `model_dirs`, as a model path is. The server reads the file for each
+request, so an edit to it takes effect on the next prompt, and captions
+written with the old file are not reused.
+
+```yaml
+image_models:
+  krea-2-turbo:
+    path: Krea-2-Turbo-Q6_K.gguf
+    encoder: Qwen3-VL-4B-Instruct-Q8_0.gguf
+    vae: qwen-image-vae-BF16.gguf
+    upsampler: qwen3.5-9b
+    upsample_prompt: prompts/krea-2-short.txt
+```
+
+The reply is read without its reasoning, as the family's own system prompt
+asks for it: the caption as written on FLUX.3 klein and FLUX.2 klein, the
+last paragraph on Krea 2, `rewritten_prompt` of a JSON object on
+Qwen-Image 2.1, or the reply as written when it has no `{`, and the
+caption as written, or `revised_prompt` of a JSON block, on Z-Image. A
+Qwen-Image reply with a `{` but no `rewritten_prompt` in it, such as one
+cut off at the token limit, is an error. On Z-Image, a `{prompt}` in your
+file is replaced by the typed prompt. Your file should ask for the same
+form.
+
+### Qwen-Image 2.1 rewriter prompt
+
+Qwen publishes the system prompt of its text to image rewriter as
+`system_prompt.txt` in the Hugging Face repository
+`Qwen/Qwen-Image-2.1-PE-T2I`, under the Qwen Research License, which
+allows non-commercial use only. gmlx does not ship it.
+`gmlx pull qwen-image` downloads it next to the model's other files, says
+its license, and names it as the entry's `upsample_prompt`, so setting an
+`upsampler` is all that is left to do. A file of that name already there
+that is not Qwen's, such as your own prompt, stays as it is, and the pull
+says to move or delete it. A new entry then goes without it, and an entry
+that already names the file keeps naming it, as the warning says. Without
+the file, a Qwen-Image request with an upsampler set is refused with a
+message that says where to get it. The rewrite keeps the image size you ask for; the aspect ratio in
+Qwen's reply is not used.
 
 ## ComfyUI
 
@@ -330,6 +385,13 @@ content filters or a review of each image for unlawful or infringing
 content before it is shared, and with a disclosure that the image is made
 with AI where the law requires one. Commercial use of them needs a license
 from Black Forest Labs.
+
+The system prompts gmlx ships for [prompt upsampling](#prompt-upsampling)
+are under Apache 2.0, from Black Forest Labs' flux-3-image-klein and flux2
+repositories, Krea's krea-2 repository and Tongyi-MAI's Z-Image-Turbo
+Space. Qwen's rewriter prompt, which
+`gmlx pull qwen-image` downloads, is under the Qwen Research License, for
+non-commercial use only.
 
 gmlx has no content filter of its own, so a deployment that a license
 asks to filter adds its own.

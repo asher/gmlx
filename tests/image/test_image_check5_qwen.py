@@ -440,14 +440,12 @@ def test_a_file_cannot_give_the_model_other_time_flags(cases, tmp_path):
 
 
 # The official VAE: needs the file and the fixture of the committed
-# manifest, on a Mac of 32 GB. A whole fp32 decode at 1024 pixels on
-# Winograd is priced at 15.49 GiB, more than a 24 GB Mac has free beside
-# the VAEs the module holds (tests/host_box.py). The tiny tests above
-# pass the free memory they are priced against and run on the CI runner.
+# manifest, on this Mac (tests/host_box.py). The tiny tests above pass
+# the free memory they are priced against and run on the CI runner.
 
 
 def official(test):
-    return pytest.mark.integration(pytest.mark.host_gb(32)(test))
+    return pytest.mark.integration(test)
 
 
 @pytest.fixture(scope="module")

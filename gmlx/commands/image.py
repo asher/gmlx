@@ -169,12 +169,16 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     up = p.add_mutually_exclusive_group()
     up.add_argument("--upsampler", default=None, metavar="GGUF",
                     help="The chat model that rewrites the prompt before it "
-                         "is encoded, on a family that takes prompt "
-                         "upsampling (FLUX.3 klein): a GGUF, or a models: id "
-                         "of the config (default: the entry's upsampler). "
-                         "A prompt with --ref or --init-image runs as typed.")
+                         "is encoded: a GGUF, or a models: id of the config "
+                         "(default: the entry's upsampler). A prompt with "
+                         "--ref or --init-image runs as typed.")
     up.add_argument("--no-upsample", action="store_true",
                     help="Run the prompt as typed, without the upsampler.")
+    p.add_argument("--upsample-prompt", default=None, metavar="FILE",
+                   help="A text file whose system prompt the upsampler takes "
+                        "in place of the family's (default: the entry's "
+                        "upsample_prompt). Qwen-Image 2.1 ships none and "
+                        "needs one.")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
                         "on Qwen-Image 2.1 (default: the init image's, else "
@@ -468,6 +472,8 @@ def _from_config(a) -> None:
             a.no_upsample = True
         elif rm.upsampler:
             a.upsampler = rm.upsampler
+    if getattr(a, "upsample_prompt", "") is None and rm.upsample_prompt:
+        a.upsample_prompt = rm.upsample_prompt
 
 
 def _upsampler_path(a) -> str:
@@ -510,27 +516,37 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
                 "upsampler is not loaded")
         return None
     if a.upsampler is None:
-        log(f"warning: {family.title} expects its prompts upsampled; set "
-            f"--upsampler to a {family.upsample.suggested} GGUF or its "
-            "models: id, or upsampler on the image_models entry, or pass "
-            "--no-upsample")
+        if family.upsample.expected:
+            log(f"warning: {family.title} expects its prompts upsampled; set "
+                f"--upsampler to a {family.upsample.suggested} GGUF or its "
+                "models: id, or upsampler on the image_models entry, or pass "
+                "--no-upsample")
         return None
+    from gmlx.image.upsample import UpsampleError, system_prompt
+
+    try:
+        system = system_prompt(family, a.upsample_prompt)
+    except UpsampleError as e:
+        raise _Usage(str(e)) from None
     a.upsampler = _upsampler_path(a)
-    return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json)
+    return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json,
+                         system=system)
 
 
 def run_upsampler(path: str, family, prompt: str, log,
-                  quiet: bool = False) -> str:
+                  quiet: bool = False, system: str | None = None) -> str:
     """Load the chat model at ``path``, write the caption of ``prompt``,
-    and release the model before returning. ``quiet`` keeps the load's
-    lines off stdout."""
+    and release the model before returning, under ``system``, by default
+    the family's shipped system prompt. ``quiet`` keeps the load's lines
+    off stdout."""
     import gc
 
     import mlx.core as mx
 
     import gmlx.load.loadlog as loadlog
     from gmlx.gen.generation import generate
-    from gmlx.image.upsample import UpsampleError, system_prompt, upsample
+    from gmlx.image.upsample import (UpsampleError, reply_lead,
+                                     system_prompt, upsample)
     from gmlx.load.loader import load_model
     from gmlx.serve.capacity import working_set_bytes
     from gmlx.serve.memory import resolve_cache_limit
@@ -538,8 +554,10 @@ def run_upsampler(path: str, family, prompt: str, log,
 
     from .tool_preflight import check_or_exit
 
+    if system is None:
+        system = system_prompt(family)
     # About 3 characters a token, which overcounts English.
-    ctx = (len(system_prompt(family)) + len(prompt)) // 3 + (
+    ctx = (len(system) + len(prompt)) // 3 + (
         family.upsample.max_tokens)
     def stdout():
         return (contextlib.redirect_stdout(sys.stderr) if quiet
@@ -564,13 +582,21 @@ def run_upsampler(path: str, family, prompt: str, log,
             kwargs = map_thinking_controls(
                 {}, req.thinking, None, template,
                 warn=lambda msg: log(f"[upsample] {msg}"))
-            return generate(model, tok, req.user, system_prompt=req.system,
-                            max_tokens=req.max_tokens, temp=req.temperature,
-                            presence_penalty=req.presence_penalty,
-                            template_kwargs=kwargs, verbose=False)
+            reply = generate(model, tok, req.user, system_prompt=req.system,
+                             max_tokens=req.max_tokens, temp=req.temperature,
+                             presence_penalty=req.presence_penalty,
+                             template_kwargs=kwargs, verbose=False)
+            # A template that opens the thinking block or the message
+            # header in the prompt leaves its marker out of the reply, which
+            # the parser reads it by.
+            rendered = tok.apply_chat_template(
+                list(req.messages), tokenize=False, add_generation_prompt=True,
+                **kwargs)
+            return reply_lead(rendered, tokenizer=tok) + reply
 
         try:
-            caption = upsample(family, prompt, chat, name=f"--upsampler {name}")
+            caption = upsample(family, prompt, chat, name=f"--upsampler {name}",
+                               system=system)
         except UpsampleError as e:
             raise _Usage(str(e)) from None
     finally:

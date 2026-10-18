@@ -1068,8 +1068,9 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
-| `--upsampler GGUF` | The entry's `upsampler` | On FLUX.3 klein, rewrite the prompt with this chat model, a GGUF or a `models` id, as [Prompt upsampling](images.md#prompt-upsampling) describes. |
+| `--upsampler GGUF` | The entry's `upsampler` | Rewrite the prompt with this chat model, a GGUF or a `models` id, as [Prompt upsampling](images.md#prompt-upsampling) describes. |
 | `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
+| `--upsample-prompt FILE` | The entry's `upsample_prompt` | The upsampler takes the system prompt in this text file in place of the family's. Qwen-Image 2.1 ships none and needs one. |
 | `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |

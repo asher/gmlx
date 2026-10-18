@@ -45,6 +45,8 @@ def _gated(fn, active=False):
 def _plain(procs_factory, b, n, prompt=PROMPT, lm_cls=None):
     """Plain greedy decode with the stock decode loop's processor calls."""
     lm, procs = (lm_cls or _PreferBadLM)(), procs_factory()
+    for p in procs:     # the prompt step that sampled b
+        p(mx.array(prompt), lm(mx.array([prompt])).logits[:, -1, :])
     ctx, out, cur = list(prompt) + [b], [], b
     for _ in range(n):
         logits = lm(mx.array([[cur]])).logits[:, -1, :]

@@ -159,7 +159,8 @@ for event in stream:
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
-| The upsampler writes an empty caption | 500 `server_error` |
+| The upsampler writes an empty caption, or a reply its family's parser finds no caption in | 500 `server_error` |
+| The entry's `upsample_prompt` file is missing, or a Qwen-Image 2.1 entry with an upsampler has none | 500 `server_error` saying where to get the file |
 | The upsampler's context has no room for its system prompt and caption | 500 `server_error` naming the upsampler |
 | More requests waiting than [`image.max_queue`](config.md#image-requests) | 429 with `Retry-After` |
 | The client disconnects | The job stops at its next step, and the log marks the request `cancelled` |

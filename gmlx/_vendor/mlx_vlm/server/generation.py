@@ -621,9 +621,9 @@ class GenerationArguments:
     repetition_penalty: Optional[float] = None
     repetition_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE
     presence_penalty: Optional[float] = None
-    presence_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE
+    presence_context_size: Optional[int] = None  # gmlx: whole output
     frequency_penalty: Optional[float] = None
-    frequency_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE
+    frequency_context_size: Optional[int] = None  # gmlx: whole output
     max_denoising_steps: Optional[int] = None
     block_length: Optional[int] = None
     num_to_transfer: Optional[int] = None

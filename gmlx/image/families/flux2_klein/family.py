@@ -6,8 +6,10 @@
 # and shapes of Flux2 in src/flux2/model.py, the prompt rules of
 # Qwen3Embedder in src/flux2/text_encoder.py, the rounding of denoise
 # and denoise_cfg and the reference image rules of encode_image_refs and
-# cap_min_pixels in src/flux2/sampling.py, and modified for gmlx
-# (Apache-2.0; see licenses/flux2-LICENSE).
+# cap_min_pixels in src/flux2/sampling.py, the text to image system
+# message of src/flux2/system_messages.py and its chat turn in
+# scripts/cli.py, and modified for gmlx (Apache-2.0; see
+# licenses/flux2-LICENSE).
 """FLUX.2 klein fingerprint, constants, config synthesis and the hooks of
 its registry row.
 
@@ -28,7 +30,8 @@ import re
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import (ConstantsRow, EditParts, Family,
-                                 LoopRules, SamplingRow, VariantRow)
+                                 LoopRules, SamplingRow, UpsampleParts,
+                                 VariantRow)
 
 TITLE = "FLUX.2 klein"
 # What a refusal of another FLUX model names as the ones gmlx image runs.
@@ -387,6 +390,29 @@ REFERENCES = ConstantsRow(
 )
 
 
+# The optional upsampler of scripts/cli.py for a prompt without
+# references, on a chat model of the user's choice: the text to image
+# system message SYSTEM_MESSAGE_UPSAMPLING_T2I of src/flux2/system_messages.py,
+# shipped as its string, with the typed prompt as the user turn. BFL
+# samples at the defaults of the model it calls; gmlx decodes greedily,
+# so the same prompt writes the same caption, with at most the 1024
+# tokens of BFL's FLUX.2 klein Space and thinking off, as the message
+# asks for the revised prompt and nothing else. The 9B rows share it.
+UPSAMPLE = UpsampleParts(
+    prompts="system_message_upsampling_t2i.txt",
+    sha256="0ad9a42c565716b0a8eb82a442dd4f6cc82d583eb3474f82ccb610c1a29233c7",
+    key=None,
+    max_tokens=1024,
+    temperature=0.0,
+    presence_penalty=0.0,
+    thinking="off",
+    repo="github.com/black-forest-labs/flux2",
+    revision="50fe5162777813d869182b139e83b10743caef15",
+    package=__package__,
+    suggested="Qwen3.5-9B",
+)
+
+
 def _prepare_all(images):
     from .edit import prepare
 
@@ -427,4 +453,5 @@ FAMILY = Family(
     loop=LOOP,
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],
                    prepare_all=_prepare_all, size=_size),
+    upsample=UPSAMPLE,
 )

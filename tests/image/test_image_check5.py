@@ -35,10 +35,9 @@ import pytest
 from image_dir import sha256, vae_files
 from oracle_fixture import fixture, fx
 
-# A Mac of 24 GB: a whole fp32 decode at 1024 pixels is priced at 8.45 GiB
-# on the default conv path and 11.55 GiB on Winograd, more than a 16 GB
-# Mac has free (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
+# Each row loads local model files, so it runs on this Mac
+# (tests/host_box.py).
+pytestmark = pytest.mark.integration
 
 NAME = "check5_z_image_vae"
 FAMILY = "z_image"

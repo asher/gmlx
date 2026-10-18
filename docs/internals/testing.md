@@ -41,7 +41,7 @@ CI runs the CPU tier on a small macOS runner, not on a developer's Mac. Every
 test sees that runner by default, a Mac VM of 7.5 GB with a virtual GPU, so a
 test that would fail in CI fails on your machine first.
 
-A test that needs more memory declares the Mac it assumes:
+A unit test that needs more memory declares the Mac it assumes:
 
 ```python
 pytestmark = pytest.mark.host_gb(16)  # a 16 GB Mac, as most users run
@@ -53,7 +53,7 @@ as the governor rig does, needs no machine at all.
 
 | CI differs in | So a test |
 |---------------|-----------|
-| About 7.5 GB of memory and a virtual GPU | Never reads this Mac's memory, chip or kernel counters. It declares a machine with `host_gb`. |
+| About 7.5 GB of memory and a virtual GPU | Never reads this Mac's memory, chip or kernel counters unless it runs on model files from this Mac. A unit test that needs more declares `host_gb`. |
 | Python 3.11 to 3.14, tests spread over parallel workers | Passes on each version, alone or beside any other test, in any order. |
 | A slower, shared machine | Bounds a time by its failure case with seconds to spare, never by a fraction of a second. |
 | Only the `all` extras, so no OpenCV | That needs an optional package skips without it, with `pytest.importorskip`. |
@@ -65,6 +65,21 @@ To run the suite as CI does, in a fresh venv:
 pip install -U -e ".[all]" pytest httpx pytest-xdist
 KQUANT_FORCE_CPU=1 pytest -n auto
 ```
+
+A test on model files from this Mac never runs in CI, so it sees this Mac,
+live, as its models load and free. That holds for a test marked
+`integration`, a test that fetches a gate fixture or a fixture that
+depends on one, and a test that calls a gate helper. A gate fixture, such
+as `gguf_dir`, carries `@host_box.gate` under `@pytest.fixture`. A gate
+helper, such as `image_dir()`, calls `host_box.real_files()` once the files
+it needs are there. A new gate does one or the other. Above
+`@pytest.fixture`, `@host_box.gate` marks nothing, and the fixture's tests
+stay on the runner.
+
+A `host_gb` on the module is for its unit rows, and a test on model files
+in that module still sees this Mac. A `host_gb` on such a test or its class
+fails the test. Keep rows that read no files out of a module marked
+`integration`, or they see this Mac too.
 
 `GMLX_TEST_HOST_RAM_GB` changes the size of the default runner.
 `GMLX_TEST_REAL_HOST=1` turns the simulation off, so a run sees the real

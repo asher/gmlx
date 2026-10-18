@@ -1,7 +1,8 @@
 """The image models gmlx can pull and the image files a model folder holds.
 
 ``RECIPES`` names each pullable image model: its DiT repository and quants,
-its text encoder (and vision tower), its VAE source and the licenses.
+its text encoder (and vision tower), its VAE source, the upsampler's
+system prompt of a family that ships none, and the licenses.
 ``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class,
 and ``NO_IMAGE`` the classes where none of them makes an image.
 ``classify`` and ``scan`` find the image files on disk by their weights:
@@ -51,6 +52,14 @@ class Recipe:
     license_note: str = ""            # what the license allows, if limited
     vae_license: str = ""             # the VAE's license, when it has its
                                       # own
+    # The upsampler's system prompt of a family that ships none, which the
+    # pull fetches when it can and the entry names as upsample_prompt.
+    prompt_repo: str = ""
+    prompt_revision: str = ""
+    prompt_file: str = ""
+    prompt_sha256: str = ""
+    prompt_license: str = ""
+    prompt_license_url: str = ""
 
     def dit_name(self, quant: str) -> str:
         return self.dit_file.format(quant=quant)
@@ -131,6 +140,18 @@ _FLUX3 = dict(
                   "that it is made with AI where the law requires one"),
     encoder_license="apache-2.0", encoder_bytes=4_280_406_816)
 
+# Qwen's text to image rewriter prompt, which gmlx does not ship: a Qwen
+# Research License file of 10045 bytes in the repository of its rewriter
+# model.
+_QWEN_PROMPT = dict(
+    prompt_repo="Qwen/Qwen-Image-2.1-PE-T2I",
+    prompt_revision="f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+    prompt_file="system_prompt.txt",
+    prompt_sha256="a77c9a06c59b120741141d9514b95682bb8761d02bec49ca61def7b2b3d9fb99",
+    prompt_license="the Qwen Research License, non-commercial use only",
+    prompt_license_url="https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I/"
+                       "blob/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b/LICENSE")
+
 RECIPES = {r.name: r for r in (
     Recipe(
         name="z-image-turbo", title="Z-Image-Turbo", family="z_image",
@@ -168,7 +189,7 @@ RECIPES = {r.name: r for r in (
         license_note="non-commercial use only",
         encoder_license="apache-2.0",
         encoder_bytes=8_709_520_224 + 1_162_569_280, vae_bytes=1_350_985_376,
-        aliases=("qwen-image-2.1",)),
+        aliases=("qwen-image-2.1",), **_QWEN_PROMPT),
     Recipe(
         name="qwen-image-turbo", title="Qwen-Image 2.1 Turbo",
         family="qwen_image21", variant="turbo",
@@ -189,7 +210,7 @@ RECIPES = {r.name: r for r in (
         license_note="non-commercial use only",
         encoder_license="apache-2.0",
         encoder_bytes=8_709_520_224 + 1_162_569_280, vae_bytes=1_350_985_376,
-        aliases=("qwen-image-2.1-turbo",)),
+        aliases=("qwen-image-2.1-turbo",), **_QWEN_PROMPT),
     Recipe(
         name="krea-2-turbo", title="Krea 2 Turbo", family="krea2",
         variant="turbo",

@@ -11,6 +11,7 @@ after it. The last test runs the real prompt lookup under the identity cap.
 
 import os
 
+import host_box
 import mlx.core as mx
 import pytest
 
@@ -74,6 +75,7 @@ EDIT = ("Add the line `# Reviewed.` as the first line of this Python code. "
 
 
 @pytest.fixture(scope="module")
+@host_box.gate
 def pair():
     path = os.environ.get("KQUANT_TEST_MTP_GGUF")
     if not path or not os.path.isfile(os.path.expanduser(path)):

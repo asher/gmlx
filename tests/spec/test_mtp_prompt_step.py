@@ -252,3 +252,39 @@ def test_a_multi_row_batch_logs_the_skipped_owned_lookup(monkeypatch, caplog):
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "owned MTP prefix lookup skipped" in text
     assert "APC skipped" not in text
+
+
+def test_prefill_step_env_override(monkeypatch):
+    """Stock nulls prefill_step_size for speculative batches; the MTP
+    re-enable must resolve None from the serve-side PREFILL_STEP_SIZE env
+    override rather than pin the stock default. Exercised directly on the
+    patched prompt_step (no model needed): the resolution runs before the
+    needs_processing gate."""
+    import types
+
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
+
+    import gmlx.spec.mtp_prefill as mtp_prefill
+
+    mtp_prefill.install_full_prompt_mtp_prefill()
+    monkeypatch.setattr(mtp_prefill, "_mtp_prefill_init", lambda s: None)
+
+    def fake_batch():
+        # _inputs_embeds: the span-aware wrapper (media_spans) reads it
+        # when a serve test has layered it over prompt_step.
+        return types.SimpleNamespace(
+            draft_kind="mtp",
+            prefill_step_size=None,
+            needs_processing=lambda: False,
+            _inputs_embeds=None,
+        )
+
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "97")
+    fake = fake_batch()
+    assert PromptProcessingBatch.prompt_step(fake) == 0
+    assert fake.prefill_step_size == 97
+
+    monkeypatch.delenv("PREFILL_STEP_SIZE")
+    fake = fake_batch()
+    PromptProcessingBatch.prompt_step(fake)
+    assert fake.prefill_step_size == 2048

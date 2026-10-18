@@ -8,6 +8,12 @@ derives its expected numbers from that machine (``mac(N)``), never from a
 literal. When kernels run on the real GPU (no KQUANT_FORCE_CPU), only the
 memory is simulated: the chip name and architecture stay the real ones, so
 kernel routing matches the hardware that runs it.
+A test on model files from this Mac never runs in CI, so it sees this
+Mac, live. A host_gb on its module is for the module's unit rows; one on
+the test or its class fails the test. A gate fixture carries ``gate``, a
+gate helper calls ``real_files`` once its files are there, and conftest.py
+puts each test on this Mac that is marked integration or fetches such a
+fixture.
 GMLX_TEST_HOST_RAM_GB changes the default size.
 GMLX_TEST_REAL_HOST=1 turns the simulation off, so a run sees the real host.
 docs/internals/testing.md has the rules this serves.
@@ -31,7 +37,9 @@ _BUFFER_FRACTION = 0.63
 _CHIP_KEYS = ("device_name", "architecture")
 
 _real: dict = {}
-_current: dict = {}
+_current: dict = {"real": True, "declared": False}
+# How many times a test found model files on this Mac (``real_files``).
+gates = 0
 
 
 def runner(gb: float = RUNNER_GB) -> tuple[dict, dict]:
@@ -67,15 +75,52 @@ def default() -> tuple[dict, dict]:
 
 
 def real_device_info() -> dict:
-    """What the real device reports, under any simulated machine."""
+    """What the real Metal device reports, under any simulated machine.
+    Without Metal, the default device."""
     import mlx.core as mx
 
-    return dict(_real.get("device_info", mx.device_info)())
+    info = _real.get("device_info", mx.device_info)
+    return dict(info(mx.gpu) if mx.metal.is_available() else info())
 
 
-def use(box: dict, vm: dict) -> None:
-    """Make ``box`` and ``vm`` the machine every read reports from now on."""
-    _current["box"], _current["vm"] = dict(box), dict(vm)
+def use(box: dict, vm: dict, *, declared: bool = False) -> None:
+    """Make ``box`` and ``vm`` the machine every read reports from now on.
+    ``declared``: the test chose it with host_gb on itself or its class,
+    so it may not read model files from this Mac."""
+    _current.update(box=dict(box), vm=dict(vm), real=False,
+                    declared=declared)
+
+
+def use_real() -> None:
+    """Let every read report this Mac, live, from now on."""
+    _current.update(real=True, declared=False)
+
+
+def real_files() -> None:
+    """The running test reads model files from this Mac. Such a test never
+    runs in CI, so from now on it sees this Mac. One that declared a Mac on
+    itself fails, as its host_gb would price models for another machine."""
+    global gates
+    gates += 1
+    if _current["declared"]:
+        import pytest
+
+        pytest.fail("this test reads model files from this Mac, so it runs "
+                    "on this Mac: remove the host_gb on the test or its "
+                    "class", pytrace=False)
+    use_real()
+
+
+def gate(fixture_function):
+    """Mark a fixture function that finds model files on this Mac: every
+    test that fetches the fixture, or a fixture that depends on it, sees
+    this Mac (conftest.py). Put it under ``@pytest.fixture``."""
+    fixture_function._gmlx_real_files = True
+    return fixture_function
+
+
+def is_gate(fixture_function) -> bool:
+    return bool(getattr(fixture_function, "_gmlx_real_files", False))
 
 
 def install() -> None:
@@ -91,18 +136,35 @@ def install() -> None:
 
     use(*default())
     real_info, real_sysconf = mx.device_info, os.sysconf
-    _real["device_info"] = real_info
+    real_snapshot, real_selfcheck = kernel_vm.snapshot, kernel_vm.selfcheck
+    _real.update(device_info=real_info, sysconf=real_sysconf,
+                 snapshot=real_snapshot)
 
     # A test turns the counters off with kernel_vm._disabled. The reported
     # counters are consistent, so the sysctl cross-check passes; run
     # against the real sysctl it would turn them off for the session.
-    kernel_vm.snapshot = lambda: (
-        None if kernel_vm._disabled is not None else dict(_current["vm"]))
-    kernel_vm.selfcheck = lambda: kernel_vm._disabled
+    def snapshot():
+        if _current["real"]:
+            return real_snapshot()
+        return None if kernel_vm._disabled is not None else dict(_current["vm"])
+
+    # On this Mac the real cross-check runs, and a failure it records
+    # stays in that call, so it cannot turn the counters off for the
+    # tests after it.
+    def selfcheck():
+        if not _current["real"]:
+            return kernel_vm._disabled
+        before = kernel_vm._disabled
+        try:
+            return real_selfcheck()
+        finally:
+            kernel_vm._disabled = before
+
+    kernel_vm.snapshot, kernel_vm.selfcheck = snapshot, selfcheck
 
     def device_info(*args, **kwargs):
         info = dict(real_info(*args, **kwargs))
-        if "memory_size" in info:
+        if "memory_size" in info and not _current["real"]:
             box = _current["box"]
             if not os.environ.get("KQUANT_FORCE_CPU"):
                 box = {k: v for k, v in box.items() if k not in _CHIP_KEYS}
@@ -110,6 +172,8 @@ def install() -> None:
         return info
 
     def sysconf(name):
+        if _current["real"]:
+            return real_sysconf(name)
         if name in ("SC_PHYS_PAGES", os.sysconf_names.get("SC_PHYS_PAGES")):
             mem = int(_current["box"]["memory_size"])
             return mem // real_sysconf("SC_PAGE_SIZE")
@@ -125,21 +189,30 @@ def install() -> None:
 
 def free_ram_bytes() -> int:
     """free + inactive of the current machine, what every free-RAM read
-    reports under the simulation."""
-    vm = _current["vm"]
+    reports under the simulation. On this Mac, the mach counters' read."""
+    vm = real("snapshot")() if _current["real"] else _current["vm"]
+    if vm is None:
+        return int(real("vm_stat_free_ram")() or 0)
     return int(vm["free"] + vm["inactive"])
 
 
 def real(name: str):
     """The real read ``install`` replaced: ``apc_free_ram`` (the copied
-    mlx-vlm apc's stock read) or ``vm_stat_free_ram`` (gmlx's
-    /usr/bin/vm_stat read). Without the simulation, the bound one."""
+    mlx-vlm apc's stock read), ``vm_stat_free_ram`` (gmlx's
+    /usr/bin/vm_stat read), ``snapshot`` (the mach counters) or ``sysconf``.
+    Without the simulation, the bound one."""
     if name in _real:
         return _real[name]
+    if name == "sysconf":
+        return os.sysconf
     if name == "apc_free_ram":
         from gmlx._vendor.mlx_vlm import apc
 
         return apc._free_ram_bytes
+    if name == "snapshot":
+        from gmlx.serve import kernel_vm
+
+        return kernel_vm.snapshot
     from gmlx.cache import apc_manager
 
     return apc_manager._vm_stat_free_ram_bytes
@@ -155,7 +228,14 @@ def _simulate_free_ram() -> None:
     from gmlx._vendor.mlx_vlm import apc
     from gmlx.cache import apc_manager
 
+    def reported(name: str):
+        real_read = _real[name]
+
+        def read():
+            return real_read() if _current["real"] else free_ram_bytes()
+        return read
+
     _real["apc_free_ram"] = apc._free_ram_bytes
     _real["vm_stat_free_ram"] = apc_manager._vm_stat_free_ram_bytes
-    apc._free_ram_bytes = free_ram_bytes
-    apc_manager._vm_stat_free_ram_bytes = free_ram_bytes
+    apc._free_ram_bytes = reported("apc_free_ram")
+    apc_manager._vm_stat_free_ram_bytes = reported("vm_stat_free_ram")

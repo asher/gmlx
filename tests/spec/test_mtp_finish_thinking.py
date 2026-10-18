@@ -13,7 +13,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 
 import gmlx.spec.speculative as spec
+from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors
 from gmlx.gen.thinking_budget import MTPFinishThinking
+from gmlx.spec.row_procs import SpecRowProcessors
 
 from test_mtp_preempt_resume import (
     VOCAB, _ArmableDrafter, _EchoDrafter, _VerifyEchoLM)
@@ -292,3 +294,82 @@ def test_server_rounds_batch_drops_stash_for_multirow(monkeypatch):
     assert list(gen) == []
     assert captured["thinking_hook"] is None    # popped, not honored at B>1
     assert not hasattr(cache, "_kq_mtp_thinking_hook")
+
+
+# -- presence and frequency penalties across a forced close -----------------
+
+
+class _RefusedDraftDrafter(_EchoDrafter):
+    """Drafts the echo continuation, then a token the target refuses."""
+
+    def draft_block(self, b, hidden, kv, n, sampler, dtype, **kw):
+        if not isinstance(b, mx.array):
+            b = mx.array([b])
+        b0 = b.reshape(-1).astype(mx.int32)
+        return mx.stack([(b0 + 1) % VOCAB, (b0 + 9) % VOCAB],
+                        axis=1).astype(dtype)
+
+
+def _penalty_rows(prompt):
+    """A presence penalty between two recorders, so each call's penalties
+    are the difference of what they saw."""
+    raw, out = [], []
+
+    def before(tokens, logits):
+        raw.append(logits)
+        return logits
+
+    def after(tokens, logits):
+        out.append((int(tokens.shape[0]), logits))
+        return logits
+
+    procs = [before, *make_logits_processors(presence_penalty=0.5), after]
+    rows = SpecRowProcessors.from_processors(procs, prompt)
+
+    def penalties_at(n):
+        """The penalties of the first call whose context has n tokens."""
+        i = next(i for i, (m, _) in enumerate(out) if m == n)
+        diff = (raw[i] - out[i][1]).reshape(-1).tolist()
+        return {t: v for t, v in enumerate(diff) if v}
+    return rows, penalties_at
+
+
+def test_a_forced_close_after_a_refused_draft_keeps_the_penalties_exact():
+    prompt = [1, 2]
+    rows, penalties_at = _penalty_rows(prompt)
+    rows.start(5)
+    hook = _hook([S1, S2, END])
+    shared = {"full": (mx.zeros((1, 2, 4, 4)), mx.zeros((1, 2, 4, 4)))}
+    gen = spec._owned_decode_rounds(
+        SimpleNamespace(), _RefusedDraftDrafter(cap=0), _VerifyEchoLM(),
+        [_FakeCache(width=1)], hidden=mx.zeros((1, 4, 8)), b=5,
+        shared_kv=shared, seed_tokens=None, emitted=1, max_tokens=8,
+        sampler=None, draft_block_size=None, thinking_hook=hook,
+        row_procs=rows)
+    out = []
+    for tok in gen:
+        out.append(int(tok))
+        if len(out) == 1:
+            hook.request_close()
+    # The first round takes 6 and refuses 14 for the target's 7.
+    assert out[:5] == [6, 7, S1, S2, END]
+    committed = [5, 6, 7, S1, S2, END]
+    assert penalties_at(len(prompt) + len(committed)) == {
+        t: 0.5 for t in committed}
+
+
+def test_a_batch_forced_close_keeps_the_penalties_exact():
+    prompt = [9, 10]
+    rows, penalties_at = _penalty_rows(prompt)
+    rows.start(1)
+    hook = _hook([S1, S2, END], budget=2, forced_ids=[14, 15, END])
+    gen = spec._owned_decode_rounds_batch(
+        SimpleNamespace(), _ArmableDrafter(cap=0), _VerifyEchoLM(),
+        [_FakeCache(width=1)], hidden=None, b=[1], shared_kv=None,
+        seed_tokens=None, emitted=[1], max_tokens=8, sampler=None,
+        draft_block_size=None, thinking_hook=hook, row_procs=[rows])
+    out = [t for toks, _ in gen for t in toks if t is not None]
+    assert out[:6] == [2, 3, 4, 14, 15, END]
+    committed = [1, 2, 3, 4, 14, 15, END]
+    assert penalties_at(len(prompt) + len(committed)) == {
+        t: 0.5 for t in committed}

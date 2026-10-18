@@ -37,9 +37,6 @@ from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
-
 NAMES = {"distilled": "check6_flux3_klein", "base": "check6_flux3_klein_base"}
 GATE_SIZE = 512
 EXACT_SIZE = 1024

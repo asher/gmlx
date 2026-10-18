@@ -541,6 +541,122 @@ def test_the_qwen_recipe_takes_the_vision_tower_beside_its_encoder(
             in capsys.readouterr().out)
 
 
+def _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails,
+                      fetched_sha=Q.prompt_sha256, args=()):
+    """A bare Qwen-Image pull with Qwen's rewriter prompt fetched, or its
+    fetch failing. A prompt file already at its path reads as another
+    digest, and a fetched one as ``fetched_sha``. Returns the downloads,
+    stdout and stderr."""
+    root, cfg = lib
+    monkeypatch.setattr(catalog, "scan", lambda *a, **k: [])
+    got = _downloads(monkeypatch)
+    fetch = manage._hf_download
+
+    def download(repo, filename, revision, dest_dir):
+        if repo == Q.prompt_repo and fetch_fails:
+            raise remote.RemoteError("offline")
+        # As the real download, a finished file is never fetched again.
+        assert not os.path.exists(os.path.join(dest_dir, filename))
+        return fetch(repo, filename, revision, dest_dir)
+
+    def sha(p):
+        if not p.endswith(Q.prompt_file):
+            return Q.vae_sha256
+        with open(p, "rb") as f:
+            return fetched_sha if f.read() == b"x" * 10 else "0" * 64
+
+    monkeypatch.setattr(manage, "_hf_download", download)
+    monkeypatch.setattr(catalog, "sha256_file", sha)
+    monkeypatch.setattr(catalog, "vae_identity",
+                        lambda p: ("qwen_image21", Q.vae_sha256))
+    import gmlx.image.vae as vae_pkg
+    monkeypatch.setattr(vae_pkg, "pack_vae", lambda src, dst, **kw: open(
+        dst, "wb").write(b"g"))
+    assert manage.cmd_pull(["qwen-image", "--config", str(cfg),
+                            *args]) == 0
+    out, err = capsys.readouterr()
+    return got, out, err
+
+
+def test_a_qwen_image_pull_fetches_qwens_rewriter_prompt_for_the_entry(
+        lib, monkeypatch, capsys):
+    _root, cfg = lib
+    got, out, _err = _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails=False)
+    assert (Q.prompt_repo, Q.prompt_file, Q.prompt_revision) in got
+    assert ("license: the upsampler prompt system_prompt.txt of "
+            "Qwen/Qwen-Image-2.1-PE-T2I, the Qwen Research License, "
+            "non-commercial use only") in out
+    m = _cfg(cfg).image_models["qwen-image"]
+    assert m.upsample_prompt == "Qwen__Qwen-Image-2.1-PE-T2I/system_prompt.txt"
+
+
+def test_a_qwen_image_pull_whose_prompt_fetch_fails_registers_without_it(
+        lib, monkeypatch, capsys):
+    _root, cfg = lib
+    _got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys, fetch_fails=True)
+    assert "the upsampler prompt was not fetched" in err
+    m = _cfg(cfg).image_models["qwen-image"]
+    assert m.upsample_prompt is None and m.vae.endswith(Q.vae_pack)
+
+
+def test_a_pull_leaves_the_users_own_system_prompt_in_a_flat_dir(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    own = root / Q.prompt_file
+    own.write_text("my own rewrite prompt\n")
+    got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys,
+                                       fetch_fails=False,
+                                       args=("--to", str(root)))
+    assert own.read_text() == "my own rewrite prompt\n"
+    assert all(repo != Q.prompt_repo for repo, _f, _r in got)
+    assert (f"warning: {own} is not the upsampler prompt of {Q.prompt_repo} "
+            f"at {Q.prompt_revision[:8]}, so the entry does not name it; "
+            "move or delete it, and pull again") in err
+    m = _cfg(cfg).image_models["qwen-image"]
+    assert m.upsample_prompt is None and m.vae.endswith(Q.vae_pack)
+
+
+def test_a_pull_leaves_a_dangling_link_at_the_prompt_path(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    link = root / "Qwen__Qwen-Image-2.1-PE-T2I" / Q.prompt_file
+    link.parent.mkdir()
+    link.symlink_to(root / "elsewhere.txt")
+    got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys,
+                                       fetch_fails=False)
+    assert link.is_symlink() and not link.exists()
+    assert all(repo != Q.prompt_repo for repo, _f, _r in got)
+    assert f"warning: {link} is not the upsampler prompt" in err
+    assert _cfg(cfg).image_models["qwen-image"].upsample_prompt is None
+
+
+def test_a_prompt_download_of_another_digest_never_lands(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    _got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys,
+                                        fetch_fails=False,
+                                        fetched_sha="f" * 64)
+    folder = root / "Qwen__Qwen-Image-2.1-PE-T2I"
+    assert os.listdir(folder) == []
+    assert f"the download has sha256 {'f' * 64}" in err
+    assert _cfg(cfg).image_models["qwen-image"].upsample_prompt is None
+
+
+def test_a_failed_prompt_fetch_says_which_entry_still_names_it(
+        lib, monkeypatch, capsys):
+    root, cfg = lib
+    rel = f"Qwen__Qwen-Image-2.1-PE-T2I/{Q.prompt_file}"
+    cfg.write_text(cfg.read_text() + (
+        "image_models:\n  older:\n    path: older.gguf\n"
+        "    encoder: enc.gguf\n    vae: vae.gguf\n"
+        f"    upsample_prompt: {rel}\n"))
+    _got, _out, err = _qwen_prompt_pull(lib, monkeypatch, capsys,
+                                        fetch_fails=True)
+    assert (f"the upsampler prompt was not fetched, so older still names "
+            f"{root / rel}: offline") in err
+    assert "the entry does not name it" not in err
+
+
 def test_krea_2_packs_a_vae_without_config(lib, monkeypatch, capsys):
     root, cfg = lib
     K = catalog.RECIPES["krea-2-turbo"]

@@ -1183,9 +1183,10 @@ class APIHandler(BaseHTTPRequestHandler):
         self.repetition_penalty = self.body.get("repetition_penalty", 0.0)
         self.repetition_context_size = self.body.get("repetition_context_size", 20)
         self.presence_penalty = self.body.get("presence_penalty", 0.0)
-        self.presence_context_size = self.body.get("presence_context_size", 20)
+        # gmlx: None counts the whole output.
+        self.presence_context_size = self.body.get("presence_context_size")
         self.frequency_penalty = self.body.get("frequency_penalty", 0.0)
-        self.frequency_context_size = self.body.get("frequency_context_size", 20)
+        self.frequency_context_size = self.body.get("frequency_context_size")
         self.xtc_probability = self.body.get("xtc_probability", 0.0)
         self.xtc_threshold = self.body.get("xtc_threshold", 0.0)
         self.logit_bias = self.body.get("logit_bias", None)
@@ -1241,9 +1242,11 @@ class APIHandler(BaseHTTPRequestHandler):
         self._validate("repetition_penalty", (float, int), min_val=0)
         self._validate("repetition_context_size", int, min_val=0)
         self._validate("presence_penalty", (float, int))
-        self._validate("presence_context_size", int, min_val=0)
+        # gmlx: None counts the whole output.
+        self._validate("presence_context_size", int, min_val=0, optional=True)
         self._validate("frequency_penalty", (float, int))
-        self._validate("frequency_context_size", int, min_val=0)
+        # gmlx: None counts the whole output.
+        self._validate("frequency_context_size", int, min_val=0, optional=True)
         self._validate("logprobs", bool)
         self._validate("top_logprobs", int, min_val=0, max_val=11, whitelist=[-1])
         self._validate("xtc_probability", float, min_val=0, max_val=1)

@@ -50,9 +50,6 @@ from gmlx.image import ops
 from gmlx.image.families.flux3_klein import model as fm
 from gmlx.image.ops import kq_routes
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
-
 ROWS = {"distilled": "check3_flux3_klein_512",
         "distilled r1": "check3_flux3_klein_r1_512",
         "base": "check3_flux3_klein_base_512",

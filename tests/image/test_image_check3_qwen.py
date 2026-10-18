@@ -43,8 +43,8 @@ from gmlx.image.families.qwen_image21 import model as qm
 from gmlx.image.lora import install
 from gmlx.image.ops import attention, kq_routes, norms
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
+# The tiny rows run on a Mac of 16 GB, as most users run, and the rows on
+# local files on this Mac (tests/host_box.py).
 
 BLOCKS = "selftest_qwen_image21_tiny_ref2"
 TINY = {c: f"selftest_qwen_image21_tiny_{c}" for c in ("text", "ref1", "ref2")}
@@ -80,6 +80,7 @@ def tiny(tmp_path_factory):
     return model
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", list(TINY))
 def test_tiny_weights_and_inputs_follow_the_shared_rule(case):
     arrays, m = committed_fixture(TINY[case])
@@ -100,6 +101,7 @@ def test_tiny_weights_and_inputs_follow_the_shared_rule(case):
     assert m["results"]["extract_against_joint_max_abs_fp32"] == 0.0
 
 
+@pytest.mark.host_gb(16)
 def test_tiny_model_matches_the_diffusers_oracle_block_by_block(tiny):
     arrays, m = committed_fixture(BLOCKS)
     n = len(tiny.transformer_blocks)
@@ -135,6 +137,7 @@ def test_tiny_model_matches_the_diffusers_oracle_block_by_block(tiny):
         assert not qg.missed(measured, tol), qg.missed(measured, tol)
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", list(TINY))
 def test_tiny_velocities_match_the_diffusers_oracle(tiny, case):
     """Both of the oracle's modes: a is its joint forward, and b its
@@ -169,6 +172,7 @@ def tiny_bf16(tmp_path_factory):
         return api.load(path, log=lambda *_: None)
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", list(TINY))
 def test_the_tiny_model_in_bf16_is_inside_the_bf16_tolerances(tiny_bf16,
                                                               case):
@@ -362,6 +366,7 @@ def _fault_id(name: str) -> str:
     return name.replace(" = ", "").replace(" ", "_")
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("name", list(FAULTS),
                          ids=[_fault_id(n) for n in FAULTS])
 def test_each_wrong_model_fails_the_tiny_gate(tiny, monkeypatch, name):
@@ -383,6 +388,7 @@ def test_each_wrong_model_fails_the_tiny_gate(tiny, monkeypatch, name):
     assert len(FAULTS) >= 7
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", ["text", "ref1"])
 def test_each_wrong_model_fails_on_the_velocities_alone(tiny, monkeypatch,
                                                         case):
@@ -423,6 +429,7 @@ def _tiny_sites(pipe, arrays: dict, routed: dict | None = None
     return sites, len(layout.prefix_layout(*qm.prefix_key(cond)).segments)
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("case", list(TINY))
 def test_the_sites_of_a_tiny_step_are_within_their_gates(tiny_bf16, case):
     """Each op of each block and each linear leaf on the path a request
@@ -500,6 +507,7 @@ SITE_FAULTS = {
 }
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("name", list(SITE_FAULTS),
                          ids=[_fault_id(n) for n in SITE_FAULTS])
 def test_each_wrong_op_fails_the_tiny_site_gate_at_its_own_site(
@@ -573,6 +581,7 @@ def _row_names(blocks: int) -> list[str]:
     return names
 
 
+@pytest.mark.host_gb(16)
 def test_a_row_with_no_tolerance_is_an_error_of_the_product_gate(tiny):
     """The product gate reads every teacher-forced row the manifest has
     a tolerance for, leaves the rows NOT_HELD names to their other gates,

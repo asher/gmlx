@@ -13,7 +13,7 @@ fp32 gap after that step.
 Skipped unless the manifests of scripts/image_oracle/check6_flux2_klein.py
 and check6_flux2_klein_edit.py, each run with --kv, are committed,
 GMLX_IMAGE_FIXTURES holds their arrays and KQUANT_TEST_GGUF_DIR the KV
-GGUF the oracle read. The runs declare a Mac of 24 GB."""
+GGUF the oracle read. The runs see this Mac."""
 from __future__ import annotations
 
 import os
@@ -65,7 +65,6 @@ def pipe(gguf_dir):
 
 
 @pytest.mark.integration
-@pytest.mark.host_gb(24)
 @pytest.mark.parametrize("case", list(CASES))
 def test_check6_kv_latents(pipe, case):
     from gmlx.image import api

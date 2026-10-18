@@ -2,7 +2,7 @@
 tap.
 
 gmlx encodes the oracle's prompts with the GGUF the oracle read: Qwen3-4B
-for the 4B checkpoints, Qwen3-8B for the 9B ones, on a Mac of 24 GB.
+for the 4B checkpoints, Qwen3-8B for the 9B ones, on this Mac.
 The reference renders each prompt with thinking off, right-pads it with
 the pad token to 512 rows and cuts it there, masks the pads as keys,
 gives each row its index as its position, and keeps the pad rows. The
@@ -31,8 +31,7 @@ pytestmark = pytest.mark.integration
 
 # The family and the fixture of each size.
 SIZES = [pytest.param(("flux2_klein", "check2_flux2_klein"), id="4b"),
-         pytest.param(("flux2_klein_9b", "check2_flux2_klein_9b"), id="9b",
-                      marks=pytest.mark.host_gb(24))]
+         pytest.param(("flux2_klein_9b", "check2_flux2_klein_9b"), id="9b")]
 
 
 def token_cosine(got: np.ndarray, ref: np.ndarray) -> np.ndarray:

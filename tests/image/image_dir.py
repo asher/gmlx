@@ -8,6 +8,7 @@ import os
 import struct
 from pathlib import Path
 
+import host_box
 import pytest
 
 ENV = "GMLX_TEST_IMAGE_DIR"
@@ -20,6 +21,7 @@ def image_dir() -> Path:
     p = Path(d).expanduser()
     if not p.is_dir():
         pytest.skip(f"{ENV}={d!r} is not a directory")
+    host_box.real_files()
     return p
 
 

@@ -7,7 +7,10 @@ A verify forward scores several positions at once, so ``SpecRowProcessors``
 runs the same chain, in the same order, at every position: position j gets
 the committed context plus the drafts ahead of it. The walk then samples
 the target from the processed logits, so every emitted token has the
-distribution plain decode gives it, whatever the drafter proposed.
+distribution plain decode gives it, whatever the drafter proposed. The
+presence and frequency penalties (``gmlx.gen.penalties``) are told the
+committed tokens, forced ones included, and count a round's drafts only
+for the positions that see them.
 
 Processors that the stock ``ThinkingAwareLogitsProcessor`` wraps stay off
 until its answer gate opens (the thinking end marker, or the answer header
@@ -23,6 +26,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
+from gmlx.gen.penalties import OutputPenalty
 from gmlx.gen.thinking_budget import AnswerGate
 
 from .grammar import SpecGrammar, _fresh_matcher, apply_masks
@@ -112,6 +116,8 @@ class SpecRowProcessors:
                     gate=gate.opener.restart(gate.opener.tail) if gate else None)
                 steps.append(_Step(None, None))
             elif callable(inner) and not hasattr(inner, "process_last_token"):
+                if gate is None and isinstance(inner, OutputPenalty):
+                    inner.anchor(len(context))
                 steps.append(_Step(inner, gate))
             else:
                 raise UnsupportedProcessor(
@@ -136,6 +142,8 @@ class SpecRowProcessors:
         self._context_arr = None
         for step in self.steps:
             gate = step.gate
+            if gate is None and isinstance(step.fn, OutputPenalty):
+                step.fn.commit(tokens)
             if gate is not None and gate.start is None:
                 j = gate.opener.advance(tokens)
                 if j is not None:
