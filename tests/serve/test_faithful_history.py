@@ -187,3 +187,30 @@ def test_retire_capture_wraps_faithful_render():
     inner = [c.cell_contents for c in outer.__closure__
              if callable(getattr(c, "cell_contents", None))]
     assert any(getattr(f, "_kq_faithful_history", False) for f in inner)
+
+
+@pytest.mark.parametrize("model_type", ["muse_spark", "k2_horizon"])
+def test_string_tool_arguments_decode_for_dict_templates(model_type):
+    # These templates raise on the OpenAI JSON-string form.
+    install_faithful_history()
+    history = _history()
+    history[1]["tool_calls"] = [{
+        "id": "c1", "type": "function",
+        "function": {"name": "f", "arguments": '{"city": "Paris"}'}}]
+    msgs = openai_mod.apply_chat_template(
+        _Proc(), {"model_type": model_type}, history, return_messages=True)
+    assert msgs[1]["tool_calls"][0]["function"]["arguments"] == {
+        "city": "Paris"}
+    assert msgs[1]["tool_calls"][0]["id"] == "c1"
+
+
+def test_string_tool_arguments_stay_strings_elsewhere():
+    install_faithful_history()
+    history = _history()
+    history[1]["tool_calls"] = [{
+        "id": "c1", "type": "function",
+        "function": {"name": "f", "arguments": '{"city": "Paris"}'}}]
+    msgs = openai_mod.apply_chat_template(
+        _Proc(), PLAIN_CFG, history, return_messages=True)
+    assert msgs[1]["tool_calls"][0]["function"]["arguments"] == (
+        '{"city": "Paris"}')

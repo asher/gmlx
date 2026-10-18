@@ -86,6 +86,9 @@ _TOOL_IMAGES = frozenset((
     "qwen3_5", "qwen3_5_moe", "kimi_k25", "muse_glimmer", "muse_spark",
     "glm5_next", "gemma4_unified",
 ))
+# The model types whose chat template raises on a JSON-string
+# ``tool_calls[*].function.arguments``.
+_DICT_TOOL_ARGUMENTS = frozenset(("muse_glimmer", "muse_spark", "k2_horizon"))
 
 
 def _tool_images(message) -> int:
@@ -265,9 +268,9 @@ def _decode_tool_arguments(msgs: list) -> None:
     """Decode ``tool_calls[*].function.arguments`` from the OpenAI wire form
     (a JSON string) into a mapping, in place.
 
-    The Muse Glimmer and Muse Spark ATEM templates raise outright on a
-    string, since the jinja sandbox cannot parse JSON, so a client replaying
-    its own tool turn would 500 on render. Undecodable arguments become an empty
+    The ``_DICT_TOOL_ARGUMENTS`` templates (the Muse ATEM ones and K2
+    Horizon) raise outright on a string, since the jinja sandbox cannot parse
+    JSON, so a client replaying its own tool turn would 500 on render. Undecodable arguments become an empty
     mapping, the same fallback the retirement mirror uses
     (``retire_key.assistant_message_from_reply``).
     """
@@ -356,7 +359,7 @@ def install_faithful_history() -> None:
                     if (isinstance(m, dict) and "thinking" not in m
                             and m.get("reasoning_content")):
                         msgs[i] = {**m, "thinking": m["reasoning_content"]}
-            elif cfg.get("model_type") in ("muse_glimmer", "muse_spark"):
+            elif cfg.get("model_type") in _DICT_TOOL_ARGUMENTS:
                 _decode_tool_arguments(msgs)
             if return_messages:
                 return msgs
