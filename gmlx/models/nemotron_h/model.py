@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright © 2025 Apple Inc.
+# Portions copyright (c) 2025 Apple Inc. (mlx-lm nemotron_h, MIT)
 # Copyright (c) 2026 Asher Feldman
 """Model for NVIDIA Nemotron-H (GGUF arch ``nemotron_h_moe``): Nano, Super,
 Lightning and Bolt.
