@@ -74,8 +74,10 @@ ComfyUI sees each gmlx model as its own model class, so its stock nodes
 for that model work too, such as `ModelSamplingAuraFlow` and
 `TextEncodeQwenImage21`. The prompt nodes of the example workflows are
 ComfyUI's `CLIP Text Encode (Prompt)`, and the latent node is its
-`EmptySD3LatentImage`, or its `EmptyFlux2LatentImage` for FLUX.2 klein and
-FLUX.3 klein.
+`EmptySD3LatentImage`, or its `EmptyFlux2LatentImage` for FLUX.2 klein,
+FLUX.3 klein and MOSS-Image. ComfyUI has no model class for MOSS-Image,
+so the gmlx nodes register their own, with the settings of the OpenMOSS
+ComfyUI plugin, and stock nodes such as `ModelSamplingSD3` work on it.
 
 The sampler, the noise, the guidance and the schedule run in ComfyUI. Each
 call to the model is one request to the gmlx server, which runs the DiT,
@@ -105,6 +107,8 @@ that names it:
 - Hook keyframes and scheduled CLIP hooks.
 - A quantized Qwen-Image 2.1 prefix cache: `QwenImage21Cache` with a dtype
   other than the default.
+- A MOSS-Image conditioning that masks some of its text rows, such as one
+  from a text encoder other than `gmlx CLIP Loader`.
 - A FLUX.2 klein reference method other than `index`, such as `offset`
   from `FluxKontextMultiReferenceLatentMethod`, but for the
   `index_timestep_zero` method that `Flux KV Cache` sets.
@@ -117,6 +121,12 @@ that names it:
 keys and values of the reference images of each row of the batch from the
 first step of a run, the later steps of the run reuse those of each row,
 and the end of the run drops them.
+
+`SkipLayerGuidanceDiTSimple` on MOSS-Image is not refused when it names
+`single_layers` alone, with `start_percent` 0 and `end_percent` 1. The
+server leaves those blocks out of the negative pass of each step. The
+node is refused with `double_layers`, another window, a linked widget or
+a block MOSS-Image lacks, and on any other model.
 
 A refusal from a node's own setup shows on that node. A refusal during
 sampling shows on the sampler and names the node upstream that caused it.

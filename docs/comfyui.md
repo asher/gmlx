@@ -213,6 +213,17 @@ on with a `CFGGuider` and a `KSamplerSelect`. Krea 2 Turbo samples at `cfg`
 Krea 2 quant fits a 1024x1024 image on a Mac with 16 GB, so set the latent
 to 512x512 there.
 
+MOSS-Image reads its prompt with the Qwen3.5-9B GGUF on the server, and
+the gmlx nodes run it on the Mac's GPU without the OpenMOSS ComfyUI plugin
+or the ComfyUI-MOSS-GGUF bridge. Its workflow, `moss-image-t2i`, takes the
+three gmlx loaders with `moss-image` or `moss-image-base` in `model_name`,
+`Empty Flux 2 Latent` for the image's size, `ModelSamplingSD3` at shift 5,
+and `SkipLayerGuidanceDiTSimple` with `single_layers` set to 22, which
+leaves block 22 out of the negative pass, as the OpenMOSS workflow does.
+`KSampler` samples 50 steps at `cfg` 3 with `euler` and `sgm_uniform`.
+That is ComfyUI's schedule, not the release's schedule that
+`gmlx image generate` and the server run.
+
 There are two more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
 `SamplerCustomAdvanced`, though `KSampler` works on every model. The
@@ -226,7 +237,7 @@ stock nodes work with a gmlx model and what runs where.
 
 ## The example workflows
 
-ComfyUI's template browser lists ten workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists eleven workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -236,6 +247,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `z-image-turbo-lora-t2i` | The same through a stock `LoraLoader` | A Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or another picked in the node |
 | `qwen-image-2.1-edit-two-references` | A Qwen-Image 2.1 edit from two reference images, through `TextEncodeQwenImage21` | `gmlx pull qwen-image`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `krea-2-turbo-t2i` | Krea 2 Turbo text to image at 1024x1024 in 8 steps, through `BasicScheduler` and `SamplerCustomAdvanced` | `gmlx pull krea-2-turbo`, and on a Mac with 16 GB a 512x512 latent |
+| `moss-image-t2i` | MOSS-Image text to image at 1024x1024 in 50 steps at `cfg` 3, with block 22 left out of the negative pass through `SkipLayerGuidanceDiTSimple` | `gmlx pull moss-image` |
 | `flux-2-klein-t2i` | FLUX.2 klein text to image at 1024x1024 in 4 steps, through `Flux2Scheduler` and `SamplerCustomAdvanced` | `gmlx pull flux-2-klein` |
 | `flux-2-klein-edit-two-references` | A FLUX.2 klein edit from two reference images, through `ReferenceLatent` | `gmlx pull flux-2-klein`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-2-klein-9b-t2i` | FLUX.2 klein 9B text to image at 1024x1024 in 4 steps, the same graph on the 9B model | `gmlx pull flux-2-klein-9b`, and a Mac with 24 GB or more |
