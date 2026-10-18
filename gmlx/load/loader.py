@@ -191,6 +191,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.hy_v3.tools as hy_v3_tools
 
         hy_v3_tools.ensure_registered()
+    if mt == "k2_horizon":
+        import gmlx.models.k2_horizon.tools as k2_horizon_tools
+
+        k2_horizon_tools.ensure_registered()
     if mt == "glm5_next":
         # Its hybrid cache depends on the deepseek_v4 DS4PoolingCache.
         import gmlx.models.glm5_next.model as glm5_next_model

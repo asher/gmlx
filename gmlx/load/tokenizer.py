@@ -910,6 +910,10 @@ def finish_gguf_tokenizer(raw, model_type: str | None) -> None:
         import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
 
         deepseek_v41_tools.install_message_normalizer(raw)
+    if model_type == "k2_horizon":
+        import gmlx.models.k2_horizon.tools as k2_horizon_tools
+
+        k2_horizon_tools.install_message_normalizer(raw)
 
 
 def bundled_chat_template_for_arch(arch: str | None) -> str | None:
