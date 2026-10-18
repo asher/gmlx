@@ -937,10 +937,10 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # Kept in step with the model class's cast_predicate.
     "nemotron_h": (".mixer.gate.weight", ".e_score_correction_bias",
                    ".A_log"),
-    # nemotron_h_omni: the same set under language_model.*, and the vision
-    # tower's F32 tensors, since llama.cpp runs the tower in fp32.
+    # nemotron_h_omni: the same set under language_model.*. The vision tower
+    # keeps its file dtypes (_F16_KEEP_BY_MODEL_TYPE).
     "nemotron_h_omni": (".mixer.gate.weight", ".e_score_correction_bias",
-                        ".A_log", "vision_tower."),
+                        ".A_log"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -958,6 +958,10 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # so the audio encoder takes the plain cast and gives the same output.
     "muse_spark": ("vision_tower.", "vision_adapter.", "vision_projection."),
     "kimi_k25": ("vision_tower.", "mm_projector."),
+    # nemotron_h_omni's tower runs in float32 as llama.cpp's does: its F32
+    # norms and tables stay F32, Bolt's BF16 weights stay BF16, and Super
+    # VL's Q8_0 weights, dequantized to F16 at remap, stay F16.
+    "nemotron_h_omni": ("vision_tower.",),
 }
 
 # Params cast to float32 at load, whatever float dtype the file stores them

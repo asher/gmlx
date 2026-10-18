@@ -84,7 +84,7 @@ projector and architecture that it found. gmlx supports these families:
 | gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | It reads images, and audio when the companion has an audio encoder. |
 | GLM-5.3-Flash | `glm5v` with `glm5-next` | GLM-5.3-Flash | The first uploads name both files `glm5next`, and those load too. |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
-| Nemotron 3.5 Bolt | `nemotron_omni` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Bolt-74B-A9B | Each image becomes 256 to 3328 tokens. Video input is refused. |
+| Nemotron 3.5 Bolt and Super VL | `nemotron_omni` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Bolt-74B-A9B, NVIDIA-Nemotron-3.5-Super-VL-120B-A12B | Each image becomes 256 to 3328 tokens. Video input is refused. |
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |

@@ -33,8 +33,12 @@ _CFG = dict(hidden_size=32, intermediate_size=64, num_hidden_layers=2,
             projection_dim=24, layer_norm_eps=1e-6, projector_norm_eps=1e-5)
 
 
-def _tower(seed=0) -> VisionModel:
-    tower = VisionModel(VisionConfig(**_CFG))
+# The Super VL file fuses q/k/v and adds post_ln; Bolt's has neither.
+_SUPER = dict(fused_qkv=True, post_norm=True)
+
+
+def _tower(seed=0, **over) -> VisionModel:
+    tower = VisionModel(VisionConfig(**{**_CFG, **over}))
     rng = np.random.default_rng(seed)
     params = [(k, mx.array(rng.normal(0, 0.3, v.shape).astype(np.float32)))
               for k, v in tree_flatten(tower.parameters())]
@@ -123,8 +127,13 @@ def _ref_tower(tower, image: np.ndarray) -> np.ndarray:
 
         hn = _layer_norm(x, _w(tower, b + "norm1.weight"),
                          _w(tower, b + "norm1.bias"), cfg.layer_norm_eps)
-        q, k, v = (lin(f"attn.{n}_proj", hn).reshape(-1, nh, hd)
-                   for n in "qkv")
+        if cfg.fused_qkv:
+            # build_vit views [q | k | v] off one projection.
+            q, k, v = (t.reshape(-1, nh, hd) for t in np.split(
+                lin("attn.qkv_proj", hn), 3, axis=-1))
+        else:
+            q, k, v = (lin(f"attn.{n}_proj", hn).reshape(-1, nh, hd)
+                       for n in "qkv")
         s = np.einsum("qhd,khd->hqk", q, k) / math.sqrt(hd)
         s = np.exp(s - s.max(-1, keepdims=True))
         s = s / s.sum(-1, keepdims=True)
@@ -133,6 +142,9 @@ def _ref_tower(tower, image: np.ndarray) -> np.ndarray:
         hn = _layer_norm(x, _w(tower, b + "norm2.weight"),
                          _w(tower, b + "norm2.bias"), cfg.layer_norm_eps)
         x = x + lin("mlp.fc2", _gelu_erf(lin("mlp.fc1", hn)))
+    if cfg.post_norm:
+        x = _layer_norm(x, _w(tower, "post_norm.weight"),
+                        _w(tower, "post_norm.bias"), cfg.layer_norm_eps)
     x = x[cfg.num_registers:]
     x = _ggml_patch_merge_permute(x, gh, gw, cfg.merge)
     x = x / np.sqrt((x * x).mean(-1, keepdims=True)
@@ -148,9 +160,10 @@ def _patchify(image: np.ndarray, p: int) -> np.ndarray:
     return a.reshape((h // p) * (w // p), c * p * p)
 
 
+@pytest.mark.parametrize("variant", [{}, _SUPER], ids=["bolt", "super-vl"])
 @pytest.mark.parametrize("gh,gw", [(4, 6), (6, 6), (8, 2)])
-def test_tower_matches_llama_cpp_graph(gh, gw):
-    tower = _tower(seed=gh * 10 + gw)
+def test_tower_matches_llama_cpp_graph(gh, gw, variant):
+    tower = _tower(seed=gh * 10 + gw, **variant)
     p = _CFG["patch_size"]
     image = np.random.default_rng(1).normal(0, 1, (3, gh * p, gw * p))
     got = tower(mx.array(_patchify(image, p).astype(np.float32)), (gh, gw))
@@ -309,6 +322,21 @@ def _bolt_mmproj_shapes(n_layers=2):
     return shapes
 
 
+def _super_mmproj_shapes(n_layers=2):
+    """The Super VL mmproj: one fused attn_qkv, post_ln, and a 3-D
+    position table."""
+    shapes = _bolt_mmproj_shapes(n_layers)
+    for i in range(n_layers):
+        for t in ("attn_q", "attn_k", "attn_v"):
+            del shapes[f"v.blk.{i}.{t}.weight"], shapes[f"v.blk.{i}.{t}.bias"]
+        shapes[f"v.blk.{i}.attn_qkv.weight"] = [1280, 3840]
+        shapes[f"v.blk.{i}.attn_qkv.bias"] = [3840]
+    shapes["v.position_embd.weight"] = [1280, 16384, 1]
+    shapes["v.post_ln.weight"] = [1280]
+    shapes["v.post_ln.bias"] = [1280]
+    return shapes
+
+
 def test_config_synth_reads_tensor_dims():
     meta = {**_omni_meta(), "clip.vision.block_count": 2}
     llm_meta = {"tokenizer.ggml.tokens": ["<unk>"] * 18 + ["<image>"]}
@@ -319,13 +347,20 @@ def test_config_synth_reads_tensor_dims():
     assert (v["num_registers"], v["position_grid"],
             v["projector_hidden_size"]) == (10, 128, 20480)
     assert cfg["image_token_id"] == 18
+    assert not v["fused_qkv"] and not v["post_norm"]
+    sv = vlm._synthesize_nemotron_omni_vlm_config(
+        {"hidden_size": 4096}, meta, llm_meta,
+        _super_mmproj_shapes())["vision_config"]
+    assert sv["fused_qkv"] and sv["post_norm"] and sv["position_grid"] == 128
     with pytest.raises(ValueError, match="hidden size"):
         vlm._synthesize_nemotron_omni_vlm_config(
             {"hidden_size": 2688}, meta, llm_meta, _bolt_mmproj_shapes())
 
 
-def test_remap_fills_every_tower_param():
-    shapes = _bolt_mmproj_shapes()
+@pytest.mark.parametrize("shapes_of", [_bolt_mmproj_shapes,
+                                       _super_mmproj_shapes])
+def test_remap_fills_every_tower_param(shapes_of):
+    shapes = shapes_of()
     arrays = {k: mx.zeros(tuple(reversed(s)), dtype=mx.float32)
               for k, s in shapes.items()}
     out, skipped, kq = vlm.remap_vision_arrays(arrays, "nemotron_h_omni")
@@ -339,6 +374,33 @@ def test_remap_fills_every_tower_param():
     assert {k[len("vision_tower."):] for k in out} == set(params)
     for k, v in out.items():
         assert v.shape == params[k[len("vision_tower."):]].shape, k
+
+
+def test_remap_dequantizes_q8_0_weights_to_float16():
+    # Super VL ships Q8_0 matmul weights. They load as float16, not through
+    # the kq kernels, whose bfloat16 activations cost the tower accuracy.
+    import mlx_kquant as kq
+
+    shapes = _super_mmproj_shapes(1)
+    arrays = {k: mx.zeros(tuple(reversed(s)), dtype=mx.float32)
+              for k, s in shapes.items()}
+    quant = {"v.blk.0.attn_qkv.weight": "vision_tower.blocks.0.attn.qkv_proj.weight",
+             "mm.model.mlp.1.weight": "vision_tower.projector.fc1.weight"}
+    want = {}
+    for src, tgt in quant.items():
+        w = mx.random.normal(arrays[src].shape, key=mx.random.key(len(src)))
+        wire, scales = kq.quantize(w, "q8_0")
+        arrays[src] = wire
+        arrays[src[: -len(".weight")] + ".scales"] = scales
+        want[tgt] = np.array(kq.dequantize(wire, scales, "q8_0", mx.float32))
+    out, _, kq_meta = vlm.remap_vision_arrays(
+        arrays, "nemotron_h_omni", mm_codecs={k: "q8_0" for k in quant})
+    assert not kq_meta
+    assert not any(k.endswith(".scales") for k in out)
+    for tgt, ref in want.items():
+        assert out[tgt].dtype == mx.float16 and out[tgt].shape == ref.shape
+        np.testing.assert_allclose(np.array(out[tgt].astype(mx.float32)), ref,
+                                   rtol=1e-3, atol=1e-3)
 
 
 def _container():
@@ -417,11 +479,19 @@ def test_container_language_model_carries_the_spec_hooks():
                                rtol=1e-5, atol=1e-5)
 
 
-def test_fp32_keep_row_covers_tower_and_router():
-    from gmlx.load.loader import _FP32_KEEP_BY_MODEL_TYPE
+def test_keep_rows_cover_tower_and_router():
+    from gmlx.load.loader import (
+        _F16_KEEP_BY_MODEL_TYPE,
+        _FP32_KEEP_BY_MODEL_TYPE,
+    )
     keep = _FP32_KEEP_BY_MODEL_TYPE["nemotron_h_omni"]
+    assert any(s in "language_model.backbone.layers.1.mixer.gate.weight"
+               for s in keep)
+    assert set(_FP32_KEEP_BY_MODEL_TYPE["nemotron_h"]) <= set(keep)
+    # The tower keeps its file dtypes, F16 included.
+    tower = _F16_KEEP_BY_MODEL_TYPE["nemotron_h_omni"]
     for name in ("vision_tower.blocks.0.norm1.weight",
                  "vision_tower.position_embedding",
-                 "language_model.backbone.layers.1.mixer.gate.weight"):
-        assert any(s in name for s in keep), name
-    assert set(_FP32_KEEP_BY_MODEL_TYPE["nemotron_h"]) <= set(keep)
+                 "vision_tower.blocks.0.attn.qkv_proj.weight"):
+        assert any(s in name for s in tower), name
+        assert not any(s in name for s in keep), name

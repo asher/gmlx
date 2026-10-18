@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""Vision tower for Nemotron-3.5-Bolt (mmproj projector ``nemotron_omni``):
-a C-RADIO ViT and the RMSNorm / relu^2 projector.
+"""Vision tower for Nemotron-3.5 Bolt and Super VL (mmproj projector
+``nemotron_omni``): a C-RADIO ViT and the RMSNorm / relu^2 projector.
 
 The reference is llama.cpp ``tools/mtmd/models/nemotron-omni.cpp`` with
 ``clip_graph::build_vit``, ``resize_position_embeddings`` and
@@ -12,13 +12,15 @@ The reference is llama.cpp ``tools/mtmd/models/nemotron-omni.cpp`` with
   antialias, no crop);
 - the register tokens prepended after the position add, and dropped after
   the last block;
-- pre-norm blocks with biased LayerNorms, biased q/k/v/out projections,
-  full attention over the image, and an exact (erf) GELU MLP;
+- pre-norm blocks with biased LayerNorms, biased q/k/v/out projections
+  (one fused ``[q | k | v]`` projection in the Super VL file), full
+  attention over the image, and an exact (erf) GELU MLP;
+- a final biased LayerNorm over every token when the file has ``post_ln``;
 - a 2x2 pixel shuffle (channel ``c + C*dx + 2*C*dy``), then RMSNorm and a
   bias-free relu^2 MLP into the text width.
 
 The tower runs in float32 against the mmproj's BF16 weights, as llama.cpp
-does. Each image runs on its own.
+does. Q8_0 weights run on the kquant modules. Each image runs on its own.
 """
 
 from __future__ import annotations
@@ -50,6 +52,8 @@ class VisionConfig(BaseModelConfig):
     projector_hidden_size: int = 20480
     projection_dim: int = 4096
     projector_norm_eps: float = 1e-5
+    fused_qkv: bool = False
+    post_norm: bool = False
 
 
 def _axis_weights(n_out: int, n_in: int) -> np.ndarray:
@@ -91,13 +95,16 @@ def resize_positions(table: mx.array, grid_h: int, grid_w: int,
 
 
 class Attention(nn.Module):
-    def __init__(self, dims: int, num_heads: int):
+    def __init__(self, dims: int, num_heads: int, fused_qkv: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.scale = (dims // num_heads) ** -0.5
-        self.q_proj = nn.Linear(dims, dims, bias=True)
-        self.k_proj = nn.Linear(dims, dims, bias=True)
-        self.v_proj = nn.Linear(dims, dims, bias=True)
+        if fused_qkv:
+            self.qkv_proj = nn.Linear(dims, 3 * dims, bias=True)
+        else:
+            self.q_proj = nn.Linear(dims, dims, bias=True)
+            self.k_proj = nn.Linear(dims, dims, bias=True)
+            self.v_proj = nn.Linear(dims, dims, bias=True)
         self.out_proj = nn.Linear(dims, dims, bias=True)
 
     def __call__(self, x: mx.array) -> mx.array:
@@ -107,9 +114,12 @@ class Attention(nn.Module):
         def heads(t):
             return t.reshape(1, n, h, d // h).transpose(0, 2, 1, 3)
 
+        if "qkv_proj" in self:
+            q, k, v = mx.split(self.qkv_proj(x), 3, axis=-1)
+        else:
+            q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         o = mx.fast.scaled_dot_product_attention(
-            heads(self.q_proj(x)), heads(self.k_proj(x)),
-            heads(self.v_proj(x)), scale=self.scale)
+            heads(q), heads(k), heads(v), scale=self.scale)
         return self.out_proj(o.transpose(0, 2, 1, 3).reshape(n, d))
 
 
@@ -128,7 +138,7 @@ class Block(nn.Module):
         super().__init__()
         d = config.hidden_size
         self.norm1 = nn.LayerNorm(d, eps=config.layer_norm_eps)
-        self.attn = Attention(d, config.num_attention_heads)
+        self.attn = Attention(d, config.num_attention_heads, config.fused_qkv)
         self.norm2 = nn.LayerNorm(d, eps=config.layer_norm_eps)
         self.mlp = MLP(d, config.intermediate_size)
 
@@ -176,6 +186,8 @@ class VisionModel(nn.Module):
             (config.position_grid * config.position_grid, d))
         self.registers = mx.zeros((config.num_registers, d))
         self.blocks = [Block(config) for _ in range(config.num_hidden_layers)]
+        if config.post_norm:
+            self.post_norm = nn.LayerNorm(d, eps=config.layer_norm_eps)
         self.projector = Projector(config)
 
     def __call__(self, patches: mx.array,
@@ -192,5 +204,7 @@ class VisionModel(nn.Module):
             [self.registers.astype(x.dtype), x], axis=0)
         for block in self.blocks:
             x = block(x)
+        if "post_norm" in self:
+            x = self.post_norm(x)
         x = x[cfg.num_registers:]
         return self.projector(pixel_shuffle(x, gh, gw, cfg.merge))

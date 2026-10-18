@@ -817,12 +817,17 @@ _GLM5NEXTV_TOP_MAP = {
 }
 
 
-# Nemotron-3.5-Bolt (nemotron_omni): the C-RADIO ViT and projector, mapped
-# onto gmlx.models.nemotron_h.vision. The patch embed is a 16x16 conv stored
-# [out, C, ph, pw] that the tower applies as a Linear over the
-# (C, ph, pw)-flattened patch. The 6-channel patch embed (frame pairs) serves
-# video only, which this tower does not take.
+# Nemotron-3.5 Bolt and Super VL (nemotron_omni): the C-RADIO ViT and
+# projector, mapped onto gmlx.models.nemotron_h.vision. The patch embed is a
+# 16x16 conv stored [out, C, ph, pw] that the tower applies as a Linear over
+# the (C, ph, pw)-flattened patch. The 6-channel patch embed (frame pairs)
+# serves video only, which this tower does not take. Super VL fuses q/k/v,
+# adds post_ln and ships Q8_0 matmul weights. Those dequantize to float16 at
+# load: the kq kernels round the tower's float32 activations to bfloat16,
+# which puts the features 8e-3 off llama.cpp's, where float16 weights under
+# float32 activations land 6e-4 off.
 _NEMOTRON_OMNI_BLK_SUBMAP = {
+    "attn_qkv": "attn.qkv_proj",
     "attn_q": "attn.q_proj",
     "attn_k": "attn.k_proj",
     "attn_v": "attn.v_proj",
@@ -838,6 +843,8 @@ _NEMOTRON_OMNI_TOP_MAP = {
     "mm.model.mlp.0.weight": "vision_tower.projector.norm.weight",
     "mm.model.mlp.1.weight": "vision_tower.projector.fc1.weight",
     "mm.model.mlp.3.weight": "vision_tower.projector.fc2.weight",
+    "v.post_ln.weight": "vision_tower.post_norm.weight",
+    "v.post_ln.bias": "vision_tower.post_norm.bias",
 }
 _NEMOTRON_OMNI_VIDEO_ONLY = frozenset({"v.patch_embd.weight.1"})
 
@@ -1105,6 +1112,18 @@ def remap_vision_arrays(
         return out, skipped, vis_kqmeta
 
     if model_type == "nemotron_h_omni":
+        codecs = mm_codecs or {}
+
+        def _emit_omni(tgt: str, arr: mx.array, src: str) -> None:
+            codec = codecs.get(src)
+            if codec is not None:
+                import mlx_kquant as kq
+
+                scales = arrays[src[: -len(".weight")] + ".scales"]
+                arr = kq.dequantize(arr, scales, codec, mx.float16).reshape(
+                    arr.shape[0], -1)
+            out[tgt] = arr
+
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -1115,9 +1134,14 @@ def remap_vision_arrays(
                 out["vision_tower.patch_embed.weight"] = arr.reshape(
                     arr.shape[0], -1)
                 continue
+            if name == "v.position_embd.weight":
+                # Super VL stores it [1, rows, C].
+                out["vision_tower.position_embedding"] = arr.reshape(
+                    -1, arr.shape[-1])
+                continue
             hit = _NEMOTRON_OMNI_TOP_MAP.get(name)
             if hit is not None:
-                out[hit] = arr
+                _emit_omni(hit, arr, name)
                 continue
             m = _VISION_BLK_RE.match(name)
             if m is None:
@@ -1128,7 +1152,8 @@ def remap_vision_arrays(
             if tgt is None:
                 skipped.append(name)
                 continue
-            out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
+            _emit_omni(f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}",
+                       arr, name)
         return out, skipped, vis_kqmeta
 
     if model_type == "deepseek_v4_vl":
@@ -1881,11 +1906,12 @@ def _synthesize_nemotron_omni_vlm_config(
     text_config: dict, mm_meta: dict, llm_meta: dict,
     mm_shapes: dict | None = None,
 ) -> dict:
-    """Nemotron-3.5-Bolt VLM config: the nemotron_h text synth plus the
-    C-RADIO tower read from ``clip.vision.*``. The register count, the
+    """Nemotron-3.5 Bolt and Super VL config: the nemotron_h text synth plus
+    the C-RADIO tower read from ``clip.vision.*``. The register count, the
     position grid and the projector width have no metadata key, so they are
     read off ``v.class_embd``, ``v.position_embd.weight`` and
-    ``mm.model.mlp.1.weight``."""
+    ``mm.model.mlp.1.weight``; the fused q/k/v and the post-norm follow
+    their tensors."""
     import math
 
     shapes = mm_shapes or {}
@@ -1900,6 +1926,8 @@ def _synthesize_nemotron_omni_vlm_config(
         "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
         "merge": _mm_int(mm_meta, "clip.vision.projector.scale_factor"),
         "projection_dim": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "fused_qkv": "v.blk.0.attn_qkv.weight" in shapes,
+        "post_norm": "v.post_ln.weight" in shapes,
     }
     eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
     if eps is not None:
