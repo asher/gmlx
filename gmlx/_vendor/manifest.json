@@ -1501,7 +1501,7 @@
   "mlx_vlm/models/zaya1_vl/zaya1_vl.py": {"status": "verbatim", "upstream": "255a5c86005d38c160b11bb228a2822ec784465d001e46da95ae0f67498989fd"},
   "mlx_vlm/moe_offload.py": {"sha256": "2918037c2f0cb7e34f8a92a9e497fbf5c433f38f3846246d4d73f205b36a6eea", "status": "edited", "upstream": "c5bc9fc7e76af1d4514076f1e4d9e259099decf452b6f3d50fff0c8ffa31ec5d"},
   "mlx_vlm/privacy_filter.py": {"status": "verbatim", "upstream": "5f45a1b183f6ee0c1c7d33ed1fcc9fa2d85f837a964baa4f4f29bc9fec1411ad"},
-  "mlx_vlm/prompt_utils.py": {"sha256": "b9fb62ef0701743dc8d5ebffa0aaa3576d309c1b0a84d26899c2149fb21e0ff7", "status": "edited", "upstream": "5e4e1889ca5a8b8b8ec1efd54a41b282a671b7cb9fef927777e1427be5735134"},
+  "mlx_vlm/prompt_utils.py": {"sha256": "da312cf0c1daae4a5b0690cd79246b15f51b75ca65a8c1a1cae066122814d197", "status": "edited", "upstream": "5e4e1889ca5a8b8b8ec1efd54a41b282a671b7cb9fef927777e1427be5735134"},
   "mlx_vlm/py.typed": {"status": "verbatim", "upstream": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
   "mlx_vlm/quant/__init__.py": {"status": "verbatim", "upstream": "fc84bc2cce35428cc1a30c3ce5eedac3f227f328b117e4bb5936f1211edcfaa4"},
   "mlx_vlm/quant/awq.py": {"status": "verbatim", "upstream": "75da9639b48141ffb67cd14b6cb6be6c56ec9f011fbc10325f604eaba1d3ac21"},

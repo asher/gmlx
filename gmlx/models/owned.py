@@ -59,4 +59,5 @@ OWNED_VLM_MODELS = {
     "muse_glimmer": "gmlx.models.muse_glimmer.vlm_model",
     "muse_spark": "gmlx.models.muse_spark.vlm_model",
     "qwen4_exp": "gmlx.models.qwen4_exp.vlm_model",
+    "nemotron_h_omni": "gmlx.models.nemotron_h.vlm_model",
 }

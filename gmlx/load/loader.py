@@ -937,6 +937,10 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # Kept in step with the model class's cast_predicate.
     "nemotron_h": (".mixer.gate.weight", ".e_score_correction_bias",
                    ".A_log"),
+    # nemotron_h_omni: the same set under language_model.*, and the vision
+    # tower's F32 tensors, since llama.cpp runs the tower in fp32.
+    "nemotron_h_omni": (".mixer.gate.weight", ".e_score_correction_bias",
+                        ".A_log", "vision_tower."),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX

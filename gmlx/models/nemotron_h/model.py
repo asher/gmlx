@@ -519,8 +519,10 @@ class NemotronHModel(nn.Module):
         self,
         inputs,
         cache: Optional[Any] = None,
+        input_embeddings: Optional[mx.array] = None,
     ):
-        hidden_states = self.embeddings(inputs)
+        hidden_states = (self.embeddings(inputs) if input_embeddings is None
+                         else input_embeddings)
 
         if cache is None:
             cache = [None] * len(self.layers)

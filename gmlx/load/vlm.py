@@ -73,6 +73,15 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         return "deepseek_v41_vl"
     proj = (mm_meta.get("clip.projector_type")
             or _mm(mm_meta, "clip.vision.projector_type"))
+    if proj == "nemotron_omni":
+        # NVIDIA Nemotron-3.5-Bolt: a C-RADIO ViT and a relu^2 projector onto
+        # the nemotron_h text tower (gmlx.models.nemotron_h.vlm_model).
+        if llm_arch != "nemotron_h_moe":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'nemotron_omni' on LLM arch {llm_arch!r} "
+                "is not supported (only Nemotron-H text GGUFs, arch "
+                "'nemotron_h_moe')")
+        return "nemotron_h_omni"
     if proj == "pixtral":
         # Mistral Pixtral: a plain-float Pixtral ViT (2-D RoPE, RMSNorm, SiLU MLP)
         # + a 2-layer GELU projector onto a Mistral-Nemo (llama-arch) text tower.
@@ -808,6 +817,31 @@ _GLM5NEXTV_TOP_MAP = {
 }
 
 
+# Nemotron-3.5-Bolt (nemotron_omni): the C-RADIO ViT and projector, mapped
+# onto gmlx.models.nemotron_h.vision. The patch embed is a 16x16 conv stored
+# [out, C, ph, pw] that the tower applies as a Linear over the
+# (C, ph, pw)-flattened patch. The 6-channel patch embed (frame pairs) serves
+# video only, which this tower does not take.
+_NEMOTRON_OMNI_BLK_SUBMAP = {
+    "attn_q": "attn.q_proj",
+    "attn_k": "attn.k_proj",
+    "attn_v": "attn.v_proj",
+    "attn_out": "attn.out_proj",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "ffn_up": "mlp.fc1",
+    "ffn_down": "mlp.fc2",
+}
+_NEMOTRON_OMNI_TOP_MAP = {
+    "v.position_embd.weight": "vision_tower.position_embedding",
+    "v.class_embd": "vision_tower.registers",
+    "mm.model.mlp.0.weight": "vision_tower.projector.norm.weight",
+    "mm.model.mlp.1.weight": "vision_tower.projector.fc1.weight",
+    "mm.model.mlp.3.weight": "vision_tower.projector.fc2.weight",
+}
+_NEMOTRON_OMNI_VIDEO_ONLY = frozenset({"v.patch_embd.weight.1"})
+
+
 # DeepSeek-V4-Flash-Vision-Exp (deepseek4v): the DeepSeek ViT + 3x3 unfold
 # aligner, mapped onto the vendored gmlx.models.deepseek_v4.vision tower. The
 # converter split the fused wqkv and w1 (llama.cpp PR 28133), so q/k/v and
@@ -1068,6 +1102,33 @@ def remap_vision_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
+        return out, skipped, vis_kqmeta
+
+    if model_type == "nemotron_h_omni":
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            if name in _NEMOTRON_OMNI_VIDEO_ONLY:
+                skipped.append(name)
+                continue
+            if name == "v.patch_embd.weight":
+                out["vision_tower.patch_embed.weight"] = arr.reshape(
+                    arr.shape[0], -1)
+                continue
+            hit = _NEMOTRON_OMNI_TOP_MAP.get(name)
+            if hit is not None:
+                out[hit] = arr
+                continue
+            m = _VISION_BLK_RE.match(name)
+            if m is None:
+                skipped.append(name)
+                continue
+            sub, _, leaf = m.group(2).rpartition(".")
+            tgt = _NEMOTRON_OMNI_BLK_SUBMAP.get(sub)
+            if tgt is None:
+                skipped.append(name)
+                continue
+            out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
         return out, skipped, vis_kqmeta
 
     if model_type == "deepseek_v4_vl":
@@ -1816,6 +1877,75 @@ def _synthesize_glm5next_vlm_config(
     return config
 
 
+def _synthesize_nemotron_omni_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+    mm_shapes: dict | None = None,
+) -> dict:
+    """Nemotron-3.5-Bolt VLM config: the nemotron_h text synth plus the
+    C-RADIO tower read from ``clip.vision.*``. The register count, the
+    position grid and the projector width have no metadata key, so they are
+    read off ``v.class_embd``, ``v.position_embd.weight`` and
+    ``mm.model.mlp.1.weight``."""
+    import math
+
+    shapes = mm_shapes or {}
+    hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
+    vision_config: dict = {
+        "model_type": "nemotron_h_omni",
+        "hidden_size": hidden,
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_hidden_layers": _mm_int(mm_meta, "clip.vision.block_count"),
+        "num_attention_heads": _mm_int(
+            mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "merge": _mm_int(mm_meta, "clip.vision.projector.scale_factor"),
+        "projection_dim": _mm_int(mm_meta, "clip.vision.projection_dim"),
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+    regs = shapes.get("v.class_embd")
+    if regs:
+        vision_config["num_registers"] = _other_dim(regs, hidden)
+    pos = shapes.get("v.position_embd.weight")
+    if pos:
+        n = _other_dim(pos, hidden)
+        side = math.isqrt(n)
+        if side * side != n:
+            raise ValueError(
+                f"nemotron_omni position table has {n} rows, not a square grid")
+        vision_config["position_grid"] = side
+    up = shapes.get("mm.model.mlp.1.weight")
+    if up:
+        vision_config["projector_hidden_size"] = _other_dim(
+            up, hidden * vision_config["merge"] ** 2)
+    if vision_config["projection_dim"] != int(text_config["hidden_size"]):
+        raise ValueError(
+            f"mmproj projection width {vision_config['projection_dim']} does "
+            f"not match the nemotron_h hidden size {text_config['hidden_size']}")
+
+    config: dict = {
+        "model_type": "nemotron_h_omni",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config.get("vocab_size", 131072)),
+    }
+    img_id = _gguf_token_id(llm_meta, NEMOTRON_OMNI_IMAGE_TOKEN)
+    if img_id is None:
+        raise ValueError(
+            f"the text GGUF has no {NEMOTRON_OMNI_IMAGE_TOKEN} token")
+    config["image_token_id"] = img_id
+    config["image_token_index"] = img_id
+    return config
+
+
+# Nemotron-3.5-Bolt: the chat template writes <image> per image; mtmd
+# brackets the embeddings with <img> and </img>.
+NEMOTRON_OMNI_IMAGE_TOKEN = "<image>"
+NEMOTRON_OMNI_IMAGE_START = "<img>"
+NEMOTRON_OMNI_IMAGE_END = "</img>"
+
+
 # DeepSeek-V4-Flash-Vision-Exp image placeholder (fullwidth bars, as the
 # chat template emits it once per image).
 DEEPSEEK4V_IMAGE_TOKEN = "<\uff5cdeepseek_image\uff5c>"
@@ -1973,6 +2103,10 @@ def synthesize_vlm_config(
 
     if model_type == "glm5_next":
         return _synthesize_glm5next_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type == "nemotron_h_omni":
+        return _synthesize_nemotron_omni_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "deepseek_v4_vl":
@@ -2285,6 +2419,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
             tokenizer, mm_meta, audio=bool(mm_meta.get("clip.has_audio_encoder")))
     if model_type == "glm5_next":
         return _synthesize_glm5next_processor(tokenizer, mm_meta)
+    if model_type == "nemotron_h_omni":
+        return _synthesize_nemotron_omni_processor(tokenizer, mm_meta)
     if model_type == "deepseek_v4_vl":
         return _synthesize_deepseek4v_processor(tokenizer, mm_meta, config or {})
     if model_type == "deepseek_v41_vl":
@@ -3302,6 +3438,209 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
         chat_template=getattr(tokenizer, "chat_template", None))
 
 
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
+class _NemotronOmniGgufImageProcessor(ImageProcessingMixin):
+    """Torch-free Nemotron-3.5-Bolt image preprocessing (numpy + PIL only).
+
+    Ports llama.cpp's ``mtmd_image_preprocessor_dyn_size`` with
+    ``img_tool::calc_size_preserved_ratio`` (``tools/mtmd/mtmd-image.cpp``):
+    round each edge to a multiple of ``patch_size * merge`` (32), then, past
+    the pixel budget, scale both edges by the sqrt area ratio and floor them
+    to the multiple, or below it, scale up and ceil them. The image is
+    stretched to that size BICUBIC with no padding, scaled to [0, 1] and
+    normalized with the mmproj's mean and std. Patches flatten channel-major
+    in row-major patch order, as the tower's patch embed reads them.
+    """
+
+    model_input_names = ["pixel_values", "image_grid_thw"]
+
+    def __init__(self, image_mean, image_std, patch_size=16, merge=2,
+                 min_pixels=262144, max_pixels=3407872):
+        super().__init__()
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.patch_size = int(patch_size)
+        self.merge = int(merge)
+        self.factor = self.patch_size * self.merge
+        self.min_pixels = int(min_pixels)
+        self.max_pixels = int(max_pixels)
+
+    def soft_tokens(self, grid) -> int:
+        _t, gh, gw = (int(v) for v in grid)
+        return (gh // self.merge) * (gw // self.merge)
+
+    def target_size(self, height: int, width: int) -> tuple[int, int]:
+        """(height, width) after the resize. float32 like the C++."""
+        import math
+
+        import numpy as np
+        f = self.factor
+        f32 = np.float32
+
+        def round_by(x):
+            return int(math.floor(float(f32(x) / f32(f)) + 0.5)) * f
+
+        def ceil_by(x):
+            return int(math.ceil(float(f32(x) / f32(f)))) * f
+
+        def floor_by(x):
+            return int(math.floor(float(f32(x) / f32(f)))) * f
+
+        w_bar = max(f, round_by(width))
+        h_bar = max(f, round_by(height))
+        if self.max_pixels > 0 and h_bar * w_bar > self.max_pixels:
+            beta = np.sqrt(f32(height) * f32(width) / f32(self.max_pixels))
+            h_bar = max(f, floor_by(f32(height) / beta))
+            w_bar = max(f, floor_by(f32(width) / beta))
+        elif self.min_pixels > 0 and h_bar * w_bar < self.min_pixels:
+            beta = np.sqrt(f32(self.min_pixels) / (f32(height) * f32(width)))
+            h_bar = ceil_by(f32(height) * beta)
+            w_bar = ceil_by(f32(width) * beta)
+        return h_bar, w_bar
+
+    def _one(self, img):
+        import numpy as np
+        from PIL import Image
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.asarray(img))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        h, w = self.target_size(img.height, img.width)
+        if (h, w) != (img.height, img.width):
+            img = img.resize((w, h), Image.Resampling.BICUBIC)
+        arr = np.asarray(img, dtype=np.float32) / np.float32(255.0)
+        mean = np.array(self.image_mean, dtype=np.float32)
+        std = np.array(self.image_std, dtype=np.float32)
+        arr = np.transpose((arr - mean) / std, (2, 0, 1))       # [C, H, W]
+        ps = self.patch_size
+        c = arr.shape[0]
+        gh, gw = h // ps, w // ps
+        patches = arr.reshape(c, gh, ps, gw, ps).transpose(1, 3, 0, 2, 4)
+        return patches.reshape(gh * gw, c * ps * ps), (1, gh, gw)
+
+    def __call__(self, images, **kwargs):
+        import numpy as np
+        flat = _PixtralGgufImageProcessor._flatten(images)
+        vecs, grids = [], []
+        for img in flat:
+            v, g = self._one(img)
+            vecs.append(v)
+            grids.append(g)
+        return {
+            "pixel_values": np.concatenate(vecs, axis=0),
+            "image_grid_thw": np.array(grids, dtype=np.int64),
+        }
+
+
+def _nemotron_omni_image_processor(
+        mm_meta: dict) -> _NemotronOmniGgufImageProcessor:
+    """The Nemotron-3.5-Bolt image processor from the mmproj's
+    ``clip.vision.*`` keys, which llama.cpp requires for this projector."""
+    return _NemotronOmniGgufImageProcessor(
+        image_mean=_mm_floats(mm_meta, "clip.vision.image_mean"),
+        image_std=_mm_floats(mm_meta, "clip.vision.image_std"),
+        patch_size=_mm_int(mm_meta, "clip.vision.patch_size"),
+        merge=_mm_int(mm_meta, "clip.vision.projector.scale_factor"),
+        min_pixels=_mm_int(mm_meta, "clip.vision.image_min_pixels"),
+        max_pixels=_mm_int(mm_meta, "clip.vision.image_max_pixels"))
+
+
+def _synthesize_nemotron_omni_processor(tokenizer, mm_meta: dict):
+    """Build the Nemotron-3.5-Bolt processor from the GGUFs alone.
+
+    The chat template writes one ``<image>`` per image item. The processor
+    turns each into ``<img>``, one ``<image>`` per soft token and
+    ``</img>``, the stream llama.cpp's mtmd builds around the embeddings.
+    Video input is refused: the 6-channel frame-pair path is not wired."""
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
+
+    from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
+
+    image_processor = _nemotron_omni_image_processor(mm_meta)
+
+    class NemotronOmniProcessor(ProcessorMixin):
+        attributes = ["image_processor", "tokenizer"]
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        image_token = NEMOTRON_OMNI_IMAGE_TOKEN
+
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
+            if kwargs.get("videos") is not None:
+                raise ValueError(
+                    "Nemotron-3.5-Bolt video input is not supported yet; "
+                    "pass still images")
+            kwargs.pop("videos", None)
+            if kwargs.get("audio") is not None:
+                raise ValueError(
+                    "Nemotron-3.5-Bolt takes no audio input")
+            kwargs.pop("audio", None)
+            if text is None and images is None:
+                raise ValueError("You must provide either text or images.")
+            if isinstance(text, str):
+                text = [text]
+
+            image_inputs = {}
+            if images is not None:
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+                image_inputs = self.image_processor(images)
+                if text is not None:
+                    text = self._expand(text, image_inputs["image_grid_thw"])
+
+            kwargs.pop("return_tensors", None)
+            data = dict(image_inputs)
+            if text is not None:
+                data = {**self.tokenizer(text, **kwargs), **data}
+            return BatchFeature(data=to_mlx(data))
+
+        def _expand(self, texts, grids):
+            """Wrap each ``<image>`` in ``<img>`` ... ``</img>`` and repeat
+            it once per soft token of its image. Grids are consumed in
+            order across the batch, matching how the images were flattened
+            for preprocessing."""
+            out, index = [], 0
+            for sample in texts:
+                parts = sample.split(self.image_token)
+                rebuilt = parts[0]
+                for part in parts[1:]:
+                    if index >= len(grids):
+                        raise ValueError(
+                            f"the prompt has more {self.image_token} "
+                            f"placeholders than the {len(grids)} images given")
+                    n = self.image_processor.soft_tokens(grids[index])
+                    rebuilt += (NEMOTRON_OMNI_IMAGE_START
+                                + self.image_token * n
+                                + NEMOTRON_OMNI_IMAGE_END + part)
+                    index += 1
+                out.append(rebuilt)
+            return out
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + list(self.image_processor.model_input_names)))
+
+    # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+    setattr(NemotronOmniProcessor, KWARGS_REACH_TOKENIZER, True)
+    processor = NemotronOmniProcessor(
+        image_processor=image_processor, tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
     return _attach_streaming_helpers(processor, tokenizer)
 
 
