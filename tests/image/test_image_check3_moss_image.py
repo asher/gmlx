@@ -1,6 +1,6 @@
 """Check 3 of the image acceptance gate for MOSS-Image: one denoise step of
 the gmlx DiT, row by row, against the release's MOSSImageTransformer on
-the same GGUF, under the plan's three gates.
+the same GGUF, under three gates.
 
 scripts/image_oracle/check3_moss_image.py writes the fixtures: every row
 of the step at 512 and the velocity at 1024 in fp32, with the oracle's
