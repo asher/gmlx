@@ -19,6 +19,7 @@ import base64
 import collections
 import functools
 import logging
+import re
 import time
 
 import numpy as np
@@ -34,6 +35,7 @@ from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepC
                      set_interrupt_check, tensor_hash)
 from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
+from .moss_image import PACK_MODELS
 from .patcher import CPU, KV_METHOD, KV_PATCHES, GmlxBinding, GmlxModelPatcher
 
 log = logging.getLogger("gmlx")
@@ -63,6 +65,12 @@ IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "Ski
 
 LAST_PROMPT: dict = {}
 STRICT_KEYS = False
+# The node whose skips of single blocks on the negative pass a step takes
+# as its skip set, on the families whose DiT skips blocks.
+SLG_NODE = "SkipLayerGuidanceDiTSimple"
+SKIP_FAMILIES = frozenset({"moss_image"})
+# The block replacement that node installs, which returns its input.
+SLG_SKIP = f"{SLG_NODE}.execute.<locals>.skip"
 
 
 def manifest_state_dict(manifest: dict, inline: bool = True) -> dict:
@@ -81,7 +89,11 @@ def manifest_state_dict(manifest: dict, inline: bool = True) -> dict:
 
 def build_weightless(manifest: dict, model_class: str):
     """``(model, model_config)`` built on the meta device from a manifest,
-    after checking that ComfyUI detects ``model_class``."""
+    after checking that ComfyUI detects ``model_class``, or by the pack's
+    own class of that name."""
+    if model_class in PACK_MODELS:
+        cfg = PACK_MODELS[model_class](manifest)
+        return _built(cfg, {})
     if not hasattr(comfy.supported_models, model_class):
         raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} has no {model_class} model, which "
                         f"the server serves {manifest.get('model')!r} as; update ComfyUI")
@@ -103,6 +115,10 @@ def build_weightless(manifest: dict, model_class: str):
         raise GmlxRefusal(f"gmlx: the server's {model_class} DiT holds the fused qkv layout "
                           "(single_blocks.0.qkv.weight), which a gmlx model does not take; "
                           "serve a file that stores q_proj, k_proj and v_proj apart")
+    return _built(cfg, sd)
+
+
+def _built(cfg, sd):
     dtypes = list(cfg.supported_inference_dtypes)
     dtype = torch.float32 if torch.float32 in dtypes else dtypes[0]
     cfg.set_inference_dtype(dtype, None, device=CPU)
@@ -205,6 +221,31 @@ def _upstream_names() -> list:
     return [f"{n} ({prompt[n]['class_type']})" for n in walk_back(prompt, sid, IN_FORWARD_CLASSES)]
 
 
+def _layers(text) -> list:
+    """The block numbers of a layers widget: every run of digits."""
+    return [int(v) for v in re.findall(r"\d+", str(text))]
+
+
+def _slg_inputs() -> tuple:
+    """``(node id, inputs)`` of the SkipLayerGuidanceDiTSimple node upstream
+    of the running sampler. Refuses none and two that differ."""
+    try:
+        import server
+        sid = getattr(server.PromptServer.instance, "last_node_id", None)
+    except Exception:  # noqa: BLE001
+        sid = None
+    prompt = LAST_PROMPT.get("prompt") or {}
+    hits = walk_back(prompt, sid, {SLG_NODE}) if sid is not None else []
+    if not hits:
+        _refuse("transformer_options['patches_replace'] on single blocks, from a node other "
+                f"than {SLG_NODE},")
+    inputs = [prompt[n].get("inputs") or {} for n in hits]
+    if any(i != inputs[0] for i in inputs[1:]):
+        raise GmlxRefusal(f"gmlx: the {SLG_NODE} nodes {', '.join(hits)} skip other blocks; "
+                          "a gmlx model takes one skip set a step")
+    return hits[0], inputs[0]
+
+
 def _refuse(what: str):
     hits = _upstream_names()
     where = f"; upstream node(s): {', '.join(hits)}" if hits else ""
@@ -272,6 +313,57 @@ class RemoteForward:
             raise GmlxRefusal(f"gmlx: a {cache['dtype']} prefix cache is not supported on a "
                               "gmlx model; use dtype default")
         return cache.get("device") != "off"
+
+    def _skip(self, to: dict) -> tuple:
+        """The blocks the rows leave out, from the single-block skips that
+        SkipLayerGuidanceDiTSimple puts on the negative pass, checked
+        against the node's widgets. Empty when the call carries no block
+        replacements, or on a family whose DiT skips none, which the check
+        refuses."""
+        pr = to.get("patches_replace")
+        if not pr or self.b.family not in SKIP_FAMILIES:
+            return ()
+        dit = (pr.get("dit") or {}) if isinstance(pr, dict) else {}
+        if set(pr) - {"dit"} or not dit or any(
+                not (isinstance(k, tuple) and len(k) == 2
+                     and k[0] in ("single_block", "double_block"))
+                or getattr(f, "__qualname__", None) != SLG_SKIP for k, f in dit.items()):
+            _refuse("a transformer_options['patches_replace'] entry other than the "
+                    f"block skips of {SLG_NODE}")
+        blocks = sorted(int(k[1]) for k in dit if k[0] == "single_block")
+        node, inputs = _slg_inputs()
+        where = f"the {SLG_NODE} node {node}"
+        widgets = ("double_layers", "single_layers", "start_percent", "end_percent")
+        linked = [w for w in widgets if isinstance(inputs.get(w), list)]
+        if linked:
+            raise GmlxRefusal(f"gmlx: {where} takes {', '.join(linked)} from another node; "
+                              "a gmlx model reads them as widgets")
+        double = sorted({*_layers(inputs.get("double_layers", "")),
+                         *(int(k[1]) for k in dit if k[0] == "double_block")})
+        if double:
+            raise GmlxRefusal(f"gmlx: {where} skips double_layers {double}; the MOSS-Image "
+                              "DiT has single blocks only, so leave double_layers empty")
+        start = float(inputs.get("start_percent", 0.0))
+        end = float(inputs.get("end_percent", 1.0))
+        if (start, end) != (0.0, 1.0):
+            raise GmlxRefusal(f"gmlx: {where} skips its blocks from {start} to {end} of the "
+                              "run; a gmlx model skips them over the whole run, at "
+                              "start_percent 0 and end_percent 1")
+        if sorted(set(_layers(inputs.get("single_layers", "")))) != blocks:
+            raise GmlxRefusal(f"gmlx: this call skips single blocks {blocks}, which are not "
+                              f"the single_layers of {where}")
+        if any(c != 1 for c in to.get("cond_or_uncond") or [0]):
+            raise GmlxRefusal(f"gmlx: {where} skips blocks of a positive row; a gmlx model "
+                              "skips them on the negative pass alone")
+        caps = getattr(self.b.client, "capabilities", None) or {}
+        if "skip_blocks" not in (caps.get("features") or ()):
+            raise GmlxRefusal("gmlx: this gmlx server skips no blocks in a step; update it")
+        n = int(getattr(self.base_model.diffusion_model, "blocks", 0) or 0)
+        bad = [b for b in blocks if not 0 <= b < n]
+        if bad:
+            raise GmlxRefusal(f"gmlx: {where} skips blocks {bad}, and the DiT has blocks 0 to "
+                              f"{n - 1}")
+        return tuple(blocks)
 
     def _hash(self, key, t: torch.Tensor, held: dict) -> str:
         h = self.memo.get(key) if key is not None else None
@@ -352,7 +444,9 @@ class RemoteForward:
         kv = getattr(patcher, "gmlx_ref_cache", frozenset())
         if kv and kv != KV_PATCHES:
             _refuse("part of the Flux KV Cache node's patches")
-        prefix_cache = self._check(control, to, kwargs, bool(kv))
+        skip = self._skip(to)
+        checked = {k: v for k, v in to.items() if k != "patches_replace"} if skip else to
+        prefix_cache = self._check(control, checked, kwargs, bool(kv))
         sigmas = self._schedule(to)
         # A latent format with a frame axis, such as Krea 2's, gives one frame.
         framed = x.ndim == 5 and x.shape[2] == 1
@@ -373,6 +467,8 @@ class RemoteForward:
         if kv and kwargs.get("ref_latents"):
             # The server keeps the references' K and V of the run's first step.
             fields["ref_cache"] = True
+        if skip:
+            fields["skip"] = list(skip)
         xs = x.float()
         ts = timesteps.float().reshape(-1)
         t1 = time.perf_counter()

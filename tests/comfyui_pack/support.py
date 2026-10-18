@@ -221,6 +221,35 @@ def write_flux2_lora(path: str, manifest: dict, rank: int = 4, alpha: float = 2.
     return [layer for _, layer, _ in FLUX2_PAIRS]
 
 
+# The layers of write_moss_lora, inside the blocks and out: the fused
+# feed-forward input and the text refiner's qkv among them.
+MOSS_STEMS = ("layers.0.proj.q", "layers.0.proj.ffn_up_gate", "layers.41.proj.ffn_down",
+              "text_embedder.blocks.1.qkv", "text_embedder.proj", "time_embedding.2",
+              "shared_block_modulation", "video_head_modulation", "video_embedder",
+              "final_linear_video")
+
+
+def write_moss_lora(path: str, manifest: dict, rank: int = 4, alpha: float = 2.0,
+                    seed: int = 0) -> list:
+    """A small MOSS-Image LoRA on the GGUF's names, which are the training
+    names: the blocks in the kohya ``lora_unet_`` form, the rest in the
+    dotted ``diffusion_model`` form. Returns the target layer names."""
+    import torch
+    from safetensors.torch import save_file
+    shapes = {t["name"]: t["shape"] for t in manifest["tensors"]}
+    g = torch.Generator().manual_seed(seed)
+    sd = {}
+    for stem in MOSS_STEMS:
+        dout, dn = shapes[f"{stem}.weight"]
+        k = ("lora_unet_" + stem.replace(".", "_")) if stem.startswith("layers.") \
+            else "diffusion_model." + stem
+        sd[f"{k}.lora_down.weight"] = (torch.randn(rank, dn, generator=g) * 0.01).to(torch.bfloat16)
+        sd[f"{k}.lora_up.weight"] = (torch.randn(dout, rank, generator=g) * 0.01).to(torch.bfloat16)
+        sd[f"{k}.alpha"] = torch.tensor(alpha)
+    save_file(sd, path)
+    return list(MOSS_STEMS)
+
+
 def manifest(family: str) -> dict:
     with open(os.path.join(FIXTURES, f"manifest-{family}.json")) as f:
         return json.load(f)

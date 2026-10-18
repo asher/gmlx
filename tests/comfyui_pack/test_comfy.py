@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import uuid
 
@@ -28,6 +29,8 @@ import support
 support.setup_comfy()
 P = support.load_pack()
 
+import comfy.latent_formats  # noqa: E402
+import comfy.model_base  # noqa: E402
 import comfy.model_management as mm  # noqa: E402
 import comfy.model_patcher  # noqa: E402
 import comfy.patcher_extension  # noqa: E402
@@ -47,6 +50,7 @@ F2ID, F2BID = "flux-2-klein", "flux-2-klein-base"
 F29ID, F29BID = "flux-2-klein-9b", "flux-2-klein-base-9b"
 F29KID = "flux-2-klein-9b-kv"
 F3ID, F3BID = "flux-3-klein", "flux-3-klein-base"
+MID = "moss-image"
 STEPS = 4
 LORAS = tempfile.mkdtemp(prefix="gmlx-pack-loras-")
 folder_paths.add_model_folder_path("loras", LORAS)
@@ -60,6 +64,9 @@ LORA_F2_KEYS = {f"diffusion_model.{s}.weight" for s in
                 support.write_flux2_lora(os.path.join(LORAS, LORA_F2), support.manifest("flux2_klein"))}
 LORA_F29 = "flux2-9b-test-lora.safetensors"
 support.write_flux2_lora(os.path.join(LORAS, LORA_F29), support.manifest("flux2_klein_9b"))
+LORA_M = "moss-test-lora.safetensors"
+LORA_M_KEYS = {f"diffusion_model.{s}.weight" for s in
+               support.write_moss_lora(os.path.join(LORAS, LORA_M), support.manifest("moss_image"))}
 # FLUX.3 came to ComfyUI after the pinned checkout; there its models are
 # refused by name.
 HAS_FLUX3 = hasattr(comfy.supported_models, "Flux3")
@@ -1185,6 +1192,242 @@ class Upsampled(Base):
         self.assertEqual(got, {ep["cond"], en["cond_typed"]})
 
 
+def slg_graph(*nodes) -> dict:
+    """A submitted graph: the gmlx loader, ModelSamplingSD3 at shift 5, the
+    SkipLayerGuidanceDiTSimple nodes of ``nodes`` in a chain, each the
+    widgets it takes, and the KSampler, node 9."""
+    g = {"1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": MID}},
+         "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 5.0}}}
+    up = "2"
+    for i, widgets in enumerate(nodes):
+        nid = str(3 + i)
+        g[nid] = {"class_type": "SkipLayerGuidanceDiTSimple",
+                  "inputs": {"model": [up, 0], "double_layers": "", "single_layers": "22",
+                             "start_percent": 0.0, "end_percent": 1.0, **widgets}}
+        up = nid
+    g["9"] = {"class_type": "KSampler", "inputs": {"model": [up, 0], "cfg": 3.0}}
+    return {"prompt": g}
+
+
+class MossImage(Base):
+    """MOSS-Image, which ComfyUI has no class for: the pack's weightless model
+    with the OpenMOSS plugin's settings, its LoRA key map, and block 22 left
+    out of the negative pass under SkipLayerGuidanceDiTSimple."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(P.model.LAST_PROMPT.clear)
+
+    def running(self, graph: dict):
+        """The pack sees ``graph`` as the prompt whose KSampler runs."""
+        from unittest import mock
+        P.model.LAST_PROMPT.clear()
+        P.model.LAST_PROMPT.update(graph)
+        fake = types.SimpleNamespace(PromptServer=types.SimpleNamespace(
+            instance=types.SimpleNamespace(last_node_id="9")))
+        return mock.patch.dict(sys.modules, {"server": fake})
+
+    def slg(self, model, single="22", double="", start=0.0, end=1.0):
+        from comfy_extras.nodes_model_advanced import ModelSamplingSD3
+        from comfy_extras.nodes_slg import SkipLayerGuidanceDiTSimple
+        m = ModelSamplingSD3().patch(model, 5.0)[0]
+        return SkipLayerGuidanceDiTSimple.execute(m, start, end, double, single)[0]
+
+    def test_moss_image_builds_on_meta_with_the_plugins_settings(self):
+        gc.collect()
+        r0 = rss()
+        m = self.model(MID)
+        gc.collect()
+        grew = (rss() - r0) / 2 ** 20
+        cfg = m.model.model_config
+        self.assertEqual(type(cfg).__name__, "MOSSImageConfig")
+        self.assertEqual(type(m.model).__name__, "MOSSImage")
+        self.assertEqual(m.model.model_type, comfy.model_base.ModelType.FLOW)
+        self.assertIsInstance(m.model.latent_format, comfy.latent_formats.Flux2)
+        ms = m.get_model_object("model_sampling")
+        self.assertEqual((float(ms.shift), float(ms.multiplier)), (1.0, 1000.0))
+        self.assertEqual(m.model.diffusion_model.blocks, 42)
+        names = {t["name"] for t in self.client.manifest(MID)["tensors"]}
+        sd = m.model.diffusion_model.state_dict()
+        self.assertEqual(set(sd), names)
+        self.assertTrue(all(p.device.type == "meta" for p in m.model.parameters()))
+        self.assertLess(grew, 200.0)
+        self.assertEqual(m.model.get_dtype(), torch.float32)
+
+    def test_a_manifest_that_is_no_moss_image_dit_is_refused_by_name(self):
+        man = self.client.manifest(MID)
+        cut = {**man, "tensors": [t for t in man["tensors"]
+                                  if t["name"] != "layers.0.proj.ffn_up_gate.weight"]}
+        with self.assertRaises(C.GmlxError) as e:
+            P.model.build_weightless(cut, "MOSSImage")
+        self.assertIn("not a MOSS-Image DiT: it has no layers.0.proj.ffn_up_gate.weight",
+                      str(e.exception))
+
+    def test_a_moss_lora_on_its_training_names_becomes_a_table(self):
+        """ComfyUI's generic key map reads the DiT's own names under the kohya
+        and dotted forms; the fused feed-forward input and the refiner's qkv
+        take their pairs whole."""
+        m = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(self.model(MID), LORA_M, 0.8)[0]
+        self.assertEqual(set(m.patches), LORA_M_KEYS)
+        self.assertEqual({t[3] for v in m.patches.values() for t in v}, {None})
+        tid = m.sync_patches()
+        table, _ = P.patches.build_table(MID, m.patches, family="moss_image")
+        self.assertEqual(tid, C.table_id(table)[0])
+        (put,) = self.stub.events("put_table")
+        self.assertEqual((put["id"], put["entries"], put["bands"], put["strengths"]),
+                         (tid, len(LORA_M_KEYS), 0, [0.8]))
+        self.assertEqual(len(self.stub.events("put_adapter")), 2 * len(LORA_M_KEYS))
+
+    def test_a_guided_sample_leaves_block_22_out_of_the_negative_pass_alone(self):
+        m = self.slg(self.model(MID))
+        with self.running(slg_graph({})):
+            out = self.sample(m, MID, cfg=3.0, steps=3)
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), 2 * 3)
+        self.assertEqual({s["rows"] for s in steps}, {1})
+        self.assertEqual([s["skip"] for s in steps], [None, [22]] * 3)
+        self.assertEqual(["skip" in s["fields"] for s in steps], [False, True] * 3)
+        self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(1, 128, 4, 4)})
+        sig = comfy.samplers.calculate_sigmas(m.get_model_object("model_sampling"), "simple", 3)
+        want = [float(np.float32(v) * np.float32(1000.0)) for v in sig[:-1].tolist() for _ in (0, 1)]
+        np.testing.assert_allclose([s["timestep"][0] for s in steps], want, rtol=1e-6)
+        self.assertGreater(want[0] / 1000.0, 0.99)
+        self.assertTrue(bool(torch.isfinite(out).all()))
+        # Without the node both passes run whole, in one call.
+        self.stub.reset()
+        self.sample(self.model(MID), MID, cfg=3.0, steps=1)
+        (s,) = self.stub.events("step")
+        self.assertEqual((s["rows"], s["skip"]), (2, None))
+
+    def test_skip_layer_guidance_refusals_name_each_cause(self):
+        base = self.model(MID)
+        node = "the SkipLayerGuidanceDiTSimple node 3"
+        cases = {
+            "double layers": (dict(double="7"), slg_graph({"double_layers": "7"}),
+                              f"{node} skips double_layers [7]"),
+            "window": (dict(start=0.0, end=0.5), slg_graph({"end_percent": 0.5}),
+                       f"{node} skips its blocks from 0.0 to 0.5 of the run"),
+            "other blocks than the widget": ({}, slg_graph({"single_layers": "21"}),
+                                             "this call skips single blocks [22], which are not "
+                                             f"the single_layers of {node}"),
+            "linked widget": ({}, slg_graph({"single_layers": ["12", 0]}),
+                              f"{node} takes single_layers from another node"),
+            "past the last block": (dict(single="42"), slg_graph({"single_layers": "42"}),
+                                    f"{node} skips blocks [42], and the DiT has blocks 0 to 41"),
+            "no node": ({}, {"prompt": {"9": {"class_type": "KSampler", "inputs": {}}}},
+                        "from a node other than SkipLayerGuidanceDiTSimple"),
+            "two nodes that differ": ({}, slg_graph({}, {"single_layers": "21"}),
+                                      "the SkipLayerGuidanceDiTSimple nodes 3, 4 skip other blocks"),
+        }
+        for name, (kw, graph, want) in cases.items():
+            with self.subTest(name):
+                m = self.slg(base, **kw)
+                with self.running(graph), self.assertRaises(C.GmlxRefusal) as e:
+                    self.sample(m, MID, cfg=3.0, steps=1)
+                self.assertIn(want, str(e.exception))
+        self.assertEqual([s["skip"] for s in self.stub.events("step")], [None] * len(cases))
+
+    def test_a_skip_the_server_or_the_call_cannot_take_is_refused(self):
+        f = self.model(MID).model.diffusion_model.forward
+        cond = self.cond(MID, "x")[0][0]
+        x, t = torch.zeros(1, 128, 4, 4), torch.tensor([500.0])
+
+        def skip(args, extra):
+            return args
+        skip.__qualname__ = P.model.SLG_SKIP
+        neg = {"cond_or_uncond": [1], "patches_replace": {"dit": {("single_block", 22): skip}}}
+        with self.running(slg_graph({})):
+            f(x, t, context=cond, transformer_options=neg)
+            self.assertEqual(self.stub.events("step")[-1]["skip"], [22])
+            cases = {
+                "a positive row": ({**neg, "cond_or_uncond": [0]},
+                                   "skips blocks of a positive row"),
+                "another replacement": ({**neg, "patches_replace": {"dit": {
+                    ("single_block", 22): lambda a, e: a}}},
+                    "entry other than the block skips of SkipLayerGuidanceDiTSimple"),
+                "another kind of patch": ({**neg, "patches_replace": {
+                    "dit": {("single_block", 22): skip}, "attn2": {}}},
+                    "entry other than the block skips of SkipLayerGuidanceDiTSimple")}
+            for name, (to, want) in cases.items():
+                with self.subTest(name), self.assertRaises(C.GmlxRefusal) as e:
+                    f(x, t, context=cond, transformer_options=to)
+                self.assertIn(want, str(e.exception))
+            caps = self.client.capabilities
+            self.client.capabilities = {**caps, "features": [
+                v for v in caps["features"] if v != "skip_blocks"]}
+            try:
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    f(x, t, context=cond, transformer_options=neg)
+                self.assertIn("this gmlx server skips no blocks in a step; update it",
+                              str(e.exception))
+            finally:
+                self.client.capabilities = caps
+            # A family whose DiT skips no blocks keeps its refusal of the replacement.
+            z = self.model(ZID).model.diffusion_model.forward
+            with self.assertRaises(C.GmlxRefusal) as e:
+                z(torch.zeros(1, 16, 4, 4), torch.tensor([0.5]), context=self.cond(ZID, "x")[0][0],
+                  transformer_options=neg)
+            self.assertIn("transformer_options['patches_replace']", str(e.exception))
+        self.assertEqual(len(self.stub.events("step")), 1)
+
+    def test_a_masked_conditioning_is_refused_and_a_whole_one_samples(self):
+        m = self.model(MID)
+        pos = self.cond(MID, "a red bicycle")
+        n = pos[0][0].shape[1]
+        whole = [[pos[0][0], {"attention_mask": torch.ones(1, n)}]]
+        self.sample(m, MID, cfg=1.0, steps=1, pos=whole)
+        self.assertEqual(len(self.stub.events("step")), 1)
+        mask = torch.ones(1, n)
+        mask[0, -2:] = 0
+        with self.assertRaises(C.GmlxRefusal) as e:
+            self.sample(m, MID, cfg=1.0, steps=1, pos=[[pos[0][0], {"attention_mask": mask}]])
+        self.assertIn("masks some of its text rows", str(e.exception))
+
+    def test_the_moss_clip_sends_an_empty_prompt_as_it_is(self):
+        # MOSSImageTokenizer applies its chat template first.
+        clip = P.nodes.GmlxCLIPLoader().load(MID, self.stub.url, False)[0]
+        (cond,) = comfy_nodes.CLIPTextEncode().encode(clip, "a lighthouse")
+        self.assertEqual(tuple(cond[0][0].shape), (1, 32, 4096))
+        clip.encode_from_tokens_scheduled(clip.tokenize("", prevent_empty_text=True))
+        self.assertEqual([e["text"] for e in self.stub.events("encode")], ["a lighthouse", ""])
+
+    def test_the_lora_key_map_equals_the_openmoss_plugins(self):
+        """The patches ComfyUI makes of one LoRA on the pack's model and on
+        the OpenMOSS plugin's own model of the same file are the same."""
+        import importlib.util
+        root = os.environ.get("GMLX_TEST_MOSS_PLUGIN")
+        if not root:
+            self.skipTest("the plugin comparison needs GMLX_TEST_MOSS_PLUGIN, the OpenMOSS "
+                          "plugin's moss-image folder")
+        spec = importlib.util.spec_from_file_location(
+            "moss_image_plugin", os.path.join(root, "__init__.py"), submodule_search_locations=[root])
+        mod = sys.modules.get("moss_image_plugin")
+        if mod is None:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["moss_image_plugin"] = mod
+            spec.loader.exec_module(mod)
+        loaders = importlib.import_module("moss_image_plugin.loaders")
+        man = self.client.manifest(MID)
+        state = {t["name"]: torch.empty(t["shape"], device="meta") for t in man["tensors"]}
+        cfg = loaders.model_config(state)
+        cfg.set_inference_dtype(torch.float32, None, device=torch.device("cpu"))
+        theirs = comfy.model_patcher.ModelPatcher(cfg.get_model(state, device=torch.device("meta")),
+                                                  torch.device("cpu"), torch.device("cpu"))
+        ours = self.model(MID)
+        self.assertEqual(set(ours.model.diffusion_model.state_dict()),
+                         set(theirs.model.diffusion_model.state_dict()))
+        sd = comfy.utils.load_torch_file(os.path.join(LORAS, LORA_M), safe_load=True)
+        mw, _ = comfy.sd.load_lora_for_models(ours, None, sd, 0.8, 0.0)
+        mp, _ = comfy.sd.load_lora_for_models(theirs, None, sd, 0.8, 0.0)
+        self.assertEqual(set(mw.patches), set(mp.patches))
+        self.assertEqual(set(mw.patches), LORA_M_KEYS)
+        for k in mw.patches:
+            for ta, tb in zip(mw.patches[k], mp.patches[k]):
+                self.assertEqual((ta[0], ta[2], ta[3]), (tb[0], tb[2], tb[3]))
+                for x, y in zip(ta[1].weights, tb[1].weights):
+                    self.assertTrue((x is None and y is None) or torch.equal(torch.as_tensor(x), torch.as_tensor(y)))
+
+
 class Widgets(unittest.TestCase):
     """The loaders list the server's image models, the default first, and
     show the address they use; a name the server lacks is refused with its
@@ -1224,7 +1467,7 @@ class Widgets(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_loaders_list_the_server_models_default_first(self):
-        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F29KID, F3ID, F3BID]
+        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F29KID, F3ID, F3BID, MID]
         for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
             node = P.NODE_CLASS_MAPPINGS[name]
             req = node.INPUT_TYPES()["required"]
@@ -1244,7 +1487,7 @@ class Widgets(unittest.TestCase):
             self.probed()
             names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
             self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F29ID, F29BID, F29KID,
-                                     F3ID, F3BID])
+                                     F3ID, F3BID, MID])
             self.assertEqual(opts["default"], KID)
         finally:
             stub.close()

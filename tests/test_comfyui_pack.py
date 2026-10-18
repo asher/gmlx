@@ -67,7 +67,7 @@ TITLES = {"z_image": "Z-Image", "qwen_image21": "Qwen-Image 2.1",
           "krea2": "Krea 2", "flux2_klein": "FLUX.2 klein",
           "flux2_klein_9b": "FLUX.2 klein 9B",
           "flux2_klein_9b_kv": "FLUX.2 klein 9B KV",
-          "flux3_klein": "FLUX.3 klein"}
+          "flux3_klein": "FLUX.3 klein", "moss_image": "MOSS-Image"}
 
 
 def _served_families() -> set:
