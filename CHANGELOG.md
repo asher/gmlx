@@ -57,6 +57,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--chat-template` as invalid Jinja.
 - `--thinking off` was silently ignored on a model with no thinking switch
   when its template has the word thinking in its text. It now warns.
+- A Krea 2 GGUF whose stored projector shape is not a list of integers
+  crashed the load. It is refused with the reason.
 - A streamed image request refused while it ran, such as one too large for
   memory, got a server error frame where the same request unstreamed got a 400.
 - The `gmlx pull` plan of an image model could say its parts fit in stages
