@@ -5,11 +5,14 @@ samples from the seed's noise on the oracle's features of the plain
 prompt and of the empty one, which is the release's negative prompt. The
 two have different lengths, and each pass runs at its own. The seed's
 noise must equal the oracle's, and the schedule must be the release's
-within one float32 ulp, at the same step count.
+bit for bit.
 
 At 512 the run is the model as it ships, in bf16, and the latents after
 each step the oracle kept and after the last must stay within twice the
-oracle's own bf16 against fp32 gap after that step.
+oracle's own bf16 against fp32 gap after that step. The release's bf16
+run drifts from its fp32 run about 2000 times over 50 steps, so these
+gates guard the bf16 numerics alone: a negative pass that runs every
+block stays inside them. The exact gate guards the skip set.
 
 At 1024 the gate is the exact run: check 3's exact arithmetic, held to
 the oracle's fp32 latents after each kept step and after the last at the
@@ -228,10 +231,9 @@ def test_the_seed_gives_the_noise_of_the_oracle(size):
 
 @pytest.mark.parametrize("size", SIZES)
 def test_the_schedule_is_the_release_one(size):
-    """The schedule of a request has the release's step count and each
-    sigma within one float32 ulp of the release's, and the release's
-    timesteps are its sigmas times 1000 in float32, as the DiT forms
-    them."""
+    """The schedule of a request is the release's bit for bit, and the
+    release's timesteps are its sigmas times 1000 in float32, as the DiT
+    forms them."""
     from gmlx.image.api import ImagePipeline
     from gmlx.image.registry import get_family
 
@@ -244,7 +246,7 @@ def test_the_schedule_is_the_release_one(size):
     got, want = pipe.sigmas(steps, (size // 16) ** 2), arrays["sigmas"]
     assert got.shape == want.shape
     assert want.size - 1 == m["inputs"]["steps_run"]
-    assert _ulps(got, want) <= 1
+    assert _ulps(got, want) == 0
     ts = want[:-1] * np.float32(1000)
     assert _ulps(ts, arrays["timesteps"]) == 0
 
@@ -369,8 +371,9 @@ def test_check6_exact_at_1024(pipe, request, monkeypatch):
                 apply(mp)
             # A fault may leave a block out of both passes, so the check
             # that every product ran dense is the clean run's alone.
-            with bg.exact_products(p.dit):
+            with bg.exact_products(p.dit) as used:
                 bad, _ = _run(p, arrays, m, stop=stop, **kw)
+            assert not used.kernel, (name, used.kernel[:3])
         print(_line(f"moss check6 exact {EXACT_SIZE}, {name}", bad, gate))
         assert bad and any(v > gate[k] for k, v in bad.items()), (name, bad)
     assert not over, over
