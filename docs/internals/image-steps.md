@@ -120,6 +120,16 @@ the keys and values of that row. The header answers `hit` on those steps,
 and the end of the run drops the keys and values. A step with `ref_cache`
 and no run gets 400, as does one on a DiT that keeps no such cache.
 
+A step with `skip`, a list of block indices from zero, on a server whose
+features list `skip_blocks`, runs each of its rows without those blocks,
+as ComfyUI's `SkipLayerGuidanceDiTSimple` runs the negative pass of
+MOSS-Image. A client sends the negative rows in a step of their own with
+that skip. A model's status gives the blocks its variant leaves out of
+the negative pass under `sampling.neg_skip`, `[22]` on MOSS-Image and an
+empty list on any other model. A skip on a DiT that skips no blocks, a
+skip that names a block the DiT lacks, and a skip with `ref_cache` get
+400.
+
 A run that sits idle for 120 seconds ends within a few seconds after, and
 lets the model go. The server holds at most 32 runs, and a begin past that
 gets 429. An interrupt names its run and takes effect at the next step:
@@ -160,6 +170,8 @@ steps in the bench with its sampler. Its steps take the `reference`
 convention, which embeds the time as `sample` does. The ComfyUI pack's
 steps take `comfy`, which embeds the time as ComfyUI's forward does, and
 for FLUX.2 klein that is the fp32 time.
+Under both, a step's timestep is its sigma, except on MOSS-Image, where
+it is the sigma times 1000, as in the OpenMOSS plugin's ComfyUI model.
 
 The record's transport is `steps`. It holds the median per step of the
 request's wall time less the forward time the server reports, and
