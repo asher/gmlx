@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2026 OpenMOSS Team
+# Ported from OpenMOSS-Team/MOSS-Image-SFT at revision fc5de0d5: the
+# tensor names and shapes of MOSSImageTransformer in
+# pipeline_moss_image.py and the constants of that file and of
+# transformer/config.json, and modified for gmlx (Apache-2.0; see
+# licenses/MOSS-Image-LICENSE).
 """MOSS-Image fingerprint, constants and config synthesis.
 
 Shapes are GGUF order, input dim first. The file's tensor names are the
@@ -11,10 +18,6 @@ that family's name.
 """
 
 from __future__ import annotations
-
-# The config values no shape gives and the training names are those of
-# OpenMOSS-Team/MOSS-Image-SFT pipeline_moss_image.py and
-# transformer/config.json at fc5de0d5 (Apache-2.0).
 
 import re
 
