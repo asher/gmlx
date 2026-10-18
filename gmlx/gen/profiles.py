@@ -142,11 +142,17 @@ FAMILIES: dict[str, dict] = {
         "intents": {},
     },
     # https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16, 2026-07.
+    # Thinking is on by default. Nemotron 3.5 Bolt's template also takes
+    # medium_effort, which asks for a shorter reasoning pass; older templates
+    # ignore it.
     "nemotron": {
         "label": "Nemotron",
         "arches": ("nemotron_h_moe",),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
-        "intents": {},
+        "intents": {
+            "instruct": {"chat_template_kwargs": {"enable_thinking": False}},
+            "reasoning-medium": {"chat_template_kwargs": {"medium_effort": True}},
+        },
     },
     # https://huggingface.co/tencent/Hunyuan-A13B-Instruct, 2026-07.
     "hunyuan": {

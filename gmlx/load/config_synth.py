@@ -2426,8 +2426,12 @@ def _synth_mistral3(meta, shapes, config: dict) -> None:
 def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
     arch = "nemotron_h_moe"
 
-    # nemotron_h model uses layer_norm_epsilon (not rms_norm_eps)
+    # nemotron_h model uses layer_norm_epsilon (not rms_norm_eps). As in
+    # llama.cpp, a file with no rms eps (Super VL) takes attention's
+    # layer_norm_epsilon.
     eps = _read_float(meta, f"{arch}.attention.layer_norm_rms_epsilon")
+    if eps is None:
+        eps = _read_float(meta, f"{arch}.attention.layer_norm_epsilon")
     if eps is not None:
         config["layer_norm_epsilon"] = eps
         config.pop("rms_norm_eps", None)
@@ -2474,16 +2478,13 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
         if non_zero:
             config["num_key_value_heads"] = non_zero[0]
 
+    ff_array = _read_int_array(meta, f"{arch}.feed_forward_length")
+
     # MoE parameters
     n_experts = _read_int(meta, f"{arch}.expert_count")
     if n_experts is not None:
-        config["n_routed_experts"] = n_experts
-        config["num_experts_per_tok"] = _require(
-            _read_int(meta, f"{arch}.expert_used_count"),
-            arch=arch, gguf_field=f"{arch}.expert_used_count")
-        config["moe_intermediate_size"] = _require(
-            _read_int(meta, f"{arch}.expert_feed_forward_length"),
-            arch=arch, gguf_field=f"{arch}.expert_feed_forward_length")
+        _synth_nemotron_h_experts(meta, shapes, config, arch, n_experts,
+                                  kv_array, ff_array)
 
         shared_ffn = _read_int(meta, f"{arch}.expert_shared_feed_forward_length")
         if shared_ffn is not None:
@@ -2500,8 +2501,9 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
         config["n_group"] = _read_int(meta, f"{arch}.expert_group_count") or 1
         config["topk_group"] = _read_int(meta, f"{arch}.expert_group_used_count") or 1
 
-        norm_topk = _read_int(meta, f"{arch}.expert_weights_norm")
-        config["norm_topk_prob"] = bool(norm_topk) if norm_topk is not None else True
+        # llama.cpp leaves expert_weights_norm false when the key is absent.
+        config["norm_topk_prob"] = bool(
+            _read_int(meta, f"{arch}.expert_weights_norm") or 0)
 
         scale = _read_float(meta, f"{arch}.expert_weights_scale")
         if scale is None:
@@ -2511,13 +2513,14 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
 
     # intermediate_size for dense MLP layers (type "-"). Use
     # feed_forward_length if uniform, else default to moe_intermediate_size.
-    ff_array = _read_int_array(meta, f"{arch}.feed_forward_length")
     if ff_array is not None:
         non_zero_ff = [v for v in ff_array if v > 0]
         if non_zero_ff:
             config["intermediate_size"] = non_zero_ff[0]
     if "intermediate_size" not in config:
-        config["intermediate_size"] = config.get("moe_intermediate_size", 0)
+        moe_ff = config.get("moe_intermediate_size", 0)
+        config["intermediate_size"] = (
+            max(moe_ff) if isinstance(moe_ff, list) else moe_ff)
 
     # Derive hybrid_override_pattern from per-layer metadata arrays.
     # head_count_kv > 0 -> attention (*); feed_forward_length > 0 and kv==0
@@ -2538,6 +2541,53 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
                 pattern.append("M")
         config["hybrid_override_pattern"] = pattern
         config["num_hidden_layers"] = n_layers
+
+
+def _synth_nemotron_h_experts(meta, shapes, config: dict, arch: str,
+                              n_experts: int, kv_array, ff_array) -> None:
+    """The routed-expert sizes, per layer as llama.cpp's nemotron_h loader
+    reads them. Puzzle models (Nemotron-3.5-Bolt) vary all three by layer:
+    the expert count is the ``ffn_gate_inp`` row count (``expert_count`` is
+    only the largest), the width is ``expert_feed_forward_length`` (else
+    ``feed_forward_length / expert_used_count``), and the top-k is
+    ``expert_used_count``. Each is a scalar when every MoE layer agrees, else
+    a list over all blocks (MTP included) with 0 on the other layers."""
+    used = _require(
+        _read_int_array(meta, f"{arch}.expert_used_count"),
+        arch=arch, gguf_field=f"{arch}.expert_used_count")
+    ff_exp = _read_int_array(meta, f"{arch}.expert_feed_forward_length") or [0]
+    n_all = len(kv_array) if kv_array is not None else int(
+        config["num_hidden_layers"])
+
+    def at(arr, i):
+        if arr is None:
+            return 0
+        return arr[i] if len(arr) > 1 else arr[0]
+
+    counts, widths, topks = [0] * n_all, [0] * n_all, [0] * n_all
+    for i in range(n_all):
+        if at(kv_array, i) > 0 or at(ff_array, i) == 0:
+            continue
+        k = at(used, i)
+        router = shapes.get(f"blk.{i}.ffn_gate_inp.weight")
+        n = int(router[1]) if router is not None and len(router) == 2 \
+            else n_experts
+        if not k <= n <= n_experts:
+            raise ValueError(
+                f"{arch}: blk.{i}.ffn_gate_inp has {n} experts, outside "
+                f"[{k}, {n_experts}] (expert_used_count, expert_count)")
+        width = at(ff_exp, i) or (at(ff_array, i) // k if k else 0)
+        counts[i], widths[i], topks[i] = n, width, k
+
+    def collapse(vals, fallback):
+        moe = {v for v in vals if v}
+        if not moe:
+            return fallback
+        return moe.pop() if len(moe) == 1 else vals
+
+    config["n_routed_experts"] = collapse(counts, n_experts)
+    config["moe_intermediate_size"] = collapse(widths, at(ff_exp, 0))
+    config["num_experts_per_tok"] = collapse(topks, at(used, 0))
 
 
 # DeepseekV2Model and its subclasses (deepseek2, glm-dsa) write the yarn log

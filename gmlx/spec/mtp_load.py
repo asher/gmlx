@@ -111,6 +111,7 @@ _DFLASH_BLOCK_DEFAULT = {
     "muse_glimmer": _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT,
     "dflash2": None,
     "dflash_dspark": None,
+    "lilicorr": None,
 }
 
 
@@ -284,7 +285,7 @@ def _load_mtp_drafter(
             f"block_size={drafter.config.block_size}"
         )
     elif model_type == "nemotron_h":
-        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx.models.nemotron_h.model import ModelArgs
         from gmlx.models.nemotron_h.mtp import (
             NemotronHMTPConfig,
             NemotronHMTPDrafter,
@@ -1046,12 +1047,15 @@ def dflash_container(arrays: dict) -> str:
     Muse Glimmer DFlash one and the DFlash 2 drafters under ``dflash``, and
     picks its graph on header keys. Tensor presence is the equivalent split
     here - the DeepSeek DSpark carries MLA's ``attn_q_a`` or the
-    hyper-connection head, the DFlash-backbone DSpark the markov head on
-    plain ``attn_q`` layers, DFlash 2 the candidate selector, Muse Glimmer
-    plain ``attn_q`` with per-head QK-norms and no hyper-connections.
+    hyper-connection head, LiLiCorr its ``lilicorr.*`` lattice head, the
+    DFlash-backbone DSpark the markov head on plain ``attn_q`` layers,
+    DFlash 2 the candidate selector, Muse Glimmer plain ``attn_q`` with
+    per-head QK-norms and no hyper-connections.
     """
     if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in arrays):
         return "dspark"
+    if any(n.startswith("lilicorr.") for n in arrays):
+        return "lilicorr"
     if any(n.startswith("markov_w1") for n in arrays):
         return "dflash_dspark"
     if any(n.startswith("selector_hidden") for n in arrays):
@@ -1111,10 +1115,41 @@ _DFLASH_DSPARK_ROOT = {
     "log_snr_fc1": "log_snr_fc1.weight",
     "log_snr_fc2": "log_snr_fc2.weight",
 }
+# LiLiCorr (llama.cpp dflash.cpp): DFlash 2 conv layers with attention sinks
+# and no selector, plus the lattice head. The head's own layers sit at
+# blk.{n_layers + i} and its feature MLP at blk.{n_layers + head_layers};
+# the rest of the head is under lilicorr.* (the drafter's ``lilicorr``).
+_LILICORR_BLK = {**_DFLASH_BLK, **_DFLASH2_BLK,
+                 "attn_sinks": "self_attn.sinks"}
+_LILICORR_HEAD_BLK = {
+    "attn_norm": "attn_norm",
+    "attn_output": "out_proj.weight",
+    "ffn_norm": "mlp_norm",
+    "ffn_up": "mlp_up.weight",
+    "ffn_down": "mlp_down.weight",
+}
+_LILICORR_FEATURE_BLK = {
+    "ffn_norm": "feature_norm.weight",
+    "ffn_up": "feature_up.weight",
+    "ffn_down": "feature_down.weight",
+}
+_LILICORR_ROOT = {
+    **_DFLASH_ROOT,
+    **{f"lilicorr.{n}": f"lilicorr.{n}.weight" for n in (
+        "token_proj", "pass_hidden_proj", "context_proj", "factor_input_proj",
+        "out_head", "in_head", "anchor_out_head")},
+    "lilicorr.slot_embedding": "lilicorr.slot_embedding",
+    "lilicorr.rank_embedding": "lilicorr.rank_embedding",
+    "lilicorr.attention_bias": "lilicorr.attention_bias",
+    "lilicorr.output_norm": "lilicorr.output_norm",
+    "lilicorr.anchor_norm": "lilicorr.anchor_norm",
+}
+_LILICORR_HEAD_LAYER_RE = re.compile(r"^lilicorr\.layers\.(\d+)\.attn\.in_proj$")
 _DFLASH_CONTAINER_MAPS = {
     "muse_glimmer": (_DFLASH_BLK, _DFLASH_ROOT),
     "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
     "dflash_dspark": (_DFLASH_BLK, {**_DFLASH_ROOT, **_DFLASH_DSPARK_ROOT}),
+    "lilicorr": (_LILICORR_BLK, _LILICORR_ROOT),
 }
 # Which target families a container can drive. A load-time check; the
 # arch-tag filter (arch_table.drafter_serves) is discovery's pairing-time one.
@@ -1122,14 +1157,48 @@ _DFLASH_CONTAINER_TARGETS = {
     "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
     "dflash_dspark": ("qwen3_5", "qwen3_5_text"),
     "muse_glimmer": ("muse_glimmer",),
+    "lilicorr": ("nemotron_h",),
 }
 
 
-def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
+def _lilicorr_blk_target(idx: int, leaf: str, n_layers: int,
+                         head_layers: int) -> str | None:
+    """The head-side target of LiLiCorr's ``blk.{idx}.{leaf}``, past the
+    backbone's ``n_layers`` blocks."""
+    i = idx - n_layers
+    if i == head_layers:
+        target = _LILICORR_FEATURE_BLK.get(leaf)
+        return None if target is None else f"lilicorr.{target}"
+    target = _LILICORR_HEAD_BLK.get(leaf)
+    if target is None or i > head_layers:
+        return None
+    return f"lilicorr.layers.{i}.{target}"
+
+
+def _dflash_target(container: str, base: str, n_layers: int | None,
+                   head_layers: int) -> str | None:
+    blk_map, root_map = _DFLASH_CONTAINER_MAPS[container]
+    if base.startswith("blk."):
+        _, idx, leaf = base.split(".", 2)
+        if container == "lilicorr" and n_layers is not None \
+                and int(idx) >= n_layers:
+            return _lilicorr_blk_target(int(idx), leaf, n_layers, head_layers)
+        target = blk_map.get(leaf)
+        return None if target is None else f"layers.{idx}.{target}"
+    if container == "lilicorr":
+        m = _LILICORR_HEAD_LAYER_RE.match(base)
+        if m:
+            return f"lilicorr.layers.{m.group(1)}.in_proj.weight"
+    return root_map.get(base)
+
+
+def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str,
+                        *, n_layers: int | None = None, head_layers: int = 0):
     """Remap a ``dflash`` GGUF of ``container`` onto the drafter param tree.
     Closed tensor set: unknown names are hard errors (converter drift must
-    surface at load, not as an unfilled param)."""
-    blk_map, root_map = _DFLASH_CONTAINER_MAPS[container]
+    surface at load, not as an unfilled param). A weight's ``.scale`` (NVFP4
+    exports) lands on its module's ``out_scale``. ``n_layers`` and
+    ``head_layers`` place LiLiCorr's head blocks after the backbone's."""
     hf_weights: dict[str, mx.array] = {}
     hf_kquant_meta: dict[str, str] = {}
     stats = {"mapped": 0}
@@ -1137,24 +1206,23 @@ def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
         if name.endswith((".scales", ".biases")):
             continue
         base, suffix = name, ""
-        for s in (".weight", ".bias"):
+        for s in (".weight", ".bias", ".scale"):
             if name.endswith(s):
                 base, suffix = name[: -len(s)], s
                 break
-        if base.startswith("blk."):
-            _, idx, leaf = base.split(".", 2)
-            target = blk_map.get(leaf)
-            if target is not None:
-                target = f"layers.{idx}.{target}"
-        else:
-            target = root_map.get(base)
-        if target is None:
+        target = _dflash_target(container, base, n_layers, head_layers)
+        if target is None or (suffix == ".scale"
+                              and not target.endswith(".weight")):
             raise RuntimeError(
                 f"{container} dflash remap: unknown tensor {name!r} "
                 f"(the drafter tensor set is closed)"
             )
         if suffix == ".bias":
-            target = _strip_weight(target) + ".bias"
+            target = (_strip_weight(target) + ".bias"
+                      if target.endswith(".weight") else target)
+        elif suffix == ".scale":
+            target = _strip_weight(target) + ".out_scale"
+            arr = arr.reshape(-1)
         if base == "conf_proj" and suffix == ".weight" \
                 and getattr(arr, "ndim", 2) == 1:
             arr = arr.reshape(1, -1)
@@ -1229,7 +1297,8 @@ def _dflash_config_from_meta(
                     f"{draft_gguf_path}: {name} has {ne[-1]} rows, the "
                     f"target vocab is {vocab}"
                 )
-    n_layers = 1 + max(
+    # block_count is the backbone; LiLiCorr's head blocks follow it.
+    n_layers = int(meta.get("dflash.block_count") or 0) or 1 + max(
         int(n.split(".")[1]) for n in arrays if n.startswith("blk."))
     pattern = meta.get("dflash.attention.sliding_window_pattern") or ()
     layer_types = [
@@ -1301,8 +1370,38 @@ def _dflash_config_from_meta(
         confidence_head=confidence,
         log_snr_range=snr_range,
         sample_from_anchor=anchor,
+        attention_sinks=any(n.endswith(".attn_sinks.weight") for n in arrays),
+        **(_lilicorr_head_keys(draft_gguf_path, meta)
+           if container == "lilicorr" else {}),
     )
     return config, layer_ids
+
+
+def _lilicorr_head_keys(draft_gguf_path: str, meta: dict) -> dict:
+    """The LiLiCorr head sizes, every key required as llama.cpp's dflash
+    loader requires them once ``lilicorr.hidden_size`` is present."""
+    keys = {
+        "lilicorr_hidden_size": "lilicorr.hidden_size",
+        "lilicorr_top_k": "lilicorr.candidate_topk",
+        "lilicorr_heads": "lilicorr.num_heads",
+        "lilicorr_layers": "lilicorr.num_layers",
+        "lilicorr_factor_dim": "lilicorr.factor_dim",
+        "lilicorr_mlp_size": "lilicorr.mlp_hidden_size",
+        "lilicorr_vector_eps": "lilicorr.vector_eps",
+        "lilicorr_logit_scale": "lilicorr.logit_scale",
+    }
+    missing = [k for k in keys.values() if meta.get(k) is None]
+    if missing:
+        raise ValueError(f"{draft_gguf_path}: LiLiCorr keys missing: {missing}")
+    out = {f: meta[k] for f, k in keys.items()}
+    for f in ("lilicorr_vector_eps", "lilicorr_logit_scale"):
+        out[f] = float(out[f])
+    for f in set(out) - {"lilicorr_vector_eps", "lilicorr_logit_scale"}:
+        out[f] = int(out[f])
+    hidden, heads = out["lilicorr_hidden_size"], out["lilicorr_heads"]
+    if not hidden or not heads or hidden % heads or not out["lilicorr_top_k"]:
+        raise ValueError(f"{draft_gguf_path}: invalid LiLiCorr head sizes {out}")
+    return out
 
 
 def _dspark_head_keys(draft_gguf_path: str, meta: dict, arrays: dict):
@@ -1510,6 +1609,61 @@ def _load_dflash_dspark_drafter(
     return drafter
 
 
+def _load_lilicorr_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind a LiLiCorr drafter and wire the target's
+    ``_dflash_capture``."""
+    from .lilicorr_drafter import LiLiCorrDrafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "lilicorr",
+        arrays=arrays, shapes=shapes)
+    drafter = LiLiCorrDrafter(config)
+    log(
+        f"[mtp] drafter: lilicorr layers={config.num_hidden_layers} "
+        f"targets={layer_ids} block_total={config.block_size} "
+        f"(native {config.native_block_size}) window={config.sliding_window} "
+        f"sinks={config.attention_sinks} head top_k={config.lilicorr_top_k} "
+        f"layers={config.lilicorr_layers}"
+    )
+    d_weights, d_meta, d_stats = remap_dflash_arrays(
+        arrays, kquant_meta, "lilicorr", n_layers=config.num_hidden_layers,
+        head_layers=config.lilicorr_layers)
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+        # The head runs in fp32, as llama.cpp's F32 head tensors do.
+        fp32_keep=("lilicorr.",),
+    )
+    drafter.bind(target)
+    _wire_dflash_capture(target, layer_ids)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] lilicorr drafter bound; target capture layers wired")
+    _stamp_mtp_width_cap(
+        drafter, str(target_config_dict.get("model_type") or "lilicorr"),
+        target=target, hard_limit=1, log=log)
+    return drafter
+
+
 def _load_dflash_drafter(
     draft_gguf_path: str,
     target,
@@ -1537,6 +1691,7 @@ def _load_dflash_drafter(
         "dflash2": _load_dflash2_drafter,
         "dflash_dspark": _load_dflash_dspark_drafter,
         "muse_glimmer": _load_muse_glimmer_dflash_drafter,
+        "lilicorr": _load_lilicorr_drafter,
     }
     loader = loaders.get(container)
     if loader is None:
@@ -1568,15 +1723,17 @@ def _drafter_header_arch(draft_gguf_path: str) -> str | None:
 def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
     """Which companion loader a ``--draft-gguf`` takes: ``deepseek4`` for a
     deepseek_v4 target (its drafters share the ``dflash`` tag with DSpark),
-    ``dflash`` for a muse_glimmer target or any ``dflash`` header, else
-    ``gemma4``. Each loader validates the pairing it is handed."""
+    ``nemotron`` for a nemotron_h MTP sidecar, ``dflash`` for a muse_glimmer
+    target or any ``dflash`` header, else ``gemma4``. Each loader validates
+    the pairing it is handed."""
     if model_type == "deepseek_v4":
         return "deepseek4"
     if model_type == "qwen4_exp":
         return "qwen4exp"
-    if model_type == "nemotron_h":
+    header_arch = _drafter_header_arch(draft_gguf_path)
+    if model_type == "nemotron_h" and header_arch != "dflash":
         return "nemotron"
-    if model_type == "muse_glimmer" or _drafter_header_arch(draft_gguf_path) == "dflash":
+    if model_type == "muse_glimmer" or header_arch == "dflash":
         return "dflash"
     return "gemma4"
 
@@ -1838,14 +1995,20 @@ def _resolve_companion_drafter(model_type: str | None, gguf_path: str, *, log):
     For model_types in ``arch_table.MTP_COMPANION_AUTO_MODEL_TYPES`` the
     native-head extraction cannot serve the target, so a missing companion
     raises the family error rather than falling into a misleading
-    no-native-head message. Returns None for every other family (their
-    drafts come from the in-GGUF head, or an explicit ``--draft-gguf``).
+    no-native-head message. In every other family, a target with no native
+    head takes its NextN sidecar or the drafter of a marked sibling repo;
+    else None (drafts come from the in-GGUF head, or ``--draft-gguf``).
     Shared by the text and VLM loaders."""
     import gmlx.load.arch_table as arch_table
-    from gmlx.load.discovery import find_mtp_companion
+    from gmlx.load.discovery import find_headless_drafter, find_mtp_companion
 
     if model_type not in arch_table.MTP_COMPANION_AUTO_MODEL_TYPES:
-        return None
+        arches = arch_table.drafter_arches(model_type) if model_type else ()
+        path = find_headless_drafter(gguf_path, arches) if arches else None
+        if path is not None:
+            loadlog.fact("mtp_companion", os.path.basename(path))
+            log(f"[mtp] companion drafter autodetected: {path}")
+        return path
     path = find_mtp_companion(gguf_path, arch_table.drafter_arches(model_type))
     if path is None:
         raise ValueError(

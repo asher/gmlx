@@ -275,7 +275,7 @@ def test_install_wire_dispatches_kquant_switchlinear(codec, bpr):
 
 
 @pytest.mark.parametrize("native_fp_wire", [False, True])
-def test_install_native_fp_non_switch_fails_loud(native_fp_wire):
+def test_install_native_fp_embedding_fails_loud(native_fp_wire):
     import mlx.nn as nn
 
     from gmlx.load.modules import install_kquant_modules
@@ -283,11 +283,37 @@ def test_install_native_fp_non_switch_fails_loud(native_fp_wire):
     class Tiny(nn.Module):
         def __init__(self):
             super().__init__()
-            self.proj = nn.Linear(32, 32, bias=False)
+            self.embed = nn.Embedding(32, 32)
 
     with pytest.raises(NotImplementedError, match="mxfp4"):
-        install_kquant_modules(Tiny(), {"proj.weight": "mxfp4"},
+        install_kquant_modules(Tiny(), {"embed.weight": "mxfp4"},
                                native_fp_wire=native_fp_wire)
+
+
+@pytest.mark.parametrize("native_fp_wire", [False, True])
+@pytest.mark.parametrize("codec", ["mxfp4", "nvfp4"])
+def test_install_native_fp_linear_dispatches_wire(native_fp_wire, codec):
+    # Nemotron-3.5-Bolt ships dense NVFP4 Mamba projections. Both modes keep
+    # the wire bytes on a KQuantLinear; no packed dense module exists.
+    if not _kq_has_fp4():
+        pytest.skip("mlx-kquant build lacks the fp4 codecs")
+    import mlx.nn as nn
+    from mlx_kquant.codec_geometry import bytes_per_row
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx.load.modules import install_kquant_modules
+
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(128, 64, bias=False)
+
+    model = Tiny()
+    assert install_kquant_modules(model, {"proj.weight": codec},
+                                  native_fp_wire=native_fp_wire) == 1
+    assert isinstance(model.proj, KQuantLinear)
+    assert model.proj.kquant_type == codec
+    assert model.proj.weight.shape == (64, bytes_per_row(codec, 128))
 
 
 @pytest.mark.parametrize("native_fp_wire", [False, True])
@@ -324,9 +350,10 @@ def test_install_native_fp_multilinear_dispatches_wire(native_fp_wire):
     assert m.scales.dtype == mx.uint8 and m.scales.shape == (1,)
 
 
-def test_native_fp_multilinear_keys_exempt_from_repack():
-    # The packed repack must leave MultiLinear-destined wire bytes untouched
-    # (KQuantMultiLinear reads ggml wire, not MLX packed layout).
+def test_native_fp_wire_only_keys_exempt_from_repack():
+    # The packed repack must leave MultiLinear- and Linear-destined wire
+    # bytes untouched (KQuantMultiLinear and KQuantLinear read ggml wire,
+    # not MLX packed layout).
     import mlx.nn as nn
 
     import gmlx.load.loader as loader
@@ -340,11 +367,13 @@ def test_native_fp_multilinear_keys_exempt_from_repack():
         def __init__(self):
             super().__init__()
             self.embed_q = MultiLinear(64, 32, 2)
+            self.proj = nn.Linear(64, 32, bias=False)
 
     model = Tiny()
-    meta = {"embed_q.weight": "mxfp4", "experts.weight": "mxfp4"}
-    keys = loader._native_fp_multilinear_keys(model, meta)
-    assert keys == {"embed_q.weight"}
+    meta = {"embed_q.weight": "mxfp4", "proj.weight": "nvfp4",
+            "experts.weight": "mxfp4"}
+    keys = loader._native_fp_wire_only_keys(model, meta)
+    assert keys == {"embed_q.weight", "proj.weight"}
 
     wire = np.arange(2 * 32 * 34, dtype=np.uint8).reshape(2, 32, 34)
     hf = {"embed_q.weight": wire}

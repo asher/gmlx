@@ -51,6 +51,7 @@ from .modules import (
     dequantize_unattachable_leaves,
     install_kquant_modules,
 )
+from .out_scale import install_out_scales
 from .populate import (
     maybe_populate_for_load,
     start_populate,
@@ -931,6 +932,15 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # class's cast_predicate.
     "k2_horizon": (".mlp.gate.weight", ".e_score_correction_bias",
                    ".selection_bias"),
+    # nemotron_h: llama.cpp routes in fp32 (F32 wire router and selection
+    # bias; Bolt picks top-9 of up to 496), and A_log feeds the fp32 scan.
+    # Kept in step with the model class's cast_predicate.
+    "nemotron_h": (".mixer.gate.weight", ".e_score_correction_bias",
+                   ".A_log"),
+    # nemotron_h_omni: the same set under language_model.*. The vision tower
+    # keeps its file dtypes (_F16_KEEP_BY_MODEL_TYPE).
+    "nemotron_h_omni": (".mixer.gate.weight", ".e_score_correction_bias",
+                        ".A_log"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -948,6 +958,10 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # so the audio encoder takes the plain cast and gives the same output.
     "muse_spark": ("vision_tower.", "vision_adapter.", "vision_projection."),
     "kimi_k25": ("vision_tower.", "mm_projector."),
+    # nemotron_h_omni's tower runs in float32 as llama.cpp's does: its F32
+    # norms and tables stay F32, Bolt's BF16 weights stay BF16, and Super
+    # VL's Q8_0 weights, dequantized to F16 at remap, stay F16.
+    "nemotron_h_omni": ("vision_tower.",),
 }
 
 # Params cast to float32 at load, whatever float dtype the file stores them
@@ -1059,22 +1073,23 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     return False
 
 
-def _native_fp_multilinear_keys(model, hf_kquant_meta) -> set[str]:
-    """Weight names of native-fp tensors destined for a MultiLinear leaf.
+def _native_fp_wire_only_keys(model, hf_kquant_meta) -> set[str]:
+    """Weight names of native-fp tensors destined for a dense Linear or a
+    MultiLinear leaf.
 
-    These stay ggml wire bytes even in packed mode (kq.gather_qmm dispatch;
-    no packed MultiLinear module exists) - the repack must skip them.
+    These stay ggml wire bytes even in packed mode (kq.quantized_matmul and
+    kq.gather_qmm dispatch; no packed module exists for either) - the repack
+    must skip them.
     """
     from .modules import MultiLinear
     from .native_fp import NATIVE_FP_CODECS
 
-    if MultiLinear is None:
-        return set()
+    wire_only = (nn.Linear,) if MultiLinear is None else (nn.Linear, MultiLinear)
     keys = set()
     for path, mod in tree_flatten(model.leaf_modules(),
                                   is_leaf=nn.Module.is_module):
         wk = f"{path}.weight"
-        if (isinstance(mod, MultiLinear)
+        if (isinstance(mod, wire_only)
                 and hf_kquant_meta.get(wk) in NATIVE_FP_CODECS):
             keys.add(wk)
     return keys
@@ -1279,7 +1294,7 @@ def _install_and_load(
 
         n_fp = repack_native_fp_weights(
             hf_weights, hf_kquant_meta,
-            skip=_native_fp_multilinear_keys(model, hf_kquant_meta))
+            skip=_native_fp_wire_only_keys(model, hf_kquant_meta))
         if n_fp:
             log(
                 f"[native-fp] de-interleaved {n_fp} mxfp4/nvfp4 tensors -> MLX packed layout"
@@ -1295,6 +1310,7 @@ def _install_and_load(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     log(f"[install] replaced {n_replaced} leaves with kquant modules")
     _install_hadamard(model, hadamard, log)
+    install_out_scales(model, hf_weights, hf_kquant_meta)
 
     from gmlx.stream.table_pread import install_deferred_tables
     attached = install_deferred_tables(model, deferred_tables or {})
@@ -1336,7 +1352,8 @@ def _install_and_load(
                 n_fp32 += 1
             continue
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
-            if fp32_keep and any(s in k for s in fp32_keep):
+            if k.endswith(".out_scale") or (
+                    fp32_keep and any(s in k for s in fp32_keep)):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
                 continue
@@ -1737,7 +1754,7 @@ def load_model(
 
         n_fp = repack_native_fp_weights(
             hf_weights, hf_kquant_meta,
-            skip=_native_fp_multilinear_keys(model, hf_kquant_meta))
+            skip=_native_fp_wire_only_keys(model, hf_kquant_meta))
         if n_fp:
             _log(
                 f"[native-fp] de-interleaved {n_fp} mxfp4/nvfp4 tensors -> MLX packed layout"
@@ -1757,6 +1774,7 @@ def load_model(
         act_dtype=activation_dtype(config.get("model_type")))
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
     _install_hadamard(model, hadamard_targets, _log)
+    install_out_scales(model, hf_weights, hf_kquant_meta)
 
     from gmlx.stream.table_pread import install_deferred_tables
     attached = install_deferred_tables(model, deferred)
@@ -1839,7 +1857,8 @@ def load_model(
     for k in list(loadable):
         v = loadable[k]
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
-            if fp32_keep and any(s in k for s in fp32_keep):
+            if k.endswith(".out_scale") or (
+                    fp32_keep and any(s in k for s in fp32_keep)):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
                 continue

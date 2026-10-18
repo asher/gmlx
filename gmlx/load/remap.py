@@ -2144,11 +2144,22 @@ EXPECTED_SKIP_TENSORS = frozenset({
 })
 
 
-# Unsloth UD `.scale` tensors are metadata for Unsloth's MLX recipe (per-tensor
-# additional scaling on top of the base K-quant). They have no HF/MLX-stock
-# counterpart; skip with warning.
+# Weight scales llama.cpp loads for every arch (llama-model.cpp, the generic
+# ".scale" pass after load_arch_tensors): a scalar per matmul weight, or one
+# per expert for the stacked experts. The matmul output is multiplied by it
+# (NVFP4 "scale2"). `<weight>.scale` maps to `<module>.out_scale`.
+_WEIGHT_SCALE_RE = re.compile(
+    r"^(blk\.\d+\.(?:attn_q|attn_k|attn_v|attn_output|attn_qkv|attn_gate"
+    r"|ffn_gate|ffn_down|ffn_up|ffn_gate_shexp|ffn_down_shexp|ffn_up_shexp"
+    r"|ffn_gate_exps|ffn_down_exps|ffn_up_exps"
+    r"|ssm_in|ssm_out|ssm_alpha|ssm_beta"
+    r"|nextn\.eh_proj|nextn\.shared_head_head)|output)\.scale$")
+
+
+# Other `.scale` tensors (Unsloth UD recipe metadata, `.input_scale`) have no
+# counterpart in llama.cpp's graph; skip with warning.
 def _is_unsloth_ud_scale(name: str) -> bool:
-    return name.endswith(".scale")
+    return name.endswith(".scale") or name.endswith(".input_scale")
 
 
 # Module-level cache: {gguf_name_template: MODEL_TENSOR_enum}. The reverse of
@@ -2236,6 +2247,16 @@ def parse_gguf_name(arch_string: str, gguf_name: str) -> RemapDecision:
             RemapDecision.KIND_FAIL,
             reason=f"no diffusion-gemma override for {gguf_name!r}; extend the "
                    f"DIFFUSION_GEMMA table")
+
+    # A weight scale follows its weight's mapping (after arch-priority claims).
+    m = _WEIGHT_SCALE_RE.match(gguf_name)
+    if m:
+        d = parse_gguf_name(arch_string, m.group(1) + ".weight")
+        if d.kind != RemapDecision.KIND_MAP or not d.hf_name.endswith(".weight"):
+            return d
+        return RemapDecision(RemapDecision.KIND_MAP,
+                             hf_name=d.hf_name[:-len("weight")] + "out_scale",
+                             transform="flatten", bid=d.bid)
 
     # Universal Unsloth-UD .scale skip (after arch-priority claims).
     if _is_unsloth_ud_scale(gguf_name):

@@ -375,7 +375,8 @@ def _kq_wire_k(w, codec):
 
 def _kq_dense(proj, codecs):
     return (isinstance(proj, KQuantLinear)
-            and proj.kquant_type in codecs and "bias" not in proj)
+            and proj.kquant_type in codecs and "bias" not in proj
+            and "out_scale" not in proj)
 
 
 def _kq_act_kind(m, caps):
@@ -2770,10 +2771,9 @@ def install_kquant_modules(model: nn.Module,
         if codec in NATIVE_FP_CODECS:
             # Micro-scaling float codec. The SwitchGLU expert path (gpt-oss,
             # DS-V4) and the absorbed-MLA MultiLinear (Kimi-K3, whose
-            # MXFP4_MOE ftype also quantizes attn_k_b/attn_v_b) are wired.
-            # A native-fp Linear / Embedding would need its own module
-            # (packed) or its own wire Metal leaves; fail loud rather than
-            # mis-dispatch onto the kquant path.
+            # MXFP4_MOE ftype also quantizes attn_k_b/attn_v_b) are wired,
+            # and so is a dense Linear. An Embedding has no native-fp module;
+            # fail loud rather than mis-dispatch onto the kquant path.
             if isinstance(module, _switch_linear_types):
                 n_experts, out_dims, in_dims = module.weight.shape
                 bias = "bias" in module
@@ -2783,22 +2783,30 @@ def install_kquant_modules(model: nn.Module,
                                               bias, codec)
                 return NativeFPSwitchLinear(n_experts, out_dims, in_dims, bias,
                                             codec)
-            if MultiLinear is not None and isinstance(module, MultiLinear):
-                # No packed MultiLinear module exists; both modes dispatch the
-                # ggml wire bytes through kq.gather_qmm (the loader exempts
-                # these tensors from the packed repack).
+            wire_only = isinstance(module, nn.Linear) or (
+                MultiLinear is not None and isinstance(module, MultiLinear))
+            if wire_only:
+                # No packed dense or MultiLinear module exists; both modes
+                # dispatch the ggml wire bytes through the kq kernels (the
+                # loader exempts these tensors from the packed repack).
                 import mlx_kquant as kq
                 if codec not in set(kq.codecs()):
                     raise NotImplementedError(
-                        f"native-fp codec {codec!r} on MultiLinear at "
-                        f"{path!r} needs an mlx-kquant build with that codec")
+                        f"native-fp codec {codec!r} on "
+                        f"{type(module).__name__} at {path!r} needs an "
+                        f"mlx-kquant build with that codec")
+            if isinstance(module, nn.Linear):
+                out_dims, in_dims = module.weight.shape
+                n_replaced += 1
+                return KQuantLinear(in_dims, out_dims, "bias" in module, codec)
+            if MultiLinear is not None and isinstance(module, MultiLinear):
                 num_heads, out_dims, in_dims = module.weight.shape
                 n_replaced += 1
                 return KQuantMultiLinear(in_dims, out_dims, num_heads, codec)
             raise NotImplementedError(
                 f"native-fp codec {codec!r} on {type(module).__name__} at "
-                f"{path!r} - only SwitchLinear (MoE experts) and MultiLinear "
-                f"(absorbed MLA) are wired so far")
+                f"{path!r} - only Linear, SwitchLinear (MoE experts) and "
+                f"MultiLinear (absorbed MLA) are wired so far")
         if isinstance(module, nn.Linear):
             out_dims, in_dims = module.weight.shape
             bias = "bias" in module

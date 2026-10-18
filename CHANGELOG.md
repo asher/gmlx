@@ -35,6 +35,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scales it, where it was refused.
 - K2 Horizon 7B and K2 Horizon MoVA 36B-A4B (GGUF arch `k2-horizon`), with
   `reasoning-low`, `-medium` and `-high` intents and tool calls.
+- NVIDIA Nemotron 3.5 Bolt 74B-A9B, with image input through its `--mmproj`
+  companion and its LiLiCorr drafter, which gmlx pairs from the sibling
+  `-LiLiCorr-GGUF` repo.
+- NVIDIA Nemotron 3.5 Super VL 120B-A12B, with image input through its
+  `--mmproj` companion and an MTP drafter from the `mtp-*.gguf` file beside it.
+- Nemotron models take `@instruct` to turn thinking off, and
+  `@reasoning-medium` for a shorter reasoning pass where the template has one.
 
 ### Changed
 
@@ -50,6 +57,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family from another source, and names it, where it downloaded the VAE again.
 - `presence_penalty` and `frequency_penalty` count every generated token, as
   vLLM does, where they counted the last 20 tokens, the prompt's included.
+- MTP speculative decoding on Nemotron 3.5 checks each draft in one batched
+  forward, as llama.cpp does, and runs faster. Greedy output can now differ
+  from plain decoding where two tokens tie.
 
 ### Fixed
 
@@ -61,6 +71,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when its template has the word thinking in its text. It now warns.
 - A Krea 2 GGUF whose stored projector shape is not a list of integers
   crashed the load. It is refused with the reason.
+- A GGUF whose NVFP4 weights carry a per-tensor `.scale` gave wrong output,
+  as gmlx dropped the scale that llama.cpp applies.
+- A dense NVFP4 or MXFP4 projection outside an expert block loads, where it
+  was refused.
 - A streamed image request refused while it ran, such as one too large for
   memory, got a server error frame where the same request unstreamed got a 400.
 - The `gmlx pull` plan of an image model could say its parts fit in stages

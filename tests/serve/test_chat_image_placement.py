@@ -298,8 +298,8 @@ def test_the_gemma4_processor_keeps_the_client_order(route, model_type):
 # order.
 _IN_PLACE = ("deepseek_v41_vl", "deepseek_v4_vl", "gemma4", "gemma4_unified",
              "glm5_next", "kimi_k25", "mistral3", "muse_glimmer", "muse_spark",
-             "pixtral", "qwen3_5", "qwen3_5_moe", "qwen3_omni_moe", "qwen3_vl",
-             "qwen3_vl_moe", "qwen4_exp")
+             "nemotron_h_omni", "pixtral", "qwen3_5", "qwen3_5_moe",
+             "qwen3_omni_moe", "qwen3_vl", "qwen3_vl_moe", "qwen4_exp")
 # The rows mlx-vlm's table lacks, which the loader adds on load.
 _LOADER_ROWS = ("deepseek_v41_vl", "deepseek_v4_vl")
 

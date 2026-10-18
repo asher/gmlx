@@ -270,10 +270,12 @@ _VISION = {
     "glm-5.3": ("glm5_next", "glm5_template.jinja", "<|begin_of_image|>"),
     "muse": ("muse_glimmer", "muse_template.jinja", "<|patch|>"),
     "muse-spark": ("muse_spark", "muse_spark_template.jinja", "<|patch|>"),
+    "nemotron-bolt": ("nemotron_h_omni", "nemotron_bolt_template.jinja",
+                      "<image>"),
 }
 # The templates that show an image in a tool turn.
 _IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "muse", "muse-spark",
-                 "qwen3.5", "qwen3.6", "qwen3.8")
+                 "nemotron-bolt", "qwen3.5", "qwen3.6", "qwen3.8")
 
 
 def test_the_tool_image_types_are_the_checked_ones():

@@ -117,6 +117,17 @@ class DFlashConfig:
     log_snr_range: Optional[tuple] = None
     # The anchor row proposes a token as well (llama.cpp's default).
     sample_from_anchor: bool = True
+    # Per-head attention sinks in every draft layer (Nemotron drafters).
+    attention_sinks: bool = False
+    # The LiLiCorr lattice head; lilicorr_layers == 0 means none.
+    lilicorr_layers: int = 0
+    lilicorr_hidden_size: int = 0
+    lilicorr_top_k: int = 0
+    lilicorr_heads: int = 0
+    lilicorr_factor_dim: int = 0
+    lilicorr_mlp_size: int = 0
+    lilicorr_vector_eps: float = 1e-4
+    lilicorr_logit_scale: float = 1.0
 
     def __post_init__(self):
         n = int(self.num_hidden_layers)
@@ -415,6 +426,8 @@ class DFlashAttention(nn.Module):
         self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        if config.attention_sinks:
+            self.sinks = mx.zeros((self.n_heads,))
 
     def inject(self, h_ctx: mx.array, rope, cache) -> None:
         """Write the context rows' K/V into the ring at the ring's positions."""
@@ -440,7 +453,9 @@ class DFlashAttention(nn.Module):
             k = mx.concatenate([ck, k], axis=2)
             v = mx.concatenate([cv, v], axis=2)
         mask = block_attention_mask(ctx_len, L, self.sliding_window, self.is_causal)
-        o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
+        sinks = self["sinks"].astype(q.dtype) if "sinks" in self else None
+        o = mx.fast.scaled_dot_product_attention(
+            q, k, v, scale=self.scale, mask=mask, sinks=sinks)
         return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
 
 

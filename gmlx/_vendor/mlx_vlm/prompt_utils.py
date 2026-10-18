@@ -125,6 +125,7 @@ MODEL_CONFIG = {
     "deepseek_v4_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "deepseek_v41_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "muse_spark": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "nemotron_h_omni": MessageFormat.LIST_WITH_IMAGE_FIRST,
 }
 
 # Models that don't support multi-image

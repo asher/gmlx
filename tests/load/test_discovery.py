@@ -1172,3 +1172,128 @@ def test_supported_main_arch_with_backbone_field_is_model():
                    "deepseek4.embedding_length_out": 16384},
                   "DeepSeek-V4-Flash-Vision-Exp-UD-IQ3_XXS-00001-of-00004.gguf")
     assert c.kind == "model"
+
+
+def _nemotron_classify(monkeypatch):
+    def _f(path):
+        name = os.path.basename(path)
+        if "LiLiCorr" in name:
+            meta = {"general.architecture": "dflash",
+                    "dflash.embedding_length": 4096}
+        else:
+            meta = {"general.architecture": "nemotron_h_moe",
+                    "nemotron_h_moe.embedding_length": 4096}
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+def test_lilicorr_sibling_repo_pairs_its_target(tmp_path, monkeypatch):
+    # NVIDIA ships the drafter as <repo>-LiLiCorr-GGUF beside <repo>-GGUF,
+    # with no base-model id in its header.
+    _nemotron_classify(monkeypatch)
+    repo = "nvidia__NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"
+    (tmp_path / f"{repo}-GGUF").mkdir()
+    (tmp_path / f"{repo}-LiLiCorr-GGUF").mkdir()
+    _write(tmp_path / f"{repo}-GGUF", "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf")
+    _write(tmp_path / f"{repo}-LiLiCorr-GGUF",
+           "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf")
+    models = _scan(tmp_path, recursive=True)
+    assert len(models) == 1
+    assert models[0].draft_gguf.endswith("-LiLiCorr.gguf")
+    assert models[0].speculative is True
+
+
+def test_lilicorr_sibling_rule_needs_the_matching_repo(tmp_path, monkeypatch):
+    _nemotron_classify(monkeypatch)
+    (tmp_path / "nvidia__Other-GGUF").mkdir()
+    (tmp_path / "nvidia__Bolt-LiLiCorr-GGUF").mkdir()
+    _write(tmp_path / "nvidia__Other-GGUF", "Other-Q4_K_M.gguf")
+    _write(tmp_path / "nvidia__Bolt-LiLiCorr-GGUF", "Bolt-LiLiCorr.gguf")
+    models = _scan(tmp_path, recursive=True)
+    assert [m.draft_gguf for m in models] == [None]
+
+
+def test_repo_name_reads_both_layouts():
+    assert disc._repo_name("/m/nvidia__X-GGUF/X.gguf") == "nvidia__X-GGUF"
+    assert disc._repo_name(
+        "/hf/models--nvidia--X-LiLiCorr-GGUF/snapshots/abc/X.gguf"
+    ) == "nvidia__X-LiLiCorr-GGUF"
+    assert disc._sibling_drafter_repo(
+        "/hf/models--nvidia--X-LiLiCorr-GGUF/snapshots/abc/X.gguf"
+    ) == "nvidia__x-gguf"
+    assert disc._sibling_drafter_repo("/m/nvidia__X-GGUF/X.gguf") is None
+
+
+def _bolt_pair(target_dir, drafter_dir, monkeypatch, *, mtp=False):
+    target_dir.mkdir(parents=True)
+    drafter_dir.mkdir(parents=True)
+    target = target_dir / "Bolt.gguf"
+    drafter = drafter_dir / "Bolt-LiLiCorr.gguf"
+    for p in (target, drafter):
+        p.write_bytes(b"GGUF")
+    metas = {str(target): {"arch": "nemotron_h_moe", "kind": "model", "mtp": mtp},
+             str(drafter): {"arch": "dflash", "kind": "drafter"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    return str(target), str(drafter)
+
+
+def test_sibling_drafter_in_the_local_layout(tmp_path, monkeypatch):
+    target, drafter = _bolt_pair(tmp_path / "nvidia__Bolt-GGUF",
+                                 tmp_path / "nvidia__Bolt-LiLiCorr-GGUF",
+                                 monkeypatch)
+    assert disc.find_sibling_drafter(target, ("dflash",)) == drafter
+    assert disc.find_mtp_companion(target, ("dflash",)) is None
+
+
+def test_sibling_drafter_in_the_hf_cache(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    target, drafter = _bolt_pair(
+        hub / "models--nvidia--Bolt-GGUF" / "snapshots" / "r1",
+        hub / "models--nvidia--Bolt-LiLiCorr-GGUF" / "snapshots" / "r2",
+        monkeypatch)
+    assert disc.find_sibling_drafter(target, ("dflash",)) == drafter
+
+
+def test_sibling_drafter_leaves_a_native_head_alone(tmp_path, monkeypatch):
+    target, _ = _bolt_pair(tmp_path / "nvidia__Lightning-GGUF",
+                           tmp_path / "nvidia__Lightning-LiLiCorr-GGUF",
+                           monkeypatch, mtp=True)
+    assert disc.find_sibling_drafter(target, ("dflash",)) is None
+
+
+def test_run_auto_enables_the_sibling_drafter(tmp_path, monkeypatch):
+    from gmlx.commands import cli
+
+    target, drafter = _bolt_pair(tmp_path / "nvidia__Bolt-GGUF",
+                                 tmp_path / "nvidia__Bolt-LiLiCorr-GGUF",
+                                 monkeypatch)
+    assert cli._companion_drafter(target) == drafter
+
+
+def _super_vl(tmp_path, monkeypatch, *, mtp=False):
+    target = tmp_path / "Super-VL-Q4_0.gguf"
+    sidecar = tmp_path / "mtp-Super-VL-Q4_0.gguf"
+    for p in (target, sidecar):
+        p.write_bytes(b"GGUF")
+    metas = {str(target): {"arch": "nemotron_h_moe", "kind": "model", "mtp": mtp},
+             str(sidecar): {"arch": "nemotron_h_moe", "kind": "drafter"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    return str(target), str(sidecar)
+
+
+def test_headless_target_takes_its_nextn_sidecar(tmp_path, monkeypatch):
+    # llama.cpp ships Super VL's MTP head as mtp-*.gguf beside the model.
+    from gmlx.commands import cli
+
+    target, sidecar = _super_vl(tmp_path, monkeypatch)
+    arches = ("dflash", "nemotron_h_moe")
+    assert disc.find_headless_drafter(target, arches) == sidecar
+    assert cli._companion_drafter(target) == sidecar
+    # Only a family whose row lists its own arch loads such a sidecar.
+    assert disc.find_headless_drafter(target, ("dflash",)) is None
+
+
+def test_headless_lookup_leaves_a_native_head_alone(tmp_path, monkeypatch):
+    target, _ = _super_vl(tmp_path, monkeypatch, mtp=True)
+    assert disc.find_headless_drafter(target, ("nemotron_h_moe",)) is None
