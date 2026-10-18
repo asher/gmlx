@@ -527,3 +527,33 @@ def test_a_skip_set_of_other_than_block_indices_is_refused():
         api.sample(pipe, _cond(5, 1), neg=_cond(3, 2), cfg=3.0,
                    height=16 * H, width=16 * W, steps=2, noise=noise,
                    neg_skip=(np.int64(1),))
+
+
+def test_a_skip_set_given_as_an_array_or_a_generator_skips_its_blocks():
+    """A numpy array of neg_skip and a generator of skip each leave out
+    the blocks they hold, as the tuple of the same blocks does."""
+    from gmlx.image import api
+
+    model, _ = _tiny()
+    pipe = api.ImagePipeline(dit=model, family=get_family("moss_image"),
+                             variant="sft")
+    noise = np.random.default_rng(4).standard_normal(
+        (1, 8, H, W)).astype(np.float32)
+    pos, neg = _cond(5, 1), _cond(3, 2)
+
+    def run(skip):
+        return np.array(api.sample(pipe, pos, neg=neg, cfg=3.0,
+                                   height=16 * H, width=16 * W, steps=2,
+                                   noise=noise, neg_skip=skip))
+
+    sigma = np.float32(0.75)
+    with mx.stream(mx.cpu):
+        assert np.array_equal(run(np.array([0, 1])), run((0, 1)))
+        want = np.array(api.denoise_step(pipe, mx.array(noise), sigma, neg,
+                                         skip=(1,)))
+        got = np.array(api.denoise_step(pipe, mx.array(noise), sigma, neg,
+                                        skip=(i for i in (1,))))
+        whole = np.array(api.denoise_step(pipe, mx.array(noise), sigma,
+                                          neg))
+    assert np.array_equal(got, want)
+    assert not np.array_equal(whole, want)

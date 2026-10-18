@@ -914,6 +914,7 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
             raise ValueError(f"the {pipe.family.title} DiT caches its "
                              f"references by itself under the reference's "
                              f"time rule")
+    skip = tuple(skip)
     if any(isinstance(i, bool) or not isinstance(i, numbers.Integral)
            for i in skip):
         raise ValueError(f"skip holds block indices, not {list(skip)}")
@@ -1307,8 +1308,10 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     if neg_skip is None:
         row = sampler_defaults(pipe.family.name, pipe.variant)
         neg_skip = () if row is None or cfg == 1.0 else row.neg_skip
-    elif neg_skip and cfg == 1.0:
-        raise ValueError("neg_skip needs guidance: cfg is 1.0")
+    else:
+        neg_skip = tuple(neg_skip)
+        if neg_skip and cfg == 1.0:
+            raise ValueError("neg_skip needs guidance: cfg is 1.0")
     flow_map = bool(getattr(pipe.dit.cfg, "flow_map", False))
     check_sampling(pipe.family, pipe.variant, flow_map, cfg, sampler)
     if cfg != 1.0 and neg is None:
