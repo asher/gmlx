@@ -911,7 +911,7 @@ def test_a_short_prompt_plan_covers_every_measured_cell(family):
     row = memfit.PEAKS[family]
     cells = _short_cells(family)
     assert len(cells) == {"z_image": 3, "krea2": 3, "qwen_image21": 79,
-                          "flux3_klein": 13, "moss_image": 7}[family]
+                          "flux3_klein": 13, "moss_image": 10}[family]
     room = [_short_room(family, c) for c in cells]
 
     def formula(c, caption):
@@ -976,9 +976,9 @@ def _moss_room(row, c: dict) -> float:
 
 
 def test_the_moss_row_covers_every_measured_step():
-    """Sizes to 2048 pixels with 80 and 4096 text rows, and one with 640.
-    A text row reads more than an image row, so the cells of the most
-    text sit closest to the line."""
+    """Sizes to 2048 pixels with 80 and 4096 text rows, and one with 640,
+    and guided steps to 1536 pixels. A text row reads more than an image
+    row, so the cells of the most text sit closest to the line."""
     row = memfit.PEAKS["moss_image"]
     assert row.step is memfit.MOSS_IMAGE_STEP
     assert row.width == 24576 and row.caption_rows == row.text_rows == 4096
@@ -987,6 +987,8 @@ def test_the_moss_row_covers_every_measured_step():
     assert {c["size"] for c in cells} == {256, 512, 768, 1024, 1280, 1536,
                                           2048}
     assert {c["text_rows"] for c in cells} == {80, 640, 4096}
+    guided = [(c["size"], c["text_rows"]) for c in cells if c["guided"]]
+    assert guided == [(512, 80), (1024, 80), (1536, 80), (1024, 4096)]
     room = [_moss_room(row, c) for c in cells]
     assert min(room) >= ROOM
     assert min(room) <= 0.35 * GiB and max(room) <= 1.5 * GiB
@@ -1006,6 +1008,8 @@ def test_a_thinner_moss_row_misses_a_measured_cell():
     assert worst() >= ROOM
     assert worst(base=1.5 * GiB) < ROOM
     assert worst(k=5.0) < ROOM
+    # A guided step holds both passes, more than a second row of slope 1.
+    assert worst(row_k=1.0) < ROOM
     # FLUX.3 klein's step at MOSS-Image's rows.
     assert worst(base=memfit.FLUX3_KLEIN_STEP.base,
                  k=memfit.FLUX3_KLEIN_STEP.k) < ROOM

@@ -1,5 +1,5 @@
 {
- "what": "MOSS-Image SFT Q4_K_M (realrebelai MOSS-Image-SFT-Q4_K_M.gguf) on an M5 Max, one fresh process per cell, through api.sample under the bounded cache, with random features of text_rows rows. steps_gib is the footprint of each of three steps over the settled process, the DiT loaded. encode holds one prompt encode of the unsloth Qwen3.5-9B encoder alone, by file, at rows rows, the footprint over the settled process.",
+ "what": "MOSS-Image SFT Q4_K_M (realrebelai MOSS-Image-SFT-Q4_K_M.gguf) on an M5 Max, one fresh process per cell, through api.sample under the bounded cache, with random features of text_rows rows; a guided cell runs cfg 3 with a negative of the same rows and block 22 left out of its pass. steps_gib is the footprint of each of three steps over the settled process, the DiT loaded. encode holds one prompt encode of the unsloth Qwen3.5-9B encoder alone, by file, at rows rows, the footprint over the settled process.",
  "cells": [
   {
    "size": 256,
@@ -129,6 +129,46 @@
     5.7607,
     5.0914,
     5.0798
+   ]
+  },
+  {
+   "size": 512,
+   "text_rows": 80,
+   "guided": true,
+   "steps_gib": [
+    1.2351,
+    1.2352,
+    1.2353
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 80,
+   "guided": true,
+   "steps_gib": [
+    2.4877,
+    2.4877,
+    2.4509
+   ]
+  },
+  {
+   "size": 1536,
+   "text_rows": 80,
+   "guided": true,
+   "steps_gib": [
+    4.3422,
+    4.0801,
+    4.1182
+   ]
+  },
+  {
+   "size": 1024,
+   "text_rows": 4096,
+   "guided": true,
+   "steps_gib": [
+    4.1826,
+    3.8712,
+    3.8713
    ]
   }
  ],
