@@ -45,6 +45,30 @@ from gmlx.cache.kv_cache import KVCache
 _WEIGHT_SUM_FLOOR = 6.103515625e-5
 _LN2 = math.log(2.0)
 
+_KQ_ROUTER_STATE = {"ok": None}
+# A/B seam: False routes every gate through the eager select.
+_KQ_ROUTER_ENABLED = True
+
+
+def _kq_router_ok(n_tokens: int, top_k: int) -> bool:
+    """Whether the kq router kernel takes this decode-scale call. The
+    kernel is Metal-only, and its sigmoid arm is docstring-sniffed so an
+    older kquant build keeps the eager select."""
+    if (not _KQ_ROUTER_ENABLED or n_tokens * top_k >= 64
+            or mx.default_device() != mx.gpu):
+        return False
+    ok = _KQ_ROUTER_STATE["ok"]
+    if ok is None:
+        try:
+            import mlx_kquant as kq
+
+            ok = mx.metal.is_available() and "sigmoid" in (
+                getattr(kq.moe_router_topk, "__doc__", "") or "")
+        except Exception:  # noqa: BLE001 - optional dependency
+            ok = False
+        _KQ_ROUTER_STATE["ok"] = ok
+    return ok
+
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -89,10 +113,23 @@ def _route_weights(scores, inds, norm, scale):
     return w
 
 
-def _route(logits, bias, top_k, scoring_func, norm, scale):
+def _route(logits, bias, top_k, scoring_func, norm, scale, fused=True):
     """``(inds, weights)``: top-k on the scores plus ``bias``, weights from
     the unbiased scores."""
     logits = logits.astype(mx.float32)
+    n = logits.shape[-1]
+    t = logits.size // n
+    if fused and scoring_func == "sigmoid" and _kq_router_ok(t, top_k):
+        # One kq dispatch for the sigmoid, the biased top-k, the renorm and
+        # the scale. Its renorm guard differs from llama.cpp's clamp only
+        # when every picked score is below about 1e-5.
+        import mlx_kquant as kq
+
+        inds, w = kq.moe_router_topk(
+            logits.reshape(t, n), top_k, norm, shared_gate=False, bias=bias,
+            scoring="sigmoid", scale=1.0 if scale in (0.0, 1.0) else scale)
+        shp = logits.shape[:-1]
+        return inds.reshape(*shp, top_k), w.reshape(*shp, top_k)
     if scoring_func == "softmax":
         scores = mx.softmax(logits, axis=-1, precise=True)
     else:
@@ -163,7 +200,7 @@ class ValueExperts(nn.Module):
         inds, weights = _route(
             self.v_router(x.astype(mx.float32)), self.selection_bias,
             self.top_k, self.scoring_func, self.norm_topk_prob,
-            self.routed_scaling_factor)
+            self.routed_scaling_factor, fused=not self.training)
 
         h = mx.expand_dims(x, (-2, -3))
         do_sort = inds.size >= 64
@@ -256,6 +293,10 @@ class Attention(nn.Module):
 class MLP(nn.Module):
     """SwiGLU MLP: the dense layers and the shared expert."""
 
+    # Plain SiLU. The fused shared-expert fold reads this to accept the
+    # shared expert as one more slot of the expert gathers.
+    swiglu_limit = 0.0
+
     def __init__(self, dim: int, hidden: int):
         super().__init__()
         self.gate_proj = nn.Linear(dim, hidden, bias=False)
@@ -292,7 +333,8 @@ class K2HorizonMoEGate(nn.Module):
     def __call__(self, x: mx.array):
         return _route(
             self._logits(x), self.e_score_correction_bias, self.top_k,
-            self.scoring_func, self.norm_topk_prob, self.routed_scaling_factor)
+            self.scoring_func, self.norm_topk_prob, self.routed_scaling_factor,
+            fused=not self.training)
 
     def _kq_route_weights(self, x, inds):
         # Route replay (stream/moe_routes): the weight branch of _route at
@@ -322,8 +364,11 @@ class K2HorizonMoE(nn.Module):
             y = self.switch_mlp(x, inds, scores)
         else:
             y = self.switch_mlp(x, inds)
-            if y.ndim == scores.ndim + 1:
-                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+        if y.ndim == scores.ndim + 1:
+            y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+        elif getattr(self.switch_mlp, "_kq_shexp_mod", None) is not None:
+            # A mixed return from the stamped shared-expert fold has it.
+            return y
         if "shared_experts" in self:
             y = y + self.shared_experts(x)
         return y

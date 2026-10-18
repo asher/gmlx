@@ -463,3 +463,61 @@ def test_lookahead_router_replica_matches_the_gate():
     ids, mass = select(x)
     assert sorted(_np(ids).ravel().tolist()) == sorted(_np(inds).ravel().tolist())
     assert (np.diff(_np(mass).ravel()) <= 0).all()
+
+
+_ON_GPU = mx.default_device() == mx.gpu
+
+
+@pytest.mark.skipif(not _ON_GPU, reason="the kq router kernel is Metal-only")
+@pytest.mark.parametrize("n, k, norm, scale", [
+    (100, 8, True, 2.5), (64, 4, True, 2.5), (64, 4, False, 1.0)])
+def test_fused_router_matches_the_eager_select(n, k, norm, scale):
+    from gmlx.models.k2_horizon.model import _kq_router_ok, _route
+
+    if not _kq_router_ok(1, k):
+        pytest.skip("this kquant build has no sigmoid router arm")
+    rng = np.random.default_rng(n + k)
+    logits = mx.array(rng.standard_normal((1, 1, n)) * 3, dtype=mx.float32)
+    bias = mx.array(rng.standard_normal(n) * 0.3, dtype=mx.float32)
+    fi, fw = _route(logits, bias, k, "sigmoid", norm, scale, fused=True)
+    ei, ew = _route(logits, bias, k, "sigmoid", norm, scale, fused=False)
+    fo, eo = np.argsort(_np(fi).ravel()), np.argsort(_np(ei).ravel())
+    assert (_np(fi).ravel()[fo] == _np(ei).ravel()[eo]).all()
+    np.testing.assert_allclose(_np(fw).ravel()[fo], _np(ew).ravel()[eo],
+                               rtol=1e-5)
+
+
+@pytest.mark.skipif(not _ON_GPU, reason="the fused MoE kernels are Metal-only")
+def test_shared_expert_fold_matches_the_unfolded_block():
+    model, _ = _loader_shaped()
+    moe = model.layers[1].mlp
+    se = getattr(moe.switch_mlp, "_kq_shexp_mod", None)
+    if se is None:
+        pytest.skip("this kquant build does not fold the shared expert")
+    assert se is moe.shared_experts
+    x = mx.array(np.random.default_rng(4).standard_normal((1, 1, 256)),
+                 dtype=mx.bfloat16)
+    folded = _np(moe(x))
+    object.__setattr__(moe.switch_mlp, "_kq_shexp_mod", None)
+    plain = _np(moe(x))
+    assert _rel(folded, plain) < 2e-2
+
+
+def test_router_kernel_is_never_called_off_the_gpu(monkeypatch):
+    import mlx_kquant as kq
+
+    from gmlx.models.k2_horizon import model as k2
+
+    def boom(*a, **k):
+        raise AssertionError("kq.moe_router_topk called off the GPU")
+
+    monkeypatch.setattr(kq, "moe_router_topk", boom, raising=False)
+    monkeypatch.setitem(k2._KQ_ROUTER_STATE, "ok", True)
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        logits = mx.zeros((1, 1, 64))
+        inds, _ = k2._route(logits, None, 4, "sigmoid", True, 2.5)
+        mx.eval(inds)
+    finally:
+        mx.set_default_device(prev)
