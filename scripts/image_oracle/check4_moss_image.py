@@ -6,9 +6,11 @@ The class lives in the release's pipeline_moss_image.py, which the script
 loads by path from --pipeline, with the official scheduler config. For
 each step count the fixture holds the scheduler's float32 sigmas with the
 final zero and its timesteps, and once the training grid the sigmas snap
-to. gmlx's sigmas must each be within one float32 ulp of these, with the
-same count: the grid comes from a float32 linspace that differs from
-k / 1000 by one ulp at some points, and the count shows a tie that moved.
+to. gmlx's sigmas must equal these bit for bit, with the same count. The
+grid is a float32 linspace that differs from k / 1000 rounded once by one
+ulp at 386 points, and on that other grid a tie can go to the other
+point, a whole grid step off, with the count unchanged: at 822 steps one
+sigma does.
 
   python scripts/image_oracle/run.py --python <oracle python> \\
       check4_moss_image.py --pipeline <dir>/pipeline_moss_image.py \\
@@ -30,8 +32,9 @@ import oracle
 
 NAME = "check4_moss_image"
 # 250 and 1000 steps snap some sigmas to one grid point, so the release
-# runs fewer steps than asked for.
-STEPS = (50, 28, 8, 250, 1000)
+# runs fewer steps than asked for. At 822 a sigma ties between two grid
+# points, which a grid of k / 1000 rounded once breaks the other way.
+STEPS = (50, 28, 8, 250, 1000, 822)
 
 
 def release(path: Path):
@@ -82,10 +85,10 @@ def main(argv=None) -> int:
                       grid_max_ulps=int(np.max(np.abs(
                           grid.view(np.int32) - exact.view(np.int32)))))
     fx.tolerances.update(
-        sigmas="one float32 ulp each", count="exact",
+        sigmas="bitwise", count="exact",
         timesteps="sigma x 1000 in float32",
-        rule="each sigma within one float32 ulp of the release's and the "
-             "same number of steps")
+        rule="each sigma equal to the release's bit for bit and the same "
+             "number of steps")
     print(f"wrote {fx.write(a.out)}; steps {counts}; grid points off "
           f"k / {total}: {off}")
     return 0

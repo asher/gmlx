@@ -61,7 +61,8 @@
    28,
    8,
    250,
-   1000
+   1000,
+   822
   ],
   "scheduler": {
    "base_image_seq_len": 256,
@@ -87,19 +88,20 @@
    "28": 28,
    "8": 8,
    "250": 246,
-   "1000": 615
+   "1000": 615,
+   "822": 556
   },
   "grid_points_off_k_over_total": 386,
   "grid_max_ulps": 1
  },
  "tolerances": {
-  "sigmas": "one float32 ulp each",
+  "sigmas": "bitwise",
   "count": "exact",
   "timesteps": "sigma x 1000 in float32",
-  "rule": "each sigma within one float32 ulp of the release's and the same number of steps"
+  "rule": "each sigma equal to the release's bit for bit and the same number of steps"
  },
  "notes": [],
- "created": "2026-10-18T06:50:11Z",
+ "created": "2026-10-18T11:20:09Z",
  "npz": "check4_moss_image.npz",
  "tensors": {
   "sigmas_1000": {
@@ -137,6 +139,13 @@
    "dtype": "float32",
    "sha256": "c229a57463f3db2e71b9595902f071390567c1a85d6ced85022c95992cdd90d1"
   },
+  "sigmas_822": {
+   "shape": [
+    557
+   ],
+   "dtype": "float32",
+   "sha256": "11f5f15ede784d78b5c311166c6272570afc98003837f13bc6833b178265278c"
+  },
   "timesteps_1000": {
    "shape": [
     615
@@ -171,6 +180,13 @@
    ],
    "dtype": "float32",
    "sha256": "933a3da4af0be7f12e536c22fcbb88200dd6b840985fcb2e3ecdd4a95c796125"
+  },
+  "timesteps_822": {
+   "shape": [
+    556
+   ],
+   "dtype": "float32",
+   "sha256": "303ef9a8d6d5104f0e50e498636e6cfe1088e12b229261d8215ada4505e7387a"
   },
   "training_grid": {
    "shape": [
