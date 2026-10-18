@@ -47,6 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx distill gen` stopped with Ctrl-C could leave out a reply that had
+  already arrived.
 - A chat template with a `{% generation %}` block was refused by
   `--chat-template` as invalid Jinja.
 - `--thinking off` was silently ignored on a model with no thinking switch
