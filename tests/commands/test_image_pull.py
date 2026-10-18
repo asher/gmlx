@@ -1106,6 +1106,29 @@ def test_a_moss_image_base_pull_after_sft_takes_only_its_dit(lib,
     assert base.encoder == sft.encoder and base.vae == sft.vae
 
 
+@pytest.mark.parametrize("held, ram_gb, args, takes", [
+    ("Q8_0", 16, (), "Q4_K_M"), ("Q8_0", 16, ("--encoder-quant", "Q8_0"), "Q8_0"),
+    ("Q4_K_M", 32, (), "Q4_K_M")])
+def test_a_held_encoder_serves_a_moss_image_pull_where_it_fits(
+        lib, monkeypatch, capsys, held, ram_gb, args, takes):
+    """Another quant on disk serves the pull when an image fits with it.
+    Qwen3.5-9B Q8_0 does not fit a 16 GB Mac, so the pull takes the class's
+    Q4_K_M and says so, unless --encoder-quant asks for the held one."""
+    root, _ = lib
+    d = root / "unsloth__Qwen3.5-9B-GGUF"
+    d.mkdir()
+    with open(d / f"Qwen3.5-9B-{held}.gguf", "wb") as f:
+        f.truncate(catalog.ENCODER_BYTES[f"Qwen3.5-9B-{held}.gguf"])
+    got, _, m = _shared_pull(lib, monkeypatch, "moss-image", ram_gb, args)
+    out = capsys.readouterr().out
+    assert m.encoder == f"unsloth__Qwen3.5-9B-GGUF/Qwen3.5-9B-{takes}.gguf"
+    pulled = (M.encoder_repo, f"Qwen3.5-9B-{takes}.gguf", "main") in got
+    assert pulled == (held != takes)
+    note = ("Qwen3.5-9B-Q8_0.gguf on disk does not fit an image on a 16 GB "
+            "Mac; the pull takes Q4_K_M")
+    assert (note in out) == (held != takes)
+
+
 def test_a_flux3_pull_takes_no_encoder_quant_but_q8_0(lib, capsys):
     root, cfg = lib
     assert manage.cmd_pull(["flux-3-klein", "--encoder-quant", "Q4_K_M",
