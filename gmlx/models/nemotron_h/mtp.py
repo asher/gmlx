@@ -94,13 +94,15 @@ class NemotronHSpecBackbone(nh.NemotronHModel):
         mamba_sink: Optional[list] = None,
         capture: Optional[tuple] = None,
         exact: bool = True,
+        input_embeddings: Optional[mx.array] = None,
     ):
         """``capture`` is ``(layer_ids, out)``: the raw output of each listed
         layer is appended to ``out`` in layer order (the DFlash seam).
         ``exact`` off runs a sinked verify batched, as llama.cpp does: the
         block drafters verify 8 positions, where stepping every layer costs
         8 decode steps."""
-        hidden_states = self.embeddings(inputs)
+        hidden_states = (self.embeddings(inputs) if input_embeddings is None
+                         else input_embeddings)
         capture_ids, captured = capture if capture is not None else ((), None)
 
         if cache is None:

@@ -28,8 +28,8 @@ from gmlx._vendor.mlx_vlm.models.base import (
     LanguageModelOutput,
 )
 
-from .model import Model as _TextModel
 from .model import ModelArgs
+from .mtp import NemotronHSpecLM
 from .vision import VisionConfig, VisionModel
 
 TextConfig = ModelArgs
@@ -53,16 +53,14 @@ class ModelConfig(BaseModelConfig):
             self.image_token_index = self.image_token_id
 
 
-class LanguageModel(_TextModel):
+class LanguageModel(NemotronHSpecLM):
+    """The text model with the speculative hooks, so a drafter runs on text
+    turns. Image turns take the plain path with the merged embeddings."""
+
     def __init__(self, config: TextConfig):
         super().__init__(config)
         # The serve engine and the APC guard read the text config here.
         self.config = config
-
-    @property
-    def model(self):
-        # mlx-vlm and the drafter binders reach the trunk as ``.model``.
-        return self.backbone
 
     def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
@@ -73,8 +71,10 @@ class LanguageModel(_TextModel):
         **kwargs,
     ):
         # The backbone builds its own attention and SSM masks from the caches.
-        skip_logits = kwargs.pop("skip_logits", False)
-        del mask, kwargs
+        del mask
+        if kwargs.get("return_hidden") or kwargs.get("return_shared_kv"):
+            return super().__call__(inputs, cache=cache, **kwargs)
+        skip_logits = kwargs.get("skip_logits", False)
         h = self.backbone(inputs, cache=cache, input_embeddings=inputs_embeds)
         return LanguageModelOutput(
             logits=None if skip_logits else self.lm_head(h))

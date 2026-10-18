@@ -341,7 +341,7 @@ def test_remap_fills_every_tower_param():
         assert v.shape == params[k[len("vision_tower."):]].shape, k
 
 
-def test_container_scatters_features_on_image_rows():
+def _container():
     from gmlx.models.nemotron_h.vlm_model import Model, ModelConfig
     from gmlx.models.nemotron_h.model import ModelArgs
 
@@ -353,9 +353,13 @@ def test_container_scatters_features_on_image_rows():
         ssm_state_size=4, conv_kernel=4, n_groups=2, mlp_bias=False,
         layer_norm_epsilon=1e-5, use_bias=False, use_conv_bias=True,
         hybrid_override_pattern=["M", "*"], head_dim=6)
-    model = Model(ModelConfig(text_config=text,
-                              vision_config=VisionConfig(**_CFG),
-                              image_token_id=18))
+    return Model(ModelConfig(text_config=text,
+                             vision_config=VisionConfig(**_CFG),
+                             image_token_id=18))
+
+
+def test_container_scatters_features_on_image_rows():
+    model = _container()
     p = _CFG["patch_size"]
     pixels = mx.zeros((4 * 6, 3 * p * p))
     feats = model.vision_tower(pixels, (4, 6))
@@ -373,6 +377,36 @@ def test_container_scatters_features_on_image_rows():
         model.get_input_embeddings(
             ids, mx.zeros((8 * 6, 3 * p * p)),
             image_grid_thw=np.array([[1, 8, 6]]))
+
+
+def test_container_language_model_carries_the_spec_hooks():
+    # A drafter runs on text turns through the container's language model;
+    # image turns keep their features on the same class.
+    from gmlx.load.mtp_target import (
+        _MTP_TARGET_HOOKS_BY_TYPE,
+        _spec_hook_key,
+        _vlm_spec_language_model,
+    )
+
+    model = _container()
+    lm = model.language_model
+    for hook in _MTP_TARGET_HOOKS_BY_TYPE[_spec_hook_key("nemotron_h_omni")]:
+        assert callable(getattr(lm, hook)), hook
+    assert callable(lm.set_dflash_capture)
+    assert lm.model.embed_tokens is lm.backbone.embeddings
+    assert _vlm_spec_language_model("nemotron_h_omni") is None
+
+    p = _CFG["patch_size"]
+    pixels = mx.random.normal((4 * 6, 3 * p * p), key=mx.random.key(1))
+    ids = mx.array([[19] + [18] * 6 + [20, 5]])
+    grid = np.array([[1, 4, 6]])
+    emb = model.get_input_embeddings(ids, pixels, image_grid_thw=grid)
+    with_image = model(ids, pixels, image_grid_thw=grid).logits
+    np.testing.assert_allclose(
+        np.array(with_image),
+        np.array(lm(ids, inputs_embeds=emb.inputs_embeds).logits), rtol=1e-6)
+    assert not np.allclose(np.array(with_image[0, -1]),
+                           np.array(lm(ids).logits[0, -1]))
 
 
 def test_fp32_keep_row_covers_tower_and_router():

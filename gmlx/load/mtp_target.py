@@ -252,6 +252,8 @@ _VLM_SPEC_MODEL_TYPE_ALIASES = {
     # The Vision-Exp container's language model carries the deepseek_v4
     # text hooks (DeepseekV4SpecHooks).
     "deepseek_v4_vl": "deepseek_v4",
+    # The Bolt image container's language model is NemotronHSpecLM.
+    "nemotron_h_omni": "nemotron_h",
 }
 
 
@@ -269,7 +271,8 @@ def _vlm_spec_language_model(model_type: str):
     image turns stays correct - unlike ``_mtp_target_classes``'s text build,
     which passes an empty one). None means the built ``.language_model``
     already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
-    their mixins in their own vlm_model, and the owned gemma4 containers
+    their mixins in their own vlm_model, nemotron_h_omni holds
+    NemotronHSpecLM, and the owned gemma4 containers
     hold the owned language model), or the arch has no spec support
     (the per-arch hook check downstream fails loud)."""
     if model_type in ("qwen3_5", "qwen3_5_moe"):
