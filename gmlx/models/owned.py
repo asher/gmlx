@@ -42,6 +42,9 @@ OWNED_LM_MODELS = {
     # relative and carries neither the independent hyper-connections nor
     # the sinks and the attention gate.
     "hy_v4": "gmlx.models.hy_v4.model",
+    # llama.cpp LLM_ARCH_K2_HORIZON; the mlx-vlm class is a plain Llama
+    # with none of the group norm, the output gate, MoE or MoVA.
+    "k2_horizon": "gmlx.models.k2_horizon.model",
 }
 
 # mlx-vlm model_type -> the gmlx module that stands for the model package

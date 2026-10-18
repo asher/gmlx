@@ -2874,3 +2874,145 @@ def test_muse_spark_synth_refuses_softmax_gating_and_shared_experts():
     m["muse-spark.expert_shared_count"] = 1
     with pytest.raises(NotImplementedError, match="shared experts"):
         synthesize_config(m, tensor_shapes=_MUSE_SPARK_SHAPES)
+
+
+# k2-horizon
+
+
+def _k2_horizon_dense_meta() -> dict:
+    arch = "k2-horizon"
+    m = _base_meta(arch)
+    m[f"{arch}.attention.value_length"] = 16
+    m[f"{arch}.attention.group_norm_groups"] = 4
+    m[f"{arch}.rope.dimension_count"] = 16
+    m[f"{arch}.rope.freq_base"] = 1e7
+    # The dense 7B ships an expert count of 0 and a gating func anyway.
+    m[f"{arch}.expert_count"] = 0
+    m[f"{arch}.expert_used_count"] = 0
+    m[f"{arch}.expert_gating_func"] = 2
+    return m
+
+
+def _k2_horizon_mova_meta() -> dict:
+    arch = "k2-horizon"
+    m = _k2_horizon_dense_meta()
+    m[f"{arch}.block_count"] = 3
+    m[f"{arch}.attention.group_norm_groups"] = 2
+    m[f"{arch}.expert_count"] = 8
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.leading_dense_block_count"] = 1
+    m[f"{arch}.moe_every_n_layers"] = 1
+    m[f"{arch}.expert_shared_count"] = 1
+    m[f"{arch}.expert_shared_feed_forward_length"] = 24
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.expert_weights_scale"] = 2.5
+    m[f"{arch}.attention.value_expert_count"] = 6
+    m[f"{arch}.attention.value_expert_used_count"] = 2
+    return m
+
+
+_K2_HORIZON_DENSE_SHAPES = {"output.weight": [64, VOCAB]}
+
+_K2_HORIZON_MOVA_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_gate.weight": [64, 64],
+    "blk.1.attn_v_exps.weight": [64, 32, 6],
+    "blk.1.ffn_gate_exps.weight": [64, 24, 8],
+}
+
+
+def test_k2_horizon_dense_synth_fields():
+    c = synthesize_config(_k2_horizon_dense_meta(),
+                          tensor_shapes=_K2_HORIZON_DENSE_SHAPES)
+    assert c["model_type"] == "k2_horizon"
+    assert c["norm_groups"] == 4
+    assert c["head_dim"] == 16
+    assert c["rope_theta"] == 1e7
+    assert "rope_dim" not in c
+    assert c["intermediate_size"] == 128
+    assert c["attn_output_gate"] is False
+    assert c["qk_norm"] is False
+    assert "num_experts" not in c and "num_value_experts" not in c
+    assert "scoring_func" not in c
+    assert not c["tie_word_embeddings"]
+
+
+def test_k2_horizon_mova_synth_fields():
+    c = synthesize_config(_k2_horizon_mova_meta(),
+                          tensor_shapes=_K2_HORIZON_MOVA_SHAPES)
+    assert c["norm_groups"] == 2
+    assert c["attn_output_gate"] is True
+    assert (c["num_experts"], c["num_experts_per_tok"]) == (8, 2)
+    assert c["moe_intermediate_size"] == 24
+    assert c["shared_expert_intermediate_size"] == 24
+    assert c["first_k_dense_replace"] == 1
+    assert c["routed_scaling_factor"] == 2.5
+    assert c["norm_topk_prob"] is True
+    assert (c["num_value_experts"], c["num_value_experts_per_tok"]) == (6, 2)
+    assert c["scoring_func"] == "sigmoid"
+
+
+def test_k2_horizon_synth_applies_llama_cpp_defaults():
+    arch = "k2-horizon"
+    m = _k2_horizon_mova_meta()
+    for key in ("attention.group_norm_groups", "expert_gating_func",
+                "expert_shared_feed_forward_length", "expert_weights_scale",
+                "expert_weights_norm", "leading_dense_block_count"):
+        del m[f"{arch}.{key}"]
+    c = synthesize_config(m, tensor_shapes=_K2_HORIZON_MOVA_SHAPES)
+    assert c["norm_groups"] == 1
+    assert c["scoring_func"] == "sigmoid"
+    # A shared width of 0 means n_ff_exp * n_shared.
+    assert c["shared_expert_intermediate_size"] == 24
+    assert c["routed_scaling_factor"] == 0.0
+    assert c["norm_topk_prob"] is False
+    assert c["first_k_dense_replace"] == 0
+
+
+def test_k2_horizon_synth_reads_partial_rope_and_qk_norm():
+    m = _k2_horizon_dense_meta()
+    m["k2-horizon.rope.dimension_count"] = 8
+    shapes = dict(_K2_HORIZON_DENSE_SHAPES)
+    shapes["blk.0.attn_q_norm.weight"] = [64]
+    c = synthesize_config(m, tensor_shapes=shapes)
+    assert c["rope_dim"] == 8
+    assert c["qk_norm"] is True
+
+
+@pytest.mark.parametrize("key", [
+    "expert_feed_forward_length", "expert_used_count",
+    "attention.key_length",
+])
+def test_k2_horizon_required_keys_fail_loud(key):
+    m = _k2_horizon_mova_meta()
+    del m[f"k2-horizon.{key}"]
+    with pytest.raises(ValueError, match=f"k2-horizon.{key}"):
+        synthesize_config(m, tensor_shapes=_K2_HORIZON_MOVA_SHAPES)
+
+
+def test_k2_horizon_synth_refuses_bad_value_routing():
+    m = _k2_horizon_mova_meta()
+    m["k2-horizon.attention.value_expert_used_count"] = 7
+    with pytest.raises(ValueError, match="value experts used"):
+        synthesize_config(m, tensor_shapes=_K2_HORIZON_MOVA_SHAPES)
+    m = _k2_horizon_mova_meta()
+    m["k2-horizon.expert_gating_func"] = 3
+    with pytest.raises(NotImplementedError, match="gating_func 3"):
+        synthesize_config(m, tensor_shapes=_K2_HORIZON_MOVA_SHAPES)
+
+
+@pytest.mark.parametrize("meta_fn, shapes", [
+    (_k2_horizon_dense_meta, _K2_HORIZON_DENSE_SHAPES),
+    (_k2_horizon_mova_meta, _K2_HORIZON_MOVA_SHAPES),
+])
+def test_k2_horizon_synth_instantiates(meta_fn, shapes):
+    from gmlx.models.k2_horizon.model import Model, ModelArgs
+
+    c = synthesize_config(meta_fn(), tensor_shapes=shapes)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    logits = m(mx.array([[1, 2, 3]]))
+    assert logits.shape == (1, 3, VOCAB)

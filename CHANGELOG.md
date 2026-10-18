@@ -25,6 +25,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and image and audio input through its `--mmproj` companion.
 - An image LoRA whose PEFT header sets `use_rslora` loads, scaled as PEFT
   scales it, where it was refused.
+- K2 Horizon 7B and K2 Horizon MoVA 36B-A4B (GGUF arch `k2-horizon`), with
+  `reasoning-low`, `-medium` and `-high` intents and tool calls.
 
 ### Changed
 
@@ -41,6 +43,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A chat template with a `{% generation %}` block was refused by
+  `--chat-template` as invalid Jinja.
+- `--thinking off` was silently ignored on a model with no thinking switch
+  when its template has the word thinking in its text. It now warns.
 - A streamed image request refused while it ran, such as one too large for
   memory, got a server error frame where the same request unstreamed got a 400.
 - The `gmlx pull` plan of an image model could say its parts fit in stages

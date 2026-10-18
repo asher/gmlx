@@ -134,9 +134,14 @@ class ThinkingStreamState:
         thinking_start_token: Optional[str],
         thinking_end_token: Optional[str],
     ) -> Tuple[Tuple[str, str], ...]:
+        from gmlx.gen.thinking_budget import end_aliases
+
         markers = []
         if thinking_start_token and thinking_end_token:
             markers.append((thinking_start_token, thinking_end_token))
+            # gmlx: the pair's alias closes end its block too.
+            for alias in end_aliases(thinking_end_token):
+                markers.append((thinking_start_token, alias))
         for marker_pair in cls._DEFAULT_OPEN_CLOSE_MARKERS:
             if marker_pair not in markers:
                 markers.append(marker_pair)
@@ -391,6 +396,10 @@ def _split_thinking(
                 "Falling back from tokenizer response-template parser", exc_info=True
             )
 
+    # gmlx: a pair's alias close (thinking_budget._END_ALIASES) splits too.
+    from gmlx.gen.thinking_budget import normalize_end_aliases
+
+    text = normalize_end_aliases(text, thinking_end_token)
     for start_marker, end_marker in ThinkingStreamState._build_open_close_markers(
         thinking_start_token, thinking_end_token
     ):

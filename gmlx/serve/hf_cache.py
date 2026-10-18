@@ -38,6 +38,8 @@ _OFFLINE_LOCK = threading.RLock()
 # Seconds that one call of fetch_pinned may take in all: to connect, and to
 # read each file it requests.
 FETCH_TIMEOUT = 5.0
+# The clock the fetch deadline runs on. Tests swap in a fake one.
+_clock = time.monotonic
 # A file larger than this is not fetched. Model cards and module configs
 # are a few kB.
 _FETCH_MAX_BYTES = 4 << 20
@@ -103,7 +105,7 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     import httpx
     from huggingface_hub.utils import build_hf_headers
 
-    deadline = time.monotonic() + FETCH_TIMEOUT
+    deadline = _clock() + FETCH_TIMEOUT
     tried: set = set()
     outcome = _GOT
     answered = False
@@ -143,7 +145,7 @@ def _inside(folder: str, name: str) -> str | None:
 def _fetch_one(hf, client, model_ref, commit, store, snapshot, name,
                deadline, mark, answered) -> str:
     """One GET of ``name`` at ``commit``, given up at ``deadline`` (a
-    ``time.monotonic`` value). ``answered``: an earlier request of the fetch
+    ``_clock`` value). ``answered``: an earlier request of the fetch
     was answered. Returns what it ended in: _GOT, _FINAL or _RETRY."""
     import httpx
 
@@ -154,7 +156,7 @@ def _fetch_one(hf, client, model_ref, commit, store, snapshot, name,
            f"{commit}/{quote(name)}")
     outcome = _FINAL
     try:
-        left = deadline - time.monotonic()
+        left = deadline - _clock()
         if left <= 0:
             raise TimeoutError("the fetch ran out of time")
         with client.stream("GET", url, timeout=left) as r:
@@ -169,7 +171,7 @@ def _fetch_one(hf, client, model_ref, commit, store, snapshot, name,
                 body += chunk
                 if len(body) > _FETCH_MAX_BYTES:
                     raise OSError("the file is too large")
-                if time.monotonic() > deadline:
+                if _clock() > deadline:
                     raise TimeoutError("the read timed out")
             etag = _etag(r)
         outcome = _RETRY                  # a failure to store it

@@ -60,6 +60,14 @@ CONFIGS = {
         output_multiplier=0.1767766922712326, post_norm_eps=1e-8, rms_norm_eps=1e-5,
         rope_parameters={"rope_theta": 5e5, "rope_type": "default"}, rope_theta=5e5,
         max_position_embeddings=4096, tie_word_embeddings=False),
+    "k2_horizon": dict(
+        model_type="k2_horizon", hidden_size=256, intermediate_size=512, num_hidden_layers=3,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=512,
+        rms_norm_eps=1e-6, norm_groups=2, rope_theta=1e7, max_position_embeddings=4096,
+        attn_output_gate=True, num_experts=8, num_experts_per_tok=4, moe_intermediate_size=256,
+        shared_expert_intermediate_size=256, first_k_dense_replace=1, num_value_experts=6,
+        num_value_experts_per_tok=2, scoring_func="sigmoid", norm_topk_prob=True,
+        routed_scaling_factor=2.5, tie_word_embeddings=False),
     "hy_v3": dict(
         model_type="hy_v3", hidden_size=256, intermediate_size=512, expert_hidden_dim=256,
         num_hidden_layers=3, first_k_dense_replace=1, num_attention_heads=4,
@@ -159,6 +167,7 @@ CASES = {
     "qwen3_moe": Case("qwen3moe"),
     "muse_glimmer": Case("muse-glimmer"),
     "muse_spark": Case("muse-spark"),
+    "k2_horizon": Case("k2-horizon"),
     "hy_v3": Case("hy_v3", (r"router\.gate$",)),
     "glm5_next": Case("glm5next"),
     "kimi_k3": Case("kimi-k3"),

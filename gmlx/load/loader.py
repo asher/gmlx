@@ -191,6 +191,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.hy_v3.tools as hy_v3_tools
 
         hy_v3_tools.ensure_registered()
+    if mt == "k2_horizon":
+        import gmlx.models.k2_horizon.tools as k2_horizon_tools
+
+        k2_horizon_tools.ensure_registered()
     if mt == "glm5_next":
         # Its hybrid cache depends on the deepseek_v4 DS4PoolingCache.
         import gmlx.models.glm5_next.model as glm5_next_model
@@ -920,6 +924,13 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # Kept in step with the model class's cast_predicate.
     "muse_spark": (".mlp.gate.weight", ".e_score_correction_bias",
                    "_resid_alpha", "_resid_beta"),
+    # k2_horizon: sigmoid top-8-of-100 FFN routing and the MoVA value
+    # routing pick on scores plus a selection bias, near-tie-heavy, and
+    # llama.cpp routes fp32. The value router weight is quantized on the
+    # wire, so only its F32 bias qualifies. Kept in step with the model
+    # class's cast_predicate.
+    "k2_horizon": (".mlp.gate.weight", ".e_score_correction_bias",
+                   ".selection_bias"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -1997,8 +2008,10 @@ def _resolve_chat_template(chat_template: str | None) -> str | None:
         import jinja2
     except ImportError:  # validated later by apply_chat_template instead
         return chat_template
+    from .template_parse import parse_chat_template
+
     try:
-        jinja2.Environment().parse(chat_template)
+        parse_chat_template(chat_template)
     except jinja2.TemplateSyntaxError as e:
         raise ValueError(
             f"chat template is not valid Jinja (line {e.lineno}: {e.message})"

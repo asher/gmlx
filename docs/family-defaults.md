@@ -39,6 +39,7 @@ a model ends up with.
 | `kimi-k2` | `deepseek2 named (?i)\bkimi` | temperature=1.0 top_p=0.95 | - |
 | `muse` | `muse-glimmer` | temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=&lt;\|start\|&gt;assistant to=self&lt;\|message\|&gt; thinking_end_token=&lt;\|eom\|&gt; | `@reasoning-high`: reasoning_strength=high; `@reasoning-low`: reasoning_strength=low; `@reasoning-medium`: reasoning_strength=medium; `@reasoning-xhigh`: reasoning_strength=xhigh |
 | `muse-spark` | `muse-spark` | temperature=1.0 top_p=1.0 top_k=64 thinking_start_token=&lt;\|start\|&gt;assistant to=self&lt;\|message\|&gt; thinking_end_token=&lt;\|eom\|&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-medium`: reasoning_effort=medium; `@reasoning-xhigh`: reasoning_effort=xhigh |
+| `k2-horizon` | `k2-horizon` | temperature=1.0 top_p=0.95 | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-medium`: reasoning_effort=medium |
 | `llama` | `llama`, `smollm3` | temperature=0.6 top_p=0.9 | - |
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3; `@creative`: temperature=1.0 min_p=0.05 |

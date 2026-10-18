@@ -998,3 +998,122 @@ def test_faithful_history_aliases_gpt_oss_thinking():
           "reasoning_content": "r"}],
         return_messages=True)
     assert "thinking" not in msgs[0]
+
+
+# K2 Horizon names one think pair per reasoning_effort. Each request takes
+# the pair its rendered prompt opens, so every marker reader agrees.
+def _k2_request_args(effort, *, proc, render_out, **args_kw):
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    original_fn = openai_mod.apply_chat_template
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    original_init = rs.ThinkingStreamState.__init__
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None,
+                                reasoning_effort=effort)
+    tok = sp_chat._LAST_GEN_ARGS.set(None)
+    try:
+        openai_mod.apply_chat_template = lambda *a, **kw: render_out
+        sp.install_stream_thinking_seed()
+        args = sp_chat._stash_template_kwargs(
+            gen.GenerationArguments(**args_kw), req, proc)
+        out = openai_mod.apply_chat_template(proc, "config", [])
+        return args, out
+    finally:
+        openai_mod.apply_chat_template = original_fn
+        rs.ThinkingStreamState.__init__ = original_init
+        sp_chat._LAST_GEN_ARGS.reset(tok)
+        sp_chat._LAST_RENDERED_PROMPT.set(None)
+
+
+@pytest.mark.parametrize("effort", ["high", "medium", "low"])
+def test_k2_request_effort_picks_the_server_markers(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    proc = types.SimpleNamespace(chat_template=k2.TEMPLATE, tokenizer=tok)
+    prompt = k2.generation_prompt(effort)
+    args, _ = _k2_request_args(effort, proc=proc, render_out=prompt)
+    start, end = k2.PAIRS[effort]
+    assert (args.thinking_start_token, args.thinking_end_token) == (start, end)
+
+    rg = types.SimpleNamespace(tokenizer=tok)
+    ids = tok.encode(prompt)
+    assert sp_chat._prompt_opens_thinking_tokens(rg, args, mx.array([ids]))
+
+    split = _APP._split_thinking_text
+    assert split(f"why{end}Hi", start, end) == ("why", "Hi")
+
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    st = rs.ThinkingStreamState(True, start, end)
+    d1, d2 = st.feed("why"), st.feed(f"{end}Hi", last=True)
+    assert (d1.reasoning, d2.content) == ("why", "Hi")
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        args.thinking_budget = 3
+        crit = cls._make_thinking_budget_criteria(rg, args, mx.array([ids]))
+    finally:
+        cls._make_thinking_budget_criteria = original
+    out = _atem_serve_run(crit, "weighing it all up", "Hi", tok)
+    assert out.split(end)[1] == "Hi"
+    for other in k2.PAIRS.values():
+        if other[1] != end:
+            assert other[1] not in out
+
+
+def test_k2_configured_markers_are_left_alone():
+    import k2_think_tokens as k2
+
+    proc = types.SimpleNamespace(chat_template=k2.TEMPLATE,
+                                 tokenizer=k2.K2Tokenizer())
+    args, _ = _k2_request_args(
+        "medium", proc=proc, render_out=k2.generation_prompt("medium"),
+        thinking_start_token="<t>", thinking_end_token="</t>")
+    assert (args.thinking_start_token, args.thinking_end_token) == ("<t>", "</t>")
+
+
+def test_single_pair_template_markers_are_left_alone():
+    proc = types.SimpleNamespace(chat_template="{{ '<think>' }}</think>")
+    args, _ = _k2_request_args(
+        None, proc=proc, render_out="<|im_start|>assistant\n<think>\n")
+    assert args.thinking_start_token is None
+    assert args.thinking_end_token is None
+
+
+# The 7B closes medium and low blocks with </ifm|think>, not the pair's own
+# close tag.
+@pytest.mark.parametrize("effort", ["medium", "low"])
+def test_k2_alias_close_splits_on_the_server(effort):
+    import k2_think_tokens as k2
+
+    tok = k2.K2Tokenizer()
+    proc = types.SimpleNamespace(chat_template=k2.TEMPLATE, tokenizer=tok)
+    prompt = k2.generation_prompt(effort)
+    args, _ = _k2_request_args(effort, proc=proc, render_out=prompt)
+    start, end = k2.PAIRS[effort]
+    alias = "</ifm|think>"
+
+    assert _APP._split_thinking_text(f"why{alias}Hi", start, end) == ("why", "Hi")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    assert rs._split_thinking(f"why{alias}Hi", start, end) == ("why", "Hi")
+    st = rs.ThinkingStreamState(True, start, end)
+    d1, d2 = st.feed("why</ifm|"), st.feed("think>Hi", last=True)
+    assert (d1.reasoning, d2.reasoning, d2.content) == ("why", None, "Hi")
+
+    rg = types.SimpleNamespace(tokenizer=tok)
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        args.thinking_budget = 6
+        crit = cls._make_thinking_budget_criteria(
+            rg, args, mx.array([tok.encode(prompt)]))
+    finally:
+        cls._make_thinking_budget_criteria = original
+    script = f"ok{alias}" + "the answer is long " * 4
+    assert _atem_serve_run(crit, script, "", tok) == script

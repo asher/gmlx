@@ -1859,6 +1859,7 @@ def _run_vlm(args) -> int:
         think_tokenizer_for(processor), None, interruptible=True,
         start_token=args.thinking_start_token,
         end_token=args.thinking_end_token,
+        prompt=prompt,
     )
     if tbp is not None:
         extra["logits_processors"] = [tbp]

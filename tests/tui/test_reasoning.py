@@ -8,6 +8,8 @@ boundaries.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import gmlx.tui.chat as chat
@@ -918,3 +920,65 @@ def test_bundled_template_wins_the_spelling_probe(monkeypatch, tmp_path):
     assert chat._template_text(args) == bundled_chat_template_for_arch(
         "deepseek41")
     assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": False}
+
+
+_K2_TEMPLATE = (Path(__file__).resolve().parents[1] / "fixtures"
+                / "k2_horizon_template.jinja")
+
+
+def test_thinking_named_only_in_an_exception_message_is_no_switch():
+    """K2 Horizon raises "...missing a thinking field..." inside a {{ }}
+    tag. That string must not read as Kimi's bare ``thinking`` switch, so
+    --thinking off warns instead of setting a no-op."""
+    from gmlx.tui.reasoning import map_thinking_controls
+
+    template = _K2_TEMPLATE.read_text()
+    warns: list = []
+    assert map_thinking_controls({}, "off", None, template,
+                                 warn=warns.append) == {}
+    assert warns and "no thinking switch" in warns[0]
+    assert "reasoning_effort" in warns[0]
+
+
+def test_unparsed_fallback_skips_string_literals():
+    """With a template jinja cannot parse, the text probe still ignores a
+    word inside a string literal and still finds the bare variable."""
+    from gmlx.tui.reasoning import map_thinking_controls
+
+    broken = "{% if %}"
+    prose = broken + "{{ raise_exception('needs a thinking field') }}"
+    assert "thinking" not in map_thinking_controls(
+        {}, "off", None, prose, warn=lambda m: None)
+    assert map_thinking_controls({}, "off", None, broken + _KIMI_TAIL) == \
+        {"thinking": False}
+
+
+@pytest.mark.parametrize("name", ["kimi_k25_template.jinja",
+                                  "kimi_k3_template.jinja"])
+def test_kimi_templates_keep_the_bare_thinking_switch(name):
+    from gmlx.tui.reasoning import map_thinking_controls
+
+    template = (_K2_TEMPLATE.parent / name).read_text()
+    assert map_thinking_controls({}, "off", None, template) == \
+        {"thinking": False}
+
+
+@pytest.mark.parametrize("effort", ["high", "medium", "low"])
+def test_k2_reply_splits_at_its_effort_close_tag(effort):
+    """The template pre-opens the effort's pair, so generation streams only
+    its close. A tag split across chunks still matches."""
+    import k2_think_tokens as k2
+
+    from gmlx.tui.sessions import split_thinking
+
+    prompt = k2.generation_prompt(effort)
+    assert chat._opens_thinking(prompt)
+    close = k2.PAIRS[effort][1]
+    reason, answer = split_thinking(f"weighing it{close}Hello!", think_open=True)
+    assert (reason, answer) == ("weighing it", "Hello!")
+    rf = ReasoningFilter(start_in_thinking=True)
+    cut = len(close) // 2
+    spans = (rf.feed("weighing it" + close[:cut]) + rf.feed(close[cut:] + "Hi")
+             + rf.flush())
+    assert "".join(t for t, m in spans if m == "reason") == "weighing it"
+    assert "".join(t for t, m in spans if m == "answer") == "Hi"

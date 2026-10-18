@@ -139,6 +139,7 @@ back.
 - GLM 4 through 5.3, Kimi-K3, MiniMax M2 and M3, and gpt-oss
 - Hunyuan, Hy3, HY4, Muse Glimmer and Muse Spark
 - Granite, Nemotron-H and Falcon-H1
+- K2 Horizon, dense and MoVA
 
 Each family's output is checked against llama.cpp at 16k context. The
 [coverage table](https://asher.github.io/gmlx/arch-coverage.html) lists the

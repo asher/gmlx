@@ -136,6 +136,20 @@ KIMI_K2_PATTERN = (
     r"\s+"
 )
 
+# K2 Horizon word-split, from the HF tokenizer.json (llama.cpp's
+# LLAMA_VOCAB_PRE_TYPE_K2_HORIZON spells the same regex with explicit-case
+# contractions). The llama3 split, with marks, ZWNJ and ZWJ inside letter runs.
+# The HF tokenizer normalizes NFC, so this pre keeps the NFC step.
+K2_HORIZON_PATTERN = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|"
+    r"[^\r\n\p{L}\p{N}]?(?:\p{L}|\p{M}|\x{200C}|\x{200D})+|"
+    r"\p{N}{1,3}|"
+    r" ?[^\s\p{L}\p{N}]+[\r\n]*|"
+    r"\s*[\r\n]+|"
+    r"\s+(?!\S)|"
+    r"\s+"
+)
+
 # DeepSeek-V3 family word-split: llama.cpp applies these three regexes
 # sequentially (each further splits the previous pass's pieces), verbatim
 # from PRE_TYPE_DEEPSEEK3_LLM (llama-vocab.cpp:318-325; the same case also
@@ -175,6 +189,7 @@ _PATTERN_BY_PRE = {
     # pre fell back to the single-digit clause - over-splitting numbers and
     # gluing Han runs to Latin words.
     "kimi-k2": KIMI_K2_PATTERN,
+    "k2-horizon": K2_HORIZON_PATTERN,
 }
 
 
@@ -733,7 +748,7 @@ _EOG_NAMES = (
     "<|flush|>", "<|calls|>", "<end_of_turn>", "<|endoftext|>", "</s>",
     "<|eom_id|>", "<EOT>", "_<EOT>", "[EOT]", "[EOS]", "<|end_of_text|>",
     "<end_of_utterance>", "<eos>", "<turn|>", "<|tool_response>",
-    "<｜end▁of▁sentence｜>", "[e~[",
+    "<｜end▁of▁sentence｜>", "[e~[", "<|ifm|im_end|>",
 )
 
 
@@ -895,6 +910,10 @@ def finish_gguf_tokenizer(raw, model_type: str | None) -> None:
         import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
 
         deepseek_v41_tools.install_message_normalizer(raw)
+    if model_type == "k2_horizon":
+        import gmlx.models.k2_horizon.tools as k2_horizon_tools
+
+        k2_horizon_tools.install_message_normalizer(raw)
 
 
 def bundled_chat_template_for_arch(arch: str | None) -> str | None:

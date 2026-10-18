@@ -33,7 +33,7 @@ SCALING_TYPES = ("none", "linear", "yarn", "longrope")
 USER_SCALING_TYPES = ("none", "linear", "yarn")
 
 # Header keys llama.cpp reads for some architectures only.
-_BETA_ARCHES = frozenset({"mistral3"})
+_BETA_ARCHES = frozenset({"mistral3", "k2-horizon"})
 _EXT_ATTN_ARCHES = frozenset({"grok"})
 # log multiplier: the deepseek converters write 0.1 * mscale_all_dim.
 _LOG_MUL_DIV10_ARCHES = frozenset({"deepseek2", "deepseek32"})
@@ -452,6 +452,7 @@ SWAP_ARCHES = frozenset({
     "mistral3", "gpt-oss", "seed_oss", "smollm3", "granite", "qwen3next",
     "minimax-m2", "qwen35", "qwen35moe", "qwen3vl", "qwen3vlmoe",
     "hy_v3", "hyv4", "muse-glimmer", "muse-spark", "minimax-m3", "falcon-h1",
+    "k2-horizon",
     "granitehybrid", "ernie4_5-moe", "gemma", "gemma2", "gemma3", "gemma4",
 })
 
