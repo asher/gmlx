@@ -142,20 +142,27 @@ def test_a_moss_image_file_given_as_another_family_is_refused(name):
         "arch=moss_image, 463 tensors")
 
 
-def test_an_error_in_another_familys_rule_is_not_hidden():
-    """A Krea 2 file whose flattened projector carries a stored shape that
-    is not a list of integers raises the same error under
-    family="moss_image" as it does with no family given."""
-    proj = "txtfusion.projector.weight"
-    kv = {**load_json(KREA2)["kv"],
-          f"comfy.gguf.orig_shape.{proj}": ["1", "twelve"]}
-    view = fixture_view(KREA2, add={proj: ((12,), "F32")}, kv=kv)
-    with pytest.raises(ValueError) as plain:
-        fp.identify(view)
-    with pytest.raises(ValueError) as given:
-        fp.identify(view, family="moss_image")
-    assert not isinstance(given.value, fp.ImageModelError)
-    assert str(given.value) == str(plain.value)
+class _RuleError(ValueError):
+    pass
+
+
+def test_an_error_in_another_familys_rule_is_not_hidden(monkeypatch):
+    """An error that another family's rule raises on a file reaches the
+    caller as it is, under family="moss_image" as with no family given."""
+    import dataclasses
+
+    from gmlx.image import registry
+
+    def broken(view):
+        raise _RuleError("the Krea 2 rule failed")
+
+    fams = tuple(dataclasses.replace(f, fingerprint=broken)
+                 if f.name == "krea2" else f for f in registry.families())
+    monkeypatch.setattr(registry, "families", lambda: fams)
+    view = fixture_view(KREA2)
+    for kw in ({}, {"family": "moss_image"}):
+        with pytest.raises(_RuleError, match="the Krea 2 rule failed"):
+            fp.identify(view, **kw)
 
 
 def test_a_file_no_family_takes_keeps_the_generic_refusal():
