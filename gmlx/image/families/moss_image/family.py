@@ -139,10 +139,7 @@ def _other_family(view: HeaderView) -> Refusal | None:
     for fam in families():
         if fam.name == FAMILY.name:
             continue
-        try:
-            got = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
-        except ValueError:
-            continue
+        got = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
         if isinstance(got, Refusal):
             return got
         if got is not None:

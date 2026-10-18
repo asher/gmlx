@@ -21,8 +21,9 @@ from gmlx.image.registry import get_family, is_image_arch
 SFT = "moss_image_sft_q4_k_m.header.json"
 CONFIG = "moss_image_transformer_config.json"
 IDENTITY = "moss_image_identity.json"
+KREA2 = "krea2_turbo_q4_k_m.header.json"
 OTHERS = {Z_HEADER: "Z-Image", Q_HEADER: "Qwen-Image 2.1",
-          "krea2_turbo_q4_k_m.header.json": "Krea 2",
+          KREA2: "Krea 2",
           "flux3_klein_q4_k_m.header.json": "FLUX.3 klein",
           "flux2_klein_4b_q4_k_m.header.json": "FLUX.2 klein",
           "flux2_klein_9b_q4_k_m.header.json": "FLUX.2 klein 9B"}
@@ -160,6 +161,22 @@ def test_no_other_family_takes_a_moss_image_file(name):
     assert _refused(view, family=other.name).startswith(
         f"not a {other.title} file. unrecognized image GGUF: "
         "arch=moss_image, 463 tensors")
+
+
+def test_an_error_in_another_familys_rule_is_not_hidden():
+    """A Krea 2 file whose flattened projector carries a stored shape that
+    is not a list of integers raises the same error under
+    family="moss_image" as it does with no family given."""
+    proj = "txtfusion.projector.weight"
+    kv = {**load_json(KREA2)["kv"],
+          f"comfy.gguf.orig_shape.{proj}": ["1", "twelve"]}
+    view = fixture_view(KREA2, add={proj: ((12,), "F32")}, kv=kv)
+    with pytest.raises(ValueError) as plain:
+        fp.identify(view)
+    with pytest.raises(ValueError) as given:
+        fp.identify(view, family="moss_image")
+    assert not isinstance(given.value, fp.ImageModelError)
+    assert str(given.value) == str(plain.value)
 
 
 def test_a_file_no_family_takes_keeps_the_generic_refusal():
