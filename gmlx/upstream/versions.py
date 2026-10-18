@@ -18,7 +18,7 @@ MLX_FLOOR = "0.32.2"
 # gmlx's mlx-kquant requirement. Each mlx-kquant release pins the mlx its
 # kernels were built against, so mlx moves with it. The test holds it equal
 # to the pyproject dependency.
-KQUANT_REQUIREMENT = "mlx-kquant>=0.5.1,<0.6"
+KQUANT_REQUIREMENT = "mlx-kquant>=0.5.2,<0.6"
 
 _COPY_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_vendor")
