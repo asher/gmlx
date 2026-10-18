@@ -279,5 +279,27 @@
     "sha256": "72ac6e652196cd9f450d4d3256d197978d3fa690e22dc21361d3bd4fb4e8250e",
     "license": "apache-2.0",
     "sha256_source": "The hub's LFS record of the file whose header the fixture holds, which the downloaded file matches."
+  },
+  "moss_image_sft_q4_k_m.header.json": {
+    "repo": "realrebelai/MOSS-Image_GGUFs",
+    "revision": "4f21f583c9213eb2230a09e9b33bfa86605aecf2",
+    "file": "MOSS-Image-SFT-Q4_K_M.gguf",
+    "size": 3702092096,
+    "sha256": "c6dda89c18c0c0897d09ed01a515ee31415c4baea02bb9c2dedbfca66eec50b6",
+    "kv_kept": "general.architecture",
+    "note": "MOSS-Image-Base-Q4_K_M.gguf (sha256 88e336e4429f81085b3a1595f01432a07de50837282e0ecace5c323d74a9d38f) has the same names, shapes and codecs"
+  },
+  "moss_image_transformer_config.json": {
+    "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+    "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+    "file": "transformer/config.json",
+    "size": 240,
+    "sha256": "3291c3a1c7adc22b8182a0de25ca8ec97474d72715ce84adbab09cc0be24f666"
+  },
+  "moss_image_identity.json": {
+    "repo": "realrebelai/MOSS-Image_GGUFs",
+    "revision": "4f21f583c9213eb2230a09e9b33bfa86605aecf2",
+    "file": "the identity tensors of every MOSS-Image .gguf, by HTTP range reads",
+    "note": "each file size is from the hub listing at the revision"
   }
 }
