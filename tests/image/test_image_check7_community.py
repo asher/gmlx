@@ -38,6 +38,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+import host_box
 from lora_fixtures import reference_delta, rel_l2
 from oracle_fixture import ORACLE, committed, fixture, fx
 from block_gates import (exact_process, rerun_exact, rerun_sites,
@@ -45,9 +46,6 @@ from block_gates import (exact_process, rerun_exact, rerun_sites,
 from test_image_check7 import (block_gate, blocks_fixture, exact_gate,
                                mutation_misses, need_blocks, site_gate, step,
                                turbo_pipe)
-
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
 
 NAME = "check7_z_image_turbo_community_512"
 ENV = "GMLX_TEST_LORA_DIR"
@@ -69,7 +67,7 @@ ADAPTERS = _ids()
 
 
 @functools.lru_cache(maxsize=None)
-def _file(aid: str) -> str:
+def _find(aid: str) -> str:
     """The adapter file under GMLX_TEST_LORA_DIR, checked by sha256."""
     root = os.environ.get(ENV)
     if not root:
@@ -81,6 +79,13 @@ def _file(aid: str) -> str:
                 pytest.fail(f"{p} is not the file the oracle read")
             return str(p)
     pytest.skip(f"{want['name']} is not under {ENV}")
+
+
+def _file(aid: str) -> str:
+    # Outside the cache, so each test that reads the file sees this Mac.
+    path = _find(aid)
+    host_box.real_files()
+    return path
 
 
 @pytest.fixture(scope="module")

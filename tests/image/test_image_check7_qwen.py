@@ -57,8 +57,8 @@ from gmlx.image import api, lora, registry
 from gmlx.image.families.qwen_image21 import model as qm
 from gmlx.image.lora import install, patch_table, plan, reader
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
+# The tiny rows run on a Mac of 16 GB, as most users run, and the rows on
+# local files on this Mac (tests/host_box.py).
 
 TINY = {v: f"selftest_qwen_image21_tiny_lora_{v}"
         for v in qt.rule.LORA_VARIANTS}
@@ -309,6 +309,7 @@ def structural_tables(pipe, entries: list) -> dict:
     return out
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("variant,dialects", CASES, ids=IDS)
 def test_a_tiny_step_under_a_patch_table_matches_the_merged_oracle(
@@ -348,6 +349,7 @@ def test_a_tiny_step_under_a_patch_table_matches_the_merged_oracle(
         assert base[k] >= 1000, (k, base[k])
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("variant", list(TINY))
 def test_each_wrong_table_fails_the_tiny_gate(tmp_path, variant, layout):
@@ -385,6 +387,7 @@ def test_each_wrong_table_fails_the_tiny_gate(tmp_path, variant, layout):
     assert top(ratios(pipe, arrays, right, m["name"]))[1] <= 1
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("variant", list(TINY))
 def test_each_structural_table_fails_the_tiny_gate(tmp_path, variant,
@@ -427,6 +430,7 @@ def test_each_structural_table_fails_the_tiny_gate(tmp_path, variant,
           "bounds on its most moved measure")
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_the_state_of_one_table_is_not_read_under_another(tmp_path, layout):
     """The prefix K and V and the modulation depend on the adapter. One
@@ -497,6 +501,7 @@ def _step(pipe, arrays: dict, table: str, key: str = "k") -> np.ndarray:
             qg.conditioning(arrays, key), patch_table=table), np.float64)
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_a_strength_change_is_a_new_table_with_no_reload(tmp_path,
                                                          monkeypatch, layout):
@@ -551,6 +556,7 @@ def test_a_strength_change_is_a_new_table_with_no_reload(tmp_path,
     assert np.array_equal(_step(pipe, arrays, t1), full)
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("strength", [0.5, 1.0, -0.4])
 def test_a_tiny_step_at_each_strength_equals_the_step_on_merged_weights(
         tmp_path, strength):
@@ -573,6 +579,7 @@ def test_a_tiny_step_at_each_strength_equals_the_step_on_merged_weights(
     assert fx.rel_l2(_step(pipe, arrays, api.EMPTY_TABLE), want) > 1e-2
 
 
+@pytest.mark.host_gb(16)
 def test_a_qwen_forward_reads_nothing_from_the_text_row_channel(
         tmp_path, monkeypatch):
     from gmlx import lora_rows
@@ -599,6 +606,7 @@ def test_a_qwen_forward_reads_nothing_from_the_text_row_channel(
         assert got[f"velocity_{tag}"]["rel_l2"] <= OWN_TOL, got
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("how,kind", (("block", "_Block"),
                                       ("slice", "_Slice"),
                                       ("split", "_Split")))
@@ -627,6 +635,7 @@ def test_each_placement_gives_the_tiny_step_of_the_merged_oracle(
             [(0, ffn)] if how == "slice" else [(0, ffn), (ffn, 2 * ffn)])
 
 
+@pytest.mark.host_gb(16)
 def test_a_gate_up_key_gives_the_tiny_step_of_the_merged_oracle(pipes,
                                                                tmp_path):
     """A file from the fused layout names img_mlp.gate_up, one pair over
@@ -677,6 +686,7 @@ def test_a_gate_up_key_gives_the_tiny_step_of_the_merged_oracle(pipes,
         lora.load_adapter(pipes["unfused"], path)
 
 
+@pytest.mark.host_gb(16)
 def test_a_dense_gate_up_pair_gives_the_tiny_step_of_the_merged_oracle(
         pipes, tmp_path):
     """One pair over the whole fused weight with one down: its up is
@@ -722,6 +732,7 @@ def test_a_dense_gate_up_pair_gives_the_tiny_step_of_the_merged_oracle(
     assert top(got)[1] >= SEEN and top(got, "step ")[1] >= SEEN
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_a_header_config_scales_the_tiny_step_as_the_reference_reads_it(
         tmp_path, layout):
@@ -777,6 +788,7 @@ def test_a_header_config_scales_the_tiny_step_as_the_reference_reads_it(
         assert whole >= SEEN and step >= SEEN, (label, whole, step)
 
 
+@pytest.mark.host_gb(16)
 def test_an_alpha_scales_a_pair_in_every_spelling_of_its_keys(pipes,
                                                              tmp_path):
     """The rule: a pair is scaled by its alpha tensor over its rank in
@@ -826,6 +838,7 @@ def test_an_alpha_scales_a_pair_in_every_spelling_of_its_keys(pipes,
         assert top(got)[1] >= SEEN and top(got, "step ")[1] >= SEEN
 
 
+@pytest.mark.host_gb(16)
 def test_a_leaf_kept_in_float32_adds_its_delta_in_the_dtype_of_its_product(
         tmp_path, monkeypatch):
     """A family may keep the timestep embedder in float32 under bfloat16
@@ -913,6 +926,7 @@ def test_a_leaf_kept_in_float32_adds_its_delta_in_the_dtype_of_its_product(
     assert t_err <= gate and t_lost >= 10 * gate
 
 
+@pytest.mark.host_gb(16)
 def test_load_adapter_refuses_a_pair_of_another_width(tmp_path, pipes):
     """A name of this family with the shape of a relative, such as the
     older Qwen-Image transformer's blocks, is refused by its shape."""
@@ -936,6 +950,7 @@ def test_load_adapter_refuses_a_pair_of_another_width(tmp_path, pipes):
             tmp_path / "tall.safetensors", "diffusers", tall))
 
 
+@pytest.mark.host_gb(16)
 def test_the_key_map_resolves_what_the_reference_loader_resolves():
     """The oracle ran diffusers' own Qwen LoRA loader on one pair for
     every linear layer of the reference class in every key spelling. The
@@ -984,6 +999,7 @@ def test_the_key_map_resolves_what_the_reference_loader_resolves():
             "transformer_blocks_1_img_mlp_gate_layer"))
 
 
+@pytest.mark.host_gb(16)
 def test_tiny_leaf_sites_under_a_table_are_within_their_gates(tmp_path,
                                                              monkeypatch):
     """The site gate of the linear leaves and the product gate of the
@@ -1037,6 +1053,7 @@ def _real_manifest(name: str) -> dict:
     return committed(name)
 
 
+@pytest.mark.host_gb(16)
 def test_the_real_manifests_name_the_adapters_the_rows_load():
     """The committed manifests alone: the dialects of each variant, the
     two adapters of the stack and where they meet, one pair fixture, one

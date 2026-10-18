@@ -11,8 +11,9 @@ import pytest
 
 import mlx.core as mx
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
+# Each row loads local model files, so it runs on this Mac
+# (tests/host_box.py).
+pytestmark = pytest.mark.integration
 
 
 def _z_image_file(gguf_index: dict) -> tuple[str, object]:

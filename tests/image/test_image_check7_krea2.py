@@ -39,16 +39,13 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+import host_box
 import krea2_gates as kg
 import qwen_gates as qg
 from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
-
-# A Mac of 24 GB: the gates peak at 20.3 GiB, past the 14 GiB working
-# set of a 16 GB Mac (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(24)
 
 COMFY = "check7_krea2_comfy_512"
 SYNTHETIC = "check7_krea2_synthetic_512"
@@ -88,6 +85,7 @@ def synthetic():
 
 
 @pytest.fixture(scope="module")
+@host_box.gate
 def lora_path(check7):
     want = check7[1]["files"]["lora"]
     root = os.environ.get(LORA_ENV)

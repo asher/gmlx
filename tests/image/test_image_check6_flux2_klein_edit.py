@@ -129,9 +129,7 @@ def _encode_gate(pipe) -> tuple:
     return "rel L2", float(t["encode_bf16_rel_l2"])
 
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
 @pytest.mark.integration
-@pytest.mark.host_gb(16)
 def test_reference_latents_of_the_vae_against_the_oracle(check6, pipe):
     from gmlx.image import api
     from gmlx.image.families.flux2_klein import edit
@@ -180,7 +178,6 @@ def _gates(m) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.host_gb(16)
 def test_check6_edit_latents_from_the_conditioning_of_the_oracle(check6,
                                                                  pipe):
     arrays, m = check6
@@ -195,7 +192,6 @@ def test_check6_edit_latents_from_the_conditioning_of_the_oracle(check6,
 
 
 @pytest.mark.integration
-@pytest.mark.host_gb(16)
 def test_check6_edit_fails_without_its_reference(check6, pipe):
     arrays, m = check6
     gates = _gates(m)

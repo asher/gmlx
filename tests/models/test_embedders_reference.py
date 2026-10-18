@@ -40,6 +40,7 @@ import os
 import sys
 from pathlib import Path
 
+import host_box
 import numpy as np
 import pytest
 
@@ -65,6 +66,7 @@ _GGUF_FLOOR = 0.9985
 
 
 @pytest.fixture
+@host_box.gate
 def mlx_dir() -> Path:
     d = os.environ.get("GMLX_TEST_MLX_DIR")
     if not d:

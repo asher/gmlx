@@ -11,6 +11,9 @@ unset:
   KQUANT_TEST_GGUF_DIR   directory searched recursively for ``*.gguf`` test models
   KQUANT_LLAMACPP_BIN    path to a llama.cpp ``llama-completion`` (or ``llama-cli``)
                          binary, used as the reference for greedy/long-context parity
+
+A test on such files never runs in CI, so it sees this Mac, not the CI
+runner (host_box.py).
 """
 
 from __future__ import annotations
@@ -41,6 +44,8 @@ import stock_blocker  # noqa: E402
 
 stock_blocker.install()
 
+import host_box  # noqa: E402
+
 
 def pytest_configure(config):
     # Every test sees the CI runner unless it declares a Mac with
@@ -48,6 +53,7 @@ def pytest_configure(config):
     import host_box
 
     host_box.install()
+    _switch_on_fetch()
     config.addinivalue_line(
         "markers", "host_gb(n): the test runs on a simulated Mac of n GiB")
 
@@ -177,7 +183,7 @@ def pytest_fixture_setup(fixturedef, request):
         _awaiting_capture = None
         _hand_back_process_state(item)
     if fixturedef.scope == "function":
-        return (yield)
+        return (yield from _noting_real_files(fixturedef))
     # A wider fixture sets up and tears down outside the capture of every
     # test, so its KQ_* keys are recorded under its own name, around its
     # setup here and around its teardown below.
@@ -185,7 +191,7 @@ def pytest_fixture_setup(fixturedef, request):
 
     before = {"env": dict(os.environ)}
     try:
-        return (yield)
+        return (yield from _noting_real_files(fixturedef))
     finally:
         process_state.note_kq_env(before, _fixture_name(fixturedef))
         # Added after the fixture's own teardown, so it runs first.
@@ -196,6 +202,83 @@ def pytest_fixture_setup(fixturedef, request):
 
 # The environment as each wider fixture's teardown starts.
 _before_teardown: dict = {}
+
+# The fixtures whose own setup called a gate helper (host_box.real_files),
+# such as a module fixture that reads image_dir(). A gate fixture itself
+# carries host_box.gate.
+_real_file_fixtures: set = set()
+
+
+def _noting_real_files(fixturedef):
+    # Counts a gate the fixture calls and a gate fixture it depends on, as
+    # pytest fetches its arguments inside this hook. Either way the fixture
+    # finds model files on this Mac.
+    import host_box
+
+    gates = host_box.gates
+    try:
+        return (yield)
+    finally:
+        if host_box.gates != gates:
+            _real_file_fixtures.add(fixturedef)
+
+
+def _real_file_fixture(fixturedef) -> bool:
+    import host_box
+
+    return host_box.is_gate(fixturedef.func) or fixturedef in _real_file_fixtures
+
+
+def _reads_real_files(item) -> bool:
+    """Marked integration, or a fixture in its closure finds model files on
+    this Mac. A gate the test reaches as it runs switches it then."""
+    if item.get_closest_marker("integration") is not None:
+        return True
+    info = getattr(item, "_fixtureinfo", None)
+    if info is None:
+        return False
+    return any(defs and _real_file_fixture(defs[-1])
+               for defs in info.name2fixturedefs.values())
+
+
+def _fetching_real_files(request, argname: str) -> bool:
+    """The fixture just fetched, or one it depends on, finds model files.
+    Its dependencies were fetched with it, so they are in the request's
+    table even when the fixture came from the cache. Without that private
+    table (a later pytest), only the setup rule switches a test."""
+    defs = getattr(request, "_fixture_defs", None)
+    if not isinstance(defs, dict):
+        return False
+    todo, seen = [argname], set()
+    while todo:
+        name = todo.pop()
+        fixturedef = defs.get(name)
+        if name in seen or fixturedef is None:
+            continue
+        seen.add(name)
+        if _real_file_fixture(fixturedef):
+            return True
+        todo.extend(fixturedef.argnames)
+    return False
+
+
+def _switch_on_fetch() -> None:
+    # pytest fills every fixture a test requests through getfixturevalue,
+    # and a body or fixture fetches one by name through it too. A cached
+    # fixture runs no setup, so the fetch is where a gate fixture switches
+    # the test to this Mac, however it was reached.
+    fetch = pytest.FixtureRequest.getfixturevalue
+
+    def getfixturevalue(self, argname):
+        value = fetch(self, argname)
+        if _fetching_real_files(self, argname):
+            import host_box
+
+            host_box.real_files()
+        return value
+
+    getfixturevalue.__doc__ = fetch.__doc__
+    pytest.FixtureRequest.getfixturevalue = getfixturevalue
 
 
 def _fixture_name(fixturedef) -> str:
@@ -268,12 +351,27 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.hookimpl(tryfirst=True, specname="pytest_runtest_setup")
 def pytest_runtest_setup_host(item):
-    # The machine a test declares with host_gb, else the CI runner. Set
-    # before any fixture, module-scoped ones included, reads the device.
+    # A test on model files from this Mac never runs in CI, so it sees this
+    # Mac. A host_gb on its module is for the module's unit rows; one on
+    # the test or its class would price for another machine, so it fails.
+    # Else the Mac a test declares, else the CI runner. Set before any
+    # fixture, module-scoped ones included, reads the device.
     import host_box
 
-    mark = item.get_closest_marker("host_gb")
-    host_box.use(*(host_box.mac(mark.args[0]) if mark else host_box.default()))
+    marks = [(isinstance(node, (pytest.Function, pytest.Class)), mark)
+             for node, mark in item.iter_markers_with_node("host_gb")]
+    if _reads_real_files(item):
+        host_box.use_real()
+        own = [mark for on_test, mark in marks if on_test]
+        if own:
+            pytest.fail(f"{item.nodeid} reads model files from this Mac, so "
+                        f"it runs on this Mac: remove its host_gb"
+                        f"({own[0].args[0]})", pytrace=False)
+    elif marks:
+        on_test, mark = marks[0]
+        host_box.use(*host_box.mac(mark.args[0]), declared=on_test)
+    else:
+        host_box.use(*host_box.default())
 
 
 @pytest.fixture
@@ -301,6 +399,7 @@ def _shutdown_read_pools():
 
 
 @pytest.fixture(scope="session")
+@host_box.gate
 def gguf_dir() -> Path:
     d = os.environ.get("KQUANT_TEST_GGUF_DIR")
     if not d:
@@ -312,6 +411,7 @@ def gguf_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
+@host_box.gate
 def llamacpp_bin() -> str:
     b = os.environ.get("KQUANT_LLAMACPP_BIN")
     if not b:

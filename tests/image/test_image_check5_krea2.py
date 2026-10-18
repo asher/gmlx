@@ -30,8 +30,8 @@ from oracle_fixture import ORACLE, committed_fixture, fixture, fx
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
+# The tiny rows run on a Mac of 16 GB, as most users run, and the rows on
+# local files on this Mac (tests/host_box.py).
 
 FAMILY = "krea2"
 NAME = "check5_krea2_vae"
@@ -93,6 +93,7 @@ def _tiny_readings(vae, arrays) -> dict:
             "encode": fx.max_abs(mean, arrays[f"encode_mean_{s}"])}
 
 
+@pytest.mark.host_gb(16)
 def test_the_tiny_fp32_decode_and_encode_are_within_max_abs(tiny,
                                                            tiny_file):
     from gmlx.image.vae import load_vae, read_header
@@ -142,6 +143,7 @@ WRONG = {"first time slice": _first_slice, "norm without sqrt(C)": _no_sqrt_c,
          "latent channels reversed": _latents_reversed}
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("name", list(WRONG),
                          ids=[n.replace(" ", "_") for n in WRONG])
 def test_a_wrong_model_misses_the_tiny_gate(tiny, tiny_file, monkeypatch,
@@ -156,6 +158,7 @@ def test_a_wrong_model_misses_the_tiny_gate(tiny, tiny_file, monkeypatch,
     assert max(got.values()) > 25 * TINY_FP32_MAX_ABS
 
 
+@pytest.mark.host_gb(16)
 def test_a_packed_gguf_loads_the_same_weights(tiny_file, tmp_path):
     import gguf
 
@@ -183,6 +186,7 @@ def test_a_packed_gguf_loads_the_same_weights(tiny_file, tmp_path):
     assert [k for k in a if not mx.array_equal(a[k], b[k]).item()] == []
 
 
+@pytest.mark.host_gb(16)
 def test_the_wan_layout_fills_the_module_tree():
     """The Comfy-Org file's names, in the original Wan 2.1 layout, map
     onto every parameter of the module, and every other tensor is a
@@ -205,6 +209,7 @@ def test_the_wan_layout_fills_the_module_tree():
     assert set(mapped) - set(params) == set(unread) and len(unread) == 8
 
 
+@pytest.mark.host_gb(16)
 def test_other_families_refuse_the_qwen_image_vae(tiny_file):
     from gmlx.image.vae import load_vae, reader
 
@@ -216,6 +221,7 @@ def test_other_families_refuse_the_qwen_image_vae(tiny_file):
             load_vae(tiny_file, family=family, dtype="fp32")
 
 
+@pytest.mark.host_gb(16)
 def test_the_memory_row_prices_tiles_first_with_a_crop():
     from gmlx.image import memfit
     from gmlx.image.vae import qwen_image_memory as m

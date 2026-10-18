@@ -65,9 +65,9 @@ from block_gates import (QWEN_EXACT_FREE_TOL, exact_process, exact_products,
                          rerun_exact)
 from test_image_check2_qwen_edit import _find
 
-# A Mac of 24 GB: an edit from the files plans an 8.92 GiB peak, over
-# the 8.55 GiB budget of a 16 GB Mac (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(24)]
+# Each row loads local model files, so it runs on this Mac
+# (tests/host_box.py).
+pytestmark = pytest.mark.integration
 
 NAME = "check6_qwen_image21_edit"
 CHECK2 = "check2_qwen_image21_edit"

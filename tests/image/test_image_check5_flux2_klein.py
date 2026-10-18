@@ -38,8 +38,8 @@ from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
+# The tiny rows run on a Mac of 16 GB, as most users run, and the rows on
+# local files on this Mac (tests/host_box.py).
 
 FAMILY = "flux2_klein"
 OTHER = "flux3_klein"
@@ -143,6 +143,7 @@ def _bn_rounded(vae) -> None:
         setattr(vae.bn, n, v.astype(mx.bfloat16).astype(mx.float32))
 
 
+@pytest.mark.host_gb(16)
 def test_the_tiny_bf16_file_packs_losslessly_and_serves_both_families(
         tiny_bf16, tmp_path):
     """BF16 stays BF16 and the batch count I64. A pack for either klein
@@ -174,6 +175,7 @@ def test_the_tiny_bf16_file_packs_losslessly_and_serves_both_families(
                 assert _differ(src[d], got) == [], (fam, use, d)
 
 
+@pytest.mark.host_gb(16)
 def test_a_bare_pack_takes_the_label_the_help_and_the_cli_page_name(
         tiny_bf16, tmp_path):
     """Without --family the FLUX.2 autoencoder packs for the label that
@@ -195,6 +197,7 @@ def test_a_bare_pack_takes_the_label_the_help_and_the_cli_page_name(
     assert "`flux-2-klein`" in row[0]
 
 
+@pytest.mark.host_gb(16)
 def test_the_manifest_names_the_family_it_was_written_for():
     """FLUX.3's oracle script wrote FLUX.2's fixture before it took
     --family, and the manifest notes the family corrected after the run."""
@@ -205,6 +208,7 @@ def test_the_manifest_names_the_family_it_was_written_for():
     assert committed(F32_NAME)["family"] == OTHER
 
 
+@pytest.mark.host_gb(16)
 def test_the_bf16_vae_of_an_f32_file_and_of_its_bf16_rounding(
         tiny, tiny_f32, tiny_bf16):
     """The bf16 VAE of each holds the same weights, the BatchNorm statistics
@@ -229,6 +233,7 @@ def test_the_bf16_vae_of_an_f32_file_and_of_its_bf16_rounding(
     assert np.array_equal(after, want)
 
 
+@pytest.mark.host_gb(16)
 def test_bfls_config_agrees_with_the_constants():
     from gmlx.image.vae import flux2_ae
 
@@ -242,6 +247,7 @@ def test_bfls_config_agrees_with_the_constants():
         "decoder_block_out_channels": None}
 
 
+@pytest.mark.host_gb(16)
 def test_bfls_header_holds_the_flux3_files_tensors_in_bf16():
     """The names and shapes of the Comfy-Org F32 file, every float tensor
     BF16, and every parameter of the module filled."""
@@ -358,10 +364,7 @@ def test_the_file_is_the_inventoried_one(check5, vaes):
         == load_json(HEADER)["tensors"]
 
 
-# The fp32 decode at 1024 pixels is priced at 8.45 GiB, more than a 16 GB
-# Mac has free beside the weights; users decode in bf16.
 @official
-@pytest.mark.host_gb(24)
 def test_fp32_decode_and_encode_are_within_the_gates(check5, vaes, request):
     arrays, m = check5
     vae = vaes("fp32")

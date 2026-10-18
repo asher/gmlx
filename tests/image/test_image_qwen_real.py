@@ -22,8 +22,9 @@ from oracle_fixture import fx
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = [pytest.mark.integration, pytest.mark.host_gb(16)]
+# Each row loads local model files, so it runs on this Mac
+# (tests/host_box.py).
+pytestmark = pytest.mark.integration
 
 FLOATS = ("F32", "F16", "BF16")
 # Tensors of the Q4_K_M file by (codec, dimensions).

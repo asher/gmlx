@@ -45,9 +45,6 @@ from image_fixtures import fixture_view, image_dits
 from lora_fixtures import DIALECTS, write_adapter
 from oracle_fixture import ORACLE, committed, fixture, fx
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
-
 SYNTHETIC = "check7_flux3_klein_synthetic_512"
 SOURCE = "check3_flux3_klein_r1_512"
 # The spellings the product gate reads the adapter in: one that stores

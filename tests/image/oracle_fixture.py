@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 
+import host_box
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +44,7 @@ def fixture(name: str) -> tuple[dict, dict]:
     if not (fx.fixture_root() / m["npz"]).is_file():
         pytest.skip(f"{m['npz']} is not under {fx.ENV}; run "
                     f"{m['script']} to write it")
+    host_box.real_files()
     return fx.load(name, manifest=m)
 
 

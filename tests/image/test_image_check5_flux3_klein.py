@@ -36,8 +36,8 @@ from oracle_fixture import ORACLE, committed_fixture, fixture, fx
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
+# The tiny rows run on a Mac of 16 GB, as most users run, and the rows on
+# local files on this Mac (tests/host_box.py).
 
 FAMILY = "flux3_klein"
 NAME = "check5_flux3_klein_vae"
@@ -164,6 +164,7 @@ def _tiny_readings(vae, arrays) -> dict:
             "mean": fx.max_abs(mean, arrays[f"encode_mean_{s}"])}
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", ["diffusers", "original"])
 def test_the_tiny_fp32_decode_and_encode_are_within_max_abs(
         tiny, tiny_file, tiny_original, layout):
@@ -247,6 +248,7 @@ WRONG = {"BatchNorm skipped": _bn_skipped, "dy and dx swapped": _dy_dx_swapped,
          "quant conv skipped": _no_quant_conv}
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("name", list(WRONG),
                          ids=[n.replace(" ", "_") for n in WRONG])
 def test_a_wrong_model_misses_the_tiny_gate(tiny, tiny_file, monkeypatch,
@@ -261,6 +263,7 @@ def test_a_wrong_model_misses_the_tiny_gate(tiny, tiny_file, monkeypatch,
     assert max(got.values()) > 25 * TINY_FP32_MAX_ABS
 
 
+@pytest.mark.host_gb(16)
 def test_model_space_round_trips_and_refuses_odd_latents(tiny_file):
     from gmlx.image.vae import load_vae
 
@@ -275,6 +278,7 @@ def test_model_space_round_trips_and_refuses_odd_latents(tiny_file):
         vae.to_vae_space(lat[:, :32])
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", ["diffusers", "original"])
 def test_a_packed_gguf_loads_the_same_weights(tiny_file, tiny_original,
                                               tmp_path, layout):
@@ -307,6 +311,7 @@ def test_a_packed_gguf_loads_the_same_weights(tiny_file, tiny_original,
     assert read_header(str(tmp_path / "bf16.gguf")).dtypes[COUNT] == "I64"
 
 
+@pytest.mark.host_gb(16)
 def test_the_bf16_vae_keeps_its_batchnorm_statistics_in_float32(tiny_file):
     from gmlx.image.vae import load_vae
 
@@ -317,6 +322,7 @@ def test_the_bf16_vae_keeps_its_batchnorm_statistics_in_float32(tiny_file):
     assert set(kinds.values()) == {mx.bfloat16}
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("layout", ["diffusers", "original"])
 def test_the_official_layouts_fill_the_module_tree(layout):
     """The names of each official file map onto every parameter of the
@@ -348,6 +354,7 @@ def test_the_official_layouts_fill_the_module_tree(layout):
     assert set(mapped) - set(params) == {COUNT}
 
 
+@pytest.mark.host_gb(16)
 def test_the_official_config_agrees_with_the_constants():
     from gmlx.image.vae import flux2_ae
 
@@ -359,6 +366,7 @@ def test_the_official_config_agrees_with_the_constants():
                                                   "patch_size"]
 
 
+@pytest.mark.host_gb(16)
 def test_other_families_refuse_the_flux2_vae(tiny_file):
     from gmlx.image.vae import load_vae, reader
 
@@ -371,6 +379,7 @@ def test_other_families_refuse_the_flux2_vae(tiny_file):
             load_vae(tiny_file, family=family, dtype="fp32")
 
 
+@pytest.mark.host_gb(16)
 def test_flux3_klein_refuses_the_flux1_vae(tiny, tmp_path):
     """The tiny tree without its quant convs and BatchNorm is a FLUX.1
     autoencoder."""
@@ -387,6 +396,7 @@ def test_flux3_klein_refuses_the_flux1_vae(tiny, tmp_path):
         load_vae(path, family=FAMILY, dtype="fp32")
 
 
+@pytest.mark.host_gb(16)
 def test_the_memory_row_prices_the_flux1_tree():
     from gmlx.image import memfit
 
@@ -409,6 +419,7 @@ def test_the_memory_row_prices_the_flux1_tree():
             op, 1024, 1024, family="z_image", itemsize=2, tiled=True)
 
 
+@pytest.mark.host_gb(16)
 @pytest.mark.parametrize("op", ["decode", "encode"])
 def test_a_tiled_pass_takes_the_least_overlap_of_the_row(tiny, tiny_file,
                                                          monkeypatch, op):
@@ -534,10 +545,7 @@ def test_the_two_files_load_the_same_weights(vaes):
     assert [k for k in a if not np.array_equal(a[k], np.array(b[k]))] == []
 
 
-# The fp32 decode at 1024 pixels is priced at 8.45 GiB, more than a 16 GB
-# Mac has free beside the weights; users decode in bf16.
 @official
-@pytest.mark.host_gb(24)
 @pytest.mark.parametrize("layout", ["diffusers", "original"])
 def test_fp32_decode_and_encode_are_within_the_gates(check5, vaes, request,
                                                      layout):
@@ -594,10 +602,7 @@ def test_a_tiled_bf16_decode_at_the_largest_size(check5, vaes, layout):
     assert db >= tol
 
 
-# A tiled fp32 decode at 2048 pixels is priced at 16.17 GiB, more than a
-# 16 GB Mac has free.
 @official
-@pytest.mark.host_gb(24)
 @pytest.mark.parametrize("layout", ["diffusers", "original"])
 def test_a_tiled_bf16_decode_at_2048_holds_the_gate_of_1024(check5, vaes,
                                                             layout):

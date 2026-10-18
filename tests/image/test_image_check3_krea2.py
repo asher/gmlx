@@ -47,10 +47,6 @@ from gmlx.image import ops
 from gmlx.image.families.krea2 import model as km
 from gmlx.image.ops import kq_routes
 
-# A Mac of 24 GB: the module peaks at 14.3 GiB, past the 14 GiB working
-# set of a 16 GB Mac (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(24)
-
 # The step nearest sigma 0.75 and a late step of check 8's trajectory.
 STEPS = (4, 7)
 ROWS = {s: f"check3_krea2_s{s}_512" for s in STEPS}

@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path
 
+import host_box
 import pytest
 
 from image_fixtures import fixture_view, load_json
@@ -201,6 +202,7 @@ def test_every_lora_file_resolves_as_before():
             want[n].get("size")]
     if not seen:
         pytest.skip(f"none of the recorded files is under {ENV}")
+    host_box.real_files()
     same = [n for n in seen if not want[n].get("rslora")]
     for name in same:
         assert got[name] == want[name], name
@@ -227,6 +229,7 @@ def test_a_rank_stabilized_file_changes_only_by_its_scale():
              and want[str(p.relative_to(root))]["size"] == p.stat().st_size]
     if not files:
         pytest.skip(f"no recorded rank-stabilized file is under {ENV}")
+    host_box.real_files()
     maps = keymaps()
     for p in files:
         path, name = str(p), str(p.relative_to(root))

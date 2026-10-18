@@ -18,8 +18,7 @@ schedule of another image size, and Base with the prompt as its
 unconditional row each fail it. The bf16 run at 1024 must stay finite,
 and its readings print as a share of the 512 gate of each step, as the
 manifest records them. The wrong runs at 512 are of the 4B files, those
-of the exact run at 1024 of the 4B and the 9B files, and the 9B cases
-declare a Mac of 24 GB.
+of the exact run at 1024 of the 4B and the 9B files.
 
 Skipped unless the manifests of scripts/image_oracle/check6_flux2_klein.py
 are committed, GMLX_IMAGE_FIXTURES holds their arrays and
@@ -36,9 +35,6 @@ import pytest
 from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
-
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
 
 # A kind is a variant, with "9b " before it for the 9B files.
 NAMES = {"distilled": "check6_flux2_klein", "base": "check6_flux2_klein_base",
@@ -67,9 +63,8 @@ def family_of(kind: str) -> str:
 
 
 def _param(kind: str, *rest):
-    """A case of ``kind``, the 9B ones on a Mac of 24 GB."""
-    marks = [pytest.mark.host_gb(24)] if kind.startswith("9b ") else []
-    return pytest.param(kind, *rest, marks=marks)
+    """A case of ``kind``."""
+    return pytest.param(kind, *rest)
 
 
 KINDS = [_param(k) for k in NAMES]

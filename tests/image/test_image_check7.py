@@ -59,9 +59,6 @@ from block_gates import (EXACT_TOL, adapter_sites, assert_all_dense,
                          rerun_sites, right_sites, site_process, site_reach,
                          stock_ops_only, table_sites, table_velocity, thin)
 
-# A Mac of 16 GB, as most users run (tests/host_box.py).
-pytestmark = pytest.mark.host_gb(16)
-
 NAME = "check7_z_image_turbo_lora_512"
 
 
