@@ -25,8 +25,8 @@ Two conventions differ from the GLM/DeepSeek nextn families:
 - ``shared_head_norm`` is a full LayerNorm (llama.cpp builds it LLM_NORM,
   not LLM_NORM_RMS), weight-only.
 
-The trunk stays the stock mlx-lm ``nemotron_h`` classes; the vendored
-backbone subclass only adds the verify-time Mamba2 sink. Verify rollback is
+The trunk is the owned ``nemotron_h.model`` classes; the backbone
+subclass only adds the verify-time Mamba2 sink. Verify rollback is
 two-part (the glm5_next recurrent precedent): the attention KV leaves trim,
 and the Mamba2 layers replay the accepted prefix from the recorded
 pre-verify (conv, ssm) state - ``ArraysCache`` state entries are replaced,
@@ -45,7 +45,7 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from gmlx._vendor.mlx_lm.models import nemotron_h as nh
+from gmlx.models.nemotron_h import model as nh
 
 from gmlx.cache.attention import create_attention_mask, create_ssm_mask
 from gmlx.envflags import env_bool
@@ -196,7 +196,7 @@ def rollback_verify_sink(sink: list, n: int) -> None:
 
 
 class NemotronHSpecLM(nh.Model):
-    """Stock nemotron_h ``Model`` + the ``speculative_*`` hooks the owned MTP
+    """The nemotron_h ``Model`` + the ``speculative_*`` hooks the owned MTP
     engine probes on its target. The backbone is swapped for the sink-aware
     subclass; numerics are byte-identical to stock."""
 
@@ -304,7 +304,8 @@ class NemotronHMTPLayer(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.self_attn = nh.NemotronHAttention(args)
-        self.mlp = nh.NemotronHMoE(args)
+        # The MTP block follows the trunk in the per-layer arrays.
+        self.mlp = nh.NemotronHMoE(args, args.num_hidden_layers)
         self.input_layernorm = nn.RMSNorm(
             args.hidden_size, eps=args.layer_norm_epsilon)
         self.post_attention_layernorm = nn.RMSNorm(

@@ -1489,9 +1489,22 @@ def test_vlm_tower_tensors_skip():
     assert d("qwen2", "mm.0.weight").kind == SKIP
 
 
+def test_weight_scale_follows_its_weight():
+    # llama.cpp's generic pass loads these for every arch and multiplies the
+    # matmul output; each lands next to its weight as out_scale.
+    r = d("qwen2", "blk.0.ffn_gate.scale")
+    assert r.kind == MAP
+    assert r.hf_name == "model.layers.0.mlp.gate_proj.out_scale"
+    r = d("nemotron_h_moe", "blk.3.ssm_in.scale")
+    assert r.hf_name == "backbone.layers.3.mixer.in_proj.out_scale"
+    assert d("llama", "output.scale").hf_name == "lm_head.out_scale"
+
+
 def test_unsloth_ud_scale_skipped_when_not_claimed():
-    # On qwen2 nothing claims a bare .scale -> universal Unsloth-UD skip.
-    assert d("qwen2", "blk.0.ffn_gate.scale").kind == SKIP
+    # A .scale outside llama.cpp's weight-scale list, and every
+    # .input_scale, is skipped.
+    assert d("qwen2", "blk.0.attn_norm.scale").kind == SKIP
+    assert d("qwen2", "blk.0.ffn_gate.input_scale").kind == SKIP
 
 
 def test_rope_freqs_skipped():

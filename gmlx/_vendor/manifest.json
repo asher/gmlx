@@ -99,7 +99,7 @@
   "mlx_lm/models/nanochat.py": {"status": "verbatim", "upstream": "989d414c4c8c3f1ae0d2d9b06c06d45b7dc5fc0bd8b796f585e318586b27dfe4"},
   "mlx_lm/models/nemotron-nas.py": {"status": "verbatim", "upstream": "05b40ddd35fd5b829172b2e40ce9674a787623e5bbb26c55d45ed31f5734a855"},
   "mlx_lm/models/nemotron.py": {"status": "verbatim", "upstream": "1ca8e8bd88d450fb03ba1723b0376a3199f2a92db2e8a3ccdc512b6cea492bae"},
-  "mlx_lm/models/nemotron_h.py": {"status": "verbatim", "upstream": "47143633f5ad663aa6834a18be69520ae4d588371e392bcdfdfad898b2571b1f"},
+  "mlx_lm/models/nemotron_h.py": {"status": "excluded", "upstream": "47143633f5ad663aa6834a18be69520ae4d588371e392bcdfdfad898b2571b1f"},
   "mlx_lm/models/olmo.py": {"status": "verbatim", "upstream": "cc4cc1097d73449ae22ee2dcf637d6e68b5f11c0482e75261f563b46c41bd40e"},
   "mlx_lm/models/olmo2.py": {"status": "verbatim", "upstream": "f14a7484ebf584fdd92faefcc394b1064ffe1828b3b7fd75267de38b1b50b4a9"},
   "mlx_lm/models/olmo3.py": {"status": "verbatim", "upstream": "ede2b37d41cff6f73877e8ab4174e9eac10dc37b49962f03c297fe41d9a27393"},

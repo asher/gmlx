@@ -230,7 +230,7 @@ def _mtp_target_classes(
         return glm5_next_mtp.Glm5NextSpecLM, build
     if model_type == "nemotron_h":
         import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
-        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx.models.nemotron_h.model import ModelArgs
 
         def build(config: dict) -> nn.Module:
             return nemotron_h_mtp.NemotronHSpecLM(ModelArgs.from_dict(config))

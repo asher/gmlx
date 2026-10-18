@@ -1,22 +1,58 @@
+# SPDX-License-Identifier: MIT
 # Copyright © 2025 Apple Inc.
+# Copyright (c) 2026 Asher Feldman
+"""Model for NVIDIA Nemotron-H (GGUF arch ``nemotron_h_moe``): Nano, Super,
+Lightning and Bolt.
+
+Absorbed from mlx-lm's ``nemotron_h``. The reference runtime is llama.cpp
+``src/models/nemotron-h.cpp`` (trunk graph) and ``src/llama-graph.cpp``
+``build_moe_ffn``. Changes from mlx-lm:
+
+- The MoE sizes may vary per layer: ``n_routed_experts``,
+  ``moe_intermediate_size`` and ``num_experts_per_tok`` each take a scalar
+  or a list indexed by layer (Bolt, Puzzle).
+- The router runs in fp32, as llama.cpp's F32 ``ffn_gate_inp`` matmul does.
+- The routing weights are renormalized over a sum clamped at
+  6.103515625e-5, whatever the top-k, and scaled only when the scale is
+  neither 0 nor 1.
+
+Block kinds: ``M`` Mamba-2, ``*`` attention (no RoPE), ``E`` MoE, ``-``
+dense MLP. Every block is ``x + mixer(rms_norm(x))``.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from .activations import swiglu
-from .base import (
-    BaseModelArgs,
+from gmlx._vendor.mlx_lm.models.activations import swiglu
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.ssm import ssm_update
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchMLP
+from gmlx.cache.attention import (
     create_attention_mask,
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from .cache import ArraysCache, KVCache
-from .ssm import ssm_update
-from .switch_layers import SwitchMLP
+from gmlx.cache.kv_cache import ArraysCache, KVCache
+
+# llama.cpp build_moe_ffn clamps the weight sum here before dividing.
+_WEIGHT_SUM_FLOOR = 6.103515625e-5
+
+PerLayer = Union[int, List[int], None]
+
+
+def per_layer(value: PerLayer, layer_idx: Optional[int]):
+    """``value`` at ``layer_idx`` when it is a list, else ``value``. An index
+    past the list (an appended MTP block) or None takes the largest entry."""
+    if not isinstance(value, (list, tuple)):
+        return value
+    if layer_idx is not None and 0 <= layer_idx < len(value):
+        return value[layer_idx]
+    return max(value) if value else None
 
 
 @dataclass()
@@ -43,14 +79,14 @@ class ModelArgs(BaseModelArgs):
     hybrid_override_pattern: Optional[List[str]] = None
     layers_block_type: Optional[List[str]] = None
     head_dim: Optional[int] = None
-    moe_intermediate_size: Optional[int] = None
+    moe_intermediate_size: PerLayer = None
     moe_shared_expert_intermediate_size: Optional[int] = None
     moe_latent_size: Optional[int] = None
     n_group: Optional[int] = None
-    n_routed_experts: Optional[int] = None
+    n_routed_experts: PerLayer = None
     n_shared_experts: Optional[int] = None
     topk_group: Optional[int] = None
-    num_experts_per_tok: Optional[int] = None
+    num_experts_per_tok: PerLayer = None
     norm_topk_prob: Optional[bool] = None
     routed_scaling_factor: Optional[float] = None
     time_step_limit: Optional[Tuple[float, float]] = None
@@ -181,11 +217,7 @@ class NemotronHMamba2Mixer(nn.Module):
         )
         B = B.reshape(batch_size, seq_len, self.n_groups, self.ssm_state_size)
         C = C.reshape(batch_size, seq_len, self.n_groups, self.ssm_state_size)
-        if cache:
-            state = cache[1]
-            lengths = cache.lengths
-        else:
-            state, lengths = None, None
+        state = cache[1] if cache else None
 
         y, state = ssm_update(
             hidden_states,
@@ -336,30 +368,34 @@ def group_expert_select(
     k = top_k
     inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
     scores = mx.take_along_axis(orig_scores, inds, axis=-1)
-    if top_k > 1 and norm_topk_prob:
+    if norm_topk_prob:
         denominator = scores.sum(axis=-1, keepdims=True)
-        scores = scores / (denominator + 1e-20)
-    scores = scores * routed_scaling_factor
+        scores = scores / mx.maximum(denominator, _WEIGHT_SUM_FLOOR)
+    if routed_scaling_factor not in (0.0, 1.0):
+        scores = scores * routed_scaling_factor
 
     return inds, scores
 
 
 class MoEGate(nn.Module):
-    def __init__(self, config: ModelArgs):
+    def __init__(self, config: ModelArgs, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
-        self.top_k = config.num_experts_per_tok
-        self.norm_topk_prob = config.norm_topk_prob
-        self.n_routed_experts = config.n_routed_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_group = config.n_group
-        self.topk_group = config.topk_group
-        self.weight = mx.zeros((self.n_routed_experts, config.hidden_size))
-        self.e_score_correction_bias = mx.zeros((self.n_routed_experts,))
+        self.top_k = int(per_layer(config.num_experts_per_tok, layer_idx))
+        self.norm_topk_prob = bool(config.norm_topk_prob)
+        self.n_routed_experts = int(per_layer(config.n_routed_experts, layer_idx))
+        self.routed_scaling_factor = float(config.routed_scaling_factor or 1.0)
+        self.n_group = config.n_group or 1
+        self.topk_group = config.topk_group or 1
+        # fp32 like the F32 wire router; llama.cpp routes in fp32.
+        self.weight = mx.zeros(
+            (self.n_routed_experts, config.hidden_size), dtype=mx.float32)
+        self.e_score_correction_bias = mx.zeros(
+            (self.n_routed_experts,), dtype=mx.float32)
 
     def __call__(self, x):
         return group_expert_select(
-            x @ self.weight.T,
+            x.astype(mx.float32) @ self.weight.T.astype(mx.float32),
             self.e_score_correction_bias,
             self.top_k,
             self.n_group,
@@ -370,10 +406,11 @@ class MoEGate(nn.Module):
 
 
 class NemotronHMoE(nn.Module):
-    def __init__(self, config: ModelArgs):
+    def __init__(self, config: ModelArgs, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
-        self.num_experts_per_tok = config.num_experts_per_tok
+        self.num_experts_per_tok = int(
+            per_layer(config.num_experts_per_tok, layer_idx))
         self.moe_latent_size = config.moe_latent_size
 
         # When latent projection is used, experts operate on the latent dim
@@ -384,12 +421,12 @@ class NemotronHMoE(nn.Module):
         )
         self.switch_mlp = SwitchMLP(
             expert_input_dim,
-            config.moe_intermediate_size,
-            config.n_routed_experts,
+            int(per_layer(config.moe_intermediate_size, layer_idx)),
+            int(per_layer(config.n_routed_experts, layer_idx)),
             activation=nn.ReLU2(),
         )
 
-        self.gate = MoEGate(config)
+        self.gate = MoEGate(config, layer_idx)
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_shared_expert_intermediate_size
             self.shared_experts = NemotronHMLP(
@@ -425,7 +462,8 @@ class NemotronHMoE(nn.Module):
 
 
 class NemotronHBlock(nn.Module):
-    def __init__(self, args: ModelArgs, block_type: str):
+    def __init__(self, args: ModelArgs, block_type: str,
+                 layer_idx: Optional[int] = None):
         super().__init__()
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.layer_norm_epsilon)
 
@@ -438,7 +476,7 @@ class NemotronHBlock(nn.Module):
         elif self.block_type == "-":
             self.mixer = NemotronHMLP(args)
         elif self.block_type == "E":
-            self.mixer = NemotronHMoE(args)
+            self.mixer = NemotronHMoE(args, layer_idx)
 
     def __call__(
         self,
@@ -460,8 +498,8 @@ class NemotronHModel(nn.Module):
         super().__init__()
         self.embeddings = nn.Embedding(args.vocab_size, args.hidden_size)
         self.layers = [
-            NemotronHBlock(args, block_type)
-            for block_type in args.hybrid_override_pattern
+            NemotronHBlock(args, block_type, i)
+            for i, block_type in enumerate(args.hybrid_override_pattern)
         ]
         self.norm_f = nn.RMSNorm(args.hidden_size, eps=args.layer_norm_epsilon)
         self.fa_idx = 0
@@ -528,35 +566,23 @@ class Model(nn.Module):
 
     def make_cache(self):
         caches = []
-        for l in self.layers:
-            if l.block_type == "M":
+        for layer in self.layers:
+            if layer.block_type == "M":
                 caches.append(ArraysCache(size=2))
-            elif l.block_type == "*":
+            elif layer.block_type == "*":
                 caches.append(KVCache())
         return caches
 
     def sanitize(self, weights):
-        weights = {k: v for (k, v) in weights.items() if not k.startswith("mtp.")}
-        for k, v in weights.items():
-            if "conv1d.weight" in k and v.shape[-1] != 1:
-                weights[k] = v.moveaxis(2, 1)
-
-        # Stack experts
-        for l in range(self.args.num_hidden_layers):
-            prefix = f"backbone.layers.{l}.mixer"
-            for m, n in [("down_proj", "fc2"), ("up_proj", "fc1")]:
-                if f"{prefix}.experts.0.{m}.weight" in weights:
-                    to_join = [
-                        weights.pop(f"{prefix}.experts.{e}.{m}.weight")
-                        for e in range(self.args.n_routed_experts)
-                    ]
-                    weights[f"{prefix}.switch_mlp.{n}.weight"] = mx.stack(to_join)
-
         return weights
 
     @property
     def cast_predicate(self):
         def predicate(k):
-            return "e_score_correction_bias" not in k and "A_log" not in k
+            return not any(s in k for s in _FP32_PARAMS)
 
         return predicate
+
+
+# Kept fp32 by the loader (loader._FP32_KEEP_BY_MODEL_TYPE["nemotron_h"]).
+_FP32_PARAMS = (".mixer.gate.weight", ".e_score_correction_bias", ".A_log")

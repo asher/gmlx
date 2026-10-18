@@ -45,6 +45,9 @@ OWNED_LM_MODELS = {
     # llama.cpp LLM_ARCH_K2_HORIZON; the mlx-vlm class is a plain Llama
     # with none of the group norm, the output gate, MoE or MoVA.
     "k2_horizon": "gmlx.models.k2_horizon.model",
+    # mlx-lm nemotron_h, with per-layer MoE sizes (Nemotron-3.5-Bolt) and
+    # llama.cpp's fp32 routing.
+    "nemotron_h": "gmlx.models.nemotron_h.model",
 }
 
 # mlx-vlm model_type -> the gmlx module that stands for the model package

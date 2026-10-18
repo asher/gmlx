@@ -284,7 +284,7 @@ def _load_mtp_drafter(
             f"block_size={drafter.config.block_size}"
         )
     elif model_type == "nemotron_h":
-        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx.models.nemotron_h.model import ModelArgs
         from gmlx.models.nemotron_h.mtp import (
             NemotronHMTPConfig,
             NemotronHMTPDrafter,

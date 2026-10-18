@@ -79,7 +79,7 @@ def _same_codec_kquant(projs) -> bool:
     # fused wire would bypass that rotation.
     if any(getattr(p, "_hadamard", None) is not None for p in projs):
         return False
-    if any("bias" in p for p in projs):
+    if any("bias" in p or "out_scale" in p for p in projs):
         return False
     return len({p.kquant_type for p in projs}) == 1
 
@@ -361,6 +361,7 @@ def _make_fused_mlp(base_cls):
             if (
                 isinstance(d, KQuantLinear)
                 and "bias" not in d
+                and "out_scale" not in d
                 and wire_cols % 2 == 0
                 and k % 512 == 0
             ):
