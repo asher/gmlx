@@ -16,7 +16,14 @@ ggml's arithmetic.
 The bf16 run loads the model again in bfloat16, as the release loads its
 encoder, and each GGUF product then runs as a float32 GEMM over the
 bfloat16 operands with one rounding, as oracle.emulate_bf16_matmul does
-for torch's linear. The tokenizer is the release's, from --tokenizer.
+for torch's linear. Each weight is dequantized in float32 and rounded to
+bfloat16 once. The tokenizer is the release's, from --tokenizer, loaded
+as Qwen2Tokenizer, the class the release's model_index.json names. The
+manifest records the class and its pre-tokenizer.
+
+The prompts are check 2's common set, plus a Devanagari and a Thai prompt
+whose combining marks split differently under a pre-tokenizer that
+keeps marks with their letters and one that does not.
 
 For each prompt the fixture holds the token ids and the fp32 and bf16
 features. The manifest records the bf16 against fp32 gap of each prompt
@@ -49,6 +56,10 @@ RULE = ("relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 "
         "of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the "
         "oracle's own smallest per-token cosine of the same prompt")
 MAX_LEN = 4096
+# Combining marks: a vowel sign and a virama in Devanagari, two vowel signs
+# in Thai.
+MARKS = {"devanagari": "a temple in \u0928\u092e\u0938\u094d\u0924\u0947 style",
+         "thai": "a shop sign that reads \u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35"}
 
 
 def load_encoder(torch, path: Path, mode: str):
@@ -101,7 +112,9 @@ def check_dequant(torch, model) -> dict:
 
 def emulate_bf16_gguf(enable: bool) -> None:
     """Each GGUF product on bfloat16 rows as a float32 GEMM over the
-    bfloat16 operands, with one rounding of the result."""
+    bfloat16 operands, with one rounding of the result. The weight is
+    dequantized in float32 and rounded to bfloat16 once, as a bf16
+    checkpoint holds it."""
     import torch
     from transformers.integrations.gguf import utils as gu
     from transformers.integrations.gguf.kernels import (DEQUANT_CHUNK_ELEMS,
@@ -124,17 +137,24 @@ def emulate_bf16_gguf(enable: bool) -> None:
         for s in range(0, self.out_features, step):
             rows = self.weight[s:s + step]
             w = dequantize_blocks(rows, self.ggml_type, rows.shape[0],
-                                  self.in_features, torch.bfloat16)
-            out[:, s:s + step] = (x @ w.float().T).to(torch.bfloat16)
+                                  self.in_features, torch.float32)
+            w = w.to(torch.bfloat16).float()
+            out[:, s:s + step] = (x @ w.T).to(torch.bfloat16)
         return out
 
     gu.GgufLinear._unpack_matmul = unpack
 
 
 def tokenizer(path: Path):
-    from transformers import AutoTokenizer
+    from transformers import Qwen2Tokenizer
 
-    return AutoTokenizer.from_pretrained(str(path), local_files_only=True)
+    return Qwen2Tokenizer.from_pretrained(str(path), local_files_only=True)
+
+
+def pre_tokenizer(tok) -> dict:
+    import json
+
+    return json.loads(tok.backend_tokenizer.to_str())["pre_tokenizer"]
 
 
 def token_ids(tok, prompt: str) -> np.ndarray:
@@ -163,13 +183,15 @@ def main(argv=None) -> int:
     ap.add_argument("--tokenizer", required=True, type=Path,
                     help="the release's tokenizer folder")
     ap.add_argument("--name", default=NAME)
-    ap.add_argument("--prompts", nargs="*", default=list(PROMPTS))
+    ap.add_argument("--prompts", nargs="*",
+                    default=[*PROMPTS, *MARKS])
     ap.add_argument("--prompt", nargs=2, action="append", default=[],
                     metavar=("NAME", "TEXT"),
                     help="one more prompt by name, such as the prompt of "
                          "check 8's trajectory")
     a = ap.parse_args(argv)
-    prompts = {**{k: PROMPTS[k] for k in a.prompts}, **dict(a.prompt)}
+    known = {**PROMPTS, **MARKS}
+    prompts = {**{k: known[k] for k in a.prompts}, **dict(a.prompt)}
     torch = oracle.setup()
     tok = tokenizer(a.tokenizer)
     ids = {k: token_ids(tok, v) for k, v in prompts.items()}
@@ -198,6 +220,8 @@ def main(argv=None) -> int:
     emulate_bf16_gguf(False)
     oracle.emulate_bf16_matmul(False)
     fx.inputs.update(prompts=prompts, max_sequence_length=MAX_LEN,
+                     tokenizer_class=type(tok).__name__,
+                     pre_tokenizer=pre_tokenizer(tok),
                      read="last_hidden_state, after the final norm",
                      template="the tokenizer's chat template, one user turn, "
                               "add_generation_prompt and enable_thinking",
