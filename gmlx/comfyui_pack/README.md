@@ -125,7 +125,7 @@ That runs the wire, client and in-process ComfyUI suites on the cpu device, then
 
 ### Parity with the stock loaders
 
-Seven checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, and ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set. They need the model files and both loaders, so they are not part of `run_tests.py`.
+Eight checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set, and for MOSS-Image the OpenMOSS ComfyUI plugin with the ComfyUI-MOSS-GGUF bridge on ComfyUI's cpu device. They need the model files and both loaders, so they are not part of `run_tests.py`.
 
 The step check is the gate. The stock model in bf16 samples and records, at each step, the latent it is fed and the denoised output it returns. The gmlx MODEL and the stock model in fp32 are then fed the same latents and sigmas. At every step the relative L2 of the gmlx output from the stock bf16 output must be at most 1.5 times that of the stock fp32 output, or at most 2e-2 where that is larger. A fixed 2e-2 cannot hold on its own: the stock fp32 output is 0.11 from the stock bf16 output at the first step of Z-Image Turbo.
 
@@ -143,8 +143,12 @@ The step check is the gate. The stock model in bf16 samples and records, at each
 | FLUX.3 klein | 512x512, 16 steps, cfg 1 | 0.022 | 0.058 | 1.17 | pass |
 | FLUX.3 klein | 512x512, 16 steps, cfg 1, stock LoRA loader | 0.029 | 0.081 | 1.24 | pass |
 | FLUX.3 klein | 512x512, 16 steps, cfg 1, one reference | 0.017 | 0.018 | 1.26 | pass |
+| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, distances from stock fp32 | 0.099 | 0.099 | 1.00 | pass |
+| MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, stock LoRA loader, distances from stock fp32 | 0.064 | 0.064 | 1.00 | pass |
 
-On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2, FLUX.2 klein and FLUX.3 klein checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
+On Z-Image Turbo the gmlx output is closer to the stock fp32 output than the stock bf16 output is, at every step. The Qwen-Image 2.1, Krea 2, FLUX.2 klein, FLUX.3 klein and MOSS-Image checks run ComfyUI with `--use-pytorch-cross-attention`. Without it, ComfyUI's attention on the Mac adds the text mask as a bias, so the stock model departs from the reference implementation at high sigma, and the ratio at the first step is about 3.
+
+The MOSS-Image check runs at 256x256 with the stock model on ComfyUI's cpu device, so its stock bf16 output comes from CPU torch arithmetic, a bf16 path the pack never takes. Its rows read from the stock fp32 output instead: the gmlx distance from it must be at most 1.5 times the larger of the stock bf16 distance and the distance of gmlx sampling in process, without ComfyUI, on the same latents and sigmas, or at most 2e-2. The gmlx MODEL equals the in-process run bit for bit at every step, and the in-process distance is the larger at every step, at the median 1.55 times the stock bf16 one in text to image and 1.58 times with the LoRA. With block 22 kept in the negative pass, the worst step reads 3.7 and 3.6 times its gate.
 
 The final image check is reported beside it: the gmlx image must be at least as close to the stock fp32 image as the stock bf16 image is, within 6 dB.
 
@@ -162,6 +166,8 @@ The final image check is reported beside it: the gmlx image must be at least as 
 | FLUX.3 klein, 512x512, 16 steps | 33.50 dB | 32.96 dB | pass |
 | FLUX.3 klein, 512x512, 16 steps, stock LoRA loader | 32.57 dB | 32.29 dB | pass |
 | FLUX.3 klein, 512x512, 16 steps, one reference | 50.41 dB | 49.28 dB | pass |
+| MOSS-Image, 256x256, 50 steps, cfg 3 | 29.75 dB | 27.44 dB | pass |
+| MOSS-Image, 256x256, 50 steps, cfg 3, stock LoRA loader | 36.86 dB | 35.15 dB | pass |
 
 A fault planted in the Z-Image step convention shows why the step check is the gate. With the velocity sign dropped, the worst step ratio is 188 and the final image reads 8.35 dB. With the timestep read 3% low, the worst step ratio is 7.1, while the final image reads 13.49 dB against a bound of 14.30 dB and fails by only 0.8 dB, so a smaller timestep fault would pass the final image check.
 
