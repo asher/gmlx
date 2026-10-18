@@ -196,8 +196,8 @@
    "2": 9.760845017376464e-08,
    "5": 1.1916169760375085e-07,
    "10": 2.3503868223467442e-07,
-   "25": 2.6951600738724614e-05,
-   "50": 0.0013914353644514938
+   "25": 2.20891604645722e-05,
+   "50": 0.0015016736002878234
   }
  },
  "tolerances": {
@@ -209,11 +209,11 @@
    "5": 0.001,
    "10": 0.001,
    "25": 0.001,
-   "50": 0.0027828707289029877
+   "50": 0.0030033472005756468
   }
  },
  "notes": [
-  "gmlx_exact_floor and exact_by_step were added from the gmlx exact run; the oracle wrote the rest"
+  "gmlx_exact_floor and exact_by_step were added from the gmlx exact run on the release's schedule bit for bit; the oracle wrote the rest"
  ],
  "created": "2026-10-18T09:08:55Z",
  "npz": "check6_moss_image_1024.npz",
