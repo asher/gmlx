@@ -245,13 +245,16 @@ class NemotronHSpecLM(nh.Model):
         # lazy slice would hand it the packed strides.
         return mx.contiguous(hidden[..., : int(self.args.hidden_size)])
 
-    def _hidden(self, inputs, cache, mamba_sink=None) -> mx.array:
+    def _hidden(self, inputs, cache, mamba_sink=None,
+                input_embeddings=None) -> mx.array:
         ids = self._dflash_capture
         if ids is None:
-            return self.backbone(inputs, cache=cache, mamba_sink=mamba_sink)
+            return self.backbone(inputs, cache=cache, mamba_sink=mamba_sink,
+                                 input_embeddings=input_embeddings)
         caps: list = []
         hidden = self.backbone(inputs, cache=cache, mamba_sink=mamba_sink,
-                               capture=(ids, caps), exact=False)
+                               capture=(ids, caps), exact=False,
+                               input_embeddings=input_embeddings)
         if len(caps) != len(ids):
             raise RuntimeError(
                 f"dflash capture collected {len(caps)} of {len(ids)} layers")

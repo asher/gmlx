@@ -407,6 +407,14 @@ def test_container_language_model_carries_the_spec_hooks():
         np.array(lm(ids, inputs_embeds=emb.inputs_embeds).logits), rtol=1e-6)
     assert not np.allclose(np.array(with_image[0, -1]),
                            np.array(lm(ids).logits[0, -1]))
+    # The speculative prefill asks for hiddens and passes the embeddings.
+    spec = lm(ids, inputs_embeds=emb.inputs_embeds, return_hidden=True)
+    np.testing.assert_allclose(np.array(spec.logits), np.array(with_image),
+                               rtol=1e-6)
+    lm.set_dflash_capture([0])
+    packed = lm(ids, inputs_embeds=emb.inputs_embeds, return_hidden=True)
+    np.testing.assert_allclose(np.array(packed.logits), np.array(with_image),
+                               rtol=1e-5, atol=1e-5)
 
 
 def test_fp32_keep_row_covers_tower_and_router():

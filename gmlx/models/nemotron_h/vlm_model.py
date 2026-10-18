@@ -29,7 +29,7 @@ from gmlx._vendor.mlx_vlm.models.base import (
 )
 
 from .model import ModelArgs
-from .mtp import NemotronHSpecLM
+from .mtp import NemotronHSpecLM, _SpecOutput
 from .vision import VisionConfig, VisionModel
 
 TextConfig = ModelArgs
@@ -54,8 +54,8 @@ class ModelConfig(BaseModelConfig):
 
 
 class LanguageModel(NemotronHSpecLM):
-    """The text model with the speculative hooks, so a drafter runs on text
-    turns. Image turns take the plain path with the merged embeddings."""
+    """The text model with the speculative hooks. Both paths take the
+    merged image embeddings, so a drafter runs on image turns too."""
 
     def __init__(self, config: TextConfig):
         super().__init__(config)
@@ -73,7 +73,9 @@ class LanguageModel(NemotronHSpecLM):
         # The backbone builds its own attention and SSM masks from the caches.
         del mask
         if kwargs.get("return_hidden") or kwargs.get("return_shared_kv"):
-            return super().__call__(inputs, cache=cache, **kwargs)
+            hidden = self._hidden(inputs, cache, input_embeddings=inputs_embeds)
+            logits = self.lm_head(self._dflash_trunk(hidden))
+            return _SpecOutput(logits=logits, hidden_states=[hidden])
         skip_logits = kwargs.get("skip_logits", False)
         h = self.backbone(inputs, cache=cache, input_embeddings=inputs_embeds)
         return LanguageModelOutput(
