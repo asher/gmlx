@@ -341,23 +341,21 @@ def test_a_failed_connection_leaves_no_mark_and_the_next_start_fetches(
 
 def test_one_deadline_bounds_the_whole_fetch(hub, tmp_path, monkeypatch,
                                              capsys):
-    # A Hub that answers each request after 2 s. The first file arrives,
+    # A Hub that answers each request after 20 s. The first file arrives,
     # and the second request gets what is left of one FETCH_TIMEOUT, so the
-    # call ends at about 2.5 s, not 3 x 2 s. The Hub answered a request, so
+    # call ends there, not after 3 x 20 s. The Hub answered a request, so
     # the timeout is no answer about the rest: no mark, and the next start
     # asks for the files still missing.
     import os
-    import time
 
-    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 2.5)
-    hub.delay = 2.0
-    started = time.monotonic()
+    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 25.0)
+    monkeypatch.setattr(hf_cache, "_clock", hub.clock)
+    hub.delay = 20.0
     with hf_cache.offline_resolve(REPO, wanted=_card):
         pass
-    assert time.monotonic() - started < 4.0
     assert len(hub.requests) == 2
-    assert ("modules.json not fetched (ReadTimeout: timed out); the next "
-            "start tries again") in capsys.readouterr().err
+    assert ("modules.json not fetched (TimeoutError: the read timed out); "
+            "the next start tries again") in capsys.readouterr().err
     assert not os.path.exists(_mark(tmp_path))
     hub.requests.clear()
     with hf_cache.offline_resolve(REPO, wanted=_card):
@@ -369,7 +367,7 @@ def test_a_slow_hub_finishes_over_two_starts_and_the_copy_pools_as_upstream(
         hub, tmp_path, monkeypatch, capsys):
     # An unnamed bert snapshot holding config.json only, whose upstream
     # Pooling config takes the first token. A Hub that answers each request
-    # correctly after 0.8 s gets two of the three files in the 2 s deadline.
+    # correctly after 8 s gets two of the three files in the 20 s deadline.
     # The first start leaves no mark, so the second fetches the third file,
     # then marks the snapshot, and the copy pools as upstream does.
     import json
@@ -388,8 +386,9 @@ def test_a_slow_hub_finishes_over_two_starts_and_the_copy_pools_as_upstream(
         "README.md": "# acme encoder\n",
         "1_Pooling/config.json": json.dumps({"pooling_mode_cls_token": True}),
     }, head=False)
-    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 2.0)
-    hub.delay = 0.8
+    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 20.0)
+    monkeypatch.setattr(hf_cache, "_clock", hub.clock)
+    hub.delay = 8.0
     with hf_cache.offline_resolve(REPO, wanted=card_files_to_fetch):
         snapshot = _window_snapshot(REPO)
     assert len(hub.requests) == 3

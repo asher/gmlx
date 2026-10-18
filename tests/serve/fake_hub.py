@@ -9,7 +9,9 @@ EntryNotFound`` for a file the commit lacks, and the repo info route and
 request is recorded. :class:`BlackHole` accepts connections and never
 answers, and :func:`refused_port` gives a port nothing listens on.
 ``fail_status`` makes the Hub answer every request with that status, and
-``delay`` makes it wait that many seconds before each answer.
+``delay`` moves the Hub's clock (:meth:`FakeHub.clock`) that many seconds
+on before each answer. A test that sets it runs the fetch deadline on that
+clock, so each answer lands at a fixed time on any machine.
 
 :func:`use_hub` points huggingface_hub at an endpoint and a scratch cache
 for one test, by the environment and by the constants it read at import,
@@ -22,7 +24,6 @@ import json
 import os
 import socket
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -37,7 +38,8 @@ class FakeHub:
         self.requests: list = []       # (method, path)
         self.tokens: list = []         # the Authorization headers received
         self.fail_status = None        # answer every request with this status
-        self.delay = 0.0               # seconds to wait before each answer
+        self.delay = 0.0               # clock seconds before each answer
+        self.now = 0.0                 # the Hub's clock
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever,
@@ -49,6 +51,10 @@ class FakeHub:
     def endpoint(self) -> str:
         host, port = self._server.server_address[:2]
         return f"http://{host}:{port}"
+
+    def clock(self) -> float:
+        """The Hub's clock, a stand-in for ``time.monotonic``."""
+        return self.now
 
     def commit(self, repo: str, sha: str, files: dict, head: bool = True):
         """Add commit ``sha`` of ``repo`` holding ``files`` (name -> bytes or
@@ -100,8 +106,7 @@ class FakeHub:
                 hub.requests.append((self.command, path))
                 if self.headers.get("Authorization"):
                     hub.tokens.append(self.headers["Authorization"])
-                if hub.delay:
-                    time.sleep(hub.delay)
+                hub.now += hub.delay
                 if hub.fail_status:
                     return self._send(hub.fail_status, {})
                 parts = path.strip("/").split("/")
