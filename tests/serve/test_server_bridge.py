@@ -131,6 +131,9 @@ def test_register_resolved_models_waits_for_build_lock():
         assert done.is_set()
     finally:
         mod._kq_residency_pool = saved
+        # the config with no models would answer every later test's
+        # request that names no model on this worker
+        bridge.clear_resolved_models()
 
 
 def test_the_module_runs_the_copied_server_with_the_bridge(monkeypatch):
