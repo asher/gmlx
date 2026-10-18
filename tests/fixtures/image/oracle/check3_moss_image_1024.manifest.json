@@ -1,0 +1,162 @@
+{
+ "schema": 1,
+ "name": "check3_moss_image_1024",
+ "check": 3,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check3_moss_image.py",
+ "argv": [
+  "check3_moss_image.py",
+  "--pipeline",
+  "pipeline_moss_image.py",
+  "--dit",
+  "MOSS-Image-SFT-Q4_K_M.gguf",
+  "--config",
+  "config.json",
+  "--sizes",
+  "512",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "MOSS-Image-SFT-Q4_K_M.gguf",
+   "size": 3702092096,
+   "sha256": "c6dda89c18c0c0897d09ed01a515ee31415c4baea02bb9c2dedbfca66eec50b6"
+  },
+  "pipeline": {
+   "name": "pipeline_moss_image.py",
+   "size": 25060,
+   "sha256": "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+  },
+  "config": {
+   "name": "config.json",
+   "size": 240,
+   "sha256": "3291c3a1c7adc22b8182a0de25ca8ec97474d72715ce84adbab09cc0be24f666"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "blocks": 42,
+  "sigma": 0.75,
+  "seed": 1024,
+  "features": "seeded normal, std 1.0",
+  "text_rows": 48,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "sigma x 1000 in float32 in both modes",
+  "gguf_codecs": {
+   "F16": 210,
+   "Q6_K": 84,
+   "Q4_K": 168,
+   "F32": 1
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.03968968370583882,
+   "cosine": 0.9992164898220565,
+   "max_abs": 0.41244423389434814
+  },
+  "times": {
+   "fp32_s": 28.7,
+   "bf16_s": 217.2
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.07937936741167764,
+   "cosine_min": 0.9968659592882259
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each text block, each block and the head, free running for the other rows and for the velocity"
+ },
+ "notes": [],
+ "created": "2026-10-18T06:39:57Z",
+ "npz": "check3_moss_image_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    48,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "51f2174fad964908bd5817f252f645cdc220c2c13ca457e1ad899301a9c3ca6b"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "a4b2103b3964c8a64efd0ddead9b65e6e2e11aed1e4cb4b625caae7c425a6bb6"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
+  },
+  "timestep": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "1d77e51c3092b797b15b02104368537eea7b222148a4d2ba2d2d578491c50ac5"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "cbb8347e7e9ed8836f5e2c3fd337957896ba67127b5613595e1cbc86697b9a0e"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    128,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "60afef324b6f6aaca3aae7d6b2f13bade821fa2eace5eb78772e8f7bd4db3401"
+  }
+ }
+}

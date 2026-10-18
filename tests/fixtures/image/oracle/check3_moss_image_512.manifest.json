@@ -1,0 +1,1189 @@
+{
+ "schema": 1,
+ "name": "check3_moss_image_512",
+ "check": 3,
+ "family": "moss_image",
+ "script": "scripts/image_oracle/check3_moss_image.py",
+ "argv": [
+  "check3_moss_image.py",
+  "--pipeline",
+  "pipeline_moss_image.py",
+  "--dit",
+  "MOSS-Image-SFT-Q4_K_M.gguf",
+  "--config",
+  "config.json",
+  "--sizes",
+  "512",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "MOSS-Image-SFT-Q4_K_M.gguf",
+   "size": 3702092096,
+   "sha256": "c6dda89c18c0c0897d09ed01a515ee31415c4baea02bb9c2dedbfca66eec50b6"
+  },
+  "pipeline": {
+   "name": "pipeline_moss_image.py",
+   "size": 25060,
+   "sha256": "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+  },
+  "config": {
+   "name": "config.json",
+   "size": 240,
+   "sha256": "3291c3a1c7adc22b8182a0de25ca8ec97474d72715ce84adbab09cc0be24f666"
+  }
+ },
+ "inputs": {
+  "size": 512,
+  "blocks": 42,
+  "sigma": 0.75,
+  "seed": 512,
+  "features": "seeded normal, std 1.0",
+  "text_rows": 48,
+  "dequant": "exact",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "timestep": "sigma x 1000 in float32 in both modes",
+  "gguf_codecs": {
+   "F16": 210,
+   "Q6_K": 84,
+   "Q4_K": 168,
+   "F32": 1
+  }
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.04263153404754413,
+   "cosine": 0.9990925493828575,
+   "max_abs": 0.24877294898033142
+  },
+  "rows_bf16_vs_fp32": {
+   "time_embedding": {
+    "rel_l2": 0.0017880038297060797,
+    "cosine": 0.9999986603234691,
+    "max_abs": 0.0019777417182922363,
+    "teacher_forced": false
+   },
+   "shared_block_modulation": {
+    "rel_l2": 0.0016879542098240739,
+    "cosine": 0.9999986500267788,
+    "max_abs": 0.10947418212890625,
+    "teacher_forced": false
+   },
+   "video_head_modulation": {
+    "rel_l2": 0.0015511273133948249,
+    "cosine": 0.99999885703462,
+    "max_abs": 0.017541885375976562,
+    "teacher_forced": false
+   },
+   "video_embedder": {
+    "rel_l2": 0.0023455135392989094,
+    "cosine": 0.9999972492970883,
+    "max_abs": 0.07721519470214844,
+    "teacher_forced": false
+   },
+   "text_embedder.proj": {
+    "rel_l2": 0.002351121441498202,
+    "cosine": 0.9999972361475599,
+    "max_abs": 0.06422615051269531,
+    "teacher_forced": false
+   },
+   "text_embedder.blocks.0": {
+    "rel_l2": 0.005746046923318964,
+    "cosine": 0.9999835047040323,
+    "max_abs": 0.5666732788085938,
+    "teacher_forced": true
+   },
+   "text_embedder.blocks.1": {
+    "rel_l2": 0.004199174266344991,
+    "cosine": 0.9999911861772524,
+    "max_abs": 0.7038726806640625,
+    "teacher_forced": true
+   },
+   "layers.0": {
+    "rel_l2": 0.0033805112919488146,
+    "cosine": 0.999995346920703,
+    "max_abs": 8.157958984375,
+    "teacher_forced": true
+   },
+   "layers.1": {
+    "rel_l2": 0.003009731834582426,
+    "cosine": 0.9999954920743668,
+    "max_abs": 5.48150634765625,
+    "teacher_forced": true
+   },
+   "layers.2": {
+    "rel_l2": 0.004130613466698473,
+    "cosine": 0.9999940978660147,
+    "max_abs": 8.69171142578125,
+    "teacher_forced": true
+   },
+   "layers.3": {
+    "rel_l2": 0.0031660628551223283,
+    "cosine": 0.9999955647403599,
+    "max_abs": 5.998046875,
+    "teacher_forced": true
+   },
+   "layers.4": {
+    "rel_l2": 0.0029541544640130663,
+    "cosine": 0.9999957468951098,
+    "max_abs": 7.046875,
+    "teacher_forced": true
+   },
+   "layers.5": {
+    "rel_l2": 0.003320484301024555,
+    "cosine": 0.999995223192378,
+    "max_abs": 8.38897705078125,
+    "teacher_forced": true
+   },
+   "layers.6": {
+    "rel_l2": 0.0028887037271521114,
+    "cosine": 0.9999962639760974,
+    "max_abs": 11.8671875,
+    "teacher_forced": true
+   },
+   "layers.7": {
+    "rel_l2": 0.0029597123418961917,
+    "cosine": 0.9999956891043652,
+    "max_abs": 20.08544921875,
+    "teacher_forced": true
+   },
+   "layers.8": {
+    "rel_l2": 0.0032251165892065764,
+    "cosine": 0.9999958379978068,
+    "max_abs": 15.343994140625,
+    "teacher_forced": true
+   },
+   "layers.9": {
+    "rel_l2": 0.002638580464974077,
+    "cosine": 0.9999968604093041,
+    "max_abs": 11.0302734375,
+    "teacher_forced": true
+   },
+   "layers.10": {
+    "rel_l2": 0.00306328017198254,
+    "cosine": 0.9999955335266718,
+    "max_abs": 16.603515625,
+    "teacher_forced": true
+   },
+   "layers.11": {
+    "rel_l2": 0.003321258790878133,
+    "cosine": 0.9999961177140309,
+    "max_abs": 9.247314453125,
+    "teacher_forced": true
+   },
+   "layers.12": {
+    "rel_l2": 0.0031863883451497127,
+    "cosine": 0.9999961751624868,
+    "max_abs": 12.5003662109375,
+    "teacher_forced": true
+   },
+   "layers.13": {
+    "rel_l2": 0.003495689074212565,
+    "cosine": 0.9999949698328701,
+    "max_abs": 10.4444580078125,
+    "teacher_forced": true
+   },
+   "layers.14": {
+    "rel_l2": 0.005342143241925715,
+    "cosine": 0.9999913380821597,
+    "max_abs": 13.3321533203125,
+    "teacher_forced": true
+   },
+   "layers.15": {
+    "rel_l2": 0.00574672891394024,
+    "cosine": 0.9999926179147978,
+    "max_abs": 10.822021484375,
+    "teacher_forced": true
+   },
+   "layers.16": {
+    "rel_l2": 0.005291596892396325,
+    "cosine": 0.9999909897784076,
+    "max_abs": 9.075927734375,
+    "teacher_forced": true
+   },
+   "layers.17": {
+    "rel_l2": 0.005607773830647339,
+    "cosine": 0.9999908314293308,
+    "max_abs": 11.46331787109375,
+    "teacher_forced": true
+   },
+   "layers.18": {
+    "rel_l2": 0.007217745065339213,
+    "cosine": 0.9999826332652529,
+    "max_abs": 12.289306640625,
+    "teacher_forced": true
+   },
+   "layers.19": {
+    "rel_l2": 0.0071663273319924016,
+    "cosine": 0.9999841525281786,
+    "max_abs": 14.646484375,
+    "teacher_forced": true
+   },
+   "layers.20": {
+    "rel_l2": 0.007403384909156674,
+    "cosine": 0.9999822498907733,
+    "max_abs": 12.659027099609375,
+    "teacher_forced": true
+   },
+   "layers.21": {
+    "rel_l2": 0.013920375934480101,
+    "cosine": 0.9999397632907432,
+    "max_abs": 17.127685546875,
+    "teacher_forced": true
+   },
+   "layers.22": {
+    "rel_l2": 0.011032856757270797,
+    "cosine": 0.9999549670803568,
+    "max_abs": 14.04632568359375,
+    "teacher_forced": true
+   },
+   "layers.23": {
+    "rel_l2": 0.013922649668453847,
+    "cosine": 0.9999276106621329,
+    "max_abs": 17.78741455078125,
+    "teacher_forced": true
+   },
+   "layers.24": {
+    "rel_l2": 0.013153346148434856,
+    "cosine": 0.9999206767419453,
+    "max_abs": 13.22265625,
+    "teacher_forced": true
+   },
+   "layers.25": {
+    "rel_l2": 0.009471184242364534,
+    "cosine": 0.9999588735457219,
+    "max_abs": 9.81866455078125,
+    "teacher_forced": true
+   },
+   "layers.26": {
+    "rel_l2": 0.008006400623644864,
+    "cosine": 0.9999679638371968,
+    "max_abs": 5.890594482421875,
+    "teacher_forced": true
+   },
+   "layers.27": {
+    "rel_l2": 0.006452923314511727,
+    "cosine": 0.9999797909453065,
+    "max_abs": 5.79351806640625,
+    "teacher_forced": true
+   },
+   "layers.28": {
+    "rel_l2": 0.0076359211943152734,
+    "cosine": 0.999971987683924,
+    "max_abs": 7.8470458984375,
+    "teacher_forced": true
+   },
+   "layers.29": {
+    "rel_l2": 0.006695458690008976,
+    "cosine": 0.9999794911165114,
+    "max_abs": 7.352752685546875,
+    "teacher_forced": true
+   },
+   "layers.30": {
+    "rel_l2": 0.00771848633843314,
+    "cosine": 0.9999716311038124,
+    "max_abs": 8.43572998046875,
+    "teacher_forced": true
+   },
+   "layers.31": {
+    "rel_l2": 0.008970138012250588,
+    "cosine": 0.9999597835853143,
+    "max_abs": 12.18975830078125,
+    "teacher_forced": true
+   },
+   "layers.32": {
+    "rel_l2": 0.008930251260973673,
+    "cosine": 0.9999603361245712,
+    "max_abs": 12.3056640625,
+    "teacher_forced": true
+   },
+   "layers.33": {
+    "rel_l2": 0.012000333981036504,
+    "cosine": 0.9999323362450916,
+    "max_abs": 16.109619140625,
+    "teacher_forced": true
+   },
+   "layers.34": {
+    "rel_l2": 0.01350675267516355,
+    "cosine": 0.999909256996868,
+    "max_abs": 20.7421875,
+    "teacher_forced": true
+   },
+   "layers.35": {
+    "rel_l2": 0.016121105104871667,
+    "cosine": 0.9998703268616204,
+    "max_abs": 26.9990234375,
+    "teacher_forced": true
+   },
+   "layers.36": {
+    "rel_l2": 0.0169766962307255,
+    "cosine": 0.9998560027261805,
+    "max_abs": 25.89013671875,
+    "teacher_forced": true
+   },
+   "layers.37": {
+    "rel_l2": 0.016693277167473215,
+    "cosine": 0.9998606798213903,
+    "max_abs": 24.6363525390625,
+    "teacher_forced": true
+   },
+   "layers.38": {
+    "rel_l2": 0.015450623953091228,
+    "cosine": 0.9998812196076702,
+    "max_abs": 29.994384765625,
+    "teacher_forced": true
+   },
+   "layers.39": {
+    "rel_l2": 0.013879347363074222,
+    "cosine": 0.9999040155383271,
+    "max_abs": 24.751953125,
+    "teacher_forced": true
+   },
+   "layers.40": {
+    "rel_l2": 0.012781894670281225,
+    "cosine": 0.9999183273886022,
+    "max_abs": 26.144775390625,
+    "teacher_forced": true
+   },
+   "layers.41": {
+    "rel_l2": 0.018279534146230302,
+    "cosine": 0.9998331335830456,
+    "max_abs": 43.5479736328125,
+    "teacher_forced": true
+   },
+   "final_linear_video": {
+    "rel_l2": 0.004121280183839743,
+    "cosine": 0.9999915293975221,
+    "max_abs": 0.020843982696533203,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "layers.0": 0.003568796111638542,
+   "layers.1": 0.0043838969671087065,
+   "layers.2": 0.005312946831784859,
+   "layers.3": 0.005364772768698953,
+   "layers.4": 0.005263227543994745,
+   "layers.5": 0.005855628418669753,
+   "layers.6": 0.005230337516982755,
+   "layers.7": 0.004886924745399782,
+   "layers.8": 0.004947188118570181,
+   "layers.9": 0.004642114975796911,
+   "layers.10": 0.005425993462861186,
+   "layers.11": 0.005186772440651156,
+   "layers.12": 0.005538870223980716,
+   "layers.13": 0.006101318080710389,
+   "layers.14": 0.007373729814392103,
+   "layers.15": 0.006462006530598639,
+   "layers.16": 0.007376730058029977,
+   "layers.17": 0.007617372334552163,
+   "layers.18": 0.010276190958139659,
+   "layers.19": 0.009972706445031926,
+   "layers.20": 0.010898405247341175,
+   "layers.21": 0.013974074796937014,
+   "layers.22": 0.014360616997252834,
+   "layers.23": 0.015451414285155807,
+   "layers.24": 0.01882663016433713,
+   "layers.25": 0.01765633133372524,
+   "layers.26": 0.021828743226979832,
+   "layers.27": 0.02005387110535613,
+   "layers.28": 0.022913333129952806,
+   "layers.29": 0.020662938490167863,
+   "layers.30": 0.02464196720165473,
+   "layers.31": 0.02971256731064926,
+   "layers.32": 0.02963242237516329,
+   "layers.33": 0.028980736771996383,
+   "layers.34": 0.03538787795881819,
+   "layers.35": 0.03836622252429749,
+   "layers.36": 0.04508697412911542,
+   "layers.37": 0.04382474834929958,
+   "layers.38": 0.045972982171921736,
+   "layers.39": 0.047319224173234746,
+   "layers.40": 0.05429789226642868,
+   "layers.41": 0.06379060641629042
+  },
+  "times": {
+   "fp32_s": 7.5,
+   "bf16_s": 20.2,
+   "bf16_teacher_forced_s": 21.0
+  },
+  "exact_free_floor": {
+   "rel_l2": 1.5447020847623357e-05,
+   "row": "free layers.41",
+   "measured": "gmlx's exact step on the GPU against the same step on the CPU stream, worst free row; tests/image/moss_gates.py exact_free_floor on moss-image 512c8f5a, Apple M5 Max"
+  },
+  "exact_velocity_floor": {
+   "rel_l2": 1.0271884390803118e-05,
+   "measured": "gmlx's exact step on the GPU against the same step on the CPU stream, velocity; tests/image/moss_gates.py exact_free_floor on moss-image 512c8f5a, Apple M5 Max"
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.08526306809508825,
+   "cosine_min": 0.9963701975314301
+  },
+  "time_embedding": {
+   "rel_l2": 0.0035760076594121594,
+   "teacher_forced": false
+  },
+  "shared_block_modulation": {
+   "rel_l2": 0.0033759084196481478,
+   "teacher_forced": false
+  },
+  "video_head_modulation": {
+   "rel_l2": 0.0031022546267896497,
+   "teacher_forced": false
+  },
+  "video_embedder": {
+   "rel_l2": 0.004691027078597819,
+   "teacher_forced": false
+  },
+  "text_embedder.proj": {
+   "rel_l2": 0.004702242882996404,
+   "teacher_forced": false
+  },
+  "text_embedder.blocks.0": {
+   "rel_l2": 0.011492093846637928,
+   "teacher_forced": true
+  },
+  "text_embedder.blocks.1": {
+   "rel_l2": 0.008398348532689982,
+   "teacher_forced": true
+  },
+  "layers.0": {
+   "rel_l2": 0.006761022583897629,
+   "teacher_forced": true
+  },
+  "layers.1": {
+   "rel_l2": 0.006019463669164852,
+   "teacher_forced": true
+  },
+  "layers.2": {
+   "rel_l2": 0.008261226933396947,
+   "teacher_forced": true
+  },
+  "layers.3": {
+   "rel_l2": 0.006332125710244657,
+   "teacher_forced": true
+  },
+  "layers.4": {
+   "rel_l2": 0.005908308928026133,
+   "teacher_forced": true
+  },
+  "layers.5": {
+   "rel_l2": 0.00664096860204911,
+   "teacher_forced": true
+  },
+  "layers.6": {
+   "rel_l2": 0.005777407454304223,
+   "teacher_forced": true
+  },
+  "layers.7": {
+   "rel_l2": 0.005919424683792383,
+   "teacher_forced": true
+  },
+  "layers.8": {
+   "rel_l2": 0.006450233178413153,
+   "teacher_forced": true
+  },
+  "layers.9": {
+   "rel_l2": 0.005277160929948154,
+   "teacher_forced": true
+  },
+  "layers.10": {
+   "rel_l2": 0.00612656034396508,
+   "teacher_forced": true
+  },
+  "layers.11": {
+   "rel_l2": 0.006642517581756266,
+   "teacher_forced": true
+  },
+  "layers.12": {
+   "rel_l2": 0.006372776690299425,
+   "teacher_forced": true
+  },
+  "layers.13": {
+   "rel_l2": 0.00699137814842513,
+   "teacher_forced": true
+  },
+  "layers.14": {
+   "rel_l2": 0.01068428648385143,
+   "teacher_forced": true
+  },
+  "layers.15": {
+   "rel_l2": 0.01149345782788048,
+   "teacher_forced": true
+  },
+  "layers.16": {
+   "rel_l2": 0.01058319378479265,
+   "teacher_forced": true
+  },
+  "layers.17": {
+   "rel_l2": 0.011215547661294678,
+   "teacher_forced": true
+  },
+  "layers.18": {
+   "rel_l2": 0.014435490130678425,
+   "teacher_forced": true
+  },
+  "layers.19": {
+   "rel_l2": 0.014332654663984803,
+   "teacher_forced": true
+  },
+  "layers.20": {
+   "rel_l2": 0.014806769818313349,
+   "teacher_forced": true
+  },
+  "layers.21": {
+   "rel_l2": 0.027840751868960203,
+   "teacher_forced": true
+  },
+  "layers.22": {
+   "rel_l2": 0.022065713514541594,
+   "teacher_forced": true
+  },
+  "layers.23": {
+   "rel_l2": 0.027845299336907693,
+   "teacher_forced": true
+  },
+  "layers.24": {
+   "rel_l2": 0.026306692296869712,
+   "teacher_forced": true
+  },
+  "layers.25": {
+   "rel_l2": 0.018942368484729067,
+   "teacher_forced": true
+  },
+  "layers.26": {
+   "rel_l2": 0.016012801247289727,
+   "teacher_forced": true
+  },
+  "layers.27": {
+   "rel_l2": 0.012905846629023453,
+   "teacher_forced": true
+  },
+  "layers.28": {
+   "rel_l2": 0.015271842388630547,
+   "teacher_forced": true
+  },
+  "layers.29": {
+   "rel_l2": 0.013390917380017952,
+   "teacher_forced": true
+  },
+  "layers.30": {
+   "rel_l2": 0.01543697267686628,
+   "teacher_forced": true
+  },
+  "layers.31": {
+   "rel_l2": 0.017940276024501177,
+   "teacher_forced": true
+  },
+  "layers.32": {
+   "rel_l2": 0.017860502521947347,
+   "teacher_forced": true
+  },
+  "layers.33": {
+   "rel_l2": 0.024000667962073008,
+   "teacher_forced": true
+  },
+  "layers.34": {
+   "rel_l2": 0.0270135053503271,
+   "teacher_forced": true
+  },
+  "layers.35": {
+   "rel_l2": 0.032242210209743334,
+   "teacher_forced": true
+  },
+  "layers.36": {
+   "rel_l2": 0.033953392461451,
+   "teacher_forced": true
+  },
+  "layers.37": {
+   "rel_l2": 0.03338655433494643,
+   "teacher_forced": true
+  },
+  "layers.38": {
+   "rel_l2": 0.030901247906182455,
+   "teacher_forced": true
+  },
+  "layers.39": {
+   "rel_l2": 0.027758694726148444,
+   "teacher_forced": true
+  },
+  "layers.40": {
+   "rel_l2": 0.02556378934056245,
+   "teacher_forced": true
+  },
+  "layers.41": {
+   "rel_l2": 0.036559068292460604,
+   "teacher_forced": true
+  },
+  "final_linear_video": {
+   "rel_l2": 0.008242560367679485,
+   "teacher_forced": true
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each text block, each block and the head, free running for the other rows and for the velocity",
+  "exact_free": {
+   "rel_l2": 5e-05
+  },
+  "exact_velocity": {
+   "rel_l2": 5e-05
+  }
+ },
+ "notes": [],
+ "created": "2026-10-18T06:35:49Z",
+ "npz": "check3_moss_image_512.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    48,
+    4096
+   ],
+   "dtype": "float32",
+   "sha256": "51f2174fad964908bd5817f252f645cdc220c2c13ca457e1ad899301a9c3ca6b"
+  },
+  "final_linear_video": {
+   "shape": [
+    1,
+    1024,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "d4bc8b5ff9ae866d2c5bb2510c0bb62acd86b443075a5cc290b775dc6344536a"
+  },
+  "in.final_norm_video": {
+   "shape": [
+    1,
+    1024,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "43116dbe95149615a633a5aefe34dd5409d33f40eaeabc7f9c16f48c0f6c57d3"
+  },
+  "in.layers.0": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "3485428cb3984d4489ec936ef37ff6e4a27aab1935c236906f04a6f011eef0a1"
+  },
+  "latents": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "4399e6b9bd209dc9af6f745557507a33dcfe730a81abebb0bce079d2b441f34c"
+  },
+  "layers.0": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "3ebbb074e4f41956a62558ef1c761e864ee21819e8767ff963528ec36a0d5a26"
+  },
+  "layers.1": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "4a4976d736543a2a338ada96c4f6a290f73dfc1c941a851923ca8ce9fc8e570c"
+  },
+  "layers.10": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "fb545107d0a22211b62ab67efcdf17ca9ae5b37687f73b5459376f61e7b09345"
+  },
+  "layers.11": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "934c38e5ea0744ed3b713834dcd662cba737394a23df2fe8f28fb9a55e654275"
+  },
+  "layers.12": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "224068c7139f6370032837a2d370b8f55744f9646857187aa5b2f49ee81d2a2e"
+  },
+  "layers.13": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "2a296aa9b8f98170ac1ff5ea37d6e83f25042ef7c712377fafab743b23ae3e3e"
+  },
+  "layers.14": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "877561fda965a4c251405f40527f7b808bef1fdf607dd33b7d36d96359fd0b02"
+  },
+  "layers.15": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "b240c1676eb0f543191f1da906d0194fe3d53a0883626336c9fe5a80fb3c1463"
+  },
+  "layers.16": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "876745618e5da483c25222c34bf404cab152e30b370664cff7a3dacfbbe4a611"
+  },
+  "layers.17": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "56e30a31015567f97e08291ae7b28eab43225178bc1656b34632ef0a7fe82fc7"
+  },
+  "layers.18": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "fadc6b7aaca5ceee0ca119ac58de7d5db0edcca721917bb50dae23ac205d87f5"
+  },
+  "layers.19": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "b32b0b2d915c6c44c2d2d10b37da33931cee04cf3879d9fdfd50aa6d7d678bbd"
+  },
+  "layers.2": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "71cc5b04fb87dacb6c05b6910c2b0c4b959f80a2a27218251c1d28657221b1e9"
+  },
+  "layers.20": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "e84b794e65acb306ffa9c9c478b4a7e48600f3a12f8f7cfa94c522254bb4ded0"
+  },
+  "layers.21": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "068de303772c022452e455309be096cf1f6ef1d80c57957cddce50cb349aa28b"
+  },
+  "layers.22": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "db0f22cb6652b34a9076a185a7b39685f885b66d8660623fe553d748c952f30c"
+  },
+  "layers.23": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "bb1e06a72ffc3930dd389dff1f7ab038d2ea9c94433c56706b017508ea0863e9"
+  },
+  "layers.24": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "6baa29c5504e9a0711eeae2029bc876b93e655ce3862a13991137e6fad629f65"
+  },
+  "layers.25": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "190e46366a944d0f4953b6c19823ff81facafbd43cc64af339dde2283236f68b"
+  },
+  "layers.26": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "b9973acfc2e458dcc44f07b963d21e9fc7fd273e8a569c81282e36f577f3f9a1"
+  },
+  "layers.27": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "c45114a2d8d3bb66de05a72bb6b0b267a3b19d6d349c5881eac1baf5037e65ef"
+  },
+  "layers.28": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "21d8b7d03e1d1481528087605c2b8ae11b833491a5e365ad0fbcb96abab1dd8a"
+  },
+  "layers.29": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "30ce49f7a95bb4c62c8f8b7ed7002eaef5ec3e7b58d72944551a30768a0c9705"
+  },
+  "layers.3": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "642fd9d486f5e0345765803b0f66b0de725597223004441b0b3320db07f8ebfc"
+  },
+  "layers.30": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "89434b507bd45ce857326ccf5cc7969fe783db743dee545ec34c348bf3a7f541"
+  },
+  "layers.31": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "2d5d13f45ebd28cfb1250d28ef791675b47930a9e6ccbe8502b8addabeb7b115"
+  },
+  "layers.32": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "975f3333c0818e132b59c6e856e62cb618cc363d4e6d99f26e85a584f9245b2d"
+  },
+  "layers.33": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "bf2384622da5ef1f8b930508fe4af5fac32dd69e1ba62723fd8ea3b5107ff9a4"
+  },
+  "layers.34": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "fd5d54a5f6502faf72dfb88ddef20d2f049fb4832fc832ce4f0128896f63d172"
+  },
+  "layers.35": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "5c9adb1b637a410870cb1a2964c3c690b76bc0c4475cd015ee8f5c192dca628a"
+  },
+  "layers.36": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "5a29199ab141287fcd8d256802adfd92fd653410b30958c3f5487c3654fdac46"
+  },
+  "layers.37": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "c8a565080bbeb9d250b017d54155071f232533324eabdb9530078f1c0495157d"
+  },
+  "layers.38": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "37351b4ec934610b089a467725e7bcf197e95eec2abd531ef4d8ea46951df187"
+  },
+  "layers.39": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "d553d547f9087778c60266d4758647e32eb3b8a8c2198468262c198c68bb1350"
+  },
+  "layers.4": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "c0571d5931a702e48f9eb904b81d3eec87a9e2d10cf8c2497637522ed993dfb5"
+  },
+  "layers.40": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "2c15b5648104c33ecddac7ec37308a7ddb2a97bf1a50e906a80de56adbe9de15"
+  },
+  "layers.41": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "80f9d5f61a009c080e0a28b0db9a23dee8ae7cef4d73077d6e67318d347d6cc2"
+  },
+  "layers.5": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "d318008e2a25f9e5a64ffc6d58cc7279518058f1ee041988de66f7beb42e2330"
+  },
+  "layers.6": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "b17bacf906342ba00b9578d11c77bf524afd375fdfa073644564917657050095"
+  },
+  "layers.7": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "202d3e0facd5342396545dd5a91d79fa63e91430ec79a76b1b6cc76f16837915"
+  },
+  "layers.8": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "c10744e57f9c2a34b4e8d8943e14da1d723120d438885ce15a930d166e6cbfde"
+  },
+  "layers.9": {
+   "shape": [
+    1,
+    1072,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "2a35cae4fa532141e55842cc578958661d65185fdd391b9504425549f1e1187b"
+  },
+  "shared_block_modulation": {
+   "shape": [
+    1,
+    18432
+   ],
+   "dtype": "float32",
+   "sha256": "2018b1648e882852e21be9c17537a00f5c352c49d4a938e7b4fd68f60d2a98a0"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
+  },
+  "text_embedder.blocks.0": {
+   "shape": [
+    1,
+    48,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "9db78b37075f6326f8a55189eb00c85c9c9924ef6532d7752cbe56f703d969ec"
+  },
+  "text_embedder.blocks.1": {
+   "shape": [
+    1,
+    48,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "1b9a12c61a9f151b9155d610e95e706805d0c0ed25ffc8291632da83560f5764"
+  },
+  "text_embedder.proj": {
+   "shape": [
+    1,
+    48,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "b24a5a382094fe5dc138e7282eb00fd2100f0dc809d1b4a9e7f8560f12d20450"
+  },
+  "time_embedding": {
+   "shape": [
+    1,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "93eac9f99ef5510c035a19eb9ff02d9623d77fdc63a5850638cd42d0f2b53586"
+  },
+  "timestep": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "1d77e51c3092b797b15b02104368537eea7b222148a4d2ba2d2d578491c50ac5"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "85299a60f4437986ff3f011d6a84e6e06f2ac5437cf0287591f07b9f3e4c8123"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    128,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "02d83e79c6312e65e213f5d256968c1b0c222e9963112221e44aa7b093fd1412"
+  },
+  "video_embedder": {
+   "shape": [
+    1,
+    1024,
+    3072
+   ],
+   "dtype": "float32",
+   "sha256": "8e782ff4fd57af77a4633a34ccd3145bf923d4f79eba2446f8a5c01022158a12"
+  },
+  "video_head_modulation": {
+   "shape": [
+    1,
+    6144
+   ],
+   "dtype": "float32",
+   "sha256": "72074b7e2f983d21aa6b537b0285d95ee7dfcb20e5ef9b85e842f99a84ce59ef"
+  }
+ }
+}
