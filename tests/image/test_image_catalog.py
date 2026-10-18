@@ -392,8 +392,12 @@ def test_sha256_file_reads_the_whole_file(tmp_path):
 
 def test_every_class_pulls_the_q8_encoder_and_the_largest_the_reference_dit():
     for r in catalog.RECIPES.values():
+        # No 16 GB budget holds the 9.5 GB Q8_0 file of Qwen3.5-9B.
+        small = {16} if r.family == "moss_image" else set()
         assert {catalog.DEFAULT_QUANTS[r.name][c][1]
-                for c in catalog.MEMORY_CLASSES} == {"Q8_0"}
+                for c in catalog.MEMORY_CLASSES if c not in small} == {"Q8_0"}
+        assert {catalog.DEFAULT_QUANTS[r.name][c][1]
+                for c in small} <= {"Q4_K_M"}
         assert catalog.DEFAULT_QUANTS[r.name][64][0] == r.dit_quants[-1]
 
 

@@ -742,6 +742,8 @@ FB = catalog.RECIPES["flux-3-klein-base"]
 F2 = catalog.RECIPES["flux-2-klein"]
 F2B = catalog.RECIPES["flux-2-klein-base"]
 K = catalog.RECIPES["krea-2-turbo"]
+M = catalog.RECIPES["moss-image"]
+MB = catalog.RECIPES["moss-image-base"]
 # The family each pack of the FLUX.2 autoencoder names: the pull's.
 _PACKED_FOR: dict = {}
 
@@ -779,6 +781,17 @@ def _shared_scan(roots, *, recursive=True, families=None):
                                                  "distilled"))
                 elif f.startswith("Krea-2-Turbo-"):
                     out.append(catalog.ImageFile(p, "dit", "krea2", "turbo"))
+                elif f.startswith("MOSS-Image-SFT-"):
+                    out.append(catalog.ImageFile(p, "dit", "moss_image",
+                                                 "sft"))
+                elif f.startswith("MOSS-Image-Base-"):
+                    out.append(catalog.ImageFile(p, "dit", "moss_image",
+                                                 "base"))
+                elif f.startswith("Qwen3.5-9B-"):
+                    out.append(catalog.ImageFile(p, "encoder", "moss_image"))
+                elif f == M.vae_pack:
+                    out.append(catalog.ImageFile(p, "vae", "moss_image",
+                                                 sha256=M.vae_sha256))
                 elif f.startswith("Qwen3-VL-4B-Instruct-"):
                     out += [catalog.ImageFile(p, "encoder", fam)
                             for fam in ("krea2", "flux3_klein")]
@@ -1054,6 +1067,43 @@ def test_a_flux3_pull_after_krea_2_shares_its_encoder_file(lib, monkeypatch):
     got, _, base = _shared_pull(lib, monkeypatch, "flux-3-klein-base")
     assert [g[0] for g in got] == [FB.dit_repo]
     assert base.encoder == krea.encoder and base.vae == flux.vae
+
+
+@pytest.mark.parametrize("r, ram_gb, quant, enc", [
+    (M, 16, "Q6_K", "Q4_K_M"), (M, 32, "Q8_0", "Q8_0"),
+    (MB, 24, "Q8_0", "Q8_0")])
+def test_a_moss_image_pull_takes_its_class_quants_and_packs_the_release_vae(
+        lib, monkeypatch, capsys, r, ram_gb, quant, enc):
+    """The DiT from realrebelai's repo, Qwen3.5-9B from unsloth's at the
+    class's quant, and the release's float32 VAE with its config.json at
+    the pinned revision, packed in its own dtype."""
+    root, cfg = lib
+    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb)
+    stem = "MOSS-Image-Base" if r.variant == "base" else "MOSS-Image-SFT"
+    assert got == [
+        ("realrebelai/MOSS-Image_GGUFs", f"{stem}-{quant}.gguf", "main"),
+        ("unsloth/Qwen3.5-9B-GGUF", f"Qwen3.5-9B-{enc}.gguf", "main"),
+        ("OpenMOSS-Team/MOSS-Image-SFT",
+         "vae/diffusion_pytorch_model.safetensors", r.vae_revision),
+        ("OpenMOSS-Team/MOSS-Image-SFT", "vae/config.json", r.vae_revision)]
+    ((_src, kw),) = packed
+    assert kw["family"] == "moss_image" and kw.get("dtype") is None
+    assert m.path == f"realrebelai__MOSS-Image_GGUFs/{stem}-{quant}.gguf"
+    assert m.encoder == f"unsloth__Qwen3.5-9B-GGUF/Qwen3.5-9B-{enc}.gguf"
+    assert m.vae == "OpenMOSS-Team__MOSS-Image-SFT/moss-image-vae-F32.gguf"
+    assert m.encoder_mmproj is None and not m.defaults.get("size")
+    assert (f"license: {r.title} apache-2.0 (https://huggingface.co/"
+            f"OpenMOSS-Team/{stem}/blob/main/LICENSE); encoder apache-2.0"
+            in capsys.readouterr().out)
+
+
+def test_a_moss_image_base_pull_after_sft_takes_only_its_dit(lib,
+                                                             monkeypatch):
+    _, _, sft = _shared_pull(lib, monkeypatch, "moss-image")
+    got, packed, base = _shared_pull(lib, monkeypatch, "moss-image-base")
+    assert got == [(MB.dit_repo, "MOSS-Image-Base-Q8_0.gguf", "main")]
+    assert packed == []
+    assert base.encoder == sft.encoder and base.vae == sft.vae
 
 
 def test_a_flux3_pull_takes_no_encoder_quant_but_q8_0(lib, capsys):
