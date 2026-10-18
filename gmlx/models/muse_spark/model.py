@@ -202,7 +202,15 @@ class MuseSparkMoE(nn.Module):
             la_x = x if x.size == x.shape[-1] else None
             object.__setattr__(self.switch_mlp, "_kq_la_input", la_x)
         z = self.pre_exp_norm(self.latent_down(x))
-        y = self.post_exp_norm(self.switch_mlp(z, inds))
+        if getattr(self.switch_mlp, "_kq_scores_sink", False):
+            # Streamed experts: the weights go along for miss-shed only. The
+            # return stays per expert, with zeros at shed experts, and
+            # post_ffw_norm cancels the gate mass a shed drops.
+            object.__setattr__(self.switch_mlp, "_kq_scores_unmixed", True)
+            y = self.switch_mlp(z, inds, weights)
+        else:
+            y = self.switch_mlp(z, inds)
+        y = self.post_exp_norm(y)
         y = (y * weights[..., None]).sum(axis=-2)
         return self.post_ffw_norm(self.latent_up(y))
 

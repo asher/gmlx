@@ -490,7 +490,13 @@ def install_expert_streaming(
                     # scores for the miss-shed hook and strip them from what
                     # gets forwarded.
                     scores_arg = args[0] if args else None
-                    if args and not _fwd_scores:
+                    # A block that norms each expert output before its own
+                    # sum (muse-spark) hands scores over for miss-shed only:
+                    # they are never forwarded, and a shed call returns
+                    # per-expert outputs with zeros at the shed experts.
+                    unmixed = getattr(self, "_kq_scores_unmixed", False)
+                    fwd = _fwd_scores and not unmixed
+                    if args and not fwd:
                         args = args[1:]
                     # Threshold read per call (cheap; once per MoE layer per
                     # forward) so env changes A/B without a reload. Streaming
@@ -556,6 +562,7 @@ def install_expert_streaming(
                     if (
                         gt_live
                         and scores_arg is not None
+                        and not unmixed
                         and not dfr.wedged_at(self._kq_li)
                         and gt.layer_autonomous(self._kq_li)
                     ):
@@ -581,7 +588,7 @@ def install_expert_streaming(
                                             indices.astype(mx.uint32),
                                             sc_f32, tbl))
                                     mix_c = mix.astype(x.dtype)
-                                    if _fwd_scores:
+                                    if fwd:
                                         y = super().__call__(
                                             x, slots, mix_c,
                                             *args[1:], **kwargs)
@@ -673,6 +680,7 @@ def install_expert_streaming(
                         routed_ids = ids
                         shed_args = None
                         shed_mix = None
+                        shed_pos = None
                         if sc_f32 is not None:
                             sc = np.asarray(sc_f32).reshape(-1)
                             keep = dfr.shed_misses(
@@ -688,8 +696,14 @@ def install_expert_streaming(
                                 scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
                                 sc_mx = mx.array(scn.reshape(shp)).astype(
                                     scores_arg.dtype)
-                                if _fwd_scores:
+                                if fwd:
                                     shed_args = (sc_mx,) + args[1:]
+                                elif unmixed:
+                                    # Row j of the return reads kept output
+                                    # pos[j], or the zero row past the end.
+                                    pos = np.full(keep.size, kept.size)
+                                    pos[keep] = np.arange(kept.size)
+                                    shed_pos = mx.array(pos)
                                 else:
                                     # Stock base returns per-expert outputs;
                                     # the block's weights still cover the
@@ -761,6 +775,14 @@ def install_expert_streaming(
                                                 and y.ndim == x.ndim + 1):
                                             y = (y * shed_mix[..., None]).sum(
                                                 axis=-2)
+                                        if shed_pos is not None:
+                                            pad = mx.zeros(
+                                                (*y.shape[:-2], 1,
+                                                 y.shape[-1]), dtype=y.dtype)
+                                            y = mx.take(
+                                                mx.concatenate(
+                                                    [y, pad], axis=-2),
+                                                shed_pos, axis=-2)
                                         if _ASYNC_GATHER and n_tokens == 1:
                                             mx.async_eval(y)
                                 if ph is not None:
@@ -817,7 +839,7 @@ def install_expert_streaming(
                         # which always takes a non-split path.
                         ax = x.ndim - 2
                         orig = ((scores_arg,) + args
-                                if scores_arg is not None and not _fwd_scores
+                                if scores_arg is not None and not fwd
                                 else args)
                         sliceable = (
                             x.shape[ax] == n_tokens

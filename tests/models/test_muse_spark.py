@@ -350,6 +350,59 @@ def test_lookahead_input_is_kept_only_for_one_token_steps():
     assert moe.switch_mlp._kq_la_input is None
 
 
+def test_miss_shed_drops_an_expert_and_keeps_the_mass():
+    """Streamed experts get the router weights for miss-shed. A shed expert
+    comes back as a zero row, and the block's output then equals the kept
+    experts mixed with weights renormalized to the full mass: post_ffw_norm
+    cancels the dropped share."""
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+    args = _tiny_args()
+    moe = _randomize(MuseSparkMoE(args), seed=10)
+    seen = {}
+
+    class _ShedSink(SwitchGLU):
+        _kq_scores_sink = True
+
+        def __call__(self, x, indices, scores=None):
+            seen["scores"] = scores
+            seen["unmixed"] = getattr(self, "_kq_scores_unmixed", False)
+            y = super().__call__(x, indices)
+            if scores is None:
+                return y
+            # shed the lowest-weight expert
+            drop = mx.argmin(scores, axis=-1, keepdims=True)
+            k = mx.arange(indices.shape[-1])
+            return mx.where((k == drop)[..., None], 0.0, y)
+
+    sink = _ShedSink(args.moe_latent_size, args.moe_intermediate_size,
+                     args.num_experts)
+    sink.update(moe.switch_mlp.parameters())
+    moe.switch_mlp = sink
+
+    rng = np.random.default_rng(11)
+    x = mx.array(rng.standard_normal((1, 1, args.hidden_size)).astype(np.float32))
+    out = moe(x)
+    mx.eval(out)
+    assert seen["unmixed"] and seen["scores"] is not None
+
+    scores = mx.sigmoid(moe.gate(x))
+    inds = mx.argpartition(-(scores + moe.e_score_correction_bias),
+                           kth=args.num_experts_per_tok - 1,
+                           axis=-1)[..., : args.num_experts_per_tok]
+    w = mx.take_along_axis(scores, inds, axis=-1)
+    assert np.allclose(np.array(seen["scores"]),
+                       np.array(w / w.sum(-1, keepdims=True) * args.routed_scaling_factor),
+                       atol=1e-6)
+    keep = mx.arange(inds.shape[-1]) != mx.argmin(w, axis=-1, keepdims=True)
+    z = moe.pre_exp_norm(moe.latent_down(x))
+    ye = moe.post_exp_norm(SwitchGLU.__call__(sink, z, inds))
+    wk = mx.where(keep, w, 0.0)
+    wk = wk / wk.sum(-1, keepdims=True) * args.routed_scaling_factor
+    ref = moe.post_ffw_norm(moe.latent_up((ye * wk[..., None]).sum(axis=-2)))
+    assert np.allclose(np.array(out), np.array(ref), atol=1e-5)
+
+
 def test_zero_weight_scale_is_skipped_like_llama_cpp():
     """llama.cpp applies expert_weights_scale only when it is not 0 or 1."""
     rng = np.random.default_rng(10)

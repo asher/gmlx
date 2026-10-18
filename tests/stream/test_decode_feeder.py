@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import numpy as np
+import pytest
 import mlx.core as mx
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
@@ -1562,6 +1563,43 @@ def test_wrapper_scores_sink_on_stock_base(monkeypatch):
     df.overflow = False
     assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
     assert out.shape == (1, 1, 2, 16)
+
+
+@pytest.mark.parametrize("stock", [False, True])
+def test_wrapper_unmixed_scores_shed_keeps_per_expert_rows(monkeypatch, stock):
+    """A block that norms each expert output before its own sum (muse-spark)
+    hands scores over for miss-shed only. The base never sees them, even
+    with the mix seam, and a shed returns one row per routed expert: the
+    survivor's output at its place and zeros at the shed expert."""
+    mx.random.seed(13)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded, stock=stock)
+    object.__setattr__(glu, "_kq_miss_shed", 0.9)
+    object.__setattr__(glu, "_kq_scores_unmixed", True)
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.25, 0.75]]], dtype=mx.float32)
+    base = super(type(glu), glu).__call__
+
+    df.keep = None
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    assert df.shed_calls and np.allclose(df.shed_calls[-1][2], [0.25, 0.75])
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert recorded[-1][1] is None
+    assert out.shape == (1, 1, 2, 16)
+
+    df.keep = np.array([False, True])
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    assert recorded[-1][0].reshape(-1).tolist() == [3]
+    assert recorded[-1][1] is None
+    assert out.shape == (1, 1, 2, 16)
+    assert not np.array(mx.abs(out[..., 0, :]).sum())
+    ref = base(x1, mx.array([[[3]]], dtype=mx.uint32))
+    assert np.allclose(np.array(out[..., 1, :]), np.array(ref[..., 0, :]),
+                       atol=1e-6)
 
 
 def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
