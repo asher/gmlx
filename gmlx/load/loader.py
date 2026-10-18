@@ -1997,8 +1997,10 @@ def _resolve_chat_template(chat_template: str | None) -> str | None:
         import jinja2
     except ImportError:  # validated later by apply_chat_template instead
         return chat_template
+    from .template_parse import parse_chat_template
+
     try:
-        jinja2.Environment().parse(chat_template)
+        parse_chat_template(chat_template)
     except jinja2.TemplateSyntaxError as e:
         raise ValueError(
             f"chat template is not valid Jinja (line {e.lineno}: {e.message})"

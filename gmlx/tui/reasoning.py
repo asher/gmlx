@@ -636,12 +636,16 @@ _THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",
 _BARE_THINKING_RE = re.compile(r"(?<![A-Za-z_])thinking(?![A-Za-z_])")
 
 _JINJA_TAG_RE = re.compile(r"\{\{.*?\}\}|\{%-?.*?-?%\}", re.S)
+_JINJA_STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", re.S)
 
 
 def _jinja_code(template: str) -> str:
-    """``template`` with its literal prose dropped. A name that only appears
-    in prose is text the model reads, not a variable the template reads."""
-    return "\n".join(_JINJA_TAG_RE.findall(template))
+    """``template`` with its literal prose and string literals dropped. A
+    name that only appears in prose, or in a string such as a
+    ``raise_exception`` message, is text, not a variable the template
+    reads."""
+    return "\n".join(_JINJA_STRING_RE.sub("''", tag)
+                     for tag in _JINJA_TAG_RE.findall(template))
 
 
 def _inputs(template: str) -> frozenset[str] | None:
@@ -650,11 +654,12 @@ def _inputs(template: str) -> frozenset[str] | None:
     its own ``thinking_mode`` from ``enable_thinking``) is not one of them,
     so passing it would be a no-op."""
     try:
-        import jinja2
         from jinja2 import meta
 
+        from gmlx.load.template_parse import parse_chat_template
+
         return frozenset(meta.find_undeclared_variables(
-            jinja2.Environment().parse(template)))
+            parse_chat_template(template)))
     except Exception:
         return None
 
@@ -665,6 +670,15 @@ def _reads(template: str, name: str) -> bool:
     if names is not None:
         return name in names
     return name in _jinja_code(template)
+
+
+def _reads_bare_thinking(template: str) -> bool:
+    """True when ``template`` reads a bare ``thinking`` variable (Kimi
+    K2.x), not only ``enable_thinking`` or ``preserve_thinking``."""
+    names = _inputs(template)
+    if names is not None:
+        return "thinking" in names
+    return bool(_BARE_THINKING_RE.search(_jinja_code(template)))
 
 
 # Templates that grade reasoning depth under a name of their own. The control
@@ -734,7 +748,7 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
               "chat template has no such variable - ignored")
     elif _reads(template, "enable_thinking") or not template:
         out["enable_thinking"] = mode == "on"
-    elif _BARE_THINKING_RE.search(_jinja_code(template)):
+    elif _reads_bare_thinking(template):
         # Kimi K2.x: a bare `thinking` variable gates the pre-filled
         # think-open (`thinking is defined and thinking is false` renders
         # the closed pair). The lookarounds skip preserve_thinking etc.
