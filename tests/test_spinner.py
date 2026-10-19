@@ -4,16 +4,39 @@ CPU-only - a StringIO stands in for the terminal; a subclass fakes ``isatty``.""
 from __future__ import annotations
 
 import io
-import time
+import re
+import threading
 
 import pytest
 
 from gmlx import spinner
 
+_FRAME = re.compile(f"[{spinner._FRAMES}] ")
+
 
 class _FakeTTY(io.StringIO):
+    """A terminal stand-in that wakes waiters on every write."""
+
+    def __init__(self):
+        super().__init__()
+        self._cond = threading.Condition()
+
     def isatty(self):                     # StringIO.isatty() is False; force the TTY path
         return True
+
+    def write(self, s):
+        with self._cond:
+            n = super().write(s)
+            self._cond.notify_all()
+        return n
+
+    def wait_for(self, pred, timeout=30.0) -> bool:
+        """Wait until ``pred(text written so far)`` holds."""
+        with self._cond:
+            return self._cond.wait_for(lambda: pred(self.getvalue()), timeout)
+
+    def wait_frame(self) -> bool:
+        return self.wait_for(lambda out: _FRAME.search(out) is not None)
 
 
 def test_non_tty_prints_label_once_no_escapes():
@@ -42,28 +65,28 @@ def test_non_tty_update_swaps_label():
 def test_tty_animates_with_elapsed():
     buf = _FakeTTY()
     with spinner.Spinner("loading", stream=buf, show_elapsed=True) as s:
-        time.sleep(0.25)                  # let a few frames land
+        assert buf.wait_for(lambda out: re.search(r"loading \d+s", out))
     assert s._thread is not None and not s._thread.is_alive()   # joined on exit
     out = buf.getvalue()
-    assert "loading" in out
     assert "\r" in out                    # animated in place
-    assert any(f in out for f in spinner._FRAMES)
-    assert "0s" in out                    # elapsed suffix
+    assert _FRAME.search(out)
+    assert re.search(r"loading \d+s", out)    # elapsed suffix
 
 
 def test_tty_clears_line_on_exit():
     buf = _FakeTTY()
     with spinner.Spinner("x", stream=buf):
-        time.sleep(0.12)
+        assert buf.wait_frame()
     assert buf.getvalue().endswith("\r\x1b[K")   # line cleared after the block
 
 
 def test_tty_no_elapsed_when_disabled():
     buf = _FakeTTY()
     with spinner.Spinner("loading", stream=buf, show_elapsed=False):
-        time.sleep(0.12)
+        assert buf.wait_for(lambda out: _FRAME.search(out) and "loading" in out)
     # The label animates but no "<N>s" elapsed token is appended.
-    assert "loading" in buf.getvalue() and "0s" not in buf.getvalue()
+    assert "loading" in buf.getvalue()
+    assert not re.search(r" \d+s", buf.getvalue())
 
 
 def test_exit_joins_thread_on_exception():
@@ -71,7 +94,7 @@ def test_exit_joins_thread_on_exception():
     s = spinner.Spinner("x", stream=buf)
     with pytest.raises(ValueError):
         with s:
-            time.sleep(0.12)
+            assert buf.wait_frame()
             raise ValueError("boom")
     assert not s._thread.is_alive()              # thread joined even on exception
     assert buf.getvalue().endswith("\r\x1b[K")   # and the line cleared
@@ -84,12 +107,9 @@ def test_println_on_tty_clears_frame_and_emits_line():
         return len(parts) == 2 and any(f in parts[1] for f in spinner._FRAMES)
 
     with spinner.Spinner("loading", stream=buf) as s:
-        time.sleep(0.12)
+        assert buf.wait_frame()
         s.println("WARNING: odd tensor")
-        deadline = time.monotonic() + 5.0        # wait for animation to resume,
-        while not frame_after_line():            # don't guess scheduling latency
-            assert time.monotonic() < deadline, "no frame after println"
-            time.sleep(0.01)
+        assert buf.wait_for(lambda out: frame_after_line()), "no frame after println"
     out = buf.getvalue()
     assert "\r\x1b[KWARNING: odd tensor\n" in out
     assert frame_after_line()                    # frames landed after the line
