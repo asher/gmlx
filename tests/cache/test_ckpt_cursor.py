@@ -74,6 +74,34 @@ def test_cursor_no_step_uses_block_grid():
     assert _positions(bounds) == [96]
 
 
+def test_streamed_grid_starts_at_the_restored_prefix(monkeypatch):
+    """A streamed model reads every expert once per chunk, so a boundary
+    that cuts its chunk adds a full pass. Its grid starts where this
+    prefill's chunks start, the restored prefix, not at token 0."""
+    def batch(streamed, tags=("rot:2048:0", "kv")):
+        return SimpleNamespace(prefill_step_size=8192, model=SimpleNamespace(
+            _kq_streaming=streamed, _kq_apc_ckpt_layout=tags))
+
+    # A warm turn at 7299 + 1735 tokens: one chunk, no cut at 8192.
+    assert ckpt._ckpt_cursor_init(
+        batch(True), guard=9033, restored=7299, block_size=16) == ([], 0, 0)
+    bounds, terminal, _ = ckpt._ckpt_cursor_init(
+        batch(False), guard=9033, restored=7299, block_size=16)
+    assert _positions(bounds) == [8192]
+    # A long warm turn stores at its own chunk edges.
+    bounds, terminal, _ = ckpt._ckpt_cursor_init(
+        batch(True), guard=30000, restored=7299, block_size=16)
+    assert _positions(bounds) == [15491, 23683]
+    # A cold prompt keeps the absolute grid, and so do recurrent layouts.
+    bounds, _, _ = ckpt._ckpt_cursor_init(
+        batch(True), guard=30000, restored=0, block_size=16)
+    assert _positions(bounds) == [8192, 16384, 24576]
+    bounds, _, _ = ckpt._ckpt_cursor_init(
+        batch(True, ("kv", "arr")), guard=30000, restored=7299,
+        block_size=16)
+    assert _positions(bounds) == [8192, 16384, 24576]
+
+
 # -- Stage 5: replay boundary at N-1 --
 
 def _arm_meta(n, tags, restored=0, guard=None, step=2048):
@@ -184,6 +212,17 @@ def test_turn_boundary_grid_collides_with_terminal(monkeypatch):
     meta = _arm_meta(5000, ("kv", "arr"))
     assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
     assert meta["ckpt_p_stable_bounds"] == [4096]
+
+
+def test_turn_boundary_streamed_grid_starts_at_the_restore(monkeypatch):
+    _stub_p_stable(monkeypatch, 9020)
+    batch = SimpleNamespace(prefill_step_size=8192, model=SimpleNamespace(
+        _kq_streaming=True, _kq_apc_ckpt_layout=("rot:2048:0", "kv")))
+    meta = {"full_input_ids": list(range(9034))}
+    ckpt._ckpt_arm_schedule(batch, meta, 9033, 7299, block_size=16)
+    # No grid point inside the one chunk; the exact pause and N-1 stay.
+    assert meta["ckpt_boundaries"] == [(9020, "boundary"), (9033, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [9020]
 
 
 def test_turn_boundary_kill_switch(monkeypatch):

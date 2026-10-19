@@ -274,6 +274,23 @@ def _ckpt_unit(batch, block_size: int) -> int:
         step * block_size // _gcd(step, block_size)
 
 
+def _ckpt_origin(batch, restored: int, block_size: int) -> int:
+    """Where the boundary grid starts: 0, or the restored prefix on a
+    model that streams its experts. There every chunk reads all of them,
+    so a boundary off this prefill's own chunk edges costs a full pass,
+    and its chunks start at the restored prefix. Recurrent layouts keep
+    the absolute grid, since off-grid chunking drifts their state."""
+    if restored <= 0:
+        return 0
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    if not experts_streamed(getattr(batch, "model", None)):
+        return 0
+    if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
+        return 0
+    return restored
+
+
 def _ckpt_cursor_init(batch, guard: int, restored: int,
                       block_size: int) -> tuple[list, int, int]:
     """Boundary schedule for the checkpoint cursor: an ordered
@@ -285,18 +302,20 @@ def _ckpt_cursor_init(batch, guard: int, restored: int,
     Interval points above the restored prefix, then the terminal (the
     grid point at or below the stock guard column). GMLX_APC_CKPT_INTERVAL
     tokens, default 4096, snapped up to the grid; 0 = terminal-only.
+    The grid starts at ``_ckpt_origin``.
     Later stages add store positions by appending boundaries here, never
     by new store mechanisms.
     """
     unit = _ckpt_unit(batch, block_size)
-    terminal = (guard // unit) * unit
+    origin = _ckpt_origin(batch, restored, block_size)
+    terminal = origin + ((guard - origin) // unit) * unit
     if terminal <= max(0, restored):
         return [], 0, 0
     raw = env_int("GMLX_APC_CKPT_INTERVAL", 4096)
     interval = 0 if raw <= 0 else max(unit, (raw // unit) * unit)
     bounds = []
     if interval:
-        b = ((max(0, restored) // interval) + 1) * interval
+        b = origin + ((max(0, restored) - origin) // interval + 1) * interval
         while b < terminal:
             bounds.append((b, "boundary"))
             b += interval
@@ -372,7 +391,8 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
     meta["ckpt_p_stable"] = p_stable
     floor = max(0, restored)
     out = []
-    grid = (p_stable // unit) * unit
+    origin = _ckpt_origin(batch, restored, block_size)
+    grid = origin + ((p_stable - origin) // unit) * unit
     if grid > floor:
         out.append(grid)
     if ws and "arr" not in tags and p_stable != grid \
