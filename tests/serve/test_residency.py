@@ -847,6 +847,11 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     ring._slots = [object()]                 # ring filled: its room is live
     acquire(pool, "dense2")
     assert seen[-1] == 10 * GB
+    # A time-shared arena holds 3 GB of the released ring's room.
+    ring._slots = []
+    stock._kq_decode_feeder._ring_share = 3 * GB
+    acquire(pool, "dense3")
+    assert seen[-1] == 11 * GB
     assert held.busy == 0
 
 

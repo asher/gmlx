@@ -149,7 +149,7 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
         assert fdr.whole_calls == [3]
 
         class _FakeDF:
-            def repay_at(self, li):
+            def repay_at(self, li, ids):
                 return False
 
             stage_calls = []
@@ -590,7 +590,8 @@ def test_ring_release_keeps_the_slots_of_a_wedged_stage(monkeypatch, tmp_path):
         with feeder.prefill_call(modules[0][0], 0):
             pass
         slots = feeder._slots
-        feeder.release_slots()
+        assert feeder.release_slots() is False  # the arena keeps its lend
+        assert feeder.release_slots() is False  # and on every later try
         assert feeder._slots is slots
         assert unlocked == locked and feeder._locked == []
         assert any(q is slots for q in pfm._QUARANTINED)
@@ -937,12 +938,15 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("timeshare", ["0", "1"])
+@pytest.mark.parametrize("env_gb", [None, "100"])
 def test_arena_sizes_against_ram_before_the_ring_is_wired(
-        monkeypatch, timeshare):
+        monkeypatch, timeshare, env_gb):
     """The ring's slots are wired when its feeder is built, so a free-RAM
     snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
     of KV room, a 2 GB ring: the arena keeping the ring apart gets 4 GB,
-    and a time-shared arena gets 6 GB and lends 2 GB of it at prefill."""
+    and a time-shared arena gets 6 GB and lends 2 GB of it at prefill.
+    A GMLX_DECODE_ARENA_GB past free RAM clamps to it less the ring and
+    keeps the whole ring apart, as the serve footprint prices it."""
     from types import SimpleNamespace
 
     import gmlx.stream.budget as budget
@@ -954,7 +958,11 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
 
     GB = 1 << 30
     monkeypatch.setenv("GMLX_RING_TIMESHARE", timeshare)
-    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    if env_gb:
+        monkeypatch.setenv("GMLX_DECODE_ARENA_GB", env_gb)
+    else:
+        monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
     monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
     # Eight 1 GB layers in the file; the ring holds two of them.
     third = GB // 3
@@ -997,5 +1005,7 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     # The residency room charges the ring once, either way.
     ring_b = 6 * third
     want = {"0": (7 * GB - GB - ring_b, 0), "1": (6 * GB, ring_b)}[timeshare]
+    if env_gb:
+        want = (7 * GB - ring_b, 0)
     assert sized == {"arena": want[0], "share": want[1],
                      "room": 100 * GB - want[0] - (ring_b - want[1])}

@@ -44,7 +44,7 @@ class _Arena:
     def wedged_at(self, li):
         return False
 
-    def repay_at(self, li):
+    def repay_at(self, li, ids):
         return False
 
     def ensure_wired(self):
@@ -92,6 +92,25 @@ class _Ring:
     def prefill_partial_call(self, module, li, ids, routing=None):
         self.partial += 1
         yield
+
+
+class _Owed(_Arena):
+    """An arena that owes a ring lend and repays it at this layer."""
+
+    def __init__(self, slots):
+        super().__init__(slots)
+        self.events = []
+
+    def repay_at(self, li, ids):
+        self.events.append(("repay_at", ids.size))
+        return True
+
+    def ensure_wired(self):
+        self.events.append("wired")
+
+    def stage(self, li, ids):
+        self.events.append("stage")
+        return super().stage(li, ids)
 
 
 def _glu(arena, ring):
@@ -201,3 +220,12 @@ def test_share_one_restores_the_split(monkeypatch):
     _check(_glu(arena, ring), 128, E, rows=True)
     assert arena.rule == [(True, False)]
     assert ring.whole == 0
+
+
+def test_wide_call_repays_a_lend_before_it_stages():
+    """A batched or verify decode step is never one token wide. The arena
+    decides from the call's routing whether it repays a ring lend, and
+    the repay runs before the layer stages."""
+    arena, ring = _Owed(slots=4), _Ring(live=False)
+    _check(_glu(arena, ring), 8, 4, rows=True)
+    assert arena.events == [("repay_at", 8 * TOPK), "wired", "stage"]

@@ -645,12 +645,10 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
-                        if not in_split and (
-                                n_tokens == 1 or dfr.repay_at(self._kq_li)):
+                        if not in_split and n_tokens == 1:
                             # A one-token piece of a split is prefill work:
                             # wiring here would release the prefill ring
-                            # in the middle of a pass. A wider call repays
-                            # a ring lend at the forward's first layer.
+                            # in the middle of a pass.
                             dfr.ensure_wired()
                         if ph is not None:
                             ph["ev_wire"] = ph.get("ev_wire", 0.0) + (
@@ -680,6 +678,11 @@ def install_expert_streaming(
                             ph.setdefault("miss_hist", []).append(
                                 (self._kq_li, dfr._lookups - dfr._hits))
                         ids, indices = _valid_expert_ids(self, indices)
+                        if (not in_split and n_tokens > 1
+                                and dfr.repay_at(self._kq_li, ids)):
+                            # A wider call repays a ring lend at the
+                            # forward's first layer.
+                            dfr.ensure_wired()
                         routed_ids = ids
                         shed_args = None
                         shed_mix = None
@@ -1075,12 +1078,10 @@ def install_expert_streaming(
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes,
             forced=explicit and not over_budget)
-        arena = _decode_arena_bytes(
-            total_bytes, prefetcher.offsets, budget, **arena_kw)
     ring = 0
     ring_share = 0
     held = None
-    if arena is not None and feeder_prefill:
+    if arena_kw and feeder_prefill:
         from gmlx.stream.prefill_feeder import ring_bytes
 
         # Sized before the ring exists: its slots are wired at
@@ -1090,6 +1091,13 @@ def install_expert_streaming(
         held = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
             **arena_kw)
+    if held is not None and os.environ.get("GMLX_DECODE_ARENA_GB"):
+        # The user's arena keeps the whole ring apart, as the serve
+        # footprint prices it.
+        arena = held
+    elif arena_kw:
+        arena = _decode_arena_bytes(
+            total_bytes, prefetcher.offsets, budget, **arena_kw)
     if (
         streaming
         and prefetcher is not None

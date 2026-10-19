@@ -25,8 +25,10 @@ empty and self-organizes toward the workload's hot set.
 On by default for ``--stream-experts`` models (``--no-decode-feeder`` or
 ``GMLX_FEEDER_DECODE=0`` disables; the every-token layers must be on the
 GPU). Arena size defaults to what the memory ceiling leaves after the
-every-token weights, the priced KV room, the prefill ring and the host
-floor; ``GMLX_DECODE_ARENA_GB`` overrides. The
+every-token weights, the priced KV room and the host floor; the arena
+either keeps the prefill ring's room apart or holds it and lends it back
+at each prefill (see ``ring_share`` below). ``GMLX_DECODE_ARENA_GB``
+overrides. The
 arena also answers system memory pressure arriving after load by shrinking
 (and later regrowing) itself - see the pressure constants below. Miss reads
 are joined with a timeout: a read wedged in the kernel is contained (slot
@@ -165,6 +167,17 @@ def _copy_experts(dst, src, pairs, stride: int) -> None:
     for e, s in pairs:
         np.copyto(dst[s * stride:(s + 1) * stride],
                   src[e * stride:(e + 1) * stride])
+
+
+def _sync_gpu() -> None:
+    """Wait for every queued GPU command."""
+    try:
+        import mlx.core as mx
+
+        mx.synchronize()
+    except Exception:  # noqa: S110 - no Metal device: nothing in flight
+        pass
+
 
 # System memory pressure: the arena is wired, so the kernel can never
 # reclaim it - pressure arriving after load (another model, a build) must
@@ -316,7 +329,7 @@ class DecodeFeeder:
         # and those layers regrow at their own stage(). The first prefill
         # starts lent, so the ring and the arena never sum past the budget.
         # A ring quarantined with its slots keeps the room for good
-        # (``_ring_dead``): its lent layers stay lent.
+        # (``_ring_dead``): every layer then gives up its share of it.
         self._ring_share = int(ring_share)
         self._lent: set[int] = set()
         self._ring_lends = 0
@@ -651,8 +664,9 @@ class DecodeFeeder:
     def ensure_wired(self) -> None:
         """First decode call: release the prefill ring and wire the arena
         (one-time fault pass; a few seconds on a tens-of-GB arena). Called
-        by the offload wrapper on decode-sized calls only - a small prefill
-        chunk served from the arena must not tear the ring down mid-pass.
+        by the offload wrapper on one-token calls and, through repay_at,
+        on wider calls at a forward's first layer, never inside a ring
+        pass.
 
         Later decode calls repay a ring lend: the ring is dropped again and
         the arena's slot targets return to full size (layers regrow lazily
@@ -708,14 +722,22 @@ class DecodeFeeder:
 
     def _repay_lend(self, released: bool) -> None:
         """The ring is gone: lent layers regrow to capacity at their own
-        stage() calls. A ring that kept its slots still holds their room,
-        so the lend stands for good and nothing lends again."""
+        stage() calls. A ring that kept its slots still holds their room
+        for good and nothing lends again. Every layer gives up its share
+        of that room instead of the lent ones holding one slot each, so
+        none is left out of the arena."""
         if released:
             self._lend_frac = 1.0
             self._lent.clear()
-        else:
-            self._ring_dead = True
-            self._ring_share = 0
+            return
+        if self._ring_share and self.nominal_bytes:
+            self._lend_frac = min(self._lend_frac, max(
+                0.0, 1.0 - self._ring_share / self.nominal_bytes))
+        self._lent.clear()
+        self._ring_dead = True
+        self._ring_share = 0
+        # Before any lent layer regrows into the room.
+        self._shrink_now()
 
     def at_target(self, li: int) -> bool:
         """Whether layer ``li`` holds its target slot count. A layer that
@@ -723,41 +745,53 @@ class DecodeFeeder:
         stage() once, the only place it resizes."""
         return self._slots.get(li) == self._target_slots(li)
 
-    def repay_at(self, li: int) -> bool:
-        """Whether a multi-token call the arena serves at ``li`` repays a
+    def repay_at(self, li: int, ids: np.ndarray) -> bool:
+        """Whether a multi-token call routed to ``ids`` at ``li`` repays a
         ring lend (see ensure_wired). Only at a forward's first covered
         layer: a call the arena serves there is a decode step (batched or
         speculative) or a short prompt, and a later layer of a ring pass
-        must not drop the ring under the layers after it."""
-        return (self._owes_lend() and bool(self._layers)
-                and li == min(self._layers))
+        must not drop the ring under the layers after it. A call routed
+        to more experts than the layer holds once repaid takes the ring
+        anyway, so it keeps the lend rather than drop the ring for it."""
+        if not (self._owes_lend() and self._layers
+                and li == min(self._layers)):
+            return False
+        return (np.unique(ids.reshape(-1)).size
+                <= self._target_slots(li, lend=False))
 
     def _pick_lent(self, nbytes: int) -> set[int]:
-        """Layers whose arenas, shrunk to one slot, free ``nbytes``: the
-        coldest first, by decode hit rate, so the lend costs the fewest
-        hits. Layers with no lookups yet go in layer order."""
+        """Layers whose capacity, shrunk to one slot, frees ``nbytes``.
+        Layers still at one slot go first: a lend the last decode did not
+        refill costs nothing to keep. Then the coldest, by decode hit
+        rate, so the lend costs the fewest hits; layers with no lookups
+        yet go in layer order. Counting capacity rather than live slots
+        keeps the arena at its nominal size less one share, however often
+        the ring returns before the layers refill."""
         hits = getattr(self, "_layer_hits", {})
         looks = getattr(self, "_layer_lookups", {})
         wedged = getattr(self, "_wedged_layers", set())
 
-        def rate(li):
+        def order(li):
             n = looks.get(li, 0)
-            return (hits.get(li, 0) / n if n else 1.0, li)
+            return (self._slots[li] > 1,
+                    hits.get(li, 0) / n if n else 1.0, li)
 
         picked: set[int] = set()
         freed = 0
         for li in sorted((li for li in self._layers if li not in wedged),
-                         key=rate):
+                         key=order):
             if freed >= nbytes:
                 break
             picked.add(li)
-            freed += max(0, self._slots[li] - 1) * self._per_expert[li]
+            freed += max(0, self._orig_slots[li] - 1) * self._per_expert[li]
         return picked
 
     def _lend_ring_share(self) -> int:
         """Shrink the time-share layers to one slot now. Their in-flight
         prestage reads join first (a resize must not free a buffer a read
-        still writes into). Returns the bytes freed."""
+        still writes into), after the queued gathers: a read that wedges
+        in the join zeroes its slot. Returns the bytes freed."""
+        _sync_gpu()
         self._lent = self._pick_lent(self._ring_share)
         empty = np.empty(0, dtype=np.int64)
         for li in self._lent:
@@ -831,12 +865,7 @@ class DecodeFeeder:
         """Resize every layer down to its current target now. Eager,
         unlike the lazy per-layer resize at stage(): the caller needs the
         bytes before its next allocation. Returns the bytes freed."""
-        try:
-            import mlx.core as mx
-
-            mx.synchronize()  # no in-flight gather may reference a layer
-        except Exception:  # noqa: S110 - no Metal device: nothing in flight
-            pass
+        _sync_gpu()  # no in-flight gather may reference a layer
         freed = 0
         for li in list(self._layers):
             self._flush_seeds(li)
@@ -1648,11 +1677,14 @@ class DecodeFeeder:
 
     # memory pressure
 
-    def _target_slots(self, li: int) -> int:
-        if li in self._lent:
+    def _target_slots(self, li: int, lend: bool = True) -> int:
+        """Slots layer ``li`` should hold now; ``lend=False`` leaves out
+        any ring lend."""
+        if lend and li in self._lent:
             return 1
-        frac = (1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC) \
-            * self._lend_frac
+        frac = 1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC
+        if lend:
+            frac *= self._lend_frac
         if frac >= 1.0:
             return self._orig_slots[li]
         return max(1, int(self._orig_slots[li] * frac))

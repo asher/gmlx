@@ -149,7 +149,7 @@ gain of each setting on real models.
 | Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
 | Stack unmap | Releases the expert stacks' GPU mapping once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
 | Tail merge | Widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
-| Ring time-share | Lets the arena use the prefill ring's room while decoding. Each prefill empties the layers with the fewest hits, and they refill during the reply. | `GMLX_RING_TIMESHARE=0` |
+| Ring time-share | The arena uses the prefill ring's room while decoding, when it is at least twice the ring. Each prefill empties its coldest layers and the reply refills them. | `GMLX_RING_TIMESHARE=0` |
 
 On a short prompt, the prefill feeder reads only the experts that the
 router chose, which shortens the time to the first token. Its reads bypass
@@ -489,7 +489,7 @@ alternated A/B medians unless noted.
 | GPU keep-warm | GLM-5.2 UD-IQ3_XXS, arena 70 GB, miss-shed 0.85, lookahead off | 2.51 tok/s | 3.64 tok/s |
 | GPU keep-warm | Hy3 IQ4_XS, layer-shed 0.10 with miss-shed 0.90 | 4.01 tok/s | 5.29 tok/s |
 | Streamable lookup table | `qwen4exp` Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
-| Ring time-share | Muse Spark UD-IQ2_S, M5 Max 128 GB, 8-turn chat with the prompt cache, mean of the turns | 5.21 tok/s | 5.84 tok/s, same replies, about 0.2 s more per turn to rebuild the ring |
+| Ring time-share | Muse Spark UD-IQ2_S, M5 Max 128 GB, 8-turn chat with the prompt cache, mean of the turns | 5.21 tok/s | 5.84 tok/s, same replies, about 0.3 s more per turn to release and rebuild the ring |
 
 Lookahead prestage recall of the next layer's actual top-k is about
 78% on GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for

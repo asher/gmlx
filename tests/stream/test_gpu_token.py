@@ -118,7 +118,7 @@ def _autonomous_glu(monkeypatch, fake_df):
 
 
 class _FakeDF:
-    def repay_at(self, li):
+    def repay_at(self, li, ids):
         return False
 
     def ensure_wired(self):
@@ -152,8 +152,10 @@ class _FakeDF:
     def covers(self, li):
         return True
 
+    target = True
+
     def at_target(self, li):
-        return True
+        return self.target
 
     def wedged_at(self, li):
         return False
@@ -234,6 +236,21 @@ def test_wrapper_autonomous_all_resident_is_transparent(monkeypatch):
     assert df.swap_calls == [5]
     gt = glu._kq_gpu_token
     assert gt.layer_calls == 1 and gt.tokens == 0  # boundary not yet
+
+
+def test_wrapper_layer_owing_a_resize_takes_stage(monkeypatch):
+    """A layer below its target slot count, such as one a ring lend left
+    at one slot, resizes only in stage(). It takes the stage path until
+    it has, so its experts are not shed for want of slots."""
+    df = _FakeDF()
+    df.target = False
+    glu = _autonomous_glu(monkeypatch, df)
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.6, 0.4]]], dtype=mx.float32)
+    mx.eval(glu(x1, i1, sc))
+    assert [li for li, _ in df.stage_calls] == [5]
+    assert df._shed_n == 0
 
 
 def test_wrapper_autonomous_miss_sheds_and_prestages(monkeypatch):
