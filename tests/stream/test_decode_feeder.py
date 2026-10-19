@@ -1886,20 +1886,23 @@ def test_ring_share_repays_at_a_wide_call_on_the_first_layer(
     assert feeder.at_target(0) and feeder._slots[0] == 3
 
 
-def test_a_wide_first_decode_wires_the_arena(monkeypatch, tmp_path):
+@pytest.mark.parametrize("share", [0, 2])
+def test_a_wide_first_decode_wires_the_arena(monkeypatch, tmp_path, share):
     """Batched and speculative decode never send a one-token call. Their
-    first call at the first layer runs the one-time wiring, with no ring
-    lend to repay, even one routed past the layer's slots."""
-    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3)
+    first call at the first layer runs the one-time wiring and repays any
+    ring lend, even one routed past the layer's slots."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             ring_share=share * per_expert)
     released = []
     feeder._release_ring = lambda: released.append(1) or True
     fits, wide = np.array([[0, 1], [2, 1]]), np.array([[0, 1], [2, 3]])
-    assert feeder._mlock_deferred and not feeder._ring_share
+    assert feeder._mlock_deferred and bool(feeder._lent) == bool(share)
     assert not feeder.repay_at(1, fits)
     assert feeder.repay_at(0, wide, ring_ok=True)
     feeder.ensure_wired()
     assert not feeder._mlock_deferred and released == [1]
-    assert set(feeder._locked) == set(feeder._arena)
+    assert not feeder._lent and set(feeder._locked) == set(feeder._arena)
     assert not feeder.repay_at(0, fits)
 
 
