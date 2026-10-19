@@ -162,6 +162,7 @@ nav:
       - internals/prompt-cache.md
       - internals/adding-architectures.md
       - internals/testing.md
+      - internals/ci.md
       - internals/upstream-upgrades.md
       - upstream-defects.md
       - internals/streaming-measurements.md

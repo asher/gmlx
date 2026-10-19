@@ -1,13 +1,17 @@
 # Testing
 
 The test suite has three tiers, ordered by what they need to run. Use the
-interpreter that has gmlx and mlx-kquant installed for all of them.
+interpreter that has gmlx and mlx-kquant installed for all of them, with the
+test plugins from `pip install --group test`.
 
 | Tier | Needs | Command |
 |------|-------|---------|
-| CPU logic | It needs nothing beyond Python. | `pytest` |
+| CPU logic | It needs nothing beyond Python. | `pytest -n 8` |
 | GGUF-gated integration | It needs real GGUFs on disk. | `KQUANT_TEST_GGUF_DIR=<dir> pytest` |
 | Server end-to-end | It needs GGUFs and the GPU. | Run the harnesses under `tests/e2e/`. |
+
+A pull request also needs a GPU gate run on a Mac, which
+[CI and the GPU gate](ci.md) explains.
 
 ## CPU logic tests
 
@@ -18,9 +22,20 @@ server patches and the chat client. The doc tests under
 `tests/test_docs_*.py` belong to this tier as well.
 
 ```sh
-pytest                       # whole suite, GGUF-gated tests skip
+pytest -n 8                  # whole suite on 8 workers, GGUF-gated tests skip
 pytest tests/test_config.py  # one module
 ```
+
+While you work, run only the tests your change can break:
+
+```sh
+python scripts/affected_tests.py --run        # changes since main, committed or not
+python scripts/affected_tests.py              # list them instead
+```
+
+It picks the tests that ran the changed code in the last full gate run,
+plus the tests that import it. A changed test file, conftest or doc picks
+its own tests.
 
 Set `KQUANT_FORCE_CPU=1` on a machine with no usable Metal GPU to keep the
 few tests that use array ops off the GPU path.
@@ -62,8 +77,9 @@ as the governor rig does, needs no machine at all.
 To run the suite as CI does, in a fresh venv:
 
 ```sh
-pip install -U -e ".[all]" pytest httpx pytest-xdist
-KQUANT_FORCE_CPU=1 pytest -n auto
+pip install --upgrade pip    # --group needs pip 25.1 or newer
+pip install -U -e ".[all]" && pip install --group test
+KQUANT_FORCE_CPU=1 pytest -n auto -m "not nightly"
 ```
 
 A test on model files from this Mac never runs in CI, so it sees this Mac,

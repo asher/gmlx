@@ -13,15 +13,16 @@ default test tier. gmlx carries mlx-vlm and mlx-lm in `gmlx/_vendor`, and
 [Upstream releases](docs/internals/upstream-upgrades.md) explains how that
 copy takes upstream changes and how the mlx version is held.
 
-Dev setup is a venv, a clone and an editable install with the `chat` and
-`assistant` extras. Without `assistant`, the MCP tool-server tests skip
-themselves. CI adds `vlm` as well, an empty extra kept for older install
-commands. These commands create the dev setup:
+Dev setup is a venv, a clone, an editable install with the `chat` and
+`assistant` extras, and the `test` group of pinned test plugins. Without
+`assistant`, the MCP tool-server tests skip themselves. CI installs the
+`all` extra. These commands create the dev setup:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
-git clone https://github.com/asher/gmlx
-pip install -e "./gmlx[chat,assistant]" pytest ruff
+git clone https://github.com/asher/gmlx && cd gmlx
+pip install --upgrade pip    # --group needs pip 25.1 or newer
+pip install -e ".[chat,assistant]" ruff && pip install --group test
 ```
 
 ## Rust toolchain for the guest entry
@@ -58,12 +59,23 @@ There are three tiers, described in full in
 [Testing](docs/internals/testing.md):
 
 ```sh
-pytest                                   # CPU logic tests, no models, runs anywhere
+pytest -n 8                              # CPU logic tests, no models, runs anywhere
+python scripts/affected_tests.py --run   # only the tests your change can break
 KQUANT_TEST_GGUF_DIR=~/llm/gguf pytest   # adds numerical parity against real GGUFs, and -m integration runs only those
 python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the GPU
 ```
 
-A PR should keep the default `pytest` tier passing. If your change
+A PR needs the CI test legs and the `gate/gpu` status, a GPU run on a Mac
+that you push with the branch:
+
+```sh
+python scripts/gate.py setup   # once per clone
+python scripts/gate.py run     # after you commit
+git push                       # a plain push carries the result
+```
+
+[CI and the GPU gate](docs/internals/ci.md) explains the gate and what CI
+runs. If your change
 touches loading or numerics, say which integration tests you ran and on
 which model. A new architecture has its own acceptance gate and required
 tests, in
