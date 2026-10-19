@@ -19,6 +19,7 @@ import os
 COARSE = (400, 100000)
 FINE = (50, 50)  # mlx 0.31.2 device defaults, read back via get_cb_caps
 
+_FLAG = "_gmlx_cb_phase"
 _state: dict = {"phase": None, "kq": None}
 
 
@@ -55,8 +56,9 @@ def install_cb_phase_flips() -> bool:
     if not _kq():
         return False
     from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.upstream.patching import link, wrapped_with
 
-    if getattr(ar.GenerationBatch._step, "_gmlx_cb_phase", False):
+    if wrapped_with(ar.GenerationBatch._step, _FLAG):
         return True
 
     def _wrap(cls, name, phase):
@@ -66,9 +68,8 @@ def install_cb_phase_flips() -> bool:
             flip(phase)
             return orig(self, *args, **kwargs)
 
-        setattr(wrapped, "_gmlx_cb_phase", True)
         wrapped.__name__ = orig.__name__
-        setattr(cls, name, wrapped)
+        setattr(cls, name, link(wrapped, orig, _FLAG))
 
     _wrap(ar.GenerationBatch, "_step", "decode")
     _wrap(ar.SpeculativeGenerationBatch, "next", "decode")
@@ -114,6 +115,8 @@ def install_cb_phase_steps(streaming: bool = False) -> bool:
         return False
     import importlib
 
+    from gmlx.upstream.patching import wrapped_with
+
     targets = [("gmlx._vendor.mlx_lm.generate", "generate_step"),
                ("gmlx._vendor.mlx_lm.generate", "speculative_generate_step"),
                ("gmlx._vendor.mlx_vlm.generate.ar", "generate_step"),
@@ -124,13 +127,13 @@ def install_cb_phase_steps(streaming: bool = False) -> bool:
         except ImportError:
             continue
         orig = getattr(mod, name, None)
-        if orig is None or getattr(orig, "_gmlx_cb_phase", False):
+        if orig is None or wrapped_with(orig, _FLAG):
             continue
 
         def wrapped(*args, _orig=orig, **kwargs):
             return phased_steps(_orig(*args, **kwargs))
 
-        setattr(wrapped, "_gmlx_cb_phase", True)
+        setattr(wrapped, _FLAG, True)
         wrapped.__name__ = orig.__name__
         wrapped.__doc__ = orig.__doc__
         setattr(wrapped, "__wrapped__", orig)
