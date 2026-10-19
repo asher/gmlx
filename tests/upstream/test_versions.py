@@ -36,7 +36,7 @@ def test_mlx_below_the_floor_raises(monkeypatch):
 
 @pytest.mark.parametrize("route, hint", [
     ("pip", "upgrade mlx-kquant, which brings the mlx it pins "
-            "(pip install -U 'mlx-kquant>=0.5.1,<0.6'), or reinstall gmlx "
+            "(pip install -U 'mlx-kquant>=0.5.2,<0.6'), or reinstall gmlx "
             "into a fresh venv"),
     ("homebrew", "reinstall gmlx to upgrade it "
                  "(brew reinstall asher/gmlx/gmlx)"),
