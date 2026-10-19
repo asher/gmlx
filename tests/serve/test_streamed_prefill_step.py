@@ -35,17 +35,35 @@ def _no_env_step(monkeypatch):
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
 
 
-def test_streamed_model_takes_the_streamed_step(monkeypatch):
+def test_model_load_adopts_the_streamed_step(monkeypatch):
     rg = _generator(monkeypatch)
     assert rg.prefill_step_size == gen.DEFAULT_PREFILL_STEP_SIZE
-    rg._adopt_streamed_prefill_step(_vlm(streamed=True))
+    vlm = _vlm(streamed=True)
+    monkeypatch.setattr(gen, "load_model_resources", lambda path, adapter: (
+        vlm, SimpleNamespace(tokenizer=SimpleNamespace()),
+        SimpleNamespace(eos_token_id=None)))
+    monkeypatch.setattr(gen, "resolve_eos_token_ids", lambda *a, **k: [])
+    monkeypatch.delenv("MLX_VLM_DRAFT_MODEL", raising=False)
+    rg._initialize_model()
     assert rg.prefill_step_size == _STREAMING_PREFILL_STEP
     assert rg._effective_prefill_step_size() == _STREAMING_PREFILL_STEP
+    # an arch profile's step replaces it, as it replaces the stock one
+    assert vlm.language_model._gmlx_adopted_prefill_step == \
+        _STREAMING_PREFILL_STEP
 
 
 def test_resident_model_keeps_the_default_step(monkeypatch):
     rg = _generator(monkeypatch)
     rg._adopt_streamed_prefill_step(_vlm(streamed=False))
+    assert rg.prefill_step_size == gen.DEFAULT_PREFILL_STEP_SIZE
+
+
+def test_a_resident_cpu_expert_codec_keeps_the_default_step(monkeypatch):
+    # Its experts run on the CPU from RAM, marked like streamed ones.
+    rg = _generator(monkeypatch)
+    vlm = _vlm(streamed=True)
+    vlm.language_model._kq_streaming = False
+    rg._adopt_streamed_prefill_step(vlm)
     assert rg.prefill_step_size == gen.DEFAULT_PREFILL_STEP_SIZE
 
 

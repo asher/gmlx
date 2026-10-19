@@ -71,6 +71,10 @@ def test_inert_on_a_streamed_model(monkeypatch):
         modules=lambda: [SimpleNamespace(_kq_cpu_only=True)])]
     assert pd.decayed_for_batch(streamed) == 8192
     assert pd.decayed_for_batch(_batch(8192, 0)) == 256
+    # A resident CPU-only expert codec marks its modules the same way, and
+    # its chunk costs in proportion to its width.
+    streamed.model._kq_streaming = False
+    assert pd.decayed_for_batch(streamed) == 256
 
 
 def test_tier_math_against_budget(monkeypatch):

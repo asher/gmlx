@@ -1519,7 +1519,7 @@
   "mlx_vlm/server/audio.py": {"sha256": "2b02bc59073b3b231e18d9f3ee3374353cf555e961f04958b73cd2f1ab618bc7", "status": "codemod", "upstream": "53cef68307be67cb850d39465012cea9d7003c10b5408116fca37f9cd6b895b6"},
   "mlx_vlm/server/cli.py": {"sha256": "7cd75c552d891bd7dfddb4731aab55a8d638a70686f162abcf274c6c2bfa910e", "status": "codemod", "upstream": "15d49f41caea3acba6238e4ac8e0839279f4d0a0c9c620ac56370aab1262b597"},
   "mlx_vlm/server/embeddings.py": {"status": "verbatim", "upstream": "a2af958265cae9cb2c82348baf38422a0d242909010dc8876980d591e7444875"},
-  "mlx_vlm/server/generation.py": {"sha256": "027683db1c67d9adb2478536efdd1df034f7a0850d4a74e2b73a51c0c894f25f", "status": "edited", "upstream": "6c0b663d7adafbc686c6049649953fd78bea1572d2a6280532fc063dda511b77"},
+  "mlx_vlm/server/generation.py": {"sha256": "8d3e0ec60d37bcc3bbc4b0ef358c36c7fb21d7a627c1d57391b53f2cde8c13c0", "status": "edited", "upstream": "6c0b663d7adafbc686c6049649953fd78bea1572d2a6280532fc063dda511b77"},
   "mlx_vlm/server/model_discovery.py": {"status": "verbatim", "upstream": "0d6fb031c579b7a1b4c63adb94f926e5913bd588234271942f52e4b9e21e72d2"},
   "mlx_vlm/server/openai.py": {"sha256": "00a590ad84b2cdaaa7bf058a633117b1fc004c3b1b6e61b1336868f26c2a181a", "status": "codemod", "upstream": "fd5dafaba30c5779390657110aa16c1fa2409335853d58bf4ceec1fa701fe6c7"},
   "mlx_vlm/server/realtime.py": {"sha256": "942671328088936df3145eb72ba7e6650d0171c22ca17321d79ad113cd0482b9", "status": "codemod", "upstream": "815998c835bd348649779ce480152c48cf8ff770ca53503f1a1c31649668b416"},

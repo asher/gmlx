@@ -1150,12 +1150,22 @@ class ResponseGenerator:
         step was set."""
         if getattr(self, "_prefill_step_pinned", True):
             return
-        from gmlx.stream.expert_streaming import _resolve_prefill_step
+        from gmlx.stream.expert_streaming import (
+            _resolve_prefill_step,
+            experts_streamed,
+        )
 
-        step, defaulted = _resolve_prefill_step(
-            getattr(model, "language_model", model), None)
+        language_model = getattr(model, "language_model", model)
+        if not experts_streamed(model):
+            return
+        step, defaulted = _resolve_prefill_step(language_model, None)
         if defaulted and step:
             self.prefill_step_size = int(step)
+            # A default an arch profile's step replaces, as it replaces
+            # the stock one (gmlx.gen.prefill_decay).
+            for m in {id(model): model, id(language_model): language_model
+                      }.values():
+                setattr(m, "_gmlx_adopted_prefill_step", int(step))
             logger.info(
                 "streamed model: prefill chunk defaults to %d tokens "
                 "(prefill_step_size sets it)", step)

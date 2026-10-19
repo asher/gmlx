@@ -1251,7 +1251,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "`server.family_defaults: false`, which a config "
                          "reload restores).")
     ap.add_argument("--prefill-step-size", type=int, default=None, metavar="N",
-                    help="Prefill chunk size in tokens (default 2048) - lower "
+                    help="Prefill chunk size in tokens (default 2048, 8192 for a streamed model) - lower "
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")

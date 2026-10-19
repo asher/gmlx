@@ -394,7 +394,8 @@ def project_admission(gen, candidates):
     kv_new = max(0.0, kv_total - live_bytes)
     transient = score_transient_bytes(
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
-        max(cand_tokens), prefill_rows=len(cand_tokens))
+        max(cand_tokens), prefill_rows=len(cand_tokens),
+        base_step=getattr(gen, "prefill_step_size", None))
     try:
         ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:

@@ -64,8 +64,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
 - With `--stream-experts`, decoding is faster: between prefills the expert
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
-- `gmlx serve --stream-experts` prefills in 8192-token chunks, as `gmlx run`
-  does, so a long prompt reaches its first token sooner.
+- `gmlx serve --stream-experts` prefills in 8192-token chunks, so a long
+  prompt reaches its first token sooner.
 - `gmlx pull` of an image model reuses a VAE GGUF on disk packed for its
   family from another source, and names it, where it downloaded the VAE again.
 - `presence_penalty` and `frequency_penalty` count every generated token, as

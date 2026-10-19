@@ -1443,6 +1443,18 @@ def install_expert_streaming(
     return n_wrapped, offloaded
 
 
+def experts_streamed(model) -> bool:
+    """True when the install streams this model's experts from the drive.
+    Reads the install's verdict, since a CPU-only expert codec marks its
+    modules the way streaming does."""
+    language_model = getattr(model, "language_model", model)
+    for m in (model, language_model):
+        flag = getattr(m, "_kq_streaming", None)
+        if flag is not None:
+            return bool(flag)
+    return moe_streaming_active(language_model)
+
+
 def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, bool]:
     """Pick the prefill chunk width: an explicit request always wins; a
     streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``, or to its

@@ -775,7 +775,8 @@ _headroom_bytes = headroom_bytes
 
 
 def score_transient_bytes(model, prompt_cache, depth: int,
-                          prefill_rows: int | None = None) -> float:
+                          prefill_rows: int | None = None,
+                          base_step: int | None = None) -> float:
     """Projected peak prefill score transient for a request at ``depth``,
     evaluated at the chunk step the decay policy would actually choose
     there. Uses the arch's ScoreTransientProfile when one arms (resolved
@@ -789,24 +790,47 @@ def score_transient_bytes(model, prompt_cache, depth: int,
         # profile, whose cut chunks can outgrow the dense price.
         from gmlx.cache.kv_cache import KVCache
 
-        dense = _transient_price(None, depth, heads)
+        dense = _transient_price(
+            None, depth, heads, _run_base(model, None, base_step))
         probe = resolve_score_profile(model, [KVCache()])
         if probe is None or not probe.fused_min_step:
             return dense
         probe = probe._replace(fused_mask_bytes=int(prefill_rows or 1) + 1)
-        return max(dense, _transient_price(probe, depth, heads))
+        return max(dense, _transient_price(
+            probe, depth, heads, _run_base(model, probe, base_step)))
     profile = resolve_score_profile(model, prompt_cache)
     if profile is not None and profile.fused_min_step and prefill_rows:
         profile = profile._replace(fused_mask_bytes=int(prefill_rows) + 1)
-    return _transient_price(profile, depth, heads)
+    return _transient_price(
+        profile, depth, heads, _run_base(model, profile, base_step))
+
+
+def _default_base(model, base) -> bool:
+    """True when ``base`` is a default an arch profile's step replaces: the
+    stock step, or the streamed step serve adopted for ``model``, with no
+    PREFILL_STEP_SIZE set."""
+    if "PREFILL_STEP_SIZE" in os.environ:
+        return False
+    return base in (_STOCK_BASE,
+                    getattr(model, "_gmlx_adopted_prefill_step", None))
+
+
+def _run_base(model, profile, base: int | None) -> int:
+    """The base step a prefill of ``model`` runs from: ``base`` (the
+    generator's step) when given, else PREFILL_STEP_SIZE, the adopted
+    streamed step or the stock one; then the arch profile's step over a
+    default."""
+    step = int(base or env_int("PREFILL_STEP_SIZE", 0)
+               or getattr(model, "_gmlx_adopted_prefill_step", None)
+               or _STOCK_BASE)
+    if (profile is not None and profile.base_step
+            and _default_base(model, step)):
+        step = int(profile.base_step)
+    return step
 
 
 def _transient_price(profile: ScoreTransientProfile | None, depth: int,
-                     heads: int) -> float:
-    base = _STOCK_BASE
-    if (profile is not None and profile.base_step
-            and "PREFILL_STEP_SIZE" not in os.environ):
-        base = int(profile.base_step)
+                     heads: int, base: int) -> float:
     step = decayed_step(base, depth, heads, profile=profile)
     if profile is not None:
         h, bpe, div = (profile.heads, profile.bytes_per_elem,
@@ -930,16 +954,13 @@ def decayed_for_batch(batch) -> int | None:
     if not base or not _enabled():
         return base
     profile = resolve_score_profile(batch.model, batch.prompt_cache)
-    if (profile is not None and profile.base_step
-            and base == _STOCK_BASE
-            and "PREFILL_STEP_SIZE" not in os.environ):
-        base = int(profile.base_step)
+    base = _run_base(batch.model, profile, base)
     depth = kv_depth(batch.prompt_cache)
     step = decayed_step(base, depth, score_heads(batch.model),
                         profile=profile)
-    from gmlx.stream.expert_streaming import moe_streaming_active
+    from gmlx.stream.expert_streaming import experts_streamed
 
-    streamed = moe_streaming_active(batch.model)
+    streamed = experts_streamed(batch.model)
     # A streamed chunk reads every expert once at any width, so a narrower
     # chunk stalls decode as long and adds passes.
     tick = None if streamed else _tick_step(base)

@@ -624,7 +624,7 @@ also has a [`gmlx serve` flag](cli.md#gmlx-serve).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| <a id="serverprefill_step_size"></a>`prefill_step_size` | `2048`, `8192` when streaming | Prompt chunk size in tokens. A lower value lowers a long prompt's memory peak and slows prefill. |
+| <a id="serverprefill_step_size"></a>`prefill_step_size` | `2048`, `8192` when streaming, `4096` for HY4 when streaming | Prompt chunk size in tokens. A lower value lowers a long prompt's memory peak and slows prefill. |
 | <a id="serverdtype"></a>`dtype` | `auto` | Type of activations, unquantized weights and KV cache: `bfloat16`, `float16`, or `auto` (`float16` on M1 and M2) |
 | <a id="serverdecode_prefill_ratio"></a>`decode_prefill_ratio` | `auto` | How a new prompt's prefill shares the GPU with generating requests. `auto` keeps generation above half its speed. |
 | <a id="serverprefill_tick_ms"></a>`prefill_tick_ms` | `500` | Longest prefill chunk, in ms, while other requests generate. A longer chunk is halved, except on a streamed model. `0` turns off the halving. |

@@ -245,10 +245,10 @@ def test_qwen35_arms_for_its_language_model_only(model_type):
 @pytest.mark.parametrize("depth", [0, 10_240, 131_072])
 def test_muse_spark_keeps_the_streamed_chunk_whole(depth):
     import gmlx.models.muse_spark  # noqa: F401
-    from gmlx.models.muse_spark.vlm_model import ModelConfig
+    from gmlx.models.muse_spark.vlm_model import TextConfig
 
-    # Serve runs the VLM wrapper; the dense model would price 128 heads.
-    target = SimpleNamespace(config=ModelConfig())
+    # Serve's batch runs the text tower; dense pricing would take 128 heads.
+    target = SimpleNamespace(config=TextConfig())
     caches = [kc.RotatingKVCache(max_size=2048), kc.KVCache()]
     for c in caches:
         c.offset = depth

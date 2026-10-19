@@ -121,6 +121,24 @@ def test_decayed_for_batch(monkeypatch):
     assert pd.decayed_for_batch(_batch(None, 100_000)) is None
 
 
+def test_admission_prices_the_step_the_server_runs(monkeypatch):
+    _cap(monkeypatch, 100.0)
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    m = SimpleNamespace(config=SimpleNamespace(
+        model_type="dense_x", num_attention_heads=HEADS))
+    cache = [SimpleNamespace(offset=0)]
+    assert pd.score_transient_bytes(m, cache, 1000) == _transient(2048, 1000)
+    # a streamed serve adopted the wider chunk
+    m._gmlx_adopted_prefill_step = 8192
+    assert pd.score_transient_bytes(m, cache, 1000) == _transient(8192, 1000)
+    # the generator's own step, when the caller has it
+    assert pd.score_transient_bytes(
+        m, cache, 1000, base_step=4096) == _transient(4096, 1000)
+    del m._gmlx_adopted_prefill_step
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "4096")
+    assert pd.score_transient_bytes(m, cache, 1000) == _transient(4096, 1000)
+
+
 def test_kill_switch(monkeypatch):
     _cap(monkeypatch, 1.0)
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
