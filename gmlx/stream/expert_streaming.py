@@ -687,8 +687,8 @@ def install_expert_streaming(
                                     and fdr.covers(self._kq_li)
                                     and n_tokens
                                     >= _STREAM_PREFETCH_MIN_TOKENS)):
-                            # A wider call repays a ring lend at the
-                            # forward's first layer.
+                            # A wider call wires the arena or repays a
+                            # ring lend at the forward's first layer.
                             dfr.ensure_wired()
                         routed_ids = ids
                         shed_args = None

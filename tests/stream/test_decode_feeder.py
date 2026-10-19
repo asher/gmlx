@@ -1798,6 +1798,7 @@ def test_ring_share_lends_cold_layers_whole_at_each_prefill(
     feeder.lend_for_ring(3 * per_expert)
     assert feeder._lent == {1} and feeder._slots == {0: 4, 1: 1}
     assert feeder.arena_bytes == 5 * per_expert
+    assert feeder._arena_bytes_at(0) == 5 * per_expert  # pressure sizes
     s = int(feeder._slot_of[1][0])
     assert s == 0 and (feeder._slot_of[1] >= 0).sum() == 1
     for kind in _KINDS:
@@ -1869,6 +1870,10 @@ def test_ring_share_repays_at_a_wide_call_on_the_first_layer(
     assert feeder._lent == {0}
     assert not feeder.can_stage_smaller(0) and feeder.can_stage_smaller(1)
     fits, wide = np.array([[0, 1], [2, 1]]), np.array([[0, 1], [2, 3]])
+    feeder.ensure_wired()  # first decode
+    feeder._kernel_has_room = lambda n: True
+    feeder.lend_for_ring(2 * per_expert)  # the next prefill
+    assert feeder._lent == {0}
     assert feeder.repay_at(0, fits, ring_ok=True)
     assert not feeder.repay_at(1, fits, ring_ok=True)
     assert not feeder.repay_at(0, wide, ring_ok=True)
@@ -1879,6 +1884,49 @@ def test_ring_share_repays_at_a_wide_call_on_the_first_layer(
     assert feeder.can_stage_smaller(0)
     feeder.stage(0, np.array([0, 1]))
     assert feeder.at_target(0) and feeder._slots[0] == 3
+
+
+def test_a_wide_first_decode_wires_the_arena(monkeypatch, tmp_path):
+    """Batched and speculative decode never send a one-token call. Their
+    first call at the first layer runs the one-time wiring, with no ring
+    lend to repay, even one routed past the layer's slots."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3)
+    released = []
+    feeder._release_ring = lambda: released.append(1) or True
+    fits, wide = np.array([[0, 1], [2, 1]]), np.array([[0, 1], [2, 3]])
+    assert feeder._mlock_deferred and not feeder._ring_share
+    assert not feeder.repay_at(1, fits)
+    assert feeder.repay_at(0, wide, ring_ok=True)
+    feeder.ensure_wired()
+    assert not feeder._mlock_deferred and released == [1]
+    assert set(feeder._locked) == set(feeder._arena)
+    assert not feeder.repay_at(0, fits)
+
+
+def test_regrow_after_a_quarantined_ring_asks_for_its_step(
+        monkeypatch, tmp_path):
+    """After a quarantined ring every layer holds a share less. A
+    pressure regrow asks only for the bytes its step adds at that size."""
+    import gmlx.stream.budget as budget
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    feeder._release_ring = lambda: False
+    feeder.ensure_wired()
+    for li in (0, 1):
+        feeder.stage(li, np.array([0, 1]))
+    assert feeder.arena_bytes == 4 * per_expert
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    feeder.governor_evict(1 / 3)
+    assert feeder._pressure_steps == 1
+    assert feeder.arena_bytes == 2 * per_expert
+    monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 0)
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes",
+                        lambda: 2 * per_expert)
+    monkeypatch.setattr(feeder, "_governor_room_ok", lambda need: True)
+    assert feeder._regrow_headroom_ok()
 
 
 def test_ring_back_before_a_refill_lends_the_same_layers(
@@ -1933,6 +1981,7 @@ def test_ring_back_in_a_wide_forward_holds_the_lend(monkeypatch, tmp_path):
             return False
         feeder.ensure_wired()
         if overflows:  # a later layer takes the ring
+            feeder.forward_start(2)
             feeder.lend_for_ring(2 * per_expert)
         return True
 

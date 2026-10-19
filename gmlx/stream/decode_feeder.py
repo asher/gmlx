@@ -775,11 +775,13 @@ class DecodeFeeder:
 
     def repay_at(self, li: int, ids: np.ndarray,
                  ring_ok: bool = False) -> bool:
-        """Whether a multi-token call routed to ``ids`` at ``li`` repays a
-        ring lend (see ensure_wired). Only at a forward's first covered
-        layer: a call the arena serves there is a decode step (batched or
-        speculative) or a short prompt, and a later layer of a ring pass
-        must not drop the ring under the layers after it.
+        """Whether a multi-token call routed to ``ids`` at ``li`` runs
+        ensure_wired: the first decode's wiring, or the repay of a ring
+        lend. Only at a forward's first covered layer: a call the arena
+        serves there is a decode step (batched or speculative) or a short
+        prompt, and a later layer of a ring pass must not drop the ring
+        under the layers after it. Batched and speculative decode never
+        send a one-token call, so without this they would never wire.
 
         ``ring_ok``: the call is wide enough to take a live ring. It keeps
         the lend when its experts overflow this layer once repaid, as it
@@ -787,6 +789,8 @@ class DecodeFeeder:
         rebuild lasts. The caller has called forward_start."""
         if not self._layers or li != min(self._layers):
             return False
+        if self._mlock_deferred:
+            return True  # the first decode wires, at any width
         if not self._owes_lend():
             return False
         if not ring_ok:
@@ -1742,9 +1746,13 @@ class DecodeFeeder:
         return max(1, int(self._orig_slots[li] * frac))
 
     def _arena_bytes_at(self, steps: int) -> int:
-        frac = max(0.0, 1.0 - steps * _PRESSURE_STEP_FRAC)
+        """Arena bytes at ``steps`` pressure steps, with the ring lend now
+        in force: the targets _target_slots gives at that step."""
+        frac = max(0.0, 1.0 - steps * _PRESSURE_STEP_FRAC) * self._lend_frac
         return sum(
-            max(1, int(self._orig_slots[li] * frac)) * self._per_expert[li]
+            (1 if li in self._lent
+             else max(1, int(self._orig_slots[li] * frac)))
+            * self._per_expert[li]
             for li in self._layers
         )
 
