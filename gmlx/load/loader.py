@@ -384,13 +384,16 @@ def _kq_expert_gpu_ok(module) -> bool:
 # phase, per decode token, dumped at exit. Buckets: ev = the router eval
 # (GPU segment for the previous layer's gather plus this layer's every-token
 # work, plus the host sync); la = lookahead router replica; stage_wait =
-# demand-read join inside stage(); stage_book = stage() minus the join;
+# demand-read join inside stage(); stage_settle = the prestage join at
+# the top of stage(); stage_book = stage() minus both joins;
 # prestage = speculative-read submission; build = gather graph build + slot
 # upload. resid = per-token wall (first-MoE-layer to first-MoE-layer) minus
 # the buckets: head matmul eval, sampling, detokenize, serve-loop glue.
 # First token after any non-decode call is skipped (prefill contamination);
 # its buckets still land in the sums, a <=1/N skew.
-_PHASE_KEYS = ("ev", "la", "stage_wait", "stage_book", "prestage", "build")
+_PHASE_KEYS = (
+    "ev", "la", "stage_wait", "stage_settle", "stage_book", "prestage",
+    "build")
 _PHASE: dict[str, Any] | None = (
     {k: 0.0 for k in _PHASE_KEYS}
     | {"tokens": 0, "wall": 0.0, "last": None, "first_li": None, "dirty": True}
@@ -460,14 +463,16 @@ def _phase_dump():
         )
     by_li = ph.get("by_li")
     if by_li and env_bool("GMLX_DECODE_PHASE_LAYERS", False):
-        print("[phase] per layer ms/token: li ev la stage_wait stage_book")
+        print("[phase] per layer ms/token: li ev la stage_wait "
+              "stage_settle stage_book")
         for li in sorted(by_li):
             d = by_li[li]
             print(
                 f"[phase]   {li:3d} "
                 + " ".join(
                     f"{1e3 * d.get(k, 0.0) / n:6.2f}"
-                    for k in ("ev", "la", "stage_wait", "stage_book")
+                    for k in ("ev", "la", "stage_wait", "stage_settle",
+                              "stage_book")
                 ),
                 flush=True,
             )

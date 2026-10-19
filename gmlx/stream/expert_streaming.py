@@ -677,6 +677,7 @@ def install_expert_streaming(
                             ph["ev"] += t1 - t0
                             _ph_li(ph, self._kq_li, "ev", t1 - t0)
                             wait0 = getattr(dfr, "_t_demand", 0.0)
+                            settle0 = getattr(dfr, "_t_settle", 0.0)
                             ph.setdefault("miss_hist", []).append(
                                 (self._kq_li, dfr._lookups - dfr._hits))
                         ids, indices = _valid_expert_ids(self, indices)
@@ -727,11 +728,14 @@ def install_expert_streaming(
                         if ph is not None:
                             t2 = time.perf_counter()
                             w = getattr(dfr, "_t_demand", 0.0) - wait0
+                            st = getattr(dfr, "_t_settle", 0.0) - settle0
+                            book = (t2 - t1) - w - st
                             ph["stage_wait"] += w
-                            ph["stage_book"] += (t2 - t1) - w
+                            ph["stage_settle"] += st
+                            ph["stage_book"] += book
                             _ph_li(ph, self._kq_li, "stage_wait", w)
-                            _ph_li(ph, self._kq_li, "stage_book",
-                                   (t2 - t1) - w)
+                            _ph_li(ph, self._kq_li, "stage_settle", st)
+                            _ph_li(ph, self._kq_li, "stage_book", book)
                         if la_pred:
                             # This layer's demand misses have joined
                             # (stage returned); the predicted layers'
