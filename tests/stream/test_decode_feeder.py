@@ -462,7 +462,7 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.eval(ref)
 
         class _FakeDF:
-            def repay_at(self, li, ids):
+            def repay_at(self, li, ids, ring_ok=False):
                 return False
 
             def ensure_wired(self):
@@ -547,7 +547,7 @@ def test_arena_call_lifts_cpu_pin(monkeypatch):
         pin_in_swap = []
 
         class _DF:
-            def repay_at(self, li, ids):
+            def repay_at(self, li, ids, ring_ok=False):
                 return False
 
             def ensure_wired(self):
@@ -795,7 +795,7 @@ def test_split_pieces_execute_before_next_stage(monkeypatch):
         events = []
 
         class _SplitDF:
-            def repay_at(self, li, ids):
+            def repay_at(self, li, ids, ring_ok=False):
                 return False
 
             def ensure_wired(self):
@@ -868,7 +868,7 @@ def test_wrapper_redirects_dead_ids_on_fallback(monkeypatch):
         mx.eval(ref)
 
         class _WedgedDF:
-            def repay_at(self, li, ids):
+            def repay_at(self, li, ids, ring_ok=False):
                 return False
 
             def ensure_wired(self):
@@ -1436,7 +1436,7 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
     install_expert_streaming(model)
 
     class _FakeDF:
-        def repay_at(self, li, ids):
+        def repay_at(self, li, ids, ring_ok=False):
             return False
 
         def ensure_wired(self):
@@ -1854,8 +1854,11 @@ def test_ring_share_repays_at_a_wide_call_on_the_first_layer(
     assert feeder._lent == {0}
     assert not feeder.can_stage_smaller(0) and feeder.can_stage_smaller(1)
     fits, wide = np.array([[0, 1], [2, 1]]), np.array([[0, 1], [2, 3]])
-    assert feeder.repay_at(0, fits) and not feeder.repay_at(1, fits)
-    assert not feeder.repay_at(0, wide)
+    assert feeder.repay_at(0, fits, ring_ok=True)
+    assert not feeder.repay_at(1, fits, ring_ok=True)
+    assert not feeder.repay_at(0, wide, ring_ok=True)
+    # Too narrow for the ring: it falls back off the arena either way.
+    assert feeder.repay_at(0, wide)
     feeder.ensure_wired()
     assert not feeder._lent and not feeder.repay_at(0, fits)
     assert feeder.can_stage_smaller(0)
@@ -1884,6 +1887,61 @@ def test_ring_back_before_a_refill_lends_the_same_layers(
         feeder.lend_for_ring(2 * per_expert)  # the next prefill
         assert feeder._lent == lent
         assert feeder.arena_bytes == feeder.nominal_bytes - 2 * per_expert
+
+
+def test_ring_back_in_a_wide_forward_holds_the_lend(monkeypatch, tmp_path):
+    """A wide call fits the first layer and repays, then a later layer
+    overflows and takes the ring. The next 16 such forwards keep the lend
+    rather than release and rebuild the ring every step. A prefill after
+    a one-token call starts no hold."""
+    import gmlx.stream.decode_feeder as dfm
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             n_layers=3, ring_share=2 * per_expert)
+    released = []
+    feeder._release_ring = lambda: released.append(1) or True
+    feeder._kernel_has_room = lambda n: True
+    feeder.ensure_wired()  # first decode
+    feeder.lend_for_ring(2 * per_expert)  # a prefill
+    fits = np.array([[0], [1]])
+
+    def forward(overflows):
+        if not feeder.repay_at(0, fits, ring_ok=True):
+            return False
+        feeder.ensure_wired()
+        if overflows:  # a later layer takes the ring
+            feeder.lend_for_ring(2 * per_expert)
+        return True
+
+    hold = dfm._HOLD_FORWARDS
+    repaid = [forward(True) for _ in range(2 * hold + 2)]
+    assert repaid == ([True] + [False] * hold) * 2
+    assert len(released) == 3
+    assert forward(False)  # this forward fits every layer
+    feeder.ensure_wired()  # a one-token forward
+    feeder.lend_for_ring(2 * per_expert)  # the next prefill
+    assert forward(True)  # starts a hold
+    feeder.ensure_wired()  # a one-token call repays
+    feeder.lend_for_ring(2 * per_expert)
+    assert forward(False)
+
+
+def test_a_call_the_layer_cannot_hold_does_not_regrow_it(
+        monkeypatch, tmp_path):
+    """A repaid layer regrows at its next stage() call, unless the call
+    routes to more experts than the grown layer holds: it is refused
+    either way, and the next lend would shrink the layer again."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             ring_share=2 * per_expert)
+    feeder._release_ring = lambda: True
+    assert feeder._lent == {0}
+    feeder.ensure_wired()
+    assert feeder.stage(0, np.array([0, 1, 2, 3])) is None
+    assert feeder._slots[0] == 1
+    assert feeder.stage(0, np.array([0, 1])) is not None
+    assert feeder._slots[0] == 3
 
 
 def test_ring_share_lend_waits_for_queued_gathers(monkeypatch, tmp_path):

@@ -118,7 +118,7 @@ def _autonomous_glu(monkeypatch, fake_df):
 
 
 class _FakeDF:
-    def repay_at(self, li, ids):
+    def repay_at(self, li, ids, ring_ok=False):
         return False
 
     def ensure_wired(self):

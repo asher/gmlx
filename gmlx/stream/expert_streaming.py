@@ -679,7 +679,10 @@ def install_expert_streaming(
                                 (self._kq_li, dfr._lookups - dfr._hits))
                         ids, indices = _valid_expert_ids(self, indices)
                         if (not in_split and n_tokens > 1
-                                and dfr.repay_at(self._kq_li, ids)):
+                                and dfr.repay_at(
+                                    self._kq_li, ids,
+                                    ring_ok=fdr is not None and n_tokens
+                                    >= _STREAM_PREFETCH_MIN_TOKENS)):
                             # A wider call repays a ring lend at the
                             # forward's first layer.
                             dfr.ensure_wired()
@@ -1127,6 +1130,9 @@ def install_expert_streaming(
                 arena = held
         if feeder is None:
             ring = 0
+            if os.environ.get("GMLX_DECODE_ARENA_GB"):
+                arena = _decode_arena_bytes(
+                    total_bytes, prefetcher.offsets, budget, **arena_kw)
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():

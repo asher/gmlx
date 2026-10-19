@@ -492,7 +492,7 @@ def test_arena_overflow_token_split():
         def wedged_at(self, li):
             return False
 
-        def repay_at(self, li, ids):
+        def repay_at(self, li, ids, ring_ok=False):
             return False
 
         def ensure_wired(self):
@@ -560,7 +560,7 @@ def test_arena_split_leaves_never_miss_shed():
         def wedged_at(self, li):
             return False
 
-        def repay_at(self, li, ids):
+        def repay_at(self, li, ids, ring_ok=False):
             return False
 
         def ensure_wired(self):

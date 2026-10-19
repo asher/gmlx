@@ -149,7 +149,7 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
         assert fdr.whole_calls == [3]
 
         class _FakeDF:
-            def repay_at(self, li, ids):
+            def repay_at(self, li, ids, ring_ok=False):
                 return False
 
             stage_calls = []
@@ -939,14 +939,16 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("timeshare", ["0", "1"])
 @pytest.mark.parametrize("env_gb", [None, "100"])
+@pytest.mark.parametrize("built", [True, False])
 def test_arena_sizes_against_ram_before_the_ring_is_wired(
-        monkeypatch, timeshare, env_gb):
+        monkeypatch, timeshare, env_gb, built):
     """The ring's slots are wired when its feeder is built, so a free-RAM
     snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
     of KV room, a 2 GB ring: the arena keeping the ring apart gets 4 GB,
     and a time-shared arena gets 6 GB and lends 2 GB of it at prefill.
     A GMLX_DECODE_ARENA_GB past free RAM clamps to it less the ring and
-    keeps the whole ring apart, as the serve footprint prices it."""
+    keeps the whole ring apart, as the serve footprint prices it. A ring
+    that is never built is charged nowhere."""
     from types import SimpleNamespace
 
     import gmlx.stream.budget as budget
@@ -985,6 +987,8 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
         dead_bytes=0, names=frozenset()))
 
     def ring(offs, modules):
+        if not built:
+            return None
         free["bytes"] -= pff.ring_bytes(offs)  # wired at construction
         return SimpleNamespace(covers=lambda li: True, n_slots=2,
                                slot_bytes=GB, release_slots=lambda: None)
@@ -1007,5 +1011,7 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     want = {"0": (7 * GB - GB - ring_b, 0), "1": (6 * GB, ring_b)}[timeshare]
     if env_gb:
         want = (7 * GB - ring_b, 0)
+    if not built:
+        want, ring_b = ((7 if env_gb else 6) * GB, 0), 0
     assert sized == {"arena": want[0], "share": want[1],
                      "room": 100 * GB - want[0] - (ring_b - want[1])}

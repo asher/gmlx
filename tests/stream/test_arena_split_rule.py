@@ -44,7 +44,7 @@ class _Arena:
     def wedged_at(self, li):
         return False
 
-    def repay_at(self, li, ids):
+    def repay_at(self, li, ids, ring_ok=False):
         return False
 
     def ensure_wired(self):
@@ -101,8 +101,8 @@ class _Owed(_Arena):
         super().__init__(slots)
         self.events = []
 
-    def repay_at(self, li, ids):
-        self.events.append(("repay_at", ids.size))
+    def repay_at(self, li, ids, ring_ok=False):
+        self.events.append(("repay_at", ids.size, ring_ok))
         return True
 
     def ensure_wired(self):
@@ -222,10 +222,12 @@ def test_share_one_restores_the_split(monkeypatch):
     assert ring.whole == 0
 
 
-def test_wide_call_repays_a_lend_before_it_stages():
+@pytest.mark.parametrize("t", [8, 40])
+def test_wide_call_repays_a_lend_before_it_stages(t):
     """A batched or verify decode step is never one token wide. The arena
-    decides from the call's routing whether it repays a ring lend, and
-    the repay runs before the layer stages."""
+    decides from the call's routing, and whether the call is wide enough
+    to take the ring, if it repays a ring lend. The repay runs before the
+    layer stages."""
     arena, ring = _Owed(slots=4), _Ring(live=False)
-    _check(_glu(arena, ring), 8, 4, rows=True)
-    assert arena.events == [("repay_at", 8 * TOPK), "wired", "stage"]
+    _check(_glu(arena, ring), t, 4, rows=True)
+    assert arena.events == [("repay_at", t * TOPK, t >= 32), "wired", "stage"]

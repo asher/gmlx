@@ -252,9 +252,10 @@ def _decode_arena_bytes(
     working-set ratio or the quant's ring size. ``ring_bytes`` keeps the
     ring's room out of the arena: a ring rebuilt on top of a full wired
     arena is a transient the kernel has to swap for on a box the arena
-    has already filled. The loader sizes the arena both ways before the
-    ring is wired, and ``ring_share_bytes`` decides whether the arena
-    holds the room and lends it at prefill.
+    has already filled. The loader sizes the arena before the ring is
+    wired, with and without the ring's room, and ``ring_share_bytes``
+    decides whether the arena holds the room and lends it at prefill; an
+    explicit ``GMLX_DECODE_ARENA_GB`` keeps the whole ring apart.
     ``room_bytes`` is the priced KV room
     (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
     ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
@@ -283,7 +284,9 @@ def _decode_arena_bytes(
         if want > cap:
             print(
                 f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds reclaimable"
-                f" RAM minus the floor; clamping the arena to"
+                f" RAM minus the floor"
+                f"{' and the prefill ring' if ring_bytes else ''};"
+                f" clamping the arena to"
                 f" {cap / (1 << 30):.1f}GB (GMLX_DECODE_ARENA_FORCE=1"
                 f" overrides)"
             )

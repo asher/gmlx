@@ -198,6 +198,10 @@ _PRESSURE_MAX_STEPS = 3
 _PRESSURE_COOLDOWN_POLLS = 8
 _REGROW_NORMAL_POLLS = 256
 
+# Forwards a wide call keeps a ring lend after the ring came back in the
+# forward it repaid in (see DecodeFeeder.repay_at).
+_HOLD_FORWARDS = 16
+
 
 @lru_cache(maxsize=1)
 def _libc():
@@ -334,6 +338,13 @@ class DecodeFeeder:
         self._lent: set[int] = set()
         self._ring_lends = 0
         self._ring_dead = False
+        # A wide call that repaid and found the ring rebuilt later in the
+        # same forward keeps the lend for _HOLD_FORWARDS forwards, so a
+        # batch that overflows a later layer does not release and rebuild
+        # the ring every step.
+        self._wide_repaid = False
+        self._repaying_wide = False
+        self._hold_left = 0
         if self._ring_share:
             self._lent = self._pick_lent(self._ring_share)
             for li in self._lent:
@@ -671,6 +682,9 @@ class DecodeFeeder:
         Later decode calls repay a ring lend: the ring is dropped again and
         the arena's slot targets return to full size (layers regrow lazily
         at their own stage() calls, each re-wiring as it resizes)."""
+        # Any call but a wide repay is a one-token forward: a rebuild after
+        # it is a new prefill, which starts no hold (see repay_at).
+        self._wide_repaid, self._repaying_wide = self._repaying_wide, False
         if self._mlock_deferred:
             self._mlock_deferred = False
             # Ring buffers land in MLX's freed-buffer cache; _drop_ring
@@ -745,19 +759,33 @@ class DecodeFeeder:
         stage() once, the only place it resizes."""
         return self._slots.get(li) == self._target_slots(li)
 
-    def repay_at(self, li: int, ids: np.ndarray) -> bool:
+    def repay_at(self, li: int, ids: np.ndarray,
+                 ring_ok: bool = False) -> bool:
         """Whether a multi-token call routed to ``ids`` at ``li`` repays a
         ring lend (see ensure_wired). Only at a forward's first covered
         layer: a call the arena serves there is a decode step (batched or
         speculative) or a short prompt, and a later layer of a ring pass
-        must not drop the ring under the layers after it. A call routed
-        to more experts than the layer holds once repaid takes the ring
-        anyway, so it keeps the lend rather than drop the ring for it."""
-        if not (self._owes_lend() and self._layers
-                and li == min(self._layers)):
+        must not drop the ring under the layers after it.
+
+        ``ring_ok``: the call is wide enough to take the ring. It keeps
+        the lend when its experts overflow this layer once repaid, as it
+        would take the ring here anyway, and while a hold from an earlier
+        rebuild lasts."""
+        if not self._layers or li != min(self._layers):
             return False
-        return (np.unique(ids.reshape(-1)).size
-                <= self._target_slots(li, lend=False))
+        self._wide_repaid = False  # the forward before this one is over
+        if not self._owes_lend():
+            return False
+        if not ring_ok:
+            return True
+        if self._hold_left:
+            self._hold_left -= 1
+            return False
+        if (np.unique(ids.reshape(-1)).size
+                > self._target_slots(li, lend=False)):
+            return False
+        self._repaying_wide = True
+        return True
 
     def _pick_lent(self, nbytes: int) -> set[int]:
         """Layers whose capacity, shrunk to one slot, frees ``nbytes``.
@@ -816,6 +844,9 @@ class DecodeFeeder:
         prefill that needs the memory. Each layer keeps its most popular
         residents, so the decode resume after this turn starts warm.
         ensure_wired repays the lend on the next decode call."""
+        # A rebuild in the forward a wide call repaid in starts a hold.
+        self._hold_left = _HOLD_FORWARDS if self._wide_repaid else 0
+        self._wide_repaid = False
         if self._ring_share and not self._lent:
             freed = self._lend_ring_share()
             if self._ring_lends == 1:
@@ -943,6 +974,8 @@ class DecodeFeeder:
         target = self._target_slots(li)
         if (
             target != self._slots[li]
+            # A call the grown layer cannot hold is refused either way.
+            and not (self._slots[li] < target < uniq.size)
             and li not in self._wedged_layers
             and not self._pending.get(li)
         ):
