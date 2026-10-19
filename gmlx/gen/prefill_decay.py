@@ -1025,11 +1025,15 @@ def install_prefill_decay() -> bool:
         step = decayed_for_batch(self)
         if step == base:
             return orig(self)
+        # A checkpoint schedule armed inside orig (the MTP body) reads the
+        # base, not this chunk's width.
+        self._gmlx_base_step = base
         self.prefill_step_size = step
         try:
             return orig(self)
         finally:
             self.prefill_step_size = base
+            vars(self).pop("_gmlx_base_step", None)
 
     def _decay_prompt_step(self):
         return _with_decayed_step(self, orig_step)
