@@ -242,6 +242,22 @@ def test_qwen35_arms_for_its_language_model_only(model_type):
                                     _caches(0)) is None
 
 
+@pytest.mark.parametrize("depth", [0, 10_240, 131_072])
+def test_muse_spark_keeps_the_streamed_chunk_whole(depth):
+    import gmlx.models.muse_spark  # noqa: F401
+    from gmlx.models.muse_spark.vlm_model import ModelConfig
+
+    # Serve runs the VLM wrapper; the dense model would price 128 heads.
+    target = SimpleNamespace(config=ModelConfig())
+    caches = [kc.RotatingKVCache(max_size=2048), kc.KVCache()]
+    for c in caches:
+        c.offset = depth
+    profile = pd.resolve_score_profile(target, caches)
+    assert profile is not None and profile.fused_min_step == 9
+    assert pd.decayed_for_batch(_batch(target, depth, 8192, caches)) == 8192
+    assert pd.decayed_step(8192, depth, 128) < 8192
+
+
 # --- chunks cut after the step is chosen ---------------------------------
 
 

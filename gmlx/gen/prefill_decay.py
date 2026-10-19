@@ -52,9 +52,10 @@ never how long one chunk runs, so every live stream hitches by a full
 chunk (1-2 s at depth, more over-RAM) whenever one lands. While the
 scheduler reports live decode rows, the chunk is halved until its
 predicted wall time - last observed chunk cost scaled by the tier - fits
-GMLX_PREFILL_TICK_MS. Inert at zero decode rows and outside the batched
-serve path, so single-stream TTFT is untouched. The resolver takes the
-min of the depth term and the tick term.
+GMLX_PREFILL_TICK_MS. Inert at zero decode rows, outside the batched
+serve path and on a model that streams its experts (a chunk reads every
+expert once whatever its width), so single-stream TTFT is untouched. The
+resolver takes the min of the depth term and the tick term.
 
 Knobs:
     GMLX_PREFILL_DECAY=0        kill switch, both terms (default on)
@@ -936,7 +937,12 @@ def decayed_for_batch(batch) -> int | None:
     depth = kv_depth(batch.prompt_cache)
     step = decayed_step(base, depth, score_heads(batch.model),
                         profile=profile)
-    tick = _tick_step(base)
+    from gmlx.stream.expert_streaming import moe_streaming_active
+
+    streamed = moe_streaming_active(batch.model)
+    # A streamed chunk reads every expert once at any width, so a narrower
+    # chunk stalls decode as long and adds passes.
+    tick = None if streamed else _tick_step(base)
     ticked = False
     if tick is not None and tick < step:
         step, ticked = tick, True
@@ -952,12 +958,9 @@ def decayed_for_batch(batch) -> int | None:
                                 profile=profile)
     embeds = getattr(batch, "_inputs_embeds", None)
     if step == base and embeds is not None:
-        from gmlx.stream.expert_streaming import (
-            merge_prefill_tail,
-            moe_streaming_active,
-        )
+        from gmlx.stream.expert_streaming import merge_prefill_tail
 
-        if moe_streaming_active(batch.model):
+        if streamed:
             # The loop chunks the prompt less its last token, or the whole
             # prompt when the last chunk and the last token run as one.
             step = merge_prefill_tail(
