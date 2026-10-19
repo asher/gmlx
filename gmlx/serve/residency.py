@@ -896,7 +896,7 @@ class _ResidencyPool:
             total += int(getattr(feeder, "_room_bytes", 0) or 0)
             ring = _prefill_feeder_of(rg)
             if ring is not None and not getattr(ring, "_slots", None):
-                total += max(0, 2 * int(getattr(ring, "slot_bytes", 0) or 0)
+                total += max(0, _ring_room(ring)
                              - int(getattr(feeder, "_ring_share", 0) or 0))
         return total
 
@@ -1490,8 +1490,8 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
 def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     """Resident bytes a ``stream: experts`` entry will hold: the every-token
     weights, the decode arena the loader sizes at install (the env override
-    when set, else the fit planner's arena) and the prefill ring's room,
-    which the budget keeps for the process lifetime. The routed experts and
+    when set, else the fit planner's arena) and the prefill ring's room
+    the arena does not hold and lend at prefill. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
     they never take. Over the budget, a table that alone brings the model
@@ -1573,7 +1573,13 @@ def _prefill_ring_of(rg) -> int:
     decode arena holds and lends at each prefill. 0 without a ring."""
     feeder = _prefill_feeder_of(rg)
     share = int(getattr(_decode_feeder_of(rg), "_ring_share", 0) or 0)
-    return max(0, 2 * int(getattr(feeder, "slot_bytes", 0) or 0) - share)
+    return max(0, _ring_room(feeder) - share)
+
+
+def _ring_room(feeder) -> int:
+    """Bytes of all of a prefill ring's slots; 0 for None."""
+    return (int(getattr(feeder, "n_slots", 2) or 0)
+            * int(getattr(feeder, "slot_bytes", 0) or 0))
 
 
 def _decode_feeder_of(rg):

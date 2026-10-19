@@ -301,6 +301,9 @@ def test_wrapper_prestages_next_layer(monkeypatch):
     assert glu0._kq_lookahead.prefetch
 
     class _FakeDF:
+        def repay_at(self, li):
+            return False
+
         def ensure_wired(self):
             pass
 
@@ -367,6 +370,9 @@ def test_wrapper_gate_trims_prestage(monkeypatch):
     assert gate is not None
 
     class _FakeDF:
+        def repay_at(self, li):
+            return False
+
         def ensure_wired(self):
             pass
 
@@ -490,6 +496,9 @@ def test_depth2_prestage_targets_both_layers(monkeypatch):
     glu0 = model.layers[0].mlp.switch_mlp
 
     class _FakeDF:
+        def repay_at(self, li):
+            return False
+
         def ensure_wired(self):
             pass
 
@@ -530,6 +539,9 @@ def test_wrapper_keeper_prestage_passes_policy(monkeypatch):
     glu0 = model.layers[0].mlp.switch_mlp
 
     class _FakeDF:
+        def repay_at(self, li):
+            return False
+
         def ensure_wired(self):
             pass
 
@@ -619,6 +631,9 @@ def test_wrapper_prefers_out_of_band_router_input(monkeypatch):
     monkeypatch.setattr(hook, "on_call", spy)
 
     class _FakeDF:
+        def repay_at(self, li):
+            return False
+
         def ensure_wired(self):
             pass
 

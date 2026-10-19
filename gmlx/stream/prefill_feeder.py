@@ -180,8 +180,8 @@ class PrefillFeeder:
         self._wedged: list[int] = []
         # Set by the loader to DecodeFeeder.lend_for_ring when a decode
         # arena coexists with this ring: called before a post-decode slot
-        # rebuild; it shrinks the arena only when the kernel has lost the
-        # ring's room.
+        # rebuild, it frees the room the arena holds for the ring, or
+        # shrinks the arena when the kernel has lost the ring's room.
         self._lend_hook = None
         # Set by the loader to DecodeFeeder.seed_from_ring: after a layer's
         # compute, its slot's most-routed experts are copied into the
@@ -227,15 +227,18 @@ class PrefillFeeder:
                     f"{want / 1e9:.1f} GB; unwired slots page out under "
                     f"pressure and the GPU pays on every use")
 
-    def release_slots(self) -> None:
-        """Drop the ring (its physical pages with it) once decode starts;
-        the ring's room stays reserved under the ceiling and the next
-        prefill pass re-allocates into it."""
+    def release_slots(self) -> bool:
+        """Drop the ring (its physical pages with it) once decode starts.
+        The next prefill pass re-allocates it, in the room kept under the
+        ceiling or lent from the decode arena. False when the ring keeps
+        its slots."""
+        if not self._slots:
+            return True
         # An out-of-service ring keeps its slots (see _quarantine).
-        if not self._slots or self._wedged:
-            return
+        if self._wedged:
+            return False
         if not self._drain_staging():  # a worker may still write a slot
-            return
+            return False
         self._submit_seed()
         for futs in self._seed_futs.values():
             futures_wait(futs)
@@ -260,6 +263,7 @@ class PrefillFeeder:
         self._locked = []
         self._slots = []
         self._views = {}
+        return True
 
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)

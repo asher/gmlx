@@ -312,19 +312,23 @@ class DecodeFeeder:
         # ring's room. Each prefill pass that builds the ring takes them
         # back by shrinking whole layers to one slot (``_lent``), which
         # copies one expert per layer and frees the memory before the ring
-        # allocates. The next decode
-        # clears ``_lent`` and those layers regrow at their own stage().
-        # The first prefill starts lent, so the ring and the arena never
-        # sum past the budget.
+        # allocates. The next decode drops the ring and clears ``_lent``,
+        # and those layers regrow at their own stage(). The first prefill
+        # starts lent, so the ring and the arena never sum past the budget.
+        # A ring quarantined with its slots keeps the room for good
+        # (``_ring_dead``): its lent layers stay lent.
         self._ring_share = int(ring_share)
         self._lent: set[int] = set()
         self._ring_lends = 0
+        self._ring_dead = False
         if self._ring_share:
             self._lent = self._pick_lent(self._ring_share)
             for li in self._lent:
                 self._slots[li] = 1
         if lend_bytes > 0 and self.nominal_bytes:
-            self._lend_frac = max(0.0, 1.0 - lend_bytes / self.nominal_bytes)
+            # The time-share layers have freed their bytes already.
+            rest = self.nominal_bytes - self._ring_share
+            self._lend_frac = max(0.0, 1.0 - lend_bytes / max(rest, 1))
             self._slots = {li: self._target_slots(li) for li in self._layers}
         # Priced KV room outside the arena (set by the loader); regrow keeps
         # the governor's headroom above half of it.
@@ -579,10 +583,13 @@ class DecodeFeeder:
         """True when a stage() refusal was a slot-count overflow that a
         smaller (token-split) call could clear, as opposed to a wedge or
         staging being disabled outright."""
+        # A lent layer holds one slot: split pieces would bottom out at
+        # one-token page-cache gathers. It takes the ring or one fallback.
         return (
             not self._staging_disabled
             and li in self._layers
             and li not in self._wedged_layers
+            and li not in self._lent
         )
 
     # staging
@@ -652,11 +659,9 @@ class DecodeFeeder:
         at their own stage() calls, each re-wiring as it resizes)."""
         if self._mlock_deferred:
             self._mlock_deferred = False
-            if self._release_ring is not None:
-                self._release_ring()
-                # Ring buffers land in MLX's freed-buffer cache; flush so
-                # the arena wires into pages the OS actually has back.
-                self._clear_mlx_cache()
+            # Ring buffers land in MLX's freed-buffer cache; _drop_ring
+            # flushes it, so the arena wires into pages the OS has back.
+            released = self._drop_ring()
             for li in list(self._seeds):
                 self._flush_seeds(li)
             if self._seeded:
@@ -667,10 +672,7 @@ class DecodeFeeder:
             t0 = time.monotonic()
             self._mlock_arena()
             t1 = time.monotonic()
-            # The ring is gone: layers regrow to capacity at their own
-            # stage() calls.
-            self._lend_frac = 1.0
-            self._lent.clear()
+            self._repay_lend(released)
             t2 = t3 = t1
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
@@ -688,12 +690,47 @@ class DecodeFeeder:
                     f"residency insert {t2 - t1:.2f}s, commit {t3 - t2:.2f}s",
                     flush=True)
             return
-        if self._lend_frac < 1.0 or self._lent:
-            if self._release_ring is not None:
-                self._release_ring()
-                self._clear_mlx_cache()
+        if self._owes_lend():
+            self._repay_lend(self._drop_ring())
+
+    def _owes_lend(self) -> bool:
+        return not self._ring_dead and (self._lend_frac < 1.0
+                                        or bool(self._lent))
+
+    def _drop_ring(self) -> bool:
+        """Release the prefill ring. False when the ring keeps its slots
+        (quarantined: a staging read may still write them)."""
+        if self._release_ring is None:
+            return True
+        gone = self._release_ring() is not False
+        self._clear_mlx_cache()
+        return gone
+
+    def _repay_lend(self, released: bool) -> None:
+        """The ring is gone: lent layers regrow to capacity at their own
+        stage() calls. A ring that kept its slots still holds their room,
+        so the lend stands for good and nothing lends again."""
+        if released:
             self._lend_frac = 1.0
             self._lent.clear()
+        else:
+            self._ring_dead = True
+            self._ring_share = 0
+
+    def at_target(self, li: int) -> bool:
+        """Whether layer ``li`` holds its target slot count. A layer that
+        still owes a resize (a repaid lend, a pressure step) must take
+        stage() once, the only place it resizes."""
+        return self._slots.get(li) == self._target_slots(li)
+
+    def repay_at(self, li: int) -> bool:
+        """Whether a multi-token call the arena serves at ``li`` repays a
+        ring lend (see ensure_wired). Only at a forward's first covered
+        layer: a call the arena serves there is a decode step (batched or
+        speculative) or a short prompt, and a later layer of a ring pass
+        must not drop the ring under the layers after it."""
+        return (self._owes_lend() and bool(self._layers)
+                and li == min(self._layers))
 
     def _pick_lent(self, nbytes: int) -> set[int]:
         """Layers whose arenas, shrunk to one slot, free ``nbytes``: the
@@ -734,15 +771,17 @@ class DecodeFeeder:
         """Shrink the wired arena by ~``nbytes`` so the prefill ring can
         re-allocate without breaching the wired cap. The prefill feeder
         calls this before rebuilding its slots on a post-decode prefill
-        pass (chat follow-up turns). The budget keeps the ring's room out
-        of the arena, so the lend is a no-op while the kernel still has
+        pass (chat follow-up turns). An arena that holds the ring's room
+        (``ring_share``) frees it first, by emptying its coldest layers.
+        Past that, the budget keeps the ring's room out of the arena, so
+        the proportional lend below is a no-op while the kernel still has
         that room; it fires only on a box whose free RAM is gone.
 
         Shrinking is eager (every layer now): the ring path never calls
         stage(), so the lazy per-layer resize would not fire during the
         prefill that needs the memory. Each layer keeps its most popular
         residents, so the decode resume after this turn starts warm.
-        ensure_wired repays the lend on the next decode-sized call."""
+        ensure_wired repays the lend on the next decode call."""
         if self._ring_share and not self._lent:
             freed = self._lend_ring_share()
             if self._ring_lends == 1:

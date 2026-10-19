@@ -81,6 +81,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   early when the client read it slowly.
 - `--moe-miss-shed` dropped no experts on Muse Spark, though the load said
   it was on. It now sheds them as on other MoE models.
+- With `--stream-experts`, the expert arena came out one prefill ring smaller
+  than the memory budget allows when free RAM set its size.
 - `gmlx distill gen` stopped with Ctrl-C could leave out a reply that had
   already arrived.
 - A chat template with a `{% generation %}` block was refused by

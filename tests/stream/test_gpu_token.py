@@ -118,6 +118,9 @@ def _autonomous_glu(monkeypatch, fake_df):
 
 
 class _FakeDF:
+    def repay_at(self, li):
+        return False
+
     def ensure_wired(self):
         pass
 
@@ -147,6 +150,9 @@ class _FakeDF:
         self.stage_calls = []
 
     def covers(self, li):
+        return True
+
+    def at_target(self, li):
         return True
 
     def wedged_at(self, li):

@@ -250,10 +250,12 @@ def _decode_arena_bytes(
     arena, the prefill ring and the KV cache share one budget: at decode
     the governor's headroom is the room minus live KV, whatever the box's
     working-set ratio or the quant's ring size. ``ring_bytes`` keeps the
-    ring's room out of the arena for good: a ring rebuilt on top of a
-    full wired arena, or lent out of it with a copy of every layer, is a
-    transient the kernel has to swap for on a box the arena has already
-    filled. ``room_bytes`` is the priced KV room
+    ring's room out of the arena: a ring rebuilt on top of a full wired
+    arena is a transient the kernel has to swap for on a box the arena
+    has already filled. The loader sizes the arena both ways from one
+    snapshot taken before the ring is wired, and ``ring_share_bytes``
+    decides whether the arena holds the room and lends it at prefill.
+    ``room_bytes`` is the priced KV room
     (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
     ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
     physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides the

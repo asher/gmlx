@@ -149,7 +149,7 @@ gain of each setting on real models.
 | Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
 | Stack unmap | Releases the expert stacks' GPU mapping once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
 | Tail merge | Widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
-| Ring time-share | Lets the arena use the prefill ring's room while decoding. Each prefill empties the least used layers for the ring, and they refill during the reply. | `GMLX_RING_TIMESHARE=0` |
+| Ring time-share | Lets the arena use the prefill ring's room while decoding. Each prefill empties the layers with the fewest hits, and they refill during the reply. | `GMLX_RING_TIMESHARE=0` |
 
 On a short prompt, the prefill feeder reads only the experts that the
 router chose, which shortens the time to the first token. Its reads bypass

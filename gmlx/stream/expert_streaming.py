@@ -564,6 +564,7 @@ def install_expert_streaming(
                         and scores_arg is not None
                         and not unmixed
                         and not dfr.wedged_at(self._kq_li)
+                        and dfr.at_target(self._kq_li)
                         and gt.layer_autonomous(self._kq_li)
                     ):
                         # GPU-autonomous layer (gpu-dispatch Tier 2): no
@@ -644,10 +645,12 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
-                        if n_tokens == 1 and not in_split:
+                        if not in_split and (
+                                n_tokens == 1 or dfr.repay_at(self._kq_li)):
                             # A one-token piece of a split is prefill work:
                             # wiring here would release the prefill ring
-                            # in the middle of a pass.
+                            # in the middle of a pass. A wider call repays
+                            # a ring lend at the forward's first layer.
                             dfr.ensure_wired()
                         if ph is not None:
                             ph["ev_wire"] = ph.get("ev_wire", 0.0) + (
@@ -1076,16 +1079,24 @@ def install_expert_streaming(
             total_bytes, prefetcher.offsets, budget, **arena_kw)
     ring = 0
     ring_share = 0
+    held = None
+    if arena is not None and feeder_prefill:
+        from gmlx.stream.prefill_feeder import ring_bytes
+
+        # Sized before the ring exists: its slots are wired at
+        # construction, and a live RAM snapshot taken after would charge
+        # them twice.
+        ring = ring_bytes(prefetcher.offsets)
+        held = _decode_arena_bytes(
+            total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+            **arena_kw)
     if (
         streaming
         and prefetcher is not None
         and moe_modules
         and feeder_prefill
     ):
-        from gmlx.stream.prefill_feeder import (
-            maybe_make_prefill_feeder,
-            ring_bytes,
-        )
+        from gmlx.stream.prefill_feeder import maybe_make_prefill_feeder
 
         # No working-set budget (the CPU device): the ring is not judged.
         reason = _prefill_ring_reason(
@@ -1096,13 +1107,9 @@ def install_expert_streaming(
         else:
             feeder = maybe_make_prefill_feeder(
                 prefetcher.offsets, moe_modules)
-        if feeder is not None and arena is not None:
+        if feeder is not None and held is not None:
             from gmlx.stream.budget import ring_share_bytes
 
-            ring = ring_bytes(prefetcher.offsets)
-            held = _decode_arena_bytes(
-                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
-                **arena_kw)
             # The arena holds the ring's room while decoding and lends
             # whole layers back for each prefill pass that builds the ring
             # (DecodeFeeder._lend_ring_share). Without a share the ring
@@ -1110,6 +1117,8 @@ def install_expert_streaming(
             ring_share = ring_share_bytes(arena, held, ring)
             if not ring_share:
                 arena = held
+        if feeder is None:
+            ring = 0
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -1137,8 +1146,9 @@ def install_expert_streaming(
 
         from gmlx.stream.budget import ceiling_bytes
 
-        # The ring's room is out of the arena's budget already, so the
-        # two never sum past the ceiling; the lend (DecodeFeeder
+        # The arena's budget leaves the ring's room out, or holds it as
+        # ring_share and lends it back at each prefill, so the two never
+        # sum past the ceiling; the proportional lend (DecodeFeeder
         # .lend_for_ring) stays as the fallback for a box whose free RAM
         # is gone when a later prefill rebuilds the ring.
         dfeeder = maybe_make_decode_feeder(
@@ -1246,7 +1256,8 @@ def install_expert_streaming(
             model, moe_modules, skip_ids=tskip,
             include_expert_stacks=bool(table_offloaded) and not streaming,
             room=(None if budget is None
-                  else max(0, budget - held_wired - int(arena or 0) - ring)))
+                  else max(0, budget - held_wired - int(arena or 0)
+                           - (ring - ring_share))))
     if (
         streaming and feeder is not None and dfeeder is not None
         and env_bool("GMLX_STREAM_UNMAP_STACKS", True)

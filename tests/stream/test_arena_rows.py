@@ -76,6 +76,9 @@ class _Arena:
     def wedged_at(self, li):
         return False
 
+    def repay_at(self, li):
+        return False
+
     def ensure_wired(self):
         self.wired += 1
 

@@ -462,6 +462,9 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.eval(ref)
 
         class _FakeDF:
+            def repay_at(self, li):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -544,6 +547,9 @@ def test_arena_call_lifts_cpu_pin(monkeypatch):
         pin_in_swap = []
 
         class _DF:
+            def repay_at(self, li):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -789,6 +795,9 @@ def test_split_pieces_execute_before_next_stage(monkeypatch):
         events = []
 
         class _SplitDF:
+            def repay_at(self, li):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -859,6 +868,9 @@ def test_wrapper_redirects_dead_ids_on_fallback(monkeypatch):
         mx.eval(ref)
 
         class _WedgedDF:
+            def repay_at(self, li):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -1424,6 +1436,9 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
     install_expert_streaming(model)
 
     class _FakeDF:
+        def repay_at(self, li):
+            return False
+
         def ensure_wired(self):
             pass
 
@@ -1786,6 +1801,7 @@ def test_ring_share_lend_joins_inflight_prestage(monkeypatch, tmp_path):
     """A lend never frees a buffer a prestage read still writes into: it
     joins the layer's reads, then shrinks it."""
     import threading
+    import time
 
     import gmlx.stream.decode_feeder as dfm
 
@@ -1795,8 +1811,11 @@ def test_ring_share_lend_joins_inflight_prestage(monkeypatch, tmp_path):
     real = dfm.read_range
     blocked = {64, 320, 560}  # layer 0, expert 1: gate/up/down slices
 
+    entered = []
+
     def gated(fd, mv, off):
         if off in blocked:
+            entered.append(off)
             release.wait(5)
         real(fd, mv, off)
 
@@ -1811,10 +1830,52 @@ def test_ring_share_lend_joins_inflight_prestage(monkeypatch, tmp_path):
     monkeypatch.setattr(dfm, "read_range", gated)
     feeder.prestage(0, np.array([[1]]))
     assert 1 in feeder._pending[0]
+    deadline = time.time() + 5  # all 3 reads inside the gate, not cancellable
+    while len(entered) < 3 and time.time() < deadline:
+        time.sleep(0.005)
     threading.Timer(0.05, release.set).start()
     feeder.lend_for_ring(3 * per_expert)
     assert release.is_set() and not feeder._pending.get(0)
     assert feeder._lent == {0} and feeder._slots == {0: 1, 1: 4}
+
+
+def test_ring_share_repays_at_a_wide_call_on_the_first_layer(
+        monkeypatch, tmp_path):
+    """Batched and speculative decode never send a one-token call. A
+    multi-token call the arena serves at the forward's first layer repays
+    the lend; one at a later layer of a ring pass does not. A lent layer
+    never splits: its pieces would bottom out at one-token fallbacks."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    feeder._release_ring = lambda: True
+    assert feeder._lent == {0}
+    assert not feeder.can_stage_smaller(0) and feeder.can_stage_smaller(1)
+    assert feeder.repay_at(0) and not feeder.repay_at(1)
+    feeder.ensure_wired()
+    assert not feeder._lent and not feeder.repay_at(0)
+    assert feeder.can_stage_smaller(0)
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder.at_target(0) and feeder._slots[0] == 4
+
+
+def test_quarantined_ring_keeps_the_lend(monkeypatch, tmp_path):
+    """A ring that cannot release keeps its slots for good, so the layers
+    lent for it never regrow into that room and nothing lends again."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    calls = []
+    feeder._release_ring = lambda: calls.append(1) or False
+    feeder.ensure_wired()
+    assert feeder._lent == {0} and feeder._ring_share == 0
+    feeder.stage(0, np.array([0]))
+    assert feeder._slots[0] == 1
+    feeder.ensure_wired()  # no retry of a dead ring on every token
+    assert calls == [1] and not feeder.repay_at(0)
+    feeder._kernel_has_room = lambda n: True
+    feeder.lend_for_ring(3 * per_expert)
+    assert feeder._slots == {0: 1, 1: 4} and feeder._ring_lends == 0
 
 
 def test_layer_wires_at_its_first_stage_call(monkeypatch, tmp_path):

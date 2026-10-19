@@ -149,6 +149,9 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
         assert fdr.whole_calls == [3]
 
         class _FakeDF:
+            def repay_at(self, li):
+                return False
+
             stage_calls = []
             fits = True
 
@@ -931,3 +934,68 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
     closed, _ = _make_prefill_feeder(monkeypatch, tmp_path)  # both stay bound: no GC here
     closed.close()
     assert waits and all(w is True for w in waits)
+
+
+@pytest.mark.parametrize("timeshare", ["0", "1"])
+def test_arena_sizes_against_ram_before_the_ring_is_wired(
+        monkeypatch, timeshare):
+    """The ring's slots are wired when its feeder is built, so a free-RAM
+    snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
+    of KV room, a 2 GB ring: the arena keeping the ring apart gets 4 GB,
+    and a time-shared arena gets 6 GB and lends 2 GB of it at prefill."""
+    from types import SimpleNamespace
+
+    import gmlx.stream.budget as budget
+    import gmlx.stream.decode_feeder as dfm
+    import gmlx.stream.expert_streaming as es
+    import gmlx.stream.pin_weights as pw
+    import gmlx.stream.prefetch as pf
+    import gmlx.stream.prefill_feeder as pff
+
+    GB = 1 << 30
+    monkeypatch.setenv("GMLX_RING_TIMESHARE", timeshare)
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    # Eight 1 GB layers in the file; the ring holds two of them.
+    third = GB // 3
+    offsets = {li: [("m.gguf", li * GB + k * third, third, 4, kind)
+                    for k, kind in enumerate(("gate", "up", "down"))]
+               for li in range(8)}
+    free = {"bytes": 7 * GB}
+    monkeypatch.setattr(es, "stream_budget_bytes", lambda: 100 * GB)
+    monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 * GB)
+    monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
+    monkeypatch.setattr(budget, "_available_ram_bytes",
+                        lambda *a, **k: free["bytes"])
+    monkeypatch.setattr(budget, "kv_room_bytes",
+                        lambda path: SimpleNamespace(bytes=GB))
+    monkeypatch.setattr(es, "_prefill_ring_reason", lambda *a: None)
+    monkeypatch.setattr(pf, "maybe_make_prefetcher",
+                        lambda path: SimpleNamespace(offsets=offsets))
+    monkeypatch.setattr(pw, "maybe_pin_weights", lambda *a, **k: None)
+    monkeypatch.setattr(pw, "cast_copies", lambda *a: SimpleNamespace(
+        dead_bytes=0, names=frozenset()))
+
+    def ring(offs, modules):
+        free["bytes"] -= pff.ring_bytes(offs)  # wired at construction
+        return SimpleNamespace(covers=lambda li: True, n_slots=2,
+                               slot_bytes=GB, release_slots=lambda: None)
+
+    sized = {}
+
+    def arena(offs, modules, arena_bytes, *a, ring_share=0, **k):
+        sized.update(arena=arena_bytes, share=ring_share)
+
+    monkeypatch.setattr(pff, "maybe_make_prefill_feeder", ring)
+    monkeypatch.setattr(dfm, "maybe_make_decode_feeder", arena)
+    monkeypatch.setattr(es, "_install_gpu_residency",
+                        lambda *a, room=None, **k: sized.update(room=room))
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "1")
+    glu = SwitchGLU(16, 32, 4)
+    install_expert_streaming(_holder_model(glu), gguf_path="m.gguf",
+                             force_stream=True)
+    # The residency room charges the ring once, either way.
+    ring_b = 6 * third
+    want = {"0": (7 * GB - GB - ring_b, 0), "1": (6 * GB, ring_b)}[timeshare]
+    assert sized == {"arena": want[0], "share": want[1],
+                     "room": 100 * GB - want[0] - (ring_b - want[1])}
