@@ -4448,7 +4448,9 @@ def test_a_served_config_that_nests_too_deeply_reads_as_none(env, monkeypatch, c
     folder read-write. Only the handlers of Claude Code and of an agent
     with api: anthropic read it."""
     served = env.proj / "gmlx.yaml"
-    served.write_text("[" * 5000 + "]" * 5000 + "\n")
+    # Each level takes the parser at least one frame.
+    depth = sys.getrecursionlimit()
+    served.write_text("[" * depth + "]" * depth + "\n")
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
         "pid": os.getpid(), "host": h, "port": p, "config_abspath": str(served)})
     real, reads = launch._served_config, []
