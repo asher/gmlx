@@ -729,7 +729,7 @@ def _installed(monkeypatch):
 
     monkeypatch.setattr(P, "prompt_step", P.prompt_step)
     monkeypatch.setattr(P, "needs_processing", P.needs_processing)
-    monkeypatch.delattr(P, pd._FLAG, raising=False)
+    monkeypatch.setattr(P, pd._FLAG, False, raising=False)
     return P
 
 
@@ -800,6 +800,24 @@ def test_a_streamed_tail_merges_into_the_folded_last_forward(monkeypatch):
     assert pd.decayed_for_batch(batch(False)) == 2099
     assert P.needs_processing(batch(False)) is True
     assert pd.decayed_for_batch(batch(True, draft=object())) == 2099
+
+
+def test_a_folding_streamed_prefill_reaches_generate_as_its_step_decays(
+        monkeypatch):
+    """A folding batch with no checkpoint pause runs the stock loop to
+    generate() on a streamed model whose step decays with depth. Inside a
+    chunk the step is sized already: sized again from the decayed width,
+    the tail merge would take the whole rest as one chunk the stock step
+    never runs, and the loop would spin."""
+    from prefill_loop import Model, drain, install, make_batch
+
+    install(monkeypatch, {"p": None, "sys": None}, [])
+    _cap(monkeypatch, 5.4)
+    for n in (28677, 28818, 20483, 37153):
+        chunks = drain(make_batch(Model(folds=True), n, apc=False))
+        assert sum(chunks) == n
+        if n == 28677:
+            assert chunks == [8192, 8192, 4096, 4096, 4096, 5]
 
 
 def test_decayed_seed_step_with_profile(monkeypatch):

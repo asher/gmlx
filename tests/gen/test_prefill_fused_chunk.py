@@ -363,7 +363,7 @@ def test_real_prompt_loop_runs_every_chunk_within_the_cap(monkeypatch):
 
     monkeypatch.setattr(P, "prompt_step", P.prompt_step)
     monkeypatch.setattr(P, "needs_processing", P.needs_processing)
-    monkeypatch.delattr(P, pd._FLAG, raising=False)
+    monkeypatch.setattr(P, pd._FLAG, False, raising=False)
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     assert pd.install_prefill_decay()

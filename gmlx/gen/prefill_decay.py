@@ -370,6 +370,14 @@ def note_cache_limit(nbytes: float | None) -> None:
     _NOTED_CACHE_LIMIT = None if nbytes is None else float(nbytes)
 
 
+def cap_follows_headroom() -> bool:
+    """Whether the body cap follows the live headroom, which falls as a
+    prefill's KV grows (``_body_cap_bytes``)."""
+    return (_env_cap_bytes() is None
+            and env_bool("GMLX_PREFILL_HEADROOM_CAP", False)
+            and _NOTED_CACHE_LIMIT is not None)
+
+
 def _body_cap_bytes() -> float:
     """Body transient cap. Env keeps absolute authority; with
     GMLX_PREFILL_HEADROOM_CAP=1 AND a noted cache limit, the legacy 5% cap is
@@ -380,13 +388,13 @@ def _body_cap_bytes() -> float:
     if env is not None:
         return env
     legacy = _cap_bytes()
-    if (not env_bool("GMLX_PREFILL_HEADROOM_CAP", False)
-            or _NOTED_CACHE_LIMIT is None):
+    limit = _NOTED_CACHE_LIMIT
+    if not cap_follows_headroom() or limit is None:
         return legacy
     room = _headroom_bytes()
     if room is None:
         return legacy
-    cap = max(legacy, min(_HEADROOM_FRACTION * room, _NOTED_CACHE_LIMIT))
+    cap = max(legacy, min(_HEADROOM_FRACTION * room, limit))
     if cap > legacy and env_bool("GMLX_PREFILL_DECAY_LOG", False) \
             and "headroom-cap" not in _PROFILE_LOGGED:
         _PROFILE_LOGGED.add("headroom-cap")
@@ -1049,7 +1057,9 @@ def install_prefill_decay() -> bool:
         return _with_decayed_step(self, orig_step)
 
     def _decay_needs_processing(self):
-        if not _folds(self):
+        # Inside a swapped prompt_step the step is sized already: sizing it
+        # again can merge the tail into one chunk that orig never runs.
+        if not _folds(self) or "_gmlx_base_step" in vars(self):
             return orig_needs(self)
         return _with_decayed_step(self, orig_needs)
 
