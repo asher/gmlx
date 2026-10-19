@@ -326,6 +326,14 @@ def pytest_collection_finish(session):
         items[:] = [i for i in items if i not in last] + last
 
 
+def pytest_collection_modifyitems(config, items):
+    # An integration test decodes real models for as long as it needs.
+    if config.pluginmanager.hasplugin("timeout"):
+        for item in items:
+            if item.get_closest_marker("integration"):
+                item.add_marker(pytest.mark.timeout(0))
+
+
 @pytest.fixture(autouse=True)
 def _no_hf_cache_writes():
     # The guard refuses each write; this fails the test that tried one,
