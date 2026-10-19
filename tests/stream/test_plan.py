@@ -182,7 +182,7 @@ def flat_room(monkeypatch):
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
 
 
-def test_box_plan_verdicts(flat_room):
+def test_box_plan_verdicts(flat_room, monkeypatch):
     ram, ws = 60e9, 45e9
     ceiling = 45e9 * 0.95
     room = 1 * GiB
@@ -200,10 +200,18 @@ def test_box_plan_verdicts(flat_room):
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS
-    # The ring and the host floor keep their room out of the arena.
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor - 5e9, abs=2)
+    # The host floor keeps its room out of the arena; the arena holds the
+    # ring's room and lends it at each prefill.
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor, abs=2)
+    assert b.ring_shared_bytes == 5e9
     assert b.arena_share == pytest.approx(b.arena_bytes / 200e9)
     assert b.ring_fits
+    monkeypatch.setenv("GMLX_RING_TIMESHARE", "0")
+    b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
+                    ram_bytes=ram, ws_bytes=ws)
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor - 5e9, abs=2)
+    assert b.ring_shared_bytes == 0
+    monkeypatch.delenv("GMLX_RING_TIMESHARE")
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=30e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS and not b.ring_fits

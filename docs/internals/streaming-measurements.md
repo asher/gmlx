@@ -43,7 +43,9 @@ physical RAM. Four things share the ceiling, in this order:
 3. The prefill ring holds two copies of the largest layer's expert stacks.
    When the ring does not fit, prefill reads through the page cache
    instead, and the load says so. Decoding is not affected.
-4. The decode arena takes what is left after a host floor. The floor is 5%
+4. The decode arena takes what is left after a host floor, and it also
+   uses the ring's room while decoding, as
+   [the lossless settings](#the-lossless-settings) describe. The floor is 5%
    of RAM, at least 4 GiB, plus 2.5 GiB for the page cache, and it keeps
    the rest of the Mac out of swap. Buffered reads, such as prefill without
    the ring and decoding from the page cache, slow sharply when the page
@@ -97,7 +99,8 @@ Its routed experts are 799 GB, with 896 experts in each of 92 layers and
 ceiling is 97.9 GB and the KV room is 11.7 GB. That leaves 24 GB, where the
 22.7 GB ring fits and the host floor takes the rest, so there is no arena.
 The model streams, and decoding reads each expert through the page cache.
-On a 512 GB Mac, the arena is 234 GB, or 29% of the experts.
+On a 512 GB Mac, the arena is about 257 GB, or 32% of the experts,
+with the ring's room lent to it while decoding.
 
 The experts' quant does not change the fit. UD-Q4_K_XL is a 1.5 TB file
 with the same 62.2 GB of every-token weights, so it streams on the same
@@ -146,6 +149,7 @@ gain of each setting on real models.
 | Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
 | Stack unmap | Releases the expert stacks' GPU mapping once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
 | Tail merge | Widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
+| Ring time-share | Lets the arena use the prefill ring's room while decoding. Each prefill empties the least used layers for the ring, and they refill during the reply. | `GMLX_RING_TIMESHARE=0` |
 
 On a short prompt, the prefill feeder reads only the experts that the
 router chose, which shortens the time to the first token. Its reads bypass

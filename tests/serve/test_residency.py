@@ -909,6 +909,17 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
                                    SimpleNamespace(arena_bytes=0,
                                                    ring_fits=False)))
     assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 60 * GB
+    # An arena that holds the ring's room prices it once, inside the arena.
+    monkeypatch.setattr(plan, "plan_path",
+                        lambda p: (SimpleNamespace(ring_bytes=6 * GB),
+                                   SimpleNamespace(arena_bytes=86 * GB,
+                                                   ring_fits=True,
+                                                   ring_shared_bytes=6 * GB)))
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 66 * GB
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB")
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 86 * GB
+    feeder._ring_share = 4 * GB
+    assert residency._prefill_ring_of(proxy.response_generator) == 0
     # A dense entry (no feeder) is still its file.
     stock._kq_decode_feeder = None
     dense = pool.acquire("b", None, "auto")

@@ -1075,6 +1075,7 @@ def install_expert_streaming(
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget, **arena_kw)
     ring = 0
+    ring_share = 0
     if (
         streaming
         and prefetcher is not None
@@ -1096,12 +1097,19 @@ def install_expert_streaming(
             feeder = maybe_make_prefill_feeder(
                 prefetcher.offsets, moe_modules)
         if feeder is not None and arena is not None:
-            # The ring keeps its room for the process lifetime: a later
-            # prefill rebuilds it there, with no lend out of the arena.
+            from gmlx.stream.budget import ring_share_bytes
+
             ring = ring_bytes(prefetcher.offsets)
-            arena = _decode_arena_bytes(
+            held = _decode_arena_bytes(
                 total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
                 **arena_kw)
+            # The arena holds the ring's room while decoding and lends
+            # whole layers back for each prefill pass that builds the ring
+            # (DecodeFeeder._lend_ring_share). Without a share the ring
+            # keeps its room for the process lifetime.
+            ring_share = ring_share_bytes(arena, held, ring)
+            if not ring_share:
+                arena = held
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -1135,7 +1143,7 @@ def install_expert_streaming(
         # is gone when a later prefill rebuilds the ring.
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose,
-            fast_disk=fast_disk)
+            fast_disk=fast_disk, ring_share=ring_share)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
@@ -1197,7 +1205,10 @@ def install_expert_streaming(
                 f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
                 f"every-token {every / 1e9:.1f} + "
                 f"arena {dfeeder.nominal_bytes / 1e9:.1f} + ring "
-                f"{ring / 1e9:.1f} + kv room {room.bytes / 1e9:.1f} "
+                f"{(ring - ring_share) / 1e9:.1f}"
+                + (f" ({ring_share / 1e9:.1f} more lent from the arena at "
+                   "each prefill)" if ring_share else "")
+                + f" + kv room {room.bytes / 1e9:.1f} "
                 f"({room_how}) + floor {floor / 1e9:.1f}; {tables}"
                 "GMLX_STREAM_KV_CTX sizes the room"
             )

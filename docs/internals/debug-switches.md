@@ -221,6 +221,7 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve in GiB that arena sizing adds to the host floor. The default is `2.5`. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure, instead of shrinking it and regrowing it when pressure clears. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache, as [The lossless settings](../streaming.md#the-lossless-settings) explains. |
+| `GMLX_RING_TIMESHARE=0` | Keep the prefill ring's room apart from the decode arena for the life of the process, instead of lending it between prefill and decode. |
 | `GMLX_PREFILL_RING_SLOTS` | Layer slots in the prefill ring. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the arena. The default is `2`. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call, in tokens, that the arena serves by reading only its routed experts. The default is `64`. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call, in tokens, that the arena splits when its routed set exceeds the arena. The default is `256`, and `0` disables splitting. |

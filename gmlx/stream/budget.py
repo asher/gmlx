@@ -100,6 +100,20 @@ def governor_headroom_bytes() -> float | None:
     return _headroom_and_ws(margin())[0]
 
 
+def ring_share_bytes(full_bytes: int, held_bytes: int, ring_bytes: int) -> int:
+    """Bytes of the prefill ring's room the decode arena holds while
+    decoding and lends back for each prefill pass, instead of leaving the
+    room idle under the ceiling. ``full_bytes`` is the arena sized with
+    the room, ``held_bytes`` the arena with the room set aside; the share
+    is what the room adds. Lends free whole layers, so the arena must be
+    at least twice the ring. ``GMLX_RING_TIMESHARE=0`` keeps the room
+    apart for the process lifetime."""
+    if (not env_bool("GMLX_RING_TIMESHARE", True) or ring_bytes <= 0
+            or full_bytes < 2 * ring_bytes):
+        return 0
+    return max(0, min(int(ring_bytes), int(full_bytes) - int(held_bytes)))
+
+
 def legacy_room_bytes() -> int:
     raw = os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "")
     try:

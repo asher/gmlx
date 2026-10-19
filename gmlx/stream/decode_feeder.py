@@ -239,6 +239,7 @@ class DecodeFeeder:
         stats_verbose: bool | None = None,
         lend_bytes: int = 0,
         fast_disk: str | None = None,
+        ring_share: int = 0,
     ):
         import mlx_kquant as kq
 
@@ -307,6 +308,21 @@ class DecodeFeeder:
             self._orig_slots[li] * self._per_expert[li] for li in self._layers)
         self._pressure_steps = 0
         self._lend_frac = 1.0
+        # Ring time-share: ``ring_share`` bytes of the arena are the prefill
+        # ring's room. Each prefill pass that builds the ring takes them
+        # back by shrinking whole layers to one slot (``_lent``), which
+        # copies one expert per layer and frees the memory before the ring
+        # allocates. The next decode
+        # clears ``_lent`` and those layers regrow at their own stage().
+        # The first prefill starts lent, so the ring and the arena never
+        # sum past the budget.
+        self._ring_share = int(ring_share)
+        self._lent: set[int] = set()
+        self._ring_lends = 0
+        if self._ring_share:
+            self._lent = self._pick_lent(self._ring_share)
+            for li in self._lent:
+                self._slots[li] = 1
         if lend_bytes > 0 and self.nominal_bytes:
             self._lend_frac = max(0.0, 1.0 - lend_bytes / self.nominal_bytes)
             self._slots = {li: self._target_slots(li) for li in self._layers}
@@ -654,6 +670,7 @@ class DecodeFeeder:
             # The ring is gone: layers regrow to capacity at their own
             # stage() calls.
             self._lend_frac = 1.0
+            self._lent.clear()
             t2 = t3 = t1
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
@@ -671,11 +688,47 @@ class DecodeFeeder:
                     f"residency insert {t2 - t1:.2f}s, commit {t3 - t2:.2f}s",
                     flush=True)
             return
-        if self._lend_frac < 1.0:
+        if self._lend_frac < 1.0 or self._lent:
             if self._release_ring is not None:
                 self._release_ring()
                 self._clear_mlx_cache()
             self._lend_frac = 1.0
+            self._lent.clear()
+
+    def _pick_lent(self, nbytes: int) -> set[int]:
+        """Layers whose arenas, shrunk to one slot, free ``nbytes``: the
+        coldest first, by decode hit rate, so the lend costs the fewest
+        hits. Layers with no lookups yet go in layer order."""
+        hits = getattr(self, "_layer_hits", {})
+        looks = getattr(self, "_layer_lookups", {})
+        wedged = getattr(self, "_wedged_layers", set())
+
+        def rate(li):
+            n = looks.get(li, 0)
+            return (hits.get(li, 0) / n if n else 1.0, li)
+
+        picked: set[int] = set()
+        freed = 0
+        for li in sorted((li for li in self._layers if li not in wedged),
+                         key=rate):
+            if freed >= nbytes:
+                break
+            picked.add(li)
+            freed += max(0, self._slots[li] - 1) * self._per_expert[li]
+        return picked
+
+    def _lend_ring_share(self) -> int:
+        """Shrink the time-share layers to one slot now. Their in-flight
+        prestage reads join first (a resize must not free a buffer a read
+        still writes into). Returns the bytes freed."""
+        self._lent = self._pick_lent(self._ring_share)
+        empty = np.empty(0, dtype=np.int64)
+        for li in self._lent:
+            if self._pending.get(li):
+                self._settle_pending(li, empty)
+        freed = self._shrink_now()
+        self._ring_lends += 1
+        return freed
 
     def lend_for_ring(self, nbytes: int) -> None:
         """Shrink the wired arena by ~``nbytes`` so the prefill ring can
@@ -690,6 +743,17 @@ class DecodeFeeder:
         prefill that needs the memory. Each layer keeps its most popular
         residents, so the decode resume after this turn starts warm.
         ensure_wired repays the lend on the next decode-sized call."""
+        if self._ring_share and not self._lent:
+            freed = self._lend_ring_share()
+            if self._ring_lends == 1:
+                loadlog.info(
+                    f"[stream] decode arena lends {len(self._lent)} layers "
+                    f"({freed / 1e9:.1f} GB) to the prefill ring at each "
+                    "prefill; they refill at the next decode "
+                    "(GMLX_RING_TIMESHARE=0 keeps the ring's room apart)")
+            nbytes = max(0, nbytes - freed)
+            if not nbytes:
+                return
         if self._mlock_deferred:
             return  # arena never wired; ring + cold arena already coexist
         if not self.arena_bytes:
@@ -1546,6 +1610,8 @@ class DecodeFeeder:
     # memory pressure
 
     def _target_slots(self, li: int) -> int:
+        if li in self._lent:
+            return 1
         frac = (1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC) \
             * self._lend_frac
         if frac >= 1.0:
@@ -1807,6 +1873,10 @@ class DecodeFeeder:
                 f"[stream] decode feeder seeded {self._seeded} experts "
                 f"({self._seed_bytes / 1e9:.1f} GB) from the prefill ring, "
                 f"copies {self._t_seed:.1f}s")
+        if getattr(self, "_ring_lends", 0):
+            print(
+                f"[stream] decode arena lent layers to the prefill ring at "
+                f"{self._ring_lends} prefills")
         if getattr(self, "_shed_tokens", 0):
             print(
                 f"[stream] miss-shed: {self._shed_n} experts shed over "
@@ -1880,7 +1950,7 @@ def _register_exit_close(feeder) -> None:
 
 def maybe_make_decode_feeder(
     offsets, modules, arena_bytes: int, stats_verbose: bool | None = None,
-    lend_bytes: int = 0, fast_disk: str | None = None,
+    lend_bytes: int = 0, fast_disk: str | None = None, ring_share: int = 0,
 ) -> DecodeFeeder | None:
     """A DecodeFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
@@ -1902,7 +1972,7 @@ def maybe_make_decode_feeder(
                 f"arena budget too small ({arena_bytes / 1e9:.1f} GB)")
         feeder = DecodeFeeder(
             offsets, modules, arena_bytes, stats_verbose, lend_bytes=lend_bytes,
-            fast_disk=fast_disk)
+            fast_disk=fast_disk, ring_share=ring_share)
         # CLI runs never tear the feeder down explicitly and __del__ is
         # not reliable at interpreter exit, so the hit-rate/prestage stats
         # lines would silently vanish; close() is idempotent, so the

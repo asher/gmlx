@@ -75,7 +75,8 @@ def _fake_arena_alloc(shape):
 
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
-                 pressure=False, fast_disk="off", lend_bytes=0):
+                 pressure=False, fast_disk="off", lend_bytes=0,
+                 ring_share=0):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
@@ -96,7 +97,7 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
     per_expert = sum(_STRIDE.values())
     return DecodeFeeder(
         offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers,
-        lend_bytes=lend_bytes,
+        lend_bytes=lend_bytes, ring_share=ring_share,
     ), modules
 
 
@@ -1736,6 +1737,84 @@ def test_lend_is_noop_while_the_kernel_has_the_room(monkeypatch, tmp_path):
     feeder.lend_for_ring(before // 2)
     assert asked == [before // 2]
     assert feeder._lend_frac == 1.0 and feeder.arena_bytes == before
+
+
+def test_ring_share_lends_cold_layers_whole_at_each_prefill(
+        monkeypatch, tmp_path):
+    """The arena holds the prefill ring's room while decoding. Each
+    prefill that rebuilds the ring shrinks the coldest layers to one slot,
+    keeping their hottest resident, even while the kernel has room; the
+    next decode releases the ring and they refill. The first prefill
+    starts lent, so the ring and the arena never sum past the budget."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    assert feeder.nominal_bytes == 8 * per_expert
+    assert feeder._lent == {0} and feeder._slots == {0: 1, 1: 4}
+    assert feeder.arena_bytes == 5 * per_expert
+    released = []
+    feeder._release_ring = lambda: released.append(1)
+    feeder.stage(0, np.array([0]))  # first prefill: still lent
+    assert feeder._slots[0] == 1
+    feeder.ensure_wired()  # first decode
+    assert released == [1] and not feeder._lent
+    for ids in ([0, 1], [0, 1], [0, 1], [0, 1]):
+        feeder.stage(0, np.array(ids))  # regrows, then hits
+    assert feeder._slots[0] == 4
+    for ids in ([0, 1], [2, 3], [0]):
+        feeder.stage(1, np.array(ids))  # mostly misses: the colder layer
+    feeder._kernel_has_room = lambda n: True
+
+    feeder.lend_for_ring(3 * per_expert)
+    assert feeder._lent == {1} and feeder._slots == {0: 4, 1: 1}
+    assert feeder.arena_bytes == 5 * per_expert
+    s = int(feeder._slot_of[1][0])
+    assert s == 0 and (feeder._slot_of[1] >= 0).sum() == 1
+    for kind in _KINDS:
+        assert _arena_slot(feeder, 1, kind, s) == _expert_bytes(1, kind, 0)
+
+    feeder.ensure_wired()  # next decode: the ring goes, layer 1 refills
+    assert released == [1, 1] and not feeder._lent
+    feeder.stage(1, np.array([0, 2]))
+    assert feeder._slots[1] == 4
+    assert feeder.arena_bytes == 8 * per_expert
+    feeder.lend_for_ring(3 * per_expert)  # every prefill lends again
+    assert feeder._ring_lends == 2 and feeder._slots[1] == 1
+
+
+def test_ring_share_lend_joins_inflight_prestage(monkeypatch, tmp_path):
+    """A lend never frees a buffer a prestage read still writes into: it
+    joins the layer's reads, then shrinks it."""
+    import threading
+
+    import gmlx.stream.decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_PAGE", 16)
+    monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", "5")
+    release = threading.Event()
+    real = dfm.read_range
+    blocked = {64, 320, 560}  # layer 0, expert 1: gate/up/down slices
+
+    def gated(fd, mv, off):
+        if off in blocked:
+            release.wait(5)
+        real(fd, mv, off)
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0]))
+    feeder.stage(1, np.array([0]))
+    feeder.stage(1, np.array([0]))  # layer 1 hotter: layer 0 is lent
+    monkeypatch.setattr(dfm, "read_range", gated)
+    feeder.prestage(0, np.array([[1]]))
+    assert 1 in feeder._pending[0]
+    threading.Timer(0.05, release.set).start()
+    feeder.lend_for_ring(3 * per_expert)
+    assert release.is_set() and not feeder._pending.get(0)
+    assert feeder._lent == {0} and feeder._slots == {0: 1, 1: 4}
 
 
 def test_layer_wires_at_its_first_stage_call(monkeypatch, tmp_path):

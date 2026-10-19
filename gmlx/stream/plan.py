@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from gmlx.stream.budget import KvRoom
+from gmlx.stream.budget import KvRoom, ring_share_bytes
 
 GiB = 1 << 30
 _MIN_ARENA = GiB           # decode_feeder refuses a smaller arena
@@ -113,6 +113,8 @@ class BoxPlan:
     floor_bytes: int
     short_bytes: int
     verdict: str
+    # Ring room the arena holds while decoding and lends at each prefill.
+    ring_shared_bytes: int = 0
 
     @property
     def arena_share(self) -> float | None:
@@ -203,8 +205,11 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     left = int(ceiling - every - room.bytes)
     ring_fits = model.ring_bytes <= left
     floor = host_floor_bytes(int(ram_bytes))
-    arena = min(max(0, left - (model.ring_bytes if ring_fits else 0) - floor),
-                model.expert_bytes)
+    full = min(max(0, left - floor), model.expert_bytes)
+    held = (min(max(0, left - model.ring_bytes - floor), model.expert_bytes)
+            if ring_fits else full)
+    shared = ring_share_bytes(full, held, model.ring_bytes) if ring_fits else 0
+    arena = full if shared else held
     if classify_weight_share(model.total_bytes, ram_bytes) != "over":
         verdict = VERDICT_RESIDENT
     elif left < 0:
@@ -218,7 +223,8 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
         ceiling_bytes=ceiling, room=room, arena_bytes=arena,
         expert_bytes=model.expert_bytes, ring_fits=ring_fits,
         floor_bytes=floor,
-        short_bytes=max(0, -left), verdict=verdict)
+        short_bytes=max(0, -left), verdict=verdict,
+        ring_shared_bytes=shared)
 
 
 def scan_path(gguf_path: str) -> list:
