@@ -198,8 +198,9 @@ _PRESSURE_MAX_STEPS = 3
 _PRESSURE_COOLDOWN_POLLS = 8
 _REGROW_NORMAL_POLLS = 256
 
-# Forwards a wide call keeps a ring lend after the ring came back in the
-# forward it repaid in (see DecodeFeeder.repay_at).
+# Longest hold, in forwards, of a ring lend that wide calls keep after the
+# ring came back in the forward one of them repaid in (see
+# DecodeFeeder.repay_at).
 _HOLD_FORWARDS = 16
 
 
@@ -338,13 +339,16 @@ class DecodeFeeder:
         self._lent: set[int] = set()
         self._ring_lends = 0
         self._ring_dead = False
-        # A wide call that repaid and found the ring rebuilt later in the
-        # same forward keeps the lend for _HOLD_FORWARDS forwards, so a
-        # batch that overflows a later layer does not release and rebuild
-        # the ring every step.
+        # When the ring comes back in the forward a wide call repaid in,
+        # the wide calls after it keep the new lend for a hold: one
+        # forward, doubling each time it recurs up to _HOLD_FORWARDS. A
+        # batch that overflows a later layer then does not release and
+        # rebuild the ring every step, and one that overflows only now
+        # and then is not held long.
         self._wide_repaid = False
         self._repaying_wide = False
         self._hold_left = 0
+        self._hold_next = 1
         if self._ring_share:
             self._lent = self._pick_lent(self._ring_share)
             for li in self._lent:
@@ -682,9 +686,11 @@ class DecodeFeeder:
         Later decode calls repay a ring lend: the ring is dropped again and
         the arena's slot targets return to full size (layers regrow lazily
         at their own stage() calls, each re-wiring as it resizes)."""
-        # Any call but a wide repay is a one-token forward: a rebuild after
-        # it is a new prefill, which starts no hold (see repay_at).
-        self._wide_repaid, self._repaying_wide = self._repaying_wide, False
+        # A wide repay marks its forward: a ring rebuild later in it
+        # starts a hold (see repay_at).
+        if self._repaying_wide:
+            self._repaying_wide = False
+            self._wide_repaid = True
         if self._mlock_deferred:
             self._mlock_deferred = False
             # Ring buffers land in MLX's freed-buffer cache; _drop_ring
@@ -759,6 +765,14 @@ class DecodeFeeder:
         stage() once, the only place it resizes."""
         return self._slots.get(li) == self._target_slots(li)
 
+    def forward_start(self, li: int) -> None:
+        """A multi-token call at ``li``, outside a token split. At the
+        forward's first covered layer it ends the forward before, so a
+        ring rebuild from here on belongs to this one. Every lend that
+        follows no wide repay resets the hold to one forward."""
+        if self._layers and li == min(self._layers):
+            self._wide_repaid = False
+
     def repay_at(self, li: int, ids: np.ndarray,
                  ring_ok: bool = False) -> bool:
         """Whether a multi-token call routed to ``ids`` at ``li`` repays a
@@ -767,13 +781,12 @@ class DecodeFeeder:
         speculative) or a short prompt, and a later layer of a ring pass
         must not drop the ring under the layers after it.
 
-        ``ring_ok``: the call is wide enough to take the ring. It keeps
+        ``ring_ok``: the call is wide enough to take a live ring. It keeps
         the lend when its experts overflow this layer once repaid, as it
         would take the ring here anyway, and while a hold from an earlier
-        rebuild lasts."""
+        rebuild lasts. The caller has called forward_start."""
         if not self._layers or li != min(self._layers):
             return False
-        self._wide_repaid = False  # the forward before this one is over
         if not self._owes_lend():
             return False
         if not ring_ok:
@@ -844,9 +857,15 @@ class DecodeFeeder:
         prefill that needs the memory. Each layer keeps its most popular
         residents, so the decode resume after this turn starts warm.
         ensure_wired repays the lend on the next decode call."""
-        # A rebuild in the forward a wide call repaid in starts a hold.
-        self._hold_left = _HOLD_FORWARDS if self._wide_repaid else 0
-        self._wide_repaid = False
+        # A rebuild in the forward a wide call repaid in starts a hold,
+        # twice as long as the last each time it recurs.
+        if self._wide_repaid:
+            self._wide_repaid = False
+            self._hold_left = self._hold_next
+            self._hold_next = min(2 * self._hold_next, _HOLD_FORWARDS)
+        else:
+            self._hold_left = 0
+            self._hold_next = 1
         if self._ring_share and not self._lent:
             freed = self._lend_ring_share()
             if self._ring_lends == 1:

@@ -492,6 +492,9 @@ def test_arena_overflow_token_split():
         def wedged_at(self, li):
             return False
 
+        def forward_start(self, li):
+            pass
+
         def repay_at(self, li, ids, ring_ok=False):
             return False
 
@@ -559,6 +562,9 @@ def test_arena_split_leaves_never_miss_shed():
 
         def wedged_at(self, li):
             return False
+
+        def forward_start(self, li):
+            pass
 
         def repay_at(self, li, ids, ring_ok=False):
             return False

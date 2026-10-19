@@ -149,6 +149,9 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
         assert fdr.whole_calls == [3]
 
         class _FakeDF:
+            def forward_start(self, li):
+                pass
+
             def repay_at(self, li, ids, ring_ok=False):
                 return False
 
@@ -941,7 +944,7 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
 @pytest.mark.parametrize("env_gb", [None, "100"])
 @pytest.mark.parametrize("built", [True, False])
 def test_arena_sizes_against_ram_before_the_ring_is_wired(
-        monkeypatch, timeshare, env_gb, built):
+        monkeypatch, capsys, timeshare, env_gb, built):
     """The ring's slots are wired when its feeder is built, so a free-RAM
     snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
     of KV room, a 2 GB ring: the arena keeping the ring apart gets 4 GB,
@@ -1015,3 +1018,9 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
         want, ring_b = ((7 if env_gb else 6) * GB, 0), 0
     assert sized == {"arena": want[0], "share": want[1],
                      "room": 100 * GB - want[0] - (ring_b - want[1])}
+    # One clamp line, for the arena the loader keeps.
+    clamps = [ln for ln in capsys.readouterr().out.splitlines()
+              if "GMLX_DECODE_ARENA_GB=" in ln]
+    assert len(clamps) == (1 if env_gb else 0)
+    if env_gb:
+        assert f"{want[0] / GB:.1f}GB" in clamps[0]

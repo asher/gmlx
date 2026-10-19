@@ -118,6 +118,9 @@ def _autonomous_glu(monkeypatch, fake_df):
 
 
 class _FakeDF:
+    def forward_start(self, li):
+        pass
+
     def repay_at(self, li, ids, ring_ok=False):
         return False
 

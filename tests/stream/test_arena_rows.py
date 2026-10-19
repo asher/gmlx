@@ -76,6 +76,9 @@ class _Arena:
     def wedged_at(self, li):
         return False
 
+    def forward_start(self, li):
+        pass
+
     def repay_at(self, li, ids, ring_ok=False):
         return False
 

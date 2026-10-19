@@ -44,6 +44,9 @@ class _Arena:
     def wedged_at(self, li):
         return False
 
+    def forward_start(self, li):
+        pass
+
     def repay_at(self, li, ids, ring_ok=False):
         return False
 
@@ -100,6 +103,9 @@ class _Owed(_Arena):
     def __init__(self, slots):
         super().__init__(slots)
         self.events = []
+
+    def forward_start(self, li):
+        self.events.append("start")
 
     def repay_at(self, li, ids, ring_ok=False):
         self.events.append(("repay_at", ids.size, ring_ok))
@@ -230,4 +236,23 @@ def test_wide_call_repays_a_lend_before_it_stages(t):
     layer stages."""
     arena, ring = _Owed(slots=4), _Ring(live=False)
     _check(_glu(arena, ring), t, 4, rows=True)
-    assert arena.events == [("repay_at", t * TOPK, t >= 32), "wired", "stage"]
+    assert arena.events == [
+        "start", ("repay_at", t * TOPK, t >= 32), "wired", "stage"]
+
+
+def test_a_quarantined_ring_takes_no_wide_call():
+    """A ring out of service covers no layer, so a wide call cannot keep
+    the lend for it."""
+    arena, ring = _Owed(slots=4), _Ring(live=False)
+    ring.covers = lambda li: False
+    _check(_glu(arena, ring), 40, 4, rows=True)
+    assert ("repay_at", 40 * TOPK, False) in arena.events
+
+
+def test_a_prefill_chunk_starts_a_forward():
+    """A chunk too wide for the arena path still ends the forward before
+    it, so its ring rebuild is a prefill and starts no hold."""
+    arena, ring = _Owed(slots=4), _Ring()
+    _check(_glu(arena, ring), 128, E, rows=False)
+    assert arena.events[0] == "start"
+    assert not any(isinstance(e, tuple) for e in arena.events)

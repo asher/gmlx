@@ -238,6 +238,7 @@ def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, room_bytes: int | None = None,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
     cast_dead_bytes: int = 0, ring_bytes: int = 0, forced: bool = False,
+    avail_bytes: int | None = None,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
     after the non-expert weights, the KV room, the prefill ring and the
@@ -255,7 +256,8 @@ def _decode_arena_bytes(
     has already filled. The loader sizes the arena before the ring is
     wired, with and without the ring's room, and ``ring_share_bytes``
     decides whether the arena holds the room and lends it at prefill; an
-    explicit ``GMLX_DECODE_ARENA_GB`` keeps the whole ring apart.
+    explicit ``GMLX_DECODE_ARENA_GB`` keeps the whole ring apart and is
+    sized once, against ``avail_bytes`` read before the ring was wired.
     ``room_bytes`` is the priced KV room
     (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
     ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
@@ -273,7 +275,8 @@ def _decode_arena_bytes(
         want = int(float(env) * (1 << 30))
         if env_bool("GMLX_DECODE_ARENA_FORCE", False):
             return want
-        avail = _available_ram_bytes()
+        avail = (_available_ram_bytes() if avail_bytes is None
+                 else avail_bytes)
         if avail is None:
             return want
         try:

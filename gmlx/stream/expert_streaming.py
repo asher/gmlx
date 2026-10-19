@@ -515,6 +515,8 @@ def install_expert_streaming(
                     fdr = getattr(self, "_kq_feeder", None)
                     dfr = getattr(self, "_kq_decode_feeder", None)
                     small = n_tokens <= _arena_stage_max_tokens()
+                    if dfr is not None and n_tokens > 1 and not in_split:
+                        dfr.forward_start(self._kq_li)
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
                     routed_ids = None
@@ -681,7 +683,9 @@ def install_expert_streaming(
                         if (not in_split and n_tokens > 1
                                 and dfr.repay_at(
                                     self._kq_li, ids,
-                                    ring_ok=fdr is not None and n_tokens
+                                    ring_ok=fdr is not None
+                                    and fdr.covers(self._kq_li)
+                                    and n_tokens
                                     >= _STREAM_PREFETCH_MIN_TOKENS)):
                             # A wider call repays a ring lend at the
                             # forward's first layer.
@@ -1084,21 +1088,26 @@ def install_expert_streaming(
     ring = 0
     ring_share = 0
     held = None
+    # The user's arena keeps the whole ring apart, as the serve footprint
+    # prices it. It is sized once, when it is known whether the ring is built.
+    env_arena = bool(arena_kw and feeder_prefill
+                     and os.environ.get("GMLX_DECODE_ARENA_GB"))
+    avail0 = None
     if arena_kw and feeder_prefill:
+        from gmlx.stream.budget import _available_ram_bytes
         from gmlx.stream.prefill_feeder import ring_bytes
 
         # Sized before the ring exists: its slots are wired at
         # construction, and a live RAM snapshot taken after would charge
         # them twice.
         ring = ring_bytes(prefetcher.offsets)
-        held = _decode_arena_bytes(
-            total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
-            **arena_kw)
-    if held is not None and os.environ.get("GMLX_DECODE_ARENA_GB"):
-        # The user's arena keeps the whole ring apart, as the serve
-        # footprint prices it.
-        arena = held
-    elif arena_kw:
+        if env_arena:
+            avail0 = _available_ram_bytes()
+        else:
+            held = _decode_arena_bytes(
+                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+                **arena_kw)
+    if arena_kw and not env_arena:
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget, **arena_kw)
     if (
@@ -1130,9 +1139,10 @@ def install_expert_streaming(
                 arena = held
         if feeder is None:
             ring = 0
-            if os.environ.get("GMLX_DECODE_ARENA_GB"):
-                arena = _decode_arena_bytes(
-                    total_bytes, prefetcher.offsets, budget, **arena_kw)
+        if env_arena:
+            arena = _decode_arena_bytes(
+                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+                avail_bytes=avail0, **arena_kw)
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():

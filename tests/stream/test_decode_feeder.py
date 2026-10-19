@@ -462,6 +462,9 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.eval(ref)
 
         class _FakeDF:
+            def forward_start(self, li):
+                pass
+
             def repay_at(self, li, ids, ring_ok=False):
                 return False
 
@@ -547,6 +550,9 @@ def test_arena_call_lifts_cpu_pin(monkeypatch):
         pin_in_swap = []
 
         class _DF:
+            def forward_start(self, li):
+                pass
+
             def repay_at(self, li, ids, ring_ok=False):
                 return False
 
@@ -795,6 +801,9 @@ def test_split_pieces_execute_before_next_stage(monkeypatch):
         events = []
 
         class _SplitDF:
+            def forward_start(self, li):
+                pass
+
             def repay_at(self, li, ids, ring_ok=False):
                 return False
 
@@ -868,6 +877,9 @@ def test_wrapper_redirects_dead_ids_on_fallback(monkeypatch):
         mx.eval(ref)
 
         class _WedgedDF:
+            def forward_start(self, li):
+                pass
+
             def repay_at(self, li, ids, ring_ok=False):
                 return False
 
@@ -1436,6 +1448,9 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
     install_expert_streaming(model)
 
     class _FakeDF:
+        def forward_start(self, li):
+            pass
+
         def repay_at(self, li, ids, ring_ok=False):
             return False
 
@@ -1891,9 +1906,10 @@ def test_ring_back_before_a_refill_lends_the_same_layers(
 
 def test_ring_back_in_a_wide_forward_holds_the_lend(monkeypatch, tmp_path):
     """A wide call fits the first layer and repays, then a later layer
-    overflows and takes the ring. The next 16 such forwards keep the lend
-    rather than release and rebuild the ring every step. A prefill after
-    a one-token call starts no hold."""
+    overflows and takes the ring. The wide forwards after it keep the
+    lend for a hold of 1, 2, 4 and on up to 16 forwards rather than
+    release and rebuild the ring every step. A prefill starts no hold and
+    resets it to one forward."""
     import gmlx.stream.decode_feeder as dfm
 
     per_expert = sum(_STRIDE.values())
@@ -1903,10 +1919,16 @@ def test_ring_back_in_a_wide_forward_holds_the_lend(monkeypatch, tmp_path):
     feeder._release_ring = lambda: released.append(1) or True
     feeder._kernel_has_room = lambda n: True
     feeder.ensure_wired()  # first decode
-    feeder.lend_for_ring(2 * per_expert)  # a prefill
+
+    def prefill():
+        feeder.forward_start(0)
+        feeder.lend_for_ring(2 * per_expert)
+
+    prefill()
     fits = np.array([[0], [1]])
 
     def forward(overflows):
+        feeder.forward_start(0)
         if not feeder.repay_at(0, fits, ring_ok=True):
             return False
         feeder.ensure_wired()
@@ -1914,17 +1936,18 @@ def test_ring_back_in_a_wide_forward_holds_the_lend(monkeypatch, tmp_path):
             feeder.lend_for_ring(2 * per_expert)
         return True
 
-    hold = dfm._HOLD_FORWARDS
-    repaid = [forward(True) for _ in range(2 * hold + 2)]
-    assert repaid == ([True] + [False] * hold) * 2
-    assert len(released) == 3
+    assert dfm._HOLD_FORWARDS == 16
+    holds = [1, 2, 4, 8, 16, 16]
+    repaid = [forward(True) for _ in range(sum(holds) + len(holds))]
+    assert repaid == [x for h in holds for x in [True] + [False] * h]
+    assert len(released) == 1 + len(holds)
     assert forward(False)  # this forward fits every layer
+    prefill()
+    assert forward(True)  # a short hold again
+    assert [forward(True) for _ in range(4)] == [False, True, False, False]
     feeder.ensure_wired()  # a one-token forward
-    feeder.lend_for_ring(2 * per_expert)  # the next prefill
-    assert forward(True)  # starts a hold
-    feeder.ensure_wired()  # a one-token call repays
-    feeder.lend_for_ring(2 * per_expert)
-    assert forward(False)
+    prefill()
+    assert forward(True)
 
 
 def test_a_call_the_layer_cannot_hold_does_not_regrow_it(
