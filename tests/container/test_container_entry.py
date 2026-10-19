@@ -604,7 +604,12 @@ def _gone(pid: int, timeout: float = 10.0) -> bool:
 def _stop(*procs) -> None:
     for proc in procs:
         if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
+            # The process can exit after the poll. macOS then refuses to
+            # signal its group with EPERM until the process is reaped.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
             proc.wait(10)
 
 
