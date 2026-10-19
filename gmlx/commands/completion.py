@@ -245,6 +245,25 @@ def _model_candidates(words: list[str]) -> list[str]:
     return out
 
 
+def _image_model_candidates(words: list[str]) -> list[str]:
+    """``id<TAB>dit file`` lines for every ``image_models`` entry in the
+    resolved config."""
+    path = _config_path_from(words)
+    if not path or not os.path.exists(os.path.expanduser(path)):
+        return []
+    import gmlx.config as cfgmod
+
+    try:
+        cfg = cfgmod.load_config(os.path.expanduser(path))
+    except Exception:  # noqa: BLE001 - a malformed config just yields no model names
+        return []
+    out: list[str] = []
+    for mid, m in cfg.image_models.items():
+        base = os.path.basename(getattr(m, "path", "") or "")
+        out.append(f"{mid}\t{base}" if base else mid)
+    return out
+
+
 # Launch targets that are not coding agents, grouped as launch.py groups them.
 _HARNESS_KINDS = {
     "hermes": "agent runtime", "goose": "agent runtime",
@@ -472,8 +491,11 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
         return [] if filled else [f"{a}\timage action" for a in _IMAGE_ACTIONS]
     if verb == "comfyui":
         return [] if filled else [f"{a}\tcomfyui action" for a in _COMFYUI_ACTIONS]
+    if verb in ("image generate", "image bench"):
+        # an image_models id of the config, or a DiT GGUF
+        return [] if filled else ["::files", *_image_model_candidates(after_verb)]
     if verb.startswith("image "):
-        # generate and bench take a DiT GGUF, pack-vae a safetensors VAE
+        # pack-vae takes a safetensors VAE
         return [] if filled else ["::files"]
     return []
 
