@@ -283,8 +283,7 @@ def install_role_normalization() -> None:
         def apply_chat_template(processor, config, prompt, *a, **kw):
             return fn(processor, config, roles_for_render(processor, prompt, kw),
                       *a, **kw)
-        apply_chat_template.__dict__[_ROLE_NORM_FLAG] = True
-        return apply_chat_template
+        return link(apply_chat_template, fn, _ROLE_NORM_FLAG)
 
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
@@ -294,9 +293,8 @@ def install_role_normalization() -> None:
     openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     merge = getattr(openai, "_normalize_instruction_messages", None)
     if merge is not None and not wrapped_with(merge, _ROLE_NORM_FLAG):
-        wrapped = _developer_in_place(merge)
-        wrapped.__dict__[_ROLE_NORM_FLAG] = True
-        setattr(openai, "_normalize_instruction_messages", wrapped)
+        setattr(openai, "_normalize_instruction_messages",
+                link(_developer_in_place(merge), merge, _ROLE_NORM_FLAG))
 
 
 # thinking_budget for models that generate <think> (not just pre-fill it)
@@ -517,8 +515,7 @@ def install_stream_thinking_seed() -> None:
                     self._kq_harmony = ReasoningFilter(start_in_header=True)
                     self._kq_harmony_closed = False
 
-        __init__.__dict__[_STREAM_SEED_FLAG] = True
-        cls.__init__ = __init__
+        cls.__init__ = link(__init__, original_init, _STREAM_SEED_FLAG)
 
     if not wrapped_with(cls.feed, _STREAM_SEED_FLAG):
         original_feed = cls.feed
@@ -539,8 +536,7 @@ def install_stream_thinking_seed() -> None:
                              content=content or None,
                              thinking_closed=closed)
 
-        feed.__dict__[_STREAM_SEED_FLAG] = True
-        cls.feed = feed
+        cls.feed = link(feed, original_feed, _STREAM_SEED_FLAG)
 
     def _wrap(fn):
         def apply_chat_template(*a, **kw):
@@ -549,8 +545,7 @@ def install_stream_thinking_seed() -> None:
             _adopt_prompt_think_pair(
                 _LAST_GEN_ARGS.get(), a[0] if a else kw.get("processor"), out)
             return out
-        apply_chat_template.__dict__[_STREAM_SEED_FLAG] = True
-        return apply_chat_template
+        return link(apply_chat_template, fn, _STREAM_SEED_FLAG)
 
     from ._common import _render_target_modules
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")

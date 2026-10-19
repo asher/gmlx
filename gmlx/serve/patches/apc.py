@@ -156,8 +156,7 @@ def install_retire_render_capture() -> None:
                 _warn_capture_once("render")
             return out
 
-        apply_chat_template._kq_retire_capture = True
-        return apply_chat_template
+        return link(apply_chat_template, orig_render, "_kq_retire_capture")
 
     # Every captured binding (openai, anthropic, _protocol_deps), so
     # retirement keys cover all protocol routes, not just OpenAI.
@@ -175,8 +174,8 @@ def install_retire_render_capture() -> None:
             _REQUEST_TOOL_PARSER.set(override)
             return infer(processor, override=override)
 
-        _infer_tool_parser_from_processor._kq_retire_capture = True
-        pkg._infer_tool_parser_from_processor = _infer_tool_parser_from_processor
+        pkg._infer_tool_parser_from_processor = link(
+            _infer_tool_parser_from_processor, infer, "_kq_retire_capture")
 
     cls = gen_mod.ResponseGenerator
     orig_pre = cls._preprocess_request

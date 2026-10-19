@@ -389,8 +389,7 @@ def install_faithful_history() -> None:
                 _TOOL_IMAGES_KEPT.reset(kept)
                 _IN_PLACE_SENT.reset(token)
 
-        apply_chat_template._kq_faithful_history = True
-        return apply_chat_template
+        return link(apply_chat_template, orig, "_kq_faithful_history")
 
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)

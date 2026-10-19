@@ -654,6 +654,32 @@ def test_install_server_patches_wires_every_aux_route():
             "/v1/audio/transcriptions", "/v1/audio/translations"} <= paths
 
 
+def test_a_second_install_of_the_render_wraps_adds_no_layer(monkeypatch):
+    """Each render wrap links to what it wraps, so an installer that runs
+    again finds its own layer under the wraps installed after it. One that
+    did not added a second layer: a doubled faithful-history layer counts
+    a tool-result image out twice, and the prompt loses its placeholder."""
+    from gmlx.serve.patches.apc import install_retire_render_capture
+    from gmlx.serve.patches.render import install_chat_image_placement, install_faithful_history
+    from gmlx.upstream.patching import root
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    state = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state").ThinkingStreamState
+    renders = [(t, "apply_chat_template") for t in sp_common._render_target_modules()]
+    seams = renders + [(openai, "extract_text_from_content"), (openai, "_normalize_instruction_messages"),
+                       (state, "__init__"), (state, "feed")]
+    for obj, attr in seams:
+        monkeypatch.setattr(obj, attr, getattr(obj, attr))
+    sp.install_server_patches(build_config({"server": {}}), reload_fn=lambda *a, **k: None)
+    installed = [getattr(obj, attr) for obj, attr in seams]
+    for install in (install_faithful_history, install_chat_image_placement, install_retire_render_capture,
+                    sp_chat.install_stream_thinking_seed, sp_chat.install_role_normalization):
+        install()
+    assert [getattr(obj, attr) for obj, attr in seams] == installed
+    for obj, attr in renders:
+        assert root(getattr(obj, attr)).__module__.startswith("gmlx._vendor."), (obj, attr)
+
+
 def _media_salt_layers() -> list:
     """For each seam the media salt wraps, whether its layer is in the
     seam's wrap chain. Other installers wrap over it (install_server_patches
