@@ -76,6 +76,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only files, not the image models of your configuration.
 - A large answer relayed into a `gmlx launch --container` session could end
   early when the client read it slowly.
+- `--moe-miss-shed` dropped no experts on Muse Spark, though the load said
+  it was on. It now sheds them as on other MoE models.
 - `gmlx distill gen` stopped with Ctrl-C could leave out a reply that had
   already arrived.
 - A chat template with a `{% generation %}` block was refused by
