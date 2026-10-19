@@ -160,6 +160,30 @@ def test_model_positional_drops_off_once_model_given(tmp_path):
     assert completion._complete(["run", "--config", cfg, "qwen-fast", ""]) == []
 
 
+def test_image_generate_and_bench_list_image_model_ids_and_files(tmp_path):
+    cfg = tmp_path / "models.yaml"
+    cfg.write_text(textwrap.dedent("""
+        server:
+          model_dirs: []
+        models:
+          qwen-fast:
+            path: /tmp/qwen.gguf
+        image_models:
+          moss-image-q4:
+            path: /tmp/MOSS-Image-SFT-Q4_K_M.gguf
+            encoder: qwen-fast
+            vae: /tmp/moss-vae.gguf
+    """).strip())
+    for action in ("generate", "bench"):
+        lines = completion._complete(["image", action, "--config", str(cfg), ""])
+        assert lines[0] == "::files"
+        assert "moss-image-q4\tMOSS-Image-SFT-Q4_K_M.gguf" in lines
+        assert "qwen-fast" not in _vals(lines)      # chat models are not image models
+        assert completion._complete(
+            ["image", action, "--config", str(cfg), "moss-image-q4", ""]) == []
+    assert completion._complete(["image", "pack-vae", ""]) == ["::files"]
+
+
 def test_talk_positional_lists_model_ids_without_files(tmp_path):
     cfg = _write_cfg(tmp_path)
     lines = completion._complete(["talk", "--config", cfg, ""])

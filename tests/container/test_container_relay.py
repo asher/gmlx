@@ -292,6 +292,39 @@ def test_backpressure_bounds_the_buffer(loop, tmp_path):
     assert got == total
 
 
+def test_a_refused_send_to_the_client_keeps_the_stream(loop, tmp_path):
+    """macOS can refuse a send on a Unix socket that select reported ready.
+    The relay keeps the bytes and sends them later instead of closing."""
+    target = relay.listen_socket(str(tmp_path / "t.sock"))
+    down, client = socket.socketpair()
+    try:
+        down.setblocking(False)
+        filled = 0
+        while True:                                   # fill the client buffer
+            try:
+                filled += down.send(b"x" * 65536)
+            except BlockingIOError:
+                break
+        pair = _in_loop(loop, lambda: relay._Pair(loop, down, [str(tmp_path / "t.sock")],
+                                                  "forward 1"))
+
+        def refused_send():
+            pair.to_down += b"y" * 4096
+            pair._on_down(relay._WRITE)
+            return pair.closed, len(pair.to_down)
+        assert _in_loop(loop, refused_send) == (False, 4096)
+        client.settimeout(10)
+        got = b""
+        while len(got) < filled + 4096:
+            chunk = client.recv(1 << 20)
+            assert chunk
+            got += chunk
+        assert got[filled:] == b"y" * 4096
+    finally:
+        client.close()
+        target.close()
+
+
 def test_forward_never_falls_back_to_ipv6_loopback(loop, tmp_path):
     """A program on ::1 at the forwarded port can be another one than the
     Mac service the user named, so the forward reaches 127.0.0.1 only."""

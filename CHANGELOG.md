@@ -63,6 +63,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Tab completion after `gmlx image generate` and `gmlx image bench` offered
+  only files, not the image models of your configuration.
+- A large answer relayed into a `gmlx launch --container` session could end
+  early when the client read it slowly.
 - `gmlx distill gen` stopped with Ctrl-C could leave out a reply that had
   already arrived.
 - A chat template with a `{% generation %}` block was refused by
