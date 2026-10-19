@@ -66,6 +66,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
 - `gmlx serve --stream-experts` prefills in 8192-token chunks, so a long
   prompt reaches its first token sooner.
+- With `--stream-experts`, a prefill copies the experts the decode arena
+  holds instead of reading them again. `GMLX_RING_FROM_ARENA=0` turns it off.
+- With `--stream-experts`, a follow-up chat turn reads the experts once per
+  8192 new tokens, where a turn that crossed a multiple of 8192 read them twice.
 - `gmlx pull` of an image model reuses a VAE GGUF on disk packed for its
   family from another source, and names it, where it downloaded the VAE again.
 - `presence_penalty` and `frequency_penalty` count every generated token, as
