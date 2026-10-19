@@ -157,6 +157,12 @@ def test_lattice_matches_reference():
     np.testing.assert_allclose(_np(first), rf, rtol=1e-2, atol=1e-2)
     np.testing.assert_allclose(_np(edges), re_, rtol=1e-2, atol=1e-2)
     assert edges.shape == (BLOCK - 2, K, K)
+    # The GPU stream, within the TF32 bound.
+    cands, first, edges = head.lattice(
+        mx.array(passes), mx.array(logits), embed, mx.array(anchor))
+    np.testing.assert_array_equal(np.array(cands), rc)
+    np.testing.assert_allclose(_np(first), rf, rtol=0, atol=1.5e-2)
+    np.testing.assert_allclose(_np(edges), re_, rtol=0, atol=1.5e-2)
 
 
 @pytest.mark.parametrize("n_max", [1, 2, BLOCK - 1])

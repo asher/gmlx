@@ -941,6 +941,39 @@ def fit_cut(batch, n: int) -> int:
                         profile=profile)
 
 
+def size_chunk(model, profile, base: int, depth: int, cols, cut,
+               ) -> tuple[int, int, bool]:
+    """``decayed_for_batch`` on explicit state: ``base`` the batch's step,
+    ``depth`` the cached columns, ``cols()`` the columns the loop chunks
+    (None: no tail merge), ``cut(step)`` the chunk the loop runs from a
+    step. Returns the step, the run base and whether the tick set it."""
+    base = _run_base(model, profile, base)
+    heads = score_heads(model)
+    step = decayed_step(base, depth, heads, profile=profile)
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    streamed = experts_streamed(model)
+    # A streamed chunk reads every expert once at any width, so a narrower
+    # chunk stalls decode as long and adds passes.
+    tick = None if streamed else _tick_step(base)
+    ticked = False
+    if tick is not None and tick < step:
+        step, ticked = tick, True
+        if profile is not None and step < profile.fused_min_step:
+            # Below the fused width the chunk materializes: refit the cap.
+            step = decayed_step(step, depth, heads, profile=profile)
+    if (profile is not None and profile.fused_min_step
+            and step >= profile.fused_min_step):
+        n = cut(step)
+        if 0 < n < profile.fused_min_step:
+            step = decayed_step(n, depth, heads, profile=profile)
+    if step == base and cols is not None and streamed:
+        from gmlx.stream.expert_streaming import merge_prefill_tail
+
+        step = merge_prefill_tail(step, cols()) or step
+    return step, base, ticked
+
+
 def decayed_for_batch(batch) -> int | None:
     """Depth-decayed prefill step for a PromptProcessingBatch-shaped object
     (None passes through: caller falls back to one-shot)."""
@@ -954,38 +987,15 @@ def decayed_for_batch(batch) -> int | None:
     if not base or not _enabled():
         return base
     profile = resolve_score_profile(batch.model, batch.prompt_cache)
-    base = _run_base(batch.model, profile, base)
     depth = kv_depth(batch.prompt_cache)
-    step = decayed_step(base, depth, score_heads(batch.model),
-                        profile=profile)
-    from gmlx.stream.expert_streaming import experts_streamed
-
-    streamed = experts_streamed(batch.model)
-    # A streamed chunk reads every expert once at any width, so a narrower
-    # chunk stalls decode as long and adds passes.
-    tick = None if streamed else _tick_step(base)
-    ticked = False
-    if tick is not None and tick < step:
-        step, ticked = tick, True
-        if profile is not None and step < profile.fused_min_step:
-            # Below the fused width the chunk materializes: refit the cap.
-            step = decayed_step(step, depth, score_heads(batch.model),
-                                profile=profile)
-    if (profile is not None and profile.fused_min_step
-            and step >= profile.fused_min_step):
-        n = _cut_chunk(batch, step)
-        if 0 < n < profile.fused_min_step:
-            step = decayed_step(n, depth, score_heads(batch.model),
-                                profile=profile)
     embeds = getattr(batch, "_inputs_embeds", None)
-    if step == base and embeds is not None:
-        from gmlx.stream.expert_streaming import merge_prefill_tail
-
-        if streamed:
-            # The loop chunks the prompt less its last token, or the whole
-            # prompt when the last chunk and the last token run as one.
-            step = merge_prefill_tail(
-                step, embeds.shape[1] - (0 if _folds(batch) else 1))
+    # The loop chunks the prompt less its last token, or the whole prompt
+    # when the last chunk and the last token run as one.
+    cols = None if embeds is None else (
+        lambda: embeds.shape[1] - (0 if _folds(batch) else 1))
+    step, base, ticked = size_chunk(
+        batch.model, profile, base, depth, cols,
+        lambda s: _cut_chunk(batch, s))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):

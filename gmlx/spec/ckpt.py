@@ -295,11 +295,14 @@ def _ckpt_run_step(batch) -> int:
         return step
 
 
-def _ckpt_unit(batch, block_size: int) -> int:
-    """The natural chunk grid: lcm(the step the loop runs, block_size)."""
-    step = _ckpt_run_step(batch)
+def _lcm_unit(step: int, block_size: int) -> int:
     return block_size if step <= 0 else \
         step * block_size // _gcd(step, block_size)
+
+
+def _ckpt_unit(batch, block_size: int) -> int:
+    """The natural chunk grid: lcm(the step the loop runs, block_size)."""
+    return _lcm_unit(_ckpt_run_step(batch), block_size)
 
 
 def _ckpt_origin(batch, restored: int, block_size: int,
@@ -308,7 +311,8 @@ def _ckpt_origin(batch, restored: int, block_size: int,
     prefill on a model that streams its experts. There every chunk reads
     all of them, so a boundary off the prefill's own chunk edges costs a
     full pass. Its chunks start at the restored prefix, then at the
-    system prefix ``anchor`` when one cuts the prompt above it.
+    system prefix ``anchor`` when one cuts the prompt above it. The arm
+    prices this grid against the others and keeps the cheapest.
     Recurrent layouts keep the absolute grid, since off-grid chunking
     drifts their state. Below a rotating window the store takes only
     block-aligned positions, so an off-block prefix there snaps down to
@@ -329,91 +333,182 @@ def _ckpt_origin(batch, restored: int, block_size: int,
     return start
 
 
-def _ckpt_loop_passes(batch, start: int, cuts: list, end: int,
-                      step: int) -> int:
-    """Expert passes the prefill loop runs from ``start`` to the last of
-    ``cuts``, as ``prefill_decay.decayed_for_batch`` sizes each chunk:
-    the decayed step, its tail merged when the step has not decayed, cut
-    at each of ``cuts``. ``end`` is the column the loop chunks to. A
-    chunk the arena serves is no pass."""
+def _ckpt_chunks(batch, cuts, restored: int, n: int,
+                 start: int | None = None,
+                 stop: int | None = None) -> list[int]:
+    """The chunk widths the prefill loop runs over an ``n``-token prompt
+    from ``restored``, pausing at each of ``cuts``: all of them, or those
+    from ``start`` (a pause) up to the pause ``stop``. Each chunk is sized
+    as ``prefill_decay.decayed_for_batch`` sizes it. The MTP body sizes
+    each chunk again from the width the decay wrapper swapped in, and on
+    its first call that width came from the prompt before the restore:
+    the batch's step while the schedule arms."""
     from gmlx.gen import prefill_decay as pd
-    from gmlx.load.loader import _arena_stage_max_tokens
-    from gmlx.stream.expert_streaming import merge_prefill_tail
 
     model = getattr(batch, "model", None)
+    cache = getattr(batch, "prompt_cache", None)
+    live = int(getattr(batch, "prefill_step_size", 0) or 0)
+    base = int(getattr(batch, "_gmlx_base_step", None) or live)
+    mtp = getattr(batch, "draft_kind", None) == "mtp"
+    folds = pd._folds(batch)
     on = pd._enabled()
-    profile, heads = None, 0
-    if on:
-        profile = pd.resolve_score_profile(
-            model, getattr(batch, "prompt_cache", None))
-        heads = pd.score_heads(model)
-    fused = profile.fused_min_step if profile is not None else 0
+    profile = pd.resolve_score_profile(model, cache) if on else None
+    min_tail = env_int("GMLX_PREFILL_MIN_TAIL", 48) if mtp else 0
+    first = restored if start is None else start
+    pending = sorted({int(c) for c in cuts if first < c < n})
+    pos, out = first, []
+
+    def size(step: int, col: int | None) -> int:
+        if not step or not on:
+            return step
+        cols = n - pos - (0 if folds else 1)
+
+        def cut(s: int) -> int:
+            k = min(s, cols)
+            return k if col is None else min(k, col - pos)
+
+        return pd.size_chunk(model, profile, step, pos, lambda: cols,
+                             cut)[0]
+
+    while stop is None or pos < stop:
+        col = pending[0] if pending else None
+        rem = n - pos
+        if mtp:
+            outer = live if pos == restored else size(base, col)
+            if col is None and rem <= 1:
+                break
+            s = size(outer, col) or rem
+        else:
+            s = size(base, col) or rem
+            if col is None and not (rem > s if folds else rem > 1):
+                break
+        k = min(s, rem - 1)
+        if col is not None:
+            k = min(k, col - pos)
+        elif 0 < rem - 1 - k < min_tail:
+            k = rem - 1
+        if k <= 0:
+            break
+        out.append(k)
+        pos += k
+        while pending and pending[0] <= pos:
+            pending.pop(0)
+    if stop is None:
+        out.append(n - pos)
+    return out
+
+
+def _ckpt_cost(batch, cuts, restored: int, n: int,
+               start: int | None = None,
+               stop: int | None = None) -> tuple[int, int]:
+    """Expert passes and routed partial calls of the prefill loop with a
+    pause at each of ``cuts`` (see ``_ckpt_chunks``). A chunk over the
+    arena's stage width reads every expert; one down to the prefill width
+    reads the routed ones."""
+    from gmlx.load.loader import (
+        _STREAM_PREFETCH_MIN_TOKENS,
+        _arena_stage_max_tokens,
+    )
+
     small = _arena_stage_max_tokens()
-    passes, pos = 0, start
-    for cut in cuts:
-        while pos < cut:
-            s = step
-            if on:
-                s = pd.decayed_step(step, pos, heads, profile=profile)
-                w = min(s, end - pos, cut - pos)
-                if fused and s >= fused and 0 < w < fused:
-                    s = pd.decayed_step(w, pos, heads, profile=profile)
-                elif s == step:
-                    s = merge_prefill_tail(s, end - pos) or s
-            w = min(s, end - pos, cut - pos)
-            if w <= 0:
-                return passes
-            passes += w > small
-            pos += w
-    return passes
+    chunks = _ckpt_chunks(batch, cuts, restored, n, start, stop)
+    return (sum(c > small for c in chunks),
+            sum(_STREAM_PREFETCH_MIN_TOKENS <= c <= small for c in chunks))
 
 
 def _ckpt_drop_tail_cuts(batch, bounds: list, turn: list, n: int,
-                         restored: int, block_size: int) -> None:
-    """On a streamed model, drop a grid point whose cut adds an expert
-    pass. The loop widens a chunk by up to an eighth so a short tail
-    joins it (``merge_prefill_tail``), and a grid point inside that tail
-    cuts it into a second pass. A point stays when a pass is not saved,
-    when it is the turn's only record, and when no turn record is known
-    (a media prompt): there the next turn can adopt only it."""
+                         restored: int) -> tuple[int, int]:
+    """Drop the grid points whose cut costs the prefill loop an expert
+    pass or a partial call, and return the schedule's cost. The loop
+    widens a chunk by up to an eighth so a short tail joins it
+    (``merge_prefill_tail``), and a grid point inside that tail cuts it
+    in two. The turn's last record stays. Points that each cost nothing
+    alone may cost a pass together, so the rest go together too when
+    that is cheaper. A chunk depends only on where it starts and the
+    pauses ahead, so a point is priced over the stretch between its
+    neighbours."""
+
+    def cost(bs):
+        return _ckpt_cost(batch, [b for b, _ in bs], restored, n)
+
+    def span(a, c, cuts):
+        return _ckpt_cost(batch, cuts, restored, n, start=a, stop=c)
+
+    def droppable(b, kind):
+        if kind != "boundary" or b <= restored:
+            return False
+        if b in turn and not any(p > b for p in turn):
+            return False
+        return any(q > b for q, _ in bounds)
+
+    for b, kind in list(bounds):
+        if not droppable(b, kind):
+            continue
+        a = max([restored] + [q for q, _ in bounds if q < b])
+        c = min(q for q, _ in bounds if q > b)
+        kept = tuple(map(sum, zip(span(a, b, [b]), span(b, c, [c]))))
+        if span(a, c, [c]) < kept:
+            bounds.remove((b, kind))
+            if b in turn:
+                turn.remove(b)
+    best = cost(bounds)
+    rest = [x for x in bounds if droppable(*x)]
+    if len(rest) > 1:
+        trial = [x for x in bounds if x not in rest]
+        c = cost(trial)
+        if c < best:
+            best = c
+            for x in rest:
+                bounds.remove(x)
+                if x[0] in turn:
+                    turn.remove(x[0])
+    return best
+
+
+def _ckpt_text_only(batch, ids) -> bool:
+    """Whether the prompt holds no media tokens (unknown: no)."""
+    try:
+        from gmlx._vendor.mlx_vlm import apc
+
+        _bind_l1_view()
+        view: Any = _L1View(getattr(batch, "model", None), None, None)
+        return not apc.media_token_spans(ids, view._apc_media_token_ids())
+    except Exception:
+        return False
+
+
+def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
+                ids) -> tuple[list[tuple[int, int]], bool]:
+    """The (origin, unit) grids the schedule may follow, first the one
+    to keep on a tie, and whether the loop's cost picks among them
+    (``_ckpt_drop_tail_cuts``): on a streamed text prompt over a layout
+    without recurrent state. The candidates there are the grid from the
+    system prefix anchor, from the restored prefix, from 0 at the step
+    the loop runs, and from 0 at the batch's step, which a resident
+    model and a media prompt keep."""
     from gmlx.stream.expert_streaming import experts_streamed
 
-    if not bounds or not turn:
-        return
+    batch_unit = _lcm_unit(int(getattr(batch, "prefill_step_size", 0) or 0),
+                           block_size)
     if not experts_streamed(getattr(batch, "model", None)):
-        return
+        return [(0, batch_unit)], False
+    run_unit = _ckpt_unit(batch, block_size)
     if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
-        return
-    step = _ckpt_run_step(batch)
-    if step <= 0:
-        return
-    from gmlx.gen.prefill_decay import _folds
-
-    try:
-        end = n if _folds(batch) else n - 1
-    except Exception:
-        end = n - 1
-    for b, kind in list(bounds):
-        if kind != "boundary" or b in turn and not any(p > b for p in turn):
-            continue
-        later = [q for q, _ in bounds if q > b]
-        if not later:
-            continue
-        start = max([max(0, restored)] + [q for q, _ in bounds if q < b])
-        try:
-            keep = _ckpt_loop_passes(batch, start, [later[0]], end, step)
-            cut = _ckpt_loop_passes(batch, start, [b, later[0]], end, step)
-        except Exception:
-            return
-        if keep >= cut:
-            continue
-        bounds.remove((b, kind))
-        if b in turn:
-            turn.remove(b)
+        return [(0, run_unit)], False
+    if _ckpt_run_step(batch) <= 0 or not _ckpt_text_only(batch, ids):
+        return [(0, batch_unit)], False
+    out = []
+    if anchor is not None and anchor > restored:
+        out.append((_ckpt_origin(batch, restored, block_size, anchor),
+                    run_unit))
+    out += [(_ckpt_origin(batch, restored, block_size), run_unit),
+            (0, run_unit), (0, batch_unit)]
+    return list(dict.fromkeys(out)), True
 
 
 def _ckpt_cursor_init(batch, guard: int, restored: int, block_size: int,
-                      anchor: int | None = None) -> tuple[list, int, int]:
+                      grid: tuple[int, int] | None = None,
+                      ) -> tuple[list, int, int]:
     """Boundary schedule for the checkpoint cursor: an ordered
     ``[(position, kind), ...]`` list plus ``(terminal, interval)``.
 
@@ -423,15 +518,15 @@ def _ckpt_cursor_init(batch, guard: int, restored: int, block_size: int,
     Interval points above the restored prefix, then the terminal (the
     grid point at or below the stock guard column). GMLX_APC_CKPT_INTERVAL
     tokens, default 4096, snapped up to the grid; 0 = terminal-only.
-    The grid starts at ``_ckpt_origin``, which may take the system
-    prefix ``anchor``.
+    ``grid`` is (origin, unit), by default from ``_ckpt_origin`` and
+    ``_ckpt_unit``. The origin itself is no grid point.
     Later stages add store positions by appending boundaries here, never
     by new store mechanisms.
     """
-    unit = _ckpt_unit(batch, block_size)
-    origin = _ckpt_origin(batch, restored, block_size, anchor)
+    origin, unit = grid or (_ckpt_origin(batch, restored, block_size),
+                            _ckpt_unit(batch, block_size))
     terminal = origin + ((guard - origin) // unit) * unit
-    if terminal <= max(0, restored):
+    if terminal <= max(0, restored, origin):
         return [], 0, 0
     raw = env_int("GMLX_APC_CKPT_INTERVAL", 4096)
     interval = 0 if raw <= 0 else max(unit, (raw // unit) * unit)
@@ -480,7 +575,7 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
 
 
 def _ckpt_turn_boundaries(batch, meta, restored: int, block_size: int,
-                          anchor: int | None = None) -> list[int]:
+                          grid: tuple[int, int] | None = None) -> list[int]:
     """Render-stable turn boundary positions for the schedule.
 
     p_stable is the deepest prompt position a next-turn re-render keeps;
@@ -490,12 +585,22 @@ def _ckpt_turn_boundaries(batch, meta, restored: int, block_size: int,
     p_stable (drift-free for chunk-shape-sensitive state); rot-only
     layouts also pause exactly at p_stable (attention splits exactly;
     needs the window wrapped). GMLX_APC_CKPT_TURN=0 disables these and
-    with them the p=N drop gate.
+    with them the p=N drop gate. ``grid`` as in ``_ckpt_cursor_init``.
     """
-    if env_int("GMLX_APC_CKPT_TURN", 1) == 0:
+    grid = grid or (_ckpt_origin(batch, restored, block_size),
+                    _ckpt_unit(batch, block_size))
+    p_stable = _ckpt_p_stable(batch, meta, block_size, grid[1])
+    if p_stable is None:
         return []
+    return _ckpt_turn_points(batch, p_stable, restored, block_size, grid)
+
+
+def _ckpt_p_stable(batch, meta, block_size: int, unit: int) -> int | None:
+    """The render-stable prefix length (see ``_ckpt_turn_boundaries``),
+    recorded in the meta, or None. ``unit`` is the finest grid armed."""
+    if env_int("GMLX_APC_CKPT_TURN", 1) == 0:
+        return None
     ids = meta.get("full_input_ids") or ()
-    unit = _ckpt_unit(batch, block_size)
     tags = _ckpt_layout_live(batch, block_size) or ()
     ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
     # Cheapest boundary this layout could arm: the grid needs one unit
@@ -504,21 +609,28 @@ def _ckpt_turn_boundaries(batch, meta, restored: int, block_size: int,
     # so skip the render+tokenize prediction entirely.
     need = unit if ("arr" in tags or not ws) else min(unit, max(ws))
     if len(ids) - 1 < need:
-        return []
+        return None
     from gmlx.cache.retire_key import lookup_render_ctx, prompt_stable_lcp
     ctx = lookup_render_ctx(ids)
     p_stable = prompt_stable_lcp(ctx, ids) if ctx else None
     if not p_stable or p_stable < 2:
-        return []
+        return None
     p_stable = min(int(p_stable), len(ids) - 1)
     meta["ckpt_p_stable"] = p_stable
+    return p_stable
+
+
+def _ckpt_turn_points(batch, p_stable: int, restored: int, block_size: int,
+                      grid: tuple[int, int]) -> list[int]:
+    origin, unit = grid
+    tags = _ckpt_layout_live(batch, block_size) or ()
+    ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
     floor = max(0, restored)
     out = []
-    origin = _ckpt_origin(batch, restored, block_size, anchor)
-    grid = origin + ((p_stable - origin) // unit) * unit
-    if grid > floor and grid >= origin:
-        out.append(grid)
-    if ws and "arr" not in tags and p_stable != grid \
+    point = origin + ((p_stable - origin) // unit) * unit
+    if point > max(floor, origin):
+        out.append(point)
+    if ws and "arr" not in tags and p_stable != point \
             and p_stable > floor and p_stable >= max(ws):
         out.append(p_stable)
     return out
@@ -680,32 +792,49 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     landed (record verified in the index) -- the settled variable the
     post-prefill p=N decision and the sidecar key set both read;
     ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop."""
+    ids = meta.get("full_input_ids") or ()
     # The media guard refuses a store inside an image; a refused anchor
     # cuts no chunk, so the grid cannot start there.
-    safe = _media_safe(batch, meta.get("full_input_ids") or ())
+    safe = _media_safe(batch, ids)
     sysb = _ckpt_sys_boundary(batch, meta, restored, block_size)
     anchor = sysb if sysb is not None and sysb < guard and safe(sysb) \
         else None
-    bounds, terminal, interval = _ckpt_cursor_init(
-        batch, guard, restored, block_size, anchor)
-    turn = _ckpt_turn_boundaries(batch, meta, restored, block_size, anchor)
-    for pos in turn:
-        _sched_insert(bounds, pos, "boundary")
-    if sysb is not None:
-        _sched_insert(bounds, sysb, "anchor", upgrade=True)
     replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
-    if replay is not None:
-        # Colliding with the anchor keeps the anchor (default no-upgrade):
-        # it adopts identical resends freely, replay semantics add nothing.
-        _sched_insert(bounds, replay, "replay")
-    # No boundary the media guard refuses, the terminal included: a
-    # prompt whose only grid point falls inside an image stores no
-    # terminal record.
-    bounds = [b for b in bounds if safe(b[0])]
-    turn = [p for p in turn if safe(p)]
-    _ckpt_drop_tail_cuts(batch, bounds, turn,
-                         len(meta.get("full_input_ids") or ()), restored,
-                         block_size)
+    grids, priced = _ckpt_grids(batch, restored, block_size, anchor, ids)
+    p_stable = _ckpt_p_stable(batch, meta, block_size,
+                              min(u for _, u in grids))
+
+    def build(grid):
+        bounds, terminal, interval = _ckpt_cursor_init(
+            batch, guard, restored, block_size, grid)
+        turn = [] if p_stable is None else _ckpt_turn_points(
+            batch, p_stable, restored, block_size, grid)
+        for pos in turn:
+            _sched_insert(bounds, pos, "boundary")
+        if sysb is not None:
+            _sched_insert(bounds, sysb, "anchor", upgrade=True)
+        if replay is not None:
+            # Colliding with the anchor keeps the anchor (default
+            # no-upgrade): it adopts identical resends freely, replay
+            # semantics add nothing.
+            _sched_insert(bounds, replay, "replay")
+        # No boundary the media guard refuses, the terminal included: a
+        # prompt whose only grid point falls inside an image stores no
+        # terminal record.
+        return ([b for b in bounds if safe(b[0])], terminal, interval,
+                [p for p in turn if safe(p)])
+
+    cands = [build(g) for g in grids]
+    pick = cands[0]
+    if priced:
+        try:
+            costs = [_ckpt_drop_tail_cuts(batch, c[0], c[3], len(ids),
+                                          restored) for c in cands]
+            pick = cands[costs.index(min(costs))]
+        except Exception:
+            _log.debug("APC ckpt schedule pricing failed", exc_info=True)
+            pick = build(grids[-1])
+    bounds, terminal, interval, turn = pick
     if sysb is not None and not safe(sysb):
         meta.pop("ckpt_sys_bound", None)
     meta["ckpt_boundaries"] = bounds
