@@ -769,8 +769,11 @@ class _Pair:
                     if not self.checking:
                         self._note_down(data)
             if mask & _WRITE and self.to_down:
-                sent = self.down.send(self.to_down)
-                del self.to_down[:sent]
+                # A Unix socket can refuse a send that select called ready.
+                try:
+                    del self.to_down[:self.down.send(self.to_down)]
+                except (BlockingIOError, InterruptedError):
+                    pass
         except OSError:
             self.close()
             return
