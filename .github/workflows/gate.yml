@@ -1,0 +1,78 @@
+name: gate
+
+# Sets the gate/gpu commit status of a pull request from the GPU gate
+# results that scripts/gate.py records on a Mac and pushes to origin as
+# refs/gmlx-gate/<tree>/<host>. It runs when the pull request is pushed,
+# and test.yml calls it again when its test legs end. Pushing results
+# alone starts no workflow, so after a push of results that comes later,
+# refresh the status with:
+#
+#   gh workflow run gate.yml -f pr=<number>
+#
+# The results come from this repository's refs, never a fork's, and the
+# decision is scripts/gate.py decide, which docs/internals/testing.md
+# describes.
+
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The pull request whose gate/gpu status to refresh
+        required: true
+
+jobs:
+  gate-status:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: read
+    env:
+      # Each host also gets a gate/gpu/<host> status, which branch
+      # protection can require one by one.
+      GATE_HOSTS: m3max orac
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: The pull request and its results
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GH_REPO/pulls/$PR" --jq '"head=\(.head.sha)", "base=\(.base.sha)", "repo=\(.head.repo.full_name)"' >> "$GITHUB_OUTPUT"
+          git fetch --quiet origin "+refs/pull/$PR/head:refs/remotes/pr/head" "+refs/gmlx-gate/*:refs/gmlx-gate/*"
+      - name: Decide
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          BASE: ${{ steps.pr.outputs.base }}
+        run: |
+          python3 scripts/gate.py decide --head "$HEAD_SHA" --base "$BASE" --hosts "$GATE_HOSTS" | tee statuses.json
+      - name: Post
+        # A fork's token is read-only, so a fork pull request gets no status
+        # and its required check blocks the merge.
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          HEAD_REPO: ${{ steps.pr.outputs.repo }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$HEAD_REPO" != "$GH_REPO" ]; then
+            echo "::notice::$HEAD_REPO is a fork; no status posted"
+            exit 0
+          fi
+          python3 - <<'EOF'
+          import json, os, subprocess
+          for s in json.load(open("statuses.json")):
+              subprocess.run(["gh", "api", f"repos/{os.environ['GH_REPO']}/statuses/{os.environ['HEAD_SHA']}",
+                              "-f", f"state={s['state']}", "-f", f"context={s['context']}",
+                              "-f", f"description={s['description']}", "-f", f"target_url={os.environ['RUN_URL']}"],
+                             check=True, stdout=subprocess.DEVNULL)
+              print(f"{s['context']}: {s['state']}, {s['description']}")
+          EOF
