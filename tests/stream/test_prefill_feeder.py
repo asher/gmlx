@@ -450,6 +450,140 @@ def test_seeding_off_leaves_arena_cold(monkeypatch, tmp_path):
     assert dfeeder._seeded == 0 and (dfeeder._owner[0] == -1).all()
 
 
+def _sourced_pair(monkeypatch, tmp_path, n_layers=2):
+    """A ring and a decode arena whose layers 0..n-1 hold experts 1 and 3
+    (in slots 0 and 1), wired as the loader wires them."""
+    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path, n_layers)
+    feeder._arena_hook = dfeeder.arena_sources
+    for li in range(n_layers):
+        dfeeder.stage(li, np.array([[3, 1]], dtype=np.uint32))
+    return dfeeder, feeder, modules
+
+
+def _record_reads(monkeypatch, feeder):
+    reads = []
+    real = feeder._submit_read
+
+    def rec(path, fd, dest, off):
+        reads.append((off, len(dest)))
+        return real(path, fd, dest, off)
+
+    monkeypatch.setattr(feeder, "_submit_read", rec)
+    return reads
+
+
+def _layer_reads(feeder, li, reads):
+    """kind -> sorted (expert offset, length) reads inside layer li's stack."""
+    out = {}
+    for kind, (_, _, off, nbytes) in feeder._layers[li].items():
+        out[kind] = sorted((o - off, n) for o, n in reads
+                           if off <= o < off + nbytes)
+    return out
+
+
+@pytest.mark.parametrize("from_arena", [True, False])
+def test_ring_copies_the_experts_the_arena_holds(
+        monkeypatch, tmp_path, from_arena):
+    """A ring stage copies the experts the decode arena holds and reads
+    only the others from the drive. The slot is the layer's stacks byte for
+    byte either way."""
+    if not from_arena:
+        monkeypatch.setenv("GMLX_RING_FROM_ARENA", "0")
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path)
+    reads = _record_reads(monkeypatch, feeder)
+    with feeder.prefill_call(modules[0][0], 0):
+        for kind in _KINDS:
+            for e in range(4):
+                assert _slot_expert(feeder, 0, kind, e) == \
+                    _expert_bytes(0, kind, e)
+    for kind, got in _layer_reads(feeder, 0, reads).items():
+        st = _STRIDE[kind]
+        want = [(0, st), (2 * st, st)] if from_arena else [(0, 4 * st)]
+        assert got == want, kind
+    # Layers 0 and 1 (kicked ahead), two experts each.
+    assert feeder._bytes_copied == (4 * sum(_STRIDE.values())
+                                    if from_arena else 0)
+    feeder.release_slots()
+    assert dfeeder._source_reads == 0
+    # The arena kept its residents.
+    assert dfeeder._owner[0].tolist() == [1, 3]
+
+
+def test_partial_call_copies_the_routed_experts_the_arena_holds(
+        monkeypatch, tmp_path):
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path, 1)
+    reads = _record_reads(monkeypatch, feeder)
+    with feeder.prefill_partial_call(modules[0][0], 0, [1, 2]):
+        for kind in _KINDS:
+            for e in (1, 2):
+                assert _slot_expert(feeder, 0, kind, e) == \
+                    _expert_bytes(0, kind, e)
+            for e in (0, 3):  # unrouted, held or not: never staged
+                assert _slot_expert(feeder, 0, kind, e) == \
+                    b"\x00" * _STRIDE[kind]
+    for kind, got in _layer_reads(feeder, 0, reads).items():
+        assert got == [(2 * _STRIDE[kind], _STRIDE[kind])], kind
+    assert dfeeder._source_reads == 0
+
+
+@pytest.mark.parametrize("writer", ["stage", "prestage", "resize"])
+def test_arena_writes_wait_for_the_ring_copies(
+        monkeypatch, tmp_path, writer):
+    """A stage of the ring copies out of arena slots on its own thread.
+    Until it gives them back, no arena write may evict or move them."""
+    dfeeder, feeder, _ = _sourced_pair(monkeypatch, tmp_path, 1)
+    src = feeder._take_sources(0)
+    assert src is not None and sorted(src.experts.tolist()) == [1, 3]
+    done = threading.Event()
+
+    def write():
+        if writer == "stage":  # two misses evict both residents
+            dfeeder.stage(0, np.array([[0, 2]], dtype=np.uint32))
+        elif writer == "prestage":
+            dfeeder.prestage(0, np.array([[0, 2]]), demand=True)
+        else:
+            dfeeder._resize_layer(0, 1)
+        done.set()
+
+    threading.Thread(target=write, daemon=True).start()
+    assert not done.wait(0.3), f"{writer} ran under a ring copy"
+    assert dfeeder._owner[0].tolist() == [1, 3]
+    src.release()
+    assert done.wait(5)
+
+
+def test_a_wedged_ring_gives_the_arena_back(monkeypatch, tmp_path):
+    """A stage queued behind a wedged read never copies. Taking the ring
+    out of service gives its arena slots back, so decode does not wait."""
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path, 3)
+    gate = _wedge_stage(monkeypatch, feeder, 1)
+    try:
+        with feeder.prefill_call(modules[0][0], 0):  # kicks layer 1 too
+            pass
+        assert dfeeder._source_reads == 1
+        with pytest.raises(RuntimeError, match="out of service"):
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        assert dfeeder._source_reads == 0
+        dfeeder.stage(1, np.array([[0, 2]], dtype=np.uint32))
+    finally:
+        _release_wedge(feeder, gate)
+
+
+def test_a_claim_held_past_the_join_timeout_ends_arena_copies(
+        monkeypatch, tmp_path):
+    import gmlx.stream.decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_SOURCE_JOIN_S", 0.1)
+    dfeeder, feeder, _ = _sourced_pair(monkeypatch, tmp_path, 1)
+    src = feeder._take_sources(0)
+    dfeeder.stage(0, np.array([[0, 2]], dtype=np.uint32))  # after 0.1 s
+    assert dfeeder._source_reads == 0
+    assert feeder._take_sources(0) is None
+    src.release()  # a late release leaves the count at zero
+    assert dfeeder._source_reads == 0
+
+
 def test_ring_depth_from_env(monkeypatch, tmp_path):
     """GMLX_PREFILL_RING_SLOTS deepens the ring: slots rotate over that
     many, ring_bytes prices them all, a call stages n-1 layers ahead and
@@ -690,16 +824,33 @@ def test_a_wedged_read_leaves_the_model_and_its_fds_to_the_process(
 
     monkeypatch.setattr(pfm, name, maybe_wedge)
 
+    from gmlx.stream.decode_feeder import ArenaSources
+
     class DecodeStandIn:
+        def __init__(self):
+            self.arena = {k: np.zeros(4 * _STRIDE[k], dtype=np.uint8)
+                          for k in _KINDS}
+
         def seed_from_ring(self, *args):
             return []
 
         def lend_for_ring(self, nbytes):
             pass
 
+        def arena_sources(self, li, geometry):
+            # Expert 2 only: layer 1 still reads expert 0, where it wedges.
+            bufs = {k: ((a, memoryview(a)), _STRIDE[k])
+                    for k, a in self.arena.items()}
+            return ArenaSources(np.array([2]), np.array([2]), bufs,
+                                self.end_read)
+
+        def end_read(self):
+            pass
+
     decode = DecodeStandIn()
     feeder._seed_hook = decode.seed_from_ring
     feeder._lend_hook = decode.lend_for_ring
+    feeder._arena_hook = decode.arena_sources
     fds = dict(feeder._fds)
     try:
         with feeder.prefill_call(modules[0][0], 0, ids=mx.array([[0, 1]])):
@@ -715,10 +866,12 @@ def test_a_wedged_read_leaves_the_model_and_its_fds_to_the_process(
             os.fstat(fd)   # raises on a closed fd
         mod_refs = [weakref.ref(m) for ms in modules.values() for m in ms]
         decode_ref = weakref.ref(decode)
+        arena_ref = weakref.ref(decode.arena["gate"])
         del modules, decode
         gc.collect()
         assert all(r() is None for r in mod_refs), "a MoE module outlived the model"
         assert decode_ref() is None, "the decode feeder outlived the model"
+        assert arena_ref() is None, "the decode arena outlived the model"
     finally:
         gate.set()
         assert feeder._ready[1].wait(5)

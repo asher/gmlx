@@ -60,6 +60,7 @@ from .feeder_common import (
     KINDS,
     DaemonPool,
     lock_pages,
+    copy_experts,
     read_range,
     swapped_weights,
     unlock_pages,
@@ -163,10 +164,36 @@ _SEED_COUNT_TOKENS = 32
 _SEED_COPY_WORKERS = 4
 
 
-def _copy_experts(dst, src, pairs, stride: int) -> None:
-    for e, s in pairs:
-        np.copyto(dst[s * stride:(s + 1) * stride],
-                  src[e * stride:(e + 1) * stride])
+# A prefill ring pass copies the experts the arena holds out of their slots
+# instead of reading them from the drive (arena_sources). Arena writes wait
+# for those copies. GMLX_RING_FROM_ARENA=0 reads every expert from the drive.
+# A copy takes milliseconds: a claim held past _SOURCE_JOIN_S belongs to a
+# stage queued behind a wedged read, of a pass that ended, whose slot the
+# next pass stages again.
+_SOURCE_JOIN_S = 60.0
+
+
+class ArenaSources:
+    """A layer's arena residents for one prefill ring stage: expert
+    ``experts[i]`` is in slot ``slots[i]`` of ``bufs[kind]``, a
+    (arena pair, stride) tuple. The arena writes none of its slots until
+    ``release``."""
+
+    __slots__ = ("experts", "slots", "bufs", "_done")
+
+    def __init__(self, experts, slots, bufs, done):
+        self.experts = experts
+        self.slots = slots
+        self.bufs = bufs
+        self._done = done
+
+    def release(self) -> None:
+        # A stage blocked on a wedged read keeps this object for good, so
+        # it lets go of the arena and the feeder.
+        done, self._done = self._done, None
+        self.bufs = None
+        if done is not None:
+            done()
 
 
 def _sync_gpu() -> None:
@@ -463,6 +490,10 @@ class DecodeFeeder:
         self._seeded = 0
         self._seed_bytes = 0
         self._t_seed = 0.0
+        # Prefill ring stages copying out of the arena (arena_sources).
+        self._ring_from_arena = env_bool("GMLX_RING_FROM_ARENA", True)
+        self._source_reads = 0
+        self._source_cv = threading.Condition()
         self._la_pool: DaemonPool | None = None
         self._la_bounce: queue.Queue | None = None
         self._la_k = env_int("GMLX_DECODE_LOOKAHEAD_K", _LA_K)
@@ -976,6 +1007,7 @@ class DecodeFeeder:
         in-flight gather references this layer's arena (see module docstring).
         """
         keepwarm.touch()
+        self._join_source_reads()
         if ((self._pressure_on or self._pressure_steps)
                 and self._calls % _PRESSURE_POLL_EVERY == 0):
             self._poll_pressure()
@@ -1320,6 +1352,7 @@ class DecodeFeeder:
             or li in self._wedged_layers
         ):
             return
+        self._join_source_reads()
         self._flush_pending(li)
         if li in self._wedged_layers or li not in self._layers:
             return  # the flush itself may have wedged the layer
@@ -1454,6 +1487,65 @@ class DecodeFeeder:
                     li, e, s, -1,
                     np.zeros(len(owner), dtype=bool), pend, pool="la")
 
+    # prefill ring copies out of the arena
+
+    def arena_sources(
+        self, li: int, geometry: dict[str, tuple[str, int, int]],
+    ) -> ArenaSources | None:
+        """The layer's resident experts for a prefill ring stage to copy
+        instead of reading, or None. ``geometry`` maps each kind to the
+        ring's (path, offset, nbytes) for the layer, and a layer whose
+        stacks differ from the arena's gives none. Called on the thread
+        that writes the arena, so the residents cannot change before the
+        writers' next join."""
+        if (
+            not self._ring_from_arena
+            or li not in self._layers
+            or li in self._wedged_layers
+        ):
+            return None
+        entry = self._layers[li]
+        if set(geometry) != set(entry):
+            return None
+        for kind, (path, off, nbytes) in geometry.items():
+            _, a_path, a_off, stride, shape = entry[kind]
+            if (path, off, nbytes) != (a_path, a_off, stride * shape[0]):
+                return None
+        owner = self._owner[li]
+        slots = np.flatnonzero(owner >= 0)
+        if not len(slots):
+            return None
+        bufs = {kind: (self._arena[(li, kind)], entry[kind][3])
+                for kind in entry}
+        with self._source_cv:
+            self._source_reads += 1
+        return ArenaSources(owner[slots].astype(np.int64),
+                            slots.astype(np.int64), bufs,
+                            self._end_source_read)
+
+    def _end_source_read(self) -> None:
+        with self._source_cv:
+            self._source_reads -= 1
+            if self._source_reads <= 0:
+                self._source_reads = 0
+                self._source_cv.notify_all()
+
+    def _join_source_reads(self) -> None:
+        """Wait for the ring copies out of the arena. Every arena write
+        (stage, prestage, resize) joins first."""
+        if not self._source_reads:
+            return
+        with self._source_cv:
+            if self._source_cv.wait_for(
+                    lambda: not self._source_reads, timeout=_SOURCE_JOIN_S):
+                return
+            self._source_reads = 0
+            self._ring_from_arena = False
+        print(
+            f"[stream] decode feeder: a prefill ring stage held arena slots "
+            f"past {_SOURCE_JOIN_S:.0f}s; the ring reads every expert from "
+            "the drive from here on")
+
     # prefill seeding
 
     def seed_from_ring(
@@ -1513,7 +1605,7 @@ class DecodeFeeder:
             for chunk in np.array_split(pairs, _SEED_COPY_WORKERS):
                 if len(chunk):
                     jobs.append(self._seed_copy_pool.submit(
-                        _copy_experts, dst, src, chunk, stride))
+                        copy_experts, dst, src, chunk, stride))
         for j in jobs:
             j.result()
         # Wire the layer now: its pages are resident from the copy, so
@@ -1857,6 +1949,7 @@ class DecodeFeeder:
         gather references this layer."""
         import mlx_kquant as kq
 
+        self._join_source_reads()
         old_s = self._slots[li]
         entry = self._layers[li]
         owner = self._owner[li]

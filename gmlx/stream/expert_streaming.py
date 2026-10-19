@@ -1200,6 +1200,7 @@ def install_expert_streaming(
                 dfeeder._release_ring = feeder.release_slots
                 feeder._lend_hook = dfeeder.lend_for_ring
                 feeder._seed_hook = dfeeder.seed_from_ring
+                feeder._arena_hook = dfeeder.arena_sources
             wired = (
                 "fully wired at first decode"
                 if dfeeder._mlock_deferred
