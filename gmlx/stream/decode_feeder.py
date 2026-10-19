@@ -1511,6 +1511,10 @@ class DecodeFeeder:
             _, a_path, a_off, stride, shape = entry[kind]
             if (path, off, nbytes) != (a_path, a_off, stride * shape[0]):
                 return None
+        # A later chunk of a cold prompt copies what an earlier one seeded.
+        item = self._seeds.get(li)
+        if item is not None and item[1].done():
+            self._flush_seeds(li)
         owner = self._owner[li]
         slots = np.flatnonzero(owner >= 0)
         if not len(slots):
@@ -1532,7 +1536,7 @@ class DecodeFeeder:
 
     def _join_source_reads(self) -> None:
         """Wait for the ring copies out of the arena. Every arena write
-        (stage, prestage, resize) joins first."""
+        (stage, prestage, resize, the zero slot) joins first."""
         if not self._source_reads:
             return
         with self._source_cv:
@@ -1776,6 +1780,7 @@ class DecodeFeeder:
         zs = self._zslot.get(li)
         if zs is not None:
             return zs
+        self._join_source_reads()
         owner = self._owner[li]
         empty = np.flatnonzero(owner == -1)
         if len(empty):

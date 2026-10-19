@@ -406,7 +406,9 @@ class PrefillFeeder:
         to stack bytes. Returns kind -> (held mask, stride) for the reads
         to skip."""
         held: dict = {}
-        self._bytes_staged += sum(sizes.values())
+        self._bytes_staged += sum(
+            nb if want is None else int(want.sum()) * (nb // len(want))
+            for nb in sizes.values())
         if src is None:
             return held
         experts, slots = src.experts, src.slots
@@ -604,18 +606,18 @@ class PrefillFeeder:
                         futs.append(self._submit_read(
                             path, fd, mv[e * stride:(e + 1) * stride],
                             off + e * stride))
-            futures_wait(copies)
         finally:
+            futures_wait(copies)
             if src is not None:
-                futures_wait(copies)
                 src.release()
-        for f in copies:
-            f.result()
-        _, pending = futures_wait(futs, timeout=_STAGE_TIMEOUT_S)
+            # Every read ends before the call returns or raises: one still
+            # in flight would write the slot the next pass stages.
+            _, pending = futures_wait(futs, timeout=_STAGE_TIMEOUT_S)
+            if pending:
+                self._quarantine([li])
         if pending:
-            self._quarantine([li])
             raise RuntimeError(f"[feeder] partial staging of layer {li} timed out")
-        for f in futs:
+        for f in copies + futs:
             f.result()
         with self._swapped(li):
             yield

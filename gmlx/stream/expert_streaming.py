@@ -1445,14 +1445,16 @@ def install_expert_streaming(
 
 def experts_streamed(model) -> bool:
     """True when the install streams this model's experts from the drive.
-    Reads the install's verdict, since a CPU-only expert codec marks its
-    modules the way streaming does."""
-    language_model = getattr(model, "language_model", model)
-    for m in (model, language_model):
+    Reads the install's verdict on the model or a module it wraps, since a
+    CPU-only expert codec marks its modules the way streaming does."""
+    from .installs import wrapper_chain
+
+    chain = list(wrapper_chain(model))
+    for m in chain:
         flag = getattr(m, "_kq_streaming", None)
         if flag is not None:
             return bool(flag)
-    return moe_streaming_active(language_model)
+    return any(moe_streaming_active(m) for m in chain)
 
 
 def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, bool]:
@@ -1460,7 +1462,7 @@ def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, boo
     streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``, or to its
     model_type's narrower entry; everything else keeps mlx-lm's own
     default. Returns ``(step_or_none, defaulted)``."""
-    if requested is not None or not moe_streaming_active(model):
+    if requested is not None or not experts_streamed(model):
         return requested, False
     mt = getattr(model, "model_type", None) or getattr(
         getattr(model, "args", None), "model_type", None)

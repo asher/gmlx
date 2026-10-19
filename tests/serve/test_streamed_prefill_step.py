@@ -67,6 +67,47 @@ def test_a_resident_cpu_expert_codec_keeps_the_default_step(monkeypatch):
     assert rg.prefill_step_size == gen.DEFAULT_PREFILL_STEP_SIZE
 
 
+def _text_gguf(streamed: bool):
+    """A text GGUF as serve loads it: the install marks the raw model, and
+    the text-only wrapper and its adapter carry no verdict. The expert
+    modules are marked CPU-only either way, as a resident CPU codec is."""
+    import mlx.nn as nn
+
+    from gmlx.models.vlm_text_only import Model
+
+    class Experts(nn.Module):
+        pass
+
+    class Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = Experts()
+
+    class Raw(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [Layer()]
+            self.model_type = "qwen3_moe"
+
+    raw = Raw()
+    raw.layers[0].mlp._kq_cpu_only = True
+    raw._kq_streaming = streamed
+    return Model(raw, config={"model_type": "qwen3_moe"})
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_a_text_gguf_reads_the_install_verdict(monkeypatch, streamed):
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    model = _text_gguf(streamed)
+    rg = _generator(monkeypatch)
+    rg._adopt_streamed_prefill_step(model)
+    assert rg.prefill_step_size == (
+        _STREAMING_PREFILL_STEP if streamed else gen.DEFAULT_PREFILL_STEP_SIZE)
+    # The batch holds the language model.
+    assert experts_streamed(model.language_model) is streamed
+
+
 def test_a_step_from_the_environment_wins(monkeypatch):
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
     rg = _generator(monkeypatch)

@@ -963,10 +963,10 @@ def _ds41_base_step(model) -> Optional[int]:
         except ValueError:
             return None
         return n if n > 0 else None
-    from gmlx.stream.expert_streaming import moe_streaming_active
+    from gmlx.stream.expert_streaming import experts_streamed
 
     try:
-        streamed = bool(moe_streaming_active(model))
+        streamed = experts_streamed(model)
     except Exception:
         streamed = False
     return _DS41_STREAM_BASE_STEP if streamed else _DS41_BASE_STEP

@@ -125,13 +125,15 @@ def _dsa_disable(path: str, exc: Exception) -> None:
 
 # Arch-default prefill chunk once the flash profile is armed (4096 measured
 # +8% prefill over 2048 at 200k depth on V4-Flash, decode unchanged; the
-# armed transient stays ~0.8 GB there). GMLX_V4_PREFILL_STEP overrides in
-# either direction; an explicit PREFILL_STEP_SIZE (flag/config/env) always
-# wins over both.
+# armed transient stays ~0.8 GB there). A streamed V4 reads its whole routed
+# expert set once per chunk, so it takes the loader's streaming step, as
+# V4.1 does. GMLX_V4_PREFILL_STEP overrides in either direction; an explicit
+# PREFILL_STEP_SIZE (flag/config/env) always wins over both.
 _V4_BASE_STEP: Optional[int] = 4096
+_V4_STREAM_BASE_STEP: Optional[int] = 8192
 
 
-def _v4_base_step() -> Optional[int]:
+def _v4_base_step(model=None) -> Optional[int]:
     env = os.environ.get("GMLX_V4_PREFILL_STEP")
     if env:
         try:
@@ -139,7 +141,13 @@ def _v4_base_step() -> Optional[int]:
             return n if n > 0 else None
         except ValueError:
             return None
-    return _V4_BASE_STEP
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    try:
+        streamed = experts_streamed(model)
+    except Exception:
+        streamed = False
+    return _V4_STREAM_BASE_STEP if streamed else _V4_BASE_STEP
 
 
 # Score-transient profile for prefill_decay. With every native DSA kernel
@@ -152,16 +160,22 @@ def _v4_base_step() -> Optional[int]:
 # and multiply that same dequant across ~16x more chunks). Disarms (dense
 # decay stays authoritative) on kernels off, batched caches, or a quantized
 # local KV.
-_prefill_score_profile = _prefill_decay.build_score_profile(
+_score_profile_composed = _prefill_decay.build_score_profile(
     profile=lambda: _prefill_decay.ScoreTransientProfile(
-        heads=1, bytes_per_elem=4, depth_divisor=4,
-        base_step=_v4_base_step()),
+        heads=1, bytes_per_elem=4, depth_divisor=4),
     kernels_armed=lambda: all(
         _dsa_probe(p) for p in ("window", "sparse", "indexer")),
     require_cache=DS4PoolingCache,
     disarm_cache=DS4BatchPoolingCache,
     allow_quantized_pools=True,
 )
+
+
+def _prefill_score_profile(model, prompt_cache):
+    prof = _score_profile_composed(model, prompt_cache)
+    if prof is None:
+        return None
+    return prof._replace(base_step=_v4_base_step(model))
 
 
 _prefill_decay.register_score_profile("deepseek_v4", _prefill_score_profile)

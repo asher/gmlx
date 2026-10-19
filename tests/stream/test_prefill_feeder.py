@@ -526,7 +526,7 @@ def test_partial_call_copies_the_routed_experts_the_arena_holds(
     assert dfeeder._source_reads == 0
 
 
-@pytest.mark.parametrize("writer", ["stage", "prestage", "resize"])
+@pytest.mark.parametrize("writer", ["stage", "prestage", "resize", "zero"])
 def test_arena_writes_wait_for_the_ring_copies(
         monkeypatch, tmp_path, writer):
     """A stage of the ring copies out of arena slots on its own thread.
@@ -541,8 +541,10 @@ def test_arena_writes_wait_for_the_ring_copies(
             dfeeder.stage(0, np.array([[0, 2]], dtype=np.uint32))
         elif writer == "prestage":
             dfeeder.prestage(0, np.array([[0, 2]]), demand=True)
-        else:
+        elif writer == "resize":
             dfeeder._resize_layer(0, 1)
+        else:  # a full layer zeroes a resident for its zero slot
+            dfeeder._zero_slot(0, np.zeros(2, dtype=bool))
         done.set()
 
     threading.Thread(target=write, daemon=True).start()
@@ -550,6 +552,102 @@ def test_arena_writes_wait_for_the_ring_copies(
     assert dfeeder._owner[0].tolist() == [1, 3]
     src.release()
     assert done.wait(5)
+
+
+def test_decode_stage_waits_for_a_live_ring_copy(monkeypatch, tmp_path):
+    """A kicked-ahead stage copies out of layer 1's arena slots while a
+    decode stage() evicts both residents. The ring slot keeps the file's
+    bytes."""
+    import time
+
+    import gmlx.stream.prefill_feeder as pfm
+
+    real = pfm.copy_experts
+
+    def slow(*args):
+        time.sleep(0.3)
+        real(*args)
+
+    monkeypatch.setattr(pfm, "copy_experts", slow)
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path)
+    with feeder.prefill_call(modules[0][0], 0):  # kicks layer 1
+        pass
+    dfeeder.stage(1, np.array([[0, 2]], dtype=np.uint32))
+    assert sorted(dfeeder._owner[1].tolist()) == [0, 2]
+    assert feeder._ready[1].wait(5) and feeder._error is None
+    with feeder.prefill_call(modules[1][0], 1):
+        for kind in _KINDS:
+            for e in range(4):
+                assert _slot_expert(feeder, 1, kind, e) == \
+                    _expert_bytes(1, kind, e)
+
+
+def test_a_later_chunk_copies_what_an_earlier_chunk_seeded(
+        monkeypatch, tmp_path):
+    """A long cold prompt: chunk 1 seeds the empty arena from the ring, and
+    chunk 2 copies those experts instead of reading them again."""
+    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path, 2)
+    feeder._arena_hook = dfeeder.arena_sources
+    routing = {0: mx.array([[3, 1], [3, 1]]), 1: mx.array([[2, 0]])}
+    for li in (0, 1):  # chunk 1
+        with feeder.prefill_call(modules[li][0], li, ids=routing[li]):
+            pass
+    dfeeder._seeds[0][1].result()
+    reads = _record_reads(monkeypatch, feeder)
+    with feeder.prefill_call(modules[0][0], 0):  # chunk 2
+        for kind in _KINDS:
+            for e in range(4):
+                assert _slot_expert(feeder, 0, kind, e) == \
+                    _expert_bytes(0, kind, e)
+    assert sorted(dfeeder._owner[0].tolist()) == [1, 3]
+    for kind, got in _layer_reads(feeder, 0, reads).items():
+        st = _STRIDE[kind]
+        assert got == [(0, st), (2 * st, st)], kind
+
+
+def test_a_failed_partial_copy_waits_for_the_reads(monkeypatch, tmp_path):
+    """A partial call whose arena copy fails still waits for its reads,
+    which would otherwise write the slot the next pass stages."""
+    import gmlx.stream.prefill_feeder as pfm
+
+    def fail(*args):
+        raise RuntimeError("copy failed")
+
+    gate = threading.Event()
+
+    def gated(real):
+        def read(*args):
+            gate.wait(5)
+            return real(*args)
+        return read
+
+    monkeypatch.setattr(pfm, "copy_experts", fail)
+    for name in ("read_range", "read_range_aligned"):
+        monkeypatch.setattr(pfm, name, gated(getattr(pfm, name)))
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path, 1)
+    futs = []
+    submit = feeder._submit_read
+
+    def rec(*args):
+        futs.append(submit(*args))
+        return futs[-1]
+
+    monkeypatch.setattr(feeder, "_submit_read", rec)
+    threading.Timer(0.3, gate.set).start()
+    with pytest.raises(RuntimeError, match="copy failed"):
+        with feeder.prefill_partial_call(modules[0][0], 0, [1, 2]):
+            pass
+    assert futs and all(f.done() for f in futs)
+    assert dfeeder._source_reads == 0
+
+
+def test_a_partial_call_counts_the_experts_it_stages(monkeypatch, tmp_path):
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path, 1)
+    with feeder.prefill_partial_call(modules[0][0], 0, [1, 2]):
+        pass
+    per_expert = sum(_STRIDE.values())
+    assert feeder._bytes_copied == per_expert  # expert 1, from the arena
+    assert feeder._bytes_staged == 2 * per_expert
 
 
 def test_a_wedged_ring_gives_the_arena_back(monkeypatch, tmp_path):
