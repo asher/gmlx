@@ -458,8 +458,8 @@ class PrefillFeeder:
             li in self._layers and li not in self._ready
             and (self._pass_last is None or li <= self._pass_last)
         ):
-            self._ready[li] = threading.Event()
             src = self._take_sources(li)
+            self._ready[li] = threading.Event()
             if src is not None:
                 self._sources[li] = src
             self._stage_pool.submit(self._stage, li)

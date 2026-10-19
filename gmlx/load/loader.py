@@ -385,7 +385,8 @@ def _kq_expert_gpu_ok(module) -> bool:
 # (GPU segment for the previous layer's gather plus this layer's every-token
 # work, plus the host sync); la = lookahead router replica; stage_wait =
 # demand-read join inside stage(); stage_settle = the prestage join at
-# the top of stage(); stage_book = stage() minus both joins;
+# the top of stage(); stage_book = the rest from the router eval to the
+# return of stage();
 # prestage = speculative-read submission; build = gather graph build + slot
 # upload. resid = per-token wall (first-MoE-layer to first-MoE-layer) minus
 # the buckets: head matmul eval, sampling, detokenize, serve-loop glue.

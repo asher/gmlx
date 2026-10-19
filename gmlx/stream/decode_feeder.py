@@ -157,9 +157,9 @@ _DECAY_EVERY = 4096
 # prefill ring anyway, so the prompt's most-routed experts are copied from
 # the ring slot into empty arena slots (memory bandwidth only) while the
 # ring moves on. Without it decode starts cold and misses every expert of
-# its first tokens. The prompt's routing counts enter the popularity ledger
-# at the weight of _SEED_COUNT_TOKENS decode tokens. GMLX_DECODE_SEED=0
-# disables.
+# its first tokens. Each prefill chunk's routing counts enter the
+# popularity ledger at the weight of _SEED_COUNT_TOKENS decode tokens.
+# GMLX_DECODE_SEED=0 disables.
 _SEED_COUNT_TOKENS = 32
 _SEED_COPY_WORKERS = 4
 

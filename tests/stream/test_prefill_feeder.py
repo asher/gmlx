@@ -650,6 +650,26 @@ def test_a_partial_call_counts_the_experts_it_stages(monkeypatch, tmp_path):
     assert feeder._bytes_staged == 2 * per_expert
 
 
+def test_a_failed_arena_claim_leaves_no_stage_to_wait_for(
+        monkeypatch, tmp_path):
+    """A raise while claiming the arena's residents leaves no staging
+    marked in flight, so the next pass does not wait out the stage
+    timeout for it."""
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path, 1)
+
+    def fail(li, geometry):
+        raise RuntimeError("verify failed")
+
+    feeder._arena_hook = fail
+    with pytest.raises(RuntimeError, match="verify failed"):
+        with feeder.prefill_call(modules[0][0], 0):
+            pass
+    assert 0 not in feeder._ready
+    feeder._arena_hook = dfeeder.arena_sources
+    with feeder.prefill_call(modules[0][0], 0):
+        assert _slot_expert(feeder, 0, "down", 1) == _expert_bytes(0, "down", 1)
+
+
 def test_a_wedged_ring_gives_the_arena_back(monkeypatch, tmp_path):
     """A stage queued behind a wedged read never copies. Taking the ring
     out of service gives its arena slots back, so decode does not wait."""

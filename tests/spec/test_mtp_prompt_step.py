@@ -288,3 +288,9 @@ def test_prefill_step_env_override(monkeypatch):
     fake = fake_batch()
     PromptProcessingBatch.prompt_step(fake)
     assert fake.prefill_step_size == 2048
+
+    # A streamed model takes the step serve adopted for it.
+    fake = fake_batch()
+    fake.model = types.SimpleNamespace(_gmlx_adopted_prefill_step=8192)
+    PromptProcessingBatch.prompt_step(fake)
+    assert fake.prefill_step_size == 8192

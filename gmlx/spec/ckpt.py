@@ -267,9 +267,28 @@ def _media_safe(batch, ids) -> Callable[[int], bool]:
     return safe_prefix(ids, view._apc_media_token_ids())
 
 
-def _ckpt_unit(batch, block_size: int) -> int:
-    """The natural chunk grid: lcm(prefill_step_size, block_size)."""
+def _ckpt_run_step(batch) -> int:
+    """The chunk width the prefill loop runs: the batch's step, or the
+    arch profile's over a default one (``prefill_decay._run_base``)."""
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    if step <= 0:
+        return step
+    from gmlx.gen import prefill_decay
+
+    if not prefill_decay._enabled():
+        return step
+    model = getattr(batch, "model", None)
+    try:
+        profile = prefill_decay.resolve_score_profile(
+            model, getattr(batch, "prompt_cache", None))
+        return int(prefill_decay._run_base(model, profile, step))
+    except Exception:
+        return step
+
+
+def _ckpt_unit(batch, block_size: int) -> int:
+    """The natural chunk grid: lcm(the step the loop runs, block_size)."""
+    step = _ckpt_run_step(batch)
     return block_size if step <= 0 else \
         step * block_size // _gcd(step, block_size)
 
@@ -279,16 +298,55 @@ def _ckpt_origin(batch, restored: int, block_size: int) -> int:
     model that streams its experts. There every chunk reads all of them,
     so a boundary off this prefill's own chunk edges costs a full pass,
     and its chunks start at the restored prefix. Recurrent layouts keep
-    the absolute grid, since off-grid chunking drifts their state."""
+    the absolute grid, since off-grid chunking drifts their state. Below
+    a rotating window the store takes only block-aligned positions, so
+    an off-block prefix there snaps down to its block."""
     if restored <= 0:
         return 0
     from gmlx.stream.expert_streaming import experts_streamed
 
     if not experts_streamed(getattr(batch, "model", None)):
         return 0
-    if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
+    tags = _ckpt_layout_live(batch, block_size) or ()
+    if "arr" in tags:
         return 0
+    ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
+    if restored % block_size and ws and restored < max(ws):
+        return restored // block_size * block_size
     return restored
+
+
+def _ckpt_drop_tail_cuts(batch, bounds: list, turn: list, n: int,
+                         restored: int, block_size: int) -> None:
+    """On a streamed model, drop the grid points a merged tail would run
+    past. The loop widens a chunk by up to an eighth so a short tail
+    joins it (``merge_prefill_tail``), and a grid point inside that tail
+    cuts it into a second full expert pass. A later store keeps the
+    turn: a grid point that is the turn's only record stays."""
+    from gmlx.stream.expert_streaming import experts_streamed, merge_prefill_tail
+
+    if not bounds or not experts_streamed(getattr(batch, "model", None)):
+        return
+    if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
+        return
+    step = _ckpt_run_step(batch)
+    unit = _ckpt_unit(batch, block_size)
+    if step <= 0:
+        return
+    end = n - 1
+    for b, kind in list(bounds):
+        if kind != "boundary" or b in turn and not any(p > b for p in turn):
+            continue
+        if not any(q > b for q, _ in bounds):
+            continue
+        start = max(max(0, restored), b - unit)
+        if start >= b or end - b <= 0:
+            continue
+        if merge_prefill_tail(step, end - start) < end - start:
+            continue
+        bounds.remove((b, kind))
+        if b in turn:
+            turn.remove(b)
 
 
 def _ckpt_cursor_init(batch, guard: int, restored: int,
@@ -576,6 +634,9 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     safe = _media_safe(batch, meta.get("full_input_ids") or ())
     bounds = [b for b in bounds if safe(b[0])]
     turn = [p for p in turn if safe(p)]
+    _ckpt_drop_tail_cuts(batch, bounds, turn,
+                         len(meta.get("full_input_ids") or ()), restored,
+                         block_size)
     if sysb is not None and not safe(sysb):
         meta.pop("ckpt_sys_bound", None)
     meta["ckpt_boundaries"] = bounds
