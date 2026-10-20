@@ -230,7 +230,7 @@ other layer adds its delta on stock ops.
 | `GMLX_ARENA_ROW_KERNELS=0` | Let multi-token arena calls pick expert kernels by width. The output then depends on the arena size. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights and the decode arena into the Metal residency set. |
-| `GMLX_RESIDENCY_ASYNC=0` | Commit decode arena residency changes on the decode thread, not on a background thread. |
+| `GMLX_RESIDENCY_ASYNC=0` | Commit decode arena residency changes and lock regrown arena memory on the decode thread, not on a background thread. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models with the decode feeder. |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. The default is `1`, and `0` runs it continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |

@@ -1984,6 +1984,167 @@ def test_a_regrown_layer_commits_off_the_decode_thread(monkeypatch, tmp_path,
     assert rs.members == set()
 
 
+@pytest.mark.parametrize("mode", ["worker", "caller", "mlock-off"])
+def test_a_grown_buffer_wires_on_the_worker(monkeypatch, tmp_path, mode):
+    """A repaid lend's regrow wires its new buffers on the residency
+    worker, so decode does not wait while pages lock. Once drained, every
+    arena buffer is wired and recorded. GMLX_RESIDENCY_ASYNC=0 wires on the
+    caller, as before, and GMLX_DECODE_ARENA_MLOCK=0 wires nothing."""
+    from gmlx.stream import decode_feeder as dfm
+
+    monkeypatch.setenv("GMLX_RESIDENCY_ASYNC", "0" if mode == "caller" else "1")
+    feeder, rs = _lent(monkeypatch, tmp_path)
+    real = dfm.lock_pages
+    threads = []
+
+    def lock_pages(mv):
+        threads.append(threading.current_thread().name)
+        return real(mv)
+
+    monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+    if mode == "mlock-off":
+        monkeypatch.setenv("GMLX_DECODE_ARENA_MLOCK", "0")
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 4
+    feeder._residency_drain()
+    grown = {(0, k) for k in _KINDS}
+    if mode == "mlock-off":
+        assert threads == [] and not grown & set(feeder._locked)
+    else:
+        off = ("gmlx-residency" if mode == "worker"
+               else threading.current_thread().name)
+        assert threads == [off] * len(_KINDS)
+        assert set(feeder._locked) == set(feeder._arena)
+        assert feeder.locked_bytes == feeder.arena_bytes
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def test_a_buffer_replaced_during_its_wiring_is_unlocked(monkeypatch,
+                                                         tmp_path):
+    """The worker wires a grown buffer while decode may replace it. A
+    buffer no longer the layer's when its lock lands is unlocked again and
+    left out of the record, so a later unlock never names a freed range
+    and the current buffer still wires."""
+    from gmlx.stream import decode_feeder as dfm
+
+    feeder, _ = _lent(monkeypatch, tmp_path)
+    feeder._residency_drain()
+    key = (0, _KINDS[0])
+    stale = feeder._arena[key]
+    feeder._munlock_buf(key)
+    unlocked = []
+    real_lock, real_unlock = dfm.lock_pages, dfm.unlock_pages
+
+    def lock_pages(mv):
+        entry = real_lock(mv)
+        feeder._arena[key] = (stale[0], bytearray(len(stale[1])))
+        return entry
+
+    def unlock_pages(entry):
+        unlocked.append(entry)
+        real_unlock(entry)
+
+    monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+    monkeypatch.setattr(dfm, "unlock_pages", unlock_pages)
+    feeder._wire_grown(key, stale)
+    assert key not in feeder._locked
+    assert len(unlocked) == 1 and unlocked[0][1] == len(stale[1])
+    feeder._arena[key] = stale
+    feeder.close()
+
+
+def test_a_buffer_is_wired_and_counted_once(monkeypatch, tmp_path):
+    """A seed thread and the worker can wire the same grown buffer. A
+    recorded buffer is not locked again, and a lock that lands after
+    another thread recorded the buffer is undone, so the record holds one
+    entry and locked_bytes counts it once."""
+    from gmlx.stream import decode_feeder as dfm
+
+    feeder, _ = _lent(monkeypatch, tmp_path)
+    feeder._residency_drain()
+    key = (0, _KINDS[0])
+    a = feeder._arena[key]
+    calls, unlocked = [], []
+    real_lock, real_unlock = dfm.lock_pages, dfm.unlock_pages
+
+    def lock_pages(mv):
+        calls.append(1)
+        return real_lock(mv)
+
+    def unlock_pages(entry):
+        unlocked.append(entry)
+        real_unlock(entry)
+
+    monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+    monkeypatch.setattr(dfm, "unlock_pages", unlock_pages)
+    feeder._wire_grown(key, a)  # recorded already
+    assert calls == [] and unlocked == []
+    feeder._munlock_buf(key)
+    unlocked.clear()
+
+    def racing_lock(mv):
+        monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+        assert feeder._mlock_buf(key)  # another thread records it first
+        return lock_pages(mv)
+
+    monkeypatch.setattr(dfm, "lock_pages", racing_lock)
+    feeder._wire_grown(key, a)
+    assert len(calls) == 2 and len(unlocked) == 1
+    assert feeder.locked_bytes == sum(n for _, n in feeder._locked.values())
+    assert set(feeder._locked) == set(feeder._arena)
+    feeder.close()
+
+
+def test_a_queued_wiring_job_does_not_keep_its_feeder(monkeypatch, tmp_path):
+    """A wiring job still queued when its model unloads holds the feeder
+    weakly: the feeder is collected and closes, and the job then does
+    nothing."""
+    import gc
+
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=3, gate=gate)
+    feeder._residency_drain()
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # its commit waits at the gate
+    assert rs.waiting.wait(10)
+    feeder.stage(1, np.array([0, 1]))  # its wiring jobs queue behind it
+    assert feeder._rworker._jobs
+    worker = feeder._rworker._thread
+    ref = weakref.ref(feeder)
+    box = [feeder]
+    del feeder
+    _within(lambda: (box.clear(), gc.collect()))
+    assert ref() is None
+    gate.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    gc.collect()
+    assert rs.members == set()  # the collected feeder closed
+    assert rs.freed_live == []
+
+
+def test_the_worker_keeps_no_buffer_it_wired(monkeypatch, tmp_path):
+    """A wiring job holds its buffer only until it runs. The next lend's
+    shrink then frees the grown buffers at once, so the ring gets their
+    memory."""
+    import gc
+
+    feeder, rs = _lent(monkeypatch, tmp_path)
+    feeder.stage(0, np.array([0, 1]))
+    feeder._residency_drain()
+    grown = [(0, k) for k in _KINDS]
+    assert set(grown) <= set(feeder._locked)
+    refs = [weakref.ref(feeder._arena[k][0]) for k in grown]
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    assert feeder._slots[0] < 4
+    gc.collect()
+    assert [r() is None for r in refs] == [True] * len(refs)
+    assert rs.freed_live == []
+    feeder.close()
+
+
 def test_a_shrink_commits_after_the_queued_regrow(monkeypatch, tmp_path):
     """A shrink waits for the worker's queued changes before making its
     own, so a buffer a regrow added and the shrink replaced never stays in
@@ -2182,6 +2343,8 @@ def test_a_failed_worker_erases_what_it_removed(monkeypatch, tmp_path,
     def drain_then_change():
         box[0]._residency_drain()  # waits while the worker fails
         assert box[0]._rworker.held == 0
+        # the queued layer's wiring still ran
+        assert set(box[0]._locked) == set(box[0]._arena)
         box[0].stage(2, np.array([0, 1]))
         assert rs.commits[-1] == threading.current_thread().name
         assert added in rs.members  # the failed batch's insert stays

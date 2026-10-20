@@ -45,10 +45,11 @@ import os
 import queue
 import threading
 import time
+import weakref
 from concurrent.futures import (
     Future, ThreadPoolExecutor, wait as futures_wait)
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import numpy as np
 
@@ -236,16 +237,26 @@ def _erase_or_park(kq, olds: list) -> None:
             pass
 
 
+def _wire_grown_ref(ref, key, a) -> None:
+    # A queued job must not keep its feeder alive.
+    feeder = ref()
+    if feeder is not None:
+        feeder._wire_grown(key, a)
+
+
 class _ResidencyWorker:
     """Applies Metal residency set changes and commits them on its own
     thread, so a commit does not stall decode. A queued change holds the
     buffer it removes until the commit after it runs. ``held`` counts
-    those bytes. If a call raises, the worker erases the buffers it was to
-    remove, and the calling thread commits every later change."""
+    those bytes. Jobs queued with a change (wiring its added buffers) run
+    just before it, and one that raises is skipped. If a residency call
+    raises, the worker erases the buffers it was to remove, runs every job
+    it has not run, and the calling thread commits every later change."""
 
     def __init__(self):
         self._cv = threading.Condition()
         self._ops: list = []
+        self._jobs: list = []
         self._busy = False
         self._stop = False
         self._failed = False
@@ -255,13 +266,15 @@ class _ResidencyWorker:
             target=self._run, name="gmlx-residency", daemon=True)
         self._thread.start()
 
-    def put(self, ops: list) -> bool:
-        """Queue (removed, added) array pairs, either side None. False once
-        the worker has failed or stopped: the caller applies them itself."""
+    def put(self, ops: list, jobs: list = ()) -> bool:
+        """Queue (removed, added) array pairs, either side None, and the
+        callables to run before them. False once the worker has failed or
+        stopped: the caller applies and runs them itself."""
         with self._cv:
             if self._failed or self._stop:
                 return False
             self._ops.extend(ops)
+            self._jobs.extend(jobs)
             self.held += _removed_bytes(ops)
             self._cv.notify()
         return True
@@ -272,7 +285,8 @@ class _ResidencyWorker:
         if threading.current_thread() is self._thread:
             return  # it would wait for itself
         with self._cv:
-            self._cv.wait_for(lambda: not (self._ops or self._busy))
+            self._cv.wait_for(
+                lambda: not (self._ops or self._jobs or self._busy))
 
     def stop(self, wait: bool = True) -> None:
         """End the thread once the queue is empty."""
@@ -286,17 +300,29 @@ class _ResidencyWorker:
         import mlx_kquant as kq
 
         ops: list = []
+        jobs: list = []
         try:
             while True:
                 with self._cv:
-                    self._cv.wait_for(lambda: self._ops or self._stop)
-                    if not self._ops:
+                    self._cv.wait_for(
+                        lambda: self._ops or self._jobs or self._stop)
+                    if not (self._ops or self._jobs):
                         return
                     ops, self._ops = self._ops, []
+                    jobs, self._jobs = self._jobs, []
                     self._busy = True
                 t0 = time.monotonic()
-                _residency_apply(kq, ops)
-                dt = time.monotonic() - t0
+                while jobs:
+                    job = jobs.pop(0)
+                    try:
+                        job()
+                    except Exception:  # noqa: S110 - a job never fails a commit
+                        pass
+                    del job  # it holds a buffer a shrink may replace
+                t1 = time.monotonic()
+                if ops:
+                    _residency_apply(kq, ops)
+                dt, dw = time.monotonic() - t1, t1 - t0
                 n, gone = len(ops), _removed_bytes(ops)
                 ops = []    # the removed buffers go only after their commit
                 with self._cv:
@@ -306,7 +332,8 @@ class _ResidencyWorker:
                 if self._stats:
                     try:
                         print(f"[phase] residency worker: {n} changes "
-                              f"committed in {dt:.2f}s", flush=True)
+                              f"committed in {dt:.2f}s, wiring "
+                              f"{dw:.2f}s", flush=True)
                     except Exception:  # noqa: S110 - a stats line never fails a commit
                         pass
         except BaseException as e:
@@ -317,7 +344,8 @@ class _ResidencyWorker:
             with self._cv:
                 self._failed = True
                 olds = [old for old, _ in ops + self._ops if old is not None]
-                ops, self._ops = [], []
+                jobs = jobs + self._jobs
+                ops, self._ops, self._jobs = [], [], []
             try:
                 try:
                     print(f"[stream] residency worker failed ({e!r}), "
@@ -326,6 +354,12 @@ class _ResidencyWorker:
                     pass
                 _erase_or_park(kq, olds)
                 del olds
+                for job in jobs:  # wiring touches no residency set
+                    try:
+                        job()
+                    except BaseException:  # noqa: S110
+                        pass
+                del jobs
             finally:
                 with self._cv:
                     self.held = 0
@@ -553,6 +587,9 @@ class DecodeFeeder:
                 self.arena_bytes += s * stride
         self._locked: dict[tuple[int, str], tuple[int, int]] = {}
         self.locked_bytes = 0
+        # _locked, locked_bytes and the swap of an arena buffer: the
+        # residency worker wires grown buffers (_wire_grown).
+        self._lock_mu = threading.RLock()
         # The one-time wiring pass waits for ensure_wired (the wrapper's
         # first decode call), after the prefill ring is released. Until
         # then a layer wires at its first stage() call, before its slots
@@ -725,21 +762,45 @@ class DecodeFeeder:
     def _mlock_buf(self, key: tuple[int, str]) -> bool:
         if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") == "0":
             return False
-        if key in self._locked:
-            return True
-        entry = lock_pages(self._arena[key][1])
+        return self._lock_current(key, self._arena[key])
+
+    def _lock_current(self, key: tuple[int, str], a) -> bool:
+        """Lock ``a``'s pages and record them under ``key`` if ``a`` is
+        still the layer's buffer. The lock runs outside ``_lock_mu``. A
+        lock that lands on a replaced or already recorded buffer is undone,
+        since page locks nest, so ``_locked`` names each current buffer once.
+        False when ``a`` is not current or the kernel refuses."""
+        with self._lock_mu:
+            if getattr(self, "_closed", False) or self._arena.get(key) is not a:
+                return False
+            if key in self._locked:
+                return True
+        entry = lock_pages(a[1])
         if entry is None:
             return False
-        self._locked[key] = entry
-        self.locked_bytes += entry[1]
-        return True
+        with self._lock_mu:
+            current = (not getattr(self, "_closed", False)
+                       and self._arena.get(key) is a)
+            first = current and key not in self._locked
+            if first:
+                self._locked[key] = entry
+                self.locked_bytes += entry[1]
+        if not first:
+            unlock_pages(entry)
+        return current
 
     def _munlock_buf(self, key: tuple[int, str]) -> None:
-        entry = self._locked.pop(key, None)
-        if entry is None:
-            return
-        unlock_pages(entry)
-        self.locked_bytes -= entry[1]
+        with self._lock_mu:
+            entry = self._locked.pop(key, None)
+            if entry is None:
+                return
+            unlock_pages(entry)
+            self.locked_bytes -= entry[1]
+
+    def _wire_grown(self, key: tuple[int, str], a) -> None:
+        """Wire a grown buffer, on the residency worker."""
+        if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") != "0":
+            self._lock_current(key, a)
 
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)
@@ -2120,6 +2181,7 @@ class DecodeFeeder:
             new_owner[ns] = e
             slot_of[e] = ns
         resident = getattr(self, "_gpu_resident", False)
+        wire: list = []
         row = sum(v[3] for v in entry.values())
         rw = getattr(self, "_rworker", None)
         if resident and rw is not None and rw.held + old_s * row > new_s * row:
@@ -2133,24 +2195,32 @@ class DecodeFeeder:
             for ns, os_ in enumerate(keep):
                 mv_new[ns * stride:(ns + 1) * stride] = \
                     mv_old[os_ * stride:(os_ + 1) * stride]
-            self._munlock_buf(key)
-            if resident:
-                # a freed buffer must not stay in the residency set
-                swaps.append((self._arena[key][0], a[0]))
-            self._arena[key] = a
+            with self._lock_mu:
+                self._munlock_buf(key)
+                if resident:
+                    # a freed buffer must not stay in the residency set
+                    swaps.append((self._arena[key][0], a[0]))
+                self._arena[key] = a
             self._views[key] = a[0].reshape((new_s,) + shape[1:])
             self.arena_bytes += (new_s - old_s) * stride
             if not self._mlock_deferred:
-                self._mlock_buf(key)
-        # A grown layer commits on the worker. A shrink frees its bytes
-        # now, after every queued change: the check above drained them.
+                wire.append(key)
+        # A grown layer wires and commits on the worker. A shrink frees its
+        # bytes now, after every queued change: the check above drained
+        # them.
         rw = self._residency_worker() if swaps and new_s > old_s else None
-        if swaps and (rw is None or not rw.put(swaps)):
-            for old, new in swaps:
-                kq.residency_erase(old)
-                kq.residency_insert(new)
-            kq.residency_commit()
-        del swaps
+        jobs = ([partial(_wire_grown_ref, weakref.ref(self), k,
+                         self._arena[k]) for k in wire]
+                if rw is not None else [])
+        if rw is None or not rw.put(swaps, jobs):
+            for key in wire:
+                self._mlock_buf(key)
+            if swaps:
+                for old, new in swaps:
+                    kq.residency_erase(old)
+                    kq.residency_insert(new)
+                kq.residency_commit()
+        del swaps, jobs
         self._owner[li] = new_owner
         self._slots[li] = new_s
         # Flush MLX's cache of freed GPU buffers: on a box sized to the
@@ -2297,8 +2367,9 @@ class DecodeFeeder:
                 # The finalizer passes wait=False: a collection that runs
                 # on a read worker cannot join its own thread.
                 pool.shutdown(wait=wait and wedges == 0)
-        locked, self._locked = getattr(self, "_locked", {}), {}
-        self.locked_bytes = 0
+        with getattr(self, "_lock_mu", threading.RLock()):
+            locked, self._locked = getattr(self, "_locked", {}), {}
+            self.locked_bytes = 0
         if locked:
             import ctypes
 
