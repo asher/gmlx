@@ -601,6 +601,32 @@ def _gone(pid: int, timeout: float = 10.0) -> bool:
         queue.close()
 
 
+def _exited(pid: int) -> None:
+    """Waits until ``pid`` has exited and its parent can reap it, which
+    ``_gone`` can report a moment before."""
+    assert _gone(pid)
+    deadline = time.monotonic() + 10
+    while True:
+        state = _state(pid)
+        if state in ("", "Z"):
+            return
+        assert time.monotonic() < deadline, f"{pid} is still {state}"
+        time.sleep(0.01)
+
+
+def _state(pid: int) -> str:
+    """The state letter of the process ``pid``, or "" once it is reaped."""
+    if sys.platform == "linux":
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rpartition(")")[2].split()[0]
+        except FileNotFoundError:
+            return ""
+    done = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                          timeout=10)
+    return done.stdout.strip()[:1]
+
+
 def _halt(proc) -> None:
     """Stops ``proc``, and returns once it has stopped."""
     os.kill(proc.pid, signal.SIGSTOP)
@@ -755,6 +781,32 @@ def test_a_stop_and_continue_of_the_entry_sends_the_client_nothing(entry):
         assert main.stderr.read() == b""
     finally:
         _stop(main)
+
+
+def test_a_signal_that_comes_before_the_client_is_reaped_is_for_the_session(entry):
+    """A Ctrl-C comes and the client exits while the entry is stopped, so the
+    entry sees both at once. The client has exited, so the Ctrl-C is for the
+    session."""
+    main = _start(entry, "--", "sh", "-c", "echo $$; read x; exit 3")
+    copy = None
+    try:
+        client = int(main.stdout.readline())
+        copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x")
+        assert copy.stdout.readline() == b"joined\n"
+        _halt(main)
+        main.send_signal(signal.SIGINT)
+        _send(main)
+        _exited(client)
+        os.kill(main.pid, signal.SIGCONT)
+        said = _read_until(main.stderr.fileno(), b"stops the other copy.\n")
+        assert said == (b"[launch] sh exited. The session stays open while 1 other copy runs.\n"
+                        b"[launch] Press Ctrl-C again to end the session, which stops the other "
+                        b"copy.\n")
+        _send(copy)
+        assert copy.wait(10) == 0
+        assert main.wait(10) == 3
+    finally:
+        _stop(main, *([copy] if copy else []))
 
 
 @pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 9), (signal.SIGINT, 8)])
@@ -939,9 +991,12 @@ while True:
 
 @pytest.mark.parametrize("again", [False, True])
 def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, monkeypatch, again):
-    """The client takes 0.3 of the 1 second grace, and the entry then waits
-    for the copy until the grace ends, or until a further signal comes."""
-    monkeypatch.setenv("GMLX_ENTRY_COPY_GRACE_MS", "1000")
+    """The client takes 0.3 seconds to exit, and the entry then waits for the
+    copy until the grace ends, or until a further signal comes. With a
+    further signal the grace is a minute, so only that signal can end the
+    wait before the test stops waiting."""
+    grace = 60 if again else 1
+    monkeypatch.setenv("GMLX_ENTRY_COPY_GRACE_MS", str(grace * 1000))
     main = _start(entry, "--", sys.executable, "-c", SLOW_TERM, "0.3")
     copy = client = None
     try:
@@ -950,11 +1005,8 @@ def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, monkey
         client = int(copy.stdout.readline())
         start = time.monotonic()
         main.send_signal(signal.SIGTERM)
-        assert _gone(first)                       # the client has exited
+        _exited(first)
         if again:
-            # The entry can take this signal before it reaps the client and
-            # pass it on to the client's group. The short grace then ends the
-            # wait.
             main.send_signal(signal.SIGINT)
         assert main.wait(10) == 9
         if not again:

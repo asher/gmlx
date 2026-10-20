@@ -429,6 +429,11 @@ pub fn next_signal() -> libc::c_int {
     }
 }
 
+/// Puts `sig` back, so that [`next_signal`] returns it again.
+fn put_back(sig: libc::c_int) {
+    PENDING.fetch_or(bit(sig), Ordering::SeqCst);
+}
+
 /// The exit code of a wait status: the process's own, or 128 plus the
 /// signal that ended it, as a shell reports it.
 pub fn exit_code(status: libc::c_int) -> i32 {
@@ -635,7 +640,8 @@ pub struct Outcome {
 /// says, gets SIGINT and SIGQUIT from the terminal itself, so only SIGTERM
 /// and SIGHUP go to it. Those two are followed by SIGCONT, as a shell does
 /// for a stopped job, since a stopped client keeps them pending, and they
-/// also call `on_stop`.
+/// also call `on_stop`. A signal that comes after the client has exited,
+/// and before the entry has reaped it, is left for the wait that follows.
 pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Outcome {
     let mut stopping = None;
     loop {
@@ -648,6 +654,10 @@ pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Out
         }
         if job_control(sig) {
             continue;
+        }
+        if let Some(code) = reap(pid) {
+            put_back(sig);
+            return Outcome { code, stopping };
         }
         let ends = sig == libc::SIGTERM || sig == libc::SIGHUP;
         if own_group || ends {
