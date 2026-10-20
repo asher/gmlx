@@ -118,12 +118,17 @@ def _relay_pids(marker: str) -> list:
     return [int(p) for p in done.stdout.split()]
 
 
-def _kill_relays(marker: str) -> None:
-    for pid in _relay_pids(marker):
+def _kill(*pids: int) -> None:
+    """SIGKILL each of ``pids`` that is still there."""
+    for pid in pids:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def _kill_relays(marker: str) -> None:
+    _kill(*_relay_pids(marker))
 
 
 def _echo_unix(path: Path):
@@ -620,7 +625,8 @@ def _state(pid: int) -> str:
         try:
             with open(f"/proc/{pid}/stat") as f:
                 return f.read().rpartition(")")[2].split()[0]
-        except FileNotFoundError:
+        # ESRCH comes instead while the parent reaps the process.
+        except (FileNotFoundError, ProcessLookupError):
             return ""
     done = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
                           timeout=10)
@@ -842,7 +848,7 @@ def test_the_lock_never_reaches_the_client(entry, session_dir):
         assert main.stderr.read() == b""                        # it waited for nothing
     finally:
         if orphan:
-            os.kill(orphan, signal.SIGKILL)
+            _kill(orphan)
         _stop(main, *([copy] if copy else []))
 
 
@@ -969,7 +975,7 @@ def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, mon
         assert copy.poll() is None                # the stopping container ends it
     finally:
         if client:
-            os.kill(client, signal.SIGKILL)
+            _kill(client)
         _stop(main, *([copy] if copy else []))
 
 
@@ -1014,7 +1020,7 @@ def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, monkey
         assert copy.poll() is None                # the stopping container ends it
     finally:
         if client:
-            os.kill(client, signal.SIGKILL)
+            _kill(client)
         _stop(main, *([copy] if copy else []))
 
 
@@ -1037,7 +1043,7 @@ def test_a_client_that_takes_the_whole_grace_leaves_none_for_the_copies(entry, m
         assert copy.poll() is None                # the stopping container ends it
     finally:
         if client:
-            os.kill(client, signal.SIGKILL)
+            _kill(client)
         _stop(main, *([copy] if copy else []))
 
 
@@ -1199,11 +1205,7 @@ def _stopped(pid: int, timeout: float = 10.0) -> bool:
 
 
 def _end(init, master, *pids) -> None:
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    _kill(*pids)
     os.close(master)
     _stop(init)
 
