@@ -8,6 +8,7 @@ of known bytes (fixture shared with test_decode_feeder)."""
 
 from __future__ import annotations
 
+import os
 import threading
 from contextlib import contextmanager
 
@@ -1241,6 +1242,10 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
     assert waits(closed) and all(w is True for w in waits(closed))
 
 
+@pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU"))
+    or not mx.metal.is_available(),
+    reason="the decode arena exists only with a GPU default device")
 @pytest.mark.parametrize("timeshare", ["0", "1"])
 @pytest.mark.parametrize("env_gb", [None, "100"])
 @pytest.mark.parametrize("built", [True, False])
