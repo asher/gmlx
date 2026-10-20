@@ -12,13 +12,12 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 
 import pytest
 
 import gmlx.serve.embeddings as emb
 import gmlx.serve.hf_cache as hf_cache
-from fake_hub import BlackHole, FakeHub, cache_state, use_hub
+from fake_hub import BlackHole, FakeHub, before_each_request, cache_state, use_hub
 
 C1 = "1" * 40
 C2 = "2" * 40
@@ -180,7 +179,21 @@ def test_an_undecided_encoder_on_a_black_holed_hub_loads_after_one_short_try(
     hole = BlackHole()
     use_hub(monkeypatch, hole.endpoint, cache)
     monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 1.0)
+    monkeypatch.setattr(hf_cache, "_clock", lambda: 0.0)
     result: list = []
+    entered = threading.Event()
+    timeouts, during = [], []
+
+    def other():
+        with hf_cache.network_fetch_allowed():
+            entered.set()
+
+    def fetch(timeout):
+        timeouts.append(timeout)
+        threading.Thread(target=other, daemon=True).start()
+        during.append(entered.wait(30))
+
+    before_each_request(monkeypatch, fetch)
 
     def request():
         try:
@@ -188,31 +201,20 @@ def test_an_undecided_encoder_on_a_black_holed_hub_loads_after_one_short_try(
         except BaseException as exc:            # noqa: BLE001
             result.append(exc)
 
-    started = time.monotonic()
     t = threading.Thread(target=request, daemon=True)
     t.start()
     try:
-        deadline = time.monotonic() + 10
-        while hole.accepted == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert hole.accepted == 1 and not result
-        entered = threading.Event()
-
-        def other():
-            with hf_cache.network_fetch_allowed():
-                entered.set()
-
-        threading.Thread(target=other, daemon=True).start()
-        assert entered.wait(0.5), "the card fetch held the offline lock"
-        t.join(15)
+        t.join(60)
         assert result == [64]
-        assert time.monotonic() - started < 10
+        assert during == [True], "the card fetch held the offline lock"
+        assert timeouts == [1.0]           # one try, given the whole timeout
+        assert hole.wait_accepted(1)
         assert hole.accepted == 1
         assert emb._EmbeddingsModelHolder.model.args.pooling == "mean"
         assert "modules.json not fetched" in capsys.readouterr().err
         _new_start(monkeypatch)
         assert len(_embed(repo)) == 64
-        assert hole.accepted == 1
+        assert hole.accepted == 1 and len(timeouts) == 1
         assert cache_state(cache, repo)["main"] == C1
     finally:
         hole.close()

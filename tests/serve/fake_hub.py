@@ -170,6 +170,7 @@ class BlackHole:
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(16)
         self.accepted = 0
+        self._cond = threading.Condition()
         self._held: list = []
         self._stop = False
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -186,8 +187,15 @@ class BlackHole:
                 conn, _ = self._sock.accept()
             except OSError:
                 return
-            self.accepted += 1
+            with self._cond:
+                self.accepted += 1
+                self._cond.notify_all()
             self._held.append(conn)
+
+    def wait_accepted(self, n: int = 1, timeout: float = 30.0) -> bool:
+        """Wait until ``n`` connections are accepted."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self.accepted >= n, timeout)
 
     def close(self):
         self._stop = True
@@ -203,6 +211,20 @@ def refused_port() -> str:
     port = s.getsockname()[1]
     s.close()
     return f"http://127.0.0.1:{port}"
+
+
+def before_each_request(monkeypatch, hook):
+    """Call ``hook(timeout)`` on the fetching thread before each request an
+    ``httpx.Client`` streams, with the timeout that request gets."""
+    import httpx
+
+    real = httpx.Client.stream
+
+    def stream(self, method, url, **kwargs):
+        hook(kwargs.get("timeout"))
+        return real(self, method, url, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "stream", stream)
 
 
 def use_hub(monkeypatch, endpoint: str, cache: str, offline: bool = False):
