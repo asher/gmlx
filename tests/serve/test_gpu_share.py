@@ -6,7 +6,6 @@ nothing runs on the GPU."""
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -51,40 +50,52 @@ def test_a_point_without_a_pacer_does_nothing_and_a_pacer_is_scoped():
 
 
 def test_the_pacer_does_nothing_with_no_chat_active():
-    evals = []
-    pacer = ImagePacer(ChatActivity(), share=0.5,
-                       evaluate=lambda *a: evals.append(a))
-    t0 = time.monotonic()
+    evals, waits = [], []
+    chat = ChatActivity()
+    chat.wait_tick = lambda timeout: waits.append(timeout) or False
+    pacer = ImagePacer(chat, share=0.5, evaluate=lambda *a: evals.append(a))
     for i in range(50):
         pacer((i,))
-    assert evals == [] and pacer.pauses == 0
-    assert time.monotonic() - t0 < 2
+    assert evals == [] and waits == [] and pacer.pauses == 0
 
 
-def _run(share: float, blocks: int, chat_delay: float):
+class _PausedGpu(ChatActivity):
+    """Chat that never goes idle, and a GPU that is free for one chat step
+    each time the pacer starts to wait for one."""
+
+    def __init__(self):
+        super().__init__(idle_s=float("inf"))
+        self.gpu_free = threading.Event()
+
+    def wait_tick(self, timeout: float) -> bool:
+        with self._cond:
+            seen = self.ticks
+            self.gpu_free.set()
+            return self._cond.wait_for(lambda: self.ticks != seen, timeout)
+
+
+def _run(share: float, blocks: int):
     """An image forward of ``blocks`` blocks under a pacer, beside a chat
     engine whose steps each wait for the GPU while an image piece holds
     it, so each step can run only when the image pauses. Returns the
     order of the GPU work."""
-    chat = ChatActivity()
+    chat = _PausedGpu()
     log, lock = [], threading.Lock()
-    gpu_free = threading.Event()
     stop = threading.Event()
 
     def evaluate(*arrays):
         with lock:
             log.append(("piece", arrays[0]))
-        gpu_free.set()
 
     def engine():
-        while not stop.is_set():
+        while True:
             chat.begin()
             # The step's command buffers queue behind the image piece.
-            if not gpu_free.wait(0.5):
+            chat.gpu_free.wait()
+            chat.gpu_free.clear()
+            if stop.is_set():
                 chat.end()
-                continue
-            gpu_free.clear()
-            time.sleep(chat_delay)
+                return
             with lock:
                 log.append(("chat",))
             chat.end()
@@ -93,19 +104,19 @@ def _run(share: float, blocks: int, chat_delay: float):
     chat.begin()
     chat.end()                      # chat is active before the job starts
     th.start()
-    # A loaded machine can take far longer than the default wait to run
-    # the chat step; the order, not the wait, is under test.
-    pacer = ImagePacer(chat, share=share, wait_s=5.0, evaluate=evaluate)
+    pacer = ImagePacer(chat, share=share, wait_s=30.0, evaluate=evaluate)
     with pacing.paced(pacer):
         for i in range(blocks):
             pacing.point(i)
     stop.set()
-    th.join(2)
+    chat.gpu_free.set()
+    th.join(30)
+    assert not th.is_alive()
     return log, pacer
 
 
 def test_a_waiting_chat_step_runs_before_the_next_image_piece():
-    log, pacer = _run(share=0.0, blocks=4, chat_delay=0.02)
+    log, pacer = _run(share=0.0, blocks=4)
     pieces = [i for i, e in enumerate(log) if e[0] == "piece"]
     assert [log[i][1] for i in pieces] == [0, 1, 2, 3]
     # Between every two pieces a chat step ran.
@@ -183,15 +194,24 @@ def test_chat_that_goes_idle_starts_the_next_pause_afresh():
 
 
 def test_a_pause_stops_waiting_when_chat_goes_idle():
-    chat = ChatActivity()
+    clock, waits = _Clock(), []
+    chat = ChatActivity(clock=clock)
     chat.begin()
     chat.end()
-    pacer = ImagePacer(chat, share=0.9, wait_s=0.01, evaluate=lambda *a: None)
-    t0 = time.monotonic()
+    real = chat.wait_tick
+
+    def wait_tick(timeout):
+        waits.append(timeout)
+        return real(timeout)        # no chat step finishes
+
+    chat.wait_tick = wait_tick
+    pacer = ImagePacer(chat, share=0.9, wait_s=0.01, clock=clock,
+                       evaluate=lambda *a: None)
     pacer(())
-    pacer.mark = time.monotonic() - 0.2
+    pacer.mark = clock.t - 0.2      # a budget of 1.8 s of chat time
     pacer(())
-    assert time.monotonic() - t0 < 1.2
+    # Each pause stops at the first wait in which no chat step finishes.
+    assert waits == [0.01, 0.01] and pacer.pauses == 2
 
 
 @pytest.mark.parametrize("raw, want", [
