@@ -294,6 +294,53 @@ jobs:
           python -m build
           python scripts/check_guest_entry_dist.py
 
+  stress:
+    # Daily: the concurrency tests under random stalls, for the races a
+    # loaded machine shows (scripts/stress_tests.py). A failing test opens
+    # or reopens its flaky issue. The job never gates a pull request.
+    if: github.event.schedule == '0 7 * * *'
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Rust toolchain for the guest entry
+        working-directory: crates/gmlx-entry
+        run: rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install "mlx==0.32.3"
+          pip install "mlx-kquant==0.5.2"
+          pip install -e ".[all]"
+          pip install --group test
+      - name: Build the guest entry
+        run: echo "GMLX_ENTRY_BIN=$(python scripts/build_guest_entry.py --native | tail -1)" >> "$GITHUB_ENV"
+      - name: Stress
+        env:
+          KQUANT_FORCE_CPU: "1"
+        run: python scripts/stress_tests.py --preset concurrency --count 3 --minutes 30 --out stress-out
+      - name: Flake issues
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/ci_tests.py issues --flaky stress-out/flaky.json --run-url "$RUN_URL"
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: stress-out
+          path: stress-out
+          if-no-files-found: ignore
+
   lint:
     if: github.event_name != 'schedule' && github.ref_type != 'tag'
     runs-on: ubuntu-latest
