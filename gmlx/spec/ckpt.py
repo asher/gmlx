@@ -830,6 +830,11 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     grids, priced = _ckpt_grids(batch, restored, block_size, anchor, ids)
     p_stable = _ckpt_p_stable(batch, meta, block_size,
                               min(u for _, u in grids))
+    if priced and p_stable is None and replay is None:
+        # With no turn record and no replay record, nothing shows which
+        # record a longer next prompt restores, and dropping one can cost
+        # it more than this prefill saves. Main's grid stays.
+        grids, priced = grids[-1:], False
 
     def build(grid):
         bounds, terminal, interval = _ckpt_cursor_init(
@@ -856,6 +861,7 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     # disk skeleton, the replay aside. Read before pricing drops any.
     main_skel = [b for b, k in cands[-1][0]
                  if k != "replay" and b >= cands[-1][1]]
+    main_turn = bool(cands[-1][3])
     pick = cands[0]
     if priced:
         try:
@@ -866,12 +872,17 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
             _log.debug("APC ckpt schedule pricing failed", exc_info=True)
             pick = build(grids[-1])
     bounds, terminal, interval, turn = pick
+    pos = [b for b, _ in bounds]
+    if main_turn and not turn and p_stable is not None:
+        # A landed turn record skips the whole-prompt store after
+        # prefill. Where the pick's grid has no turn point, the record
+        # the next turn restores (main's, by the pick) stands in.
+        turn = [b for b in pos if b <= p_stable][-1:]
     # Each of main's skeletons goes to the shallowest kept record at or
     # past it, else to the deepest, a replay included (an attention-only
-    # replay adopts on extension). The pick writes no more heavy
-    # skeletons than main, and where a kept record reaches one, a
+    # replay adopts on extension). The cursor writes no more heavy
+    # skeletons than main's, and where a kept record reaches one, a
     # restart restores no shallower.
-    pos = [b for b, _ in bounds]
     skel = sorted({min([b for b in pos if b >= m], default=pos[-1])
                    for m in main_skel}) if pos else []
     if sysb is not None and not safe(sysb):

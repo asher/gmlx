@@ -227,8 +227,8 @@ def test_kvarn_disk_skeletons_go_where_mains_do(loop, monkeypatch):
     assert loop.stored == [(7957, "boundary", True),
                            (8256, "replay", False)]
     monkeypatch.setenv("GMLX_APC_CKPT_REPLAY", "0")
-    loop.run(m, 9000, 0, sys=3000)
-    assert loop.stored == [(2992, "anchor", True)]
+    loop.run(m, 8257, 0, 7957, sys=1000)
+    assert loop.stored == [(992, "anchor", False), (7957, "boundary", True)]
 
 
 def test_kvarn_restart_restores_as_deep_as_mains_with_no_more_skeletons(
@@ -236,8 +236,8 @@ def test_kvarn_restart_restores_as_deep_as_mains_with_no_more_skeletons(
     """After a restart only disk skeletons survive, so the next turn
     restores the deepest one at or below its stable prefix. The pick
     writes no more heavy skeletons than main, and that restore is never
-    shallower, also when the re-rendered tail is longer than the guard
-    gap."""
+    shallower, also when the next turn re-renders more than the prompt's
+    last 16 tokens."""
 
     def skel():
         return [b for b, _, s in loop.stored if s]
@@ -281,3 +281,70 @@ def test_turn_records_off_keep_mains_schedule(loop, monkeypatch):
                 assert head["chunks"] == main["chunks"]
     out = loop.run(loop.model("flat", folds=True), 24627, 0)
     assert cost(out["chunks"]) == (3, 1)
+
+
+def test_the_whole_prompt_store_is_skipped_where_mains_is(loop):
+    """After prefill the whole prompt is stored unless a record the next
+    turn restores landed. Where a wide window keeps the pick's grid from
+    a turn point, its deepest record at or below the stable prefix
+    counts, so a kvarn layout writes no heavy whole-prompt record that
+    main skips."""
+    from gmlx.cache.snapshot import ckpt_full_store_redundant
+
+    for folds in (False, True):
+        m = loop.model("flat", folds, ("rot:32768:0", "kvarn:4:4:64"))
+        main = loop.run(m, 17408, 0, 15908, 12000, arm=main_arm)
+        assert main["meta"]["ckpt_p_stable_bounds"] == [8192]
+        assert ckpt_full_store_redundant(main["meta"])
+        head = loop.run(m, 17408, 0, 15908, 12000)
+        assert loop.stored == [(12000, "anchor", True)]
+        assert head["meta"]["ckpt_p_stable_bounds"] == [12000]
+        assert ckpt_full_store_redundant(head["meta"])
+        # Where main's has no turn record either, both store it.
+        main = loop.run(m, 17408, 0, 7000, 3000, arm=main_arm)
+        assert not ckpt_full_store_redundant(main["meta"])
+        head = loop.run(m, 17408, 0, 7000, 3000)
+        assert not ckpt_full_store_redundant(head["meta"])
+
+
+def test_no_turn_record_and_no_replay_keep_mains_schedule(loop,
+                                                          monkeypatch):
+    """A prompt with no render-stable prefix gets no turn record, and one
+    shorter than a rotating window gets no replay record. Then nothing
+    shows which record a longer next prompt restores, so main's schedule
+    stays."""
+    for tags in (("rot:32768:0", "kv"), ("rot:131072:0", "kv"),
+                 ("rot:32768:0", "kvarn:4:4:64")):
+        for cfg in CONFIGS:
+            for _, folds, mtp in LOOPS:
+                m = loop.model(cfg, folds, tags)
+                for r, n in ((7299, 17484), (13104, 30000), (21808, 26657)):
+                    head = loop.run(m, n, r, mtp=mtp)
+                    main = loop.run(m, n, r, mtp=mtp, arm=main_arm)
+                    assert "replay" not in dict(_bounds(main)).values()
+                    assert _bounds(head) == _bounds(main), (
+                        tags, cfg, folds, mtp, n)
+                    assert head["chunks"] == main["chunks"]
+    out = loop.run(loop.model("dense", True, ("rot:32768:0", "kv")),
+                   26657, 21808)
+    assert _bounds(out) == [(24576, "boundary")]
+    monkeypatch.setenv("GMLX_APC_CKPT_REPLAY", "0")
+    loop.run(loop.model("flat", tags=KVARN), 9000, 0, sys=3000)
+    assert loop.stored == [(2992, "anchor", False), (8192, "boundary", True)]
+
+
+def test_a_pricing_failure_arms_mains_schedule(loop, monkeypatch):
+    """If pricing the candidates fails, main's schedule is armed whole:
+    its records, skeletons and turn records."""
+    m = loop.model("flat", tags=KVARN)
+    main = loop.run(m, 15565, 7299, 15551, arm=main_arm)
+    want = list(loop.stored)
+
+    def fail(*a, **k):
+        raise RuntimeError("pricing")
+
+    monkeypatch.setattr(ckpt, "_ckpt_drop_tail_cuts", fail)
+    head = loop.run(m, 15565, 7299, 15551)
+    assert head["meta"] == main["meta"]
+    assert head["chunks"] == main["chunks"]
+    assert loop.stored == want
