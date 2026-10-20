@@ -2300,7 +2300,7 @@ class _Watch:
 
 
 _LAUNCH_IN_A_WINDOW = textwrap.dedent("""
-    import os, signal, sys
+    import os, select, signal, sys
     from gmlx.container import session
     if sys.argv[1] == "copy":
         copy = [sys.executable, "-c",
@@ -2311,8 +2311,14 @@ _LAUNCH_IN_A_WINDOW = textwrap.dedent("""
         signals = session._Signals("gmlx-pi-1", tty=False,
                                    log=lambda line: print(line, flush=True))
         signals.install()
+        # Waits as launch does, on a signal wakeup fd: a signal that lands
+        # just before a blocking read would wait for the read to end.
+        wake = os.pipe()
+        os.set_blocking(wake[1], False)
+        signal.set_wakeup_fd(wake[1])
         print("ready", flush=True)
-        sys.stdin.read()
+        while 0 not in select.select([0, wake[0]], [], [])[0]:
+            os.read(wake[0], 512)
 """)
 
 
