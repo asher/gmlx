@@ -938,7 +938,7 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=as_salt(meta.get("extra_hash", 0)),
-            skeleton_disk=skel, kind=kind):
+            skeleton_disk=skel, kind=kind, keep=meta.get("ckpt_p_stable")):
         meta["ckpt_last_stored"] = checkpoint_len
         meta.setdefault("ckpt_stored_boundaries", []).append(checkpoint_len)
     if bounds:

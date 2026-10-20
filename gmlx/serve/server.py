@@ -1207,9 +1207,10 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "model).")
     ap.add_argument("--moe-layer-shed", type=float, default=None, metavar="P",
                     help="Lossy: at decode, skip each streamed MoE layer's routed "
-                         "experts with probability P (0 < P < 1) per token; the "
-                         "shared expert still runs on shed layers (config mode: "
-                         "set `moe_layer_shed: P` per model).")
+                         "experts with probability P (0 < P < 1) per token. A "
+                         "shed layer still runs its shared expert or dense MLP, "
+                         "or on Muse Spark its top expert (config mode: set "
+                         "`moe_layer_shed: P` per model).")
     ap.add_argument("--moe-prestage", choices=("ranked", "keepers"),
                     default=None,
                     help="Lookahead prestage targeting for a streamed model; "

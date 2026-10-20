@@ -372,6 +372,32 @@ def _widen_prompt_rope_state(batch, prompt_kwargs: dict) -> dict:
     return prompt_kwargs
 
 
+def _ckpt_plain_post_prefill(result) -> None:
+    """Full-prompt checkpoint store for a stock-path ckpt batch. Never
+    raises."""
+    try:
+        cache = getattr(result, "prompt_cache", None) or []
+        stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
+        if stash is None or stash.get("mode") != "ckpt":
+            return
+        from gmlx.cache.snapshot import ckpt_full_store_redundant, ckpt_store
+
+        m = stash.get("apc_meta")
+        if ckpt_full_store_redundant(m):
+            _log.info("APC ckpt post-prefill store skipped: render-stable "
+                      "boundary landed")
+        elif ckpt_store(
+                stash["manager"], stash["full_ids"], cache,
+                extra_hash=as_salt(stash.get("extra_hash", 0)),
+                keep=(m or {}).get("ckpt_p_stable")):
+            if m is not None:
+                m.setdefault("ckpt_stored_boundaries", []).append(
+                    len(stash["full_ids"]))
+    except Exception:
+        _log.warning("APC plain post-prefill store failed; continuing",
+                     exc_info=True)
+
+
 def install_full_prompt_mtp_prefill() -> None:
     """Retain full-prompt hidden through the BatchGenerator MTP prefill so the
     native head teacher-forces the whole prompt into its KV (llama parity).
@@ -687,30 +713,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 getattr(self, "_kq_ckpt_armed", False)
                 and getattr(self, "draft_kind", None) is None
             ):
-                try:
-                    cache = getattr(result, "prompt_cache", None) or []
-                    stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
-                    if stash is not None and stash.get("mode") == "ckpt":
-                        from gmlx.cache.snapshot import (
-                            ckpt_full_store_redundant,
-                            ckpt_store,
-                        )
-                        m = stash.get("apc_meta")
-                        if ckpt_full_store_redundant(m):
-                            _log.info("APC ckpt post-prefill store "
-                                      "skipped: render-stable boundary "
-                                      "landed")
-                        elif ckpt_store(
-                                stash["manager"], stash["full_ids"], cache,
-                                extra_hash=as_salt(stash.get("extra_hash", 0))):
-                            if m is not None:
-                                m.setdefault(
-                                    "ckpt_stored_boundaries", []
-                                ).append(len(stash["full_ids"]))
-                except Exception:
-                    _log.warning(
-                        "APC plain post-prefill store failed; continuing", exc_info=True
-                    )
+                _ckpt_plain_post_prefill(result)
             return result
         chunk_hiddens = getattr(self, "_mtp_chunk_hiddens", None)
         full_ids = getattr(self, "_mtp_full_input_ids", None)

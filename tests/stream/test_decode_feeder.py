@@ -1659,13 +1659,17 @@ def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
 
 @pytest.mark.parametrize("miss_shed", [None, 0.9])
 @pytest.mark.parametrize("unmixed", [True, False])
-def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, unmixed,
+def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, capsys, unmixed,
                                                  miss_shed):
     """On a block with no shared expert a shed layer stages and runs only
-    its top-scored expert, in place of miss-shed. An unmixed block (Muse
-    Spark) gets one row per routed expert, zeros at the others; a mixing
-    base gets the token's full mass on that expert. A call without
-    scores has no top expert and returns zeros."""
+    its top-scored expert, in place of miss-shed, wherever the top score
+    sits. An unmixed block (Muse Spark) gets one row per routed expert,
+    zeros at the others; a mixing base gets the token's full mass on that
+    expert. A call without scores has no top expert: its layer runs in
+    full and a one-time notice says so."""
+    from gmlx.stream import expert_streaming
+
+    monkeypatch.setattr(expert_streaming, "_UNSHED_NOTED", False)
     mx.random.seed(11)
     recorded = []
     glu, df = _stream_scores_glu(monkeypatch, recorded)
@@ -1673,30 +1677,88 @@ def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, unmixed,
     object.__setattr__(glu, "_kq_shed_keeps_top1", True)
     object.__setattr__(glu, "_kq_miss_shed", miss_shed)
     object.__setattr__(glu, "_kq_scores_unmixed", unmixed)
+    base = super(type(glu), glu).__call__
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    for sc, top in (([0.25, 0.75], 3), ([0.75, 0.25], 1)):
+        out = glu(x1, i1, mx.array([[sc]], dtype=mx.float32))
+        mx.eval(out)
+        assert df.shed_calls == []
+        assert df.stage_calls[-1][1].reshape(-1).tolist() == [top]
+        assert recorded[-1][0].reshape(-1).tolist() == [top]
+        slot = [1, 3].index(top)
+        if unmixed:
+            assert recorded[-1][1] is None
+            assert out.shape == (1, 1, 2, 16)
+            assert not np.array(mx.abs(out[..., 1 - slot, :]).sum())
+            ref = base(x1, mx.array([[[top]]], dtype=mx.uint32))
+            assert np.allclose(np.array(out[..., slot, :]),
+                               np.array(ref[..., 0, :]), atol=1e-6)
+        else:
+            assert np.allclose(recorded[-1][1].reshape(-1), [1.0], atol=1e-6)
+    assert df._layer_shed_n == 2
+
+    out = glu(x1, i1)
+    mx.eval(out)
+    assert df._layer_shed_n == 2
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert np.allclose(np.array(out), np.array(base(x1, i1)), atol=1e-6)
+    assert "run in full on this model" in capsys.readouterr().out
+
+
+def test_wrapper_layer_shed_runs_an_uncovered_layer_in_full(monkeypatch):
+    """A shed draw on a block with no shared expert, on a layer the decode
+    feeder does not cover, has no arena to stage the top expert from: the
+    layer runs in full instead of adding nothing."""
+    mx.random.seed(12)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", True)
+    object.__setattr__(glu, "_kq_scores_unmixed", True)
+    df.covers = lambda li: False
+    base = super(type(glu), glu).__call__
 
     x1 = mx.random.normal((1, 1, 16))
     i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
     out = glu(x1, i1, mx.array([[[0.25, 0.75]]], dtype=mx.float32))
     mx.eval(out)
-    assert df._layer_shed_n == 1 and df.shed_calls == []
-    assert df.stage_calls[-1][1].reshape(-1).tolist() == [3]
-    assert recorded[-1][0].reshape(-1).tolist() == [3]
-    if unmixed:
-        assert recorded[-1][1] is None
-        assert out.shape == (1, 1, 2, 16)
-        assert not np.array(mx.abs(out[..., 0, :]).sum())
-        ref = super(type(glu), glu).__call__(
-            x1, mx.array([[[3]]], dtype=mx.uint32))
-        assert np.allclose(np.array(out[..., 1, :]),
-                           np.array(ref[..., 0, :]), atol=1e-6)
-    else:
-        assert np.allclose(recorded[-1][1].reshape(-1), [1.0], atol=1e-6)
+    assert df._layer_shed_n == 0 and df.stage_calls == []
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert np.allclose(np.array(out), np.array(base(x1, i1)), atol=1e-5)
 
-    calls = len(recorded)
-    out = glu(x1, i1)
+
+@pytest.mark.parametrize("top1", [False, True])
+def test_wrapper_layer_shed_never_sheds_a_split_leaf(monkeypatch, top1):
+    """A multi-token call whose routed union overflows the arena splits
+    down to one-token leaves. Those leaves are prefill or verify work, so
+    none of them sheds: the call matches the same call without the lever."""
+    mx.random.seed(14)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", top1)
+    staged = df.stage
+
+    def stage(li, ids):
+        return None if np.unique(ids).size > 2 else staged(li, ids)
+
+    df.stage = stage
+    df.slot_count = lambda li: 2
+    df.can_stage_smaller = lambda li: True
+    df.note_split_rule = lambda split, ahead=False: None
+    df.has_dead = lambda li: False
+
+    x = mx.random.normal((1, 4, 16))
+    i = mx.array([[[0, 1], [2, 3], [0, 1], [2, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.6, 0.4]] * 4], dtype=mx.float32)
+    ref = glu(x, i, sc)
+    mx.eval(ref)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    out = glu(x, i, sc)
     mx.eval(out)
-    assert df._layer_shed_n == 2 and len(recorded) == calls
-    assert out.shape == (1, 1, 2, 16) and not np.array(mx.abs(out).sum())
+    assert df._layer_shed_n == 0
+    assert np.array_equal(np.array(out), np.array(ref))
 
 
 def test_available_ram_counts_active_file_cache(monkeypatch):

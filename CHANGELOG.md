@@ -86,9 +86,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   early when the client read it slowly.
 - `--moe-miss-shed` dropped no experts on Muse Spark, though the load said
   it was on. It now sheds them as on other MoE models.
-- `--moe-layer-shed` on a model with no shared expert, such as Muse Spark,
-  dropped a shed layer's whole MoE output. A shed layer now keeps its top
-  expert.
+- `--moe-layer-shed` no longer drops a shed layer's whole MoE output on models
+  with no shared expert: Muse Spark keeps the top expert, others run in full.
+- `--moe-layer-shed` could stop speculative or batched decoding with a
+  concatenate error on DeepSeek-V4, GLM-5.3-Flash, Hunyuan and K2 Horizon.
 - With `--stream-experts`, the expert arena came out one prefill ring smaller
   than the memory budget allows when free RAM set its size.
 - With `--stream-experts`, batched or speculative decoding of up to 64 tokens

@@ -672,6 +672,54 @@ def test_strip_on_extend_keeps_newest_two_plus_anchor():
     assert got == 64
 
 
+def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores():
+    """A turn with no turn record stores a prefill boundary and the whole
+    prompt past its p_stable (70). Strip-on-extend still keeps the
+    deepest record at or below p_stable (64), which the next turn
+    restores, beside the newest older record."""
+    from gmlx.cache.snapshot import _ckpt_records
+    man = APCManager(num_blocks=96, block_size=16)
+    ids = list(range(400, 400 + 96))
+    for p in (32, 64):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0)
+    for p in (80, 90):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0, keep=70)
+    assert sorted(r.p for r in _ckpt_records(man).values()) == [32, 64, 80, 90]
+    warm, got = ckpt_lookup(man, ids[:70] + [7, 8], extra_hash=0)
+    assert got == 64
+
+
+def test_the_post_prefill_store_passes_the_stable_prefix(monkeypatch):
+    """The whole-prompt store after prefill hands the store the turn's
+    p_stable, so it keeps the record the next turn restores."""
+    import gmlx.cache.snapshot as snapshot
+    from gmlx.spec.mtp_prefill import _ckpt_plain_post_prefill
+    from gmlx.spec.speculative import _ckpt_post_prefill
+
+    keeps = []
+
+    def store(manager, ids, cache, **kw):
+        keeps.append(kw.get("keep"))
+        return len(ids)
+
+    monkeypatch.setattr(snapshot, "ckpt_store", store)
+    meta = {"ckpt_p_stable": 70}
+    _ckpt_post_prefill(SimpleNamespace(_kq_apc_manager=object()), [],
+                       {"apc_meta": meta, "full_ids": list(range(90))})
+    assert keeps == [70]
+    assert meta["ckpt_stored_boundaries"] == [90]
+    # The stock path's store, after a prefill with no drafter.
+    meta = {"ckpt_p_stable": 70}
+    stash = {"mode": "ckpt", "manager": object(), "apc_meta": meta,
+             "full_ids": list(range(90))}
+    _ckpt_plain_post_prefill(SimpleNamespace(prompt_cache=[
+        SimpleNamespace(_kq_apc_retire=stash)]))
+    assert keeps == [70, 70]
+    assert meta["ckpt_stored_boundaries"] == [90]
+
+
 def test_strip_on_extend_exempts_replay():
     """A growing chain strips boundary records past the cap but never a
     replay record; the replay stays adoptable through terminal and

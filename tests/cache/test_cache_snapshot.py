@@ -818,6 +818,28 @@ def test_sidecar_post_prefill_keys_landed_turn_boundary():
         mgr.close()
 
 
+def test_sidecar_post_prefill_keys_the_record_the_next_turn_restores():
+    """A schedule with no turn record that lands a record past p_stable
+    (REPLAY=0: an anchor at 4, a boundary at 11, p_stable 9): the next
+    turn restores 4, the deepest landed record at or below p_stable, so
+    its drafter head needs a key there too."""
+    from gmlx.spec.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))
+        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": [4, 11],
+                "ckpt_p_stable_bounds": [], "ckpt_p_stable": 9}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 4,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        nxt = full_ids[:9] + [200, 201]
+        assert drafter_sidecar_lookup(mgr, nxt, 4) is not None
+        assert drafter_sidecar_lookup(mgr, full_ids + [200], 11) is not None
+    finally:
+        mgr.close()
+
+
 def test_sidecar_post_prefill_ckpt_no_orphan_full_key():
     """Drop-branch mirror: when the p=N store did not land there is no
     target record at N, and a sidecar key there would only burn slots."""

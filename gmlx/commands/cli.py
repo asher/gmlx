@@ -198,9 +198,9 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         default=None,
         metavar="P",
         help="Lossy: at decode, skip each streamed MoE layer's routed "
-        "experts with probability P (0 < P < 1) per token; a shed layer "
-        "still runs its shared expert, or its top expert where it has "
-        "none.",
+        "experts with probability P (0 < P < 1) per token. A shed layer "
+        "still runs its shared expert or dense MLP, or on Muse Spark its "
+        "top expert.",
     )
 
 

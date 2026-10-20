@@ -242,6 +242,15 @@ def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
 
 
 _NO_EXPERT_LOGGED: set = set()
+_UNSHED_NOTED = False
+
+
+def _note_unshed() -> None:
+    global _UNSHED_NOTED
+    if not _UNSHED_NOTED:
+        _UNSHED_NOTED = True
+        print("[stream] --moe-layer-shed: MoE layers with no shared expert "
+              "or dense MLP run in full on this model")
 
 
 def _valid_expert_ids(module, indices):
@@ -528,7 +537,12 @@ def install_expert_streaming(
                             ph = None
                     lsp = getattr(self, "_kq_layer_shed", None)
                     shed_top1 = False
-                    if lsp is not None and cpu_only and n_tokens == 1:
+                    # Decode only: a one-token leaf of an arena token split
+                    # is prefill or verify work, and a shed leaf's
+                    # per-expert zeros cannot join a clean leaf's mixed
+                    # output.
+                    if (lsp is not None and cpu_only and n_tokens == 1
+                            and not in_split):
                         rng = getattr(self, "_kq_shed_rng", None)
                         if rng is None:
                             # per-layer seed: reproducible shed pattern
@@ -536,18 +550,22 @@ def install_expert_streaming(
                                 0x5EED ^ (getattr(self, "_kq_li", 0) or 0))
                             object.__setattr__(self, "_kq_shed_rng", rng)
                         if rng.random() < lsp:
-                            if dfr is not None:
-                                dfr._layer_shed_n += 1
-                            # A block with no shared expert keeps its
-                            # top-scored expert from the arena: with
-                            # nothing routed its layer adds nothing.
+                            # A layer with no shared expert or dense MLP
+                            # keeps its top-scored expert from the arena:
+                            # with nothing routed it would add nothing.
+                            # Where it cannot, it runs in full.
+                            top1 = getattr(self, "_kq_shed_keeps_top1", False)
                             shed_top1 = (
-                                getattr(self, "_kq_shed_keeps_top1", False)
+                                top1
                                 and scores_arg is not None
-                                and not in_split
                                 and dfr is not None
                                 and dfr.covers(self._kq_li))
-                            if not shed_top1:
+                            if shed_top1 or not top1:
+                                if dfr is not None:
+                                    dfr._layer_shed_n += 1
+                            elif scores_arg is None:
+                                _note_unshed()
+                            if not top1:
                                 # Skip the routed path entirely (gather,
                                 # stage and this layer's eval fence). The
                                 # unmixed zeros return makes the block mix

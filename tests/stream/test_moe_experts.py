@@ -7,6 +7,7 @@ stock when the controls are unset. Pure CPU, tiny synthetic blocks."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -516,22 +517,193 @@ def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
     assert "layer-shed 0.1" in capsys.readouterr().out
 
 
-def test_layer_shed_keeps_the_top_expert_without_a_shared_one(monkeypatch):
-    """A shed layer runs its shared expert. A block with none (Muse Spark,
-    Qwen3 MoE, MiniMax) keeps its top expert instead."""
+class _CoveringFeeder:
+    """A decode feeder that covers the layer and serves each expert from
+    its own slot, recording what it stages."""
+
+    def __init__(self):
+        self.stage_calls = []
+        self._layer_shed_n = 0
+
+    def forward_start(self, li):
+        pass
+
+    def repay_at(self, li, ids, ring_ok=False):
+        return False
+
+    def ensure_wired(self):
+        pass
+
+    def covers(self, li):
+        return True
+
+    def slot_count(self, li):
+        return 1 << 16
+
+    def shed_misses(self, li, ids, scores, keep_mass):
+        return None
+
+    def stage(self, li, ids):
+        self.stage_calls.append(np.array(ids).reshape(-1).tolist())
+        return ids.astype(np.uint32)
+
+    def wedged_at(self, li):
+        return False
+
+    @contextmanager
+    def swapped(self, li):
+        yield
+
+
+def _block_out(block, x, rows=None):
+    """The block's output, with the expert container's per-expert rows
+    multiplied by ``rows(indices, scores)`` when given."""
+    c = block.switch_mlp
+    real = type(c).__call__
+    if rows is not None:
+        def masked(self, x_, inds, *a, **k):
+            return real(self, x_, inds, *a, **k) * rows(inds, a)[..., None]
+
+        type(c).__call__ = masked
+    try:
+        out = block(x)
+        mx.eval(out)
+        return np.array(out)
+    finally:
+        type(c).__call__ = real
+
+
+def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
+    """One decode token through real blocks, the layer shed. Qwen3-Next
+    keeps its shared expert only. Muse Spark has none and hands the
+    experts its routing scores, so it runs its top expert alone. Qwen3 MoE
+    has none and keeps its scores, so its layer runs in full."""
+    from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    from gmlx.stream import expert_streaming
     from gmlx.stream.moe_experts import install_moe_layer_shed
 
     monkeypatch.setattr(
         mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
     )
-    qwen3, qwen3_next, minimax, m3 = _arch_fixtures()
-    for block, top1 in ((_spark_block(), True), (qwen3, True),
-                        (minimax, True), (qwen3_next, False), (m3, False)):
-        block.switch_mlp = _kquant_glu()
-        model = _shell(block)
+    monkeypatch.setattr(expert_streaming, "_UNSHED_NOTED", False)
+    args = SimpleNamespace(
+        hidden_size=32, moe_intermediate_size=64, intermediate_size=64,
+        num_experts=4, num_experts_per_tok=2, norm_topk_prob=True,
+        shared_expert_intermediate_size=64)
+
+    def top_slot(inds, a):
+        return (mx.arange(inds.shape[-1])
+                == mx.argmax(a[0], axis=-1)[..., None]).astype(mx.float32)
+
+    for name, block in (("qwen3_next", Qwen3NextSparseMoeBlock(args)),
+                        ("muse_spark", _spark_block()),
+                        ("qwen3_moe", Qwen3MoeSparseMoeBlock(args))):
+        mx.random.seed(5)
+        if name != "muse_spark":
+            block.switch_mlp = _kquant_glu()
+        mx.eval(block.parameters())
+        install_expert_streaming(_shell(block))
+        df = _CoveringFeeder()
+        object.__setattr__(block.switch_mlp, "_kq_decode_feeder", df)
+        x = mx.random.normal((1, 1, 48 if name == "muse_spark" else 32))
+        full = _block_out(block, x)
+        if name == "muse_spark":
+            want = _block_out(block, x, top_slot)
+        elif name == "qwen3_next":
+            want = _block_out(block, x, lambda inds, a: mx.zeros(inds.shape))
+        else:
+            want = full
+        assert install_moe_layer_shed(_shell(block), 0.999999) == 1
+        df.stage_calls.clear()
+        shed = _block_out(block, x)
+        object.__setattr__(block.switch_mlp, "_kq_layer_shed", None)
+        assert np.allclose(shed, want, atol=1e-5), name
+        if name == "qwen3_moe":
+            assert df._layer_shed_n == 0
+            assert "run in full on this model" in capsys.readouterr().out
+        else:
+            assert df._layer_shed_n == 1
+            assert not np.allclose(shed, full, atol=1e-3), name
+            staged = [len(c) for c in df.stage_calls]
+            assert staged == ([1] if name == "muse_spark" else []), name
+
+
+def test_layer_shed_sees_a_dense_or_shared_mlp_beside_the_experts(
+        monkeypatch):
+    """Real decoder layers. Gemma 4 runs a dense MLP beside its experts and
+    Granite MoE Hybrid a shared MLP, both outside the experts' own block:
+    a shed layer keeps that path. Muse Spark and Qwen3 MoE layers have only
+    attention beside the MoE block, so a shed layer keeps its top
+    expert."""
+    import dataclasses
+    import json
+    from pathlib import Path
+
+    from gmlx._vendor.mlx_lm.models import granitemoehybrid as granite
+    from gmlx._vendor.mlx_lm.models import qwen3_moe
+    from gmlx.models.gemma4.language import DecoderLayer as Gemma4Layer
+    from gmlx.models.gemma4.language import TextConfig
+    from gmlx.models.muse_spark import model as spark
+    from gmlx.stream.moe_experts import install_moe_layer_shed
+
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    fixture = (Path(__file__).parents[1] / "fixtures"
+               / "gemma4_26b_a4b_it_config.json")
+    tc = json.loads(fixture.read_text())["text_config"]
+    tc.update(hidden_size=32, intermediate_size=64, moe_intermediate_size=64,
+              num_experts=4, top_k_experts=2, num_attention_heads=2,
+              num_key_value_heads=1, num_global_key_value_heads=1,
+              head_dim=16, global_head_dim=16, num_hidden_layers=1,
+              num_kv_shared_layers=0, layer_types=["sliding_attention"],
+              vocab_size=64, hidden_size_per_layer_input=0)
+    fields = {f.name for f in dataclasses.fields(TextConfig)}
+    gemma = Gemma4Layer(
+        TextConfig(**{k: v for k, v in tc.items() if k in fields}), 0)
+    gran = granite.GraniteMoeHybridLayer(granite.ModelArgs(
+        model_type="granitemoehybrid", vocab_size=64, hidden_size=32,
+        intermediate_size=64, num_hidden_layers=1,
+        max_position_embeddings=128, num_attention_heads=2,
+        num_key_value_heads=1, attention_bias=False,
+        embedding_multiplier=1.0, attention_multiplier=1.0,
+        logits_scaling=1.0, residual_multiplier=1.0,
+        layer_types=["attention"], rms_norm_eps=1e-5, rope_theta=1e4,
+        num_local_experts=4, num_experts_per_tok=2,
+        shared_intermediate_size=64), "attention")
+    muse = spark.DecoderLayer(spark.ModelArgs(
+        model_type="muse_spark", hidden_size=48, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+        vocab_size=32, layer_types=["sliding_attention"], num_experts=4,
+        num_experts_per_tok=2, moe_intermediate_size=64,
+        moe_latent_size=32), True)
+    qwen = qwen3_moe.Qwen3MoeDecoderLayer(qwen3_moe.ModelArgs(
+        model_type="qwen3_moe", hidden_size=32, num_hidden_layers=1,
+        intermediate_size=64, num_attention_heads=2, num_experts=4,
+        num_experts_per_tok=2, decoder_sparse_step=1, mlp_only_layers=[],
+        moe_intermediate_size=64, rms_norm_eps=1e-5, vocab_size=64,
+        num_key_value_heads=1, head_dim=16, rope_theta=1e4,
+        tie_word_embeddings=False, max_position_embeddings=128,
+        norm_topk_prob=True), 0)
+    for layer, owner, attr, top1 in (
+            (gemma, gemma.experts, "switch_glu", False),
+            (gran, gran.block_sparse_moe, "switch_mlp", False),
+            (muse, muse.mlp, "switch_mlp", True),
+            (qwen, qwen.mlp, "switch_mlp", True)):
+        glu = _kquant_glu()
+        setattr(owner, attr, glu)
+
+        class _Shell:
+            pass
+
+        model = _Shell()
+        model.layers = [layer]
+        model.parameters = lambda glu=glu: {"glu": glu.parameters()}
         install_expert_streaming(model)
-        assert install_moe_layer_shed(model, 0.1) == 1
-        assert block.switch_mlp._kq_shed_keeps_top1 is top1, type(block)
+        assert install_moe_layer_shed(model, 0.1) == 1, type(layer)
+        assert getattr(owner, attr)._kq_shed_keeps_top1 is top1, type(layer)
 
 
 def _k3_block():

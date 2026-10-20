@@ -603,18 +603,28 @@ def install_moe_prestage_keepers(model) -> int:
     return n
 
 
-def _has_shared_expert(block) -> bool:
-    """Whether an MoE block holds a shared expert (``shared_experts``,
-    ``shared_mlp``, ``share_expert`` and the like)."""
-    return any("share" in k and isinstance(v, nn.Module)
-               for k, v in block.children().items())
+def _ffn_beside(mods: dict, name: str) -> bool:
+    """Whether the layer runs a feed-forward path beside the routed experts
+    at ``name``: a shared expert (``shared_experts``, ``shared_mlp``,
+    ``share_expert`` and the like) or a dense MLP, in the experts' block or
+    any block above it. ``mods`` is the layer's ``named_modules``."""
+    path = name.split(".")
+    for i in range(len(path) - 1, -1, -1):
+        node = mods[".".join(path[:i])]
+        for k, v in node.children().items():
+            if k != path[i] and isinstance(v, nn.Module) and (
+                    "share" in k or hasattr(v, "down_proj")):
+                return True
+    return False
 
 
 def install_moe_layer_shed(model, p: float) -> int:
     """Skip each streamed MoE layer's routed path with probability ``p``
-    per decode token; the layer's shared expert still runs, and a block
-    with none keeps its top-scored expert. Lossy. Returns the number of
-    layers hooked; raises on p outside (0, 1)."""
+    per decode token; the layer's shared expert or dense MLP still runs.
+    A layer with neither keeps its top-scored expert where its block hands
+    the experts their routing scores, and runs in full where it does not.
+    Lossy. Returns the number of layers hooked; raises on p outside
+    (0, 1)."""
     if not 0.0 < p < 1.0:
         raise ValueError(
             f"MoE layer-shed probability must be in (0, 1), got {p}")
@@ -630,17 +640,16 @@ def install_moe_layer_shed(model, p: float) -> int:
                     or not hasattr(m, "_kq_cpu_only")):
                 continue
             seen.add(id(m))
-            block = mods.get(name.rpartition(".")[0], layer)
             object.__setattr__(m, "_kq_layer_shed", float(p))
             object.__setattr__(m, "_kq_shed_keeps_top1",
-                               not _has_shared_expert(block))
+                               not _ffn_beside(mods, name))
             n += 1
     if n:
         loadlog.info(
             f"[stream] MoE layer-shed {p:g}: each of {n} streamed MoE "
             "layers skips its routed experts with that probability per "
-            "token (lossy - a shed layer runs its shared expert, or its "
-            "top expert where it has none)"
+            "token. Lossy: a shed layer keeps its shared expert or dense "
+            "MLP, or on Muse Spark its top expert."
         )
     else:
         print(

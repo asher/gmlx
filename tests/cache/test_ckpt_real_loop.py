@@ -165,6 +165,36 @@ def test_pick_keeps_the_record_the_next_turn_restores(loop):
                    4912, 8831)
     assert _bounds(out) == [(8192, "boundary")]
     assert out["chunks"] == [3280, 652, 1]
+    # Where the pick's grid has no turn point, the record that stands in
+    # is the deepest at or below the stable prefix, not the replay.
+    out = loop.run(loop.model("dense", tags=("rot:32768:0", "kvarn:4:4:64")),
+                   46536, 29931, 44112, 44119, mtp=True)
+    assert out["meta"]["ckpt_p_stable_bounds"] == [44112]
+
+
+def test_every_prefill_store_passes_the_stable_prefix(loop, monkeypatch):
+    """Each record the prefill stores hands the store the turn's p_stable,
+    so a deeper record never strips the one the next turn restores."""
+    import gmlx.cache.snapshot as snapshot
+
+    keeps = []
+    stub = snapshot.ckpt_store
+
+    def store(manager, ids, cache, **kw):
+        keeps.append(kw.get("keep"))
+        return stub(manager, ids, cache, **kw)
+
+    monkeypatch.setattr(snapshot, "ckpt_store", store)
+    for _, folds, mtp in LOOPS:
+        m = loop.model("flat", folds)
+        keeps.clear()
+        out = loop.run(m, 15565, 7299, 15551, mtp=mtp)
+        assert len(keeps) == len(loop.stored) > 1
+        assert set(keeps) == {out["meta"]["ckpt_p_stable"]}
+        assert keeps[0] is not None
+        keeps.clear()
+        loop.run(m, 8492, 0, mtp=mtp)
+        assert keeps and set(keeps) == {None}
 
 
 def test_a_cap_that_follows_headroom_keeps_mains_schedule(loop,
@@ -328,6 +358,12 @@ def test_no_turn_record_and_no_replay_keep_mains_schedule(loop,
     out = loop.run(loop.model("dense", True, ("rot:32768:0", "kv")),
                    26657, 21808)
     assert _bounds(out) == [(24576, "boundary")]
+    # Main's grid is armed unpriced, so no tail cut drops its records.
+    m = loop.model("dense", True, ("rot:32768:0", "kvarn:4:4:64"))
+    main = loop.run(m, 8257, 0, sys=12000, arm=main_arm)
+    head = loop.run(m, 8257, 0, sys=12000)
+    assert _bounds(head) == _bounds(main) == [(8192, "boundary"),
+                                              (8256, "anchor")]
     monkeypatch.setenv("GMLX_APC_CKPT_REPLAY", "0")
     loop.run(loop.model("flat", tags=KVARN), 9000, 0, sys=3000)
     assert loop.stored == [(2992, "anchor", False), (8192, "boundary", True)]

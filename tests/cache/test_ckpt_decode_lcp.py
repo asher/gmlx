@@ -344,7 +344,7 @@ def test_cursor_skeleton_policy(monkeypatch):
     seen = []
 
     def rec_store(manager, ids, cache, *, extra_hash=0, skeleton_disk=True,
-                  kind="boundary"):
+                  kind="boundary", keep=None):
         seen.append((len(ids), skeleton_disk))
         return True
 

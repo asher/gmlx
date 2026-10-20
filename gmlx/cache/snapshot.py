@@ -1150,7 +1150,7 @@ def _evict_lru_record(manager, idx, keep):
     return victim
 
 
-def _record_insert(manager, rec) -> None:
+def _record_insert(manager, rec, keep: int | None = None) -> None:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
@@ -1179,7 +1179,10 @@ def _record_insert(manager, rec) -> None:
     and byte bounds evict anchors after non-anchors (LRU by last hit),
     and pool-pressure eviction (_evict_for_pool) gives anchors no
     protection at all: position-salted window chains must never sit
-    pinned on an exhausted pool."""
+    pinned on an exhausted pool.
+
+    ``keep``: the storing request's p_stable. A record past it leaves the
+    deepest record at or below it, the one a next turn restores."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
@@ -1204,6 +1207,11 @@ def _record_insert(manager, rec) -> None:
                 idx[k].kind not in ("replay", "decision")
                 for k in chain if k in idx):
             rec.kind = "anchor"         # first restorable boundary
+        held = None
+        if keep is not None and rec.p > keep and rec.kind != "decision":
+            below = [k for k in chain if k in idx and idx[k].p <= keep
+                     and idx[k].kind != "decision"]
+            held = max(below, key=lambda k: idx[k].p, default=None)
         if rec.kind == "decision":
             chain = [k for k in chain if k in idx and idx[k].kind == "decision"]
         else:
@@ -1219,7 +1227,7 @@ def _record_insert(manager, rec) -> None:
         # The count and byte bounds below govern those records, and
         # _evict_for_pool reclaims the blocks they pin.
         chain = [k for k in chain
-                 if idx[k].main_blocks
+                 if k != held and idx[k].main_blocks
                  and not any(_is_kvarn(t) for t in idx[k].layout)]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
@@ -1247,6 +1255,7 @@ def ckpt_store(
     skeleton_disk: bool = True,
     kind: str = "boundary",
     grid_truncate: bool = False,
+    keep: int | None = None,
 ) -> int:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
@@ -1263,6 +1272,8 @@ def ckpt_store(
     the buffer is a temporal prefix, so a slice is a faithful shorter
     run. Non-recurrent layouts only (state cannot rewind), memory-only
     (the live cache's offset would stamp a mismatched skeleton).
+    ``keep``: the request's p_stable, which the record's strip-on-extend
+    honors (see _record_insert).
     Returns the stored length in tokens, 0 when nothing stored. Never
     raises.
     """
@@ -1548,7 +1559,7 @@ def ckpt_store(
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
             states=states, tails=tails, qsa=qsa_streams, kind=str(kind))
-        _record_insert(manager, rec)
+        _record_insert(manager, rec, keep)
         # Ownership moved to the record; the except path must not release.
         main_blocks = bounded_blocks = []
 
