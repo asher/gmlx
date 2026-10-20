@@ -349,16 +349,17 @@ def test_cursor_skeleton_policy(monkeypatch):
         return True
 
     monkeypatch.setattr(cs, "ckpt_store", rec_store)
+    monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "32")
     man = APCManager(num_blocks=8, block_size=16)
     tags = tuple("arr" if k == "arr" else "kv" for k in LAYOUT)
-    meta = {"full_input_ids": list(range(96)), "extra_hash": 0,
-            "ckpt_boundaries": [(32, "boundary"), (64, "boundary")],
-            "checkpoint_len": 32, "ckpt_terminal": 64, "ckpt_interval": 32,
-            "ckpt_last_stored": 0}
+    meta = {"full_input_ids": list(range(96)), "extra_hash": 0}
     batch = SimpleNamespace(
         _kq_ckpt_armed=True, _apc_manager=man, _apc_meta=[meta],
-        prompt_cache=[], model=SimpleNamespace(_kq_apc_ckpt_layout=tags),
+        prefill_step_size=32, prompt_cache=[],
+        model=SimpleNamespace(_kq_apc_ckpt_layout=tags),
         _row_real_tokens_processed=lambda i: meta["checkpoint_len"])
+    ckpt._ckpt_arm_schedule(batch, meta, 80, 0, 16)
+    assert meta["ckpt_boundaries"] == [(32, "boundary"), (64, "boundary")]
     ckpt._ckpt_mid_prefill_store(batch)   # boundary 32: interval
     ckpt._ckpt_mid_prefill_store(batch)   # boundary 64: terminal
     assert seen == [(32, False), (64, True)]

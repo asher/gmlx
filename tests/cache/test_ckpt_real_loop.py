@@ -191,13 +191,20 @@ def test_a_cap_that_follows_headroom_keeps_mains_schedule(loop,
     main = loop.run(m, 81666, 20000, arm=main_arm)
     assert _bounds(head) == _bounds(main)
     assert cost(head["chunks"]) == cost(main["chunks"]) == (8, 0)
+    # With no cache limit noted the cap stays fixed, so the schedule is
+    # priced again.
+    monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", None)
+    head = loop.run(m, 24783, 7299)
+    main = loop.run(m, 24783, 7299, arm=main_arm)
+    assert cost(head["chunks"]) < cost(main["chunks"])
 
 
-def test_a_dropped_terminal_hands_its_disk_skeleton_to_the_replay(loop):
-    """A kvarn layout writes a disk skeleton only for its terminal record.
-    When the pricing drops the terminal and keeps no turn record past it,
-    the replay, which a longer next prompt adopts, takes the skeleton;
-    the anchor below it does not."""
+def test_kvarn_disk_skeletons_go_where_mains_do(loop, monkeypatch):
+    """A kvarn layout writes disk skeletons for main's terminal record and
+    the turn records past it. Where the pick drops one, the next kept
+    record takes it, the replay included, which a longer next prompt
+    adopts. With no kept record past it, the deepest kept record takes
+    it. No other record gets one."""
     m = loop.model("flat", tags=KVARN)
     loop.run(m, 8492, 0, arm=main_arm)
     assert loop.stored == [(8192, "boundary", True),
@@ -209,3 +216,68 @@ def test_a_dropped_terminal_hands_its_disk_skeleton_to_the_replay(loop):
     loop.run(m, 15565, 7299, 15551)
     assert loop.stored == [(15551, "boundary", True),
                            (15564, "replay", False)]
+    fold = loop.model("flat", folds=True, tags=KVARN)
+    loop.run(fold, 9217, 0, 8917, sys=1000)
+    assert loop.stored == [(992, "anchor", False), (8917, "boundary", True),
+                           (9216, "replay", False)]
+    loop.run(fold, 8492, 0, 8192, sys=1000)
+    assert loop.stored == [(992, "anchor", False), (8192, "boundary", True),
+                           (8491, "replay", False)]
+    loop.run(m, 8257, 0, 7957, mtp=True)
+    assert loop.stored == [(7957, "boundary", True),
+                           (8256, "replay", False)]
+    monkeypatch.setenv("GMLX_APC_CKPT_REPLAY", "0")
+    loop.run(m, 9000, 0, sys=3000)
+    assert loop.stored == [(2992, "anchor", True)]
+
+
+def test_kvarn_restart_restores_as_deep_as_mains_with_no_more_skeletons(
+        loop):
+    """After a restart only disk skeletons survive, so the next turn
+    restores the deepest one at or below its stable prefix. The pick
+    writes no more heavy skeletons than main, and that restore is never
+    shallower, also when the re-rendered tail is longer than the guard
+    gap."""
+
+    def skel():
+        return [b for b, _, s in loop.stored if s]
+
+    runs = 0
+    for cfg in CONFIGS:
+        for _, folds, mtp in LOOPS:
+            m = loop.model(cfg, folds, KVARN)
+            for r in (0, 7299):
+                for extra in (500, 8300, 9217, 17484):
+                    n = r + extra
+                    for tail in (14, 300):
+                        for sys in (None, 1000):
+                            p = n - tail
+                            loop.run(m, n, r, p, sys, mtp)
+                            head = skel()
+                            loop.run(m, n, r, p, sys, mtp, arm=main_arm)
+                            main = skel()
+                            assert len(head) <= len(main), (
+                                cfg, folds, mtp, r, n, tail, sys)
+                            assert max([b for b in head if b <= p],
+                                       default=0) >= max(
+                                [b for b in main if b <= p], default=0), (
+                                cfg, folds, mtp, r, n, tail, sys)
+                            runs += 1
+    assert runs == 288
+
+
+def test_turn_records_off_keep_mains_schedule(loop, monkeypatch):
+    """With GMLX_APC_CKPT_TURN=0 the pick cannot see which record the next
+    turn restores, and dropping the terminal there can cost the next turn
+    more than this one saves. Main's schedule stays."""
+    monkeypatch.setenv("GMLX_APC_CKPT_TURN", "0")
+    for cfg in CONFIGS:
+        for _, folds, mtp in LOOPS:
+            m = loop.model(cfg, folds)
+            for r, n in ((0, 24627), (7299, 15599), (7299, 24783)):
+                head = loop.run(m, n, r, mtp=mtp)
+                main = loop.run(m, n, r, mtp=mtp, arm=main_arm)
+                assert _bounds(head) == _bounds(main), (cfg, folds, mtp, n)
+                assert head["chunks"] == main["chunks"]
+    out = loop.run(loop.model("flat", folds=True), 24627, 0)
+    assert cost(out["chunks"]) == (3, 1)

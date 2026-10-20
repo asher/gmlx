@@ -1296,10 +1296,10 @@ def ckpt_store(
         # process a skeleton re-indexes a record whose blocks survived
         # strip-on-extend (the divergent-suffix recovery path); across a
         # restart it misses on the window chain, loudly. Kvarn layouts
-        # widen the set: their replay skeletons are heavy-suppressed
-        # upstream, so the terminal boundary/turn skeleton is the only
-        # restart-restorable record -- its window chain (bounded by W,
-        # not p) must persist with it or the skeleton is dead weight.
+        # widen the set: a kvarn record gets a disk skeleton only where
+        # the arm lists it (``ckpt_skeletons``, the replay included), so
+        # each one is restart-restorable, and its window chain (bounded by
+        # W, not p) must persist with it or the skeleton is dead weight.
         rot_disk = skeleton_disk and (
             kind in ("replay", "retire")
             or any(_is_kvarn(str(t)) for t in layout))

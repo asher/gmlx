@@ -501,7 +501,8 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     the loop runs, and from 0 at the batch's step, which a resident
     model and a media prompt keep. The loop's cost is known at arm time
     only while the score cap is fixed, not while it follows the live
-    headroom."""
+    headroom. Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot
+    see which record the next turn restores, so main's grid stays."""
     from gmlx.gen import prefill_decay
     from gmlx.stream.expert_streaming import experts_streamed
 
@@ -513,6 +514,7 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
         return [(0, run_unit)], False
     if (_ckpt_run_step(batch) <= 0 or prefill_decay.cap_follows_headroom()
+            or env_int("GMLX_APC_CKPT_TURN", 1) == 0
             or not _ckpt_text_only(batch, ids)):
         return [(0, batch_unit)], False
     out = []
@@ -814,7 +816,9 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     precedence when present). ``ckpt_stored_boundaries`` collects every boundary whose store
     landed (record verified in the index) -- the settled variable the
     post-prefill p=N decision and the sidecar key set both read;
-    ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop."""
+    ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop;
+    ``ckpt_skeletons`` lists the records that take a disk skeleton on a
+    heavy layout."""
     ids = meta.get("full_input_ids") or ()
     # The media guard refuses a store inside an image; a refused anchor
     # cuts no chunk, so the grid cannot start there.
@@ -848,6 +852,10 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
                 [p for p in turn if safe(p)])
 
     cands = [build(g) for g in grids]
+    # On a heavy layout main's records at or past its terminal take a
+    # disk skeleton, the replay aside. Read before pricing drops any.
+    main_skel = [b for b, k in cands[-1][0]
+                 if k != "replay" and b >= cands[-1][1]]
     pick = cands[0]
     if priced:
         try:
@@ -858,22 +866,21 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
             _log.debug("APC ckpt schedule pricing failed", exc_info=True)
             pick = build(grids[-1])
     bounds, terminal, interval, turn = pick
-    replay_skel = False
-    main_terminal = cands[-1][1] if priced else 0
-    if main_terminal and not any(
-            k != "replay" and b >= main_terminal for b, k in bounds):
-        # No record reaches main's terminal: the deepest takes its disk
-        # skeleton, the replay included, which a longer prompt adopts.
-        if bounds:
-            terminal = bounds[-1][0]
-            replay_skel = bounds[-1][1] == "replay"
+    # Each of main's skeletons goes to the shallowest kept record at or
+    # past it, else to the deepest, a replay included (an attention-only
+    # replay adopts on extension). The pick writes no more heavy
+    # skeletons than main, and where a kept record reaches one, a
+    # restart restores no shallower.
+    pos = [b for b, _ in bounds]
+    skel = sorted({min([b for b in pos if b >= m], default=pos[-1])
+                   for m in main_skel}) if pos else []
     if sysb is not None and not safe(sysb):
         meta.pop("ckpt_sys_bound", None)
     meta["ckpt_boundaries"] = bounds
     meta.pop("checkpoint_lengths", None)
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
     meta["ckpt_terminal"] = terminal
-    meta["ckpt_replay_skeleton"] = replay_skel
+    meta["ckpt_skeletons"] = skel
     meta["ckpt_interval"] = interval
     meta["ckpt_last_stored"] = 0
     meta["ckpt_stored_boundaries"] = []
@@ -905,22 +912,16 @@ def _ckpt_mid_prefill_store(batch) -> None:
         return
     if batch._row_real_tokens_processed(0) != checkpoint_len:
         return
-    terminal = int(meta.get("ckpt_terminal") or 0)
     bounds = meta.get("ckpt_boundaries") or []
     kind = "boundary"
     if bounds and int(bounds[0][0]) == checkpoint_len:
         kind = str(bounds.pop(0)[1])
     # Inline-heavy skeletons (GDN state >100 MB; kvarn state scales with p
-    # across every attention layer) earn disk only at the terminal --
-    # boundaries superseded within the same prefill do not, and a replay
-    # skeleton would buy restart-repair of an identical resend only,
-    # which does not earn it either, unless the schedule dropped the
-    # terminal for it: an attention-only replay adopts on extension.
+    # across every attention layer) earn disk only on the records the arm
+    # lists, not on boundaries superseded within the same prefill.
     layout = _ckpt_layout_live(batch, int(manager.block_size)) or ()
     heavy = "arr" in layout or any(t.startswith("kvarn") for t in layout)
-    skel = not heavy or (kind != "replay"
-                         and checkpoint_len >= terminal) or (
-        kind == "replay" and bool(meta.get("ckpt_replay_skeleton")))
+    skel = not heavy or checkpoint_len in (meta.get("ckpt_skeletons") or ())
     from gmlx.cache.snapshot import ckpt_store
 
     if ckpt_store(

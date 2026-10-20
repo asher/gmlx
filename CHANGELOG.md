@@ -90,8 +90,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   than the memory budget allows when free RAM set its size.
 - With `--stream-experts`, batched or speculative decoding of up to 64 tokens
   a step gets the GPU-wired expert arena from its first step.
-- With `--stream-experts` and the prompt cache off, a long prompt on some
-  models stopped prefilling and never answered.
+- With `--stream-experts`, a long prompt on some models stopped
+  prefilling and never answered.
 - `gmlx distill gen` stopped with Ctrl-C could leave out a reply that had
   already arrived.
 - A chat template with a `{% generation %}` block was refused by
