@@ -2,7 +2,7 @@ name: gate
 
 # Sets the gate/gpu commit status of a pull request from the GPU gate
 # results that scripts/gate.py records on a Mac and pushes to origin as
-# refs/gmlx-gate/<tree>/<host>. It runs when the pull request is pushed,
+# refs/gmlx-gate/<tree>/<run>. It runs when the pull request is pushed,
 # and test.yml calls it again when its test legs end. Pushing results
 # alone starts no workflow, so after a push of results that comes later,
 # refresh the status with:
@@ -29,10 +29,6 @@ jobs:
       contents: read
       statuses: write
       pull-requests: read
-    env:
-      # Each host also gets a gate/gpu/<host> status, which branch
-      # protection can require one by one.
-      GATE_HOSTS: m3max orac
     steps:
       - uses: actions/checkout@v6
         with:
@@ -51,7 +47,7 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head }}
           BASE: ${{ steps.pr.outputs.base }}
         run: |
-          python3 scripts/gate.py decide --head "$HEAD_SHA" --base "$BASE" --hosts "$GATE_HOSTS" | tee statuses.json
+          python3 scripts/gate.py decide --head "$HEAD_SHA" --base "$BASE" | tee status.json
       - name: Post
         # A fork's token is read-only, so a fork pull request gets no status
         # and its required check blocks the merge.
@@ -69,10 +65,10 @@ jobs:
           fi
           python3 - <<'EOF'
           import json, os, subprocess
-          for s in json.load(open("statuses.json")):
-              subprocess.run(["gh", "api", f"repos/{os.environ['GH_REPO']}/statuses/{os.environ['HEAD_SHA']}",
-                              "-f", f"state={s['state']}", "-f", f"context={s['context']}",
-                              "-f", f"description={s['description']}", "-f", f"target_url={os.environ['RUN_URL']}"],
-                             check=True, stdout=subprocess.DEVNULL)
-              print(f"{s['context']}: {s['state']}, {s['description']}")
+          s = json.load(open("status.json"))
+          subprocess.run(["gh", "api", f"repos/{os.environ['GH_REPO']}/statuses/{os.environ['HEAD_SHA']}",
+                          "-f", f"state={s['state']}", "-f", f"context={s['context']}",
+                          "-f", f"description={s['description']}", "-f", f"target_url={os.environ['RUN_URL']}"],
+                         check=True, stdout=subprocess.DEVNULL)
+          print(f"{s['context']}: {s['state']}, {s['description']}")
           EOF

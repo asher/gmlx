@@ -61,12 +61,12 @@ def clones(tmp_path, monkeypatch):
 
 
 def _result(passed=True, when=NOW, commit="c" * 40):
-    return {"pass": passed, "commit": commit, "host": "M3 Max", "when": when.isoformat(),
+    return {"pass": passed, "commit": commit, "chip": "M3 Max", "when": when.isoformat(),
             "duration_s": 600, "tiers": ["gpu"], "log": []}
 
 
 def _gate_status(repo, head, base=""):
-    return gate.decide(head, base, cwd=repo, now=NOW)[0]
+    return gate.decide(head, base, cwd=repo, now=NOW)
 
 
 def test_setup_is_idempotent(clones, monkeypatch, capsys):
@@ -76,15 +76,17 @@ def test_setup_is_idempotent(clones, monkeypatch, capsys):
     assert _git(clones[0], "config", "--get-all", "remote.origin.push").splitlines() == ["HEAD", gate.PUSH]
 
 
-def test_run_records_a_result_under_this_macs_namespace(clones, monkeypatch):
+def test_each_run_records_a_result_under_a_name_of_its_own(clones, monkeypatch):
+    """The ref names the tree and the run, never the machine."""
     monkeypatch.setattr(gate, "run_tier", lambda tier, workers, log: (0, 90.0))
     monkeypatch.setattr(gate, "_changed_since_main", lambda: [])
-    monkeypatch.setattr(gate, "host_slug", lambda: "m3max")
-    assert gate.run(SimpleNamespace(workers=1, full=False, stress=None)) == 0
+    for _ in range(2):
+        assert gate.run(SimpleNamespace(workers=1, full=False, stress=None)) == 0
     tree = _git(clones[0], "rev-parse", "HEAD^{tree}")
     found = gate.results(clones[0])
-    assert found[(tree, "m3max")]["pass"] is True
-    assert found[(tree, "m3max")]["ref"] == f"{gate.MINE}/{tree}/m3max"
+    runs = [run for (t, run) in found if t == tree]
+    assert len(runs) == 2 and all(len(run) == 12 and int(run, 16) >= 0 for run in runs)
+    assert all(r["pass"] is True and r["ref"].startswith(f"{gate.MINE}/{tree}/") for r in found.values())
 
 
 def test_run_refuses_a_dirty_tree(clones):
@@ -97,17 +99,17 @@ def test_a_plain_push_publishes_the_result_for_other_clones(clones):
     a, b = clones
     _git(a, "checkout", "-q", "-b", "feat")
     tree = _git(a, "rev-parse", "HEAD^{tree}")
-    gate.record(_result(), tree, "m3max", cwd=a)
+    run = gate.record(_result(), tree, cwd=a).rsplit("/", 1)[1]
     _git(a, "push", "-q")
-    assert _git(a, "ls-remote", "origin", "refs/gmlx-gate/*").endswith(f"refs/gmlx-gate/{tree}/m3max")
+    assert _git(a, "ls-remote", "origin", "refs/gmlx-gate/*").endswith(f"refs/gmlx-gate/{tree}/{run}")
     _git(b, "fetch", "-q")
-    assert gate.results(b)[(tree, "m3max")]["ref"] == f"{gate.MIRROR}/{tree}/m3max"
+    assert gate.results(b)[(tree, run)]["ref"] == f"{gate.MIRROR}/{tree}/{run}"
 
 
 def test_a_pruned_result_does_not_come_back(clones, monkeypatch):
     a, b = clones
     tree = _git(a, "rev-parse", "HEAD^{tree}")
-    gate.record(_result(when=NOW - timedelta(days=40)), tree, "m3max", cwd=a)
+    gate.record(_result(when=NOW - timedelta(days=40)), tree, cwd=a)
     _git(a, "push", "-q", "origin", f"{gate.MINE}/*:{gate.MIRROR}/*")
     _git(b, "fetch", "-q")
     assert gate.results(b)
@@ -120,33 +122,32 @@ def test_a_pruned_result_does_not_come_back(clones, monkeypatch):
 def test_an_unpushed_result_survives_the_pruning_fetch(clones):
     a, _ = clones
     tree = _git(a, "rev-parse", "HEAD^{tree}")
-    gate.record(_result(), tree, "m3max", cwd=a)
+    ref = gate.record(_result(), tree, cwd=a)
     _git(a, "fetch", "--prune", "-q", "origin", gate.FETCH)
-    assert (tree, "m3max") in gate.results(a)
+    assert [r["ref"] for r in gate.results(a).values()] == [ref]
 
 
 def test_run_drops_its_own_expired_results_before_recording(clones, monkeypatch):
     a, _ = clones
-    gate.record(_result(when=datetime.now(timezone.utc) - timedelta(days=40)), "0" * 40, "m3max", cwd=a)
+    gate.record(_result(when=datetime.now(timezone.utc) - timedelta(days=40)), "0" * 40, cwd=a)
     monkeypatch.setattr(gate, "run_tier", lambda tier, workers, log: (0, 1.0))
     monkeypatch.setattr(gate, "_changed_since_main", lambda: [])
-    monkeypatch.setattr(gate, "host_slug", lambda: "m3max")
     gate.run(SimpleNamespace(workers=1, full=False, stress=None))
-    assert ("0" * 40, "m3max") not in gate.results(a)
+    assert all(tree != "0" * 40 for tree, _ in gate.results(a))
 
 
 def _gated_branch(repo):
     """A feature commit on a branch with a passing result for its tree."""
     _git(repo, "checkout", "-q", "-b", "feat")
     gated = _commit(repo, "gmlx/b.py", "1")
-    gate.record(_result(commit=gated), _git(repo, "rev-parse", "HEAD^{tree}"), "m3max", cwd=repo)
+    gate.record(_result(commit=gated), _git(repo, "rev-parse", "HEAD^{tree}"), cwd=repo)
     return gated
 
 
 def test_a_result_for_the_tree_passes_it(clones):
     a, _ = clones
     head = _gated_branch(a)
-    assert _gate_status(a, head) == {"context": "gate/gpu", "state": "success", "description": "m3max 10m"}
+    assert _gate_status(a, head) == {"context": "gate/gpu", "state": "success", "description": "passed in 10m"}
 
 
 def test_a_docs_commit_over_a_gated_tree_inherits_its_result(clones):
@@ -170,8 +171,8 @@ def test_a_failure_for_the_tree_beats_an_inherited_pass(clones):
     a, _ = clones
     _gated_branch(a)
     head = _commit(a, "docs/a.md", "typo")
-    gate.record(_result(passed=False, commit=head), _git(a, "rev-parse", "HEAD^{tree}"), "orac", cwd=a)
-    assert _gate_status(a, head) == {"context": "gate/gpu", "state": "failure", "description": "failed on orac"}
+    gate.record(_result(passed=False, commit=head), _git(a, "rev-parse", "HEAD^{tree}"), cwd=a)
+    assert _gate_status(a, head) == {"context": "gate/gpu", "state": "failure", "description": "failed"}
 
 
 def test_a_docs_only_branch_needs_no_run(clones):
@@ -187,16 +188,29 @@ def test_an_expired_result_is_ignored(clones):
     _git(a, "checkout", "-q", "-b", "feat")
     head = _commit(a, "gmlx/b.py", "1")
     gate.record(_result(when=NOW - gate.WINDOW - timedelta(days=1)), _git(a, "rev-parse", "HEAD^{tree}"),
-                "m3max", cwd=a)
+                cwd=a)
     assert _gate_status(a, head)["state"] == "pending"
 
 
-def test_each_listed_host_gets_its_own_status(clones):
+@pytest.mark.parametrize("order,state", [((False, True), "success"), ((True, False), "failure")])
+def test_the_newest_result_for_the_tree_decides(clones, order, state):
+    """A pass after a flaky failure clears it, and a failure after a pass
+    is not hidden by it, whichever Mac ran each."""
     a, _ = clones
-    head = _gated_branch(a)
-    statuses = gate.decide(head, hosts=["m3max", "orac"], cwd=a, now=NOW)
-    assert [(s["context"], s["state"]) for s in statuses] == [
-        ("gate/gpu", "success"), ("gate/gpu/m3max", "success"), ("gate/gpu/orac", "pending")]
+    _git(a, "checkout", "-q", "-b", "feat")
+    head = _commit(a, "gmlx/b.py", "1")
+    tree = _git(a, "rev-parse", "HEAD^{tree}")
+    for age, passed in zip((2, 1), order):
+        gate.record(_result(passed=passed, when=NOW - timedelta(hours=age), commit=head), tree, cwd=a)
+    assert _gate_status(a, head)["state"] == state
+
+
+def test_a_result_names_no_folder_of_this_mac(tmp_path):
+    log = tmp_path / "gpu.log"
+    home = Path.home()
+    log.write_text(f"FAILED tests/test_a.py::test_x - OSError: {home}/m.gguf\n...\n...\n1 failed in {home}/src\n")
+    assert gate._summary_lines(log) == [
+        "FAILED tests/test_a.py::test_x - OSError: ~/m.gguf", "...", "...", "1 failed in ~/src"]
 
 
 def _write(root: Path, files: dict[str, str]) -> None:

@@ -16,16 +16,17 @@ reports (`scope --check`) and writes the test map that
 scripts/affected_tests.py reads. Either adds the stress tier when
 concurrency code changed.
 
-A result is a JSON blob under refs/gmlx-gate-mine/<tree>/<host>. After
+A result is a JSON blob under refs/gmlx-gate-mine/<tree>/<run>, where
+<run> is a random name for that run, so a ref never names a machine. After
 `setup`, a plain `git push` publishes it on origin as
-refs/gmlx-gate/<tree>/<host>, and a fetch brings every result down to
+refs/gmlx-gate/<tree>/<run>, and a fetch brings every result down to
 refs/gmlx-gate/*. The gate workflow reads those refs and sets the gate/gpu
 status of a pull request.
 
-`decide --head SHA [--base SHA]` prints the statuses for a commit as JSON.
-Results for the commit's own tree settle it, pass or fail. Without one, a
-passing tree that differs only in docs passes it, then a change that is
-docs-only from its merge-base, and otherwise it is pending.
+`decide --head SHA [--base SHA]` prints the status for a commit as JSON.
+The newest result for the commit's own tree settles it, pass or fail.
+Without one, a passing tree that differs only in docs passes it, then a
+change that is docs-only from its merge-base, and otherwise it is pending.
 
 Stdlib only, plus git.
 """
@@ -38,6 +39,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -73,15 +75,9 @@ def git(*args: str, cwd: Path | str | None = None, check: bool = True, stdin: st
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
-def host_slug() -> str:
-    name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True).stdout.strip() \
-        if sys.platform == "darwin" else ""
-    return re.sub(r"[^a-z0-9-]+", "-", (name or platform.node()).lower()).strip("-") or "host"
-
-
-def host_label() -> str:
-    chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout
-    return chip.strip().removeprefix("Apple ") or platform.machine()
+def chip() -> str:
+    brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout
+    return brand.strip().removeprefix("Apple ") or platform.machine()
 
 
 def tree_of(rev: str, cwd=None) -> str | None:
@@ -98,7 +94,7 @@ def _when(result: dict) -> datetime:
 
 
 def results(cwd=None, namespaces=(MINE, MIRROR)) -> dict[tuple[str, str], dict]:
-    """Every readable result, keyed by (tree, host), newest first per key."""
+    """Every readable result, keyed by (tree, run)."""
     listing = git("for-each-ref", "--format=%(refname) %(objectname) %(objecttype)",
                   *[f"{n}/" for n in namespaces], cwd=cwd)
     found: dict[tuple[str, str], dict] = {}
@@ -129,10 +125,10 @@ def _duration(result: dict) -> str:
 def _decide_one(head_tree: str, own: list[dict], passing: list[tuple[str, dict]],
                 docs_change: bool, cwd) -> dict:
     if own:
-        good = [r for r in own if r.get("pass")]
-        if good:
-            return {"state": "success", "description": ", ".join(f"{r['host_slug']} {_duration(r)}" for r in good)}
-        return {"state": "failure", "description": "failed on " + ", ".join(r["host_slug"] for r in own)}
+        newest = max(own, key=_when)
+        if newest.get("pass"):
+            return {"state": "success", "description": f"passed in {_duration(newest)}"}
+        return {"state": "failure", "description": "failed"}
     for tree, r in sorted(passing, key=lambda tr: _when(tr[1]), reverse=True):
         # -r lists files; without it a change shows only as its top-level folder.
         diff = subprocess.run(["git", "diff-tree", "-r", "--name-only", "--no-renames", tree, head_tree],
@@ -148,27 +144,20 @@ def _decide_one(head_tree: str, own: list[dict], passing: list[tuple[str, dict]]
     return {"state": "pending", "description": "no gate result for this tree"}
 
 
-def decide(head: str, base: str = "", hosts: list[str] = (), cwd=None,
-           now: datetime | None = None) -> list[dict]:
-    """The gate/gpu status for ``head``, then one per host in ``hosts``."""
+def decide(head: str, base: str = "", cwd=None, now: datetime | None = None) -> dict:
+    """The gate/gpu status for ``head``."""
     now = now or datetime.now(timezone.utc)
     head_tree = tree_of(head, cwd)
     if head_tree is None:
         raise SystemExit(f"{head} is not a commit here")
     found = _fresh(results(cwd), now)
-    for (tree, host), r in found.items():
-        r["host_slug"] = host
     paths = changed_paths.changed(base, head, cwd=cwd) if base else None
     docs_change = paths is not None and not changed_paths.classify(paths)["code"]
-    out = []
-    for context, wanted in [("gate/gpu", None), *[(f"gate/gpu/{h}", h) for h in hosts]]:
-        keep = {k: r for k, r in found.items() if wanted is None or k[1] == wanted}
-        own = [r for (tree, _), r in keep.items() if tree == head_tree]
-        passing = [(tree, r) for (tree, _), r in keep.items() if tree != head_tree and r.get("pass")]
-        status = _decide_one(head_tree, own, passing, docs_change, cwd)
-        status["description"] = status["description"][:DESCRIPTION_MAX]
-        out.append({"context": context, **status})
-    return out
+    own = [r for (tree, _), r in found.items() if tree == head_tree]
+    passing = [(tree, r) for (tree, _), r in found.items() if tree != head_tree and r.get("pass")]
+    status = _decide_one(head_tree, own, passing, docs_change, cwd)
+    status["description"] = status["description"][:DESCRIPTION_MAX]
+    return {"context": "gate/gpu", **status}
 
 
 def prune_local(now: datetime | None = None, namespaces=(MINE, MIRROR), cwd=None) -> list[str]:
@@ -180,9 +169,9 @@ def prune_local(now: datetime | None = None, namespaces=(MINE, MIRROR), cwd=None
     return old
 
 
-def record(result: dict, tree: str, host: str, cwd=None) -> str:
+def record(result: dict, tree: str, cwd=None) -> str:
     blob = git("hash-object", "-w", "--stdin", stdin=json.dumps(result, indent=1) + "\n", cwd=cwd)
-    ref = f"{MINE}/{tree}/{host}"
+    ref = f"{MINE}/{tree}/{secrets.token_hex(6)}"
     git("update-ref", ref, blob, cwd=cwd)
     return ref
 
@@ -207,7 +196,8 @@ def _summary_lines(log: Path) -> list[str]:
     lines = log.read_text(errors="replace").splitlines() if log.exists() else []
     keep = [ln for ln in lines if ln.startswith(("FAILED", "ERROR"))][:20]
     tail = [ln for ln in lines[-3:] if ln.strip()]
-    return keep + tail
+    # The result is public on origin, so it names no folder of this Mac.
+    return [ln.replace(str(Path.home()), "~") for ln in keep + tail]
 
 
 def imports_device(path: Path) -> bool:
@@ -354,11 +344,11 @@ def run(a) -> int:
     if "gpu-full" in tiers and cov.exists():
         print(f"test map: {affected_tests.write_map(cov, head, ROOT)}", flush=True)
     prune_local(namespaces=(MINE,))
-    result = {"pass": passed, "commit": head, "host": host_label(),
+    result = {"pass": passed, "commit": head, "chip": chip(),
               "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "duration_s": round(total), "tiers": [t["tier"] for t in done],
               "log": [line for t in done for line in [f"{t['tier']}: exit {t['exit']}", *t["summary"]]]}
-    ref = record(result, tree, host_slug())
+    ref = record(result, tree)
     print(f"{'passed' if passed else 'failed'}; recorded {ref}")
     print("Push it with a plain `git push` (after `scripts/gate.py setup`).")
     return 0 if passed else 1
@@ -370,14 +360,13 @@ def status(a) -> int:
     head = git("rev-parse", a.sha)
     tree = git("rev-parse", f"{head}^{{tree}}")
     mirror = results(namespaces=(MIRROR,))
-    for (t, host), r in sorted(results().items()):
-        if t != tree:
-            continue
-        where = "on origin" if (tree, host) in mirror else "only on this Mac"
-        print(f"{host}: {'passed' if r.get('pass') else 'failed'} {r.get('when')} "
+    own = [(key, r) for key, r in results().items() if key[0] == tree]
+    for key, r in sorted(own, key=lambda kr: _when(kr[1])):
+        where = "on origin" if key in mirror else "only on this Mac"
+        print(f"{'passed' if r.get('pass') else 'failed'} {r.get('when')} on {r.get('chip', 'a Mac')} "
               f"in {_duration(r)}, {', '.join(r.get('tiers', []))}; {where}")
     base = git("merge-base", head, "origin/main", check=False)
-    gate = decide(head, base)[0]
+    gate = decide(head, base)
     if "inherits" in gate:
         print(f"inherits from {gate['inherits'][:10]}: a docs-only delta over a gated tree needs no run")
     print(f"gate/gpu would be {gate['state']}: {gate['description']}")
@@ -411,7 +400,7 @@ def scope(a) -> int:
 
 
 def decide_cmd(a) -> int:
-    print(json.dumps(decide(a.head, a.base, a.hosts.split()), indent=1))
+    print(json.dumps(decide(a.head, a.base), indent=1))
     return 0
 
 
@@ -437,7 +426,6 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("decide")
     d.add_argument("--head", required=True)
     d.add_argument("--base", default="")
-    d.add_argument("--hosts", default="", help="space-separated host slugs to report one by one")
     a = ap.parse_args(argv)
     return {"setup": setup, "run": run, "status": status, "scope": scope, "prune": prune,
             "decide": decide_cmd}[a.cmd](a)

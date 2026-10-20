@@ -86,14 +86,15 @@ map over four weeks old.
 
 | Status | Meaning |
 |--------|---------|
-| success, `m3max 4m` | A Mac passed this exact tree. |
-| failure, `failed on m3max` | Every result for this tree failed. Fix it, commit and run the gate again. |
+| success, `passed in 4m` | The newest run on this exact tree passed. |
+| failure, `failed` | The newest run on this exact tree failed. Fix it, commit and run the gate again. |
 | success, `inherited from <commit>, docs-only delta` | This tree differs only in docs from a tree that passed. |
 | success, `no code change` | The pull request changes only docs. |
 | pending, `no gate result for this tree` | No Mac has gated this tree. Run the gate and push. |
 
-A result for the exact tree always wins, so a failure is never hidden by an
-older pass. Results expire after four weeks.
+A result for the exact tree always wins over an inherited one. When the
+tree has more than one result, from reruns or from other Macs, the newest
+counts. Results expire after four weeks.
 
 To see the status that HEAD would get, and whether your result has reached
 GitHub:
@@ -102,16 +103,13 @@ GitHub:
 python scripts/gate.py status
 ```
 
-Each host also gets its own status, `gate/gpu/<host>`, so branch protection
-can require a run on more than one Mac.
-
 ## How results reach GitHub
 
-A result is a git ref, `refs/gmlx-gate/<tree>/<host>`. `gate.py setup`
-configures the clone so that a plain `git push` sends the current branch
-and this Mac's results together. That setting changes what a plain push
-does in this clone: it pushes the current branch to the branch of the same
-name.
+A result is a git ref under `refs/gmlx-gate/`, named for the tree it
+tested. `gate.py setup` configures the clone so that a plain `git push`
+sends the current branch and this Mac's results together. That setting
+changes what a plain push does in this clone: it pushes the current branch
+to the branch of the same name.
 
 Other forms of push carry the branch only. That includes
 `git push -u origin <branch>`, and a plain push fails from a detached
