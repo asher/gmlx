@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 
 import sys
+import tempfile
 
 import pytest
 
@@ -326,6 +327,14 @@ def pytest_collection_finish(session):
         items[:] = [i for i in items if i not in last] + last
 
 
+def pytest_collection_modifyitems(config, items):
+    # An integration test decodes real models for as long as it needs.
+    if config.pluginmanager.hasplugin("timeout"):
+        for item in items:
+            if item.get_closest_marker("integration"):
+                item.add_marker(pytest.mark.timeout(0))
+
+
 @pytest.fixture(autouse=True)
 def _no_hf_cache_writes():
     # The guard refuses each write; this fails the test that tried one,
@@ -489,21 +498,26 @@ def require_arch(gguf_index: dict, arch: str) -> str:
     return paths[0]
 
 
+@pytest.fixture(scope="session")
+def _isolated_root(tmp_path_factory) -> str:
+    # The folders of the two fixtures below. A numbered folder, as
+    # tmp_path makes, costs a listing of its parent, so they stay out of it.
+    return str(tmp_path_factory.mktemp("isolated", numbered=False))
+
+
 @pytest.fixture(autouse=True)
-def _isolated_xdg_data(tmp_path_factory, monkeypatch):
+def _isolated_xdg_data(_isolated_root, monkeypatch):
     # Chat autosave writes sessions under $XDG_DATA_HOME/gmlx/chats; keep
     # every test away from the user's real data dir.
-    monkeypatch.setenv(
-        "XDG_DATA_HOME", str(tmp_path_factory.mktemp("xdg-data"))
-    )
+    monkeypatch.setenv("XDG_DATA_HOME", tempfile.mkdtemp(prefix="xdg-data", dir=_isolated_root))
 
 
 @pytest.fixture(autouse=True)
-def _isolated_comfyui_record(tmp_path_factory, monkeypatch):
+def _isolated_comfyui_record(_isolated_root, monkeypatch):
     # `gmlx serve` and `gmlx launch comfyui` read and write the ComfyUI
     # install record; keep every test away from the user's real one.
-    monkeypatch.setenv("GMLX_COMFY_SETTINGS",
-                       str(tmp_path_factory.mktemp("comfyui") / "comfyui.json"))
+    folder = tempfile.mkdtemp(prefix="comfyui", dir=_isolated_root)
+    monkeypatch.setenv("GMLX_COMFY_SETTINGS", os.path.join(folder, "comfyui.json"))
 
 
 @pytest.fixture(autouse=True)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 
 import numpy as np
@@ -371,7 +372,7 @@ def _make_loop(mode="wake", **kw):
     return loop
 
 
-def _pump_until(loop, cond, timeout=5.0):
+def _pump_until(loop, cond, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -442,7 +443,7 @@ def test_loop_wake_barge_in_stop_phrase(capsys):
         def turn(self, text):
             self.turns.append(text)
             yield ("say", "Once upon a time, in a land far away. ")
-            self.release.wait(5.0)          # park mid-turn until canceled
+            self.release.wait(30.0)         # park mid-turn until canceled
             yield ("say", "The end.")
             yield ("done", {})
 
@@ -497,7 +498,7 @@ def test_loop_hallucination_never_becomes_turn():
     assert loop.brain.turns == []                 # ghost filtered, no turn
 
 
-def _wait(cond, timeout=5.0):
+def _wait(cond, timeout=30.0):
     """Poll ``cond`` without touching loop.events (run_headless owns them)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -527,7 +528,7 @@ def test_run_headless_full_turn_display_and_control():
         control.put("mute")
         _wait(lambda: loop.m.muted)
         control.put("quit")
-        t.join(3.0)
+        t.join(30.0)
         assert not t.is_alive()
     finally:
         loop.shutdown()
@@ -570,44 +571,51 @@ def test_run_headless_memory_control_command():
         _wait(lambda: any("cleared 1 memories" in ln for ln in lines))
         assert loop.brain.memory.cleared
         control.put("quit")
-        t.join(3.0)
+        t.join(30.0)
         assert not t.is_alive()
     finally:
         loop.shutdown()
 
 
+class _SlowBrain:
+    """A brain whose reply waits until the test releases it."""
+
+    def __init__(self):
+        self.turns = []
+        self.release = threading.Event()
+
+    def turn(self, text):
+        self.turns.append(text)
+        yield ("status", "thinking")
+        self.release.wait(30.0)
+        yield ("say", "too late")
+        yield ("done", {})
+
+    def reset(self):
+        pass
+
+
 def test_run_headless_stop_cancels_busy_turn():
-    import threading
-
-    class SlowBrain:
-        def __init__(self):
-            self.turns = []
-
-        def turn(self, text):
-            self.turns.append(text)
-            yield ("status", "thinking")
-            time.sleep(0.4)                       # cancellation window
-            yield ("say", "too late")
-            yield ("done", {})
-
-        def reset(self):
-            pass
-
     loop = _make_loop("vad")
-    loop.brain = SlowBrain()
+    loop.brain = _SlowBrain()
     control = queue.Queue()
     t = threading.Thread(target=loop.run_headless, args=(control,),
                          daemon=True)
     t.start()
     try:
         loop._apply(loop.m.text_turn("q"), "q")
+        turn = loop._turn_thread
         _wait(lambda: loop.m.state == THINKING)
         control.put("stop")
         _wait(lambda: not loop.m.turn_active and loop.m.state != THINKING)
+        loop.brain.release.set()                  # the reply comes after the stop
+        turn.join(30.0)
+        assert not turn.is_alive()
         control.put("quit")
-        t.join(3.0)
+        t.join(30.0)
         assert not t.is_alive()
     finally:
+        loop.brain.release.set()
         loop.shutdown()
     assert loop._said == []                       # cancelled before speech
 
@@ -615,24 +623,8 @@ def test_run_headless_stop_cancels_busy_turn():
 def test_run_headless_hotkey_control_command():
     """Global tap-to-talk: "hotkey" opens the mic from idle, dismisses on a
     second tap, and barges in on a busy turn (always force-listen)."""
-    import threading
-
-    class SlowBrain:
-        def __init__(self):
-            self.turns = []
-
-        def turn(self, text):
-            self.turns.append(text)
-            yield ("status", "thinking")
-            time.sleep(0.4)                       # cancellation window
-            yield ("say", "too late")
-            yield ("done", {})
-
-        def reset(self):
-            pass
-
     loop = _make_loop("wake")
-    loop.brain = SlowBrain()
+    loop.brain = _SlowBrain()
     control = queue.Queue()
     t = threading.Thread(target=loop.run_headless, args=(control,),
                          daemon=True)
@@ -643,13 +635,18 @@ def test_run_headless_hotkey_control_command():
         control.put("hotkey")
         _wait(lambda: loop.m.state == IDLE)
         loop._apply(loop.m.text_turn("q"), "q")
+        turn = loop._turn_thread
         _wait(lambda: loop.m.state == THINKING)
         control.put("hotkey")                     # barge in, land listening
         _wait(lambda: loop.m.state == LISTENING and not loop.m.turn_active)
+        loop.brain.release.set()                  # the reply comes after the barge-in
+        turn.join(30.0)
+        assert not turn.is_alive()
         control.put("quit")
-        t.join(3.0)
+        t.join(30.0)
         assert not t.is_alive()
     finally:
+        loop.brain.release.set()
         loop.shutdown()
     assert loop._said == []                       # cancelled before speech
 
@@ -670,7 +667,7 @@ def test_canceled_turn_does_not_resurrect_into_next_turn():
             self.calls += 1
             if self.calls == 1:
                 yield ("status", "thinking")
-                self.release.wait(5.0)      # parked awaiting first SSE delta
+                self.release.wait(30.0)     # parked awaiting first SSE delta
                 yield ("say", "STALE REPLY. ")
                 yield ("done", {})
             else:
@@ -686,6 +683,7 @@ def test_canceled_turn_does_not_resurrect_into_next_turn():
     loop.start_threads()
     try:
         loop._apply(loop.m.text_turn("one"), "one")
+        stale = loop._turn_thread
         _wait(lambda: brain.calls == 1)
         loop._apply(loop.m.on_cancel())               # Esc while parked
         loop._apply(loop.m.text_turn("two"), "two")   # immediate new turn
@@ -693,7 +691,8 @@ def test_canceled_turn_does_not_resurrect_into_next_turn():
         brain.release.set()                           # stale stream wakes up
         _pump_until(loop, lambda: (not loop.m.turn_active
                                    and not loop.m.speaking))
-        time.sleep(0.2)     # window for the stale thread to misbehave
+        stale.join(30.0)    # the stale thread runs to its end
+        assert not stale.is_alive()
         while True:         # drain whatever it produced through the machine
             try:
                 kind, payload = loop.events.get_nowait()

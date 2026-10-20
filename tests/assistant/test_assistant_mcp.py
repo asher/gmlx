@@ -136,9 +136,11 @@ def test_an_mcp_release_from_2_on_is_refused_with_the_install_hint(monkeypatch, 
 
 
 def test_connect_timeout_raises():
+    opened = asyncio.Event()
+
     @contextlib.asynccontextmanager
     async def slow_open(server):
-        await asyncio.sleep(0.3)                 # ready never set in time
+        await opened.wait()                      # opens only after the timeout
         yield FakeSession([])
 
     host = McpToolHost(connect_timeout_s=0.05, open_session=slow_open)
@@ -146,6 +148,7 @@ def test_connect_timeout_raises():
         with pytest.raises(TalkMcpError, match="no response"):
             host.connect(_srv("slow"))
     finally:
+        host._loop.call_soon_threadsafe(opened.set)
         host.close()
 
 

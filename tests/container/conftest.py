@@ -4,9 +4,12 @@ none of them, so the Linux CI job can run it with ``--noconftest``."""
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -40,6 +43,51 @@ class FakeContainer:
 
     def calls(self, *prefix: str) -> list[list[str]]:
         return [a for a in self.log if a[:len(prefix)] == list(prefix)]
+
+
+_RUN, _POPEN = subprocess.run, subprocess.Popen
+
+
+def _in_process(binary: str):
+    """``subprocess.run``, with each call of the fake ``container`` at
+    ``binary`` run in this process, which saves a Python start per call. A
+    call still starts a process when the test watches its process: through
+    ``FAKE_CONTAINER_WATCH``, its own ``Popen``, or a timeout under a
+    second."""
+    def run(*args, **kw):
+        argv = args[0] if args else kw.get("args")
+        env = kw.get("env")
+        environ = os.environ if env is None else env
+        timeout = kw.get("timeout")
+        if (not isinstance(argv, list) or argv[:1] != [binary]
+                or environ.get("FAKE_CONTAINER_WATCH") or subprocess.Popen is not _POPEN
+                or (timeout is not None and timeout < 1)):
+            return _RUN(*args, **kw)
+        import fake_container
+
+        out, err = io.StringIO(), io.StringIO()
+        # A signal waits for the end of the call, as the call of a process
+        # of its own would end even if the signal stops launch.
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
+        try:
+            code = fake_container.call(argv[1:], environ, out, err,
+                                       lambda: signal.raise_signal(signal.SIGINT))
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if not kw.get("capture_output"):
+            # As a child's would, the output goes to the descriptors.
+            for fd, stream, text_out in ((1, sys.stdout, out), (2, sys.stderr, err)):
+                stream.flush()
+                os.write(fd, text_out.getvalue().encode())
+            stdout = stderr = None
+        elif kw.get("text") or kw.get("universal_newlines"):
+            stdout, stderr = out.getvalue(), err.getvalue()
+        else:
+            stdout, stderr = out.getvalue().encode(), err.getvalue().encode()
+        if kw.get("check") and code:
+            raise subprocess.CalledProcessError(code, argv, stdout, stderr)
+        return subprocess.CompletedProcess(argv, code, stdout, stderr)
+    return run
 
 
 def _remove_tree(path: str) -> None:
@@ -133,6 +181,7 @@ def fake_container(tmp_path, monkeypatch, short_tmpdir) -> Iterator[FakeContaine
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr("gmlx.container.images._other_builds", lambda: False)
+    monkeypatch.setattr(subprocess, "run", _in_process(str(script)))
     fake = FakeContainer(state)
     yield fake
     # A call that the real CLI would refuse fails the test, also when

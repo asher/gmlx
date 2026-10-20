@@ -4,8 +4,9 @@ wheel instead of an sdist build. A pin below the pyproject floor is worse than
 no pin: the editable install upgrades it, so the job tests a version nobody
 chose. This anchors the workflow pins against pyproject, and the mlx and
 mlx-kquant pins against the mlx that the copied mlx-vlm needs. It also
-checks that the test job installs the all extra and that the drift step
-fails when its report fails.
+checks that the test job installs the all extra, that the drift step
+fails when its report fails, and the job conditions and permissions the
+workflows rely on.
 """
 from __future__ import annotations
 
@@ -175,3 +176,65 @@ def test_the_drift_step_fails_when_the_report_fails():
     run = _run("drift", "Drift report")
     assert "set -o pipefail" in run, run
     assert run.index("set -o pipefail") < run.index("| tee"), run
+
+
+_WORKFLOWS = _ROOT / ".github" / "workflows"
+
+
+def _yaml(name: str) -> dict:
+    import yaml
+
+    return yaml.safe_load((_WORKFLOWS / name).read_text())
+
+
+def test_the_install_step_upgrades_pip_before_the_group_install():
+    """``pip install --group`` needs pip 25.1, newer than setup-python's on 3.11."""
+    run = _run("test", "Install")
+    assert run.index("pip install --upgrade pip") < run.index("--group test"), run
+
+
+@pytest.mark.parametrize("name", ["test.yml", "gate.yml"])
+def test_a_job_that_names_permissions_keeps_contents_read(name):
+    """A job's permissions block drops each permission it does not name, and
+    checkout and every ref fetch need contents: read."""
+    jobs = _yaml(name)["jobs"]
+    bad = [j for j, job in jobs.items()
+           if "permissions" in job and job["permissions"].get("contents") != "read"]
+    assert not bad, bad
+
+
+def test_each_schedule_condition_names_a_declared_cron():
+    """The file has a weekly and a daily cron. A condition on the event name
+    alone would run a weekly job every day."""
+    text = _WORKFLOW.read_text()
+    on = _yaml("test.yml")
+    crons = {c["cron"] for c in (on.get("on") or on[True])["schedule"]}
+    assert "event_name == 'schedule'" not in text
+    assert "github.event_name }}\" = schedule" not in text
+    named = set(re.findall(r"github\.event\.schedule\s*==\s*'([^']+)'", text))
+    named |= set(re.findall(r'github\.event\.schedule \}\}" = "([^"]+)"', text))
+    assert named == crons, (named, crons)
+
+
+def test_the_gate_status_posts_only_for_this_repository():
+    """A fork's token cannot post, so its run skips the step instead of
+    failing. A dispatch run has no pull_request payload, so the step lets
+    it through and checks the head repository it looked up."""
+    steps = _yaml("gate.yml")["jobs"]["gate-status"]["steps"]
+    post = next(s for s in steps if s.get("name") == "Post")
+    assert post["if"] == ("github.event_name == 'workflow_dispatch' || "
+                          "github.event.pull_request.head.repo.full_name == github.repository")
+    assert '[ "$HEAD_REPO" != "$GH_REPO" ]' in post["run"]
+
+
+def test_the_gate_job_follows_the_test_legs_of_a_pull_request():
+    """A red test leg still posts the gate status, and a push to main has no
+    pull request to post on. A called workflow gets only what its caller
+    grants, so the job grants what gate.yml needs."""
+    job = _yaml("test.yml")["jobs"]["gate"]
+    assert job["uses"] == "./.github/workflows/gate.yml"
+    assert job["needs"] == ["test"]
+    assert job["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
+    assert job["permissions"] == {"contents": "read", "statuses": "write", "pull-requests": "read"}
+    gate = _yaml("gate.yml")
+    assert "workflow_call" in (gate.get("on") or gate[True])

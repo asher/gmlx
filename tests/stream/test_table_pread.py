@@ -304,7 +304,6 @@ def test_a_refused_submit_waits_for_the_reads_already_queued(
     The read raises, and the fd stays open until the fills already
     submitted end, so no pread runs on a closed or reused fd."""
     import os
-    import time
 
     import gmlx.stream.table_pread as tp
 
@@ -314,10 +313,14 @@ def test_a_refused_submit_waits_for_the_reads_already_queued(
     fd, pool, _ = s._ready()
     s._release()
     closed, late = threading.Event(), []
+    running, close_called = threading.Semaphore(0), threading.Event()
     real_read, real_close = tp.read_range_aligned, os.close
 
     def read(rfd, mv, off, size):
-        time.sleep(0.002)
+        if rfd == fd and not close_called.is_set():
+            # A fill holds here until the close: its reads straddle it.
+            running.release()
+            close_called.wait(30)
         if rfd == fd and closed.is_set():
             late.append(off)
         return real_read(rfd, mv, off, size)
@@ -333,17 +336,19 @@ def test_a_refused_submit_waits_for_the_reads_already_queued(
 
     def submit(fn, *args):
         if len(submitted) == 2:
-            time.sleep(0.01)             # the first two fills are running
+            for _ in range(2):           # the first two fills are running
+                assert running.acquire(timeout=30)
             closer = threading.Thread(target=s.close, kwargs={"wait": False})
             closer.start()
             closer.join()
+            close_called.set()
         submitted.append(real_submit(fn, *args))
         return submitted[-1]
 
     monkeypatch.setattr(pool, "submit", submit)
     with pytest.raises(RuntimeError):
         s.read(np.arange(40))
-    futures_wait(submitted, timeout=5)
+    futures_wait(submitted, timeout=30)
     assert len(submitted) == 2
     assert closed.is_set() and s._fd is None
     assert late == [], f"{len(late)} preads ran on the closed fd"

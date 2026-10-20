@@ -29,6 +29,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -58,12 +59,36 @@ const JOB_CONTROL: [libc::c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTT
 /// session, counted from the signal that ended it. Launch gives
 /// `container stop` 10 seconds, so the copies can exit before the container
 /// is killed.
-pub const COPY_GRACE: Duration = Duration::from_secs(5);
+const COPY_GRACE: Duration = Duration::from_secs(5);
+/// Names another [`COPY_GRACE`] in milliseconds, for the tests. The client
+/// never sees it.
+pub const COPY_GRACE_ENV: &str = "GMLX_ENTRY_COPY_GRACE_MS";
 
 /// How long a joined copy whose terminal closed has after its SIGHUP before
 /// the entry kills its client. A client whose output nobody reads any more
 /// can block in a write and never act on the SIGHUP.
-pub const HANGUP_GRACE: Duration = Duration::from_secs(10);
+const HANGUP_GRACE: Duration = Duration::from_secs(10);
+/// Names another [`HANGUP_GRACE`] in milliseconds, for the tests. The
+/// client never sees it.
+pub const HANGUP_GRACE_ENV: &str = "GMLX_ENTRY_HANGUP_GRACE_MS";
+
+/// [`COPY_GRACE`], or the grace that [`COPY_GRACE_ENV`] names.
+pub fn copy_grace() -> Duration {
+    grace(std::env::var_os(COPY_GRACE_ENV).as_deref(), COPY_GRACE)
+}
+
+/// [`HANGUP_GRACE`], or the grace that [`HANGUP_GRACE_ENV`] names.
+pub fn hangup_grace() -> Duration {
+    grace(std::env::var_os(HANGUP_GRACE_ENV).as_deref(), HANGUP_GRACE)
+}
+
+/// The milliseconds in `ms`, or `default` when `ms` is unset or not a whole
+/// number.
+fn grace(ms: Option<&OsStr>, default: Duration) -> Duration {
+    ms.and_then(OsStr::to_str)
+        .and_then(|text| text.parse().ok())
+        .map_or(default, Duration::from_millis)
+}
 
 /// The session folder: [`DIR`], or the folder [`DIR_ENV`] names.
 pub fn dir() -> PathBuf {
@@ -352,32 +377,61 @@ pub fn job_control(sig: libc::c_int) -> bool {
     JOB_CONTROL.contains(&sig)
 }
 
-extern "C" fn ignore(_: libc::c_int) {}
+/// The waited signals that have come and that [`next_signal`] has not
+/// returned yet, one bit per signal number.
+static PENDING: AtomicU64 = AtomicU64::new(0);
 
-/// Makes the waited signals wait for [`next_signal`]. A handler, never
-/// SIG_IGN, is installed for each first, since a signal whose action is to
-/// ignore it can be dropped even while it is blocked. exec resets a handler,
-/// so the client starts with the default actions.
+fn bit(sig: libc::c_int) -> u64 {
+    1 << sig
+}
+
+extern "C" fn record(sig: libc::c_int) {
+    PENDING.fetch_or(bit(sig), Ordering::SeqCst);
+}
+
+/// Blocks the waited signals, which [`next_signal`] then returns one at a
+/// time. Each gets a handler that records it. exec resets a handler, so the
+/// client starts with the default actions.
 pub fn block_signals() {
     for sig in waited_list() {
-        // SAFETY: the handler does nothing, and it never runs while blocked.
-        unsafe { libc::signal(sig, ignore as extern "C" fn(libc::c_int) as libc::sighandler_t) };
+        // SAFETY: the handler only sets a bit, and it runs only inside the
+        // sigsuspend of next_signal.
+        unsafe { libc::signal(sig, record as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
     let set = waited();
     // SAFETY: set is initialized; the old mask is not needed.
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, ptr::null_mut()) };
 }
 
-/// The next waited signal.
+/// The next waited signal, the lowest number first. It waits in sigsuspend,
+/// not sigwait: on macOS, a sigwait that a stop and continue interrupts
+/// returns the lowest waited signal, SIGHUP, which never came.
 pub fn next_signal() -> libc::c_int {
-    let set = waited();
-    let mut sig = 0;
+    let mut open = MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: with no new set, the call only writes the current mask to open.
+    unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), open.as_mut_ptr()) };
+    // SAFETY: the call above wrote open.
+    let mut open = unsafe { open.assume_init() };
+    for sig in waited_list() {
+        // SAFETY: open is initialized.
+        unsafe { libc::sigdelset(&mut open, sig) };
+    }
     loop {
-        // SAFETY: set and sig are valid for the call.
-        if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
+        let pending = PENDING.load(Ordering::SeqCst);
+        if pending != 0 {
+            let sig = pending.trailing_zeros() as libc::c_int;
+            PENDING.fetch_and(!bit(sig), Ordering::SeqCst);
             return sig;
         }
+        // SAFETY: open is initialized. The handlers of the signals that
+        // come run before sigsuspend returns.
+        unsafe { libc::sigsuspend(&open) };
     }
+}
+
+/// Puts `sig` back, so that [`next_signal`] returns it again.
+fn put_back(sig: libc::c_int) {
+    PENDING.fetch_or(bit(sig), Ordering::SeqCst);
 }
 
 /// The exit code of a wait status: the process's own, or 128 plus the
@@ -392,7 +446,7 @@ pub fn exit_code(status: libc::c_int) -> i32 {
     }
 }
 
-static RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RESUMED: AtomicBool = AtomicBool::new(false);
 
 /// Reaps every child that has exited, and returns the exit code of `pid`
 /// when it is one of them. A child that Ctrl-Z or SIGSTOP stopped is
@@ -411,7 +465,7 @@ pub fn reap(pid: libc::pid_t) -> Option<i32> {
         }
         if libc::WIFSTOPPED(status) {
             if matches!(libc::WSTOPSIG(status), libc::SIGTSTP | libc::SIGSTOP) {
-                if !RESUMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if !RESUMED.swap(true, Ordering::Relaxed) {
                     say("[launch] Ctrl-Z cannot suspend a client in the container, so it goes \
                          on running.");
                 }
@@ -586,7 +640,8 @@ pub struct Outcome {
 /// says, gets SIGINT and SIGQUIT from the terminal itself, so only SIGTERM
 /// and SIGHUP go to it. Those two are followed by SIGCONT, as a shell does
 /// for a stopped job, since a stopped client keeps them pending, and they
-/// also call `on_stop`.
+/// also call `on_stop`. A signal that comes after the client has exited,
+/// and before the entry has reaped it, is left for the wait that follows.
 pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Outcome {
     let mut stopping = None;
     loop {
@@ -599,6 +654,10 @@ pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Out
         }
         if job_control(sig) {
             continue;
+        }
+        if let Some(code) = reap(pid) {
+            put_back(sig);
+            return Outcome { code, stopping };
         }
         let ends = sig == libc::SIGTERM || sig == libc::SIGHUP;
         if own_group || ends {
@@ -656,7 +715,7 @@ fn finish_after(delay: Duration, code: i32) {
 /// Waits for the joined copies after the main entry's own client has
 /// exited, and exits with that client's code. A first Ctrl-C says how to
 /// end the session. A second one, SIGTERM, SIGHUP or SIGQUIT ends it, and
-/// the copies then get SIGHUP and [`COPY_GRACE`] to exit. One more signal
+/// the copies then get SIGHUP and [`copy_grace`] to exit. One more signal
 /// ends the wait at once. Ctrl-Z cannot suspend the wait, and the first one
 /// says how to end the session instead.
 pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
@@ -693,10 +752,11 @@ pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
             _ => {
                 ending = true;
                 let left = stop_copies(&dir);
+                let grace = copy_grace();
                 say(&format!("[launch] Ending the session, which gives {} {} seconds to exit. \
                               Press Ctrl-C to end it at once.",
-                             them(left), COPY_GRACE.as_secs()));
-                finish_after(COPY_GRACE, code);
+                             them(left), grace.as_secs()));
+                finish_after(grace, code);
             }
         }
     }
@@ -704,10 +764,10 @@ pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
 
 /// Waits for the joined copies after a stopping container ended the
 /// session while the main entry's own client ran. The copies got SIGHUP
-/// then, and they have until [`COPY_GRACE`] after `since` to exit. Any
+/// then, and they have until [`copy_grace`] after `since` to exit. Any
 /// signal but a job-control one ends the wait at once.
 pub fn wait_for_stopped(dir: PathBuf, lock: File, code: i32, since: Instant) -> ! {
-    finish_after(COPY_GRACE.saturating_sub(since.elapsed()), code);
+    finish_after(copy_grace().saturating_sub(since.elapsed()), code);
     std::thread::spawn(move || {
         wait_end(&dir, &lock);
         finish(code)
@@ -751,6 +811,19 @@ mod tests {
     fn cloexec(file: &File) -> bool {
         // SAFETY: the descriptor is open.
         unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) & libc::FD_CLOEXEC != 0 }
+    }
+
+    #[test]
+    fn a_grace_override_is_a_whole_number_of_milliseconds() {
+        let ms = |text: &str| grace(Some(OsStr::new(text)), COPY_GRACE);
+        assert_eq!(grace(None, COPY_GRACE), Duration::from_secs(5));
+        assert_eq!(grace(None, HANGUP_GRACE), Duration::from_secs(10));
+        assert_eq!(ms("250"), Duration::from_millis(250));
+        assert_eq!(ms("0"), Duration::ZERO);
+        for bad in ["", "-1", "1.5", "2s", " 250", "x", "18446744073709551616"] {
+            assert_eq!(ms(bad), COPY_GRACE, "{bad}");
+        }
+        assert_eq!(grace(Some(OsStr::from_bytes(b"25\xff")), HANGUP_GRACE), HANGUP_GRACE);
     }
 
     #[test]

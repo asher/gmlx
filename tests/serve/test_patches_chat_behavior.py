@@ -783,10 +783,12 @@ def test_install_role_normalization_rewrites_before_render():
             self.messages = messages
             return "rendered"
 
+    from gmlx.upstream.patching import wrapped_with
+
     sp.install_role_normalization()
     openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
-    assert getattr(openai.apply_chat_template,
-                   sp_chat._ROLE_NORM_FLAG, False)
+    # An earlier install in this process can sit under later wrappers.
+    assert wrapped_with(openai.apply_chat_template, sp_chat._ROLE_NORM_FLAG)
 
     tok = _Recorder()
     out = openai.apply_chat_template(
@@ -808,10 +810,12 @@ def test_instruction_merge_leaves_developer_messages_in_place():
     message. Called with the messages alone (chat completions), the merge
     leaves developer messages where they were; called with instructions
     (Responses), it runs stock."""
+    from gmlx.upstream.patching import wrapped_with
+
     sp.install_role_normalization()
     openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     merge = openai._normalize_instruction_messages
-    assert getattr(merge, sp_chat._ROLE_NORM_FLAG, False)
+    assert wrapped_with(merge, sp_chat._ROLE_NORM_FLAG)
 
     dev = {"role": "developer", "content": "D"}
     msgs = [{"role": "system", "content": "S"},

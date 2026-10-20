@@ -613,7 +613,14 @@ _FIRST = {
 }
 
 
-@pytest.mark.parametrize("first", sorted(_FIRST))
+# The owned modules first and the copy's cache first run on every pull
+# request, the other orders nightly.
+_EVERY_RUN = ("owned", "vlm-cache")
+
+
+@pytest.mark.parametrize("first", [
+    pytest.param(f, marks=() if f in _EVERY_RUN else pytest.mark.nightly)
+    for f in sorted(_FIRST)])
 def test_every_import_order_gives_the_owned_objects(first):
     r = subprocess.run([sys.executable, "-c", _ORDER_CHILD,
                         json.dumps(_FIRST[first]), json.dumps(EXPECTED)],

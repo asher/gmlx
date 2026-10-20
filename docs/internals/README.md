@@ -32,6 +32,8 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
   model family involves, and its acceptance gate.
 - [Testing](testing.md): The test tiers, GGUF-gated runs and the end-to-end
   harnesses.
+- [CI and the GPU gate](ci.md): What a pull request needs to merge, the GPU
+  gate run on a Mac, and what each CI leg runs.
 - [Upstream releases](upstream-upgrades.md): The copy of mlx-vlm and
   mlx-lm that gmlx carries, how it takes upstream changes, and moving mlx.
 - [Debug switches](debug-switches.md): Environment variables for isolating

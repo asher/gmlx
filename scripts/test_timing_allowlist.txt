@@ -1,0 +1,34 @@
+# Test functions that may keep a fixed sleep or a wall-clock bound.
+# scripts/check-test-timing.py reads this file. One `path::function` per
+# line, with the reason. A sleep inside a poll needs no line.
+
+# A stand-in for a service or a client that answers late or never.
+tests/assistant/test_assistant_brain.py::test_call_with_timeout_bounds_and_reports  # a tool that answers ten times past the timeout
+tests/comfyui_pack/test_client.py::do_GET  # a route that answers past the client's timeout
+tests/container/test_container_session.py::test_a_third_signal_abandons_a_teardown_that_waits  # a service that never answers
+tests/serve/test_image_routes.py::_receive  # a client that never sends again
+tests/serve/test_server_patches.py::test_keepalive_sse_close_closes_upstream  # an upstream that never sends again
+tests/stream/test_prefill_feeder.py::test_prefill_pass_seeds_decode_arena  # slow seeding widens the race window; load only widens it more
+
+# A minimum wait: a loaded machine only makes it longer.
+tests/serve/test_server_patches.py::test_keepalive_sse_injects_comment_on_silence  # silence four times the keepalive interval
+tests/stream/test_decode_feeder.py::test_prestage_wedge_quarantines  # outlives the 0.2 s read timeout
+tests/test_comfyui_pack_runtime.py::test_a_kept_list_is_probed_again_after_keep_seconds  # outlives keep_seconds
+tests/image/test_image_vae_memory.py::test_a_512_decode_stays_under_the_fitted_footprint  # the memory sampler takes its baseline
+
+# A wait before a check that something did not happen: load can only hide a bug.
+tests/serve/test_hf_cache.py::test_network_fetch_waits_for_offline_window  # the fetch stays blocked while the window is open
+tests/serve/test_server_bridge.py::test_register_resolved_models_waits_for_build_lock  # the register stays blocked on the lock
+tests/commands/test_comfyui.py::test_two_installs_at_once_both_stay_in_the_record  # time for both installs to reach the lock
+
+# The bound is the property, with seconds to spare.
+tests/container/test_container_entry.py::test_a_client_that_takes_the_whole_grace_leaves_none_for_the_copies  # a wrong grace ends past 8 s, the right one at about 4 s
+tests/test_comfyui_pack_runtime.py::test_a_hung_gmlx_never_stalls_or_fails_the_widgets  # the widgets answer within 10 s while gmlx hangs
+
+# Known races in the ComfyUI pack job's tests, still to fix.
+tests/comfyui_pack/headless.py::interrupt  # waits 0.5 s for the stub's log
+tests/comfyui_pack/test_client.py::test_interrupt_and_run_end_stop_an_in_flight_step  # waits 0.2 s for the step to start
+tests/comfyui_pack/test_client.py::test_a_pooled_connection_the_server_closed_is_retried_once  # waits 0.1 s for the server to close
+tests/comfyui_pack/test_client.py::test_a_pooled_post_the_server_closed_while_idle_goes_out_once  # waits 0.1 s for the server to close
+tests/comfyui_pack/test_client.py::test_a_call_that_timed_out_is_never_sent_again  # waits 0.8 s for a resend
+tests/comfyui_pack/test_comfy.py::test_interrupt_reaches_the_server_and_stops_the_run  # waits 0.3 s for the stub's log

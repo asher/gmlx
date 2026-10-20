@@ -97,17 +97,21 @@ print(json.dumps(out))
 
 
 def _orders():
+    # Each copied package first runs on every pull request, the other
+    # orders nightly. A child checks every alias, whatever its row.
+    seen = set()
     for copy, (owned, _bound) in ALIASES.items():
-        yield copy, [copy.rpartition(".")[0]]
-        yield copy, [copy]
-        yield copy, [owned.rpartition(".")[0]]
-        yield copy, [owned]
+        for i, first in enumerate((copy.rpartition(".")[0], copy,
+                                   owned.rpartition(".")[0], owned)):
+            every_run = i == 0 and first not in seen
+            seen.add(first)
+            yield pytest.param(
+                copy, [first], marks=() if every_run else pytest.mark.nightly,
+                id=f"{copy.removeprefix(_VLM).removeprefix(_LM)}"
+                   f"<-{first.removeprefix('gmlx.')}")
 
 
-@pytest.mark.parametrize(
-    "copy,first", list(_orders()),
-    ids=[f"{c.removeprefix(_VLM).removeprefix(_LM)}"
-         f"<-{f[0].removeprefix('gmlx.')}" for c, f in _orders()])
+@pytest.mark.parametrize("copy,first", list(_orders()))
 def test_every_import_order_gives_one_module(copy, first):
     r = subprocess.run([sys.executable, "-c", _CHILD, json.dumps(first),
                         json.dumps(ALIASES)],

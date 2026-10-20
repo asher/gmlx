@@ -7,7 +7,6 @@ import errno
 import http.server
 import json
 import os
-import pty
 import select
 import signal
 import socket
@@ -21,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from gmlx.container import runtime, session, settings
+from gmlx.container import runtime, session, settings, terminal
 from gmlx.container.settings import ContainerPlan, Mount, SettingsError
 from gmlx.container.state import FileLock
 
@@ -1338,7 +1337,7 @@ def test_supervise_hands_the_output_limit_to_the_copy(fake_container, tmp_path, 
         stream.read()
     monkeypatch.setattr(session, "_tee_for_url", tee)
     sess = session.new_session("dsh", "default", [])
-    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=3100,
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
                  url_pattern=pattern)
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None,
                       output_max=1 << 20)
@@ -2042,7 +2041,7 @@ def test_a_killed_container_exec_leaves_the_terminal_as_it_was(fake_container, t
     heard = tmp_path / "heard"
     os.mkfifo(heard)
     fake_container.update(hangup_notify=str(heard))
-    master, slave = pty.openpty()
+    master, slave = terminal.open_pty()
     launch = subprocess.Popen([sys.executable, "-c", _COPY_ON_A_TERMINAL, str(heard)],
                               stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
@@ -2099,7 +2098,7 @@ def _on_a_terminal(argv: list[str], timeout: float = 20, *,
     wrote there. Each item of ``answers`` is a line the program writes and
     the bytes the terminal then types, as a terminal answers a query. A line
     to the FIFO ``go`` then lets the program go on."""
-    master, slave = pty.openpty()
+    master, slave = terminal.open_pty()
     # Spare ends, so neither the test nor the program waits to open the FIFO.
     held = [os.open(go, os.O_RDONLY | os.O_NONBLOCK), os.open(go, os.O_WRONLY)] if go else []
     proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,

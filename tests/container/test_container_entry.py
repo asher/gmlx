@@ -601,10 +601,48 @@ def _gone(pid: int, timeout: float = 10.0) -> bool:
         queue.close()
 
 
+def _exited(pid: int) -> None:
+    """Waits until ``pid`` has exited and its parent can reap it, which
+    ``_gone`` can report a moment before."""
+    assert _gone(pid)
+    deadline = time.monotonic() + 10
+    while True:
+        state = _state(pid)
+        if state in ("", "Z"):
+            return
+        assert time.monotonic() < deadline, f"{pid} is still {state}"
+        time.sleep(0.01)
+
+
+def _state(pid: int) -> str:
+    """The state letter of the process ``pid``, or "" once it is reaped."""
+    if sys.platform == "linux":
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rpartition(")")[2].split()[0]
+        except FileNotFoundError:
+            return ""
+    done = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                          timeout=10)
+    return done.stdout.strip()[:1]
+
+
+def _halt(proc) -> None:
+    """Stops ``proc``, and returns once it has stopped."""
+    os.kill(proc.pid, signal.SIGSTOP)
+    _, status = os.waitpid(proc.pid, os.WUNTRACED)
+    assert os.WIFSTOPPED(status), status
+
+
 def _stop(*procs) -> None:
     for proc in procs:
         if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
+            # The process can exit after the poll. macOS then refuses to
+            # signal its group with EPERM until the process is reaped.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
             proc.wait(10)
 
 
@@ -677,9 +715,11 @@ def test_a_hangup_ends_only_the_copy_of_its_id(entry):
         _stop(main, *copies)
 
 
-def test_a_hung_up_copy_that_stays_is_killed_after_the_grace(entry):
+def test_a_hung_up_copy_that_stays_is_killed_after_the_grace(entry, monkeypatch):
     """A client that does not act on the SIGHUP, such as one blocked in a
-    write that nobody reads any more, is killed 10 seconds later."""
+    write that nobody reads any more, is killed when the grace ends. The
+    grace is 10 seconds, and 1 second here."""
+    monkeypatch.setenv("GMLX_ENTRY_HANGUP_GRACE_MS", "1000")
     main = _start(entry, "--", "sh", "-c", "echo ready; read x")
     copy = None
     try:
@@ -689,8 +729,8 @@ def test_a_hung_up_copy_that_stays_is_killed_after_the_grace(entry):
         assert copy.stdout.readline() == b"joined\n"
         sent = time.monotonic()
         assert _run(entry, "--hangup", "0f3a").returncode == 0
-        assert copy.wait(20) == 128 + signal.SIGKILL
-        assert time.monotonic() - sent > 9            # not killed before the grace
+        assert copy.wait(10) == 128 + signal.SIGKILL
+        assert time.monotonic() - sent > 0.9          # not killed before the grace
         _send(main)
         assert main.wait(10) == 0
     finally:
@@ -725,6 +765,48 @@ print(os.getpid(), os.getpgrp(), child.pid, flush=True)
 while True:
     os.read(wake[0], 512)
 """
+
+
+def test_a_stop_and_continue_of_the_entry_sends_the_client_nothing(entry):
+    """On macOS, a sigwait that a stop and continue interrupts returns
+    SIGHUP, which never came."""
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 3")
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        for _ in range(3):
+            _halt(main)
+            os.kill(main.pid, signal.SIGCONT)
+        _send(main)
+        assert main.wait(10) == 3
+        assert main.stderr.read() == b""
+    finally:
+        _stop(main)
+
+
+def test_a_signal_that_comes_before_the_client_is_reaped_is_for_the_session(entry):
+    """A Ctrl-C comes and the client exits while the entry is stopped, so the
+    entry sees both at once. The client has exited, so the Ctrl-C is for the
+    session."""
+    main = _start(entry, "--", "sh", "-c", "echo $$; read x; exit 3")
+    copy = None
+    try:
+        client = int(main.stdout.readline())
+        copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x")
+        assert copy.stdout.readline() == b"joined\n"
+        _halt(main)
+        main.send_signal(signal.SIGINT)
+        _send(main)
+        _exited(client)
+        os.kill(main.pid, signal.SIGCONT)
+        said = _read_until(main.stderr.fileno(), b"stops the other copy.\n")
+        assert said == (b"[launch] sh exited. The session stays open while 1 other copy runs.\n"
+                        b"[launch] Press Ctrl-C again to end the session, which stops the other "
+                        b"copy.\n")
+        _send(copy)
+        assert copy.wait(10) == 0
+        assert main.wait(10) == 3
+    finally:
+        _stop(main, *([copy] if copy else []))
 
 
 @pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 9), (signal.SIGINT, 8)])
@@ -762,6 +844,14 @@ def test_the_lock_never_reaches_the_client(entry, session_dir):
         if orphan:
             os.kill(orphan, signal.SIGKILL)
         _stop(main, *([copy] if copy else []))
+
+
+def test_the_grace_overrides_never_reach_the_client(entry, monkeypatch):
+    monkeypatch.setenv("GMLX_ENTRY_COPY_GRACE_MS", "1000")
+    monkeypatch.setenv("GMLX_ENTRY_HANGUP_GRACE_MS", "1000")
+    done = _run(entry, "--", "sh", "-c",
+                'echo "${GMLX_ENTRY_COPY_GRACE_MS-unset} ${GMLX_ENTRY_HANGUP_GRACE_MS-unset}"')
+    assert (done.returncode, done.stdout) == (0, "unset unset\n")
 
 
 # A client that takes a second to exit after SIGHUP, as a client that saves
@@ -848,7 +938,14 @@ def test_a_sigterm_while_the_client_runs_gives_the_copy_time_to_stop(entry):
 
 
 @pytest.mark.parametrize("again", [False, True])
-def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, again):
+def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, monkeypatch, again):
+    """The grace counts from the signal that ends the session, not from the
+    client's exit. So the session stays open for a whole grace after the
+    client exits, and the entry then waits one more grace. With a further
+    signal the grace is a minute, so only that signal can end the wait
+    before the test stops waiting."""
+    grace = 60 if again else 1
+    monkeypatch.setenv("GMLX_ENTRY_COPY_GRACE_MS", str(grace * 1000))
     main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 3")
     copy = client = None
     try:
@@ -857,17 +954,18 @@ def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, aga
         client = int(copy.stdout.readline())
         _send(main)
         assert b"stays open" in main.stderr.readline()
-        start = time.monotonic()                  # the grace starts after the signal
+        if not again:
+            assert not _gone(main.pid, grace)     # the client's exit starts no grace
+        start = time.monotonic()
         main.send_signal(signal.SIGHUP)
-        assert b"Ending the session" in main.stderr.readline()
+        line = main.stderr.readline()
+        assert b"Ending the session" in line
         if again:
+            assert b"gives the other copy 60 seconds to exit" in line
             main.send_signal(signal.SIGINT)
         assert main.wait(10) == 3
         if not again:
-            # A grace that counted from the client's exit would end after
-            # 8 s, so the upper bound is the only check of where it starts.
-            # Only a stall of over 3 s can break it.
-            assert 4.5 < time.monotonic() - start < 8
+            assert time.monotonic() - start > 0.9 * grace     # not ended before the grace
         assert copy.poll() is None                # the stopping container ends it
     finally:
         if client:
@@ -875,11 +973,11 @@ def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, aga
         _stop(main, *([copy] if copy else []))
 
 
-# A main client that takes 3 seconds to exit after SIGTERM.
+# A main client that takes the seconds in its argument to exit after SIGTERM.
 SLOW_TERM = """
 import os, signal, sys, time
 def term(*a):
-    time.sleep(3)
+    time.sleep(float(sys.argv[1]))
     sys.exit(9)
 signal.signal(signal.SIGTERM, term)
 wake = os.pipe()
@@ -892,10 +990,14 @@ while True:
 
 
 @pytest.mark.parametrize("again", [False, True])
-def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, again):
-    """The client takes 3 of the 5 seconds, and the entry then waits for the
-    copy until the grace ends, or until a further signal comes."""
-    main = _start(entry, "--", sys.executable, "-c", SLOW_TERM)
+def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, monkeypatch, again):
+    """The client takes 0.3 seconds to exit, and the entry then waits for the
+    copy until the grace ends, or until a further signal comes. With a
+    further signal the grace is a minute, so only that signal can end the
+    wait before the test stops waiting."""
+    grace = 60 if again else 1
+    monkeypatch.setenv("GMLX_ENTRY_COPY_GRACE_MS", str(grace * 1000))
+    main = _start(entry, "--", sys.executable, "-c", SLOW_TERM, "0.3")
     copy = client = None
     try:
         first = int(main.stdout.readline())
@@ -903,12 +1005,12 @@ def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, again)
         client = int(copy.stdout.readline())
         start = time.monotonic()
         main.send_signal(signal.SIGTERM)
-        assert _gone(first)                       # the entry has reaped it
+        _exited(first)
         if again:
             main.send_signal(signal.SIGINT)
         assert main.wait(10) == 9
         if not again:
-            assert time.monotonic() - start > 4.5     # not ended before the grace
+            assert time.monotonic() - start > 0.9     # not ended before the grace
         assert copy.poll() is None                # the stopping container ends it
     finally:
         if client:
@@ -916,7 +1018,30 @@ def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, again)
         _stop(main, *([copy] if copy else []))
 
 
-def _read_until(fd: int, text: bytes, timeout: float = 10.0, seen: bytes = b"") -> bytes:
+def test_a_client_that_takes_the_whole_grace_leaves_none_for_the_copies(entry, monkeypatch):
+    """The client takes the whole 4 second grace to exit, so the entry exits
+    with it. A grace that counted from the client's exit would end 4 seconds
+    later. Only an upper bound tells the two apart, and only a delay of over
+    4 seconds can break it."""
+    monkeypatch.setenv("GMLX_ENTRY_COPY_GRACE_MS", "4000")
+    main = _start(entry, "--", sys.executable, "-c", SLOW_TERM, "4")
+    copy = client = None
+    try:
+        main.stdout.readline()
+        copy = _start(entry, "--join", "--", "sh", "-c", "trap '' HUP; echo $$; exec sleep 60")
+        client = int(copy.stdout.readline())
+        start = time.monotonic()
+        main.send_signal(signal.SIGTERM)
+        assert main.wait(10) == 9
+        assert time.monotonic() - start < 8       # the client's 4 seconds and the grace
+        assert copy.poll() is None                # the stopping container ends it
+    finally:
+        if client:
+            os.kill(client, signal.SIGKILL)
+        _stop(main, *([copy] if copy else []))
+
+
+def _read_until(fd: int, text: bytes, timeout: float = 30.0, seen: bytes = b"") -> bytes:
     import select
 
     out = seen
@@ -927,6 +1052,20 @@ def _read_until(fd: int, text: bytes, timeout: float = 10.0, seen: bytes = b"") 
             pytest.fail(f"no {text!r} in {out!r}")
         out += os.read(fd, 4096)
     return out
+
+
+def _openpty() -> tuple[int, int]:
+    """os.openpty, tried again on the error macOS gives now and then while
+    other processes open pseudo-terminals at the same moment. This file
+    imports nothing from gmlx, so it keeps its own copy of
+    gmlx.container.terminal.open_pty."""
+    for _ in range(4):
+        try:
+            return os.openpty()
+        except OSError as e:
+            if e.errno != -6:
+                raise
+    return os.openpty()
 
 
 def _foreground_group(pid: int) -> int:
@@ -940,7 +1079,7 @@ def test_the_client_gets_the_terminal_and_the_entry_takes_it_back(entry):
     login_tty = getattr(os, "login_tty", None)
     if login_tty is None or shutil.which("ps") is None:
         pytest.skip("needs os.login_tty and ps")
-    master, slave = os.openpty()
+    master, slave = _openpty()
     main = subprocess.Popen([entry, "--", "sh", "-c", "echo pid $$; read x; exit 4"],
                             stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
                             preexec_fn=lambda: login_tty(slave))
@@ -962,13 +1101,19 @@ def test_the_client_gets_the_terminal_and_the_entry_takes_it_back(entry):
         os.close(master)
 
 
+# A job-control shell that starts the entry in a background group. The
+# child execs only once the parent has set its group.
 BACKGROUND = """
 import os, sys
+r, w = os.pipe()
 pid = os.fork()
 if pid == 0:
-    os.setpgid(0, 0)
+    os.close(w)
+    os.read(r, 1)
     os.execv(sys.argv[1], sys.argv[1:])
+os.close(r)
 os.setpgid(pid, pid)
+os.close(w)
 sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 """
 
@@ -980,7 +1125,7 @@ def test_a_client_in_the_background_of_a_terminal_stays_in_the_entrys_group(entr
     if login_tty is None:
         pytest.skip("needs os.login_tty")
     client = CLIENT.replace("print(os.getpid()", "print(os.getppid(), os.getpid()")
-    master, slave = os.openpty()
+    master, slave = _openpty()
     shell = subprocess.Popen(
         [sys.executable, "-c", BACKGROUND, entry, "--", sys.executable, "-c", client],
         stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
@@ -1033,7 +1178,7 @@ def _in_terminal(entry, helper: str, *client) -> tuple:
     login_tty = getattr(os, "login_tty", None)
     if login_tty is None:
         pytest.skip("needs os.login_tty")
-    master, slave = os.openpty()
+    master, slave = _openpty()
     init = subprocess.Popen([sys.executable, "-c", helper, entry, "--", *client],
                             stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
                             preexec_fn=lambda: login_tty(slave))

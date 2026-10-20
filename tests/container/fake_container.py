@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """A stand-in for Apple's ``container`` command, for the container-mode tests.
 
-The ``fake_container`` fixture installs it on ``PATH`` as ``container``. It
-keeps its state in the JSON file named by ``FAKE_CONTAINER_STATE``: the
-image store, a registry to pull from, containers, volumes and the result of
-each ``gmlx-entry --check``. Every call appends its argv to ``log``. The
-output mimics the JSON shapes that apple/container 1.4.1 prints, which
-1.5.0 keeps.
+The ``fake_container`` fixture installs it on ``PATH`` as ``container``, and
+runs the calls of ``gmlx.container.cli._run`` through :func:`call` in the
+test's own process. It keeps its state in the JSON file named by
+``FAKE_CONTAINER_STATE``: the image store, a registry to pull from,
+containers, volumes and the result of each ``gmlx-entry --check``. Every
+call appends its argv to ``log``. The output mimics the JSON shapes that
+apple/container 1.4.1 prints, which 1.5.0 keeps.
 """
 
 from __future__ import annotations
@@ -71,11 +72,11 @@ def _open_files() -> list[str]:
     return paths
 
 
-def main(state: dict, args: list[str]) -> int:
+def main(state: dict, args: list[str], env, out, err) -> int:
     state.setdefault("log", []).append(args)
     images = state["images"] = {_normalize(k): v for k, v in state.get("images", {}).items()}
     if args == ["--version"]:
-        print(f"container CLI version {state.get('version', '1.5.0')} (build: release)")
+        print(f"container CLI version {state.get('version', '1.5.0')} (build: release)", file=out)
         return 0
     if args[:2] == ["system", "status"]:
         # ``app_root`` is the folder of a service that ``container system
@@ -83,15 +84,15 @@ def main(state: dict, args: list[str]) -> int:
         as_json = _flag(args, "--format") == ["json"]
         if state.get("running", True):
             root = state.get("app_root") or os.path.join(
-                os.environ["HOME"], "Library", "Application Support", "com.apple.container")
+                env["HOME"], "Library", "Application Support", "com.apple.container")
             print(json.dumps({"status": "running", "paths": {
                 "appRoot": root.rstrip("/") + "/", "installRoot": "/usr/local/"}})
-                  if as_json else "FIELD   VALUE\nstatus  running")
+                  if as_json else "FIELD   VALUE\nstatus  running", file=out)
             return 0
         if as_json:
-            print(json.dumps({"status": "not running"}))
+            print(json.dumps({"status": "not running"}), file=out)
         else:
-            print("apiserver is not running", file=sys.stderr)
+            print("apiserver is not running", file=err)
         return 1
     if args[:2] == ["system", "start"]:
         # The service starts before the kernel step. A start with neither
@@ -101,22 +102,22 @@ def main(state: dict, args: list[str]) -> int:
         # as for ``system kernel set``.
         if "--enable-kernel-install" not in args and "--disable-kernel-install" not in args:
             print("fake container: a start without a kernel flag asks a question",
-                  file=sys.stderr)
+                  file=err)
             return 64
         if state.get("start_down"):
-            print("Error: failed to get a response from apiserver", file=sys.stderr)
+            print("Error: failed to get a response from apiserver", file=err)
             return 1
         state["running"] = True
         state.pop("app_root", None)
-        _read_settings(state)
+        _read_settings(state, env)
         if "--enable-kernel-install" in args:
-            return _kernel_download(state)
+            return _kernel_download(state, env, err)
         return 0
     if args[:3] == ["system", "kernel", "set"]:
         if not state.get("running", True):
-            print("Error: failed to get a response from apiserver", file=sys.stderr)
+            print("Error: failed to get a response from apiserver", file=err)
             return 1
-        return _kernel_download(state)
+        return _kernel_download(state, env, err)
     if args[:2] == ["system", "stop"]:
         state["running"] = False
         return 0
@@ -125,20 +126,20 @@ def main(state: dict, args: list[str]) -> int:
         # started.
         print(json.dumps({"build": {"cpus": 2, "memory": "2048mb",
                                     "rosetta": state.get("rosetta", True)},
-                          "container": {"cpus": 4, "memory": "1gb"}}))
+                          "container": {"cpus": 4, "memory": "1gb"}}), file=out)
         return 0
     if args[:2] == ["image", "inspect"]:
         if state.get("inspect_error"):
-            print(f"Error: {state['inspect_error']}", file=sys.stderr)
+            print(f"Error: {state['inspect_error']}", file=err)
             return 1
         img = images.get(_normalize(args[2]))
         if img is None:
-            print(f"Error: image not found: {args[2]}", file=sys.stderr)
+            print(f"Error: image not found: {args[2]}", file=err)
             return 1
-        print(json.dumps([_image_json(_normalize(args[2]), img)]))
+        print(json.dumps([_image_json(_normalize(args[2]), img)]), file=out)
         return 0
     if args[:2] == ["image", "list"]:
-        print(json.dumps([_image_json(n, i) for n, i in sorted(images.items())]))
+        print(json.dumps([_image_json(n, i) for n, i in sorted(images.items())]), file=out)
         return 0
     if args[:2] == ["image", "tag"]:
         if _normalize(args[2]) not in images:
@@ -152,20 +153,20 @@ def main(state: dict, args: list[str]) -> int:
                 images.pop(_normalize(ref), None)
         state.setdefault("deleted", []).extend(args[2:])
         if refused:
-            print(f"Error: failed to delete one or more images: {refused}", file=sys.stderr)
+            print(f"Error: failed to delete one or more images: {refused}", file=err)
             return 1
         return 0
     if args[:2] == ["image", "pull"]:
         img = state.get("registry", {}).get(args[2])
         if img is None:
-            print(f"Error: {args[2]} not found in the registry", file=sys.stderr)
+            print(f"Error: {args[2]} not found in the registry", file=err)
             return 1
         images[_normalize(args[2])] = dict(img)
         return 0
     if args[:2] == ["builder", "status"]:
         # With no builder at all, 1.4.1 prints an empty list.
         if state.get("builder") is None:
-            print("[]")
+            print("[]", file=out)
             return 0
         conf = state.get("builder_config", {"cpus": 2, "memory": 2 << 30, "ssh": False})
         env = ["PATH=/usr/bin:/bin", *state.get("builder_env", [])]
@@ -179,11 +180,11 @@ def main(state: dict, args: list[str]) -> int:
             "id": "buildkit", "ssh": conf["ssh"], "initProcess": {"environment": env},
             "resources": {"cpus": conf["cpus"], "memoryInBytes": conf["memory"]}},
             "status": {"state": builder_state,
-                       "startedDate": state.get("builder_started", "2026-01-01T00:00:00Z")}}]))
+                       "startedDate": state.get("builder_started", "2026-01-01T00:00:00Z")}}]), file=out)
         return 0
     if args[:2] == ["builder", "stop"]:
         if state.get("fail_builder_stop"):
-            print("Error: internalError: the builder did not stop", file=sys.stderr)
+            print("Error: internalError: the builder did not stop", file=err)
             return 1
         if state.get("builder") is not None:
             state["builder"] = False
@@ -192,9 +193,9 @@ def main(state: dict, args: list[str]) -> int:
         # As 1.4.1 does, the builder takes BUILDKIT_COLORS and NO_COLOR from
         # the build command, and a running builder whose copy differs is
         # created again.
-        wanted = sorted([f"BUILDKIT_COLORS={os.environ['BUILDKIT_COLORS']}"]
-                        if "BUILDKIT_COLORS" in os.environ else []) + (
-            ["NO_COLOR=true"] if "NO_COLOR" in os.environ else [])
+        wanted = sorted([f"BUILDKIT_COLORS={env['BUILDKIT_COLORS']}"]
+                        if "BUILDKIT_COLORS" in env else []) + (
+            ["NO_COLOR=true"] if "NO_COLOR" in env else [])
         wanted.sort()
         if state.get("builder") and state.get("builder_env", []) != wanted:
             state["builder_recreated"] = state.get("builder_recreated", 0) + 1
@@ -222,18 +223,18 @@ def main(state: dict, args: list[str]) -> int:
             for sig in wanted:
                 signal.signal(sig, lambda *_: None)
             signal.pthread_sigmask(signal.SIG_BLOCK, wanted)
-            print("waiting for a resize", file=sys.stderr, flush=True)
+            print("waiting for a resize", file=err, flush=True)
             signal.alarm(5)
             got = signal.sigwait(wanted)
             size = os.get_terminal_size(2)
             print(f"got {signal.Signals(got).name} at {size.columns}x{size.lines}",
-                  file=sys.stderr, flush=True)
+                  file=err, flush=True)
         if state.get("fail_build"):
             # A string is the output of the failed step, and the fake says
             # whether its standard error was a terminal.
             if isinstance(state["fail_build"], str):
-                print(f"{state['fail_build']}\nstderr tty: {sys.stderr.isatty()}",
-                      file=sys.stderr)
+                print(f"{state['fail_build']}\nstderr tty: {err.isatty()}",
+                      file=err)
             return 1
         state["next"] = state.get("next", 0) + 1
         digest = "sha256:" + hashlib.sha256(str(state["next"]).encode()).hexdigest()
@@ -249,13 +250,13 @@ def main(state: dict, args: list[str]) -> int:
         names = [args[i + 1] for i, a in enumerate(args[:-1])
                  if a == "-e" and "=" not in args[i + 1]]
         state.setdefault("runs", []).append(
-            {"argv": args, "env": {n: os.environ.get(n) for n in names},
+            {"argv": args, "env": {n: env.get(n) for n in names},
              "pgid": os.getpgrp(), "open_files": _open_files()})
         return state.get("run_rc", 0)
     if args[0] == "run":
         word = args[args.index("--check") + 1] if "--check" in args else ""
         rc, line = state.get("checks", {}).get(word, [0, f"/usr/bin/{word}"])
-        print(line, file=sys.stderr if rc else sys.stdout)
+        print(line, file=err if rc else out)
         return rc
     if args[0] == "ls":
         print(json.dumps([{
@@ -268,7 +269,7 @@ def main(state: dict, args: list[str]) -> int:
                             "type": {"volume": {"name": v, "format": "ext4"}}}
                            for v in c.get("volumes", [])],
                 "resources": {"cpus": 4, "memoryInBytes": c.get("memory", 4 << 30)}}}
-            for c in state.get("containers", [])]))
+            for c in state.get("containers", [])]), file=out)
         return 0
     if args[0] in ("stop", "kill", "delete"):
         # With ``delete_removes`` a delete takes the container off the list.
@@ -292,7 +293,7 @@ def main(state: dict, args: list[str]) -> int:
             "name": v["name"], "labels": v.get("labels", {}),
             "options": {"size": v["size"]} if v.get("size") else {},
             "sizeInBytes": v.get("bytes", 549755813888), "source": v.get("source", ""),
-            "format": "ext4"}} for v in state.get("volumes", [])]))
+            "format": "ext4"}} for v in state.get("volumes", [])]), file=out)
         return 0
     if args[:2] == ["volume", "create"]:
         labels = dict(a.split("=", 1) for a in _flag(args, "--label"))
@@ -307,20 +308,20 @@ def main(state: dict, args: list[str]) -> int:
         volumes = state.get("volumes", [])
         if name in state.get("refuse_volume_delete", []) or not any(
                 v["name"] == name for v in volumes):
-            print(f"Error: volume {name} could not be deleted", file=sys.stderr)
+            print(f"Error: volume {name} could not be deleted", file=err)
             return 1
         state["volumes"] = [v for v in volumes if v["name"] != name]
         return 0
-    print(f"fake container: unhandled {args}", file=sys.stderr)
+    print(f"fake container: unhandled {args}", file=err)
     return 64
 
 
-def _read_settings(state: dict) -> None:
+def _read_settings(state: dict, env) -> None:
     """As the service does when it starts: take the builder's Rosetta
     setting from the user file of the test's HOME."""
     import tomllib
 
-    path = os.path.join(os.environ["HOME"], ".config", "container", "config.toml")
+    path = os.path.join(env["HOME"], ".config", "container", "config.toml")
     try:
         with open(path, "rb") as f:
             build = tomllib.load(f).get("build") or {}
@@ -330,30 +331,29 @@ def _read_settings(state: dict) -> None:
         state["rosetta"] = build["rosetta"]
 
 
-def _kernel_download(state: dict) -> int:
+def _kernel_download(state: dict, env, err) -> int:
     """The download of the recommended kernel. ``kernel_fail`` fails it, as
-    a download with no network does, and ``kernel_interrupt`` sends the
-    launch that ran the call a SIGINT, as a Ctrl-C on the terminal does,
-    and ends with the exit code of SIGINT."""
-    print("Installing kernel...", file=sys.stderr)
+    a download with no network does, and ``kernel_interrupt`` ends the call
+    with a SIGINT to the launch that ran it, as a Ctrl-C on the terminal
+    does."""
+    print("Installing kernel...", file=err)
     if state.get("kernel_interrupt"):
-        os.kill(os.getppid(), signal.SIGINT)
-        return 130
+        raise _Interrupt
     if state.get("kernel_fail"):
-        print("Error: failed to download the kernel: network is unreachable", file=sys.stderr)
+        print("Error: failed to download the kernel: network is unreachable", file=err)
         return 1
-    _install_kernel(state.get("app_root"))
+    _install_kernel(env, state.get("app_root"))
     state["kernel_installs"] = state.get("kernel_installs", 0) + 1
     return 0
 
 
-def _install_kernel(root: str | None = None) -> None:
+def _install_kernel(env, root: str | None = None) -> None:
     """Put a kernel where Apple container keeps it: in the folder of a
     service started with --app-root, or for the test's HOME. A HOME that is
     the account's own is never written."""
     import pwd
 
-    home = os.environ["HOME"]
+    home = env["HOME"]
     if root is None and os.path.realpath(home) == os.path.realpath(
             pwd.getpwuid(os.getuid()).pw_dir):
         return
@@ -401,26 +401,50 @@ def _watch(folder: str, name: str) -> None:
         f.readline()
 
 
-if __name__ == "__main__":
-    path = os.environ["FAKE_CONTAINER_STATE"]
-    watch = os.environ.get("FAKE_CONTAINER_WATCH")
-    if watch:
-        _watch(watch, _call_name(sys.argv[1:]))
+class _Interrupt(Exception):
+    """The call ends with the exit code of SIGINT, and the launch that ran
+    it gets the signal."""
+
+
+def call(args: list[str], env, out, err, interrupt) -> int:
+    """One call of the fake, with its state file locked. ``env`` is the
+    environment of the call, ``out`` and ``err`` take its output, and
+    ``interrupt`` sends the launch that ran it a SIGINT, once the state is
+    saved."""
+    sigint = False
+    path = env["FAKE_CONTAINER_STATE"]
     with open(path + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with open(path) as f:
             current = json.load(f)
         # The real CLI refuses a flag that its help does not list, with
         # exit 64. The fixture fails the test that made such a call.
-        refused = container_cli_spec.problem(sys.argv[1:], container_cli_spec.load())
+        refused = container_cli_spec.problem(args, container_cli_spec.load())
         if refused is not None:
             current.setdefault("refused", []).append(refused)
-            print(f"Error: {refused}", file=sys.stderr)
+            print(f"Error: {refused}", file=err)
             code = 64
         else:
-            code = main(current, sys.argv[1:])
-        with open(path, "w") as f:
+            try:
+                code = main(current, args, env, out, err)
+            except _Interrupt:
+                code, sigint = 128 + signal.SIGINT, True
+        # A signal can end a call at any point, so the state file is never
+        # left half written.
+        with open(path + ".tmp", "w") as f:
             json.dump(current, f)
+        os.replace(path + ".tmp", path)
+    if sigint:
+        interrupt()
+    return code
+
+
+if __name__ == "__main__":
+    watch = os.environ.get("FAKE_CONTAINER_WATCH")
+    if watch:
+        _watch(watch, _call_name(sys.argv[1:]))
+    code = call(sys.argv[1:], os.environ, sys.stdout, sys.stderr,
+                lambda: os.kill(os.getppid(), signal.SIGINT))
     if watch:
         _event(watch, f"end {_call_name(sys.argv[1:])} {code}")
     sys.exit(code)

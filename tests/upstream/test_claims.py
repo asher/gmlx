@@ -52,6 +52,47 @@ def test_every_claim_takes_after_install():
     assert r.stdout.strip().splitlines()[-1] == f"{len(uc.CLAIMS)} claims OK"
 
 
+_TWICE_CHILD = r"""
+import contextlib
+import io
+import json
+import os
+
+import gmlx.upstream.claims as uc
+import mlx.core as mx
+
+if os.environ.get("KQUANT_FORCE_CPU"):
+    mx.set_default_device(mx.cpu)
+
+
+def wraps():
+    out = {}
+    for c in uc.CLAIMS:
+        status, obj = uc._resolve(c.module, c.attr)
+        if c.how == "wrap" and status == "ok":
+            out[uc._key(c)] = obj
+    return out
+
+
+with contextlib.redirect_stdout(io.StringIO()):
+    uc.install_claims()
+first = wraps()
+with contextlib.redirect_stdout(io.StringIO()):
+    uc.install_claims()
+print(json.dumps(sorted(k for k, v in wraps().items() if v is not first[k])))
+"""
+
+
+def test_a_second_install_changes_no_claimed_name():
+    """A wrapper that does not link down hides the layers below it, so a
+    second run of their installers stacks a copy of each on top."""
+    r = subprocess.run([sys.executable, "-c", _TWICE_CHILD],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 0, (r.stdout + r.stderr)[-6000:]
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == []
+
+
 def test_a_name_missing_from_the_copy_is_named(monkeypatch):
     _only(monkeypatch, Claim(_COPY, "definitely_not_a_thing", "test"),
           Claim("gmlx._vendor.mlx_vlm.no_such_module", "x", "test"))

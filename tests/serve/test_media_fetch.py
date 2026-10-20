@@ -8,7 +8,7 @@ import ipaddress
 import socket
 import ssl
 import threading
-import time
+import types
 
 import pytest
 
@@ -85,11 +85,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             self.wfile.write(head)
             self.wfile.flush()
-            for _ in range(200):
+            for i in range(200):
                 if _release(self.server).wait(0.05):
                     return
                 self.wfile.write(piece)
                 self.wfile.flush()
+                if self.server.on_drip is not None:
+                    self.server.on_drip(i)
         except OSError:
             pass
 
@@ -129,6 +131,7 @@ class _Server(http.server.ThreadingHTTPServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.release = threading.Event()
+        self.on_drip = None             # called with the index of each piece sent
 
     def handle_error(self, request, client_address):
         # A fetch that refuses a body closes its connection mid-response.
@@ -436,13 +439,33 @@ def test_a_silent_server_times_out(server, loopback_allowed):
 
 @pytest.mark.parametrize("path", ["/drip-body", "/drip-length", "/drip-headers"])
 def test_a_server_that_sends_slowly_is_cut_off_at_the_deadline(server, loopback_allowed,
-                                                               path):
+                                                               monkeypatch, path):
     # Each piece comes well inside the read timeout, so only the deadline
     # ends the fetch, and the part of the body read by then is not returned.
-    start = time.monotonic()
+    # The deadline passes, and its timer fires, once three pieces are sent.
+    clock, timers = [0.0], []
+
+    class Timer:
+        def __init__(self, interval, fn, args):
+            self.interval, self.fn, self.args = interval, fn, args
+
+        def start(self):
+            timers.append(self)
+
+        def cancel(self):
+            pass
+
+    def drip(i):
+        if i == 2:
+            clock[0] = timers[0].interval
+            timers[0].fn(*timers[0].args)
+
+    monkeypatch.setattr(mf, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(mf, "threading", types.SimpleNamespace(Timer=Timer))
+    server.on_drip = drip
     with pytest.raises(mf.FetchRefused, match="did not arrive within 0.5 seconds"):
-        _fetch(_url(server, path), timeout=5.0, total=0.5)
-    assert time.monotonic() - start < 3.0
+        _fetch(_url(server, path), timeout=30.0, total=0.5)
+    assert [t.interval for t in timers] == [0.5]
 
 
 def test_the_deadline_covers_every_redirect(server, loopback_allowed, monkeypatch):

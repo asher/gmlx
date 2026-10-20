@@ -453,7 +453,8 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
 
     let mut command = Command::new(&program);
     command.arg0(&name).args(&rest).env_remove(session::DIR_ENV).env_remove(ssh::PASSWD_ENV)
-        .env_remove(ssh::ROOTFS_ENV);
+        .env_remove(ssh::ROOTFS_ENV).env_remove(session::COPY_GRACE_ENV)
+        .env_remove(session::HANGUP_GRACE_ENV);
     if spec.clipboard {
         command.env("PATH", clipboard_path(&clipboard::clip_bin(), path_env.as_deref()));
     }
@@ -474,7 +475,7 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         } else if let Some(id) = spec.copy_id.as_deref() {
             if !armed.get() && session::hung_up(&dir, id) {
                 armed.set(true);
-                session::kill_after(pid, session::HANGUP_GRACE);
+                session::kill_after(pid, session::hangup_grace());
             }
         }
     });

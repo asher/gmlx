@@ -13,7 +13,6 @@ import contextlib
 import fcntl
 import json
 import os
-import pty
 import re
 import secrets
 import select
@@ -26,6 +25,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .terminal import open_pty
 
 CONTAINER_MIN = (1, 5, 0)
 # Download sizes for the first-run steps, in MB.
@@ -287,7 +288,7 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
     out = sys.stderr
     master = slave = None
     if out.isatty():
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         _copy_size(out, slave)
         # The terminal turns each newline into CR LF already.
         with contextlib.suppress(termios.error):

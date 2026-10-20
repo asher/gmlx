@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Ctrl-C that reached a `gmlx launch --container` session without a
+  terminal just as its client exited was lost, and the session kept waiting
+  for its other copies.
+
 ## [0.5.1] - 2026-10-18
 
 ### Added

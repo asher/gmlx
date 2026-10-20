@@ -168,6 +168,17 @@ docs = [
     "mkdocs-material==9.7.7",
     "pymdown-extensions==12.1",
 ]
+# The test suite's plugins: `pip install --group test` (pip 25.1 or newer).
+# CI and the GPU gate install the same pins.
+test = [
+    "pytest==9.1.1",
+    "pytest-xdist==3.8.0",
+    "pytest-timeout==2.4.0",
+    "pytest-cov==7.1.0",
+    "pytest-repeat==0.9.4",
+    "httpx==0.28.1",
+    "build==1.6.1",
+]
 
 [project.scripts]
 # `gmlx <verb>` (run / chat / serve / init / sync-models / ...) is the umbrella command.
@@ -197,7 +208,13 @@ markers = [
     "integration: end-to-end test needing a real GGUF (and, for parity, a llama.cpp binary); skipped unless KQUANT_TEST_GGUF_DIR is set",
     "needs_kvarn_ops: dispatches kvarn Metal kernels; skipped when the mlx-kquant ops probe fails (CPU device, op-less wheel)",
     "needs_kvarn_row_ends: dispatches the decode kernels with per-row ends; skipped unless the installed mlx-kquant is 0.4.9 or later",
+    "nightly: costly and rarely broken; the daily CI legs and `gate.py run --full` run it, other runs pass -m 'not nightly'",
 ]
+# pytest-timeout: a hung test fails with every thread's stack instead of
+# holding the run. SIGALRM keeps an xdist worker alive, so its other results
+# survive. Integration tests have no limit (tests/conftest.py).
+timeout = 900
+timeout_method = "signal"
 
 [tool.pyright]
 # Type-checks gmlx's calls into the copied mlx-vlm and mlx-lm

@@ -1,13 +1,17 @@
 # Testing
 
 The test suite has three tiers, ordered by what they need to run. Use the
-interpreter that has gmlx and mlx-kquant installed for all of them.
+interpreter that has gmlx and mlx-kquant installed for all of them, with the
+test plugins from `pip install --group test`.
 
 | Tier | Needs | Command |
 |------|-------|---------|
-| CPU logic | It needs nothing beyond Python. | `pytest` |
+| CPU logic | It needs nothing beyond Python. | `pytest -n 8` |
 | GGUF-gated integration | It needs real GGUFs on disk. | `KQUANT_TEST_GGUF_DIR=<dir> pytest` |
 | Server end-to-end | It needs GGUFs and the GPU. | Run the harnesses under `tests/e2e/`. |
+
+A pull request also needs a GPU gate run on a Mac, which
+[CI and the GPU gate](ci.md) explains.
 
 ## CPU logic tests
 
@@ -18,9 +22,20 @@ server patches and the chat client. The doc tests under
 `tests/test_docs_*.py` belong to this tier as well.
 
 ```sh
-pytest                       # whole suite, GGUF-gated tests skip
+pytest -n 8                  # whole suite on 8 workers, GGUF-gated tests skip
 pytest tests/test_config.py  # one module
 ```
+
+While you work, run only the tests your change can break:
+
+```sh
+python scripts/affected_tests.py --run        # changes since main, committed or not
+python scripts/affected_tests.py              # list them instead
+```
+
+It picks the tests that ran the changed code in the last full gate run,
+plus the tests that import it. A changed test file, conftest or doc picks
+its own tests.
 
 Set `KQUANT_FORCE_CPU=1` on a machine with no usable Metal GPU to keep the
 few tests that use array ops off the GPU path.
@@ -55,15 +70,16 @@ as the governor rig does, needs no machine at all.
 |---------------|-----------|
 | About 7.5 GB of memory and a virtual GPU | Never reads this Mac's memory, chip or kernel counters unless it runs on model files from this Mac. A unit test that needs more declares `host_gb`. |
 | Python 3.11 to 3.14, tests spread over parallel workers | Passes on each version, alone or beside any other test, in any order. |
-| A slower, shared machine | Bounds a time by its failure case with seconds to spare, never by a fraction of a second. |
+| A slower, shared machine | Waits on an event, a pipe or a hook, never on a sleep, and asserts no upper bound on elapsed time. |
 | Only the `all` extras, so no OpenCV | That needs an optional package skips without it, with `pytest.importorskip`. |
 | The newest release of every dependency | Handles a dependency's behavior change in gmlx code, and covers both versions. |
 
 To run the suite as CI does, in a fresh venv:
 
 ```sh
-pip install -U -e ".[all]" pytest httpx pytest-xdist
-KQUANT_FORCE_CPU=1 pytest -n auto
+pip install --upgrade pip    # --group needs pip 25.1 or newer
+pip install -U -e ".[all]" && pip install --group test
+KQUANT_FORCE_CPU=1 pytest -n auto -m "not nightly"
 ```
 
 A test on model files from this Mac never runs in CI, so it sees this Mac,
@@ -85,6 +101,39 @@ fails the test. Keep rows that read no files out of a module marked
 `GMLX_TEST_REAL_HOST=1` turns the simulation off, so a run sees the real
 host. A test that needs the real GPU checks it with
 `helpers._real_apple_gpu()`, which reads the real device.
+
+## Write a test
+
+Every pull request runs the whole suite, so each test adds to every
+contributor's wait. Keep a test small and in this process:
+
+- Test one behavior per test. Parametrize only over inputs that take
+  different code paths.
+- Run in this process, with fakes for programs and services. A subprocess,
+  a child interpreter or a real wait needs a comment that says why.
+- Add a model or image family as rows of the shared tables, not as new
+  files per aspect.
+- Assert the text of a message only when users search for that message.
+- Never sleep to let another thread or process get somewhere, and never
+  assert that elapsed time stays under a bound. Wait on an event, a pipe,
+  an injected clock or a hook.
+
+The lint job enforces the last rule with `scripts/check-test-timing.py`. A
+function that stands in for a hung service, or bounds a hang guard, can
+keep its sleep: list it in `scripts/test_timing_allowlist.txt` with the
+reason.
+
+Mark a costly test that rarely breaks as [nightly](ci.md#nightly-tests).
+
+To find tests whose coverage a neighbour already has:
+
+```sh
+python scripts/redundant_tests.py tests/image
+```
+
+It reads the coverage of the last `gate.py run --full`. A listed test is a
+candidate only: two tests with the same coverage can assert different
+things.
 
 ## Process state between tests
 

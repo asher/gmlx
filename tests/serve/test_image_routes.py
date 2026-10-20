@@ -472,7 +472,7 @@ def test_the_queue_cap_answers_429_with_retry_after(served):
 
     def slow(req, kw):
         entered.set()
-        gate.wait(5)
+        gate.wait(30)
         return svc.ImageJobResult(images=[b"x"], size=(64, 32), quality="auto",
                                   usage={}, seeds=[0], steps=1)
 
@@ -483,32 +483,35 @@ def test_the_queue_cap_answers_429_with_retry_after(served):
     first = threading.Thread(target=lambda: client.post(
         "/v1/images/generations", json={"prompt": "x"}))
     first.start()
-    assert entered.wait(5)
+    assert entered.wait(30)
     r = client.post("/v1/images/generations", json={"prompt": "y"})
     gate.set()
-    first.join(5)
+    first.join(30)
     assert r.status_code == 429
     assert int(r.headers["Retry-After"]) >= 2
 
 
 def _disconnecting_receive(body: bytes):
     """An ASGI receive that gives ``body``, then waits until ``leave()``,
-    then answers every call with a disconnect, as uvicorn does."""
+    then answers every call with a disconnect, as uvicorn does.
+    ``waiting`` is set once a call waits for the disconnect."""
     import asyncio
 
     state = {"sent": False, "event": asyncio.Event()}
+    waiting = asyncio.Event()
 
     async def receive():
         if not state["sent"]:
             state["sent"] = True
             return {"type": "http.request", "body": body, "more_body": False}
+        waiting.set()
         await state["event"].wait()
         return {"type": "http.disconnect"}
 
     def leave():
         state["event"].set()
 
-    return receive, leave
+    return receive, leave, waiting
 
 
 def test_a_disconnect_behind_the_http_middlewares_sets_the_stop_event():
@@ -531,7 +534,7 @@ def test_a_disconnect_behind_the_http_middlewares_sets_the_stop_event():
         await request.body()
         stop = threading.Event()
         watcher = asyncio.create_task(images._watch_disconnect(request, stop))
-        for _ in range(200):
+        for _ in range(3000):
             if stop.is_set():
                 break
             await asyncio.sleep(0.01)
@@ -542,7 +545,7 @@ def test_a_disconnect_behind_the_http_middlewares_sets_the_stop_event():
     app.add_route("/x", x, methods=["POST"])
 
     async def run():
-        receive, leave = _disconnecting_receive(b"{}")
+        receive, leave, waiting = _disconnecting_receive(b"{}")
         sent = []
 
         async def send(message):
@@ -555,9 +558,9 @@ def test_a_disconnect_behind_the_http_middlewares_sets_the_stop_event():
                  "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80),
                  "scheme": "http"}
         task = asyncio.create_task(app(scope, receive, send))
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(waiting.wait(), 30)
         leave()
-        await asyncio.wait_for(task, 10)
+        await asyncio.wait_for(task, 30)
 
     asyncio.run(run())
     assert seen["stop"] is True
@@ -757,13 +760,12 @@ def _receive(body: dict, *, gone: bool):
     return receive
 
 
-def _until(cond, secs=3.0):
-    import time
+async def _job_ended():
+    """Wait until the image worker has run what is queued on it: it is one
+    thread, so the job and its done callbacks have run."""
+    import asyncio
 
-    end = time.monotonic() + secs
-    while time.monotonic() < end and not cond():
-        time.sleep(0.02)
-    return cond()
+    await asyncio.wrap_future(svc.WORKER.submit(lambda: None))
 
 
 def test_a_stream_closed_after_its_job_ended_frees_its_hold(served):
@@ -779,12 +781,11 @@ def test_a_stream_closed_after_its_job_ended_frees_its_hold(served):
         resp = await ep(Request(_scope(), _receive(body, gone=False)))
         it = resp.body_iterator
         await it.__anext__()               # the first partial
-        await asyncio.sleep(0.3)           # the job has ended
+        await _job_ended()
         await it.aclose()                  # the client left
-        await asyncio.sleep(0.1)
 
     asyncio.run(run())
-    assert _until(lambda: served.released == [1]), served.released
+    assert served.released == [1]
     assert images.STATE.in_flight == 0
 
 
@@ -814,10 +815,10 @@ def test_a_stream_whose_body_never_starts_frees_its_hold(served, running):
             pass
 
         await resp(_scope(), receive, send)
-        await asyncio.sleep(0.2)
+        await _job_ended()
 
     asyncio.run(run())
-    assert _until(lambda: served.released == [1]), served.released
+    assert served.released == [1]
     assert images.STATE.in_flight == 0
 
 
@@ -842,11 +843,11 @@ def test_a_left_stream_logs_no_unretrieved_future_or_pending_task(
         it = resp.body_iterator
         await it.__anext__()
         await it.aclose()
-        await asyncio.sleep(0.3)
+        await _job_ended()                 # the job failed after the client left
 
     with caplog.at_level(logging.ERROR, logger="asyncio"):
         asyncio.run(run())
-        assert _until(lambda: served.released == [1])
+        assert served.released == [1]
         gc.collect()
     bad = [m for m in caplog.messages
            if "never retrieved" in m or "Task was destroyed" in m]
@@ -862,7 +863,7 @@ def test_a_gone_client_stops_its_job(served):
     seen = []
 
     def job(req, kw):
-        seen.append(kw["stop"].wait(3))
+        seen.append(kw["stop"].wait(30))
         raise svc.JobStopped(False)
 
     served.job = job

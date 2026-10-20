@@ -411,47 +411,47 @@ def test_a_slow_hub_finishes_over_two_starts_and_the_copy_pools_as_upstream(
 def test_a_black_holed_hub_costs_one_short_try_with_no_lock_held(
         hub, tmp_path, monkeypatch):
     # The endpoint accepts and never answers. The fetch gives up after its
-    # timeout, on its one connection. While it waits, it holds no lock: a
+    # timeout, on its one connection. While it fetches, it holds no lock: a
     # load-path fetch of another thread proceeds.
     import threading
-    import time
 
-    from fake_hub import BlackHole, use_hub
+    from fake_hub import BlackHole, before_each_request, use_hub
 
     hole = BlackHole()
     use_hub(monkeypatch, hole.endpoint, str(tmp_path / "hf"))
     monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 1.0)
-    done = threading.Event()
+    monkeypatch.setattr(hf_cache, "_clock", lambda: 0.0)
+    done, entered = threading.Event(), threading.Event()
+    timeouts, during = [], []
+
+    def other():
+        with hf_cache.network_fetch_allowed():
+            entered.set()
+
+    def request(timeout):
+        timeouts.append(timeout)
+        threading.Thread(target=other, daemon=True).start()
+        during.append(entered.wait(30))
+
+    before_each_request(monkeypatch, request)
 
     def load():
         with hf_cache.offline_resolve(REPO, wanted=_card):
             done.set()
 
-    started = time.monotonic()
     t = threading.Thread(target=load, daemon=True)
     t.start()
     try:
-        deadline = time.monotonic() + 5
-        while hole.accepted == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert hole.accepted == 1 and not done.is_set()
-        entered = threading.Event()
-
-        def other():
-            with hf_cache.network_fetch_allowed():
-                entered.set()
-
-        threading.Thread(target=other, daemon=True).start()
-        assert entered.wait(0.5), "a fetch waited on the offline lock"
-        assert not done.is_set()
-        assert done.wait(10)
-        assert time.monotonic() - started < 5
-        t.join(5)
+        assert done.wait(60)
+        t.join(30)
+        assert during == [True], "a fetch waited on the offline lock"
+        assert timeouts == [1.0]           # one try, given the whole timeout
+        assert hole.wait_accepted(1)
         assert hole.accepted == 1
         # The next load does not try again.
         with hf_cache.offline_resolve(REPO, wanted=_card):
             pass
-        assert hole.accepted == 1
+        assert hole.accepted == 1 and len(timeouts) == 1
     finally:
         hole.close()
 

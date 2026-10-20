@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import fcntl
 import os
-import pty
 import select
 import signal
 import struct
@@ -171,6 +170,29 @@ def test_unbracketed_input_is_never_a_paste():
     assert _joined(terminal.InputParser().feed(text)) == [("data", text)]
 
 
+def test_a_pseudo_terminal_open_that_macos_fails_now_and_then_is_tried_again(monkeypatch):
+    real, calls = os.openpty, []
+
+    def flaky(errno_value):
+        def openpty():
+            calls.append(errno_value)
+            if len(calls) < 3:
+                raise OSError(errno_value, os.strerror(errno_value))
+            return real()
+        return openpty
+
+    monkeypatch.setattr(os, "openpty", flaky(-6))
+    fds = terminal.open_pty()
+    assert len(calls) == 3 and all(os.isatty(fd) for fd in fds)
+    for fd in fds:
+        os.close(fd)
+    calls.clear()
+    monkeypatch.setattr(os, "openpty", flaky(24))           # EMFILE is no race
+    with pytest.raises(OSError):
+        terminal.open_pty()
+    assert len(calls) == 1
+
+
 # The relay
 
 class _Terminal:
@@ -178,7 +200,7 @@ class _Terminal:
     ``keys`` and the relay reads ``tty``."""
 
     def __init__(self, rows=30, cols=100):
-        self.keys, self.tty = pty.openpty()
+        self.keys, self.tty = terminal.open_pty()
         fcntl.ioctl(self.tty, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.mode = termios.tcgetattr(self.tty)
 

@@ -9,54 +9,120 @@ on:
   schedule:
     # Weekly: the drift report (the drift job), what the newest mlx-vlm and
     # mlx-lm releases change in the copy under gmlx/_vendor, and the
-    # comfyui-pack job against ComfyUI's newest release and master. The test
-    # and lint jobs do not run on the schedule.
+    # comfyui-pack job against ComfyUI's newest release and master.
     - cron: "0 6 * * 1"
+    # Daily: the test job on Python 3.12 and 3.13 with the nightly tests.
+    - cron: "0 7 * * *"
 
 concurrency:
-  group: tests-${{ github.ref }}
+  # The schedule is part of the group, so a scheduled run and a push to
+  # main never cancel each other, and the daily run never cancels the weekly.
+  group: tests-${{ github.ref }}-${{ github.event.schedule }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # The kinds of file a push or pull request changes, from the merge-base,
+    # by scripts/changed_paths.py. A schedule counts as changing everything.
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+      pack: ${{ steps.diff.outputs.pack }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/changed_paths.py --base "$BASE" --head "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
   test:
-    if: github.event_name != 'schedule' && github.ref_type != 'tag'
+    needs: [changes]
+    if: >-
+      github.ref_type != 'tag'
+      && (github.event_name != 'schedule' || github.event.schedule == '0 7 * * *')
     # macos-26, not older images: the published mlx-kquant wheels are tagged
     # macosx_26_0_arm64 (built with MACOSX_DEPLOYMENT_TARGET=26.2 for the
     # Xcode 26.5 SDK miscompile workaround) - an older runner can't install
     # them and would fall back to compiling the Metal extension from sdist.
     runs-on: macos-26
+    # The 3.14 leg also runs pyright and builds the guest entry.
+    timeout-minutes: ${{ matrix.python-version == '3.14' && 60 || 45 }}
+    permissions:
+      contents: read
+      # Flake issues, and the main baseline the growth report compares with.
+      issues: write
+      actions: read
     strategy:
+      fail-fast: false
       matrix:
-        # 3.11 is the requires-python floor; 3.14 is what uv and pipx select by
-        # default, so the documented install lands there unless asked otherwise.
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # A pull request runs 3.11, the requires-python floor, and 3.14, what
+        # uv and pipx select by default. A push to main runs 3.14. The daily
+        # schedule runs 3.12 and 3.13 with the nightly tests.
+        python-version: ${{ fromJSON(github.event.schedule == '0 7 * * *' && '["3.12", "3.13"]' || github.event_name == 'push' && '["3.14"]' || '["3.11", "3.14"]') }}
+    env:
+      CODE: ${{ needs.changes.outputs.code }}
+      # A docs-only change runs only the 3.14 leg: the docs tests and the
+      # arch-coverage check, after the full install the docs tests need.
+      # The other leg skips every step after checkout, so its check passes.
+      RUN: ${{ needs.changes.outputs.code == 'true' || matrix.python-version == '3.14' }}
+      DAILY: ${{ github.event.schedule == '0 7 * * *' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
+        if: env.RUN == 'true'
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Week of the year
+        # Part of the Rust cache key, so a new stable release replaces the
+        # cached toolchain within a week.
+        id: week
+        if: env.CODE == 'true'
+        run: echo "week=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        if: env.CODE == 'true'
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            crates/gmlx-entry/target
+          key: rust-${{ runner.os }}-${{ steps.week.outputs.week }}-${{ hashFiles('crates/gmlx-entry/rust-toolchain.toml', 'crates/gmlx-entry/Cargo.lock') }}
       - name: Rust toolchain for the guest entry
         # The channel and target match rust-toolchain.toml, which a test
         # checks. Naming them keeps an older rustup from failing on a bare
         # `rustup toolchain install`.
+        if: env.CODE == 'true'
         working-directory: crates/gmlx-entry
         run: |
           rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
           cargo test --locked
       - name: Install
+        if: env.RUN == 'true'
         run: |
+          # --group needs pip 25.1 or newer.
+          python -m pip install --upgrade pip
           pip install "mlx==0.32.3"
           # Wheel, not sdist. Must satisfy the pyproject floor or the
           # editable install upgrades it; tests/test_ci_pins.py gates that.
           pip install "mlx-kquant==0.5.2"
           # `all` brings the chat, voice and assistant extras, so their tests
           # run instead of skipping themselves away.
-          pip install -e ".[all]" pytest pytest-xdist httpx build
+          pip install -e ".[all]"
+          pip install --group test
       - name: Import canary
+        if: env.RUN == 'true'
         # A broken package import must fail the build loudly. The test files
         # importorskip only true optionals, never gmlx itself.
         run: python -c "import gmlx, gmlx.commands.cli, gmlx.serve.server, gmlx.serve.patches, gmlx.spec.engine, gmlx.spec.speculative"
       - name: Wheel completeness
+        if: env.RUN == 'true'
         # The editable install above can't catch packaging drops: build the
         # wheel (via sdist, so a stale build/ dir can't leak deleted modules
         # into it) and require it to ship exactly the tracked package modules,
@@ -106,24 +172,74 @@ jobs:
       - name: Arch coverage doc
         # docs/arch-coverage.md is generated; a new arch must not leave the
         # committed doc lying about what loads.
+        if: env.RUN == 'true'
         run: python scripts/check-coverage.py --check --strict
       - name: Type check (pyright)
         # pyright checks gmlx's calls into the copied mlx-vlm and mlx-lm, whose
         # imports of mlx, transformers and the rest only this job installs, not
         # the deps-free lint job. One interpreter is enough: the checked
         # surface does not vary by Python version.
-        if: matrix.python-version == '3.12'
+        if: env.CODE == 'true' && matrix.python-version == '3.14'
         run: |
           pip install "pyright[nodejs]==1.1.414"
           pyright
+      - name: Build the guest entry
+        # Once, before the tests, so their workers do not each build it.
+        if: env.CODE == 'true'
+        run: echo "GMLX_ENTRY_BIN=$(python scripts/build_guest_entry.py --native | tail -1)" >> "$GITHUB_ENV"
       - name: Run CPU logic tests
+        if: env.RUN == 'true'
         env:
           # Hosted runners have no dependable Metal device; the conftest flips
           # the default device to CPU when this is set.
           KQUANT_FORCE_CPU: "1"
-        # One worker per core, so a failure shows in minutes, not an hour.
-        run: pytest -q -rfE -n auto
+        # One worker per core. Tests that fail are rerun alone; one that then
+        # passes is flaky, which warns instead of failing the step.
+        run: >-
+          python scripts/ci_tests.py run
+          --select ${{ env.CODE == 'true' && 'full' || 'docs' }}
+          ${{ matrix.python-version == '3.11' && '--skip-numerics' || '' }}
+          ${{ env.DAILY == 'true' && '--nightly' || '' }}
+      - name: Flake issues
+        # One issue per flaky test. A push to main and the daily 3.13 leg
+        # also count green runs towards closing the open ones. A fork's
+        # token cannot write issues.
+        if: >-
+          always() && env.RUN == 'true'
+          && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PY: ${{ matrix.python-version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          args=()
+          if [ "$EVENT" = push ] || { [ "$DAILY" = true ] && [ "$PY" = 3.13 ]; }; then args+=(--count); fi
+          if [ "$DAILY" = true ] && [ "$PY" = 3.13 ]; then args+=(--daily); fi
+          python scripts/ci_tests.py issues --run-url "$RUN_URL" "${args[@]}"
+      - name: Suite growth
+        # The test count and test time against the newest main run that
+        # uploaded a full 3.14 report.
+        if: always() && env.CODE == 'true' && matrix.python-version == '3.14' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for run in $(gh run list --workflow test.yml --branch main --event push --status success \
+                         --limit 10 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run" --name junit-3.14 --dir baseline 2>/dev/null; then break; fi
+          done
+          python scripts/ci_tests.py growth --junit junit.xml --baseline baseline/junit.xml
+      - uses: actions/upload-artifact@v7
+        # A docs-only run's report is named apart, so it is never a baseline.
+        if: always() && env.RUN == 'true'
+        with:
+          name: junit-${{ matrix.python-version }}${{ env.CODE != 'true' && '-docs' || '' }}
+          path: junit*.xml
+          if-no-files-found: ignore
       - name: No stock mlx-vlm or mlx-lm
+        if: env.RUN == 'true'
         # No requirement of gmlx with all its extras installs mlx-vlm, mlx-lm
         # or mlx-embeddings, which requires a stock mlx-vlm, and the copy's
         # version files name the releases the manifest records.
@@ -178,6 +294,53 @@ jobs:
           python -m build
           python scripts/check_guest_entry_dist.py
 
+  stress:
+    # Daily: the concurrency tests under random stalls, for the races a
+    # loaded machine shows (scripts/stress_tests.py). A failing test opens
+    # or reopens its flaky issue. The job never gates a pull request.
+    if: github.event.schedule == '0 7 * * *'
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Rust toolchain for the guest entry
+        working-directory: crates/gmlx-entry
+        run: rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install "mlx==0.32.3"
+          pip install "mlx-kquant==0.5.2"
+          pip install -e ".[all]"
+          pip install --group test
+      - name: Build the guest entry
+        run: echo "GMLX_ENTRY_BIN=$(python scripts/build_guest_entry.py --native | tail -1)" >> "$GITHUB_ENV"
+      - name: Stress
+        env:
+          KQUANT_FORCE_CPU: "1"
+        run: python scripts/stress_tests.py --preset concurrency --count 3 --minutes 30 --out stress-out
+      - name: Flake issues
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/ci_tests.py issues --flaky stress-out/flaky.json --run-url "$RUN_URL"
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: stress-out
+          path: stress-out
+          if-no-files-found: ignore
+
   lint:
     if: github.event_name != 'schedule' && github.ref_type != 'tag'
     runs-on: ubuntu-latest
@@ -199,6 +362,7 @@ jobs:
           python scripts/vendor_upstream.py verify
           python scripts/vendor_upstream.py lint
       - run: python scripts/check-docs.py
+      - run: python scripts/check-test-timing.py
       - name: Docs site build
         # The release workflow publishes this site. --strict fails on a link,
         # anchor or nav entry the site cannot resolve.
@@ -211,7 +375,7 @@ jobs:
     # What the newest mlx-vlm and mlx-lm releases change in the copy, as a
     # Markdown report in the run summary. It informs a port and never fails
     # the run; see docs/internals/upstream-upgrades.md.
-    if: github.event_name == 'schedule'
+    if: github.event.schedule == '0 6 * * 1'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -225,59 +389,30 @@ jobs:
           set -o pipefail
           scripts/upstream_canary.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
-  pack-changes:
-    # Whether a push or pull request changes the ComfyUI node pack, its
-    # tests, the verb that installs it, the path python -m gmlx takes to that
-    # verb or this workflow, which the comfyui-pack job needs outside the
-    # schedule and tags.
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
-    runs-on: ubuntu-latest
-    outputs:
-      pack: ${{ steps.diff.outputs.pack }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - id: diff
-        env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          # A new branch has no usable base, so its push runs the job.
-          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-            changed=$(git diff --name-only "$BASE" HEAD -- gmlx/comfyui_pack tests/comfyui_pack \
-              gmlx/commands/comfyui.py gmlx/commands/cli.py gmlx/commands/__init__.py \
-              gmlx/__init__.py gmlx/__main__.py \
-              .github/workflows/test.yml)
-          else
-            changed=all
-          fi
-          echo "pack=$([ -n "$changed" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
   comfyui-pack:
     # The ComfyUI node pack against real ComfyUI and the stub server in
     # tests/comfyui_pack, loaded through the link that `gmlx comfyui install`
     # makes. Each run clones ComfyUI and installs torch, so the job runs on
-    # the weekly schedule, on a release tag, and when a push or pull request
-    # changes the pack or its tests. It checks the ComfyUI commit that the
-    # release tests pin, the oldest ComfyUI release the pack supports, as
-    # gmlx/comfyui_pack/version.py names it, and a newer release: on the
-    # schedule the newest tag, otherwise the version that version.py names
-    # as tested. On the schedule it also runs ComfyUI master, which only
-    # reports.
-    needs: [pack-changes]
+    # the weekly schedule, on a release tag, and when a pull request changes
+    # the pack, its tests or its verb. A pull request checks the ComfyUI
+    # commit that the release tests pin. A tag adds the oldest ComfyUI
+    # release the pack supports, as gmlx/comfyui_pack/version.py names it,
+    # and the release version.py names as tested. The weekly schedule checks
+    # the newest release instead and also runs ComfyUI master, which only
+    # reports. tests/commands/test_comfyui.py covers the bare-interpreter
+    # `python -m gmlx comfyui install` path on every test leg.
+    needs: [changes]
     if: >-
-      ${{ !cancelled() && (github.event_name == 'schedule'
+      ${{ !cancelled() && (github.event.schedule == '0 6 * * 1'
       || github.ref_type == 'tag'
-      || needs.pack-changes.outputs.pack == 'true') }}
+      || (github.event_name == 'pull_request' && needs.changes.outputs.pack == 'true')) }}
     runs-on: macos-26
     timeout-minutes: 60
     continue-on-error: ${{ matrix.comfyui == 'master' }}
     strategy:
       fail-fast: false
       matrix:
-        comfyui: [pin, floor, release, master]
-        exclude:
-          - comfyui: ${{ github.event_name == 'schedule' && 'none' || 'master' }}
+        comfyui: ${{ fromJSON(github.event.schedule == '0 6 * * 1' && '["pin", "floor", "release", "master"]' || github.ref_type == 'tag' && '["pin", "floor", "release"]' || '["pin"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -292,7 +427,7 @@ jobs:
             pin) ref=$PIN ;;
             floor) ref=v$(sed -n 's/^COMFYUI_FLOOR = "\(.*\)"$/\1/p' gmlx/comfyui_pack/version.py) ;;
             release)
-              if [ "${{ github.event_name }}" = schedule ]; then
+              if [ "${{ github.event.schedule }}" = "0 6 * * 1" ]; then
                 ref=$(git ls-remote --tags --refs "$REPO" 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -1)
               else
                 ref=v$(sed -n 's/^COMFYUI_TESTED = "\(.*\)"$/\1/p' gmlx/comfyui_pack/version.py)
@@ -322,3 +457,16 @@ jobs:
         with:
           name: comfyui-pack-${{ matrix.comfyui }}
           path: pack-results
+
+  gate:
+    # The gate/gpu status once the test legs end, so a result pushed while
+    # they ran counts without a dispatch. gate.yml also runs on its own
+    # when the pull request is pushed. A red test leg still posts.
+    needs: [test]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    # A called workflow gets no more than its caller grants.
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: read
+    uses: ./.github/workflows/gate.yml

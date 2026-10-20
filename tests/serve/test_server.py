@@ -1419,16 +1419,24 @@ def test_a_sighup_reload_names_the_services_a_missing_extra_left_off(monkeypatch
     assert "To add it: old" not in err
 
 
-def test_the_services_off_wait_ends_at_its_timeout(tmp_path):
-    import time
+def test_the_services_off_wait_ends_at_its_timeout(tmp_path, monkeypatch):
+    from types import SimpleNamespace
 
     import gmlx.serve.lifecycle as lc
     log = tmp_path / "server.log"
     log.write_text("[server] server.stt is off: its optional stt extra is not installed.\n")
-    t0 = time.monotonic()
+    clock = SimpleNamespace(now=0.0, naps=[])
+
+    def sleep(s):
+        clock.naps.append(s)
+        clock.now += s
+
+    monkeypatch.setattr(lc, "time", SimpleNamespace(monotonic=lambda: clock.now,
+                                                    sleep=sleep))
     assert lc.services_off_after(str(log), 0, timeout=0.3) == [
         "[server] server.stt is off: its optional stt extra is not installed."]
-    assert 0.25 < time.monotonic() - t0 < 2.0
+    # The log never says the reload is done: it polls until the timeout.
+    assert clock.naps == [0.1, 0.1, 0.1] and clock.now >= 0.3
     assert lc.services_off_after(str(tmp_path / "gone.log"), 0) == []
 
 
