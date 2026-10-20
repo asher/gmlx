@@ -845,10 +845,11 @@ class _CkptRecord:
     # record, retirement stores, and the state prefixes of letter
     # decisions (gmlx/systemone/prefixes.py). Retention differs only in
     # _record_insert's strip-on-extend rules and eviction order;
-    # adoption gates only ever test for "replay".
+    # adoption gates only ever test for "replay". spared: a record
+    # strip-on-extend kept for the next turn (see _record_insert).
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails", "qsa", "nbytes", "kind")
+                 "tails", "qsa", "nbytes", "kind", "spared")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1136,13 +1137,15 @@ def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
 
 def _evict_lru_record(manager, idx, keep):
     """Release and return the eviction victim: the least-recently-used
-    non-anchor record, else the least-recently-used anchor, never the
+    spared record, else non-anchor record, else anchor, never the
     ``keep`` key (the record being inserted always survives). Lookup
     hits move_to_end, so anchor order is LRU by last hit: an anchor
     that never serves a sibling ages out, one that does stays hot.
     Caller holds the lock and guarantees a non-keep record exists."""
-    key = next((k for k, r in idx.items()
-                if r.kind != "anchor" and k != keep), None)
+    key = next((k for k, r in idx.items() if r.spared and k != keep), None)
+    if key is None:
+        key = next((k for k, r in idx.items()
+                    if r.kind != "anchor" and k != keep), None)
     if key is None:
         key = next(k for k in idx if k != keep)
     victim = idx.pop(key)
@@ -1183,7 +1186,8 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
 
     ``keep``: the storing request's p_stable. Where a record past it would
     strip the deepest record at or below it, the one a next turn
-    restores, that record stays."""
+    restores, that record stays, marked spared: the count and byte
+    bounds evict it first, so it never costs another chain a record."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
@@ -1234,6 +1238,8 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             if k != held:
                 _release_record(manager, idx.pop(k))
+            else:
+                idx[k].spared = True
         idx[key] = rec
         idx.move_to_end(key)
         if rec.kind == "decision":

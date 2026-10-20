@@ -8,6 +8,8 @@ tests exercise every byte movement without Metal or a real model."""
 
 from __future__ import annotations
 
+import gc
+import weakref
 from contextlib import contextmanager
 
 import numpy as np
@@ -1297,8 +1299,10 @@ def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):
 
 
 def test_close_stats_gated_on_stats_verbose(capsys):
-    """All end-of-run stat lines follow _stats_verbose (the CLI's -v); the
-    wedge anomaly warning prints regardless."""
+    """All end-of-run stat lines follow _stats_verbose (the CLI's -v), and
+    a feeder the garbage collector closes prints none: they would land in
+    whatever the process prints then, such as a command's JSON. The wedge
+    anomaly warning prints regardless."""
     import time as _time
 
     from gmlx.stream.decode_feeder import DecodeFeeder
@@ -1329,6 +1333,14 @@ def test_close_stats_gated_on_stats_verbose(capsys):
     assert "arena hit rate" in out
     assert "per-layer hit rate" in out
     assert "stalls" in out
+    assert "wedged" in out
+    f = bare(True)
+    collected = weakref.ref(f)
+    del f
+    gc.collect()
+    assert collected() is None
+    out = capsys.readouterr().out
+    assert "arena hit rate" not in out
     assert "wedged" in out
 
 
@@ -1698,6 +1710,7 @@ def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, capsys, unmixed,
         else:
             assert np.allclose(recorded[-1][1].reshape(-1), [1.0], atol=1e-6)
     assert df._layer_shed_n == 2
+    assert "run in full" not in capsys.readouterr().out
 
     out = glu(x1, i1)
     mx.eval(out)

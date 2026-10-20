@@ -2011,12 +2011,14 @@ class DecodeFeeder:
                              slot_owner=lambda: self._owner[li]):
             yield
 
-    def close(self, wait: bool = True) -> None:
+    def close(self, wait: bool = True, report: bool = True) -> None:
         """``wait=False`` is the finalizer's form: a join from ``__del__``
         deadlocks when the collection runs inside a thread's bootstrap,
         which holds ``threading._shutdown_locks_lock`` that the join of a
         finished thread takes again. Nothing in flight references the
-        feeder once it is collectable, so the pools drain on their own."""
+        feeder once it is collectable, so the pools drain on their own.
+        ``report=False`` skips the stats lines, which from a finalizer
+        would land in whatever the process prints then."""
         if getattr(self, "_closed", False):
             return
         self._closed = True
@@ -2045,7 +2047,7 @@ class DecodeFeeder:
                 f"[stream] routed-id trace: {len(rows)} stage calls -> "
                 f"{self._routed_log_path}")
             self._routed_log = None
-        if not getattr(self, "_stats_verbose", True):
+        if not report or not getattr(self, "_stats_verbose", True):
             self._print_wedges(wait=wait)
             return
         if getattr(self, "_lookups", 0):
@@ -2149,7 +2151,7 @@ class DecodeFeeder:
 
     def __del__(self):
         try:
-            self.close(wait=False)
+            self.close(wait=False, report=False)
         except BaseException:  # noqa: BLE001, S110 - incl. ^C during interpreter exit
             pass
 

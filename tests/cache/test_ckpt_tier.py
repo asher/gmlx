@@ -672,15 +672,17 @@ def test_strip_on_extend_keeps_newest_two_plus_anchor():
     assert got == 64
 
 
+@pytest.mark.parametrize("last", ["boundary", "replay"])
 @pytest.mark.parametrize("turn", [False, True], ids=["grid", "turn"])
 @pytest.mark.parametrize("make", [make_hybrid_cache, make_swa_cache],
                          ids=["arrays", "window"])
 def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores(
-        make, turn):
+        make, turn, last):
     """Grid records at 32, 64 and 96, a turn record at p_stable (110) or
-    none, then two stores past p_stable. The first leaves main's records.
-    The second keeps the deepest record at or below p_stable, which the
-    next turn restores and main's strip drops."""
+    none, then two stores past p_stable, the second a boundary or the N-1
+    replay. The first leaves main's records. The second keeps the deepest
+    record at or below p_stable, which the next turn restores and main's
+    strip drops."""
     from gmlx.cache.snapshot import _ckpt_records
 
     def records():
@@ -694,10 +696,35 @@ def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores(
                           keep=110)
     assert records() == [32, held, 124]
     assert ckpt_store(man, ids[:130], make(130, seed=130), extra_hash=0,
-                      keep=110)
+                      keep=110, kind=last)
     assert records() == [32, held, 124, 130]
     _warm, got = ckpt_lookup(man, ids[:110] + [7, 8, 9], extra_hash=0)
     assert got == held
+
+
+def test_the_record_a_store_past_p_stable_keeps_is_evicted_first(
+        monkeypatch):
+    """At the record bound, the record kept for one chat's next turn goes
+    before another chat's least recently used record."""
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 6)
+    man = APCManager(num_blocks=256, block_size=16)
+    other = list(range(1000, 1064))
+    for p in (32, 48):
+        assert ckpt_store(man, other[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0)
+    ids = list(range(400, 540))
+    for p in (32, 64, 96, 124, 130):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0, keep=110)
+    assert len(cs._ckpt_records(man)) == 6
+    assert ckpt_store(man, list(range(2000, 2032)),
+                      make_hybrid_cache(32, seed=7), extra_hash=0)
+    _warm, got = ckpt_lookup(man, other[:48] + [7], extra_hash=0)
+    assert got == 48
+    _warm, got = ckpt_lookup(man, ids[:110] + [7], extra_hash=0)
+    assert got == 32
 
 
 def test_the_post_prefill_store_passes_the_stable_prefix(monkeypatch):
