@@ -147,6 +147,22 @@ def copy_size(source: int, target: int, last: bytes | None = None) -> bytes | No
     return size
 
 
+# What macOS's posix_openpt fails with now and then while other processes
+# open pseudo-terminals at the same moment. The next try succeeds.
+_PTY_BUSY = -6
+
+
+def open_pty(tries: int = 5) -> tuple[int, int]:
+    """A new pseudo-terminal, as (master, slave)."""
+    for _ in range(tries - 1):
+        try:
+            return os.openpty()
+        except OSError as e:
+            if e.errno != _PTY_BUSY:
+                raise
+    return os.openpty()
+
+
 def take_terminal() -> None:
     """Make standard input the controlling terminal of the session that
     the child leads. It runs in the child between fork and exec, so it
@@ -360,7 +376,7 @@ class TerminalRelay:
         self.term, self.out, self.esc_wait = term, out, esc_wait
         self.on_key, self.pastes, self.log = on_key, pastes, log
         self.parser = InputParser(keys)
-        self.master, self.slave = os.openpty()
+        self.master, self.slave = open_pty()
         self._fds = [self.master, self.slave]
         try:
             # Until the CLI sets raw mode, the pseudo-terminal acts as yours did.

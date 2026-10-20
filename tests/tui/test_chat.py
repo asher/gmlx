@@ -859,14 +859,14 @@ def test_esc_typed_before_cbreak_entry_still_cancels(monkeypatch):
     # the tty input queue; _EscCancel's cbreak entry must not flush it
     # (tty.setcbreak's default TCSAFLUSH discards pending input, so a reply
     # on a fast model streamed to completion uncancelable).
-    import pty
     import threading
 
+    from gmlx.container.terminal import open_pty
     from gmlx.tui.chat import _EscCancel
 
     import select
 
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     stop = threading.Event()
 
     def _drain_master():

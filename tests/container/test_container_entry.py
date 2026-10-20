@@ -1054,6 +1054,20 @@ def _read_until(fd: int, text: bytes, timeout: float = 30.0, seen: bytes = b"") 
     return out
 
 
+def _openpty() -> tuple[int, int]:
+    """os.openpty, tried again on the error macOS gives now and then while
+    other processes open pseudo-terminals at the same moment. This file
+    imports nothing from gmlx, so it keeps its own copy of
+    gmlx.container.terminal.open_pty."""
+    for _ in range(4):
+        try:
+            return os.openpty()
+        except OSError as e:
+            if e.errno != -6:
+                raise
+    return os.openpty()
+
+
 def _foreground_group(pid: int) -> int:
     """The foreground process group of the terminal of ``pid``."""
     done = subprocess.run(["ps", "-o", "tpgid=", "-p", str(pid)], capture_output=True,
@@ -1065,7 +1079,7 @@ def test_the_client_gets_the_terminal_and_the_entry_takes_it_back(entry):
     login_tty = getattr(os, "login_tty", None)
     if login_tty is None or shutil.which("ps") is None:
         pytest.skip("needs os.login_tty and ps")
-    master, slave = os.openpty()
+    master, slave = _openpty()
     main = subprocess.Popen([entry, "--", "sh", "-c", "echo pid $$; read x; exit 4"],
                             stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
                             preexec_fn=lambda: login_tty(slave))
@@ -1111,7 +1125,7 @@ def test_a_client_in_the_background_of_a_terminal_stays_in_the_entrys_group(entr
     if login_tty is None:
         pytest.skip("needs os.login_tty")
     client = CLIENT.replace("print(os.getpid()", "print(os.getppid(), os.getpid()")
-    master, slave = os.openpty()
+    master, slave = _openpty()
     shell = subprocess.Popen(
         [sys.executable, "-c", BACKGROUND, entry, "--", sys.executable, "-c", client],
         stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
@@ -1164,7 +1178,7 @@ def _in_terminal(entry, helper: str, *client) -> tuple:
     login_tty = getattr(os, "login_tty", None)
     if login_tty is None:
         pytest.skip("needs os.login_tty")
-    master, slave = os.openpty()
+    master, slave = _openpty()
     init = subprocess.Popen([sys.executable, "-c", helper, entry, "--", *client],
                             stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
                             preexec_fn=lambda: login_tty(slave))

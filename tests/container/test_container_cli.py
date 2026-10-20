@@ -850,12 +850,13 @@ def test_a_build_follows_a_terminal_resize(fake_container, monkeypatch):
     """A resize reaches the build's pseudo-terminal, and the build gets a
     SIGWINCH to draw again at the new size."""
     import fcntl
-    import pty
     import signal
     import struct
     import termios
 
-    term, term_slave = pty.openpty()
+    from gmlx.container.terminal import open_pty
+
+    term, term_slave = open_pty()
     fcntl.ioctl(term, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     stderr = os.fdopen(term_slave, "w")
     monkeypatch.setattr(sys, "stderr", stderr)
