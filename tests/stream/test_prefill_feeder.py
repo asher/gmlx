@@ -512,7 +512,7 @@ def _release_wedge(feeder, gate):
 
     gate.set()
     for ev in list(feeder._ready.values()):
-        assert ev.wait(5)
+        assert ev.wait(30)
     feeder.close()
     for held in pfm._QUARANTINED:
         if isinstance(held, dict):
@@ -600,25 +600,56 @@ def test_the_drain_waits_one_timeout_for_all_the_staging(monkeypatch, tmp_path):
     """A new pass gives the stages in flight one timeout between them, not
     one each. Layer 2 is queued behind the wedged layer 1 on the one stage
     worker, so it never starts either."""
-    import time
+    from types import SimpleNamespace
 
     import gmlx.stream.prefill_feeder as pfm
 
     monkeypatch.setenv("GMLX_PREFILL_RING_SLOTS", "3")
     feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=4)
     gate = _wedge_stage(monkeypatch, feeder, 1)
-    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 30.0)
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(pfm, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    waits, started = [], []
+    wedged = feeder._stage
+
+    def stage(li):
+        started.append(li)
+        wedged(li)
+
+    monkeypatch.setattr(feeder, "_stage", stage)
+
+    class Clocked:
+        """A stage event whose wait runs out on the clock: no stage can end
+        while the gate holds layer 1."""
+
+        def __init__(self, ev):
+            self.ev = ev
+
+        def set(self):
+            self.ev.set()
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if self.ev.is_set():
+                return True
+            clock.now += timeout
+            return False
+
+    real = {}
     try:
         with feeder.prefill_call(modules[0][0], 0):   # kicks layers 1 and 2
             pass
-        t0 = time.monotonic()
+        assert sorted(feeder._ready) == [0, 1, 2] and feeder._ready[0].is_set()
+        real = {li: feeder._ready[li] for li in (1, 2)}
+        feeder._ready.update({li: Clocked(ev) for li, ev in real.items()})
         with pytest.raises(RuntimeError, match="out of service"):
             with feeder.prefill_call(modules[0][0], 0):
                 pass
-        elapsed = time.monotonic() - t0
-        assert feeder._wedged == [1, 2]
-        assert elapsed < 3.0, f"the drain took {elapsed:.2f}s for a 2s timeout"
+        assert feeder._wedged == [1, 2] and 2 not in started
+        assert waits == [30.0, 0.0]
     finally:
+        feeder._ready.update(real)
         _release_wedge(feeder, gate)
 
 
