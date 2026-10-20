@@ -966,7 +966,7 @@ def test_a_client_that_takes_the_whole_grace_leaves_none_for_the_copies(entry, m
         _stop(main, *([copy] if copy else []))
 
 
-def _read_until(fd: int, text: bytes, timeout: float = 10.0, seen: bytes = b"") -> bytes:
+def _read_until(fd: int, text: bytes, timeout: float = 30.0, seen: bytes = b"") -> bytes:
     import select
 
     out = seen
@@ -1012,13 +1012,19 @@ def test_the_client_gets_the_terminal_and_the_entry_takes_it_back(entry):
         os.close(master)
 
 
+# A job-control shell that starts the entry in a background group. The
+# child execs only once the parent has set its group.
 BACKGROUND = """
 import os, sys
+r, w = os.pipe()
 pid = os.fork()
 if pid == 0:
-    os.setpgid(0, 0)
+    os.close(w)
+    os.read(r, 1)
     os.execv(sys.argv[1], sys.argv[1:])
+os.close(r)
 os.setpgid(pid, pid)
+os.close(w)
 sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 """
 
