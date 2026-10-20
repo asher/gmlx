@@ -664,6 +664,7 @@ def test_strip_on_extend_keeps_newest_two_plus_anchor():
     idx = _ckpt_records(man)
     assert sorted(r.p for r in idx.values()) == [32, 64, 80]
     assert [r.p for r in idx.values() if r.kind == "anchor"] == [32]
+    assert not any(r.spared for r in idx.values())
     warm, got = ckpt_lookup(man, ids[:40], extra_hash=0)
     assert got == 32                          # the anchor serves siblings
     warm, got = ckpt_lookup(man, ids[:50], extra_hash=0)
@@ -682,11 +683,12 @@ def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores(
     none, then two stores past p_stable, the second a boundary or the N-1
     replay. The first leaves main's records. The second keeps the deepest
     record at or below p_stable, which the next turn restores and main's
-    strip drops."""
+    strip drops, and marks only that record."""
     from gmlx.cache.snapshot import _ckpt_records
 
-    def records():
-        return sorted(r.p for r in _ckpt_records(man).values())
+    def records(spared=False):
+        return sorted(r.p for r in _ckpt_records(man).values()
+                      if r.spared or not spared)
 
     man = APCManager(num_blocks=256, block_size=16)
     ids = list(range(400, 400 + 140))
@@ -695,9 +697,11 @@ def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores(
         assert ckpt_store(man, ids[:p], make(p, seed=p), extra_hash=0,
                           keep=110)
     assert records() == [32, held, 124]
+    assert records(spared=True) == []
     assert ckpt_store(man, ids[:130], make(130, seed=130), extra_hash=0,
                       keep=110, kind=last)
     assert records() == [32, held, 124, 130]
+    assert records(spared=True) == [held]
     _warm, got = ckpt_lookup(man, ids[:110] + [7, 8, 9], extra_hash=0)
     assert got == held
 

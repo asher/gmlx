@@ -290,16 +290,18 @@ class ExpertPrefetcher:
                 self._spec[nxt] = self._submit_reads(
                     nxt, pred, self._spec_pool)
 
-    def close(self) -> None:
-        """Idempotent: teardown and GC finalization may both land here."""
+    def close(self, report: bool = True) -> None:
+        """Idempotent: teardown and GC finalization may both land here.
+        ``report=False`` skips the reuse line, which from a finalizer would
+        land in whatever the process prints then."""
         total = getattr(self, "_spec_total", 0)
-        if total:
+        if total and report:
             print(
                 f"[stream] decode expert reuse (prev-token prediction): "
                 f"{getattr(self, '_spec_hits', 0)}/{total} "
                 f"({100 * getattr(self, '_spec_hits', 0) / total:.1f}%)"
             )
-            self._spec_total = 0
+        self._spec_total = 0
         self._pool.shutdown(wait=False)
         if self._read_pool is not None:
             self._read_pool.shutdown(wait=False)
@@ -316,7 +318,7 @@ class ExpertPrefetcher:
 
     def __del__(self):
         try:
-            self.close()
+            self.close(report=False)
         except Exception:  # noqa: S110 - GC-time cleanup must never raise
             pass
 
@@ -336,7 +338,25 @@ def maybe_make_prefetcher(
     if not offsets:
         return None
     try:
-        return ExpertPrefetcher(offsets, depth=depth)
+        prefetcher = ExpertPrefetcher(offsets, depth=depth)
     except OSError as e:   # e.g. EMFILE - degrade, don't abort the model load
         print(f"[stream] expert prefetch unavailable ({e}); prefill will demand-fault")
         return None
+    _register_exit_close(prefetcher)
+    return prefetcher
+
+
+def _register_exit_close(prefetcher) -> None:
+    """Close a still-live prefetcher at interpreter exit, so its reuse line
+    prints there and not from the collector. Held through a weakref."""
+    import atexit
+    import weakref
+
+    wref = weakref.ref(prefetcher)
+
+    def _close_at_exit():
+        live = wref()
+        if live is not None:
+            live.close()
+
+    atexit.register(_close_at_exit)

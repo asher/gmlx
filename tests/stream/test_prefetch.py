@@ -82,3 +82,45 @@ def test_close_is_idempotent(tmp_path):
     import pytest
     with pytest.raises(OSError):
         os.fstat(fd)         # fd really was closed
+
+
+def test_reuse_line_prints_at_exit_but_not_from_the_collector(
+        tmp_path, capsys, monkeypatch):
+    """A prefetcher still live at exit prints the reuse line once. One the
+    garbage collector closes prints nothing: the line would land in
+    whatever the process prints then."""
+    import atexit
+    import gc
+    import weakref
+
+    import numpy as np
+    from gguf import GGUFWriter
+
+    path = tmp_path / "m.gguf"
+    w = GGUFWriter(str(path), "llama")
+    w.add_uint32("llama.block_count", 1)
+    for kind in ("gate", "up", "down"):
+        w.add_tensor(f"blk.0.ffn_{kind}_exps.weight",
+                     np.zeros((4, 8, 16), dtype=np.float16))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    monkeypatch.delenv("GMLX_STREAM_PREFETCH", raising=False)
+    hooks = []
+    monkeypatch.setattr(atexit, "register", hooks.append)
+    live = pf.maybe_make_prefetcher(str(path))
+    gone = pf.maybe_make_prefetcher(str(path))
+    for fetcher in (live, gone):
+        assert fetcher is not None
+        fetcher._spec_hits, fetcher._spec_total = 3, 4
+    collected = weakref.ref(gone)
+    del fetcher, gone
+    gc.collect()
+    assert collected() is None
+    assert "decode expert reuse" not in capsys.readouterr().out
+    for hook in hooks:
+        hook()
+    assert capsys.readouterr().out.count("decode expert reuse") == 1
+    live.close()
+    assert "decode expert reuse" not in capsys.readouterr().out
