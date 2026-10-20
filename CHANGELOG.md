@@ -88,8 +88,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it was on. It now sheds them as on other MoE models.
 - `--moe-layer-shed` no longer drops a shed layer's whole MoE output on models
   with no shared expert: Muse Spark keeps the top expert, others run in full.
-- `--moe-layer-shed` could stop speculative or batched decoding with a
-  concatenate error on DeepSeek-V4, GLM-5.3-Flash, Hunyuan and K2 Horizon.
+- `--moe-layer-shed` could stop a request with a concatenate error on models
+  such as DeepSeek-V4, GLM-5.2, Kimi K3 and MiniMax-M3.
 - With `--stream-experts`, the expert arena came out one prefill ring smaller
   than the memory budget allows when free RAM set its size.
 - With `--stream-experts`, batched or speculative decoding of up to 64 tokens

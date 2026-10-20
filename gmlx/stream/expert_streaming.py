@@ -249,8 +249,8 @@ def _note_unshed() -> None:
     global _UNSHED_NOTED
     if not _UNSHED_NOTED:
         _UNSHED_NOTED = True
-        print("[stream] --moe-layer-shed: MoE layers with no shared expert "
-              "or dense MLP run in full on this model")
+        print("[stream] --moe-layer-shed: layers that cannot keep their "
+              "top expert run in full")
 
 
 def _valid_expert_ids(module, indices):
@@ -563,13 +563,14 @@ def install_expert_streaming(
                             if shed_top1 or not top1:
                                 if dfr is not None:
                                     dfr._layer_shed_n += 1
-                            elif scores_arg is None:
+                            else:
                                 _note_unshed()
                             if not top1:
                                 # Skip the routed path entirely (gather,
                                 # stage and this layer's eval fence). The
                                 # unmixed zeros return makes the block mix
-                                # nothing and still add its shared expert.
+                                # nothing, and the layer keeps its shared
+                                # expert or dense MLP.
                                 return mx.zeros(
                                     (*x.shape[:-1], indices.shape[-1],
                                      x.shape[-1]), dtype=x.dtype)

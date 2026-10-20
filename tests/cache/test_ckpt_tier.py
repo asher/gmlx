@@ -672,23 +672,32 @@ def test_strip_on_extend_keeps_newest_two_plus_anchor():
     assert got == 64
 
 
-def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores():
-    """A turn with no turn record stores a prefill boundary and the whole
-    prompt past its p_stable (70). Strip-on-extend still keeps the
-    deepest record at or below p_stable (64), which the next turn
-    restores, beside the newest older record."""
+@pytest.mark.parametrize("turn", [False, True], ids=["grid", "turn"])
+@pytest.mark.parametrize("make", [make_hybrid_cache, make_swa_cache],
+                         ids=["arrays", "window"])
+def test_a_store_past_p_stable_keeps_the_record_the_next_turn_restores(
+        make, turn):
+    """Grid records at 32, 64 and 96, a turn record at p_stable (110) or
+    none, then two stores past p_stable. The first leaves main's records.
+    The second keeps the deepest record at or below p_stable, which the
+    next turn restores and main's strip drops."""
     from gmlx.cache.snapshot import _ckpt_records
-    man = APCManager(num_blocks=96, block_size=16)
-    ids = list(range(400, 400 + 96))
-    for p in (32, 64):
-        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
-                          extra_hash=0)
-    for p in (80, 90):
-        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
-                          extra_hash=0, keep=70)
-    assert sorted(r.p for r in _ckpt_records(man).values()) == [32, 64, 80, 90]
-    warm, got = ckpt_lookup(man, ids[:70] + [7, 8], extra_hash=0)
-    assert got == 64
+
+    def records():
+        return sorted(r.p for r in _ckpt_records(man).values())
+
+    man = APCManager(num_blocks=256, block_size=16)
+    ids = list(range(400, 400 + 140))
+    held = 110 if turn else 96
+    for p in (32, 64, 96, 110, 124) if turn else (32, 64, 96, 124):
+        assert ckpt_store(man, ids[:p], make(p, seed=p), extra_hash=0,
+                          keep=110)
+    assert records() == [32, held, 124]
+    assert ckpt_store(man, ids[:130], make(130, seed=130), extra_hash=0,
+                      keep=110)
+    assert records() == [32, held, 124, 130]
+    _warm, got = ckpt_lookup(man, ids[:110] + [7, 8, 9], extra_hash=0)
+    assert got == held
 
 
 def test_the_post_prefill_store_passes_the_stable_prefix(monkeypatch):

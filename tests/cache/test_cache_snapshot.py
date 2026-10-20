@@ -818,23 +818,25 @@ def test_sidecar_post_prefill_keys_landed_turn_boundary():
         mgr.close()
 
 
-def test_sidecar_post_prefill_keys_the_record_the_next_turn_restores():
-    """A schedule with no turn record that lands a record past p_stable
-    (REPLAY=0: an anchor at 4, a boundary at 11, p_stable 9): the next
-    turn restores 4, the deepest landed record at or below p_stable, so
-    its drafter head needs a key there too."""
+@pytest.mark.parametrize("stored,restored", [([4, 11], 4), ([4, 9, 11], 9)])
+def test_sidecar_post_prefill_keys_the_record_the_next_turn_restores(
+        stored, restored):
+    """A schedule with no turn record that lands records below p_stable
+    (9), maybe at it, and past it (REPLAY=0): the next turn restores the
+    deepest landed record at or below p_stable, so its drafter head needs
+    a key there too."""
     from gmlx.spec.speculative import _sidecar_post_prefill
     mgr = _manager()
     try:
         full_ids = list(range(1, 13))
-        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": [4, 11],
+        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": stored,
                 "ckpt_p_stable_bounds": [], "ckpt_p_stable": 9}
         ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 4,
                "manager": mgr, "mode": "ckpt", "apc_meta": meta}
         drafter = _FakeDrafter([_kv_row(12, 0)])
         _sidecar_post_prefill(drafter, ctx)
         nxt = full_ids[:9] + [200, 201]
-        assert drafter_sidecar_lookup(mgr, nxt, 4) is not None
+        assert drafter_sidecar_lookup(mgr, nxt, restored) is not None
         assert drafter_sidecar_lookup(mgr, full_ids + [200], 11) is not None
     finally:
         mgr.close()

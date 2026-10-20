@@ -1181,8 +1181,9 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
     protection at all: position-salted window chains must never sit
     pinned on an exhausted pool.
 
-    ``keep``: the storing request's p_stable. A record past it leaves the
-    deepest record at or below it, the one a next turn restores."""
+    ``keep``: the storing request's p_stable. Where a record past it would
+    strip the deepest record at or below it, the one a next turn
+    restores, that record stays."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
@@ -1227,11 +1228,12 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         # The count and byte bounds below govern those records, and
         # _evict_for_pool reclaims the blocks they pin.
         chain = [k for k in chain
-                 if k != held and idx[k].main_blocks
+                 if idx[k].main_blocks
                  and not any(_is_kvarn(t) for t in idx[k].layout)]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
-            _release_record(manager, idx.pop(k))
+            if k != held:
+                _release_record(manager, idx.pop(k))
         idx[key] = rec
         idx.move_to_end(key)
         if rec.kind == "decision":
@@ -1483,8 +1485,8 @@ def ckpt_store(
                 manager.release(main_blocks)
                 return 0
             rot_meta = canon[0][2]
-            keep, _w, _off, L = rot_meta
-            canon_ids = ids[:keep] + ids[p - (L - keep):p]
+            sink, _w, _off, L = rot_meta
+            canon_ids = ids[:sink] + ids[p - (L - sink):p]
             bsalt = bounded_extra_hash(extra_hash, p)
             canon_k = [cw[0] for cw in canon]
             canon_v = [cw[1] for cw in canon]

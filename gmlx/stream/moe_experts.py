@@ -621,10 +621,9 @@ def _ffn_beside(mods: dict, name: str) -> bool:
 def install_moe_layer_shed(model, p: float) -> int:
     """Skip each streamed MoE layer's routed path with probability ``p``
     per decode token; the layer's shared expert or dense MLP still runs.
-    A layer with neither keeps its top-scored expert where its block hands
-    the experts their routing scores, and runs in full where it does not.
-    Lossy. Returns the number of layers hooked; raises on p outside
-    (0, 1)."""
+    A layer with neither keeps its top-scored expert where its block sets
+    ``_kq_layer_shed_top1``, and is not hooked where it does not. Lossy.
+    Returns the number of layers hooked; raises on p outside (0, 1)."""
     if not 0.0 < p < 1.0:
         raise ValueError(
             f"MoE layer-shed probability must be in (0, 1), got {p}")
@@ -640,9 +639,12 @@ def install_moe_layer_shed(model, p: float) -> int:
                     or not hasattr(m, "_kq_cpu_only")):
                 continue
             seen.add(id(m))
+            top1 = not _ffn_beside(mods, name)
+            block = mods[name.rpartition(".")[0]]
+            if top1 and not getattr(block, "_kq_layer_shed_top1", False):
+                continue    # a shed would add nothing
             object.__setattr__(m, "_kq_layer_shed", float(p))
-            object.__setattr__(m, "_kq_shed_keeps_top1",
-                               not _ffn_beside(mods, name))
+            object.__setattr__(m, "_kq_shed_keeps_top1", top1)
             n += 1
     if n:
         loadlog.info(
@@ -653,8 +655,8 @@ def install_moe_layer_shed(model, p: float) -> int:
         )
     else:
         print(
-            "[stream] MoE layer-shed found no streamed MoE layer - "
-            "no effect"
+            "[stream] MoE layer-shed: no streamed MoE layer here can shed, "
+            "so the flag has no effect"
         )
     return n
 

@@ -492,6 +492,7 @@ def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
     from gmlx.stream.moe_experts import install_moe_layer_shed
 
     block = _Block(_kquant_glu(), _TupleGate())
+    block.shared_expert = nn.Linear(32, 32)
     model = _shell(block)
 
     for bad in (0.0, 1.0):
@@ -577,7 +578,7 @@ def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
     """One decode token through real blocks, the layer shed. Qwen3-Next
     keeps its shared expert only. Muse Spark has none and hands the
     experts its routing scores, so it runs its top expert alone. Qwen3 MoE
-    has none and keeps its scores, so its layer runs in full."""
+    has none and keeps its scores, so the lever leaves it alone."""
     from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
     from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
@@ -615,14 +616,15 @@ def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
             want = _block_out(block, x, lambda inds, a: mx.zeros(inds.shape))
         else:
             want = full
-        assert install_moe_layer_shed(_shell(block), 0.999999) == 1
+        hooked = install_moe_layer_shed(_shell(block), 0.999999)
+        assert hooked == (name != "qwen3_moe"), name
         df.stage_calls.clear()
         shed = _block_out(block, x)
         object.__setattr__(block.switch_mlp, "_kq_layer_shed", None)
         assert np.allclose(shed, want, atol=1e-5), name
         if name == "qwen3_moe":
             assert df._layer_shed_n == 0
-            assert "run in full on this model" in capsys.readouterr().out
+            assert "no effect" in capsys.readouterr().out
         else:
             assert df._layer_shed_n == 1
             assert not np.allclose(shed, full, atol=1e-3), name
@@ -635,8 +637,9 @@ def test_layer_shed_sees_a_dense_or_shared_mlp_beside_the_experts(
     """Real decoder layers. Gemma 4 runs a dense MLP beside its experts and
     Granite MoE Hybrid a shared MLP, both outside the experts' own block:
     a shed layer keeps that path. Muse Spark and Qwen3 MoE layers have only
-    attention beside the MoE block, so a shed layer keeps its top
-    expert."""
+    attention beside the MoE block: a shed Muse Spark layer keeps its top
+    expert, and a Qwen3 MoE block, which keeps its scores, is not
+    hooked."""
     import dataclasses
     import json
     from pathlib import Path
@@ -702,8 +705,13 @@ def test_layer_shed_sees_a_dense_or_shared_mlp_beside_the_experts(
         model.layers = [layer]
         model.parameters = lambda glu=glu: {"glu": glu.parameters()}
         install_expert_streaming(model)
+        glu = getattr(owner, attr)
+        if layer is qwen:
+            assert install_moe_layer_shed(model, 0.1) == 0
+            assert not hasattr(glu, "_kq_layer_shed")
+            continue
         assert install_moe_layer_shed(model, 0.1) == 1, type(layer)
-        assert getattr(owner, attr)._kq_shed_keeps_top1 is top1, type(layer)
+        assert glu._kq_shed_keeps_top1 is top1, type(layer)
 
 
 def _k3_block():

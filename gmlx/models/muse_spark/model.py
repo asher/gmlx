@@ -155,6 +155,10 @@ class MuseSparkMoE(nn.Module):
     every expert output before the weighted sum.
     """
 
+    # Streamed experts get the routing scores, so a layer-shed draw can
+    # keep the top expert.
+    _kq_layer_shed_top1 = True
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         dim, latent = args.hidden_size, args.moe_latent_size

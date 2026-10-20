@@ -1704,13 +1704,17 @@ def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, capsys, unmixed,
     assert df._layer_shed_n == 2
     assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
     assert np.allclose(np.array(out), np.array(base(x1, i1)), atol=1e-6)
-    assert "run in full on this model" in capsys.readouterr().out
+    assert "run in full" in capsys.readouterr().out
 
 
-def test_wrapper_layer_shed_runs_an_uncovered_layer_in_full(monkeypatch):
+def test_wrapper_layer_shed_runs_an_uncovered_layer_in_full(monkeypatch,
+                                                          capsys):
     """A shed draw on a block with no shared expert, on a layer the decode
     feeder does not cover, has no arena to stage the top expert from: the
-    layer runs in full instead of adding nothing."""
+    layer runs in full instead of adding nothing, and a notice says so."""
+    from gmlx.stream import expert_streaming
+
+    monkeypatch.setattr(expert_streaming, "_UNSHED_NOTED", False)
     mx.random.seed(12)
     recorded = []
     glu, df = _stream_scores_glu(monkeypatch, recorded)
@@ -1727,6 +1731,7 @@ def test_wrapper_layer_shed_runs_an_uncovered_layer_in_full(monkeypatch):
     assert df._layer_shed_n == 0 and df.stage_calls == []
     assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
     assert np.allclose(np.array(out), np.array(base(x1, i1)), atol=1e-5)
+    assert "run in full" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("top1", [False, True])
