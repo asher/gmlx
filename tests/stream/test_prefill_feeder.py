@@ -558,23 +558,46 @@ def test_decode_stage_waits_for_a_live_ring_copy(monkeypatch, tmp_path):
     """A kicked-ahead stage copies out of layer 1's arena slots while a
     decode stage() evicts both residents. The ring slot keeps the file's
     bytes."""
-    import time
-
     import gmlx.stream.prefill_feeder as pfm
 
-    real = pfm.copy_experts
-
-    def slow(*args):
-        time.sleep(0.3)
-        real(*args)
-
-    monkeypatch.setattr(pfm, "copy_experts", slow)
     dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path)
+    real = pfm.copy_experts
+    copying, go = threading.Event(), threading.Event()
+    layer1 = {np.frombuffer(dfeeder._arena[(1, kind)][1], dtype=np.uint8)
+              .ctypes.data for kind in _KINDS}
+
+    def gated(dst, src, pairs, stride):
+        if src.ctypes.data in layer1:  # layer 0's copy runs free
+            copying.set()
+            assert go.wait(30)
+        real(dst, src, pairs, stride)
+
+    monkeypatch.setattr(pfm, "copy_experts", gated)
     with feeder.prefill_call(modules[0][0], 0):  # kicks layer 1
         pass
-    dfeeder.stage(1, np.array([[0, 2]], dtype=np.uint32))
+    assert copying.wait(30)
+    # The copy goes on once stage() waits on it, or is done without a wait.
+    reached = threading.Event()
+
+    class Watched(threading.Condition):
+        def wait_for(self, predicate, timeout=None):
+            reached.set()
+            return super().wait_for(predicate, timeout)
+
+    monkeypatch.setattr(dfeeder, "_source_cv", Watched())
+
+    def stage():
+        dfeeder.stage(1, np.array([[0, 2]], dtype=np.uint32))
+        reached.set()
+
+    t = threading.Thread(target=stage, daemon=True)
+    t.start()
+    assert reached.wait(30)
+    go.set()
+    t.join(30)
+    assert not t.is_alive()
     assert sorted(dfeeder._owner[1].tolist()) == [0, 2]
-    assert feeder._ready[1].wait(5) and feeder._error is None
+    assert feeder._ready[1].wait(30) and feeder._error is None
     with feeder.prefill_call(modules[1][0], 1):
         for kind in _KINDS:
             for e in range(4):
@@ -1194,21 +1217,28 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
     """Same contract as the decode feeder: ``__del__`` never joins."""
     from gmlx.stream.feeder_common import DaemonPool
 
-    waits = []
+    calls = []
     orig = DaemonPool.shutdown
 
     def spy(self, wait=True, **kw):
-        waits.append(wait)
+        calls.append((self, wait))
         return orig(self, wait=wait, **kw)
+
+    def waits(feeder):
+        # The GC can collect an earlier test's feeder meanwhile: count only
+        # this feeder's pools.
+        own = [getattr(feeder, n, None)
+               for n in ("_stage_pool", "_read_pool", "_copy_pool")]
+        return [w for pool, w in calls
+                if any(pool is p for p in own if p is not None)]
 
     monkeypatch.setattr(DaemonPool, "shutdown", spy)
     collected, _ = _make_prefill_feeder(monkeypatch, tmp_path)
     collected.__del__()
-    assert waits and all(w is False for w in waits)
-    waits.clear()
+    assert waits(collected) and all(w is False for w in waits(collected))
     closed, _ = _make_prefill_feeder(monkeypatch, tmp_path)  # both stay bound: no GC here
     closed.close()
-    assert waits and all(w is True for w in waits)
+    assert waits(closed) and all(w is True for w in waits(closed))
 
 
 @pytest.mark.parametrize("timeshare", ["0", "1"])
