@@ -4,7 +4,6 @@ real sleepers), the budget gate is driven via device_info."""
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -14,6 +13,25 @@ import gmlx.load.populate as populate
 @pytest.fixture(autouse=True)
 def _fresh_registry(monkeypatch):
     monkeypatch.setattr(populate, "_streams", {})
+
+
+class _Clock:
+    """populate's clock: each poll of ``wait_for`` moves it, and calls
+    ``on_poll``."""
+
+    def __init__(self, on_poll=None):
+        self.now = 0.0
+        self.polls = 0
+        self._on_poll = on_poll
+
+    def perf_counter(self):
+        return self.now
+
+    def sleep(self, s):
+        self.polls += 1
+        self.now += s
+        if self._on_poll is not None:
+            self._on_poll()
 
 
 class FakeThread:
@@ -92,15 +110,17 @@ def test_finished_stream_restarts_after_eviction(tmp_path, fake_threads,
     assert len(fake_threads) == 2 * populate._POPULATE_WORKERS
 
 
-def test_wait_for_releases_on_small_tail(tmp_path, fake_threads):
+def test_wait_for_releases_on_small_tail(tmp_path, fake_threads, monkeypatch):
     p = tmp_path / "m.gguf"
     p.write_bytes(b"x" * 1000)
     populate.start_populate([str(p)], log=lambda *a: None)
     st = next(iter(populate._streams.values()))
     st.done = 800  # remaining 20% < default 25% tail
-    t0 = time.perf_counter()
-    populate.wait_for([str(p)], log=lambda *a: None)
-    assert time.perf_counter() - t0 < 5
+    clock = _Clock()
+    monkeypatch.setattr(populate, "time", clock)
+    lines = []
+    populate.wait_for([str(p)], log=lines.append)
+    assert clock.polls == 0 and lines == []   # released without a wait
 
 
 def test_wait_for_blocks_until_stream_done(tmp_path, monkeypatch):
@@ -111,18 +131,34 @@ def test_wait_for_blocks_until_stream_done(tmp_path, monkeypatch):
 
     release = threading.Event()
     monkeypatch.setattr(
-        populate, "_reader", lambda st: release.wait(5))
+        populate, "_reader", lambda st: release.wait(30))
+
+    def end_stream():
+        # The readers end only once wait_for waits on them.
+        release.set()
+        for st in populate._streams.values():
+            for t in st.threads:
+                t.join(30)
+
+    clock = _Clock(on_poll=end_stream)
+    monkeypatch.setattr(populate, "time", clock)
     populate.start_populate([str(p)], log=lambda *a: None)
 
     lines = []
-    threading.Timer(0.2, release.set).start()
     populate.wait_for([str(p)], log=lines.append)
+    assert clock.polls >= 1
     assert lines and "waited" in lines[0]
 
+    # Off, it does not wait on a stream whose readers still run.
+    release.clear()
+    populate.start_populate([str(p)], log=lambda *a: None)
+    st = next(iter(populate._streams.values()))
+    assert any(t.is_alive() for t in st.threads)
     monkeypatch.setenv("GMLX_POPULATE_WAIT", "0")
-    t0 = time.perf_counter()
+    polls = clock.polls
     populate.wait_for([str(p)], log=lines.append)
-    assert time.perf_counter() - t0 < 2
+    assert clock.polls == polls and len(lines) == 1
+    end_stream()
 
 
 def test_residency_warm_env_disables(tmp_path, monkeypatch):
