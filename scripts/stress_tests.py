@@ -6,9 +6,10 @@
 
 Each round is one pytest session with every selected test repeated --count
 times (pytest-repeat) over twice as many xdist workers as cores. While it
-runs, a staller stops one random process of the session's tree at a time
-for up to --stall-ms, then continues it. Fast idle machines never reproduce
-the lost-signal and FIFO races that a stalled CI VM shows; these stalls do.
+runs, a staller stops one random process of the session's tree at a time,
+with its parent, for up to --stall-ms, then continues them. Fast idle
+machines never reproduce the lost-signal and FIFO races that a stalled CI
+VM shows; these stalls do.
 
 A test that hangs fails at --timeout with every thread's stack. A failed
 round keeps its log, a `ps` listing of the tree and any FIFOs left in its
@@ -48,19 +49,24 @@ PRESETS = {"concurrency": [
 ]}
 
 
-def tree_pids(root: int) -> list[int]:
-    """``root`` and every live descendant."""
+def tree(root: int) -> dict[int, int]:
+    """``root`` and every live descendant, each with its parent."""
     out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout
     children: dict[int, list[int]] = {}
     for line in out.splitlines():
         pid, ppid = (int(x) for x in line.split())
         children.setdefault(ppid, []).append(pid)
-    found, todo = [], [root]
+    found, todo = {}, [(root, 0)]
     while todo:
-        pid = todo.pop()
-        found.append(pid)
-        todo += children.get(pid, [])
+        pid, ppid = todo.pop()
+        found[pid] = ppid
+        todo += [(child, pid) for child in children.get(pid, [])]
     return found
+
+
+def tree_pids(root: int) -> list[int]:
+    """``root`` and every live descendant."""
+    return list(tree(root))
 
 
 class Staller(threading.Thread):
@@ -73,26 +79,31 @@ class Staller(threading.Thread):
         self.stalls = 0
 
     def run(self) -> None:
-        pids: list[int] = []
+        procs: dict[int, int] = {}
         refreshed = 0.0
         while not self.done.is_set():
             if time.monotonic() - refreshed > 0.2:
-                pids, refreshed = tree_pids(self.root), time.monotonic()
-            if self.done.wait(self.rnd.uniform(0, 2 * self.stall_ms) / 1000) or not pids:
+                procs, refreshed = tree(self.root), time.monotonic()
+            if self.done.wait(self.rnd.uniform(0, 2 * self.stall_ms) / 1000) or not procs:
                 continue
-            pid = self.rnd.choice(pids)
+            pid = self.rnd.choice(list(procs))
+            # A parent that waits with WUNTRACED, as the guest entry does,
+            # sees a stopped child, which a busy machine never shows. The
+            # parent stops first and goes on last, so it sees only a delay.
+            stalled = [p for p in (procs[pid], pid) if p in procs]
             try:
-                os.kill(pid, signal.SIGSTOP)
-            except ProcessLookupError:
-                continue
-            try:
+                for p in stalled:
+                    os.kill(p, signal.SIGSTOP)
                 time.sleep(self.rnd.uniform(0, self.stall_ms) / 1000)
+                self.stalls += 1
+            except ProcessLookupError:
+                pass
             finally:
-                try:
-                    os.kill(pid, signal.SIGCONT)
-                except ProcessLookupError:
-                    pass
-            self.stalls += 1
+                for p in reversed(stalled):
+                    try:
+                        os.kill(p, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
 
     def stop(self) -> None:
         self.done.set()
