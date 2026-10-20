@@ -603,23 +603,44 @@ def install_moe_prestage_keepers(model) -> int:
     return n
 
 
+def _has_shared_expert(block) -> bool:
+    """Whether an MoE block holds a shared expert (``shared_experts``,
+    ``shared_mlp``, ``share_expert`` and the like)."""
+    return any("share" in k and isinstance(v, nn.Module)
+               for k, v in block.children().items())
+
+
 def install_moe_layer_shed(model, p: float) -> int:
     """Skip each streamed MoE layer's routed path with probability ``p``
-    per decode token; the layer's shared expert still runs. Lossy.
-    Returns the number of layers hooked; raises on p outside (0, 1)."""
+    per decode token; the layer's shared expert still runs, and a block
+    with none keeps its top-scored expert. Lossy. Returns the number of
+    layers hooked; raises on p outside (0, 1)."""
     if not 0.0 < p < 1.0:
         raise ValueError(
             f"MoE layer-shed probability must be in (0, 1), got {p}")
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = model.model.layers
     n = 0
-    for m in _streamed_modules(model):
-        if hasattr(m, "_kq_li") and hasattr(m, "_kq_cpu_only"):
+    seen: set = set()
+    for layer in layers:
+        mods = dict(layer.named_modules())
+        for name, m in mods.items():
+            if (id(m) in seen or not hasattr(m, "_kq_li")
+                    or not hasattr(m, "_kq_cpu_only")):
+                continue
+            seen.add(id(m))
+            block = mods.get(name.rpartition(".")[0], layer)
             object.__setattr__(m, "_kq_layer_shed", float(p))
+            object.__setattr__(m, "_kq_shed_keeps_top1",
+                               not _has_shared_expert(block))
             n += 1
     if n:
         loadlog.info(
             f"[stream] MoE layer-shed {p:g}: each of {n} streamed MoE "
             "layers skips its routed experts with that probability per "
-            "token (lossy - shared expert only on shed layers)"
+            "token (lossy - a shed layer runs its shared expert, or its "
+            "top expert where it has none)"
         )
     else:
         print(

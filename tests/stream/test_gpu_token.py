@@ -256,6 +256,26 @@ def test_wrapper_layer_owing_a_resize_takes_stage(monkeypatch):
     assert df._shed_n == 0
 
 
+def test_wrapper_layer_shed_keeps_the_top_expert_on_the_stage_path(
+        monkeypatch):
+    """A shed layer that keeps its top expert stages only that one: the
+    syncless path would run the whole routed set."""
+    df = _FakeDF()
+    df._layer_shed_n = 0
+    glu = _autonomous_glu(monkeypatch, df)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", True)
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    out = glu(x1, i1, mx.array([[[0.4, 0.6]]], dtype=mx.float32))
+    ref = glu.__class__.__bases__[0].__call__(
+        glu, x1, mx.array([[[3]]], dtype=mx.uint32))[..., 0, :]
+    mx.eval(out, ref)
+    assert [ids.reshape(-1).tolist() for _, ids in df.stage_calls] == [[3]]
+    assert df._layer_shed_n == 1
+    assert mx.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+
 def test_wrapper_autonomous_miss_sheds_and_prestages(monkeypatch):
     """A non-resident routed expert is shed (survivors renormalized to the
     token's full mass) and prestaged at the next token boundary."""

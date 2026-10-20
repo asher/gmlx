@@ -150,7 +150,7 @@ default, and they act only on a model with a `stream` placement.
 | Expert-mass | `--moe-expert-mass P` | [`moe_expert_mass`](config.md#modelsmoe_expert_mass) | Each token keeps the fewest experts that cover share P of the gate weight. | Prefill and decoding |
 | Miss-shed | `--moe-miss-shed P` | [`moe_miss_shed`](config.md#modelsmoe_miss_shed) | Drops experts that are not in the arena, lowest first, while the rest cover share P. | Decoding |
 | Keeper prestage | `--moe-prestage keepers` | [`moe_prestage`](config.md#modelsmoe_prestage) | Reads ahead only the experts that miss-shed would keep. Needs miss-shed. | Decoding |
-| Layer-shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | Skips a layer's routed experts with probability P. The shared expert still runs. | Decoding |
+| Layer-shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | Skips a layer's routed experts with probability P. The shared expert still runs, or the top expert where the layer has none. | Decoding |
 
 The expert cap and expert-mass combine. This keeps at most 6 experts per
 token, then keeps the fewest of those 6 that cover 90% of their gate

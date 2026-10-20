@@ -516,6 +516,24 @@ def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
     assert "layer-shed 0.1" in capsys.readouterr().out
 
 
+def test_layer_shed_keeps_the_top_expert_without_a_shared_one(monkeypatch):
+    """A shed layer runs its shared expert. A block with none (Muse Spark,
+    Qwen3 MoE, MiniMax) keeps its top expert instead."""
+    from gmlx.stream.moe_experts import install_moe_layer_shed
+
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    qwen3, qwen3_next, minimax, m3 = _arch_fixtures()
+    for block, top1 in ((_spark_block(), True), (qwen3, True),
+                        (minimax, True), (qwen3_next, False), (m3, False)):
+        block.switch_mlp = _kquant_glu()
+        model = _shell(block)
+        install_expert_streaming(model)
+        assert install_moe_layer_shed(model, 0.1) == 1
+        assert block.switch_mlp._kq_shed_keeps_top1 is top1, type(block)
+
+
 def _k3_block():
     from gmlx.models.kimi_k3 import KimiK3MoE
 

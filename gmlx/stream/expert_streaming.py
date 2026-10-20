@@ -527,6 +527,7 @@ def install_expert_streaming(
                         if n_tokens != 1:
                             ph = None
                     lsp = getattr(self, "_kq_layer_shed", None)
+                    shed_top1 = False
                     if lsp is not None and cpu_only and n_tokens == 1:
                         rng = getattr(self, "_kq_shed_rng", None)
                         if rng is None:
@@ -535,15 +536,25 @@ def install_expert_streaming(
                                 0x5EED ^ (getattr(self, "_kq_li", 0) or 0))
                             object.__setattr__(self, "_kq_shed_rng", rng)
                         if rng.random() < lsp:
-                            # Skip the routed path entirely (gather, stage
-                            # and this layer's eval fence). The unmixed
-                            # zeros return makes the block mix nothing and
-                            # still add its shared expert.
                             if dfr is not None:
                                 dfr._layer_shed_n += 1
-                            return mx.zeros(
-                                (*x.shape[:-1], indices.shape[-1],
-                                 x.shape[-1]), dtype=x.dtype)
+                            # A block with no shared expert keeps its
+                            # top-scored expert from the arena: with
+                            # nothing routed its layer adds nothing.
+                            shed_top1 = (
+                                getattr(self, "_kq_shed_keeps_top1", False)
+                                and scores_arg is not None
+                                and not in_split
+                                and dfr is not None
+                                and dfr.covers(self._kq_li))
+                            if not shed_top1:
+                                # Skip the routed path entirely (gather,
+                                # stage and this layer's eval fence). The
+                                # unmixed zeros return makes the block mix
+                                # nothing and still add its shared expert.
+                                return mx.zeros(
+                                    (*x.shape[:-1], indices.shape[-1],
+                                     x.shape[-1]), dtype=x.dtype)
                     gt = getattr(self, "_kq_gpu_token", None)
                     gt_live = (
                         gt is not None
@@ -565,6 +576,7 @@ def install_expert_streaming(
                         gt_live
                         and scores_arg is not None
                         and not unmixed
+                        and not shed_top1
                         and not dfr.wedged_at(self._kq_li)
                         and dfr.at_target(self._kq_li)
                         and gt.layer_autonomous(self._kq_li)
@@ -663,7 +675,8 @@ def install_expert_streaming(
                         ms = (None if in_split
                               else getattr(self, "_kq_miss_shed", None))
                         sc_f32 = None
-                        if (ms is not None and scores_arg is not None
+                        if ((ms is not None or shed_top1)
+                                and scores_arg is not None
                                 and n_tokens == 1):
                             # Shed reads the scores host-side; fold them into
                             # the router eval so the hook adds a small D2H
@@ -697,8 +710,12 @@ def install_expert_streaming(
                         shed_pos = None
                         if sc_f32 is not None:
                             sc = np.asarray(sc_f32).reshape(-1)
-                            keep = dfr.shed_misses(
-                                self._kq_li, ids.reshape(-1), sc, ms)
+                            if shed_top1:
+                                keep = np.arange(sc.size) == int(
+                                    np.argmax(sc))
+                            else:
+                                keep = dfr.shed_misses(
+                                    self._kq_li, ids.reshape(-1), sc, ms)
                             if keep is not None:
                                 # Arena-path only: the overflow fallback
                                 # below keeps the original routed set.

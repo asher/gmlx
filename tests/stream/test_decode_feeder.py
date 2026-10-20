@@ -1657,6 +1657,48 @@ def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
     assert df.stage_calls and df._layer_shed_n == 1  # t=2 ran normally
 
 
+@pytest.mark.parametrize("miss_shed", [None, 0.9])
+@pytest.mark.parametrize("unmixed", [True, False])
+def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, unmixed,
+                                                 miss_shed):
+    """On a block with no shared expert a shed layer stages and runs only
+    its top-scored expert, in place of miss-shed. An unmixed block (Muse
+    Spark) gets one row per routed expert, zeros at the others; a mixing
+    base gets the token's full mass on that expert. A call without
+    scores has no top expert and returns zeros."""
+    mx.random.seed(11)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", True)
+    object.__setattr__(glu, "_kq_miss_shed", miss_shed)
+    object.__setattr__(glu, "_kq_scores_unmixed", unmixed)
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    out = glu(x1, i1, mx.array([[[0.25, 0.75]]], dtype=mx.float32))
+    mx.eval(out)
+    assert df._layer_shed_n == 1 and df.shed_calls == []
+    assert df.stage_calls[-1][1].reshape(-1).tolist() == [3]
+    assert recorded[-1][0].reshape(-1).tolist() == [3]
+    if unmixed:
+        assert recorded[-1][1] is None
+        assert out.shape == (1, 1, 2, 16)
+        assert not np.array(mx.abs(out[..., 0, :]).sum())
+        ref = super(type(glu), glu).__call__(
+            x1, mx.array([[[3]]], dtype=mx.uint32))
+        assert np.allclose(np.array(out[..., 1, :]),
+                           np.array(ref[..., 0, :]), atol=1e-6)
+    else:
+        assert np.allclose(recorded[-1][1].reshape(-1), [1.0], atol=1e-6)
+
+    calls = len(recorded)
+    out = glu(x1, i1)
+    mx.eval(out)
+    assert df._layer_shed_n == 2 and len(recorded) == calls
+    assert out.shape == (1, 1, 2, 16) and not np.array(mx.abs(out).sum())
+
+
 def test_available_ram_counts_active_file_cache(monkeypatch):
     """Reclaimable RAM counts the whole file-backed page cache (droppable
     without swap), not just the inactive queue - a machine full of hot GGUF

@@ -2115,7 +2115,7 @@ class DecodeFeeder:
         if getattr(self, "_layer_shed_n", 0):
             print(
                 f"[stream] layer-shed: {self._layer_shed_n} token-layer "
-                "routed paths skipped (shared expert only)")
+                "routed paths shed (shared or top expert only)")
         self._print_wedges(wait=wait)
 
     def _print_wedges(self, wait: bool = True) -> None:
