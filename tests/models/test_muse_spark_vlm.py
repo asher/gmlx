@@ -101,7 +101,9 @@ def test_audio_encoder_matches_the_numpy_graph(audio):
     got = np.asarray(model(mx.array(wave)))
     want = _np_audio(params, cfg, wave)
     assert got.shape == (5, HIDDEN)
-    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
+    # M5 f32 GEMM runs at TF32 precision by default (~1.4e-3 here); a wrong
+    # layer or norm is O(1).
+    np.testing.assert_allclose(got, want, rtol=1e-2, atol=1e-2)
 
 
 def test_audio_embeddings_depend_only_on_earlier_samples(audio):

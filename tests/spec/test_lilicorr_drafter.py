@@ -152,8 +152,10 @@ def test_lattice_matches_reference():
                                logits.astype(np.float64),
                                _np(embed.weight), anchor.astype(np.float64))
     np.testing.assert_array_equal(np.array(cands), rc)
-    np.testing.assert_allclose(_np(first), rf, rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(_np(edges), re_, rtol=1e-3, atol=1e-3)
+    # M5 f32 GEMM runs at TF32 precision by default (~3e-3 here); a wrong
+    # lattice score is O(1).
+    np.testing.assert_allclose(_np(first), rf, rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(_np(edges), re_, rtol=1e-2, atol=1e-2)
     assert edges.shape == (BLOCK - 2, K, K)
 
 

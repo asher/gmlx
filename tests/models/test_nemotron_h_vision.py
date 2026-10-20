@@ -169,7 +169,9 @@ def test_tower_matches_llama_cpp_graph(gh, gw, variant):
     got = tower(mx.array(_patchify(image, p).astype(np.float32)), (gh, gw))
     ref = _ref_tower(tower, image)
     assert got.shape == ((gh // 2) * (gw // 2), _CFG["projection_dim"])
-    np.testing.assert_allclose(np.array(got), ref, rtol=2e-3, atol=2e-3)
+    # M5 f32 GEMM runs at TF32 precision by default (up to ~4e-3 of scale
+    # here); a wrong patch order or projector is O(1).
+    np.testing.assert_allclose(np.array(got), ref, rtol=0, atol=2e-2 * np.abs(ref).max())
 
 
 def test_pixel_shuffle_channel_order():
