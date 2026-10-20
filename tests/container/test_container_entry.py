@@ -601,6 +601,13 @@ def _gone(pid: int, timeout: float = 10.0) -> bool:
         queue.close()
 
 
+def _halt(proc) -> None:
+    """Stops ``proc``, and returns once it has stopped."""
+    os.kill(proc.pid, signal.SIGSTOP)
+    _, status = os.waitpid(proc.pid, os.WUNTRACED)
+    assert os.WIFSTOPPED(status), status
+
+
 def _stop(*procs) -> None:
     for proc in procs:
         if proc.poll() is None:
@@ -732,6 +739,22 @@ print(os.getpid(), os.getpgrp(), child.pid, flush=True)
 while True:
     os.read(wake[0], 512)
 """
+
+
+def test_a_stop_and_continue_of_the_entry_sends_the_client_nothing(entry):
+    """On macOS, a sigwait that a stop and continue interrupts returns
+    SIGHUP, which never came."""
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 3")
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        for _ in range(3):
+            _halt(main)
+            os.kill(main.pid, signal.SIGCONT)
+        _send(main)
+        assert main.wait(10) == 3
+        assert main.stderr.read() == b""
+    finally:
+        _stop(main)
 
 
 @pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 9), (signal.SIGINT, 8)])

@@ -29,6 +29,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -376,31 +377,55 @@ pub fn job_control(sig: libc::c_int) -> bool {
     JOB_CONTROL.contains(&sig)
 }
 
-extern "C" fn ignore(_: libc::c_int) {}
+/// The waited signals that have come and that [`next_signal`] has not
+/// returned yet, one bit per signal number.
+static PENDING: AtomicU64 = AtomicU64::new(0);
 
-/// Makes the waited signals wait for [`next_signal`]. A handler, never
-/// SIG_IGN, is installed for each first, since a signal whose action is to
-/// ignore it can be dropped even while it is blocked. exec resets a handler,
-/// so the client starts with the default actions.
+fn bit(sig: libc::c_int) -> u64 {
+    1 << sig
+}
+
+extern "C" fn record(sig: libc::c_int) {
+    PENDING.fetch_or(bit(sig), Ordering::SeqCst);
+}
+
+/// Blocks the waited signals, which [`next_signal`] then returns one at a
+/// time. Each gets a handler that records it. exec resets a handler, so the
+/// client starts with the default actions.
 pub fn block_signals() {
     for sig in waited_list() {
-        // SAFETY: the handler does nothing, and it never runs while blocked.
-        unsafe { libc::signal(sig, ignore as extern "C" fn(libc::c_int) as libc::sighandler_t) };
+        // SAFETY: the handler only sets a bit, and it runs only inside the
+        // sigsuspend of next_signal.
+        unsafe { libc::signal(sig, record as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
     let set = waited();
     // SAFETY: set is initialized; the old mask is not needed.
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, ptr::null_mut()) };
 }
 
-/// The next waited signal.
+/// The next waited signal, the lowest number first. It waits in sigsuspend,
+/// not sigwait: on macOS, a sigwait that a stop and continue interrupts
+/// returns the lowest waited signal, SIGHUP, which never came.
 pub fn next_signal() -> libc::c_int {
-    let set = waited();
-    let mut sig = 0;
+    let mut open = MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: with no new set, the call only writes the current mask to open.
+    unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), open.as_mut_ptr()) };
+    // SAFETY: the call above wrote open.
+    let mut open = unsafe { open.assume_init() };
+    for sig in waited_list() {
+        // SAFETY: open is initialized.
+        unsafe { libc::sigdelset(&mut open, sig) };
+    }
     loop {
-        // SAFETY: set and sig are valid for the call.
-        if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
+        let pending = PENDING.load(Ordering::SeqCst);
+        if pending != 0 {
+            let sig = pending.trailing_zeros() as libc::c_int;
+            PENDING.fetch_and(!bit(sig), Ordering::SeqCst);
             return sig;
         }
+        // SAFETY: open is initialized. The handlers of the signals that
+        // come run before sigsuspend returns.
+        unsafe { libc::sigsuspend(&open) };
     }
 }
 
@@ -416,7 +441,7 @@ pub fn exit_code(status: libc::c_int) -> i32 {
     }
 }
 
-static RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RESUMED: AtomicBool = AtomicBool::new(false);
 
 /// Reaps every child that has exited, and returns the exit code of `pid`
 /// when it is one of them. A child that Ctrl-Z or SIGSTOP stopped is
@@ -435,7 +460,7 @@ pub fn reap(pid: libc::pid_t) -> Option<i32> {
         }
         if libc::WIFSTOPPED(status) {
             if matches!(libc::WSTOPSIG(status), libc::SIGTSTP | libc::SIGSTOP) {
-                if !RESUMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if !RESUMED.swap(true, Ordering::Relaxed) {
                     say("[launch] Ctrl-Z cannot suspend a client in the container, so it goes \
                          on running.");
                 }
