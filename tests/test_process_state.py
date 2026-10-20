@@ -351,6 +351,7 @@ def test_a_test_skipped_in_setup_tears_down_clean(tmp_path):
     assert "1 skipped" in r.stdout, r.stdout[-4000:]
 
 
+@pytest.mark.nightly
 def test_the_end_of_run_check_stays_last_under_ff_and_nf(tmp_path):
     # The check failed last time and its file is the newest, so --ff and
     # --nf would each move it to the front.
@@ -410,6 +411,7 @@ def test_two(kq_module_env):
 '''
 
 
+@pytest.mark.nightly
 def test_the_end_of_run_check_names_a_kq_key_a_wider_fixture_set(tmp_path):
     # The key is set before either test's capture, and its teardown
     # removes it before the check.
@@ -423,6 +425,7 @@ def test_the_end_of_run_check_names_a_kq_key_a_wider_fixture_set(tmp_path):
     assert touched in r.stdout, r.stdout[-4000:]
 
 
+@pytest.mark.nightly
 def test_the_end_of_run_check_names_a_kq_key_set_outside_any_test(tmp_path):
     # Set as the module is collected, so every capture starts with it.
     root = _inner_tree(tmp_path)
