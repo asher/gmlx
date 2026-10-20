@@ -48,10 +48,16 @@ def test_install_wraps_engine_once(monkeypatch, fake_kq):
 
     import gmlx.serve.cb_phase as cb_phase
 
+    from gmlx.upstream.patching import root
+
     saved = (ar.GenerationBatch._step, ar.SpeculativeGenerationBatch.next,
              ar.PromptProcessingBatch.prompt_step,
              ar.PromptProcessingBatch.generate)
     try:
+        # The copy's own methods, without what an earlier install left.
+        (ar.GenerationBatch._step, ar.SpeculativeGenerationBatch.next,
+         ar.PromptProcessingBatch.prompt_step,
+         ar.PromptProcessingBatch.generate) = map(root, saved)
         assert cb_phase.install_cb_phase_flips() is True
         assert ar.GenerationBatch._step._gmlx_cb_phase
         assert ar.SpeculativeGenerationBatch.next._gmlx_cb_phase
