@@ -429,8 +429,11 @@ def call(args: list[str], env, out, err, interrupt) -> int:
                 code = main(current, args, env, out, err)
             except _Interrupt:
                 code, sigint = 128 + signal.SIGINT, True
-        with open(path, "w") as f:
+        # A signal can end a call at any point, so the state file is never
+        # left half written.
+        with open(path + ".tmp", "w") as f:
             json.dump(current, f)
+        os.replace(path + ".tmp", path)
     if sigint:
         interrupt()
     return code
