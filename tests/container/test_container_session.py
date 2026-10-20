@@ -1338,7 +1338,7 @@ def test_supervise_hands_the_output_limit_to_the_copy(fake_container, tmp_path, 
         stream.read()
     monkeypatch.setattr(session, "_tee_for_url", tee)
     sess = session.new_session("dsh", "default", [])
-    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=3100,
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
                  url_pattern=pattern)
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None,
                       output_max=1 << 20)
