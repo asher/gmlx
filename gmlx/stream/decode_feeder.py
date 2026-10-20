@@ -206,6 +206,133 @@ def _sync_gpu() -> None:
         pass
 
 
+def _residency_apply(kq, ops: list) -> None:
+    for old, new in ops:
+        if old is not None:
+            kq.residency_erase(old)
+        if new is not None:
+            kq.residency_insert(new)
+    kq.residency_commit()
+
+
+def _removed_bytes(ops: list) -> int:
+    return sum(int(old.nbytes) for old, _ in ops if old is not None)
+
+
+# Buffers a failed residency worker could not erase. They stay alive until
+# exit: freeing a buffer the set still holds is the worse fault.
+_PARKED: list = []
+
+
+def _erase_or_park(kq, olds: list) -> None:
+    try:
+        _residency_apply(kq, [(old, None) for old in olds])
+    except BaseException as e:
+        _PARKED.extend(olds)
+        try:
+            print(f"[stream] residency erase failed again ({e!r}), keeping "
+                  f"{len(olds)} buffers until exit")
+        except BaseException:  # noqa: S110
+            pass
+
+
+class _ResidencyWorker:
+    """Applies Metal residency set changes and commits them on its own
+    thread, so a commit does not stall decode. A queued change holds the
+    buffer it removes until the commit after it runs. ``held`` counts
+    those bytes. If a call raises, the worker erases the buffers it was to
+    remove, and the calling thread commits every later change."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._ops: list = []
+        self._busy = False
+        self._stop = False
+        self._failed = False
+        self.held = 0
+        self._stats = env_bool("GMLX_DECODE_PHASE_STATS", False)
+        self._thread = threading.Thread(
+            target=self._run, name="gmlx-residency", daemon=True)
+        self._thread.start()
+
+    def put(self, ops: list) -> bool:
+        """Queue (removed, added) array pairs, either side None. False once
+        the worker has failed or stopped: the caller applies them itself."""
+        with self._cv:
+            if self._failed or self._stop:
+                return False
+            self._ops.extend(ops)
+            self.held += _removed_bytes(ops)
+            self._cv.notify()
+        return True
+
+    def drain(self) -> None:
+        """Wait until every queued change is committed, or a failed worker
+        has erased the buffers it removed."""
+        if threading.current_thread() is self._thread:
+            return  # it would wait for itself
+        with self._cv:
+            self._cv.wait_for(lambda: not (self._ops or self._busy))
+
+    def stop(self, wait: bool = True) -> None:
+        """End the thread once the queue is empty."""
+        if wait:
+            self.drain()
+        with self._cv:
+            self._stop = True
+            self._cv.notify()
+
+    def _run(self) -> None:
+        import mlx_kquant as kq
+
+        ops: list = []
+        try:
+            while True:
+                with self._cv:
+                    self._cv.wait_for(lambda: self._ops or self._stop)
+                    if not self._ops:
+                        return
+                    ops, self._ops = self._ops, []
+                    self._busy = True
+                t0 = time.monotonic()
+                _residency_apply(kq, ops)
+                dt = time.monotonic() - t0
+                n, gone = len(ops), _removed_bytes(ops)
+                ops = []    # the removed buffers go only after their commit
+                with self._cv:
+                    self.held -= gone
+                    self._busy = False
+                    self._cv.notify_all()
+                if self._stats:
+                    try:
+                        print(f"[phase] residency worker: {n} changes "
+                              f"committed in {dt:.2f}s", flush=True)
+                    except Exception:  # noqa: S110 - a stats line never fails a commit
+                        pass
+        except BaseException as e:
+            # The set's state is unknown. Erase every buffer a change
+            # removes before it can be freed, here, since a closing feeder
+            # leaves no other thread to do it. The arena holds the added
+            # ones, and a later swap erases them inline.
+            with self._cv:
+                self._failed = True
+                olds = [old for old, _ in ops + self._ops if old is not None]
+                ops, self._ops = [], []
+            try:
+                try:
+                    print(f"[stream] residency worker failed ({e!r}), "
+                          "committing on the decode thread from here on")
+                except BaseException:  # noqa: S110
+                    pass
+                _erase_or_park(kq, olds)
+                del olds
+            finally:
+                with self._cv:
+                    self.held = 0
+                    self._busy = False
+                    self._cv.notify_all()
+
+
 # System memory pressure: the arena is wired, so the kernel can never
 # reclaim it - pressure arriving after load (another model, a build) must
 # be answered by the feeder itself. Every _PRESSURE_POLL_EVERY stage calls
@@ -707,6 +834,20 @@ class DecodeFeeder:
                         f"expert {e} slot {s} kind {kind} sample_off {o} "
                         f"owner={int(self._owner[li][s])} pending={pend}")
 
+    def _residency_worker(self) -> _ResidencyWorker | None:
+        """The thread that commits the arena's residency set changes, or
+        None to commit on the calling thread (GMLX_RESIDENCY_ASYNC=0)."""
+        rw = getattr(self, "_rworker", None)
+        if rw is None and env_bool("GMLX_RESIDENCY_ASYNC", True):
+            rw = self._rworker = _ResidencyWorker()
+        return rw
+
+    def _residency_drain(self) -> None:
+        """Commit every queued residency change before one made here."""
+        rw = getattr(self, "_rworker", None)
+        if rw is not None:
+            rw.drain()
+
     def ensure_wired(self) -> None:
         """First decode call: release the prefill ring and wire the arena
         (one-time fault pass; a few seconds on a tens-of-GB arena). Called
@@ -739,21 +880,27 @@ class DecodeFeeder:
             t1 = time.monotonic()
             self._repay_lend(released)
             t2 = t3 = t1
+            queued = False
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
 
                 if getattr(kq, "residency_insert", None):
                     self._gpu_resident = True
-                    for a in self._arena.values():
-                        kq.residency_insert(a[0])
-                    t2 = time.monotonic()
-                    kq.residency_commit()
+                    adds = [(None, a[0]) for a in self._arena.values()]
+                    rw = self._residency_worker()
+                    queued = rw is not None and rw.put(adds)
+                    if not queued:
+                        for _, a in adds:
+                            kq.residency_insert(a)
+                        t2 = time.monotonic()
+                        kq.residency_commit()
                     t3 = time.monotonic()
             if env_bool("GMLX_DECODE_PHASE_STATS", False):
-                print(
-                    f"[phase] first decode: arena wiring {t1 - t0:.2f}s, "
-                    f"residency insert {t2 - t1:.2f}s, commit {t3 - t2:.2f}s",
-                    flush=True)
+                res = ("residency queued to the worker" if queued else
+                       f"residency insert {t2 - t1:.2f}s, "
+                       f"commit {t3 - t2:.2f}s")
+                print(f"[phase] first decode: arena wiring {t1 - t0:.2f}s, "
+                      f"{res}", flush=True)
             return
         if self._owes_lend():
             self._repay_lend(self._drop_ring())
@@ -1950,8 +2097,9 @@ class DecodeFeeder:
         token, so its pages stay GPU-resident whatever madvise says - only
         dropping the buffer returns memory. Reallocating one layer at its
         own stage() call bounds the transient old+new overlap to a single
-        layer's stacks, and the caller's eval fence guarantees no in-flight
-        gather references this layer."""
+        layer's stacks, plus the old stacks a grow leaves to the residency
+        worker, at most one grown layer's. The caller's eval fence
+        guarantees no in-flight gather references this layer."""
         import mlx_kquant as kq
 
         self._join_source_reads()
@@ -1972,6 +2120,11 @@ class DecodeFeeder:
             new_owner[ns] = e
             slot_of[e] = ns
         resident = getattr(self, "_gpu_resident", False)
+        row = sum(v[3] for v in entry.values())
+        rw = getattr(self, "_rworker", None)
+        if resident and rw is not None and rw.held + old_s * row > new_s * row:
+            rw.drain()  # at most one grown layer of old buffers waits
+        swaps = []
         for kind, (_, _, _, stride, shape) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
@@ -1983,21 +2136,26 @@ class DecodeFeeder:
             self._munlock_buf(key)
             if resident:
                 # a freed buffer must not stay in the residency set
-                kq.residency_erase(self._arena[key][0])
-                kq.residency_insert(a[0])
+                swaps.append((self._arena[key][0], a[0]))
             self._arena[key] = a
             self._views[key] = a[0].reshape((new_s,) + shape[1:])
             self.arena_bytes += (new_s - old_s) * stride
             if not self._mlock_deferred:
                 self._mlock_buf(key)
-        if resident:
+        # A grown layer commits on the worker. A shrink frees its bytes
+        # now, after every queued change: the check above drained them.
+        rw = self._residency_worker() if swaps and new_s > old_s else None
+        if swaps and (rw is None or not rw.put(swaps)):
+            for old, new in swaps:
+                kq.residency_erase(old)
+                kq.residency_insert(new)
             kq.residency_commit()
+        del swaps
         self._owner[li] = new_owner
         self._slots[li] = new_s
-        # The dropped buffers land in MLX's cache of freed GPU buffers,
-        # not back with the OS; on a box sized to the wired cap that idle
-        # anon memory is what the kernel starts compressing. Flush it
-        # while the freed bytes are the point of the resize.
+        # Flush MLX's cache of freed GPU buffers: on a box sized to the
+        # wired cap, that idle anon memory is what the kernel starts
+        # compressing.
         self._clear_mlx_cache()
 
     @contextmanager
@@ -2026,14 +2184,20 @@ class DecodeFeeder:
                      getattr(self, "_seed_copy_pool", None)):
             if pool is not None:
                 pool.shutdown(wait=wait)
+        rw = getattr(self, "_rworker", None)
         if getattr(self, "_gpu_resident", False):
             import mlx_kquant as kq
 
             if getattr(kq, "residency_erase", None):
-                for a in self._arena.values():
-                    kq.residency_erase(a[0])
-                kq.residency_commit()
+                # Queued behind the worker's changes, in their order.
+                drops = [(a[0], None) for a in self._arena.values()]
+                if rw is None or not rw.put(drops):
+                    for a, _ in drops:
+                        kq.residency_erase(a)
+                    kq.residency_commit()
             self._gpu_resident = False
+        if rw is not None:
+            rw.stop(wait)
         if getattr(self, "_routed_log", None):
             lis = np.array([li for li, _ in self._routed_log], np.uint16)
             rows = [ids for _, ids in self._routed_log]

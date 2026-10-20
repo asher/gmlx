@@ -64,6 +64,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefills faster. `GMLX_ARENA_SPLIT_MAX_SHARE` tunes the choice.
 - With `--stream-experts`, decoding is faster: between prefills the expert
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
+- With `--stream-experts`, replies start sooner: the expert arena updates its
+  GPU residency on a background thread. `GMLX_RESIDENCY_ASYNC=0` turns it off.
 - `gmlx serve --stream-experts` prefills in larger chunks, so a long prompt
   reaches its first token sooner.
 - With `--stream-experts`, prompts prefill faster: experts the decode arena

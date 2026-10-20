@@ -9,6 +9,7 @@ tests exercise every byte movement without Metal or a real model."""
 from __future__ import annotations
 
 import gc
+import threading
 import weakref
 from contextlib import contextmanager
 
@@ -1874,6 +1875,359 @@ def test_lend_for_ring_shrinks_then_decode_restores(monkeypatch, tmp_path):
     feeder.stage(0, np.array([0, 1]))
     assert feeder._slots[0] == 4  # ...at the layer's own stage call
     assert feeder.arena_bytes == before // 2 + 2 * feeder._per_expert[0]
+
+
+class _FakeResidencySet:
+    """mlx_kquant's residency calls on a model set: changes stage until a
+    commit applies them in order. Like kq's, the set does not keep its
+    buffers alive: one freed while a member or with a change staged lands
+    in ``freed_live``. Records the thread of each commit. With a gate, the
+    residency worker's calls wait for it (``waiting`` is set once one
+    finds it closed). The worker's call number ``fail_at`` raises, and so
+    does every erase of a buffer whose id is in ``bad``. With ``hold``,
+    the worker's calls after that one wait for it (``holding`` is set
+    once one does)."""
+
+    def __init__(self, monkeypatch, gate=None):
+        import mlx_kquant as kq
+
+        self.members: set = set()
+        self.staged: list = []
+        self.commits: list = []
+        self.freed_live: list = []
+        self.gate = gate
+        self.waiting = threading.Event()
+        self.worker_calls = 0
+        self.fail_at = None
+        self.bad: set = set()
+        self.hold = None
+        self.holding = threading.Event()
+        for name, fn in (("residency_insert", self.insert),
+                         ("residency_erase", self.erase),
+                         ("residency_commit", self.commit)):
+            monkeypatch.setattr(kq, name, fn, raising=False)
+        monkeypatch.setenv("GMLX_GPU_RESIDENT", "1")
+
+    def _wait(self):
+        if threading.current_thread().name != "gmlx-residency":
+            return
+        self.worker_calls += 1
+        if self.gate is not None:
+            if not self.gate.is_set():
+                self.waiting.set()
+            assert self.gate.wait(10)
+        if self.worker_calls == self.fail_at:
+            raise RuntimeError("residency set is gone")
+        if (self.hold is not None and self.fail_at is not None
+                and self.worker_calls > self.fail_at):
+            self.holding.set()
+            assert self.hold.wait(10)
+
+    def _gone(self, k):
+        if k in self.members or any(x == k for _, x in self.staged):
+            self.freed_live.append(k)
+
+    def insert(self, a):
+        self._wait()
+        weakref.finalize(a, self._gone, id(a))
+        self.staged.append((True, id(a)))
+        return True
+
+    def erase(self, a):
+        self._wait()
+        if id(a) in self.bad:
+            raise RuntimeError("residency set is gone")
+        self.staged.append((False, id(a)))
+        return True
+
+    def commit(self):
+        self._wait()
+        for add, k in self.staged:
+            if add:
+                self.members.add(k)
+            else:
+                self.members.discard(k)
+        self.staged.clear()
+        self.commits.append(threading.current_thread().name)
+        return True
+
+
+def _arena_ids(feeder):
+    return {id(a[0]) for a in feeder._arena.values()}
+
+
+@pytest.mark.parametrize("worker", [True, False])
+def test_a_regrown_layer_commits_off_the_decode_thread(monkeypatch, tmp_path,
+                                                       worker):
+    """The first decode's residency set and a repaid lend's regrow commit
+    on the residency worker, so decode does not wait while pages wire. A
+    lend's shrink commits on the calling thread, which needs the bytes
+    now. GMLX_RESIDENCY_ASYNC=0 commits everything on the caller."""
+    monkeypatch.setenv("GMLX_RESIDENCY_ASYNC", "1" if worker else "0")
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    rs = _FakeResidencySet(monkeypatch)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 4
+    feeder._residency_drain()
+    main = threading.current_thread().name
+    off = "gmlx-residency" if worker else main
+    assert rs.commits == [off, main, main, off]
+    assert rs.members == _arena_ids(feeder)
+    assert rs.freed_live == []
+    feeder.close()
+    assert rs.members == set()
+
+
+def test_a_shrink_commits_after_the_queued_regrow(monkeypatch, tmp_path):
+    """A shrink waits for the worker's queued changes before making its
+    own, so a buffer a regrow added and the shrink replaced never stays in
+    the set."""
+    gate = threading.Event()
+    gate.set()
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    rs = _FakeResidencySet(monkeypatch, gate)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # the regrow waits at the gate
+    opener = threading.Timer(0.2, gate.set)
+    opener.start()
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    opener.join()
+    assert feeder._slots[0] < 4
+    feeder._residency_drain()
+    assert rs.commits[-2:] == ["gmlx-residency",
+                               threading.current_thread().name]
+    assert rs.members == _arena_ids(feeder)
+    feeder.close()
+
+
+def test_close_empties_the_set_after_a_queued_regrow(monkeypatch, tmp_path):
+    gate = threading.Event()
+    gate.set()
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    rs = _FakeResidencySet(monkeypatch, gate)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # the regrow waits at the gate
+    opener = threading.Timer(0.2, gate.set)
+    opener.start()
+    feeder.close()
+    opener.join()
+    assert rs.members == set()
+
+
+def _lent(monkeypatch, tmp_path, n_layers=2, gate=None):
+    """A wired feeder whose layers each lent half their slots to the ring
+    and are owed them back: a layer's next stage() call regrows it."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             n_layers=n_layers)
+    rs = _FakeResidencySet(monkeypatch, gate)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    return feeder, rs
+
+
+def test_old_buffers_waiting_on_the_worker_stay_within_a_layer(monkeypatch,
+                                                               tmp_path):
+    """Every layer regrows in one forward while the worker is still
+    committing. A grow that would leave more than one layer's stacks of
+    old buffers waiting on the worker waits for it first, so the old and
+    new arenas never coexist whole."""
+    from gmlx.stream import decode_feeder as dfm
+
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=4, gate=gate)
+    real_drain = dfm._ResidencyWorker.drain
+
+    def drain(self):
+        gate.set()
+        real_drain(self)
+
+    monkeypatch.setattr(dfm._ResidencyWorker, "drain", drain)
+    gate.clear()
+    held = []
+    for li in range(4):
+        feeder.stage(li, np.array([0, 1]))
+        held.append(feeder._rworker.held)
+    assert [feeder._slots[li] for li in range(4)] == [4] * 4
+    assert 0 < max(held) <= 4 * sum(_STRIDE.values())
+    feeder._residency_drain()
+    assert rs.members == _arena_ids(feeder)
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def test_a_ring_share_repay_regrows_without_waiting_on_the_worker(
+        monkeypatch, tmp_path):
+    """At the first decode every lent layer is owed its slots back and
+    regrows from one slot while the worker is still committing the
+    arena's wiring. None of those grows waits for the worker."""
+    from gmlx.stream import decode_feeder as dfm
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             n_layers=4, ring_share=9 * per_expert)
+    gate = threading.Event()
+    rs = _FakeResidencySet(monkeypatch, gate)
+    lent = sorted(feeder._lent)
+    assert len(lent) == 3 and {feeder._slots[li] for li in lent} == {1}
+    drains = []
+    real_drain = dfm._ResidencyWorker.drain
+
+    def drain(self):
+        drains.append(1)
+        gate.set()
+        real_drain(self)
+
+    monkeypatch.setattr(dfm._ResidencyWorker, "drain", drain)
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()  # the wiring commit waits at the gate
+    for li in lent:
+        feeder.stage(li, np.array([0, 1]))
+    assert [feeder._slots[li] for li in lent] == [4] * 3
+    assert drains == []
+    gate.set()
+    feeder._residency_drain()
+    assert rs.members == _arena_ids(feeder)
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def _within(fn, timeout=10):
+    """Run fn on a helper thread, so a wait on a dead worker fails the
+    test instead of hanging it."""
+    err = []
+
+    def run():
+        try:
+            fn()
+        except BaseException as e:  # noqa: BLE001 - re-raised below
+            err.append(e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), "waited on a dead residency worker"
+    if err:
+        raise err[0]
+
+
+@pytest.mark.parametrize("then", ["drain", "collect", "persistent"])
+def test_a_failed_worker_erases_what_it_removed(monkeypatch, tmp_path,
+                                                capsys, then):
+    """A residency call that raises on the worker leaves the set's state
+    unknown. The worker erases the buffers its failed and queued changes
+    remove, then wakes a waiting drain, so they are freed as non-members.
+    If that erase raises too, it keeps them all until exit. Later changes
+    commit on the calling thread."""
+    import gc
+
+    from gmlx.stream import decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_PARKED", [])
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=3, gate=gate)
+    olds = [feeder._arena[(li, k)][0] for li in (0, 1) for k in _KINDS]
+    removed = [weakref.ref(a) for a in olds]
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # the regrow waits at the gate
+    assert rs.waiting.wait(10)
+    feeder.stage(1, np.array([0, 1]))  # queued behind it
+    # The held erase and the insert after it go through, the next raises.
+    rs.fail_at = rs.worker_calls + 2
+    if then == "persistent":
+        rs.bad.add(id(olds[1]))
+    del olds
+    added = id(feeder._arena[(0, "gate")][0])
+    if then == "drain":
+        rs.hold = threading.Event()
+    threading.Timer(0.2, gate.set).start()
+    box = [feeder]
+    del feeder
+
+    if then == "drain":
+        drained = threading.Event()
+        t = threading.Thread(
+            target=lambda: (box[0]._residency_drain(), drained.set()),
+            daemon=True)
+        t.start()
+        assert rs.holding.wait(10)
+        assert not drained.wait(0.2)  # the drain waits for the erase
+        rs.hold.set()
+        assert drained.wait(10)
+        t.join(10)
+
+    def drain_then_change():
+        box[0]._residency_drain()  # waits while the worker fails
+        assert box[0]._rworker.held == 0
+        box[0].stage(2, np.array([0, 1]))
+        assert rs.commits[-1] == threading.current_thread().name
+        assert added in rs.members  # the failed batch's insert stays
+        box[0].close()
+
+    if then != "collect":
+        _within(drain_then_change)
+    box[0]._rworker._thread.join(10)
+    out = capsys.readouterr().out
+    assert "residency worker failed (RuntimeError('residency set is gone'))" \
+        in out
+    _within(lambda: (box.clear(), gc.collect()))
+    alive = [r() is not None for r in removed]
+    assert alive == [then == "persistent"] * len(removed)
+    assert ("erase failed again" in out) == (then == "persistent")
+    assert rs.freed_live == []
+
+
+def test_a_failure_in_the_collectors_close_frees_no_member(monkeypatch,
+                                                           tmp_path, capsys):
+    """The collector's close queues the arena's erase on the worker and
+    returns. If a call in that batch raises, the worker still erases the
+    arena before the last reference to it goes."""
+    import gc
+
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=2, gate=gate)
+    feeder._residency_drain()
+    arena = [weakref.ref(a[0]) for a in feeder._arena.values()]
+    gate.clear()
+    feeder.close(wait=False)  # the finalizer's form
+    assert rs.waiting.wait(10)
+    rs.fail_at = rs.worker_calls + 1
+    worker = feeder._rworker._thread
+    box = [feeder]
+    del feeder
+    _within(lambda: (box.clear(), gc.collect()))
+    gate.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    gc.collect()
+    assert "residency worker failed" in capsys.readouterr().out
+    assert [r() for r in arena] == [None] * len(arena)
+    assert rs.members == set()
+    assert rs.freed_live == []
 
 
 def test_lend_is_noop_while_the_kernel_has_the_room(monkeypatch, tmp_path):
