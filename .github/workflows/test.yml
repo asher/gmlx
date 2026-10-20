@@ -362,6 +362,7 @@ jobs:
           python scripts/vendor_upstream.py verify
           python scripts/vendor_upstream.py lint
       - run: python scripts/check-docs.py
+      - run: python scripts/check-test-timing.py
       - name: Docs site build
         # The release workflow publishes this site. --strict fails on a link,
         # anchor or nav entry the site cannot resolve.
