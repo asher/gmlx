@@ -93,6 +93,9 @@ from gmlx.upstream.patching import link
 
 _WS_CAP_BYTES: float | None = None
 _FLAG = "_gmlx_prefill_decay"
+# Marks the decay's prompt_step layer, so a later install can tell that the
+# decay sits under it.
+STEP_LAYER = "_gmlx_prefill_decay_step"
 
 # Prefill-tick state, fed by the batched-serve scheduler (batch_sched).
 # Single-threaded tick loop; plain module globals. Outside serve nothing
@@ -1020,14 +1023,32 @@ def decayed_for_batch(batch) -> int | None:
     return step
 
 
+def with_decayed_step(batch, fn):
+    """Runs ``fn(batch)`` with the batch's step swapped for the decayed one,
+    as the decay's prompt_step layer runs the layers under it."""
+    base = batch.prefill_step_size
+    step = decayed_for_batch(batch)
+    if step == base:
+        return fn(batch)
+    # A checkpoint schedule armed inside fn (the MTP body) reads the base,
+    # not this chunk's width.
+    batch._gmlx_base_step = base
+    batch.prefill_step_size = step
+    try:
+        return fn(batch)
+    finally:
+        batch.prefill_step_size = base
+        vars(batch).pop("_gmlx_base_step", None)
+
+
 def install_prefill_decay() -> bool:
     """Wrap PromptProcessingBatch.prompt_step so each chunk is sized from
     the depth-decayed step, and needs_processing so a batch whose model
     keeps only the last logits hands generate() at most that step's
     columns. Any other batch's needs_processing reads the step only to test
-    it for None, so it runs as it is. Idempotent; composes with the MTP
-    prompt_step override in either install order (decay is idempotent, and
-    the MTP body resolves its own step via decayed_for_batch)."""
+    it for None, so it runs as it is. Idempotent. The MTP body runs inside
+    the swapped step in either install order: an MTP install that finds
+    this layer under it swaps the step in itself."""
     if not _enabled():
         return False
     from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
@@ -1038,32 +1059,17 @@ def install_prefill_decay() -> bool:
     orig_step = PromptProcessingBatch.prompt_step
     orig_needs = PromptProcessingBatch.needs_processing
 
-    def _with_decayed_step(self, orig):
-        base = self.prefill_step_size
-        step = decayed_for_batch(self)
-        if step == base:
-            return orig(self)
-        # A checkpoint schedule armed inside orig (the MTP body) reads the
-        # base, not this chunk's width.
-        self._gmlx_base_step = base
-        self.prefill_step_size = step
-        try:
-            return orig(self)
-        finally:
-            self.prefill_step_size = base
-            vars(self).pop("_gmlx_base_step", None)
-
     def _decay_prompt_step(self):
-        return _with_decayed_step(self, orig_step)
+        return with_decayed_step(self, orig_step)
 
     def _decay_needs_processing(self):
         # Inside a swapped prompt_step the step is sized already: sizing it
         # again can merge the tail into one chunk that orig never runs.
         if not _folds(self) or "_gmlx_base_step" in vars(self):
             return orig_needs(self)
-        return _with_decayed_step(self, orig_needs)
+        return with_decayed_step(self, orig_needs)
 
-    PromptProcessingBatch.prompt_step = link(_decay_prompt_step, orig_step)
+    PromptProcessingBatch.prompt_step = link(_decay_prompt_step, orig_step, STEP_LAYER)
     PromptProcessingBatch.needs_processing = link(
         _decay_needs_processing, orig_needs)
     setattr(PromptProcessingBatch, _FLAG, True)

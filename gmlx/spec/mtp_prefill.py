@@ -43,7 +43,7 @@ from gmlx.spec.engine import (
     _resolve_l1,
     _trim_prompt_columns,
 )
-from gmlx.upstream.patching import link
+from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -520,9 +520,20 @@ def install_full_prompt_mtp_prefill() -> None:
                     "APC plain ckpt init failed; continuing stock", exc_info=True
                 )
 
+    # The decay's layer swaps each chunk's width in around this body, and
+    # the chunk sizing and checkpoint schedule here read it. A decay that
+    # installed first sits under this body, which never calls it for an MTP
+    # batch, so the body swaps the width in itself.
+    decay_under = wrapped_with(_orig_prompt_step, prefill_decay.STEP_LAYER)
+
     def _mtp_prompt_step(self) -> int:
         if self.draft_kind != "mtp":
             return _orig_prompt_step(self)
+        if decay_under:
+            return prefill_decay.with_decayed_step(self, _mtp_chunk)
+        return _mtp_chunk(self)
+
+    def _mtp_chunk(self) -> int:
         # cb_phase flips fine prefill caps by wrapping the stock
         # prompt_step, but this body replaces it for MTP batches, so the
         # flip must happen here too: a multi-thousand-token chunk under

@@ -76,6 +76,21 @@ class _Manager:
         pass
 
 
+def stock_batch_class(mp):
+    """Puts PromptProcessingBatch back to the vendored copy's methods, with
+    no install flag set, so a test can build the install chain in an order
+    of its own. ``mp`` puts the process's chain back after the test."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.upstream.patching import root
+
+    cls = ar.PromptProcessingBatch
+    for name, value in list(vars(cls).items()):
+        if callable(value) and root(value) is not value:
+            mp.setattr(cls, name, root(value))
+        elif value is True and name.startswith(("_gmlx_", "_kq_")):
+            mp.setattr(cls, name, False)
+
+
 def install(mp, state, stored):
     """Install the serve chain with the render and store stubs. ``state``
     holds the next-turn prediction ``p`` and system prefix ``sys``;
