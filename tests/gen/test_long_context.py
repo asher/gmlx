@@ -46,7 +46,7 @@ CANDIDATE_ARCHES = [
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
     "kimi-k3", "muse-glimmer", "muse-spark", "qwen4exp", "glm5-next", "glm5next", "hyv4",
-    "k2-horizon",
+    "k2-horizon", "beam",
     "qwen3vl",
 ]
 
@@ -90,9 +90,15 @@ PARITY_WINDOW = {"gemma2": 4096, "hyv4": 4096}
 #   collapse to identical "..." spam at 16k - a coin flip at every depth.
 #   gpt-oss loader/numerics are covered by the batch-parity and kernel
 #   bit-exactness tests instead.
+#   beam - the same harmony format. Teacher-forced against llama.cpp on a
+#   16k raw prompt, the real IQ2_XXS file puts about 45% on its top token,
+#   and near-ties within 0.3 logprob split 4 of 23 greedy steps. The graph
+#   at 16k is checked against an fp64 reference on a synthetic Beam instead.
 PARITY_SKIP = {
     "gpt-oss": "harmony-format model: raw-completion greedy text parity is "
                "a coin flip (flat OOD distribution); no loader signal",
+    "beam": "harmony-format model: raw-completion greedy text parity is "
+            "a coin flip (flat OOD distribution); no loader signal",
 }
 
 _SEED = ("The history of science is a long and winding story, full of false "

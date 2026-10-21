@@ -28,6 +28,7 @@ user-facing rule is under Sampling in docs/config.md.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from gmlx.upstream.patching import link, wrapped_with
 
@@ -50,7 +51,7 @@ class _HookCarrier:
     unconditionally on any non-None criteria entry, so a row that lands on
     the plain batch (drafter disabled, fallback) must not raise."""
 
-    _kq_mtp_hook = None
+    _kq_mtp_hook: Any = None
 
     def __call__(self, tok):
         return None
@@ -76,7 +77,8 @@ def _build_hook(rg, args, input_ids):
         start_in_thinking=start_in,
         start_token=getattr(args, "thinking_start_token", None),
         end_token=getattr(args, "thinking_end_token", None),
-        prompt_ids=prompt_tail_ids(input_ids))
+        prompt_ids=prompt_tail_ids(input_ids),
+        tools=getattr(args, "_kq_has_tools", False))
 
 
 def _install_defer(cls) -> None:
@@ -86,6 +88,14 @@ def _install_defer(cls) -> None:
 
     def _generate(self, prompt, images=None, audio=None, args=None,
                   videos=None):
+        if (args is not None and getattr(args, "_kq_off_budget", False)
+                and getattr(self, "draft_model", None) is not None
+                and not _is_mtp(self)):
+            # Thinking off on a template with no switch is a budget of 0,
+            # which this drafter cannot run. Thinking stays on, as before.
+            _log.warning("thinking off ignored: this model has no thinking "
+                         "switch, and its drafter cannot run a thinking budget")
+            args.thinking_budget = None
         if (_is_mtp(self) and args is not None
                 and getattr(args, "thinking_budget", None) is not None):
             setattr(args, _DEFERRED_ATTR, args.thinking_budget)

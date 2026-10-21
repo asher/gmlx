@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 45 GGUF architectures to model types, and 44 of them load end-to-end
+gmlx maps 46 GGUF architectures to model types, and 45 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -24,6 +24,7 @@ family, backend, status and caveat:
 
 | GGUF arch | Family | Backend | Status | Caveat |
 |-----------|--------|---------|--------|--------|
+| `beam` | beam | mlx-lm | loadable | Speculative decoding is not available: the DFlash2 drafter ships only as safetensors. |
 | `deepseek2` | deepseek | mlx-lm | loadable | DeepSeek-V2, with softmax gating, is not supported. |
 | `deepseek4` | deepseek | mlx-lm | loadable | The GGUF is not a llama.cpp conversion. |
 | `deepseek41` | deepseek | mlx-lm | loadable | MTP is not yet implemented. An engram lookup table larger than one GPU buffer is read from the file row by row. |

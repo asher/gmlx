@@ -446,6 +446,40 @@ def test_router_attr_gate_drives_predictor(monkeypatch):
     assert la0.predictor is not None and la0.predictor.dst_li == 1
 
 
+class _BeamLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        from types import SimpleNamespace
+
+        from gmlx.models.beam.model import BeamMoE
+
+        self.post_attention_layernorm = nn.RMSNorm(DIM)
+        self.mlp = BeamMoE(SimpleNamespace(
+            hidden_size=DIM, moe_intermediate_size=HID, num_experts=NE,
+            num_experts_per_tok=K, n_group=4, topk_group=2,
+            norm_topk_prob=True, routed_scaling_factor=2.5))
+        self.mlp.gate.weight = mx.random.normal((NE, DIM))
+
+
+def test_beam_grouped_gate_drives_predictor(monkeypatch):
+    """Beam's gate submodule (grouped selection, a correction bias) wires
+    the layer-pair predictor, and the prediction keeps the group mask."""
+    mx.random.seed(7)
+    model = _FakeModel(2)
+    model.layers = [_BeamLayer() for _ in range(2)]
+    mx.eval(model.parameters())
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+    fn = _router_fn_for(model.layers[1].mlp)
+    assert fn is not None
+    assert install_lookahead(model, model.layers, probe=True) == 1
+    la0 = model.layers[0].mlp.switch_mlp._kq_lookahead
+    assert la0.predictor is not None and la0.predictor.dst_li == 1
+    mx.eval(model.layers[0].mlp(mx.random.normal((1, 1, DIM))))
+
+
 def test_depth2_installs_second_predictor(monkeypatch):
     """GMLX_DECODE_LOOKAHEAD_DEPTH=2 gives the first layer predictors for
     both following MoE layers, labeled with their depth."""

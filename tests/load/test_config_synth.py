@@ -2876,6 +2876,144 @@ def test_muse_spark_synth_refuses_softmax_gating_and_shared_experts():
         synthesize_config(m, tensor_shapes=_MUSE_SPARK_SHAPES)
 
 
+# beam
+
+
+def _beam_meta() -> dict:
+    arch = "beam"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 6
+    m[f"{arch}.feed_forward_length"] = 96
+    # The shipped schedule repeats five sliding layers and one full layer.
+    m[f"{arch}.attention.sliding_window"] = 8
+    m[f"{arch}.attention.sliding_window_pattern"] = [True] * 5 + [False]
+    m[f"{arch}.rope.freq_base_swa"] = 20000.0
+    m[f"{arch}.attention.temperature_scale"] = 0.1
+    m[f"{arch}.attention.temperature_length"] = 2048
+    m[f"{arch}.leading_dense_block_count"] = 2
+    m[f"{arch}.expert_count"] = 16
+    m[f"{arch}.expert_used_count"] = 4
+    m[f"{arch}.expert_group_count"] = 4
+    m[f"{arch}.expert_group_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.expert_gating_func"] = 2
+    m[f"{arch}.expert_weights_scale"] = 2.5
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.final_logit_softcapping"] = 30.0
+    return m
+
+
+_BEAM_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_gate.weight": [64, 64],
+    "blk.2.ffn_gate_exps.weight": [64, 24, 16],
+}
+
+
+def test_beam_synth_fields():
+    c = synthesize_config(_beam_meta(), tensor_shapes=_BEAM_SHAPES)
+    assert c["model_type"] == "beam"
+    assert c["layer_types"] == ["sliding_attention"] * 5 + ["full_attention"]
+    assert c["sliding_window"] == 8
+    assert c["rope_theta"] == 20000.0
+    assert c["rope_parameters"] == {"rope_theta": 20000.0,
+                                    "rope_type": "default"}
+    assert c["attn_temperature_scale"] == pytest.approx(0.1)
+    assert c["attn_temperature_length"] == 2048
+    assert c["first_k_dense_replace"] == 2
+    assert c["intermediate_size"] == 96
+    assert (c["num_experts"], c["num_experts_per_tok"]) == (16, 4)
+    assert (c["n_group"], c["topk_group"]) == (4, 2)
+    assert c["moe_intermediate_size"] == 24
+    assert c["routed_scaling_factor"] == 2.5
+    assert c["norm_topk_prob"] is True
+    assert c["final_logit_softcapping"] == 30.0
+    assert c["head_dim"] == 16
+    assert not c["tie_word_embeddings"]
+
+
+def test_beam_synth_instantiates():
+    from gmlx.models.beam.model import BeamMLP, BeamMoE, Model, ModelArgs
+
+    c = synthesize_config(_beam_meta(), tensor_shapes=_BEAM_SHAPES)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    logits = m(mx.array([[1, 2, 3]]))
+    assert logits.shape == (1, 3, VOCAB)
+    assert float(mx.abs(logits).max().item()) <= 30.0
+    assert [type(ly.mlp) for ly in m.layers[1:3]] == [BeamMLP, BeamMoE]
+    assert m.layers[0].self_attn.rope is not None
+    assert m.layers[5].self_attn.rope is None
+
+
+def test_beam_synth_defaults_when_optional_keys_are_absent():
+    m = _beam_meta()
+    for key in ("rope.freq_base_swa", "attention.temperature_scale",
+                "attention.temperature_length", "expert_group_count",
+                "expert_group_used_count", "final_logit_softcapping",
+                "expert_gating_func"):
+        del m[f"beam.{key}"]
+    c = synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+    assert c["rope_theta"] == 10000.0
+    assert c["attn_temperature_scale"] == pytest.approx(0.1)
+    assert c["attn_temperature_length"] == 2048
+    assert (c["n_group"], c["topk_group"]) == (1, 1)
+    assert c["final_logit_softcapping"] == 0.0
+
+
+def test_beam_synth_reads_a_per_layer_expert_width():
+    """A per-layer width array may carry 0 on the dense layers."""
+    m = _beam_meta()
+    m["beam.expert_feed_forward_length"] = [0, 0, 24, 24, 24, 24]
+    c = synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+    assert c["moe_intermediate_size"] == 24
+    m["beam.expert_feed_forward_length"] = [0, 0, 24, 32, 24, 24]
+    with pytest.raises(ValueError, match="non-uniform"):
+        synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+
+
+@pytest.mark.parametrize("key", [
+    "attention.sliding_window", "attention.sliding_window_pattern",
+    "leading_dense_block_count", "expert_feed_forward_length",
+    "expert_weights_scale", "expert_weights_norm",
+])
+def test_beam_required_keys_fail_loud(key):
+    m = _beam_meta()
+    del m[f"beam.{key}"]
+    with pytest.raises(ValueError, match=f"beam.{key}"):
+        synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+
+
+@pytest.mark.parametrize("key,value,match", [
+    ("attention.sliding_window", 0, "must be positive"),
+    ("attention.sliding_window_pattern", [True, False], "entries for"),
+    ("attention.sliding_window_pattern", [False] * 6, "no sliding layer"),
+    ("attention.temperature_scale", 0.0, "must be nonzero"),
+    ("attention.temperature_length", 0, "must be positive"),
+    ("leading_dense_block_count", 7, "exceeds"),
+    ("expert_group_count", 3, "do not split"),
+    ("expert_group_used_count", 4, "must be in"),
+])
+def test_beam_synth_refuses_what_llama_cpp_refuses(key, value, match):
+    m = _beam_meta()
+    m[f"beam.{key}"] = value
+    with pytest.raises(ValueError, match=match):
+        synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+
+
+def test_beam_synth_refuses_softmax_gating_and_shared_experts():
+    m = _beam_meta()
+    m["beam.expert_gating_func"] = 1
+    with pytest.raises(NotImplementedError, match="sigmoid"):
+        synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+    m = _beam_meta()
+    m["beam.expert_shared_count"] = 1
+    with pytest.raises(NotImplementedError, match="shared experts"):
+        synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
+
+
 # k2-horizon
 
 

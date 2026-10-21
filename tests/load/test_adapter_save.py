@@ -94,6 +94,8 @@ def test_empty_modules_raises(tmp_path):
 # Two LoRA targets for each architecture the loader reads and gguf-py has
 # no tensor-name map for, as (module path, base tensor, output width).
 _OWNED = {
+    "beam": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),
+             ("model.layers.1.mlp.up_proj", "blk.1.ffn_up.weight", IN)],
     "deepseek4": [("model.layers.0.attn.wq_a", "blk.0.attn_q_a.weight", IN),
                   ("model.layers.1.attn.wo_b", "blk.1.attn_output_b.weight", IN)],
     "deepseek41": [("model.layers.0.attn.wkv", "blk.0.attn_kv.weight", IN),

@@ -64,6 +64,38 @@ _SHORT_NAME = {mx.bfloat16: "bf16", mx.float16: "fp16", mx.float32: "fp32"}
 # encoder loader applies the rule to it (models/embedders/checkpoint.py).
 NO_FLOAT16_MODEL_TYPES = frozenset({"gemma_embedding"})
 
+# Norm weights. GGUF files store them F32. "auto" keeps them float32 for
+# the model types below and casts them to the activation dtype for the rest;
+# "fp32" keeps them float32 for every model, and "activation" casts them for
+# every model. A norm with a float32 weight returns its input's dtype, so
+# only the weight is wider (loader.cast_fp32_norm_outputs).
+NORM_ENV_VAR = "GMLX_NORM_DTYPE"
+NORM_CHOICES = ("auto", "fp32", "float32", "activation")
+NORM_WEIGHT_KEY = "norm.weight"
+# beam: four sandwich norms per layer plus q/k norms, and the post-norms
+# scale each branch just before the residual. bf16 weights put the synthetic
+# cert at 1.3e-3 median KLD from an fp64 reference, float32 at 1e-5, and
+# greedy text on the real model splits after about 170 tokens. The streamed
+# model shows no decode cost.
+FP32_NORM_MODEL_TYPES = frozenset({"beam"})
+
+
+def wider_float(a: mx.Dtype, b: mx.Dtype) -> mx.Dtype:
+    """The dtype MLX promotes two float dtypes to: either one when they
+    match, float32 for any mix of float16, bfloat16 and float32."""
+    return a if a == b else mx.float32
+
+
+def fp32_norms(model_type: str | None) -> bool:
+    """Whether ``model_type`` keeps its F32 norm weights float32."""
+    choice = env_choice(NORM_ENV_VAR, "auto", NORM_CHOICES)
+    if choice == "activation":
+        return False
+    if choice in ("fp32", "float32"):
+        return True
+    return model_type in FP32_NORM_MODEL_TYPES
+
+
 _ARCH_RE = re.compile(r"applegpu_g(\d+)")
 _NATIVE_BF16_GEN = 15  # Apple9 (M3) and later
 

@@ -88,7 +88,8 @@ _TOOL_IMAGES = frozenset((
 ))
 # The model types whose chat template raises on a JSON-string
 # ``tool_calls[*].function.arguments``.
-_DICT_TOOL_ARGUMENTS = frozenset(("muse_glimmer", "muse_spark", "k2_horizon"))
+_DICT_TOOL_ARGUMENTS = frozenset(("muse_glimmer", "muse_spark", "k2_horizon",
+                                  "beam"))
 
 
 def _tool_images(message) -> int:

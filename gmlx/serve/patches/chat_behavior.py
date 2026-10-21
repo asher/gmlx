@@ -155,8 +155,18 @@ def _stash_template_kwargs(args, request, _processor):
 
         merged = map_thinking_controls(merged, raw, req_effort, template,
                                        warn=_warn_thinking)
-    from gmlx.tui.reasoning import thinking_switch_flag
+    from gmlx.tui.reasoning import off_by_budget, thinking_switch_flag
 
+    # A template with no thinking switch takes off as a thinking budget of
+    # 0. An explicit budget wins.
+    asked = raw if raw is not None else (
+        None if request_switch else getattr(spec, "thinking", None))
+    if (getattr(args, "thinking_budget", None) is None
+            and off_by_budget(asked, template)):
+        args.thinking_budget = 0
+        args._kq_off_budget = True
+    # A forced close leads into the answer only when no tool call can be.
+    args._kq_has_tools = bool(getattr(request, "tools", None))
     flag = thinking_switch_flag(raw) if raw is not None else None
     if flag is not None:
         args.enable_thinking = flag
@@ -374,6 +384,7 @@ def install_thinking_budget_fix() -> None:
             enable_thinking=True,             # arm the gates regardless of origin
             prompt_open_thinking=prompt_open,  # but only start inside if pre-filled
             prompt_ids=prompt_tail_ids(input_ids),
+            tools=getattr(args, "_kq_has_tools", False),
         )
 
     _make_thinking_budget_criteria.__dict__[_TBUDGET_FLAG] = True

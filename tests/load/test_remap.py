@@ -1637,6 +1637,70 @@ def test_muse_spark_unknown_tensor_fails():
     assert d("muse-spark", "blk.0.not_a_muse_spark_tensor.weight").kind == FAIL
 
 
+# beam: every tensor is claimed by the BEAM block, all passthrough (NeoX
+# rope, so no qk permute).
+_BEAM_ROWS = (
+    ("token_embd.weight", "model.embed_tokens.weight"),
+    ("output_norm.weight", "model.norm.weight"),
+    ("output.weight", "lm_head.weight"),
+    ("blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight"),
+    ("blk.0.attn_q.weight", "model.layers.0.self_attn.q_proj.weight"),
+    ("blk.0.attn_k.weight", "model.layers.0.self_attn.k_proj.weight"),
+    ("blk.0.attn_v.weight", "model.layers.0.self_attn.v_proj.weight"),
+    ("blk.0.attn_output.weight", "model.layers.0.self_attn.o_proj.weight"),
+    ("blk.0.attn_q_norm.weight", "model.layers.0.self_attn.q_norm.weight"),
+    ("blk.0.attn_k_norm.weight", "model.layers.0.self_attn.k_norm.weight"),
+    ("blk.0.attn_gate.weight", "model.layers.0.self_attn.gate_proj.weight"),
+    ("blk.0.attn_gate.bias", "model.layers.0.self_attn.gate_bias"),
+    ("blk.0.post_attention_norm.weight", "model.layers.0.post_attn_norm.weight"),
+    ("blk.0.ffn_norm.weight", "model.layers.0.post_attention_layernorm.weight"),
+    ("blk.0.post_ffw_norm.weight", "model.layers.0.post_ffw_norm.weight"),
+    ("blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"),
+    ("blk.0.ffn_up.weight", "model.layers.0.mlp.up_proj.weight"),
+    ("blk.0.ffn_down.weight", "model.layers.0.mlp.down_proj.weight"),
+    ("blk.3.ffn_gate_inp.weight", "model.layers.3.mlp.gate.weight"),
+    ("blk.3.exp_probs_b.bias", "model.layers.3.mlp.gate.e_score_correction_bias"),
+    ("blk.3.ffn_gate_exps.weight", "model.layers.3.mlp.switch_mlp.gate_proj.weight"),
+    ("blk.3.ffn_up_exps.weight", "model.layers.3.mlp.switch_mlp.up_proj.weight"),
+    ("blk.3.ffn_down_exps.weight", "model.layers.3.mlp.switch_mlp.down_proj.weight"),
+)
+
+
+@pytest.mark.parametrize("gguf, hf", _BEAM_ROWS)
+def test_beam_rows(gguf, hf):
+    r = d("beam", gguf)
+    assert r.kind == MAP and r.hf_name == hf, (gguf, r.reason)
+    assert r.transform == "passthrough"
+
+
+def test_beam_claims_every_row_before_the_canonical_map():
+    from gmlx.load.remap import ARCH_PRIORITY_OVERRIDES
+
+    claimed = ARCH_PRIORITY_OVERRIDES["BEAM"]
+    for gguf, _hf in _BEAM_ROWS:
+        assert any(p.match(gguf) for p, _t, _x in claimed), gguf
+
+
+def test_beam_canonical_fallback_would_misload(monkeypatch):
+    """Without the BEAM block the canonical map puts the gate bias on the
+    gate weight, the FFN pre-norm and the sandwich norm on the wrong
+    norms, and skips the router bias."""
+    from gmlx.load.remap import ARCH_PRIORITY_OVERRIDES
+
+    monkeypatch.delitem(ARCH_PRIORITY_OVERRIDES, "BEAM")
+    w, b = d("beam", "blk.3.attn_gate.weight"), d("beam", "blk.3.attn_gate.bias")
+    assert w.hf_name == b.hf_name
+    assert d("beam", "blk.3.ffn_norm.weight").hf_name == (
+        "model.layers.3.pre_feedforward_layernorm.weight")
+    assert d("beam", "blk.3.post_attention_norm.weight").hf_name == (
+        "model.layers.3.post_attention_layernorm.weight")
+    assert d("beam", "blk.3.exp_probs_b.bias").kind == SKIP
+
+
+def test_beam_unknown_tensor_fails():
+    assert d("beam", "blk.0.not_a_beam_tensor.weight").kind == FAIL
+
+
 # k2-horizon: every tensor is claimed by the K2_HORIZON block, all passthrough.
 _K2_HORIZON_ROWS = (
     ("token_embd.weight", "model.embed_tokens.weight"),

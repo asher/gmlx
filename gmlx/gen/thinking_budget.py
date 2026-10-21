@@ -35,6 +35,12 @@ import sys
 import mlx.core as mx
 
 
+# Harmony's analysis pair. Phi-3 also ends turns with <|end|>, so this pair
+# is matched by its start tag only, and the single-token vocab probe skips
+# it.
+_HARMONY_PAIR = ("<|channel|>analysis<|message|>", "<|end|>")
+_START_ONLY_PAIRS = (_HARMONY_PAIR,)
+
 # Think-tag spellings scanned when the caller relies on the defaults. The
 # suffixed pair is Hy3's (every control tag carries ':opensource'; its chat
 # template pre-fills the open tag at reasoning_effort low/high); the mm pair
@@ -60,7 +66,11 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 # the effort picks, so the prompt decides the pair.
                 ("<ifm|think>", "</ifm|think>"),
                 ("<ifm|think_fast>", "</ifm|think_fast>"),
-                ("<ifm|think_faster>", "</ifm|think_faster>"))
+                ("<ifm|think_faster>", "</ifm|think_faster>"),
+                # Harmony (gpt-oss, Beam): the analysis channel. Last, so a
+                # real pair keeps priority. The family markers carry the full
+                # "<|start|>assistant..." header.
+                _HARMONY_PAIR)
 
 # Other close tags a model ends a pair's block with. The K2 Horizon 7B ends
 # its medium and low blocks with </ifm|think>; MoVA uses each pair's own
@@ -84,6 +94,60 @@ def normalize_end_aliases(text, end_tag):
     for alias in end_aliases(end_tag):
         text = text.replace(alias, end_tag)
     return text
+
+
+# Text that also ends a harmony analysis body, as in llama.cpp's harmony
+# parsers: a new message header with no <|end|> first, and <|constrain|>.
+# These end a block for the budget only, and only while it is open. They
+# never rewrite text and never count as stray closes. Inside a header,
+# <|constrain|> is the tool-call constraint, and a header is never inside
+# an open block.
+_SOFT_CLOSES = {
+    _HARMONY_PAIR[0]: ("<|start|>assistant", "<|constrain|>"),
+}
+
+
+def soft_end_seqs(tokenizer, start_seq) -> tuple:
+    """Token ids of the budget-only closes of the block ``start_seq`` opens."""
+    if not start_seq:
+        return ()
+    try:
+        text = tokenizer.decode(list(start_seq))
+    except Exception:  # noqa: BLE001 - undecodable: no soft closes
+        return ()
+    for key, closes in _SOFT_CLOSES.items():
+        if key in text:
+            return tuple(s for s in (marker_ids(tokenizer, c) for c in closes)
+                         if s)
+    return ()
+
+
+# Harmony answers on the final channel. When the request declares no tools,
+# a forced close also opens that channel: after a cut analysis block, Beam
+# otherwise calls a bash tool that was never declared.
+_ANSWER_STEER = {
+    _HARMONY_PAIR[0]: "<|start|>assistant<|channel|>final<|message|>",
+}
+
+
+def answer_steer_ids(tokenizer, start_seq) -> list:
+    """Token ids a forced close of the block ``start_seq`` opens adds to
+    lead into the answer, or [] for formats with no answer header."""
+    if not start_seq:
+        return []
+    try:
+        text = tokenizer.decode(list(start_seq))
+    except Exception:  # noqa: BLE001 - undecodable: no steer
+        return []
+    for key, header in _ANSWER_STEER.items():
+        if key in text:
+            return list(marker_ids(tokenizer, header))
+    return []
+
+
+def _report_stand_down(forced_closes: int) -> None:
+    print(f"[thinking] budget stood down after {forced_closes} forced closes",
+          file=sys.stderr, flush=True)
 
 
 def alias_end_seqs(tokenizer, end_seq) -> tuple:
@@ -121,7 +185,8 @@ def think_pairs_in(template) -> list:
     Most templates name one; K2 Horizon names one per reasoning effort."""
     if not isinstance(template, str) or not template:
         return []
-    pairs = [p for p in _THINK_PAIRS if p[0] in template or p[1] in template]
+    pairs = [p for p in _THINK_PAIRS if p[0] in template
+             or (p[1] in template and p not in _START_ONLY_PAIRS)]
     # Kimi-K3 builds its markers by macro concatenation ('<|open|>' + tag +
     # '<|sep|>'), so the literal pair never appears in the template source;
     # detect the macro call on the 'think' tag instead.
@@ -303,7 +368,8 @@ def seq_thinking_budget_criteria_cls():
     class SeqThinkingBudgetCriteria(ThinkingBudgetCriteria):
         def __init__(self, tokenizer, thinking_budget,
                      thinking_end_token="</think>", thinking_start_token=None,
-                     *, prompt_open_thinking=False, prompt_ids=None, **kw):
+                     *, prompt_open_thinking=False, prompt_ids=None,
+                     tools=False, **kw):
             super().__init__(tokenizer, thinking_budget,
                              thinking_end_token=thinking_end_token,
                              thinking_start_token=thinking_start_token, **kw)
@@ -312,35 +378,98 @@ def seq_thinking_budget_criteria_cls():
             self._end_seqs = (self._end_seq,) + tuple(
                 s for s in (marker_ids(tokenizer, a)
                             for a in end_aliases(thinking_end_token)) if s)
+            self._soft_end_seqs = soft_end_seqs(tokenizer, self._start_seq)
             self._forced_sequence = (self._forced_sequence[:-1]
                                      + list(self._end_seq))
+            # Fed after the close lands, as our own tokens.
+            self._steer = ([] if tools
+                           else answer_steer_ids(tokenizer, self._start_seq))
+            self._steer_left: list[int] = []
+            self._steering = False
             self._tail_max = max(len(self._start_seq),
-                                 *(len(s) for s in self._end_seqs))
+                                 *(len(s) for s in self._end_seqs),
+                                 *(len(s) for s in self._soft_end_seqs))
             keep = self._tail_max - 1
             self._prompt_tail = ([int(t) for t in prompt_ids[-keep:]]
                                  if prompt_ids is not None and keep else [])
             self._tail = list(self._prompt_tail)
             self._prompt_open = bool(prompt_open_thinking)
             self.in_thinking = self._prompt_open
+            self._reset_stand_down()
+
+        def _reset_stand_down(self):
+            # As in ThinkingBudgetProcessor: three forced closes with no
+            # answer token between them stand the budget down.
+            self.done = False
+            self._spent = False
+            self._answer_pending = False
+            self._strikes = 0
+            self._forced_closes = 0
 
         def reset_thinking_state(self):
             super().reset_thinking_state()
             self.in_thinking = self._prompt_open
             self._tail = list(self._prompt_tail)
+            self._steer_left = []
+            self._steering = False
+            self._reset_stand_down()
+
+        def _strike(self):
+            self._strikes += 1
+            if self._strikes >= 3:
+                self.done = True
+                self.budget_exceeded = False
+                _report_stand_down(self._forced_closes)
+
+        def _steer_next(self):
+            if not self._steer_left:
+                self._steering = False
+                self.forced_token_id = None
+                return None
+            forced = self._steer_left.pop(0)
+            self.forced_token_id = forced
+            return forced
 
         def __call__(self, token_id):
             self._tail.append(int(token_id))
             del self._tail[:-self._tail_max]
+            if self._steering:
+                return self._steer_next()
+            if self.done:
+                self.forced_token_id = None
+                return None
             if self.enable_thinking and ends_with_seq(self._tail, self._start_seq):
                 self.in_thinking = True
                 return None
             if any(ends_with_seq(self._tail, s) for s in self._end_seqs):
                 # Also a commentary <|eom|> outside reasoning, where it
                 # changes nothing.
+                landing = self.budget_exceeded
                 self.in_thinking = False
                 self.budget_exceeded = False
                 self._forced_index = 0
+                if landing:
+                    # A forced close just landed.
+                    self._forced_closes += 1
+                    self._spent = True
+                    if self._answer_pending:
+                        self._strike()
+                    self._answer_pending = True
+                    if self._steer:
+                        self._steering = True
+                        self._steer_left = list(self._steer)
+                        return self._steer_next()
+                elif self._spent and self._answer_pending:
+                    self._strike()  # stray close with no answer between
                 return None
+            if self.in_thinking and not self.budget_exceeded and any(
+                    ends_with_seq(self._tail, s) for s in self._soft_end_seqs):
+                self.in_thinking = False
+                return None
+            if (not self.in_thinking and self._answer_pending
+                    and not _opens_marker(self._tail, self._start_seq)):
+                self._answer_pending = False
+                self._strikes = 0
             if self.in_thinking:
                 self.thinking_token_count += 1
                 if self.thinking_token_count > self.thinking_budget:
@@ -362,10 +491,15 @@ def seq_thinking_budget_criteria_cls():
 # <|eom|>, which also closes commentary and tool calls, and the answer text
 # starts only after "<|start|>assistant to=user<|message|>". The recipient
 # is optional, as in llama.cpp's Muse parsers.
+# Harmony's answer is the final channel, with the JSON-constrained variant
+# llama.cpp's response-format rule accepts.
 _ANSWER_HEADERS = {
     "<|start|>assistant to=self<|message|>": (
         "<|start|>assistant to=user<|message|>",
         "<|start|>assistant<|message|>"),
+    "<|start|>assistant<|channel|>analysis<|message|>": (
+        "<|channel|>final<|message|>",
+        "<|channel|>final <|constrain|>json<|message|>"),
 }
 
 
@@ -488,6 +622,8 @@ def _thinking_token_seqs(tokenizer, start_token=None, end_token=None,
         start = getattr(tokenizer, "think_start_tokens", None)
         return (tuple(start) if start else None, tuple(end))
     for start_tag, end_tag in _THINK_PAIRS:
+        if (start_tag, end_tag) in _START_ONLY_PAIRS:
+            continue
         end_id = _single_token_id(tokenizer, end_tag)
         if end_id is None:
             continue
@@ -560,9 +696,11 @@ class ThinkingBudgetProcessor:
         reclose_ids=None,
         skip_ids=None,
         alt_end_seqs=(),
+        soft_end_seqs=(),
     ):
         self.end_seq = tuple(end_seq)
         self.alt_end_seqs = tuple(tuple(s) for s in alt_end_seqs if s)
+        self.soft_end_seqs = tuple(tuple(s) for s in soft_end_seqs if s)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.forced_ids = list(forced_ids)
         self.reclose_ids = list(reclose_ids) if reclose_ids else self.forced_ids
@@ -574,7 +712,8 @@ class ThinkingBudgetProcessor:
         self._baseline = None  # len(tokens) at first call -> skip the prompt
         self._tail: list[int] = []  # last tokens seen, for marker matching
         self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1,
-                             *(len(s) for s in self.alt_end_seqs))
+                             *(len(s) for s in self.alt_end_seqs),
+                             *(len(s) for s in self.soft_end_seqs))
         self._forcing = False
         self._forced_idx = 0
         self._force_seq = self.forced_ids
@@ -584,6 +723,7 @@ class ThinkingBudgetProcessor:
         self._answer_pending = False  # no answer token since the last close
         self._landing = False  # next end_seq match is our own forced close
         self._strikes = 0
+        self._forced_closes = 0
         self._ban_rows = {}
 
     def _one_hot(self, logits, tok_id):
@@ -629,6 +769,10 @@ class ThinkingBudgetProcessor:
         self._strikes += 1
         if self._strikes >= 3:
             self.done = True
+            _report_stand_down(self._forced_closes)
+
+    def _tail_soft_closes(self) -> bool:
+        return any(self._tail_is(s) for s in self.soft_end_seqs)
 
     def _outside_block(self) -> bool:
         """Whether an end marker now closes no block this processor saw
@@ -654,15 +798,21 @@ class ThinkingBudgetProcessor:
             self._baseline = n
             self._tail.append(int(tokens[-1].item()))
             del self._tail[:-self._tail_max]
-            if not self._forcing:
+            if self._landing:
+                # The last token of our own forced close. It may end in an
+                # answer header, which is no answer token.
+                self._landing = False
+            elif not self._forcing:
                 if self._tail_closes() and not self._outside_block():
                     self.in_thinking = False
-                    if self._landing:
-                        self._landing = False  # our own forced close arriving
-                    elif not self._spent:
+                    if not self._spent:
                         self.done = True  # natural close - disarm
                     elif self._answer_pending:
                         self._strike()  # stray close with no answer between
+                elif self.in_thinking and self._tail_soft_closes():
+                    self.in_thinking = False
+                    if not self._spent:
+                        self.done = True  # natural close - disarm
                 elif self.start_seq is not None and self._tail_is(
                     self.start_seq
                 ):
@@ -704,6 +854,7 @@ class ThinkingBudgetProcessor:
                 self.in_thinking = False
                 self._spent = True
                 self._landing = True
+                self._forced_closes += 1
                 if self._answer_pending:
                     self._strike()  # closed again without any answer between
                 self._answer_pending = True
@@ -754,21 +905,23 @@ def think_tokenizer_for(processor):
     return wrapped
 
 
-def _forced_close_ids(tokenizer, budget, end_seq):
+def _forced_close_ids(tokenizer, budget, end_seq, steer=()):
     """``(reclose_ids, forced_ids, skip_ids)`` for a resolved ``end_seq``:
     the terse newline+close, and the budget/^T variants carrying their wrap
-    phrases when the budget funds any thinking at all (``None`` or > 0)."""
+    phrases when the budget funds any thinking at all (``None`` or > 0).
+    Each ends with ``steer`` (``answer_steer_ids``) when given."""
     nl_id = _last_token_id(tokenizer, "\n")
-    reclose_ids = ([nl_id] if nl_id is not None else []) + list(end_seq)
+    close = list(end_seq) + list(steer)
+    reclose_ids = ([nl_id] if nl_id is not None else []) + close
     forced_ids = reclose_ids
     skip_ids = reclose_ids
     if budget is None or budget > 0:
         wrap = _encode_ids(tokenizer, _BUDGET_WRAP_PHRASE)
         if wrap:
-            forced_ids = list(wrap) + list(end_seq)
+            forced_ids = list(wrap) + close
         wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
         if wrap:
-            skip_ids = list(wrap) + list(end_seq)
+            skip_ids = list(wrap) + close
     return reclose_ids, forced_ids, skip_ids
 
 
@@ -801,7 +954,7 @@ def _announce_budget(tokenizer, budget, end_seq) -> None:
 def make_thinking_budget_processor(
     tokenizer, budget, *, start_in_thinking=True, verbose=False,
     eos_floor=True, interruptible=False, start_token=None, end_token=None,
-    prompt=None,
+    prompt=None, tools=False,
 ):
     """Build a thinking-budget logits processor, or ``None`` if unsupported.
 
@@ -816,7 +969,9 @@ def make_thinking_budget_processor(
     ``start_token``/``end_token`` (a family card's or the user's configured
     markers) override that inference for a model it does not recognize.
     ``prompt`` (the rendered prompt) picks the pair it opens when the
-    template names several, so the close matches the open.
+    template names several, so the close matches the open. ``tools`` says
+    the request declares tools; without them a harmony close also opens
+    the final channel (``answer_steer_ids``).
     Returns ``None`` (warning when ``verbose``) when no thinking-end token is
     detected; the caller then generates uncapped. ``budget=0`` force-closes as
     soon as a thinking block opens.
@@ -856,8 +1011,9 @@ def make_thinking_budget_processor(
                 "ignoring thinking budget"
             )
         return None
+    steer = [] if tools else answer_steer_ids(tokenizer, start_seq)
     reclose_ids, forced_ids, skip_ids = _forced_close_ids(
-        tokenizer, budget, end_seq)
+        tokenizer, budget, end_seq, steer)
     if verbose and budget is not None:
         _announce_budget(tokenizer, budget, end_seq)
     return ThinkingBudgetProcessor(
@@ -870,6 +1026,7 @@ def make_thinking_budget_processor(
         reclose_ids=reclose_ids,
         skip_ids=skip_ids,
         alt_end_seqs=alias_end_seqs(tokenizer, end_seq),
+        soft_end_seqs=soft_end_seqs(tokenizer, start_seq),
     )
 
 
@@ -897,9 +1054,10 @@ class MTPFinishThinking:
 
     def __init__(self, *, end_seq, skip_ids, reclose_ids, forced_ids=None,
                  budget=None, start_seq=None, start_in_thinking=False,
-                 prompt_ids=None, alt_end_seqs=()):
+                 prompt_ids=None, alt_end_seqs=(), soft_end_seqs=()):
         self.end_seq = tuple(end_seq)
         self.alt_end_seqs = tuple(tuple(s) for s in alt_end_seqs if s)
+        self.soft_end_seqs = tuple(tuple(s) for s in soft_end_seqs if s)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.skip_ids = list(skip_ids)
         self.reclose_ids = list(reclose_ids)
@@ -912,8 +1070,11 @@ class MTPFinishThinking:
         self._spent = False
         self._answer_pending = False
         self._strikes = 0
+        self._forced_closes = 0
+        self._own = 0  # tokens of the injected close still to observe
         self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1,
-                             *(len(s) for s in self.alt_end_seqs))
+                             *(len(s) for s in self.alt_end_seqs),
+                             *(len(s) for s in self.soft_end_seqs))
         # The prompt's last tokens, so a start marker that the generation
         # prompt begins (ATEM's "<|start|>assistant") completes on the
         # generated tokens. Never a whole marker, so the prompt itself
@@ -939,18 +1100,26 @@ class MTPFinishThinking:
         return k > 0 and len(self._tail) >= k and self._tail[-k:] == list(seq)
 
     def observe(self, tok) -> None:
-        """Track one emitted token (forced ids included: the injected close
-        ends with ``end_seq``, which flips ``in_thinking`` off here without
-        disarming, because ``_spent`` is already set by take_forced)."""
+        """Track one emitted token. The tokens of an injected close only
+        extend the tail: take_forced has already closed the block, and a
+        close that ends in an answer header writes no answer token."""
         self._tail.append(int(tok))
         if len(self._tail) > self._tail_max:
             del self._tail[: len(self._tail) - self._tail_max]
+        if self._own:
+            self._own -= 1
+            return
         closes = self._tail_is(self.end_seq) or any(
             self._tail_is(s) for s in self.alt_end_seqs)
         if closes and not self._outside_block():
             self.in_thinking = False
             if not self._spent:
                 self.done = True  # natural close - disarm, as on the plain path
+        elif self.in_thinking and any(self._tail_is(s)
+                                      for s in self.soft_end_seqs):
+            self.in_thinking = False
+            if not self._spent:
+                self.done = True
         elif self.start_seq is not None and self._tail_is(self.start_seq):
             self.in_thinking = True
             self.count = 0
@@ -982,6 +1151,7 @@ class MTPFinishThinking:
             self._strikes += 1
             if self._strikes >= 3:
                 self.done = True
+                _report_stand_down(self._forced_closes)
                 return None
         if self._spent:
             seq = self.reclose_ids
@@ -991,12 +1161,16 @@ class MTPFinishThinking:
             seq = self.forced_ids
         self._spent = True
         self._answer_pending = True
+        self._forced_closes += 1
+        self.in_thinking = False
+        self._own = len(seq)
         return list(seq)
 
 
 def make_mtp_finish_hook(
     tokenizer, *, budget=None, start_in_thinking=False, verbose=False,
     start_token=None, end_token=None, prompt_ids=None, prompt=None,
+    tools=False,
 ):
     """Build the thinking-budget/^T hook for the owned MTP round loop, or
     ``None`` when the model's thinking delimiters can't be resolved (the
@@ -1006,7 +1180,8 @@ def make_mtp_finish_hook(
     MTP decode. ``prompt_ids`` (the prompt's token ids, a list or a 1-D
     array) lets a start marker that the prompt begins complete on the
     generated tokens. ``prompt`` (the rendered text, else ``prompt_ids``)
-    picks the pair it opens when the template names several."""
+    picks the pair it opens when the template names several. ``tools`` is
+    as in ``make_thinking_budget_processor``."""
     if budget is not None and budget < 0:
         return None
     try:
@@ -1022,8 +1197,9 @@ def make_mtp_finish_hook(
                 "ignoring thinking budget"
             )
         return None
+    steer = [] if tools else answer_steer_ids(tokenizer, start_seq)
     reclose_ids, forced_ids, skip_ids = _forced_close_ids(
-        tokenizer, budget, end_seq)
+        tokenizer, budget, end_seq, steer)
     if verbose and budget is not None:
         _announce_budget(tokenizer, budget, end_seq)
     return MTPFinishThinking(
@@ -1036,6 +1212,7 @@ def make_mtp_finish_hook(
         start_in_thinking=start_in_thinking,
         prompt_ids=prompt_ids,
         alt_end_seqs=alias_end_seqs(tokenizer, end_seq),
+        soft_end_seqs=soft_end_seqs(tokenizer, start_seq),
     )
 
 

@@ -620,6 +620,67 @@ def test_request_thinking_off_maps_onto_kimi_bare_switch():
     assert out.enable_thinking is True
 
 
+@pytest.mark.parametrize("name", ["gptoss_template.jinja", "beam_template.jinja",
+                                  "muse_spark_template.jinja"])
+def test_request_thinking_off_without_a_switch_sets_a_budget_of_zero(name):
+    """These templates have no thinking switch, so a request's thinking off
+    is a thinking budget of 0. A request's own budget wins."""
+    from pathlib import Path
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    template = (Path(__file__).parents[1] / "fixtures" / name).read_text()
+    proc = types.SimpleNamespace(chat_template=template)
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="off")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out.thinking_budget == 0
+    assert out._kq_off_budget is True
+    assert "enable_thinking" not in (getattr(out, "_kq_template_kwargs", None) or {})
+
+    out = sp_chat._stash_template_kwargs(
+        gen.GenerationArguments(thinking_budget=32), req, proc)
+    assert out.thinking_budget == 32
+
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="on")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out.thinking_budget is None
+
+
+@pytest.mark.parametrize("tools, steered", [(None, True), ([], True),
+                                             ([{"type": "function"}], False)])
+def test_request_tools_decide_whether_a_forced_close_opens_the_answer(
+        tools, steered):
+    """With no tools declared, a harmony close also writes the final header,
+    so the model cannot follow it with an undeclared tool call."""
+    from pathlib import Path
+
+    import beam_tokens as bt
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "beam_template.jinja").read_text()
+    proc = types.SimpleNamespace(chat_template=template)
+    req = types.SimpleNamespace(model_fields_set=set(), chat_template_kwargs=None,
+                                thinking="off", tools=tools)
+    args = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert args._kq_has_tools is not steered
+    args.thinking_start_token, args.thinking_end_token = bt.START, bt.END
+    tok = bt.BeamTokenizer()
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        crit = cls._make_thinking_budget_criteria(
+            types.SimpleNamespace(tokenizer=tok), args,
+            mx.array([tok.encode("<|start|>user<|message|>hi<|end|>"
+                                 "<|start|>assistant")]))
+    finally:
+        cls._make_thinking_budget_criteria = original
+    header = tok.encode("<|start|>assistant<|channel|>final<|message|>")
+    assert crit._steer == (header if steered else [])
+
+
 def test_request_reasoning_effort_field_maps_onto_template():
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     proc = types.SimpleNamespace(chat_template="reads reasoning_effort")

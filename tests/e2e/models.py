@@ -89,6 +89,11 @@ _CANDIDATES = {
         "unsloth__Muse-Spark-Open-816B-A42B-GGUF/UD-IQ2_S/"
         "Muse-Spark-Open-816B-A42B-UD-IQ2_S-00001-of-00007.gguf",
     ],
+    # Beam-1.0 501B-A23B: 134 GB over four shards.
+    "beam_iq2xxs": [
+        "unsloth__Beam-1.0-501B-A23B-GGUF/UD-IQ2_XXS/"
+        "Beam-1.0-501B-A23B-UD-IQ2_XXS-00001-of-00004.gguf",
+    ],
     # DeepSeek-V4-Flash-Vision-Exp pair (103 GB, single-row image turns):
     # the block-expansion VLM path. Last vlm fallback, and the target of the
     # dsv4-vision scenarios when present.
@@ -138,6 +143,8 @@ _SOURCES = {
     "Muse-Spark-Open-816B-A42B-UD-IQ2_S-00001-of-00007.gguf",
     "dsv41_flash_mmproj": "hf:antirez/deepseek-v4.1-flash-gguf/"
     "DeepSeek-V4.1-Flash-Vision.gguf",
+    "beam_iq2xxs": "hf:unsloth/Beam-1.0-501B-A23B-GGUF/UD-IQ2_XXS/"
+    "Beam-1.0-501B-A23B-UD-IQ2_XXS-00001-of-00004.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -171,6 +178,7 @@ _ROLES = {
         ("glm53_flash_q2",),
         ("dsv41_flash_q2",),
         ("muse_spark_iq2s",),
+        ("beam_iq2xxs",),
     ],
     # Streamed n-gram tables on top of streamed experts; only V4.1 has them.
     "streaming_tables": [("dsv41_flash_q2",)],

@@ -43,7 +43,7 @@ _DEFAULT_FREQ_BASE = 10000.0
 # Architectures whose sliding-window layers keep the trained frequency scale
 # (rope_freq_scale_train_swa = rope_freq_scale_train in their llama.cpp
 # loaders); every other one rotates them with scale 1.
-_SWA_TRAIN_SCALE_ARCHES = frozenset({"gpt-oss", "gemma2"})
+_SWA_TRAIN_SCALE_ARCHES = frozenset({"gpt-oss", "gemma2", "beam"})
 _DEFAULT_BETA_FAST = 32.0
 _DEFAULT_BETA_SLOW = 1.0
 
@@ -452,7 +452,7 @@ SWAP_ARCHES = frozenset({
     "mistral3", "gpt-oss", "seed_oss", "smollm3", "granite", "qwen3next",
     "minimax-m2", "qwen35", "qwen35moe", "qwen3vl", "qwen3vlmoe",
     "hy_v3", "hyv4", "muse-glimmer", "muse-spark", "minimax-m3", "falcon-h1",
-    "k2-horizon",
+    "k2-horizon", "beam",
     "granitehybrid", "ernie4_5-moe", "gemma", "gemma2", "gemma3", "gemma4",
 })
 
