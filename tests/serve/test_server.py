@@ -1536,6 +1536,72 @@ def test_sync_that_removes_every_entry_leaves_a_file_that_parses(
     assert got == _HEAD.split("models:\n", 1)[1] + _ALIASES
 
 
+_DS41 = "  # sampling (deepseek41): t=1 top_p=0.95\n  ds41:\n    path: ds41.gguf\n"
+
+
+def _resync(monkeypatch, cfg_path, lib, new=(), image=None):
+    """Run sync-models again on ``cfg_path``. The scan finds the ``new``
+    ids with their sampling comment, and the image model ``image`` paired
+    with a text encoder file."""
+    from gmlx.config import ImageModelCfg, ModelCfg as MC
+    notes = dict(new)
+    for mid in notes:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
+
+    def scan(specs, dirs, *, images, **kw):
+        if image:
+            images.append(ImageModelCfg(
+                id=image, path=str(lib / f"{image}.gguf"),
+                encoder=str(lib / "enc.gguf"), vae=str(lib / "vae.gguf")))
+        return [MC(id=mid, path=str(lib / f"{mid}.gguf")) for mid in notes]
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv.discovery, "family_comment",
+                        lambda mc: notes.get(mc.id, ""))
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    text = cfg_path.read_text()
+    srv.load_config(cfg_path)                     # the file still parses
+    return text.split("models:", 1)[1]
+
+
+def test_a_sync_after_one_that_removed_every_entry_keeps_the_block_head(
+        monkeypatch, tmp_path):
+    """Removing every entry leaves ``models:`` null with the block's head
+    under it. A later write that adds no model leaves it null, and the
+    next add goes below the head, blank line and all."""
+    head = _HEAD.split("models:", 1)[1]
+    image = "image_models:\n  z:\n    path: z.gguf\n    encoder: enc.gguf\n    vae: vae.gguf\n"
+    cfg_path, lib = _sync_config(tmp_path, _HEAD + "\n" + _QWEN3 + _ALIASES)
+    assert _resync(monkeypatch, cfg_path, lib) == head + _ALIASES
+    assert _resync(monkeypatch, cfg_path, lib, image="z") == (
+        head + _ALIASES + image)
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("ds41", "sampling (deepseek41): t=1 top_p=0.95")]) == (
+        head + "\n" + _DS41 + _ALIASES + image)
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("q36", "sampling (qwen3.6 + gguf): t=1")]) == (
+        head + "\n" + "  # sampling (qwen3.6 + gguf): t=1\n"
+        "  q36:\n    path: q36.gguf\n" + _DS41 + _ALIASES + image)
+
+
+@pytest.mark.parametrize("block, tail", [
+    ("models:  # my models\n  # none yet\n", _ALIASES),
+    ("models:\n  # none yet\n", "\n# The end.\n"),
+    ("models:\n# Friendly request names:\n", "aliases: {}\n"),
+])
+def test_an_add_to_a_null_models_block_goes_below_its_comment(
+        monkeypatch, tmp_path, block, tail):
+    """The lines indented under a null ``models:`` are the block's head;
+    the lines from the first one at column 0 on stay after the block."""
+    cfg_path, lib = _sync_config(tmp_path, block + tail)
+    got = _resync(monkeypatch, cfg_path, lib, new=[
+        ("ds41", "sampling (deepseek41): t=1 top_p=0.95")])
+    if "none yet" in block:
+        assert got == block.split("models:", 1)[1] + "\n" + _DS41 + tail
+    else:
+        assert got == "\n" + _DS41 + block.split("\n", 1)[1] + tail
+
+
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,
                                                           capsys):
     # An unreadable hf cache means hf: entries CANNOT BE VERIFIED - removing

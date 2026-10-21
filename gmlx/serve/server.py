@@ -1156,6 +1156,50 @@ def _place_entry(doc, models, pos, key, entry, note) -> None:
     _put_above(doc, models, pos + 1, above[stay:])
 
 
+def _open_models_block(doc):
+    """Make a null or missing ``models:`` block an empty map and return it.
+    The comment lines indented under the null value become the map's head.
+    The lines from the first one at column 0 on stay above the next key,
+    or at the end of the file."""
+    from ruamel.yaml.comments import CommentedMap
+
+    keys = list(doc)
+    row = doc.ca.items.get("models")
+    lines = []
+    if row is not None and row[2] is not None:
+        eol = row[2]
+        lines = _token_lines([eol], skip_first=True)
+        first = eol.value.split("\n", 1)[0]
+        if first.strip():
+            eol.value = first + "\n"
+        else:
+            row[2] = None
+    i = keys.index("models") + 1 if "models" in keys else len(keys)
+    nxt = keys[i] if i < len(keys) else None
+    if nxt is not None:
+        lines += _take_before(doc, nxt)
+    elif "models" in keys and doc.ca.end:
+        lines += _token_lines(doc.ca.end)
+        doc.ca.end = []
+    cut = next((n for n, line in enumerate(lines)
+                if line.strip() and not line.startswith(" ")), len(lines))
+    head, rest = lines[:cut], lines[cut:]
+    gap = bool(head) and not head[-1].strip()
+    while head and not head[-1].strip():
+        rest.insert(0, head.pop())
+    if head and gap:
+        head.append("\n")
+    if rest and nxt is not None:
+        doc.ca.items.setdefault(nxt, [None, None, None, None])[1] = (
+            _comment_tokens(rest))
+    elif rest:
+        doc.ca.end = _comment_tokens(rest)
+    models = CommentedMap()
+    doc["models"] = models
+    _set_head(doc, models, head)
+    return models
+
+
 def _empty_models_block(doc, models) -> None:
     """Write an emptied ``models:`` block that has comment lines as a null
     value under them. The dump would put the lines above the ``{}`` it
@@ -1194,28 +1238,10 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
     ``speculative: false``."""
     from ruamel.yaml.comments import CommentedMap
 
-    def mutate(doc):
-        if new_roots and discovered:
-            srv = doc.get("server")
-            if not isinstance(srv, dict):
-                srv = CommentedMap()
-                doc["server"] = srv
-            roots = srv.get("model_dirs")
-            if not isinstance(roots, list):
-                roots = []
-                srv["model_dirs"] = roots
-            for d in new_roots:
-                if d not in roots:
-                    roots.append(d)
-        models = doc.get("models")
-        if not isinstance(models, dict):
-            models = CommentedMap()
-            doc["models"] = models
+    def edit_models(doc, models):
         for mid in removed:
             if mid in models:
                 _drop_entry(doc, models, mid)
-        if discovered:
-            discovery.drop_no_models_comment(doc)
         pos = 0
         for mid, fresh in (restream or {}).items():
             ent = models.get(mid)
@@ -1255,6 +1281,28 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                                           companion_note)
         if not models:
             _empty_models_block(doc, models)
+
+    def mutate(doc):
+        if new_roots and discovered:
+            srv = doc.get("server")
+            if not isinstance(srv, dict):
+                srv = CommentedMap()
+                doc["server"] = srv
+            roots = srv.get("model_dirs")
+            if not isinstance(roots, list):
+                roots = []
+                srv["model_dirs"] = roots
+            for d in new_roots:
+                if d not in roots:
+                    roots.append(d)
+        # A null or missing block stays as it is unless the sync adds to it.
+        models = doc.get("models")
+        if discovered:
+            discovery.drop_no_models_comment(doc)
+            if not isinstance(models, dict):
+                models = _open_models_block(doc)
+        if isinstance(models, dict):
+            edit_models(doc, models)
         if images:
             block = doc.get("image_models")
             if not isinstance(block, dict):

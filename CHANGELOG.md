@@ -77,6 +77,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the next model, and dropped that model's own.
 - A `gmlx sync-models` that removed the last model under a commented
   `models:` block wrote a config that did not parse.
+- A model that `gmlx sync-models` or `gmlx pull` added to an empty
+  `models:` block went above the comment lines under it.
 - `gmlx run` with `--mmproj` and `--stream-experts` prefilled in smaller
   chunks than a text run, so a long prompt took longer to its first token.
 - With `--mmproj`, each reply printed a warning that the model was close to
