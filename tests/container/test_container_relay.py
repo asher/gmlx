@@ -1090,6 +1090,28 @@ def test_a_request_head_sent_one_byte_at_a_time_counts():
     assert pair.moved
 
 
+def test_the_loop_keeps_no_connection_it_stopped_watching(loop):
+    """A connection closed in its handler is freed when the handler
+    returns, not at the loop's next event, which can be an hour away."""
+    import weakref
+    a, b = socket.socketpair()
+    freed, done = [], threading.Event()
+
+    class Conn:
+        def on_read(self, mask):
+            loop.unwatch(a)
+            ref = weakref.ref(self)
+            loop.call_soon(lambda: (freed.append(ref() is None), done.set()))
+    try:
+        _in_loop(loop, lambda: loop.watch(a, relay._READ, Conn().on_read))
+        b.send(b"x")
+        assert done.wait(10)
+        assert freed == [True]
+    finally:
+        a.close()
+        b.close()
+
+
 def test_a_closed_pair_holds_no_memory(loop, tmp_path, monkeypatch):
     """Each pair arms timers of up to an hour. Once the pair closes, nothing
     may keep it alive until those timers would run, or a guest that opens
@@ -1112,6 +1134,7 @@ def test_a_closed_pair_holds_no_memory(loop, tmp_path, monkeypatch):
             c.shutdown(socket.SHUT_WR)              # arms the hour-long answer deadline
             assert c.recv(1) == b"x" and c.recv(1) == b""
     assert _when_released(loop, r).wait(10)
+    _in_loop(loop, lambda: None)        # the last close has returned
     gc.collect()
     assert len(pairs) == 300 and not [p for p in pairs if p() is not None]
     assert _in_loop(loop, lambda: len(loop._timers)) < 200

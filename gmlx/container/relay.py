@@ -336,6 +336,20 @@ class RelayLoop:
             if late:
                 self._close_all()
 
+    def _dispatch(self, events) -> None:
+        for key, mask in events:
+            if key.fileobj is self._wake_r:
+                try:
+                    while self._wake_r.recv(4096):
+                        pass
+                except (BlockingIOError, OSError):
+                    pass
+                continue
+            try:
+                key.data(mask)
+            except Exception as e:  # noqa: BLE001 - one bad connection must not end the loop
+                self.log(f"relay loop: {type(e).__name__}: {e}")
+
     def _serve(self) -> None:
         while not self._stopping:
             wait = self._run_due_timers()
@@ -344,18 +358,10 @@ class RelayLoop:
             except OSError as e:
                 self.log(f"relay loop: select failed ({e})")
                 return
-            for key, mask in events:
-                if key.fileobj is self._wake_r:
-                    try:
-                        while self._wake_r.recv(4096):
-                            pass
-                    except (BlockingIOError, OSError):
-                        pass
-                    continue
-                try:
-                    key.data(mask)
-                except Exception as e:  # noqa: BLE001 - one bad connection must not end the loop
-                    self.log(f"relay loop: {type(e).__name__}: {e}")
+            self._dispatch(events)
+            # The keys hold their callbacks. Kept until the next select
+            # returns, they keep a connection closed in this one alive.
+            del events
             while self._calls:
                 fn = self._calls.popleft()
                 try:
