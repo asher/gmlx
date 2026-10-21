@@ -196,7 +196,7 @@
   "mlx_vlm/generate/ar.py": {"sha256": "d2dc36f632e29cc1d52a0b6881b0103bb99516193733b434aca31da5f589ba86", "status": "edited", "upstream": "23106ad929b88c47cb67dd2f010519f954dbf3aa61b63f20eeca2ebae0053e7e"},
   "mlx_vlm/generate/audio.py": {"status": "verbatim", "upstream": "33dfde340761855e8171446e365f235144e4f845e5dde9d48dbd6495cef05433"},
   "mlx_vlm/generate/cli.py": {"status": "verbatim", "upstream": "86e9348e69596623ffe36b76111fa252b55cfac75633b048f7afba051086aa9a"},
-  "mlx_vlm/generate/common.py": {"sha256": "32975a1bd06d4c34f067af39ac39d5413bf9142259537ba4a7da04480af6ec35", "status": "edited", "upstream": "c69e7e38a09990404d299b0a8d4be55c8220e60652e67a2456e8177633813ba0"},
+  "mlx_vlm/generate/common.py": {"sha256": "4cc7def1fb679ae0ff8782fc9e8ac613e4871725c8f4166b8cc3ffa5278d4c1c", "status": "edited", "upstream": "c69e7e38a09990404d299b0a8d4be55c8220e60652e67a2456e8177633813ba0"},
   "mlx_vlm/generate/diffusion.py": {"sha256": "2a7f6626fe01872fc7f44db07178bfb12b3e35a692979c44e58cca1d53e41948", "status": "codemod", "upstream": "b91dbb29d8486e9adf20bc408fdf0956d6eac68f5563ce775b4afcf931d3b4fd"},
   "mlx_vlm/generate/dispatch.py": {"sha256": "67c73473a12db7e55f665e8ea9f5ed605baecc7fdfec823d0cd7f3c99d80b834", "status": "edited", "upstream": "e49e508bb0a8cc8eda24b53430a60450697a52b1d3d5b63b2dd14d3dd413f0f3"},
   "mlx_vlm/generate/edit_image.py": {"sha256": "aaca736da50024ef0b2ebbbc798ee23ff203fd0195df822c196c6ae3b9419ec9", "status": "codemod", "upstream": "22a36e39ec7b8e0bb4f5a25c9e1c991d2e04422052c88dced8b1d631c53d2442"},

@@ -231,10 +231,16 @@ def wired_limit(model: nn.Module, streams: Optional[List[mx.Stream]] = None):
                 mx.synchronize()
         return
 
-    model_bytes = tree_reduce(
-        lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc, model, 0
-    )
     max_rec_size = mx.device_info()["max_recommended_working_set_size"]
+    # gmlx: a model that streams its experts pins the wired limit (see
+    # gmlx.stream.wired_limit), and a warning sized against the limit it
+    # no longer raises means nothing, once per turn.
+    from gmlx.upstream.patching import wrapped_with
+
+    model_bytes = 0 if wrapped_with(mx.set_wired_limit, "_kq_no_sweep") else (
+        tree_reduce(
+            lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
+            model, 0))
     if model_bytes > 0.9 * max_rec_size:
         model_mb = model_bytes // 2**20
         max_rec_mb = max_rec_size // 2**20
