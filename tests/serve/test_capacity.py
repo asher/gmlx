@@ -670,6 +670,20 @@ def test_discovery_preflight_and_serve_read_the_table_rule_alike(
 
     must_stream = rest > budget
     resident = text - cap.deferred_table_bytes(path)
+    # validate's plan on the same box: 128 GiB at the 108 GB budget,
+    # 256 GiB at 185.6 GB.
+    from gmlx.stream import plan as sp
+    m = sp.ModelPlan(arch="deepseek41", total_bytes=text,
+                     expert_bytes=int(experts), groups={}, moe_layers=40,
+                     n_experts=384, experts_per_token=6, ring_bytes=0,
+                     kv_costs=None, trained_ctx=None, table_bytes=table,
+                     tables=((table, {176: "Q5_K", 210: "Q6_K",
+                                      264: "MXFP8"}[row_bytes]),))
+    monkeypatch.setattr(tpr, "_kq_has", lambda codec: True)
+    box = sp.box_plan(m, ram_bytes=(128 if budget < 150 * GB else 256) << 30,
+                      ws_bytes=budget / 0.9, max_buffer_bytes=int(max_buffer))
+    assert box is not None
+    assert (box.verdict == sp.VERDICT_TABLES) == (not must_stream)
     entry = disc.ClassifiedGguf(path, "model", "deepseek_v41", False,
                                 "IQ2_XXS", True)
     assert (disc._over_budget(entry) is not None) == must_stream

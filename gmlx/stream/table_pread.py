@@ -228,10 +228,17 @@ def _table_sources(shards: list[str], arch: str | None,
                 path=shard, offset=h.data_offset + t.offset, rows=rows,
                 row_bytes=t.nbytes // rows, codec=codec,
                 dims=int(t.shape[0]) if codec else 0)
-            too_big = cap is not None and t.nbytes > cap
-            if too_big or (t.type_name == "MXFP8" and not _kq_has("mxfp8")):
+            if no_array_holds(t.nbytes, t.type_name, cap):
                 held.add(t.name)
     return out, held
+
+
+def no_array_holds(nbytes: int, type_name: str, cap: int | None) -> bool:
+    """Whether no array can hold a table of ``nbytes`` in GGUF type
+    ``type_name``: past the device ceiling ``cap``, or MXFP8 when
+    mlx-kquant cannot hold it."""
+    return ((cap is not None and nbytes > cap)
+            or (type_name == "MXFP8" and not _kq_has("mxfp8")))
 
 
 def oversize_tables(shards: list[str], arch: str | None,

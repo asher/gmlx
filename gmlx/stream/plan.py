@@ -3,9 +3,9 @@
 Prices a MoE GGUF from its header only. The routed experts stream from
 disk. Every other tensor is an every-token weight and stays resident.
 A box streams the model when the every-token weights and the KV room
-fit under the memory ceiling. A model whose streamable tables alone bring
-it under the resident budget reads them from the file and keeps its
-experts resident. What is left after the prefill chunk, and
+fit under the memory ceiling. A model that the tables it reads from the
+file bring under the resident budget keeps its experts resident. What is
+left after the prefill chunk, and
 after what the host floor and the host overhead need past the RAM the
 ceiling leaves outside it, is the decode arena, and its share of the
 experts sets the decode speed. ``gmlx validate`` and ``gmlx doctor``
@@ -22,8 +22,8 @@ GiB = 1 << 30
 _MIN_ARENA = GiB           # decode_feeder refuses a smaller arena
 
 VERDICT_RESIDENT = "resident"
-# The tables alone bring the load under the stream budget: they are read
-# from the file and the experts stay resident (table_stream.tables_bring_under).
+# The tables a load reads from the file bring it under the stream budget,
+# and the experts stay resident (capacity.deferred_table_bytes).
 VERDICT_TABLES = "tables_from_file"
 VERDICT_STREAMS = "streams"
 VERDICT_PAGE_CACHE = "page_cache"
@@ -85,6 +85,9 @@ class ModelPlan:
     # One streamed prefill chunk's live activations
     # (budget.prefill_activation_bytes), priced into the KV room.
     activation_bytes: int = 0
+    # Each streamable table as (bytes, GGUF type name), so a box can tell
+    # the ones no array holds (table_pread.no_array_holds).
+    tables: tuple = ()
 
     @property
     def every_token_bytes(self) -> int:
@@ -130,6 +133,11 @@ class BoxPlan:
     host_bytes: int = 0
     # The weight bytes a load may hold resident (device.stream_budget_for).
     budget_bytes: int = 0
+    # The table bytes a load without a stream flag reads from the file
+    # (capacity.deferred_table_bytes), and whether --stream-experts still
+    # streams the experts beside them.
+    deferred_bytes: int = 0
+    flag_streams: bool = False
 
     @property
     def arena_share(self) -> float | None:
@@ -150,13 +158,20 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
     from gmlx.stream.prefetch import _EXPS_RE
     from gmlx.stream.prefill_feeder import ring_bytes
 
+    from gmlx.load.discovery import block_of, mtp_blocks
+
     groups: dict[str, int] = {}
     # layer -> offsets-shaped entries, so the ring is the runtime's formula
     stacks: dict[int, list] = {}
     total = expert = table = 0
+    tables: list[tuple[int, str]] = []
     exps_shape = None
+    # The NextN blocks load only into a drafter, as text_tensor_bytes has it.
+    mtp = mtp_blocks([t for hs in scans for t in hs.tensors])
     for hs in scans:
         for t in hs.tensors:
+            if block_of(t.name) in mtp:
+                continue
             total += t.nbytes
             m = _EXPS_RE.fullmatch(t.name)
             if m is not None:
@@ -168,6 +183,7 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
                 g = group_of(t.name, arch)
                 if g == "table":
                     table += t.nbytes      # streamed, not an every-token group
+                    tables.append((int(t.nbytes), str(t.type_name)))
                 else:
                     groups[g] = groups.get(g, 0) + t.nbytes
     n_experts = _int(kv.get(f"{arch}.expert_count"))
@@ -193,7 +209,7 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
         experts_per_token=_int(kv.get(f"{arch}.expert_used_count")),
         ring_bytes=ring_bytes(stacks),
         kv_costs=costs, trained_ctx=trained, table_bytes=table,
-        activation_bytes=activation)
+        activation_bytes=activation, tables=tuple(tables))
 
 
 def ceiling_for(ram_bytes: float, ws_bytes: float) -> float:
@@ -203,17 +219,36 @@ def ceiling_for(ram_bytes: float, ws_bytes: float) -> float:
     return min(ws_bytes * (1.0 - margin()), ram_bytes - reserve_bytes(ram_bytes))
 
 
+def _deferred(model: ModelPlan, budget: int,
+              max_buffer_bytes: int | None) -> tuple[int, bool]:
+    """The table bytes a load of ``model`` without a stream flag reads
+    from the file, and whether they are all of its tables because they
+    alone bring it under ``budget``: ``capacity.deferred_table_bytes``
+    from the header, with the box's buffer ceiling."""
+    from gmlx.stream.table_pread import no_array_holds
+    from gmlx.stream.table_stream import tables_bring_under, tables_read_ahead
+
+    if not (model.table_bytes and tables_read_ahead(model.arch)):
+        return 0, False
+    if tables_bring_under(model.total_bytes, model.table_bytes, budget):
+        return model.table_bytes, True
+    return sum(n for n, kind in model.tables
+               if no_array_holds(n, kind, max_buffer_bytes)), False
+
+
 def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
-             ws_bytes: float | None = None) -> BoxPlan | None:
+             ws_bytes: float | None = None,
+             max_buffer_bytes: int | None = None) -> BoxPlan | None:
     """Fit ``model`` on a box. Defaults to this machine; pass both sizes
-    for another one. None when the machine cannot be read."""
+    for another one, and its buffer ceiling (this machine's when None).
+    None when the machine cannot be read."""
     from gmlx.device import stream_budget_for
     from gmlx.load.memfit import total_ram_bytes
     from gmlx.serve.capacity import classify_weight_share, working_set_bytes
     from gmlx.stream.budget import (host_floor_bytes, host_overhead_bytes,
                                     outside_ceiling_bytes, price_room,
                                     transient_bytes)
-    from gmlx.stream.table_stream import tables_bring_under, tables_read_ahead
+    from gmlx.stream.table_pread import max_buffer_bytes as device_max_buffer
 
     if ws_bytes is None:
         ws_bytes = working_set_bytes()
@@ -242,9 +277,10 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     shared = ring_share_bytes(full, held, model.ring_bytes) if ring_fits else 0
     arena = full if shared else held
     budget = stream_budget_for(ws_bytes)
-    if (tables_read_ahead(model.arch)
-            and tables_bring_under(model.total_bytes, model.table_bytes,
-                                   budget)):
+    if max_buffer_bytes is None:
+        max_buffer_bytes = device_max_buffer()
+    deferred, all_tables = _deferred(model, budget, max_buffer_bytes)
+    if deferred and model.total_bytes - deferred <= budget:
         verdict = VERDICT_TABLES
     elif classify_weight_share(model.total_bytes, ram_bytes) != "over":
         verdict = VERDICT_RESIDENT
@@ -260,7 +296,9 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
         expert_bytes=model.expert_bytes, ring_fits=ring_fits,
         floor_bytes=floor,
         short_bytes=max(0, -fit_left), verdict=verdict,
-        ring_shared_bytes=shared, host_bytes=host, budget_bytes=budget)
+        ring_shared_bytes=shared, host_bytes=host, budget_bytes=budget,
+        deferred_bytes=deferred if verdict == VERDICT_TABLES else 0,
+        flag_streams=verdict == VERDICT_TABLES and not all_tables)
 
 
 def scan_path(gguf_path: str) -> list:
@@ -312,8 +350,8 @@ def box_summary(m: ModelPlan, b: BoxPlan) -> str:
     if b.verdict == VERDICT_RESIDENT:
         return "fits in RAM, streaming is optional"
     if b.verdict == VERDICT_TABLES:
-        return (f"tables {gb(m.table_bytes)} read from the file, experts in "
-                f"memory ({gb(m.total_bytes - m.table_bytes)} under the "
+        return (f"tables {gb(b.deferred_bytes)} read from the file, experts "
+                f"in memory ({gb(m.total_bytes - b.deferred_bytes)} under the "
                 f"{gb(b.budget_bytes)} budget)")
     if b.verdict == VERDICT_TOO_BIG:
         return (f"every-token weights {gb(m.every_token_bytes)} + KV room "
@@ -351,10 +389,12 @@ def box_lines(m: ModelPlan, b: BoxPlan) -> list[str]:
                      f"({box_summary(m, b)} if streamed)")
         return lines
     if b.verdict == VERDICT_TABLES:
-        lines.append(f"tables {gb(m.table_bytes)} read from the file; the "
-                     f"other {gb(m.total_bytes - m.table_bytes)} fit the "
+        lines.append(f"tables {gb(b.deferred_bytes)} read from the file; the "
+                     f"other {gb(m.total_bytes - b.deferred_bytes)} fit the "
                      f"{gb(b.budget_bytes)} resident budget")
-        lines.append("=> loads with its experts in memory, with or without "
+        lines.append("=> loads with its experts in memory; --stream-experts "
+                     "streams them" if b.flag_streams else
+                     "=> loads with its experts in memory, with or without "
                      "--stream-experts")
         return lines
     if b.verdict == VERDICT_TOO_BIG:

@@ -340,7 +340,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # A load that reads its tables from the file holds the rest.
     resident = None
     if size_bytes and stream and _tables_from_file(stream):
-        resident = max(0, size_bytes - stream["table_bytes"])
+        resident = max(0, size_bytes - stream["box"]["deferred_bytes"])
     return {
         "ref": ref.raw,
         "kind": ref.kind,

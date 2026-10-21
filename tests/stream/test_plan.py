@@ -15,9 +15,10 @@ F16 = 2
 
 
 def _mint_moe(path, *, layers=2, experts=8, used=2, expert_count_kv=True,
-              big_layer=None):
+              big_layer=None, nextn_block=None):
     """A llama-shaped MoE file. ``big_layer`` doubles that layer's expert
-    stacks so the ring (twice the largest layer) is distinguishable."""
+    stacks so the ring (twice the largest layer) is distinguishable;
+    ``nextn_block`` makes that block a NextN block."""
     from gguf import GGUFWriter
 
     w = GGUFWriter(str(path), "llama")
@@ -44,6 +45,9 @@ def _mint_moe(path, *, layers=2, experts=8, used=2, expert_count_kv=True,
         for kind in ("gate", "up", "down"):
             w.add_tensor(f"blk.{i}.ffn_{kind}_exps.weight",
                          np.zeros((experts, rows, 64), dtype=np.float16))
+        if i == nextn_block:
+            w.add_tensor(f"blk.{i}.nextn.eh_proj.weight",
+                         np.zeros((64, 128), dtype=np.float16))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -227,20 +231,27 @@ def test_box_plan_verdicts(flat_room, monkeypatch):
     assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
 
 
-def ds41_plan():
-    """DeepSeek-V4.1-Flash 1017 UD-IQ2_XXS as its header prices it: an
-    engram table of 135.2 of its 300.5 GB."""
-    return sp.ModelPlan(arch="deepseek41", total_bytes=300_469_616_416,
+def ds41_plan(table=135_172_021_600, kind="Q5_K"):
+    """DeepSeek-V4.1-Flash 1017 as its header prices it: 165.3 GB beside
+    its engram table, 135.2 GB at UD-IQ2_XXS's Q5_K."""
+    return sp.ModelPlan(arch="deepseek41", total_bytes=165_297_594_816 + table,
                         expert_bytes=156_881_387_520, groups={}, moe_layers=40,
                         n_experts=384, experts_per_token=6,
                         ring_bytes=9_272_033_280, kv_costs=None,
-                        trained_ctx=None, table_bytes=135_172_021_600)
+                        trained_ctx=None, table_bytes=table,
+                        tables=((table, kind),))
 
 
-# The two boxes' working sets: a 256 GB Studio at the default 75%, and
-# this 128 GB M5 Max as Metal reports it.
-STUDIO = dict(ram_bytes=256 * GiB, ws_bytes=192 * GiB)
-M5_MAX = dict(ram_bytes=128 * GiB, ws_bytes=120_259_084_288)
+# The boxes' working sets, with Metal's buffer cap at 0.63 of RAM: a
+# 256 GB Studio at the default 75%, this 128 GB M5 Max as Metal reports
+# it, and a 512 GB Studio.
+STUDIO = dict(ram_bytes=256 * GiB, ws_bytes=192 * GiB,
+              max_buffer_bytes=int(0.63 * 256 * GiB))
+M5_MAX = dict(ram_bytes=128 * GiB, ws_bytes=120_259_084_288,
+              max_buffer_bytes=int(0.63 * 128 * GiB))
+STUDIO_512 = dict(ram_bytes=512 * GiB, ws_bytes=384 * GiB,
+                  max_buffer_bytes=int(0.63 * 512 * GiB))
+MXFP8 = 768_022_850 * 264
 
 
 def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
@@ -267,6 +278,51 @@ def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     b = sp.box_plan(m, **STUDIO)
     assert b is not None and b.verdict == sp.VERDICT_STREAMS
+
+
+def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
+        flat_room, monkeypatch):
+    """A table past the buffer ceiling, or MXFP8 on an mlx-kquant without
+    the codec, is read from the file even where it does not alone bring
+    the model under the budget: with GMLX_STREAM_PLE=0, or on a model
+    already under it. The other bytes fit, so the load keeps its experts
+    in memory, and --stream-experts streams them, as the loader does."""
+    import gmlx.stream.table_pread as tpr
+
+    lines = ["=> loads with its experts in memory; --stream-experts "
+             "streams them"]
+    # The MXFP8 table is past the 256 GB Studio's 173.2 GB ceiling.
+    m = ds41_plan(MXFP8, "MXFP8")
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    b = sp.box_plan(m, **STUDIO)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES and b.flag_streams
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 202.8 GB read from the file; the other 165.3 GB fit the "
+        "185.5 GB resident budget"] + lines
+    # The whole model is under a 512 GB Studio's 371.1 GB budget, and an
+    # mlx-kquant without MXFP8 holds no such table.
+    monkeypatch.delenv("GMLX_STREAM_PLE")
+    monkeypatch.setattr(tpr, "_kq_has", lambda codec: codec != "mxfp8")
+    b = sp.box_plan(m, **STUDIO_512)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES and b.flag_streams
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 202.8 GB read from the file; the other 165.3 GB fit the "
+        "371.1 GB resident budget"] + lines
+    monkeypatch.setattr(tpr, "_kq_has", lambda codec: True)
+    b = sp.box_plan(m, **STUDIO_512)
+    assert b is not None and b.verdict == sp.VERDICT_RESIDENT
+
+
+def test_the_plan_leaves_out_the_nextn_blocks(tmp_path):
+    """A NextN block loads only into a drafter: the plan prices what the
+    text load holds, as the loader and discovery do."""
+    from gmlx.load.discovery import text_tensor_bytes
+
+    p = _mint_moe(tmp_path / "m.gguf", layers=3, nextn_block=2)
+    m = sp.model_plan(sp.scan_path(p))
+    assert m.total_bytes == text_tensor_bytes(p)
+    assert m.moe_layers == 2
+    assert m.expert_bytes == 2 * 3 * 8 * 64 * 64 * F16
 
 
 @pytest.fixture
