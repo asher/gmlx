@@ -758,10 +758,11 @@ def scan_dirs(
     ``known_paths`` (from configured ``models:``) are skipped/deduped against, as
     are paths an earlier spec/root in this same call already emitted.
     ``known_models`` maps a configured model's resolved path to its
-    :class:`config.ModelCfg`. A drafter pairs into one of those too, and an
-    mmproj into one that has none; the model stays out of the return list,
-    and the caller writes the key from ``stats["draft_pairs"]`` or
-    ``stats["mmproj_pairs"]``.
+    :class:`config.ModelCfg`, with any ``draft_gguf`` resolved too. A
+    drafter pairs into one of those, unless it is the one the model names
+    already, and an mmproj into one that has none; the model stays out of
+    the return list, and the caller writes the key from
+    ``stats["draft_pairs"]`` or ``stats["mmproj_pairs"]``.
     ``progress`` streams per-file scan feedback to stderr (used by ``init``).
     ``stats``, if given, is a dict that receives ``skipped``: the count of
     .gguf files seen but unreadable as GGUF (so callers can distinguish an
@@ -1247,9 +1248,10 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             targets = ([] if spec.speculative is False
                        else _drafter_targets(dr, made + old))
             for mc in targets:
+                had = mc.draft_gguf
                 mc.draft_gguf = dr.path
                 mc.speculative = True
-                if mc.id in old_ids:
+                if mc.id in old_ids and had != dr.path:
                     draft_pairs[mc.id] = dr.path
             if targets:
                 ids = ", ".join(mc.id for mc in targets)
@@ -1279,7 +1281,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 loser = mc.draft_gguf
                 mc.draft_gguf = dr.path
                 mc.speculative = True
-                if mc.id in all_old_ids:
+                if mc.id in all_old_ids and loser != dr.path:
                     draft_pairs[mc.id] = dr.path
                 if loser and loser != dr.path:
                     print(f"[discover] drafter superseded for {mc.id}: "

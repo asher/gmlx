@@ -1111,26 +1111,66 @@ def test_sync_of_a_config_in_sync_in_a_read_only_folder_exits_0(monkeypatch, tmp
     assert "already in sync" in captured.out and captured.err == ""
 
 
-def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
-                                                               tmp_path):
-    # The user drops a drafter next to a model the config already carries:
-    # sync adds `draft_gguf` to that entry and leaves the rest of it alone.
-    from gmlx.config import load_config
-    cfg_path, lib = _sync_config(
-        tmp_path,
-        "models:\n  muse:\n    path: muse.gguf\n    pin: true\n")
-    (lib / "muse.gguf").write_bytes(b"x")
-    drafter = str(lib / "dflash-muse.gguf")
+def _drafter_beside(monkeypatch, lib, pairs):
+    """A scan that pairs each configured id in ``pairs`` with a drafter
+    beside its model."""
+    for mid in pairs:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
 
     def fake_scan(specs, dirs, **kw):
-        kw["stats"]["draft_pairs"] = {"muse": drafter}
+        kw["stats"]["draft_pairs"] = {mid: str(lib / f"dflash-{mid}.gguf")
+                                      for mid in pairs}
         return []
 
     monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
-    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
-    mc = load_config(cfg_path).models["muse"]
-    assert mc.draft_gguf == "dflash-muse.gguf"    # relative to model_dirs
-    assert mc.pin is True                         # the hand-edit survives
+
+
+def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
+                                                        capsys):
+    """A drafter dropped next to a model the config already carries joins
+    its entry after `path`, above the next entry's comment, and only with
+    --add-companions."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n  muse:\n    path: muse.gguf\n    pin: true\n"
+        "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n")
+    _drafter_beside(monkeypatch, lib, ["muse", "qwen"])
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    assert "already in sync" in capsys.readouterr().out
+    assert cfg_path.read_text() == before
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    cfg = load_config(cfg_path)
+    assert cfg.models["muse"].draft_gguf == "dflash-muse.gguf"
+    assert cfg.models["muse"].pin is True         # the hand-edit survives
+    note = srv.discovery.COMPANION_MARK_NOTE
+    assert cfg_path.read_text().endswith(
+        "  muse:\n    path: muse.gguf\n"
+        f"    draft_gguf: dflash-muse.gguf  # {note}\n    pin: true\n"
+        "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n"
+        f"    draft_gguf: dflash-qwen.gguf  # {note}\n")
+
+
+@pytest.mark.parametrize("held", [
+    "    draft_gguf: dflash-v1-muse.gguf\n",
+    "    #draft_gguf: dflash-muse.gguf\n",
+    "    speculative: false\n",
+])
+def test_sync_add_companions_leaves_a_drafter_out_of_a_held_entry(
+        monkeypatch, tmp_path, capsys, held):
+    """A drafter key the entry has, one commented out, or speculative
+    decoding turned off: the plan and the write both leave the entry be."""
+    cfg_path, lib = _sync_config(
+        tmp_path, f"models:\n  muse:\n    path: muse.gguf\n{held}")
+    _drafter_beside(monkeypatch, lib, ["muse"])
+    before = cfg_path.read_text()
+    for extra in (["--dry-run"], ["--no-reload"]):
+        assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                              *extra]) == 0
+        assert "already in sync" in capsys.readouterr().out
+    assert cfg_path.read_text() == before
 
 
 def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys):
@@ -1193,15 +1233,11 @@ def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
     from gmlx.config import load_config
     cfg_path, lib = _sync_config(
         tmp_path, "models:\n  muse:\n    path: muse.gguf\n")
-    (lib / "muse.gguf").write_bytes(b"x")
-
-    def fake_scan(specs, dirs, **kw):
-        kw["stats"]["draft_pairs"] = {"muse": str(lib / "dflash-muse.gguf")}
-        return []
-
-    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
-    assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
-    assert "update:  muse" in capsys.readouterr().out
+    _drafter_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--dry-run"]) == 0
+    assert "update:  muse  (draft_gguf: dflash-muse.gguf)" in \
+        capsys.readouterr().out
     assert load_config(cfg_path).models["muse"].draft_gguf is None
 
 
@@ -2564,6 +2600,72 @@ def test_register_downloads_never_edits_the_file_that_a_swapped_link_leads_to(
     err = capsys.readouterr().err
     assert "A container client can change where it leads" in err
     assert "sync-models" not in err
+
+
+_QWEN_REPO = "unsloth__Qwen3.8-27B-GGUF"
+_QWEN_HEADERS = {
+    "Qwen3.8-27B-UD-Q6_K_XL.gguf": {
+        "general.architecture": "qwen35", "general.basename": "Qwen3.8-27B",
+        "qwen35.nextn_predict_layers": 1, "qwen35.embedding_length": 5120},
+    "Qwen3.8-27B-DFlash2-Q8_0.gguf": {
+        "general.architecture": "dflash", "general.basename": "Qwen3.8-27B",
+        "general.base_model.0.name": "Qwen3.8 27B",
+        "dflash.selector_top_k": 16, "dflash.embedding_length": 5120},
+    "Qwen3.8-27B-DFlash-Q8_0.gguf": {
+        "general.architecture": "dflash", "dflash.embedding_length": 5120},
+}
+
+
+def _qwen_drafters(monkeypatch, lib):
+    """Qwen3.8-27B with a DFlash 2 drafter and a v1 one beside it, read by
+    a classifier that goes by file name."""
+    repo = lib / _QWEN_REPO
+    repo.mkdir()
+    for name in _QWEN_HEADERS:
+        (repo / name).write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        return srv.discovery._classify_meta(dict(_QWEN_HEADERS[name]),
+                                            basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    return repo / "Qwen3.8-27B-DFlash2-Q8_0.gguf"
+
+
+def test_register_downloads_adds_a_pulled_drafter_after_the_path(
+        monkeypatch, tmp_path, capsys):
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+        "\n  # sampling (gguf): t=0.6\n  old:\n    path: old.gguf\n")
+    drafter = _qwen_drafters(monkeypatch, lib)
+    srv.register_downloads([str(drafter)], str(cfg_path))
+    assert (f"    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+            f"    draft_gguf: {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf\n"
+            "\n  # sampling (gguf): t=0.6\n  old:\n") in cfg_path.read_text()
+    assert ("registered Qwen3.8-27B-DFlash2-Q8_0.gguf as the drafter of qwen"
+            in capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("drafter, out", [
+    ("Qwen3.8-27B-DFlash2-Q8_0.gguf", ""),        # a re-pull
+    ("Qwen3.8-27B-DFlash-Q8_0.gguf",
+     "Qwen3.8-27B-DFlash2-Q8_0.gguf is not registered as the drafter of qwen"),
+])
+def test_register_downloads_keeps_the_drafter_an_entry_names(
+        monkeypatch, tmp_path, capsys, drafter, out):
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+        f"    draft_gguf: {_QWEN_REPO}/{drafter}\n")
+    pulled = _qwen_drafters(monkeypatch, lib)
+    before = cfg_path.read_text()
+    srv.register_downloads([str(pulled)], str(cfg_path))
+    assert cfg_path.read_text() == before
+    got = capsys.readouterr().out
+    assert (out in got) if out else got == ""
 
 
 def test_register_downloads_skips_outside_model_dirs(monkeypatch, tmp_path):

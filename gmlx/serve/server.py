@@ -609,7 +609,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         kept.append(mid)
         if rp:
             known_paths.add(rp)
-            known_models[rp] = mc
+            known_models[rp] = _resolved_drafter(mc, cfg.model_dirs)
     if missing_roots:
         print(f"warning: model_dirs root(s) not on disk right now: "
               f"{', '.join(missing_roots)} - their entries are kept unverified",
@@ -630,9 +630,8 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             restream[mid] = fresh
 
     # Discover, skipping anything already configured (by id or by resolved path).
-    # `draft_pairs`: sibling drafters that pair into an entry already configured;
-    # `mmproj_pairs`: with --add-companions, the same for an mmproj, into an
-    # entry that has no mmproj key.
+    # With --add-companions, `draft_pairs` and `mmproj_pairs` are the drafters
+    # and mmprojs that pair into an entry already configured that can take one.
     discovered, draft_pairs, mmproj_pairs, images = [], {}, {}, []
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
@@ -643,14 +642,11 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             known_paths=known_paths | _image_paths(cfg),
             known_models=known_models, progress=True, stats=stats,
             images=images, encoder_ids=_encoder_ids(known_models))
-        draft_pairs = stats.get("draft_pairs") or {}
         if a.add_companions:
-            # A commented-out `#mmproj:` line keeps an entry text-only on
-            # purpose, and a key already there is the user's.
-            hold = _ids_with_key(path, "mmproj")
-            mmproj_pairs = {mid: mp for mid, mp
-                            in (stats.get("mmproj_pairs") or {}).items()
-                            if mid not in hold}
+            draft_pairs = _open_pairs(path, "draft_gguf",
+                                      stats.get("draft_pairs"))
+            mmproj_pairs = _open_pairs(path, "mmproj",
+                                       stats.get("mmproj_pairs"))
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
@@ -785,6 +781,46 @@ def _marked_stream_ids(path) -> list:
     return out
 
 
+def _resolved_drafter(mc, model_dirs):
+    """A copy of ``mc`` whose ``draft_gguf`` is the absolute path the scan
+    names the file by, so a pairing that is in place already reads as one.
+    A value that does not resolve stays as written."""
+    if not mc.draft_gguf:
+        return mc
+    try:
+        rp = resolve_path(mc.draft_gguf, model_dirs)
+    except ConfigError:
+        return mc
+    return dataclasses.replace(mc, draft_gguf=rp)
+
+
+def _open_pairs(path, key, pairs) -> dict:
+    """The ``pairs`` (id -> companion path) whose entry in ``path`` can take
+    ``key``. A key already there is the user's, and a commented-out line
+    such as ``#mmproj:`` keeps the entry without one on purpose. A drafter
+    also skips an entry set to ``speculative: false``, which it would turn
+    on."""
+    hold = _ids_with_key(path, key)
+    if key == "draft_gguf":
+        hold |= _ids_speculative_off(path)
+    return {mid: p for mid, p in (pairs or {}).items() if mid not in hold}
+
+
+def _ids_speculative_off(path) -> set:
+    """The ids of ``path``'s model entries set to ``speculative: false``."""
+    from ruamel.yaml import YAML
+
+    try:
+        doc = YAML().load(Path(path).read_text())
+    except Exception:
+        return set()
+    models = doc.get("models") if isinstance(doc, dict) else None
+    if not isinstance(models, dict):
+        return set()
+    return {str(mid) for mid, ent in models.items()
+            if isinstance(ent, dict) and ent.get("speculative") is False}
+
+
 def _ids_with_key(path, key) -> set:
     """The ids of ``path``'s model entries that carry ``key``, live or as a
     commented-out line such as ``#mmproj: ...`` below the entry's key."""
@@ -845,11 +881,15 @@ def _drop_key_keep_trailing(ent, key) -> None:
         prev[2] = CommentToken("\n" + rest, CommentMark(0), None)
 
 
-def _insert_key_keep_trailing(ent, after, key, value, note) -> None:
-    """Insert ``key: value  # note`` after ``after`` in a ruamel map. The
-    lines that rode ``after``'s end-of-line comment token (a blank line,
-    the next entry's comment) move onto the new key, so they stay below
-    it."""
+def _insert_key_keep_trailing(ent, after, key, value,
+                              note: str | None = None) -> None:
+    """Insert ``key: value  # note`` after ``after`` in a ruamel map, with
+    no comment when ``note`` is None. The lines that rode ``after``'s
+    end-of-line comment token (a blank line, the next entry's comment)
+    move onto the new key, so they stay below it."""
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
     item = ent.ca.items.get(after)
     tok = item[2] if item and len(item) > 2 else None
     rest = ""
@@ -861,32 +901,38 @@ def _insert_key_keep_trailing(ent, after, key, value, note) -> None:
             else:
                 item[2] = None
     ent.insert(list(ent).index(after) + 1, key, value)
-    try:
-        column = ent.lc.key(after)[1] + len(f"{key}: {value}") + 2
-    except Exception:  # noqa: BLE001 - a map built in memory has no positions
-        column = None
-    ent.yaml_add_eol_comment(note, key, column=column)
+    if note is not None:
+        try:
+            column = ent.lc.key(after)[1] + len(f"{key}: {value}") + 2
+        except Exception:  # noqa: BLE001 - a map built in memory has no positions
+            column = None
+        ent.yaml_add_eol_comment(note, key, column=column)
     if rest:
-        new = ent.ca.items[key][2]
-        new.value = new.value.rstrip("\n") + "\n" + rest
+        new = ent.ca.items.setdefault(key, [None, None, None, None])
+        if new[2] is not None:
+            new[2].value = new[2].value.rstrip("\n") + "\n" + rest
+        else:
+            new[2] = CommentToken("\n" + rest, CommentMark(0), None)
 
 
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 draft_pairs=None, images=(), restream=None,
-                mmproj_pairs=None) -> None:
+                mmproj_pairs=None,
+                companion_note: str | None = discovery.COMPANION_MARK_NOTE,
+                ) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
     ``new_roots`` are --models-dir override roots absent from
     ``server.model_dirs``; they're appended so the new entries resolve.
-    ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
-    to that entry; an entry that already has one keeps its value. ``images``
-    (paired :class:`ImageModelCfg`) go under ``image_models:``. ``restream``
-    (id -> a fresh scan's ``stream`` and ``speculative``) drops the
-    ``stream:`` key discovery wrote, and turns speculative decoding back
-    on where the fresh scan would. ``mmproj_pairs`` (configured id -> mmproj
-    path, from --add-companions) adds a marked ``mmproj`` key to an entry
-    that has none."""
+    ``images`` (paired :class:`ImageModelCfg`) go under ``image_models:``.
+    ``restream`` (id -> a fresh scan's ``stream`` and ``speculative``)
+    drops the ``stream:`` key discovery wrote, and turns speculative
+    decoding back on where the fresh scan would. ``draft_pairs`` and
+    ``mmproj_pairs`` (configured id -> companion path) add a ``draft_gguf``
+    or ``mmproj`` key to an entry that has none, with the end-of-line
+    comment ``companion_note``; a drafter skips an entry set to
+    ``speculative: false``."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -937,17 +983,24 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             if note:
                 models.yaml_set_comment_before_after_key(
                     mc.id, before=note, indent=2)
+        # A companion goes after `path` (a drafter after an `mmproj`), as
+        # discovery writes an entry: the last key's comment token holds the
+        # next entry's comment, so a key appended there would land below it.
         for mid, dpath in (draft_pairs or {}).items():
             ent = models.get(mid)
-            if isinstance(ent, dict) and not ent.get("draft_gguf"):
-                ent["draft_gguf"] = discovery._rel(dpath, dirs)
+            if (isinstance(ent, dict) and "path" in ent
+                    and "draft_gguf" not in ent
+                    and ent.get("speculative") is not False):
+                _insert_key_keep_trailing(
+                    ent, "mmproj" if "mmproj" in ent else "path",
+                    "draft_gguf", discovery._rel(dpath, dirs), companion_note)
         for mid, mpath in (mmproj_pairs or {}).items():
             ent = models.get(mid)
             if (isinstance(ent, dict) and "path" in ent
                     and "mmproj" not in ent):
                 _insert_key_keep_trailing(ent, "path", "mmproj",
                                           discovery._rel(mpath, dirs),
-                                          discovery.COMPANION_MARK_NOTE)
+                                          companion_note)
         if images:
             block = doc.get("image_models")
             if not isinstance(block, dict):
@@ -1002,7 +1055,7 @@ def register_downloads(paths: list, config_path=None) -> None:
                 continue
             known_paths.add(rp)
             if rp:
-                known_models[rp] = mc
+                known_models[rp] = _resolved_drafter(mc, cfg.model_dirs)
         # Scan the parent dirs (mmproj pairing needs the siblings), then keep
         # only models whose file is one we just downloaded - a neighbouring
         # file the user left unregistered stays unregistered.
@@ -1020,12 +1073,18 @@ def register_downloads(paths: list, config_path=None) -> None:
         images = [im for im in images if os.path.abspath(im.path) in wanted]
         # Only a drafter from this download may change a configured entry: a
         # file the user left beside a model stays unregistered.
-        pairs = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
-                 if os.path.abspath(dp) in wanted}
+        pulled = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
+                  if os.path.abspath(dp) in wanted}
+        pairs = _open_pairs(path, "draft_gguf", pulled)
+        for mid, dp in pulled.items():
+            if mid not in pairs:
+                print(f"{os.path.basename(dp)} is not registered as the "
+                      f"drafter of {mid}: its entry in {path} has a "
+                      "draft_gguf key or speculative: false")
         if not newly and not pairs and not images:
             return                     # already configured (a re-pull) - quiet
         _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs,
-                    images=images)
+                    images=images, companion_note=None)
         for mid, dp in pairs.items():
             print(f"registered {os.path.basename(dp)} as the drafter of "
                   f"{mid} in {path}")

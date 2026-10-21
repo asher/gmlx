@@ -432,6 +432,35 @@ def test_drafter_pairs_into_a_model_already_in_the_config(tmp_path, monkeypatch)
     assert mc.draft_gguf and mc.speculative is True
 
 
+def test_a_drafter_a_configured_model_names_already_is_no_pair(
+        tmp_path, monkeypatch):
+    # A DFlash 2 drafter may replace a drafter of another kind, so only the
+    # path tells that the one the entry names is this one.
+    heads = {
+        "Muse-Glimmer-30B-Q6_K_L.gguf": {
+            "general.architecture": "muse-glimmer",
+            "general.basename": "Muse-Glimmer", "general.size_label": "30B",
+            "muse-glimmer.embedding_length": 6656},
+        "Muse-Glimmer-30B-DFlash2-Q8_0.gguf": {
+            "general.architecture": "dflash",
+            "general.basename": "Muse-Glimmer-30B",
+            "dflash.selector_top_k": 16, "dflash.embedding_length": 6656},
+    }
+    monkeypatch.setattr(disc, "classify_gguf", lambda path: disc._classify_meta(
+        dict(heads[os.path.basename(path)]), basename=os.path.basename(path),
+        path=path))
+    root = _write(tmp_path, *heads)
+    target = str(root / "Muse-Glimmer-30B-Q6_K_L.gguf")
+    mc = ModelCfg(id="muse-30b", path=target,
+                  draft_gguf=str(root / "Muse-Glimmer-30B-DFlash2-Q8_0.gguf"))
+    spec = DiscoverSpec(dir=str(root), recursive=False, pair_mmproj=True,
+                        speculative="auto")
+    stats = {}
+    disc.scan_dirs([spec], [str(root)], known_paths={target},
+                   known_models={target: mc}, stats=stats)
+    assert stats["draft_pairs"] == {}
+
+
 def test_drafter_without_a_hidden_size_pairs_with_its_lone_target(
         tmp_path, monkeypatch):
     # A DSpark sidecar declares no hidden size, and its filename shares too

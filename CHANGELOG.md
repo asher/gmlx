@@ -18,11 +18,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mmproj-F16.gguf`) loads with `--mmproj`, so the 1017 quants read images.
 - A folder scan pairs an `mmproj` file at a repository root with the quants
   in the folders below it, when they are all one model, as unsloth lays out.
-- `gmlx sync-models --add-companions` adds a paired `mmproj` to a model
-  already in the config, so a companion downloaded later is picked up.
+- `gmlx sync-models --add-companions` adds a paired `mmproj` or drafter to
+  a model already in the config, so a companion downloaded later is picked up.
 
 ### Changed
 
+- `gmlx sync-models` adds a drafter to a model already in the config only
+  with `--add-companions`.
 - With `--stream-experts`, decoding is faster: between prefills the expert
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
 - With `--stream-experts`, replies start sooner and their first tokens come
@@ -63,6 +65,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a step gets the GPU-wired expert arena from its first step.
 - With `--stream-experts`, a long prompt on some models stopped
   prefilling and never answered.
+- A drafter that `gmlx pull` added to a model already in the config landed
+  below the comment of the next model in the file.
+- `gmlx pull` said it registered a drafter for a model whose entry kept its
+  own `draft_gguf`, and `gmlx sync-models` listed that update on every run.
 
 ## [0.5.1] - 2026-10-18
 
