@@ -1358,26 +1358,13 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
     assert waits(closed) and all(w is True for w in waits(closed))
 
 
-@pytest.mark.skipif(
-    bool(os.environ.get("KQUANT_FORCE_CPU"))
-    or not mx.metal.is_available(),
-    reason="the decode arena exists only with a GPU default device")
-# A Mac whose RAM outside the 100 GiB ceiling holds the host floor.
-@pytest.mark.host_gb(128)
-@pytest.mark.parametrize("timeshare", ["0", "1"])
-@pytest.mark.parametrize("env_gb", [None, "100"])
-@pytest.mark.parametrize("built", [True, False])
-def test_arena_sizes_against_ram_before_the_ring_is_wired(
-        monkeypatch, capsys, timeshare, env_gb, built):
-    """The ring's slots are wired when its feeder is built, so a free-RAM
-    snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
-    of KV room, 0.5 GB of host overhead, a 2 GB ring: the arena keeping the
-    ring apart gets 3.5 GB, and a time-shared arena gets 5.5 GB and lends
-    2 GB of it at prefill. A GMLX_DECODE_ARENA_GB past free RAM clamps to
-    it less the ring, the KV room and the host overhead, and keeps the
-    whole ring apart, as the serve footprint prices it. A ring that is
-    never built is charged nowhere. The allocator's buffer cache is the
-    pool the KV room prices, not the whole room."""
+def _install_sized(monkeypatch, *, timeshare="0", env_gb=None, built=True,
+                   free_gb=7, host=None):
+    """Install streaming on eight 1 GiB expert layers under a 100 GiB
+    ceiling with ``free_gb`` reclaimable, a 1 GiB KV room priced with a
+    0.25 GiB pool and no floor. Returns what the arena, its ring share and
+    the residency room were sized to, and the allocator limits. ``host``
+    stubs the host overhead; None leaves the install's own price."""
     from types import SimpleNamespace
 
     import gmlx.stream.budget as budget
@@ -1393,29 +1380,32 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
         monkeypatch.setenv("GMLX_DECODE_ARENA_GB", env_gb)
     else:
         monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
-    monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
+    for k in ("GMLX_DECODE_ARENA_FORCE", "GMLX_DECODE_PROCESS_GB",
+              "GMLX_DECODE_RESIDENT_CACHE_GB", "GMLX_STREAM_CACHE_GB",
+              "GMLX_STREAM_ALLOC_LIMITS"):
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
     # Eight 1 GB layers in the file; the ring holds two of them.
     third = GB // 3
     offsets = {li: [("m.gguf", li * GB + k * third, third, 4, kind)
                     for k, kind in enumerate(("gate", "up", "down"))]
                for li in range(8)}
-    free = {"bytes": 7 * GB}
+    free = {"bytes": int(free_gb * GB)}
     monkeypatch.setattr(es, "stream_budget_bytes", lambda: 100 * GB)
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 * GB)
     monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
     monkeypatch.setattr(budget, "_available_ram_bytes",
                         lambda *a, **k: free["bytes"])
-    monkeypatch.setattr(budget, "kv_room_bytes", lambda path, **kw: budget.KvRoom(
-        GB, 32768, 1, 0, 0, 0, priced=False, pool_bytes=GB // 4))
-    host = GB // 2
-    monkeypatch.setattr(budget, "host_overhead_bytes", lambda *a, **k: host)
+    monkeypatch.setattr(
+        budget, "kv_room_bytes", lambda path, **kw: budget.KvRoom(
+            GB, 32768, 1, 0, 0, 0, priced=False, pool_bytes=GB // 4))
+    if host is not None:
+        monkeypatch.setattr(budget, "host_overhead_bytes",
+                            lambda *a, **k: host)
     alloc = {}
     monkeypatch.setattr(mx, "set_memory_limit",
                         lambda b: alloc.update(limit=b))
     monkeypatch.setattr(mx, "set_cache_limit", lambda b: alloc.update(cache=b))
-    monkeypatch.delenv("GMLX_STREAM_CACHE_GB", raising=False)
-    monkeypatch.delenv("GMLX_STREAM_ALLOC_LIMITS", raising=False)
     monkeypatch.setattr(es, "_prefill_ring_reason", lambda *a: None)
     monkeypatch.setattr(pf, "maybe_make_prefetcher",
                         lambda path: SimpleNamespace(offsets=offsets))
@@ -1443,8 +1433,38 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     glu = SwitchGLU(16, 32, 4)
     install_expert_streaming(_holder_model(glu), gguf_path="m.gguf",
                              force_stream=True)
+    return sized, alloc
+
+
+_GPU_ARENA = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU"))
+    or not mx.metal.is_available(),
+    reason="the decode arena exists only with a GPU default device")
+
+
+@_GPU_ARENA
+# A Mac whose RAM outside the 100 GiB ceiling holds the host overhead.
+@pytest.mark.host_gb(128)
+@pytest.mark.parametrize("timeshare", ["0", "1"])
+@pytest.mark.parametrize("env_gb", [None, "100"])
+@pytest.mark.parametrize("built", [True, False])
+def test_arena_sizes_against_ram_before_the_ring_is_wired(
+        monkeypatch, capsys, timeshare, env_gb, built):
+    """The ring's slots are wired when its feeder is built, so a free-RAM
+    snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
+    of KV room, 0.5 GB of host overhead, a 2 GB ring: the arena keeping the
+    ring apart gets 3.5 GB, and a time-shared arena gets 5.5 GB and lends
+    2 GB of it at prefill. A GMLX_DECODE_ARENA_GB past free RAM clamps to
+    it less the ring, the KV room and the host overhead, and keeps the
+    whole ring apart, as the serve footprint prices it. A ring that is
+    never built is charged nowhere. The allocator's buffer cache is the
+    pool the KV room prices, not the whole room."""
+    GB = 1 << 30
+    host = GB // 2
+    sized, alloc = _install_sized(monkeypatch, timeshare=timeshare,
+                                  env_gb=env_gb, built=built, host=host)
     # The residency room charges the ring once, either way.
-    ring_b = 6 * third
+    ring_b = 6 * (GB // 3)
     want = {"0": (7 * GB - GB - host - ring_b, 0),
             "1": (6 * GB - host, ring_b)}[timeshare]
     if env_gb:
@@ -1460,3 +1480,23 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     assert len(clamps) == (1 if env_gb else 0)
     if env_gb:
         assert f"{want[0] / GB:.1f}GB" in clamps[0]
+
+
+@_GPU_ARENA
+@pytest.mark.host_gb(128)
+def test_install_prices_the_host_overhead_at_its_cap_on_a_cold_cache(
+        monkeypatch):
+    """A 128 GB Mac loads a stream right after boot, with 2 GiB of file
+    pages in the cache. The host overhead is 2 GiB of process memory and
+    8 GiB of file pages, the cap: DeepSeek V4.1 Flash held 8.6 to 8.7 GiB
+    of file pages under prefill. Priced from the cold cache it was 4 GiB,
+    and the arena took 6 GiB the pages need once they are read."""
+    import gmlx.serve.kernel_vm as kvm
+
+    GB = 1 << 30
+    cold = dict(kvm.snapshot() or {})
+    cold["filebacked"] = 2 * GB
+    monkeypatch.setattr(kvm, "snapshot", lambda: dict(cold))
+    sized, _ = _install_sized(monkeypatch, built=False, free_gb=12)
+    # 12 free, less the 1 GiB room and the 10 GiB host overhead.
+    assert sized["arena"] == GB
