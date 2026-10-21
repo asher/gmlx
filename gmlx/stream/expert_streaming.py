@@ -209,16 +209,16 @@ def _physical_ram() -> int:
     return ram
 
 
-def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
+def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     """MLX's allocator counts the file-backed weights as active memory,
     which on a streamed model sits past its default gc limit; every cache
     miss then purged the whole buffer cache and every temporary was a
     fresh Metal allocation. Put the gc limit out of reach and let the
-    cache limit alone bound the pool. The pool defaults to the priced KV
-    room (``room_bytes``, already reserved under the ceiling): a pool
-    smaller than one layer's transient set allocates fresh buffers every
-    layer, and each pays page population. GMLX_STREAM_ALLOC_LIMITS=0
-    keeps the defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    cache limit alone bound the pool. The pool is the one the KV room
+    prices (``pool_bytes``, ``budget.pool_bytes``): it fills to its limit
+    under prefill, and the live activations sit on top of it, so the room
+    holds both. GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults;
+    GMLX_STREAM_CACHE_GB sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
@@ -226,9 +226,9 @@ def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
     if env:
         cache = int(float(env) * 2**30)
         how = "GMLX_STREAM_CACHE_GB"
-    elif room_bytes > 0:
-        cache = int(room_bytes)
-        how = "the KV room; GMLX_STREAM_CACHE_GB overrides"
+    elif pool_bytes > 0:
+        cache = int(pool_bytes)
+        how = "priced in the KV room; GMLX_STREAM_CACHE_GB overrides"
     else:
         cache = 4 * 2**30
         how = "GMLX_STREAM_CACHE_GB sizes it"
@@ -1112,15 +1112,21 @@ def install_expert_streaming(
     feeder = None
     dfeeder = None
     room = arena = None
+    host_bytes = 0
     arena_kw: dict = {}
     if streaming and prefetcher is not None and moe_modules:
-        from gmlx.stream.budget import kv_room_bytes
+        from gmlx.stream.budget import (filebacked_bytes,
+                                        host_overhead_bytes, kv_room_bytes)
         from gmlx.stream.table_stream import streamed_table_bytes
 
         pin = getattr(model, "_kq_weights_pin", None)
         room = kv_room_bytes(gguf_path)
+        # Priced once, before the ring is wired, from the same moment's
+        # page counts the arena's reclaimable snapshot reads.
+        host_bytes = host_overhead_bytes(_physical_ram(), filebacked_bytes())
         arena_kw = dict(
             room_bytes=room.bytes,
+            host_bytes=host_bytes,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes,
@@ -1260,8 +1266,10 @@ def install_expert_streaming(
                 r[2] for rs in prefetcher.offsets.values() for r in rs)
             room_how = (
                 f"{room.depth} tokens x {room.width}: kv "
-                f"{room.kv_bytes / 1e9:.1f} + prefill "
-                f"{room.transient_bytes / 1e9:.1f} + reserve "
+                f"{room.kv_bytes / 1e9:.1f} + prefill scores "
+                f"{room.transient_bytes / 1e9:.1f} + chunk "
+                f"{room.activation_bytes / 1e9:.1f} + pool "
+                f"{room.pool_bytes / 1e9:.1f} + reserve "
                 f"{room.reserve_bytes / 1e9:.1f}"
                 if room.priced else "flat GMLX_DECODE_KV_RESERVE_GB")
             # Always visible, like the pin line: the one line a memory
@@ -1284,8 +1292,9 @@ def install_expert_streaming(
                 + (f" ({ring_share / 1e9:.1f} more lent from the arena at "
                    "each prefill)" if ring_share else "")
                 + f" + kv room {room.bytes / 1e9:.1f} "
-                f"({room_how}) + floor {floor / 1e9:.1f}; {tables}"
-                "GMLX_STREAM_KV_CTX sizes the room"
+                f"({room_how}) + floor {floor / 1e9:.1f} + host "
+                f"{host_bytes / 1e9:.1f} (process and resident page cache);"
+                f" {tables}GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)
             measured = (
@@ -1424,7 +1433,7 @@ def install_expert_streaming(
             )
     if streaming:
         _set_allocator_limits(
-            total_bytes, room.bytes if room is not None else 0)
+            total_bytes, room.pool_bytes if room is not None else 0)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.

@@ -34,8 +34,8 @@ a streaming plan for this Mac. This plan is for Kimi-K3 UD-Q2_K_XL, an
 ```text
   streaming: every-token weights 62.2 GB, routed experts 799.1 GB (92 layers, 896 experts, 16 per token), prefill ring 22.7 GB
     every-token by group: attention 31.8 GB, shared experts 12.9 GB, dense ffn and routers 8.2 GB, ...
-    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 11.7 GB at 32768 tokens, host floor 9.6 GB
-    => streams, but no decode arena (0.0 GB left after the ring and the host floor), decode runs from the page cache; expect slow decode
+    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 42.1 GB at 32768 tokens (30.4 GB of it the prefill chunk and its pool), host floor 9.6 GB, host overhead 10.7 GB
+    => streams, but no decode arena (0.0 GB left after the ring, the host floor and the host overhead), decode runs from the page cache; expect slow decode
 ```
 
 The last line is the verdict:
@@ -111,6 +111,10 @@ To make a model fit, or to give it a decode arena:
 - Shrink the KV room. `GMLX_STREAM_KV_CTX` sets how many tokens it holds,
   and `--kv-bits 8` halves the KV cache part. The safe context is then
   shorter.
+- Shrink the prefill chunk on the server with `--prefill-step-size` or
+  `prefill_step_size`. The KV room holds the chunk's activations and a
+  buffer pool of the same size, and a narrower chunk gives that room to
+  the arena. Prefill reads every expert once per chunk, so it is slower.
 - Raise the GPU limit, as [The GPU memory limit](memory.md#the-gpu-memory-limit)
   describes.
 - Quit other models and apps. The arena takes what is left of the RAM at

@@ -4,15 +4,19 @@ The decode arena, the prefill ring beside it and the KV cache are all
 MLX-tracked, and the serve governor enforces one ceiling over them
 (``gmlx.serve.capacity.ceiling_bytes``). The arena is sized as what that
 ceiling leaves after the every-token weights, a priced KV room, the ring's
-own room and the host floor, so at decode the governor's headroom is the
-room minus live KV on any box and any quant, not the gap between two
-unrelated estimates.
+own room, the host floor and the host overhead, so at decode the
+governor's headroom is the room minus live KV on any box and any quant,
+not the gap between two unrelated estimates.
 
 The room prices ``GMLX_STREAM_KV_CTX`` tokens (default 32768, clamped to
 the trained context) at ``GMLX_STREAM_KV_WIDTH`` rows (default 1) with
 the model's own per-token KV cost, plus the prefill score transient the
-decay policy allows and the admission reserve. ``GMLX_DECODE_KV_RESERVE_GB``
-replaces the priced room with a flat value.
+decay policy allows, the live activations of one streamed prefill chunk,
+the MLX buffer pool that recycles them, and the admission reserve.
+``GMLX_DECODE_KV_RESERVE_GB`` replaces the priced room with a flat value.
+
+The host overhead is RAM the arena leaves outside MLX: this process's
+own memory and the file pages that stay resident under load.
 """
 
 from __future__ import annotations
@@ -26,6 +30,11 @@ from gmlx.envflags import env_bool, env_int
 
 _DEFAULT_CTX = 32768
 _LEGACY_RESERVE_GB = 8.0
+_MIN_POOL_BYTES = 1 << 30
+_UNPRICED_POOL_BYTES = 4 << 30
+_PROCESS_GB = 2.0
+_RESIDENT_CACHE_RAM_SHARE = 1 / 16
+_RESIDENT_CACHE_MAX_GB = 8.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,21 @@ class KvRoom:
     transient_bytes: int
     reserve_bytes: int
     priced: bool
+    # One streamed prefill chunk's live activations, and the MLX buffer
+    # pool (the allocator's cache limit) that keeps the freed ones. The
+    # pool fills to its limit and the live set sits on top of it.
+    activation_bytes: int = 0
+    pool_bytes: int = 0
+
+    @property
+    def fit_bytes(self) -> int:
+        """The room less the prefill chunk and its pool: what a model
+        needs under the ceiling to stream at all. The chunk comes out of
+        the arena, and with no arena it takes RAM the page cache gives
+        back. A flat room is all fit."""
+        if not self.priced:
+            return self.bytes
+        return self.bytes - self.activation_bytes - self.pool_bytes
 
 
 def ceiling_bytes() -> float | None:
@@ -92,6 +116,38 @@ def host_floor_bytes(ram: int | None) -> int:
     return int(gb * (1 << 30))
 
 
+def filebacked_bytes() -> int | None:
+    """File-backed pages right now, or None when the counters cannot be
+    read."""
+    from gmlx.serve import kernel_vm
+
+    s = kernel_vm.snapshot()
+    return None if s is None else int(s["filebacked"])
+
+
+def host_overhead_bytes(ram: int | None, filebacked: int | None = None) -> int:
+    """RAM the arena leaves outside MLX beyond the host floor: this
+    process's own memory (``GMLX_DECODE_PROCESS_GB``, default 2: the
+    Python heap, the tokenizer and the server) and the file pages that
+    stay resident under load (the mapped weights the pin leaves, the
+    table rows, the libraries). The reclaimable snapshot counts those
+    pages as free to take, but they are in use and stay resident. They
+    are priced as the file-backed pages at sizing (``filebacked``) up to
+    ``GMLX_DECODE_RESIDENT_CACHE_GB`` (default 1/16 of RAM, at most 8),
+    so a stale cache past the cap still counts as reclaimable;
+    ``filebacked`` None (no live measure, as in the header-only plan)
+    prices the cap."""
+    from gmlx.envflags import env_float
+
+    process = env_float("GMLX_DECODE_PROCESS_GB", _PROCESS_GB)
+    cap_gb = env_float("GMLX_DECODE_RESIDENT_CACHE_GB", min(
+        _RESIDENT_CACHE_MAX_GB,
+        _RESIDENT_CACHE_RAM_SHARE * (ram or 0) / (1 << 30)))
+    cap = int(max(0.0, cap_gb) * (1 << 30))
+    resident = cap if filebacked is None else min(cap, max(0, int(filebacked)))
+    return int(max(0.0, process) * (1 << 30)) + resident
+
+
 def governor_headroom_bytes() -> float | None:
     """What the governor reads at its tick: ``prefill_decay.headroom_bytes``
     shifted from the full working set down to the governor ceiling."""
@@ -131,23 +187,101 @@ def transient_bytes(ws: float) -> float:
     return cap_bytes_for(ws)
 
 
-def price_room(costs, trained_ctx, ws: float, transient: float) -> KvRoom:
-    """The KV room from priced per-layer costs. A flat legacy reserve
-    when ``costs`` is None or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+def prefill_rows(model_type: str | None) -> int:
+    """Rows of the widest streamed prefill chunk: ``PREFILL_STEP_SIZE``
+    when set, else the loader's streaming step for this model type, and
+    9/8 of it while the short tail merges into the chunk before
+    (``expert_streaming.merge_prefill_tail``)."""
+    step = env_int("PREFILL_STEP_SIZE", 0)
+    if step <= 0:
+        from gmlx.load.loader import (_STREAMING_PREFILL_STEP,
+                                      _STREAMING_PREFILL_STEP_BY_MODEL_TYPE)
+
+        step = _STREAMING_PREFILL_STEP_BY_MODEL_TYPE.get(
+            model_type or "", _STREAMING_PREFILL_STEP)
+    if env_bool("GMLX_STREAM_PREFILL_TAIL_MERGE", True):
+        step += step // 8
+    return step
+
+
+def _width(c, name) -> int:
+    from gmlx.serve.mem_preflight import _get
+
+    v = _get(c, name)
+    return v if isinstance(v, int) and v > 0 else 0
+
+
+def prefill_activation_bytes(cfg) -> int:
+    """Live activations of one streamed prefill chunk: one layer's
+    working set at fp32 for ``prefill_rows`` rows. Per row: four
+    hidden-wide copies (residual, norm, attention and mixer outputs) on
+    each of ``hc_mult`` residual streams, the attention output (heads x
+    head_dim), and per routed expert the row takes its input and output
+    (2 x hidden) and its gate, up and GLU product (3 x the expert width).
+    0 when the config lacks the widths."""
+    from gmlx.serve.mem_preflight import _get
+
+    if not cfg:
+        return 0
+    text = _get(cfg, "text_config")
+    c = text if text is not None else cfg
+    hidden = _width(c, "hidden_size")
+    heads = _width(c, "num_attention_heads")
+    if not (hidden and heads):
+        return 0
+    head_dim = _width(c, "head_dim") or hidden // heads
+    k = _width(c, "num_experts_per_tok")
+    ff = _width(c, "moe_intermediate_size") or _width(c, "intermediate_size")
+    streams = max(1, _width(c, "hc_mult"))
+    per_row = 4 * (4 * hidden * streams + heads * head_dim
+                   + k * (2 * hidden + 3 * ff))
+    mt = _get(c, "model_type") or _get(cfg, "model_type")
+    return per_row * prefill_rows(mt if isinstance(mt, str) else None)
+
+
+def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
+    """The MLX buffer pool a streamed install sets: one chunk's
+    activations (a pool under one layer's working set allocates fresh
+    buffers every layer, and each pays page population), at least 1 GiB;
+    ``fallback`` when the activations are not priced.
+    ``GMLX_STREAM_CACHE_GB`` sizes it."""
+    raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
+    if raw:
+        try:
+            return max(0, int(float(raw) * (1 << 30)))
+        except (ValueError, OverflowError):
+            pass
+    if activation <= 0:
+        return int(fallback)
+    return max(_MIN_POOL_BYTES, int(activation))
+
+
+def price_room(costs, trained_ctx, ws: float, transient: float,
+               activation: int = 0) -> KvRoom:
+    """The KV room from priced per-layer costs, the prefill transients
+    (the score cap, one chunk's ``activation`` bytes and the buffer pool
+    that keeps them) and the admission reserve. A flat legacy reserve
+    when ``costs`` is None or ``GMLX_DECODE_KV_RESERVE_GB`` is set; the
+    pool then fills the flat room."""
     from gmlx.serve.mem_preflight import prompt_kv_bytes
     from gmlx.serve.memory import admit_reserve_bytes
 
     depth = max(1, env_int("GMLX_STREAM_KV_CTX", _DEFAULT_CTX))
     width = max(1, env_int("GMLX_STREAM_KV_WIDTH", 1))
-    flat = KvRoom(legacy_room_bytes(), depth, width, 0, 0, 0, priced=False)
+    legacy = legacy_room_bytes()
+    flat = KvRoom(legacy, depth, width, 0, 0, 0, priced=False,
+                  pool_bytes=pool_bytes(0, fallback=legacy))
     if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not costs or not ws:
         return flat
     if isinstance(trained_ctx, int) and trained_ctx > 0:
         depth = min(depth, trained_ctx)
     kv = int(prompt_kv_bytes(costs, depth) * width)
     reserve = int(admit_reserve_bytes(ws))
-    return KvRoom(kv + int(transient) + reserve, depth, width, kv,
-                  int(transient), reserve, priced=True)
+    act = max(0, int(activation))
+    pool = pool_bytes(act)
+    return KvRoom(kv + int(transient) + act + pool + reserve, depth, width,
+                  kv, int(transient), reserve, priced=True,
+                  activation_bytes=act, pool_bytes=pool)
 
 
 def kv_room_bytes(gguf_path: str | None, env: dict | None = None) -> KvRoom:
@@ -165,7 +299,7 @@ def kv_room_bytes(gguf_path: str | None, env: dict | None = None) -> KvRoom:
             return price_room(None, None, 0, 0)
         cfg, costs, _ = priced
         return price_room(costs, cfg.get("max_position_embeddings"), ws,
-                          _cap_bytes())
+                          _cap_bytes(), prefill_activation_bytes(cfg))
     except Exception:
         return price_room(None, None, 0, 0)
 
@@ -239,14 +373,16 @@ def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, room_bytes: int | None = None,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
     cast_dead_bytes: int = 0, ring_bytes: int = 0, forced: bool = False,
-    avail_bytes: int | None = None,
+    avail_bytes: int | None = None, host_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
-    after the non-expert weights, the KV room, the prefill ring and the
-    host floor, clamped to the RAM reclaimable right now, and capped at
-    the expert bytes themselves. ``forced`` is a stream the flag asked for
-    on a model under the budget: its cap is ``FORCED_ARENA_SHARE`` of the
-    expert bytes, so the experts stay streamed rather than all wired.
+    after the non-expert weights, the KV room, the prefill ring, the host
+    floor and the host overhead (``host_bytes``, priced by
+    ``host_overhead_bytes``), clamped to the RAM reclaimable right now,
+    and capped at the expert bytes themselves. ``forced`` is a stream the
+    flag asked for on a model under the budget: its cap is
+    ``FORCED_ARENA_SHARE`` of the expert bytes, so the experts stay
+    streamed rather than all wired.
 
     The ceiling is the serve governor's (``gmlx.stream.budget``), so the
     arena, the prefill ring and the KV cache share one budget: at decode
@@ -263,15 +399,18 @@ def _decode_arena_bytes(
     (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
     ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
     physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides the
-    ceilings but is still clamped to what is reclaimable minus the floor
-    and the ring: an arena wired past that starves the page cache every
-    buffered read path depends on (``GMLX_DECODE_ARENA_FORCE=1`` restores
-    the unclamped behavior).
+    ceilings but is still clamped to what is reclaimable minus the floor,
+    the ring, the KV room and the host overhead: an arena wired past that
+    leaves the next prefill's transients nowhere but swap and starves the
+    page cache every buffered read path depends on
+    (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
 
     A second live streaming install needs no term here: mlock moves a page
     out of the file-backed count and an arena is anonymous, so the
     reclaimable snapshot already excludes both."""
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
+    room = int(room_bytes) if room_bytes is not None else legacy_room_bytes()
+    host = max(0, int(host_bytes))
     if env:
         want = int(float(env) * (1 << 30))
         if env_bool("GMLX_DECODE_ARENA_FORCE", False):
@@ -284,11 +423,12 @@ def _decode_arena_bytes(
             ram = int(metal_value("memory_size"))
         except Exception:
             ram = avail
-        cap = max(0, avail - _ram_floor_bytes(ram) - int(ring_bytes))
+        cap = max(0, avail - _ram_floor_bytes(ram) - int(ring_bytes)
+                  - room - host)
         if want > cap:
             print(
                 f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds reclaimable"
-                f" RAM minus the floor"
+                f" RAM minus the floor, the KV room, the host overhead"
                 f"{' and the prefill ring' if ring_bytes else ''};"
                 f" clamping the arena to"
                 f" {cap / (1 << 30):.1f}GB (GMLX_DECODE_ARENA_FORCE=1"
@@ -318,12 +458,11 @@ def _decode_arena_bytes(
     # .cast_copies), so charging it would cancel the pin it just freed.
     non_expert_bytes = max(
         0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
-    room = int(room_bytes) if room_bytes is not None else legacy_room_bytes()
-    # The floor on both measures: the ceiling is a share of the Metal
-    # working set, and the OS side (the page cache, other processes) is
-    # not in it.
+    # The floor and the host overhead on both measures: the ceiling is a
+    # share of the Metal working set, and the OS side (the page cache,
+    # this process outside MLX, other processes) is not in it.
     arena = (ceiling - non_expert_bytes - room - int(ring_bytes)
-             - _ram_floor_bytes(ram))
+             - _ram_floor_bytes(ram) - host)
     # Second ceiling: what is reclaimable right now. The governor ceiling
     # assumes an otherwise idle machine; co-resident workloads shrink the
     # offer, and a wired arena sized past it would evict them to swap. The
@@ -336,7 +475,7 @@ def _decode_arena_bytes(
     if avail is not None:
         unpinned = max(0, non_expert_bytes - pinned_bytes)
         reclaimable = (avail - _ram_floor_bytes(ram or avail) - room
-                       - unpinned - int(ring_bytes))
+                       - unpinned - int(ring_bytes) - host)
         if reclaimable < arena:
             from gmlx.load import loadlog
 

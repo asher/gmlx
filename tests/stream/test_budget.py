@@ -29,7 +29,9 @@ def header(monkeypatch, tmp_path):
     import gmlx.serve.memory as sm
 
     for k in ("GMLX_STREAM_KV_CTX", "GMLX_STREAM_KV_WIDTH",
-              "GMLX_DECODE_KV_RESERVE_GB", "GMLX_GOV_MARGIN"):
+              "GMLX_DECODE_KV_RESERVE_GB", "GMLX_GOV_MARGIN",
+              "GMLX_STREAM_CACHE_GB", "PREFILL_STEP_SIZE",
+              "GMLX_STREAM_PREFILL_TAIL_MERGE"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(tp, "_shards", lambda p: [str(f)])
     monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG))
@@ -48,7 +50,61 @@ def test_room_prices_ctx_width_transient_reserve(header, monkeypatch):
     assert room.kv_bytes == BPT * 4096 * 2
     assert room.transient_bytes == int(3.0 * GB)
     assert room.reserve_bytes == int(1.0 * GB)
-    assert room.bytes == room.kv_bytes + room.transient_bytes + room.reserve_bytes
+    # A config without the chunk widths prices no activations and keeps
+    # the allocator's 4 GiB pool, which the room still holds.
+    assert room.activation_bytes == 0 and room.pool_bytes == 4 << 30
+    assert room.bytes == (room.kv_bytes + room.transient_bytes
+                          + room.pool_bytes + room.reserve_bytes)
+
+
+# The deepseek41 header's synthesized widths.
+DS41_CFG = {"model_type": "deepseek_v41", "hidden_size": 5120,
+            "num_attention_heads": 64, "head_dim": 512, "hc_mult": 4,
+            "num_experts_per_tok": 6, "moe_intermediate_size": 2304}
+DS41_ROW = 4 * (4 * 5120 * 4 + 64 * 512 + 6 * (2 * 5120 + 3 * 2304))
+
+
+def test_chunk_activations_follow_the_streamed_chunk_width(monkeypatch):
+    for k in ("PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE"):
+        monkeypatch.delenv(k, raising=False)
+    assert DS41_ROW == 870_400
+    # The loader's 8192-row streaming step, 9/8 of it with the tail merge.
+    assert budget.prefill_rows("deepseek_v41") == 9216
+    assert budget.prefill_rows("hy_v4") == 4608
+    assert budget.prefill_activation_bytes(DS41_CFG) == DS41_ROW * 9216
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
+    assert budget.prefill_activation_bytes(DS41_CFG) == DS41_ROW * 2304
+    monkeypatch.setenv("GMLX_STREAM_PREFILL_TAIL_MERGE", "0")
+    assert budget.prefill_activation_bytes(DS41_CFG) == DS41_ROW * 2048
+    # A nested text config; one residual stream, head_dim from the heads.
+    nested = {"text_config": {"hidden_size": 1024, "num_attention_heads": 8,
+                              "num_experts_per_tok": 2,
+                              "moe_intermediate_size": 256}}
+    row = 4 * (4 * 1024 + 8 * 128 + 2 * (2 * 1024 + 3 * 256))
+    assert budget.prefill_activation_bytes(nested) == row * 2048
+    assert budget.prefill_activation_bytes({}) == 0
+    assert budget.prefill_activation_bytes({"hidden_size": 1024}) == 0
+
+
+def test_room_prices_the_chunk_and_the_pool_that_keeps_it(header, monkeypatch):
+    """Under prefill the buffer pool fills to its limit and the chunk's
+    live activations sit on top of it, so the room holds both."""
+    import gmlx.commands.tool_preflight as tp
+
+    moe = dict(CFG, hidden_size=4096, num_experts_per_tok=8,
+               moe_intermediate_size=2048)
+    monkeypatch.setattr(tp, "_synth_config", lambda p: dict(moe))
+    act = budget.prefill_activation_bytes(moe)
+    assert act > 1 << 30
+    room = budget.kv_room_bytes(header)
+    assert room.activation_bytes == act and room.pool_bytes == act
+    assert room.bytes == (room.kv_bytes + room.transient_bytes + 2 * act
+                          + room.reserve_bytes)
+    monkeypatch.setenv("GMLX_STREAM_CACHE_GB", "2")
+    room = budget.kv_room_bytes(header)
+    assert room.pool_bytes == 2 << 30
+    assert room.bytes == (room.kv_bytes + room.transient_bytes + act
+                          + (2 << 30) + room.reserve_bytes)
 
 
 def test_room_depth_clamped_to_trained_context(header, monkeypatch):
@@ -178,6 +234,105 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
               budget=100 << 30, room_bytes=4 << 30)
     assert budget._decode_arena_bytes(**kw) == experts
     assert budget._decode_arena_bytes(**kw, forced=True) == experts // 2
+
+
+def test_host_overhead_prices_the_process_and_resident_pages(monkeypatch):
+    for k in ("GMLX_DECODE_PROCESS_GB", "GMLX_DECODE_RESIDENT_CACHE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    gib = 1 << 30
+    ram = 128 * gib
+    # 2 GiB of process memory, and the file pages at sizing up to 1/16 of
+    # RAM and at most 8 GiB: a stale cache past the cap still counts as
+    # reclaimable.
+    assert budget.host_overhead_bytes(ram, 5 * gib) == 7 * gib
+    assert budget.host_overhead_bytes(ram, 40 * gib) == 10 * gib
+    assert budget.host_overhead_bytes(64 * gib, 40 * gib) == 6 * gib
+    assert budget.host_overhead_bytes(512 * gib, 40 * gib) == 10 * gib
+    # No live measure (the header-only plan) prices the cap.
+    assert budget.host_overhead_bytes(ram) == 10 * gib
+    monkeypatch.setenv("GMLX_DECODE_PROCESS_GB", "0")
+    monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", "3")
+    assert budget.host_overhead_bytes(ram, 40 * gib) == 3 * gib
+
+
+def test_arena_leaves_the_host_overhead_and_room_on_every_leg(monkeypatch):
+    import mlx.core as mx
+
+    for k in ("GMLX_DECODE_ARENA_GB", "GMLX_DECODE_ARENA_FORCE",
+              "GMLX_DECODE_ARENA_RAM_FRAC"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "0")
+    monkeypatch.setenv("GMLX_DECODE_PAGECACHE_GB", "0")
+    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 1000 << 30})
+    monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
+    avail = {"v": None}
+    monkeypatch.setattr(budget, "_available_ram_bytes",
+                        lambda *a, **k: avail["v"])
+    gib = 1 << 30
+    kw = dict(total_bytes=210 * gib, offsets={0: [(0, 0, 200 * gib)]},
+              budget=100 * gib, room_bytes=10 * gib, pinned_bytes=10 * gib,
+              host_bytes=3 * gib)
+    # The ceiling leg: 100 less 10 every-token, 10 room and 3 host.
+    assert budget._decode_arena_bytes(**kw) == 77 * gib
+    # The reclaimable leg: the pin is already out of the 60 GiB snapshot.
+    avail["v"] = 60 * gib
+    assert budget._decode_arena_bytes(**kw) == 47 * gib
+    # An explicit arena clamps to the same: the next prefill's transients
+    # and the resident pages need the room it would take.
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "50")
+    assert budget._decode_arena_bytes(**kw) == 47 * gib
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "40")
+    assert budget._decode_arena_bytes(**kw) == 40 * gib
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "50")
+    monkeypatch.setenv("GMLX_DECODE_ARENA_FORCE", "1")
+    assert budget._decode_arena_bytes(**kw) == 50 * gib
+
+
+def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
+        monkeypatch):
+    """DeepSeek V4.1 Flash UD-IQ2_XXS served by default on a 128 GB M5
+    Max. At load: 102.0 GB reclaimable, 8.4 GB of every-token weights
+    (pinned), a 135.2 GB table and 156.9 GB of experts on disk, a 9.27 GB
+    ring the arena lends at prefill, 9 GiB of file pages. Measured under
+    an 8k prefill: the buffer pool at its limit, 5.4 GiB of live chunk
+    activations on top, 8.7 GiB of file pages and 1.8 GiB of process
+    memory outside MLX that stayed resident. The room without the chunk,
+    the pool or the host overhead (12.0 GB, and the pool set to all of
+    it) sized an 80.4 GB arena that left the box 7 GiB short."""
+    import mlx.core as mx
+
+    import gmlx.serve.mem_preflight as mp
+
+    for k in ("GMLX_DECODE_ARENA_GB", "GMLX_DECODE_ARENA_RAM_FRAC",
+              "GMLX_DECODE_RAM_FLOOR_GB", "GMLX_DECODE_PAGECACHE_GB",
+              "GMLX_DECODE_PROCESS_GB", "GMLX_DECODE_RESIDENT_CACHE_GB",
+              "GMLX_STREAM_CACHE_GB", "GMLX_STREAM_KV_CTX",
+              "GMLX_STREAM_KV_WIDTH", "GMLX_DECODE_KV_RESERVE_GB",
+              "GMLX_ADMIT_RESERVE_GB", "GMLX_RING_TIMESHARE",
+              "PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE"):
+        monkeypatch.delenv(k, raising=False)
+    gib = 1 << 30
+    ram, ws, avail = 128 * gib, 120.2e9, int(102.0e9)
+    every, table, experts, ring = 8.4e9, 135.2e9, 156.9e9, 9.27e9
+    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
+    monkeypatch.setattr(budget, "ceiling_bytes", lambda: 0.95 * ws)
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: avail)
+    monkeypatch.setattr(mp, "prompt_kv_bytes", lambda costs, n: 10e6)
+    room = budget.price_room(((1, 1),), 1 << 20, ws, 0.05 * ws,
+                             budget.prefill_activation_bytes(DS41_CFG))
+    kw = dict(total_bytes=int(every + table + experts),
+              offsets={0: [(0, 0, int(experts))]}, budget=int(0.95 * ws),
+              room_bytes=room.bytes, pinned_bytes=int(every),
+              streamable_bytes=int(table),
+              host_bytes=budget.host_overhead_bytes(ram, 9 * gib))
+    full = budget._decode_arena_bytes(**kw)
+    held = budget._decode_arena_bytes(**kw, ring_bytes=int(ring))
+    share = budget.ring_share_bytes(full, held, int(ring))
+    arena = full if share else held
+    assert share == int(ring)
+    free = avail - arena - room.pool_bytes - 5.4 * gib - 8.7 * gib - 1.8 * gib
+    assert free >= 8 * gib
+    assert 50e9 < arena < 57e9
 
 
 def test_ring_share_is_the_room_the_ring_adds_to_the_arena(monkeypatch):

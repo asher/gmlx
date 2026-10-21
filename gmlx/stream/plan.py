@@ -3,9 +3,10 @@
 Prices a MoE GGUF from its header only. The routed experts stream from
 disk. Every other tensor is an every-token weight and stays resident.
 A box streams the model when the every-token weights and the KV room
-fit under the memory ceiling. What is left is the decode arena, and its
-share of the experts sets the decode speed. ``gmlx validate`` and
-``gmlx doctor`` print this plan; the loader prints the live budget.
+fit under the memory ceiling. What is left after the prefill chunk, the
+host floor and the host overhead is the decode arena, and its share of
+the experts sets the decode speed. ``gmlx validate`` and ``gmlx doctor``
+print this plan; the loader prints the live budget.
 """
 
 from __future__ import annotations
@@ -75,6 +76,9 @@ class ModelPlan:
     kv_costs: tuple | None
     trained_ctx: int | None
     table_bytes: int = 0
+    # One streamed prefill chunk's live activations
+    # (budget.prefill_activation_bytes), priced into the KV room.
+    activation_bytes: int = 0
 
     @property
     def every_token_bytes(self) -> int:
@@ -115,6 +119,9 @@ class BoxPlan:
     verdict: str
     # Ring room the arena holds while decoding and lends at each prefill.
     ring_shared_bytes: int = 0
+    # Process memory outside MLX and resident page cache, priced at the
+    # cap (budget.host_overhead_bytes with no live measure).
+    host_bytes: int = 0
 
     @property
     def arena_share(self) -> float | None:
@@ -159,9 +166,11 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
     if n_experts is None and exps_shape and len(exps_shape) == 3:
         n_experts = _int(exps_shape[-1])
     costs = trained = None
+    activation = 0
     if expert:
         from gmlx.load import loadlog
         from gmlx.serve.capacity import boot_costs
+        from gmlx.stream.budget import prefill_activation_bytes
 
         with loadlog.quiet():
             priced = boot_costs(None, env, scans=scans)
@@ -169,12 +178,14 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
             cfg, costs, _ = priced
             costs = tuple(costs)
             trained = _int(cfg.get("max_position_embeddings"))
+            activation = prefill_activation_bytes(cfg)
     return ModelPlan(
         arch=arch, total_bytes=total, expert_bytes=expert, groups=groups,
         moe_layers=len(stacks), n_experts=n_experts,
         experts_per_token=_int(kv.get(f"{arch}.expert_used_count")),
         ring_bytes=ring_bytes(stacks),
-        kv_costs=costs, trained_ctx=trained, table_bytes=table)
+        kv_costs=costs, trained_ctx=trained, table_bytes=table,
+        activation_bytes=activation)
 
 
 def ceiling_for(ram_bytes: float, ws_bytes: float) -> float:
@@ -190,7 +201,8 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     for another one. None when the machine cannot be read."""
     from gmlx.load.memfit import total_ram_bytes
     from gmlx.serve.capacity import classify_weight_share, working_set_bytes
-    from gmlx.stream.budget import host_floor_bytes, price_room, transient_bytes
+    from gmlx.stream.budget import (host_floor_bytes, host_overhead_bytes,
+                                    price_room, transient_bytes)
 
     if ws_bytes is None:
         ws_bytes = working_set_bytes()
@@ -200,19 +212,24 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
         return None
     ceiling = ceiling_for(ram_bytes, ws_bytes)
     room = price_room(model.kv_costs, model.trained_ctx, ws_bytes,
-                      transient_bytes(ws_bytes))
+                      transient_bytes(ws_bytes), model.activation_bytes)
     every = model.every_token_bytes
+    # The fit leaves out the prefill chunk; the arena and the ring make
+    # room for it.
+    fit_left = int(ceiling - every - room.fit_bytes)
     left = int(ceiling - every - room.bytes)
     ring_fits = model.ring_bytes <= left
     floor = host_floor_bytes(int(ram_bytes))
-    full = min(max(0, left - floor), model.expert_bytes)
-    held = (min(max(0, left - model.ring_bytes - floor), model.expert_bytes)
+    host = host_overhead_bytes(int(ram_bytes))
+    full = min(max(0, left - floor - host), model.expert_bytes)
+    held = (min(max(0, left - model.ring_bytes - floor - host),
+                model.expert_bytes)
             if ring_fits else full)
     shared = ring_share_bytes(full, held, model.ring_bytes) if ring_fits else 0
     arena = full if shared else held
     if classify_weight_share(model.total_bytes, ram_bytes) != "over":
         verdict = VERDICT_RESIDENT
-    elif left < 0:
+    elif fit_left < 0:
         verdict = VERDICT_TOO_BIG
     elif arena < _MIN_ARENA:
         verdict = VERDICT_PAGE_CACHE
@@ -223,8 +240,8 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
         ceiling_bytes=ceiling, room=room, arena_bytes=arena,
         expert_bytes=model.expert_bytes, ring_fits=ring_fits,
         floor_bytes=floor,
-        short_bytes=max(0, -left), verdict=verdict,
-        ring_shared_bytes=shared)
+        short_bytes=max(0, -fit_left), verdict=verdict,
+        ring_shared_bytes=shared, host_bytes=host)
 
 
 def scan_path(gguf_path: str) -> list:
@@ -277,11 +294,12 @@ def box_summary(m: ModelPlan, b: BoxPlan) -> str:
         return "fits in RAM, streaming is optional"
     if b.verdict == VERDICT_TOO_BIG:
         return (f"every-token weights {gb(m.every_token_bytes)} + KV room "
-                f"{gb(b.room.bytes)} exceed the {gb(b.ceiling_bytes)} ceiling "
-                f"by {gb(b.short_bytes)}")
+                f"{gb(b.room.fit_bytes)} exceed the {gb(b.ceiling_bytes)} "
+                f"ceiling by {gb(b.short_bytes)}")
     if b.verdict == VERDICT_PAGE_CACHE:
         return (f"no decode arena ({gb(b.arena_bytes)} left after the "
-                "ring and the host floor), decode runs from the page cache")
+                "ring, the host floor and the host overhead), decode runs "
+                "from the page cache")
     return f"decode arena {gb(b.arena_bytes)}{share_text(b.arena_share)}"
 
 
@@ -300,8 +318,12 @@ def box_lines(m: ModelPlan, b: BoxPlan) -> list[str]:
     room = f"KV room {gb(b.room.bytes)}"
     room += (f" at {b.room.depth} tokens" if b.room.priced
              else " (flat, header not priced)")
+    if b.room.activation_bytes:
+        chunk = b.room.activation_bytes + b.room.pool_bytes
+        room += f" ({gb(chunk)} of it the prefill chunk and its pool)"
     lines = [f"this Mac: {human_gb(b.ram_bytes, 0)} RAM, ceiling "
-             f"{gb(b.ceiling_bytes)}, {room}, host floor {gb(b.floor_bytes)}"]
+             f"{gb(b.ceiling_bytes)}, {room}, host floor {gb(b.floor_bytes)}"
+             + (f", host overhead {gb(b.host_bytes)}" if b.host_bytes else "")]
     if b.verdict == VERDICT_RESIDENT:
         lines.append("=> the whole file fits in RAM; streaming is optional "
                      f"({box_summary(m, b)} if streamed)")
@@ -339,6 +361,7 @@ def to_dict(m: ModelPlan, b: BoxPlan | None) -> dict:
         "experts_per_token": m.experts_per_token,
         "per_token_read_bytes": m.per_token_read_bytes,
         "ring_bytes": m.ring_bytes,
+        "activation_bytes": m.activation_bytes,
         "trained_ctx": m.trained_ctx,
         "box": None,
     }

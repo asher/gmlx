@@ -386,9 +386,11 @@ def test_arena_budget_math(monkeypatch):
     # A modest GMLX_DECODE_ARENA_GB passes through untouched.
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "2.5")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == int(2.5 * (1 << 30))
-    # An oversized override is clamped to reclaimable minus the floor...
+    # An oversized override is clamped to reclaimable minus the floor and
+    # the KV room (the flat 8 GB here)...
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "200")
-    assert _decode_arena_bytes(60 << 30, offsets, budget=None) == (40 << 30) - floor
+    assert _decode_arena_bytes(60 << 30, offsets, budget=None) == (
+        (40 << 30) - floor - (8 << 30))
     # ...unless forced, and passes through when reclaimable is unknown.
     monkeypatch.setenv("GMLX_DECODE_ARENA_FORCE", "1")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30

@@ -1372,8 +1372,8 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     of KV room, a 2 GB ring: the arena keeping the ring apart gets 4 GB,
     and a time-shared arena gets 6 GB and lends 2 GB of it at prefill.
     A GMLX_DECODE_ARENA_GB past free RAM clamps to it less the ring and
-    keeps the whole ring apart, as the serve footprint prices it. A ring
-    that is never built is charged nowhere."""
+    the KV room and keeps the whole ring apart, as the serve footprint
+    prices it. A ring that is never built is charged nowhere."""
     from types import SimpleNamespace
 
     import gmlx.stream.budget as budget
@@ -1402,8 +1402,9 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
     monkeypatch.setattr(budget, "_available_ram_bytes",
                         lambda *a, **k: free["bytes"])
-    monkeypatch.setattr(budget, "kv_room_bytes",
-                        lambda path: SimpleNamespace(bytes=GB))
+    monkeypatch.setattr(budget, "kv_room_bytes", lambda path: budget.KvRoom(
+        GB, 32768, 1, 0, 0, 0, priced=False, pool_bytes=GB))
+    monkeypatch.setattr(budget, "host_overhead_bytes", lambda *a, **k: 0)
     monkeypatch.setattr(es, "_prefill_ring_reason", lambda *a: None)
     monkeypatch.setattr(pf, "maybe_make_prefetcher",
                         lambda path: SimpleNamespace(offsets=offsets))
@@ -1435,9 +1436,9 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     ring_b = 6 * third
     want = {"0": (7 * GB - GB - ring_b, 0), "1": (6 * GB, ring_b)}[timeshare]
     if env_gb:
-        want = (7 * GB - ring_b, 0)
+        want = (7 * GB - ring_b - GB, 0)
     if not built:
-        want, ring_b = ((7 if env_gb else 6) * GB, 0), 0
+        want, ring_b = (6 * GB, 0), 0
     assert sized == {"arena": want[0], "share": want[1],
                      "room": 100 * GB - want[0] - (ring_b - want[1])}
     # One clamp line, for the arena the loader keeps.
