@@ -815,7 +815,7 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     seen = []
     monkeypatch.setattr(
         cap, "preload_gate",
-        lambda w, m, streaming=False, reserved_bytes=0.0:
+        lambda w, m, streaming=False, reserved_bytes=0.0, **k:
             seen.append(int(reserved_bytes)))
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
@@ -855,33 +855,32 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     assert held.busy == 0
 
 
-def test_load_gate_keeps_the_host_margins_a_resident_stream_leaves(
-        monkeypatch):
-    """DeepSeek V4.1 Flash streamed by default on a 128 GB M5 Max: 52.2 GB
-    of headroom under the ceiling, a 28.1 GB KV room, and an arena sized
-    to leave a 9.6 GB host floor and 10.7 GB of host overhead in RAM. A
-    24 GB model passed beside the room alone and left the stream's next
-    prefill with no free memory. The floor and the overhead are the
-    machine's, so a second stream does not add them again."""
-    from types import SimpleNamespace
-
+def _ds41_beside(monkeypatch, *, ws, budget, headroom, reclaimable,
+                 feeder, ring=None):
+    """A pool with DeepSeek V4.1 Flash streamed and idle, and the two gates
+    reading the given measures: ``headroom`` against the full working set
+    and ``reclaimable`` RAM after the arena was wired. The governor's
+    kernel floor is armed at 4 GB."""
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kvm
 
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
-    monkeypatch.setattr(pd, "headroom_bytes", lambda: 52.2e9)
-    monkeypatch.setattr(cap, "working_set_bytes", lambda: 120.2e9)
-    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 120.2e9)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: headroom)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: ws)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4e9)
+    monkeypatch.setattr(kvm, "reclaimable_bytes", lambda: reclaimable)
+    monkeypatch.setattr(cap, "_settle_reclaimable", lambda f, rec, n: rec)
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
     proxy = _RuntimeProxy(_FakeOriginal())
 
     def streamed():
-        feeder = SimpleNamespace(nominal_bytes=53.6e9, _room_bytes=28.1e9,
-                                 _floor_bytes=9.6e9, _host_bytes=10.7e9)
-        return SimpleNamespace(language_model=SimpleNamespace(
-            _model=SimpleNamespace(_kq_decode_feeder=feeder)))
+        inner = SimpleNamespace(_kq_decode_feeder=SimpleNamespace(**feeder),
+                                _kq_feeder=ring)
+        return SimpleNamespace(language_model=SimpleNamespace(_model=inner))
 
     models = {"ds41": streamed(), "ds41b": streamed()}
 
@@ -894,16 +893,69 @@ def test_load_gate_keeps_the_host_margins_a_resident_stream_leaves(
             "model": "M",
         }
 
-    sizes = {"ds41": 8e9, "ds41b": 1e9, "dense24": 24e9}
+    sizes = {"ds41": 8.4e9, "ds41b": 1e9, "dense": 20e9, "dense25": 25e9,
+             "small": 3.5e9}
     pool = _ResidencyPool(
         proxy, fake_stock_get, lambda: True, int(400 * GB), (),
         footprint_fn=lambda p: int(sizes[p]))
     acquire(pool, "ds41")
-    assert pool._reserved_room_bytes() == pytest.approx(48.4e9)
-    with pytest.raises(cap.LoadDeferred, match="host margins"):
-        acquire(pool, "dense24")
+    return pool
+
+
+def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
+        monkeypatch):
+    """DeepSeek V4.1 Flash on a stock 128 GB Mac with a 30 GiB arena, the
+    documented way to keep a second model loaded. Loaded at 102 GB
+    reclaimable: 8.4 GB every-token, 32.2 GB arena, a 16.3 GB KV room
+    and a 9.3 GB ring held apart and released between prefills. The RAM
+    outside the 97.9 GB ceiling holds the 9.6 GB floor and the 10.7 GB
+    host overhead, so under the ceiling the stream keeps only its room
+    and ring: 31.7 GB is free there, and 23.9 GB in RAM. A 20 GB model
+    fits both. Charged under the ceiling, the margins left 11.4 GB and
+    refused it. A 25 GB model fits under the ceiling but not in RAM."""
+    import gmlx.serve.capacity as cap
+
+    ws = 0.75 * (128 << 30)
+    ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
+    pool = _ds41_beside(
+        monkeypatch, ws=ws, budget=0.95 * ws,
+        headroom=ws - 8.4e9 - 32.21e9, reclaimable=102e9 - 32.21e9,
+        feeder=dict(nominal_bytes=32.21e9, _room_bytes=16.33e9,
+                    _floor_bytes=9.56e9, _host_bytes=10.74e9,
+                    _outside_bytes=0, _ring_share=0),
+        ring=ring)
+    assert pool._reserved_room_bytes() == pytest.approx(25.6e9)
+    with pytest.raises(cap.LoadDeferred, match="host overhead"):
+        acquire(pool, "dense25")
+    acquire(pool, "dense")
+    # A second stream adds its room and ring; the margins count once.
     acquire(pool, "ds41b")
-    assert pool._reserved_room_bytes() == pytest.approx(76.5e9)
+    assert pool._stream_reservations() == pytest.approx(
+        (51.2e9, 0, 10.74e9, 9.56e9))
+
+
+def test_load_gate_defers_a_model_the_ram_beside_a_default_stream_lacks(
+        monkeypatch):
+    """DeepSeek V4.1 Flash served by default on a 128 GB M5 Max, loaded at
+    102 GB reclaimable: the arena took the RAM less the 9.6 GB floor, the
+    17.2 GB room and the 10.7 GB host overhead (64.5 GB), and lends the
+    ring's room at prefill. Under the 114.2 GB ceiling 24.1 GB look
+    free, and the old ceiling-side margins left 3.8 GB, so a 3.5 GB model
+    loaded. In RAM nothing is left past what the next prefill needs."""
+    import gmlx.serve.capacity as cap
+
+    ws = 120.2e9
+    ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
+    pool = _ds41_beside(
+        monkeypatch, ws=ws, budget=114.19e9,
+        headroom=ws - 8.4e9 - 64.51e9, reclaimable=102e9 - 64.51e9,
+        feeder=dict(nominal_bytes=64.51e9, _room_bytes=17.19e9,
+                    _floor_bytes=9.56e9, _host_bytes=10.74e9,
+                    _outside_bytes=0, _ring_share=9.27e9),
+        ring=ring)
+    assert pool._reserved_room_bytes() == pytest.approx(17.19e9)
+    with pytest.raises(cap.LoadDeferred, match="reclaimable memory"):
+        acquire(pool, "small")
 
 
 def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):

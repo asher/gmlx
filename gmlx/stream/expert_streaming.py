@@ -1230,8 +1230,14 @@ def install_expert_streaming(
             fast_disk=fast_disk, ring_share=ring_share)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
-            dfeeder._floor_bytes = _ram_floor_bytes(_physical_ram())
+            ram_now = _physical_ram()
+            dfeeder._floor_bytes = _ram_floor_bytes(ram_now)
             dfeeder._host_bytes = host_bytes
+            if budget is not None:
+                from gmlx.stream.budget import ceiling_bytes as _ceiling
+
+                dfeeder._outside_bytes = outside_ceiling_bytes(
+                    ram_now, float(_ceiling() or budget), host_bytes)
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
                 if dfeeder.covers(li):

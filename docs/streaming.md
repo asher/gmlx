@@ -221,7 +221,8 @@ The arena takes what the ceiling leaves, so a streamed model can fill the
 budget by itself. To keep a second model loaded beside it, set
 [`GMLX_DECODE_ARENA_GB`](env-vars.md#runtime) to an arena size in GiB that
 leaves room for both. A load beside a streamed model leaves that model's KV
-room and released prefill ring free, and the host floor and host overhead
-its arena was sized around, or the server defers the load. Streaming also
-lowers the wired memory limit for the rest of the process, so a dense model
-loaded later runs without wiring.
+room and released prefill ring free under the memory ceiling, and those
+with the host floor and host overhead its arena was sized around free in
+RAM, or the server defers the load. Streaming also lowers the wired memory
+limit for the rest of the process, so a dense model loaded later runs
+without wiring.

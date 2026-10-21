@@ -311,7 +311,7 @@ def test_preload_gate(rig, monkeypatch):
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
 
     cap.preload_gate(4.0 * GB, "small")       # fits: no raise
     with pytest.raises(cap.LoadDeferred, match="deferred"):
@@ -331,7 +331,7 @@ def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 18.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
     cap.preload_gate(3.0 * GB, "fits")                   # 5 - (20 - 18) = 3
     with pytest.raises(cap.LoadDeferred, match="free working set 3.0 GB"):
         cap.preload_gate(3.5 * GB, "edge")
@@ -345,7 +345,7 @@ def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
     cap.preload_gate(4.0 * GB, "fits")
     with pytest.raises(cap.LoadDeferred, match="working set 2.0 GB less the 3.0 GB"):
         cap.preload_gate(4.0 * GB, "room-taker", reserved_bytes=3.0 * GB)
@@ -595,7 +595,7 @@ def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch)
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
     with pytest.raises(RuntimeError) as e:
         cap.preload_gate(25.0 * GB, "huge", streaming=True)
     msg = str(e.value)

@@ -883,30 +883,38 @@ class _ResidencyPool:
     def _resident_bytes(self) -> int:
         return sum(e.footprint for e in self._entries.values())
 
-    def _reserved_room_bytes(self) -> int:
-        """Room the resident streamed models keep but have not filled: a
-        released prefill ring, the priced KV room, and the host floor and
-        host overhead each arena was sized to leave in RAM. The headroom
-        measure reads them as free; a load into them sheds the stream's
-        arena at its next prefill, or takes the RAM its prefill needs.
-        The floor and the host overhead are the machine's and the
-        process's, so they count once."""
-        total = 0
-        outside = 0
+    def _stream_reservations(self) -> tuple[int, int, int, int]:
+        """``(room, ceiling margin, host overhead, host floor)`` the
+        resident streamed models keep but have not filled. The room is a
+        released prefill ring and the priced KV room. The host floor and
+        the host overhead are what each arena was sized to leave in RAM,
+        and the ceiling margin the part of them its ceiling leg charged,
+        past the RAM outside the ceiling. The margins are the machine's
+        and the process's, so they count once."""
+        room = ceiling = host = floor = 0
         for e in self._entries.values():
             rg = e.response_generator
             feeder = _decode_feeder_of(rg)
             if feeder is None:
                 continue
-            total += int(getattr(feeder, "_room_bytes", 0) or 0)
-            outside = max(outside,
-                          int(getattr(feeder, "_floor_bytes", 0) or 0)
-                          + int(getattr(feeder, "_host_bytes", 0) or 0))
+            room += int(getattr(feeder, "_room_bytes", 0) or 0)
+            ceiling = max(ceiling,
+                          int(getattr(feeder, "_outside_bytes", 0) or 0))
+            host = max(host, int(getattr(feeder, "_host_bytes", 0) or 0))
+            floor = max(floor, int(getattr(feeder, "_floor_bytes", 0) or 0))
             ring = _prefill_feeder_of(rg)
             if ring is not None and not getattr(ring, "_slots", None):
-                total += max(0, _ring_room(ring)
-                             - int(getattr(feeder, "_ring_share", 0) or 0))
-        return total + outside
+                room += max(0, _ring_room(ring)
+                            - int(getattr(feeder, "_ring_share", 0) or 0))
+        return room, ceiling, host, floor
+
+    def _reserved_room_bytes(self) -> int:
+        """What the resident streams keep under the ceiling: their room
+        and the margin their ceiling leg charged. The headroom measure
+        reads it as free; a load into it sheds the stream's arena at its
+        next prefill."""
+        room, ceiling, _, _ = self._stream_reservations()
+        return room + ceiling
 
     def _over_capacity(self, incoming: int, held: int | None = None,
                        count: int | None = None) -> bool:
@@ -1010,8 +1018,11 @@ class _ResidencyPool:
         from .capacity import preload_gate
 
         extra = {"image": True} if image else {}
+        room, ceiling, host, floor = self._stream_reservations()
         preload_gate(gate_bytes, str(model_path), streaming=streaming,
-                     reserved_bytes=self._reserved_room_bytes(), **extra)
+                     reserved_bytes=room + ceiling,
+                     reserved_ram_bytes=room + host, ram_floor_bytes=floor,
+                     **extra)
 
     def _new_entry(self, cache_key, model_path, footprint, ttl,
                    **fields) -> _Entry:

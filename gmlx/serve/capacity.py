@@ -573,7 +573,9 @@ class LoadDeferred(RuntimeError):
 
 def preload_gate(weight_bytes: float, model_id: str, *,
                  streaming: bool = False, image: bool = False,
-                 reserved_bytes: float = 0.0) -> None:
+                 reserved_bytes: float = 0.0,
+                 reserved_ram_bytes: float = 0.0,
+                 ram_floor_bytes: float = 0.0) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
@@ -581,9 +583,12 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     ``streaming`` names the bytes as the every-token weights: the routed
     experts are already discounted, so a smaller quant of the rest is
     the fix, not streaming. ``reserved_bytes`` is room a resident
-    streamed model keeps but has not filled (its prefill ring, its KV
-    room, the host floor and overhead its arena leaves in RAM); the
-    measure reads it as free, the load may not take it.
+    streamed model keeps under the ceiling but has not filled (its
+    prefill ring, its KV room, and the host margins its ceiling leg
+    charged); the measure reads it as free, the load may not take it.
+    ``reserved_ram_bytes`` is the same model's room and host overhead in
+    RAM and ``ram_floor_bytes`` the host floor its arena leaves free; the
+    kernel gate holds both back from the reclaimable sum.
     ``image`` names the bytes as an image model's weights and the memory
     of one image at its default size."""
     if overcommit() or weight_bytes <= 0:
@@ -614,8 +619,8 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         head -= max(0.0, ws - budget)
     if head is not None and reserved_bytes > 0:
         head -= reserved_bytes
-    kept = (f" less the {reserved_bytes / GB:.1f} GB ring, KV room and "
-            "host margins a resident streamed model keeps"
+    kept = (f" less the {reserved_bytes / GB:.1f} GB ring and KV room a "
+            "resident streamed model keeps"
             if reserved_bytes > 0 else "")
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
@@ -630,7 +635,8 @@ def preload_gate(weight_bytes: float, model_id: str, *,
             f"working set {head / GB:.1f} GB{kept} (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
-    _kernel_gate(weight_bytes, model_id)
+    _kernel_gate(weight_bytes, model_id, reserved_ram_bytes,
+                 ram_floor_bytes)
 
 
 _DEFER_WARN_S = 10.0
@@ -686,20 +692,26 @@ def _settle_reclaimable(sample, rec, need: float):
     return rec
 
 
-def _kernel_gate(weight_bytes: float, model_id: str) -> None:
+def _kernel_gate(weight_bytes: float, model_id: str,
+                 reserved_bytes: float = 0.0,
+                 floor_bytes: float = 0.0) -> None:
     """The kernel's side of the same question: MLX accounting cannot see
     other processes' pages (2026-08-25: ~16 GB of another app's pages in
     the compressor let an 81 GB load through and Metal OOM'd). Below the
     governor's kernel floor the serve loop sheds anyway, so a load that
     would land there is deferred, not started. Reads the armed floor (0
     without a governor: CLI paths, tests) and the same reclaimable sum
-    the governor samples."""
+    the governor samples. ``reserved_bytes`` is the RAM a resident
+    streamed model keeps (``preload_gate``), held back too, and
+    ``floor_bytes`` the host floor its arena leaves free. Both floors are
+    free RAM kept for the system, so the larger one applies."""
     try:
         from .governor import armed_kernel_floor_bytes
         from .kernel_vm import reclaimable_bytes
 
-        floor = float(armed_kernel_floor_bytes() or 0.0)
-        if floor <= 0:
+        floor = max(float(armed_kernel_floor_bytes() or 0.0),
+                    float(floor_bytes))
+        if floor <= 0 and reserved_bytes <= 0:
             return
         rec = reclaimable_bytes()
     except Exception:
@@ -711,17 +723,21 @@ def _kernel_gate(weight_bytes: float, model_id: str) -> None:
     # and deferred forever whenever day-to-day noise sat a few GB under
     # that (2026-08-26: reclaimable steady at 91 GB, refused for 240 s).
     need = weight_bytes - _resident_shard_bytes(model_id)
-    if need <= 0 or rec is None or need <= rec - floor:
+    hold = floor + max(0.0, float(reserved_bytes))
+    if need <= 0 or rec is None or need <= rec - hold:
         return
-    rec = _settle_reclaimable(reclaimable_bytes, rec, need + floor)
-    if rec is None or need <= rec - floor:
+    rec = _settle_reclaimable(reclaimable_bytes, rec, need + hold)
+    if rec is None or need <= rec - hold:
         return
+    kept = (f" and the {reserved_bytes / GB:.1f} GB of KV room, ring and "
+            "host overhead a resident streamed model keeps"
+            if reserved_bytes > 0 else "")
     _defer(
         f"model load deferred: {model_id} weights {weight_bytes / GB:.1f} GB "
         f"({need / GB:.1f} GB not yet page-cached) exceed the kernel's "
         f"reclaimable memory {rec / GB:.1f} GB less the {floor / GB:.1f} GB "
-        f"floor (other processes hold the rest). Retry when memory frees, "
-        f"or GMLX_OVERCOMMIT=1 overrides.")
+        f"floor{kept} (other processes hold the rest). Retry when memory "
+        f"frees, or GMLX_OVERCOMMIT=1 overrides.")
 
 
 def _resident_shard_bytes(model_id) -> float:
