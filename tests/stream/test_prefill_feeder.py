@@ -290,6 +290,51 @@ def test_ring_bounce_buffers_go_with_the_slots(monkeypatch, tmp_path):
     assert feeder._bounce.qsize() == pfm._READ_WORKERS
 
 
+def test_every_feeder_buffer_is_kept_out_of_a_forked_child(monkeypatch,
+                                                           tmp_path):
+    """A fork copies each Metal-mapped buffer it inherits before the exec.
+    Every buffer either feeder takes from ``kq.arena_alloc`` is marked: the
+    decode arena, a regrown layer of it, its demand and lookahead bounce
+    buffers and the one that replaces a wedged read's, the ring slots and
+    the ring's bounce buffers."""
+    import gmlx.stream.decode_feeder as dfm
+    import gmlx.stream.prefill_feeder as pfm
+    import test_decode_feeder as tdf
+
+    made, marked = [], []
+
+    def alloc(shape, **kw):
+        pair = _fake_arena_alloc(shape)
+        made.append(pair[1])
+        return pair
+
+    def mark(mv):
+        marked.append(mv)
+        return True
+
+    monkeypatch.setattr(tdf, "_fake_arena_alloc", alloc)
+    monkeypatch.setattr(dfm, "unshare_on_fork", mark)
+    monkeypatch.setattr(pfm, "unshare_on_fork", mark)
+    dfeeder, release = tdf._wedge_setup(monkeypatch, tmp_path, {64},
+                                        slots_per_layer=3)
+    try:
+        dfeeder._la_state()
+        assert dfeeder._bounce.qsize() and dfeeder._la_bounce.qsize()
+        n = len(made)
+        dfeeder.stage(0, np.array([[0, 1]], dtype=np.uint32))
+        assert dfeeder.wedged_at(0) and len(made) == n + 1
+        dfeeder._resize_layer(1, 4)
+        assert len(made) > n + 1
+    finally:
+        release.set()
+    offsets, modules = _make_fixture(tmp_path, 2)
+    feeder = pfm.PrefillFeeder(offsets, modules)
+    assert feeder._slots
+    assert feeder._bounce is not None or not feeder._nocache
+    assert made
+    assert all(any(m is mv for m in marked) for mv in made)
+
+
 def test_staged_ahead_and_ring_live(monkeypatch, tmp_path):
     """The arena split rule reads these. A whole-layer call starts the
     next layer's read, which counts as staged ahead in its own pass only.

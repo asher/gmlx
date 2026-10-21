@@ -614,7 +614,7 @@ class DecodeFeeder:
             self._bounce_bytes = max_stride + 2 * _PAGE
             self._bounce: queue.Queue = queue.Queue()
             for _ in range(read_workers):
-                self._bounce.put(kq.arena_alloc([self._bounce_bytes]))
+                self._bounce.put(self._new_bounce())
 
         # Residency state per layer. slot_of[e] is e's arena slot or -1;
         # owner[s] is slot s's expert or -1 (empty); counts is the decayed
@@ -1457,10 +1457,17 @@ class DecodeFeeder:
             "prestage back to guess-grade eviction and the wide barrier"
         )
 
+    def _new_bounce(self):
+        """A read worker's bounce buffer, kept out of a forked child like
+        the arena."""
+        import mlx_kquant as kq
+
+        buf = kq.arena_alloc([self._bounce_bytes])
+        unshare_on_fork(buf[1])
+        return buf
+
     def _la_state(self) -> DaemonPool:
         if self._la_pool is None:
-            import mlx_kquant as kq
-
             n = env_int("GMLX_DECODE_LOOKAHEAD_WORKERS", _LA_WORKERS)
             # Utility priority keeps speculation behind demand misses,
             # which is only worth its latency where the two compete.
@@ -1474,7 +1481,7 @@ class DecodeFeeder:
             if self._aligned:
                 self._la_bounce = queue.Queue()
                 for _ in range(n):
-                    self._la_bounce.put(kq.arena_alloc([self._bounce_bytes]))
+                    self._la_bounce.put(self._new_bounce())
         return self._la_pool
 
     def shed_misses(self, li: int, ids: np.ndarray, scores: np.ndarray,
@@ -1962,9 +1969,7 @@ class DecodeFeeder:
             if rpool is not None:
                 rpool.grow()
             if self._aligned and rbounce is not None:
-                import mlx_kquant as kq
-
-                rbounce.put(kq.arena_alloc([self._bounce_bytes]))
+                rbounce.put(self._new_bounce())
         print(
             f"[stream] decode feeder: layer {li} expert {e} read wedged "
             f"in the kernel (>{self._read_timeout:.0f}s); slot quarantined,"
