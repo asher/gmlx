@@ -405,6 +405,7 @@ def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
     it without, --stream-experts keeps the experts resident, as the header
     prediction does (the arena it would size is priced nowhere)."""
     from types import SimpleNamespace
+    from typing import Any, cast
 
     from mlx.utils import tree_flatten
 
@@ -412,7 +413,7 @@ def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
-    model, glu = _moe_table_model()
+    model, glu = cast("tuple[Any, Any]", _moe_table_model())
     table = model.model.ple_embed
     tbytes = ts.table_bytes(model)
     del table["weight"]
@@ -420,7 +421,8 @@ def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
     table._kq_table_source = SimpleNamespace(nbytes=tbytes)
     table.__class__ = _pread_class(table.__class__)
     model.parameters = lambda: {"glu": glu.parameters()}
-    rest = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    flat = cast("list[tuple[str, Any]]", tree_flatten(model.parameters()))
+    rest = sum(a.nbytes for _, a in flat)
     assert ts.file_table_bytes(model) == tbytes
     _fake_budget(monkeypatch, rest + tbytes // 2)
     monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",

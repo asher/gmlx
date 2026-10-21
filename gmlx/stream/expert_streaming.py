@@ -428,12 +428,12 @@ def install_expert_streaming(
         over_budget = False
         base = ("" if budget is None
                 else f" of {budget / 2**30:.1f} GiB budget")
-        where = ("on the CPU stream" if table_offloaded
-                 else "read from the file")
+        where = ("stays file-backed on the CPU stream" if table_offloaded
+                 else "is read from the file")
         loadlog.info(
             f"[stream] streamable table {'+'.join(table_names)} "
-            f"({(table_offloaded + file_tables) / 2**30:.1f} GiB) stays "
-            f"file-backed {where}; experts resident (post-deduction "
+            f"({(table_offloaded + file_tables) / 2**30:.1f} GiB) "
+            f"{where}; experts resident (post-deduction "
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
         table_credit = credit_streamed(

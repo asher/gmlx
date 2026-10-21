@@ -352,9 +352,9 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
     cache stack, or None when the geometry cannot be read: one entry per
     growing KV region (a rotating window caps it), one FixedRows(1)
     entry per recurrent state and one growing entry per layer's pools
-    (compressed pools, DSA indexer keys), priced fp16. Admit-side throughout: MLA prices the
-    compressed latent, a configured sliding window caps every layer it
-    could apply to. ``geometry`` (from stack_geometry) replaces the
+    (compressed pools, DSA indexer keys), priced fp16. Admit-side
+    throughout: MLA prices the compressed latent, a configured sliding
+    window caps every layer it could apply to. ``geometry`` (from stack_geometry) replaces the
     config's layer pattern. Per geometry entry: ``per_layer_bpe`` (from
     the KV policy) prices the storage exactly; ``per_layer_steps`` marks
     entries whose storage grows in slabs (StepTokens windows); and
