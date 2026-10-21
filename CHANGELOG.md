@@ -77,8 +77,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `models:` block wrote a config that did not parse.
 - `gmlx run` with `--mmproj` and `--stream-experts` prefilled in smaller
   chunks than a text run, so a long prompt took longer to its first token.
-- With `--mmproj` and `--stream-experts`, each reply printed a warning that
-  the model was close to the maximum recommended size.
+- With `--mmproj`, each reply printed a warning that the model was close to
+  the maximum recommended size. It now prints once, and not with
+  `--stream-experts`.
 
 ## [0.5.1] - 2026-10-18
 
