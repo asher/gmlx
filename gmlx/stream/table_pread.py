@@ -10,12 +10,15 @@ from the GGUF instead, which is what the reference runtime does too.
 
 The rows a step needs are tiny next to the table: 24 rows of 264 bytes
 per token per engram table. Rows stored in a GGUF quant decode through
-``kq.dequantize``. MXFP8 rows (one E8M0 scale byte, then 32 E4M3 values,
+``kq.dequantize``, float rows by their bytes' dtype. MXFP8 rows (one E8M0 scale byte, then 32 E4M3 values,
 per block) decode through the engram codec's lookup tables, so reading
 them needs no kquant codec. Reads bypass the page cache and round out to
 page boundaries, per the ``decode_feeder`` rules, since a 264-byte row
 is never page-aligned and an unaligned F_NOCACHE read can wedge in the
 kernel. The cost is one host sync per gather, to read the row ids.
+
+An MXFP8 table is read the same way at any size when mlx-kquant has no
+mxfp8 codec to hold it as an array.
 
 ``GMLX_TABLE_MAX_BUFFER`` overrides the ceiling (bytes), for tests.
 ``GMLX_TABLE_PREAD_WORKERS`` sets the reader thread count.
@@ -201,25 +204,28 @@ class TableSource:
 
 def oversize_tables(shards: list[str], arch: str | None,
                     cap: int | None = None) -> dict[str, TableSource]:
-    """Streamable tables of ``arch`` in ``shards`` that pass the device
-    ceiling, as wire name -> source. A pure function of the files: the
-    wire load calls it for the skip list, the model install for the
-    sources."""
+    """Streamable tables of ``arch`` in ``shards`` that are read from the
+    file, as wire name -> source: those past the device ceiling, and MXFP8
+    ones when mlx-kquant cannot hold them. A function of the files and the
+    mlx-kquant build: the wire load calls it for the skip list, the model
+    install for the sources."""
     from .table_stream import streamable_table_names
 
     pattern = streamable_table_names(arch)
     if pattern is None:
         return {}
     cap = max_buffer_bytes() if cap is None else cap
-    if cap is None:
-        return {}
     from gmlx.load.headerscan import scan_gguf
 
     out: dict[str, TableSource] = {}
     for shard in shards:
         h = scan_gguf(shard, array_limit=0)
         for t in h.tensors:
-            if t.nbytes <= cap or not pattern.fullmatch(t.name):
+            if not pattern.fullmatch(t.name):
+                continue
+            too_big = cap is not None and t.nbytes > cap
+            if not too_big and not (t.type_name == "MXFP8"
+                                    and not _kq_has("mxfp8")):
                 continue
             rows = int(np.prod(t.shape[1:])) if len(t.shape) > 1 else 1
             codec = _row_codec(t.type_name)
@@ -251,15 +257,21 @@ def _row_codec(type_name: str) -> str | None:
 
 
 def _check_codec(name: str, src: TableSource) -> None:
-    if src.codec is None or src.codec == "mxfp8":
+    if src.codec is None or src.codec == "mxfp8" or src.codec in _FLOAT_ROWS:
         return
-    import mlx_kquant as kq
-
-    if src.codec not in set(kq.codecs()):
+    if not _kq_has(src.codec):
         raise RuntimeError(
             f"{name}: reading {src.codec} table rows from the file needs "
             f"an mlx-kquant build with a {src.codec} codec")
 
+
+def _kq_has(codec: str) -> bool:
+    import mlx_kquant as kq
+
+    return codec in set(kq.codecs())
+
+
+_FLOAT_ROWS = {"f32": mx.float32, "f16": mx.float16, "bf16": mx.bfloat16}
 
 _MXFP8_LUTS: tuple | None = None
 
@@ -284,6 +296,8 @@ def _decode_rows(raw: mx.array, src: TableSource) -> mx.array:
     placeholder ``KQuantEmbedding`` passes."""
     if src.codec == "mxfp8":
         out = _decode_mxfp8(raw, src.dims)
+    elif src.codec in _FLOAT_ROWS:
+        out = raw.view(_FLOAT_ROWS[src.codec])
     else:
         import mlx_kquant as kq
 

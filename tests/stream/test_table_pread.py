@@ -611,9 +611,56 @@ def test_an_mxfp8_table_past_the_ceiling_decodes_from_the_file(
         got = np.array(table(mx.array(ids)).astype(mx.float32))[0]
         want = _mxfp8_reference(raw)[ids[0]]
         # The engram path rounds rows to bfloat16, as the reference does.
-        want = np.array(mx.array(want.astype(np.float32))
-                        .astype(mx.bfloat16).astype(mx.float32))
+        # The largest scales overflow float32, on both sides.
+        with np.errstate(over="ignore"):
+            want = want.astype(np.float32)
+        want = np.array(mx.array(want).astype(mx.bfloat16).astype(mx.float32))
         assert np.array_equal(np.isnan(got), np.isnan(want))
         assert np.array_equal(np.nan_to_num(got), np.nan_to_num(want))
+    finally:
+        s.close()
+
+
+def test_an_mxfp8_table_is_read_from_the_file_when_kquant_cannot_hold_it(
+        mxfp8_table_gguf, monkeypatch):
+    """Under the ceiling too: without an mxfp8 codec, mlx-kquant would load
+    the table as STQ1_0 weights, which share its type id."""
+    import mlx_kquant as kq
+
+    path, _raw = mxfp8_table_gguf
+    monkeypatch.setattr(kq, "codecs", lambda: ["q8_0", "stq1_0"])
+    src = _sources(path, monkeypatch, cap=str(1 << 40))
+    assert list(src) == ["per_layer_token_embd.weight"]
+    src["per_layer_token_embd.weight"].close()
+    monkeypatch.setattr(kq, "codecs", lambda: ["q8_0", "stq1_0", "mxfp8"])
+    assert _sources(path, monkeypatch, cap=str(1 << 40)) == {}
+
+
+def test_a_bf16_table_past_the_ceiling_decodes_from_the_file(tmp_path,
+                                                            monkeypatch):
+    """The converter can also write the table unquantized."""
+    from gmlx.models.deepseek_v41.model import EngramTable
+
+    rows, dims = 16, 64
+    vals = np.random.default_rng(17).standard_normal((rows, dims)).astype(
+        np.float32)
+    bf16 = mx.array(vals).astype(mx.bfloat16)
+    path = str(tmp_path / "bf16.gguf")
+    w = gguf.GGUFWriter(path, "deepseek41")
+    w.add_tensor("per_layer_token_embd.weight", np.array(bf16.view(mx.uint16)),
+                 raw_dtype=gguf.GGMLQuantizationType.BF16)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    src = _sources(path, monkeypatch)
+    s = src["per_layer_token_embd.weight"]
+    assert (s.codec, s.dims, s.row_bytes) == ("bf16", dims, 2 * dims)
+    table = EngramTable(rows, dims)
+    install_deferred_tables(_SharedModel(table), src)
+    try:
+        ids = [[0, 15, 3]]
+        got = table(mx.array(ids))
+        assert mx.array_equal(got.astype(mx.bfloat16), bf16[mx.array(ids)])
     finally:
         s.close()

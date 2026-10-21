@@ -3423,14 +3423,20 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
             "owns a compressed-KV stream")
 
     # Two-level candidate selection, which only engages past 16K compressed
-    # positions. The llama.cpp conversion writes none of it, so the
-    # reference config's values are the fallback.
-    for cfg, key, default in (
-        ("candidate_source_layer", "candidate_source_layer_id", 20),
-        ("candidate_topk_blocks", "candidate_topk_blocks", 2048),
-        ("candidate_block_size", "candidate_block_size", 8),
+    # positions. The llama.cpp conversion writes it under the indexer keys;
+    # older files have the config's names or nothing, and the reference
+    # config's values are the fallback.
+    for cfg, key, old, default in (
+        ("candidate_source_layer", "candidate_source_layer",
+         "candidate_source_layer_id", 20),
+        ("candidate_topk_blocks", "candidate_top_k_blocks",
+         "candidate_topk_blocks", 2048),
+        ("candidate_block_size", "candidate_block_size",
+         "candidate_block_size", 8),
     ):
-        got = _read_int(meta, f"{arch}.{key}")
+        got = _read_int(meta, f"{arch}.attention.indexer.{key}")
+        if got is None:
+            got = _read_int(meta, f"{arch}.{old}")
         config[cfg] = default if got is None else int(got)
 
     layer_ids = _read_int_array(meta, f"{arch}.engram.layer_ids")

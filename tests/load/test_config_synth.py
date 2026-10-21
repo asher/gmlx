@@ -3220,3 +3220,16 @@ def test_deepseek41_engram_tensors_without_constants_are_refused():
             if ".ple." not in k}
     with pytest.raises(ValueError, match="engram tensors"):
         synthesize_config(meta, tensor_shapes=_PLE_SHAPES)
+
+
+def test_deepseek41_reads_the_indexer_candidate_keys():
+    # The llama.cpp conversion names the two-level selection constants
+    # under the indexer; values off the reference defaults prove the read.
+    arch = "deepseek41"
+    meta = _deepseek41_ple_meta()
+    meta[f"{arch}.attention.indexer.candidate_source_layer"] = 3
+    meta[f"{arch}.attention.indexer.candidate_top_k_blocks"] = 64
+    meta[f"{arch}.attention.indexer.candidate_block_size"] = 4
+    c = synthesize_config(meta, tensor_shapes=_PLE_SHAPES)
+    assert (c["candidate_source_layer"], c["candidate_topk_blocks"],
+            c["candidate_block_size"]) == (3, 64, 4)

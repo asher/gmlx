@@ -81,7 +81,7 @@ def load_gguf_wire_bytes(
             _raise_if_oversize(shard, skip, e)
             raise
         if "stq1_0" in s_codecs.values():
-            _check_type43(shard, s_codecs)
+            _check_type43(shard, s_codecs, skip)
         arrays.update(s_arrays)
         kquant_meta.update(s_codecs)
         tensor_shapes.update(s_shapes)
@@ -101,13 +101,17 @@ def load_gguf_wire_bytes(
     return arrays, kquant_meta, arch, meta, tensor_shapes
 
 
-def _check_type43(shard: str, codecs: dict[str, str]) -> None:
+def _check_type43(shard: str, codecs: dict[str, str], skip) -> None:
     """GGML type id 43 is STQ1_0 or MXFP8, told apart by the bytes a tensor
     spans. An mlx-kquant that predates MXFP8 reads every id-43 tensor as
-    STQ1_0; refuse rather than decode an MXFP8 table as ternary weights."""
+    STQ1_0; refuse rather than decode an MXFP8 tensor as ternary weights.
+    A skipped table is read from the file and decoded in gmlx."""
     from .headerscan import scan_gguf
 
+    skipped = set(skip or ())
     for t in scan_gguf(shard, array_limit=0).tensors:
+        if t.name in skipped:
+            continue
         if t.type_name == "MXFP8" and codecs.get(t.name) == "stq1_0":
             raise RuntimeError(
                 f"{t.name} is an MXFP8 tensor, which this mlx-kquant reads "
