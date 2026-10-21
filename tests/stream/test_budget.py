@@ -106,11 +106,7 @@ def test_chunk_activations_read_each_archs_width_names(chunk_env):
     gemma4's top_k_experts, hy_v3's expert width expert_hidden_dim, and
     nemotron_h puzzle models list k and the expert width per layer. Each
     prices what the same widths do under the common names."""
-    # Qwen3.8-Flash-Next's header: 4 residual streams.
-    qwen = dict(model_type="qwen4_exp", hidden_size=2560,
-                num_attention_heads=24, head_dim=256, hc_count=4,
-                num_experts_per_tok=10, moe_intermediate_size=640)
-    assert budget.prefill_activation_bytes(qwen) == 4_331_667_456
+    assert budget.prefill_activation_bytes(QWEN4EXP_CFG) == 4_331_667_456
     # ERNIE-4.5-300B-A47B's widths, top-k under moe_k.
     ernie = dict(model_type="ernie4_5_moe", hidden_size=8192,
                  num_attention_heads=64, head_dim=128, moe_k=8,
@@ -139,25 +135,46 @@ def test_chunk_activations_read_each_archs_width_names(chunk_env):
     assert budget.prefill_activation_bytes({"hidden_size": 1024}) == 0
 
 
+# Qwen3.8-Flash-Next's header widths: 4 residual streams.
+QWEN4EXP_CFG = {"model_type": "qwen4_exp", "hidden_size": 2560,
+                "num_attention_heads": 24, "head_dim": 256, "hc_count": 4,
+                "num_experts_per_tok": 10, "moe_intermediate_size": 640}
+
+
 def test_room_holds_the_chunk_and_the_pool_the_allocator_keeps(
         header, monkeypatch):
-    """The pool is a quarter of the chunk, at least 2 GiB: on DeepSeek V4.1
-    Flash's 8 GB chunk a 2 GiB pool prefilled 2k and 8k prompts as fast as
-    the whole chunk did. Under prefill it fills to its limit and the live
-    chunk sits on top, so the room moves with both."""
+    """The pool holds the buffers one layer frees for the next, and
+    prefill keeps its speed only with that whole set pooled, so the pool
+    is one chunk's price, at least 2 GiB: 8.0 GB on DeepSeek V4.1 Flash
+    and 4.3 GB on Qwen3.8-Flash-Next at the streamed chunk width.
+    Under prefill it fills to its limit and the live chunk sits on top,
+    so the room moves with both."""
     import gmlx.commands.tool_preflight as tp
 
-    monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG, **DS41_CFG))
-    ds41 = budget.kv_room_bytes(header)
-    assert ds41.activation_bytes == budget.prefill_activation_bytes(DS41_CFG)
-    assert ds41.pool_bytes == 2 << 30
+    rooms = {}
+    for name, widths in (("ds41", DS41_CFG), ("qwen4exp", QWEN4EXP_CFG)):
+        monkeypatch.setattr(tp, "_synth_config",
+                            lambda p, w=widths: dict(CFG, **w))
+        rooms[name] = budget.kv_room_bytes(header)
+        act = budget.prefill_activation_bytes(widths)
+        assert rooms[name].activation_bytes == act
+        assert rooms[name].pool_bytes == act
+    assert rooms["ds41"].pool_bytes == 8_021_606_400
+    assert rooms["qwen4exp"].pool_bytes == 4_331_667_456
+    ds41 = rooms["ds41"]
     wide = dict(DS41_CFG, num_experts_per_tok=16)
     monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG, **wide))
     room = budget.kv_room_bytes(header)
-    assert room.pool_bytes == room.activation_bytes // 4 > 2 << 30
+    assert room.pool_bytes == room.activation_bytes > ds41.pool_bytes
     assert room.bytes - ds41.bytes == (
         room.activation_bytes - ds41.activation_bytes
         + room.pool_bytes - ds41.pool_bytes)
+    # A chunk under 2 GiB keeps a 2 GiB pool.
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "1024")
+    small_chunk = budget.kv_room_bytes(header)
+    assert small_chunk.activation_bytes < 2 << 30
+    assert small_chunk.pool_bytes == 2 << 30
+    monkeypatch.delenv("PREFILL_STEP_SIZE")
     # GMLX_STREAM_CACHE_GB sets the pool, and the room follows it.
     monkeypatch.setenv("GMLX_STREAM_CACHE_GB", "1")
     small = budget.kv_room_bytes(header)

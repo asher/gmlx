@@ -46,7 +46,7 @@ physical RAM. Four things share the ceiling, in this order:
    the chunk's activations, priced from the model's widths at the
    streamed chunk width (`--prefill-step-size` or the arch's own step
    switch when set), and the MLX buffer pool that keeps freed buffers
-   for the next layer, a quarter of the chunk and at least 2 GiB. Under
+   for the next layer, the chunk's size and at least 2 GiB. Under
    prefill the pool fills to its limit and the live activations sit on
    top of it, so the room counts both.
 3. The prefill ring holds two copies of the largest layer's expert stacks.
@@ -115,12 +115,12 @@ Its routed experts are 799 GB, with 896 experts in each of 92 layers and
 16 read for each token. On a 128 GB Mac with the default working set, the
 ceiling is 97.9 GB and the KV room without the prefill chunk is 7.5 GB.
 That leaves 28.2 GB, so the model streams. An 8192-token chunk at 16
-experts a token takes 11.2 GB of activations and a 2.8 GB pool, which
-leaves a 14.2 GB arena, 2% of the experts. The 22.7 GB ring does not fit
-beside it, so prefill reads each expert through the page cache. On a
-256 GB Mac, the arena is about 107 GB, or 13% of the experts, and on a
-512 GB Mac it is about 293 GB, or 37%, with the ring's room lent to it
-while decoding.
+experts a token takes 11.2 GB of activations and a pool of the same
+size, which leaves a 5.9 GB arena, under 1% of the experts. The 22.7 GB
+ring does not fit beside it, so prefill reads each expert through the
+page cache. On a 256 GB Mac, the arena is about 99 GB, or 12% of the
+experts, and on a 512 GB Mac it is about 284 GB, or 36%, with the ring's
+room lent to it while decoding.
 
 The experts' quant does not change the fit. UD-Q4_K_XL is a 1.5 TB file
 with the same 62.2 GB of every-token weights, so it streams on the same
