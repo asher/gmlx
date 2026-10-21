@@ -45,6 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Qwen-Image 2.1, FLUX.3 klein, Krea 2 and MOSS-Image failed every request
+  when their `encoder` was a chat model served with its `mmproj`.
 - A folder scan paired an `mmproj` file with the model beside it when their
   headers gave different hidden sizes.
 - A folder scan paired an `mmproj` file with only one quant of its model in the

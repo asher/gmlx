@@ -568,27 +568,50 @@ class _PadRope:
         return mx.concatenate([head, tail], axis=-2)
 
 
+class _PadMRope:
+    """A multimodal rotary embedding that rotates the last of ``n + 1``
+    rows at the pad position on every axis and the others as the wrapped
+    one does."""
+
+    def __init__(self, emb, n: int, position: int):
+        self.emb, self.n, self.position = emb, n, position
+
+    def apply_rotary(self, q, k, position_ids, unsqueeze_dim=1):
+        if q.shape[-2] == self.n + 1:
+            tail = mx.full(position_ids[..., self.n:].shape, self.position,
+                           position_ids.dtype)
+            position_ids = mx.concatenate(
+                [position_ids[..., :self.n], tail], axis=-1)
+        return self.emb.apply_rotary(q, k, position_ids,
+                                     unsqueeze_dim=unsqueeze_dim)
+
+
 @contextlib.contextmanager
 def pad_rope(model, n: int, position: int):
     """Run a tap of ``n`` tokens and one pad row with each attention's
     rope placing the pad row at ``position``, and restore the ropes
-    after."""
+    after. The attention of a multimodal model has a ``rotary_emb`` of
+    three axes, which places the row at ``position`` on each."""
     _, blocks = _text_stack(model)
     found = []
     for b in blocks:
         attn = getattr(b, "self_attn", None)
         rope = getattr(attn, "rope", None)
-        if rope is None:
+        if rope is not None:
+            found.append((attn, "rope", rope, _PadRope))
+            continue
+        emb = getattr(attn, "rotary_emb", None)
+        if emb is None or not hasattr(emb, "apply_rotary"):
             raise TypeError(f"{type(b).__name__} has no self_attn.rope to "
                             "place a pad row with")
-        found.append((attn, rope))
+        found.append((attn, "rotary_emb", emb, _PadMRope))
     try:
-        for attn, rope in found:
-            attn.rope = _PadRope(rope, n, position)
+        for attn, name, rope, wrap in found:
+            setattr(attn, name, wrap(rope, n, position))
         yield
     finally:
-        for attn, rope in found:
-            attn.rope = rope
+        for attn, name, rope, _wrap in found:
+            setattr(attn, name, rope)
 
 
 class _VisionRope:
@@ -759,15 +782,22 @@ def check_mmproj_file(view, spec: EncoderSpec, *,
             f"is {spec.hidden}")
     if override or not spec.vision_identity:
         return
-    got = file_identity(view, dataclasses.replace(
-        spec, identity=spec.vision_identity))
+    _check_tower(spec, file_identity(view, _tower_spec(spec)))
+
+
+def _tower_spec(spec: EncoderSpec) -> EncoderSpec:
+    """``spec`` with the identity rows of its vision tower as its own."""
+    return dataclasses.replace(spec, identity=spec.vision_identity)
+
+
+def _check_tower(spec: EncoderSpec, got: dict) -> None:
     bad = [r.gguf_name for r in spec.vision_identity
            if got.get(r.gguf_name) != r.sha256]
     if bad:
         raise EncoderMismatchError(
-            f"{what}: {', '.join(bad)} differ from "
-            f"{spec.vision_identity_source}. A fine-tuned encoder needs the "
-            "explicit encoder override")
+            f"the mmproj is not the vision tower of {spec.name}: "
+            f"{', '.join(bad)} differ from {spec.vision_identity_source}. A "
+            "fine-tuned encoder needs the explicit encoder override")
 
 
 def check_encoder(model, config: dict, spec: EncoderSpec, *,
@@ -947,16 +977,40 @@ def _load_owned(path: str, mmproj: str | None = None):
             pd.set_untracked_weights_owner(None)
 
 
+# The multimodal model types whose language model is the text tower of a
+# GGUF arch of another name. Such a model is checked as that arch.
+_MULTIMODAL_ARCH = {"qwen3_vl": "qwen3vl"}
+
+
 def _vision_config(config: dict, spec: EncoderSpec) -> dict:
     """What ``check_encoder`` reads, from the config of an encoder loaded
-    with its vision tower: the text model's sizes, and the spec's model
-    type when the multimodal type is the one the spec names."""
+    with its vision tower: the text model's sizes, and as its type the
+    spec's model type when the multimodal type is the one the spec names,
+    else the text arch that type holds."""
     text = config.get("text_config") or {}
     kind = config.get("model_type")
-    return {"model_type": spec.model_type if kind == spec.vision_type
-            else kind,
+    kind = (spec.model_type if kind == spec.vision_type
+            else _MULTIMODAL_ARCH.get(str(kind), kind))
+    return {"model_type": kind,
             "hidden_size": text.get("hidden_size"),
             "num_hidden_layers": text.get("num_hidden_layers")}
+
+
+def resident_config(model, spec: EncoderSpec) -> dict:
+    """What ``check_encoder`` reads from a resident chat model: the args
+    of a text model, or what ``_vision_config`` reads from the config of a
+    multimodal one, which has no args."""
+    args = getattr(model, "args", None)
+    if args is not None:
+        return dict(vars(args))
+    config = getattr(model, "config", None)
+    if config is None:
+        return {}
+    config = config if isinstance(config, dict) else dict(vars(config))
+    text = config.get("text_config") or {}
+    return _vision_config(
+        {**config, "text_config": text if isinstance(text, dict)
+         else dict(vars(text))}, spec)
 
 
 def _drop_head(model) -> None:
@@ -1014,19 +1068,25 @@ def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
 
 
 def borrow_encoder(model, tokenizer, config: dict, spec: EncoderSpec, *,
-                   override: bool = False,
-                   gguf: str | None = None) -> EncoderHandle:
+                   override: bool = False, gguf: str | None = None,
+                   processor=None) -> EncoderHandle:
     """Wrap a resident chat model as the encoder. It is checked against the
     spec and never released. ``gguf`` is the chat model's file, which a
     spec with F32 norms reads them from; without it an encode runs on the
-    model's own norms."""
+    model's own norms. A multimodal chat model is the encoder with its
+    vision tower, which is checked against the spec's too, and
+    ``processor`` is its processor, which reads the reference images of
+    an edit."""
     check_encoder(model, config, spec, override=override)
+    if (not override and spec.vision_identity
+            and getattr(model, "vision_tower", None) is not None):
+        _check_tower(spec, model_identity(model, _tower_spec(spec)))
     digests = json.dumps(model_identity(model, spec), sort_keys=True)
     norms = (read_norms(gguf, model, spec) if spec.fp32_norms and gguf
              else {})
     key = "borrowed:" + hashlib.sha256(
         (digests + ("\x00fp32_norms" if norms else "")).encode()).hexdigest()
     handle = EncoderHandle(model, tokenizer, spec, owned=False,
-                           source_key=key)
+                           source_key=key, processor=processor)
     handle.norms = norms
     return handle

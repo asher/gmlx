@@ -329,9 +329,16 @@ def _borrow_for(spec):
         def job(engine_rg, should_stop):
             # A chat model's engine runs a job as steps between its decode
             # steps; the encode is one step.
+            model = _text_model(engine_rg.model)
+            # A multimodal chat model is the encoder with its vision tower,
+            # and its processor reads the reference images of an edit.
+            processor = (getattr(engine_rg, "processor", None)
+                         if getattr(model, "vision_tower", None) is not None
+                         else None)
             served_pipe.encoder = api._borrowed(
-                (_text_model(engine_rg.model), engine_rg.tokenizer),
-                encoder_spec(served_pipe.family), gguf=gguf)
+                (model, engine_rg.tokenizer),
+                encoder_spec(served_pipe.family), gguf=gguf,
+                processor=processor)
             try:
                 return fn()
             finally:
