@@ -1600,10 +1600,19 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
     users = sorted(im.id for im in _all_images(cfg, images)
                    if im.encoder == target)
     if users:
+        # A discovered image model has no entry to point at another
+        # encoder, and a configured one has.
+        if all(u in cfg.image_models for u in users):
+            other = "point `encoder:` at another model"
+        elif len(users) == 1:
+            other = "add an `image_models:` entry with another `encoder:`"
+        else:
+            other = ("set another `encoder:` in an `image_models:` entry "
+                     "for each")
         print(f"error: {target} is the text encoder of image model"
               f"{plural_s(len(users))} {', '.join(users)}; remove "
-              f"{'it' if len(users) == 1 else 'them'} first, or point "
-              "`encoder:` at another model", file=sys.stderr)
+              f"{'it' if len(users) == 1 else 'them'} first, or {other}",
+              file=sys.stderr)
         return 2
 
     to_delete, sizes = _rm_deletion_plan(
@@ -1701,10 +1710,12 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
     refs = _image_refs(cfg, disc, im.id, images)
     to_delete: list[str] = []
     if not a.keep_files:
+        chat = im.encoder in cfg.models or any(
+            d.id == im.encoder for d in disc)
         parts = [("model file", im.path), ("vae", im.vae),
-                 ("encoder", None if im.encoder in cfg.models else im.encoder),
+                 ("encoder", None if chat else im.encoder),
                  ("encoder_mmproj", im.encoder_mmproj)]
-        if im.encoder in cfg.models:
+        if chat:
             notes.append(f"encoder {im.encoder} is a chat model; it stays")
         for label, p in parts:
             rp = _try_resolve(p, cfg.model_dirs)
