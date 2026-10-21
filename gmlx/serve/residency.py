@@ -1053,6 +1053,7 @@ class _ResidencyPool:
         # The capacity table is derived (header-based, no load needed) and
         # gated before the box's biggest allocation starts.
         from .capacity import (
+            gathered_table_bytes,
             held_table_bytes,
             install_boot_table,
             predicted_stream_bytes,
@@ -1068,12 +1069,20 @@ class _ResidencyPool:
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
+        # Tables that alone bring a plain build under the budget, on an
+        # arch that gathers them per layer: the load maps them and the
+        # bridge's install serves them from the file, as a stream build's
+        # table share. The experts stay in memory if they fit.
+        gathered = 0
         if getattr(build_spec, "stream", None) is None:
             gate_bytes = _plain_footprint(model_path, footprint, env)
+            if isinstance(model_path, str) and model_path.endswith(".gguf"):
+                gathered = gathered_table_bytes(model_path, env=env)
+                shares = (gathered, 0)
+                streamed = gathered
         elif getattr(build_spec, "stream", None) == "experts":
-            # What the install will stream, by its own ladder: over the
-            # budget, a table that alone brings the model under it streams
-            # and the experts stay resident.
+            # What the install will stream, by its own ladder: the
+            # experts, and the tables with them.
             shares = predicted_stream_bytes(str(model_path), env)
             streamed = sum(shares)
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
@@ -1201,7 +1210,7 @@ class _ResidencyPool:
             # The install decided on the loaded model; price what it
             # really streamed if the header prediction differed.
             repriced = priced_up = False
-            if getattr(build_spec, "stream", None) == "experts":
+            if getattr(build_spec, "stream", None) == "experts" or gathered:
                 done = _streamed_shares(getattr(rg, "model", None), shares,
                                         str(model_path))
                 if done is not None and sum(done) != streamed:
@@ -1562,10 +1571,9 @@ def _streaming_footprint(model_path, file_bytes: int, env=None,
     prefill. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
-    they never take. Over the budget, a table that alone brings the model
-    under it streams and the experts stay resident, with no arena or
-    ring: the build streams what :func:`capacity.predicted_stream_bytes`
-    predicts, and so the entry is priced on it."""
+    they never take. The build streams what
+    :func:`capacity.predicted_stream_bytes` predicts, and so the entry is
+    priced on it."""
     from .capacity import predicted_stream_bytes, preload_gate_bytes
 
     experts_stream = True

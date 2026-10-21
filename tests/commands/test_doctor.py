@@ -866,6 +866,30 @@ def test_memory_row_warns_when_every_token_weights_exceed_ceiling(
     assert "every-token weights must fit under the memory ceiling" in out
 
 
+# stream marks row: a `stream: experts` key discovery wrote that no longer holds
+@pytest.mark.parametrize("marked", [True, False])
+def test_the_stream_marks_row_names_a_mark_the_model_fits_without(
+        tmp_path, monkeypatch, capsys, marked):
+    """Flash-Next marked before its table, which alone brings it under the
+    budget, streamed on its own: the row sends the user to sync-models. A
+    key the user wrote is theirs, and the row says nothing."""
+    import gmlx.load.discovery as discovery
+    from helpers import FLASH_NEXT, flash_next_under_its_table
+
+    note = f"  # {discovery.STREAM_MARK_NOTE}" if marked else ""
+    cfg, lib = _cfg(tmp_path, _BASE.replace("m.gguf", FLASH_NEXT)
+                    + f"    stream: experts{note}\n")
+    flash_next_under_its_table(monkeypatch, lib)
+    _ram(monkeypatch, 64 * 1024**3)
+    _ws(monkeypatch, 48e9)
+    assert doctor.cmd_doctor(["--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    row = ("WARN  stream marks  m: discovery set `stream: experts`, and the "
+           "model fits in memory now; run `gmlx sync-models` to drop the key")
+    assert (row in out) is marked
+    assert ("stream marks" in out) is marked
+
+
 def test_the_mcp_row_names_a_tool_server_that_gmlx_will_not_run(tmp_path, monkeypatch):
     """gmlx never runs a tool server from a folder that a container session
     shared read-write, so the row does not pass it as a command on PATH."""

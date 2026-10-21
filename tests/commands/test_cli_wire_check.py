@@ -472,6 +472,37 @@ def test_a_bench_depths_drafter_counts_in_the_wire(header, tmp_path):
     assert args.stream_experts is True       # 72 > 71.1
 
 
+@pytest.mark.parametrize("fits", [True, False])
+def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
+        monkeypatch, tmp_path, capsys, fits):
+    # Flash-Next over the budget by its per-layer embedding table alone:
+    # the load serves the table from the file and judges the rest, where
+    # its text bytes are past the budget. Its install wires the experts in
+    # chunks, which GMLX_OVERCOMMIT=1 still stops. The minted headers are
+    # small, so the exemption is off.
+    from helpers import FLASH_NEXT, flash_next_under_its_table
+
+    for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB", "GMLX_STREAM_PLE"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(budget, "_WIRE_DEPTH", None)
+    monkeypatch.setattr(budget, "WIRE_EXEMPT_BYTES", 0)
+    monkeypatch.setattr(
+        budget, "kv_room_bytes",
+        lambda p, env=None, step=None, depth=None: budget.KvRoom(
+            0, 32768, 1, 0, 0, 0, priced=True))
+    flash_next_under_its_table(monkeypatch, tmp_path)
+    _box(host_box.mac(128)[0], rec=90 * GiB if fits else GiB // 1024)
+    args = _args(str(tmp_path / FLASH_NEXT), no_speculative=True)
+    cli.preload_wire_check(args, depth=None)
+    assert args.stream_experts is not fits
+    err = capsys.readouterr().err
+    if fits:
+        assert err == ""
+    else:
+        assert err.startswith(f"[stream] {budget.STREAM_FREE_NOW}: ")
+        assert err.rstrip().endswith(budget.OVERCOMMIT_LEVER)
+
+
 def test_no_mtp_leaves_the_head_out(glm_head):
     _box(host_box.mac(128)[0], rec=90 * GiB)
     args = _args(glm_head, no_speculative=True)

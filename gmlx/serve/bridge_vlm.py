@@ -538,6 +538,9 @@ def _install_stream_placement(
 
     The levers come after the placement, because each one hooks the streamed
     layers that the placement makes.
+
+    With no placement, a model whose tables alone bring it under the budget
+    serves them from the file (``install_unflagged_tables``).
     """
     if stream == "cpu":
         # The whole model runs on the CPU device, and this device change
@@ -556,6 +559,13 @@ def _install_stream_placement(
             text_model, gguf_path=gguf_path, explicit=True,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
             fast_disk=fast_disk)
+    else:
+        from gmlx.stream.expert_streaming import install_unflagged_tables
+        # A plain build whose tables alone bring it under the budget
+        # serves them from the file; residency priced it so.
+        install_unflagged_tables(
+            text_model, gguf_path, feeder_prefill=feeder_prefill,
+            feeder_decode=feeder_decode, fast_disk=fast_disk)
     if moe_experts is not None:
         from gmlx.stream.expert_streaming import install_moe_experts_override
         install_moe_experts_override(text_model, moe_experts)

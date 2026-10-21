@@ -1516,6 +1516,19 @@ def _apply_placement(args, model) -> None:
                 f"[stream] {'/'.join(used)} ignored: needs --stream-experts "
                 "or --stream-cpu (they only apply to streamed MoE layers)"
             )
+        from gmlx.stream.expert_streaming import install_unflagged_tables
+
+        # Tables that alone bring the model under the budget serve from the
+        # file; its experts stay in memory if they fit, else they stream.
+        # An MTP load installs this before its wire, and the call is a no-op.
+        install_unflagged_tables(
+            model, getattr(args, "gguf", None),
+            feeder_prefill=getattr(args, "prefill_feeder", None),
+            feeder_decode=getattr(args, "decode_feeder", None),
+            prefill_step=getattr(args, "prefill_step_size", None),
+            stats_verbose=bool(getattr(args, "verbose", False)))
+        if getattr(model, "_kq_streaming", False):
+            _lift_live_cb_caps()
         return
 
     gguf_path = getattr(args, "gguf", None)
@@ -2374,8 +2387,13 @@ def _ensure_stream_cb_caps(args) -> None:
     stream = bool(getattr(args, "stream_experts", False)
                   or getattr(args, "stream_cpu", False))
     force_table_stream(stream)
-    if not stream:
-        return
+    if stream:
+        _lift_live_cb_caps()
+
+
+def _lift_live_cb_caps() -> None:
+    """The streaming command-buffer caps on the live device: for a
+    placement from config, or experts that stream for want of memory."""
     if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
         return                       # argv path already latched it, or the
                                      # user pinned their own caps
@@ -2575,7 +2593,11 @@ def preload_wire_check(args, *, depth: int | None,
             return
     if check.fits:
         return
-    loadlog.warn(f"[stream] {check.line(room, depth)}")
+    from gmlx.serve.capacity import gathered_table_bytes
+
+    # A load whose gathered tables bring it under wires in chunks.
+    loadlog.warn(f"[stream] "
+                 f"{check.line(room, depth, chunked=bool(gathered_table_bytes(path)))}")
     args.stream_experts = True
     # The install names this leg, not the flag.
     args.stream_fallback = check.reason

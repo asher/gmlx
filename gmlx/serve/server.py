@@ -622,13 +622,13 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     # A `stream:` key discovery wrote holds only while the model is over the
     # memory budget; the budget moves with iogpu.wired_limit_mb, so each
     # sync judges it again.
-    restream = {}                                  # id -> {"stream", "speculative"}
-    path_of = {mc.id: rp for rp, mc in known_models.items()}
-    for mid in _marked_stream_ids(path):
-        rp = path_of.get(mid)
-        fresh = discovery.rescan_entry(rp) if rp else None
-        if fresh is not None and fresh["stream"] is None:
-            restream[mid] = fresh
+    restream = stale_stream_marks(                 # id -> {"stream", "speculative"}
+        path, {mc.id: rp for rp, mc in known_models.items()})
+    # The scan pairs a drafter only with a resident model, as the entry
+    # reads once the key is gone.
+    for rp, mc in known_models.items():
+        if mc.id in restream:
+            known_models[rp] = dataclasses.replace(mc, stream=None)
 
     # Discover, skipping anything already configured (by id or by resolved path).
     # `draft_pairs` and `mmproj_pairs` are the drafters and mmprojs that pair
@@ -763,6 +763,48 @@ def _hf_cache_readable() -> bool:
         return os.path.isdir(HF_HUB_CACHE)
     except Exception:
         return False
+
+
+def stale_stream_marks(path, path_of: dict) -> dict:
+    """The entries of the config at ``path`` whose ``stream:`` key
+    discovery wrote and a fresh scan no longer gives: id -> the scan's
+    ``stream`` and ``speculative`` values. ``path_of`` maps an id to its
+    resolved model file. Sync drops these keys."""
+    out = {}
+    for mid in _marked_stream_ids(path):
+        rp = path_of.get(mid)
+        fresh = discovery.rescan_entry(rp) if rp else None
+        if fresh is not None and fresh["stream"] is None:
+            out[mid] = fresh
+    return out
+
+
+def _warn_stale_stream_marks(cfg, path) -> None:
+    """At the start, a warning for each entry of the config at ``path``
+    whose ``stream: experts`` key a folder scan wrote and a fresh scan no
+    longer gives (``stale_stream_marks``): the key streams the experts of
+    a model that now fits, until ``gmlx sync-models`` drops it. Reads the
+    headers of the marked entries only. A read that fails says nothing."""
+    if not path or not getattr(cfg, "models", None):
+        return
+    path_of = {}
+    for mid, m in cfg.models.items():
+        try:
+            path_of[mid] = resolve_path(m.path, cfg.model_dirs)
+        except Exception:                              # noqa: BLE001 - advisory
+            continue
+    try:
+        stale = sorted(stale_stream_marks(path, path_of))
+    except Exception:                                  # noqa: BLE001 - advisory
+        return
+    from .capacity import gathered_table_bytes
+
+    for mid in stale:
+        fits = ("fits with its table read from the file"
+                if gathered_table_bytes(path_of[mid]) else "fits in memory")
+        print(f"[server] warning: {mid}: a folder scan set stream: experts, "
+              f"and the model now {fits}, so its experts stream. Run gmlx "
+              "sync-models to keep them in memory.", file=sys.stderr)
 
 
 def _marked_stream_ids(path) -> list:
@@ -3040,6 +3082,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     print(f"[server] {len(cfg.models)} model(s) configured"
           + (f", preloading {preload} in background" if preload else ""))
     _print_models(cfg.models)
+    _warn_stale_stream_marks(cfg, config_given)
     if cfg.stt:
         print(f"[server] stt: {cfg.stt}  (POST /v1/audio/transcriptions, "
               f"pre-warming in background)")

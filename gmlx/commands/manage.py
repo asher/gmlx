@@ -212,7 +212,8 @@ def _stream_plan(scans: list | None, path: str | None = None) -> dict | None:
                 drafter = bare_run_drafter_bytes(path)
             live = sp.live_check(model, box, drafter)
             if live is not None:
-                lines.append(sp.live_line(live, box))
+                lines.append(sp.live_line(
+                    live, box, chunked=sp.wires_in_chunks(model, box)))
                 out["experts_in_memory_now"] = live.fits
                 out["auto_mtp_off_now"] = live.mtp_off
         else:

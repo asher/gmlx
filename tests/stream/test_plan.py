@@ -258,8 +258,8 @@ def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
                                                               monkeypatch):
     """On a 256 GB Studio the 165.3 GB DeepSeek-V4.1 keeps once its table
     is read from the file fit the 185.5 GB budget, so it loads with its
-    experts in memory, with or without --stream-experts. On a 128 GB M5
-    Max they do not, and the experts stream."""
+    experts in memory, and --stream-experts streams them. On a 128 GB M5
+    Max they do not fit, and the experts stream."""
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     m = ds41_plan()
     b = sp.box_plan(m, **STUDIO)
@@ -267,7 +267,7 @@ def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
     assert sp.box_lines(m, b)[1:] == [
         "tables 135.2 GB read from the file; the other 165.3 GB fit the "
         "185.5 GB resident budget",
-        "=> loads with its experts in memory, with or without --stream-experts"]
+        "=> loads with its experts in memory; --stream-experts streams them"]
     assert sp.box_summary(m, b) == (
         "tables 135.2 GB read from the file, experts in memory (165.3 GB "
         "under the 185.5 GB budget)")
@@ -295,7 +295,7 @@ def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
     m = ds41_plan(MXFP8, "MXFP8")
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     b = sp.box_plan(m, **STUDIO)
-    assert b is not None and b.verdict == sp.VERDICT_TABLES and b.flag_streams
+    assert b is not None and b.verdict == sp.VERDICT_TABLES
     assert sp.box_lines(m, b)[1:] == [
         "tables 202.8 GB read from the file; the other 165.3 GB fit the "
         "185.5 GB resident budget"] + lines
@@ -304,13 +304,40 @@ def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
     monkeypatch.delenv("GMLX_STREAM_PLE")
     monkeypatch.setattr(tpr, "_kq_has", lambda codec: codec != "mxfp8")
     b = sp.box_plan(m, **STUDIO_512)
-    assert b is not None and b.verdict == sp.VERDICT_TABLES and b.flag_streams
+    assert b is not None and b.verdict == sp.VERDICT_TABLES
     assert sp.box_lines(m, b)[1:] == [
         "tables 202.8 GB read from the file; the other 165.3 GB fit the "
         "371.1 GB resident budget"] + lines
     monkeypatch.setattr(tpr, "_kq_has", lambda codec: True)
     b = sp.box_plan(m, **STUDIO_512)
     assert b is not None and b.verdict == sp.VERDICT_RESIDENT
+
+
+def test_a_table_gathered_per_layer_that_brings_the_load_under_keeps_the_experts(
+        flat_room, monkeypatch):
+    """Qwen3.8-Flash-Next UD-Q4_K_XL on a 128 GB M5 Max: 111.3 GB, its
+    28.8 GB per-layer embedding table gathered per layer on the CPU
+    stream. The other 82.5 GB fit the 108.2 GB budget, so it loads with
+    its experts in memory, as the install's ladder does."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    table = 28_800_000_000
+    m = sp.ModelPlan(arch="qwen4exp", total_bytes=82_500_000_000 + table,
+                     expert_bytes=77_000_000_000, groups={}, moe_layers=48,
+                     n_experts=512, experts_per_token=10,
+                     ring_bytes=4_100_000_000, kv_costs=None,
+                     trained_ctx=None, table_bytes=table,
+                     tables=((table, "Q4_K"),))
+    b = sp.box_plan(m, **M5_MAX)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 28.8 GB read from the file; the other 82.5 GB fit the "
+        "108.2 GB resident budget",
+        "=> loads with its experts in memory; --stream-experts streams them"]
+    # GMLX_STREAM_PLE=0 holds the table: past the budget, in RAM.
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    b = sp.box_plan(m, **M5_MAX)
+    assert b is not None and b.verdict == sp.VERDICT_STREAMS
+    assert b.past_budget
 
 
 def test_the_plan_leaves_out_the_nextn_blocks(tmp_path):

@@ -540,24 +540,61 @@ def _table_shards(gguf_path: str) -> tuple[list[str], str | None]:
 def deferred_table_bytes(gguf_path: str, budget: int | None = None,
                          env=None) -> int:
     """Bytes of the arch's streamable tables a load without a stream flag
-    reads from the file instead of holding, on an arch that reads its
-    tables ahead (``table_stream.tables_read_ahead``): those no array can
-    hold, and all of them when they alone bring the text tensors under
-    the stream budget (``budget``, the device's when None). The figure
-    discovery, the run preflight and the serve footprint take off the
-    file bytes of a model they would load resident;
-    ``table_pread.deferred_tables`` is the loader's side of the same rule.
-    0 on another arch, or when the header cannot be read."""
+    serves from the file instead of holding. All of them when they alone
+    bring the text tensors under the stream budget (``budget``, the
+    device's when None), on any arch that declares tables. On an arch
+    that reads its tables ahead (``table_stream.tables_read_ahead``),
+    also those no array can hold. The figure discovery, the run
+    preflight and the serve footprint take off the file bytes of a model
+    they would load resident. ``table_pread.deferred_tables`` is the
+    loader's side of the rule for an arch that reads ahead, and
+    ``gathered_table_bytes`` the install's for one that gathers per
+    layer. 0 when the header cannot be read."""
     try:
         from gmlx.stream.table_pread import deferred_tables
         from gmlx.stream.table_stream import tables_read_ahead
 
         shards, arch = _table_shards(gguf_path)
-        if not shards or not tables_read_ahead(arch):
+        if not shards:
             return 0
+        if not tables_read_ahead(arch):
+            return gathered_table_bytes(gguf_path, budget, env)
         sources = deferred_tables(shards, arch, budget=budget,
                                   latched=False, env=env)
         return sum(s.nbytes for s in sources.values())
+    except Exception:
+        return 0
+
+
+def gathered_table_bytes(gguf_path: str, budget: int | None = None,
+                         env=None) -> int:
+    """Bytes of the streamable tables a load without a stream flag serves
+    from the file on the CPU stream, on an arch that gathers its tables
+    per layer (not ``table_stream.tables_read_ahead``): all of them when
+    they alone bring the text tensors under the stream budget
+    (``table_stream.tables_bring_under``; ``budget`` the device's when
+    None). Such a load maps the table, and its install
+    (``expert_streaming.install_unflagged_tables``) wraps it before any
+    GPU work, so the experts stay in memory. 0 otherwise, or when the
+    header cannot be read."""
+    try:
+        from gmlx.device import stream_budget_bytes
+        from gmlx.load.discovery import text_tensor_bytes
+        from gmlx.stream.table_stream import (tables_bring_under,
+                                              tables_read_ahead)
+
+        shards, arch = _table_shards(gguf_path)
+        if not shards or tables_read_ahead(arch):
+            return 0
+        tables = streamed_table_bytes(gguf_path)
+        if not tables:
+            return 0
+        text = text_tensor_bytes(gguf_path)
+        if budget is None:
+            budget = stream_budget_bytes()
+        if text and tables_bring_under(text, tables, budget, env):
+            return tables
+        return 0
     except Exception:
         return 0
 
@@ -588,10 +625,10 @@ def predicted_stream_bytes(gguf_path: str, env=None) -> tuple[int, int]:
     """``(table bytes, expert bytes)`` a ``stream: experts`` build will
     stream, from the header: the installer's ladder (``stream_plan``) on
     the text tensor bytes, the declared tables and the routed experts.
-    Over the budget, a table that alone brings the model under it streams
-    and the experts stay resident. Without the text tensor bytes, both.
-    ``env`` is the model's env window (GMLX_STREAM_PLE and
-    GMLX_STREAM_PLE_COMPOSE), which the install reads."""
+    The experts always stream, and the tables with them unless
+    GMLX_STREAM_PLE=0 or GMLX_STREAM_PLE_COMPOSE=0 keeps them. Without
+    the text tensor bytes, both. ``env`` is the model's env window,
+    which the install reads."""
     from gmlx.device import stream_budget_bytes
     from gmlx.load.discovery import text_tensor_bytes
     from gmlx.stream.table_stream import stream_plan

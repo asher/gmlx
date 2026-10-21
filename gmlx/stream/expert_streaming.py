@@ -140,6 +140,33 @@ def configure_stream_cpu(
     )
 
 
+def install_unflagged_tables(model, gguf_path: str | None, *,
+                             feeder_prefill: bool | None = None,
+                             feeder_decode: bool | None = None,
+                             fast_disk: str | None = None,
+                             prefill_step: int | None = None,
+                             stats_verbose: bool | None = None) -> bool:
+    """The install of a load with no stream placement whose tables alone
+    bring it under the budget, on an arch that gathers them per layer
+    (``capacity.gathered_table_bytes``). Its own ladder serves the tables
+    from the file on the CPU stream and keeps the experts in memory when
+    the memory free now holds them; else the experts stream, with the
+    stream line. Call it after the load, before any GPU work on the model
+    and before a sticky wire. True when it installed. False, with nothing
+    changed, on any other load or on a model installed already."""
+    if not gguf_path or hasattr(model, "_kq_streaming"):
+        return False
+    from gmlx.serve.capacity import gathered_table_bytes
+
+    if not gathered_table_bytes(gguf_path):
+        return False
+    install_expert_streaming(
+        model, gguf_path=gguf_path, feeder_prefill=feeder_prefill,
+        feeder_decode=feeder_decode, fast_disk=fast_disk,
+        prefill_step=prefill_step, stats_verbose=stats_verbose)
+    return True
+
+
 # The chunked wire's wait for reclaimable memory under a chunk's line:
 # a rise smaller than _WIRE_MIN_RISE does not count, the wait stops once
 # no rise has counted for _WIRE_STALL_S, and the waits of one wire add
@@ -457,9 +484,8 @@ def install_expert_streaming(
     for streaming-mode models - see ``gmlx.stream.prefetch``. Without it,
     over-budget prefill demand-faults expert bytes at random-read bandwidth.
 
-    ``explicit`` is ``--stream-experts`` or ``stream: experts``: a model
-    under the budget streams as with ``force_stream``, and one over it
-    takes the budget-keyed ladder (table first) as without the flag.
+    ``explicit`` is ``--stream-experts`` or ``stream: experts``: the
+    experts stream as with ``force_stream``, whatever the model's size.
 
     ``prefill_step`` is the requested prefill chunk width
     (``--prefill-step-size``), which the KV room prices.
@@ -486,9 +512,9 @@ def install_expert_streaming(
     # Engaged when the model is over the wired budget (it must stream) or
     # when streaming is forced: --stream-cpu passes force_stream, and
     # --stream-experts and `stream: experts` pass explicit, which forces it
-    # under the budget, so the flag streams a model that fits too. Without
-    # either (the distill teacher's auto path, a direct call), a model under
-    # budget routes every expert call to the GPU stream
+    # on every model. Without either (a load the header plan streams the
+    # tables of, the distill teacher's auto path, a direct call), a model
+    # under budget routes every expert call to the GPU stream
     # (GMLX_STREAM_GPU_TOKENS), the fast path in-RAM.
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
@@ -502,7 +528,7 @@ def install_expert_streaming(
     file_tables = file_table_bytes(model)
     ladder_bytes = total_bytes + file_tables
     over_budget = budget is not None and ladder_bytes > budget
-    if explicit and not over_budget:
+    if explicit:
         force_stream = True
 
     # Streamed lookup tables (docs/internals/streaming-measurements.md): archs with a
@@ -527,8 +553,9 @@ def install_expert_streaming(
     # over budget even post-table streams both (compose); --stream-cpu and
     # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
     # table resident.
-    plan = stream_plan(ladder_bytes, table_bytes(model) + file_tables,
-                       budget, force_stream=force_stream)
+    tables = table_bytes(model) + file_tables
+    plan = stream_plan(ladder_bytes, tables, budget,
+                       force_stream=force_stream)
     compose = plan.tables and plan.experts
     table_only = plan.tables and not plan.experts
     if plan.table_kept and table_bytes(model):
@@ -1276,6 +1303,11 @@ def install_expert_streaming(
             head = f"{size}, its experts do not fit the memory free now"
         elif fallback:
             head = f"{size}, its experts do not fit the memory budget"
+        elif explicit and (budget is None or ladder_bytes - tables <= budget):
+            # Over the budget only by tables that a load without the flag
+            # reads from the file, or not over it at all.
+            head = (f"{size}, streaming forced by --stream-experts or "
+                    "stream: experts")
         elif over_budget:
             head = f"{size} > ~{budget / 1e9:.0f} GB wired budget"
         else:
@@ -1306,7 +1338,10 @@ def install_expert_streaming(
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes,
-            forced=explicit and not over_budget)
+            # A flag on a model that fits once its tables stream: an arena
+            # of every expert would be the resident load it asks to avoid.
+            forced=explicit and (budget is None
+                                 or ladder_bytes - tables <= budget))
     ring = 0
     ring_share = 0
     held = None

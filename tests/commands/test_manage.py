@@ -1877,7 +1877,8 @@ def test_validate_reports_the_table_read_from_the_file(tmp_path, monkeypatch,
     """DeepSeek-V4.1-Flash 1017 UD-IQ2_XXS: 300.5 GB, 135.2 GB of it the
     engram table. On a 256 GB Studio the table is read from the file and
     the other 165.3 GB stay in memory, so validate says the experts stay
-    resident. On a 128 GB M5 Max they stream."""
+    resident, and --stream-experts streams them. On a 128 GB M5 Max they
+    stream."""
     import gmlx.load.memfit as memfit
     import gmlx.serve.capacity as cap
     from gmlx.stream import plan as sp
@@ -1910,8 +1911,8 @@ def test_validate_reports_the_table_read_from_the_file(tmp_path, monkeypatch,
         # The live check wires the 165.3 GB the table leaves.
         assert ("    tables 135.2 GB read from the file; the other 165.3 GB "
                 "fit the 185.5 GB resident budget\n"
-                "    => loads with its experts in memory, with or without "
-                "--stream-experts\n"
+                "    => loads with its experts in memory; --stream-experts "
+                "streams them\n"
                 f"    {sp.LIVE_RESIDENT}\n") in out
     else:
         assert "  size: 279.8 GB  - exceeds this Mac's 128 GB RAM" in out
@@ -2045,6 +2046,45 @@ def test_validate_prices_the_auto_mtp_head_a_run_loads(
     stream = json.loads(capsys.readouterr().out)["stream"]
     assert stream["experts_in_memory_now"] is (free_gib > 10)
     assert stream["auto_mtp_off_now"] is mtp_off
+
+
+@pytest.mark.parametrize("arch,chunked", [("qwen4exp", True),
+                                          ("deepseek41", False)])
+def test_validate_offers_the_lever_of_the_load_it_models(
+        tmp_path, monkeypatch, capsys, arch, chunked):
+    # A 50 GB MoE whose 10 GB of tables alone bring it under the 43.2 GB
+    # budget, on a 64 GiB Mac with 16 GiB reclaimable. A table gathered
+    # per layer streams beside experts that wire in chunks; one read
+    # ahead is read from the file by a load that holds the rest.
+    import host_box
+    import gmlx.stream.budget as budget
+    from gmlx.stream import plan as sp
+
+    box, _ = host_box.mac(64)
+    host_box.use(box, {"free": 10 << 30, "inactive": 0, "purgeable": 0,
+                       "speculative": 0, "filebacked": 6 << 30,
+                       "wired": box["memory_size"] // 20, "compressor": 0})
+    _box(monkeypatch, ram_gb=64, ws_gb=48)
+    for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB",
+              "GMLX_DECODE_KV_RESERVE_GB", "GMLX_STREAM_PLE"):
+        monkeypatch.delenv(k, raising=False)
+    table = 10_000_000_000
+    monkeypatch.setattr(sp, "model_plan", lambda scans: sp.ModelPlan(
+        arch=arch, total_bytes=50_000_000_000, expert_bytes=36_000_000_000,
+        groups={}, moe_layers=48, n_experts=128, experts_per_token=8,
+        ring_bytes=1_200_000_000, kv_costs=None, trained_ctx=None,
+        table_bytes=table, tables=((table, "Q4_K"),)))
+    monkeypatch.setattr(manage, "_ref_size_bytes",
+                        lambda ref, report: 50_000_000_000)
+    p = tmp_path / "moe.gguf"
+    _mint_moe_bytes(p)
+    assert manage.cmd_validate([str(p)]) == 0
+    live = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("    => ")][-1]
+    assert live.startswith(f"    => {budget.STREAM_FREE_NOW}: holding them "
+                           "takes 40.0 GB, against 17.2 GB")
+    assert live.endswith(budget.OVERCOMMIT_LEVER if chunked
+                         else budget.OVERCOMMIT_KEEPS)
 
 
 def test_validate_local_moe_without_a_readable_box(tmp_path, monkeypatch, capsys):

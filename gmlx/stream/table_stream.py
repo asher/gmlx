@@ -290,14 +290,14 @@ def stream_plan(total_bytes: int, tbytes: int, budget: int | None, *,
     """The selection ladder, from byte counts alone: the installer runs it
     on the loaded model, and a serve build on the GGUF header before the
     load, so the build prices what the install will stream. ``explicit``
-    (``stream: experts``) forces a stream under the budget; ``latched``
+    (``stream: experts``) forces the experts to stream; ``latched``
     stands for the :func:`force_table_stream` latch a build sets later.
     ``env`` is a model's own env window, read over ``os.environ``: the
     install runs inside it, and the header prediction before it."""
     from gmlx.envflags import env_bool
 
     over = budget is not None and total_bytes > budget
-    force = force_stream or (explicit and not over)
+    force = force_stream or explicit
     if not _selected(tbytes, total_bytes, budget, force or latched, env):
         return StreamPlan(False, force or over)
     if force or (budget is not None and total_bytes - tbytes > budget):
