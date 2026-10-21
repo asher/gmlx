@@ -58,12 +58,13 @@ def bind_stock_checkpoint_methods(batch):
     return batch
 
 
-def mint_type43_gguf(path, tensors, *, pad_last=True, cut=0,
+def mint_type43_gguf(path, tensors, *, pad_last=True, cut=0, tail=0,
                      arch="deepseek41") -> bytes:
     """A GGUF whose tensors all carry GGML type id 43, which gguf-py cannot
     write. ``tensors`` is ``[(name, dims, fmt, data)]`` in file order, with
     ``fmt`` a key of ``TYPE_43_FORMATS`` and ``data`` the tensor's bytes or
-    None for zeros. ``cut`` drops bytes off the end of the file."""
+    None for zeros. ``cut`` drops bytes off the end of the file and ``tail``
+    appends zeros to it."""
     import struct
 
     from gmlx.load.headerscan import TYPE_43_FORMATS
@@ -94,7 +95,7 @@ def mint_type43_gguf(path, tensors, *, pad_last=True, cut=0,
         body += blob
         if pad_last or i + 1 < len(blobs):
             body += bytes(-len(body) % align)
-    out = bytes(body[:len(body) - cut])
+    out = bytes(body[:len(body) - cut]) + bytes(tail)
     with open(path, "wb") as f:
         f.write(out)
     return out

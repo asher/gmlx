@@ -123,7 +123,7 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list, int | None]
 def _parse_header_full(buf: bytes):
     """``_parse_header`` plus each tensor's value count and data offset, and
     the data section's start: ``(arch, gguf_type, [(name, ggml_type,
-    n_elems, offset), ...], hadamard, (data_start, alignment))``."""
+    n_elems, offset), ...], hadamard, data_start)``."""
     r = _Reader(buf)
     if r.raw(4) != b"GGUF":
         raise RemoteError("not a GGUF file (bad magic)")
@@ -166,7 +166,7 @@ def _parse_header_full(buf: bytes):
         offset = r.u64()
         entries.append((name, ttype, n_elems, offset))
     data_start = (r.i + alignment - 1) // alignment * alignment
-    return arch, gguf_type, entries, hadamard, (data_start, alignment)
+    return arch, gguf_type, entries, hadamard, data_start
 
 
 def _type_name(ttype: int) -> str:
@@ -200,8 +200,7 @@ def classify_header(buf: bytes, total: int | None = None) -> HeaderReport:
     end of the file apart (STQ1_0 or MXFP8)."""
     from gmlx.load.headerscan import TYPE_43, type_43_format, type_43_spans
 
-    arch, gguf_type, tensors, hadamard, (data_start, alignment) = \
-        _parse_header_full(buf)
+    arch, gguf_type, tensors, hadamard, data_start = _parse_header_full(buf)
     spans = type_43_spans([(t[1], t[3]) for t in tensors],
                           total - data_start if total else None)
     hist: dict[str, int] = {}
@@ -210,7 +209,7 @@ def classify_header(buf: bytes, total: int | None = None) -> HeaderReport:
         if ttype == TYPE_43:
             span, at_end = spans[i]
             try:
-                tn = type_43_format(n_elems, span, alignment, at_end=at_end)
+                tn = type_43_format(n_elems, span, at_end=at_end)
             except ValueError:
                 tn = "TYPE_43"
         else:

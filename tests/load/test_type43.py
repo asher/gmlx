@@ -59,10 +59,22 @@ def test_a_truncated_table_at_the_end_reads_as_mxfp8(tmp_path):
     assert h.truncated
 
 
+def test_an_stq1_0_tensor_with_slack_after_it_reads_as_stq1_0(tmp_path):
+    # Bytes past the padding, between tensors or at the end of the file,
+    # leave an STQ1_0 weight as it loaded before MXFP8 shared its id.
+    path = tmp_path / "m.gguf"
+    _mint(path, _ORDERS[1], tail=2 * ALIGN)
+    h = scan_gguf(str(path))
+    assert [t.type_name for t in h.tensors] == ["MXFP8", "STQ1_0"]
+    assert not h.truncated
+    n = 1024
+    assert type_43_format(n, _size(n, "STQ1_0") + 3 * ALIGN) == "STQ1_0"
+
+
 def test_a_span_that_fits_neither_format_raises():
     n = 1024
     with pytest.raises(ValueError, match="neither STQ1_0"):
-        type_43_format(n, _size(n, "STQ1_0") + 3 * ALIGN, ALIGN)
+        type_43_format(n, _size(n, "STQ1_0") - 1)
     # A header prefix with no file size cannot see the last span; it reads
     # as STQ1_0 and the local scan decides again.
-    assert type_43_format(n, None, ALIGN) == "STQ1_0"
+    assert type_43_format(n, None) == "STQ1_0"

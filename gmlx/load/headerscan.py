@@ -46,29 +46,31 @@ FALLBACK_SIZES_BY_NAME = {
 }
 
 
-def type_43_format(n_elems: int, span: int | None, alignment: int,
-                   *, at_end: bool = False) -> str:
+def type_43_format(n_elems: int, span: int | None, *,
+                   at_end: bool = False) -> str:
     """The format of a type-43 tensor of ``n_elems`` values whose data spans
     ``span`` bytes: up to the next tensor, or to the end of the file when
     ``at_end``. A span that is unknown (a header prefix with no file size)
     reads as STQ1_0, the older owner; the local scan decides again.
 
-    Between tensors the span is the size plus under ``alignment`` bytes of
-    padding. At the end of the file a short span is a truncated download,
-    so it takes the format it is closest to and the size check flags it."""
+    The format is the largest that fits in the span, as mlx-kquant reads
+    it. At the end of the file a span short of MXFP8 but nearer it than
+    STQ1_0, by ratio, is a cut MXFP8 download, which the size check flags."""
     if span is None:
         return "STQ1_0"
     sizes = {name: n_elems // block * tsize
              for name, (block, tsize) in TYPE_43_FORMATS.items()}
-    for name, size in sizes.items():
-        if size <= span < size + alignment:
-            return name
-    if at_end and span < sizes["MXFP8"]:
-        return "MXFP8" if span > sizes["STQ1_0"] + alignment else "STQ1_0"
+    can = {name for name, (block, _) in TYPE_43_FORMATS.items()
+           if n_elems % block == 0}
+    stq, mx = sizes["STQ1_0"], sizes["MXFP8"]
+    if "MXFP8" in can and (span >= mx or (
+            at_end and ("STQ1_0" not in can or span * span > stq * mx))):
+        return "MXFP8"
+    if "STQ1_0" in can and (span >= stq or at_end):
+        return "STQ1_0"
     raise ValueError(
         f"type-43 tensor of {n_elems} values spans {span} bytes, which is "
-        f"neither STQ1_0 ({sizes['STQ1_0']} bytes) nor MXFP8 "
-        f"({sizes['MXFP8']} bytes)")
+        f"neither STQ1_0 ({stq} bytes) nor MXFP8 ({mx} bytes)")
 
 
 def type_43_spans(entries, data_end: int | None) -> dict[int, tuple[int | None, bool]]:
@@ -237,8 +239,7 @@ def _scan(buf, path, size, include_tensors, limit) -> HeaderScan:
             if ttype == TYPE_43:
                 span, at_end = spans[i]
                 try:
-                    tname = type_43_format(n_elems, span, alignment,
-                                           at_end=at_end)
+                    tname = type_43_format(n_elems, span, at_end=at_end)
                 except ValueError as e:
                     raise ValueError(f"{path}: {name}: {e}") from None
                 block, tsize = TYPE_43_FORMATS[tname]
