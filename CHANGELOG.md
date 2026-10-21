@@ -48,6 +48,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A folder scan paired an `mmproj` file with the model beside it when their
   headers gave different hidden sizes.
 - A sync or pull printed the pairing of a DFlash 2 drafter twice.
+- A sync, pull or `discover:` scan said to configure a drafter that a model's
+  entry already named.
 - With `--stream-experts`, a prompt of more than 64 tokens filled the file
   cache as it prefilled, and macOS compressed other apps' memory to make room.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram

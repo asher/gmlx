@@ -2967,6 +2967,23 @@ def test_a_drafter_pairing_prints_once_and_only_for_a_scanned_model(
             "pairs with it; --add-companions adds it)") in got.out
 
 
+def test_a_drafter_an_entry_names_gets_no_line_to_configure_it(
+        monkeypatch, tmp_path, capsys):
+    """An entry names the v1 drafter, and the DFlash 2 one beside it
+    outranks it in the scan. The sync leaves the entry as it is, with no
+    line that tells the user to configure the drafter it names."""
+    v1 = f"{_QWEN_REPO}/Qwen3.8-27B-DFlash-Q8_0.gguf"
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+        f"    draft_gguf: {v1}\n")
+    _qwen_drafters(monkeypatch, lib)
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    assert cfg_path.read_text() == before
+    assert "configure via draft_gguf" not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("held", [False, True])
 def test_register_downloads_names_an_mmproj_it_leaves_out(monkeypatch, tmp_path,
                                                           capsys, held):

@@ -694,8 +694,16 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
     known_paths = set()
     encoder_ids = {}
     tower_ids: set = set()
+    named: set = set()
     for m in cfg.models.values():
         known_paths.add(m.path)
+        if m.draft_gguf:
+            try:
+                rd = resolve_path(m.draft_gguf, cfg.model_dirs)
+            except ConfigError:
+                rd = None
+            if rd:
+                named.add(rd)
         try:
             rp = resolve_path(m.path, cfg.model_dirs)
         except ConfigError:
@@ -720,7 +728,7 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
                          known_ids=set(cfg.models) | set(cfg.image_models),
                          known_paths=known_paths, progress=progress,
                          images=images, encoder_ids=encoder_ids,
-                         tower_ids=tower_ids)
+                         tower_ids=tower_ids, named_drafters=named)
     except Exception as e:                       # noqa: BLE001 - a flaky scan dir
         print(f"warning: discover scan failed: {e}", file=sys.stderr)
         return []
@@ -751,6 +759,7 @@ def scan_dirs(
     images=None,
     encoder_ids=None,
     tower_ids=None,
+    named_drafters=None,
 ) -> list[ModelCfg]:
     """Discover servable models from ``specs`` (each a :class:`config.DiscoverSpec`).
 
@@ -782,8 +791,13 @@ def scan_dirs(
     set appends an :class:`config.ImageModelCfg` to ``images`` when it is a
     list. ``encoder_ids`` maps a configured chat model's resolved path to
     its id, so an encoder that is a configured model is shared by id;
-    ``tower_ids`` are the configured ones with an ``mmproj``."""
+    ``tower_ids`` are the configured ones with an ``mmproj``.
+    ``named_drafters`` are the resolved drafter paths that configured
+    entries name, for a caller that passes no ``known_models``: the scan
+    tells the user to configure none of them."""
     known_paths = {os.path.abspath(os.path.expanduser(p)) for p in known_paths}
+    named_drafters = {os.path.abspath(os.path.expanduser(p))
+                      for p in named_drafters or ()}
     configured = {os.path.abspath(os.path.expanduser(p)): mc
                   for p, mc in (known_models or {}).items()}
     draft_pairs: dict[str, str] = {}
@@ -813,7 +827,7 @@ def scan_dirs(
             every += classified
             _emit_dir(classified, spec, used_ids, out,
                       configured=configured, draft_pairs=draft_pairs,
-                      mmproj_pairs=mmproj_pairs)
+                      mmproj_pairs=mmproj_pairs, named=named_drafters)
     if any(c.kind == "image-dit" for c in every):
         _pair_images(every, out, used_ids, images, encoder_ids or {},
                      tower_ids or set())
@@ -1168,7 +1182,7 @@ def rescan_entry(path: str) -> dict | None:
 
 
 def _emit_dir(classified, spec, used_ids, out, *, configured=None,
-              draft_pairs=None, mmproj_pairs=None):
+              draft_pairs=None, mmproj_pairs=None, named=None):
     """Build ModelCfgs for one scan, pairing mmproj/draft per directory.
 
     A drafter or an mmproj can also pair into a ``configured`` model
@@ -1176,6 +1190,11 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
     ``mmproj_pairs`` collect those as ``{id: path}``. An mmproj pairs into
     a configured model only when it has none."""
     configured = configured or {}
+    # The drafters configured entries name, before the pairing below
+    # rewrites their draft_gguf: these need no line telling the user to
+    # configure them.
+    named = set(named or ()) | {os.path.abspath(mc.draft_gguf)
+                                for mc in configured.values() if mc.draft_gguf}
     draft_pairs = {} if draft_pairs is None else draft_pairs
     mmproj_pairs = {} if mmproj_pairs is None else mmproj_pairs
     by_dir: dict[str, list[ClassifiedGguf]] = {}
@@ -1308,8 +1327,9 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             print(f"[discover] drafter paired (speculative on for "
                   f"{', '.join(paired[dpath])}): {dpath}", file=sys.stderr)
     for dr in unpaired:
-        print(f"[discover] assistant drafter (configure via "
-              f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
+        if dr.path not in named:
+            print(f"[discover] assistant drafter (configure via "
+                  f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
 
 
 def _assign_ids(models, used_ids: set) -> dict[str, str]:
