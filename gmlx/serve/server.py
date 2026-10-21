@@ -1147,10 +1147,15 @@ def _place_entry(doc, models, pos, key, entry, note) -> None:
     above = _take_above(doc, models, pos)
     stay = 0
     if pos == 0:
-        # The head holds the block's own comment, then the first entry's.
-        stay = len(above)
-        while stay and discovery.is_family_comment(above[stay - 1]):
-            stay -= 1
+        # The head holds the block's own comment, then the first entry's:
+        # the lines after its last blank line, or with no blank line, the
+        # lines from its first sampling comment on.
+        blank = [n + 1 for n, line in enumerate(above) if not line.strip()]
+        if blank:
+            stay = blank[-1]
+        else:
+            stay = next((n for n, line in enumerate(above)
+                         if discovery.is_family_comment(line)), len(above))
     models.insert(pos, key, entry)
     _put_above(doc, models, pos, above[:stay] + mine)
     _put_above(doc, models, pos + 1, above[stay:])

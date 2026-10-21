@@ -1539,6 +1539,27 @@ def test_sync_that_removes_every_entry_leaves_a_file_that_parses(
 _DS41 = "  # sampling (deepseek41): t=1 top_p=0.95\n  ds41:\n    path: ds41.gguf\n"
 
 
+@pytest.mark.parametrize("gap, above", [
+    ("\n", "  # my note on qwen3\n"),
+    ("\n", "  # sampling (qwen3): t=0.6 top_p=0.95 top_k=20\n" * 3),
+    ("\n", "  # sampling (qwen3): t=0.7\n  # my note on qwen3\n"),
+    ("\n  # More on the block.\n\n", "  # my note on qwen3\n"),
+    ("", ""),
+    ("", "  # sampling (qwen3): t=0.7\n  # my note on qwen3\n"),
+])
+def test_a_new_first_entry_takes_no_comment_of_the_entry_below(
+        monkeypatch, tmp_path, gap, above):
+    """The comment lines after the head's last blank line run into the
+    first entry and stay with it, below a new entry. With no blank line,
+    as gmlx init wrote the head up to 0.4.17, the lines from its first
+    sampling comment on do, and the rest of the head stays on top."""
+    head = _HEAD.split("models:\n", 1)[1]
+    got = _sync_sampling(
+        monkeypatch, tmp_path, _HEAD + gap + above + _QWEN3 + _GLM,
+        ["qwen3", "glm"], new=[("ds41", "sampling (deepseek41): t=1 top_p=0.95")])
+    assert got == head + gap + _DS41 + above + _QWEN3 + _GLM
+
+
 def _resync(monkeypatch, cfg_path, lib, new=(), image=None):
     """Run sync-models again on ``cfg_path``. The scan finds the ``new``
     ids with their sampling comment, and the image model ``image`` paired
@@ -1584,22 +1605,27 @@ def test_a_sync_after_one_that_removed_every_entry_keeps_the_block_head(
         "  q36:\n    path: q36.gguf\n" + _DS41 + _ALIASES + image)
 
 
-@pytest.mark.parametrize("block, tail", [
-    ("models:  # my models\n  # none yet\n", _ALIASES),
-    ("models:\n  # none yet\n", "\n# The end.\n"),
-    ("models:\n# Friendly request names:\n", "aliases: {}\n"),
+@pytest.mark.parametrize("head, after", [
+    ("  # my models\n  # none yet\n", _ALIASES),
+    ("\n  # none yet\n", "\n# The end.\n"),
+    ("\n", "# Friendly request names:\naliases: {}\n"),
+    ("\n  # none yet\n  # more\n", ""),
+    ("\n  # Optional per-model keys:\n", "aliases: {}\n"),
 ])
 def test_an_add_to_a_null_models_block_goes_below_its_comment(
-        monkeypatch, tmp_path, block, tail):
+        monkeypatch, tmp_path, head, after):
     """The lines indented under a null ``models:`` are the block's head;
-    the lines from the first one at column 0 on stay after the block."""
-    cfg_path, lib = _sync_config(tmp_path, block + tail)
-    got = _resync(monkeypatch, cfg_path, lib, new=[
-        ("ds41", "sampling (deepseek41): t=1 top_p=0.95")])
-    if "none yet" in block:
-        assert got == block.split("models:", 1)[1] + "\n" + _DS41 + tail
-    else:
-        assert got == "\n" + _DS41 + block.split("\n", 1)[1] + tail
+    the lines from the first one at column 0 on stay after the block. The
+    next add goes below the head too, with or without a blank line."""
+    cfg_path, lib = _sync_config(tmp_path, "models:" + head + after)
+    gap = "\n" if after.startswith("\n") else ""
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("ds41", "sampling (deepseek41): t=1 top_p=0.95")]) == (
+        head + gap + _DS41 + after)
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("q36", "sampling (qwen3.6 + gguf): t=1")]) == (
+        head + gap + "  # sampling (qwen3.6 + gguf): t=1\n"
+        "  q36:\n    path: q36.gguf\n" + _DS41 + after)
 
 
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,

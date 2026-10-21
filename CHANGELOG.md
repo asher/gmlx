@@ -71,8 +71,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   below the comment of the next model in the file.
 - `gmlx pull` said it registered a drafter for a model whose entry kept its
   own `draft_gguf`, and `gmlx sync-models` listed that update on every run.
-- A model that `gmlx sync-models` or `gmlx pull` added sat under the sampling
-  comment of the model that was first before it, and those comments piled up.
+- A model that `gmlx sync-models` or `gmlx pull` added went in above the first
+  model but below its sampling comment and notes, and those comments piled up.
 - `gmlx sync-models` left the sampling comment of a model it removed above
   the next model, and dropped that model's own.
 - A `gmlx sync-models` that removed the last model under a commented

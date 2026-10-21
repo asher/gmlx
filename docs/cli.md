@@ -752,6 +752,11 @@ entries whose file is gone are dropped, and new files are added. Run it
 after adding files by hand or pulling with `--no-register`. An image DiT
 found with its text encoder and VAE is added to `image_models`.
 
+New entries go at the top of the block, below the block's own comment.
+When a blank line sets that comment apart, the lines after the last blank
+line belong to the first entry and stay with it. Without a blank line,
+the lines from the first entry's sampling comment on stay with it.
+
 ```sh
 gmlx sync-models
 gmlx sync-models --from-hf-cache
