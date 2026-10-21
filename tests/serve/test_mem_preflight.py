@@ -443,6 +443,38 @@ def test_compressed_pools_grow_beside_the_window():
     assert pools == [(512 + 128) * 2 / 4, 512 * 2 / 128] * 20 + [320.0]
 
 
+def test_the_stack_prices_the_pools_as_the_config_does():
+    """The per-request preflight reads the cache stack the model builds,
+    the boot table its config. On V4.1 and V4 both cap each layer's
+    local cache at the 128-token window and price its pools at their
+    ratio, 3200 B per token on V4.1."""
+    from gmlx.cache.kv_cache import CacheList, RotatingKVCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
+
+    def layer(ratio, index):
+        local = RotatingKVCache(max_size=128)
+        if not ratio:
+            return local
+        pools = [DS4PoolingCache(ratio)]
+        if index:
+            pools.append(DS4PoolingCache(ratio))
+            pools[-1].quantizable = False
+        return CacheList(local, *pools)
+
+    model = _model(**DS41_CFG)
+    c = model.config
+    stack = [layer(c.compress_ratios[i] if i in c.kv_source_layers else 0,
+                   True) for i in range(40)]
+    geo = mp.stack_geometry(model, stack)
+    assert geo == mp.config_geometry(c)
+    window = 40 * 128 * 2 * 512 * 2.0
+    costs = mp.kv_layer_costs(model, geometry=geo)
+    assert mp.prompt_kv_bytes(costs, 1 << 20) == window + 3200 * (1 << 20)
+    model = _model(**DS4_CFG)
+    stack = [layer(r, r == 4) for r in model.config.compress_ratios]
+    assert mp.stack_geometry(model, stack) == mp.config_geometry(model.config)
+
+
 # DeepSeek V3.2 as its config sets it; GLM-5.x (glm_moe_dsa) and HY4
 # (hy_v4) build the same MLA latent and indexer.
 DSV32_CFG = dict(model_type="deepseek_v32", num_hidden_layers=61,

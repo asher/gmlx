@@ -320,16 +320,18 @@ def stack_geometry(model, stack):
         kinds = [_classify(m, types) for m in members]
         has_state = (state is not None
                      and any(isinstance(m, types["state"]) for m in members))
-        # The config prices a DSA indexer's keys when the stack holds
-        # them, as a second growing cache.
+        # The config prices a layer's pools when the stack holds them: a
+        # pooling cache, or a second growing cache (a DSA indexer's keys).
+        pooled = any(hasattr(m, "quantize_storage") for m in members)
         growing = sum(k in ("kv", "optout") for k in kinds)
-        pool = pools[i] if pools[i] and growing > 1 else 0.0
+        pool = pools[i] if pools[i] and (pooled or growing > 1) else 0.0
         # The rotating window caps the layer whatever rides beside it, as
-        # long as nothing else there grows: a side cache holds no KV, and
-        # a recurrent state is priced on its own. A pool or a plain KV
-        # member does grow, so those layers keep the growing price.
+        # long as nothing else there grows unpriced: a side cache holds no
+        # KV, and a recurrent state and a priced pool are priced on their
+        # own. A plain KV member or an unpriced pool does grow, so those
+        # layers keep the growing price.
         window = None
-        if "kv" not in kinds and "pool" not in kinds:
+        if "kv" not in kinds and ("pool" not in kinds or pool):
             for m in members:
                 if isinstance(m, types["window"]):
                     window = getattr(m, "max_size", None)

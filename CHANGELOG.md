@@ -77,6 +77,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   3.4 GB at a 1M-token V4.1 context.
 - `gmlx validate` and the server overstated the context GLM-5.x and HY4 can
   hold, by a fifth of the KV on GLM-5.x.
+- The server could refuse a long DeepSeek-V4 or V4.1 prompt that the boot
+  capacity table said fits: it priced the prompt's KV 2.6 times higher.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
   table, larger than a GPU buffer, is read from the file, and MXFP8 tables
   are told apart from STQ1_0 weights, which share the same GGUF type id.
