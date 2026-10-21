@@ -17,7 +17,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - unsloth's DeepSeek-V4.1-Flash-1017 vision companion (`mmproj-BF16.gguf` or
   `mmproj-F16.gguf`) loads with `--mmproj`, so the 1017 quants read images.
 - A folder scan pairs an `mmproj` file at a repository root with the quants
-  in the folders below it, when they are all one model, as unsloth lays out.
+  in the folders below it, as unsloth lays them out, when their headers agree
+  on the model and its hidden size.
 - `gmlx sync-models --add-companions` adds a paired `mmproj` or drafter to
   a model already in the config, so a companion downloaded later is picked up.
 
@@ -44,6 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A folder scan paired an `mmproj` file with the model beside it when their
+  headers gave different hidden sizes.
 - A sync or pull printed the pairing of a DFlash 2 drafter twice.
 - With `--stream-experts`, a prompt of more than 64 tokens filled the file
   cache as it prefilled, and macOS compressed other apps' memory to make room.

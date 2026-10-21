@@ -525,7 +525,9 @@ A companion with no model beside it pairs with every model in the folders
 one level down when they are all quants of one model, the layout of
 repositories that keep each quant in its own folder. A named companion,
 such as `mmproj-Qwen3.8-27B-BF16.gguf`, must also match the model's name.
-When a folder holds several companions, the first by file name wins.
+A companion whose header gives another hidden size than the model's stays
+unpaired. When a folder holds several companions, the first by file name
+wins.
 
 A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
 

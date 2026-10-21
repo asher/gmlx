@@ -643,6 +643,167 @@ def test_named_root_mmproj_must_match_the_quants(tmp_path, ds41_classify):
     assert all(m.mmproj is None for m in _scan(root, recursive=True))
 
 
+def _clip(basename, size, width=None, base=None):
+    meta = {"general.architecture": "clip", "general.type": "mmproj",
+            "general.basename": basename, "general.size_label": size}
+    if width:
+        meta["clip.vision.projection_dim"] = width
+    if base:
+        meta["general.base_model.0.name"] = base
+    return meta
+
+
+def _llm(arch, basename, size, name, width=None, base=None):
+    meta = {"general.architecture": arch, "general.basename": basename,
+            "general.size_label": size, "general.name": name}
+    if width:
+        meta[f"{arch}.embedding_length"] = width
+    if base:
+        meta["general.base_model.0.name"] = base
+    return meta
+
+
+# The header fields of real files: unsloth's two DeepSeek layouts, the
+# Vision-Exp projector with the odd basename its conversion wrote, and
+# projectors of one size over the quants of another size in their family.
+# The last entry is the reason a sync prints, or None when it pairs.
+_ROOT_MMPROJ_LAYOUTS = {
+    "ds41": (_clip("DeepSeek-V4.1-Flash", "485M", 5120),
+             {**_llm("deepseek41", "DeepSeek-V4.1-Flash", "748B-A16B",
+                     "DeepSeek-V4.1-Flash-1017", 5120, "DeepSeek V4.1 Flash 1017"),
+              "deepseek41.expert_count": 384},
+             _DS41_IQ2, None),
+    "vision-exp": (_clip("downloaded_cache_model_DeepSeek-V4-Flash", "466M", 4096),
+                   {**_llm("deepseek4", "Deepseek-V4-Flash-Vision-Exp", "256x8.4B",
+                           "Deepseek-V4-Flash-Vision-Exp", 4096,
+                           "DeepSeek V4 Flash Vision Exp"),
+                    "deepseek4.expert_count": 256},
+                   "DeepSeek-V4-Flash-Vision-Exp-UD-IQ3_XXS-00001-of-00004.gguf",
+                   None),
+    "gemma-4-31B over 12B": (
+        _clip("Gemma-4-31B-It", "576M", 5376, "Gemma 4 31B It"),
+        _llm("gemma4", "Gemma-4-12B-It", "12B", "Gemma-4-12B-It", 3840,
+             "Gemma 4 12b It"),
+        "gemma-4-12b-it-Q6_K.gguf", "hidden size of 5376, the models below have 3840"),
+    "gemma-4-E4B over E2B": (
+        _clip("Gemma-4-E4B-It", "478M", 2560, "Gemma 4 E4B It"),
+        _llm("gemma4", "Gemma-4-E2B-It", "4.6B", "Gemma-4-E2B-It", 1536,
+             "Gemma 4 E2B It"),
+        "gemma-4-E2B-it-UD-Q6_K_XL.gguf", "hidden size of 2560, the models below have 1536"),
+    "Qwen3.6-27B over 35B-A3B": (
+        _clip("Qwen3.6-27B", "461M", 5120, "Qwen3.6 27B"),
+        _llm("qwen35moe", "Qwen3.6-35B-A3B", "35B-A3B", "Qwen3.6-35B-A3B", 2048,
+             "Qwen3.6 35B A3B"),
+        "Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf", "hidden size of 5120, the models below have 2048"),
+    "audio-only projector over the quants": (
+        {**_clip("Muse-Spark-Open", "1.1B", base="Muse Spark Open 816B A42B"),
+         "clip.has_vision_encoder": False, "clip.has_audio_encoder": True,
+         "clip.audio.projection_dim": 8192},
+        _llm("muse-spark", "Muse-Spark-Open", "816B-A42B",
+             "Muse-Spark-Open-816B-A42B", 8192, "Muse Spark Open 816B A42B"),
+        "Muse-Spark-Open-816B-A42B-UD-Q2_K_XL-00001-of-00009.gguf", None),
+    "one-word name": (_clip("SmolVLM2", "434M"),
+                      _llm("llama", "SmolVLM2", "2.2B", "SmolVLM2 2.2B Instruct"),
+                      "SmolVLM2-2.2B-Instruct-Q8_0.gguf", None),
+    "gemma over llama": (_clip("gemma-3", "4B"),
+                         _llm("llama", "Llama-3.2", "1B", "Llama 3.2 1B Instruct"),
+                         "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+                         "its header names 'gemma-3-4b', not the models below"),
+    "gemma 3 over gemma 2": (_clip("gemma-3", "4B"),
+                             _llm("gemma2", "gemma-2", "9B", "Gemma 2 9b It"),
+                             "gemma-2-9b-it-Q4_K_M.gguf",
+                             "its header names 'gemma-3-4b', not the models below"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(_ROOT_MMPROJ_LAYOUTS))
+def test_a_root_mmproj_pairs_only_with_the_model_its_header_names(
+        tmp_path, monkeypatch, capsys, layout):
+    """A projector above one model's quant folders pairs when its header
+    and theirs give one hidden size and name one model, past their size
+    words. A projector of another model, or of another size of the same
+    family, stays unpaired."""
+    mm_meta, model_meta, quant, why = _ROOT_MMPROJ_LAYOUTS[layout]
+
+    def _f(path):
+        name = os.path.basename(path)
+        meta = mm_meta if name.startswith("mmproj") else model_meta
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, "mmproj-F16.gguf")
+    (tmp_path / "q").mkdir()
+    _write(tmp_path / "q", quant)
+    models = _scan(tmp_path, recursive=True)
+    assert [m.mmproj for m in models] == [
+        None if why else str(tmp_path / "mmproj-F16.gguf")]
+    err = capsys.readouterr().err
+    assert ("mmproj unpaired" in err) is bool(why)
+    assert why is None or why in err
+
+
+_GEMMA4_31B = _llm("gemma4", "Gemma-4-31B-It", "31B", "Gemma-4-31B-It", 5376,
+                   "Gemma 4 31B It")
+_GEMMA4_E4B = _llm("gemma4", "Gemma-4-E4B-It", "7.5B", "Gemma-4-E4B-It", 2560,
+                   "Gemma 4 E4B It")
+
+_MUSE_AUDIO_MM, _MUSE, _MUSE_QUANT, _ = _ROOT_MMPROJ_LAYOUTS[
+    "audio-only projector over the quants"]
+
+# The header fields of real files: a projector beside one quant, the last
+# entry the reason the scan prints, or None when it pairs.
+_SIBLING_MMPROJ_LAYOUTS = {
+    "31B projector beside the 31B quant": (
+        "mmproj-F16.gguf", _clip("Gemma-4-31B-It", "576M", 5376, "Gemma 4 31B It"),
+        "gemma-4-31B-it-Q6_K.gguf", _GEMMA4_31B, None),
+    "12B repository's projector beside the 31B quant": (
+        "mmproj-F16.gguf", _clip("Gemma-4-12B-It", "52M", 3840, "Gemma 4 12B"),
+        "gemma-4-31B-it-Q6_K.gguf", _GEMMA4_31B,
+        "hidden size of 3840, gemma-4-31b-it-q6 has 5376"),
+    "E2B projector beside the E4B quant": (
+        "mmproj-gemma-4-E2B-it-bf16.gguf",
+        _clip("Gemma-4-E2B-It", "476M", 1536, "Gemma 4 E2B It"),
+        "gemma-4-E4B-it-Q6_K.gguf", _GEMMA4_E4B,
+        "hidden size of 1536, gemma-4-e4b-it-q6 has 2560"),
+    "audio-only projector beside the quant": (
+        "mmproj-F16.gguf", _MUSE_AUDIO_MM, _MUSE_QUANT, _MUSE, None),
+    # llama.cpp's older LLaVA converter writes CLIP's projection width and
+    # no general.type.
+    "LLaVA-1.5 projector beside its quant": (
+        "mmproj-model-f16.gguf",
+        {"general.architecture": "clip", "clip.has_llava_projector": True,
+         "general.name": "openai/clip-vit-large-patch14-336",
+         "clip.vision.projection_dim": 768},
+        "ggml-model-q4_k.gguf",
+        {"general.architecture": "llama", "general.name": "LLaMA v2",
+         "llama.embedding_length": 4096}, None),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(_SIBLING_MMPROJ_LAYOUTS))
+def test_an_mmproj_beside_a_model_pairs_only_at_its_hidden_size(
+        tmp_path, monkeypatch, capsys, layout):
+    """A projector beside one quant pairs with it when their headers give
+    one hidden size, or the projector gives none, as an audio-only one does.
+    A projector of another size of the family, generic or named close enough
+    to match, stays unpaired."""
+    mm_name, mm_meta, quant, model_meta, why = _SIBLING_MMPROJ_LAYOUTS[layout]
+
+    def _f(path):
+        name = os.path.basename(path)
+        meta = mm_meta if name.startswith("mmproj") else model_meta
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, mm_name, quant)
+    models = _scan(tmp_path)
+    assert [m.mmproj for m in models] == [
+        None if why else str(tmp_path / mm_name)]
+    err = capsys.readouterr().err
+    assert ("mmproj unpaired" in err) is bool(why)
+    assert why is None or why in err
+
+
 def _known(*paths):
     """``known_models`` for configured entries at ``paths``."""
     return {str(p): ModelCfg(id=f"m{i}", path=str(p))

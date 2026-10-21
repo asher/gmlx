@@ -107,13 +107,15 @@ class ClassifiedGguf:
     loadable: bool          # arch builds a model with no hf override (model kind)
     moe: bool = False       # routed experts present (model kind only)
     name: str | None = None  # general.name, for family refinement (model kind)
-    # hidden size; on a drafter, its target's (see `_drafter_hidden_size`)
+    # hidden size; on a drafter, its target's (see `_drafter_hidden_size`);
+    # on an mmproj, the text model's it projects to
     n_embd: int | None = None
     # drafter kind: "dflash2" for a DFlash 2 header, else the arch
     drafter_kind: str | None = None
     # base-model ids the header declares (general.basename + size_label,
     # general.base_model.0.name), slugged like filename ids; `general.name`
-    # is deliberately not one (it names the file, not the base model)
+    # is deliberately not one (it names the file, not the base model).
+    # On an mmproj, the model it was converted from.
     declared: tuple = ()
 
 
@@ -214,7 +216,13 @@ def _classify_meta(
     ap = os.path.abspath(path)
 
     if arch == "clip" or basename.lower().startswith("mmproj"):
-        return ClassifiedGguf(ap, "mmproj", arch, False, quant, False)
+        # The projection width is the text model's hidden size in a file
+        # that llama.cpp's mmproj converter wrote, which sets general.type.
+        # Its older LLaVA converter stores CLIP's own width there (768).
+        width = (read_int(meta, "clip.vision.projection_dim")
+                 if read_string(meta, "general.type") == "mmproj" else None)
+        return ClassifiedGguf(ap, "mmproj", arch, False, quant, False,
+                              n_embd=width, declared=_declared_base_ids(meta))
     # A LoRA adapter (`gmlx train` / llama.cpp export) carries its base model's
     # `general.architecture`, so without this check it classifies as a loadable
     # chat model and serves a phantom id that 500s on request.
@@ -1357,28 +1365,43 @@ def _best_mmproj_target(mm: ClassifiedGguf, made, *, quiet=False):
       match a model: the shared id-prefix has to cover most of the projector's
       name (>=70%, >=6 chars). A bare family overlap like ``qwen`` between a
       Qwen2-VL projector and a Qwen3-Embedding model is *not* enough - that loose
-      match is exactly what mis-paired projectors onto unrelated models before."""
+      match is exactly what mis-paired projectors onto unrelated models before.
+
+    A projector whose header gives another hidden size than the header of
+    the model it picks stays unpaired."""
     if not made:
         return None
     core = _mmproj_name(mm)
     if not core:                                     # generic projector, no name
         if len(made) == 1:
-            return made[0][0]
+            return _same_width(mm, *made[0], quiet=quiet)
         if not quiet:
             print(f"[discover] mmproj unpaired (ambiguous; several models): "
                   f"{mm.path}", file=sys.stderr)
         return None
-    best, best_len = None, 0
-    for mc, _c in made:
+    best, best_c, best_len = None, None, 0
+    for mc, c in made:
         n = _common_prefix_len(core, mc.id)
         if n > best_len:
-            best, best_len = mc, n
+            best, best_c, best_len = mc, c, n
     if best is not None and _mmproj_name_matches(core, best.id):
-        return best
+        return _same_width(mm, best, best_c, quiet=quiet)
     if not quiet:
         print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
               f"{mm.path}", file=sys.stderr)
     return None
+
+
+def _same_width(mm: ClassifiedGguf, mc, c, *, quiet=False):
+    """``mc``, or ``None`` (logged) when the projector's header gives
+    another hidden size than the header ``c`` of its model."""
+    if mm.n_embd and c.n_embd and mm.n_embd != c.n_embd:
+        if not quiet:
+            print(f"[discover] mmproj unpaired (it projects to a hidden size "
+                  f"of {mm.n_embd}, {mc.id} has {c.n_embd}): {mm.path}",
+                  file=sys.stderr)
+        return None
+    return mc
 
 
 def _mmproj_name(mm: ClassifiedGguf) -> str:
@@ -1395,13 +1418,35 @@ def _mmproj_name_matches(core: str, model_id: str) -> bool:
     return _common_prefix_len(core, model_id) >= max(6, int(0.7 * len(core)))
 
 
+_SIZE_WORD_RE = re.compile(r"(\d+x)?\d+(\.\d+)?[bkm]|a\d+(\.\d+)?[bm]")
+
+
+def _same_model_named(a: str, b: str) -> bool:
+    """Whether the id slugs ``a`` and ``b`` name one model: past their size
+    words, they share a run of two words, or every word of the shorter."""
+    x, y = ([w for w in s.split("-") if not _SIZE_WORD_RE.fullmatch(w)]
+            for s in (a, b))
+    run = max((_common_run(x[i:], y[j:])
+               for i in range(len(x)) for j in range(len(y))), default=0)
+    return run >= min(2, len(x), len(y))
+
+
+def _common_run(x: list, y: list) -> int:
+    """The number of leading words ``x`` and ``y`` share."""
+    n = 0
+    while n < min(len(x), len(y)) and x[n] == y[n]:
+        n += 1
+    return n
+
+
 def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
     """Pair a projector with no model beside it into the models one folder
     down, when every model there is the same one: a repository that keeps
     each quant in its own folder and the projector at its root, as
-    unsloth's do. A configured model without an mmproj lands in
-    ``mmproj_pairs``. Several projectors: the first in scan order wins, as
-    beside a model."""
+    unsloth's do. A projector whose header gives another hidden size, or
+    names another model, than the models' headers stays unpaired. A
+    configured model without an mmproj lands in ``mmproj_pairs``. Several
+    projectors: the first in scan order wins, as beside a model."""
     for parent, group in sorted(by_dir.items()):
         mmprojs = [c for c in group if c.kind == "mmproj"]
         if (not mmprojs or any(c.kind == "model" for c in group)
@@ -1421,10 +1466,24 @@ def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
             continue
         names = {(c.arch, derive_id(os.path.basename(c.path))[0])
                  for c in below}
+        ids = {i for c in below for i in c.declared}
+        widths = {c.n_embd for c in below if c.n_embd}
         for mm in mmprojs:
             if len(names) > 1:
                 print(f"[discover] mmproj unpaired (the models in the folders "
                       f"below differ in name or arch): {mm.path}",
+                      file=sys.stderr)
+                continue
+            if mm.n_embd and widths and widths != {mm.n_embd}:
+                print(f"[discover] mmproj unpaired (it projects to a hidden "
+                      f"size of {mm.n_embd}, the models below have "
+                      f"{', '.join(map(str, sorted(widths)))}): {mm.path}",
+                      file=sys.stderr)
+                continue
+            if mm.declared and ids and not any(
+                    _same_model_named(a, b) for a in mm.declared for b in ids):
+                print(f"[discover] mmproj unpaired (its header names "
+                      f"{mm.declared[0]!r}, not the models below): {mm.path}",
                       file=sys.stderr)
                 continue
             core = _mmproj_name(mm)
