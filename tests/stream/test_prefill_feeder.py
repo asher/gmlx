@@ -252,6 +252,44 @@ def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
     assert feeder._error is None
 
 
+def test_ring_bounce_buffers_go_with_the_slots(monkeypatch, tmp_path):
+    """The aligned ring reads bounce through buffers the feeder owns, one
+    per read worker, never a worker thread's own: those would hold their
+    memory for the life of the process. Decode frees them with the
+    slots, and the next pass makes them again."""
+    import gc
+    import weakref
+
+    import gmlx.stream.feeder_common as fc
+    import gmlx.stream.prefill_feeder as pfm
+
+    def thread_buffer(nbytes):
+        raise AssertionError("a ring read took a thread's bounce buffer")
+
+    monkeypatch.setattr(fc, "_bounce_buffer", thread_buffer)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    if not feeder._nocache:
+        pytest.skip("the ring reads through the page cache here")
+    with feeder.prefill_call(modules[0][0], 0):
+        for kind in _KINDS:
+            assert _slot_expert(feeder, 0, kind, 1) == _expert_bytes(0, kind, 1)
+    assert feeder._error is None
+    assert feeder._drain_staging()
+    bufs = list(feeder._bounce.queue)
+    assert len(bufs) == pfm._READ_WORKERS
+    refs = [weakref.ref(a) for a, _ in bufs]
+    del bufs
+    assert feeder.release_slots()
+    gc.collect()
+    assert all(r() is None for r in refs)
+    with feeder.prefill_call(modules[0][0], 0):
+        for kind in _KINDS:
+            assert _slot_expert(feeder, 0, kind, 2) == _expert_bytes(0, kind, 2)
+    assert feeder._error is None
+    assert feeder._drain_staging()
+    assert feeder._bounce.qsize() == pfm._READ_WORKERS
+
+
 def test_staged_ahead_and_ring_live(monkeypatch, tmp_path):
     """The arena split rule reads these. A whole-layer call starts the
     next layer's read, which counts as staged ahead in its own pass only.
@@ -336,9 +374,11 @@ def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
     starts on a 32-byte boundary, and a read into the slot at that phase
     goes through the page cache. The bytes match a plain read for ranges
     that start, end, or sit inside a page, at the file tail, and into a
-    destination at any phase."""
+    destination at any phase, through a thread's bounce buffer or one
+    from the caller's queue. A range past the end of the file raises."""
     import mmap
     import os
+    import queue
 
     import gmlx.stream.feeder_common as fc
     from gmlx.stream.feeder_common import read_range, read_range_aligned
@@ -358,8 +398,12 @@ def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "preadv", spy)
     # Small bounce reads, so one range takes several.
-    monkeypatch.setattr(fc, "_BOUNCE_BYTES", 2 * page, raising=False)
+    monkeypatch.setattr(fc, "BOUNCE_BYTES", 2 * page)
     slot = mmap.mmap(-1, 12 * page)
+    own = mmap.mmap(-1, 2 * page)
+    view = memoryview(own)
+    pool: queue.Queue = queue.Queue()
+    pool.put((own, view))
     try:
         for off, n in [(0, page), (7, 100), (page - 5, 10), (page + 3, 2 * page + 9),
                        (0, len(data)), (len(data) - 50, 50), (page, page),
@@ -370,16 +414,27 @@ def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
             for phase in (0, off % page, 96):
                 if phase + n > len(slot):
                     continue
-                seen.clear()
-                got = memoryview(slot)[phase:phase + n]
-                read_range_aligned(fd, got, off, len(data))
-                assert bytes(got) == want == data[off:off + n]
-                got.release()
-                for o, ln, addr in seen:
-                    assert o % page == 0
-                    assert addr % page == 0
-                    assert ln % page == 0 or o + ln == len(data)
+                for bounce in (None, pool):
+                    seen.clear()
+                    got = memoryview(slot)[phase:phase + n]
+                    try:
+                        read_range_aligned(fd, got, off, len(data), bounce)
+                        assert bytes(got) == want == data[off:off + n]
+                    finally:
+                        got.release()
+                    assert pool.qsize() == 1
+                    for o, ln, addr in seen:
+                        assert o % page == 0
+                        assert addr % page == 0
+                        assert ln % page == 0 or o + ln == len(data)
+        for bounce in (None, pool):
+            with pytest.raises(OSError, match="past the end"):
+                read_range_aligned(
+                    fd, bytearray(60), len(data) - 50, len(data), bounce)
+            assert pool.qsize() == 1
     finally:
+        view.release()
+        own.close()
         slot.close()
         os.close(fd)
 

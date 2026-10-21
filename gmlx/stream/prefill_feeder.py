@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import queue
 import threading
 import time
 from concurrent.futures import wait as futures_wait
@@ -37,6 +38,7 @@ import numpy as np
 
 from .feeder_common import (
     ATTRS,
+    BOUNCE_BYTES,
     KINDS,
     DaemonPool,
     copy_experts,
@@ -218,6 +220,15 @@ class PrefillFeeder:
             for _ in range(self.n_slots)
         ]
         self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
+        # One bounce buffer per read worker for the aligned reads, freed
+        # with the slots.
+        self._bounce: queue.Queue | None = None
+        if self._nocache:
+            self._bounce = queue.Queue()
+            for _ in range(_READ_WORKERS):
+                buf = kq.arena_alloc([BOUNCE_BYTES])
+                unshare_on_fork(buf[1])
+                self._bounce.put(buf)
         # Wired like the arena, in the room the budget keeps for it. A
         # filled slot left unwired is what the kernel compresses first
         # when free RAM is gone, and the GPU decompresses it on every use.
@@ -279,6 +290,7 @@ class PrefillFeeder:
         self._locked = []
         self._slots = []
         self._views = {}
+        self._bounce = None
         return True
 
     def _verify_zero_copy(self) -> None:
@@ -450,7 +462,8 @@ class PrefillFeeder:
     def _submit_read(self, path: str, fd: int, dest, off: int):
         if self._nocache:
             return self._read_pool.submit(
-                read_range_aligned, fd, dest, off, self._sizes[path])
+                read_range_aligned, fd, dest, off, self._sizes[path],
+                self._bounce)
         return self._read_pool.submit(read_range, fd, dest, off)
 
     def _kick(self, li: int) -> None:

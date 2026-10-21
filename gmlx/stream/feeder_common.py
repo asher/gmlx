@@ -37,9 +37,9 @@ def copy_experts(dst, src, pairs, stride: int) -> None:
                   src[e * stride:(e + 1) * stride])
 
 
-# Largest read through the bounce buffer. The copy out of it costs far
-# less than the read.
-_BOUNCE_BYTES = 16 << 20
+# Size of a bounce buffer, the largest read through one. The copy out of
+# it costs far less than the read.
+BOUNCE_BYTES = 16 << 20
 _bounce = threading.local()
 
 
@@ -51,7 +51,8 @@ def _bounce_buffer(nbytes: int) -> memoryview:
     return memoryview(buf)[:nbytes]
 
 
-def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
+def read_range_aligned(fd, mv, off: int, file_size: int,
+                       bounce: queue.Queue | None = None) -> None:
     """``read_range`` with every pread on the kernel's direct path: the
     file offset and the destination address page-aligned. An F_NOCACHE
     read that misses either is served through the page cache. A prefill
@@ -59,13 +60,21 @@ def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
     compresses other memory to make room, and that path can wedge under
     pressure (see decode_feeder). The whole pages land in ``mv`` directly
     when ``mv`` and ``off`` share a page phase; the rest goes through a
-    page-aligned bounce buffer per thread."""
+    page-aligned bounce buffer: one taken for the call from ``bounce``, a
+    queue of ``kq.arena_alloc`` (array, memoryview) pairs, or else this
+    thread's own. A ring slot is page-aligned and a GGUF stack seldom
+    starts on a page boundary, so in practice the ring bounces every
+    byte."""
     mv = memoryview(mv).cast("B")
     n = len(mv)
     if n == 0:
         return
-    page = mmap.PAGESIZE
     end = off + n
+    if end > file_size:
+        raise OSError(
+            f"read of {n} bytes at offset {off} runs past the end of the "
+            f"file ({file_size} bytes)")
+    page = mmap.PAGESIZE
     a = off & ~(page - 1)
     b = min((end + page - 1) & ~(page - 1), file_size)
     dst = np.frombuffer(mv, dtype=np.uint8)
@@ -75,15 +84,24 @@ def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
         d1 = end & ~(page - 1)
         if d1 > d0:
             read_range(fd, mv[d0 - off:d1 - off], d0)
-            pieces = [(a, d0), (d1, b)]
-    for p0, p1 in pieces:
-        for pos in range(p0, p1, _BOUNCE_BYTES):
-            stop = min(pos + _BOUNCE_BYTES, p1)
-            buf = _bounce_buffer(stop - pos)
-            read_range(fd, buf, pos)
-            lo, hi = max(pos, off), min(stop, end)
-            np.copyto(dst[lo - off:hi - off],
-                      np.frombuffer(buf, dtype=np.uint8)[lo - pos:hi - pos])
+            pieces = [(p0, p1) for p0, p1 in ((a, d0), (d1, b)) if p1 > p0]
+    if not pieces:
+        return
+    held = bounce.get() if bounce is not None else None
+    try:
+        step = len(held[1]) if held is not None else BOUNCE_BYTES
+        for p0, p1 in pieces:
+            for pos in range(p0, p1, step):
+                stop = min(pos + step, p1)
+                buf = (held[1][:stop - pos] if held is not None
+                       else _bounce_buffer(stop - pos))
+                read_range(fd, buf, pos)
+                lo, hi = max(pos, off), min(stop, end)
+                np.copyto(dst[lo - off:hi - off],
+                          np.frombuffer(buf, dtype=np.uint8)[lo - pos:hi - pos])
+    finally:
+        if held is not None:
+            bounce.put(held)
 
 
 def lock_pages(mv) -> tuple[int, int] | None:
