@@ -1053,6 +1053,7 @@ class _ResidencyPool:
         # The capacity table is derived (header-based, no load needed) and
         # gated before the box's biggest allocation starts.
         from .capacity import (
+            held_table_bytes,
             install_boot_table,
             predicted_stream_bytes,
             preload_gate_bytes,
@@ -1140,8 +1141,10 @@ class _ResidencyPool:
             # first request. A governor tick in between reads the file as
             # live memory and sheds another model's rows. Credit what the
             # load adds, up to the streamed bytes, until the install's own
-            # credit or deduction takes over.
-            note_build_credit(cache_key, streamed)
+            # credit or deduction takes over. A table no array can hold is
+            # read from the file and never adds any.
+            note_build_credit(cache_key, streamed - min(
+                shares[0], held_table_bytes(str(model_path))))
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
             # One policy resolve per load, inside the env window. An

@@ -73,6 +73,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scan and `stream: experts` streamed its experts; they now stay in memory.
 - On that Mac, `gmlx validate` said DeepSeek-V4.1-Flash streams its experts
   and is larger than RAM, and `gmlx doctor` warned about it.
+- While `serve` loaded a DeepSeek-V4.1-Flash whose engram table is read from
+  the file, requests to other models could take memory the load already held.
 - `gmlx validate` and the server overstated the context DeepSeek-V4, V4.1
   and GLM-5.3-Flash can hold, by 3.4 GB at 1M tokens on V4.1.
 - `gmlx validate` and the server overstated the context GLM-5.x and HY4 can

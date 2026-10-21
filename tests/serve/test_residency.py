@@ -414,6 +414,74 @@ def test_streaming_build_lowers_the_wired_limit_and_credits_the_walk(monkeypatch
     assert not pd._BUILD_CREDIT
 
 
+# DeepSeek-V4.1-Flash 1017 under stream: experts. On a 256 GB Studio an
+# MXFP8 engram table (202.8 GB) is past the 173.2 GB buffer ceiling and
+# the build streams the table alone; on this 128 GB M5 Max a Q5_K table
+# (135.2 GB) is past 86.6 GB and the experts stream beside it.
+@pytest.mark.parametrize("table, max_buffer, budget, credit", [
+    (202.8e9, 173.2e9, 185.6e9, 0.0),
+    (135.2e9, 86.6e9, 108.0e9, 156.9e9),
+])
+def test_a_build_credits_no_table_it_reads_from_the_file(
+        monkeypatch, table, max_buffer, budget, credit):
+    """The build credit covers what the walk adds, up to the bytes the
+    build streams. A table no array can hold is read from the file and
+    never lands, so the credit leaves it out: otherwise the resident
+    experts and every-token weights the walk maps count as reclaimable."""
+    import gmlx.device as dev
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.load.discovery as disc
+    import gmlx.load.headerscan as hs
+    import gmlx.load.preflight as pre
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_pread as tpr
+    import gmlx.stream.wired_limit as wired_limit
+
+    name, path = "blk.1.engram_embd.weight", "/m/DS-00001-of-00006.gguf"
+    rest, experts = 165.3e9, 156.9e9
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    for attr in ("_STREAMED_TRACKED", "_STREAMED_CAP", "_UNTRACKED_OWNERS",
+                 "_UNTRACKED_WEIGHTS", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, attr, {})
+    box = {"active": 10e9}
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
+    monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
+        kv={"general.architecture": "deepseek41"}))
+    monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
+        {name: SimpleNamespace(nbytes=int(table))},
+        {name} if table > max_buffer else set()))
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: int(rest + table))
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: int(budget))
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: int(table))
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: int(experts))
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    monkeypatch.setattr(wired_limit, "_neutralize_wired_limit_sweep",
+                        lambda: None)
+    seen = []
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        box["active"] += rest           # experts and every-token weights map
+        seen.append(pd.build_credit_bytes())
+        proxy.response_generator = SimpleNamespace(model=None)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(400e9), (),
+        footprint_fn=lambda p: int(rest + table))
+    entry = pool.acquire(path, None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert seen == [pytest.approx(credit, abs=1)]
+
+
 def test_release_returns_refcount_to_zero_and_entry_evictable():
     proxy, pool, teardowns = make_pool(15, {"A": 10, "B": 10})
     ea = pool.acquire("A", None, "auto")

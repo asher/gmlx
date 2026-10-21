@@ -524,6 +524,19 @@ def streamed_table_bytes(gguf_path: str) -> int:
         return 0
 
 
+def _table_shards(gguf_path: str) -> tuple[list[str], str | None]:
+    """The shards of ``gguf_path`` and its GGUF architecture."""
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.preflight import find_split_shards
+
+    shards = find_split_shards(gguf_path)
+    if not shards:
+        return [], None
+    arch = scan_gguf(shards[0], include_tensors=False,
+                     array_limit=0).kv.get("general.architecture")
+    return shards, arch
+
+
 def deferred_table_bytes(gguf_path: str, budget: int | None = None,
                          env=None) -> int:
     """Bytes of the arch's streamable tables a load without a stream flag
@@ -535,17 +548,29 @@ def deferred_table_bytes(gguf_path: str, budget: int | None = None,
     the loader's side of the same rule. 0 when the header cannot be
     read."""
     try:
-        from gmlx.load.headerscan import scan_gguf
-        from gmlx.load.preflight import find_split_shards
         from gmlx.stream.table_pread import deferred_tables
 
-        shards = find_split_shards(gguf_path)
+        shards, arch = _table_shards(gguf_path)
         if not shards:
             return 0
-        arch = scan_gguf(shards[0], include_tensors=False,
-                         array_limit=0).kv.get("general.architecture")
         sources = deferred_tables(shards, arch, budget=budget,
                                   latched=False, env=env)
+        return sum(s.nbytes for s in sources.values())
+    except Exception:
+        return 0
+
+
+def held_table_bytes(gguf_path: str) -> int:
+    """Bytes of the arch's streamable tables no array can hold, which a
+    build under a stream flag reads from the file and never maps. 0 when
+    the header cannot be read."""
+    try:
+        from gmlx.stream.table_pread import deferred_tables
+
+        shards, arch = _table_shards(gguf_path)
+        if not shards:
+            return 0
+        sources = deferred_tables(shards, arch, latched=True)
         return sum(s.nbytes for s in sources.values())
     except Exception:
         return 0
