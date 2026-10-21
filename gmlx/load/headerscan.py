@@ -38,6 +38,9 @@ QUANT_TYPE_FALLBACK = {
 # bytes a tensor spans in the file tell them apart.
 TYPE_43 = 43
 TYPE_43_FORMATS = {"STQ1_0": (256, 42), "MXFP8": (32, 33)}
+# Bytes past an STQ1_0 tensor at the end of a file that still read as
+# STQ1_0; a longer span short of MXFP8 is a cut MXFP8 table.
+TYPE_43_END_SLACK = 1 << 20
 
 # Block geometry by type name, for the types gguf-py does not know.
 FALLBACK_SIZES_BY_NAME = {
@@ -46,7 +49,7 @@ FALLBACK_SIZES_BY_NAME = {
 }
 
 
-def type_43_format(n_elems: int, span: int | None, *,
+def type_43_format(n_elems: int, span: int | None, alignment: int, *,
                    at_end: bool = False) -> str:
     """The format of a type-43 tensor of ``n_elems`` values whose data spans
     ``span`` bytes: up to the next tensor, or to the end of the file when
@@ -54,8 +57,9 @@ def type_43_format(n_elems: int, span: int | None, *,
     reads as STQ1_0, the older owner; the local scan decides again.
 
     The format is the largest that fits in the span, as mlx-kquant reads
-    it. At the end of the file a span short of MXFP8 but nearer it than
-    STQ1_0, by ratio, is a cut MXFP8 download, which the size check flags."""
+    it. At the end of the file a span short of MXFP8 but more than
+    TYPE_43_END_SLACK past STQ1_0 is a cut MXFP8 table, which the size
+    check flags."""
     if span is None:
         return "STQ1_0"
     sizes = {name: n_elems // block * tsize
@@ -63,8 +67,9 @@ def type_43_format(n_elems: int, span: int | None, *,
     can = {name for name, (block, _) in TYPE_43_FORMATS.items()
            if n_elems % block == 0}
     stq, mx = sizes["STQ1_0"], sizes["MXFP8"]
+    slack = max(alignment, TYPE_43_END_SLACK)
     if "MXFP8" in can and (span >= mx or (
-            at_end and ("STQ1_0" not in can or span * span > stq * mx))):
+            at_end and ("STQ1_0" not in can or span >= stq + slack))):
         return "MXFP8"
     if "STQ1_0" in can and (span >= stq or at_end):
         return "STQ1_0"
@@ -239,7 +244,8 @@ def _scan(buf, path, size, include_tensors, limit) -> HeaderScan:
             if ttype == TYPE_43:
                 span, at_end = spans[i]
                 try:
-                    tname = type_43_format(n_elems, span, at_end=at_end)
+                    tname = type_43_format(n_elems, span, alignment,
+                                           at_end=at_end)
                 except ValueError as e:
                     raise ValueError(f"{path}: {name}: {e}") from None
                 block, tsize = TYPE_43_FORMATS[tname]
