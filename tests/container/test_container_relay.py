@@ -1112,6 +1112,37 @@ def test_the_loop_keeps_no_connection_it_stopped_watching(loop):
         b.close()
 
 
+def test_the_loop_keeps_no_call_it_ran(loop):
+    """A queued call and what it holds are freed when it returns, not when
+    the loop runs its next call."""
+    import weakref
+
+    class Held:
+        pass
+    a, b = socket.socketpair()
+    ran, done, freed = threading.Event(), threading.Event(), []
+
+    def queue():
+        held = Held()
+        loop.call_soon(lambda: (held, ran.set()))
+        return weakref.ref(held)
+
+    def on_read(mask):
+        loop.unwatch(a)
+        freed.append(ref() is None)
+        done.set()
+    try:
+        _in_loop(loop, lambda: loop.watch(a, relay._READ, on_read))
+        ref = queue()
+        assert ran.wait(10)
+        b.send(b"x")                    # handled in a later select than the call
+        assert done.wait(10)
+        assert freed == [True]
+    finally:
+        a.close()
+        b.close()
+
+
 def test_a_closed_pair_holds_no_memory(loop, tmp_path, monkeypatch):
     """Each pair arms timers of up to an hour. Once the pair closes, nothing
     may keep it alive until those timers would run, or a guest that opens

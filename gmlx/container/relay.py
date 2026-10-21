@@ -362,12 +362,16 @@ class RelayLoop:
             # The keys hold their callbacks. Kept until the next select
             # returns, they keep a connection closed in this one alive.
             del events
-            while self._calls:
-                fn = self._calls.popleft()
-                try:
-                    fn()
-                except Exception as e:  # noqa: BLE001 - as above
-                    self.log(f"relay loop: {type(e).__name__}: {e}")
+            self._run_calls()
+
+    def _run_calls(self) -> None:
+        # In its own frame, so the last call is freed before the next select.
+        while self._calls:
+            fn = self._calls.popleft()
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - one bad call must not end the loop
+                self.log(f"relay loop: {type(e).__name__}: {e}")
 
 
 class AcceptPause:
