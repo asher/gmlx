@@ -52,12 +52,14 @@ def _weights(mod):
 
 
 def test_placeholder_keeps_shape_dtype_and_nbytes_over_one_row():
-    w = mx.ones((E, N, K), dtype=mx.float16)
+    # 32 MiB over a 512 KiB row: a small buffer MLX allocates on its own
+    # during the call stays far under the bound.
+    w = mx.ones((64, 512, 512), dtype=mx.float16)
     mx.eval(w)
     before = mx.get_active_memory()
     p = placeholder(w)
     assert p.shape == w.shape and p.dtype == w.dtype and p.nbytes == w.nbytes
-    assert mx.get_active_memory() - before < w.nbytes
+    assert mx.get_active_memory() - before < w.nbytes // 4
     assert float(mx.abs(p).sum()) == 0.0
 
 
