@@ -412,6 +412,37 @@ def test_unsized_recurrent_family_prices_growth():
     assert mp.kv_layer_costs(m) == [(None, 512.0)] * 2
 
 
+# DeepSeek V4.1 Flash and V4 Flash as their GGUF headers synthesize.
+DS41_CFG = dict(model_type="deepseek_v41", num_hidden_layers=40,
+                num_attention_heads=64, num_key_value_heads=1, head_dim=512,
+                sliding_window=128, index_head_dim=128,
+                compress_ratios=[0, 0] + [2] * 18 + [1] * 20,
+                kv_source_layers=[2, 8, 14, 20],
+                index_key_layers=[2, 8, 14, 20])
+DS4_CFG = dict(model_type="deepseek_v4", num_hidden_layers=43,
+               num_attention_heads=64, num_key_value_heads=1, head_dim=512,
+               sliding_window=128, index_head_dim=128,
+               compress_ratios=[0, 0] + [4, 128] * 20 + [4])
+
+
+def test_compressed_pools_grow_beside_the_window():
+    """The 128-token window is a V4 layer's local cache only: the
+    compressed pools hold one row per ratio tokens to the full depth.
+    V4.1 keeps a 512-wide latent and a 128-wide indexer pool on each of
+    its four source layers, 640 B per token at ratio 2 and 1280 at
+    ratio 1, so 32k of context holds 105 MB beside the 10.5 MB of
+    windows. V4 keeps a latent pool on every compressed layer and an
+    indexer pool on the sparse ratio-4 ones."""
+    costs = mp.kv_layer_costs(_model(**DS41_CFG))
+    assert [b for w, b in costs if w is None] == [640.0] * 3 + [1280.0]
+    window = 40 * 128 * 2 * 512 * 2.0
+    for depth in (32768, 1 << 20):
+        assert mp.prompt_kv_bytes(costs, depth) == window + 3200 * depth
+    costs = mp.kv_layer_costs(_model(**DS4_CFG))
+    pools = [b for w, b in costs if w is None]
+    assert pools == [(512 + 128) * 2 / 4, 512 * 2 / 128] * 20 + [320.0]
+
+
 def test_stack_geometry_reads_the_caches():
     from gmlx._vendor.mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
                                       RotatingKVCache)

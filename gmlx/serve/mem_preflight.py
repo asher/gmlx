@@ -163,10 +163,56 @@ def recurrent_state_bytes(c) -> float | None:
 @dataclass(frozen=True)
 class LayerGeometry:
     """One cache-stack entry: a growing KV region (capped at ``window``
-    rows when it rotates) and/or a fixed recurrent state."""
+    rows when it rotates), a fixed recurrent state, and the bytes per
+    token of compressed pools that grow beside a rotating window."""
     attn: bool = True
     window: int | None = None
     state: float = 0.0
+    pool: float = 0.0
+
+
+_POOL_BYTES = 2     # pooled rows are priced fp16, the unpacked bound
+
+
+def _int_set(c, name):
+    v = _get(c, name)
+    return {int(i) for i in v} if isinstance(v, (list, tuple)) else None
+
+
+def pool_bytes_per_token(c, layers):
+    """Per config layer, the bytes per token of context its compressed
+    pools hold: one row per ``compress_ratio`` tokens. DeepSeek V4 keeps a
+    latent pool ``head_dim`` wide on every compressed layer and an indexer
+    key pool ``index_head_dim`` wide on the sparse ones (ratio 4). V4.1
+    keeps both pools only on its ``kv_source_layers``, the indexer pool
+    filled only on its ``index_key_layers``; the other layers read them.
+    glm5_next keeps an indexer pool on each attention layer, one row per
+    ``index_kpool`` tokens. Zero for any other layout."""
+    out = [0.0] * layers
+    mt = _get(c, "model_type")
+    width = _get(c, "head_dim") or 0
+    index = _get(c, "index_head_dim") or 0
+    if mt == "glm5_next":
+        kpool = _get(c, "index_kpool")
+        if isinstance(kpool, int) and kpool > 0 and index:
+            return [index * _POOL_BYTES / kpool] * layers
+        return out
+    if mt not in ("deepseek_v4", "deepseek_v41"):
+        return out
+    ratios = _get(c, "compress_ratios")
+    if not isinstance(ratios, (list, tuple)) or len(ratios) < layers:
+        return out
+    sources = _int_set(c, "kv_source_layers")
+    keys = _int_set(c, "index_key_layers")
+    for i in range(layers):
+        r = int(ratios[i])
+        if r <= 0 or (sources is not None and i not in sources):
+            continue
+        rows = width
+        if (i in keys) if keys is not None else r != 128:
+            rows += index
+        out[i] = rows * _POOL_BYTES / r
+    return out
 
 
 def _config_kinds(c, layers):
@@ -201,16 +247,18 @@ def config_geometry(c):
     kinds = _config_kinds(c, layers)
     windows = _layer_windows(c, layers)
     state = recurrent_state_bytes(c)
+    pools = pool_bytes_per_token(c, layers)
     geo = []
     for i, kind in enumerate(kinds):
         if kind is None:
             continue
         if kind == "kv" or state is None:
-            geo.append(LayerGeometry(True, windows[i]))
+            pool = pools[i] if kind != "state" else 0.0
+            geo.append(LayerGeometry(True, windows[i], pool=pool))
         elif kind == "state":
             geo.append(LayerGeometry(False, None, state))
         else:
-            geo.append(LayerGeometry(True, windows[i], state))
+            geo.append(LayerGeometry(True, windows[i], state, pools[i]))
     return geo
 
 
@@ -253,8 +301,9 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
                    geometry=None):
     """Cost entries ``(window_or_None, bytes_per_token)`` for the model's
     cache stack, or None when the geometry cannot be read: one entry per
-    growing KV region (a rotating window caps it) and one FixedRows(1)
-    entry per recurrent state. Admit-side throughout: MLA prices the
+    growing KV region (a rotating window caps it), one FixedRows(1)
+    entry per recurrent state and one growing entry per layer's
+    compressed pools, priced fp16. Admit-side throughout: MLA prices the
     compressed latent, a configured sliding window caps every layer it
     could apply to. ``geometry`` (from stack_geometry) replaces the
     config's layer pattern. Per geometry entry: ``per_layer_bpe`` (from
@@ -305,6 +354,8 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
             costs.append((w, elems * bpe(i)))
         if g.state:
             costs.append((FixedRows(1), float(g.state)))
+        if g.pool:
+            costs.append((None, float(g.pool)))
     for regions in per_layer_regions or ():
         for rows, region_bpe in regions:
             costs.append((FixedRows(rows), elems * region_bpe))
