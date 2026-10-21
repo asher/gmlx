@@ -658,6 +658,23 @@ def _scan_known(root, known):
     return models, stats["mmproj_pairs"]
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_root_mmproj_beside_a_model_stays_out_of_the_quant_folders(
+        tmp_path, ds41_classify, configured):
+    """A model beside the mmproj, scanned or in the config, takes it as a
+    sibling; the quant folder below gets none."""
+    root = _quant_tree(tmp_path, _DS41_Q4, mmprojs=("mmproj-BF16.gguf",))
+    _write(root, _DS41_IQ2)
+    beside, below = root / _DS41_IQ2, root / "UD-Q4_K_XL" / _DS41_Q4
+    mm = str(root / "mmproj-BF16.gguf")
+    if configured:
+        models, pairs = _scan_known(root, _known(beside, below))
+        assert models == [] and pairs == {"m0": mm}
+    else:
+        by_path = {m.path: m.mmproj for m in _scan(root, recursive=True)}
+        assert by_path == {str(beside): mm, str(below): None}
+
+
 @pytest.mark.parametrize("chosen", [False, True])
 def test_generic_mmproj_beside_configured_quants_says_why_it_stays_unpaired(
         tmp_path, monkeypatch, capsys, chosen):

@@ -1355,6 +1355,43 @@ def test_sync_add_companions_respects_a_commented_out_mmproj(monkeypatch,
     assert text.endswith("Ternary-Bonsai-2-27B-PQ2_0.gguf\n" + bonsai)
 
 
+@pytest.mark.parametrize("quants", [
+    # One GLM model, converted under two arch spellings.
+    {"UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf": "glm5-next",
+     "old-glm5next/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00005.gguf": "glm5next"},
+    {"UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf": "glm5-next",
+     "UD-IQ4_XS/GLM-5.3-UD-IQ4_XS-00001-of-00005.gguf": "glm5-next"},
+])
+def test_sync_add_companions_leaves_a_root_mmproj_over_unlike_entries(
+        monkeypatch, tmp_path, capsys, quants):
+    """A root mmproj over quant folders whose configured models differ in
+    name or arch joins none of them."""
+    repo = "unsloth__GLM-5.3-Flash-GGUF"
+    entries = "".join(f"  glm{i}:\n    path: {repo}/{rel}\n"
+                      for i, rel in enumerate(quants))
+    cfg_path, lib = _sync_config(tmp_path, "models:\n" + entries)
+    for rel in ["mmproj-F16.gguf", *quants]:
+        (lib / repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (lib / repo / rel).write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        arch = ("clip" if name.startswith("mmproj")
+                else quants[os.path.relpath(path, lib / repo)])
+        return srv.discovery._classify_meta(
+            {"general.architecture": arch, f"{arch}.expert_count": 256},
+            basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    captured = capsys.readouterr()
+    assert "already in sync" in captured.out
+    assert "differ in name or arch" in captured.err
+    assert cfg_path.read_text() == before
+
+
 def _mmproj_beside(monkeypatch, lib, pairs):
     """A scan that pairs each configured id in ``pairs`` with an mmproj
     beside its model."""
