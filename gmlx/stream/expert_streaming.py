@@ -33,7 +33,8 @@ from gmlx.load.loader import (
     moe_streaming_active,
 )
 
-from .budget import _decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes
+from .budget import (_decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes,
+                     outside_ceiling_bytes)
 from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
@@ -1280,9 +1281,12 @@ def install_expert_streaming(
             # Always visible, like the pin line: the one line a memory
             # report needs.
             try:
-                floor = _ram_floor_bytes(int(metal_value("memory_size")))
+                ram_b = int(metal_value("memory_size"))
             except Exception:
-                floor = _ram_floor_bytes(None)
+                ram_b = None
+            floor = _ram_floor_bytes(ram_b)
+            past = (outside_ceiling_bytes(ram_b, float(ceiling), host_bytes)
+                    if ram_b and ceiling else floor)
             # Streamed tables are page-cache citizens like the experts, so
             # they are out of the every-token term the arena is sized
             # against (arena_kw carries the same figure).
@@ -1297,9 +1301,10 @@ def install_expert_streaming(
                 + (f" ({ring_share / 1e9:.1f} more lent from the arena at "
                    "each prefill)" if ring_share else "")
                 + f" + kv room {room.bytes / 1e9:.1f} "
-                f"({room_how}) + floor {floor / 1e9:.1f}; host "
-                f"{host_bytes / 1e9:.1f} outside it (process and resident "
-                f"page cache, out of reclaimable RAM); {tables}"
+                f"({room_how}) + floor and host past RAM outside it "
+                f"{past / 1e9:.1f} (floor {floor / 1e9:.1f}, host "
+                f"{host_bytes / 1e9:.1f}: process and resident page cache; "
+                f"reclaimable RAM pays both); {tables}"
                 "GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)

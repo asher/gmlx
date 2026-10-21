@@ -57,7 +57,8 @@ LONG_PROMPT = "Count from 1 to 5000, one number per line, no other text."
 _results: list = []
 _BUDGET = re.compile(r"memory budget: ceiling ([\d.]+) GB = every-token ([\d.]+) "
                      r"\+ arena ([\d.]+) \+ ring ([\d.]+) \+ kv room ([\d.]+) "
-                     r"\(.*\) \+ floor ([\d.]+)")
+                     r"\(.*\) \+ floor and host past RAM outside it [\d.]+ "
+                     r"\(floor ([\d.]+)")
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:

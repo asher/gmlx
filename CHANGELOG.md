@@ -67,6 +67,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with almost no free memory during prefill, and push it into swap.
 - A model loaded beside a streamed model could take the memory the stream's
   next prefill needed, and leave the Mac with no free memory.
+- With `--stream-experts`, the expert arena came out smaller than the one
+  `gmlx validate` plans, by 5% of RAM or more, when the GPU limit set its size.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
   table, larger than a GPU buffer, is read from the file, and MXFP8 tables
   are told apart from STQ1_0 weights, which share the same GGUF type id.

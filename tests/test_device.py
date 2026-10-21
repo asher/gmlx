@@ -374,7 +374,8 @@ def test_decode_arena_ram_fraction(on_cpu, monkeypatch):
     _metal(monkeypatch, **{WS: 100 * GB, "memory_size": ram})
     arena = budget._decode_arena_bytes(
         201 * GB, {0: [(0, 0, 200 * GB)]}, 90 * GB, room_bytes=0)
-    assert arena == ram // 4 - GB - budget._ram_floor_bytes(ram)
+    # The RAM outside the capped ceiling holds the host floor.
+    assert arena == ram // 4 - GB
 
 
 # Wiring: nothing to wire on the CPU device.

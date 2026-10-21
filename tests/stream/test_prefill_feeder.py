@@ -1362,6 +1362,8 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
     bool(os.environ.get("KQUANT_FORCE_CPU"))
     or not mx.metal.is_available(),
     reason="the decode arena exists only with a GPU default device")
+# A Mac whose RAM outside the 100 GiB ceiling holds the host floor.
+@pytest.mark.host_gb(128)
 @pytest.mark.parametrize("timeshare", ["0", "1"])
 @pytest.mark.parametrize("env_gb", [None, "100"])
 @pytest.mark.parametrize("built", [True, False])

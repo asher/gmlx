@@ -341,11 +341,18 @@ def test_arena_budget_math(monkeypatch):
     assert got == (40 << 30) - (20 << 30) - (10 << 30)
     assert _decode_arena_bytes(
         100 << 30, offsets, budget=25 << 30, room_bytes=6 << 30) == 0
-    # The host floor and the prefill ring come off the ceiling too.
+    # The prefill ring comes off the ceiling. The host floor comes off it
+    # only past the RAM outside the ceiling: 920 GiB hold all of a 5 GiB
+    # floor, 4 GiB hold all but 1 GiB.
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
     got = _decode_arena_bytes(
         100 << 30, offsets, budget=80 << 30, ring_bytes=4 << 30)
-    assert got == (80 << 30) - (20 << 30) - (8 << 30) - (5 << 30) - (4 << 30)
+    assert got == (80 << 30) - (20 << 30) - (8 << 30) - (4 << 30)
+    monkeypatch.setattr(mx, "device_info", lambda: {"memory_size": 84 << 30})
+    got = _decode_arena_bytes(
+        100 << 30, offsets, budget=80 << 30, ring_bytes=4 << 30)
+    assert got == (80 << 30) - (20 << 30) - (8 << 30) - (1 << 30) - (4 << 30)
+    monkeypatch.setattr(mx, "device_info", lambda: {"memory_size": 1000 << 30})
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "0")
     # A RAM fraction caps the ceiling only when the user asks for one.
     monkeypatch.setattr(

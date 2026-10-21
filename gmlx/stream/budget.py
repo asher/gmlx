@@ -413,12 +413,14 @@ def _decode_arena_bytes(
     avail_bytes: int | None = None, host_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
-    after the non-expert weights, the KV room, the prefill ring and the
-    host floor, clamped to the RAM reclaimable right now less the same
-    and the host overhead (``host_bytes``, ``host_overhead_bytes``), and
-    capped at the expert bytes themselves. The host overhead is not MLX
-    memory: the RAM the ceiling leaves outside it holds that, and only
-    the reclaimable leg, which measures RAM, charges it. ``forced`` is a stream the
+    after the non-expert weights, the KV room and the prefill ring,
+    clamped to the RAM reclaimable right now less the same, the host
+    floor and the host overhead (``host_bytes``, ``host_overhead_bytes``),
+    and capped at the expert bytes themselves. The floor and the host
+    overhead are not MLX memory: the RAM the ceiling leaves outside it
+    holds them, so the ceiling leg charges only what they need past that
+    RAM (``outside_ceiling_bytes``, as the plan does), and the reclaimable
+    leg, which measures RAM, charges them whole. ``forced`` is a stream the
     flag asked for on a model under the budget: its cap is
     ``FORCED_ARENA_SHARE`` of the expert bytes, so the experts stay
     streamed rather than all wired.
@@ -497,8 +499,9 @@ def _decode_arena_bytes(
     # .cast_copies), so charging it would cancel the pin it just freed.
     non_expert_bytes = max(
         0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
-    arena = (ceiling - non_expert_bytes - room - int(ring_bytes)
-             - _ram_floor_bytes(ram))
+    outside = (outside_ceiling_bytes(ram, ceiling, host) if ram
+               else _ram_floor_bytes(None))
+    arena = ceiling - non_expert_bytes - room - int(ring_bytes) - outside
     # Second ceiling: what is reclaimable right now. The governor ceiling
     # assumes an otherwise idle machine; co-resident workloads shrink the
     # offer, and a wired arena sized past it would evict them to swap. The

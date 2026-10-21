@@ -381,8 +381,10 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
     stayed resident. The room without the chunk, the pool or the host
     overhead (12.0 GB, and the pool set to all of it) sized an 80.4 GB
     arena that left the box 7 GiB short. At the stock working set the
-    ceiling leg binds: an arena under 50 GB there is the arena that ran
-    decode 15 to 20% slower, for free memory nothing needs."""
+    ceiling leaves 39.5 GB of RAM outside it, which holds the floor and
+    the host overhead, so the reclaimable leg binds there too. An arena
+    under 50 GB is the arena that ran decode 15 to 20% slower, for free
+    memory nothing needs."""
     import mlx.core as mx
 
     import gmlx.serve.mem_preflight as mp
@@ -417,6 +419,64 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
     free = avail - arena - room.pool_bytes - 5.4 * gib - 8.7 * gib - 1.8 * gib
     assert free >= 8 * gib
     assert arena >= 50e9
+
+
+# Kimi-K3 UD-Q2_K_XL boxes where the ceiling leg binds: stock 128 GB and
+# 512 GB, where the RAM outside the ceiling holds the floor and the host
+# overhead, and 128 GB with a raised GPU limit, where 1.6 GB of them are
+# past it.
+@pytest.mark.parametrize("ram_gib,ws,avail", [
+    (128, 0.75 * (128 << 30), 120e9),
+    (128, 125e9, 120e9),
+    (512, 0.75 * (512 << 30), 530e9),
+], ids=["128-stock", "128-raised", "512-stock"])
+def test_loader_arena_matches_the_plan_where_the_ceiling_binds(
+        monkeypatch, ram_gib, ws, avail):
+    """The loader sizes the arena the plan prints. Both charge the floor
+    and the host overhead under the ceiling only past the RAM the ceiling
+    leaves outside it. On a stock 128 GB Mac the loader's arena was 9.6 GB
+    under the plan's 14.3 GB, and the ring the plan builds on 192 GB and
+    up was judged against an arena short by the whole floor."""
+    import mlx.core as mx
+
+    import gmlx.stream.plan as sp
+
+    for k in ("GMLX_DECODE_ARENA_GB", "GMLX_DECODE_ARENA_FORCE",
+              "GMLX_DECODE_ARENA_RAM_FRAC", "GMLX_DECODE_RAM_FLOOR_GB",
+              "GMLX_DECODE_PAGECACHE_GB", "GMLX_DECODE_PROCESS_GB",
+              "GMLX_DECODE_RESIDENT_CACHE_GB", "GMLX_STREAM_CACHE_GB",
+              "GMLX_GOV_MARGIN", "GMLX_GOV_RESERVE_GB", "GMLX_RING_TIMESHARE"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GMLX_DECODE_KV_RESERVE_GB", "20")
+    ram = ram_gib << 30
+    every, experts, ring = 62.2e9, 799.1e9, 22.7e9
+    model = sp.ModelPlan(
+        arch="deepseek2", total_bytes=int(every + experts),
+        expert_bytes=int(experts), groups={}, moe_layers=92, n_experts=896,
+        experts_per_token=16, ring_bytes=int(ring), kv_costs=None,
+        trained_ctx=None)
+    box = sp.box_plan(model, ram_bytes=ram, ws_bytes=ws)
+    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
+    monkeypatch.setattr(budget, "ceiling_bytes",
+                        lambda: sp.ceiling_for(ram, ws))
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: avail)
+
+    def loader(ring_bytes=0):
+        return budget._decode_arena_bytes(
+            model.total_bytes, {0: [(0, 0, model.expert_bytes)]},
+            int(sp.ceiling_for(ram, ws)), room_bytes=box.room.bytes,
+            pinned_bytes=int(every), ring_bytes=ring_bytes,
+            host_bytes=budget.host_overhead_bytes(ram))
+
+    arena = loader()
+    if box.ring_fits:
+        held = loader(int(ring))
+        if not budget.ring_share_bytes(arena, held, int(ring)):
+            arena = held
+    assert arena == pytest.approx(box.arena_bytes, abs=64)
+    if ram_gib == 128 and ws < 100e9:
+        assert arena == pytest.approx(14.26e9, rel=0.01)
+        assert not box.ring_fits
 
 
 def test_ring_share_is_the_room_the_ring_adds_to_the_arena(monkeypatch):
