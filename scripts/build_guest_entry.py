@@ -4,7 +4,13 @@
 The default build compiles crates/gmlx-entry for aarch64-unknown-linux-musl
 in release mode and writes a static binary to gmlx/container/guest/gmlx-entry
 with mode 0755. `--native` builds the same crate for this machine instead,
-for the entry tests, and prints the binary's path.
+for the entry tests, writes the binary to
+crates/gmlx-entry/target/native/gmlx-entry and prints that path.
+
+Cargo removes and links its own copy of the binary again on every build,
+so the script never hands that copy out. Builds take a lock in the crate's
+target folder, and each one renames its copy into place, so test workers
+that build at once never exec a missing or partial binary.
 
 Every build first checks the toolchain: `cargo` and `rustc`, run from the
 crate folder, must be at least the rust-version that Cargo.toml states, and
@@ -23,12 +29,15 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import re
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -145,23 +154,50 @@ def check_static_aarch64_elf(path: Path) -> None:
             raise ValueError(f"{path} names a program interpreter, so it is not static")
 
 
+@contextlib.contextmanager
+def _build_lock(crate: Path):
+    """Holds the lock that keeps a build and its copy apart from another
+    build of the same crate, which would remove cargo's binary midway."""
+    target = crate / "target"
+    target.mkdir(parents=True, exist_ok=True)
+    with open(target / "build.lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def _install(built: Path, out: Path) -> None:
+    """Copy ``built`` to ``out`` with mode 0755 through a temporary file of
+    this build's own, so ``out`` is always a whole binary."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f, open(built, "rb") as src:
+            shutil.copyfileobj(src, f)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def build_musl(crate: Path = CRATE, out: Path = OUT) -> Path:
     check_toolchain(musl=True, crate=crate)
-    _cargo_build(["--target", TARGET], crate)
-    built = crate / "target" / TARGET / "release" / "gmlx-entry"
-    check_static_aarch64_elf(built)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    shutil.copyfile(built, tmp)
-    os.chmod(tmp, 0o755)
-    os.replace(tmp, out)
+    with _build_lock(crate):
+        _cargo_build(["--target", TARGET], crate)
+        built = crate / "target" / TARGET / "release" / "gmlx-entry"
+        check_static_aarch64_elf(built)
+        _install(built, out)
     return out
 
 
 def build_native(crate: Path = CRATE) -> Path:
     check_toolchain(musl=False, crate=crate)
-    _cargo_build([], crate)
-    return crate / "target" / "release" / "gmlx-entry"
+    out = crate / "target" / "native" / "gmlx-entry"
+    with _build_lock(crate):
+        _cargo_build([], crate)
+        _install(crate / "target" / "release" / "gmlx-entry", out)
+    return out
 
 
 def main(argv=None) -> int:

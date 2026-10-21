@@ -3,11 +3,13 @@ guest entry build, and the static-ELF check on its output. Fake cargo and
 rustc scripts stand in for the toolchain, so nothing is compiled."""
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import os
 import re
 import struct
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -159,6 +161,103 @@ def test_check_turns_off_rustup_downloads(tmp_path, monkeypatch):
     (tmp_path / "bin" / "cargo").write_text(
         f'#!/bin/sh\n[ "$RUSTUP_AUTO_INSTALL" = 0 ] && echo "cargo {version} (x)"\n')
     build.check_toolchain(musl=False)
+
+
+_FAKE_CARGO_BUILD = """\
+import fcntl, os, sys
+from pathlib import Path
+target = Path(os.environ["CARGO_TARGET_DIR"])
+target.mkdir(parents=True, exist_ok=True)
+with open(target / "build.lock", "a") as f:
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        sys.exit("cargo runs outside the build lock")
+args = sys.argv[1:]
+triple = args[args.index("--target") + 1] if "--target" in args else ""
+binary = target / triple / "release" / "gmlx-entry"
+binary.unlink(missing_ok=True)
+handed = os.environ.get("HANDED_OUT")
+if handed and not os.access(handed, os.X_OK):
+    sys.exit(f"{handed} is gone while cargo builds")
+binary.parent.mkdir(parents=True, exist_ok=True)
+if triple:
+    binary.write_bytes(Path(os.environ["ELF"]).read_bytes())
+else:
+    binary.write_text("#!/bin/sh\\necho build " + os.environ["BUILD"] + "\\n")
+binary.chmod(0o755)
+"""
+
+
+def _fake_cargo(tmp_path, monkeypatch, *, musl: bool) -> Path:
+    """A crate folder whose cargo removes its binary and writes it again, as
+    cargo does, and exits nonzero when it runs outside the build lock."""
+    version = build.min_version()
+    crate = tmp_path / "crate"
+    crate.mkdir()
+    (crate / "Cargo.toml").write_text(f'[package]\nrust-version = "{version}"\n')
+    _fake_tools(tmp_path, monkeypatch, cargo=version, rustc=version,
+                sysroot=_sysroot(tmp_path, musl=musl))
+    fake = tmp_path / "fake_cargo.py"
+    fake.write_text(_FAKE_CARGO_BUILD)
+    (tmp_path / "bin" / "cargo").write_text(
+        f'#!/bin/sh\n[ "$1" = --version ] && exec echo "cargo {version} (x)"\n'
+        f'exec "{sys.executable}" -I "{fake}" "$@"\n')
+    return crate
+
+
+def _copies_under_the_lock(monkeypatch, crate: Path) -> None:
+    install = build._install
+
+    def checked(built, out):
+        with open(crate / "target" / "build.lock") as f:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        install(built, out)
+    monkeypatch.setattr(build, "_install", checked)
+
+
+def test_a_native_build_never_removes_the_binary_an_earlier_build_returned(
+        tmp_path, monkeypatch):
+    """Cargo removes its binary and links it again on every build, so a
+    test worker that runs the binary while another worker builds would find
+    it missing. The fake cargo removes its binary the same way, and fails
+    when the binary that the first build returned is gone or when it runs
+    outside the build lock. A worker that has the first binary open keeps
+    reading it whole."""
+    crate = _fake_cargo(tmp_path, monkeypatch, musl=False)
+    _copies_under_the_lock(monkeypatch, crate)
+    monkeypatch.setenv("BUILD", "1")
+    first = build.build_native(crate)
+    monkeypatch.setenv("HANDED_OUT", str(first))
+    monkeypatch.setenv("BUILD", "2")
+    with open(first) as held:
+        second = build.build_native(crate)
+        assert held.read() == "#!/bin/sh\necho build 1\n"
+    assert second == first
+    assert subprocess.run([second], capture_output=True, text=True).stdout == "build 2\n"
+    assert [p.name for p in second.parent.iterdir()] == ["gmlx-entry"]
+
+
+def test_the_guest_build_runs_under_the_build_lock(tmp_path, monkeypatch):
+    crate = _fake_cargo(tmp_path, monkeypatch, musl=True)
+    _copies_under_the_lock(monkeypatch, crate)
+    elf = tmp_path / "elf"
+    elf.write_bytes(_elf())
+    monkeypatch.setenv("ELF", str(elf))
+    out = build.build_musl(crate, tmp_path / "guest" / "gmlx-entry")
+    assert out.read_bytes() == _elf()
+    assert out.stat().st_mode & 0o777 == 0o755
+    assert [p.name for p in out.parent.iterdir()] == ["gmlx-entry"]
+
+
+def test_a_failed_copy_leaves_no_temporary_file(tmp_path):
+    out = tmp_path / "guest" / "gmlx-entry"
+    with pytest.raises(FileNotFoundError):
+        build._install(tmp_path / "missing", out)
+    assert list(out.parent.iterdir()) == []
 
 
 def _elf(*, machine=183, etype=2, interp=False) -> bytes:
