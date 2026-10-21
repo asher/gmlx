@@ -352,7 +352,15 @@ def install_expert_streaming(
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
     budget = stream_budget_bytes()
-    over_budget = budget is not None and total_bytes > budget
+    from gmlx.stream.table_stream import file_table_bytes
+
+    # A table read from the file has no array, but the ladder runs on the
+    # text bytes, as the header prediction (predicted_stream_bytes) does:
+    # a model whose tables alone bring it under the budget keeps its
+    # experts resident however its tables were loaded.
+    file_tables = file_table_bytes(model)
+    ladder_bytes = total_bytes + file_tables
+    over_budget = budget is not None and ladder_bytes > budget
     if explicit and not over_budget:
         force_stream = True
 
@@ -378,10 +386,11 @@ def install_expert_streaming(
     # over budget even post-table streams both (compose); --stream-cpu and
     # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
     # table resident.
-    plan = stream_plan(total_bytes, table_bytes(model), budget,
-                       force_stream=force_stream)
+    plan = stream_plan(ladder_bytes, table_bytes(model) + file_tables,
+                       budget, force_stream=force_stream)
     compose = plan.tables and plan.experts
-    if plan.table_kept:
+    table_only = plan.tables and not plan.experts
+    if plan.table_kept and table_bytes(model):
         print(
             "[stream] table stays resident "
             "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
@@ -410,17 +419,19 @@ def install_expert_streaming(
         table_credit = credit_streamed(
             getattr(model, "_kq_weights_key", None), table_offloaded,
             max(0.0, total_bytes - untracked0), "table")
-    elif table_offloaded:
+    elif table_only:
         # The selection test admits the table only when the remainder
         # clears the budget (or streaming is forced on a fits model),
         # so experts are resident from here on.
         over_budget = False
         base = ("" if budget is None
                 else f" of {budget / 2**30:.1f} GiB budget")
+        where = ("on the CPU stream" if table_offloaded
+                 else "read from the file")
         loadlog.info(
             f"[stream] streamable table {'+'.join(table_names)} "
-            f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
-            "the CPU stream; experts resident (post-deduction "
+            f"({(table_offloaded + file_tables) / 2**30:.1f} GiB) stays "
+            f"file-backed {where}; experts resident (post-deduction "
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
         table_credit = credit_streamed(
@@ -1333,7 +1344,7 @@ def install_expert_streaming(
                     " (--stream-fast-disk on overrides,"
                     " GMLX_DECODE_FAST_DISK_GBPS sets the bar)"
                 )
-    if (streaming or table_offloaded) and env_bool("GMLX_GPU_RESIDENT", True):
+    if (streaming or table_only) and env_bool("GMLX_GPU_RESIDENT", True):
         tskip = frozenset()
         if table_offloaded:
             from gmlx.stream.table_stream import streamed_table_array_ids
@@ -1347,7 +1358,7 @@ def install_expert_streaming(
         # set rather than cap it.
         _install_gpu_residency(
             model, moe_modules, skip_ids=tskip,
-            include_expert_stacks=bool(table_offloaded) and not streaming,
+            include_expert_stacks=table_only and not streaming,
             room=(None if budget is None
                   else max(0, budget - held_wired - int(arena or 0)
                            - (ring - ring_share))))
@@ -1494,7 +1505,7 @@ def install_expert_streaming(
             staging = f"prefill calls >={gpu_tokens} tokens routed to GPU"
         else:
             staging = "GPU prefill routing disabled"
-        if table_offloaded:
+        if table_only:
             # Table-only mode: the experts are GPU-resident and wired (the
             # streamed table made room); "file-backed" would be wrong.
             loadlog.info(

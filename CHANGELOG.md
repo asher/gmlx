@@ -69,6 +69,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   next prefill needed, and leave the Mac with no free memory.
 - With `--stream-experts`, the expert arena came out smaller than the one
   `gmlx validate` plans, by 5% of RAM or more, when the GPU limit set its size.
+- On a Mac where DeepSeek-V4.1-Flash fits once its engram table is read from
+  the file, a folder scan gave it `stream: experts` and turned `speculative`
+  off. It now loads with its experts in memory, with or without the flag.
 - `gmlx validate`, the boot capacity table and the streamed KV room left out
   the compressed KV pools of DeepSeek-V4, V4.1 and GLM-5.3-Flash, which hold
   3.4 GB at a 1M-token V4.1 context.

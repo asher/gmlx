@@ -399,6 +399,37 @@ def test_the_stream_flag_keeps_the_ladder_over_budget(monkeypatch):
     assert not getattr(glu, "_kq_cpu_only", False)
 
 
+def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
+    """A table the load reads from the file has no array, but the model is
+    as large as its header says. Over the budget with the table and under
+    it without, --stream-experts keeps the experts resident, as the header
+    prediction does (the arena it would size is priced nowhere)."""
+    from types import SimpleNamespace
+
+    from mlx.utils import tree_flatten
+
+    from gmlx.stream.table_pread import _pread_class
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    model, glu = _moe_table_model()
+    table = model.model.ple_embed
+    tbytes = ts.table_bytes(model)
+    del table["weight"]
+    del table["scales"]
+    table._kq_table_source = SimpleNamespace(nbytes=tbytes)
+    table.__class__ = _pread_class(table.__class__)
+    model.parameters = lambda: {"glu": glu.parameters()}
+    rest = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    assert ts.file_table_bytes(model) == tbytes
+    _fake_budget(monkeypatch, rest + tbytes // 2)
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
+                        lambda n, key=None: None)
+    install_expert_streaming(model, explicit=True)
+    assert not getattr(glu, "_kq_cpu_only", False)
+    assert not getattr(model, "_kq_streaming", True)
+
+
 def test_the_stream_flag_under_the_budget_streams_table_and_experts(monkeypatch):
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")

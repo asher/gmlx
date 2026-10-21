@@ -59,6 +59,11 @@ class ArchTables(NamedTuple):
     arch: str            # GGUF general.architecture
     name_pattern: str    # full-match regex over wire tensor names
     tiers: TableTiers    # ordered, cheapest-to-stream first
+    # The model issues every table read before its first layer runs
+    # (``prefetch``), so a table read from the file costs a load without
+    # a stream flag no decode time: such a load reads it from the file
+    # when that alone brings the model under the budget.
+    reads_ahead: bool = False
 
 
 def _deepseek_v41_tiers(model, prefix: str = "") -> tuple[StreamableTable, ...]:
@@ -97,15 +102,25 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
         arch="deepseek41",
         name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_tiers,
+        reads_ahead=True,
     ),
     "deepseek_v41_vl": ArchTables(
         arch="deepseek41",
         name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_vl_tiers,
+        reads_ahead=True,
     ),
 }
 
 _NAME_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def tables_read_ahead(arch: str | None) -> bool:
+    """Whether ``arch`` (GGUF general.architecture) reads its tables
+    ahead of its layers, so a table can serve from the file without a
+    stream flag (``ArchTables.reads_ahead``)."""
+    return any(spec.arch == arch and spec.reads_ahead
+               for spec in STREAMABLE_TABLES.values())
 
 
 def streamable_table_names(arch: str | None) -> re.Pattern | None:
@@ -179,6 +194,15 @@ def table_bytes(model) -> int:
     return sum(resident_table_bytes(m) for _, m in streamable_tables_for(model))
 
 
+def file_table_bytes(model) -> int:
+    """Bytes of the declared tables on ``model`` that are read from the
+    GGUF (``table_pread``): in no array, so in no parameter total, but in
+    the text bytes the header prices."""
+    return sum(src.nbytes for _, m in streamable_tables_for(model)
+               for src in [getattr(m, "_kq_table_source", None)]
+               if src is not None)
+
+
 def streamed_table_bytes(model) -> int:
     """Bytes of tables actually streamed. A declared table left resident
     (fallback) is wired like any other weight and must stay charged in
@@ -218,6 +242,17 @@ def table_stream_selected(model, total_bytes: int, budget: int | None,
     return _selected(table_bytes(model), total_bytes, budget, force_stream)
 
 
+def tables_bring_under(total_bytes: int, tbytes: int, budget: int | None,
+                       env=None) -> bool:
+    """The ladder's table-only step: a load over ``budget`` that its
+    declared tables alone bring back under it. The tables then serve
+    from disk and the experts stay resident. ``GMLX_STREAM_PLE=0`` keeps
+    the tables resident."""
+    if stream_ple_env(env) == "0" or not tbytes or budget is None:
+        return False
+    return total_bytes > budget and total_bytes - tbytes <= budget
+
+
 def _selected(tbytes: int, total_bytes: int, budget: int | None,
               force_stream: bool, env=None) -> bool:
     from gmlx.envflags import env_bool
@@ -229,11 +264,16 @@ def _selected(tbytes: int, total_bytes: int, budget: int | None,
         return False
     if ple == "1" or force_stream or _FORCED:
         return True
+    if tables_bring_under(total_bytes, tbytes, budget, env):
+        return True
     if budget is None or total_bytes <= budget:
         return False
-    if (total_bytes - tbytes) <= budget:
-        return True
     return env_bool("GMLX_STREAM_PLE_COMPOSE", True, env)
+
+
+def latched() -> bool:
+    """Whether a stream flag latched table streaming for the next load."""
+    return _FORCED
 
 
 class StreamPlan(NamedTuple):

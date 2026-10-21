@@ -140,6 +140,35 @@ def test_failed_build_after_eviction_drops_proxy_last_ref():
     assert ref() is None
 
 
+def test_a_plain_entry_is_priced_without_the_tables_read_from_the_file(
+        tmp_path, monkeypatch):
+    """A model loaded without a stream placement maps its file less the
+    lookup tables the load reads from it: a table no GPU buffer holds, or
+    one whose bytes alone bring the model under the budget."""
+    import os
+
+    import numpy as np
+    from gguf import GGMLQuantizationType, GGUFWriter
+
+    import gmlx.serve.residency as residency
+
+    path = str(tmp_path / "DS-IQ2_XXS.gguf")
+    w = GGUFWriter(path, "deepseek41")
+    w.add_tensor("blk.1.engram_embd.weight", np.ones((4096, 33), np.int8),
+                 raw_dtype=GGMLQuantizationType.I8)
+    w.add_tensor("token_embd.weight", np.zeros((4, 8), np.float32),
+                 raw_dtype=GGMLQuantizationType.F32)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    size = os.path.getsize(path)
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
+    assert residency._plain_footprint(path, size) == size - 4096 * 33
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    assert residency._plain_footprint(path, size) == size
+
+
 def test_pin_protected_even_when_over_budget():
     # Two 10 GB models can't both fit a 15 GB budget, but A is pinned: it is
     # never evicted, so B is admitted over budget rather than refused.

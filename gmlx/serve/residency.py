@@ -512,11 +512,14 @@ class _ResidencyPool:
         else:
             file_bytes = self._footprint_fn(model_path)
             incoming = file_bytes
-        if getattr(build_spec, "stream", None) == "experts":
+        stream = getattr(build_spec, "stream", None)
+        if stream == "experts":
             incoming = _streaming_footprint(model_path, file_bytes, env,
                                             held_bytes=self._resident_bytes())
             _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
                       incoming / 1e9, file_bytes / 1e9)
+        elif stream is None and model_kind != IMAGE_KIND:
+            incoming = _plain_footprint(model_path, file_bytes, env)
         # Refuse an unloadable GGUF *before* evicting healthy residents for
         # room - a corrupt/unsupported file would otherwise cost every LRU
         # victim a full cold reload for a build that was never going to work.
@@ -1064,7 +1067,9 @@ class _ResidencyPool:
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
-        if getattr(build_spec, "stream", None) == "experts":
+        if getattr(build_spec, "stream", None) is None:
+            gate_bytes = _plain_footprint(model_path, footprint, env)
+        elif getattr(build_spec, "stream", None) == "experts":
             # What the install will stream, by its own ladder: over the
             # budget, a table that alone brings the model under it streams
             # and the experts stay resident.
@@ -1529,6 +1534,19 @@ def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
                - int(model.every_token_bytes)
                - host_floor_bytes(int(box.ram_bytes)) - ring
                - int(room.bytes) - int(getattr(box, "host_bytes", 0)))
+
+
+def _plain_footprint(model_path, file_bytes: int, env=None) -> int:
+    """Resident bytes of a model loaded without a stream placement: its
+    file, less the lookup tables the load reads from the file instead of
+    mapping (``capacity.deferred_table_bytes``). A model over the budget
+    whose tables alone bring it under loads that way, with its experts
+    resident."""
+    from .capacity import deferred_table_bytes
+
+    if not isinstance(model_path, str) or not model_path.endswith(".gguf"):
+        return int(file_bytes)
+    return max(0, int(file_bytes) - deferred_table_bytes(model_path, env=env))
 
 
 def _streaming_footprint(model_path, file_bytes: int, env=None,

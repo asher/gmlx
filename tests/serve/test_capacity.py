@@ -606,3 +606,53 @@ def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch)
         cap.preload_gate(25.0 * GB, "huge")
     with pytest.raises(cap.LoadDeferred, match="busybox every-token weights"):
         cap.preload_gate(10.0 * GB, "busybox", streaming=True)
+
+
+# DeepSeek-V4.1-Flash-1017's engram table: 768,022,850 rows at Q5_K, Q6_K
+# and MXFP8 row sizes, beside 165.3 GB of every-token weights and experts.
+@pytest.mark.parametrize("row_bytes", [176, 210, 264])
+@pytest.mark.parametrize("max_buffer", [86.6 * GB, 173.2 * GB, 1e15])
+@pytest.mark.parametrize("budget", [108.0 * GB, 185.6 * GB])
+def test_discovery_preflight_and_serve_read_the_table_rule_alike(
+        monkeypatch, row_bytes, max_buffer, budget):
+    """Experts stream only when the model stays over the budget without
+    its table: discovery marks it, the run preflight and a plain serve
+    entry price the same resident bytes, and a stream build predicts the
+    experts streamed. Otherwise the table is read from the file, with no
+    mark, and a stream build keeps the experts resident too."""
+    from types import SimpleNamespace
+
+    import gmlx.device as dev
+    import gmlx.load.discovery as disc
+    import gmlx.load.headerscan as hs
+    import gmlx.load.preflight as pre
+    import gmlx.stream.table_pread as tpr
+    from gmlx.serve.residency import _plain_footprint
+
+    name = "blk.1.engram_embd.weight"
+    table, rest, experts = 768_022_850 * row_bytes, 165.3 * GB, 156.9 * GB
+    text = int(rest + table)
+    path = "/m/DS-00001-of-00006.gguf"
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
+    monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
+        kv={"general.architecture": "deepseek41"}))
+    monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
+        {name: SimpleNamespace(nbytes=table)},
+        {name} if table > max_buffer else set()))
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: text)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: text + 10**6)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: int(budget))
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: int(budget))
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: table)
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: int(experts))
+
+    must_stream = rest > budget
+    resident = text - cap.deferred_table_bytes(path)
+    entry = disc.ClassifiedGguf(path, "model", "deepseek_v41", False,
+                                "IQ2_XXS", True)
+    assert (disc._over_budget(entry) is not None) == must_stream
+    assert (resident > budget) == must_stream
+    assert _plain_footprint(path, text + 10**6) == resident + 10**6
+    assert cap.predicted_stream_bytes(path) == (
+        table, int(experts) if must_stream else 0)

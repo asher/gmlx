@@ -202,30 +202,25 @@ class TableSource:
             os.close(fd)
 
 
-def oversize_tables(shards: list[str], arch: str | None,
-                    cap: int | None = None) -> dict[str, TableSource]:
-    """Streamable tables of ``arch`` in ``shards`` that are read from the
-    file, as wire name -> source: those past the device ceiling, and MXFP8
-    ones when mlx-kquant cannot hold them. A function of the files and the
-    mlx-kquant build: the wire load calls it for the skip list, the model
-    install for the sources."""
+def _table_sources(shards: list[str], arch: str | None,
+                   cap: int | None) -> tuple[dict[str, TableSource], set]:
+    """Every streamable table of ``arch`` in ``shards`` as wire name ->
+    source, and the names no array can hold: past the device ceiling,
+    or MXFP8 when mlx-kquant cannot hold it."""
     from .table_stream import streamable_table_names
 
     pattern = streamable_table_names(arch)
     if pattern is None:
-        return {}
+        return {}, set()
     cap = max_buffer_bytes() if cap is None else cap
     from gmlx.load.headerscan import scan_gguf
 
     out: dict[str, TableSource] = {}
+    held: set = set()
     for shard in shards:
         h = scan_gguf(shard, array_limit=0)
         for t in h.tensors:
             if not pattern.fullmatch(t.name):
-                continue
-            too_big = cap is not None and t.nbytes > cap
-            if not too_big and not (t.type_name == "MXFP8"
-                                    and not _kq_has("mxfp8")):
                 continue
             rows = int(np.prod(t.shape[1:])) if len(t.shape) > 1 else 1
             codec = _row_codec(t.type_name)
@@ -233,7 +228,57 @@ def oversize_tables(shards: list[str], arch: str | None,
                 path=shard, offset=h.data_offset + t.offset, rows=rows,
                 row_bytes=t.nbytes // rows, codec=codec,
                 dims=int(t.shape[0]) if codec else 0)
-    return out
+            too_big = cap is not None and t.nbytes > cap
+            if too_big or (t.type_name == "MXFP8" and not _kq_has("mxfp8")):
+                held.add(t.name)
+    return out, held
+
+
+def oversize_tables(shards: list[str], arch: str | None,
+                    cap: int | None = None) -> dict[str, TableSource]:
+    """Streamable tables of ``arch`` in ``shards`` that no array can hold,
+    as wire name -> source: those past the device ceiling, and MXFP8
+    ones when mlx-kquant cannot hold them."""
+    sources, held = _table_sources(shards, arch, cap)
+    return {n: s for n, s in sources.items() if n in held}
+
+
+def deferred_tables(shards: list[str], arch: str | None,
+                    cap: int | None = None, *, budget: int | None = None,
+                    latched: bool | None = None,
+                    env=None) -> dict[str, TableSource]:
+    """Streamable tables of ``arch`` in ``shards`` that a load reads from
+    the file, as wire name -> source: the oversize ones, and, on an arch
+    that reads its tables ahead (``table_stream.tables_read_ahead``), all
+    of them when they alone bring the text tensors under the stream
+    budget (``table_stream.tables_bring_under``), so that an over-budget
+    model loads with its experts resident. Under a stream flag
+    (``latched``, read from the latch when None) the install's ladder
+    streams the tables instead. ``budget`` defaults to the device stream
+    budget. A function of the files, the build and the budget: the wire
+    load calls it for the skip list, the model install for the
+    sources."""
+    from .table_stream import latched as table_latch
+    from .table_stream import tables_bring_under, tables_read_ahead
+
+    sources, held = _table_sources(shards, arch, cap)
+    if not sources:
+        return {}
+    if latched is None:
+        latched = table_latch()
+    if (not latched and len(held) < len(sources)
+            and tables_read_ahead(arch)):
+        if budget is None:
+            from gmlx.device import stream_budget_bytes
+
+            budget = stream_budget_bytes()
+        from gmlx.load.discovery import text_tensor_bytes
+
+        text = text_tensor_bytes(shards[0]) if shards else None
+        tbytes = sum(s.nbytes for s in sources.values())
+        if text and tables_bring_under(text, tbytes, budget, env):
+            return sources
+    return {n: s for n, s in sources.items() if n in held}
 
 
 def oversize_names(path: str, cap: int | None = None) -> list[str]:

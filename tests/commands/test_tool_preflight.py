@@ -42,6 +42,19 @@ def test_estimate_math_and_fit(rig):
     assert est["largest_fit_ctx"] > 8192
 
 
+def test_estimate_leaves_out_the_tables_read_from_the_file(rig, monkeypatch):
+    """The load reads a lookup table from the file when no array holds it,
+    or when it alone brings the model under the budget: the weights it
+    maps are the file less that table."""
+    import gmlx.serve.capacity as cap
+
+    path = rig(weights_gb=40.0, ws_gb=30.0)
+    monkeypatch.setattr(cap, "deferred_table_bytes", lambda p, **k: 25 * GB)
+    est = tp.estimate(path)
+    assert est["weights"] == 15 * GB
+    assert est["fits"]
+
+
 def test_estimate_refuses_over_working_set(rig):
     path = rig(weights_gb=30.0, ws_gb=20.0)
     est = tp.estimate(path, ctx_tokens=4096)

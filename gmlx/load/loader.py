@@ -1827,8 +1827,8 @@ def load_model(
 
     # 6. swap leaves with kquant equivalents.
     loadlog.stage("installing quantized weights")
-    from gmlx.stream.table_pread import oversize_tables
-    deferred = oversize_tables(pf.shards, arch)
+    from gmlx.stream.table_pread import deferred_tables
+    deferred = deferred_tables(pf.shards, arch)
     dequant = dequantize_unattachable_leaves(model, hf_weights, hf_kquant_meta)
     if dequant:
         _log(f"[install] dequantized {len(dequant)} raw-array leaves to f32: "

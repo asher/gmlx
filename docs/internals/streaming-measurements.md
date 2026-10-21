@@ -149,7 +149,9 @@ Some architectures have large lookup tables that every token reads a few
 rows of, such as DeepSeek-V4.1-Flash's engram tables. gmlx streams these
 tables too, and the plan shows them as `streamed tables`, outside the
 every-token total. A table too large for a single GPU buffer is read from
-the file row by row, and the load names it on an `[install]` line.
+the file row by row, and so is a DeepSeek-V4.1-Flash table whose bytes
+alone bring the model back under the budget. The load names it on an
+`[install]` line.
 
 ## The lossless settings
 
