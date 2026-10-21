@@ -90,8 +90,7 @@ has to stream, and there a large lookup table streams first. When the
 table alone brings the model under that budget, the experts stay in
 memory. DeepSeek-V4.1-Flash, which reads its engram tables ahead of its
 layers, loads that way without the flag too, with the tables read from
-the file, so a folder scan leaves its entry without `stream: experts` and
-keeps `speculative` on.
+the file, so a folder scan leaves its entry without `stream: experts`.
 
 | Placement | What stays on the GPU | Use it for |
 |-----------|-----------------------|------------|
