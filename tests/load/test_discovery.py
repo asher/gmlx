@@ -562,6 +562,64 @@ def test_scan_mmproj_not_paired_on_weak_prefix(tmp_path, fake_classify):
     assert all(m.mmproj is None for m in by_id.values())
 
 
+# A projector at a repository root over one folder per quant (unsloth's
+# layout) pairs into every quant below it.
+_DS41_IQ2 = "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf"
+_DS41_Q4 = "DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00008.gguf"
+
+
+@pytest.fixture
+def ds41_classify(monkeypatch):
+    def _f(path):
+        name = os.path.basename(path)
+        meta = ({"general.architecture": "clip"} if name.startswith("mmproj")
+                else {"general.architecture": "deepseek41",
+                      "deepseek41.expert_count": 384})
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+def _quant_tree(root, *quants, mmprojs=("mmproj-BF16.gguf", "mmproj-F16.gguf")):
+    _write(root, *mmprojs)
+    for name in quants:
+        sub = root / ("UD-" + name.split("-UD-")[1].split("-")[0])
+        sub.mkdir(exist_ok=True)
+        _write(sub, name)
+    return root
+
+
+def test_root_mmproj_pairs_into_every_quant_folder_of_one_model(
+        tmp_path, ds41_classify):
+    root = _quant_tree(tmp_path, _DS41_IQ2, _DS41_Q4)
+    models = _scan(root, recursive=True)
+    assert sorted(os.path.basename(os.path.dirname(m.path)) for m in models) \
+        == ["UD-IQ2_XXS", "UD-Q4_K_XL"]
+    # the first projector in scan order wins, as beside a model
+    assert all(m.mmproj == str(root / "mmproj-BF16.gguf") for m in models)
+
+
+def test_root_mmproj_unpaired_when_a_quant_folder_holds_another_model(
+        tmp_path, ds41_classify, capsys):
+    other = "DeepSeek-V4.1-Flash-UD-Q4_K_XL-00001-of-00008.gguf"
+    root = _quant_tree(tmp_path, _DS41_IQ2, other)
+    models = _scan(root, recursive=True)
+    assert len(models) == 2 and all(m.mmproj is None for m in models)
+    assert "different models" in capsys.readouterr().err
+
+
+def test_named_root_mmproj_must_match_the_quants(tmp_path, ds41_classify):
+    root = _quant_tree(tmp_path, _DS41_IQ2, _DS41_Q4,
+                       mmprojs=("mmproj-Kimi-K2.7-BF16.gguf",))
+    assert all(m.mmproj is None for m in _scan(root, recursive=True))
+
+
+def test_root_mmproj_unpaired_when_pair_mmproj_is_off(tmp_path, ds41_classify):
+    root = _quant_tree(tmp_path, _DS41_IQ2, _DS41_Q4)
+    models = _scan(root, recursive=True, pair_mmproj=False)
+    assert len(models) == 2 and all(m.mmproj is None for m in models)
+
+
 def test_scan_excludes_embedding_and_reranker(tmp_path, fake_classify):
     root = _write(tmp_path, "Qwen3-Embedding-0.6B-Q4_K_M.gguf",
                   "Qwen3-Reranker-0.6B-Q4_K_M.gguf", "real-chat-Q4_K_M.gguf")

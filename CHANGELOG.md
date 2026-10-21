@@ -16,6 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the activation dtype, whatever the model's default.
 - unsloth's DeepSeek-V4.1-Flash-1017 vision companion (`mmproj-BF16.gguf` or
   `mmproj-F16.gguf`) loads with `--mmproj`, so the 1017 quants read images.
+- A folder scan pairs an `mmproj` file at a repository root with the quants
+  in the folders below it, when they are all one model, as unsloth lays out.
 
 ### Changed
 

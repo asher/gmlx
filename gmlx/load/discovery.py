@@ -4,7 +4,8 @@ Walks one or more directories, reads each GGUF's *header* (architecture +
 ``nextn_predict_layers``, never tensor data), and classifies it as a servable
 **model**, a VLM **mmproj** companion, or an assistant **drafter**. Synthesizes a
 friendly, deterministic id from each model's filename, pairs sibling mmproj files
-into VLM entries, and emits a starter YAML config.
+(or a parent folder's, over quant folders of one model) into VLM entries, and
+emits a starter YAML config.
 
 Classification (header-only):
 
@@ -750,7 +751,9 @@ def scan_dirs(
     A sibling assistant drafter pairs into the models it can serve as their
     ``draft_gguf`` (see :func:`_drafter_targets`), which also turns
     ``speculative`` on. Sibling mmproj files pair into the model they best match when
-    ``pair_mmproj``. Every id carries its quant codec (see :func:`_assign_ids`).
+    ``pair_mmproj``, and one with no model beside it pairs into the models one
+    folder down when they are all one model (see :func:`_pair_parent_mmproj`).
+    Every id carries its quant codec (see :func:`_assign_ids`).
     ``known_ids`` /
     ``known_paths`` (from configured ``models:``) are skipped/deduped against, as
     are paths an earlier spec/root in this same call already emitted.
@@ -1238,6 +1241,9 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                     not targets or dr.drafter_kind == "dflash2"):
                 cross.append(dr)
 
+    if spec.pair_mmproj:
+        _pair_parent_mmproj(by_dir, all_made, configured)
+
     # Cross-directory pass: a drafter that declares its base model (a DFlash 2
     # header does), or sits in a marked sibling repo of its target's, pairs
     # with that model wherever the scan found it, and a
@@ -1324,10 +1330,8 @@ def _best_mmproj_target(mm: ClassifiedGguf, made):
       match is exactly what mis-paired projectors onto unrelated models before."""
     if not made:
         return None
-    core, _ = derive_id(os.path.basename(mm.path))   # markers (mmproj) stripped
-    # llama.cpp's conversion default is mmproj-model-f16.gguf: a residual
-    # core of "model" is the generic-name case, not a model called "model".
-    if not core or core == "model":                  # generic projector, no name
+    core = _mmproj_name(mm)
+    if not core:                                     # generic projector, no name
         if len(made) == 1:
             return made[0][0]
         print(f"[discover] mmproj unpaired (ambiguous; several models): "
@@ -1338,11 +1342,65 @@ def _best_mmproj_target(mm: ClassifiedGguf, made):
         n = _common_prefix_len(core, mc.id)
         if n > best_len:
             best, best_len = mc, n
-    if best is not None and best_len >= max(6, int(0.7 * len(core))):
+    if best is not None and _mmproj_name_matches(core, best.id):
         return best
     print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
           f"{mm.path}", file=sys.stderr)
     return None
+
+
+def _mmproj_name(mm: ClassifiedGguf) -> str:
+    """The model name in a projector's filename, ``""`` for a generic one."""
+    core, _ = derive_id(os.path.basename(mm.path))   # markers (mmproj) stripped
+    # llama.cpp's conversion default is mmproj-model-f16.gguf: a residual
+    # core of "model" is the generic-name case, not a model called "model".
+    return "" if core == "model" else core
+
+
+def _mmproj_name_matches(core: str, model_id: str) -> bool:
+    """A named projector matches a model when their shared id prefix covers
+    most of the projector's name (>=70%, >=6 chars)."""
+    return _common_prefix_len(core, model_id) >= max(6, int(0.7 * len(core)))
+
+
+def _pair_parent_mmproj(by_dir, made, configured) -> None:
+    """Pair a projector with no model beside it into the models one folder
+    down, when every model there is the same one: a repository that keeps
+    each quant in its own folder and the projector at its root, as
+    unsloth's do. Only models this scan made get it; configured entries
+    are never changed. Several projectors: the first in scan order wins,
+    as beside a model."""
+    for parent, group in sorted(by_dir.items()):
+        mmprojs = [c for c in group if c.kind == "mmproj"]
+        if (not mmprojs or any(c.kind == "model" for c in group)
+                or _configured_in_dir(parent, configured)):
+            continue
+        targets = [mc for mc, c in made
+                   if os.path.dirname(os.path.dirname(c.path)) == parent]
+        if not targets:
+            continue
+        below = [c for d, g in by_dir.items() if os.path.dirname(d) == parent
+                 for c in g if c.kind == "model"]
+        below += [c for ap in configured
+                  if os.path.dirname(os.path.dirname(ap)) == parent
+                  for c in [classify_gguf(ap)]
+                  if c is not None and c.kind == "model"]
+        names = {(c.arch, derive_id(os.path.basename(c.path))[0])
+                 for c in below}
+        for mm in mmprojs:
+            if len(names) > 1:
+                print(f"[discover] mmproj unpaired (the folders below hold "
+                      f"different models): {mm.path}", file=sys.stderr)
+                continue
+            core = _mmproj_name(mm)
+            hits = [mc for mc in targets
+                    if not core or _mmproj_name_matches(core, mc.id)]
+            if not hits:
+                print(f"[discover] mmproj unpaired (no model name matches "
+                      f"{core!r}): {mm.path}", file=sys.stderr)
+            for mc in hits:
+                if mc.mmproj is None:
+                    mc.mmproj = mm.path
 
 
 def _configured_in_dir(dirpath: str, configured) -> list:

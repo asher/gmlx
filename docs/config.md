@@ -518,8 +518,14 @@ already has. `gmlx list` shows the names.
 |-----|---------|---------|
 | <a id="discoverdir"></a>`dir` | `null` | The folder to scan. `null` scans every folder in `server.model_dirs`. |
 | <a id="discoverrecursive"></a>`recursive` | `false` | Also scan subfolders |
-| <a id="discoverpair_mmproj"></a>`pair_mmproj` | `true` | Pair each `mmproj*.gguf` with the model in the same folder that it matches |
+| <a id="discoverpair_mmproj"></a>`pair_mmproj` | `true` | Pair each `mmproj*.gguf` with the model in the same folder that it matches, or with the quant folders below it |
 | <a id="discoverspeculative"></a>`speculative` | `auto` | `auto` and `true` turn on speculative decoding for models with an MTP head, and pair drafters. `false` never does. |
+
+A companion with no model beside it pairs with every model in the folders
+one level down when they are all quants of one model, the layout of
+repositories that keep each quant in its own folder. A named companion,
+such as `mmproj-Qwen3.8-27B-BF16.gguf`, must also match the model's name.
+When a folder holds several companions, the first by file name wins.
 
 A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
 
