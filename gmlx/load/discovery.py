@@ -1127,11 +1127,12 @@ def text_tensor_bytes(path: str) -> int | None:
 def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
     """``(resident bytes, budget)`` when the model is over the stream
     budget, else None. The resident bytes are the text bytes less the
-    lookup tables a load reads from the file (``deferred_table_bytes``):
-    a table no array holds, or one whose bytes alone bring the model
-    under the budget, so that model loads with its experts resident and
-    keeps ``speculative``. The file size bounds the text bytes, so only a
-    file over the budget pays for the tensor-table scan."""
+    lookup tables a load reads from the file, on an arch that reads them
+    ahead of its layers (``deferred_table_bytes``): a table no array
+    holds, or one whose bytes alone bring the model under the budget, so
+    that model loads with its experts resident. The file size bounds the
+    text bytes, so only a file over the budget pays for the tensor-table
+    scan."""
     total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()
     if not total or not budget or total <= budget:
         return None

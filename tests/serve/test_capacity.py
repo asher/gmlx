@@ -677,3 +677,34 @@ def test_discovery_preflight_and_serve_read_the_table_rule_alike(
     assert _plain_footprint(path, text + 10**6) == resident + 10**6
     assert cap.predicted_stream_bytes(path) == (
         table, int(experts) if must_stream else 0)
+
+
+def test_a_table_the_arch_does_not_read_ahead_keeps_the_mark(monkeypatch):
+    """A qwen3.8-flash-next quant on a 36 GB Mac: its 28.8 GB per-layer
+    embedding table is past the 24.4 GB buffer ceiling and is read from
+    the file, and the other 20 GB fit the 26.1 GB budget. The arch does
+    not read the table ahead of its layers, so the resident figure keeps
+    the table and discovery marks the model, as before."""
+    from types import SimpleNamespace
+
+    import gmlx.load.discovery as disc
+    import gmlx.load.headerscan as hs
+    import gmlx.load.preflight as pre
+    import gmlx.stream.table_pread as tpr
+
+    name, path = "per_layer_token_embd.weight", "/m/QN-Q2_K.gguf"
+    table, rest, budget = int(28.8 * GB), int(20 * GB), int(26.1 * GB)
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
+    monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
+        kv={"general.architecture": "qwen4exp"}))
+    monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
+        {name: SimpleNamespace(nbytes=table)}, {name}))
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: rest + table)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: rest + table)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: budget)
+    assert cap.deferred_table_bytes(path) == 0
+    assert cap.held_table_bytes(path) == table
+    entry = disc.ClassifiedGguf(path, "model", "qwen4_exp", False, "Q2_K",
+                                True)
+    assert disc._over_budget(entry) == (rest + table, budget)

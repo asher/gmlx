@@ -540,18 +540,20 @@ def _table_shards(gguf_path: str) -> tuple[list[str], str | None]:
 def deferred_table_bytes(gguf_path: str, budget: int | None = None,
                          env=None) -> int:
     """Bytes of the arch's streamable tables a load without a stream flag
-    reads from the file instead of holding: those no array can hold, and
-    all of them when they alone bring the text tensors under the stream
-    budget (``budget``, the device's when None). The figure discovery,
-    the run preflight and the serve footprint take off the file bytes of
-    a model they would load resident; ``table_pread.deferred_tables`` is
-    the loader's side of the same rule. 0 when the header cannot be
-    read."""
+    reads from the file instead of holding, on an arch that reads its
+    tables ahead (``table_stream.tables_read_ahead``): those no array can
+    hold, and all of them when they alone bring the text tensors under
+    the stream budget (``budget``, the device's when None). The figure
+    discovery, the run preflight and the serve footprint take off the
+    file bytes of a model they would load resident;
+    ``table_pread.deferred_tables`` is the loader's side of the same rule.
+    0 on another arch, or when the header cannot be read."""
     try:
         from gmlx.stream.table_pread import deferred_tables
+        from gmlx.stream.table_stream import tables_read_ahead
 
         shards, arch = _table_shards(gguf_path)
-        if not shards:
+        if not shards or not tables_read_ahead(arch):
             return 0
         sources = deferred_tables(shards, arch, budget=budget,
                                   latched=False, env=env)
