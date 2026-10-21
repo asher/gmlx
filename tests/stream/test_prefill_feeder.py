@@ -331,15 +331,20 @@ def test_ring_bytes_is_twice_the_largest_layer(tmp_path):
 
 
 def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
-    """Every pread lands page-aligned; the bytes match a plain read for
-    ranges that start, end, or sit inside a page, and at the file tail."""
+    """Every pread has a page-aligned file offset and destination, the
+    kernel's direct path. A ring slot is page-aligned but a GGUF stack
+    starts on a 32-byte boundary, and a read into the slot at that phase
+    goes through the page cache. The bytes match a plain read for ranges
+    that start, end, or sit inside a page, at the file tail, and into a
+    destination at any phase."""
     import mmap
     import os
 
+    import gmlx.stream.feeder_common as fc
     from gmlx.stream.feeder_common import read_range, read_range_aligned
 
     page = mmap.PAGESIZE
-    data = os.urandom(5 * page + 123)
+    data = os.urandom(9 * page + 123)
     path = tmp_path / "f.bin"
     path.write_bytes(data)
     fd = os.open(path, os.O_RDONLY)
@@ -347,24 +352,35 @@ def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
     real = os.preadv
 
     def spy(fd_, bufs, off):
-        seen.append((off, sum(len(b) for b in bufs)))
+        for b in bufs:
+            seen.append((off, len(b), np.frombuffer(b, np.uint8).ctypes.data))
         return real(fd_, bufs, off)
 
     monkeypatch.setattr(os, "preadv", spy)
+    # Small bounce reads, so one range takes several.
+    monkeypatch.setattr(fc, "_BOUNCE_BYTES", 2 * page, raising=False)
+    slot = mmap.mmap(-1, 12 * page)
     try:
         for off, n in [(0, page), (7, 100), (page - 5, 10), (page + 3, 2 * page + 9),
                        (0, len(data)), (len(data) - 50, 50), (page, page),
-                       (3, 0), (4 * page + 100, page + 23)]:
+                       (3, 0), (4 * page + 100, page + 23), (32, 7 * page),
+                       (page + 64, len(data) - page - 64)]:
             want = bytearray(n)
             read_range(fd, memoryview(want), off)
-            seen.clear()
-            got = bytearray(n)
-            read_range_aligned(fd, memoryview(got), off, len(data))
-            assert got == want == data[off:off + n]
-            for o, ln in seen:
-                assert o % page == 0
-                assert ln % page == 0 or o + ln == len(data)
+            for phase in (0, off % page, 96):
+                if phase + n > len(slot):
+                    continue
+                seen.clear()
+                got = memoryview(slot)[phase:phase + n]
+                read_range_aligned(fd, got, off, len(data))
+                assert bytes(got) == want == data[off:off + n]
+                got.release()
+                for o, ln, addr in seen:
+                    assert o % page == 0
+                    assert addr % page == 0
+                    assert ln % page == 0 or o + ln == len(data)
     finally:
+        slot.close()
         os.close(fd)
 
 

@@ -37,12 +37,30 @@ def copy_experts(dst, src, pairs, stride: int) -> None:
                   src[e * stride:(e + 1) * stride])
 
 
+# Largest read through the bounce buffer. The copy out of it costs far
+# less than the read.
+_BOUNCE_BYTES = 16 << 20
+_bounce = threading.local()
+
+
+def _bounce_buffer(nbytes: int) -> memoryview:
+    """This thread's page-aligned bounce buffer, ``nbytes`` long."""
+    buf = getattr(_bounce, "buf", None)
+    if buf is None or len(buf) < nbytes:
+        buf = _bounce.buf = mmap.mmap(-1, max(nbytes, mmap.PAGESIZE))
+    return memoryview(buf)[:nbytes]
+
+
 def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
-    """``read_range`` with every pread page-aligned. The kernel services
-    an F_NOCACHE read at an unaligned offset through the page cache, and
-    that path can wedge under pressure (see decode_feeder). The aligned
-    middle lands in ``mv`` directly; the head and tail partial pages go
-    through a scratch page."""
+    """``read_range`` with every pread on the kernel's direct path: the
+    file offset and the destination address page-aligned. An F_NOCACHE
+    read that misses either is served through the page cache. A prefill
+    ring pass then fills the cache at drive speed and the kernel
+    compresses other memory to make room, and that path can wedge under
+    pressure (see decode_feeder). The whole pages land in ``mv`` directly
+    when ``mv`` and ``off`` share a page phase; the rest goes through a
+    page-aligned bounce buffer per thread."""
+    mv = memoryview(mv).cast("B")
     n = len(mv)
     if n == 0:
         return
@@ -50,27 +68,22 @@ def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
     end = off + n
     a = off & ~(page - 1)
     b = min((end + page - 1) & ~(page - 1), file_size)
-    if a == off and b == end:
-        read_range(fd, mv, off)
-        return
-    head = off - a
-    a_in = a + page if head else a
-    if a_in >= end:
-        buf = bytearray(b - a)
-        read_range(fd, memoryview(buf), a)
-        mv[:] = buf[head:head + n]
-        return
-    if head:
-        buf = bytearray(page)
-        read_range(fd, memoryview(buf), a)
-        mv[:a_in - off] = buf[head:]
-    b_in = end & ~(page - 1)
-    if b_in > a_in:
-        read_range(fd, mv[a_in - off:b_in - off], a_in)
-    if b_in < end:
-        buf = bytearray(b - b_in)
-        read_range(fd, memoryview(buf), b_in)
-        mv[b_in - off:] = buf[:end - b_in]
+    dst = np.frombuffer(mv, dtype=np.uint8)
+    pieces = [(a, b)]
+    if (dst.ctypes.data - off) % page == 0:
+        d0 = (off + page - 1) & ~(page - 1)
+        d1 = end & ~(page - 1)
+        if d1 > d0:
+            read_range(fd, mv[d0 - off:d1 - off], d0)
+            pieces = [(a, d0), (d1, b)]
+    for p0, p1 in pieces:
+        for pos in range(p0, p1, _BOUNCE_BYTES):
+            stop = min(pos + _BOUNCE_BYTES, p1)
+            buf = _bounce_buffer(stop - pos)
+            read_range(fd, buf, pos)
+            lo, hi = max(pos, off), min(stop, end)
+            np.copyto(dst[lo - off:hi - off],
+                      np.frombuffer(buf, dtype=np.uint8)[lo - pos:hi - pos])
 
 
 def lock_pages(mv) -> tuple[int, int] | None:

@@ -35,6 +35,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With `--stream-experts`, a prompt of more than 64 tokens filled the file
+  cache as it prefilled, and macOS compressed other apps' memory to make room.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
   table, larger than a GPU buffer, is read from the file, and MXFP8 tables
   are told apart from STQ1_0 weights, which share the same GGUF type id.
