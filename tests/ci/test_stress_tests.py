@@ -1,5 +1,6 @@
 """scripts/stress_tests.py: a round that runs no test is a failure, and a
-stall never resumes a stopped process or overlaps a test's stop."""
+stall shows no parent a stop, never resumes a stopped process and never
+overlaps a test's stop."""
 from __future__ import annotations
 
 import fcntl
@@ -71,6 +72,31 @@ def test_a_round_gives_its_staller_and_its_tests_one_lock_and_removes_it(
     assert len(given) == 1 and given[0] is not None
     assert seen.read_text() == str(given[0])
     assert not Path(given[0]).exists()
+
+
+# pid: (parent, name). A test process runs a main entry, whose client has a
+# child of its own, and an entry that the main entry started.
+_PROCS = {1: (0, ""), 10: (1, "python3.14"), 20: (10, "gmlx-entry"), 30: (20, "python3.14"),
+          40: (30, "sleep"), 50: (20, "gmlx-entry"), 60: (50, "sh")}
+
+
+def test_a_stall_stops_a_process_alone_unless_a_guest_entry_would_see_it():
+    """The entry reaps with WUNTRACED, so it would see a stopped child, which
+    a busy machine never shows. No other process here sees a stop."""
+    assert stress.stalled(_PROCS, 40) == [40]            # the client sees no stop of its child
+    assert stress.stalled(_PROCS, 30) == [20, 30]        # the entry would, so it stops first
+    assert stress.stalled(_PROCS, 20) == [20]            # the test process sees no stop
+    assert stress.stalled(_PROCS, 60) == [20, 50, 60]    # each entry above it, from the top
+    assert stress.stalled(_PROCS, 1) == [1]
+
+
+def test_the_tree_names_each_process_by_its_program():
+    child = subprocess.Popen(["sleep", "60"])
+    try:
+        assert stress.tree(os.getpid())[child.pid] == (os.getpid(), "sleep")
+    finally:
+        child.kill()
+        child.wait()
 
 
 def _until(check, timeout: float = 10.0) -> None:

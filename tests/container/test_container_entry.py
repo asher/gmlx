@@ -639,9 +639,10 @@ def _state(pid: int) -> str:
 def _no_stall():
     """Holds the lock of scripts/stress_tests.py's staller, so no stall is
     under way. The kernel drops a stop sent to a process that a stall holds
-    stopped, such as the SIGTSTP of a Ctrl-Z, and the stall's SIGCONT would
-    undo a stop sent before it. The terminal posts that SIGTSTP before the
-    write of the Ctrl-Z returns, so the lock covers it."""
+    stopped, such as the SIGTSTP of a Ctrl-Z. A stall's SIGCONT undoes a
+    stop that has taken effect, and discards one still pending, as a
+    SIGTSTP is until its process runs or unblocks it. So a test holds the
+    lock from the stop until it sees what the stop did."""
     path = os.environ.get("GMLX_STRESS_LOCK")
     if not path:
         yield
@@ -1236,9 +1237,9 @@ def test_ctrl_z_and_sigstop_cannot_suspend_the_client(entry):
     try:
         with _no_stall():
             os.write(master, b"\x1a")             # Ctrl-Z
-        out = _read_until(master, RESUMED + b"\r\n", seen=out)
-        os.write(master, b"\n")
-        out = _read_until(master, b"resumed\r\n", seen=out)
+            out = _read_until(master, RESUMED + b"\r\n", seen=out)
+            os.write(master, b"\n")
+            out = _read_until(master, b"resumed\r\n", seen=out)
         assert init.wait(10) == 5
         assert out.count(RESUMED) == 1            # once for each client
     finally:
@@ -1256,8 +1257,8 @@ def test_ctrl_z_cannot_suspend_the_main_entry_while_it_waits_for_copies(entry):
         _read_until(master, b"stays open")
         with _no_stall():
             os.write(master, b"\x1a")             # Ctrl-Z now reaches the entry's group
-        _read_until(master, b"[launch] Ctrl-Z cannot suspend this session. Press Ctrl-C twice "
-                            b"to end it, which stops the other copy.\r\n")
+            _read_until(master, b"[launch] Ctrl-Z cannot suspend this session. Press Ctrl-C "
+                                b"twice to end it, which stops the other copy.\r\n")
         _send(copy)
         assert copy.wait(10) == 0
         assert init.wait(10) == 3
@@ -1271,16 +1272,17 @@ def test_a_stop_of_the_entrys_own_group_stops_neither(entry):
     itself, and the entry resumes it."""
     if shutil.which("ps") is None:
         pytest.skip("needs ps")
-    init, master, (client, main, group), out = _in_terminal(
-        entry, BACKGROUND, "sh", "-c",
-        "echo pid $$ $PPID $(ps -o pgid= -p $$); kill -TSTP 0; echo resumed; exit 6")
-    try:
-        assert group == main
-        out = _read_until(master, b"resumed\r\n", seen=out)
-        assert RESUMED in out
-        assert init.wait(10) == 6
-    finally:
-        _end(init, master, client, main)
+    with _no_stall():                             # the client stops as it starts
+        init, master, (client, main, group), out = _in_terminal(
+            entry, BACKGROUND, "sh", "-c",
+            "echo pid $$ $PPID $(ps -o pgid= -p $$); kill -TSTP 0; echo resumed; exit 6")
+        try:
+            assert group == main
+            out = _read_until(master, b"resumed\r\n", seen=out)
+            assert RESUMED in out
+            assert init.wait(10) == 6
+        finally:
+            _end(init, master, client, main)
 
 
 READER = """

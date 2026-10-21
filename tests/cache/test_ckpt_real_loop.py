@@ -15,7 +15,7 @@ import pytest
 import gmlx.gen.prefill_decay as pd
 import gmlx.spec.ckpt as ckpt
 import prefill_loop
-from prefill_loop import Model, cost, install, run
+from prefill_loop import Model, cost, install, run, stock_batch_class
 
 ROT = ("rot:2048:0", "kv")
 KVARN = ("rot:2048:0", "kvarn:4:4:64")
@@ -384,3 +384,25 @@ def test_a_pricing_failure_arms_mains_schedule(loop, monkeypatch):
     assert head["meta"] == main["meta"]
     assert head["chunks"] == main["chunks"]
     assert loop.stored == want
+
+
+def _flat_mtp(monkeypatch, decay_first: bool):
+    """The chunks and checkpoint boundaries of a flat MTP prefill under
+    main's schedule, on an install chain built in this order."""
+    stock_batch_class(monkeypatch)
+    if decay_first:
+        assert pd.install_prefill_decay()
+    state, stored = {"p": 24769, "sys": None}, []
+    install(monkeypatch, state, stored)
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    cap, mt = CONFIGS["flat"]
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", cap)
+    out = run(monkeypatch, Model(ROT, mt=mt), 24783, 7299, mtp=True, arm=main_arm)
+    return out["chunks"], _bounds(out)
+
+
+def test_the_mtp_prefill_takes_the_decayed_step_in_either_install_order(monkeypatch):
+    """Serve installs the MTP prefill before its first load installs the
+    decay. A process that loaded a model first, such as a test worker, runs
+    the same prefill."""
+    assert _flat_mtp(monkeypatch, decay_first=True) == _flat_mtp(monkeypatch, decay_first=False)

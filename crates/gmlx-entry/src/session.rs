@@ -394,8 +394,8 @@ extern "C" fn record(sig: libc::c_int) {
 /// client starts with the default actions.
 pub fn block_signals() {
     for sig in waited_list() {
-        // SAFETY: the handler only sets a bit, and it runs only inside the
-        // sigsuspend of next_signal.
+        // SAFETY: the handler only sets a bit, and it runs only while
+        // next_signal has the waited signals open.
         unsafe { libc::signal(sig, record as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
     let set = waited();
@@ -407,6 +407,7 @@ pub fn block_signals() {
 /// not sigwait: on macOS, a sigwait that a stop and continue interrupts
 /// returns the lowest waited signal, SIGHUP, which never came.
 pub fn next_signal() -> libc::c_int {
+    let waited = waited();
     let mut open = MaybeUninit::<libc::sigset_t>::uninit();
     // SAFETY: with no new set, the call only writes the current mask to open.
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), open.as_mut_ptr()) };
@@ -423,9 +424,14 @@ pub fn next_signal() -> libc::c_int {
             PENDING.fetch_and(!bit(sig), Ordering::SeqCst);
             return sig;
         }
-        // SAFETY: open is initialized. The handlers of the signals that
-        // come run before sigsuspend returns.
+        // SAFETY: open is initialized.
         unsafe { libc::sigsuspend(&open) };
+        // On macOS, the stop or exit of a child can end sigsuspend before
+        // its SIGCHLD comes, and the mask stays open. The handler of that
+        // SIGCHLD could then run after the check above, and the next
+        // sigsuspend would wait for a signal that has come.
+        // SAFETY: waited is initialized.
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &waited, ptr::null_mut()) };
     }
 }
 
@@ -1003,6 +1009,92 @@ mod tests {
         }
         assert_eq!(code, Some(7));
         assert!(RESUMED.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// The running threads and the context switches of the process `pid`.
+    #[cfg(target_os = "macos")]
+    fn task(pid: libc::pid_t) -> (i32, i32) {
+        let mut info = MaybeUninit::<libc::proc_taskinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        // SAFETY: info has room for size bytes.
+        let got = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), size)
+        };
+        // SAFETY: zeroed is a valid proc_taskinfo, and the call fills it.
+        let info = unsafe { info.assume_init() };
+        if got == size { (info.pti_numrunning, info.pti_csw) } else { (-1, -1) }
+    }
+
+    /// Forks a child that runs `f` and exits.
+    #[cfg(target_os = "macos")]
+    fn fork_running(f: impl FnOnce()) -> libc::pid_t {
+        // SAFETY: the child runs f in its only thread and exits at once.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            f();
+            // SAFETY: _exit has no memory-safety preconditions.
+            unsafe { libc::_exit(0) };
+        }
+        pid
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn next_signal_blocks_the_waited_signals_after_a_wakeup_with_no_signal() {
+        // On macOS, the stop of a child ends the sigsuspend of its parent
+        // before the SIGCHLD comes, and the mask stays open. SA_NOCLDSTOP
+        // keeps that SIGCHLD away, so the stop only wakes the entry, and a
+        // SIGTERM ends the sigsuspend that follows.
+        let _forks = forking();
+        let entry = fork_running(|| {
+            block_signals();
+            // SAFETY: act is zeroed and then filled before the call.
+            unsafe {
+                let mut act: libc::sigaction = std::mem::zeroed();
+                act.sa_sigaction = record as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                act.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
+                libc::sigaction(libc::SIGCHLD, &act, ptr::null_mut());
+            }
+            // SAFETY: getpid and pause have no memory-safety preconditions.
+            let me = unsafe { libc::getpid() };
+            let child = fork_running(|| loop {
+                unsafe { libc::pause() };
+            });
+            fork_running(move || {
+                let until = |done: &dyn Fn((i32, i32)) -> bool| {
+                    let end = Instant::now() + Duration::from_secs(30);
+                    while !done(task(me)) {
+                        if Instant::now() > end {
+                            forward(me, libc::SIGKILL);
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                };
+                until(&|(running, _)| running == 0);
+                let switches = task(me).1;
+                forward(child, libc::SIGSTOP);
+                // The entry has run since, and waits again.
+                until(&|(running, now)| running == 0 && now != switches);
+                forward(me, libc::SIGTERM);
+            });
+            next_signal();
+            let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+            // SAFETY: with no new set, the call only writes the current mask.
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), mask.as_mut_ptr()) };
+            // SAFETY: the call above wrote mask.
+            let mask = unsafe { mask.assume_init() };
+            // SAFETY: mask is initialized.
+            let open = waited_list().into_iter()
+                .filter(|&sig| unsafe { libc::sigismember(&mask, sig) } != 1).count();
+            forward(child, libc::SIGKILL);
+            // SAFETY: _exit has no memory-safety preconditions.
+            unsafe { libc::_exit(if open == 0 { 0 } else { 1 }) };
+        });
+        let mut status = 0;
+        // SAFETY: status is valid for the call.
+        unsafe { libc::waitpid(entry, &mut status, 0) };
+        assert!(libc::WIFEXITED(status), "the entry got signal {}", libc::WTERMSIG(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0, "the waited signals stayed open");
     }
 
     #[test]
