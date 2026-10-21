@@ -209,6 +209,8 @@ def _ref_model(model, tokens, args):
     return np.tanh(out / cap) * cap
 
 
+# M5 f32 GEMM runs at TF32 precision by default (up to ~3e-3 of scale here);
+# a wrong window, query scale or layer index moves the output 5e-2 or more.
 def _rel(a, b):
     return float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-12))
 
@@ -221,15 +223,15 @@ def test_full_model_matches_reference_across_the_window():
     tokens = np.array([5, 17, 2, 40, 33, 8, 21, 11, 30])
     got = _np(model(mx.array(tokens)[None])[0])
     want = _ref_model(model, tokens, args)
-    assert _rel(got, want) < 1e-4
+    assert _rel(got, want) < 1e-2
     # The reference is sensitive to the window and to the query scale.
     for layer in model.layers:
         layer.use_sliding = False
-    assert _rel(_ref_model(model, tokens, args), want) > 1e-2
+    assert _rel(_ref_model(model, tokens, args), want) > 5e-2
     for layer, kind in zip(model.layers, _LAYER_TYPES):
         layer.use_sliding = kind == "sliding_attention"
     flat = _ref_model(model, tokens, _tiny_args(attn_temperature_scale=1e-9))
-    assert _rel(flat, want) > 1e-3
+    assert _rel(flat, want) > 5e-2
 
 
 def test_layers_match_reference_at_depth():
@@ -249,9 +251,9 @@ def test_layers_match_reference_at_depth():
         got = _np(layer(mx.array(x.astype(np.float32))[None], mask, None,
                         q_scale)[0])
         want = _ref_layer(layer, x, args, il)
-        assert _rel(got, want) < 1e-4, il
+        assert _rel(got, want) < 5e-3, il
         other = _ref_layer(layer, x, args, il + 1)
-        assert _rel(other, want) > 1e-3, il
+        assert _rel(other, want) > 2e-2, il
 
 
 def test_cached_decode_matches_full_forward():
@@ -265,7 +267,7 @@ def test_cached_decode_matches_full_forward():
     mx.eval(full, steps)
     for n, s in enumerate(steps):
         np.testing.assert_allclose(
-            _np(s[0, 0]), _np(full[0, 3 + n]), rtol=1e-4, atol=1e-4
+            _np(s[0, 0]), _np(full[0, 3 + n]), rtol=0, atol=1.5e-2
         )
 
 
@@ -315,7 +317,7 @@ def test_grouped_selection_masks_dropped_groups_to_minus_inf():
     np.testing.assert_allclose(
         np.take_along_axis(_np(w[0]), order, axis=-1),
         np.take_along_axis(want_w, np.argsort(want, axis=-1), axis=-1),
-        rtol=1e-5)
+        rtol=1e-3)
 
 
 def test_top_k_is_read_from_the_gate_at_call_time():
@@ -390,9 +392,9 @@ def test_left_padded_batch_matches_unpadded_rows():
     ref = model(mx.array([short]), cache=alone)
     ref_step = model(mx.array([[3]]), cache=alone)
     np.testing.assert_allclose(_np(out[0, pad:]), _np(ref[0]),
-                               rtol=1e-3, atol=1e-3)
+                               rtol=0, atol=2e-2)
     np.testing.assert_allclose(_np(step[0]), _np(ref_step[0]),
-                               rtol=1e-3, atol=1e-3)
+                               rtol=0, atol=2e-2)
 
 
 def test_sliding_layers_get_a_rotating_cache():
