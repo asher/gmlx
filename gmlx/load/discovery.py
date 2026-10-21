@@ -1252,19 +1252,19 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             # scanned ones pair as they would without it.
             old_mm = _configured_in_dir(_dir, configured) if mms else []
             for mm in mms:
-                tgt = _best_mmproj_target(mm, made)
-                if tgt is not None and tgt.mmproj is None:
-                    tgt.mmproj = mm.path
+                for tgt in _mmproj_targets(mm, made):
+                    if tgt.mmproj is None:
+                        tgt.mmproj = mm.path
                 if old_mm:
                     # Quiet when the call above said why already, or when
                     # an entry here names an mmproj: the user chose.
-                    tgt = _best_mmproj_target(
-                        mm, made + old_mm,
-                        quiet=bool(made) or any(mc.mmproj for mc, _c in old_mm))
-                    if (any(tgt is mc for mc, _c in old_mm)
-                            and tgt.mmproj is None
-                            and tgt.id not in mmproj_pairs):
-                        mmproj_pairs[tgt.id] = mm.path
+                    for tgt in _mmproj_targets(
+                            mm, made + old_mm,
+                            quiet=bool(made) or any(mc.mmproj for mc, _c in old_mm)):
+                        if (any(tgt is mc for mc, _c in old_mm)
+                                and tgt.mmproj is None
+                                and tgt.id not in mmproj_pairs):
+                            mmproj_pairs[tgt.id] = mm.path
 
         drafters = [c for c in group if c.kind == "drafter"]
         # The usual case: the target is configured already, so it is not in
@@ -1374,13 +1374,14 @@ def _assign_ids(models, used_ids: set) -> dict[str, str]:
     return assigned
 
 
-def _best_mmproj_target(mm: ClassifiedGguf, made, *, quiet=False):
-    """Pick the model a sibling mmproj belongs to. ``None`` if no confident match
-    (logged). Two cases:
+def _mmproj_targets(mm: ClassifiedGguf, made, *, quiet=False) -> list:
+    """The models a sibling mmproj belongs to: each quant in ``made`` of the
+    model it picks. ``[]`` if no confident match (logged). Two cases:
 
     * A **generic** projector name (``mmproj-F16.gguf`` -> no model name once the
-      ``mmproj`` / codec markers are stripped) carries no signal, so it pairs to
-      the sole model in the directory - and stays unpaired if there are several.
+      ``mmproj`` / codec markers are stripped) carries no signal, so it pairs
+      when the models in the directory are all quants of one model, and stays
+      unpaired when they are several models.
     * A **named** projector (``mmproj-Qwen2-VL-2B-Instruct-f16``) must actually
       match a model: the shared id-prefix has to cover most of the projector's
       name (>=70%, >=6 chars). A bare family overlap like ``qwen`` between a
@@ -1390,38 +1391,49 @@ def _best_mmproj_target(mm: ClassifiedGguf, made, *, quiet=False):
     A projector whose header gives another hidden size than the header of
     the model it picks stays unpaired."""
     if not made:
-        return None
+        return []
     core = _mmproj_name(mm)
     if not core:                                     # generic projector, no name
-        if len(made) == 1:
-            return _same_width(mm, *made[0], quiet=quiet)
+        if len({_model_name(c) for _mc, c in made}) == 1:
+            return _same_width(mm, made, quiet=quiet)
         if not quiet:
             print(f"[discover] mmproj unpaired (ambiguous; several models): "
                   f"{mm.path}", file=sys.stderr)
-        return None
+        return []
     best, best_c, best_len = None, None, 0
     for mc, c in made:
         n = _common_prefix_len(core, mc.id)
         if n > best_len:
             best, best_c, best_len = mc, c, n
-    if best is not None and _mmproj_name_matches(core, best.id):
-        return _same_width(mm, best, best_c, quiet=quiet)
+    if best is not None and best_c is not None \
+            and _mmproj_name_matches(core, best.id):
+        return _same_width(mm, [(mc, c) for mc, c in made
+                                if _model_name(c) == _model_name(best_c)],
+                           quiet=quiet)
     if not quiet:
         print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
               f"{mm.path}", file=sys.stderr)
-    return None
+    return []
 
 
-def _same_width(mm: ClassifiedGguf, mc, c, *, quiet=False):
-    """``mc``, or ``None`` (logged) when the projector's header gives
-    another hidden size than the header ``c`` of its model."""
-    if mm.n_embd and c.n_embd and mm.n_embd != c.n_embd:
-        if not quiet:
-            print(f"[discover] mmproj unpaired (it projects to a hidden size "
-                  f"of {mm.n_embd}, {mc.id} has {c.n_embd}): {mm.path}",
-                  file=sys.stderr)
-        return None
-    return mc
+def _model_name(c: ClassifiedGguf) -> tuple:
+    """A model's arch, file name past its quant and hidden size: one value
+    for all the quants of one model."""
+    return c.arch, derive_id(os.path.basename(c.path))[0], c.n_embd
+
+
+def _same_width(mm: ClassifiedGguf, made, *, quiet=False) -> list:
+    """The models of ``made`` but those whose header gives another hidden
+    size than the projector's (logged)."""
+    off = [(mc, c) for mc, c in made
+           if mm.n_embd and c.n_embd and mm.n_embd != c.n_embd]
+    if off and not quiet:
+        print(f"[discover] mmproj unpaired (it projects to a hidden size "
+              f"of {mm.n_embd}, {', '.join(mc.id for mc, _c in off)} "
+              f"{'has' if len(off) == 1 else 'have'} "
+              f"{', '.join(sorted({str(c.n_embd) for _mc, c in off}))}): "
+              f"{mm.path}", file=sys.stderr)
+    return [mc for mc, c in made if not any(mc is o for o, _c in off)]
 
 
 def _mmproj_name(mm: ClassifiedGguf) -> str:
@@ -1484,8 +1496,7 @@ def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
                    if os.path.dirname(os.path.dirname(c.path)) == parent]
         if not targets and not old_mcs:
             continue
-        names = {(c.arch, derive_id(os.path.basename(c.path))[0])
-                 for c in below}
+        names = {_model_name(c) for c in below}
         ids = {i for c in below for i in c.declared}
         widths = {c.n_embd for c in below if c.n_embd}
         for mm in mmprojs:
@@ -1586,7 +1597,7 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
     Header identity decides first: a hit when the drafter's declared base ids
     meet the target's; a veto when both declare and disjointly. Otherwise
     (``declared_only`` off) the filename selects among the candidates, on the
-    :func:`_best_mmproj_target` rule, and a lone candidate pairs without it.
+    :func:`_mmproj_targets` rule, and a lone candidate pairs without it.
     Two quants of one target both pair on purpose."""
     kinds = drafter_kinds or {}
     supersede = dr.drafter_kind == "dflash2"

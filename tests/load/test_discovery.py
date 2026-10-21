@@ -752,6 +752,14 @@ _MUSE_AUDIO_MM, _MUSE, _MUSE_QUANT, _ = _ROOT_MMPROJ_LAYOUTS[
 
 # The header fields of real files: a projector beside one quant, the last
 # entry the reason the scan prints, or None when it pairs.
+# mys's LLaVA-1.5 7B. llama.cpp's older LLaVA converter writes CLIP's
+# projection width and no general.type.
+_LLAVA_MM = {"general.architecture": "clip", "clip.has_llava_projector": True,
+             "general.name": "openai/clip-vit-large-patch14-336",
+             "clip.vision.projection_dim": 768}
+_LLAVA_7B = {"general.architecture": "llama", "general.name": "LLaMA v2",
+             "llama.embedding_length": 4096, "llama.block_count": 32}
+
 _SIBLING_MMPROJ_LAYOUTS = {
     "31B projector beside the 31B quant": (
         "mmproj-F16.gguf", _clip("Gemma-4-31B-It", "576M", 5376, "Gemma 4 31B It"),
@@ -767,16 +775,9 @@ _SIBLING_MMPROJ_LAYOUTS = {
         "hidden size of 1536, gemma-4-e4b-it-q6 has 2560"),
     "audio-only projector beside the quant": (
         "mmproj-F16.gguf", _MUSE_AUDIO_MM, _MUSE_QUANT, _MUSE, None),
-    # llama.cpp's older LLaVA converter writes CLIP's projection width and
-    # no general.type.
     "LLaVA-1.5 projector beside its quant": (
-        "mmproj-model-f16.gguf",
-        {"general.architecture": "clip", "clip.has_llava_projector": True,
-         "general.name": "openai/clip-vit-large-patch14-336",
-         "clip.vision.projection_dim": 768},
-        "ggml-model-q4_k.gguf",
-        {"general.architecture": "llama", "general.name": "LLaMA v2",
-         "llama.embedding_length": 4096}, None),
+        "mmproj-model-f16.gguf", _LLAVA_MM, "ggml-model-q4_k.gguf", _LLAVA_7B,
+        None),
 }
 
 
@@ -802,6 +803,119 @@ def test_an_mmproj_beside_a_model_pairs_only_at_its_hidden_size(
     err = capsys.readouterr().err
     assert ("mmproj unpaired" in err) is bool(why)
     assert why is None or why in err
+
+
+# The header fields of real files: a projector beside two quants of one
+# model, named in prism-ml's repository and generic in unsloth's.
+_SAME_MODEL_QUANTS = {
+    "named, Ternary-Bonsai": (
+        "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+        {"general.architecture": "clip", "general.type": "mmproj",
+         "general.name": "Hf", "general.size_label": "461M",
+         "clip.has_vision_encoder": True, "clip.vision.projection_dim": 5120},
+        ("Ternary-Bonsai-2-27B-PQ2_0.gguf", "Ternary-Bonsai-2-27B-PTQ1_0.gguf"),
+        {"general.architecture": "qwen35", "general.type": "model",
+         "general.basename": "folded", "general.name": "Hf",
+         "general.size_label": "27B", "qwen35.embedding_length": 5120}),
+    "generic, Qwen3-VL-8B": (
+        "mmproj-BF16.gguf",
+        _clip("Qwen3-Vl-8B-Instruct", "576M", 4096, "Qwen3 VL 8B Instruct"),
+        ("Qwen3-VL-8B-Instruct-Q4_K_M.gguf", "Qwen3-VL-8B-Instruct-Q8_0.gguf"),
+        _llm("qwen3vl", "Qwen3-Vl-8B-Instruct", "8B", "Qwen3-Vl-8B-Instruct",
+             4096, "Qwen3 VL 8B Instruct")),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(_SAME_MODEL_QUANTS))
+def test_an_mmproj_pairs_with_every_quant_of_its_model_beside_it(
+        tmp_path, monkeypatch, capsys, layout):
+    """A repository that keeps several quants of one model beside one
+    projector: each quant pairs with it."""
+    mm_name, mm_meta, quants, model_meta = _SAME_MODEL_QUANTS[layout]
+
+    def _f(path):
+        name = os.path.basename(path)
+        meta = mm_meta if name == mm_name else model_meta
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, mm_name, *quants)
+    models = _scan(tmp_path)
+    assert sorted(os.path.basename(m.path) for m in models) == sorted(quants)
+    assert [m.mmproj for m in models] == [str(tmp_path / mm_name)] * len(quants)
+    assert "mmproj unpaired" not in capsys.readouterr().err
+
+
+def test_named_mmprojs_of_two_sizes_pair_each_with_its_own_quant(
+        tmp_path, monkeypatch, capsys):
+    """gemma-4 E2B and E4B quants in one folder with their named projectors.
+    Each projector's name also matches the other size's id, and each still
+    pairs with its own size only."""
+    metas = {
+        "mmproj-gemma-4-E2B-it-bf16.gguf":
+            _clip("Gemma-4-E2B-It", "476M", 1536, "Gemma 4 E2B It"),
+        "mmproj-gemma-4-E4B-it-bf16.gguf":
+            _clip("Gemma-4-E4B-It", "478M", 2560, "Gemma 4 E4B It"),
+        "gemma-4-E2B-it-UD-Q8_K_XL.gguf":
+            _llm("gemma4", "Gemma-4-E2B-It", "4.6B", "Gemma-4-E2B-It", 1536,
+                 "Gemma 4 E2B It"),
+        "gemma-4-E4B-it-Q6_K.gguf": _GEMMA4_E4B,
+    }
+
+    def _f(path):
+        name = os.path.basename(path)
+        return disc._classify_meta(metas[name], basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, *metas)
+    got = {os.path.basename(m.path): os.path.basename(m.mmproj)
+           for m in _scan(tmp_path)}
+    assert got == {"gemma-4-E2B-it-UD-Q8_K_XL.gguf": "mmproj-gemma-4-E2B-it-bf16.gguf",
+                   "gemma-4-E4B-it-Q6_K.gguf": "mmproj-gemma-4-E4B-it-bf16.gguf"}
+    assert "mmproj unpaired" not in capsys.readouterr().err
+
+
+def test_a_legacy_mmproj_beside_two_models_of_one_file_name_stays_unpaired(
+        tmp_path, monkeypatch, capsys):
+    """mys's LLaVA-1.5 7B and 13B both name their quants
+    ggml-model-<quant>.gguf. A folder with a quant of each and the 7B's
+    projector, which gives no hidden size: the quants' headers give two,
+    so they are two models, and the projector stays unpaired."""
+    metas = {
+        "mmproj-model-f16.gguf": _LLAVA_MM,
+        "ggml-model-q4_k.gguf": _LLAVA_7B,
+        "ggml-model-q5_k.gguf": dict(_LLAVA_7B, **{
+            "llama.embedding_length": 5120, "llama.block_count": 40}),
+    }
+
+    def _f(path):
+        name = os.path.basename(path)
+        return disc._classify_meta(metas[name], basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, *metas)
+    assert [m.mmproj for m in _scan(tmp_path)] == [None, None]
+    assert "mmproj unpaired (ambiguous; several models)" in \
+        capsys.readouterr().err
+
+
+def test_quants_beside_several_mmprojs_each_take_the_first_by_file_name(
+        tmp_path, monkeypatch):
+    """unsloth's repositories keep mmproj-BF16, -F16 and -F32 side by
+    side. Each quant of the model takes mmproj-BF16.gguf."""
+    mm_name, mm_meta, quants, model_meta = _SAME_MODEL_QUANTS[
+        "generic, Qwen3-VL-8B"]
+    mms = ("mmproj-F32.gguf", "mmproj-F16.gguf", mm_name)
+
+    def _f(path):
+        name = os.path.basename(path)
+        meta = mm_meta if name in mms else model_meta
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, *mms, *quants)
+    assert [m.mmproj for m in _scan(tmp_path)] == \
+        [str(tmp_path / "mmproj-BF16.gguf")] * len(quants)
 
 
 def _known(*paths):
@@ -836,12 +950,7 @@ def test_root_mmproj_beside_a_model_stays_out_of_the_quant_folders(
         assert by_path == {str(beside): mm, str(below): None}
 
 
-@pytest.mark.parametrize("chosen", [False, True])
-def test_generic_mmproj_beside_configured_quants_says_why_it_stays_unpaired(
-        tmp_path, monkeypatch, capsys, chosen):
-    """Two configured quants of a VLM and a generic mmproj that arrived
-    later: the scan cannot tell them apart, and says so, unless an entry
-    names an mmproj already."""
+def _qwen3vl_classify(monkeypatch):
     def _f(path):
         name = os.path.basename(path)
         meta = ({"general.architecture": "clip"} if name.startswith("mmproj")
@@ -849,12 +958,36 @@ def test_generic_mmproj_beside_configured_quants_says_why_it_stays_unpaired(
         return disc._classify_meta(meta, basename=name, path=path)
 
     monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+def test_generic_mmproj_beside_configured_quants_of_one_model_pairs_with_each(
+        tmp_path, monkeypatch, capsys):
+    """Two configured quants of a VLM and a generic mmproj that arrived
+    later: each quant takes it."""
+    _qwen3vl_classify(monkeypatch)
     root = _write(tmp_path, "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
                   "Qwen3-VL-8B-Instruct-Q8_0.gguf", "mmproj-BF16.gguf")
     known = _known(root / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
                    root / "Qwen3-VL-8B-Instruct-Q8_0.gguf")
+    _models, pairs = _scan_known(root, known)
+    assert pairs == {"m0": str(root / "mmproj-BF16.gguf"),
+                     "m1": str(root / "mmproj-BF16.gguf")}
+    assert "mmproj unpaired" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("chosen", [False, True])
+def test_generic_mmproj_beside_configured_quants_of_two_models_says_why_it_stays_unpaired(
+        tmp_path, monkeypatch, capsys, chosen):
+    """Configured quants of two VLMs and a generic mmproj that arrived
+    later: the scan cannot tell which model it belongs to, and says so,
+    unless an entry names an mmproj already."""
+    _qwen3vl_classify(monkeypatch)
+    root = _write(tmp_path, "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+                  "Qwen3-VL-4B-Instruct-Q8_0.gguf", "mmproj-BF16.gguf")
+    known = _known(root / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+                   root / "Qwen3-VL-4B-Instruct-Q8_0.gguf")
     if chosen:
-        known[str(root / "Qwen3-VL-8B-Instruct-Q8_0.gguf")].mmproj = \
+        known[str(root / "Qwen3-VL-4B-Instruct-Q8_0.gguf")].mmproj = \
             "mmproj-BF16.gguf"
     _models, pairs = _scan_known(root, known)
     assert pairs == {}

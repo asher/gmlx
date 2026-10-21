@@ -47,6 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A folder scan paired an `mmproj` file with the model beside it when their
   headers gave different hidden sizes.
+- A folder scan paired an `mmproj` file with only one quant of its model in the
+  folder, or with none when the file name was generic.
 - A sync or pull printed the pairing of a DFlash 2 drafter twice.
 - A sync, pull or `discover:` scan said to configure a drafter that a model's
   entry already named.
