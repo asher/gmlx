@@ -339,7 +339,8 @@ def test_arena_charges_the_host_overhead_on_ram_not_the_ceiling(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "0")
     monkeypatch.setenv("GMLX_DECODE_PAGECACHE_GB", "0")
-    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 1000 << 30})
+    monkeypatch.setattr(mx, "device_info",
+                        lambda *a: {"memory_size": 1000 << 30})
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
     avail = {"v": None}
     monkeypatch.setattr(budget, "_available_ram_bytes",

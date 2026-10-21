@@ -144,7 +144,7 @@ def outside_ceiling_bytes(ram: int | None, ceiling: float,
     excess comes out of an arena sized under the ceiling."""
     if not ram:
         return 0
-    return max(0, host_floor_bytes(ram) + int(host) - int(ram - ceiling))
+    return max(0, _ram_floor_bytes(ram) + int(host) - int(ram - ceiling))
 
 
 def governor_headroom_bytes() -> float | None:

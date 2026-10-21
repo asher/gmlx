@@ -33,8 +33,8 @@ from gmlx.load.loader import (
     moe_streaming_active,
 )
 
-from .budget import (_decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes,
-                     outside_ceiling_bytes)
+from .budget import (_decode_arena_bytes, _prefill_ring_reason,
+                     _ram_floor_bytes, outside_ceiling_bytes)
 from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
@@ -220,8 +220,9 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     cache limit alone bound the pool. The pool is the one the KV room
     prices (``pool_bytes``, ``budget.pool_bytes``): it fills to its limit
     under prefill, and the live activations sit on top of it, so the room
-    holds both. Without a priced pool it is 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults;
-    GMLX_STREAM_CACHE_GB sizes the pool."""
+    holds both. Without a priced pool it is 4 GiB.
+    GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults; GMLX_STREAM_CACHE_GB
+    sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
@@ -1340,9 +1341,10 @@ def install_expert_streaming(
             tskip = streamed_table_array_ids(model)
         # The pin is not a term here: it mlocks the same every-token
         # arrays this inserts, and the arena already priced them (it is
-        # sized under ceiling - non_expert - room - ring - floor), so
-        # subtracting both would leave the unpinned remainder and
-        # disable the residency set rather than cap it.
+        # sized under ceiling - non_expert - room - ring, less the host
+        # margins past the RAM outside the ceiling), so subtracting both
+        # would leave the unpinned remainder and disable the residency
+        # set rather than cap it.
         _install_gpu_residency(
             model, moe_modules, skip_ids=tskip,
             include_expert_stacks=bool(table_offloaded) and not streaming,

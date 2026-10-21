@@ -199,7 +199,8 @@ def test_box_plan_verdicts(flat_room, monkeypatch):
     assert b.verdict == sp.VERDICT_TOO_BIG
     assert b.short_bytes == pytest.approx(50e9 + room - ceiling, abs=2)
     assert b.arena_bytes == 0
-    b = sp.box_plan(_model(total=241.5e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
+    b = sp.box_plan(_model(total=241.5e9, expert=200e9), ram_bytes=ram,
+                    ws_bytes=ws)
     assert b.verdict == sp.VERDICT_PAGE_CACHE
     assert 0 < b.arena_bytes < GiB
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
@@ -268,7 +269,8 @@ def test_box_plan_prices_the_chunk_the_pool_and_the_host(priced_room,
     for box_ws in (ws, 0.75 * ram):
         base = sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws).arena_bytes
         monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", "1")
-        assert sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws).arena_bytes == base
+        again = sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws)
+        assert again.arena_bytes == base
         monkeypatch.delenv("GMLX_DECODE_RESIDENT_CACHE_GB")
     # A host overhead past the RAM outside the ceiling: the excess comes
     # out of the arena, byte for byte.

@@ -1371,7 +1371,8 @@ def test_streaming_footprint_prices_the_clamped_explicit_arena(monkeypatch):
                           room=SimpleNamespace(bytes=20 * GB),
                           host_bytes=10 * GB)
     monkeypatch.setattr(plan, "plan_path", lambda p: (model, box))
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: 110 * GB)
+    monkeypatch.setattr(budget, "_available_ram_bytes",
+                        lambda *a, **k: 110 * GB)
     floor = budget.host_floor_bytes(128 * GB)
     env = {"GMLX_DECODE_ARENA_GB": "70"}
     clamped = 110 * GB - 10 * GB - floor - 8 * GB - 20 * GB - 10 * GB
