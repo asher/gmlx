@@ -335,6 +335,12 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     from gmlx.load.preflight import hadamard_fold_error
     fold_err = hadamard_fold_error(report.arch, report.hadamard)
     runs = report.loadable_codecs and arch_ok and fold_err is None
+    stream = (_stream_plan(scans)
+              if not (mmproj or adapter or drafter or image) else None)
+    # A load that reads its tables from the file holds the rest.
+    resident = None
+    if size_bytes and stream and _tables_from_file(stream):
+        resident = max(0, size_bytes - stream["table_bytes"])
     return {
         "ref": ref.raw,
         "kind": ref.kind,
@@ -343,10 +349,13 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # fits / tight / over vs this machine's RAM (None = size or RAM
         # unknown); companions (mmproj/adapter) ride a base model, so their
         # standalone fit is not judged.
-        "fit": (classify_fit(combined or size_bytes, ram)
+        "fit": (classify_fit(combined or resident or size_bytes, ram)
                 if size_bytes and not (mmproj or adapter or drafter
                                        or image == "vae")
                 else None),
+        # The bytes a load keeps in memory when it reads the tables from
+        # the file, else None.
+        "resident_bytes": resident,
         "arch": report.arch,
         "arch_supported": arch_ok,
         "arch_error": arch_err,
@@ -369,8 +378,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "hadamard_error": fold_err,
         # The streaming plan (every-token weights, experts, this Mac's
         # arena and verdict) for a MoE file; None for a dense one.
-        "stream": (_stream_plan(scans)
-                   if not (mmproj or adapter or drafter or image) else None),
+        "stream": stream,
         "loadable": runs,
         # loadable = runs standalone; usable also admits a healthy companion
         # (mmproj / LoRA adapter).
@@ -378,6 +386,30 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
                   or (bool(mmproj or adapter or drafter or image)
                       and report.loadable_codecs and chip_error is None),
     }
+
+
+def _tables_from_file(stream: dict) -> bool:
+    from gmlx.stream import plan as sp
+
+    box = stream.get("box")
+    return bool(box) and box.get("verdict") == sp.VERDICT_TABLES
+
+
+def _fit_note(v: dict) -> str | None:
+    """The fit sentence of a validate report: the image set for a DiT,
+    the bytes kept in memory for a load that reads its tables from the
+    file, else the file."""
+    from gmlx.load.memfit import fit_sentence
+
+    if v.get("combined_bytes"):
+        return _image_fit_note(v)
+    if v.get("fit") is None:
+        return None
+    resident = v.get("resident_bytes")
+    note = fit_sentence(resident or v["size_bytes"], v.get("ram_bytes"))
+    if note and resident:
+        note = f"with its tables read from the file, {note}"
+    return note
 
 
 def _image_fit_note(v: dict) -> str | None:
@@ -415,12 +447,7 @@ def _print_report(v: dict) -> None:
         sline = f"  size: {_human_gb(size)}"
         if v.get("n_shards", 1) > 1:
             sline += f"  ({v['n_shards']} shards)"
-        from gmlx.load.memfit import fit_sentence
-        if v.get("combined_bytes"):
-            note = _image_fit_note(v)
-        else:
-            note = (fit_sentence(size, v.get("ram_bytes"))
-                    if v.get("fit") is not None else None)
+        note = _fit_note(v)
         if note:
             sline += f"  - {note}"
         print(sline)
@@ -1263,9 +1290,7 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
             if v.get("fit") in ("tight", "over"):
                 # Advisory only - the file may be destined for another machine
                 # or a streaming setup, so the pull itself proceeds.
-                from gmlx.load.memfit import fit_sentence
-                note = (_image_fit_note(v) if v.get("combined_bytes")
-                        else fit_sentence(v["size_bytes"], v.get("ram_bytes")))
+                note = _fit_note(v)
                 if note:
                     print(f"note: {note}", file=sys.stderr)
         if not v["usable"] and not a.force:

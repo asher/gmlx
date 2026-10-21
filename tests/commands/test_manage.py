@@ -1871,6 +1871,47 @@ def test_validate_local_moe_prints_streaming_plan(tmp_path, monkeypatch, capsys)
     assert "    => the whole file fits in RAM; streaming is optional" in out
 
 
+@pytest.mark.parametrize("box", ["studio", "m5max"])
+def test_validate_reports_the_table_read_from_the_file(tmp_path, monkeypatch,
+                                                       capsys, box):
+    """DeepSeek-V4.1-Flash 1017 UD-IQ2_XXS: 300.5 GB, 135.2 GB of it the
+    engram table. On a 256 GB Studio the table is read from the file and
+    the other 165.3 GB stay in memory, so validate says the experts stay
+    resident. On a 128 GB M5 Max they stream."""
+    import gmlx.load.memfit as memfit
+    import gmlx.serve.capacity as cap
+    from gmlx.stream import plan as sp
+
+    ram, ws = {"studio": (256 * 1024**3, 192 * 1024**3),
+               "m5max": (128 * 1024**3, 120_259_084_288)}[box]
+    monkeypatch.setattr(memfit, "total_ram_bytes", lambda: ram)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: ws)
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setattr(sp, "model_plan", lambda scans: sp.ModelPlan(
+        arch="deepseek41", total_bytes=300_469_616_416,
+        expert_bytes=156_881_387_520, groups={}, moe_layers=40, n_experts=384,
+        experts_per_token=6, ring_bytes=9_272_033_280, kv_costs=None,
+        trained_ctx=None, table_bytes=135_172_021_600))
+    monkeypatch.setattr(manage, "_ref_size_bytes",
+                        lambda ref, report: 300_469_616_416)
+    p = tmp_path / "moe.gguf"
+    _mint_moe_bytes(p)
+    assert manage.cmd_validate([str(p)]) == 0
+    out = capsys.readouterr().out
+    if box == "studio":
+        assert ("  size: 279.8 GB  - with its tables read from the file, "
+                "fits this Mac's 256 GB RAM") in out
+        assert ("    tables 135.2 GB read from the file; the other 165.3 GB "
+                "fit the 185.5 GB resident budget\n"
+                "    => loads with its experts in memory, with or without "
+                "--stream-experts\n") in out
+    else:
+        assert "  size: 279.8 GB  - exceeds this Mac's 128 GB RAM" in out
+        assert "tables read from the file" not in out
+        assert ("    => streams with --stream-experts (server: stream: "
+                "experts)\n") in out
+
+
 def test_validate_local_moe_without_a_readable_box(tmp_path, monkeypatch, capsys):
     import gmlx.serve.capacity as cap
     monkeypatch.setattr(cap, "working_set_bytes", lambda: None)
@@ -1893,7 +1934,7 @@ def test_validate_local_moe_json_carries_plan(tmp_path, capsys):
     assert plan["moe_layers"] == 1 and plan["n_experts"] == 8
     assert plan["ring_bytes"] == 2 * plan["expert_bytes"]
     assert plan["box"] is None or plan["box"]["verdict"] in (
-        "resident", "streams", "page_cache", "too_big")
+        "resident", "tables_from_file", "streams", "page_cache", "too_big")
     assert plan["lines"][0].startswith("every-token weights")
 
 

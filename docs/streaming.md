@@ -48,6 +48,7 @@ The last line is the verdict:
 | `=> streams, but no decode arena (...); expect slow decode` | Runs, slowly. [When a model cannot stream](#when-a-model-cannot-stream) lists ways to free memory for the arena. |
 | `=> cannot stream: every-token weights ... + KV room ... exceed the ... ceiling by ...` | Pick another quant, as [When a model cannot stream](#when-a-model-cannot-stream) describes. |
 | `=> the whole file fits in RAM; streaming is optional` | Run it without `--stream-experts`. |
+| `=> loads with its experts in memory, with or without --stream-experts` | Run it. Its lookup tables are read from the file, and the line above gives their size. |
 
 `run`, `chat` and `serve` do not check the plan. They try to load a model
 that cannot stream, so run `validate` first. A dense model larger than RAM

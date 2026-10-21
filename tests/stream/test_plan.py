@@ -227,6 +227,48 @@ def test_box_plan_verdicts(flat_room, monkeypatch):
     assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
 
 
+def ds41_plan():
+    """DeepSeek-V4.1-Flash 1017 UD-IQ2_XXS as its header prices it: an
+    engram table of 135.2 of its 300.5 GB."""
+    return sp.ModelPlan(arch="deepseek41", total_bytes=300_469_616_416,
+                        expert_bytes=156_881_387_520, groups={}, moe_layers=40,
+                        n_experts=384, experts_per_token=6,
+                        ring_bytes=9_272_033_280, kv_costs=None,
+                        trained_ctx=None, table_bytes=135_172_021_600)
+
+
+# The two boxes' working sets: a 256 GB Studio at the default 75%, and
+# this 128 GB M5 Max as Metal reports it.
+STUDIO = dict(ram_bytes=256 * GiB, ws_bytes=192 * GiB)
+M5_MAX = dict(ram_bytes=128 * GiB, ws_bytes=120_259_084_288)
+
+
+def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
+                                                              monkeypatch):
+    """On a 256 GB Studio the 165.3 GB DeepSeek-V4.1 keeps once its table
+    is read from the file fit the 185.5 GB budget, so it loads with its
+    experts in memory, with or without --stream-experts. On a 128 GB M5
+    Max they do not, and the experts stream."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    m = ds41_plan()
+    b = sp.box_plan(m, **STUDIO)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 135.2 GB read from the file; the other 165.3 GB fit the "
+        "185.5 GB resident budget",
+        "=> loads with its experts in memory, with or without --stream-experts"]
+    assert sp.box_summary(m, b) == (
+        "tables 135.2 GB read from the file, experts in memory (165.3 GB "
+        "under the 185.5 GB budget)")
+    b = sp.box_plan(m, **M5_MAX)
+    assert b is not None and b.verdict == sp.VERDICT_STREAMS
+    assert sp.box_lines(m, b)[-1] == (
+        "=> streams with --stream-experts (server: stream: experts)")
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    b = sp.box_plan(m, **STUDIO)
+    assert b is not None and b.verdict == sp.VERDICT_STREAMS
+
+
 @pytest.fixture
 def priced_room(monkeypatch):
     """A priced room on a 128 GiB box: 1 GB of KV, 6 GB of scores at a
