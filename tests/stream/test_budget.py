@@ -26,9 +26,9 @@ def header(monkeypatch, tmp_path):
     f.write_bytes(b"x")
     import gmlx.commands.tool_preflight as tp
     import gmlx.gen.prefill_decay as pd
-    import gmlx.serve.memory as sm
 
-    for k in ("GMLX_STREAM_KV_CTX", "GMLX_STREAM_KV_WIDTH",
+    for k in ("GMLX_STREAM_KV_CTX", "GMLX_STREAM_KV_WIDTH", "GMLX_DECODE_BATCH",
+              "GMLX_ADMIT_RESERVE_GB",
               "GMLX_DECODE_KV_RESERVE_GB", "GMLX_GOV_MARGIN",
               "GMLX_STREAM_CACHE_GB", "PREFILL_STEP_SIZE",
               "GMLX_STREAM_PREFILL_TAIL_MERGE"):
@@ -36,7 +36,6 @@ def header(monkeypatch, tmp_path):
     monkeypatch.setattr(tp, "_shards", lambda p: [str(f)])
     monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG))
     monkeypatch.setattr(cap, "working_set_bytes", lambda: 100.0 * GB)
-    monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 1.0 * GB)
     monkeypatch.setattr(pd, "_cap_bytes", lambda: 3.0 * GB)
     return str(f)
 
@@ -166,6 +165,20 @@ def test_room_holds_the_chunk_and_the_pool_the_allocator_keeps(
     assert room.bytes - small.bytes == room.pool_bytes - (1 << 30)
     # The fit leaves out the chunk and its pool.
     assert small.fit_bytes == room.fit_bytes
+
+
+def test_room_reserve_covers_a_batch_at_the_decode_cap(header, monkeypatch):
+    """Serve decodes up to the decode batch cap on a streamed model, so the
+    room's admission reserve prices that many rows at the room's depth."""
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    monkeypatch.setenv("GMLX_DECODE_BATCH", "8")
+    assert budget.kv_room_bytes(header).reserve_bytes == int(1e9)
+    monkeypatch.setenv("GMLX_DECODE_BATCH", "64")
+    wide = budget.kv_room_bytes(header)
+    layer = BPT // 10 * 32768
+    assert wide.reserve_bytes == 64 * layer + layer
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    assert budget.kv_room_bytes(header).reserve_bytes == int(2e9)
 
 
 def test_room_depth_clamped_to_trained_context(header, monkeypatch):

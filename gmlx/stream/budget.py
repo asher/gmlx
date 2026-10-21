@@ -12,7 +12,8 @@ The room prices ``GMLX_STREAM_KV_CTX`` tokens (default 32768, clamped to
 the trained context) at ``GMLX_STREAM_KV_WIDTH`` rows (default 1) with
 the model's own per-token KV cost, plus the prefill score transient the
 decay policy allows, the live activations of one streamed prefill chunk,
-the MLX buffer pool that recycles them, and the admission reserve.
+the MLX buffer pool that recycles them, and the admission reserve for a
+batch at the decode batch cap.
 ``GMLX_DECODE_KV_RESERVE_GB`` replaces the priced room with a flat value.
 
 The host overhead is RAM the arena leaves outside MLX: this process's
@@ -289,11 +290,13 @@ def price_room(costs, trained_ctx, ws: float, transient: float,
                activation: int = 0) -> KvRoom:
     """The KV room from priced per-layer costs, the prefill transients
     (the score cap, one chunk's ``activation`` bytes and the buffer pool
-    that keeps them) and the admission reserve. A flat legacy reserve
+    that keeps them) and the admission reserve, priced from the same
+    costs (``memory.priced_admit_reserve_bytes``). A flat legacy reserve
     when ``costs`` is None or ``GMLX_DECODE_KV_RESERVE_GB`` is set; the
     pool then fills the flat room."""
+    from gmlx.serve.decode_batch import decode_batch
     from gmlx.serve.mem_preflight import prompt_kv_bytes
-    from gmlx.serve.memory import admit_reserve_bytes
+    from gmlx.serve.memory import priced_admit_reserve_bytes
 
     depth = max(1, env_int("GMLX_STREAM_KV_CTX", _DEFAULT_CTX))
     width = max(1, env_int("GMLX_STREAM_KV_WIDTH", 1))
@@ -305,7 +308,10 @@ def price_room(costs, trained_ctx, ws: float, transient: float,
     if isinstance(trained_ctx, int) and trained_ctx > 0:
         depth = min(depth, trained_ctx)
     kv = int(prompt_kv_bytes(costs, depth) * width)
-    reserve = int(admit_reserve_bytes(ws))
+    # Serve decodes a batch up to the decode batch cap on a streamed model
+    # too, so the reserve covers that many rows at the room's depth.
+    reserve = int(priced_admit_reserve_bytes(
+        costs, depth, max(width, decode_batch())))
     act = max(0, int(activation))
     pool = pool_bytes(act)
     return KvRoom(kv + int(transient) + act + pool + reserve, depth, width,

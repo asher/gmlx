@@ -38,8 +38,11 @@ physical RAM. Four things share the ceiling, in this order:
 1. The every-token weights come first.
 2. The KV room comes next. It holds the KV cache for 32768 tokens, or the
    trained context when that is shorter. It adds room for the prefill
-   attention scores and a reserve for admitting requests, each the larger
-   of 2 GB and 5% of the working set. It also holds one prefill chunk:
+   attention scores, the larger of 2 GB and 5% of the working set, and a
+   reserve for admitting requests, priced from the model's KV layout:
+   one layer's cache for a batch at the decode batch cap at that depth,
+   plus one row's share of a layer, at least 1 GB. It also holds one
+   prefill chunk:
    the chunk's activations, priced from the model's widths at the
    streamed chunk width (`--prefill-step-size` or the arch's own step
    switch when set), and the MLX buffer pool that keeps freed buffers
@@ -74,22 +77,23 @@ changes only the speed.
 
 The default working set is two thirds of RAM below 36 GB and three
 quarters from 36 GB up. Sizes are in decimal GB, and the KV room floor is
-the score room and the reserve for admitting requests, before any KV
-cache and before the prefill chunk, which depends on the model.
+the score room and the 1 GB floor of the reserve for admitting requests,
+before any KV cache and before the prefill chunk, which depends on the
+model.
 
 | RAM | Working set | Ceiling | KV room floor | Left for weights and KV cache |
 |---|---|---|---|---|
-| 16 | 11.5 | 9.2 | 4.0 | 5.2 |
-| 24 | 17.2 | 16.3 | 4.0 | 12.3 |
-| 32 | 22.9 | 21.8 | 4.0 | 17.8 |
-| 36 | 29.0 | 27.5 | 4.0 | 23.5 |
-| 48 | 38.7 | 36.7 | 4.0 | 32.7 |
-| 64 | 51.5 | 49.0 | 5.2 | 43.8 |
-| 96 | 77.3 | 73.4 | 7.7 | 65.7 |
-| 128 | 103.1 | 97.9 | 10.3 | 87.6 |
-| 192 | 154.6 | 146.9 | 15.5 | 131.4 |
-| 256 | 206.2 | 195.9 | 20.6 | 175.2 |
-| 512 | 412.3 | 391.7 | 41.2 | 350.5 |
+| 16 | 11.5 | 9.2 | 3.0 | 6.2 |
+| 24 | 17.2 | 16.3 | 3.0 | 13.3 |
+| 32 | 22.9 | 21.8 | 3.0 | 18.8 |
+| 36 | 29.0 | 27.5 | 3.0 | 24.5 |
+| 48 | 38.7 | 36.7 | 3.0 | 33.7 |
+| 64 | 51.5 | 49.0 | 3.6 | 45.4 |
+| 96 | 77.3 | 73.4 | 4.9 | 68.5 |
+| 128 | 103.1 | 97.9 | 6.2 | 91.7 |
+| 192 | 154.6 | 146.9 | 8.7 | 138.2 |
+| 256 | 206.2 | 195.9 | 11.3 | 184.6 |
+| 512 | 412.3 | 391.7 | 21.6 | 370.1 |
 
 Raising the GPU limit with `iogpu.wired_limit_mb` raises the working set,
 and the reserve below physical RAM still applies.

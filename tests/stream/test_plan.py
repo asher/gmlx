@@ -228,8 +228,8 @@ def test_box_plan_verdicts(flat_room, monkeypatch):
 
 @pytest.fixture
 def priced_room(monkeypatch):
-    """A priced room on a 128 GiB box: 1 GB of KV, 6 GB of scores and a
-    6 GB reserve at a 120 GB working set."""
+    """A priced room on a 128 GiB box: 1 GB of KV, 6 GB of scores at a
+    120 GB working set, and the 1 GB floor of the admission reserve."""
     import gmlx.serve.mem_preflight as mp
 
     for k in ("GMLX_DECODE_KV_RESERVE_GB", "GMLX_DECODE_PROCESS_GB",
@@ -284,15 +284,15 @@ def test_a_chunk_past_the_ceiling_still_streams_without_an_arena(priced_room):
     page cache gives back, so a chunk too big for the ceiling costs the
     arena and the ring, not the verdict."""
     ram, ws = priced_room
-    b = sp.box_plan(_chunked(64 * GiB, total=220e9, expert=200e9, ring=5e9),
+    b = sp.box_plan(_chunked(72 * GiB, total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
-    assert b.room.fit_bytes == pytest.approx(13e9)
+    assert b.room.fit_bytes == pytest.approx(8e9)
     assert b.verdict == sp.VERDICT_PAGE_CACHE
     assert b.arena_bytes == 0 and not b.ring_fits and b.short_bytes == 0
     b = sp.box_plan(_chunked(40 * GiB, total=230e9, expert=120e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_TOO_BIG
-    assert b.short_bytes == pytest.approx(110e9 + 13e9 - b.ceiling_bytes, abs=2)
+    assert b.short_bytes == pytest.approx(110e9 + 8e9 - b.ceiling_bytes, abs=2)
 
 
 def test_box_plan_arena_capped_at_experts(flat_room, monkeypatch):
