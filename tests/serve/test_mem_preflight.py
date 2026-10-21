@@ -443,6 +443,39 @@ def test_compressed_pools_grow_beside_the_window():
     assert pools == [(512 + 128) * 2 / 4, 512 * 2 / 128] * 20 + [320.0]
 
 
+# DeepSeek V3.2 as its config sets it; GLM-5.x (glm_moe_dsa) and HY4
+# (hy_v4) build the same MLA latent and indexer.
+DSV32_CFG = dict(model_type="deepseek_v32", num_hidden_layers=61,
+                 num_attention_heads=128, kv_lora_rank=512,
+                 qk_rope_head_dim=64, index_head_dim=128, index_topk=2048)
+
+
+def test_dsa_indexer_keys_grow_beside_the_latent():
+    """A DSA layer keeps its indexer keys, 128 wide, to the full depth
+    beside the 576-wide MLA latent: 256 more bytes per token on each
+    layer that owns an indexer. GLM-5.x from a GGUF owns one on every
+    layer; HY4 only on the layers its header marks full. The stack each
+    model builds prices the same keys as its config."""
+    from gmlx.cache.kv_cache import CacheList, KVCache
+    from gmlx.models.hy_v4.model import HyV4KVCache
+
+    model = _model(**DSV32_CFG)
+    assert mp.per_token_bytes(mp.kv_layer_costs(model)) == 61 * 1408.0
+    stack = [CacheList(KVCache(), KVCache()) for _ in range(61)]
+    assert mp.stack_geometry(model, stack) == mp.config_geometry(model.config)
+    glm = _model(**dict(DSV32_CFG, model_type="glm_moe_dsa",
+                        num_hidden_layers=78))
+    assert mp.per_token_bytes(mp.kv_layer_costs(glm)) == 78 * 1408.0
+    full = [int(i % 4 == 0) for i in range(78)]
+    hy = _model(**dict(DSV32_CFG, model_type="hy_v4", num_hidden_layers=78,
+                       index_is_full=full))
+    assert mp.per_token_bytes(mp.kv_layer_costs(hy)) == (
+        78 * 1152.0 + 20 * 256.0)
+    stack = [CacheList(HyV4KVCache(), KVCache()) if f else HyV4KVCache()
+             for f in full]
+    assert mp.stack_geometry(hy, stack) == mp.config_geometry(hy.config)
+
+
 def test_stack_geometry_reads_the_caches():
     from gmlx._vendor.mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
                                       RotatingKVCache)

@@ -164,7 +164,7 @@ def recurrent_state_bytes(c) -> float | None:
 class LayerGeometry:
     """One cache-stack entry: a growing KV region (capped at ``window``
     rows when it rotates), a fixed recurrent state, and the bytes per
-    token of compressed pools that grow beside a rotating window."""
+    token of the pools that grow to the full depth beside it."""
     attn: bool = True
     window: int | None = None
     state: float = 0.0
@@ -179,19 +179,54 @@ def _int_set(c, name):
     return {int(i) for i in v} if isinstance(v, (list, tuple)) else None
 
 
+def _indexer_layers(c, layers):
+    """The layers of a DSA model that own a lightning indexer, read the
+    way the model builds them, or None for another family."""
+    mt = _get(c, "model_type")
+    if mt == "deepseek_v32":
+        return set(range(layers))
+    if mt == "hy_v4":
+        if not _get(c, "index_topk"):
+            return set()
+        full = _get(c, "index_is_full")
+        if not isinstance(full, (list, tuple)) or not full:
+            return set(range(layers))
+        return {i for i in range(min(layers, len(full))) if full[i]}
+    if mt != "glm_moe_dsa":
+        return None
+    types = _get(c, "indexer_types")
+    pattern = _get(c, "index_topk_pattern")
+    if not isinstance(types, (list, tuple)) and pattern is not None:
+        types = ([{"F": "full", "S": "shared"}.get(ch) for ch in pattern]
+                 if isinstance(pattern, str) else pattern)
+    if isinstance(types, (list, tuple)):
+        return {i for i in range(min(layers, len(types)))
+                if types[i] != "shared"}
+    freq = max(_get(c, "index_topk_freq", 1) or 1, 1)
+    offset = _get(c, "index_skip_topk_offset", 2)
+    offset = 2 if offset is None else offset
+    return {i for i in range(layers) if max(i - offset + 1, 0) % freq == 0}
+
+
 def pool_bytes_per_token(c, layers):
-    """Per config layer, the bytes per token of context its compressed
-    pools hold: one row per ``compress_ratio`` tokens. DeepSeek V4 keeps a
-    latent pool ``head_dim`` wide on every compressed layer and an indexer
-    key pool ``index_head_dim`` wide on the sparse ones (ratio 4). V4.1
-    keeps both pools only on its ``kv_source_layers``, the indexer pool
-    filled only on its ``index_key_layers``; the other layers read them.
-    glm5_next keeps an indexer pool on each attention layer, one row per
-    ``index_kpool`` tokens. Zero for any other layout."""
+    """Per config layer, the bytes per token of context its pools hold to
+    the full depth: one row per ``compress_ratio`` tokens. DeepSeek V4
+    keeps a latent pool ``head_dim`` wide on every compressed layer and an
+    indexer key pool ``index_head_dim`` wide on the sparse ones (ratio 4).
+    V4.1 keeps both pools only on its ``kv_source_layers``, the indexer
+    pool filled only on its ``index_key_layers``; the other layers read
+    them. glm5_next keeps an indexer pool on each attention layer, one row
+    per ``index_kpool`` tokens. The DSA models (deepseek_v32, glm_moe_dsa,
+    hy_v4) keep their indexer keys one row per token on each layer that
+    owns an indexer. Zero for any other layout."""
     out = [0.0] * layers
     mt = _get(c, "model_type")
     width = _get(c, "head_dim") or 0
     index = _get(c, "index_head_dim") or 0
+    indexed = _indexer_layers(c, layers)
+    if indexed is not None:
+        return [index * _POOL_BYTES if i in indexed else 0.0
+                for i in range(layers)]
     if mt == "glm5_next":
         kpool = _get(c, "index_kpool")
         if isinstance(kpool, int) and kpool > 0 and index:
@@ -264,26 +299,37 @@ def config_geometry(c):
 
 def stack_geometry(model, stack):
     """Geometry read off a constructed cache stack: kinds from the cache
-    classes, rotating windows from the caches, state bytes from the
-    config. A recurrent cache whose state the config cannot size is
-    priced as growing KV."""
+    classes, rotating windows from the caches, state bytes and pool
+    prices from the config. A recurrent cache whose state the config
+    cannot size is priced as growing KV."""
     from gmlx.cache.kv_policy import _cache_kind_types, _classify
 
     types = _cache_kind_types()
-    state = recurrent_state_bytes(_lm_config(model))
+    cfg = _lm_config(model)
+    state = recurrent_state_bytes(cfg)
+    layers = _get(cfg, "num_hidden_layers")
+    # Pool prices are per config layer, so they apply only to a stack
+    # with one entry per layer.
+    pools = (pool_bytes_per_token(cfg, layers) if layers == len(stack)
+             else [0.0] * len(stack))
     geo = []
-    for c in stack:
+    for i, c in enumerate(stack):
         kind = _classify(c, types)
         members = getattr(c, "caches", None)
         members = list(members) if members is not None else [c]
+        kinds = [_classify(m, types) for m in members]
         has_state = (state is not None
                      and any(isinstance(m, types["state"]) for m in members))
+        # The config prices a DSA indexer's keys when the stack holds
+        # them, as a second growing cache.
+        growing = sum(k in ("kv", "optout") for k in kinds)
+        pool = pools[i] if pools[i] and growing > 1 else 0.0
         # The rotating window caps the layer whatever rides beside it, as
         # long as nothing else there grows: a side cache holds no KV, and
         # a recurrent state is priced on its own. A pool or a plain KV
         # member does grow, so those layers keep the growing price.
         window = None
-        if not any(_classify(m, types) in ("kv", "pool") for m in members):
+        if "kv" not in kinds and "pool" not in kinds:
             for m in members:
                 if isinstance(m, types["window"]):
                     window = getattr(m, "max_size", None)
@@ -292,7 +338,8 @@ def stack_geometry(model, stack):
         if kind == "state" and has_state:
             geo.append(LayerGeometry(False, None, state))
         else:
-            geo.append(LayerGeometry(True, window, state if has_state else 0.0))
+            geo.append(LayerGeometry(True, window, state if has_state else 0.0,
+                                     pool))
     return geo
 
 
@@ -302,8 +349,8 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
     """Cost entries ``(window_or_None, bytes_per_token)`` for the model's
     cache stack, or None when the geometry cannot be read: one entry per
     growing KV region (a rotating window caps it), one FixedRows(1)
-    entry per recurrent state and one growing entry per layer's
-    compressed pools, priced fp16. Admit-side throughout: MLA prices the
+    entry per recurrent state and one growing entry per layer's pools
+    (compressed pools, DSA indexer keys), priced fp16. Admit-side throughout: MLA prices the
     compressed latent, a configured sliding window caps every layer it
     could apply to. ``geometry`` (from stack_geometry) replaces the
     config's layer pattern. Per geometry entry: ``per_layer_bpe`` (from
