@@ -1,4 +1,4 @@
-"""The MLX allocator limits a streamed model sets: the gc limit past the
+"""The MLX allocator limits a streamed model sets: the memory limit past the
 tracked file-backed bytes, the buffer cache capped by GMLX_STREAM_CACHE_GB,
 and nothing under GMLX_STREAM_ALLOC_LIMITS=0."""
 from __future__ import annotations

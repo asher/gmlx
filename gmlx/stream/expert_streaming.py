@@ -215,15 +215,16 @@ def _physical_ram() -> int:
 
 def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     """MLX's allocator counts the file-backed weights as active memory,
-    which on a streamed model sits past its default gc limit; every cache
-    miss then purged the whole buffer cache and every temporary was a
-    fresh Metal allocation. Put the gc limit out of reach and let the
-    cache limit alone bound the pool. The pool is the one the KV room
-    prices (``pool_bytes``, ``budget.pool_bytes``): it fills to its limit
-    under prefill, and the live activations sit on top of it, so the room
-    holds both. Without a priced pool it is 4 GiB.
-    GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults; GMLX_STREAM_CACHE_GB
-    sizes the pool."""
+    which on a streamed model sits past its default memory limit, so each
+    eval waited for the GPU work in flight to finish. Raise the memory
+    limit past the tracked bytes and let the cache limit bound the pool.
+    MLX caps the gc limit at 0.95 of the working set whatever the memory
+    limit, so a cache miss under pressure still releases the pool. The
+    pool is the one the KV room prices (``pool_bytes``,
+    ``budget.pool_bytes``): it fills to its limit under prefill, and the
+    live activations sit on top of it, so the room holds both. Without a
+    priced pool it is 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0 keeps the
+    defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
@@ -240,7 +241,7 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     mx.set_memory_limit(limit)
     mx.set_cache_limit(cache)
     loadlog.info(
-        f"[stream] allocator: gc limit {limit / 1e9:.0f} GB, past the "
+        f"[stream] allocator: memory limit {limit / 1e9:.0f} GB, past the "
         f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "
         f"({how}, GMLX_STREAM_ALLOC_LIMITS=0 keeps the MLX defaults)"
     )
