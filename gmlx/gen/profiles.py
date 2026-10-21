@@ -94,11 +94,19 @@ FAMILIES: dict[str, dict] = {
     },
     # https://github.com/openai/gpt-oss + gpt-oss-120b card, 2026-07.
     # top_k deliberately unset (the card says disable it). reasoning_effort is
-    # a chat-template variable in the GGUF-embedded harmony template.
+    # a chat-template variable in the GGUF-embedded harmony template. The
+    # markers are the full analysis header and its close, so a thinking
+    # budget can find the block (the generation prompt ends at
+    # <|start|>assistant).
     "gpt-oss": {
         "label": "gpt-oss",
         "arches": ("gpt-oss",),
-        "base": {"sampling": {"temperature": 1.0, "top_p": 1.0}},
+        "base": {"sampling": {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "thinking_start_token": "<|start|>assistant<|channel|>analysis<|message|>",
+            "thinking_end_token": "<|end|>",
+        }},
         "intents": {
             "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
             "reasoning-medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},
@@ -291,6 +299,25 @@ FAMILIES: dict[str, dict] = {
         "label": "K2 Horizon",
         "arches": ("k2-horizon",),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        },
+    },
+    # reflection/Beam-1.0-501B-A23B generation_config.json, 2026-10:
+    # t=0.7, top_p=0.99. Harmony channels, so the markers match gpt-oss.
+    # The template's reasoning_effort takes minimal/low/medium/high/xhigh/
+    # max and defaults to max.
+    "beam": {
+        "label": "Beam",
+        "arches": ("beam",),
+        "base": {"sampling": {
+            "temperature": 0.7,
+            "top_p": 0.99,
+            "thinking_start_token": "<|start|>assistant<|channel|>analysis<|message|>",
+            "thinking_end_token": "<|end|>",
+        }},
         "intents": {
             "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
             "reasoning-medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},

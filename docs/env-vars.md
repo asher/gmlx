@@ -69,6 +69,7 @@ is internal and may change between releases.
 | `GMLX_STREAM_KV_CTX` | `32768`, at most the trained context | Tokens of KV cache that a streamed model keeps room for. A lower value leaves more memory for the expert arena. |
 | `GMLX_KVARN_BITS` | Unset | Separate kvarn widths for keys and values, such as `k6v5`, over `kv_bits`. |
 | `GMLX_IMAGE_ALLOW_FP16` | `0` | `1` lets `gmlx pull`, `gmlx image` and `gmlx serve` run Z-Image in float16 on an M1 or M2, with its VAE in float32. Its images differ from an M3's. |
+| `GMLX_NORM_DTYPE` | `auto` | Width of a language model's norm weights. `auto` keeps each model's default, `fp32` keeps them float32, and `activation` casts them to bf16 (fp16 on M1, M2). |
 | `GMLX_QWEN35_VISION_FP32` | `0` | `1` loads the vision encoder of a Qwen3.5 or Qwen3.6 pair in float32. Image features are more exact, and an image request's first token comes about 12% later. |
 
 ## Load and cache keys

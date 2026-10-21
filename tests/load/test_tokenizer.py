@@ -706,6 +706,29 @@ def test_harmony_drop_is_independent_of_route():
     assert _drop_message_end_eog([_H_CALL, _H_END], toks) == [_H_CALL, _H_END]
 
 
+_BEAM_SPECIALS = ["<|endoftext|>", "<|im_end|>", "<|return|>", "<|call|>",
+                  "<|end|>", "<|start|>", "<|channel|>", "<|message|>",
+                  "<|constrain|>", "<think>", "</think>", "</s>"]
+
+
+def test_beam_stop_set():
+    """Beam stops on <|return|> and <|call|> and the Qwen turn ends. A
+    message ends at <|end|>, so it is no stop. The vocab holds </s> as
+    text and <think> tags it never uses."""
+    from pathlib import Path
+
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "beam_template.jinja").read_text()
+    meta = _control_meta(_BEAM_SPECIALS, 2, template, "beam")
+    meta["tokenizer.ggml.token_type"][_BEAM_SPECIALS.index("</s>")] = 1
+    meta["tokenizer.ggml.eot_token_id"] = 2
+    tok = load_tokenizer_from_gguf(meta, "beam")
+    names = [_BEAM_SPECIALS[t] for t in tok._gguf_eos_token_ids]
+    assert names[0] == "<|return|>"
+    assert set(names) == {"<|return|>", "<|call|>", "<|im_end|>",
+                          "<|endoftext|>"}
+
+
 def test_phi3_stop_set_keeps_end():
     meta = _control_meta(_PHI3_SPECIALS, _P_EOT, _PHI3_TEMPLATE, "phi3")
     tok = load_tokenizer_from_gguf(meta, "phi3")

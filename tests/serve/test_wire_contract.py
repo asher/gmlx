@@ -823,6 +823,151 @@ def test_spark_commentary_then_tool_call_stream(spark):
     assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}
 
 
+# 7c. Beam: harmony channels, and each tool call is its own message with
+#     the recipient in the header and XML parameters. The prompt stops at
+#     "<|start|>assistant", so a call can open the reply.
+_BEAM_PROMPT = ("<|start|>system<|message|>Be brief.<|end|>"
+                "<|start|>user<|message|>hi<|end|><|start|>assistant")
+_BEAM_HEAD = ("<|start|>assistant to={}<|channel|>analysis "
+              "<|constrain|>xml<|message|>")
+_BEAM_REPLY = [
+    ("<|channel|>analysis<|message|>Think", None),
+    ("ing.<|end|><|start|>assistant", None),
+    ("<|channel|>final<|message|>Hello!", "stop")]
+_BEAM_CALL_REPLY = [
+    ("<|channel|>analysis<|message|>Need the weather.<|end|>", None),
+    (_BEAM_HEAD.format("get_weather"), None),
+    ('<rfl:parameter name="city">\nParis\n</rfl:parameter><|end|>', None),
+    (_BEAM_HEAD.format("get_weather"), None),
+    ('<rfl:parameter name="city">\nRome\n</rfl:parameter>', "stop")]
+_BEAM_OFFSET0_REPLY = [
+    (" to=get_weather<|channel|>analysis <|constrain|>xml<|message|>", None),
+    ('<rfl:parameter name="city">\nParis\n</rfl:parameter>', "stop")]
+
+
+@pytest.fixture()
+def beam(wire, monkeypatch):
+    import gmlx.models.beam.tools as beam_tools
+
+    beam_tools.ensure_registered()
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "beam_template.jinja").read_text()
+    monkeypatch.setattr(_WireTokenizer, "chat_template", template)
+    monkeypatch.setattr(_PKG, "apply_chat_template",
+                        lambda *a, **k: _BEAM_PROMPT)
+    return wire
+
+
+def test_beam_reasoning_and_answer_non_stream(beam):
+    beam.gen.script = _BEAM_REPLY
+    r = beam.client.post("/v1/chat/completions", json=_chat_body())
+    assert r.status_code == 200, r.text
+    msg = r.json()["choices"][0]["message"]
+    assert msg["content"] == "Hello!"
+    assert msg["reasoning"] == "Thinking."
+
+
+def test_beam_reasoning_and_answer_stream(beam):
+    beam.gen.script = _BEAM_REPLY
+    r = beam.client.post("/v1/chat/completions",
+                         json=_chat_body(stream=True))
+    assert r.status_code == 200, r.text
+    content, reasoning, calls, finish = _stream_parts(r.text)
+    assert content == "Hello!"
+    assert reasoning == "Thinking."
+    assert not calls and finish == "stop"
+
+
+def _cities(calls):
+    assert {c["function"]["name"] for c in calls} == {"get_weather"}
+    return [json.loads(c["function"]["arguments"])["city"] for c in calls]
+
+
+@pytest.mark.parametrize("reply, cities", [
+    (_BEAM_CALL_REPLY, ["Paris", "Rome"]), (_BEAM_OFFSET0_REPLY, ["Paris"])])
+def test_beam_tool_calls_non_stream(beam, reply, cities):
+    beam.gen.script = reply
+    r = beam.client.post("/v1/chat/completions",
+                         json=_chat_body(tools=_WEATHER))
+    assert r.status_code == 200, r.text
+    choice = r.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    msg = choice["message"]
+    assert not msg["content"]
+    assert _cities(msg["tool_calls"]) == cities
+    if reply is _BEAM_CALL_REPLY:
+        assert msg["reasoning"] == "Need the weather."
+
+
+@pytest.mark.parametrize("reply, cities", [
+    (_BEAM_CALL_REPLY, ["Paris", "Rome"]), (_BEAM_OFFSET0_REPLY, ["Paris"])])
+def test_beam_tool_calls_stream(beam, reply, cities):
+    beam.gen.script = reply
+    r = beam.client.post("/v1/chat/completions",
+                         json=_chat_body(stream=True, tools=_WEATHER))
+    assert r.status_code == 200, r.text
+    content, reasoning, calls, finish = _stream_parts(r.text)
+    assert content == ""
+    assert finish == "tool_calls"
+    assert _cities(calls) == cities
+    if reply is _BEAM_CALL_REPLY:
+        assert reasoning == "Need the weather."
+
+
+_ANTHROPIC_WEATHER = [{"name": "get_weather", "input_schema": {
+    "type": "object", "properties": {"city": {"type": "string"}}}}]
+
+
+def _messages_body(**kw):
+    body = {"model": MODEL_ID, "max_tokens": 64, "tools": _ANTHROPIC_WEATHER,
+            "messages": [{"role": "user", "content": "weather?"}]}
+    body.update(kw)
+    return body
+
+
+def test_beam_tool_calls_on_messages_non_stream(beam):
+    beam.gen.script = _BEAM_CALL_REPLY
+    r = beam.client.post("/v1/messages", json=_messages_body())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stop_reason"] == "tool_use"
+    uses = [b for b in body["content"] if b["type"] == "tool_use"]
+    assert [u["input"]["city"] for u in uses] == ["Paris", "Rome"]
+    texts = [b["text"] for b in body["content"] if b["type"] == "text"]
+    assert not any(t.strip() for t in texts)
+
+
+def test_beam_tool_calls_on_messages_stream(beam):
+    beam.gen.script = _BEAM_CALL_REPLY
+    r = beam.client.post("/v1/messages", json=_messages_body(stream=True))
+    assert r.status_code == 200, r.text
+    starts, text, thinking = [], "", ""
+    for payload in _sse_data_lines(r.text):
+        ev = json.loads(payload)
+        if ev.get("type") == "content_block_start":
+            starts.append(ev["content_block"])
+        delta = ev.get("delta") or {}
+        text += delta.get("text") or ""
+        thinking += delta.get("thinking") or ""
+    names = [b["name"] for b in starts if b["type"] == "tool_use"]
+    assert names == ["get_weather", "get_weather"]
+    assert text.strip() == ""
+    assert thinking == "Need the weather."
+    assert '"stop_reason":"tool_use"' in r.text.replace(" ", "")
+
+
+def test_beam_tool_calls_on_responses(beam):
+    beam.gen.script = _BEAM_CALL_REPLY
+    r = beam.client.post("/v1/responses", json={
+        "model": MODEL_ID, "input": "weather?", "tools": [{
+            "type": "function", "name": "get_weather",
+            "parameters": _WEATHER[0]["function"]["parameters"]}]})
+    assert r.status_code == 200, r.text
+    calls = [o for o in r.json()["output"] if o.get("type") == "function_call"]
+    assert [json.loads(c["arguments"])["city"] for c in calls] == [
+        "Paris", "Rome"]
+
+
 # 8. response_format (docs/api.md, structured output). json_schema -> 200.
 #    DOC MISMATCH: docs/api.md says `"json_object"` "is rejected
 #    with `Unsupported response_format type`", but mlx-vlm now maps it to a

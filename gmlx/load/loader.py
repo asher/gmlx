@@ -27,7 +27,15 @@ from mlx.utils import tree_flatten
 import mlx_kquant as kq
 
 from . import loadlog, rope_scaling, rope_swap
-from .dtypes import activation_dtype, activation_dtype_name, dtype_name
+from .dtypes import (
+    NORM_ENV_VAR,
+    NORM_WEIGHT_KEY,
+    activation_dtype,
+    activation_dtype_name,
+    dtype_name,
+    fp32_norms,
+    wider_float,
+)
 from gmlx.device import cpu_default_device, metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
@@ -196,6 +204,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.k2_horizon.tools as k2_horizon_tools
 
         k2_horizon_tools.ensure_registered()
+    if mt == "beam":
+        import gmlx.models.beam.tools as beam_tools
+
+        beam_tools.ensure_registered()
     if mt == "glm5_next":
         # Its hybrid cache depends on the deepseek_v4 DS4PoolingCache.
         import gmlx.models.glm5_next.model as glm5_next_model
@@ -938,6 +950,10 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # class's cast_predicate.
     "k2_horizon": (".mlp.gate.weight", ".e_score_correction_bias",
                    ".selection_bias"),
+    # beam: grouped sigmoid top-8-of-256 routing with a selection bias is
+    # near-tie-heavy, and llama.cpp routes fp32. The gate bias is F32 on the
+    # wire. Kept in step with the model class's cast_predicate.
+    "beam": (".mlp.gate.weight", ".e_score_correction_bias", ".gate_bias"),
     # nemotron_h: llama.cpp routes in fp32 (F32 wire router and selection
     # bias; Bolt picks top-9 of up to 496), and A_log feeds the fp32 scan.
     # Kept in step with the model class's cast_predicate.
@@ -948,6 +964,48 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "nemotron_h_omni": (".mixer.gate.weight", ".e_score_correction_bias",
                         ".A_log"),
 }
+
+def fp32_keep_for(model_type: str) -> tuple[str, ...]:
+    """The float32 pins of ``model_type``: its ``_FP32_KEEP_BY_MODEL_TYPE``
+    row, plus its norm weights when ``dtypes.fp32_norms`` says so."""
+    keep = _FP32_KEEP_BY_MODEL_TYPE.get(model_type, ())
+    if fp32_norms(model_type):
+        keep = keep + (NORM_WEIGHT_KEY,)
+    return keep
+
+
+_NORM_OUT_CLASSES: dict[tuple[type, Any], type] = {}
+
+
+def cast_fp32_norm_outputs(model, act_dtype) -> int:
+    """Make each norm module that holds a float32 weight return the wider of
+    its input dtype and ``act_dtype``, as a weight in ``act_dtype`` gives, so
+    a float32 norm weight never widens the residual stream. Returns the
+    number of modules changed. A model class that already does this sets
+    ``OUTPUT_IN_INPUT_DTYPE``."""
+    if act_dtype == mx.float32:
+        return 0
+    n = 0
+    for _, m in model.named_modules():
+        cls = type(m)
+        w = m.get("weight") if isinstance(m, dict) else None
+        if (not isinstance(w, mx.array) or w.dtype != mx.float32 or w.ndim != 1
+                or "norm" not in cls.__name__.lower()
+                or getattr(cls, "OUTPUT_IN_INPUT_DTYPE", False)):
+            continue
+        sub = _NORM_OUT_CLASSES.get((cls, act_dtype))
+        if sub is None:
+            def __call__(self, x, *a, _base=cls, _act=act_dtype, **k):
+                out = wider_float(x.dtype, _act)
+                return _base.__call__(self, x, *a, **k).astype(out)
+
+            sub = type(cls.__name__, (cls,), {"__call__": __call__,
+                                              "OUTPUT_IN_INPUT_DTYPE": True})
+            _NORM_OUT_CLASSES[(cls, act_dtype)] = sub
+        m.__class__ = sub  # pyright: ignore[reportAttributeAccessIssue]
+        n += 1
+    return n
+
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
 # promotes an f16-weight matmul against f32 activations to f32, so these read
@@ -1015,7 +1073,7 @@ def float_dtype_rules(model_type: str) -> FloatDtypeRules:
     if switch is not None and env_bool(switch[0], False):
         fp32_cast = fp32_cast + switch[1]
     return {
-        "fp32_keep": _FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        "fp32_keep": fp32_keep_for(model_type),
         "f16_keep": _F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
         "fp32_cast": fp32_cast,
     }
@@ -1856,7 +1914,7 @@ def load_model(
     # quantized/regular matmul.
     # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32,
     # and those in dtypes.NO_FLOAT16_MODEL_TYPES run float32 over float16.
-    fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type") or "", ())
+    fp32_keep = fp32_keep_for(config.get("model_type") or "")
     act_dtype = activation_dtype(config.get("model_type"))
     act_name = activation_dtype_name(config.get("model_type"))
     n_cast = 0
@@ -1885,6 +1943,11 @@ def load_model(
     _log(
         f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters"
     )
+    if fp32_norms(config.get("model_type")):
+        n_norms = cast_fp32_norm_outputs(model, act_dtype)
+        if n_norms:
+            _log(f"[dtype] {n_norms} norms keep float32 weights and return "
+                 f"{act_name} ({NORM_ENV_VAR}=activation casts them)")
     _warm_mmap_residency(model, log=_log, paths=pf.shards,
                          active_before=active_before)
 

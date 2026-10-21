@@ -69,6 +69,7 @@ flags refuses.
 
 | GGUF arch | Notes |
 |-----------|-------|
+| `beam` | Only the sliding window layers rotate, and they keep the header's scale, so the flags change only the reported context. |
 | `deepseek4`, `deepseek41` | Compressed layers scale. The other layers keep a plain rope, as in llama.cpp's `deepseek4`. |
 | `ernie4_5-moe` | |
 | `falcon-h1` | |

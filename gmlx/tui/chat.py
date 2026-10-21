@@ -344,15 +344,22 @@ def fold_thinking_flag(args, tkw: dict) -> dict:
     into the template kwargs, spelled as the variables this model's chat
     template actually reads. ``tkw`` (the ``--chat-template-config`` blob)
     passes through verbatim; the dedicated flags overlay it. See
-    :func:`gmlx.tui.reasoning.map_thinking_controls` for the spelling table."""
+    :func:`gmlx.tui.reasoning.map_thinking_controls` for the spelling table.
+    On a template with no thinking switch, ``--thinking off`` sets a
+    thinking budget of 0 unless ``--thinking-budget`` is set."""
     t = getattr(args, "thinking", None)
     effort = getattr(args, "reasoning_effort", None)
     if t is None and effort is None:
         return tkw
-    from .reasoning import map_thinking_controls
+    from .reasoning import map_thinking_controls, off_by_budget
 
+    template = _template_text(args)
+    if (getattr(args, "thinking_budget", None) is None
+            and off_by_budget(t, template)):
+        args.thinking_budget = 0
+        args.thinking_off_budget = True
     return map_thinking_controls(
-        tkw, t, effort, _template_text(args),
+        tkw, t, effort, template,
         warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
 
 
@@ -424,6 +431,7 @@ class ChatState:
     vlm: bool = False
     system_prompt: str | None = None
     thinking_budget: int | None = None
+    thinking_off_budget: bool = False  # the budget is /thinking off's
     thinking_start_token: str | None = None
     thinking_end_token: str | None = None
     template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
@@ -1284,15 +1292,23 @@ def _slash_thinking(cmd, arg, state):
         return None
     for k in _THINKING_SWITCH_KEYS:
         tkw.pop(k, None)
+    if state.thinking_off_budget:
+        state.thinking_budget = None
+        state.thinking_off_budget = False
     if arg == "default":
         print("[chat] thinking = default (next reply)")
         return None
-    from .reasoning import map_thinking_controls
+    from .reasoning import map_thinking_controls, off_by_budget
 
     mapped = map_thinking_controls(
         {}, arg, None, state.template_text,
         warn=lambda msg: print(f"[thinking] {msg}"))
     tkw.update(mapped)
+    if state.thinking_budget is None and off_by_budget(arg, state.template_text):
+        # No switch to flip: close each thinking block as it opens.
+        state.thinking_budget = 0
+        state.thinking_off_budget = True
+        mapped = True
     if mapped:
         print(f"[chat] thinking = {arg} (next reply)")
     return None
@@ -1309,10 +1325,12 @@ def _slash_thinking_budget(cmd, arg, state):
         except ValueError:
             print(f"[chat] /thinking-budget needs an int or 'off', got {arg!r}")
             return None
+        state.thinking_off_budget = False
         print(f"[chat] thinking-budget = {arg} (next reply)")
         return None
     if arg == "off":
         state.thinking_budget = None
+        state.thinking_off_budget = False
         print("[chat] thinking-budget = off (next reply)")
         return None
     tb = state.thinking_budget
@@ -3536,6 +3554,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state.system_prompt = getattr(args, "system_prompt", None)
     state.thinking_budget = getattr(args, "thinking_budget", None)
+    state.thinking_off_budget = bool(getattr(args, "thinking_off_budget", False))
     state.thinking_start_token = getattr(args, "thinking_start_token", None)
     state.thinking_end_token = getattr(args, "thinking_end_token", None)
     if args.assistant:

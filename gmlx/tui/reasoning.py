@@ -19,6 +19,10 @@ to read raw:
     text, as llama.cpp's muse-spark parser reads it. The prompt ends at
     ``<|start|>assistant``, so the first header arrives without its opener -
     seed with ``start_in_header=True``.
+  * Beam: harmony channels, plus tool calls as their own messages,
+    ``<|start|>assistant to=NAME<|channel|>analysis <|constrain|>xml<|message|>``
+    ... ``<|end|>``. The call is neither reasoning nor answer, so its body is
+    dropped. The tool parser reads it from the raw text.
   * Gemma-style ``<|channel>thought`` ... ``<channel|>`` (as detokenized).
 
 ``ReasoningFilter`` is a streaming state machine that strips the markers and
@@ -121,6 +125,11 @@ _HEADER_PREFIXES = ("<|channel|>", "<|start|>assistant")
 # user-visible; "user", "commentary" and tool namespaces are answer-side.
 _SELF_RECIPIENT = "to=self"
 
+# A header with a recipient and this constraint opens a Beam tool call.
+_RECIPIENT_RE = re.compile(r"to=([^\s<]+)")
+_TOOL_CONSTRAINT = "<|constrain|>xml"
+_TOOL_ENDS = ("<|end|>", "<|call|>", "<|return|>")
+
 
 class ReasoningFilter:
     """Strip reasoning control markers from a token stream and tag the rest.
@@ -140,6 +149,8 @@ class ReasoningFilter:
         self._swallow = False  # inside a message header (drop text)
         self._swallow_budget = 0
         self._header = ""
+        self._header_at_start = False  # the open header began at "<|start|>"
+        self._tool = False  # inside a tool-call body (drop text)
         if start_in_header:
             self._open_header()
 
@@ -181,32 +192,50 @@ class ReasoningFilter:
             # (harmony) or "<|start|>assistant to=RECIPIENT<|message|>" (ATEM):
             # an opener marker starts the header, "<|message|>" closes it, and
             # the text in between is routing, never a display span.
-            if marker.startswith(_HEADER_PREFIXES):
-                self._open_header()
+            if self._tool and (marker in _TOOL_ENDS or marker.startswith("<|start|>")):
+                self._tool = False
+            # A channel inside a "<|start|>" header keeps the recipient
+            # already read: "<|start|>assistant to=NAME<|channel|>...".
+            if marker.startswith("<|channel|>") and self._swallow and self._header_at_start:
+                pass
+            elif marker.startswith(_HEADER_PREFIXES):
+                self._open_header(at_start=marker.startswith("<|start|>"))
             elif marker == "<|message|>":
                 self._close_header()
+            elif marker == "<|constrain|>" and self._swallow:
+                self._header += marker
         return [s for s in spans if s[0]]
 
-    def _open_header(self) -> None:
+    def _open_header(self, *, at_start: bool = True) -> None:
         self._swallow = True
         self._swallow_budget = 256
         self._header = ""
+        self._header_at_start = at_start
 
     def _close_header(self) -> None:
         """End the header and apply its routing. Only an explicit ``to=self``
         recipient moves the mode: a harmony header is empty (its channel marker
         already routed), and an ATEM answer/tool header must leave a mode that
-        "<|eom|>" or the initial state already set."""
+        "<|eom|>" or the initial state already set. A recipient with the XML
+        constraint opens a tool call, whose body is dropped."""
         self._swallow = False
-        if self._header.strip() == _SELF_RECIPIENT:
+        header = self._header.strip()
+        if header == _SELF_RECIPIENT:
             self.mode = _REASON
+        else:
+            m = _RECIPIENT_RE.search(header)
+            self._tool = (m is not None and m.group(1) != "self"
+                          and _TOOL_CONSTRAINT in header)
         self._header = ""
+        self._header_at_start = False
 
     def _emit(self, text: str, spans: list[tuple[str, str]]) -> None:
         """Append a display span, unless a message header is being swallowed.
         The budget bounds the swallow: a literal "<|channel|>" in a
         non-harmony reply (no "<|message|>" ever follows) must not eat the
         rest of the message."""
+        if self._tool:
+            return
         if self._swallow:
             self._swallow_budget -= len(text)
             if self._swallow_budget >= 0:
@@ -706,6 +735,33 @@ def _effort_variable(template: str) -> str:
     return "reasoning_effort"
 
 
+def _thinking_mode(thinking) -> str | None:
+    """``thinking`` as on/off/adaptive, or None when unrecognized."""
+    if isinstance(thinking, dict):
+        return {True: "on", False: "off"}.get(thinking_flag(thinking))
+    return _THINKING_LEVELS.get(thinking)
+
+
+def _has_thinking_switch(template: str) -> bool:
+    return (_reads(template, "thinking_mode")
+            or _reads(template, "enable_thinking")
+            or _reads_bare_thinking(template)
+            or ("no_think" in template and _reads(template, "reasoning_effort")))
+
+
+def off_by_budget(thinking, template: str) -> bool:
+    """Whether ``thinking`` asks for off on a template that has no thinking
+    switch but names a think pair. A thinking budget of 0 serves that off:
+    each thinking block closes as soon as it opens."""
+    if _thinking_mode(thinking) != "off" or not template:
+        return False
+    if _has_thinking_switch(template):
+        return False
+    from gmlx.gen.thinking_budget import think_pairs_in
+
+    return bool(think_pairs_in(template))
+
+
 def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
                           template: str = "", warn=None) -> dict:
     """Overlay the dedicated thinking controls onto ``base`` template kwargs,
@@ -724,9 +780,10 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     ``reasoning_effort`` passes through under its own name (level names are
     the model's own; its template validates them), and an explicit level -
     argument or ``base`` key - wins over one a ``thinking`` switch would
-    imply. gpt-oss-style templates grade effort but cannot disable
-    reasoning; ``warn`` (an optional callable taking a message) hears about
-    that and other unmappable controls. With no template text available the
+    imply. gpt-oss-style templates grade effort but have no switch: off
+    there is a thinking budget of 0, which the caller sets (see
+    :func:`off_by_budget`). ``warn`` (an optional callable taking a message)
+    hears about unmappable controls. With no template text available the
     switch defaults to the ``enable_thinking`` spelling."""
     _warn = warn or (lambda msg: None)
     out = dict(base)
@@ -764,6 +821,8 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     elif "no_think" in template and _reads(template, "reasoning_effort"):
         out.setdefault("reasoning_effort",
                        "no_think" if mode == "off" else "high")
+    elif off_by_budget(mode, template):
+        pass
     elif _reads(template, "reasoning_effort"):
         _warn("this model has no thinking switch (reasoning always runs); "
               "use reasoning_effort low|medium|high to size it")

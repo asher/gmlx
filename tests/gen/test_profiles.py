@@ -115,7 +115,10 @@ def test_intent_delta_merges_over_base():
 
 def test_gpt_oss_reasoning_intents():
     base = profiles.groups_for("gpt-oss")
-    assert base["sampling"] == {"temperature": 1.0, "top_p": 1.0}
+    assert base["sampling"] == {
+        "temperature": 1.0, "top_p": 1.0,
+        "thinking_start_token": "<|start|>assistant<|channel|>analysis<|message|>",
+        "thinking_end_token": "<|end|>"}
     assert "top_k" not in base["sampling"]     # card: disable top_k
     hi = profiles.groups_for("gpt-oss", "reasoning-high")
     assert hi["chat_template_kwargs"] == {"reasoning_effort": "high"}

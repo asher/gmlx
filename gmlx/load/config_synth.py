@@ -174,6 +174,12 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # expert plus routed value experts in the attention. Model class owned
     # by gmlx (the mlx-vlm class has none of the group norm, gate or MoVA).
     "k2-horizon": "k2_horizon",
+    # Reflection Beam-1.0 (501B-A23B): GQA with per-head QK-norm, a per-head
+    # biased sigmoid output gate, NeoX RoPE on the sliding-window layers and
+    # NoPE with a power-law query scale on the full ones, sandwich norms,
+    # depth-scaled residuals, and a sigmoid MoE with grouped selection after
+    # three dense layers. Model class owned by gmlx (no mlx-lm class).
+    "beam": "beam",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -1972,6 +1978,122 @@ def _synth_k2_horizon(meta, shapes, config: dict) -> None:
                 f"k2-horizon synth: {arch}.expert_gating_func {gating} is not "
                 "softmax (1) or sigmoid (2).")
         config["scoring_func"] = scoring
+
+
+# beam (Reflection Beam-1.0 501B-A23B)
+
+def _synth_beam(meta, shapes, config: dict) -> None:
+    """Synthesize a beam config from a 'beam'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ffn/ctx/eps/head_dim/
+    rope_theta/tie/vocab. This adds the per-layer sliding/full schedule, the
+    NoPE query scale, the leading dense layers, the grouped sigmoid MoE and
+    the softcap. Defaults and refusals follow llama.cpp's beam loader: an
+    absent temperature scale/length means 0.1/2048, an absent softcap means
+    none, and an absent group count means one group.
+    """
+    arch = "beam"
+    n_layers = config["num_hidden_layers"]
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    _require(config.get("rms_norm_eps"), arch=arch,
+             gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")
+
+    window = req(_read_int, "attention.sliding_window")
+    if window <= 0:
+        raise ValueError("beam synth: attention.sliding_window must be positive")
+    config["sliding_window"] = window
+    key = "attention.sliding_window_pattern"
+    pattern = req(_read_bool_array, key)
+    if len(pattern) != n_layers:
+        raise ValueError(
+            f"beam synth: {arch}.{key} has {len(pattern)} entries for "
+            f"{n_layers} layers")
+    if not any(pattern):
+        raise ValueError(f"beam synth: {arch}.{key} has no sliding layer")
+    config["layer_types"] = [
+        "sliding_attention" if v else "full_attention" for v in pattern]
+
+    # Only the sliding layers rotate. Their base falls back to the main one.
+    theta = _read_float(meta, f"{arch}.rope.freq_base_swa")
+    if theta is None:
+        theta = req(_read_float, "rope.freq_base")
+    config["rope_theta"] = theta
+    config["rope_parameters"] = {"rope_theta": theta, "rope_type": "default"}
+
+    temp_scale = _read_float(meta, f"{arch}.attention.temperature_scale")
+    temp_length = _read_int(meta, f"{arch}.attention.temperature_length")
+    temp_scale = 0.1 if temp_scale is None else temp_scale
+    temp_length = 2048 if temp_length is None else temp_length
+    if temp_scale == 0.0:
+        raise ValueError(
+            "beam synth: attention.temperature_scale must be nonzero")
+    if temp_length <= 0:
+        raise ValueError(
+            "beam synth: attention.temperature_length must be positive")
+    config["attn_temperature_scale"] = temp_scale
+    config["attn_temperature_length"] = temp_length
+
+    n_dense = req(_read_int, "leading_dense_block_count")
+    if n_dense > n_layers:
+        raise ValueError(
+            f"beam synth: leading_dense_block_count {n_dense} exceeds the "
+            f"{n_layers} layers")
+    config["first_k_dense_replace"] = n_dense
+
+    gating = _read_int(meta, f"{arch}.expert_gating_func")
+    if gating not in (None, 0, 2):
+        raise NotImplementedError(
+            f"beam synth: {arch}.expert_gating_func {gating} is not 2 "
+            "(sigmoid). The Beam converter always writes sigmoid.")
+    if _read_int(meta, f"{arch}.expert_shared_count"):
+        raise NotImplementedError(
+            "beam synth: the GGUF declares shared experts, which Beam does "
+            "not have.")
+
+    # A scalar or a per-layer array (llama.cpp's get_key_or_arr). The dense
+    # layers may carry 0; the routed layers must agree.
+    widths = req(_read_int_array, "expert_feed_forward_length")
+    if len(widths) == 1:
+        moe_ffn = widths[0]
+    elif len(widths) == n_layers:
+        routed = set(widths[n_dense:])
+        if len(routed) != 1:
+            raise ValueError(
+                f"beam synth: non-uniform expert_feed_forward_length "
+                f"{sorted(routed)} across the MoE layers")
+        moe_ffn = routed.pop()
+    else:
+        raise ValueError(
+            f"beam synth: expert_feed_forward_length has {len(widths)} "
+            f"entries for {n_layers} layers")
+
+    n_experts = req(_read_int, "expert_count")
+    n_group = _read_int(meta, f"{arch}.expert_group_count") or 1
+    topk_group = _read_int(meta, f"{arch}.expert_group_used_count") or 1
+    if n_group > 1:
+        if n_experts % n_group:
+            raise ValueError(
+                f"beam synth: {n_experts} experts do not split into "
+                f"{n_group} groups")
+        if not 0 < topk_group < n_group:
+            raise ValueError(
+                f"beam synth: expert_group_used_count {topk_group} must be "
+                f"in 1..{n_group - 1}")
+    else:
+        n_group = topk_group = 1
+    config["num_experts"] = n_experts
+    config["num_experts_per_tok"] = req(_read_int, "expert_used_count")
+    config["moe_intermediate_size"] = moe_ffn
+    config["n_group"] = n_group
+    config["topk_group"] = topk_group
+    config["routed_scaling_factor"] = req(_read_float, "expert_weights_scale")
+    config["norm_topk_prob"] = req(_read_bool, "expert_weights_norm")
+    config["final_logit_softcapping"] = (
+        _read_float(meta, f"{arch}.final_logit_softcapping") or 0.0)
 
 
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
@@ -3960,6 +4082,7 @@ _SYNTH = {
     "muse-glimmer": _synth_muse_glimmer,
     "muse-spark": _synth_muse_spark,
     "k2-horizon": _synth_k2_horizon,
+    "beam": _synth_beam,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Beam-1.0 501B-A23B (GGUF arch `beam`), with `reasoning-low`, `-medium` and
+  `-high` intents and tool calls. On a Mac with less memory than the file, it
+  runs with `--stream-experts`.
+- `GMLX_NORM_DTYPE` sets the width of a language model's norm weights:
+  `fp32` keeps the F32 norm weights in float32 and `activation` casts them to
+  the activation dtype, whatever the model's default.
+
 ### Changed
 
 - With `--stream-experts`, decoding is faster: between prefills the expert
@@ -19,6 +28,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds are copied from memory. `GMLX_RING_FROM_ARENA=0` turns it off.
 - With `--stream-experts`, Muse Spark and other sliding-window models start
   answering sooner on many follow-up turns and long prompts.
+- `--thinking off` now turns thinking off on gpt-oss, Beam, Muse Glimmer, Muse
+  Spark and K2 Horizon, whose templates have no switch, by closing each
+  thinking block as it opens. Thinking budgets now work for gpt-oss in
+  `gmlx serve`.
 
 ### Fixed
 

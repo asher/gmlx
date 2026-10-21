@@ -456,6 +456,48 @@ def test_hy_v3_router_attr_is_hooked(monkeypatch):
     assert block.router.top_k == 1  # live attr, not the dead block-level one
 
 
+def _beam_moe():
+    """Real Beam MoE block: a gate submodule with grouped selection, the
+    SwitchGLU swapped for the kquant fixture the offload installer wraps."""
+    from gmlx.models.beam.model import BeamMoE
+
+    args = SimpleNamespace(
+        hidden_size=32, moe_intermediate_size=64, num_experts=4,
+        num_experts_per_tok=2, n_group=2, topk_group=1,
+        norm_topk_prob=True, routed_scaling_factor=2.5)
+    block = BeamMoE(args)
+    block.gate.weight = mx.random.normal((4, 32))
+    block.switch_mlp = _kquant_glu()
+    mx.eval(block.parameters())
+    return block
+
+
+def test_beam_grouped_gate_is_hooked(monkeypatch):
+    """The mass installer wraps Beam's grouped gate, the wrap keeps the
+    group mask, and the fixed-k override reaches the live ``gate.top_k``."""
+    mx.random.seed(10)
+    block = _beam_moe()
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+
+    assert install_moe_expert_mass(model, 0.999) == 1
+    assert type(block.gate).__name__ == "BeamGate_ExpertCtl"
+    x = mx.random.normal((1, 5, 32))
+    inds, weights = block.gate(x)
+    mx.eval(inds, weights)
+    groups = np.array(inds)[0] // 2
+    kept = np.array(weights)[0] > 0
+    for t in range(5):
+        assert len(set(groups[t][kept[t]].tolist())) == 1  # one kept group
+    mx.eval(block(x))  # end-to-end through the offloaded gather
+
+    install_moe_experts_override(model, 1)
+    assert block.gate.top_k == 1
+
+
 # miss-shed / layer-shed installers (--moe-miss-shed / --moe-layer-shed)
 def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
     from gmlx.stream.moe_experts import install_moe_miss_shed

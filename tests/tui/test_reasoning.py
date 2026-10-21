@@ -454,16 +454,94 @@ def test_fold_thinking_flag_hy3_dialect(monkeypatch):
     assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "low"}
 
 
-def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
-    """gpt-oss grades reasoning_effort but cannot disable reasoning."""
+def test_fold_thinking_flag_without_a_switch_or_pair_warns(monkeypatch, capsys):
+    """A template that grades reasoning_effort but names no think pair has
+    no way to turn reasoning off."""
     from types import SimpleNamespace
     import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: '{%- if reasoning_effort is not defined %}{%- set reasoning_effort = "medium" %}{%- endif %}')
-    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf",
+                           thinking_budget=None)
     assert chat.fold_thinking_flag(args, {}) == {}   # no kwarg forced
     assert "reasoning_effort" in capsys.readouterr().err
+    assert args.thinking_budget is None
+
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+@pytest.mark.parametrize("name", ["gptoss_template.jinja", "beam_template.jinja",
+                                  "muse_template.jinja",
+                                  "muse_spark_template.jinja",
+                                  "k2_horizon_template.jinja"])
+def test_thinking_off_without_a_switch_is_a_budget_of_zero(monkeypatch, capsys,
+                                                           name):
+    """These templates have no thinking switch but name a think pair, so
+    --thinking off closes each thinking block as it opens."""
+    from types import SimpleNamespace
+    import gmlx.tui.chat as chat
+
+    template = (_FIXTURES / name).read_text()
+    monkeypatch.setattr(chat, "_template_text", lambda a: template)
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf",
+                           thinking_budget=None)
+    out = chat.fold_thinking_flag(args, {})
+    assert not {"enable_thinking", "thinking", "thinking_mode"} & set(out)
+    assert args.thinking_budget == 0 and args.thinking_off_budget
+    assert capsys.readouterr().err == ""
+    # An explicit budget wins.
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf",
+                           thinking_budget=64)
+    chat.fold_thinking_flag(args, {})
+    assert args.thinking_budget == 64
+    # On stays a no-op.
+    args = SimpleNamespace(thinking="on", reasoning_effort=None, gguf="/m/x.gguf",
+                           thinking_budget=None)
+    chat.fold_thinking_flag(args, {})
+    assert args.thinking_budget is None
+
+
+_PHI3_TEMPLATE = (
+    "{% for message in messages %}{% if message['role'] == 'user' %}"
+    "{{ '<|user|>\n' + message['content'] + '<|end|>\n' }}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{ '<|assistant|>\n' + message['content'] + '<|end|>\n' }}{% endif %}"
+    "{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% endif %}")
+
+
+def test_phi3_end_tag_is_not_a_harmony_pair():
+    """Phi-3 ends turns with <|end|>, harmony's analysis close. The harmony
+    pair matches by its start tag only, so Phi-3 resolves no pair and
+    --thinking off still warns."""
+    from gmlx.gen.thinking_budget import think_pairs_in
+    from gmlx.tui.reasoning import map_thinking_controls, off_by_budget
+
+    assert think_pairs_in(_PHI3_TEMPLATE) == []
+    assert not off_by_budget("off", _PHI3_TEMPLATE)
+    warns: list = []
+    map_thinking_controls({}, "off", None, _PHI3_TEMPLATE, warn=warns.append)
+    assert warns and "no thinking switch" in warns[0]
+
+
+def test_slash_thinking_off_sets_and_clears_its_budget():
+    from types import SimpleNamespace
+    import gmlx.tui.chat as chat
+
+    state = SimpleNamespace(
+        assistant_brain=None, template_kwargs={}, thinking_budget=None,
+        thinking_off_budget=False,
+        template_text=(_FIXTURES / "beam_template.jinja").read_text())
+    chat._slash_thinking("/thinking", "off", state)
+    assert (state.thinking_budget, state.thinking_off_budget) == (0, True)
+    chat._slash_thinking("/thinking", "on", state)
+    assert (state.thinking_budget, state.thinking_off_budget) == (None, False)
+    # A budget the user set is theirs: off leaves it alone.
+    state.thinking_budget = 128
+    chat._slash_thinking("/thinking", "off", state)
+    chat._slash_thinking("/thinking", "default", state)
+    assert state.thinking_budget == 128
 
 
 def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys):
@@ -828,15 +906,21 @@ def _assert_pair_routes(start, end):
 
     Either as literal markers, or - for the ATEM shape - through the message
     header, where the opener is a header prefix and the recipient decides the
-    mode in _close_header.
+    mode in _close_header. A harmony analysis block ends at a dropped
+    <|end|>, and the next header's channel decides the mode.
     """
     from gmlx.tui.reasoning import (
-        _ANSWER, _HEADER_PREFIXES, _MARKERS, _REASON,
+        _ANSWER, _DROP, _HEADER_PREFIXES, _MARKERS, _REASON,
     )
 
     m = dict(_MARKERS)
     if not start.startswith(_HEADER_PREFIXES):
         assert m.get(start) == _REASON, f"{start!r} is not a reason marker"
+    if "<|channel|>analysis" in start:
+        assert m.get("<|channel|>analysis") == _REASON
+        assert m.get("<|channel|>final") == _ANSWER
+        assert m.get(end) == _DROP, f"{end!r} is not a dropped marker"
+        return
     assert m.get(end) == _ANSWER, f"{end!r} is not an answer marker"
 
 
@@ -929,15 +1013,15 @@ _K2_TEMPLATE = (Path(__file__).resolve().parents[1] / "fixtures"
 def test_thinking_named_only_in_an_exception_message_is_no_switch():
     """K2 Horizon raises "...missing a thinking field..." inside a {{ }}
     tag. That string must not read as Kimi's bare ``thinking`` switch, so
-    --thinking off warns instead of setting a no-op."""
-    from gmlx.tui.reasoning import map_thinking_controls
+    --thinking off becomes a budget of 0 instead of setting a no-op."""
+    from gmlx.tui.reasoning import map_thinking_controls, off_by_budget
 
     template = _K2_TEMPLATE.read_text()
     warns: list = []
     assert map_thinking_controls({}, "off", None, template,
                                  warn=warns.append) == {}
-    assert warns and "no thinking switch" in warns[0]
-    assert "reasoning_effort" in warns[0]
+    assert warns == []
+    assert off_by_budget("off", template)
 
 
 def test_unparsed_fallback_skips_string_literals():
