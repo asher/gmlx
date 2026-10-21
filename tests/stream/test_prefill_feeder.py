@@ -1358,13 +1358,30 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
     assert waits(closed) and all(w is True for w in waits(closed))
 
 
+class _Arena:
+    """The decode feeder an install keeps: the margins it records."""
+
+    nominal_bytes = locked_bytes = 0
+    _fast_disk = _mlock_deferred = False
+    _host_bytes = _outside_bytes = -1
+
+    def covers(self, li):
+        return True
+
+    def arena_sources(self, *a):
+        return None
+
+    lend_for_ring = seed_from_ring = arena_sources
+
+
 def _install_sized(monkeypatch, *, timeshare="0", env_gb=None, built=True,
-                   free_gb=7, host=None):
+                   free_gb=7, host=None, arena_out=None):
     """Install streaming on eight 1 GiB expert layers under a 100 GiB
     ceiling with ``free_gb`` reclaimable, a 1 GiB KV room priced with a
     0.25 GiB pool and no floor. Returns what the arena, its ring share and
     the residency room were sized to, and the allocator limits. ``host``
-    stubs the host overhead; None leaves the install's own price."""
+    stubs the host overhead; None leaves the install's own price. An
+    ``arena_out`` (an _Arena) is the decode feeder the install keeps."""
     from types import SimpleNamespace
 
     import gmlx.stream.budget as budget
@@ -1424,6 +1441,7 @@ def _install_sized(monkeypatch, *, timeshare="0", env_gb=None, built=True,
 
     def arena(offs, modules, arena_bytes, *a, ring_share=0, **k):
         sized.update(arena=arena_bytes, share=ring_share)
+        return arena_out
 
     monkeypatch.setattr(pff, "maybe_make_prefill_feeder", ring)
     monkeypatch.setattr(dfm, "maybe_make_decode_feeder", arena)
@@ -1500,3 +1518,21 @@ def test_install_prices_the_host_overhead_at_its_cap_on_a_cold_cache(
     sized, _ = _install_sized(monkeypatch, built=False, free_gb=12)
     # 12 free, less the 1 GiB room and the 10 GiB host overhead.
     assert sized["arena"] == GB
+
+
+@_GPU_ARENA
+@pytest.mark.host_gb(128)
+def test_the_resident_hold_reads_the_ceiling_the_arena_was_sized_under(
+        monkeypatch):
+    """With GMLX_DECODE_ARENA_RAM_FRAC=0.5 the arena is sized under 64 of
+    the Mac's 128 GiB, so the 64 GiB outside it holds the 30 GiB host
+    overhead and the arena's ceiling leg charges none of it. The margin a
+    load beside the stream keeps free is the same 0: under the 100 GiB
+    memory ceiling it would be 2 GiB."""
+    GB = 1 << 30
+    monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "0.5")
+    out = _Arena()
+    _install_sized(monkeypatch, built=False, free_gb=60, host=30 * GB,
+                   arena_out=out)
+    assert out._host_bytes == 30 * GB
+    assert out._outside_bytes == 0

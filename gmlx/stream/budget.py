@@ -136,6 +136,20 @@ def host_overhead_bytes(ram: int | None) -> int:
     return int((max(0.0, process) + max(0.0, cap_gb)) * (1 << 30))
 
 
+def arena_ceiling_bytes(budget: float, ram: int | None) -> int:
+    """The ceiling the decode arena is sized under: the memory ceiling, or
+    ``budget`` without one, capped at ``GMLX_DECODE_ARENA_RAM_FRAC`` of
+    ``ram`` when that is set."""
+    ceiling = int(ceiling_bytes() or budget)
+    frac = os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
+    if frac and ram:
+        try:
+            ceiling = min(ceiling, int(float(frac) * ram))
+        except (ValueError, OverflowError):
+            pass
+    return ceiling
+
+
 def outside_ceiling_bytes(ram: int | None, ceiling: float,
                           host: int) -> int:
     """What the host floor and the host overhead need past the RAM the
@@ -477,18 +491,12 @@ def _decode_arena_bytes(
         return want
     if budget is None:
         return 0
-    ceiling = int(ceiling_bytes() or budget)
     ram = None
     try:
         ram = int(metal_value("memory_size"))
     except Exception:  # noqa: S110 - no device info (CPU-only build); the RAM fraction lever is skipped
         pass
-    frac = os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
-    if frac and ram:
-        try:
-            ceiling = min(ceiling, int(float(frac) * ram))
-        except (ValueError, OverflowError):
-            pass
+    ceiling = arena_ceiling_bytes(budget, ram)
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     # Streamable components are page-cache citizens like the experts;
     # charging them as non-expert would zero the arena. Cast tensors cost

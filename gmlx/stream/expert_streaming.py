@@ -35,7 +35,8 @@ from gmlx.load.loader import (
 )
 
 from .budget import (_decode_arena_bytes, _prefill_ring_reason,
-                     _ram_floor_bytes, outside_ceiling_bytes)
+                     _ram_floor_bytes, arena_ceiling_bytes,
+                     outside_ceiling_bytes)
 from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
@@ -1249,10 +1250,8 @@ def install_expert_streaming(
             dfeeder._floor_bytes = _ram_floor_bytes(ram_now)
             dfeeder._host_bytes = host_bytes
             if budget is not None:
-                from gmlx.stream.budget import ceiling_bytes as _ceiling
-
                 dfeeder._outside_bytes = outside_ceiling_bytes(
-                    ram_now, float(_ceiling() or budget), host_bytes)
+                    ram_now, arena_ceiling_bytes(budget, ram_now), host_bytes)
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
                 if dfeeder.covers(li):
@@ -1288,7 +1287,6 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
-            ceiling = ceiling_bytes() or budget
             expert_bytes = sum(
                 r[2] for rs in prefetcher.offsets.values() for r in rs)
             room_how = (
@@ -1305,6 +1303,9 @@ def install_expert_streaming(
                 ram_b = int(metal_value("memory_size"))
             except Exception:
                 ram_b = None
+            # The ceiling the arena was sized under.
+            ceiling = (arena_ceiling_bytes(budget, ram_b)
+                       if budget is not None else ceiling_bytes())
             floor = _ram_floor_bytes(ram_b)
             past = (outside_ceiling_bytes(ram_b, float(ceiling), host_bytes)
                     if ram_b and ceiling else floor)
