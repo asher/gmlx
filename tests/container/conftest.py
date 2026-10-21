@@ -162,8 +162,22 @@ def short_tmpdir(monkeypatch):
     shutil.rmtree(path, ignore_errors=True)
 
 
+@pytest.fixture(scope="session")
+def _container_script() -> Iterator[Path]:
+    """The script of the fake ``container``, which every test links. macOS
+    checks a file it has not run before with Apple's servers, which can take
+    seconds, so the tests share one file."""
+    path = os.path.realpath(tempfile.mkdtemp(prefix="gmlx-fc-", dir="/tmp"))
+    script = Path(path) / "container"
+    script.write_text(f"#!/bin/sh\nexec {sys.executable} {_FAKE} \"$@\"\n")
+    script.chmod(0o755)
+    yield script
+    _remove_tree(path)
+
+
 @pytest.fixture
-def fake_container(tmp_path, monkeypatch, short_tmpdir) -> Iterator[FakeContainer]:
+def fake_container(tmp_path, monkeypatch, short_tmpdir,
+                   _container_script) -> Iterator[FakeContainer]:
     """A fake ``container`` first on ``PATH``, with the launch data and cache
     folders under ``tmp_path`` and a short ``TMPDIR`` of its own. Launch
     sees no other build on the Mac, because the fake containers of other
@@ -172,8 +186,7 @@ def fake_container(tmp_path, monkeypatch, short_tmpdir) -> Iterator[FakeContaine
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
     script = bin_dir / "container"
-    script.write_text(f"#!/bin/sh\nexec {sys.executable} {_FAKE} \"$@\"\n")
-    script.chmod(0o755)
+    os.link(_container_script, script)
     state = tmp_path / "container-state.json"
     state.write_text("{}")
     monkeypatch.setenv("FAKE_CONTAINER_STATE", str(state))
