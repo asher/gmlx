@@ -537,9 +537,10 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what would change without writing the config.")
     ap.add_argument("--add-companions", action="store_true",
-                    help="Also add an mmproj the scan pairs with a model already "
-                         "in the config, when its entry has no mmproj key, live "
-                         "or commented out.")
+                    help="Also add an mmproj or drafter the scan pairs with a "
+                         "model already in the config, when its entry has no "
+                         "such key, live or commented out. No drafter goes to "
+                         "an entry set to speculative: false.")
     ap.add_argument("--no-reload", action="store_true",
                     help="Don't SIGHUP a server already running this config to pick "
                          "up the change.")
