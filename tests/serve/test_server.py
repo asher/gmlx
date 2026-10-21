@@ -1138,10 +1138,17 @@ def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
     _drafter_beside(monkeypatch, lib, ["muse", "qwen"])
     before = cfg_path.read_text()
     assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
-    assert "already in sync" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "already in sync" in out
+    for mid in ("muse", "qwen"):
+        assert out.count(f"  hint:    {mid}  (drafter dflash-{mid}.gguf pairs "
+                         "with it; --add-companions adds it)") == 1
     assert cfg_path.read_text() == before
     assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
                           "--no-reload"]) == 0
+    out = capsys.readouterr().out
+    assert "update:  muse  (draft_gguf: dflash-muse.gguf)" in out
+    assert "hint:" not in out
     cfg = load_config(cfg_path)
     assert cfg.models["muse"].draft_gguf == "dflash-muse.gguf"
     assert cfg.models["muse"].pin is True         # the hand-edit survives
@@ -1166,10 +1173,11 @@ def test_sync_add_companions_leaves_a_drafter_out_of_a_held_entry(
         tmp_path, f"models:\n  muse:\n    path: muse.gguf\n{held}")
     _drafter_beside(monkeypatch, lib, ["muse"])
     before = cfg_path.read_text()
-    for extra in (["--dry-run"], ["--no-reload"]):
-        assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
-                              *extra]) == 0
-        assert "already in sync" in capsys.readouterr().out
+    for extra in (["--add-companions", "--dry-run"],
+                  ["--add-companions", "--no-reload"], ["--no-reload"]):
+        assert srv._cmd_sync(["--config", str(cfg_path), *extra]) == 0
+        out = capsys.readouterr().out
+        assert "already in sync" in out and "hint:" not in out
     assert cfg_path.read_text() == before
 
 
@@ -1313,11 +1321,22 @@ def test_sync_add_companions_adds_an_mmproj_to_an_entry(monkeypatch,
 
 def test_sync_without_add_companions_leaves_entries_alone(monkeypatch,
                                                           tmp_path, capsys):
+    """The plan names each mmproj it leaves out, once, and how to add it."""
     cfg_path, lib = _sync_config(tmp_path, _vlm_entries())
     _vlm_library(monkeypatch, lib)
     before = cfg_path.read_text()
     assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
-    assert "already in sync" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "already in sync" in out
+    for mid, mm in (
+            ("deepseek-v4.1-flash-1017-ud-iq2",
+             "unsloth__DeepSeek-V4.1-Flash-1017-GGUF/mmproj-BF16.gguf"),
+            ("qwen3.8-27b-ud-q8", "unsloth__Qwen3.8-27B-GGUF/mmproj-BF16.gguf"),
+            ("ternary-bonsai-2-27b-pq2", "prism-ml__Ternary-Bonsai-2-27B-gguf/"
+             "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf")):
+        assert out.count(f"  hint:    {mid}  (mmproj {mm} pairs with it; "
+                         "--add-companions adds it)") == 1
+    assert out.count("hint:") == 3
     assert cfg_path.read_text() == before
 
 
@@ -1411,14 +1430,16 @@ def _mmproj_beside(monkeypatch, lib, pairs):
     ("#  old:\n#    path: old.gguf\n#    mmproj: mmproj-old.gguf\n", False),
 ])
 def test_sync_add_companions_reads_a_key_commented_out_at_column_0(
-        monkeypatch, tmp_path, tail, held):
+        monkeypatch, tmp_path, capsys, tail, held):
     """A comment toggle puts the `#` at column 0. A key commented out that
-    way keeps the entry text-only; a whole entry commented out below one
-    speaks only for itself."""
+    way keeps the entry text-only, and a plain sync names no mmproj for
+    it; a whole entry commented out below one speaks only for itself."""
     from gmlx.config import load_config
     cfg_path, lib = _sync_config(
         tmp_path, f"models:\n  muse:\n    path: muse.gguf\n{tail}")
     _mmproj_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    assert ("hint:" in capsys.readouterr().out) is not held
     assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
                           "--no-reload"]) == 0
     mmproj = load_config(cfg_path).models["muse"].mmproj
@@ -2805,8 +2826,9 @@ def test_register_downloads_adds_a_pulled_drafter_after_the_path(
     assert (f"    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
             f"    draft_gguf: {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf\n"
             "\n  # sampling (gguf): t=0.6\n  old:\n") in cfg_path.read_text()
-    assert ("registered Qwen3.8-27B-DFlash2-Q8_0.gguf as the drafter of qwen"
-            in capsys.readouterr().out)
+    out = capsys.readouterr().out
+    assert "registered Qwen3.8-27B-DFlash2-Q8_0.gguf as the drafter of qwen" in out
+    assert "--add-companions" not in out
 
 
 @pytest.mark.parametrize("drafter, out", [
@@ -2826,6 +2848,51 @@ def test_register_downloads_keeps_the_drafter_an_entry_names(
     assert cfg_path.read_text() == before
     got = capsys.readouterr().out
     assert (out in got) if out else got == ""
+
+
+def test_a_drafter_pairing_prints_once_and_only_for_a_scanned_model(
+        monkeypatch, tmp_path, capsys):
+    """The scan names a drafter it pairs with a model it adds once, though
+    the DFlash 2 pass pairs it again. A configured model gets no such line:
+    the sync writes its drafter only with --add-companions, and says so."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    drafter = _qwen_drafters(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
+    err = capsys.readouterr().err
+    assert err.count("drafter paired") == 1
+    assert f"drafter paired (speculative on for qwen3.8-27b-ud-q6): {drafter}" in err
+    cfg_path.write_text(
+        f"server:\n  model_dirs:\n    - {lib}\n"
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n")
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    got = capsys.readouterr()
+    assert "drafter paired" not in got.err
+    assert got.out.count("hint:") == 1
+    assert (f"  hint:    qwen  (drafter {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf "
+            "pairs with it; --add-companions adds it)") in got.out
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_register_downloads_names_an_mmproj_it_leaves_out(monkeypatch, tmp_path,
+                                                          capsys, held):
+    """A pulled mmproj for a model already in the config stays out of its
+    entry, and the pull says how to add it, unless the entry has the key
+    commented out."""
+    bonsai = ("    #mmproj: prism-ml__Ternary-Bonsai-2-27B-gguf/"
+              "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf\n") if held else ""
+    cfg_path, lib = _reg_config(tmp_path, _vlm_entries(bonsai_extra=bonsai))
+    _vlm_library(monkeypatch, lib)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    before = cfg_path.read_text()
+    srv.register_downloads(
+        [str(lib / "prism-ml__Ternary-Bonsai-2-27B-gguf"
+             / "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf")], str(cfg_path))
+    assert cfg_path.read_text() == before
+    out = capsys.readouterr().out
+    assert out == ("" if held else
+                   "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf pairs with "
+                   "ternary-bonsai-2-27b-pq2 as its mmproj: gmlx sync-models "
+                   "--add-companions adds it\n")
 
 
 def test_register_downloads_skips_outside_model_dirs(monkeypatch, tmp_path):

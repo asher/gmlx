@@ -776,7 +776,9 @@ model. It never changes an `mmproj` or `draft_gguf` key that the entry
 has, and it leaves an entry alone when the key is there but commented
 out. It adds no drafter to an entry set to `speculative: false`. Each
 line it adds carries a comment that says so. Without the flag, a sync
-adds no companion to an entry it keeps.
+adds no companion to an entry it keeps, and its plan prints a `hint:`
+line for each companion it would add. `gmlx pull` prints the same hint
+for a companion it leaves out.
 
 A scan writes `stream: experts` for a MoE model whose weights are larger
 than 90% of the GPU working set, with a comment that says so. Each sync

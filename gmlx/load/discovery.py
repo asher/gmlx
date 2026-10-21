@@ -1257,11 +1257,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 mc.speculative = True
                 if mc.id in old_ids and had != dr.path:
                     draft_pairs[mc.id] = dr.path
-            if targets:
-                ids = ", ".join(mc.id for mc in targets)
-                print(f"[discover] drafter paired (speculative on for {ids}): "
-                      f"{dr.path}", file=sys.stderr)
-            else:
+            if not targets:
                 unpaired.append(dr)
             if (dr.declared or _sibling_drafter_repo(dr.path)) and (
                     not targets or dr.drafter_kind == "dflash2"):
@@ -1291,10 +1287,18 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                     print(f"[discover] drafter superseded for {mc.id}: "
                           f"{loser} -> {dr.path}", file=sys.stderr)
             if targets:
-                ids = ", ".join(mc.id for mc in targets)
-                print(f"[discover] drafter paired (speculative on for {ids}): "
-                      f"{dr.path}", file=sys.stderr)
                 unpaired = [d for d in unpaired if d.path != dr.path]
+    # One line per drafter, for the scanned models it ends up with. A
+    # configured model is the caller's to report: a sync writes its
+    # drafter only with --add-companions.
+    paired: dict[str, list[str]] = {}
+    for mc, _c in all_made:
+        if mc.draft_gguf:
+            paired.setdefault(mc.draft_gguf, []).append(mc.id)
+    for dpath in drafter_kinds:
+        if dpath in paired:
+            print(f"[discover] drafter paired (speculative on for "
+                  f"{', '.join(paired[dpath])}): {dpath}", file=sys.stderr)
     for dr in unpaired:
         print(f"[discover] assistant drafter (configure via "
               f"draft_gguf: on its model): {dr.path}", file=sys.stderr)

@@ -630,8 +630,9 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             restream[mid] = fresh
 
     # Discover, skipping anything already configured (by id or by resolved path).
-    # With --add-companions, `draft_pairs` and `mmproj_pairs` are the drafters
-    # and mmprojs that pair into an entry already configured that can take one.
+    # `draft_pairs` and `mmproj_pairs` are the drafters and mmprojs that pair
+    # into an entry already configured that can take one. Without
+    # --add-companions they are only named, as hints.
     discovered, draft_pairs, mmproj_pairs, images = [], {}, {}, []
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
@@ -642,11 +643,13 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             known_paths=known_paths | _image_paths(cfg),
             known_models=known_models, progress=True, stats=stats,
             images=images, encoder_ids=_encoder_ids(known_models))
-        if a.add_companions:
-            draft_pairs = _open_pairs(path, "draft_gguf",
-                                      stats.get("draft_pairs"))
-            mmproj_pairs = _open_pairs(path, "mmproj",
-                                       stats.get("mmproj_pairs"))
+        draft_pairs = _open_pairs(path, "draft_gguf",
+                                  stats.get("draft_pairs"))
+        mmproj_pairs = _open_pairs(path, "mmproj", stats.get("mmproj_pairs"))
+    hints = {}
+    if not a.add_companions:
+        hints = _companion_hints(draft_pairs, mmproj_pairs)
+        draft_pairs, mmproj_pairs = {}, {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
@@ -672,6 +675,9 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     for mid in restream:
         print(f"  update:  {mid}  (stream: experts dropped, the model fits "
               "the memory budget now)")
+    for (mid, what), cpath in hints.items():
+        print(f"  hint:    {mid}  ({what} {discovery._rel(cpath, dirs)} pairs "
+              "with it; --add-companions adds it)")
     if (not removed and not discovered and not draft_pairs and not images
             and not restream and not mmproj_pairs):
         print("  (already in sync)")
@@ -792,6 +798,14 @@ def _resolved_drafter(mc, model_dirs):
     except ConfigError:
         return mc
     return dataclasses.replace(mc, draft_gguf=rp)
+
+
+def _companion_hints(draft_pairs, mmproj_pairs) -> dict:
+    """{(id, "drafter" or "mmproj"): path} for the companions a sync leaves
+    out without --add-companions."""
+    hints = {(mid, "mmproj"): p for mid, p in (mmproj_pairs or {}).items()}
+    hints.update({(mid, "drafter"): p for mid, p in (draft_pairs or {}).items()})
+    return dict(sorted(hints.items()))
 
 
 def _open_pairs(path, key, pairs) -> dict:
@@ -1320,6 +1334,16 @@ def register_downloads(paths: list, config_path=None) -> None:
                 print(f"{os.path.basename(dp)} is not registered as the "
                       f"drafter of {mid}: its entry in {path} has a "
                       "draft_gguf key or speculative: false")
+        # The companions beside a configured entry that a pull leaves out:
+        # a drafter it did not download, and an mmproj.
+        beside = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
+                  if mid not in pulled}
+        hints = _companion_hints(
+            _open_pairs(path, "draft_gguf", beside),
+            _open_pairs(path, "mmproj", stats.get("mmproj_pairs")))
+        for (mid, what), cp in hints.items():
+            print(f"{os.path.basename(cp)} pairs with {mid} as its {what}: "
+                  "gmlx sync-models --add-companions adds it")
         if not newly and not pairs and not images:
             return                     # already configured (a re-pull) - quiet
         _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs,

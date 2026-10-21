@@ -24,7 +24,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - `gmlx sync-models` adds a drafter to a model already in the config only
-  with `--add-companions`.
+  with `--add-companions`. Without it, a sync or pull names each drafter
+  or `mmproj` it leaves out.
 - With `--stream-experts`, decoding is faster: between prefills the expert
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
 - With `--stream-experts`, replies start sooner and their first tokens come
@@ -43,6 +44,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A sync or pull printed the pairing of a DFlash 2 drafter twice.
 - With `--stream-experts`, a prompt of more than 64 tokens filled the file
   cache as it prefilled, and macOS compressed other apps' memory to make room.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
