@@ -553,6 +553,14 @@ def _no_live_server(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_held_cache(monkeypatch):
+    # A streamed install marks the buffer cache held for the process
+    # lifetime; every test starts unmarked.
+    import gmlx.gen.prefill_decay as _prefill_decay
+    monkeypatch.setattr(_prefill_decay, "_CACHE_HELD", False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_local_config_note(monkeypatch):
     # The ./gmlx.yaml line prints once per process; every test sees its own.
     import gmlx.config as _config

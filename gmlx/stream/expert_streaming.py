@@ -12,7 +12,8 @@ from mlx.utils import tree_flatten
 
 from gmlx.device import metal_info, metal_value, stream_budget_bytes
 from gmlx.envflags import env_bool, env_int
-from gmlx.gen.prefill_decay import credit_streamed, end_build_credit
+from gmlx.gen.prefill_decay import (credit_streamed, end_build_credit,
+                                   note_cache_held)
 from gmlx.load import loadlog
 from gmlx.load.loader import (
     _PHASE,
@@ -220,7 +221,8 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     cache limit alone bound the pool. The pool is the one the KV room
     prices (``pool_bytes``, ``budget.pool_bytes``): it fills to its limit
     under prefill, and the live activations sit on top of it, so the room
-    holds both. Without a priced pool it is 4 GiB.
+    holds both. Without a priced pool it is 4 GiB. The allocator then
+    keeps the pool under pressure, so the headroom counts it as used.
     GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults; GMLX_STREAM_CACHE_GB
     sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
@@ -238,6 +240,7 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
         how = "GMLX_STREAM_CACHE_GB sizes it"
     mx.set_memory_limit(limit)
     mx.set_cache_limit(cache)
+    note_cache_held()
     loadlog.info(
         f"[stream] allocator: gc limit {limit / 1e9:.0f} GB, past the "
         f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "

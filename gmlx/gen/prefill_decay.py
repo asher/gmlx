@@ -764,13 +764,38 @@ def streamed_tracked_bytes() -> float:
         return total
 
 
+# Set by a streamed install, whose allocator limits put the gc limit out
+# of reach (expert_streaming._set_allocator_limits): from then on the
+# allocator keeps its buffer cache under pressure, up to the cache limit,
+# until something clears it. The limits stay for the process lifetime.
+_CACHE_HELD = False
+
+
+def note_cache_held() -> None:
+    global _CACHE_HELD
+    _CACHE_HELD = True
+
+
+def held_cache_bytes() -> float:
+    """The MLX buffer cache's bytes once the allocator no longer evicts
+    them under pressure (``note_cache_held``), else 0."""
+    if not _CACHE_HELD:
+        return 0.0
+    try:
+        return float(mx.get_cache_memory())
+    except Exception:
+        return 0.0
+
+
 def headroom_bytes() -> float | None:
     """Estimated live free working set: recommended working set minus
     zero-copy weights minus MLX-tracked allocations, plus the streamed
     expert bytes the tracker counts but the pager can reclaim. The buffer
-    cache counts as free (the allocator evicts it under pressure). Sampled
-    fresh per call, never memoized. The one shared accounting: the prefill
-    caps, the serve memory trace, and the admission gate all read this."""
+    cache counts as free, since the allocator evicts it under pressure,
+    except after a streamed install, whose allocator keeps it
+    (``held_cache_bytes``). Sampled fresh per call, never memoized. The
+    one shared accounting: the prefill caps, the serve memory trace, and
+    the admission gate all read this."""
     try:
         ws = float(metal_value("max_recommended_working_set_size"))
         active = float(mx.get_active_memory())
@@ -779,7 +804,7 @@ def headroom_bytes() -> float | None:
     with _UNTRACKED_LOCK:
         build = _build_credit_locked(active)
     return (ws - untracked_weight_bytes() + streamed_tracked_bytes()
-            + build - active)
+            + build - active - held_cache_bytes())
 
 
 _headroom_bytes = headroom_bytes

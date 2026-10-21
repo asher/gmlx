@@ -79,6 +79,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hold, by a fifth of the KV on GLM-5.x.
 - The server could refuse a long DeepSeek-V4 or V4.1 prompt that the boot
   capacity table said fits: it priced the prompt's KV 2.6 times higher.
+- With `--stream-experts`, the server counted the memory its prefill buffer
+  pool held as free, and could admit a request that did not fit.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
   table, larger than a GPU buffer, is read from the file, and MXFP8 tables
   are told apart from STQ1_0 weights, which share the same GGUF type id.

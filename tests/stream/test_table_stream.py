@@ -558,6 +558,7 @@ def _serve_build(monkeypatch, tracked_parts, table_rows=8, ws=1 << 40):
     size["N"] = total - size["T"] - size["E"]
     box = {"active": 0.0}
     monkeypatch.setattr(mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(mx, "device_info",
                         lambda: {"max_recommended_working_set_size": ws})
     pd.set_untracked_weights_owner("entry")

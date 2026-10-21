@@ -613,3 +613,44 @@ def test_fresh_model_projects_from_boot_rates(monkeypatch):
         1000.0 * 512 + pd.score_transient_bytes(g.model, None, 500)
         + sm.admit_reserve_bytes(0), rel=0.05)
     assert "kv" in parts
+
+
+@pytest.mark.skipif(not mx.metal.is_available(), reason="Metal allocator only")
+def test_a_streamed_install_keeps_its_buffer_pool_out_of_the_headroom(
+        monkeypatch):
+    """A streamed install puts the allocator's gc limit out of reach, so
+    the buffer pool it fills under prefill keeps its bytes under pressure.
+    A dense-KV row the gate admits mid-prefill must not be planned into
+    that pool."""
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+    from gmlx.stream import expert_streaming as es
+
+    gb = 10**9
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    monkeypatch.delenv("GMLX_STREAM_ALLOC_LIMITS", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_CACHE_GB", raising=False)
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
+    monkeypatch.setattr(pd, "_BUILD_CREDIT", {})
+    monkeypatch.setattr(pd.mx, "device_info",
+                        lambda: {"max_recommended_working_set_size": 100 * gb})
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 80 * gb)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 8 * gb)
+    monkeypatch.setattr(mx, "set_memory_limit", lambda n: 0)
+    monkeypatch.setattr(mx, "set_cache_limit", lambda n: 0)
+    monkeypatch.setattr(cap, "_TABLE", None)
+    g = FakeGen(rows=0)
+    # 32 layers of GQA KV, 8 heads 128 wide: 128 KiB per token
+    monkeypatch.setattr(g.model, "_kq_boot_kv_costs", [(None, 4096.0)] * 32,
+                        raising=False)
+    rows = [_pending(2, 80_000, 0)]
+    out = sm.project_admission(g, rows)
+    assert out is not None
+    projected, head, _ = out
+    assert head == 20 * gb and projected < head
+    es._set_allocator_limits(10 * gb, pool_bytes=8 * gb)
+    out = sm.project_admission(g, rows)
+    assert out is not None
+    projected, head, _ = out
+    assert head == 12 * gb and projected > head
