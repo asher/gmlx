@@ -113,13 +113,14 @@ Kimi-K3 UD-Q2_K_XL is an 861 GB file, and its every-token weights are
 
 Its routed experts are 799 GB, with 896 experts in each of 92 layers and
 16 read for each token. On a 128 GB Mac with the default working set, the
-ceiling is 97.9 GB and the KV room without the prefill chunk is 11.7 GB.
-That leaves 24 GB, so the model streams. An 8192-token chunk at 16
-experts a token takes 15.2 GB of activations and a pool of the same size,
-which leaves no room for the 22.7 GB ring or an arena, so prefill and
-decoding read each expert through the page cache. On a 256 GB Mac, the
-arena is about 54 GB, or 7% of the experts, and on a 512 GB Mac it is
-about 216 GB, or 27%, with the ring's room lent to it while decoding.
+ceiling is 97.9 GB and the KV room without the prefill chunk is 7.5 GB.
+That leaves 28.2 GB, so the model streams. An 8192-token chunk at 16
+experts a token takes 11.2 GB of activations and a 2.8 GB pool, which
+leaves a 14.2 GB arena, 2% of the experts. The 22.7 GB ring does not fit
+beside it, so prefill reads each expert through the page cache. On a
+256 GB Mac, the arena is about 107 GB, or 13% of the experts, and on a
+512 GB Mac it is about 293 GB, or 37%, with the ring's room lent to it
+while decoding.
 
 The experts' quant does not change the fit. UD-Q4_K_XL is a 1.5 TB file
 with the same 62.2 GB of every-token weights, so it streams on the same

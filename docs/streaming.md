@@ -34,8 +34,10 @@ a streaming plan for this Mac. This plan is for Kimi-K3 UD-Q2_K_XL, an
 ```text
   streaming: every-token weights 62.2 GB, routed experts 799.1 GB (92 layers, 896 experts, 16 per token), prefill ring 22.7 GB
     every-token by group: attention 31.8 GB, shared experts 12.9 GB, dense ffn and routers 8.2 GB, ...
-    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 42.1 GB at 32768 tokens (30.4 GB of it the prefill chunk and its pool), host floor 9.6 GB, host overhead 10.7 GB
-    => streams, but no decode arena (0.0 GB left after the ring, the host floor and the host overhead), decode runs from the page cache; expect slow decode
+    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 21.5 GB at 32768 tokens (14.0 GB of it the prefill chunk and its pool), host floor 9.6 GB, host overhead 10.7 GB
+    decode arena 14.2 GB (2% of the experts); a cold token reads about 14.3 GB of experts
+    prefill ring 22.7 GB exceeds the arena; prefill runs from the page cache
+    => streams with --stream-experts (server: stream: experts)
 ```
 
 The last line is the verdict:
